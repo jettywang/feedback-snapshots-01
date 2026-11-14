@@ -24,3 +24,12 @@ class NoiseMaxNonceError(Exception):
 
 class NoiseValidationError(Exception):
     pass
+
+
+class NoiseIdentityError(NoiseHandshakeError):
+    """Raised when peer identity evidence is rejected or cannot be obtained."""
+    pass
+
+
+# Backwards/forwards friendly alias for callers that prefer the more explicit name.
+NoisePeerIdentityError = NoiseIdentityError

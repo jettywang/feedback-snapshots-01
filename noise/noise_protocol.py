@@ -3,6 +3,7 @@ from functools import partial
 from typing import Tuple
 
 from noise.exceptions import NoiseProtocolNameError, NoisePSKError, NoiseValidationError
+from noise.identity import PeerIdentityEvidence, PeerRole, PeerStaticKeySource
 from noise.state import HandshakeState
 from .constants import MAX_PROTOCOL_NAME_LEN, Empty
 
@@ -41,6 +42,15 @@ class NoiseProtocol(object):
         self.initiator = None
         self.handshake_hash = None
 
+        # Optional application callback receiving PeerIdentityEvidence before
+        # transport keys are derived. Returning a false value, or raising any
+        # exception, aborts the handshake.
+        self.peer_identity_verifier = None
+        self.peer_identity = None
+        self.peer_admitted = False
+        self.peer_identity_admitted = False
+        self.handshake_aborted = False
+
         self.handshake_state = Empty()
         self.symmetric_state = Empty()
         self.cipher_state_handshake = Empty()
@@ -48,6 +58,66 @@ class NoiseProtocol(object):
         self.cipher_state_decrypt = Empty()
 
         self.keypairs = {'s': None, 'e': None, 'rs': None, 're': None}
+
+    def build_peer_identity_evidence(self) -> PeerIdentityEvidence:
+        """
+        Build a snapshot of the peer identity facts for this handshake.
+
+        Only values actually present in the current handshake state are used.
+        In particular, a key supplied by the application before the handshake
+        is reported with ``peer_static_key_source == configured``; if the peer's
+        handshake message later replaces it, the observed key and its source
+        are reported instead.
+        """
+        handshake_state = self.handshake_state
+        rs = getattr(handshake_state, 'rs', Empty())
+        relevant = getattr(handshake_state, 'peer_static_key_relevant', False)
+        if isinstance(rs, Empty) or rs is None or not relevant:
+            # A configured key that this pattern never carries or uses is not
+            # peer identity evidence for this handshake.
+            peer_static_public_key = None
+            peer_static_key_source = PeerStaticKeySource.NONE
+            peer_static_key_proven = False
+        else:
+            peer_static_public_key = rs.public_bytes
+            peer_static_key_source = handshake_state.peer_static_key_source
+            peer_static_key_proven = handshake_state.peer_static_key_proven
+
+        local_s = getattr(handshake_state, 's', Empty())
+        local_static_public_key = None if isinstance(local_s, Empty) else local_s.public_bytes
+
+        role = PeerRole.INITIATOR if handshake_state.initiator else PeerRole.RESPONDER
+        return PeerIdentityEvidence(
+            pattern=self.pattern.name,
+            protocol_name=self.name,
+            pattern_modifiers=tuple(self.pattern_modifiers),
+            role=role,
+            handshake_hash=self.symmetric_state.get_handshake_hash(),
+            peer_static_public_key=peer_static_public_key,
+            peer_static_key_proven=peer_static_key_proven,
+            peer_static_key_source=peer_static_key_source,
+            local_static_public_key=local_static_public_key,
+        )
+
+    def abort_handshake(self):
+        """
+        Tear down handshake state after an identity-policy refusal.
+
+        Transport cipher states were never derived in this path, so there is no
+        usable transport state left behind. Handshake state (including the
+        transcript and ephemeral private keys) is dropped; application-supplied
+        key pairs and the protocol configuration are left intact.
+        """
+        self.handshake_aborted = True
+        self.peer_identity = None
+        self.peer_admitted = False
+        self.peer_identity_admitted = False
+        self.handshake_state = None
+        self.symmetric_state = None
+        self.cipher_state_handshake = None
+        self.cipher_state_encrypt = None
+        self.cipher_state_decrypt = None
+        self.handshake_hash = None
 
     def handshake_done(self):
         if self.pattern.one_way:

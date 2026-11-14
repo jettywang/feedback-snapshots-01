@@ -5,7 +5,8 @@ from cryptography.exceptions import InvalidTag
 
 from noise.backends.default import noise_backend
 from noise.constants import MAX_MESSAGE_LEN
-from noise.exceptions import NoisePSKError, NoiseValueError, NoiseHandshakeError, NoiseInvalidMessage
+from noise.exceptions import (NoisePSKError, NoiseValueError, NoiseHandshakeError, NoiseInvalidMessage,
+                             NoiseIdentityError)
 from .noise_protocol import NoiseProtocol
 
 
@@ -66,6 +67,59 @@ class NoiseConnection(object):
         else:
             raise NoiseValueError('Prologue must be ASCII string or bytes')
 
+    def set_peer_identity_verifier(self, verifier):
+        """
+        Install an optional application admission callback for peer identity.
+
+        The callback receives a :class:`noise.identity.PeerIdentityEvidence`
+        snapshot immediately before transport keys are derived. It must return
+        a true value to admit the peer. Returning a false value raises
+        ``NoiseIdentityError``; any exception from the callback is wrapped in
+        ``NoiseIdentityError``. In both refusal cases the handshake is aborted,
+        the reply/payload from the final handshake message is not returned, and
+        no transport cipher state is created.
+
+        Pass ``None`` to remove a previously installed callback.
+        """
+        if verifier is not None and not callable(verifier):
+            raise NoiseValueError('Peer identity verifier must be callable or None')
+        if self.handshake_finished:
+            raise NoiseHandshakeError('Handshake finished. Identity verifier cannot be changed now')
+        self.noise_protocol.peer_identity_verifier = verifier
+
+    def get_peer_identity(self):
+        """Return the accepted peer identity evidence, or None if unavailable."""
+        return self.noise_protocol.peer_identity
+
+    @property
+    def peer_identity(self):
+        return self.noise_protocol.peer_identity
+
+    @property
+    def peer_admitted(self):
+        """
+        True only if an application peer-identity callback accepted this peer.
+
+        A finished handshake alone never sets this. This flag only records the
+        callback's decision; it does not imply that the pattern provided any
+        peer identity.
+        """
+        return self.noise_protocol.peer_admitted
+
+    @property
+    def peer_identity_admitted(self):
+        """
+        True only if a callback accepted evidence naming a peer static key.
+
+        A finished handshake alone never sets this. NN can never set it because
+        it has no peer identity to admit.
+        """
+        return self.noise_protocol.peer_identity_admitted
+
+    @property
+    def handshake_aborted(self):
+        return getattr(self.noise_protocol, 'handshake_aborted', False)
+
     def set_as_initiator(self):
         self.noise_protocol.initiator = True
         self._next_fn = self.write_message
@@ -93,6 +147,8 @@ class NoiseConnection(object):
                 self.noise_protocol.dh_fn.klass.from_public_bytes(fd.read())
 
     def start_handshake(self):
+        if self.handshake_aborted:
+            raise NoiseHandshakeError('Handshake aborted by peer identity policy; use a new connection')
         self.noise_protocol.validate()
         self.noise_protocol.initialise_handshake_state()
         self._handshake_started = True
@@ -100,6 +156,8 @@ class NoiseConnection(object):
     def write_message(self, payload: bytes=b'') -> bytearray:
         if not self._handshake_started:
             raise NoiseHandshakeError('Call NoiseConnection.start_handshake first')
+        if self.handshake_aborted:
+            raise NoiseHandshakeError('Handshake aborted by peer identity policy')
         if self._next_fn != self.write_message:
             raise NoiseHandshakeError('NoiseConnection.read_message has to be called now')
         if self.handshake_finished:
@@ -115,6 +173,8 @@ class NoiseConnection(object):
     def read_message(self, data: bytes) -> bytearray:
         if not self._handshake_started:
             raise NoiseHandshakeError('Call NoiseConnection.start_handshake first')
+        if self.handshake_aborted:
+            raise NoiseHandshakeError('Handshake aborted by peer identity policy')
         if self._next_fn != self.read_message:
             raise NoiseHandshakeError('NoiseConnection.write_message has to be called now')
         if self.handshake_finished:
@@ -128,6 +188,8 @@ class NoiseConnection(object):
         return buffer
 
     def encrypt(self, data: bytes) -> bytes:
+        if self.handshake_aborted:
+            raise NoiseHandshakeError('Handshake aborted by peer identity policy')
         if not self.handshake_finished:
             raise NoiseHandshakeError('Handshake not finished yet!')
         if not isinstance(data, bytes) or len(data) > MAX_MESSAGE_LEN:
@@ -135,6 +197,8 @@ class NoiseConnection(object):
         return self.noise_protocol.cipher_state_encrypt.encrypt_with_ad(None, data)
 
     def decrypt(self, data: bytes) -> bytes:
+        if self.handshake_aborted:
+            raise NoiseHandshakeError('Handshake aborted by peer identity policy')
         if not self.handshake_finished:
             raise NoiseHandshakeError('Handshake not finished yet!')
         if not isinstance(data, bytes) or len(data) > MAX_MESSAGE_LEN:
@@ -148,7 +212,17 @@ class NoiseConnection(object):
         return self.noise_protocol.handshake_hash
 
     def rekey_inbound_cipher(self):
-        self.noise_protocol.cipher_state_decrypt.rekey()
+        self._get_transport_cipher('cipher_state_decrypt').rekey()
 
     def rekey_outbound_cipher(self):
-        self.noise_protocol.cipher_state_encrypt.rekey()
+        self._get_transport_cipher('cipher_state_encrypt').rekey()
+
+    def _get_transport_cipher(self, name):
+        if self.handshake_aborted:
+            raise NoiseHandshakeError('Handshake aborted by peer identity policy')
+        if not self.handshake_finished:
+            raise NoiseHandshakeError('Handshake not finished yet!')
+        cipher_state = getattr(self.noise_protocol, name)
+        if cipher_state is None:
+            raise NoiseHandshakeError('No transport cipher exists for this direction')
+        return cipher_state

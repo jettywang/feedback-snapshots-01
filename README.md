@@ -109,6 +109,53 @@ if __name__ == '__main__':
         conn.sendall(noise.encrypt(received))
 ```
 
+#### Peer identity admission
+
+`handshake_finished` means the Noise handshake flow completed; it does not mean
+the peer is authenticated for your application. Patterns differ:
+
+- `NN` provides no peer identity at all.
+- `XX` lets each party observe and prove the other's static key, but the
+  application must still decide whether that key is trusted.
+- `IK` proves the peer static key that was configured locally before the
+  handshake. A local expectation is not the same as an observed key.
+
+Install an optional admission callback before `start_handshake()`:
+
+```python
+from noise.identity import PeerAuthentication
+
+def check_peer(evidence):
+    # evidence.pattern, .role, .peer_static_public_key, .peer_static_key_proven,
+    # .peer_static_key_source, .handshake_hash, and .peer_authentication are
+    # the actual handshake values, never the configured expectations.
+    return evidence.peer_authentication == PeerAuthentication.STATIC and \
+        evidence.peer_static_public_key in TRUSTED_KEYS
+
+proto.set_peer_identity_verifier(check_peer)
+```
+
+The callback runs once, after the final handshake message has been processed
+but before transport keys are derived. Return a false value, or raise, and the
+handshake aborts: the final handshake payload is withheld, no transport cipher
+state is created, and `encrypt`/`decrypt` raise `NoiseHandshakeError`. The
+refusal is reported as `NoiseIdentityError`, whose `evidence` attribute carries
+the facts the callback saw.
+
+`PeerIdentityEvidence.peer_static_key_source` is `observed` for keys received
+in the handshake, `configured` for keys supplied with
+`set_keypair_from_public_bytes`/`..._path`, and `none` when the pattern has no
+peer static key. `peer_static_key_proven` is true only when a peer message
+authenticated under a key chain that used that static key, so patterns such as
+one-way `X`, `KN`, and the responder side of `IX` do not overclaim.
+
+After a successful handshake, `proto.peer_admitted` records that a callback
+allowed the peer, while `proto.peer_identity_admitted` is true only if the
+evidence also named a peer static key. For `NN` the latter is always false,
+even if a callback chose to allow anonymous peers.
+
+See `examples/peer-identity/main.py` for an in-memory NN/XX/IK demonstration.
+
 #### Wireguard integration example
 In *examples* directory, there is an example of interoperation of this package with Wireguard VPN solution. Please refer to [README.md](examples/wireguard/README.md) of that example for details.
 

@@ -1,6 +1,7 @@
 from typing import Union
 
-from noise.exceptions import NoiseMaxNonceError
+from noise.exceptions import NoiseMaxNonceError, NoiseIdentityError
+from noise.identity import PeerStaticKeySource
 from .constants import Empty, TOKEN_E, TOKEN_S, TOKEN_EE, TOKEN_ES, TOKEN_SE, TOKEN_SS, TOKEN_PSK, MAX_NONCE
 
 
@@ -189,8 +190,44 @@ class SymmetricState(object):
         """
         Returns a pair of CipherState objects for encrypting/decrypting transport messages.
 
+        Before any transport key is derived, peer identity evidence for this
+        handshake is built and offered to the optional application admission
+        callback. A rejection or an exception from that callback aborts the
+        handshake, so no transport state is created and no application payload
+        from the final handshake message is released to the caller.
+
         :return: tuple (CipherState, CipherState)
         """
+        evidence = self.noise_protocol.build_peer_identity_evidence()
+        verifier = self.noise_protocol.peer_identity_verifier
+        if verifier is not None:
+            try:
+                accepted = verifier(evidence)
+            except Exception as exc:
+                self.noise_protocol.abort_handshake()
+                refusal = NoiseIdentityError(
+                    'Peer identity callback raised for pattern {} as {}: {}'.format(
+                        evidence.pattern, evidence.role, exc))
+                refusal.evidence = evidence
+                raise refusal from exc
+            if not accepted:
+                self.noise_protocol.abort_handshake()
+                refusal = NoiseIdentityError(
+                    'Peer identity rejected by application policy for pattern {} as {}'.format(
+                        evidence.pattern, evidence.role))
+                refusal.evidence = evidence
+                raise refusal
+        self.noise_protocol.peer_identity = evidence
+        # Only an application callback can admit a peer. Without one, a
+        # completed handshake has evidence at most, not an accepted peer.
+        self.noise_protocol.peer_admitted = verifier is not None
+        # Identity admission additionally requires evidence that names a peer
+        # static key. NN has none, so a finished NN handshake can never report
+        # an admitted peer identity.
+        self.noise_protocol.peer_identity_admitted = (
+            verifier is not None and evidence.peer_identity_available)
+
+        # Only now derive transport keys.
         # Sets temp_k1, temp_k2 = HKDF(ck, b'', 2).
         temp_k1, temp_k2 = self.noise_protocol.hkdf(self.ck, b'', 2)
 
@@ -232,6 +269,10 @@ class HandshakeState(object):
         self.rs = None
         self.re = None
         self.message_patterns = None
+        self.peer_static_key_proven = False
+        self.peer_static_key_dh_pending = False
+        self.peer_static_key_source = PeerStaticKeySource.NONE
+        self.peer_static_key_relevant = False
 
     @classmethod
     def initialize(cls, noise_protocol: 'NoiseProtocol', initiator: bool, prologue: bytes=b'', s: '_KeyPair'=None,
@@ -273,6 +314,11 @@ class HandshakeState(object):
         instance.e = e if e is not None else Empty()
         instance.rs = rs if rs is not None else Empty()
         instance.re = re if re is not None else Empty()
+        instance.peer_static_key_relevant = cls._pattern_uses_peer_static(noise_protocol, initiator)
+        if rs is not None and instance.peer_static_key_relevant:
+            # Supplied by the application before the handshake; this is an
+            # expectation, not an observation of what the peer actually sent.
+            instance.peer_static_key_source = PeerStaticKeySource.CONFIGURED
 
         # Calls MixHash() once for each public key listed in the pre-messages from handshake_pattern, with the specified
         # public key as input (...). If both initiator and responder have pre-messages, the initiator’s public keys are
@@ -288,6 +334,23 @@ class HandshakeState(object):
         instance.message_patterns = noise_protocol.pattern.tokens.copy()
 
         return instance
+
+    @staticmethod
+    def _pattern_uses_peer_static(noise_protocol, initiator: bool) -> bool:
+        """Whether this role's peer static public key is part of the handshake."""
+        pattern = noise_protocol.pattern
+        peer_pre_messages = pattern.get_responder_pre_messages() if initiator \
+            else pattern.get_initiator_pre_messages()
+        if TOKEN_S in peer_pre_messages:
+            return True
+        tokens = [token for message in pattern.tokens for token in message]
+        if TOKEN_SS in tokens:
+            return True
+        if initiator and TOKEN_ES in tokens:
+            return True
+        if not initiator and TOKEN_SE in tokens:
+            return True
+        return False
 
     def write_message(self, payload: Union[bytes, bytearray], message_buffer: bytearray):
         """
@@ -321,6 +384,7 @@ class HandshakeState(object):
                 # Calls MixKey(DH(e, rs)) if initiator, MixKey(DH(s, re)) if responder
                 if self.initiator:
                     self.symmetric_state.mix_key(self.noise_protocol.dh_fn.dh(self.e.private, self.rs.public))
+                    self._mark_peer_static_key_dh_pending()
                 else:
                     self.symmetric_state.mix_key(self.noise_protocol.dh_fn.dh(self.s.private, self.re.public))
 
@@ -330,10 +394,12 @@ class HandshakeState(object):
                     self.symmetric_state.mix_key(self.noise_protocol.dh_fn.dh(self.s.private, self.re.public))
                 else:
                     self.symmetric_state.mix_key(self.noise_protocol.dh_fn.dh(self.e.private, self.rs.public))
+                    self._mark_peer_static_key_dh_pending()
 
             elif token == TOKEN_SS:
                 # Calls MixKey(DH(s, rs))
                 self.symmetric_state.mix_key(self.noise_protocol.dh_fn.dh(self.s.private, self.rs.public))
+                self._mark_peer_static_key_dh_pending()
 
             elif token == TOKEN_PSK:
                 self.symmetric_state.mix_key_and_hash(self.noise_protocol.psks.pop(0))
@@ -381,6 +447,13 @@ class HandshakeState(object):
                 self.rs = self.noise_protocol.keypair_class.from_public_bytes(
                     self.symmetric_state.decrypt_and_hash(temp)
                 )
+                # The peer sent this key in the handshake. It replaces any
+                # application-supplied expectation, and has not been proven
+                # yet by a DH operation.
+                self.peer_static_key_source = PeerStaticKeySource.OBSERVED
+                self.peer_static_key_proven = False
+                self.peer_static_key_dh_pending = False
+                self.peer_static_key_relevant = True
 
             elif token == TOKEN_EE:
                 # Calls MixKey(DH(e, re)).
@@ -390,6 +463,7 @@ class HandshakeState(object):
                 # Calls MixKey(DH(e, rs)) if initiator, MixKey(DH(s, re)) if responder
                 if self.initiator:
                     self.symmetric_state.mix_key(self.noise_protocol.dh_fn.dh(self.e.private, self.rs.public))
+                    self._mark_peer_static_key_dh_pending()
                 else:
                     self.symmetric_state.mix_key(self.noise_protocol.dh_fn.dh(self.s.private, self.re.public))
 
@@ -399,10 +473,12 @@ class HandshakeState(object):
                     self.symmetric_state.mix_key(self.noise_protocol.dh_fn.dh(self.s.private, self.re.public))
                 else:
                     self.symmetric_state.mix_key(self.noise_protocol.dh_fn.dh(self.e.private, self.rs.public))
+                    self._mark_peer_static_key_dh_pending()
 
             elif token == TOKEN_SS:
                 # Calls MixKey(DH(s, rs))
                 self.symmetric_state.mix_key(self.noise_protocol.dh_fn.dh(self.s.private, self.rs.public))
+                self._mark_peer_static_key_dh_pending()
 
             elif token == TOKEN_PSK:
                 self.symmetric_state.mix_key_and_hash(self.noise_protocol.psks.pop(0))
@@ -412,10 +488,28 @@ class HandshakeState(object):
 
         # Calls DecryptAndHash() on the remaining bytes of the message and stores the output into payload_buffer.
         payload_buffer += self.symmetric_state.decrypt_and_hash(bytes(message))
+        self._confirm_peer_static_key()
 
         # If there are no more message patterns returns two new CipherState objects by calling Split()
         if len(self.message_patterns) == 0:
             return self.symmetric_state.split()
+
+    def _mark_peer_static_key_dh_pending(self):
+        # A DH operation used rs as a public input. This is not by itself proof
+        # that the peer knows the matching private key; proof requires the peer
+        # to authenticate a message under a key chain that includes this DH.
+        if not isinstance(self.rs, Empty):
+            self.peer_static_key_dh_pending = True
+            self.peer_static_key_relevant = True
+
+    def _confirm_peer_static_key(self):
+        # Called only after an incoming message authenticated. Because the
+        # chaining key is cumulative, a successful authenticated message that
+        # post-dates a DH involving the peer static public key demonstrates
+        # that the sender knew the matching static private key.
+        if self.peer_static_key_dh_pending:
+            self.peer_static_key_proven = True
+            self.peer_static_key_dh_pending = False
 
     def _get_local_keypair(self, token: str) -> 'KeyPair':
         keypair = getattr(self, token)  # Maybe explicitly handle exception when getting improper keypair
