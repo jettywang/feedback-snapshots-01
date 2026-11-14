@@ -17,10 +17,23 @@ from .eddsa import (
     curve_ed448,
     PrivateKey,
     PublicKey,
+    Prehash,
+    Ed25519,
+    Ed25519ctx,
+    Ed25519ph,
+    Ed448,
+    Ed448ph,
 )
+from .curves import (
+    Ed25519 as Ed25519_curve,
+    Ed448 as Ed448_curve,
+    NIST256p,
+)
+from .keys import SigningKey, VerifyingKey
+from ._sha3 import shake_256 as _shake256
 from .ecdsa import generator_256, curve_256
 from .errors import MalformedPointError
-from ._compat import a2b_hex, compat26_str
+from ._compat import a2b_hex, compat26_str, bytes_to_int, int_to_bytes
 
 
 class TestA2B_Hex(unittest.TestCase):
@@ -1122,3 +1135,655 @@ def test_vectors(generator, private_key, public_key, message, signature):
     assert gen_sig == signature
 
     assert ver_key.verify(message, signature)
+
+
+# RFC 8032, section 7.2 (Ed25519ctx), 7.3 (Ed25519ph), 7.5 (Ed448ph).
+# Each entry: variant, generator, secret key, public key, message, context,
+# signature. The signature covers the full RFC 8032 output, byte for byte.
+VARIANT_VECTORS = [
+    (
+        Ed25519ctx,
+        generator_ed25519,
+        "0305334e381af78f141cb666f6199f57" "bc3495335a256a95bd2a55bf546663f6",
+        "dfc9425e4f968f7f0c29f0259cf5f9ae" "d6851c2bb4ad8bfb860cfee0ab248292",
+        "f726936d19c800494e3fdaff20b276a8",
+        b"foo",
+        "55a4cc2f70a54e04288c5f4cd1e45a7b"
+        "b520b36292911876cada7323198dd87a"
+        "8b36950b95130022907a7fb7c4e9b2d5"
+        "f6cca685a587b4b21f4b888e4e7edb0d",
+    ),
+    (
+        Ed25519ctx,
+        generator_ed25519,
+        "0305334e381af78f141cb666f6199f57" "bc3495335a256a95bd2a55bf546663f6",
+        "dfc9425e4f968f7f0c29f0259cf5f9ae" "d6851c2bb4ad8bfb860cfee0ab248292",
+        "f726936d19c800494e3fdaff20b276a8",
+        b"bar",
+        "fc60d5872fc46b3aa69f8b5b4351d580"
+        "8f92bcc044606db097abab6dbcb1aee3"
+        "216c48e8b3b66431b5b186d1d28f8ee1"
+        "5a5ca2df6668346291c2043d4eb3e90d",
+    ),
+    (
+        Ed25519ctx,
+        generator_ed25519,
+        "ab9c2853ce297ddab85c993b3ae14bca" "d39b2c682beabc27d6d4eb20711d6560",
+        "0f1d1274943b91415889152e893d80e9" "3275a1fc0b65fd71b4b0dda10ad7d772",
+        "f726936d19c800494e3fdaff20b276a8",
+        b"foo",
+        "21655b5f1aa965996b3f97b3c849eafb"
+        "a922a0a62992f73b3d1b73106a84ad85"
+        "e9b86a7b6005ea868337ff2d20a7f5fb"
+        "d4cd10b0be49a68da2b2e0dc0ad8960f",
+    ),
+    (
+        Ed25519ph,
+        generator_ed25519,
+        "833fe62409237b9d62ec77587520911e" "9a759cec1d19755b7da901b96dca3d42",
+        "ec172b93ad5e563bf4932c70e1245034" "c35467ef2efd4d64ebf819683467e2bf",
+        "616263",
+        None,
+        "98a70222f0b8121aa9d30f813d683f80"
+        "9e462b469c7ff87639499bb94e6dae41"
+        "31f85042463c2a355a2003d062adf5aa"
+        "a10b8c61e636062aaad11c2a26083406",
+    ),
+    (
+        Ed448ph,
+        generator_ed448,
+        "833fe62409237b9d62ec77587520911e"
+        "9a759cec1d19755b7da901b96dca3d42"
+        "ef7822e0d5104127dc05d6dbefde69e3"
+        "ab2cec7c867c6e2c49",
+        "259b71c19f83ef77a7abd26524cbdb31"
+        "61b590a48f7d17de3ee0ba9c52beb743"
+        "c09428a131d6b1b57303d90d8132c276"
+        "d5ed3d5d01c0f53880",
+        "616263",
+        None,
+        "822f6901f7480f3d5f562c592994d969"
+        "3602875614483256505600bbc281ae38"
+        "1f54d6bce2ea911574932f52a4e6cadd"
+        "78769375ec3ffd1b801a0d9b3f4030cd"
+        "433964b6457ea39476511214f97469b5"
+        "7dd32dbc560a9a94d00bff07620464a3"
+        "ad203df7dc7ce360c3cd3696d9d9fab9"
+        "0f00",
+    ),
+    (
+        Ed448ph,
+        generator_ed448,
+        "833fe62409237b9d62ec77587520911e"
+        "9a759cec1d19755b7da901b96dca3d42"
+        "ef7822e0d5104127dc05d6dbefde69e3"
+        "ab2cec7c867c6e2c49",
+        "259b71c19f83ef77a7abd26524cbdb31"
+        "61b590a48f7d17de3ee0ba9c52beb743"
+        "c09428a131d6b1b57303d90d8132c276"
+        "d5ed3d5d01c0f53880",
+        "616263",
+        b"foo",
+        "c32299d46ec8ff02b54540982814dce9"
+        "a05812f81962b649d528095916a2aa48"
+        "1065b1580423ef927ecf0af5888f90da"
+        "0f6a9a85ad5dc3f280d91224ba9911a3"
+        "653d00e484e2ce232521481c8658df30"
+        "4bb7745a73514cdb9bf3e15784ab7128"
+        "4f8d0704a608c54a6b62d97beb511d13"
+        "2100",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "variant,generator,private_key,public_key,message,context,signature",
+    VARIANT_VECTORS,
+)
+def test_variant_vectors(
+    variant, generator, private_key, public_key, message, context, signature
+):
+    private_key = a2b_hex(private_key)
+    public_key = a2b_hex(public_key)
+    message = a2b_hex(message)
+    signature = a2b_hex(signature)
+
+    sig_key = PrivateKey(generator, private_key)
+    ver_key = PublicKey(generator, public_key)
+
+    assert sig_key.public_key().public_key() == ver_key.public_key()
+
+    assert sig_key.sign_variant(variant, message, context) == signature
+    assert ver_key.verify_variant(variant, message, signature, context)
+
+
+@pytest.mark.parametrize(
+    "variant,generator,private_key,public_key,message,context,signature",
+    VARIANT_VECTORS,
+)
+def test_variant_vectors_via_keys(
+    variant, generator, private_key, public_key, message, context, signature
+):
+    """The high level keys API must produce the very same bytes."""
+    if generator is generator_ed25519:
+        curve = Ed25519_curve
+    else:
+        curve = Ed448_curve
+    signing_key = SigningKey.from_string(a2b_hex(private_key), curve=curve)
+    verifying_key = VerifyingKey.from_string(a2b_hex(public_key), curve=curve)
+
+    assert signing_key.get_verifying_key() == verifying_key
+    assert signing_key.sign_eddsa(
+        a2b_hex(message), variant, context
+    ) == a2b_hex(signature)
+    assert verifying_key.verify_eddsa(
+        a2b_hex(signature), a2b_hex(message), variant, context
+    )
+
+
+def test_ed25519ctx_empty_context_is_not_pure():
+    """An empty context in ctx mode must still be dom2-separated."""
+    private_key = a2b_hex(
+        "0305334e381af78f141cb666f6199f57bc3495335a256a95bd2a55bf546663f6"
+    )
+    message = b"message"
+    key = PrivateKey(generator_ed25519, private_key)
+
+    pure = key.sign(message)
+    ctx_empty = key.sign_variant(Ed25519ctx, message)
+    ctx_empty_explicit = key.sign_variant(Ed25519ctx, message, b"")
+
+    assert ctx_empty == ctx_empty_explicit
+    assert ctx_empty != pure
+    # and a ctx signature made with an empty context must not verify as Pure,
+    # while a Pure signature must not verify as Ed25519ctx
+    with pytest.raises(ValueError):
+        key.public_key().verify(message, ctx_empty)
+    with pytest.raises(ValueError):
+        key.public_key().verify_variant(Ed25519ctx, message, pure)
+
+
+def test_variants_are_not_interchangeable():
+    """Same message, same key, different mode or context -> different sigs."""
+    private_key = a2b_hex(
+        "0305334e381af78f141cb666f6199f57bc3495335a256a95bd2a55bf546663f6"
+    )
+    key = PrivateKey(generator_ed25519, private_key)
+    message = b"the same message"
+
+    signatures = {
+        ("Ed25519", None): key.sign_variant(Ed25519, message),
+        ("Ed25519ctx", b""): key.sign_variant(Ed25519ctx, message, b""),
+        ("Ed25519ctx", b"foo"): key.sign_variant(Ed25519ctx, message, b"foo"),
+        ("Ed25519ctx", b"bar"): key.sign_variant(Ed25519ctx, message, b"bar"),
+        ("Ed25519ph", b""): key.sign_variant(Ed25519ph, message, b""),
+        ("Ed25519ph", b"foo"): key.sign_variant(Ed25519ph, message, b"foo"),
+    }
+
+    encoded = [bytes(sig) for sig in signatures.values()]
+    assert len(set(encoded)) == len(signatures)
+
+    for (name, context), signature in signatures.items():
+        variant = {
+            "Ed25519": Ed25519,
+            "Ed25519ctx": Ed25519ctx,
+            "Ed25519ph": Ed25519ph,
+        }[name]
+        assert key.public_key().verify_variant(
+            variant, message, signature, context
+        )
+        # every other mode/context pair must reject the signature
+        for other_name, other_context in signatures:
+            if (other_name, other_context) == (name, context):
+                continue
+            other_variant = {
+                "Ed25519": Ed25519,
+                "Ed25519ctx": Ed25519ctx,
+                "Ed25519ph": Ed25519ph,
+            }[other_name]
+            with pytest.raises(ValueError):
+                key.public_key().verify_variant(
+                    other_variant, message, signature, other_context
+                )
+
+
+def test_prehash_is_not_sha512_then_pure():
+    """A ph signature is not a Pure signature over the bare digest."""
+    private_key = a2b_hex(
+        "833fe62409237b9d62ec77587520911e9a759cec1d19755b7da901b96dca3d42"
+    )
+    message = b"abc"
+    digest = hashlib.sha512(message).digest()
+
+    key = PrivateKey(generator_ed25519, private_key)
+    ph_signature = key.sign_variant(Ed25519ph, message)
+
+    # both the digest-input Pure signature and a message-signing ph
+    # signature over the digest differ from the RFC 8032 ph signature
+    wrong_pure = key.sign_variant(Ed25519, digest)
+    wrong_ph = key.sign_variant(Ed25519ph, digest)
+
+    assert ph_signature != wrong_pure
+    assert ph_signature != wrong_ph
+    with pytest.raises(ValueError):
+        key.public_key().verify_variant(Ed25519, message, ph_signature)
+    with pytest.raises(ValueError):
+        key.public_key().verify_variant(Ed25519ph, digest, ph_signature)
+
+
+def test_ed448ph_is_not_shake_then_pure():
+    private_key = a2b_hex(
+        "833fe62409237b9d62ec77587520911e"
+        "9a759cec1d19755b7da901b96dca3d42"
+        "ef7822e0d5104127dc05d6dbefde69e3"
+        "ab2cec7c867c6e2c49"
+    )
+    message = b"abc"
+    digest = _shake256(message, 64)
+
+    key = PrivateKey(generator_ed448, private_key)
+    ph_signature = key.sign_variant(Ed448ph, message)
+
+    assert ph_signature != key.sign_variant(Ed448, digest)
+    assert ph_signature != key.sign_variant(Ed448ph, digest)
+    with pytest.raises(ValueError):
+        key.public_key().verify_variant(Ed448, message, ph_signature)
+
+
+def test_sign_prehash_requires_ph_variant():
+    private_key = a2b_hex(
+        "833fe62409237b9d62ec77587520911e9a759cec1d19755b7da901b96dca3d42"
+    )
+    key = PrivateKey(generator_ed25519, private_key)
+    digest = hashlib.sha512(b"abc").digest()
+
+    with pytest.raises(ValueError):
+        key.sign_prehash(Ed25519, digest)
+    with pytest.raises(ValueError):
+        key.sign_prehash(Ed25519ctx, digest)
+    with pytest.raises(ValueError):
+        key.sign_prehash(Ed25519ph, digest[:-1])
+    with pytest.raises(ValueError):
+        key.public_key().verify_prehash(Ed25519, digest, b"\x00" * 64)
+
+
+@pytest.mark.parametrize(
+    "variant,generator,private_key,message,context",
+    [
+        (
+            Ed25519ph,
+            generator_ed25519,
+            "833fe62409237b9d62ec77587520911e"
+            "9a759cec1d19755b7da901b96dca3d42",
+            b"abc",
+            None,
+        ),
+        (
+            Ed25519ph,
+            generator_ed25519,
+            "833fe62409237b9d62ec77587520911e"
+            "9a759cec1d19755b7da901b96dca3d42",
+            b"a longer message chunked in three parts",
+            b"ctx",
+        ),
+        (
+            Ed448ph,
+            generator_ed448,
+            "833fe62409237b9d62ec77587520911e"
+            "9a759cec1d19755b7da901b96dca3d42"
+            "ef7822e0d5104127dc05d6dbefde69e3"
+            "ab2cec7c867c6e2c49",
+            b"abc",
+            None,
+        ),
+        (
+            Ed448ph,
+            generator_ed448,
+            "833fe62409237b9d62ec77587520911e"
+            "9a759cec1d19755b7da901b96dca3d42"
+            "ef7822e0d5104127dc05d6dbefde69e3"
+            "ab2cec7c867c6e2c49",
+            b"x" * 512,
+            b"ctx",
+        ),
+    ],
+)
+def test_prehash_chunking_is_order_preserving(
+    variant, generator, private_key, message, context
+):
+    """Any chunking of the same message produces the same digest and sig."""
+    key = PrivateKey(generator, a2b_hex(private_key))
+
+    whole = key.prehash(variant)
+    whole.update(message)
+    digest = whole.finalize()
+    signature = key.sign_prehash(variant, digest, context)
+    assert key.public_key().verify_prehash(variant, digest, signature, context)
+
+    for split in range(len(message) + 1):
+        state = key.prehash(variant)
+        state.update(message[:split])
+        state.update(message[split:])
+        assert state.finalize() == digest
+
+    # byte-at-a-time chunking
+    state = key.prehash(variant)
+    for i in range(len(message)):
+        state.update(message[i : i + 1])
+    assert state.sign(key, context) == signature
+
+    verifier = key.public_key().prehash(variant)
+    for i in range(0, len(message), 7):
+        verifier.update(message[i : i + 7])
+    assert verifier.verify(key.public_key(), signature, context)
+
+
+def test_prehash_state_is_single_use():
+    private_key = a2b_hex(
+        "833fe62409237b9d62ec77587520911e9a759cec1d19755b7da901b96dca3d42"
+    )
+    key = PrivateKey(generator_ed25519, private_key)
+    state = key.prehash(Ed25519ph)
+    state.update(b"ab")
+    digest = state.finalize()
+
+    with pytest.raises(ValueError):
+        state.update(b"c")
+    with pytest.raises(ValueError):
+        state.finalize()
+    with pytest.raises(ValueError):
+        state.sign(key)
+    with pytest.raises(ValueError):
+        state.verify(key.public_key(), b"\x00" * 64)
+
+    # the digest itself is still usable, but only explicitly as a digest
+    signature = key.sign_prehash(Ed25519ph, digest)
+    assert key.public_key().verify_prehash(Ed25519ph, digest, signature)
+
+
+def test_prehash_state_requires_ph_variant():
+    private_key = a2b_hex(
+        "833fe62409237b9d62ec77587520911e9a759cec1d19755b7da901b96dca3d42"
+    )
+    key = PrivateKey(generator_ed25519, private_key)
+    for variant in (Ed25519, Ed25519ctx):
+        with pytest.raises(ValueError):
+            key.prehash(variant)
+
+    with pytest.raises(TypeError):
+        Prehash("not a variant")
+
+
+def test_context_length_is_limited_to_255():
+    private_key = a2b_hex(
+        "0305334e381af78f141cb666f6199f57bc3495335a256a95bd2a55bf546663f6"
+    )
+    key = PrivateKey(generator_ed25519, private_key)
+    key.sign_variant(Ed25519ctx, b"m", b"x" * 255)
+    for variant in (Ed25519ctx, Ed25519ph):
+        with pytest.raises(ValueError):
+            key.sign_variant(variant, b"m", b"x" * 256)
+        with pytest.raises(ValueError):
+            key.public_key().verify_variant(
+                variant, b"m", b"\x00" * 64, b"x" * 256
+            )
+
+
+def test_pure_ed25519_rejects_context():
+    private_key = a2b_hex(
+        "0305334e381af78f141cb666f6199f57bc3495335a256a95bd2a55bf546663f6"
+    )
+    key = PrivateKey(generator_ed25519, private_key)
+    with pytest.raises(ValueError):
+        key.sign_variant(Ed25519, b"m", b"foo")
+    with pytest.raises(ValueError):
+        key.public_key().verify_variant(Ed25519, b"m", b"\x00" * 64, b"foo")
+
+
+def test_variant_must_match_curve():
+    sk_25519 = PrivateKey(
+        generator_ed25519,
+        a2b_hex(
+            "833fe62409237b9d62ec77587520911e9a759cec1d19755b7da901b96dca3d42"
+        ),
+    )
+    with pytest.raises(ValueError):
+        sk_25519.sign_variant(Ed448ph, b"abc")
+    with pytest.raises(TypeError):
+        sk_25519.sign_variant("Ed25519ph", b"abc")
+
+
+def test_dom_prefixes_match_rfc8032():
+    """dom2/dom4 must include phflag, context length and context bytes."""
+    assert Ed25519.dom() == b""
+    assert Ed25519ctx.dom() == (b"SigEd25519 no Ed25519 collisions\x00\x00")
+    assert Ed25519ph.dom() == (b"SigEd25519 no Ed25519 collisions\x01\x00")
+    assert Ed25519ctx.dom(b"foo") == (
+        b"SigEd25519 no Ed25519 collisions\x00\x03foo"
+    )
+    assert Ed25519ph.dom(b"foo") == (
+        b"SigEd25519 no Ed25519 collisions\x01\x03foo"
+    )
+    assert Ed448.dom() == b"SigEd448\x00\x00"
+    assert Ed448ph.dom() == b"SigEd448\x01\x00"
+    assert Ed448ph.dom(b"foo") == b"SigEd448\x01\x03foo"
+
+
+def test_legacy_sign_and_verify_unchanged():
+    """The default calls keep using PureEdDSA and its exact bytes."""
+    private_key = a2b_hex(
+        "833fe62409237b9d62ec77587520911e9a759cec1d19755b7da901b96dca3d42"
+    )
+    message = b"abc"
+    key = PrivateKey(generator_ed25519, private_key)
+    assert key.sign(message) == key.sign_variant(Ed25519, message)
+    assert key.public_key().verify(message, key.sign(message))
+
+    # the high level API defaults to the same Pure variant
+    curve = Ed25519_curve
+    signing_key = SigningKey.from_string(private_key, curve=curve)
+    assert signing_key.sign_deterministic(message) == key.sign(message)
+    assert signing_key.sign_eddsa(message) == key.sign(message)
+    verifying_key = signing_key.get_verifying_key()
+    assert verifying_key.verify_eddsa(key.sign(message), message, Ed25519)
+    assert verifying_key.verify(key.sign(message), message)
+
+
+def test_ed448_and_ed448ph_are_separated():
+    """Ed448 context and Ed448ph prehash are distinct signature domains."""
+    private_key = a2b_hex(
+        "6c82a562cb808d10d632be89c8513ebf"
+        "6c929f34ddfa8c9f63c9960ef6e348a3"
+        "528c8a3fcc2f044e39a3fc5b94492f8f"
+        "032e7549a20098f95b"
+    )
+    key = PrivateKey(generator_ed448, private_key)
+    message = b"same message"
+
+    signatures = {
+        ("Ed448", b""): key.sign_variant(Ed448, message, b""),
+        ("Ed448", b"foo"): key.sign_variant(Ed448, message, b"foo"),
+        ("Ed448ph", b""): key.sign_variant(Ed448ph, message, b""),
+        ("Ed448ph", b"foo"): key.sign_variant(Ed448ph, message, b"foo"),
+    }
+    assert len(set(bytes(sig) for sig in signatures.values())) == 4
+
+    for (name, context), signature in signatures.items():
+        variant = Ed448 if name == "Ed448" else Ed448ph
+        assert key.public_key().verify_variant(
+            variant, message, signature, context
+        )
+        for other_name, other_context in signatures:
+            if (other_name, other_context) == (name, context):
+                continue
+            other_variant = Ed448 if other_name == "Ed448" else Ed448ph
+            with pytest.raises(ValueError):
+                key.public_key().verify_variant(
+                    other_variant, message, signature, other_context
+                )
+
+
+def _reference_sign_without_dom(key, variant, message, context, dom_override):
+    """Reproduce the signature computation while overriding the domain."""
+    A = key.public_key().public_key()
+    prefix = key.private_key
+    data = variant.prehash(message)
+    dom = dom_override
+    r = bytes_to_int(
+        key.curve.hash_func(dom + key._PrivateKey__h[key.baselen :] + data),
+        "little",
+    )
+    R = (key.generator * r).to_bytes()
+    k = (
+        bytes_to_int(key.curve.hash_func(dom + R + A + data), "little")
+        % key.generator.order()
+    )
+    S = (r + k * key._PrivateKey__s) % key.generator.order()
+    return R + int_to_bytes(S, key.baselen, "little")
+
+
+def test_variant_signature_without_dom_is_rejected():
+    """
+    A signature computed without the dom prefix must not verify.
+
+    This is the negative control: if the implementation ignored the
+    context/opcode domain separation, the modified signature would verify
+    and the test would fail.
+    """
+    private_key = a2b_hex(
+        "0305334e381af78f141cb666f6199f57bc3495335a256a95bd2a55bf546663f6"
+    )
+    key = PrivateKey(generator_ed25519, private_key)
+    message = b"the same message"
+    context = b"foo"
+
+    # Ed25519ctx with no domain separation is exactly the PureEdDSA path
+    undomained_ctx = _reference_sign_without_dom(
+        key, Ed25519ctx, message, context, b""
+    )
+    assert undomained_ctx == key.sign_variant(Ed25519, message)
+    with pytest.raises(ValueError):
+        key.public_key().verify_variant(
+            Ed25519ctx, message, undomained_ctx, context
+        )
+
+    # Ed25519ph with no dom prefix is "SHA-512 then Pure" -- not valid ph
+    undomained_ph = _reference_sign_without_dom(
+        key, Ed25519ph, message, context, b""
+    )
+    with pytest.raises(ValueError):
+        key.public_key().verify_variant(
+            Ed25519ph, message, undomained_ph, context
+        )
+
+    # an omitted context-length octet is also rejected
+    truncated_dom = b"SigEd25519 no Ed25519 collisions" + bytes([0])
+    truncated = _reference_sign_without_dom(
+        key, Ed25519ctx, message, context, truncated_dom
+    )
+    with pytest.raises(ValueError):
+        key.public_key().verify_variant(
+            Ed25519ctx, message, truncated, context
+        )
+
+
+def test_ed448ph_without_dom_is_rejected():
+    private_key = a2b_hex(
+        "6c82a562cb808d10d632be89c8513ebf"
+        "6c929f34ddfa8c9f63c9960ef6e348a3"
+        "528c8a3fcc2f044e39a3fc5b94492f8f"
+        "032e7549a20098f95b"
+    )
+    key = PrivateKey(generator_ed448, private_key)
+    message = b"abc"
+    context = b"foo"
+
+    undomained = _reference_sign_without_dom(
+        key, Ed448ph, message, context, b""
+    )
+    with pytest.raises(ValueError):
+        key.public_key().verify_variant(Ed448ph, message, undomained, context)
+    # Pure Ed448 always uses dom4, even with an empty context
+    assert key.sign_variant(Ed448, message) != key.sign_variant(
+        Ed448, message, b"foo"
+    )
+
+
+def test_keys_api_reports_misuse_as_value_error():
+    """Mode/context misuse is an API error, not a bad signature."""
+    from .keys import BadSignatureError
+
+    private_key = a2b_hex(
+        "833fe62409237b9d62ec77587520911e9a759cec1d19755b7da901b96dca3d42"
+    )
+    signing_key = SigningKey.from_string(private_key, curve=Ed25519_curve)
+    verifying_key = signing_key.get_verifying_key()
+    message = b"abc"
+    signature = signing_key.sign_eddsa(message, Ed25519ctx, b"foo")
+
+    with pytest.raises(ValueError) as exc:
+        verifying_key.verify_eddsa(signature, message, Ed448ph, b"foo")
+    assert not isinstance(exc.value, BadSignatureError)
+
+    with pytest.raises(ValueError):
+        verifying_key.verify_eddsa(signature, message, Ed25519ctx, b"x" * 256)
+
+    with pytest.raises(ValueError):
+        verifying_key.verify_prehash(
+            signature, hashlib.sha512(message).digest(), Ed25519ctx
+        )
+
+    with pytest.raises(ValueError):
+        signing_key.sign_eddsa(message, Ed25519, b"foo")
+
+    # a genuine wrong-mode/context signature is still a BadSignatureError
+    with pytest.raises(BadSignatureError):
+        verifying_key.verify_eddsa(signature, message, Ed25519ctx, b"bar")
+
+    # wrong prehash length is an API error
+    with pytest.raises(ValueError):
+        verifying_key.verify_prehash(signature, b"a" * 10, Ed25519ph)
+
+
+def test_keys_api_prehash_state_flow():
+    private_key = a2b_hex(
+        "833fe62409237b9d62ec77587520911e9a759cec1d19755b7da901b96dca3d42"
+    )
+    signing_key = SigningKey.from_string(private_key, curve=Ed25519_curve)
+    verifying_key = signing_key.get_verifying_key()
+
+    state = signing_key.eddsa_prehash(Ed25519ph)
+    state.update(b"a")
+    state.update(b"bc")
+    signature = state.sign(signing_key)
+
+    vstate = verifying_key.eddsa_prehash(Ed25519ph)
+    vstate.update(b"abc")
+    assert vstate.verify(verifying_key, signature)
+
+    # both states are now closed
+    with pytest.raises(ValueError):
+        state.update(b"def")
+    with pytest.raises(ValueError):
+        vstate.verify(verifying_key, signature)
+
+    # and the signature matches the RFC 8032 Ed25519ph(SHA-512("abc")) vector
+    assert signature == a2b_hex(
+        "98a70222f0b8121aa9d30f813d683f80"
+        "9e462b469c7ff87639499bb94e6dae41"
+        "31f85042463c2a355a2003d062adf5aa"
+        "a10b8c61e636062aaad11c2a26083406"
+    )
+
+
+def test_non_edwards_key_rejects_eddsa_api():
+    signing_key = SigningKey.generate(curve=NIST256p)
+    verifying_key = signing_key.get_verifying_key()
+    with pytest.raises(ValueError):
+        signing_key.sign_eddsa(b"abc", Ed25519)
+    with pytest.raises(ValueError):
+        signing_key.eddsa_prehash(Ed25519ph)
+    with pytest.raises(ValueError):
+        verifying_key.verify_eddsa(b"sig", b"abc", Ed25519)
+    with pytest.raises(ValueError):
+        verifying_key.eddsa_prehash(Ed25519ph)

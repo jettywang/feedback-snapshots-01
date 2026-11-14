@@ -684,6 +684,123 @@ class VerifyingKey(object):
         digest = hashfunc(data).digest()
         return self.verify_digest(signature, digest, sigdecode, allow_truncate)
 
+    def verify_eddsa(
+        self,
+        signature,
+        data,
+        variant=None,
+        context=None,
+    ):
+        """
+        Verify an EdDSA signature with an explicitly selected RFC 8032 mode.
+
+        Unlike :meth:`verify`, this method never guesses the mode from the
+        data: the ``variant`` must be passed explicitly. When it is omitted
+        the PureEdDSA variant of the key's curve is used, which keeps the
+        existing single-argument behaviour of :meth:`verify`.
+
+        :param signature: raw encoding of the signature
+        :type signature: :term:`bytes-like object`
+        :param data: signed message
+        :type data: :term:`bytes-like object`
+        :param variant: explicitly selected variant, one of
+            :data:`ecdsa.eddsa.Ed25519`, :data:`ecdsa.eddsa.Ed25519ctx`,
+            :data:`ecdsa.eddsa.Ed25519ph`, :data:`ecdsa.eddsa.Ed448` or
+            :data:`ecdsa.eddsa.Ed448ph`
+        :type variant: EdDSAVariant
+        :param context: context string, at most 255 bytes long; allowed
+            for Ed25519ctx, Ed25519ph, Ed448 and Ed448ph
+        :type context: :term:`bytes-like object`
+        :raises BadSignatureError: if the signature is invalid
+        :return: True if the verification was successful
+        :rtype: bool
+        """
+        if not isinstance(self.curve.curve, CurveEdTw):
+            raise ValueError("Method supported only for Edwards curves")
+        if variant is None:
+            variant = eddsa.pure_variant(self.curve.curve)
+        signature = normalise_bytes(signature)
+        # validate the mode arguments before verification, so that
+        # misuse of the API is not reported as a bad signature
+        self.pubkey.check_variant(variant)
+        variant.dom(context)
+        try:
+            return self.pubkey.verify_variant(
+                variant, data, signature, context
+            )
+        except (ValueError, MalformedPointError) as e:
+            raise BadSignatureError("Signature verification failed", e)
+
+    def verify_prehash(
+        self,
+        signature,
+        digest,
+        variant,
+        context=None,
+    ):
+        """
+        Verify an EdDSA signature over an already computed prehash.
+
+        The ``digest`` must be the ``PH(M)`` output of the selected
+        prehashed variant (SHA-512 for Ed25519ph, SHAKE256(x, 64) for
+        Ed448ph); it is never hashed again and never treated as a message.
+        Use :meth:`verify_eddsa` or :meth:`eddsa_prehash` to verify a
+        message instead.
+
+        :param signature: raw encoding of the signature
+        :type signature: :term:`bytes-like object`
+        :param digest: the PH(M) digest, 64 bytes long
+        :type digest: :term:`bytes-like object`
+        :param variant: explicitly selected prehashed variant
+        :type variant: EdDSAVariant
+        :param context: context string, at most 255 bytes long
+        :type context: :term:`bytes-like object`
+        :raises BadSignatureError: if the signature is invalid
+        :return: True if the verification was successful
+        :rtype: bool
+        """
+        if not isinstance(self.curve.curve, CurveEdTw):
+            raise ValueError("Method supported only for Edwards curves")
+        signature = normalise_bytes(signature)
+        # validate the mode arguments before verification, so that
+        # misuse of the API is not reported as a bad signature
+        self.pubkey.check_variant(variant)
+        if not variant.uses_prehash:
+            raise ValueError(
+                "{0} does not use a prehash; verify the message "
+                "instead".format(variant.name)
+            )
+        if len(normalise_bytes(digest)) != variant.prehash_length:
+            raise ValueError(
+                "Invalid prehash length for {0}, expected: {1} bytes".format(
+                    variant.name, variant.prehash_length
+                )
+            )
+        variant.dom(context)
+        try:
+            return self.pubkey.verify_prehash(
+                variant, digest, signature, context
+            )
+        except (ValueError, MalformedPointError) as e:
+            raise BadSignatureError("Signature verification failed", e)
+
+    def eddsa_prehash(self, variant):
+        """
+        Return a one-shot, chunkable prehash state for a prehashed variant.
+
+        Chunks of the message can be supplied with the ``update`` method of
+        the returned object. The state is then finalised exactly once,
+        either through ``finalize``, ``sign`` or ``verify``; afterwards the
+        state is closed and can neither be extended nor reused.
+
+        :param variant: explicitly selected prehashed variant
+        :type variant: EdDSAVariant
+        :rtype: `ecdsa.eddsa.Prehash`
+        """
+        if not isinstance(self.curve.curve, CurveEdTw):
+            raise ValueError("Method supported only for Edwards curves")
+        return self.pubkey.prehash(variant)
+
     def verify_digest(
         self,
         signature,
@@ -1374,6 +1491,90 @@ class SigningKey(object):
             extra_entropy=extra_entropy,
             allow_truncate=True,
         )
+
+    def sign_eddsa(self, data, variant=None, context=None):
+        """
+        Create an EdDSA signature with an explicitly selected RFC 8032 mode.
+
+        This method never guesses the mode from the input: the ``variant``
+        must be passed explicitly. When it is omitted, the PureEdDSA
+        variant of the key's curve is used, which is equivalent to the
+        existing :meth:`sign_deterministic` behaviour.
+
+        For the prehashed variants the message is hashed with the ``PH``
+        function defined by RFC 8032 as part of the signature computation;
+        computing a plain SHA-512/SHAKE256 digest and passing it to the
+        PureEdDSA path is *not* equivalent and is rejected by
+        :meth:`sign_prehash` unless the variant is a prehashed one.
+
+        :param data: message to sign
+        :type data: :term:`bytes-like object`
+        :param variant: explicitly selected variant, one of
+            :data:`ecdsa.eddsa.Ed25519`, :data:`ecdsa.eddsa.Ed25519ctx`,
+            :data:`ecdsa.eddsa.Ed25519ph`, :data:`ecdsa.eddsa.Ed448` or
+            :data:`ecdsa.eddsa.Ed448ph`
+        :type variant: EdDSAVariant
+        :param context: context string, at most 255 bytes long; allowed
+            for Ed25519ctx, Ed25519ph, Ed448 and Ed448ph, rejected for
+            Ed25519
+        :type context: :term:`bytes-like object`
+        :raises ValueError: if the key is not an Edwards curve key or the
+            context is not usable with the selected variant
+        :return: raw encoding of the signature
+        :rtype: bytes
+        """
+        if not isinstance(self.curve.curve, CurveEdTw):
+            raise ValueError("Method supported only for Edwards curves")
+        if variant is None:
+            variant = eddsa.pure_variant(self.curve.curve)
+        return self.privkey.sign_variant(variant, data, context)
+
+    def sign_prehash(self, digest, variant, context=None):
+        """
+        Create an EdDSA signature over an already computed prehash digest.
+
+        The ``digest`` must be the ``PH(M)`` output of the selected
+        prehashed variant (SHA-512 for Ed25519ph, SHAKE256(x, 64) for
+        Ed448ph). It is not hashed again and is never interpreted as a
+        message. Use :meth:`sign_eddsa` to sign messages, or buffer the
+        message in the state returned by :meth:`eddsa_prehash` first.
+
+        :param digest: the PH(M) digest, 64 bytes long
+        :type digest: :term:`bytes-like object`
+        :param variant: explicitly selected prehashed variant
+        :type variant: EdDSAVariant
+        :param context: context string, at most 255 bytes long
+        :type context: :term:`bytes-like object`
+        :raises ValueError: if the variant is not a prehashed one or the
+            digest has an unexpected length
+        :return: raw encoding of the signature
+        :rtype: bytes
+        """
+        if not isinstance(self.curve.curve, CurveEdTw):
+            raise ValueError("Method supported only for Edwards curves")
+        return self.privkey.sign_prehash(variant, digest, context)
+
+    def eddsa_prehash(self, variant):
+        """
+        Return a one-shot, chunkable prehash state for a prehashed variant.
+
+        Example::
+
+            state = private_key.eddsa_prehash(Ed25519ph)
+            state.update(first_chunk)
+            state.update(second_chunk)
+            signature = state.sign(private_key, context=b"protocol")
+
+        After finalisation the state is closed: it cannot be extended with
+        more data and it cannot be used for a second signature.
+
+        :param variant: explicitly selected prehashed variant
+        :type variant: EdDSAVariant
+        :rtype: `ecdsa.eddsa.Prehash`
+        """
+        if not isinstance(self.curve.curve, CurveEdTw):
+            raise ValueError("Method supported only for Edwards curves")
+        return self.privkey.prehash(variant)
 
     def sign_digest_deterministic(
         self,

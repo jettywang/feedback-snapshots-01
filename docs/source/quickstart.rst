@@ -176,3 +176,53 @@ you can use the following code:
         print("Valid signature")
     except BadSignatureError:
         print("Incorrect signature")
+
+EdDSA modes (Ed25519, Ed25519ctx, Ed25519ph, Ed448, Ed448ph)
+===========================================================
+
+By default, EdDSA keys use PureEdDSA: ``sign()``, ``sign_deterministic()``
+and ``verify()`` behave exactly as before and do not take a context.
+
+RFC 8032 also defines a contextual mode (Ed25519ctx) and the prehashed
+modes (Ed25519ph, Ed448ph). They must be selected explicitly with the
+variants from :mod:`ecdsa.eddsa`; the library never guesses the mode from
+the size of the message or of a digest.
+
+.. code:: python
+
+    from ecdsa import SigningKey
+    from ecdsa.curves import Ed25519
+    from ecdsa.eddsa import Ed25519ctx, Ed25519ph, Ed448ph
+
+    private_key = SigningKey.generate(Ed25519)
+    public_key = private_key.get_verifying_key()
+
+    # contextual Ed25519: the context is part of the signed domain
+    sig = private_key.sign_eddsa(message, Ed25519ctx, context=b"proto-1")
+    assert public_key.verify_eddsa(sig, message, Ed25519ctx, b"proto-1")
+
+    # prehashed Ed25519: the message is PH(M), not SHA-512(M) fed to Pure
+    sig = private_key.sign_eddsa(message, Ed25519ph, context=b"proto-1")
+    assert public_key.verify_eddsa(sig, message, Ed25519ph, b"proto-1")
+
+Messages for the prehashed modes can be supplied in chunks. The returned
+state is one-shot: after it is finalised it cannot be extended or reused.
+
+.. code:: python
+
+    state = private_key.eddsa_prehash(Ed25519ph)
+    state.update(first_chunk)
+    state.update(second_chunk)
+    sig = state.sign(private_key, context=b"proto-1")
+
+If a digest was computed elsewhere, sign it with ``sign_prehash``. That
+method only accepts the prehashed variants and requires a 64-byte digest;
+it never treats its input as a message:
+
+.. code:: python
+
+    from hashlib import sha512
+
+    digest = sha512(message).digest()
+    sig = private_key.sign_prehash(digest, Ed25519ph, context=b"proto-1")
+    assert public_key.verify_prehash(sig, digest, Ed25519ph, b"proto-1")
