@@ -245,7 +245,7 @@ class Encoder:
 
         # Before we begin, if the header table size has been changed we need
         # to signal all changes since last emission appropriately.
-        if self.header_table.resized:
+        if self.table_size_changes:
             header_block.append(self._encode_table_size_change())
             self.header_table.resized = False
 
@@ -403,14 +403,28 @@ class Encoder:
 
     def _encode_table_size_change(self) -> bytes:
         """
-        Produces the encoded form of all header table size change context
-        updates.
+        Produces the encoded form of the header table size change context
+        updates that must be emitted before the next header block.
+
+        RFC 7541 Section 4.2 requires the smallest maximum size reached since
+        the previous header block to be signalled, so that the decoder can
+        evict entries that the encoder has already evicted. The final maximum
+        size is also signalled. If those are the same, a single update is
+        sufficient; otherwise at most two updates are emitted.
         """
+        minimum = min(self.table_size_changes)
+        final = self.header_table.maxsize
+
+        sizes = [minimum]
+        if final != minimum:
+            sizes.append(final)
+
         block = b""
-        for size_bytes in self.table_size_changes:
-            b = encode_integer(size_bytes, 5)
-            b[0] |= 0x20
-            block += bytes(b)
+        for size_bytes in sizes:
+            encoded = encode_integer(size_bytes, 5)
+            encoded[0] |= 0x20
+            block += bytes(encoded)
+
         self.table_size_changes = []
         return block
 

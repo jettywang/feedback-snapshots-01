@@ -12,6 +12,14 @@ dev
 
 **Bugfixes**
 
+- When the dynamic table size changes more than once between header blocks,
+  the encoder now signals only the smallest value and the final value, as
+  required by RFC 7541 Section 4.2, instead of emitting every intermediate
+  change. This ensures the decoder evicts entries, including sensitive ones,
+  that the encoder has already evicted.
+- A sequence that shrinks the table and then restores the original size no
+  longer loses the required size update.
+
 
 4.2.0 (2026-06-22)
 ------------------

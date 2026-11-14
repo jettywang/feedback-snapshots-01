@@ -145,7 +145,7 @@ class TestHPACKEncoder:
         result = b'\x82'
 
         # Make sure we don't emit an encoding context update.
-        e.header_table.resized = False
+        e.table_size_changes = []
 
         assert e.encode(header_set, huffman=False) == result
         assert list(e.header_table.dynamic_entries) == []
@@ -294,15 +294,19 @@ class TestHPACKEncoder:
         assert len(e.header_table.dynamic_entries) == 0
 
     def test_resizing_header_table_sends_multiple_updates(self):
+        """
+        When the table size changes more than once between header blocks, only
+        the smallest value and the final value are emitted.
+        """
         e = Encoder()
 
         e.header_table_size = 40
         e.header_table_size = 100
-        e.header_table_size = 40
+        e.header_table_size = 4096
 
         header_set = [(':method', 'GET')]
         out = e.encode(header_set, huffman=True)
-        assert out == b'\x3F\x09\x3F\x45\x3F\x09\x82'
+        assert out == b'\x3F\x09\x3F\xe1\x1f\x82'
 
     def test_resizing_header_table_to_same_size_ignored(self):
         e = Encoder()
@@ -312,14 +316,15 @@ class TestHPACKEncoder:
         e.header_table_size = 4096
         e.header_table_size = 4096
 
-        # These size changes should be encoded
+        # These size changes should be encoded. The minimum and final values
+        # are the same, so only one update is emitted.
         e.header_table_size = 40
         e.header_table_size = 100
         e.header_table_size = 40
 
         header_set = [(':method', 'GET')]
         out = e.encode(header_set, huffman=True)
-        assert out == b'\x3F\x09\x3F\x45\x3F\x09\x82'
+        assert out == b'\x3F\x09\x82'
 
     def test_resizing_header_table_sends_context_update(self):
         e = Encoder()
