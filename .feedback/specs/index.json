@@ -1,0 +1,14 @@
+[
+  {
+    "repo": "h2",
+    "file": ".feedback/specs/rfc9218.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc9218.txt",
+    "sha256": "b7ae1a59fde881e839f947e2fbd01f7a859e9ffedbaf0a38e78a97aeea01d190"
+  },
+  {
+    "repo": "h2",
+    "file": ".feedback/specs/rfc9113.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc9113.txt",
+    "sha256": "a00ef91b64e111a282e77ec66980f5242e77c0bb5e33e0927e3b6757080506de"
+  }
+]
