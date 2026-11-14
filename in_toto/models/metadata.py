@@ -166,7 +166,7 @@ class Envelope(SSlibEnvelope, Metadata):
 
         # Serialize the signable object to JSON bytes without canonicalization
         json_bytes = json.dumps(
-            attr.asdict(signable),
+            signable.to_dict(),
             sort_keys=True,
         ).encode("utf-8")
 
@@ -249,7 +249,10 @@ class Metablock(Metadata, ValidationMixin):
         separators = (",", ":") if self.compact_json else (",", ": ")
 
         return json.dumps(
-            {"signatures": self.signatures, "signed": attr.asdict(self.signed)},
+            {
+                "signatures": self.signatures,
+                "signed": self.signed.to_dict(),
+            },
             indent=indent,
             separators=separators,
             sort_keys=True,
@@ -294,7 +297,7 @@ class Metablock(Metadata, ValidationMixin):
 
         return {
             "signatures": self.signatures,
-            "signed": attr.asdict(self.signed),
+            "signed": self.signed.to_dict(),
         }
 
     @property

@@ -75,6 +75,22 @@ LSTRIP_PATHS_KWARGS = {
     ),
 }
 
+ARTIFACT_DIGEST_CONFIG_ARGS = ["--artifact-digest-config"]
+ARTIFACT_DIGEST_CONFIG_KWARGS = {
+    "dest": "artifact_digest_config",
+    "required": False,
+    "metavar": "<config>",
+    "help": (
+        "explicit digest configuration for recorded materials and products."
+        " Pass a JSON object or a path to a JSON file, e.g."
+        ' \'{"materials": "raw", "products": "line-endings"}\'.'
+        " The configuration is stored in the signed link metadata, so"
+        " verifiers can tell raw bytes from normalized text. If omitted,"
+        " recording defaults to raw bytes (or line-ending normalization if"
+        " that option is used), and the resulting link states this explicitly."
+    ),
+}
+
 KEY_PASSWORD_ARGS = ["-P", "--password"]
 KEY_PASSWORD_KWARGS = {
     "nargs": "?",

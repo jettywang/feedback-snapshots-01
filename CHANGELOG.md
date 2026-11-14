@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Added
+* Signed `artifact_digest_config` link descriptor distinguishing raw-byte from
+  line-ending-normalized artifact digests, with a matching
+  `--artifact-digest-config` CLI option. Legacy links without the descriptor
+  keep raw-byte semantics. MATCH rules, threshold agreement, summary links,
+  and in-toto-match-products preserve the distinction.
+
 ## v3.1.0
 
 This release includes version bumpbs, as well as upgraded debian support , and

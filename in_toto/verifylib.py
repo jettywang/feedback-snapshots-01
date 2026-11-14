@@ -42,6 +42,13 @@ import in_toto.models.link
 import in_toto.rulelib
 import in_toto.runlib
 import in_toto.settings
+from in_toto.artifact_digest import (
+    ARTIFACT_DIGEST_CONFIG_FIELD,
+    artifact_hashes_match,
+    config_for_summary,
+    hashes_match,
+    links_have_same_artifacts,
+)
 from in_toto.exceptions import (
     BadReturnValueError,
     LayoutExpiredError,
@@ -235,6 +242,7 @@ def run_all_inspections(
             product_list,
             inspection.run,
             timeout=timeout,
+            artifact_digest_config={"materials": "raw", "products": "raw"},
         )
 
         _raise_on_bad_retval(
@@ -642,7 +650,14 @@ def verify_all_steps_command_alignment(layout, chain_link_dict):
             verify_command_alignment(command, expected_command)
 
 
-def verify_match_rule(rule_data, artifacts_queue, source_artifacts, links):
+def verify_match_rule(
+    rule_data,
+    artifacts_queue,
+    source_artifacts,
+    links,
+    source_link=None,
+    source_type=None,
+):
     """
     <Purpose>
       Filters artifacts from artifact queue using rule pattern and optional rule
@@ -676,6 +691,14 @@ def verify_match_rule(rule_data, artifacts_queue, source_artifacts, links):
                 <link name> : <Link object>,
                 ...
               }
+
+      source_link:
+              The Link object that carries ``source_artifacts``. If omitted, the
+              artifacts are compared with legacy raw-byte semantics.
+
+      source_type:
+              One of "materials" or "products", identifying the source artifact
+              side whose digest policy applies.
 
     <Exceptions>
       None.
@@ -755,8 +778,28 @@ def verify_match_rule(rule_data, artifacts_queue, source_artifacts, links):
         except KeyError:
             continue
 
-        # Don't consume source artifact w/o corresponding dest artifact (by hash)
-        if source_artifact != dest_artifact:
+        # Don't consume source artifact if the digest values differ, or if
+        # equal values were computed under different content interpretations.
+        if source_link is None:
+            matches = hashes_match(
+                source_artifact,
+                None,
+                source_type or "materials",
+                dest_artifact,
+                dest_link.artifact_digest_config,
+                rule_data["dest_type"],
+            )
+        else:
+            matches = artifact_hashes_match(
+                source_artifact,
+                source_link,
+                source_type or "materials",
+                dest_artifact,
+                dest_link,
+                rule_data["dest_type"],
+            )
+
+        if not matches:
             continue
 
         # Source and destination matched, consume artifact
@@ -839,7 +882,13 @@ def verify_delete_rule(rule_pattern, artifacts_queue, materials, products):
     return set(filtered_artifacts) & (materials - products)
 
 
-def verify_modify_rule(rule_pattern, artifacts_queue, materials, products):
+def verify_modify_rule(
+    rule_pattern,
+    artifacts_queue,
+    materials,
+    products,
+    link=None,
+):
     """
     <Purpose>
       Filters artifacts from artifacts queue using rule pattern and consumes them
@@ -859,6 +908,11 @@ def verify_modify_rule(rule_pattern, artifacts_queue, materials, products):
       products:
               All products of an item (including hashes).
 
+      link:
+              The Link object carrying the materials and products. If passed,
+              differing digest policies count as a modification even when the
+              digest values happen to be equal.
+
     <Exceptions>
       None.
 
@@ -877,10 +931,24 @@ def verify_modify_rule(rule_pattern, artifacts_queue, materials, products):
         set(filtered_artifacts) & set(materials.keys()) & set(products.keys())
     )
 
-    # Consume filtered artifacts that have different hashes
+    # Consume filtered artifacts that have different content. Equal digest
+    # values computed under different policies are not known to be the same
+    # content, so they count as modified.
     consumed = set()
     for path in filtered_artifacts:
-        if materials[path] != products[path]:
+        if link is None:
+            link_config = None
+        else:
+            link_config = getattr(link, ARTIFACT_DIGEST_CONFIG_FIELD, None)
+
+        if not hashes_match(
+            materials[path],
+            link_config,
+            "materials",
+            products[path],
+            link_config,
+            "products",
+        ):
             consumed.add(path)
 
     return consumed
@@ -1111,7 +1179,12 @@ def verify_item_rules(source_name, source_type, rules, links):
 
         if _type == "match":
             consumed = verify_match_rule(
-                rule_data, artifacts_queue, artifacts, links
+                rule_data,
+                artifacts_queue,
+                artifacts,
+                links,
+                source_link=links[source_name],
+                source_type=source_type,
             )
 
         elif _type == "create":
@@ -1126,7 +1199,11 @@ def verify_item_rules(source_name, source_type, rules, links):
 
         elif _type == "modify":
             consumed = verify_modify_rule(
-                pattern, artifacts_queue, materials_dict, products_dict
+                pattern,
+                artifacts_queue,
+                materials_dict,
+                products_dict,
+                link=links[source_name],
             )
 
         elif _type == "allow":
@@ -1261,10 +1338,7 @@ def verify_threshold_constraints(layout, chain_link_dict):
         for keyid, link in key_link_dict.items():
             # TODO: Do we only care for artifacts, or do we want to
             # assert equality of other properties as well?
-            if (
-                reference_link.materials != link.materials
-                or reference_link.products != link.products
-            ):
+            if not links_have_same_artifacts(reference_link, link):
                 raise ThresholdVerificationError(
                     "Links '{}' and '{}' have different artifacts!".format(
                         in_toto.models.link.FILENAME_FORMAT.format(
@@ -1477,6 +1551,9 @@ def get_summary_link(layout, reduced_chain_link_dict, name):
         summary_link.products = last_step_link.products
         summary_link.byproducts = last_step_link.byproducts
         summary_link.command = last_step_link.command
+        summary_link.artifact_digest_config = config_for_summary(
+            first_step_link, last_step_link
+        )
 
     return summary_link
 

@@ -30,7 +30,10 @@ import sys
 from getpass import getpass
 
 from in_toto import __version__, runlib
+from in_toto.artifact_digest import parse_config_argument
 from in_toto.common_args import (
+    ARTIFACT_DIGEST_CONFIG_ARGS,
+    ARTIFACT_DIGEST_CONFIG_KWARGS,
     BASE_PATH_ARGS,
     BASE_PATH_KWARGS,
     DSSE_ARGS,
@@ -204,6 +207,9 @@ e.g. 'document.pdf'.
     named_args.add_argument(*SIGNING_KEY_ARGS, **SIGNING_KEY_KWARGS)
 
     parser.add_argument(*EXCLUDE_ARGS, **EXCLUDE_KWARGS)
+    parser.add_argument(
+        *ARTIFACT_DIGEST_CONFIG_ARGS, **ARTIFACT_DIGEST_CONFIG_KWARGS
+    )
     parser.add_argument(*BASE_PATH_ARGS, **BASE_PATH_KWARGS)
     parser.add_argument(*LSTRIP_PATHS_ARGS, **LSTRIP_PATHS_KWARGS)
     parser.add_argument(*METADATA_DIRECTORY_ARGS, **METADATA_DIRECTORY_KWARGS)
@@ -307,6 +313,9 @@ def main():
             use_dsse=args.use_dsse,
             timeout=args.run_timeout,
             signer=signer,
+            artifact_digest_config=parse_config_argument(
+                args.artifact_digest_config
+            ),
         )
         # FIXME the link has just been serialized and the payload
         # is being deserialized in order to get the 'return-value'.

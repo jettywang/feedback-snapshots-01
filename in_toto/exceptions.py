@@ -41,3 +41,7 @@ class PrefixError(Error):
 
 class InvalidMetadata(Error):  # noqa: N818
     """Indicates that the metadata is not valid."""
+
+
+class DigestConfigError(Error):
+    """Indicates an invalid or unsupported artifact digest configuration."""

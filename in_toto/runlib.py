@@ -45,6 +45,15 @@ from securesystemslib.signer import Signer
 
 import in_toto.exceptions
 import in_toto.settings
+from in_toto.artifact_digest import (
+    ARTIFACT_DIGEST_CONFIG_FIELD,
+    NORMALIZATION_LINE_ENDINGS,
+    build_config_from_hashes,
+    explicit_side_config,
+    hashes_match,
+    parse_artifact_digest_config,
+    recording_normalization,
+)
 from in_toto.formats import _check_hex, _check_str, _check_str_list
 from in_toto.models._signer import GPGSigner
 from in_toto.models.link import (
@@ -73,6 +82,8 @@ def record_artifacts_as_dict(  # noqa: PLR0913, PLR0917, RUF100
     follow_symlink_dirs=False,
     normalize_line_endings=False,
     lstrip_paths=None,
+    artifact_digest_config=None,
+    artifact_type=None,
 ):
     """
     <Purpose>
@@ -139,6 +150,17 @@ def record_artifacts_as_dict(  # noqa: PLR0913, PLR0917, RUF100
               If a prefix path is passed, the prefix is left stripped from
               the path of every artifact that contains the prefix.
 
+      artifact_digest_config: (optional)
+              An artifact digest configuration (see
+              ``in_toto.artifact_digest.parse_artifact_digest_config``). If
+              passed, ``artifact_type`` must also be passed, and the
+              configuration determines the normalization used for hashing.
+
+      artifact_type: (optional)
+              One of "materials" or "products". Together with
+              ``artifact_digest_config`` it selects the normalization for
+              this recording.
+
     <Exceptions>
       OSError: cannot change to base path directory.
       ValueError: arguments are malformed.
@@ -151,6 +173,22 @@ def record_artifacts_as_dict(  # noqa: PLR0913, PLR0917, RUF100
 
     """
     artifact_hashes = {}
+
+    if artifact_digest_config is None:
+        digest_config = None
+    else:
+        digest_config = parse_artifact_digest_config(artifact_digest_config)
+        if artifact_type not in {"materials", "products"}:
+            raise ValueError(
+                "'artifact_type' must be 'materials' or 'products' when"
+                " 'artifact_digest_config' is passed"
+            )
+
+    normalization = recording_normalization(
+        digest_config, artifact_type, normalize_line_endings
+    )
+    if normalization == NORMALIZATION_LINE_ENDINGS:
+        normalize_line_endings = True
 
     if not artifacts:
         return artifact_hashes
@@ -422,6 +460,7 @@ def in_toto_run(  # noqa: C901, PLR0912, PLR0913, PLR0914, PLR0915, PLR0917, RUF
     use_dsse=False,
     timeout=in_toto.settings.LINK_CMD_EXEC_TIMEOUT,
     signer=None,
+    artifact_digest_config=None,
 ):
     """Performs a supply chain step or inspection generating link metadata.
 
@@ -473,6 +512,13 @@ def in_toto_run(  # noqa: C901, PLR0912, PLR0913, PLR0914, PLR0915, PLR0917, RUF
     normalize_line_endings (optional): A boolean indicating if line endings of
         artifacts should be normalized before hashing for cross-platform
         support.
+
+    artifact_digest_config (optional): An explicit artifact digest
+        configuration describing the content interpretation of the recorded
+        hashes, per artifact side and hash algorithm. If passed, it overrides
+        ``normalize_line_endings`` for recording. The descriptor is stored in
+        the signed link payload. If omitted, an explicit descriptor is derived
+        from ``normalize_line_endings``.
 
     lstrip_paths (optional): A list of path prefixes used to left-strip
         artifact paths before storing them in the resulting link metadata.
@@ -539,6 +585,8 @@ def in_toto_run(  # noqa: C901, PLR0912, PLR0913, PLR0914, PLR0915, PLR0917, RUF
     if metadata_directory:
         _check_str(metadata_directory)
 
+    digest_config = parse_artifact_digest_config(artifact_digest_config)
+
     if material_list:
         LOG.info("Recording materials '%s'...", ", ".join(material_list))
 
@@ -549,6 +597,8 @@ def in_toto_run(  # noqa: C901, PLR0912, PLR0913, PLR0914, PLR0915, PLR0917, RUF
         follow_symlink_dirs=True,
         normalize_line_endings=normalize_line_endings,
         lstrip_paths=lstrip_paths,
+        artifact_digest_config=digest_config,
+        artifact_type="materials",
     )
 
     if link_cmd_args:
@@ -569,6 +619,15 @@ def in_toto_run(  # noqa: C901, PLR0912, PLR0913, PLR0914, PLR0915, PLR0917, RUF
         follow_symlink_dirs=True,
         normalize_line_endings=normalize_line_endings,
         lstrip_paths=lstrip_paths,
+        artifact_digest_config=digest_config,
+        artifact_type="products",
+    )
+
+    link_digest_config = build_config_from_hashes(
+        materials_dict,
+        products_dict,
+        digest_config,
+        normalize_line_endings,
     )
 
     LOG.info("Creating link metadata...")
@@ -583,6 +642,7 @@ def in_toto_run(  # noqa: C901, PLR0912, PLR0913, PLR0914, PLR0915, PLR0917, RUF
         command=link_cmd_args,
         byproducts=byproducts,
         environment=environment,
+        artifact_digest_config=link_digest_config,
     )
 
     if use_dsse:
@@ -632,6 +692,7 @@ def in_toto_record_start(  # noqa: PLR0913, PLR0917, RUF100
     lstrip_paths=None,
     use_dsse=False,
     signer=None,
+    artifact_digest_config=None,
 ):
     """Generates preliminary link metadata.
 
@@ -673,6 +734,10 @@ def in_toto_record_start(  # noqa: PLR0913, PLR0917, RUF100
     normalize_line_endings (optional): A boolean indicating if line endings of
         artifacts should be normalized before hashing for cross-platform
         support.
+
+    artifact_digest_config (optional): An explicit artifact digest
+        configuration (see ``in_toto_run``). It is stored in the signed link
+        payload and is reused for products in ``in_toto_record_stop``.
 
     lstrip_paths (optional): A list of path prefixes used to left-strip
         artifact paths before storing them in the resulting link metadata.
@@ -732,6 +797,8 @@ def in_toto_record_start(  # noqa: PLR0913, PLR0917, RUF100
     if base_path:
         _check_str(base_path)
 
+    digest_config = parse_artifact_digest_config(artifact_digest_config)
+
     if material_list:
         LOG.info("Recording materials '%s'...", ", ".join(material_list))
 
@@ -742,6 +809,15 @@ def in_toto_record_start(  # noqa: PLR0913, PLR0917, RUF100
         follow_symlink_dirs=True,
         normalize_line_endings=normalize_line_endings,
         lstrip_paths=lstrip_paths,
+        artifact_digest_config=digest_config,
+        artifact_type="materials",
+    )
+
+    link_digest_config = build_config_from_hashes(
+        materials_dict,
+        {},
+        digest_config,
+        normalize_line_endings,
     )
 
     LOG.info("Creating preliminary link metadata...")
@@ -756,6 +832,7 @@ def in_toto_record_start(  # noqa: PLR0913, PLR0917, RUF100
         command=[],
         byproducts={},
         environment=environment,
+        artifact_digest_config=link_digest_config,
     )
 
     if use_dsse:
@@ -803,6 +880,7 @@ def in_toto_record_stop(  # noqa: C901, PLR0912, PLR0913, PLR0914, PLR0915, PLR0
     byproducts=None,
     environment=None,
     signer=None,
+    artifact_digest_config=None,
 ):
     """Finalizes preliminary link metadata generated with in_toto_record_start.
 
@@ -842,6 +920,14 @@ def in_toto_record_stop(  # noqa: C901, PLR0912, PLR0913, PLR0914, PLR0915, PLR0
     normalize_line_endings (optional): A boolean indicating if line endings of
         artifacts should be normalized before hashing for cross-platform
         support.
+
+    artifact_digest_config (optional): An explicit artifact digest
+        configuration describing the content interpretation of the recorded
+        product hashes, per artifact side and hash algorithm. The descriptor of
+        the preliminary link (set in ``in_toto_record_start``) is preserved for
+        materials, so both sides stay explicitly described in the final link.
+        If omitted for products, the preliminary descriptor or
+        ``normalize_line_endings`` determines the policy.
 
     lstrip_paths (optional): A list of path prefixes used to left-strip
         artifact paths before storing them in the resulting link metadata.
@@ -1003,6 +1089,12 @@ def in_toto_record_stop(  # noqa: C901, PLR0912, PLR0913, PLR0914, PLR0915, PLR0
     LOG.info("Extracting Link from metadata...")
     link = link_metadata.get_payload()
 
+    existing_config = getattr(link, ARTIFACT_DIGEST_CONFIG_FIELD, None)
+    if artifact_digest_config is None:
+        product_config = existing_config
+    else:
+        product_config = parse_artifact_digest_config(artifact_digest_config)
+
     # Record products if a product path list was passed
     if product_list:
         LOG.info("Recording products '%s'...", ", ".join(product_list))
@@ -1014,7 +1106,23 @@ def in_toto_record_stop(  # noqa: C901, PLR0912, PLR0913, PLR0914, PLR0915, PLR0
         follow_symlink_dirs=True,
         normalize_line_endings=normalize_line_endings,
         lstrip_paths=lstrip_paths,
+        artifact_digest_config=product_config,
+        artifact_type="products",
     )
+
+    # A preliminary link from an older in-toto version has no descriptor and
+    # therefore raw-byte materials. State that explicitly in the new link
+    # rather than carrying an undescribed side forward.
+    materials_config = explicit_side_config(link, "materials")
+    link.artifact_digest_config = {"materials": materials_config}
+    products_config = build_config_from_hashes(
+        {},
+        link.products,
+        product_config,
+        normalize_line_endings,
+    ).get("products")
+    if products_config is not None:
+        link.artifact_digest_config["products"] = products_config
 
     if command:
         link.command = command
@@ -1058,7 +1166,11 @@ def in_toto_record_stop(  # noqa: C901, PLR0912, PLR0913, PLR0914, PLR0915, PLR0
 
 
 def in_toto_match_products(
-    link, paths=None, exclude_patterns=None, lstrip_paths=None
+    link,
+    paths=None,
+    exclude_patterns=None,
+    lstrip_paths=None,
+    artifact_digest_config=None,
 ):
     """Check if local artifacts match products in passed link.
 
@@ -1067,20 +1179,35 @@ def in_toto_match_products(
     Arguments:
       link: The Link object to match.
 
-    See ``in_toto_run`` for details about arguments, and exceptions that may
-    occur while recording artifact hashes.
+      artifact_digest_config: (optional) The digest configuration used to record
+          local artifacts. If omitted, the link's own product descriptor is
+          used, including its legacy raw-byte semantics. Local digests are only
+          compared with link products if both were computed with the same
+          content normalization.
+
+    See ``in_toto_run`` for details about other arguments, and exceptions that
+    may occur while recording artifact hashes.
 
     Returns:
       A 3-tuple with artifact names that are
       - only in products,
       - not in products,
-      - have different hashes.
+      - have different hashes or digest content interpretations.
     """
     if paths is None:
         paths = ["."]
 
+    if artifact_digest_config is None:
+        local_config = getattr(link, ARTIFACT_DIGEST_CONFIG_FIELD, None)
+    else:
+        local_config = parse_artifact_digest_config(artifact_digest_config)
+
     artifacts = record_artifacts_as_dict(
-        paths, exclude_patterns=exclude_patterns, lstrip_paths=lstrip_paths
+        paths,
+        exclude_patterns=exclude_patterns,
+        lstrip_paths=lstrip_paths,
+        artifact_digest_config=local_config,
+        artifact_type="products",
     )
 
     artifact_names = artifacts.keys()
@@ -1091,7 +1218,14 @@ def in_toto_match_products(
     differ = {
         name
         for name in product_names & artifact_names
-        if link.products[name] != artifacts[name]
+        if not hashes_match(
+            link.products[name],
+            getattr(link, ARTIFACT_DIGEST_CONFIG_FIELD, None),
+            "products",
+            artifacts[name],
+            local_config,
+            "products",
+        )
     }
 
     return only_products, not_in_products, differ

@@ -52,13 +52,21 @@ class Signable(ValidationMixin):
     def __repr__(self):
         """Returns an indented JSON string of the metadata object."""
         return json.dumps(
-            attr.asdict(self), indent=1, separators=(",", ": "), sort_keys=True
+            self.to_dict(), indent=1, separators=(",", ": "), sort_keys=True
         )
+
+    def to_dict(self):
+        """Return the dictionary representation used for serialization.
+
+        Subclasses may override this to omit fields that are absent in legacy
+        metadata, so the canonical signed representation stays stable.
+        """
+        return attr.asdict(self)
 
     @property
     def signable_bytes(self):
         """The UTF-8 encoded canonical JSON byte representation of the dictionary
         representation of the instance."""
-        return securesystemslib.formats.encode_canonical(
-            attr.asdict(self)
-        ).encode("UTF-8")
+        return securesystemslib.formats.encode_canonical(self.to_dict()).encode(
+            "UTF-8"
+        )

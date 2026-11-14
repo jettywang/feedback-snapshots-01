@@ -7,7 +7,10 @@ import argparse
 import logging
 import sys
 
+from in_toto.artifact_digest import parse_config_argument
 from in_toto.common_args import (
+    ARTIFACT_DIGEST_CONFIG_ARGS,
+    ARTIFACT_DIGEST_CONFIG_KWARGS,
     LSTRIP_PATHS_ARGS,
     LSTRIP_PATHS_KWARGS,
     VERBOSE_ARGS,
@@ -56,6 +59,9 @@ def create_parser():
     )
 
     parser.add_argument(*LSTRIP_PATHS_ARGS, **LSTRIP_PATHS_KWARGS)
+    parser.add_argument(
+        *ARTIFACT_DIGEST_CONFIG_ARGS, **ARTIFACT_DIGEST_CONFIG_KWARGS
+    )
     parser.add_argument(*VERBOSE_ARGS, **VERBOSE_KWARGS)
 
     title_case_action_groups(parser)
@@ -70,11 +76,18 @@ def main():
     args = parser.parse_args()
 
     metadata = Metadata.load(args.link)
+    kwargs = {
+        "paths": args.paths,
+        "exclude_patterns": args.exclude,
+        "lstrip_paths": args.lstrip_paths,
+    }
+    if args.artifact_digest_config is not None:
+        kwargs["artifact_digest_config"] = parse_config_argument(
+            args.artifact_digest_config
+        )
+
     only_products, not_in_products, differ = match_products(
-        metadata.signed,
-        paths=args.paths,
-        exclude_patterns=args.exclude,
-        lstrip_paths=args.lstrip_paths,
+        metadata.signed, **kwargs
     )
     # raise Exception("test")
     if only_products or not_in_products or differ:

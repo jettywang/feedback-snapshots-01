@@ -23,6 +23,11 @@
 import attr
 import securesystemslib.formats
 
+from in_toto.artifact_digest import (
+    ARTIFACT_DIGEST_CONFIG_FIELD,
+    parse_artifact_digest_config,
+    validate_link_config,
+)
 from in_toto.formats import _check_hash_dict
 from in_toto.models.common import Signable
 
@@ -79,6 +84,20 @@ class Link(Signable):
                 "workdir": "<CWD when executing link command>"
               }
 
+      artifact_digest_config: An optional, signed descriptor that states which
+          content interpretation the recorded material/product digests
+          authenticate, per artifact side and hash algorithm. It is either
+          ``None``, which means the link is a legacy link with raw-byte
+          semantics, or a dictionary like::
+
+              {
+                "materials": {"sha256": "raw"},
+                "products": {"sha256": "line-endings"}
+              }
+
+          Unknown normalization names are rejected rather than treated as raw
+          bytes.
+
     """
 
     _type = attr.ib()
@@ -88,6 +107,7 @@ class Link(Signable):
     byproducts = attr.ib()
     command = attr.ib()
     environment = attr.ib()
+    artifact_digest_config = attr.ib()
 
     def __init__(self, **kwargs):
         super().__init__()
@@ -99,6 +119,9 @@ class Link(Signable):
         self.byproducts = kwargs.get("byproducts", {})
         self.command = kwargs.get("command", [])
         self.environment = kwargs.get("environment", {})
+        self.artifact_digest_config = parse_artifact_digest_config(
+            kwargs.get(ARTIFACT_DIGEST_CONFIG_FIELD)
+        )
 
         self.validate()
 
@@ -174,3 +197,28 @@ class Link(Signable):
             raise securesystemslib.exceptions.FormatError(
                 f"Invalid Link: field `environment` must be of type dict, got: {type(self.environment)}"
             )
+
+    def _validate_artifact_digest_config(self):
+        """Private method to validate the artifact digest descriptor.
+
+        ``None`` is valid and means a legacy link with raw-byte semantics.
+        """
+        if self.artifact_digest_config is None:
+            return
+
+        # Raises DigestConfigError for malformed or unknown configurations.
+        parse_artifact_digest_config(self.artifact_digest_config)
+        validate_link_config(self)
+
+    def to_dict(self):
+        """Return dictionary representation.
+
+        The digest descriptor is omitted when absent, so legacy links keep
+        their historical signed representation.
+        """
+        return attr.asdict(
+            self,
+            filter=lambda attribute, value: not (
+                attribute.name == ARTIFACT_DIGEST_CONFIG_FIELD and value is None
+            ),
+        )

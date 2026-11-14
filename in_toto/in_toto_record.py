@@ -32,7 +32,10 @@ from getpass import getpass
 
 import in_toto.runlib
 from in_toto import __version__
+from in_toto.artifact_digest import parse_config_argument
 from in_toto.common_args import (
+    ARTIFACT_DIGEST_CONFIG_ARGS,
+    ARTIFACT_DIGEST_CONFIG_KWARGS,
     BASE_PATH_ARGS,
     BASE_PATH_KWARGS,
     DSSE_ARGS,
@@ -137,6 +140,9 @@ file to the target directory (on stop).
     parent_named_args.add_argument(*SIGNING_KEY_ARGS, **SIGNING_KEY_KWARGS)
 
     parent_parser.add_argument(*EXCLUDE_ARGS, **EXCLUDE_KWARGS)
+    parent_parser.add_argument(
+        *ARTIFACT_DIGEST_CONFIG_ARGS, **ARTIFACT_DIGEST_CONFIG_KWARGS
+    )
     parent_parser.add_argument(*BASE_PATH_ARGS, **BASE_PATH_KWARGS)
     parent_parser.add_argument(*LSTRIP_PATHS_ARGS, **LSTRIP_PATHS_KWARGS)
     parent_parser.add_argument(*DSSE_ARGS, **DSSE_KWARGS)
@@ -270,6 +276,9 @@ def main():
                 lstrip_paths=args.lstrip_paths,
                 use_dsse=args.use_dsse,
                 signer=signer,
+                artifact_digest_config=parse_config_argument(
+                    args.artifact_digest_config
+                ),
             )
 
         # Mutually exclusiveness is guaranteed by argparser
@@ -285,6 +294,9 @@ def main():
                 lstrip_paths=args.lstrip_paths,
                 metadata_directory=args.metadata_directory,
                 signer=signer,
+                artifact_digest_config=parse_config_argument(
+                    args.artifact_digest_config
+                ),
             )
 
     except Exception as e:  # noqa: BLE001
