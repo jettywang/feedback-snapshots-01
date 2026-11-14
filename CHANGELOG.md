@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+* Runlib: `in_toto_record_start` returns a serializable `RecordHandle` that
+  binds an unfinished record to its step, signing identity, start proof, and
+  working directory. `in_toto_record_stop` accepts the handle and finishes
+  only that record, so same-named concurrent builds cannot mix materials.
+  Explicit tamper, identity, working-directory, duplicate-stop, and write-fault
+  outcomes are reported, completed results can be re-read on retry, and the
+  historical step-name-only call style remains compatible.
+* in-toto-record CLI: `--record-handle-out` (start) and `--record-handle`
+  (stop) to persist and reuse the handle across separate jobs.
+
 ## v3.1.0
 
 This release includes version bumpbs, as well as upgraded debian support , and

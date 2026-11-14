@@ -27,6 +27,7 @@ from unittest import mock
 
 from in_toto.in_toto_record import main as in_toto_record_main
 from in_toto.models.link import UNFINISHED_FILENAME_FORMAT
+from in_toto.models.record import RecordHandle
 from tests.common import PEMS, CliTestCase, GPGKeysMixin, TmpDirMixin
 
 
@@ -385,3 +386,109 @@ class TestInTotoRecordToolWithDSSE(CliTestCase, TmpDirMixin, GPGKeysMixin):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestInTotoRecordHandleCli(CliTestCase, TmpDirMixin):
+    """Test the CLI record handle persistence and reuse."""
+
+    cli_main_func = staticmethod(in_toto_record_main)
+
+    @classmethod
+    def setUpClass(cls):
+        cls.set_up_test_dir()
+        cls.rsa_key_path = str(PEMS / "rsa_private_unencrypted.pem")
+        Path("material.txt").write_text("material", encoding="utf8")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tear_down_test_dir()
+
+    def test_start_writes_handle_and_stop_uses_it(self):
+        """A handle written by start can finish that exact session."""
+        args = ["--step-name", "cli-step", "--signing-key", self.rsa_key_path]
+        self.assert_cli_sys_exit(
+            ["start"]
+            + args
+            + [
+                "--materials",
+                "material.txt",
+                "--record-handle-out",
+                "handle.json",
+            ],
+            0,
+        )
+
+        handle_path = Path("handle.json")
+        self.assertTrue(handle_path.exists())
+        handle = RecordHandle.from_json(handle_path.read_text(encoding="utf8"))
+        self.assertEqual(handle.step_name, "cli-step")
+        self.assertTrue(Path(handle.unfinished_path).exists())
+
+        Path("product.txt").write_text("product", encoding="utf8")
+        self.assert_cli_sys_exit(
+            ["stop"]
+            + args
+            + [
+                "--products",
+                "product.txt",
+                "--record-handle",
+                "handle.json",
+            ],
+            0,
+        )
+
+        self.assertTrue(Path(handle.completed_path).exists())
+        self.assertFalse(Path(handle.unfinished_path).exists())
+        self.assertTrue(Path("cli-step.2f685fa7.link").exists())
+
+    def test_stop_with_handle_after_legacy_stop_is_explicit(self):
+        """Using the handle after the legacy stop reports the completed Link."""
+        args = [
+            "--step-name",
+            "legacy-handle",
+            "--signing-key",
+            self.rsa_key_path,
+        ]
+        self.assert_cli_sys_exit(
+            [
+                "start",
+                *args,
+                "--materials",
+                "material.txt",
+                "--record-handle-out",
+                "legacy-handle.json",
+            ],
+            0,
+        )
+        self.assert_cli_sys_exit(
+            ["stop", *args, "--products", "product.txt"], 0
+        )
+
+        # The legacy stop consumed the same start proof. A retry through the
+        # handle reads the completed session result instead of failing.
+        self.assert_cli_sys_exit(
+            [
+                "stop",
+                *args,
+                "--products",
+                "product.txt",
+                "--record-handle",
+                "legacy-handle.json",
+            ],
+            0,
+        )
+
+    def test_stop_without_handle_keeps_legacy_behavior(self):
+        """The CLI without a handle still uses the historical link name."""
+        args = ["--step-name", "legacy-cli", "--signing-key", self.rsa_key_path]
+        self.assert_cli_sys_exit(
+            ["start"] + args + ["--materials", "material.txt"], 0
+        )
+        legacy_unfinished = Path(".legacy-cli.2f685fa7.link-unfinished")
+        self.assertTrue(legacy_unfinished.exists())
+
+        self.assert_cli_sys_exit(
+            ["stop"] + args + ["--products", "product.txt"], 0
+        )
+        self.assertFalse(legacy_unfinished.exists())
+        self.assertTrue(Path("legacy-cli.2f685fa7.link").exists())

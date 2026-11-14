@@ -61,6 +61,7 @@ from in_toto.common_args import (
     title_case_action_groups,
 )
 from in_toto.models._signer import load_crypto_signer_from_pkcs8_file
+from in_toto.models.record import RecordHandle
 
 # Command line interfaces should use in_toto base logger (c.f. in_toto.log)
 LOG = logging.getLogger("in_toto")
@@ -101,6 +102,15 @@ file to the target directory (on stop).
 
   {parser.prog} start -n edit-files --signing-key path/to/key_file -m .
   {parser.prog} stop -d path/to/target/dir -n edit-files --signing-key path/to/key_file -p .
+
+
+Run same-named builds concurrently: persist the start handle and pass it to
+the matching stop, instead of relying on the step name.
+
+  {parser.prog} start -n build --signing-key path/to/key_file -m . \
+      --record-handle-out build-a.json
+  {parser.prog} stop -n build --signing-key path/to/key_file -p . \
+      --record-handle build-a.json
 
 """
 
@@ -200,6 +210,30 @@ file to the target directory (on stop).
         *METADATA_DIRECTORY_ARGS, **METADATA_DIRECTORY_KWARGS
     )
 
+    subparser_start.add_argument(
+        "--record-handle-out",
+        type=str,
+        required=False,
+        metavar="<path>",
+        help=(
+            "write the JSON record handle for the started record to this"
+            " path. Pass it to 'stop --record-handle' to finish that exact"
+            " record, even if same-named records run concurrently."
+        ),
+    )
+
+    subparser_stop.add_argument(
+        "--record-handle",
+        type=str,
+        required=False,
+        metavar="<path>",
+        help=(
+            "path to the JSON record handle written by 'start"
+            " --record-handle-out'. Only the exact unfinished record bound"
+            " to the handle is finished."
+        ),
+    )
+
     parser.add_argument(
         "--version",
         action="version",
@@ -259,7 +293,7 @@ def main():
             )
 
         if args.command == "start":
-            in_toto.runlib.in_toto_record_start(
+            record_handle = in_toto.runlib.in_toto_record_start(
                 args.step_name,
                 args.materials,
                 gpg_keyid=gpg_keyid,
@@ -272,10 +306,19 @@ def main():
                 signer=signer,
             )
 
+            if args.record_handle_out:
+                with open(args.record_handle_out, "w", encoding="utf8") as fp:
+                    fp.write(record_handle.to_json())
+
         # Mutually exclusiveness is guaranteed by argparser
         else:  # args.command == "stop":
+            record_handle = None
+            if args.record_handle:
+                with open(args.record_handle, encoding="utf8") as fp:
+                    record_handle = RecordHandle.from_json(fp.read())
+
             in_toto.runlib.in_toto_record_stop(
-                args.step_name,
+                record_handle if record_handle is not None else args.step_name,
                 args.products,
                 gpg_keyid=gpg_keyid,
                 gpg_use_default=gpg_use_default,

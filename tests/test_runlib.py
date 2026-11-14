@@ -20,6 +20,7 @@
 """
 
 import contextlib
+import hashlib
 import os
 import shutil
 import stat
@@ -28,6 +29,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import securesystemslib.exceptions
 import securesystemslib.formats
@@ -42,6 +44,7 @@ from in_toto.models.link import (
     Link,
 )
 from in_toto.models.metadata import Envelope, Metablock
+from in_toto.models.record import RecordHandle
 from in_toto.resolver import FileResolver
 from in_toto.runlib import (
     _subprocess_run_duplicate_streams,
@@ -1434,3 +1437,558 @@ class TestSigner(unittest.TestCase, TmpDirMixin):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestInTotoRecordHandle(unittest.TestCase, TmpDirMixin):
+    """Test explicit record handles for start/stop session binding."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.set_up_test_dir()  # teardown is called implicitly
+
+        cls.signer = SignerStore.rsa
+        cls.key = SignerStore.rsa_pub
+        cls.other_signer = SignerStore.ecdsa
+        cls.other_key = SignerStore.ecdsa_pub
+
+        cls.step_name = "build-step"
+
+    def _make_session(self, name, material_content, token=None):
+        """Create a session directory with one material and start a record."""
+        os.makedirs(name, exist_ok=True)
+        material = os.path.join(name, "material.txt")
+        Path(material).write_text(material_content, encoding="utf8")
+
+        kwargs = {"record_token": token} if token is not None else {}
+        handle = in_toto_record_start(
+            self.step_name,
+            [name],
+            signer=self.signer,
+            **kwargs,
+        )
+        return handle, material
+
+    def _finish(self, handle, name, product_content):
+        """Create a product in the session directory and finish the record."""
+        product = os.path.join(name, "product.txt")
+        Path(product).write_text(product_content, encoding="utf8")
+        return in_toto_record_stop(handle, [name], signer=self.signer)
+
+    def test_interleaved_same_named_sessions_keep_materials_and_products(self):
+        """Two interleaved same-name builds must not mix their artifacts."""
+        handle_a, material_a = self._make_session("session-a", "A")
+        handle_b, material_b = self._make_session("session-b", "B")
+
+        # Both starts happened before either stop, so their unfinished proofs
+        # coexist and have distinct session file names.
+        self.assertNotEqual(handle_a.unfinished_path, handle_b.unfinished_path)
+        self.assertTrue(os.path.isfile(handle_a.unfinished_path))
+        self.assertTrue(os.path.isfile(handle_b.unfinished_path))
+
+        # Finish in reverse order to expose name-based cross-talk.
+        metadata_b = self._finish(handle_b, "session-b", "product-B")
+        metadata_a = self._finish(handle_a, "session-a", "product-A")
+
+        link_a = Metablock.load(handle_a.completed_path)
+        link_b = Metablock.load(handle_b.completed_path)
+        link_a.verify_signature(self.key)
+        link_b.verify_signature(self.key)
+        self.assertEqual(link_a.signed, metadata_a.get_payload())
+        self.assertEqual(link_b.signed, metadata_b.get_payload())
+
+        self.assertEqual(
+            set(link_a.signed.materials), {material_a.replace("\\", "/")}
+        )
+        self.assertEqual(
+            set(link_b.signed.materials), {material_b.replace("\\", "/")}
+        )
+        self.assertEqual(
+            set(link_a.signed.products),
+            {
+                material_a.replace("\\", "/"),
+                os.path.join("session-a", "product.txt").replace("\\", "/"),
+            },
+        )
+        self.assertEqual(
+            set(link_b.signed.products),
+            {
+                material_b.replace("\\", "/"),
+                os.path.join("session-b", "product.txt").replace("\\", "/"),
+            },
+        )
+
+        self.assertFalse(os.path.exists(handle_a.unfinished_path))
+        self.assertFalse(os.path.exists(handle_b.unfinished_path))
+
+    def test_default_handles_for_same_name_do_not_collide(self):
+        """Two default handles for one step carry independent started state."""
+        handle_a, _ = self._make_session("default-a", "A")
+        handle_b, _ = self._make_session("default-b", "B")
+
+        self.assertNotEqual(handle_a.token, handle_b.token)
+        self.assertNotEqual(handle_a.unfinished_path, handle_b.unfinished_path)
+        self.assertNotEqual(handle_a.start_digest, handle_b.start_digest)
+        self.assertTrue(os.path.exists(handle_a.unfinished_path))
+        self.assertTrue(os.path.exists(handle_b.unfinished_path))
+
+        self._finish(handle_a, "default-a", "PA")
+        self._finish(handle_b, "default-b", "PB")
+
+        link_a = Metablock.load(handle_a.completed_path).signed
+        link_b = Metablock.load(handle_b.completed_path).signed
+        self.assertEqual(set(link_a.materials), {"default-a/material.txt"})
+        self.assertEqual(set(link_b.materials), {"default-b/material.txt"})
+        self.assertIn("default-a/product.txt", link_a.products)
+        self.assertNotIn("default-b/product.txt", link_a.products)
+        self.assertIn("default-b/product.txt", link_b.products)
+        self.assertNotIn("default-a/product.txt", link_b.products)
+
+    def test_duplicate_record_token_is_rejected(self):
+        """A caller-chosen token cannot overwrite another start proof."""
+        handle, _ = self._make_session("session-token", "A", "token" + "x" * 16)
+
+        with self.assertRaises(in_toto.exceptions.RecordHandleFormatError):
+            in_toto_record_start(
+                self.step_name,
+                ["session-token"],
+                signer=self.signer,
+                record_token="token" + "x" * 16,
+            )
+
+        self.assertTrue(os.path.exists(handle.unfinished_path))
+        self.assertFalse(os.path.exists(handle.completed_path))
+
+    def test_handle_accepts_dict_and_json_roundtrip(self):
+        """A handle can be persisted and reloaded by a separate stop task."""
+        handle, _ = self._make_session("session-json", "J", "json" + "x" * 16)
+
+        for restored in (
+            RecordHandle.from_dict(handle.to_dict()),
+            RecordHandle.from_json(handle.to_json()),
+        ):
+            self.assertEqual(restored, handle)
+            self.assertEqual(restored.step_name, self.step_name)
+            self.assertEqual(restored.keyid, self.signer.public_key.keyid)
+
+        # Use the restored handle rather than the original object.
+        restored = RecordHandle.from_json(handle.to_json())
+        metadata = in_toto_record_stop(
+            record_handle=restored,
+            product_list=["session-json"],
+            signer=self.signer,
+        )
+        self.assertTrue(os.path.exists(handle.completed_path))
+        self.assertIsInstance(metadata, Metablock)
+
+    def test_tampered_unfinished_file_preserves_raw_proof(self):
+        """A modified unfinished proof must fail and remain diagnosable."""
+        handle, _ = self._make_session(
+            "session-tamper", "T", "tamper" + "x" * 16
+        )
+
+        with open(handle.unfinished_path, "rb") as fp:
+            original = fp.read()
+        tampered = original + b" "
+        self.assertNotEqual(original, tampered)
+        Path(handle.unfinished_path).write_bytes(tampered)
+
+        with self.assertRaises(in_toto.exceptions.RecordTamperedError):
+            in_toto_record_stop(handle, ["session-tamper"], signer=self.signer)
+
+        # Raw material for diagnosis is untouched, and no completed Link exists.
+        self.assertEqual(Path(handle.unfinished_path).read_bytes(), tampered)
+        self.assertFalse(os.path.exists(handle.completed_path))
+
+    def test_tampered_materials_with_valid_file_digest_fails(self):
+        """A proof that is re-signed for other materials must be rejected."""
+        handle, _ = self._make_session(
+            "session-resign", "R", "resign" + "x" * 16
+        )
+        link_metadata = Metablock.load(handle.unfinished_path)
+        link_metadata.signed.materials["forged"] = {"sha256": "0" * 64}
+        link_metadata = Metablock(signed=link_metadata.signed)
+        link_metadata.create_signature(self.signer)
+        link_metadata.dump(handle.unfinished_path)
+
+        # The handle is refreshed only in digest terms, not in materials terms,
+        # so the materials digest must catch the forged proof.
+        forged_handle = RecordHandle.from_dict(
+            {
+                **handle.to_dict(),
+                "start_digest": hashlib.sha256(
+                    Path(handle.unfinished_path).read_bytes()
+                ).hexdigest(),
+            }
+        )
+        with self.assertRaises(in_toto.exceptions.RecordTamperedError):
+            in_toto_record_stop(
+                forged_handle, ["session-resign"], signer=self.signer
+            )
+        self.assertTrue(os.path.exists(forged_handle.unfinished_path))
+        self.assertFalse(os.path.exists(handle.completed_path))
+
+    def test_handle_metadata_directory_keeps_session_link_separate(self):
+        """metadata_directory affects the completed output, not the handle PKI."""
+        handle, _ = self._make_session("session-md", "M", "metadata" + "x" * 16)
+        os.makedirs("links")
+
+        in_toto_record_stop(
+            handle,
+            ["session-md"],
+            signer=self.signer,
+            metadata_directory="links",
+        )
+
+        session_link = Path(handle.completed_path)
+        canonical_link = Path("links") / FILENAME_FORMAT.format(
+            step_name=self.step_name, keyid=self.key["keyid"]
+        )
+        self.assertTrue(session_link.exists())
+        self.assertTrue(canonical_link.exists())
+        self.assertEqual(session_link.read_bytes(), canonical_link.read_bytes())
+
+    def test_stop_with_other_identity_preserves_proof(self):
+        """A different signing identity must not consume the record."""
+        handle, _ = self._make_session(
+            "session-identity", "I", "ident" + "x" * 16
+        )
+
+        with self.assertRaises(in_toto.exceptions.RecordIdentityError):
+            in_toto_record_stop(
+                handle, ["session-identity"], signer=self.other_signer
+            )
+
+        self.assertTrue(os.path.exists(handle.unfinished_path))
+        self.assertFalse(os.path.exists(handle.completed_path))
+
+        # The bound identity can still finish the record.
+        in_toto_record_stop(handle, ["session-identity"], signer=self.signer)
+        self.assertTrue(os.path.exists(handle.completed_path))
+
+    def test_stop_from_other_cwd_requires_explicit_base_path(self):
+        """Changing working directory without base_path is explicit."""
+        handle, _ = self._make_session("session-cwd", "C", "cwd" + "x" * 16)
+        os.makedirs("elsewhere")
+
+        original_cwd = os.getcwd()
+        try:
+            os.chdir("elsewhere")
+            with self.assertRaises(
+                in_toto.exceptions.RecordWorkingDirectoryError
+            ):
+                in_toto_record_stop(handle, ["session-cwd"], signer=self.signer)
+            self.assertTrue(os.path.exists(handle.unfinished_path))
+
+            # Explicit base_path allows finishing from the other directory.
+            in_toto_record_stop(
+                handle,
+                ["session-cwd"],
+                signer=self.signer,
+                base_path=original_cwd,
+            )
+        finally:
+            os.chdir(original_cwd)
+
+        self.assertTrue(os.path.exists(handle.completed_path))
+
+    def test_handle_completion_also_writes_canonical_link(self):
+        """The canonical link stays discoverable to existing verifiers."""
+        handle, _ = self._make_session(
+            "session-canonical", "C", "canonical" + "x" * 16
+        )
+        in_toto_record_stop(handle, ["session-canonical"], signer=self.signer)
+
+        canonical = Path(
+            FILENAME_FORMAT.format(
+                step_name=self.step_name, keyid=self.key["keyid"]
+            )
+        )
+        self.assertTrue(canonical.exists())
+        self.assertEqual(
+            canonical.read_bytes(), Path(handle.completed_path).read_bytes()
+        )
+        Metablock.load(str(canonical)).verify_signature(self.key)
+
+    def test_duplicate_stop_reads_completed_result(self):
+        """A retry with the same products returns the completed result."""
+        handle, _ = self._make_session("session-retry", "S", "retry" + "x" * 16)
+        first = self._finish(handle, "session-retry", "same")
+        completed_bytes = Path(handle.completed_path).read_bytes()
+
+        second = in_toto_record_stop(
+            handle, ["session-retry"], signer=self.signer
+        )
+
+        self.assertEqual(first.get_payload(), second.get_payload())
+        self.assertEqual(
+            Path(handle.completed_path).read_bytes(), completed_bytes
+        )
+        Metablock.load(handle.completed_path).verify_signature(self.key)
+
+    def test_write_fault_before_canonical_link_preserves_proof(self):
+        """A failure while mirroring leaves the proof and session link safe."""
+        handle, _ = self._make_session(
+            "session-canonical-fault", "F", "canon-fault" + "x" * 16
+        )
+        canonical = Path(
+            FILENAME_FORMAT.format(
+                step_name=self.step_name, keyid=self.key["keyid"]
+            )
+        )
+        if canonical.exists():
+            canonical.unlink()
+
+        real_replace = os.replace
+
+        def replace_once(src, dst):
+            if os.path.abspath(dst) == os.path.abspath(str(canonical)):
+                raise OSError("controlled fault on canonical mirror")
+            return real_replace(src, dst)
+
+        with (
+            mock.patch("in_toto.runlib.os.replace", side_effect=replace_once),
+            self.assertRaises(OSError),
+        ):
+            in_toto_record_stop(
+                handle, ["session-canonical-fault"], signer=self.signer
+            )
+
+        self.assertTrue(os.path.exists(handle.completed_path))
+        self.assertFalse(canonical.exists())
+        self.assertTrue(os.path.exists(handle.unfinished_path))
+
+        # A retry restores the mirror and leaves the session link untouched.
+        before = Path(handle.completed_path).read_bytes()
+        metadata = in_toto_record_stop(
+            handle, ["session-canonical-fault"], signer=self.signer
+        )
+        self.assertEqual(Path(handle.completed_path).read_bytes(), before)
+
+        self.assertTrue(canonical.exists())
+        self.assertTrue(os.path.exists(handle.completed_path))
+        self.assertIsNotNone(metadata)
+        os.remove(canonical)
+
+    def test_retry_with_directory_products_ignores_record_housekeeping(self):
+        """Retry over '.' may read the result though proof files disappeared."""
+        handle, _ = self._make_session("session-dot", "D", "dot" + "x" * 16)
+        metadata = in_toto_record_stop(handle, ["."], signer=self.signer)
+
+        products = metadata.get_payload().products
+        # Default settings exclude '*link*', so record files are not recorded.
+        self.assertNotIn(os.path.basename(handle.unfinished_path), products)
+        self.assertNotIn(os.path.basename(handle.completed_path), products)
+
+        retry = in_toto_record_stop(handle, ["."], signer=self.signer)
+        self.assertEqual(retry.get_payload().products, products)
+        Metablock.load(handle.completed_path).verify_signature(self.key)
+
+    def test_duplicate_stop_with_different_products_is_rejected(self):
+        """A retry must not splice different products into a completed Link."""
+        handle, _ = self._make_session("session-dup", "D", "dup" + "x" * 16)
+        self._finish(handle, "session-dup", "first")
+        completed_bytes = Path(handle.completed_path).read_bytes()
+
+        os.makedirs("other-products")
+        Path("other-products/product.txt").write_text(
+            "different", encoding="utf8"
+        )
+        with self.assertRaises(in_toto.exceptions.RecordAlreadyCompletedError):
+            in_toto_record_stop(handle, ["other-products"], signer=self.signer)
+
+        # Completed evidence is unchanged.
+        self.assertEqual(
+            Path(handle.completed_path).read_bytes(), completed_bytes
+        )
+
+    def test_duplicate_stop_with_different_byproducts_is_rejected(self):
+        """Retries may not change non-product fields either."""
+        handle, _ = self._make_session("session-meta", "M", "meta" + "x" * 16)
+        in_toto_record_stop(
+            handle,
+            ["session-meta"],
+            signer=self.signer,
+            byproducts={"return-value": 0},
+        )
+
+        with self.assertRaises(in_toto.exceptions.RecordAlreadyCompletedError):
+            in_toto_record_stop(
+                handle,
+                ["session-meta"],
+                signer=self.signer,
+                byproducts={"return-value": 1},
+            )
+
+    def test_write_fault_preserves_unfinished_proof_and_no_link(self):
+        """A failed completed-link write must not overwrite a partial Link."""
+        handle, _ = self._make_session("session-fault", "F", "fault" + "x" * 16)
+
+        with (
+            mock.patch(
+                "in_toto.models.metadata.Metablock.dump",
+                side_effect=OSError("controlled write fault"),
+            ),
+            self.assertRaises(OSError),
+        ):
+            in_toto_record_stop(handle, ["session-fault"], signer=self.signer)
+
+        # The unfinished proof remains intact, and no completed Link exists.
+        self.assertTrue(os.path.exists(handle.unfinished_path))
+        self.assertFalse(os.path.exists(handle.completed_path))
+        self.assertFalse(
+            [
+                name
+                for name in os.listdir(".")
+                if name.startswith(".in-toto-record-")
+            ]
+        )
+
+        # Retrying after the fault completes normally.
+        metadata = in_toto_record_stop(
+            handle, ["session-fault"], signer=self.signer
+        )
+        self.assertTrue(os.path.exists(handle.completed_path))
+        self.assertIsNotNone(metadata)
+
+    def test_partial_target_is_not_left_behind_on_write_fault(self):
+        """A failure after staging leaves no partial completed Link."""
+        handle, _ = self._make_session(
+            "session-partial", "P", "partial" + "x" * 16
+        )
+
+        with (
+            mock.patch(
+                "in_toto.runlib.os.replace",
+                side_effect=OSError("controlled fault before replace"),
+            ),
+            self.assertRaises(OSError),
+        ):
+            in_toto_record_stop(handle, ["session-partial"], signer=self.signer)
+
+        self.assertFalse(os.path.exists(handle.completed_path))
+        self.assertTrue(os.path.exists(handle.unfinished_path))
+        self.assertFalse(
+            [
+                name
+                for name in os.listdir(".")
+                if name.startswith(".in-toto-record-")
+            ]
+        )
+
+    def test_step_name_only_stop_rejects_ambiguous_sessions(self):
+        """Identical session proofs make a step-name-only stop ambiguous."""
+        handle = in_toto_record_start(
+            self.step_name,
+            ["session-ambiguous"],
+            signer=self.signer,
+            record_token="ambig" + "a" * 16,
+        )
+        os.makedirs("session-ambiguous", exist_ok=True)
+
+        # Simulate a backend that duplicated one start proof under another
+        # session token. Both session files now carry the same materials.
+        duplicate = Path(handle.unfinished_path).with_name(
+            f".{self.step_name}.{self.key['keyid'][:8]}.ambig{'b' * 16}"
+            ".link-unfinished"
+        )
+        shutil.copyfile(handle.unfinished_path, duplicate)
+
+        with self.assertRaises(in_toto.exceptions.RecordAmbiguousError):
+            in_toto_record_stop(self.step_name, [], signer=self.signer)
+
+        # Nothing was consumed by the refused stop.
+        self.assertTrue(os.path.exists(handle.unfinished_path))
+        self.assertTrue(duplicate.exists())
+        self.assertFalse(os.path.exists(handle.completed_path))
+
+        in_toto_record_stop(handle, ["session-ambiguous"], signer=self.signer)
+        self.assertTrue(os.path.exists(handle.completed_path))
+
+    def test_default_start_writes_both_proofs(self):
+        """A default start writes session and historical proofs."""
+        os.makedirs("session-default", exist_ok=True)
+        Path("session-default/material.txt").write_text("D", encoding="utf8")
+        handle = in_toto_record_start(
+            self.step_name, ["session-default"], signer=self.signer
+        )
+
+        legacy = UNFINISHED_FILENAME_FORMAT.format(
+            step_name=self.step_name, keyid=self.key["keyid"]
+        )
+        self.assertTrue(Path(legacy).exists())
+        self.assertRegex(
+            os.path.basename(handle.unfinished_path),
+            r"^\.build-step\.[0-9a-f]{8}\.[0-9a-f]{32}\.link-unfinished$",
+        )
+        self.assertNotEqual(os.path.basename(handle.unfinished_path), legacy)
+
+        metadata = in_toto_record_stop(
+            handle, ["session-default"], signer=self.signer
+        )
+        self.assertTrue(os.path.exists(handle.completed_path))
+        self.assertIsInstance(metadata, Metablock)
+        os.remove(handle.completed_path)
+
+    def test_legacy_single_task_still_works(self):
+        """The historical step-name-only call style remains compatible."""
+        os.makedirs("legacy")
+        Path("legacy/material.txt").write_text("L", encoding="utf8")
+
+        in_toto_record_start(self.step_name, ["legacy"], signer=self.signer)
+        Path("legacy/product.txt").write_text("P", encoding="utf8")
+        in_toto_record_stop(self.step_name, ["legacy"], signer=self.signer)
+
+        link_name = FILENAME_FORMAT.format(
+            step_name=self.step_name, keyid=self.key["keyid"]
+        )
+        link = Metablock.load(link_name)
+        link.verify_signature(self.key)
+        self.assertIn(
+            "legacy/material.txt", link.signed.materials, link.signed.materials
+        )
+        self.assertIn(
+            "legacy/product.txt", link.signed.products, link.signed.products
+        )
+        os.remove(link_name)
+
+    def test_dsse_handle_sessions_are_bound(self):
+        """DSSE sessions also carry materials/products of the right session."""
+        os.makedirs("dsse-a")
+        os.makedirs("dsse-b")
+        Path("dsse-a/material.txt").write_text("A", encoding="utf8")
+        Path("dsse-b/material.txt").write_text("B", encoding="utf8")
+
+        handle_a = in_toto_record_start(
+            "dsse-step",
+            ["dsse-a"],
+            signer=self.signer,
+            use_dsse=True,
+            record_token="dsse" + "a" * 16,
+        )
+        handle_b = in_toto_record_start(
+            "dsse-step",
+            ["dsse-b"],
+            signer=self.signer,
+            use_dsse=True,
+            record_token="dsse" + "b" * 16,
+        )
+        Path("dsse-a/product.txt").write_text("PA", encoding="utf8")
+        Path("dsse-b/product.txt").write_text("PB", encoding="utf8")
+
+        in_toto_record_stop(handle_b, ["dsse-b"], signer=self.signer)
+        in_toto_record_stop(handle_a, ["dsse-a"], signer=self.signer)
+
+        link_a = Envelope.load(handle_a.completed_path)
+        link_b = Envelope.load(handle_b.completed_path)
+        link_a.verify_signature(self.key)
+        link_b.verify_signature(self.key)
+        self.assertEqual(
+            set(link_a.get_payload().materials), {"dsse-a/material.txt"}
+        )
+        self.assertEqual(
+            set(link_b.get_payload().materials), {"dsse-b/material.txt"}
+        )
+        self.assertIn("dsse-a/product.txt", link_a.get_payload().products)
+        self.assertNotIn("dsse-b/product.txt", link_a.get_payload().products)
+        self.assertIn("dsse-b/product.txt", link_b.get_payload().products)
+        self.assertNotIn("dsse-a/product.txt", link_b.get_payload().products)

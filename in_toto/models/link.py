@@ -31,6 +31,14 @@ FILENAME_FORMAT_SHORT = "{step_name}.link"
 UNFINISHED_FILENAME_FORMAT = ".{step_name}.{keyid:.8}.link-unfinished"
 UNFINISHED_FILENAME_FORMAT_GLOB = ".{step_name}.{pattern}.link-unfinished"
 
+# Explicit record handles use a distinct, content-derived infix, so that
+# unfinished records for the same step name and signing key do not collide.
+UNFINISHED_HANDLE_FILENAME_FORMAT = (
+    ".{step_name}.{keyid:.8}.{handle}.link-unfinished"
+)
+UNFINISHED_HANDLE_FILENAME_GLOB = ".{step_name}.*.link-unfinished"
+FILENAME_HANDLE_FORMAT = "{step_name}.{keyid:.8}.{handle}.link"
+
 
 @attr.s(repr=False, init=False)
 class Link(Signable):

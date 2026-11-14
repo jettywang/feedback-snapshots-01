@@ -32,6 +32,11 @@ documented [in-toto#663](https://github.com/in-toto/in-toto/issues/663).
 ```
 
 ```{eval-rst}
+.. autoclass:: in_toto.models.record.RecordHandle
+   :members:
+```
+
+```{eval-rst}
 .. autofunction:: in_toto.runlib.in_toto_match_products
 
 ```
