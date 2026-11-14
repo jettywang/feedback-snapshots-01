@@ -141,3 +141,30 @@ class TestHeaderTable:
         tbl.maxsize = 146
         assert len(tbl.dynamic_entries) == 2
         assert tbl._current_size == 98
+
+    def test_clear_dynamic_table_keeps_size_and_flag(self):
+        tbl = HeaderTable()
+        tbl.add(b'TestName', b'TestValue')
+        tbl.resized = True
+
+        tbl.clear_dynamic_table()
+
+        assert list(tbl.dynamic_entries) == []
+        assert tbl._current_size == 0
+        assert tbl.maxsize == HeaderTable.DEFAULT_SIZE
+        assert tbl.resized is True
+        # The static table is shared and must remain reachable.
+        assert tbl.get_by_index(1) == (b':authority', b'')
+
+    def test_reset_dynamic_table_pins_size_without_resized_flag(self):
+        tbl = HeaderTable()
+        tbl.add(b'TestName', b'TestValue')
+        tbl.resized = True
+
+        tbl.reset_dynamic_table(0)
+
+        assert list(tbl.dynamic_entries) == []
+        assert tbl._current_size == 0
+        assert tbl.maxsize == 0
+        assert tbl.resized is False
+        assert tbl.get_by_index(2) == (b':method', b'GET')

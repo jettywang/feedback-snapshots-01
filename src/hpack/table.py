@@ -162,6 +162,34 @@ class HeaderTable:
             self._current_size += size
             self._shrink()
 
+    def clear_dynamic_table(self) -> None:
+        """
+        Empties the dynamic table without changing its configured maximum
+        size or resized flag.
+
+        The static table is shared by all HPACK contexts and is therefore
+        left untouched.
+        """
+        self.dynamic_entries.clear()
+        self._current_size = 0
+
+    def reset_dynamic_table(self, maxsize: int) -> None:
+        """
+        Empties the dynamic table and pins its configured maximum size without
+        marking the table as resized.
+
+        Used when switching between mutually distrustful encoding contexts:
+        the local dynamic history is discarded while the size update that
+        resynchronizes the peer is queued separately by the encoder.
+
+        The static table is shared by all HPACK contexts and is therefore
+        left untouched.
+        """
+        self._maxsize = int(maxsize)
+        self.dynamic_entries.clear()
+        self._current_size = 0
+        self.resized = False
+
     def search(self, name: bytes, value: bytes) -> Optional[tuple[int, bytes, Optional[bytes]]]:
         """
         Searches the table for the entry specified by name

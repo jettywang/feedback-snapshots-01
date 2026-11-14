@@ -172,6 +172,24 @@ class Encoder:
         )
         self.table_size_changes: list[int] = []
 
+        #: Identifier of the origin (request source) whose headers this
+        #: encoder is currently compressing. ``None`` until the first call to
+        #: :meth:`switch_context`.
+        #:
+        #: The value is opaque to this class: the trusted caller is responsible
+        #: for passing an identifier that uniquely distinguishes the sources it
+        #: multiplexes onto one connection.
+        self.current_source: Any = None
+
+        #: Largest dynamic table size, in octets, that the decoding peer is
+        #: known to accept. A HTTP/2 implementation should set this to the most
+        #: recent acknowledged value of the peer's SETTINGS_HEADER_TABLE_SIZE.
+        #:
+        #: Defaults to the HPACK default maximum of 4096 octets and may be zero.
+        #: :meth:`switch_context` never emits a dynamic table size update above
+        #: this value.
+        self.max_allowed_table_size: int = HeaderTable.DEFAULT_SIZE
+
     @property
     def header_table_size(self) -> int:
         """
@@ -184,6 +202,66 @@ class Encoder:
         self.header_table.maxsize = value
         if self.header_table.resized:
             self.table_size_changes.append(value)
+
+    def switch_context(self, source_id: Any) -> None:
+        """
+        Switch the encoder to a different request source.
+
+        This is an optional interface for agents that multiplex headers from
+        several mutually distrustful sources onto a single HPACK connection.
+        Because HPACK compresses relative to the dynamic table, one source
+        could otherwise infer whether another source previously emitted a
+        guessed header value by observing the encoded length of its own
+        blocks. On every switch this method:
+
+        1. Discards the dynamic table, so entries learned from one source can
+           never shorten another source's blocks. The static table is shared
+           by every HPACK endpoint and remains available.
+        2. Queues a legal dynamic table size update (RFC 7541 section 6.3) so
+           that the decoding peer empties its own dynamic table in lockstep.
+           The peer cannot be resynchronized by rebuilding this object, which
+           would leave the peer holding a stale table.
+
+        The queued update is emitted at the start of the next call to
+        :meth:`encode`. Repeated calls, including calls with the same
+        ``source_id`` and calls before any header block has been emitted, are
+        safe and always leave the encoder in a defined state.
+
+        :param source_id: Opaque identifier of the source that will own the
+                          following header blocks. The value is trusted input:
+                          the caller, not this class, is responsible for
+                          authenticating it. It is only stored and compared, so
+                          any hashable-or-not object is accepted.
+
+        .. note::
+            This narrows one specific compression side channel, cross-source
+            dynamic-table probing. It does **not** eliminate all length-based
+            side channels: literal encoding still leaks header name and value
+            lengths, Huffman-encoded lengths vary with content, and a source
+            can still observe the sizes of its own blocks. Treat secrets in
+            header values with the care described in RFC 7541 section 7.1.
+        """
+        if self.max_allowed_table_size < 0:
+            msg = (
+                "max_allowed_table_size must be zero or a positive integer, "
+                f"got {self.max_allowed_table_size}"
+            )
+            raise ValueError(msg)
+
+        # Any size update queued before the switch belongs to the previous
+        # source's context and must not leak into the new source's first
+        # block. Replace it with the two updates that resynchronize the peer.
+        self.table_size_changes = [0, self.max_allowed_table_size]
+
+        # Empty the local dynamic table while keeping the configured size
+        # available to the new source. Marking the table resized ensures the
+        # updates queued above are emitted at the start of the next block,
+        # which is what resynchronizes the peer (rebuilding this object would
+        # not reach it).
+        self.header_table.reset_dynamic_table(self.max_allowed_table_size)
+        self.header_table.resized = True
+
+        self.current_source = source_id
 
     def encode(self,
                headers: Iterable[\
@@ -244,10 +322,20 @@ class Encoder:
         header_block = []
 
         # Before we begin, if the header table size has been changed we need
-        # to signal all changes since last emission appropriately.
+        # to signal all changes since last emission appropriately. The updates
+        # are encoded but not consumed yet, so they can be rolled back if this
+        # block fails below.
         if self.header_table.resized:
-            header_block.append(self._encode_table_size_change())
+            header_block.append(self._encode_table_size_change(consume=False))
             self.header_table.resized = False
+
+        # Snapshot the queued size updates. If encoding fails partway through,
+        # the partially built block is discarded and the peer may never receive
+        # it, so retaining the snapshot lets the next attempt resynchronize
+        # the peer instead of silently dropping the update (for example after a
+        # switch_context call whose first block fails).
+        pending_size_changes = self.table_size_changes
+        self.table_size_changes = []
 
         if isinstance(headers, dict):
             # Turn the headers into a list of tuples if possible. This is the
@@ -277,16 +365,27 @@ class Encoder:
             hpack_headers = iter(headers)  # type: ignore
 
         # Add each header to the header block
-        for header in hpack_headers:
-            sensitive = False
-            if isinstance(header, HeaderTuple):
-                # HeaderTuple implies it's a 2-tuple with the sensitive information stored as instance attribute
-                sensitive = not header.indexable
-            elif len(header) > 2:
-                sensitive = header[2]
+        try:
+            for header in hpack_headers:
+                sensitive = False
+                if isinstance(header, HeaderTuple):
+                    # HeaderTuple implies it's a 2-tuple with the sensitive information stored as instance attribute
+                    sensitive = not header.indexable
+                elif len(header) > 2:
+                    sensitive = header[2]
 
-            new_header = (_to_bytes(header[0]), _to_bytes(header[1]))
-            header_block.append(self.add(new_header, sensitive, huffman))
+                new_header = (_to_bytes(header[0]), _to_bytes(header[1]))
+                header_block.append(self.add(new_header, sensitive, huffman))
+        except BaseException:
+            # Roll back the pending updates so the peer stays synchronized on
+            # the next attempt. A failed block that carried a context switch
+            # must also leave the local dynamic table empty, matching the empty
+            # table the peer will derive once the queued updates are emitted.
+            if pending_size_changes:
+                self.table_size_changes = pending_size_changes
+                self.header_table.resized = True
+                self.header_table.clear_dynamic_table()
+            raise
 
         encoded = b"".join(header_block)
 
@@ -401,17 +500,22 @@ class Encoder:
 
         return b"".join([bytes(prefix), bytes(value_len), value])
 
-    def _encode_table_size_change(self) -> bytes:
+    def _encode_table_size_change(self, consume: bool = True) -> bytes:
         """
         Produces the encoded form of all header table size change context
         updates.
+
+        When ``consume`` is False the queued updates are encoded but retained,
+        so a failure later in the same block can roll the queue back instead of
+        silently dropping the peer's resynchronization.
         """
         block = b""
         for size_bytes in self.table_size_changes:
             b = encode_integer(size_bytes, 5)
             b[0] |= 0x20
             block += bytes(b)
-        self.table_size_changes = []
+        if consume:
+            self.table_size_changes = []
         return block
 
 

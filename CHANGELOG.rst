@@ -10,6 +10,17 @@ dev
 
 **API Changes (Backward Compatible)**
 
+- Added ``Encoder.switch_context(source_id)`` for agents that multiplex
+  headers from several request sources onto one connection. On each switch the
+  local dynamic table is cleared and a legal dynamic table size update is
+  queued so the decoding peer empties its table in lockstep, preventing one
+  source from probing another source's header history through encoded block
+  lengths. The static table remains shared, repeated switches and a zero peer
+  table size are supported, and a failed first block after a switch leaves the
+  queued synchronization intact for retry. This narrows cross-source
+  dynamic-table probing only; it does not eliminate all length-based side
+  channels.
+
 **Bugfixes**
 
 
