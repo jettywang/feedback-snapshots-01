@@ -16,6 +16,7 @@ Submodules
    ecdsa.der
    ecdsa.ecdh
    ecdsa.ecdsa
+   ecdsa.ecvrf
    ecdsa.eddsa
    ecdsa.ellipticcurve
    ecdsa.errors

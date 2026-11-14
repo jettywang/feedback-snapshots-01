@@ -1,3 +1,11 @@
+* Release 0.19.3 (unreleased)
+
+New API:
+* ``ecvrf`` module implementing the ECVRF-P256-SHA256-TAI Verifiable Random
+  Function from RFC 9381: ``prove()`` to generate a proof, ``verify()`` to
+  validate a proof and obtain the authenticated VRF output, and
+  ``proof_to_hash()`` to extract the output from an already verified proof
+
 * Release 0.19.2 (26 Mar 2026)
 
 Bug fixes:
