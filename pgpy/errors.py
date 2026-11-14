@@ -7,6 +7,11 @@ __all__ = ('PGPError',
            'PGPIncompatibleECPointFormatError',
            'PGPOpenSSLCipherNotSupportedError',
            'PGPInsecureCipherError',
+           'BatchEncryptionError',
+           'RecipientUnavailableError',
+           'NoCommonAlgorithmError',
+           'DuplicateRecipientError',
+           'MessageAlreadyEncryptedError',
            'WontImplementError',)
 
 
@@ -42,4 +47,27 @@ class PGPInsecureCipherError(Exception):
 
 class WontImplementError(NotImplementedError):
     """Raised when something that is not implemented, will not be implemented"""
-    pass
+
+
+class BatchEncryptionError(PGPEncryptionError):
+    """Base class for failures that abort batch encryption before any ciphertext exists."""
+
+    def __init__(self, message, details=None):
+        super().__init__(message)
+        self.details = {} if details is None else details
+
+
+class RecipientUnavailableError(BatchEncryptionError):
+    """Raised when a recipient has no usable, unexpired, unrevoked encryption key."""
+
+
+class NoCommonAlgorithmError(BatchEncryptionError):
+    """Raised when the recipients' authenticated preferences have no usable intersection."""
+
+
+class DuplicateRecipientError(BatchEncryptionError):
+    """Raised when the same recipient key is supplied in conflicting ways."""
+
+
+class MessageAlreadyEncryptedError(BatchEncryptionError):
+    """Raised when batch encryption is asked to alter an already-encrypted message."""

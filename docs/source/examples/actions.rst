@@ -98,17 +98,51 @@ asymmetric encryption/decryption using RSA or ECDH::
 Encrypting Messages to Multiple Recipients
 """"""""""""""""""""""""""""""""""""""""""
 
-.. warning::
-    Care must be taken when doing this to delete the session key as soon as possible after encrypting the message.
+Use :py:meth:`~pgpy.PGPMessage.encrypt_to_recipients` when the same ciphertext must be readable by several
+recipients. It negotiates one symmetric cipher and one compression algorithm from the recipients' *authenticated*
+self-signature preferences before any ciphertext is produced::
 
-Messages can also be encrypted to multiple recipients by pre-generating the session key::
+    message = PGPMessage.new("quarterly numbers")
+    encrypted = message.encrypt_to_recipients([alice.pubkey, bob.pubkey, carol.pubkey])
 
-    # The symmetric cipher should be specified, in case the first preferred cipher is not
-    #  the same for all recipients' public keys
+    # explain which algorithms were chosen, and why each recipient accepts them
+    print(encrypted.encryption_report.explain())
+
+    # every recipient decrypts the same content ciphertext with the same session key
+    assert alice.decrypt(encrypted).message == "quarterly numbers"
+    assert bob.decrypt(encrypted).message == "quarterly numbers"
+    assert carol.decrypt(encrypted).message == "quarterly numbers"
+
+The whole batch either succeeds or fails before any ciphertext exists. In particular:
+
+- each recipient must have a usable encryption key (unexpired, unrevoked, bound to the primary key
+  with an authenticated signature, and flagged for encryption);
+- preference lists are honoured only when they are in the hashed, signed area of a verified self-signature (or
+  verified subkey binding signature); unhashed subpackets are ignored;
+- an empty intersection raises :py:exc:`~pgpy.errors.NoCommonAlgorithmError`;
+- an unusable recipient raises :py:exc:`~pgpy.errors.RecipientUnavailableError`;
+- identical duplicate recipients collapse to one session-key packet, while conflicting duplicates raise
+  :py:exc:`~pgpy.errors.DuplicateRecipientError`;
+- an already-encrypted message raises :py:exc:`~pgpy.errors.MessageAlreadyEncryptedError` rather than pretending its
+  content cipher can be changed;
+- the input message is never mutated, so a failure cannot leave a half-built encrypted message behind.
+
+An explicit policy can impose limits that old preferences cannot lower::
+
+    from pgpy.batch import EncryptionPolicy
+
+    encrypted = message.encrypt_to_recipients(
+        [alice.pubkey, bob.pubkey],
+        policy=EncryptionPolicy(minimum_cipher=SymmetricKeyAlgorithm.AES256,
+                                allowed_compression=[CompressionAlgorithm.ZIP]))
+
+The older imperative pattern still works, but it does **not** verify that the first recipient's chosen cipher is
+acceptable to every later recipient::
+
+    # Prefer encrypt_to_recipients() instead: this pattern trusts the first key's preferences.
     cipher = pgpy.constants.SymmetricKeyAlgorithm.AES256
     sessionkey = cipher.gen_key()
 
-    # encrypt the message to multiple recipients
     # A decryption passphrase can be added at any point as well, as long as cipher
     #  and sessionkey are also provided to enc_msg.encrypt
     enc_msg = pubkey1.encrypt(message, cipher=cipher, sessionkey=sessionkey)
@@ -116,6 +150,10 @@ Messages can also be encrypted to multiple recipients by pre-generating the sess
 
     # do at least this as soon as possible after encrypting to the final recipient
     del sessionkey
+
+.. warning::
+    When using that manual pattern, care must be taken to delete the session key as soon as possible after
+    encrypting the message.  ``encrypt_to_recipients()`` keeps the session key scoped to the call.
 
 Encrypting/Decrypting Messages With a Passphrase
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

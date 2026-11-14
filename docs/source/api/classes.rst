@@ -87,6 +87,23 @@ Classes
         :returns: :py:obj:`PGPMessage`
 
 
+    .. py:method:: encrypt_to_recipients(recipients, policy=None, **overrides)
+
+        Encrypt this plaintext message once for a batch of recipients.  Every
+        recipient's usable encryption key and authenticated algorithm
+        preferences are checked before any ciphertext is produced; one common
+        symmetric cipher and compression algorithm are selected and used for
+        the single content ciphertext, with one session-key packet per distinct
+        recipient.  ``encryption_report`` on the returned message explains the
+        result.
+
+        :param recipients: :py:obj:`PGPKey`, :py:obj:`~pgpy.batch.Recipient`, or
+                           ``(PGPKey, user)`` entries.
+        :param policy: Optional :py:obj:`~pgpy.batch.EncryptionPolicy`.
+        :raises: :py:exc:`~errors.BatchEncryptionError` (and its subclasses)
+                 when the batch cannot be completed for all recipients
+
+
 :py:class:`PGPSignature`
 ------------------------
 
@@ -128,6 +145,32 @@ Classes
 
 Other Objects
 =============
+
+.. py:currentmodule:: pgpy.batch
+
+The batch encryption objects below are returned by or accepted by
+:py:meth:`PGPMessage.encrypt_to_recipients`.
+
+
+:py:class:`EncryptionPolicy`
+----------------------------
+
+.. autoclass:: EncryptionPolicy
+    :members:
+
+
+:py:class:`Recipient`
+---------------------
+
+.. autoclass:: Recipient
+
+
+:py:class:`BatchEncryptionReport`
+---------------------------------
+
+.. autoclass:: BatchEncryptionReport
+    :members:
+
 
 .. py:currentmodule:: pgpy.types
 

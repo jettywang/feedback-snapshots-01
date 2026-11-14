@@ -876,6 +876,11 @@ class PGPMessage(Armorable, PGPObject):
         return set(m.encrypter for m in self._sessionkeys if isinstance(m, PKESessionKey))
 
     @property
+    def encryption_report(self):
+        """The :py:obj:`~pgpy.batch.BatchEncryptionReport` from batch encryption, if any."""
+        return self._encryption_report
+
+    @property
     def filename(self):
         """If applicable, returns the original filename of the message. Otherwise, returns an empty string."""
         if self.type == 'literal':
@@ -971,6 +976,7 @@ class PGPMessage(Armorable, PGPObject):
         self._mdc = None
         self._signatures = SorteDeque()
         self._sessionkeys = []
+        self._encryption_report = None
 
     def __bytearray__(self):
         if self.is_compressed:
@@ -1091,7 +1097,50 @@ class PGPMessage(Armorable, PGPObject):
         for sk in self._sessionkeys:
             msg |= copy.copy(sk)
 
+        msg._encryption_report = self._encryption_report
         return msg
+
+    def encrypt_to_recipients(self, recipients, policy=None, user=None,
+                              cipher=None, compression=None,
+                              minimum_cipher=None, allowed_ciphers=None,
+                              allowed_compression=None, minimum_key_bits=None):
+        """Encrypt this plaintext message once for a batch of recipients.
+
+        All recipients are resolved and their authenticated self-signature
+        preferences intersected before any ciphertext is produced.  The same
+        negotiated symmetric cipher and compression algorithm are used for the
+        single content ciphertext; each recipient only gets a session-key
+        packet wrapping that same session key.
+
+        :param recipients: The recipients.  Each element may be a
+                           :py:obj:`PGPKey`, a :py:obj:`~pgpy.batch.Recipient`
+                           (key plus User ID), or a ``(PGPKey, user)`` pair.
+        :type recipients: ``list``
+        :param policy: Explicit :py:obj:`~pgpy.batch.EncryptionPolicy` limits.
+                       Convenience keyword arguments below override individual
+                       policy fields.
+        :type policy: :py:obj:`~pgpy.batch.EncryptionPolicy`, ``dict``, or ``None``
+        :keyword cipher: Require this symmetric cipher instead of the strongest
+                         common one.  It must be permitted by every recipient.
+        :keyword compression: Require this compression algorithm instead of the
+                              default deterministic choice.
+        :raises: :py:exc:`~errors.RecipientUnavailableError` if any recipient has
+                 no usable encryption key
+        :raises: :py:exc:`~errors.NoCommonAlgorithmError` if the authenticated
+                 preference intersection is empty
+        :raises: :py:exc:`~errors.DuplicateRecipientError` for conflicting duplicate recipients
+        :raises: :py:exc:`~errors.MessageAlreadyEncryptedError` if this message is
+                 already encrypted
+        :returns: A new :py:obj:`PGPMessage`; :py:attr:`encryption_report`
+                  explains the negotiated result
+        """
+        from .batch import encrypt_message_to_recipients
+
+        return encrypt_message_to_recipients(
+            self, recipients, policy=policy, user=user, cipher=cipher,
+            compression=compression, minimum_cipher=minimum_cipher,
+            allowed_ciphers=allowed_ciphers, allowed_compression=allowed_compression,
+            minimum_key_bits=minimum_key_bits)
 
     @classmethod
     def new(cls, message, **kwargs):
