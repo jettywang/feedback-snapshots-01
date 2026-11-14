@@ -1,6 +1,15 @@
 Changelog
 =========
 
+Unreleased
+~~~~~~~~~~
+
+* Added support for fallback patterns (Section 10 of the Noise specification): the ``fallback`` pattern modifier
+  is now implemented and ``NoiseConnection.begin_fallback()`` allows an application-authorised switch from a
+  failed IK handshake to XXfallback, carrying over only the ephemeral pre-message. Remote static identities
+  learned through a fallback handshake require explicit application confirmation
+  (``confirm_remote_static()``/``reject_remote_static()``) before transport messages can be exchanged.
+
 .. _v0-3-1:
 
 0.3.1 - 2020-03-03

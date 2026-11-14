@@ -134,7 +134,7 @@ pytest
 ### Todo-list for the project:
 
 - [x] add non-default crypto algorithms support, as requested
-- [ ] fallback patterns support
+- [x] fallback patterns support
 - [ ] scripts for keypair generation (+ console entry points)
 - [ ] "echo" (noise-c like) example
 - [ ] extensive logging

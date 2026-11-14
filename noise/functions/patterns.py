@@ -1,6 +1,6 @@
 from typing import List
 
-from noise.constants import TOKEN_PSK
+from noise.constants import TOKEN_E, TOKEN_S, TOKEN_PSK
 
 
 class Pattern(object):
@@ -22,6 +22,9 @@ class Pattern(object):
         self.name = ''
         self.one_way = False
         self.psk_count = 0
+        # Set to True when the 'fallback' modifier is applied - the first message of the original pattern becomes
+        # a pre-message, so the responder sends the first actual message (see Section 10 of the specification)
+        self.fallback = False
 
     def has_pre_messages(self):
         return any(map(lambda x: len(x) > 0, self.pre_messages))
@@ -52,7 +55,20 @@ class Pattern(object):
                 self.psk_count += 1
 
             elif modifier == 'fallback':
-                raise NotImplementedError  # TODO implement
+                # As per Section 10.1 of the specification: delete the first message and convert any public keys
+                # it carried into initiator pre-messages. The sender of that first message remains the initiator,
+                # therefore the responder sends the first message of the fallback pattern.
+                if not self.tokens:
+                    raise ValueError('Modifier fallback cannot be applied - pattern has no messages')
+                first_message = self.tokens.pop(0)
+                if not self.tokens:
+                    raise ValueError('Modifier fallback cannot be applied - pattern has not enough messages')
+                for token in first_message:
+                    if token not in (TOKEN_E, TOKEN_S):
+                        raise ValueError('Modifier fallback cannot be applied - first message contains '
+                                         'non-public-key token {}'.format(token))
+                    self.pre_messages[0].append(token)
+                self.fallback = True
 
             else:
                 raise ValueError('Unknown pattern modifier {}'.format(modifier))
@@ -69,6 +85,13 @@ class Pattern(object):
                 required.append('rs')
             if self.one_way or self.name[1] in ['K', 'X']:
                 required.append('s')
+        if self.fallback:
+            # Pre-messages introduced by the fallback modifier (e.g. the initiator's ephemeral in XXfallback)
+            # have to be provided by both parties before the handshake starts
+            for token in self.pre_messages[0]:
+                required.append(token if initiator else 'r' + token)
+            for token in self.pre_messages[1]:
+                required.append('r' + token if initiator else token)
         return required
 
 

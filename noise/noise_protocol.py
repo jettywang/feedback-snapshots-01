@@ -40,6 +40,7 @@ class NoiseProtocol(object):
         self.prologue = None
         self.initiator = None
         self.handshake_hash = None
+        self.remote_static = None
 
         self.handshake_state = Empty()
         self.symmetric_state = Empty()
@@ -56,6 +57,8 @@ class NoiseProtocol(object):
             else:
                 self.cipher_state_encrypt = None
         self.handshake_hash = self.symmetric_state.get_handshake_hash()
+        rs = self.handshake_state.rs
+        self.remote_static = None if isinstance(rs, Empty) else rs
         del self.handshake_state
         del self.symmetric_state
         del self.cipher_state_handshake
@@ -81,7 +84,7 @@ class NoiseProtocol(object):
             if self.keypairs[keypair] is None:
                 raise NoiseValidationError('Keypair {} has to be set for chosen handshake pattern'.format(keypair))
 
-        if self.keypairs['e'] is not None or self.keypairs['re'] is not None:
+        if not self.pattern.fallback and (self.keypairs['e'] is not None or self.keypairs['re'] is not None):
             warnings.warn('One of ephemeral keypairs is already set. '
                           'This is OK for testing, but should NEVER happen in production!')
 
