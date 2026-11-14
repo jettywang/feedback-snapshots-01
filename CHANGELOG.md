@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Added
+
+* `DSSESigningContext`: a restricted DSSE signing handle that only signs
+  envelopes whose `payloadType` and signing key match a trusted configuration.
+  The context has no raw `sign(bytes)` entry point, freezes its allowed types
+  and trusted keys at construction, and rejects requests before calling the
+  underlying `Signer`.
+
 ## 1.6.0
 
 ### Changed

@@ -116,6 +116,57 @@ The following example illustrates the full lifecycle using :class:`HSMSigner`
    See `'New Signer API' <https://theupdateframework.github.io/python-tuf/2023/01/24/securesystemslib-signer-api.html>`_ blog post
    for background information.
 
+Restricted DSSE signing contexts
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A single signing backend is sometimes shared by several purposes: for example,
+the same key may sign build provenance and release approvals. A plain
+``Signer`` can sign any bytes, so passing it to application code hands over a
+"sign anything" capability.
+
+:class:`securesystemslib.dsse.DSSESigningContext` narrows that capability. It
+wraps a ``Signer`` together with a trusted configuration -- the allowed DSSE
+``payloadType`` values and the trusted public keys -- and exposes only
+``sign_envelope()``. The application should hold a restricted context when
+untrusted or semi-trusted code needs to request signatures; it should hold the
+plain ``Signer`` only in the process that owns the policy and never hands the
+signer itself to that code.
+
+.. code-block:: python
+
+    from securesystemslib.dsse import DSSESigningContext, Envelope
+    from securesystemslib.signer import Signer
+
+    # The backend owns the signer and the policy. Each caller gets only the
+    # context for its own purpose.
+    signer = Signer.from_priv_key_uri(uri, public_key)
+
+    build_context = DSSESigningContext(
+        signer,
+        payload_types=["https://example.com/build-provenance"],
+        trusted_keys=[public_key],
+    )
+    release_context = DSSESigningContext(
+        signer,
+        payload_types=["https://example.com/release-approval"],
+        trusted_keys=[public_key],
+    )
+
+    # Callers can only sign envelopes of their purpose. The purpose is part of
+    # the DSSE PAE bytes, so a signature for one purpose does not verify on an
+    # envelope with the same payload but a different payloadType.
+    envelope = Envelope(payload, "https://example.com/build-provenance", {})
+    build_context.sign_envelope(envelope)
+
+The payload type list and trusted keys are frozen when the context is created;
+later mutation of the original lists, keys, or nested key material does not
+widen it. Rejections happen before the underlying signer is called, and the
+context has no raw ``sign(bytes)`` method, so raw-byte signing cannot bypass
+the payload type check. Signatures produced this way are ordinary DSSE
+signatures and verify with :meth:`Envelope.verify` and the matching ``Key``.
+Applications that do not need purpose separation can continue to use the
+``Signer`` and ``Envelope.sign()`` interfaces directly.
+
 API documentation
 -----------------
 

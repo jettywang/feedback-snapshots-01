@@ -50,3 +50,19 @@ class UnverifiedSignatureError(Error):
 
 class VerificationError(UnverifiedSignatureError):
     """Signature could not be verified because something failed in the process"""
+
+
+class SigningContextError(Error, ValueError):
+    """A restricted signing context rejected a signing request.
+
+    This is a ``ValueError`` so callers that treat policy rejections as invalid
+    arguments can handle them without importing the specific exception type.
+    """
+
+
+class UntrustedPayloadTypeError(SigningContextError):
+    """The requested DSSE payload type is not allowed by the signing context."""
+
+
+class UntrustedSigningKeyError(SigningContextError):
+    """The signer's public key is not trusted by the signing context."""
