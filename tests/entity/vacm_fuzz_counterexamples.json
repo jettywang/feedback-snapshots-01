@@ -1,0 +1,58 @@
+[
+  {
+    "actual": [
+      "error",
+      "IndexError: list assignment index out of range"
+    ],
+    "case": {
+      "families": [
+        {
+          "included": false,
+          "mask": [
+            0
+          ],
+          "subtree": [
+            0,
+            0
+          ]
+        }
+      ],
+      "oid": [
+        0
+      ],
+      "rebuild": null
+    },
+    "expected": "denied"
+  },
+  {
+    "actual": [
+      "allowed",
+      null
+    ],
+    "case": {
+      "families": [
+        {
+          "included": false,
+          "mask": [
+            0
+          ],
+          "subtree": [
+            2
+          ]
+        },
+        {
+          "included": true,
+          "mask": [],
+          "subtree": [
+            1
+          ]
+        }
+      ],
+      "oid": [
+        1
+      ],
+      "rebuild": null
+    },
+    "expected": "denied"
+  }
+]

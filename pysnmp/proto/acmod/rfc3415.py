@@ -393,14 +393,19 @@ class Vacm:
                     for ignoredSubOid in ignoredSubOids:
                         pattern[ignoredSubOid] = 0
 
-                    subtree = subtree.clone(pattern)
+                    maskedSubtree = subtree.clone(pattern)
 
-                entry = subtree, ignoredSubOids, mode == 1
+                else:
+                    maskedSubtree = subtree
+
+                entry = maskedSubtree, ignoredSubOids, mode == 1, subtree
 
                 self._viewTreeMap[nextMibNode.syntax].append(entry)
 
             for entries in self._viewTreeMap.values():
-                entries.sort(key=lambda x: (len(x[0]), x[0]))
+                # RFC 3415: longest match wins, ties are broken by the
+                # lexicographically greatest vacmViewTreeFamilySubtree
+                entries.sort(key=lambda x: (len(x[3]), x[3]))
 
             self._viewTreeBranchId = vacmViewTreeFamilyViewName.branchVersionId
 
@@ -416,7 +421,12 @@ class Vacm:
         accessAllowed = False
 
         for entry in entries:
-            subtree, ignoredSubOids, included = entry
+            subtree, ignoredSubOids, included = entry[:3]
+
+            # RFC 3415: X must have at least as many sub-identifiers as
+            # the value of vacmViewTreeFamilySubtree for the entry
+            if len(variableName) < len(subtree):
+                continue
 
             if ignoredSubOids:
                 subOids = list(variableName)
