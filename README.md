@@ -109,6 +109,14 @@ if __name__ == '__main__':
         conn.sendall(noise.encrypt(received))
 ```
 
+#### Channel-binding login example
+In *examples/channel_binding*, there is a runnable example of binding an HMAC
+login proof to a completed Noise handshake. It shows why a proof forwarded to
+another simultaneous connection to the same service is rejected, and why a
+handshake hash is public transcript material rather than a password or access
+token. See [README.md](examples/channel_binding/README.md) for the state rules
+and threat model.
+
 #### Wireguard integration example
 In *examples* directory, there is an example of interoperation of this package with Wireguard VPN solution. Please refer to [README.md](examples/wireguard/README.md) of that example for details.
 
