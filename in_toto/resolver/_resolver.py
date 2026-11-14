@@ -2,11 +2,9 @@
 artifacts."""
 
 import hashlib
-import locale
 import logging
 import os
 from abc import ABC, abstractmethod
-from functools import cmp_to_key
 from itertools import combinations
 from os.path import exists, isdir, isfile, join, normpath
 
@@ -25,14 +23,23 @@ class Resolver(ABC):
     """Resolver interface and factory."""
 
     @classmethod
-    def for_uri(cls, uri):
-        """Return registered resolver instance for passed URI."""
+    def for_uri(cls, uri, resolver_for_uri_scheme=None):
+        """Return registered resolver instance for passed URI.
+
+        Resolvers are looked up in ``resolver_for_uri_scheme`` if passed,
+        otherwise in the process-wide ``RESOLVER_FOR_URI_SCHEME`` registry.
+        Passing a per-call registry lets callers resolve artifacts without
+        mutating or depending on process-global state.
+        """
+        if resolver_for_uri_scheme is None:
+            resolver_for_uri_scheme = RESOLVER_FOR_URI_SCHEME
+
         scheme, match, _ = uri.partition(":")
 
-        if not match or scheme not in RESOLVER_FOR_URI_SCHEME:
+        if not match or scheme not in resolver_for_uri_scheme:
             scheme = FileResolver.SCHEME
 
-        return RESOLVER_FOR_URI_SCHEME[scheme]
+        return resolver_for_uri_scheme[scheme]
 
     @abstractmethod
     def hash_artifacts(self, uris):
@@ -137,12 +144,36 @@ class FileResolver(Resolver):
 
         return path, prefix
 
+    def _disk_path(self, path):
+        """Return the on-disk location of an artifact path.
+
+        Joins ``base_path`` (if configured) instead of changing the process
+        working directory, so concurrent recordings stay isolated.
+        """
+        if self._base_path:
+            return join(self._base_path, path)
+        return path
+
+    def _rel_name(self, disk_path):
+        """Return the artifact name for a walked file.
+
+        With ``base_path`` set, names are relative to ``base_path`` (the
+        walked directory prefix is dropped). Without it, names are returned
+        as the normalized on-disk path, i.e. relative to the current working
+        directory and including the originally passed directory. This keeps
+        the returned artifact names identical to the pre-isolation behavior.
+        """
+        if self._base_path:
+            return normpath(os.path.relpath(disk_path, self._base_path))
+        return normpath(disk_path)
+
     def hash_artifacts(self, uris):  # noqa: C901
         hashes = {}
 
-        if self._base_path:
-            original_cwd = os.getcwd()
-            os.chdir(self._base_path)
+        # Fail early on a bogus base path, mirroring the OSError raised by the
+        # previous implementation when it tried to change into the directory.
+        if self._base_path and not isdir(self._base_path):
+            raise OSError(f"'{self._base_path}' is not a directory")
 
         for path in uris:
             # Remove scheme prefix, but preserver to re-add later (see _mangle)
@@ -157,17 +188,18 @@ class FileResolver(Resolver):
             if self._exclude(path):
                 continue
 
-            if not exists(path):
+            disk_path = self._disk_path(path)
+            if not exists(disk_path):
                 logger.info("path: %s does not exist, skipping..", path)
                 continue
 
-            if isfile(path):
+            if isfile(disk_path):
                 name = self._mangle(path, hashes, prefix)
-                hashes[name] = self._hash(path)
+                hashes[name] = self._hash(disk_path)
 
-            if isdir(path):
+            if isdir(disk_path):
                 for base, dirs, names in os.walk(
-                    path, followlinks=self._follow_symlink_dirs
+                    disk_path, followlinks=self._follow_symlink_dirs
                 ):
                     # Filter directories to avoid unnecessary recursion below
                     # NOTE: Normalize to filter on directory paths without
@@ -175,31 +207,30 @@ class FileResolver(Resolver):
                     dirs[:] = [
                         dirname
                         for dirname in dirs
-                        if not self._exclude(normpath(join(base, dirname)))
+                        if not self._exclude(
+                            self._rel_name(join(base, dirname))
+                        )
                     ]
 
                     for filename in names:
                         # NOTE: Normalize to filter on and return file paths
                         # without their dot-slash prefix, if path was dot.
-                        filepath = normpath(join(base, filename))
+                        rel_name = self._rel_name(join(base, filename))
 
-                        if self._exclude(filepath):
+                        if self._exclude(rel_name):
                             continue
 
+                        filepath = join(base, filename)
                         if not isfile(filepath):
                             logger.info(
                                 "File '%s' appears to be a broken symlink. "
                                 "Skipping...",
-                                filepath,
+                                rel_name,
                             )
                             continue
 
-                        name = self._mangle(filepath, hashes, prefix)
+                        name = self._mangle(rel_name, hashes, prefix)
                         hashes[name] = self._hash(filepath)
-
-        # Change back to original current working dir
-        if self._base_path:
-            os.chdir(original_cwd)
 
         return hashes
 
@@ -229,14 +260,22 @@ class OSTreeResolver(Resolver):
     def _hash(self, path):
         """Helper to hash OSTree commits."""
 
-        ref_path = os.path.join("refs", "heads", path)
+        if self._base_path:
+            repo_path = self._base_path
+        else:
+            repo_path = ""
+
+        ref_path = os.path.join(repo_path, "refs", "heads", path)
 
         with open(ref_path) as ref:  # noqa: PLW1514, RUF100
             ref_contents = ref.read()
         ref_contents = ref_contents.strip("\n")
 
         object_path = os.path.join(
-            "objects", ref_contents[:2], f"{ref_contents[2:]}.commit"
+            repo_path,
+            "objects",
+            ref_contents[:2],
+            f"{ref_contents[2:]}.commit",
         )
 
         hexdigest = _hash_file(object_path, self._HASH_ALGORITHM, False)
@@ -246,18 +285,10 @@ class OSTreeResolver(Resolver):
     def hash_artifacts(self, uris):
         hashes = {}
 
-        if self._base_path:
-            original_cwd = os.getcwd()
-            os.chdir(self._base_path)
-
         for path in uris:
             # Remove scheme prefix, but preserver to re-add later
             path = self._strip_scheme_prefix(path)  # noqa: PLW2901
             hashes[self._add_scheme_prefix(path)] = self._hash(path)
-
-        # Change back to original current working dir
-        if self._base_path:
-            os.chdir(original_cwd)
 
         return hashes
 
@@ -334,8 +365,9 @@ class DirectoryResolver(Resolver):
         text_repr = ""
         keys = list(file_hashes.keys())
         if keys:
-            locale.setlocale(locale.LC_ALL, "C")
-            keys.sort(key=cmp_to_key(locale.strcoll))
+            # Sorting by the raw UTF-8 bytes reproduces `LC_ALL=C sort`
+            # (byte-wise ordering) without mutating the process-wide locale.
+            keys.sort(key=lambda key: key.encode("utf-8", "surrogateescape"))
 
             text_repr = "\n".join(
                 [f"{file_hashes[k][_HASH_ALGORITHM]}  {k}" for k in keys]

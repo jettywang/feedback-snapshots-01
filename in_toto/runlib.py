@@ -161,10 +161,14 @@ def record_artifacts_as_dict(  # noqa: PLR0913, PLR0917, RUF100
     if not exclude_patterns:
         exclude_patterns = in_toto.settings.ARTIFACT_EXCLUDE_PATTERNS
 
+    # Configure resolver with resolver specific arguments in a per-call
+    # registry. Using a local dict keeps concurrent recordings isolated and
+    # avoids mutating or clearing the process-wide RESOLVER_FOR_URI_SCHEME,
+    # including on failure or when recordings are nested.
+    resolver_for_uri_scheme = dict(RESOLVER_FOR_URI_SCHEME)
+
     # Configure resolver with resolver specific arguments
-    # FIXME: This should happen closer to the user boundary, where
-    # resolver-specific config arguments are passed and global state is managed.
-    RESOLVER_FOR_URI_SCHEME[FileResolver.SCHEME] = FileResolver(
+    resolver_for_uri_scheme[FileResolver.SCHEME] = FileResolver(
         exclude_patterns,
         base_path,
         follow_symlink_dirs,
@@ -173,10 +177,10 @@ def record_artifacts_as_dict(  # noqa: PLR0913, PLR0917, RUF100
     )
 
     # Configure resolver for OSTree
-    RESOLVER_FOR_URI_SCHEME[OSTreeResolver.SCHEME] = OSTreeResolver(base_path)
+    resolver_for_uri_scheme[OSTreeResolver.SCHEME] = OSTreeResolver(base_path)
 
     # Configure resolver for hashing directories as a single entry
-    RESOLVER_FOR_URI_SCHEME[DirectoryResolver.SCHEME] = DirectoryResolver(
+    resolver_for_uri_scheme[DirectoryResolver.SCHEME] = DirectoryResolver(
         exclude_patterns=exclude_patterns,
         follow_symlink_dirs=follow_symlink_dirs,
         normalize_line_endings=normalize_line_endings,
@@ -186,7 +190,7 @@ def record_artifacts_as_dict(  # noqa: PLR0913, PLR0917, RUF100
     # Aggregate artifacts per resolver
     resolver_for_uris = defaultdict(list)
     for artifact in artifacts:
-        resolver = Resolver.for_uri(artifact)
+        resolver = Resolver.for_uri(artifact, resolver_for_uri_scheme)
         resolver_for_uris[resolver].append(artifact)
 
     # Hash artifacts in a batch per resolver
@@ -195,11 +199,6 @@ def record_artifacts_as_dict(  # noqa: PLR0913, PLR0917, RUF100
     # artifacts hashed in one batch.
     for resolver, uris in resolver_for_uris.items():
         artifact_hashes.update(resolver.hash_artifacts(uris))
-
-    # Clear resolvers to not preserve global state change beyond this function.
-    # FIXME: This also clears resolver registered elsewhere. For now we
-    # assume that we only modify RESOLVER_FOR_URI_SCHEME in this function.
-    RESOLVER_FOR_URI_SCHEME.clear()
 
     return artifact_hashes
 
