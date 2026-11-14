@@ -8,6 +8,7 @@ import pytest
 
 import h2.config
 import h2.connection
+import h2.errors
 import h2.events
 import h2.exceptions
 
@@ -148,8 +149,8 @@ class TestReceivingInformationalResponses:
                                                           frame_factory,
                                                           end_stream) -> None:
         """
-        Receiving provisional responses with END_STREAM set causes
-        ProtocolErrors.
+        Receiving provisional responses with END_STREAM set resets the
+        stream with a stream-level PROTOCOL_ERROR.
         """
         c = h2.connection.H2Connection()
         c.initiate_connection()
@@ -166,20 +167,27 @@ class TestReceivingInformationalResponses:
             flags=["END_STREAM"],
         )
 
-        with pytest.raises(h2.exceptions.ProtocolError):
-            c.receive_data(f.serialize())
+        events = c.receive_data(f.serialize())
 
-        expected = frame_factory.build_goaway_frame(
-            last_stream_id=0,
-            error_code=1,
+        assert len(events) == 1
+        event = events[0]
+        assert isinstance(event, h2.events.StreamReset)
+        assert event.stream_id == 1
+        assert event.error_code == h2.errors.ErrorCodes.PROTOCOL_ERROR
+        assert event.remote_reset is False
+        assert "Cannot set END_STREAM on informational responses" in event.error_reason
+
+        expected = frame_factory.build_rst_stream_frame(
+            stream_id=1,
+            error_code=h2.errors.ErrorCodes.PROTOCOL_ERROR,
         )
         assert c.data_to_send() == expected.serialize()
 
     @pytest.mark.parametrize("end_stream", [True, False])
     def test_receiving_out_of_order_headers(self, frame_factory, end_stream) -> None:
         """
-        When receiving a informational response after the actual response
-        headers we consider it a ProtocolError and raise it.
+        When receiving an informational response after the actual response
+        headers we reset the stream with a stream-level PROTOCOL_ERROR.
         """
         c = h2.connection.H2Connection()
         c.initiate_connection()
@@ -200,12 +208,19 @@ class TestReceivingInformationalResponses:
         c.receive_data(f1.serialize())
         c.clear_outbound_data_buffer()
 
-        with pytest.raises(h2.exceptions.ProtocolError):
-            c.receive_data(f2.serialize())
+        events = c.receive_data(f2.serialize())
 
-        expected = frame_factory.build_goaway_frame(
-            last_stream_id=0,
-            error_code=1,
+        assert len(events) == 1
+        event = events[0]
+        assert isinstance(event, h2.events.StreamReset)
+        assert event.stream_id == 1
+        assert event.error_code == h2.errors.ErrorCodes.PROTOCOL_ERROR
+        assert event.remote_reset is False
+        assert event.error_reason
+
+        expected = frame_factory.build_rst_stream_frame(
+            stream_id=1,
+            error_code=h2.errors.ErrorCodes.PROTOCOL_ERROR,
         )
         assert c.data_to_send() == expected.serialize()
 

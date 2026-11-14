@@ -89,8 +89,8 @@ class TestInvalidContentLengths:
     )
     def test_content_length_with_non_digit_value(self, frame_factory, value) -> None:
         """
-        Remote peers sending content-length with non-digit value causes Protocol
-        Errors.
+        Remote peers sending content-length with non-digit value get their
+        stream reset with a stream-level PROTOCOL_ERROR.
         """
         c = h2.connection.H2Connection(config=self.server_config)
         c.initiate_connection()
@@ -103,14 +103,18 @@ class TestInvalidContentLengths:
                 ("content-length", value),
             ],
         )
-        with pytest.raises(
-            h2.exceptions.ProtocolError,
-            match=f"Invalid content-length header",
-        ):
-            c.receive_data(headers.serialize())
+        events = c.receive_data(headers.serialize())
 
-        expected_frame = frame_factory.build_goaway_frame(
-            last_stream_id=1,
+        assert len(events) == 1
+        event = events[0]
+        assert isinstance(event, h2.events.StreamReset)
+        assert event.stream_id == 1
+        assert event.error_code == h2.errors.ErrorCodes.PROTOCOL_ERROR
+        assert event.remote_reset is False
+        assert "Invalid content-length header" in event.error_reason
+
+        expected_frame = frame_factory.build_rst_stream_frame(
+            stream_id=1,
             error_code=h2.errors.ErrorCodes.PROTOCOL_ERROR,
         )
         assert c.data_to_send() == expected_frame.serialize()
@@ -124,8 +128,8 @@ class TestInvalidContentLengths:
     )
     def test_duplicate_conflicting_content_lengths(self, frame_factory, request_headers) -> None:
         """
-        Remote peers sending duplicate conflicting content-length fields cause
-        Protocol Errors.
+        Remote peers sending duplicate conflicting content-length fields get
+        their stream reset with a stream-level PROTOCOL_ERROR.
         """
         c = h2.connection.H2Connection(config=self.server_config)
         c.initiate_connection()
@@ -139,14 +143,18 @@ class TestInvalidContentLengths:
                 ("content-length", "16"),
             ],
         )
-        with pytest.raises(
-            h2.exceptions.ProtocolError,
-            match="Conflicting content-length headers: 15 and 16",
-        ):
-            c.receive_data(headers.serialize())
+        events = c.receive_data(headers.serialize())
 
-        expected_frame = frame_factory.build_goaway_frame(
-            last_stream_id=1,
+        assert len(events) == 1
+        event = events[0]
+        assert isinstance(event, h2.events.StreamReset)
+        assert event.stream_id == 1
+        assert event.error_code == h2.errors.ErrorCodes.PROTOCOL_ERROR
+        assert event.remote_reset is False
+        assert "Conflicting content-length headers: 15 and 16" in event.error_reason
+
+        expected_frame = frame_factory.build_rst_stream_frame(
+            stream_id=1,
             error_code=h2.errors.ErrorCodes.PROTOCOL_ERROR,
         )
         assert c.data_to_send() == expected_frame.serialize()

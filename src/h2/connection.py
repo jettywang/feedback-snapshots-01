@@ -43,6 +43,7 @@ from .events import (
     RequestReceived,
     ResponseReceived,
     SettingsAcknowledged,
+    StreamReset,
     TrailersReceived,
     UnknownFrameReceived,
     WindowUpdated,
@@ -1608,6 +1609,19 @@ class H2Connection:
         # Let's decode the headers. We handle headers as bytes internally up
         # until we hang them off the event, at which point we may optionally
         # convert them to unicode.
+        #
+        # This call is the boundary between the two classes of header block
+        # errors:
+        #
+        # - Failures to decompress the header block (raised here) are
+        #   compression errors: the state of the HPACK dynamic table is no
+        #   longer knowable, so these are connection errors (RFC 7540
+        #   § 4.3) that propagate up to _terminate_connection.
+        # - Errors detected in a cleanly decompressed header block (raised
+        #   by stream.receive_headers below), such as out-of-sequence
+        #   pseudo-header fields or illegal header fields, are stream
+        #   errors (RFC 7540 § 8.1.2.6): the compression context is intact,
+        #   so only the offending stream is reset.
         headers = _decode_headers(self.decoder, frame.data)
 
         events = self.state_machine.process_input(
@@ -1616,11 +1630,38 @@ class H2Connection:
         stream = self._get_or_create_stream(
             frame.stream_id, AllowedStreamIDs(not self.config.client_side),
         )
-        frames, stream_events = stream.receive_headers(
-            headers,
-            "END_STREAM" in frame.flags,
-            self.config.header_encoding,
-        )
+
+        try:
+            frames, stream_events = stream.receive_headers(
+                headers,
+                "END_STREAM" in frame.flags,
+                self.config.header_encoding,
+            )
+        except NoSuchStreamError:
+            # Frames for closed or unknown streams are handled by the
+            # higher-level frame dispatch logic: re-raise to let it apply.
+            raise
+        except ProtocolError as e:
+            # The header block decompressed cleanly, so the HPACK dynamic
+            # table advanced consistently on both peers and stays usable for
+            # the other streams. Reject only this stream: the application
+            # must not see a partial headers event, so instead of the
+            # headers event we emit a single StreamReset that preserves the
+            # original failure reason for diagnostics.
+            self.config.logger.debug(
+                "Invalid headers received on stream %d, resetting stream: %s",
+                frame.stream_id, e,
+            )
+            frames = self._reset_rejected_stream(stream, e)
+            stream_events = [
+                StreamReset(
+                    stream_id=frame.stream_id,
+                    error_code=e.error_code,
+                    remote_reset=False,
+                    error_reason=str(e),
+                ),
+            ]
+            return frames, events + stream_events
 
         if "PRIORITY" in frame.flags:
             p_frames, p_events = self._receive_priority_frame(frame)
@@ -1632,6 +1673,21 @@ class H2Connection:
             assert not p_frames
 
         return frames, events + stream_events
+
+    def _reset_rejected_stream(self, stream: H2Stream, error: ProtocolError) -> list[Frame]:
+        """
+        Locally reset a stream whose header block decompressed cleanly but
+        was semantically invalid. Returns the RST_STREAM frame to send.
+        """
+        try:
+            return stream.reset_stream(error.error_code)
+        except StreamClosedError:
+            # The stream state machine has already closed this stream as a
+            # result of the error: still emit the RST_STREAM frame so the
+            # peer knows the stream was rejected.
+            f = RstStreamFrame(stream.stream_id)
+            f.error_code = error.error_code
+            return [f]
 
     def _receive_push_promise_frame(self, frame: PushPromiseFrame) -> tuple[list[Frame], list[Event]]:
         """

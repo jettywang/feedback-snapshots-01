@@ -732,7 +732,7 @@ class TestBasicClient:
     def test_reject_trailers_not_ending_stream(self, frame_factory) -> None:
         """
         When trailers are received without the END_STREAM flag being present,
-        this is a ProtocolError.
+        the stream is reset with a stream-level PROTOCOL_ERROR.
         """
         c = h2.connection.H2Connection()
         c.initiate_connection()
@@ -748,11 +748,18 @@ class TestBasicClient:
             flags=[],
         )
 
-        with pytest.raises(h2.exceptions.ProtocolError):
-            c.receive_data(f.serialize())
+        events = c.receive_data(f.serialize())
 
-        expected_frame = frame_factory.build_goaway_frame(
-            last_stream_id=0, error_code=h2.errors.ErrorCodes.PROTOCOL_ERROR,
+        assert len(events) == 1
+        event = events[0]
+        assert isinstance(event, h2.events.StreamReset)
+        assert event.stream_id == 1
+        assert event.error_code == h2.errors.ErrorCodes.PROTOCOL_ERROR
+        assert event.remote_reset is False
+        assert "Trailers must have END_STREAM set" in event.error_reason
+
+        expected_frame = frame_factory.build_rst_stream_frame(
+            stream_id=1, error_code=h2.errors.ErrorCodes.PROTOCOL_ERROR,
         )
         assert c.data_to_send() == expected_frame.serialize()
 
@@ -1662,7 +1669,7 @@ class TestBasicServer:
     def test_reject_trailers_not_ending_stream(self, frame_factory) -> None:
         """
         When trailers are received without the END_STREAM flag being present,
-        this is a ProtocolError.
+        the stream is reset with a stream-level PROTOCOL_ERROR.
         """
         c = h2.connection.H2Connection(config=self.server_config)
         c.receive_data(frame_factory.preamble())
@@ -1677,11 +1684,18 @@ class TestBasicServer:
             flags=[],
         )
 
-        with pytest.raises(h2.exceptions.ProtocolError):
-            c.receive_data(f.serialize())
+        events = c.receive_data(f.serialize())
 
-        expected_frame = frame_factory.build_goaway_frame(
-            last_stream_id=1, error_code=h2.errors.ErrorCodes.PROTOCOL_ERROR,
+        assert len(events) == 1
+        event = events[0]
+        assert isinstance(event, h2.events.StreamReset)
+        assert event.stream_id == 1
+        assert event.error_code == h2.errors.ErrorCodes.PROTOCOL_ERROR
+        assert event.remote_reset is False
+        assert "Trailers must have END_STREAM set" in event.error_reason
+
+        expected_frame = frame_factory.build_rst_stream_frame(
+            stream_id=1, error_code=h2.errors.ErrorCodes.PROTOCOL_ERROR,
         )
         assert c.data_to_send() == expected_frame.serialize()
 

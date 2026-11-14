@@ -77,7 +77,8 @@ class TestInvalidFrameSequences:
     @pytest.mark.parametrize("headers", invalid_header_blocks)
     def test_headers_event(self, frame_factory, headers) -> None:
         """
-        Test invalid headers are rejected with PROTOCOL_ERROR.
+        Test invalid headers are rejected with a stream-level PROTOCOL_ERROR:
+        only the offending stream is reset, the connection stays up.
         """
         c = h2.connection.H2Connection(config=self.server_config)
         c.receive_data(frame_factory.preamble())
@@ -86,11 +87,20 @@ class TestInvalidFrameSequences:
         f = frame_factory.build_headers_frame(headers)
         data = f.serialize()
 
-        with pytest.raises(h2.exceptions.ProtocolError):
-            c.receive_data(data)
+        events = c.receive_data(data)
 
-        expected_frame = frame_factory.build_goaway_frame(
-            last_stream_id=1, error_code=h2.errors.ErrorCodes.PROTOCOL_ERROR,
+        # The application must not see a partial headers event: the only
+        # event is the stream reset, which preserves the failure reason.
+        assert len(events) == 1
+        event = events[0]
+        assert isinstance(event, h2.events.StreamReset)
+        assert event.stream_id == 1
+        assert event.error_code == h2.errors.ErrorCodes.PROTOCOL_ERROR
+        assert event.remote_reset is False
+        assert event.error_reason
+
+        expected_frame = frame_factory.build_rst_stream_frame(
+            stream_id=1, error_code=h2.errors.ErrorCodes.PROTOCOL_ERROR,
         )
         assert c.data_to_send() == expected_frame.serialize()
 
@@ -109,11 +119,18 @@ class TestInvalidFrameSequences:
         f = frame_factory.build_headers_frame(headers)
         data = f.serialize()
 
-        with pytest.raises(h2.exceptions.ProtocolError, match="Request header block has multiple Host headers"):
-            c.receive_data(data)
+        events = c.receive_data(data)
 
-        expected_frame = frame_factory.build_goaway_frame(
-            last_stream_id=1, error_code=h2.errors.ErrorCodes.PROTOCOL_ERROR,
+        assert len(events) == 1
+        event = events[0]
+        assert isinstance(event, h2.events.StreamReset)
+        assert event.stream_id == 1
+        assert event.error_code == h2.errors.ErrorCodes.PROTOCOL_ERROR
+        assert event.remote_reset is False
+        assert "Request header block has multiple Host headers" in event.error_reason
+
+        expected_frame = frame_factory.build_rst_stream_frame(
+            stream_id=1, error_code=h2.errors.ErrorCodes.PROTOCOL_ERROR,
         )
         assert c.data_to_send() == expected_frame.serialize()
 
@@ -236,14 +253,120 @@ class TestInvalidFrameSequences:
         trailer = trailer_frame.serialize()
 
         c.receive_data(head)
-        # Raise exception if pseudo header in trailer
-        with pytest.raises(h2.exceptions.ProtocolError) as e:
-            c.receive_data(trailer)
-        assert "pseudo-header in trailer" in str(e.value)
+        # Pseudo headers in a trailer are a stream-level error: the stream
+        # is reset, the connection stays up, and the reason is preserved.
+        events = c.receive_data(trailer)
+
+        assert len(events) == 1
+        event = events[0]
+        assert isinstance(event, h2.events.StreamReset)
+        assert event.stream_id == 1
+        assert event.error_code == h2.errors.ErrorCodes.PROTOCOL_ERROR
+        assert event.remote_reset is False
+        assert "pseudo-header in trailer" in event.error_reason
 
         # Test appropriate response frame is generated
+        expected_frame = frame_factory.build_rst_stream_frame(
+            stream_id=1, error_code=h2.errors.ErrorCodes.PROTOCOL_ERROR,
+        )
+        assert c.data_to_send() == expected_frame.serialize()
+
+
+class TestStreamErrorClassification:
+    """
+    Tests for the boundary between the two classes of header block errors.
+
+    A cleanly decompressed but semantically invalid header block is a stream
+    error: only the offending stream is reset, and the HPACK dynamic table
+    it advanced stays usable for the other streams. A header block that
+    cannot be decompressed at all is a compression error: the connection
+    must be terminated.
+    """
+
+    server_config = h2.config.H2Configuration(
+        client_side=False, header_encoding="utf-8",
+    )
+
+    def test_rejected_stream_preserves_hpack_dynamic_table(self, frame_factory) -> None:
+        """
+        A semantically invalid header block that updates the HPACK dynamic
+        table only kills its own stream: later streams can still reference
+        the dynamic table entries it added.
+        """
+        c = h2.connection.H2Connection(config=self.server_config)
+        c.receive_data(frame_factory.preamble())
+        c.clear_outbound_data_buffer()
+
+        # This block decompresses cleanly and adds ``custom-key`` to the
+        # dynamic table, but a pseudo-header field follows a regular one:
+        # a stream-level error.
+        bad_headers = [
+            (":authority", "example.com"),
+            (":path", "/"),
+            (":scheme", "https"),
+            (":method", "GET"),
+            ("custom-key", "custom-value"),
+            (":late", "pseudo-header"),
+        ]
+        f = frame_factory.build_headers_frame(bad_headers, stream_id=1)
+        events = c.receive_data(f.serialize())
+
+        # The application sees no partial headers event, only the reset,
+        # which preserves the original failure reason.
+        assert len(events) == 1
+        event = events[0]
+        assert isinstance(event, h2.events.StreamReset)
+        assert event.stream_id == 1
+        assert event.error_code == h2.errors.ErrorCodes.PROTOCOL_ERROR
+        assert event.remote_reset is False
+        assert "pseudo-header field out of sequence" in event.error_reason
+
+        expected_frame = frame_factory.build_rst_stream_frame(
+            stream_id=1, error_code=h2.errors.ErrorCodes.PROTOCOL_ERROR,
+        )
+        assert c.data_to_send() == expected_frame.serialize()
+
+        # A later stream references the dynamic table entries added by the
+        # rejected block: the shared encoder emits indexed representations
+        # (0xc0 for ``:authority``, 0xbf for ``custom-key``) instead of
+        # literals. These only decode if the rejected stream's table
+        # updates were kept.
+        good_headers = [
+            (":authority", "example.com"),
+            (":path", "/"),
+            (":scheme", "https"),
+            (":method", "GET"),
+            ("custom-key", "custom-value"),
+        ]
+        f = frame_factory.build_headers_frame(good_headers, stream_id=3)
+        assert f.data == bytes.fromhex("c0848782bf")
+
+        events = c.receive_data(f.serialize())
+        assert len(events) == 1
+        event = events[0]
+        assert isinstance(event, h2.events.RequestReceived)
+        assert event.stream_id == 3
+        assert ("custom-key", "custom-value") in event.headers
+
+    def test_compression_error_terminates_connection(self, frame_factory) -> None:
+        """
+        A header block that cannot be decompressed at all is a compression
+        error: the connection is torn down with GOAWAY. It must not be
+        downgraded to a stream reset.
+        """
+        c = h2.connection.H2Connection(config=self.server_config)
+        c.receive_data(frame_factory.preamble())
+        c.clear_outbound_data_buffer()
+
+        f = frame_factory.build_headers_frame([], stream_id=1)
+        # A truncated indexed field representation: undecodable.
+        f.data = b"\xff"
+
+        with pytest.raises(h2.exceptions.ProtocolError, match="Error decoding header block"):
+            c.receive_data(f.serialize())
+
         expected_frame = frame_factory.build_goaway_frame(
-            last_stream_id=1, error_code=h2.errors.ErrorCodes.PROTOCOL_ERROR,
+            last_stream_id=0, error_code=h2.errors.ErrorCodes.PROTOCOL_ERROR,
         )
         assert c.data_to_send() == expected_frame.serialize()
 
@@ -711,8 +834,14 @@ class TestFilter:
         c.receive_data(frame_factory.preamble())
         c.clear_outbound_data_buffer()
 
-        with pytest.raises(h2.exceptions.ProtocolError, match="Received header name with zero length."):
-            c.receive_data(data)
+        events = c.receive_data(data)
+
+        assert len(events) == 1
+        event = events[0]
+        assert isinstance(event, h2.events.StreamReset)
+        assert event.error_code == h2.errors.ErrorCodes.PROTOCOL_ERROR
+        assert event.remote_reset is False
+        assert "Received header name with zero length." in event.error_reason
 
 
 class TestOversizedHeaders:

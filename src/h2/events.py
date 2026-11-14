@@ -478,6 +478,16 @@ class StreamReset(Event):
     Whether the remote peer sent a RST_STREAM or we did.
     """
 
+    error_reason: str | None = None
+    """
+    When h2 itself reset the stream (``remote_reset`` is ``False``) because
+    the remote peer made a stream-level protocol error, this carries the
+    original error message describing why the stream was terminated.
+    ``None`` when the remote peer sent the RST_STREAM frame.
+
+    .. versionadded:: 4.5.0
+    """
+
     def __repr__(self) -> str:
         return f"<StreamReset stream_id:{self.stream_id}, error_code:{self.error_code!s}, remote_reset:{self.remote_reset}>"
 

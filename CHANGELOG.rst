@@ -11,6 +11,15 @@ dev
 **API Changes (Backward Compatible)**
 
 - Support for Python 3.15 has been added.
+- Inbound header blocks that decompress cleanly but are semantically invalid
+  (for example out-of-sequence pseudo-header fields or illegal header fields)
+  are now treated as stream errors, per RFC 7540 § 8.1.2.6: h2 resets only the
+  offending stream and emits a ``StreamReset`` event instead of raising
+  ``ProtocolError`` and terminating the connection. The HPACK dynamic table
+  updates from such a header block are kept, so other streams are unaffected.
+  Header blocks that fail to decompress remain connection errors. The new
+  ``StreamReset.error_reason`` attribute carries the original error message
+  when h2 resets the stream itself.
 
 **Bugfixes**
 
