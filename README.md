@@ -639,3 +639,68 @@ with open("remote_public_key.pem") as e:
 ecdh.load_received_public_key_pem(remote_public_key)
 secret = ecdh.generate_sharedsecret_bytes()
 ```
+
+### Key derivation and key confirmation
+
+The raw ECDH output is a shared secret, not a ready-to-use traffic key. Do
+not use it directly as an encryption key. The `ecdsa.hkdf` module shows how
+to derive separate, direction-specific keys and explicit key confirmation
+on top of ECDH using only the standard library `hashlib`/`hmac` modules
+(RFC 5869 HKDF):
+
+```python
+from ecdsa.curves import NIST256p
+from ecdsa.hkdf import (
+    HandshakeContext,
+    HandshakeParty,
+    ROLE_INITIATOR,
+    ROLE_RESPONDER,
+)
+
+initiator = HandshakeParty(b"client-alice", NIST256p)
+responder = HandshakeParty(b"server-bob", NIST256p)
+initiator.ecdh.load_received_public_key(responder.public_key)
+responder.ecdh.load_received_public_key(initiator.public_key)
+
+context = HandshakeContext(
+    initiator.identity,
+    responder.identity,
+    initiator.public_bytes,
+    responder.public_bytes,
+)
+initiator.complete(context)
+responder.complete(context)
+
+initiator_tag = initiator.make_confirmation(context, ROLE_INITIATOR)
+responder_tag = responder.make_confirmation(context, ROLE_RESPONDER)
+responder.check_peer_confirmation(context, ROLE_INITIATOR, initiator_tag)
+initiator.check_peer_confirmation(context, ROLE_RESPONDER, responder_tag)
+
+keys = initiator._secrets  # two directional keys + two confirmation keys
+```
+
+A runnable, network-free version that also demonstrates the failure cases is
+available as `python -m ecdsa.hkdf_handshake_demo`.
+
+The derivation input is bound to the protocol version, a fixed protocol
+identifier, both authenticated identities, both ephemeral public keys, and
+the initiator/responder role of every participant. Each field carries a fixed
+label and an explicit 32-bit length prefix (`len(label) || label ||
+len(value) || value`), so there is no ambiguity from bare concatenation,
+empty fields, or shifted field boundaries. One HKDF-Expand call per distinct
+label yields the `initiator_to_responder` and `responder_to_initiator`
+traffic keys plus two confirmation keys, and the ECDH shared secret keeps its
+fixed-width field encoding (leading zero bytes included). As a result,
+swapping an identity, reflecting the roles, or reusing the same secret under
+a different protocol identifier changes every derived key and makes
+confirmation fail.
+
+This module does **not** authenticate the peers and is not a replacement for
+an authenticated key-exchange protocol. It assumes both identities have
+already been verified by a layer above, such as a validated certificate or a
+signature over the ephemeral public keys. Until both confirmation tags have
+been verified, application data must not be treated as belonging to an
+established secure session: the peers have computed candidate keys but have
+not yet proved that they share the same secret and the same negotiated
+context, so the session is not mutually confirmed.
+
