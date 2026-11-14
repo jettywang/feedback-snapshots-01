@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+* Versioned `dirv2:` directory digest scheme (`DirV2Resolver`) with a
+  locale-free, byte-oriented canonical format that explicitly separates entry
+  names, types (`file`/`directory`/`symlink`) and digests, supports names with
+  newlines and non-ASCII characters, and distinguishes structures the legacy
+  `dir:` scheme cannot (e.g. empty directories). The legacy `dir:` scheme and
+  its digests are unchanged, and the two schemes are never equivalent.
+* Standalone, standard-library-only recomputation script
+  (`tests/dirv2_recompute.py`) and a dual-record migration example
+  (`tests/dirv2_migration_example.py`).
+
 ## v3.1.0
 
 This release includes version bumpbs, as well as upgraded debian support , and

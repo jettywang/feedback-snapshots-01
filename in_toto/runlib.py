@@ -57,6 +57,7 @@ from in_toto.models.metadata import Envelope, Metablock, Metadata
 from in_toto.resolver import (
     RESOLVER_FOR_URI_SCHEME,
     DirectoryResolver,
+    DirV2Resolver,
     FileResolver,
     OSTreeResolver,
     Resolver,
@@ -177,6 +178,15 @@ def record_artifacts_as_dict(  # noqa: PLR0913, PLR0917, RUF100
 
     # Configure resolver for hashing directories as a single entry
     RESOLVER_FOR_URI_SCHEME[DirectoryResolver.SCHEME] = DirectoryResolver(
+        exclude_patterns=exclude_patterns,
+        follow_symlink_dirs=follow_symlink_dirs,
+        normalize_line_endings=normalize_line_endings,
+        lstrip_paths=lstrip_paths,
+    )
+
+    # Configure the versioned directory resolver. This uses an independent,
+    # locale-free canonical format. It never changes the legacy "dir:" result.
+    RESOLVER_FOR_URI_SCHEME[DirV2Resolver.SCHEME] = DirV2Resolver(
         exclude_patterns=exclude_patterns,
         follow_symlink_dirs=follow_symlink_dirs,
         normalize_line_endings=normalize_line_endings,
