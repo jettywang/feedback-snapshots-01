@@ -317,11 +317,13 @@ module Dnsruby
     # Reserve ownership while Resolver still holds its query lock, then perform
     # the synchronous public send after releasing that lock. close/timeout can
     # cancel this reservation even before send_async has started.
-    def prepare_send_async(message, queue, id, retire_connection = false) #:nodoc:
+    def prepare_send_async(message, queue, id, retire_connection = false, control = QueryControl.current) #:nodoc:
       ensure_current_process
       selector = @selector = SelectThread.instance
       pending = SelectThread::QuerySettings.new(nil, message, @ignore_truncation,
         queue, id, nil, @server, @port, TransportClock.now + @packet_timeout, udp_packet_size, self)
+      pending.send_token = SelectThread::SendToken.new(control)
+      pending.endtime = [pending.endtime, control&.deadline].compact.min
       pending.retire_connection = retire_connection
       return unless selector.reserve_send(pending)
       -> do
@@ -573,6 +575,9 @@ module Dnsruby
         @ignore_truncation, client_queue, client_query_id, nil, @server, @port,
         endtime, udp_receive_size(query), self)
       pending.send_token = previous_settings.send_token if previous_settings
+      # Carry the controlling lookup through selector retries and workers, whose
+      # thread-local control may differ from the thread which admitted it.
+      endtime = pending.endtime = [endtime, pending.send_token.control&.deadline].compact.min
       pending.disable_edns = disable_edns || (previous_settings && previous_settings.disable_edns)
       # A protocol retry starts its own packet deadline at dispatch, including
       # time queued for a worker. Retire the old socket membership atomically.
@@ -591,10 +596,11 @@ module Dnsruby
           locked = false
           begin
             until (locked = pipeline_mutex.try_lock)
-              break if TransportClock.now >= endtime || !st.query_settings_for_id(client_query_id).equal?(previous_settings)
+              break if previous_settings.send_token.cancelled? || TransportClock.now >= endtime ||
+                !st.query_settings_for_id(client_query_id).equal?(previous_settings)
               sleep 0.005
             end
-            if locked && TransportClock.now < endtime
+            if locked && !previous_settings.send_token.cancelled? && TransportClock.now < endtime
               operation.call
             else
               st.fail_query_if_current(client_query_id, client_queue, previous_settings,
@@ -738,6 +744,7 @@ module Dnsruby
         # admission retry without changing ownership or extending its deadline.
         pipeline = use_tcp && @tcp_pipelining && !previous_settings.retire_connection
         return unless st.query_settings_for_id(client_query_id).equal?(previous_settings)
+        return if previous_settings.send_token.cancelled?
         begin
           if TransportClock.now >= endtime
             report_error.call(ResolvTimeout.new("Query timed out before connect"))

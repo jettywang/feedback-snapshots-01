@@ -958,6 +958,7 @@ module Dnsruby
       #       @mutex=Mutex.new
       @query_list = {}
       @timeouts = {}
+      @tick_deadlines = DeadlineQueue.new
       @validation_queries = {}
     end
     def send_async(msg, client_queue, client_query_id=nil)
@@ -1021,7 +1022,8 @@ module Dnsruby
           return
         end
         outstanding = []
-        @query_list[client_query_id]=[msg, client_queue, q, outstanding]
+        control = QueryControl.current
+        @query_list[client_query_id]=[msg, client_queue, q, outstanding, control]
 
         query_timeout = TransportClock.now + @parent.query_timeout
         if @parent.query_timeout == 0
@@ -1034,7 +1036,9 @@ module Dnsruby
         if no_nameservers && @parent.query_timeout == 0
           query_timeout = TransportClock.now + 1
         end
+        query_timeout = [query_timeout, control&.deadline].compact.min
         @timeouts[client_query_id] = [query_timeout, retries, no_nameservers]
+        update_tick_deadline(client_query_id)
         # Publish the observer together with its logical query. close must never
         # see a query whose selector ownership has not yet been registered.
         st.add_observer(q, self)
@@ -1096,6 +1100,7 @@ module Dnsruby
     #  Stops send any more packets for a client-level query
     def stop_querying(client_query_id) # :nodoc: all
       @timeouts.delete(client_query_id)
+      @tick_deadlines.delete(client_query_id)
     end
 
     # Accept one answer for validation, without losing the total query deadline.
@@ -1105,6 +1110,7 @@ module Dnsruby
     def begin_validation(client_query_id, query_id, select_queue)
       @validation_queries[client_query_id] = query_id
       @timeouts[client_query_id][1].clear
+      update_tick_deadline(client_query_id)
       SelectThread.instance.cancel_queries_for_queue(select_queue)
       @query_list[client_query_id][3].clear
     end
@@ -1145,15 +1151,18 @@ module Dnsruby
     # Earliest retry or total query deadline, using the same lock as admission.
     # The selector must call this outside its own lock.
     def next_tick_at # :nodoc: all
-      @parent.single_res_mutex.synchronize do
-        earliest = nil
-        @timeouts.each_value do |deadline, retries, _|
-          earliest = deadline if !earliest || deadline < earliest
-          retries.each_key { |retry_at| earliest = retry_at if retry_at < earliest }
-        end
-        earliest
+      @parent.single_res_mutex.synchronize { @tick_deadlines.first_deadline }
+    end
+
+    # Only a changed query's finite retry plan needs inspection. The selector
+    # reads the minimum in constant time, without scanning all pending queries.
+    # MUST BE CALLED WITH THE PARENT MUTEX HELD.
+    def update_tick_deadline(client_query_id)
+      if (entry = @timeouts[client_query_id])
+        @tick_deadlines[client_query_id] = [entry[0], entry[1].keys.min].compact.min
       end
     end
+    private :update_tick_deadline
 
     #  This method is called when a retry or query deadline is due.
     #  It should arguably be called from another worker thread... (which also handles the queue)
@@ -1169,7 +1178,7 @@ module Dnsruby
         query_ids = client_query_id.nil? ? @timeouts.keys : [client_query_id]
         query_ids.each do |client_query_id|
           next unless @timeouts.key?(client_query_id)
-          msg, client_queue, select_queue, outstanding = @query_list[client_query_id]
+          msg, client_queue, select_queue, outstanding, control = @query_list[client_query_id]
           query_timeout, timeouts, no_nameservers = @timeouts[client_query_id]
           if query_timeout <= time_now
             #  Time the query out through the same exactly-once completion path.
@@ -1197,13 +1206,14 @@ module Dnsruby
               # Removed senders may retry, but must not create idle reusable
               # sockets that this Resolver can no longer reach through close.
               retired = !@parent.single_resolvers.include?(res)
-              operation = res.prepare_send_async(msg, select_queue, id, retired)
+              operation = res.prepare_send_async(msg, select_queue, id, retired, control)
               sends << operation if operation
             else
               break
             end
           end
           timeouts_done.each { |t| timeouts.delete(t) }
+          update_tick_deadline(client_query_id)
         end
       }
       sends.each(&:call)
@@ -1359,6 +1369,7 @@ module Dnsruby
                 timeouts[1].delete(key)
               end
             end
+            update_tick_deadline(client_query_id)
           end
           #  Also stick it to the back of the list for future queries
           demote_resolver(resolver)

@@ -24,6 +24,8 @@ require 'set'
 require 'singleton'
 require 'dnsruby/validator_thread.rb'
 require 'dnsruby/transport_clock'
+require 'dnsruby/query_control'
+require 'dnsruby/deadline_queue'
 module Dnsruby
   class SelectThread #:nodoc: all
     class SelectWakeup < RuntimeError; end
@@ -57,6 +59,8 @@ module Dnsruby
     def initialize
       @process_mutex ||= Mutex.new
       @send_queue = @send_workers = @send_groups = nil
+      @packet_deadlines = DeadlineQueue.new
+      @idle_deadlines = DeadlineQueue.new
       @created_sockets = ObjectSpace::WeakMap.new
       @@mutex = Mutex.new
       @@mutex.synchronize {
@@ -210,9 +214,12 @@ module Dnsruby
     # selector mutex during I/O. Waiting for a connect or a writable socket never
     # holds this lock, so closing a Resolver remains responsive.
     class SendToken
-      def initialize
+      attr_reader :control
+
+      def initialize(control = QueryControl.current)
         @mutex = Mutex.new
         @cancelled = false
+        @control = control
       end
 
       def cancel
@@ -220,12 +227,20 @@ module Dnsruby
       end
 
       def cancelled?
+        @control&.check!
         @mutex.synchronize { @cancelled }
+      rescue QueryControl::Stopped
+        true
       end
 
       def write
         @mutex.synchronize do
           return false if @cancelled
+          begin
+            @control&.check!
+          rescue QueryControl::Stopped
+            return false
+          end
           yield
         end
       end
@@ -244,6 +259,7 @@ module Dnsruby
         (@@queries_by_queue[settings.client_queue] ||= Set.new) << settings.client_query_id
         ((@@queries_by_sender ||= {}.compare_by_identity)[settings.single_resolver] ||= Set.new) << settings.client_query_id
         @@timeouts[settings.client_query_id] = settings.endtime
+        (@packet_deadlines ||= DeadlineQueue.new)[settings.client_query_id] = settings.endtime
         check_select_thread_synchronized
       end
       wake_up_select_thread
@@ -389,10 +405,12 @@ module Dnsruby
       end
       membership.add_query(settings)
       (@@socket_idle_deadlines ||= {}).delete(settings.socket)
+      @idle_deadlines&.delete(settings.socket)
       if settings.tcp_pipelining_max_queries != :infinite
         @@socket_remaining_queries[settings.socket] ||= settings.tcp_pipelining_max_queries
       end
       @@timeouts[id] = settings.endtime
+      (@packet_deadlines ||= DeadlineQueue.new)[id] = settings.endtime
       @@sockets << settings.socket
       @@socket_is_persistent[settings.socket] = settings.is_persistent_socket
       previous_owner = (@@socket_owners ||= {})[settings.socket]
@@ -552,7 +570,7 @@ module Dnsruby
         send_queued_validation_responses
         observer_deadline = next_observer_deadline
         sockets, packet_deadline, idle_deadline = state_mutex.synchronize do
-          [@@sockets.to_a, @@timeouts.values.min, (@@socket_idle_deadlines ||= {}).values.min]
+          [@@sockets.to_a, @packet_deadlines&.first_deadline, @idle_deadlines&.first_deadline]
         end
         now = TransportClock.now
         if packet_deadline && packet_deadline <= now
@@ -641,6 +659,7 @@ module Dnsruby
       @@tcp_buffers.delete(socket)
       @@socket_remaining_queries.delete(socket)
       (@@socket_idle_deadlines ||= {}).delete(socket)
+      @idle_deadlines&.delete(socket)
       @@socket_is_persistent.delete(socket)
       owner = (@@socket_owners ||= {}).delete(socket)
       if (sockets = (@@sockets_by_sender ||= {}.compare_by_identity)[owner])
@@ -784,6 +803,7 @@ module Dnsruby
       end
       settings.send_token.cancel unless settings.send_token.equal?(preserved_token)
       @@timeouts.delete(id)
+      @packet_deadlines&.delete(id)
       socket = settings.socket
       return unless socket # A queued send may not have acquired a socket yet.
       (@@socket_hash[socket] || []).delete(id)
@@ -808,14 +828,17 @@ module Dnsruby
         # query or pipeline writer still owns the socket.
         (@@socket_idle_deadlines ||= {})[socket] =
           TransportClock.now + settings.single_resolver.tcp_idle_timeout
+        (@idle_deadlines ||= DeadlineQueue.new)[socket] = @@socket_idle_deadlines[socket]
       end
     end
 
     def expire_idle_sockets
       state_mutex.synchronize do
         now = TransportClock.now
-        (@@socket_idle_deadlines ||= {}).dup.each do |socket, deadline|
-          next if deadline > now || !(@@socket_hash[socket] || []).empty?
+        while (entry = @idle_deadlines&.first) && entry[1] <= now
+          socket = entry[0]
+          @idle_deadlines.delete(socket)
+          next unless (@@socket_hash[socket] || []).empty?
           socket.close rescue nil
           retire_socket_from_mutex_synchronized_block(socket)
         end

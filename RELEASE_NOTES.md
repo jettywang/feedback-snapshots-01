@@ -20,9 +20,10 @@ compatibility notes below for the changes from 1.74.0.
   partial writes and disconnected servers. Idle reusable connections close after
   ten seconds by default; set `tcp_idle_timeout` to a positive number of seconds
   to change this. Connections with outstanding queries are retained.
-  Connects and writes respect their
-  deadlines, and cancellation releases the sender worker promptly. Matching
-  replies is faster when many queries share a connection. Malformed replies no
+  Connects and writes respect their deadlines, and cancellation releases the
+  sender worker promptly. The controlling lookup deadline and cancellation also
+  cover the initial connection, writes and waiting for a pipeline slot.
+  Matching replies is faster when many queries share a connection. Malformed replies no
   longer interrupt other queries or cause endless TCP retries.
   UDP-to-TCP fallback still respects `no_tcp` and `ignore_truncation`, and
   retrying without EDNS keeps the current transport.
@@ -37,6 +38,9 @@ compatibility notes below for the changes from 1.74.0.
   Replacing or adding nameservers also preserves configuration changes made
   concurrently while the new senders are being constructed. Queries continue
   using the published configuration during hostname resolution for replacements.
+  Recursive address discovery continues with other nameservers and address
+  families after ordinary lookup failures, while preserving cancellation and
+  validation limits.
   [#179](https://github.com/alexdalitz/dnsruby/issues/179),
   [#184](https://github.com/alexdalitz/dnsruby/issues/184),
   [PR #221](https://github.com/alexdalitz/dnsruby/pull/221).
@@ -63,7 +67,12 @@ compatibility notes below for the changes from 1.74.0.
   wildcard NODATA and NSEC3 Opt-Out delegations. Validated response TTLs and
   cached copies respect their original receipt time, signature lifetime and
   chain of trust. Revalidating cached records does not renew their lifetime.
-  DS and DNSKEY RRsets are verified once per message. Chain discovery requires
+  DS, DNSKEY and reusable wildcard proof RRsets are verified once per message.
+  Cross-zone aliases discover the target signer's chain within the same
+  validation budget. DNAME responses authenticate the synthesized CNAME by
+  checking its substitution against the signed DNAME, retaining the DNAME's
+  lifetime limits; responses that omit the synthesized CNAME also validate.
+  Chain discovery requires
   authenticated proof of an unsigned delegation, and lookup failures cannot
   become insecure results. Signer zones, DNSKEY Zone Key flags and DS owner/class
   bindings are checked. Failed or BOGUS validation is never cached as successful.
@@ -79,7 +88,9 @@ compatibility notes below for the changes from 1.74.0.
   affect a later query that reuses its ID. The total `query_timeout` also covers
   local DNSSEC validation; late results are ignored after timeout or close.
   Logical deadlines and retries wake the selector when due, without a half-second
-  polling delay. Controlled internal queries wake immediately on replies or
+  polling delay. Indexed deadlines avoid rescanning all pending queries on each
+  selector iteration and retain only entries for live queries or idle connections.
+  Controlled internal queries wake immediately on replies or
   cancellation, including on Ruby versions without timed Queue waits.
   Once validation starts, replies from other nameservers cannot replace the
   accepted answer. Waiting UDP and TCP writers check for cancellation at least
@@ -117,6 +128,8 @@ compatibility notes below for the changes from 1.74.0.
   instead of scanning every query. Simple zone-file records parse faster;
   quoted, escaped and multiline records keep the full parser. Parsing preserves
   parentheses, semicolons and quotes inside record values where appropriate.
+  Quoted values copy ordinary text in runs to avoid per-character allocation,
+  preserving Unicode and binary character strings.
   Ordinary record lookup no longer slows as numeric class names accumulate,
   and numeric type/class lookups allocate fewer temporary objects.
   Cache hits decode an immutable wire snapshot outside the cache lock, and

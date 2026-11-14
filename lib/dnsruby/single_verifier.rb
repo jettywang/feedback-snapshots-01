@@ -574,6 +574,9 @@ module Dnsruby
         rrsets.each do |rrset|
           # Key learning already authenticated these exact per-message sets.
           next if context[:verified].key?(rrset)
+          if section == 'answer' && rrset.type == Types.CNAME && rrset.sigs.empty?
+            next if verify_synthesized_cname(rrset, keys, context)
+          end
           #  If delegation NS or glue AAAA/A, then don't expect RRSIG.
           #  Otherwise, expect RRSIG and fail verification if RRSIG is not present
 
@@ -664,6 +667,38 @@ module Dnsruby
       return context[:insecure] ? :insecure : true
     end
 
+    # RFC 6672 5.3.1: a synthesized CNAME inherits authentication from the
+    # DNAME, provided that the complete label substitution is identical. Only
+    # answer-section DNAMEs can authenticate this unsigned answer CNAME.
+    def verify_synthesized_cname(cname, keys, context)
+      dname = context[:sections].fetch('answer').select do |set|
+        set.type == Types.DNAME && set.klass == cname.klass && cname.name.subdomain_of?(set.name)
+      end.max_by { |set| set.name.labels.length }
+      return false unless dname
+      unless cname.rrs.length == 1 && dname.rrs.length == 1 &&
+          cname.rrs.first.domainname == dname_substitution(cname.name, dname.rrs.first)
+        raise VerifyError, 'CNAME does not match its DNAME substitution'
+      end
+      unless context[:verified].key?(dname)
+        return false unless verify_rrset(dname, keys, context)
+      end
+      expiration = context[:verified].fetch(dname).fetch(:expiration)
+      received_at = cname.rrs.first.instance_variable_get(:@dnsruby_received_at) || Time.now.to_i
+      previous = cname.rrs.first.instance_variable_get(:@dnsruby_authenticated_expiration)
+      expiration = [expiration, received_at + cname.ttl, previous].compact.min
+      cname.ttl = [cname.ttl, dname.ttl, [expiration - Time.now.to_i, 0].max].min
+      context[:verified][cname] = { signature: nil, expiration: expiration }
+      true
+    end
+
+    def dname_substitution(name, dname)
+      Name.new(name.labels.first(name.labels.length - dname.name.labels.length) +
+        dname.domainname.labels, true)
+    rescue ResolvError => e
+      raise VerifyError, "Invalid DNAME substitution: #{e.message}"
+    end
+    private :verify_synthesized_cname, :dname_substitution
+
     # Check denial at the end of an alias chain, not at the original QNAME.
     # A CNAME-only answer without a negative SOA can legitimately be partial.
     # Positive wildcard proofs are checked when their signatures verify.
@@ -746,7 +781,20 @@ module Dnsruby
         records = msg.answer.select { |rr| rr.name == name && rr.klass == question.qclass && rr.type != Types.RRSIG }
         return [name, true] if records.any? { |rr| question.qtype == Types.ANY || rr.type == question.qtype }
         aliases = records.select { |rr| rr.type == Types.CNAME }
-        return [name, false] if aliases.empty?
+        if aliases.empty?
+          # A DNSSEC-aware server may omit the synthesized CNAME (RFC 6672
+          # 5.3.1); the authenticated DNAME still redirects the question.
+          dnames = msg.answer.select do |rr|
+            rr.type == Types.DNAME && rr.klass == question.qclass && name.subdomain_of?(rr.name)
+          end
+          return [name, false] if dnames.empty?
+          closest = dnames.max_by { |rr| rr.name.labels.length }
+          if dnames.any? { |rr| rr.name == closest.name && rr.domainname != closest.domainname }
+            raise VerifyError, 'Conflicting DNAME targets in answer'
+          end
+          name = dname_substitution(name, closest)
+          next
+        end
         targets = aliases.map(&:domainname).uniq
         raise VerifyError, 'Conflicting CNAME targets in answer' unless targets.length == 1
         name = targets.first
@@ -1269,10 +1317,11 @@ module Dnsruby
         return
       end
 
-      authority = context[:message].authority
+      authority = context[:sections].fetch('authority')
       insecure_proof = false
-      (authority.rrsets(Types.NSEC) + authority.rrsets(Types.NSEC3)).each do |proof|
+      authority.each do |proof|
         ValidationBudget.current&.check!(1)
+        next unless [Types.NSEC, Types.NSEC3].include?(proof.type)
         next unless proof.klass == rrset.klass
         covers = proof.rrs.any? do |record|
           if record.type == Types.NSEC
@@ -1290,7 +1339,17 @@ module Dnsruby
         end
         next if signatures.empty?
         begin
-          verify_rrset(RRSet.new(proof.rrs + signatures), keys)
+          verified = context[:verified][proof]
+          unless verified && signatures.include?(verified[:signature])
+            proof_context = {}
+            restricted = RRSet.new(proof.rrs + signatures)
+            verify_rrset(restricted, keys, proof_context)
+            proof.ttl = [proof.ttl, restricted.ttl].min
+            context[:verified][proof] = {
+              signature: proof_context.fetch(:signature),
+              expiration: proof_context.fetch(:expiration)
+            }
+          end
           if proof.type == Types.NSEC3 && proof.rrs.any? { |rr| rr.flags == 1 }
             insecure_proof = true
             next
@@ -1922,8 +1981,15 @@ module Dnsruby
       if (msg.security_level.code != Message::SecurityLevel::SECURE)
         begin
           #           print "Trying to verify one last time\n"
-
-          if (result = verify_result(msg)) # Keys may have been learned during discovery.
+          result = begin
+            # Cached target keys may already authenticate the entire answer.
+            # A matching key tag alone cannot establish that during rollover.
+            verify_result(msg)
+          rescue VerifyError
+            raise unless discover_signer_keys(msg)
+            verify_result(msg)
+          end
+          if result
             set_verified_security_level(msg, result)
             return true
           end
@@ -1942,6 +2008,44 @@ module Dnsruby
         return false
       end
     end
+
+    # An alias can cross zone boundaries. Walking only the original QNAME
+    # cannot discover keys for the target's answer or negative proof. These
+    # lookups remain inside the caller's validation budget and trust operation.
+    def discover_signer_keys(msg)
+      discovered = {}
+      attempted = false
+      qname = msg.question.first&.qname
+      msg.section_rrsets.each do |section, rrsets|
+        next if section == 'additional'
+        rrsets.each do |rrset|
+          next if rrset.rrs.empty? || rrset.sigs.empty?
+          begin
+            signatures = valid_signatures(rrset)
+          rescue VerifyError
+            next # Ordinary verification will report the invalid RRset.
+          end
+          signatures.map(&:signers_name).uniq.each do |zone|
+            ValidationBudget.current&.check!(1)
+            next if qname && within_zone?(qname, zone) # The original chain already visited this zone.
+            next if discovered[zone.canonical]
+            discovered[zone.canonical] = true
+            anchor = find_closest_anchor_for(zone)
+            anchor ||= find_closest_dlv_anchor_for(zone) if @verifier_type == VerifierType::DLV && @added_dlv_key
+            next unless anchor
+            attempted = true
+            begin
+              follow_chain(anchor, zone)
+            rescue VerifyError
+              # An alternative signature may still validate this RRset. A
+              # budget abort deliberately propagates past this fallback.
+            end
+          end
+        end
+      end
+      attempted
+    end
+    private :discover_signer_keys
 
     def try_to_follow_from_anchor(closest_anchor, msg, qname) # :nodoc:
       with_validation { try_to_follow_from_anchor_internal(closest_anchor, msg, qname) }

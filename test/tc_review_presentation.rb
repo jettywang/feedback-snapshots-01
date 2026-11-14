@@ -187,4 +187,27 @@ class TestReviewPresentation < Minitest::Test
       assert_equal(grouped.clone, plain.clone, text)
     end
   end
+
+  def test_runs_preserve_unicode_quotes_escapes_and_continuation_state
+    text = "é.example. TXT ('café; (value)'\"déjà\\\"vu\") ; ignored quote '\n"
+    start = presentation.single_quoted_start(text)
+    normalized, depth, quote = presentation.scan(text, single_quoted_from: start)
+    assert_equal("é.example. TXT 'café; (value)'\"déjà\\\"vu\"  ", normalized)
+    assert_equal(0, depth)
+    assert_equal(false, quote)
+    assert_equal(Encoding::UTF_8, normalized.encoding)
+
+    normalized, depth, quote = presentation.scan("début; (one)\\\nfin\" )", 1, true)
+    assert_equal("début; (one)\\\nfin\" ", normalized)
+    assert_equal(0, depth)
+    assert_equal(false, quote)
+  end
+
+  def test_runs_keep_binary_character_strings_and_trailing_escapes
+    text = "owner TXT \"\xFE\xFF (value);\" \\".b
+    normalized, depth, quote = presentation.scan(text)
+    assert_equal(text, normalized)
+    assert_equal(Encoding::BINARY, normalized.encoding)
+    assert_equal([0, false], [depth, quote])
+  end
 end

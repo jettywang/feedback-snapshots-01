@@ -554,17 +554,40 @@ module Dnsruby
           control = QueryControl.new(parent: QueryControl.current)
           hints = @@mutex.synchronize { @@hints.dup }
           workers = []
+          results = QueryControl::Queue.new
+          ans = []
           begin
             (@ipv6_ok ? ['AAAA', 'A'] : ['A']).each do |address_type|
               workers << Thread.new do
                 Thread.current.report_on_exception = false
-                QueryControl.with(control) do
-                  _dorecursion(ns_rec, address_type, klass, '.', hints.dup,
-                    depth + 1, no_validation)
+                begin
+                  answer = QueryControl.with(control) do
+                    _dorecursion(ns_rec, address_type, klass, '.', hints.dup,
+                      depth + 1, no_validation)
+                  end
+                  results << [answer, nil]
+                rescue StandardError => error
+                  results << [nil, error]
                 end
               end
             end
-            ans = workers.map(&:value).compact.map(&:answer)
+            workers.length.times do
+              answer, error = control.pop(results)
+              if error
+                # A failed family or nameserver must not hide a usable
+                # alternative. Budget failures and cancellation still stop
+                # the entire operation, as do unexpected programming errors.
+                raise error if error.is_a?(ValidationLimitError)
+                case error
+                when ResolvError, ResolvTimeout, IOError, SystemCallError
+                  TheLog.debug(";; _dorecursion() Address lookup failed: #{error}")
+                else
+                  raise error
+                end
+              elsif answer
+                ans << answer.answer
+              end
+            end
           ensure
             control.cancel
             # A failed lookup must not leave its sibling running.

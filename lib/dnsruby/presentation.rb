@@ -42,25 +42,31 @@ module Dnsruby
       end
 
       result = +''
-      escaped = false
-      comment = false
       quoted = '"' if quoted == true
       just_closed_quote = false
+      position = 0
 
-      text.each_char.with_index do |char, index|
+      # Copy ordinary text in runs. Quoted TXT values often contain hundreds
+      # of characters but only two delimiters; allocating one String for each
+      # character makes that common case unnecessarily expensive. Regexp and
+      # String offsets both count characters, including for Unicode owners.
+      while (syntax = /[\\'"();\r\n]/.match(text, position))
+        index = syntax.begin(0)
+        if index > position
+          result << text[position...index]
+          just_closed_quote = false
+        end
+        char = syntax[0]
+        position = index + 1
         after_quote = just_closed_quote
         just_closed_quote = false
-        if comment
-          next unless char == "\n"
-          comment = false
-        end
 
-        if escaped
+        if char == '\\'
           result << char
-          escaped = false
-        elsif char == '\\'
-          result << char
-          escaped = true
+          if (escaped = text[position])
+            result << escaped
+            position += 1
+          end
         elsif char == '"' || (single_quoted_from && index >= single_quoted_from && char == "'" &&
               (quoted == "'" || (!quoted && (after_quote || index.zero? || /[\s(]/.match?(text[index - 1])))))
           result << char
@@ -71,7 +77,9 @@ module Dnsruby
             quoted = char
           end
         elsif !quoted && char == ';'
-          comment = true
+          # Comments end only at LF, matching the zone reader's physical
+          # line handling. Leave that newline for the ordinary layout branch.
+          position = text.index("\n", position) || text.length
         elsif !quoted && (char == '(' || char == ')')
           depth += char == '(' ? 1 : -1
           if depth.negative? && !allow_unbalanced
@@ -92,6 +100,7 @@ module Dnsruby
           result << char
         end
       end
+      result << text[position..-1] if position < text.length
 
       [result, depth, quoted]
     end

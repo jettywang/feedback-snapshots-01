@@ -172,6 +172,26 @@ class DnssecWildcardProofsTest < Minitest::Test
     assert_equal(Dnsruby::Message::SecurityLevel.SECURE, message.security_level)
   end
 
+  def test_wildcard_proof_is_verified_once_and_keeps_its_authenticated_lifetime
+    now = Time.now
+    Time.stub(:now, now) do
+      [false, true].each do |nsec3|
+        message = wildcard_message
+        nsec3 ? add_nsec3(message) : add_nsec(message)
+        message.authority.find { |rr| rr.type == Dnsruby::Types.RRSIG }.ttl = 7
+        2.times do
+          budget = Dnsruby::ValidationBudget.new(limits:
+            Dnsruby::Dnssec.validation_limits.merge(max_signature_verifications: 2))
+          Dnsruby::ValidationBudget.with(budget) { assert(@verifier.verify(message)) }
+          assert_equal([7, 7], message.authority.map(&:ttl))
+          assert(message.authority.all? do |rr|
+            rr.instance_variable_get(:@dnsruby_authenticated_expiration) == now.to_i + 7
+          end)
+        end
+      end
+    end
+  end
+
   private
 
   def signed(record, key: @key)
