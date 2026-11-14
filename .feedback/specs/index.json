@@ -1,0 +1,14 @@
+[
+  {
+    "repo": "pgpy",
+    "file": ".feedback/specs/rfc4880.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc4880.txt",
+    "sha256": "575dc55f0edea3cb490ad92941e83bd755f674c20619efee0a5a5b721b32bf02"
+  },
+  {
+    "repo": "pgpy",
+    "file": ".feedback/specs/rfc6637.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc6637.txt",
+    "sha256": "64b075ac7093fe3949a1446b13db91092439572b6d751797a90b924b45f16583"
+  }
+]
