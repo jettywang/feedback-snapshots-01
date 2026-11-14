@@ -843,11 +843,22 @@ class SnmpV3MessageProcessingModel(AbstractMessageProcessingModel):
             or pduType in rfc3411.INTERNAL_CLASS_PDUS
         ):
             # 7.2.10a
-            try:
-                cachedReqParams = self._cache.pop_by_message_id(msgID)
-            except error.ProtocolError:
-                smHandler.release_state_information(securityStateReference)
-                raise error.StatusInformation(errorIndication=errind.dataMismatch)
+            # Reports always consume the cached request (they drive a
+            # retry); responses are only looked up here -- they consume the
+            # cache below once every field has been validated, so a rejected
+            # response leaves the in-flight request intact for later, valid
+            # responses.
+            if pduType in rfc3411.INTERNAL_CLASS_PDUS:
+                try:
+                    cachedReqParams = self._cache.pop_by_message_id(msgID)
+                except error.ProtocolError:
+                    smHandler.release_state_information(securityStateReference)
+                    raise error.StatusInformation(errorIndication=errind.dataMismatch)
+            else:
+                cachedReqParams = self._cache.get_by_message_id(msgID)
+                if cachedReqParams is None:
+                    smHandler.release_state_information(securityStateReference)
+                    raise error.StatusInformation(errorIndication=errind.dataMismatch)
             # 7.2.10b
             sendPduHandle = cachedReqParams["sendPduHandle"]
         else:
@@ -926,6 +937,8 @@ class SnmpV3MessageProcessingModel(AbstractMessageProcessingModel):
                 or contextEngineId != cachedReqParams["contextEngineId"]
                 or contextName != cachedReqParams["contextName"]
             ):
+                # Drop this response but keep the cached request alive so a
+                # later, matching response can still complete it.
                 smHandler.release_state_information(securityStateReference)
                 raise error.StatusInformation(errorIndication=errind.dataMismatch)
 
@@ -947,6 +960,9 @@ class SnmpV3MessageProcessingModel(AbstractMessageProcessingModel):
             snmpEngine.observer.clear_execution_context(
                 snmpEngine, "rfc3412.prepareDataElements:response"
             )
+
+            # All checks passed: consume the cached request exactly once.
+            self._cache.pop_by_message_id(msgID)
 
             # 7.2.12c
             smHandler.release_state_information(securityStateReference)

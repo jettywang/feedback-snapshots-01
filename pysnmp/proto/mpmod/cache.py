@@ -80,6 +80,13 @@ class Cache:
             self.__expirationQueue[expireAt]["msgId"] = {}
         self.__expirationQueue[expireAt]["msgId"][msgId] = 1
 
+    def get_by_message_id(self, msgId):
+        """Return cached state information without removing it."""
+        if msgId in self.__msgIdIndex:
+            cacheEntry, _ = self.__msgIdIndex[msgId]
+            return cacheEntry
+        return
+
     def pop_by_message_id(self, msgId):
         """Release state information."""
         if msgId in self.__msgIdIndex:

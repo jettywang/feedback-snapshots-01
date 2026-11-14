@@ -19,6 +19,12 @@ class Cache:
         self.__cacheRepository[index] = kwargs
         return index
 
+    def peek(self, index):
+        """Return cache entry without removing it."""
+        if index in self.__cacheRepository:
+            return self.__cacheRepository[index]
+        return
+
     def pop(self, index):
         """Pop cache entry."""
         if index in self.__cacheRepository:

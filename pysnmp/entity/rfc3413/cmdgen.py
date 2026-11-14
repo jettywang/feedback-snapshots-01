@@ -50,27 +50,30 @@ class CommandGenerator:
         if sendPduHandle not in self.__pendingReqs:
             raise error.PySnmpError("Missing sendPduHandle %s" % sendPduHandle)
 
-        (
-            origTransportDomain,
-            origTransportAddress,
-            origMessageProcessingModel,
-            origSecurityModel,
-            origSecurityName,
-            origSecurityLevel,
-            origContextEngineId,
-            origContextName,
-            origPduVersion,
-            origPdu,
-            origTimeout,
-            origRetryCount,
-            origRetries,
-            origDiscoveryRetries,
-        ) = self.__pendingReqs.pop(sendPduHandle)
-
-        snmpEngine.transport_dispatcher.job_finished(id(self))
-
-        # 3.1.3
+        # A Report / processing error always consumes the in-flight request:
+        # it either triggers a retry under a (possibly new) handle or fails the
+        # request outright.
         if statusInformation:
+            (
+                origTransportDomain,
+                origTransportAddress,
+                origMessageProcessingModel,
+                origSecurityModel,
+                origSecurityName,
+                origSecurityLevel,
+                origContextEngineId,
+                origContextName,
+                origPduVersion,
+                origPdu,
+                origTimeout,
+                origRetryCount,
+                origRetries,
+                origDiscoveryRetries,
+            ) = self.__pendingReqs.pop(sendPduHandle)
+
+            snmpEngine.transport_dispatcher.job_finished(id(self))
+
+            # 3.1.3
             debug.logger & debug.FLAG_APP and debug.logger(
                 f"processResponsePdu: sendPduHandle {sendPduHandle}, statusInformation {statusInformation}"
             )
@@ -158,10 +161,32 @@ class CommandGenerator:
                 )
                 return
 
+        # A normal response must match the outstanding request across the whole
+        # security model before it is allowed to consume it. Inspect the
+        # pending request without removing it so a rejected, duplicate or late
+        # response leaves the real request in place for a later valid response.
+        (
+            origTransportDomain,
+            origTransportAddress,
+            origMessageProcessingModel,
+            origSecurityModel,
+            origSecurityName,
+            origSecurityLevel,
+            origContextEngineId,
+            origContextName,
+            origPduVersion,
+            origPdu,
+            origTimeout,
+            origRetryCount,
+            origRetries,
+            origDiscoveryRetries,
+        ) = self.__pendingReqs[sendPduHandle]
+
         if (
             origMessageProcessingModel != messageProcessingModel
             or origSecurityModel != securityModel
-            or origSecurityName != origSecurityName
+            or origSecurityName != securityName
+            or origSecurityLevel != securityLevel
             or origContextEngineId
             and origContextEngineId != contextEngineId
             or origContextName
@@ -173,7 +198,8 @@ class CommandGenerator:
                 % sendPduHandle
             )
 
-            cbFun(snmpEngine, origSendRequestHandle, "badResponse", None, cbCtx)
+            # Drop the mismatching response; the pending request stays valid
+            # and is left untouched, so no job/state reference is released.
             return
 
         # User-side API assumes SMIv2
@@ -186,8 +212,17 @@ class CommandGenerator:
                 "processResponsePdu: sendPduHandle %s, request-id/response-id mismatch"
                 % sendPduHandle
             )
-            cbFun(snmpEngine, origSendRequestHandle, "badResponse", None, cbCtx)
             return
+
+        # Every association matches: consume the request and its caches exactly
+        # once, then deliver the successful response to the application.
+        self.__pendingReqs.pop(sendPduHandle)
+        snmpEngine.message_dispatcher.consume_cached_request(sendPduHandle)
+        snmpEngine.message_dispatcher.release_state_information(
+            snmpEngine, sendPduHandle, messageProcessingModel
+        )
+
+        snmpEngine.transport_dispatcher.job_finished(id(self))
 
         cbFun(snmpEngine, origSendRequestHandle, None, PDU, cbCtx)
 

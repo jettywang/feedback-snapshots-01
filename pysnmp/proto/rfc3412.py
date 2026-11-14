@@ -588,7 +588,11 @@ class MsgAndPduDispatcher:
             # 4.2.2.2 (response)
 
             # 4.2.2.2.1
-            cachedParams = self.__cache.pop(sendPduHandle)
+            # Look the pending request up without consuming it. It is only
+            # consumed once the response has been accepted, so a rejected
+            # response (e.g. a msgID collision whose security or context data
+            # does not match) leaves the request waiting for the real response.
+            cachedParams = self.__cache.peek(sendPduHandle)
 
             # 4.2.2.2.2
             if cachedParams is None:
@@ -606,6 +610,14 @@ class MsgAndPduDispatcher:
 
             # 4.2.2.2.3
             # no-op ? XXX
+
+            # A Report / processing error always completes this in-flight
+            # request (the application may re-send it under a new handle), so
+            # consume the cache before invoking the callback. Ordinary
+            # responses are consumed by the application only after it has
+            # validated and accepted them.
+            if statusInformation is not None:
+                self.__cache.pop(sendPduHandle)
 
             snmpEngine.observer.store_execution_context(
                 snmpEngine,
@@ -651,6 +663,10 @@ class MsgAndPduDispatcher:
             )
 
             return restOfWholeMsg
+
+    def consume_cached_request(self, sendPduHandle):
+        """Consume a pending request once its response has been accepted."""
+        return self.__cache.pop(sendPduHandle)
 
     def release_state_information(
         self, snmpEngine: "SnmpEngine", sendPduHandle, messageProcessingModel

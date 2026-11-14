@@ -414,20 +414,14 @@ class SnmpV1MessageProcessingModel(AbstractMessageProcessingModel):
             msgID = pdu.getComponentByPosition(0)
 
             # 7.2.10a
-            try:
-                cachedReqParams = self._cache.pop_by_message_id(int(msgID))
-            except error.ProtocolError:
+            # Look the cached request up without consuming it -- it is only
+            # consumed below once every field has been validated, so a
+            # rejected response leaves the in-flight request intact for a
+            # later, matching response.
+            cachedReqParams = self._cache.get_by_message_id(int(msgID))
+            if cachedReqParams is None:
                 smHandler.release_state_information(securityStateReference)
                 raise error.StatusInformation(errorIndication=errind.dataMismatch)
-
-            # recover original PDU request-id to return to app
-            pdu.setComponentByPosition(0, cachedReqParams["reqID"])
-
-            debug.logger & debug.FLAG_MP and debug.logger(
-                "prepareDataElements: unique PDU request-id {} replaced with original ID {}".format(
-                    msgID, cachedReqParams["reqID"]
-                )
-            )
 
             # 7.2.10b
             sendPduHandle = cachedReqParams["sendPduHandle"]
@@ -451,8 +445,21 @@ class SnmpV1MessageProcessingModel(AbstractMessageProcessingModel):
                 or contextEngineId != cachedReqParams["contextEngineId"]
                 or contextName != cachedReqParams["contextName"]
             ):
+                # Drop this response but keep the cached request alive so a
+                # later, matching response can still complete it.
                 smHandler.release_state_information(securityStateReference)
                 raise error.StatusInformation(errorIndication=errind.dataMismatch)
+
+            # All checks passed: consume the cached request exactly once and
+            # recover the original PDU request-id to return to the app.
+            self._cache.pop_by_message_id(int(msgID))
+            pdu.setComponentByPosition(0, cachedReqParams["reqID"])
+
+            debug.logger & debug.FLAG_MP and debug.logger(
+                "prepareDataElements: unique PDU request-id {} replaced with original ID {}".format(
+                    msgID, cachedReqParams["reqID"]
+                )
+            )
 
             stateReference = None
 

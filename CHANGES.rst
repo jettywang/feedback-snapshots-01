@@ -1,5 +1,14 @@
 .. current-version: 7.1.32 (managed by bump2version)
 
+Unreleased
+----------
+
+- Fixed a response whose msgID collided with an in-flight request but whose
+  security model, identity, security level or context did not match consuming
+  and dropping the pending request. Such responses are now rejected without
+  touching the outstanding request, so a later valid response still completes
+  it; duplicate and late responses complete or time out exactly once.
+
 Revision 7.1.32, released on Nov 07, 2026
 -----------------------------------------
 
