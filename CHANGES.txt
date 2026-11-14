@@ -1,3 +1,16 @@
+Unreleased
+----------
+
+- Added rfc5914_import, an import adapter that converts an RFC 5914
+  TrustAnchorList into immutable TrustAnchorConstraints objects.  It retains
+  the path controls carried by each certificate, tbsCert and taInfo entry,
+  keeps same-key/different-constraint anchors distinct, diagnoses embedded
+  certificate conflicts, and rejects unsupported critical controls.  Trust in
+  the list source must be confirmed explicitly by the caller.
+- Added rfc5914_pathcheck, a minimal path-validation consumer demonstrating
+  that the same leaf certificate yields different verdicts under two
+  same-key anchors with different name and policy constraints.
+
 Revision 0.4.2, released 27-03-2025
 ---------------------------------------
 
