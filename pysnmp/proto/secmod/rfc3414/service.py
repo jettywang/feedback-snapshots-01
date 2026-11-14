@@ -366,7 +366,11 @@ class SnmpUSMSecurityModel(AbstractSecurityModel):
         # 3.1.1
         if securityStateReference is not None:
             # 3.1.1a
-            cachedSecurityData = self._cache.pop(securityStateReference)
+            # NOTE: read the cached security data without consuming it --
+            # the caller (MP model) may need it again e.g. to rebuild the
+            # message as a smaller tooBig response. It is the caller's
+            # duty to release the state once done.
+            cachedSecurityData = self._cache.get(securityStateReference)
             usmUserName = cachedSecurityData["msgUserName"]
             if "usmUserSecurityName" in cachedSecurityData:
                 usmUserSecurityName = cachedSecurityData["usmUserSecurityName"]

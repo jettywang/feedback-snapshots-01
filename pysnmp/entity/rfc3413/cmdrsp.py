@@ -133,13 +133,17 @@ class CommandResponderBase:
             )
 
         except error.StatusInformation:
+            statusInformation = sys.exc_info()[1]
             debug.logger & debug.FLAG_APP and debug.logger(
-                f"sendPdu: stateReference {stateReference}, statusInformation {sys.exc_info()[1]}"
+                f"sendPdu: stateReference {stateReference}, statusInformation {statusInformation}"
             )
-            (snmpSilentDrops,) = snmpEngine.get_mib_builder().import_symbols(  # type: ignore
-                "__SNMPv2-MIB", "snmpSilentDrops"
-            )
-            snmpSilentDrops.syntax += 1
+            # Oversized responses get silently dropped and are already
+            # counted by the message dispatcher
+            if statusInformation.get("errorIndication") != errind.tooBig:
+                (snmpSilentDrops,) = snmpEngine.get_mib_builder().import_symbols(  # type: ignore
+                    "__SNMPv2-MIB", "snmpSilentDrops"
+                )
+                snmpSilentDrops.syntax += 1
 
     _get_request_type = rfc1905.GetRequestPDU.tagSet
     _next_request_type = rfc1905.GetNextRequestPDU.tagSet

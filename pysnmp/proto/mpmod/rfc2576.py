@@ -272,19 +272,25 @@ class SnmpV1MessageProcessingModel(AbstractMessageProcessingModel):
         pdu.setComponentByPosition(0, reqID)
 
         # rfc3412: 7.1.8.a
-        (securityParameters, wholeMsg) = smHandler.generate_response_message(
-            snmpEngine,
-            self.MESSAGE_PROCESSING_MODEL_ID,
-            globalData,
-            maxMessageSize,
-            securityModel,
-            snmpEngineId,
-            securityName,
-            securityLevel,
-            scopedPDU,
-            securityStateReference,
-            statusInformation.get("errorIndication"),
-        )
+        try:
+            (securityParameters, wholeMsg) = smHandler.generate_response_message(
+                snmpEngine,
+                self.MESSAGE_PROCESSING_MODEL_ID,
+                globalData,
+                maxMessageSize,
+                securityModel,
+                snmpEngineId,
+                securityName,
+                securityLevel,
+                scopedPDU,
+                securityStateReference,
+                statusInformation.get("errorIndication"),
+            )
+        except error.StatusInformation:
+            smHandler.release_state_information(securityStateReference)
+            raise
+
+        smHandler.release_state_information(securityStateReference)
 
         # recover unique request-id right after PDU serialization
         pdu.setComponentByPosition(0, msgID)

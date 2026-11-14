@@ -515,7 +515,9 @@ class SnmpV1SecurityModel(base.AbstractSecurityModel):
         # rfc2576: 5.2.2
         (msg,) = globalData
         contextEngineId, contextName, pdu = scopedPDU
-        cachedSecurityData = self._cache.pop(securityStateReference)
+        # NOTE: read the cached security data without consuming it -- the
+        # caller (MP model) releases the state once the response is built.
+        cachedSecurityData = self._cache.get(securityStateReference)
         communityName = cachedSecurityData["communityName"]
 
         debug.logger & debug.FLAG_SM and debug.logger(

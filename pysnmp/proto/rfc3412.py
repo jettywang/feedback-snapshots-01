@@ -321,7 +321,13 @@ class MsgAndPduDispatcher:
             )
 
         except error.StatusInformation:
-            # 4.1.2.3
+            # 4.1.2.3 -- response can not be sent, it gets silently
+            # dropped. Count size-related drops here, once, on behalf
+            # of all callers.
+            mpStatusInformation = sys.exc_info()[1]
+            if mpStatusInformation.get("errorIndication") == errind.tooBig:
+                (snmpSilentDrops,) = self.mib_instrum_controller.get_mib_builder().import_symbols("__SNMPv2-MIB", "snmpSilentDrops")  # type: ignore
+                snmpSilentDrops.syntax += 1
             raise
 
         # Handle oversized messages XXX transport constrains?

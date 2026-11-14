@@ -9,7 +9,7 @@ import sys
 
 from pysnmp import debug
 from pysnmp.entity.engine import SnmpEngine
-from pysnmp.proto import error, rfc3411
+from pysnmp.proto import errind, error, rfc3411
 from pysnmp.proto.api import v1, v2c  # backend is always SMIv2 compliant
 from pysnmp.proto.proxy import rfc2576
 
@@ -117,13 +117,17 @@ class NotificationReceiver:
                 )
 
             except error.StatusInformation:
+                statusInformation = sys.exc_info()[1]
                 debug.logger & debug.FLAG_APP and debug.logger(
-                    f"processPdu: stateReference {stateReference}, statusInformation {sys.exc_info()[1]}"
+                    f"processPdu: stateReference {stateReference}, statusInformation {statusInformation}"
                 )
-                (snmpSilentDrops,) = snmpEngine.get_mib_builder().import_symbols(
-                    "__SNMPv2-MIB", "snmpSilentDrops"
-                )
-                snmpSilentDrops.syntax += 1
+                # Oversized responses get silently dropped and are already
+                # counted by the message dispatcher
+                if statusInformation.get("errorIndication") != errind.tooBig:
+                    (snmpSilentDrops,) = snmpEngine.get_mib_builder().import_symbols(
+                        "__SNMPv2-MIB", "snmpSilentDrops"
+                    )
+                    snmpSilentDrops.syntax += 1
 
         elif PDU.tagSet in rfc3411.UNCONFIRMED_CLASS_PDUS:
             pass

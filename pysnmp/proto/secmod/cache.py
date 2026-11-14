@@ -38,6 +38,15 @@ class Cache:
         del self.__cache_entries[stateReference]
         return securityData
 
+    def get(self, stateReference):
+        """Read securityData from cache without removing it."""
+        if stateReference in self.__cache_entries:
+            return self.__cache_entries[stateReference]
+        else:
+            raise error.ProtocolError(
+                f"Cache miss for stateReference={stateReference} at {self}"
+            )
+
     def is_empty(self):
         """Return True if cache is empty."""
         return not bool(self.__cache_entries)

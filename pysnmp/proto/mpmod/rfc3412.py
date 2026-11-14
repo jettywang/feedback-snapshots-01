@@ -565,34 +565,88 @@ class SnmpV3MessageProcessingModel(AbstractMessageProcessingModel):
             )
         )
 
-        # 7.1.8a
-        try:
-            (securityParameters, wholeMsg) = smHandler.generate_response_message(
-                snmpEngine,
-                self.MESSAGE_PROCESSING_MODEL_ID,
-                msg,
-                snmpEngineMaxMessageSize.syntax,
-                securityModel,
-                snmpEngineID,
-                securityName,
-                securityLevel,
-                scopedPDU,
-                securityStateReference,
-                statusInformation.get(
-                    "errorIndication"
-                ),  # Use get() to handle missing errorIndication
-            )  # type: ignore
-        except error.StatusInformation:
-            # 7.1.8.b
-            raise
+        # 7.1.8
+        # The response budget is constrained by both the local engine
+        # (snmpEngineMaxMessageSize) and the peer-declared msgMaxSize.
+        # The *entire* serialized message, security encapsulation
+        # included, must fit into that budget -- estimating the plaintext
+        # scoped PDU size is not good enough because BER length fields,
+        # USM parameters, digest sizes and privacy padding all add up.
+        maxResponseMessageSize = min(
+            int(snmpEngineMaxMessageSize.syntax), int(maxMessageSize)
+        )
+
+        while True:
+            # 7.1.8a
+            try:
+                (securityParameters, wholeMsg) = smHandler.generate_response_message(
+                    snmpEngine,
+                    self.MESSAGE_PROCESSING_MODEL_ID,
+                    msg,
+                    snmpEngineMaxMessageSize.syntax,
+                    securityModel,
+                    snmpEngineID,
+                    securityName,
+                    securityLevel,
+                    scopedPDU,
+                    securityStateReference,
+                    statusInformation.get(
+                        "errorIndication"
+                    ),  # Use get() to handle missing errorIndication
+                )  # type: ignore
+            except error.StatusInformation:
+                # 7.1.8.b
+                smHandler.release_state_information(securityStateReference)
+                raise
+
+            # Message size constraint verification, performed on the
+            # actual wire message
+            if len(wholeMsg) <= maxResponseMessageSize:
+                break
+
+            # 7.1.8.c -- the response does not fit the response budget.
+            # Per RFC 1905 4.2.1.3, fall back to a tooBig error response
+            # (empty var-binds make it much smaller) and try to make
+            # *that* fit instead. The security level is never lowered
+            # to squeeze a message into the budget.
+            if (
+                pdu.tagSet not in rfc3411.RESPONSE_CLASS_PDUS
+                or pMod.apiPDU.get_error_status(pdu)
+                == rfc1905.errorStatus.namedValues["tooBig"]
+            ):
+                # Not a response that can be trimmed (e.g. a Report) or
+                # already a tooBig response that still does not fit --
+                # give up and let the dispatcher silently drop it.
+                smHandler.release_state_information(securityStateReference)
+                raise error.StatusInformation(errorIndication=errind.tooBig)
+
+            debug.logger & debug.FLAG_MP and debug.logger(
+                "prepareResponseMessage: response of %d octets exceeds "
+                "response budget of %d octets, retrying with tooBig"
+                % (len(wholeMsg), maxResponseMessageSize)
+            )
+
+            tooBigPDU = rfc1905.ResponsePDU()
+            pMod.apiPDU.set_request_id(tooBigPDU, pMod.apiPDU.get_request_id(pdu))
+            pMod.apiPDU.set_error_status(tooBigPDU, "tooBig")
+            pMod.apiPDU.set_error_index(tooBigPDU, 0)
+            pMod.apiPDU.set_varbinds(tooBigPDU, ())
+
+            pdu = tooBigPDU
+
+            scopedPDU.getComponentByPosition(2).setComponentByType(
+                pdu.tagSet,
+                pdu,
+                verifyConstraints=False,
+                matchTags=False,
+                matchConstraints=False,
+            )
+
+        smHandler.release_state_information(securityStateReference)
 
         debug.logger & debug.FLAG_MP and debug.logger(
             "prepareResponseMessage: SM finished"
         )
-
-        # Message size constraint verification
-        if len(wholeMsg) > min(snmpEngineMaxMessageSize.syntax, maxMessageSize):
-            raise error.StatusInformation(errorIndication=errind.tooBig)
 
         snmpEngine.observer.store_execution_context(
             snmpEngine,
