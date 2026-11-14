@@ -12,6 +12,7 @@ command-line-tools/index
 api
 model
 configuration
+inspection-inputs
 layout-creation-example
 Demo Supply Chain <https://github.com/in-toto/demo>
 CONTRIBUTING

@@ -21,6 +21,7 @@
 """
 
 from copy import deepcopy
+from posixpath import normpath as _posix_normpath
 from re import fullmatch
 
 from securesystemslib.exceptions import FormatError
@@ -84,6 +85,24 @@ def _check_hash_dict(arg):
     for k, v in arg.items():
         _check_str(k)
         _check_hex(v)
+
+
+def _check_path(arg):
+    """Check that a path is a normalized, relative POSIX-style file path.
+
+    Used for inspection input declarations. Absolute paths, parent traversal,
+    empty or directory-only paths, and backslashes are rejected.
+    """
+    _check_str(arg)
+    if not arg:
+        raise _err(arg, "non-empty relative path")
+    if "\\" in arg:
+        raise _err(arg, "path without backslashes")
+    if arg.startswith("/") or arg.endswith("/"):
+        raise _err(arg, "relative file path")
+    normalized = _posix_normpath(arg)
+    if normalized != arg or normalized in {".", ".."} or ".." in arg.split("/"):
+        raise _err(arg, "normalized path without parent traversal")
 
 
 def _check_parameter_dict(arg):

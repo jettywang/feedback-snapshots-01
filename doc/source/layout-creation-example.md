@@ -139,6 +139,12 @@ inspection = Inspection(name="untar")
 
 inspection.set_run_from_string("tar xzf demo-project.tar.gz")
 
+# Declare the local file the inspection reads as an authenticated input. Before
+# the command runs, verification checks that the file's name, digest and
+# recording method still match the Link of the named step. Files that are not
+# declared are not treated as authenticated inputs.
+inspection.add_input_from_string("package:demo-project.tar.gz")
+
 inspection.add_material_rule_from_string(
     "MATCH demo-project.tar.gz WITH PRODUCTS FROM package")
 inspection.add_product_rule_from_string(

@@ -41,3 +41,7 @@ documented [in-toto#663](https://github.com/in-toto/in-toto/issues/663).
 ```{eval-rst}
 .. autofunction:: in_toto.verifylib.in_toto_verify
 ```
+
+Inspection input binding evidence is available via
+`in_toto.inspection_binding.InspectionInputReport`; see
+{doc}`inspection-inputs` for the policy, its guarantees and its limits.

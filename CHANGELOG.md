@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Added
+* Inspection `inputs` declarations and pre-execution binding to authenticated
+  step Links, with a JSON evidence report and `--require-inspection-inputs`
+  strict mode for `in-toto-verify`.
+
 ## v3.1.0
 
 This release includes version bumpbs, as well as upgraded debian support , and

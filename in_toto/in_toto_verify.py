@@ -30,7 +30,7 @@ import sys
 
 from securesystemslib._gpg import functions as gpg_interface
 
-from in_toto import __version__, verifylib
+from in_toto import __version__, inspection_binding, verifylib
 from in_toto.common_args import (
     GPG_HOME_ARGS,
     GPG_HOME_KWARGS,
@@ -185,6 +185,28 @@ for which the public part can be found in the GPG keyring at '~/.gnupg'.
             f"   Default is '{LINK_CMD_EXEC_TIMEOUT}' seconds."
         ),
     )
+    parser.add_argument(
+        "--inspection-input-report",
+        dest="inspection_input_report",
+        type=str,
+        metavar="<path>",
+        help=(
+            "write a JSON report with the Link identity and file evidence"
+            " checked for inspection inputs before inspection commands were"
+            " executed. The report also documents what this binding does not"
+            " guarantee, including concurrent modification limits."
+        ),
+    )
+    parser.add_argument(
+        "--require-inspection-inputs",
+        dest="require_inspection_inputs",
+        action="store_true",
+        help=(
+            "fail verification before executing any inspection that has no"
+            " 'inputs' declarations. Declared inputs are always enforced; this"
+            " flag additionally rejects inspections that declare none."
+        ),
+    )
 
     verbosity_args = parser.add_mutually_exclusive_group(required=False)
     verbosity_args.add_argument(*VERBOSE_ARGS, **VERBOSE_KWARGS)
@@ -233,12 +255,25 @@ def main():
                 key = load_public_key_from_file(path)
                 layout_key_dict[key["keyid"]] = key
 
-        verifylib.in_toto_verify(
-            layout,
-            layout_key_dict,
-            args.link_dir,
-            inspect_timeout=args.inspect_timeout,
-        )
+        reports = []
+        report_callback = None
+        if args.inspection_input_report:
+            report_callback = reports.append
+
+        try:
+            verifylib.in_toto_verify(
+                layout,
+                layout_key_dict,
+                args.link_dir,
+                inspect_timeout=args.inspect_timeout,
+                binding_report_callback=report_callback,
+                require_inspection_inputs=args.require_inspection_inputs,
+            )
+        finally:
+            if args.inspection_input_report:
+                inspection_binding.dump_reports(
+                    reports, args.inspection_input_report
+                )
 
     except Exception as e:  # noqa: BLE001
         LOG.error("(in-toto-verify) %s: %s", type(e).__name__, e)

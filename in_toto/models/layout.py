@@ -48,13 +48,14 @@ from in_toto.formats import (
     _check_hex_list,
     _check_int,
     _check_iso8601,
+    _check_path,
     _check_public_key,
     _check_public_keys,
     _check_str,
     _check_str_list,
 )
 from in_toto.models._signer import load_public_key_from_file
-from in_toto.models.common import Signable, ValidationMixin
+from in_toto.models.common import Signable, ValidationMixin, asdict
 
 # Link metadata for sublayouts are expected to be found in a subdirectory
 # with the following name, relative to the verification directory
@@ -501,7 +502,7 @@ class SupplyChainItem(ValidationMixin):
     def __repr__(self):
         """Returns an indented JSON string of the metadata object."""
         return json.dumps(
-            attr.asdict(self), indent=1, separators=(",", ": "), sort_keys=True
+            asdict(self), indent=1, separators=(",", ": "), sort_keys=True
         )
 
     def add_material_rule_from_string(self, rule_string):
@@ -657,6 +658,157 @@ class Step(SupplyChainItem):
             )
 
 
+def _check_input_path(path, field="path"):
+    """Check that a path used by an inspection input is a normalized, relative
+    POSIX-style path.
+    """
+    _check_path(path)
+    if path.endswith("/"):
+        raise securesystemslib.exceptions.FormatError(
+            f"Invalid inspection {field} '{path}': must be a file path."
+        )
+
+
+@attr.s(repr=False, init=False)
+class InspectionInput(ValidationMixin):
+    """An explicit input declaration for an Inspection.
+
+    An inspection input binds a file that the inspection command may read to a
+    product reported by an authenticated step Link. Binding happens by name,
+    digest and recording method:
+
+    * ``name`` is the path relative to the verification directory (POSIX
+      separators) of the file the inspection reads.
+    * ``from_step`` and ``from_type`` identify the already verified Link the
+      file evidence must be taken from.
+    * ``link_path`` is the exact artifact name as recorded in that Link, which
+      may differ from ``name`` when the producer and consumer use different
+      path prefixes (``MATCH ... IN ...`` semantics).
+    * ``record_method`` is the way the Link is expected to have recorded the
+      artifact. Only ``"file"`` (regular file, hashed with the file resolver)
+      is supported; other methods are rejected rather than guessed.
+
+    Attributes:
+      name: Inspection view path of the input.
+      from_step: Name of the step whose Link provides the evidence.
+      from_type: Link artifact type, either ``products`` or ``materials``.
+      link_path: Artifact name as reported by the source Link.
+      record_method: Recording method expected for the source artifact.
+
+    """
+
+    name = attr.ib()
+    from_step = attr.ib()
+    from_type = attr.ib()
+    link_path = attr.ib()
+    record_method = attr.ib()
+
+    def __init__(self, **kwargs):
+        super().__init__()
+        self.name = kwargs.get("name")
+        self.from_step = kwargs.get("from_step")
+        self.from_type = kwargs.get("from_type")
+        self.link_path = kwargs.get("link_path")
+        self.record_method = kwargs.get("record_method", "file")
+
+        if self.name is not None:
+            self._parse_name(kwargs.get("link_path") is None)
+
+        self.validate()
+
+    def _parse_name(self, use_name_for_link_path):
+        """Parse the compact input string ``[STEP:]NAME[@TYPE]``.
+
+        The compact form keeps the layout readable for the common case where
+        the inspection reads a step product under the same name. The hybrid
+        form allows ``from_step`` to be passed separately, i.e.
+        ``{"name": "foo@materials", "from_step": "package"}``.
+        """
+        _check_str(self.name)
+
+        if ":" in self.name:
+            prefix_step, self.name = self.name.split(":", 1)
+            if self.from_step not in {None, prefix_step}:
+                raise securesystemslib.exceptions.FormatError(
+                    "Inspection input specifies conflicting source steps"
+                    f" '{prefix_step}' and '{self.from_step}'."
+                )
+            self.from_step = prefix_step
+
+        if "@" in self.name:
+            self.name, suffix_type = self.name.rsplit("@", 1)
+            if self.from_type not in {None, suffix_type}:
+                raise securesystemslib.exceptions.FormatError(
+                    "Inspection input specifies conflicting source types"
+                    f" '{suffix_type}' and '{self.from_type}'."
+                )
+            self.from_type = suffix_type
+
+        if use_name_for_link_path:
+            self.link_path = self.name
+
+        if self.from_step is None:
+            raise securesystemslib.exceptions.FormatError(
+                f"Inspection input '{self.name}' has no source step."
+            )
+
+        if self.from_type is None:
+            self.from_type = "products"
+
+    def _validate_name(self):
+        """Check the inspection view path is relative and normalized."""
+        _check_str(self.name)
+        _check_input_path(self.name, "inspection input name")
+
+    def _validate_from_step(self):
+        """Check the source step name is a string."""
+        _check_str(self.from_step)
+
+    def _validate_from_type(self):
+        """Check the source artifact type."""
+        if self.from_type not in {"materials", "products"}:
+            raise securesystemslib.exceptions.FormatError(
+                f"Invalid inspection input type '{self.from_type}'. Expected"
+                " 'materials' or 'products'."
+            )
+
+    def _validate_link_path(self):
+        """Check the source artifact name is relative and normalized."""
+        _check_str(self.link_path)
+        _check_input_path(self.link_path, "inspection link path")
+
+    def _validate_record_method(self):
+        """Check the recording method."""
+        if self.record_method != "file":
+            raise securesystemslib.exceptions.FormatError(
+                "Unsupported inspection input record method"
+                f" '{self.record_method}'. Only 'file' artifacts can be"
+                " bound to authenticated Link products."
+            )
+
+    def to_dict(self):
+        """Return the JSON/dict representation of this input declaration."""
+        return {
+            "name": self.name,
+            "from_step": self.from_step,
+            "from_type": self.from_type,
+            "link_path": self.link_path,
+            "record_method": self.record_method,
+        }
+
+    @classmethod
+    def read(cls, data):
+        """Create an InspectionInput from a string or dictionary."""
+        if isinstance(data, str):
+            return cls(name=data)
+        if not isinstance(data, dict):
+            raise securesystemslib.exceptions.FormatError(
+                "Inspection input declaration must be a string or a dict,"
+                f" got '{data}'."
+            )
+        return cls(**data)
+
+
 @attr.s(repr=False, init=False)
 class Inspection(SupplyChainItem):
     """An inspection for a software supply chain.
@@ -669,15 +821,27 @@ class Inspection(SupplyChainItem):
       run: A list of command and command arguments to be executed upon final
           product verification.
 
+      inputs: A list of explicit ``InspectionInput`` declarations. Every
+          declared input is checked against an authenticated step Link before
+          the inspection command is executed. An empty list means the
+          inspection declares no bound inputs; it does not mean that arbitrary
+          files may be read. See ``in_toto.verifylib`` for the enforcement
+          policy and its limits.
+
     """
 
     _type = attr.ib()
     run = attr.ib()
+    inputs = attr.ib()
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._type = "inspection"
         self.run = kwargs.get("run", [])
+        self.inputs = [
+            InspectionInput.read(input_decl)
+            for input_decl in kwargs.get("inputs", [])
+        ]
 
         self.validate()
 
@@ -723,3 +887,41 @@ class Inspection(SupplyChainItem):
             raise securesystemslib.exceptions.FormatError(
                 "The run field is malformed!"
             )
+
+    def _validate_inputs(self):
+        """Private method to check that input declarations are well-formed."""
+        if not isinstance(self.inputs, list):
+            raise securesystemslib.exceptions.FormatError(
+                "The inputs field must be a list!"
+            )
+
+        for input_decl in self.inputs:
+            if not isinstance(input_decl, InspectionInput):
+                raise securesystemslib.exceptions.FormatError(
+                    "The inputs list must only contain InspectionInput"
+                    " objects!"
+                )
+            input_decl.validate()
+
+        names = set()
+        for input_decl in self.inputs:
+            if input_decl.name in names:
+                raise securesystemslib.exceptions.FormatError(
+                    f"Duplicate inspection input '{input_decl.name}' in"
+                    f" inspection '{self.name}'."
+                )
+            names.add(input_decl.name)
+
+    def add_input_from_string(self, input_string):
+        """Parse a compact input declaration and add it to inputs.
+
+        Arguments:
+          input_string: ``[<step>:]<path>[@<materials|products>]``
+
+        Raises:
+          securesystemslib.exceptions.FormatError: Argument is malformed.
+
+        """
+        _check_str(input_string)
+        self.inputs.append(InspectionInput(name=input_string))
+        self.validate()

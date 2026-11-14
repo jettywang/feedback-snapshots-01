@@ -40,7 +40,7 @@ from securesystemslib.signer import Key, Signature, Signer
 from in_toto.exceptions import InvalidMetadata, SignatureVerificationError
 from in_toto.formats import _check_public_key, _check_signature
 from in_toto.models._signer import GPGSigner
-from in_toto.models.common import Signable, ValidationMixin
+from in_toto.models.common import Signable, ValidationMixin, asdict
 from in_toto.models.layout import Layout
 from in_toto.models.link import Link
 
@@ -166,7 +166,7 @@ class Envelope(SSlibEnvelope, Metadata):
 
         # Serialize the signable object to JSON bytes without canonicalization
         json_bytes = json.dumps(
-            attr.asdict(signable),
+            asdict(signable),
             sort_keys=True,
         ).encode("utf-8")
 
@@ -249,7 +249,7 @@ class Metablock(Metadata, ValidationMixin):
         separators = (",", ":") if self.compact_json else (",", ": ")
 
         return json.dumps(
-            {"signatures": self.signatures, "signed": attr.asdict(self.signed)},
+            {"signatures": self.signatures, "signed": asdict(self.signed)},
             indent=indent,
             separators=separators,
             sort_keys=True,
@@ -294,7 +294,7 @@ class Metablock(Metadata, ValidationMixin):
 
         return {
             "signatures": self.signatures,
-            "signed": attr.asdict(self.signed),
+            "signed": asdict(self.signed),
         }
 
     @property

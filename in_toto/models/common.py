@@ -27,6 +27,23 @@ import attr
 import securesystemslib.formats
 
 
+def asdict(obj):
+    """Return a JSON-serializable dictionary representation of an attrs object.
+
+    Empty inspection ``inputs`` lists are omitted, so that layouts signed by
+    older in-toto versions (which did not know about inspection inputs) keep
+    their signature-compatible canonical representation. Non-empty input
+    declarations are always included.
+    """
+
+    def _filter(attribute, value):
+        if attribute.name == "inputs" and value == []:
+            return False
+        return True
+
+    return attr.asdict(obj, filter=_filter)
+
+
 class ValidationMixin:
     """The validation mixin provides a self-inspecting method, validate, to
     allow in-toto's objects to check that they are proper."""
@@ -52,13 +69,13 @@ class Signable(ValidationMixin):
     def __repr__(self):
         """Returns an indented JSON string of the metadata object."""
         return json.dumps(
-            attr.asdict(self), indent=1, separators=(",", ": "), sort_keys=True
+            asdict(self), indent=1, separators=(",", ": "), sort_keys=True
         )
 
     @property
     def signable_bytes(self):
         """The UTF-8 encoded canonical JSON byte representation of the dictionary
         representation of the instance."""
-        return securesystemslib.formats.encode_canonical(
-            attr.asdict(self)
-        ).encode("UTF-8")
+        return securesystemslib.formats.encode_canonical(asdict(self)).encode(
+            "UTF-8"
+        )

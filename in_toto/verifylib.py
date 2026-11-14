@@ -37,8 +37,10 @@ from dateutil import tz
 from securesystemslib._gpg.exceptions import KeyExpirationError
 
 import in_toto.formats
+import in_toto.inspection_binding
 import in_toto.models.layout
 import in_toto.models.link
+import in_toto.models.metadata
 import in_toto.rulelib
 import in_toto.runlib
 import in_toto.settings
@@ -175,10 +177,13 @@ def load_links_for_layout(layout, link_dir_path):
     return steps_metadata
 
 
-def run_all_inspections(
+def run_all_inspections(  # noqa: PLR0913
     layout,
     persist_inspection_links,
     timeout=in_toto.settings.LINK_CMD_EXEC_TIMEOUT,
+    step_links=None,
+    link_keyids=None,
+    binding_report_callback=None,
 ):
     """
     <Purpose>
@@ -187,6 +192,10 @@ def run_all_inspections(
       `runlib.in_toto_run`, which returns a Link object.
 
       If a link command returns non-zero the verification is aborted.
+
+      Before an inspection command is executed, its declared inputs are bound
+      to authenticated step Links (see ``inspection_binding``). Inspection commands
+      are never started if that preflight fails.
 
     <Arguments>
       layout:
@@ -200,9 +209,26 @@ def run_all_inspections(
               Integer that is the amount of seconds that the inspection run will
               fail after.
 
+      step_links: (optional)
+              A dictionary of verified Link objects per step name, i.e. the
+              ``reduced_chain_link_dict`` produced by ``in_toto_verify``. Without
+              it, inspections that declare inputs are rejected before execution.
+
+      link_keyids: (optional)
+              A dictionary mapping step names to a keyid or a list of keyids,
+              recorded in the binding report as the Link identity.
+
+      binding_report_callback: (optional)
+              A callable that receives one ``InspectionInputReport`` per
+              inspection, including successful and rejected ones. Failures also
+              raise ``InspectionInputError`` with the report attached.
+
     <Exceptions>
       Calls function that raises BadReturnValueError if an inspection returned
       non-int or non-zero.
+
+      InspectionInputError if an inspection's declared inputs cannot be bound
+      before execution.
 
     <Returns>
       A dictionary of metadata about the executed inspections, e.g.:
@@ -217,31 +243,87 @@ def run_all_inspections(
     """
     inspection_links_dict = {}
     for inspection in layout.inspect:
+        try:
+            report = in_toto.inspection_binding.bind_inspection_inputs(
+                inspection,
+                step_links or {},
+                layout,
+                link_keyids=link_keyids,
+            )
+        except in_toto.exceptions.InspectionInputError as e:
+            if binding_report_callback is not None and e.report is not None:
+                binding_report_callback(e.report)
+            raise
+
+        if binding_report_callback is not None:
+            binding_report_callback(report)
+
         LOG.info("Executing command for inspection '%s'...", inspection.name)
 
-        # FIXME: We don't want to use the base path for runlib so we patch this
-        # for now. This will not stay!
-        base_path_backup = in_toto.settings.ARTIFACT_BASE_PATH
-        in_toto.settings.ARTIFACT_BASE_PATH = None
+        if inspection.inputs:
+            # Bindings were checked above. Use exactly the authenticated digests
+            # as materials instead of re-recording every file in the working
+            # directory, which would silently turn undeclared files into inputs.
+            # Re-hash once more directly before process start to keep the
+            # binding close to execution.
+            in_toto.inspection_binding.recheck_declared_digests(
+                report, base_path=None
+            )
+            materials = {
+                input_decl.name: report.declared_digests_of(input_decl.name)
+                for input_decl in inspection.inputs
+            }
 
-        # FIXME: What should we record as material/product?
-        # Is the current directory a sensible default? In general?
-        # If so, we should probably make it a default in run_link
-        # We could use artifact rule paths.
-        material_list = product_list = ["."]
-        link = in_toto.runlib.in_toto_run(
-            inspection.name,
-            material_list,
-            product_list,
-            inspection.run,
-            timeout=timeout,
-        )
+            if inspection.run:
+                byproducts = in_toto.runlib.execute_link(
+                    inspection.run, False, timeout
+                )
+            else:
+                byproducts = {}
+
+            products = in_toto.runlib.record_artifacts_as_dict(
+                ["."],
+                exclude_patterns=None,
+                base_path=".",
+                follow_symlink_dirs=True,
+            )
+
+            link = in_toto.models.link.Link(
+                name=inspection.name,
+                materials=materials,
+                products=products,
+                command=inspection.run,
+                byproducts=byproducts,
+                environment={},
+            )
+            link_metadata = in_toto.models.metadata.Metablock(signed=link)
+
+        else:
+            # Legacy behavior for inspections without input declarations:
+            # record the working directory before and after execution. These
+            # observations are not authenticated inputs (see the report status
+            # 'no-inputs-declared').
+            base_path_backup = in_toto.settings.ARTIFACT_BASE_PATH
+            in_toto.settings.ARTIFACT_BASE_PATH = None
+
+            try:
+                link_metadata = in_toto.runlib.in_toto_run(
+                    inspection.name,
+                    ["."],
+                    ["."],
+                    inspection.run,
+                    timeout=timeout,
+                )
+            finally:
+                in_toto.settings.ARTIFACT_BASE_PATH = base_path_backup
+
+            link = link_metadata.signed
 
         _raise_on_bad_retval(
-            link.signed.byproducts.get("return-value"), inspection.run
+            link.byproducts.get("return-value"), inspection.run
         )
 
-        inspection_links_dict[inspection.name] = link.signed
+        inspection_links_dict[inspection.name] = link
 
         # If client requests persistent inspection links,
         # Dump the inspection link file for auditing
@@ -250,9 +332,7 @@ def run_all_inspections(
             filename = in_toto.models.link.FILENAME_FORMAT_SHORT.format(
                 step_name=inspection.name
             )
-            link.dump(filename)
-
-        in_toto.settings.ARTIFACT_BASE_PATH = base_path_backup
+            link_metadata.dump(filename)
 
     return inspection_links_dict
 
@@ -1277,11 +1357,12 @@ def verify_threshold_constraints(layout, chain_link_dict):
                 )
 
 
-def reduce_chain_links(chain_link_dict):
+def reduce_chain_links(chain_link_dict, link_keyids=None):
     """
     <Purpose>
       Iterates through the passed chain_link_dict and builds a dict with
-      step-name as keys and link objects as values.
+      step-name as keys and link objects as values. If ``link_keyids`` is
+      passed, it is populated with the keyid whose Link was selected.
       We already check if the links of different functionaries are
       identical.
 
@@ -1318,13 +1399,21 @@ def reduce_chain_links(chain_link_dict):
         # Extract the key_link_dict for this step from the passed chain_link_dict
         # take one exemplary link (e.g. the first in the step_link_dict)
         # form the reduced_chain_link_dict to return
-        reduced_chain_link_dict[step_name] = next(iter(key_link_dict.values()))
+        keyid, link = next(iter(key_link_dict.items()))
+        reduced_chain_link_dict[step_name] = link
+        if link_keyids is not None:
+            link_keyids[step_name] = [keyid]
 
     return reduced_chain_link_dict
 
 
-def verify_sublayouts(
-    layout, steps_metadata, superlayout_link_dir_path, inspect_timeout
+def verify_sublayouts(  # noqa: PLR0913
+    layout,
+    steps_metadata,
+    superlayout_link_dir_path,
+    inspect_timeout,
+    binding_report_callback=None,
+    require_inspection_inputs=False,
 ):
     """
     <Purpose>
@@ -1357,6 +1446,13 @@ def verify_sublayouts(
       inspect_timeout:
               Integer value that is the number of seconds to pass to the run
               command to timeout the subprocess within.
+
+      binding_report_callback: (optional)
+              Callable passed on to recursive ``in_toto_verify`` calls to
+              collect inspection input binding reports.
+
+      require_inspection_inputs: (optional)
+              Passed on to recursive ``in_toto_verify`` calls.
 
     <Exceptions>
       raises an Exception if verification of the delegated step fails.
@@ -1413,6 +1509,8 @@ def verify_sublayouts(
                     link_dir_path=sublayout_link_dir_path,
                     step_name=step_name,
                     inspect_timeout=inspect_timeout,
+                    binding_report_callback=binding_report_callback,
+                    require_inspection_inputs=require_inspection_inputs,
                 )
 
                 # Replace the layout object with the link object returned
@@ -1481,7 +1579,7 @@ def get_summary_link(layout, reduced_chain_link_dict, name):
     return summary_link
 
 
-def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
+def in_toto_verify(  # noqa: C901, PLR0912, PLR0913, PLR0915, PLR0917, RUF100
     metadata,
     layout_key_dict,
     link_dir_path=".",
@@ -1489,6 +1587,8 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
     step_name="",
     persist_inspection_links=True,
     inspect_timeout=in_toto.settings.LINK_CMD_EXEC_TIMEOUT,
+    binding_report_callback=None,
+    require_inspection_inputs=False,
 ):
     """Performs complete in-toto supply chain verification for a final product.
 
@@ -1547,6 +1647,16 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
           in_toto.settings.LINK_CMD_EXEC_TIMEOUT in seconds which ends up timing
           out the run command subprocess if it runs over.
 
+      binding_report_callback (optional): A callable that receives one
+          ``InspectionInputReport`` for every inspection, including
+          recursive sublayout inspections. This may be used to persist the
+          evidence that was checked before executing inspections.
+
+
+      require_inspection_inputs (optional): If True, verification fails before
+          executing an inspection that declares no inputs. Declared inputs are
+          always enforced regardless of this flag.
+
     Raises:
       securesystemslib.exceptions.FormatError: Passed parameters are malformed.
 
@@ -1567,11 +1677,16 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
       RuleVerificationError: A DISALLOW rule matches disallowed artifacts, or
           a REQUIRE rule does not find a required artifact.
 
+      InspectionInputError: An inspection declares inputs that cannot be bound
+          to authenticated step Links, or the file evidence on disk does not
+          match. The inspection command is not executed in that case.
+
       BadReturnValueError: An inspection command returns a non-zero value.
 
     Side Effects:
       Reads link metadata files from disk.
-      Runs inspection commands in subprocess.
+      Runs inspection commands in subprocess, but only after their declared
+      inputs were bound to authenticated Links.
 
     Returns:
       A Link object, which summarizes the materials and products of the overall
@@ -1605,7 +1720,12 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
 
     LOG.info("Verifying sublayouts...")
     chain_link_dict = verify_sublayouts(
-        layout, steps_metadata, link_dir_path, inspect_timeout
+        layout,
+        steps_metadata,
+        link_dir_path,
+        inspect_timeout,
+        binding_report_callback=binding_report_callback,
+        require_inspection_inputs=require_inspection_inputs,
     )
 
     LOG.info("Verifying alignment of reported commands...")
@@ -1613,7 +1733,10 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
 
     LOG.info("Verifying threshold constraints...")
     verify_threshold_constraints(layout, chain_link_dict)
-    reduced_chain_link_dict = reduce_chain_links(chain_link_dict)
+    selected_link_keyids = {}
+    reduced_chain_link_dict = reduce_chain_links(
+        chain_link_dict, selected_link_keyids
+    )
 
     # NOTE: Processing step rules before executing inspections guarantees that
     # inspection commands don't run on compromised target files, however, this
@@ -1622,8 +1745,38 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
     verify_all_item_rules(layout.steps, reduced_chain_link_dict)
 
     LOG.info("Executing Inspection commands...")
+    if require_inspection_inputs:
+        for inspection in layout.inspect:
+            if not inspection.inputs:
+                report = in_toto.inspection_binding.InspectionInputReport(
+                    inspection.name, base_path=os.getcwd()
+                )
+                report.status = "rejected"
+                report.errors.append(
+                    "Inspection declares no inputs, but"
+                    " 'require_inspection_inputs' is set. Its command was not"
+                    " executed."
+                )
+                if binding_report_callback is not None:
+                    binding_report_callback(report)
+                raise in_toto.exceptions.InspectionInputError(
+                    f"Inspection '{inspection.name}' declares no inputs, but"
+                    " 'require_inspection_inputs' is set. Its command was not"
+                    " executed.",
+                    inspection_name=inspection.name,
+                    report=report,
+                )
+
+    keyids_per_step = in_toto.inspection_binding.get_link_keyids(
+        selected_link_keyids, steps_metadata
+    )
     inspection_link_dict = run_all_inspections(
-        layout, persist_inspection_links, inspect_timeout
+        layout,
+        persist_inspection_links,
+        inspect_timeout,
+        step_links=reduced_chain_link_dict,
+        link_keyids=keyids_per_step,
+        binding_report_callback=binding_report_callback,
     )
 
     LOG.info("Verifying Inspection rules...")
