@@ -1283,20 +1283,6 @@ class SnmpUSMSecurityModel(AbstractSecurityModel):
                     "processIncomingMsg: incoming msg authenticated"
                 )
 
-            # synchronize time with authed peer
-            self.__timeline[msgAuthoritativeEngineId] = (
-                securityParameters.getComponentByPosition(1),
-                securityParameters.getComponentByPosition(2),
-                securityParameters.getComponentByPosition(2),
-                int(time.time()),
-            )
-
-            self.__schedule_timeline_expiry(msgAuthoritativeEngineId, snmpEngine)
-
-            debug.logger & debug.FLAG_SM and debug.logger(
-                f"processIncomingMsg: store timeline for securityEngineID {msgAuthoritativeEngineId!r}"
-            )
-
         # 3.2.7
         if securityLevel == 3 or securityLevel == 2:
             if msgAuthoritativeEngineId == snmpEngineID:
@@ -1332,7 +1318,22 @@ class SnmpUSMSecurityModel(AbstractSecurityModel):
                         )
                     )
                 else:
-                    raise error.ProtocolError("Peer SNMP engine info missing")
+                    # RFC 3414 section 2.3: before the first time
+                    # synchronization the local notions of snmpEngineBoots
+                    # and latestReceivedEngineTime are zero, so the first
+                    # authenticated message from this engine synchronizes
+                    # the timeline via step 7b.1 below.
+                    snmpEngineBoots = msgAuthoritativeEngineBoots.clone(0)
+                    snmpEngineTime = latestReceivedEngineTime = (
+                        msgAuthoritativeEngineTime.clone(0)
+                    )
+                    latestUpdateTimestamp = int(time.time())
+                    idleTime = 0
+                    debug.logger & debug.FLAG_SM and debug.logger(
+                        "processIncomingMsg: no timeline for msgAuthoritativeEngineId {!r}, assuming zero time synchronization state".format(
+                            msgAuthoritativeEngineId
+                        )
+                    )
 
             # 3.2.7a
             if msgAuthoritativeEngineId == snmpEngineID:
@@ -1361,8 +1362,11 @@ class SnmpUSMSecurityModel(AbstractSecurityModel):
                     )
             # 3.2.7b
             else:
-                # 3.2.7b.1
-                # noinspection PyUnboundLocalVariable
+                # 3.2.7b.1 -- the LCD entry may only move forward. The
+                # monotonic check is evaluated against the state captured
+                # above, before any write, so an authenticated but stale
+                # message cannot roll the estimate back and cannot refresh
+                # the entry's expiry deadline.
                 if (
                     msgAuthoritativeEngineBoots > snmpEngineBoots
                     or msgAuthoritativeEngineBoots == snmpEngineBoots
@@ -1387,7 +1391,10 @@ class SnmpUSMSecurityModel(AbstractSecurityModel):
                         )
                     )
 
-                # 3.2.7b.2
+                # 3.2.7b.2 -- timeliness is decided from the same
+                # pre-update state, so a rejected message leaves both the
+                # estimate and the replay baseline (latestReceivedEngineTime)
+                # untouched and a replay of it keeps failing afterwards.
                 if (
                     snmpEngineBoots == 2147483647
                     or msgAuthoritativeEngineBoots < snmpEngineBoots
