@@ -6,6 +6,7 @@ Documentation
    :caption: PySNMP Fundamentals
 
    /docs/pysnmp-architecture
+   /docs/design/usm-aes-gcm-review
 
 .. toctree::
    :maxdepth: 2
