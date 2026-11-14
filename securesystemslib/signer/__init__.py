@@ -41,6 +41,10 @@ from securesystemslib.signer._signer import (
     Signer,
 )
 from securesystemslib.signer._sigstore_signer import SigstoreKey, SigstoreSigner
+from securesystemslib.signer._subprocess_signer import (
+    SubprocessSigner,
+    SubprocessSignerError,
+)
 from securesystemslib.signer._tkey_signer import TKeySigner
 from securesystemslib.signer._vault_signer import VaultSigner
 
@@ -60,6 +64,9 @@ SIGNER_FOR_URI_SCHEME.update(
 
 # Signers with currently unstable metadata formats, not supported by default:
 #   SigstoreSigner
+# Signers that must be configured with an explicit executable and argument
+# array (never derived from a private key URI), not registered by default:
+#   SubprocessSigner
 
 # Register supported key types and schemes, and the Keys implementing them
 KEY_FOR_TYPE_AND_SCHEME.update(

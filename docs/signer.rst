@@ -186,6 +186,10 @@ each signer is documented below.
 .. autoclass:: securesystemslib.signer.CryptoSigner
    :exclude-members: sign, public_key, from_priv_key_uri
 
+.. autoclass:: securesystemslib.signer.SubprocessSigner
+   :members: close
+   :exclude-members: sign, public_key, from_priv_key_uri
+
 .. autoclass:: securesystemslib.signer.AWSSigner
    :members: import_
    :exclude-members: sign, public_key, from_priv_key_uri
