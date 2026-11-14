@@ -1451,6 +1451,11 @@ class PointEdwards(AbstractPoint):
         """Compare for inequality two points with each-other."""
         return not self == other
 
+    def __neg__(self):
+        """Return the negation of the point."""
+        x1, y1, z1, t1 = self.__coords
+        return PointEdwards(self.__curve, -x1, y1, z1, -t1, self.__order)
+
     def _add(self, X1, Y1, Z1, T1, X2, Y2, Z2, T2, p, a):
         """add two points, assume sane parameters."""
         # after add-2008-hwcd-2

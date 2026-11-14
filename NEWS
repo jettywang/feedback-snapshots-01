@@ -1,3 +1,14 @@
+* Unreleased
+
+New API:
+* ``ecdsa.batch_eddsa.verify_batch`` for capped, randomised batch
+  verification of Pure EdDSA (Ed25519/Ed448) signatures.  It reduces the
+  number of group operations versus verifying each signature separately while
+  preserving per-item failure positions through an independent single
+  verification fallback.  Blinding coefficients come from ``os.urandom``
+  (128 bit, strictly positive, fresh per call); a deterministic entropy
+  source is injectable for tests but no fixed-coefficient default exists.
+
 * Release 0.19.2 (26 Mar 2026)
 
 Bug fixes:
