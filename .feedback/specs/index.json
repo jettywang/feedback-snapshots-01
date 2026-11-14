@@ -1,0 +1,32 @@
+[
+  {
+    "repo": "pycose",
+    "file": ".feedback/specs/rfc9052.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc9052.txt",
+    "sha256": "01eecd7f646537600e7aad665b1fa581ce6ec33dae4ef4add0997aaf38cd0a45"
+  },
+  {
+    "repo": "pycose",
+    "file": ".feedback/specs/rfc9053.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc9053.txt",
+    "sha256": "3d470615875620375f8453ba25b8dce7e4d0271e76b0b79a46df34ccb2d56ab0"
+  },
+  {
+    "repo": "pycose",
+    "file": ".feedback/specs/rfc9360.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc9360.txt",
+    "sha256": "3dbe546adf08e309b429c8e71b2ee8384292fb8767338d3eb17d1c4e5adefc23"
+  },
+  {
+    "repo": "pycose",
+    "file": ".feedback/specs/rfc9278.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc9278.txt",
+    "sha256": "c84d83e485a078599b4a022602ce336910b6d7c166fb9072a72ad8d923414816"
+  },
+  {
+    "repo": "pycose",
+    "file": ".feedback/specs/rfc9679.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc9679.txt",
+    "sha256": "f6b460e38ba1496bbba7d1430175f6398af104d6b8803f7a4ea059af5d3fa29d"
+  }
+]
