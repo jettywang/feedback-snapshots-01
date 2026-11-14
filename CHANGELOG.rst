@@ -1,6 +1,18 @@
 Changelog
 =========
 
+Unreleased
+~~~~~~~~~~
+
+* A handshake failure that occurs after processing has started (authentication, DH or
+  encoding errors) now latches the ``NoiseConnection`` into a terminated state. All public
+  entry points (``start_handshake``, ``write_message``, ``read_message``, ``encrypt``,
+  ``decrypt``, ``rekey_inbound_cipher``, ``rekey_outbound_cipher``, ``get_handshake_hash``)
+  then raise ``NoiseHandshakeError`` chained to the original failure, instead of leaving a
+  half-advanced handshake that appears usable. Errors raised before any state is touched
+  (e.g. wrong turn, missing keypair) remain retryable. Partial message output produced
+  before a failure is never returned to the caller.
+
 .. _v0-3-1:
 
 0.3.1 - 2020-03-03

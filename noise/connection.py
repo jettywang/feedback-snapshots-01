@@ -28,6 +28,7 @@ class NoiseConnection(object):
         self.handshake_finished = False
         self._handshake_started = False
         self._next_fn = None
+        self._failure = None
 
     @classmethod
     def from_name(cls, name: Union[str, bytes], backend=noise_backend):
@@ -74,6 +75,18 @@ class NoiseConnection(object):
         self.noise_protocol.initiator = False
         self._next_fn = self.read_message
 
+    @property
+    def terminated(self):
+        return self._failure is not None
+
+    def _assert_not_terminated(self):
+        if self._failure is not None:
+            raise NoiseHandshakeError(
+                'NoiseConnection is terminated: a previous handshake operation failed after '
+                'partially advancing the handshake state ({!r}). This connection can no longer '
+                'be used - create a new NoiseConnection to retry.'.format(self._failure)
+            ) from self._failure
+
     def set_keypair_from_private_bytes(self, keypair: Keypair, private_bytes: bytes):
         self.noise_protocol.keypairs[_keypairs[keypair]] = \
             self.noise_protocol.dh_fn.klass.from_private_bytes(private_bytes)
@@ -93,41 +106,53 @@ class NoiseConnection(object):
                 self.noise_protocol.dh_fn.klass.from_public_bytes(fd.read())
 
     def start_handshake(self):
+        self._assert_not_terminated()
         self.noise_protocol.validate()
         self.noise_protocol.initialise_handshake_state()
         self._handshake_started = True
 
     def write_message(self, payload: bytes=b'') -> bytearray:
+        self._assert_not_terminated()
         if not self._handshake_started:
             raise NoiseHandshakeError('Call NoiseConnection.start_handshake first')
         if self._next_fn != self.write_message:
             raise NoiseHandshakeError('NoiseConnection.read_message has to be called now')
         if self.handshake_finished:
             raise NoiseHandshakeError('Handshake finished. NoiseConnection.encrypt should be used now')
-        self._next_fn = self.read_message
 
         buffer = bytearray()
-        result = self.noise_protocol.handshake_state.write_message(payload, buffer)
+        try:
+            result = self.noise_protocol.handshake_state.write_message(payload, buffer)
+        except Exception as exc:
+            self._failure = exc
+            raise
+        self._next_fn = self.read_message
         if result:
             self.handshake_finished = True
         return buffer
 
     def read_message(self, data: bytes) -> bytearray:
+        self._assert_not_terminated()
         if not self._handshake_started:
             raise NoiseHandshakeError('Call NoiseConnection.start_handshake first')
         if self._next_fn != self.read_message:
             raise NoiseHandshakeError('NoiseConnection.write_message has to be called now')
         if self.handshake_finished:
             raise NoiseHandshakeError('Handshake finished. NoiseConnection.decrypt should be used now')
-        self._next_fn = self.write_message
 
         buffer = bytearray()
-        result = self.noise_protocol.handshake_state.read_message(data, buffer)
+        try:
+            result = self.noise_protocol.handshake_state.read_message(data, buffer)
+        except Exception as exc:
+            self._failure = exc
+            raise
+        self._next_fn = self.write_message
         if result:
             self.handshake_finished = True
         return buffer
 
     def encrypt(self, data: bytes) -> bytes:
+        self._assert_not_terminated()
         if not self.handshake_finished:
             raise NoiseHandshakeError('Handshake not finished yet!')
         if not isinstance(data, bytes) or len(data) > MAX_MESSAGE_LEN:
@@ -135,6 +160,7 @@ class NoiseConnection(object):
         return self.noise_protocol.cipher_state_encrypt.encrypt_with_ad(None, data)
 
     def decrypt(self, data: bytes) -> bytes:
+        self._assert_not_terminated()
         if not self.handshake_finished:
             raise NoiseHandshakeError('Handshake not finished yet!')
         if not isinstance(data, bytes) or len(data) > MAX_MESSAGE_LEN:
@@ -145,10 +171,17 @@ class NoiseConnection(object):
             raise NoiseInvalidMessage('Failed authentication of message')
 
     def get_handshake_hash(self) -> bytes:
+        self._assert_not_terminated()
         return self.noise_protocol.handshake_hash
 
     def rekey_inbound_cipher(self):
+        self._assert_not_terminated()
+        if not self.handshake_finished:
+            raise NoiseHandshakeError('Handshake not finished yet!')
         self.noise_protocol.cipher_state_decrypt.rekey()
 
     def rekey_outbound_cipher(self):
+        self._assert_not_terminated()
+        if not self.handshake_finished:
+            raise NoiseHandshakeError('Handshake not finished yet!')
         self.noise_protocol.cipher_state_encrypt.rekey()
