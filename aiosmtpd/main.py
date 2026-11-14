@@ -85,6 +85,16 @@ def _parser() -> ArgumentParser:
         help="""Enable the ``SMTPUTF8`` extension as defined in RFC 6531.""",
     )
     parser.add_argument(
+        "--chunking",
+        default=False,
+        action="store_true",
+        help=(
+            "Enable the ``CHUNKING`` extension (the ``BDAT`` command) as "
+            "defined in RFC 3030. Disabled by default; ``DATA`` remains "
+            "available regardless."
+        ),
+    )
+    parser.add_argument(
         "-d",
         "--debug",
         default=0,
@@ -247,6 +257,7 @@ def main(args: Optional[Sequence[str]] = None) -> None:
         enable_SMTPUTF8=ns.smtputf8,
         tls_context=tls_context,
         require_starttls=ns.requiretls,
+        enable_chunking=ns.chunking,
     )
 
     logging.basicConfig(level=logging.ERROR)

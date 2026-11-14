@@ -163,8 +163,8 @@ aiosmtpd.smtp
    require_starttls=False, timeout=300, auth_required=False, \
    auth_require_tls=True, auth_exclude_mechanism=None, auth_callback=None, \
    authenticator=None, command_call_limit=None, \
-   proxy_protocol_timeout=None, \
-   loop=None)
+   proxy_protocol_timeout=None, enable_chunking=False, \
+   bdat_chunk_size_limit=33554432, loop=None)
 
    |
    | :part:`Parameters`
@@ -370,6 +370,28 @@ aiosmtpd.smtp
          This is in accordance to the PROXY Protocol standard.
 
       .. versionadded:: 1.4
+
+   .. py:attribute:: enable_chunking
+      :type: bool
+      :value: False
+
+      When ``True``, advertises the ``CHUNKING`` ESMTP extension and enables
+      the ``BDAT`` command as defined in :rfc:`3030`.
+      The regular ``DATA`` command remains available regardless of this
+      setting, and ``DATA`` and ``BDAT`` cannot be mixed in one transaction.
+
+      The extension is opt-in and disabled by default.
+
+   .. py:attribute:: bdat_chunk_size_limit
+      :type: Optional[int]
+      :value: 33554432
+
+      The maximum size, in octets, of a single ``BDAT`` chunk.
+      A chunk declaring a larger size is rejected with a ``552`` reply
+      before any of its body octets are read and the connection is closed,
+      so untrusted pipelined bytes can never be re-parsed as commands.
+      Set to ``None`` to disable the per-chunk limit; the transaction-wide
+      :attr:`data_size_limit` still applies.
 
    .. py:attribute:: loop
       :noindex:

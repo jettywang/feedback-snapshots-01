@@ -17,6 +17,19 @@ Fixed/Improved
   ``salt`` column, so re-run ``make_user_db.py`` if you already have one.
   (Closes #475)
 
+Added
+-----
+
+* Opt-in server-side support for the ``CHUNKING`` extension (the ``BDAT``
+  command, RFC 3030). Enable it with the new ``enable_chunking`` parameter;
+  the ``DATA`` command keeps working unchanged and is the default.
+  The per-chunk ``bdat_chunk_size_limit`` and the transaction-wide
+  ``data_size_limit`` are enforced up front. Declared body octets are read
+  as opaque data and are never re-parsed as SMTP commands, the delivery
+  handler runs only after the ``BDAT ... LAST`` chunk, and short reads,
+  mid-transaction ``RSET`` and illegal states abort the transaction without
+  partial delivery.
+
 
 1.4.6 (2024-05-18)
 ==================

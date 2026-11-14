@@ -86,6 +86,7 @@ log = logging.getLogger('mail.log')
 BOGUS_LIMIT = 5
 CALL_LIMIT_DEFAULT = 20
 DATA_SIZE_DEFAULT = 2**25  # Where does this number come from, I wonder...
+BDAT_CHUNK_LIMIT_DEFAULT = 2**25
 EMPTY_BARR = bytearray()
 EMPTYBYTES = b''
 MISSING = _Missing.MISSING
@@ -338,6 +339,8 @@ class SMTP(asyncio.StreamReaderProtocol):
             command_call_limit: Union[int, Dict[str, int], None] = None,
             authenticator: Optional[AuthenticatorType] = None,
             proxy_protocol_timeout: Optional[Union[int, float]] = None,
+            enable_chunking: bool = False,
+            bdat_chunk_size_limit: Optional[int] = BDAT_CHUNK_LIMIT_DEFAULT,
             loop: Optional[asyncio.AbstractEventLoop] = None
     ):
         self.__ident__ = ident or __ident__
@@ -349,6 +352,11 @@ class SMTP(asyncio.StreamReaderProtocol):
         self.event_handler = handler
         assert data_size_limit is None or isinstance(data_size_limit, int)
         self.data_size_limit = data_size_limit
+        assert bdat_chunk_size_limit is None or isinstance(
+            bdat_chunk_size_limit, int
+        )
+        self.bdat_chunk_size_limit = bdat_chunk_size_limit
+        self.enable_chunking = enable_chunking
         self.enable_SMTPUTF8 = enable_SMTPUTF8
         self._decode_data = decode_data
         self.command_size_limits.clear()
@@ -376,6 +384,12 @@ class SMTP(asyncio.StreamReaderProtocol):
         self.envelope: Optional[Envelope] = None
         self.transport: Optional[asyncio.BaseTransport] = None
         self._handler_coroutine: Optional[asyncio.Task[None]] = None
+        # CHUNKING (RFC 3030) transaction state.  These track a BDAT
+        # transaction in progress and are reset together with the envelope.
+        self._bdat_in_progress: bool = False
+        self._bdat_seen_last: bool = False
+        self._bdat_data: List[bytearray] = []
+        self._bdat_num_bytes: int = 0
         if not auth_require_tls and auth_required:
             warn("Requiring AUTH while not requiring TLS "
                  "can lead to security vulnerabilities!")
@@ -590,6 +604,10 @@ class SMTP(asyncio.StreamReaderProtocol):
     def _set_post_data_state(self):
         """Reset state variables to their post-DATA state."""
         self.envelope = self._create_envelope()
+        self._bdat_in_progress = False
+        self._bdat_seen_last = False
+        self._bdat_data = []
+        self._bdat_num_bytes = 0
 
     def _set_rset_state(self):
         """Reset all state variables except the greeting."""
@@ -860,6 +878,8 @@ class SMTP(asyncio.StreamReaderProtocol):
         if self.enable_SMTPUTF8:
             response.append('250-SMTPUTF8')
             self.command_size_limits['MAIL'] += 10
+        if self.enable_chunking:
+            response.append('250-CHUNKING')
         if self.tls_context and not self._tls_protocol:
             response.append('250-STARTTLS')
         if not self._auth_require_tls or self._tls_protocol:
@@ -1425,6 +1445,10 @@ class SMTP(asyncio.StreamReaderProtocol):
         if arg:
             await self.push('501 Syntax: DATA')
             return
+        # RFC 3030: DATA and BDAT cannot be mixed in the same transaction.
+        if self._bdat_in_progress:
+            await self.push('503 Bad sequence of commands')
+            return
 
         await self.push('354 End data with <CR><LF>.<CR><LF>')
         data: List[bytearray] = []
@@ -1518,6 +1542,17 @@ class SMTP(asyncio.StreamReaderProtocol):
                     return
         else:
             content = original_content
+        status = await self._deliver_content(content, original_content)
+        self._set_post_data_state()
+        await self.push('250 OK' if status is MISSING else status)
+
+    async def _deliver_content(
+            self, content: Union[str, bytes], original_content: bytes
+    ) -> Any:
+        """
+        Store the finalized message body on the envelope and invoke the
+        delivery handler.  Shared by the DATA and BDAT code paths.
+        """
         self.envelope.content = content
         self.envelope.original_content = original_content
 
@@ -1543,6 +1578,139 @@ class SMTP(asyncio.StreamReaderProtocol):
                 # it's a deprecated API that will go away after 1.0.
                 if status is None:                  # pragma: nocover
                     status = MISSING
+        return status
+
+    @syntax('BDAT chunk-size [LAST]', when='enable_chunking')
+    async def smtp_BDAT(self, arg: Optional[str]) -> None:
+        # RFC 3030 CHUNKING.  The command line is parsed by _handle_client(),
+        # everything past the keyword is handed over here verbatim.  The
+        # declared number of octets is read as opaque message body: it is
+        # NEVER fed back through the command parser, so NUL bytes, bare line
+        # endings or lines that look like SMTP commands cannot smuggle a
+        # command into the session.
+        if await self.check_helo_needed("EHLO"):
+            return
+        if await self.check_auth_needed("BDAT"):
+            return
+        assert self.session is not None
+        if not self.enable_chunking or not self.session.extended_smtp:
+            # The extension is disabled (default) or not negotiated via EHLO.
+            # Behave exactly like an unimplemented command in that case.
+            await self.push("500 Error: command 'BDAT' not recognized")
+            return
+        assert self.envelope is not None
+        if not self.envelope.rcpt_tos:
+            await self.push('503 Error: need RCPT command')
+            return
+        if not arg:
+            await self.push('501 Syntax: BDAT chunk-size [LAST]')
+            return
+        # Any BDAT after BDAT LAST is illegal (RFC 3030 section 2).
+        if self._bdat_seen_last:
+            await self.push('503 Bad sequence of commands')
+            return
+
+        parts = arg.split()
+        if len(parts) > 2 or not parts[0].isdigit():
+            await self.push('501 Syntax: BDAT chunk-size [LAST]')
+            return
+        chunk_size = int(parts[0])
+        is_last = len(parts) == 2
+        if is_last and parts[1].upper() != "LAST":
+            await self.push('501 Syntax: BDAT chunk-size [LAST]')
+            return
+
+        chunk_limit = self.bdat_chunk_size_limit
+        if chunk_limit is not None and chunk_size > chunk_limit:
+            # Reject before reading a single octet.  The declared size cannot
+            # be trusted to delimit the stream once it exceeds our limits, so
+            # the connection is closed rather than attempting protocol
+            # recovery on potentially hostile pipelined data.
+            log.warning(
+                "%r BDAT chunk of %s octets exceeds limit of %s",
+                self.session.peer, chunk_size, chunk_limit
+            )
+            await self.push('552 Error: chunk size exceeds fixed limit')
+            assert self.transport is not None
+            self.transport.close()
+            return
+        total_limit = self.data_size_limit
+        projected = self._bdat_num_bytes + chunk_size
+        if total_limit is not None and projected > total_limit:
+            log.warning(
+                "%r BDAT transaction of %s octets exceeds limit of %s",
+                self.session.peer, projected, total_limit
+            )
+            await self.push('552 Error: Too much mail data')
+            assert self.transport is not None
+            self.transport.close()
+            return
+
+        # Mark the transaction as using BDAT so a later DATA is refused and
+        # RSET knows there are chunks to discard.
+        self._bdat_in_progress = True
+        chunk = bytearray()
+        remaining = chunk_size
+        try:
+            while remaining:
+                part = await self._reader.readexactly(remaining)
+                # Every declared octet is opaque body data, including NUL,
+                # bare CR/LF and anything resembling an SMTP command.
+                chunk.extend(part)
+                remaining -= len(part)
+        except asyncio.CancelledError:
+            # EOF/timeout while waiting for the declared body bytes.
+            log.info('Connection lost during BDAT')
+            self._writer.close()
+            raise
+        except asyncio.IncompleteReadError as error:
+            # Short read: the peer closed the connection before sending all
+            # declared octets.  The transaction is incomplete, therefore the
+            # delivery handler must not run and no partial message may be
+            # delivered.  Discard everything buffered, close the connection;
+            # do not try to re-parse the leftover bytes as commands.
+            log.warning(
+                '%r BDAT short read: expected %s more octets, got %s',
+                self.session.peer, remaining, len(error.partial)
+            )
+            chunk.extend(error.partial)
+            chunk *= 0
+            self._set_post_data_state()
+            self._writer.close()
+            return
+
+        assert len(chunk) == chunk_size
+        self._bdat_data.append(chunk)
+        self._bdat_num_bytes += chunk_size
+
+        if not is_last:
+            # One 250 per successfully received chunk; the handler is only
+            # invoked once the final chunk has arrived.
+            await self.push('250 OK')
+            return
+
+        self._bdat_seen_last = True
+        original_content: bytes = EMPTYBYTES.join(self._bdat_data)
+        # Discard the chunk list immediately to limit memory pressure.
+        self._bdat_data = []
+
+        content: Union[str, bytes]
+        if self._decode_data:
+            if self.enable_SMTPUTF8:
+                content = original_content.decode(
+                    'utf-8', errors='surrogateescape'
+                )
+            else:
+                try:
+                    content = original_content.decode('ascii', errors='strict')
+                except UnicodeDecodeError:
+                    await self.push('500 Error: strict ASCII mode')
+                    self._set_post_data_state()
+                    return
+        else:
+            content = original_content
+
+        status = await self._deliver_content(content, original_content)
         self._set_post_data_state()
         await self.push('250 OK' if status is MISSING else status)
 
