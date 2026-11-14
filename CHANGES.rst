@@ -1,6 +1,15 @@
 Revision 0.7.0, released XX-XX-2026
 ---------------------------------------
 
+- Added ``pyasn1.codec.ber.bounded``, a forward-only bounded consumer for
+  constructed OCTET STRING and BIT STRING values that works against
+  non-seekable streams. ``BoundedFragmentDecoder`` enforces explicit budgets
+  for total payload size, nesting depth and fragments retained at once,
+  delivers validated chunks to a user ``FragmentSink`` and signals
+  completion only after the full value is verified. Truncation, a wrong
+  subtype, an exceeded budget or a failing callback never produce a complete
+  result and never consume bytes belonging to the following object. The
+  existing whole-value ``decode`` interface is unchanged.
 - Fixed OverflowError from BER/CER/DER length values that fit in the
   supported 8-octet length field but exceed the platform maximum readable
   size. Such oversized definite lengths are now rejected with PyAsn1Error.

@@ -40,7 +40,7 @@ python -m unittest tests.type.test_univ
 There is also a hand-registered aggregate runner, `python -m tests`, discussed
 under [suite registration](#suite-registration-the-silent-failure) below. It
 and `discover` should always report the same test count; both currently report
-1261 tests. A divergence means a module is missing from a `__main__.py` list.
+1319 tests. A divergence means a module is missing from a `__main__.py` list.
 
 ### The gates, and which Python version runs each
 
@@ -274,7 +274,9 @@ tests/
 └── codec/
     ├── test_streaming.py          stream wrappers
     ├── test_encoder_no_mutation.py  cross-codec regression
-    ├── ber/  cer/  der/  native/  test_encoder.py + test_decoder.py each
+    ├── ber/  cer/  der/  native/  test_encoder.py + test_decoder.py each;
+    │                              ber/ also has test_bounded.py for the
+    │                              budget-bounded forward-only consumer
 ```
 
 Every directory carries both `__init__.py` and `__main__.py`. Cross-codec

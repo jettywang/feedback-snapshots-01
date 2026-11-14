@@ -84,6 +84,7 @@ The package is thirty-two modules; four carry most of the weight:
 | `type/error.py` | A *second* `ValueConstraintError`, the one actually raised |
 | `codec/streaming.py` | `asSeekableStream`, `CachingStreamWrapper`, `readFromStream`: the resumable-stream engine |
 | `codec/ber/decoder.py` | The base decoder: payload decoders, the state machine, every security limit |
+| `codec/ber/bounded.py` | Forward-only, budget-bounded consumption of constructed OCTET STRING / BIT STRING off non-seekable streams; see [Bounded fragment consumption](#bounded-fragment-consumption) |
 | `codec/ber/encoder.py` | The base encoder |
 | `codec/ber/eoo.py` | The end-of-octets singleton |
 | `codec/cer/*`, `codec/der/*` | Derived codecs, sharing BER's objects by identity |
@@ -1662,6 +1663,67 @@ not. A stack-frame count in place of the counter re-introduces
 `RecursionError` and breaks `testWithSchema` in the same class and the
 `NestingDepthLimitTestCase` mirrors in `tests/codec/cer/test_decoder.py`
 and `tests/codec/der/test_decoder.py`.
+
+### Bounded fragment consumption
+
+The streaming decoder above always reassembles a constructed OCTET STRING or
+BIT STRING into one in-memory value, and it requires a seekable substrate
+(the `CachingStreamWrapper` teeing that fakes seekability keeps every read
+byte cached). That is wrong shape for a security gateway reading an
+untrusted, non-seekable source: a constructed TLV can declare an arbitrarily
+large length while only a few header octets are on the wire, letting the
+framing alone drive reservation and reassembly.
+`pyasn1/codec/ber/bounded.py` is a separate, forward-only parser for exactly
+these two string types. It never imports the BER `decoder.py` state machine
+and never calls `seek`/`peek`, so the shared `TAG_MAP`/`TYPE_MAP` invariant
+under [Sharing by identity](#sharing-by-identity) is untouched and DER
+signature behaviour cannot change.
+
+The entry point is `BoundedFragmentDecoder.read`, driven by a
+`FragmentBudget` of three independent limits: `maxTotalSize` (payload octets
+that may ever accumulate for one logical value), `maxNestingDepth`
+(constructed-string nesting) and `maxRetainedFragments` (payload held back
+from the sink at any instant). The convenience wrapper `decodeBounded`
+reassembles into a pyasn1 object for callers that still want the whole
+value; the streaming class hands validated chunks to a user `FragmentSink`
+and is the entry point that keeps live retention at the retain budget.
+
+Three rules make the bounding real rather than cosmetic. First, payload is
+charged before its bytes are read: `_readPrimitive` calls `_charge` against
+`maxTotalSize` ahead of `_readExact`, so an oversized leaf is refused before
+it materializes, and the indefinite-length path (which has no declared
+extent) is bounded exactly this way, leaf by leaf. A definite constructed
+frame's declared length cannot be compared directly with the payload budget,
+because it also counts nested TLV headers; instead the frame bounds
+iteration (`while bytesRead < frameEnd`) and the leaves do the precise
+charging, so a huge advertised length with a truncated body ends in
+`EndOfStreamError` while still inside the frame. Second, retention is flushed
+incrementally in `_retain`; a single leaf larger than the retain budget is
+delivered in pieces, which is what keeps
+`ConsumptionStats.peakRetainedBytes` at or near `maxRetainedFragments` even
+for a megabyte primitive read one fragment at a time. Third, the parser is
+strictly forward-only: `_readExact` loops on blocking `read(n)` for exactly
+`n` octets and never pushes bytes back, so on any failure the stream is
+positioned immediately after the last byte that legitimately belonged to the
+object and no byte of the following object has been pulled.
+
+Completeness is a separate, explicit signal. `FragmentSink.onComplete` runs
+exactly once, only after the framing (`Read N bytes instead of expected M`
+equivalents, end-of-contents for the indefinite form), the tag class and
+number (only the universal OCTET STRING / BIT STRING tags are accepted, so
+an implicitly tagged subtype is a `BoundedDecodeError`, not a silent
+acceptance) and the BIT STRING unused-bits rules have all passed. Truncation
+raises `EndOfStreamError`; every other framing, padding or budget violation
+raises `BoundedDecodeError`, a `PyAsn1Error` subclass. A sink callback that
+raises propagates the original exception and suppresses `onComplete`, so a
+callback failure can never leave a "fully verified" result. The BIT STRING
+bit concatenation mirrors `BitStringPayloadDecoder._appendFragment`, holding
+back only the single partially-used byte across fragment boundaries; the
+final padding is `(-bitCount) % 8`, the same formula the BER decoder uses.
+The executable specification is `tests/codec/ber/test_bounded.py`, including
+the huge-declared-length and indefinite-trickle attacks with assertions on
+`ConsumptionStats.readCalls`, `peakRetainedBytes` and the unconsumed
+trailing object.
 
 ## Security hardening inventory
 
