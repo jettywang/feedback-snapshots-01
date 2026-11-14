@@ -47,7 +47,6 @@ from paramiko.common import (
     DEFAULT_MAX_PACKET_SIZE,
     DEFAULT_WINDOW_SIZE,
     ERROR,
-    HIGHEST_USERAUTH_MESSAGE_ID,
     INFO,
     MAX_WINDOW_SIZE,
     MIN_PACKET_SIZE,
@@ -139,6 +138,38 @@ except ImportError:
 
 # for thread cleanup
 _active_threads = []
+
+# Message numbers of the connection protocol (RFC 4254) and any other
+# protocol running on top of user authentication (RFC 4252 section 6:
+# numbers 80 and higher are reserved for post-authentication protocols).
+# A server MUST NOT dispatch any of these to a business handler before
+# authentication has fully completed. Keeping them in one place means the
+# pre-auth gate covers both global/channel-open handlers *and* the per-channel
+# handler table, instead of being patched one request type at a time.
+_POST_AUTH_MESSAGE_TYPES = frozenset(
+    [
+        MSG_GLOBAL_REQUEST,
+        MSG_REQUEST_SUCCESS,
+        MSG_REQUEST_FAILURE,
+        MSG_CHANNEL_OPEN,
+        MSG_CHANNEL_OPEN_SUCCESS,
+        MSG_CHANNEL_OPEN_FAILURE,
+        MSG_CHANNEL_WINDOW_ADJUST,
+        MSG_CHANNEL_DATA,
+        MSG_CHANNEL_EXTENDED_DATA,
+        MSG_CHANNEL_EOF,
+        MSG_CHANNEL_CLOSE,
+        MSG_CHANNEL_REQUEST,
+        MSG_CHANNEL_SUCCESS,
+        MSG_CHANNEL_FAILURE,
+    ]
+)
+
+# Sentinel returned by the pre-auth gate for post-auth messages that must be
+# dropped without any reply (distinct from None, which means "allow normal
+# dispatch") and without surfacing an unknown-channel error that would tear
+# the transport down.
+_PRE_AUTH_DROP = object()
 
 
 def _join_lingering_threads():
@@ -1966,28 +1997,41 @@ class Transport(threading.Thread, ClosingContextManager):
 
     def _ensure_authed(self, ptype, message):
         """
-        Checks message type against current auth state.
+        Gate post-authentication (RFC 4254) messages behind completed auth.
 
-        If server mode, and auth has not succeeded, and the message is of a
-        post-auth type (channel open or global request) an appropriate error
-        response Message is crafted and returned to caller for sending.
+        In server mode, if authentication has not fully succeeded and the
+        incoming message belongs to the post-authentication connection
+        protocol (message numbers 80+, per RFC 4252 section 6), the message
+        must never reach a business handler: no ``ServerInterface`` channel or
+        forwarding hooks may fire, and per-channel messages must not be able to
+        kill the transport by referencing an unknown channel id either.
 
-        Otherwise (client mode, authed, or pre-auth message) returns None.
+        Return values:
+
+        - ``None``: client mode, fully authenticated session, or a
+          pre-authentication/transport-control message; normal dispatch
+          continues.
+        - A reply ``Message``: send this rejection back to the peer (used for
+          global requests and channel opens, which define failure replies).
+        - `_PRE_AUTH_DROP`: swallow the message with no reply and without
+          touching any handler (per-channel and other post-auth traffic).
         """
         if (
             not self.server_mode
-            or ptype <= HIGHEST_USERAUTH_MESSAGE_ID
+            or ptype not in _POST_AUTH_MESSAGE_TYPES
             or self.is_authenticated()
         ):
             return None
         # WELP. We must be dealing with someone trying to do non-auth things
-        # without being authed. Tell them off, based on message class.
-        reply = Message()
+        # without being (fully) authed. Tell them off, based on message class.
         # Global requests have no details, just failure.
         if ptype == MSG_GLOBAL_REQUEST:
+            reply = Message()
             reply.add_byte(cMSG_REQUEST_FAILURE)
+            return reply
         # Channel opens let us reject w/ a specific type + message.
-        elif ptype == MSG_CHANNEL_OPEN:
+        if ptype == MSG_CHANNEL_OPEN:
+            reply = Message()
             kind = message.get_text()  # noqa
             chanid = message.get_int()
             reply.add_byte(cMSG_CHANNEL_OPEN_FAILURE)
@@ -1995,12 +2039,19 @@ class Transport(threading.Thread, ClosingContextManager):
             reply.add_int(OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED)
             reply.add_string("")
             reply.add_string("en")
-        # NOTE: Post-open channel messages do not need checking; the above will
-        # reject attempts to open channels, meaning that even if a malicious
-        # user tries to send a MSG_CHANNEL_REQUEST, it will simply fall under
-        # the logic that handles unknown channel IDs (as the channel list will
-        # be empty.)
-        return reply
+            return reply
+        # Per-channel messages (incl. MSG_CHANNEL_REQUEST) and any other
+        # post-auth traffic cannot reference a legitimate channel yet: all
+        # channel opens were rejected above, so no channel exists. Per RFC
+        # 4252 section 5.1 such non-authentication traffic is silently ignored
+        # rather than tearing down the whole transport or invoking any
+        # ServerInterface business hook.
+        self._log(
+            DEBUG,
+            "Ignoring post-auth message {!r} received before "
+            "authentication completed.".format(MSG_NAMES.get(ptype, ptype)),
+        )
+        return _PRE_AUTH_DROP
 
     def _enforce_strict_kex(self, ptype):
         """
@@ -2086,12 +2137,23 @@ class Transport(threading.Thread, ClosingContextManager):
                             self.kex_engine.parse_next(ptype, m)
                             continue
 
-                    if ptype in self._handler_table:
-                        error_msg = self._ensure_authed(ptype, m)
-                        if error_msg:
-                            self._send_message(error_msg)
-                        else:
-                            self._handler_table[ptype](m)
+                    # Single pre-authentication boundary for *all*
+                    # post-authentication (RFC 4254 connection protocol)
+                    # traffic, regardless of which handler table would
+                    # otherwise receive it. Running this before either table
+                    # lookup ensures unauthenticated/partially-authed peers
+                    # cannot trigger channel, forwarding, or other business
+                    # hooks, and cannot kill the transport via a channel
+                    # message referencing a nonexistent channel.
+                    error_msg = self._ensure_authed(ptype, m)
+                    if error_msg is _PRE_AUTH_DROP:
+                        # Unauthenticated post-auth traffic: silently swallow,
+                        # do not dispatch to any handler table.
+                        pass
+                    elif error_msg:
+                        self._send_message(error_msg)
+                    elif ptype in self._handler_table:
+                        self._handler_table[ptype](m)
                     elif ptype in self._channel_handler_table:
                         chanid = m.get_int()
                         chan = self._channels.get(chanid)

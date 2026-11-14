@@ -33,7 +33,12 @@ from unittest.mock import Mock
 from pytest import mark, raises
 
 from paramiko import (
+    AUTH_FAILED,
+    AUTH_PARTIALLY_SUCCESSFUL,
+    AUTH_SUCCESSFUL,
+    Ed25519Key,
     OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED,
+    OPEN_SUCCEEDED,
     AuthHandler,
     ChannelException,
     IncompatiblePeer,
@@ -41,6 +46,7 @@ from paramiko import (
     Packetizer,
     RSAKey,
     SecurityOptions,
+    ServerInterface,
     ServiceRequestingTransport,
     SSHException,
     Transport,
@@ -53,12 +59,18 @@ from paramiko.common import (
     MIN_PACKET_SIZE,
     MIN_WINDOW_SIZE,
     MSG_CHANNEL_OPEN,
+    MSG_CHANNEL_OPEN_FAILURE,
+    MSG_CHANNEL_REQUEST,
+    MSG_CHANNEL_FAILURE,
     MSG_DEBUG,
+    MSG_GLOBAL_REQUEST,
     MSG_IGNORE,
     MSG_KEXINIT,
+    MSG_REQUEST_FAILURE,
     MSG_UNIMPLEMENTED,
     MSG_USERAUTH_SUCCESS,
     byte_chr,
+    byte_ord,
     cMSG_CHANNEL_WINDOW_ADJUST,
     cMSG_UNIMPLEMENTED,
 )
@@ -73,6 +85,7 @@ from ._util import (
     needs_builtin,
     server,
     slow,
+    wait_until,
 )
 
 LONG_BANNER = """\
@@ -1071,6 +1084,332 @@ class TransportTest(unittest.TestCase):
         # overridden case
         tweaked = Transport(sock=LoopSocket(), packetizer_class=MyPacketizer)
         assert tweaked.packetizer.__class__ is MyPacketizer
+
+
+class RecordingServer(ServerInterface):
+    """
+    ServerInterface that records every business hook it is asked to run.
+
+    Also implements two-factor ("paranoid") auth: password then publickey,
+    each returning AUTH_PARTIALLY_SUCCESSFUL until both have succeeded.
+    """
+
+    paranoid_key = Ed25519Key.from_private_key_file(_support("ed25519.key"))
+
+    def __init__(self):
+        self.hook_calls = []
+        self.did_password = False
+        self.did_publickey = False
+
+    def _record(self, name, *args):
+        self.hook_calls.append((name,) + args)
+
+    # --- auth hooks (the only hooks allowed pre-auth) ---
+    def get_allowed_auths(self, username):
+        if self.did_password and not self.did_publickey:
+            return "publickey"
+        if self.did_publickey and not self.did_password:
+            return "password"
+        return "publickey,password"
+
+    def check_auth_password(self, username, password):
+        if (username, password) == ("paranoid", "paranoid"):
+            self.did_password = True
+            if self.did_publickey:
+                return AUTH_SUCCESSFUL
+            return AUTH_PARTIALLY_SUCCESSFUL
+        return AUTH_FAILED
+
+    def check_auth_publickey(self, username, key):
+        if username == "paranoid" and key == self.paranoid_key:
+            self.did_publickey = True
+            if self.did_password:
+                return AUTH_SUCCESSFUL
+            return AUTH_PARTIALLY_SUCCESSFUL
+        return AUTH_FAILED
+
+    # --- business hooks that must NEVER fire before full auth ---
+    def check_channel_request(self, kind, chanid):
+        self._record("check_channel_request", kind, chanid)
+        return OPEN_SUCCEEDED
+
+    def check_channel_direct_tcpip_request(self, chanid, origin, destination):
+        self._record("check_channel_direct_tcpip_request", chanid, destination)
+        return OPEN_SUCCEEDED
+
+    def check_channel_shell_request(self, channel):
+        self._record("check_channel_shell_request", channel.chanid)
+        return True
+
+    def check_channel_exec_request(self, channel, command):
+        self._record("check_channel_exec_request", channel.chanid, command)
+        return True
+
+    def check_global_request(self, kind, msg):
+        self._record("check_global_request", kind)
+        return True
+
+    def check_port_forward_request(self, address, port):
+        self._record("check_port_forward_request", address, port)
+        return 8080
+
+    def cancel_port_forward_request(self, address, port):
+        self._record("cancel_port_forward_request", address, port)
+
+
+class PreAuthDispatchTest(unittest.TestCase):
+    """
+    Regression: post-auth (RFC 4254) traffic must not reach business hooks
+    until authentication fully completes.
+
+    Key exchange completing does NOT mean the peer is authenticated. These
+    tests drive real Transport threads over LoopSocket and assert on the
+    actual ServerInterface hook calls, not merely on the failure code the
+    client receives. Transport-control / auth messages must still flow.
+    """
+
+    # channel id that no legitimate channel can have pre-auth
+    BOGUS_CHANID = 4242
+
+    def setUp(self):
+        self.socks = LoopSocket()
+        self.sockc = LoopSocket()
+        self.sockc.link(self.socks)
+        self.tc = Transport(self.sockc)
+        self.ts = Transport(self.socks)
+        host_key = RSAKey.from_private_key_file(_support("rsa.key"))
+        self.ts.add_server_key(host_key)
+        self.server = RecordingServer()
+        self.event = threading.Event()
+        self.ts.start_server(self.event, self.server)
+        # connect() with no auth: kex + service negotiation only.
+        self.tc.connect()
+        self.event.wait(2.0)
+        assert self.event.is_set()
+        assert self.ts.is_active()
+        assert not self.ts.is_authenticated()
+        # Capture every packet the server emits, with its on-the-wire sequence
+        # number, preserving the raw packet order as evidence.
+        self.server_packets = []
+        self._original_send = self.ts.packetizer.send_message
+
+        def capturing_send(message):
+            seq = self.ts.packetizer._Packetizer__sequence_number_out
+            message.rewind()
+            ptype = message.get_byte()
+            self.server_packets.append((seq, byte_ord(ptype)))
+            return self._original_send(message)
+
+        self.ts.packetizer.send_message = capturing_send
+
+    def tearDown(self):
+        self.tc.close()
+        self.ts.close()
+        self.socks.close()
+        self.sockc.close()
+
+    def _send(self, ptype, *fields):
+        """Send a raw, hand-built message from the (malicious) client."""
+        msg = Message()
+        msg.add_byte(byte_chr(ptype))
+        for field in fields:
+            if isinstance(field, bool):
+                msg.add_boolean(field)
+            elif isinstance(field, int):
+                msg.add_int(field)
+            else:
+                msg.add_string(field)
+        self.tc._send_message(msg)
+
+    def _settle(self):
+        # No native ack for the dropped path; give the server thread time to
+        # process whatever was sent.
+        time.sleep(0.2)
+
+    def _server_packet_types(self):
+        return [ptype for _, ptype in self.server_packets]
+
+    def _assert_transport_alive(self):
+        assert self.ts.is_active(), (
+            "pre-auth message killed the server transport"
+        )
+        assert self.ts.saved_exception is None
+
+    def _assert_no_business_hooks(self):
+        allowed = {"check_auth_password", "check_auth_publickey"}
+        business = [
+            call for call in self.server.hook_calls if call[0] not in allowed
+        ]
+        assert business == [], "business hook fired pre-auth: {!r}".format(
+            business
+        )
+
+    # --- the three sensitive request families, hand-built ---
+    def _send_channel_open(self):
+        self._send(MSG_CHANNEL_OPEN, "session", 0, 65536, 32768)
+
+    def _send_channel_request(self):
+        self._send(
+            MSG_CHANNEL_REQUEST,
+            self.BOGUS_CHANID,
+            "shell",
+            True,
+        )
+
+    def _send_global_request(self):
+        self._send(
+            MSG_GLOBAL_REQUEST, "tcpip-forward", True, "127.0.0.1", 1234
+        )
+
+    def _send_all_post_auth_probes(self):
+        self._send_channel_open()
+        self._send_channel_request()
+        self._send_global_request()
+        self._settle()
+
+    # Phase 1: key exchange done, no authentication attempted.
+    def test_unauthenticated_peer_cannot_reach_business(self):
+        self._send_all_post_auth_probes()
+        self._assert_no_business_hooks()
+        self._assert_transport_alive()
+        # channel-open and global-request still get protocol failure replies,
+        # while the channel-request is silently dropped.
+        assert MSG_CHANNEL_OPEN_FAILURE in self._server_packet_types()
+        assert MSG_REQUEST_FAILURE in self._server_packet_types()
+        assert MSG_CHANNEL_FAILURE not in self._server_packet_types()
+
+    # Phase 2: authentication explicitly failed.
+    def test_failed_authentication_peer_cannot_reach_business(self):
+        with raises(SSHException):
+            self.tc.auth_password(username="paranoid", password="wrong")
+        assert not self.ts.is_authenticated()
+        self.server_packets.clear()
+        self._send_all_post_auth_probes()
+        self._assert_no_business_hooks()
+        self._assert_transport_alive()
+        assert MSG_CHANNEL_OPEN_FAILURE in self._server_packet_types()
+        assert MSG_REQUEST_FAILURE in self._server_packet_types()
+
+    # Phase 3: multi-factor partially successful (one factor accepted, but
+    # USERAUTH_SUCCESS has NOT been emitted).
+    def test_partially_authenticated_peer_cannot_reach_business(self):
+        # First factor succeeds partially: still not fully authenticated.
+        remaining = self.tc.auth_password(
+            username="paranoid", password="paranoid"
+        )
+        assert remaining == ["publickey"]
+        assert not self.ts.is_authenticated()
+        self.server_packets.clear()
+        self._send_all_post_auth_probes()
+        self._assert_no_business_hooks()
+        self._assert_transport_alive()
+        assert MSG_CHANNEL_OPEN_FAILURE in self._server_packet_types()
+        assert MSG_REQUEST_FAILURE in self._server_packet_types()
+
+    def test_channel_request_alone_does_not_disconnect_pre_auth(self):
+        # This is the concrete bypass: previously an unknown-channel request
+        # broke the run() loop and tore the whole transport down.
+        self._send_channel_request()
+        self._settle()
+        self._assert_no_business_hooks()
+        self._assert_transport_alive()
+        # Nothing should be emitted for a silently dropped channel request.
+        assert self.server_packets == []
+
+    def test_all_post_auth_message_types_are_gated_pre_auth(self):
+        # The fix is a shared boundary, not a per-request blocklist: exercise
+        # every RFC 4254 message id, including forwarding channel opens and
+        # per-channel traffic, and prove none reaches a hook or disconnects.
+        from paramiko.common import (
+            MSG_CHANNEL_CLOSE,
+            MSG_CHANNEL_DATA,
+            MSG_CHANNEL_EOF,
+            MSG_CHANNEL_EXTENDED_DATA,
+            MSG_CHANNEL_WINDOW_ADJUST,
+            MSG_REQUEST_SUCCESS,
+        )
+
+        # Forwarding-flavored channel opens must be rejected (and their
+        # check_channel_direct_tcpip_request hook never invoked).
+        self._send(
+            MSG_CHANNEL_OPEN,
+            "direct-tcpip",
+            1,
+            65536,
+            32768,
+            "10.0.0.1",
+            22,
+            "10.0.0.2",
+            9,
+        )
+        # Every per-channel message id, all referencing a nonexistent channel.
+        for ptype in (
+            MSG_CHANNEL_REQUEST,
+            MSG_CHANNEL_DATA,
+            MSG_CHANNEL_EXTENDED_DATA,
+            MSG_CHANNEL_WINDOW_ADJUST,
+            MSG_CHANNEL_EOF,
+            MSG_CHANNEL_CLOSE,
+        ):
+            self._send(ptype, self.BOGUS_CHANID, b"ignored")
+        # A post-auth-only global reply type likewise must not dispatch.
+        self._send(MSG_REQUEST_SUCCESS)
+        self._settle()
+        self._assert_no_business_hooks()
+        self._assert_transport_alive()
+        assert MSG_CHANNEL_OPEN_FAILURE in self._server_packet_types()
+
+    def test_packet_sequence_evidence_preserved_in_order(self):
+        # The gate must not corrupt the transport's own bookkeeping: replies
+        # carry monotonically increasing on-the-wire sequence numbers.
+        self._send_channel_open()
+        self._send_global_request()
+        self._settle()
+        seqs = [seq for seq, _ in self.server_packets]
+        assert seqs == sorted(seqs)
+        assert len(seqs) == len(set(seqs))
+        # And the surrounding transport-control path still works: an ignore
+        # message is processed without any reply and without disruption.
+        self.tc._send_message(Message(byte_chr(MSG_IGNORE)))
+        self._settle()
+        self._assert_transport_alive()
+
+    def test_business_reachable_after_full_authentication(self):
+        # Complete both factors; the same legitimate requests must now flow
+        # through to the real ServerInterface hooks.
+        self.tc.auth_password(username="paranoid", password="paranoid")
+        key = Ed25519Key.from_private_key_file(_support("ed25519.key"))
+        self.tc.auth_publickey(username="paranoid", key=key)
+        wait_until(lambda: self.assertTrue(self.ts.is_authenticated()))
+        self.server_packets.clear()
+
+        # A genuine channel open + shell request now reaches the hooks.
+        chan = self.tc.open_session()
+        wait_until(
+            lambda: self.assertIn(
+                "check_channel_request",
+                [call[0] for call in self.server.hook_calls],
+            )
+        )
+        # invoke_shell() raises SSHException if the server-side hook rejects.
+        chan.invoke_shell()
+        wait_until(
+            lambda: self.assertIn(
+                "check_channel_shell_request",
+                [call[0] for call in self.server.hook_calls],
+            )
+        )
+        # And a post-auth global request is honored rather than rejected by
+        # the gate. A denied request returns None; success returns a Message.
+        assert self.tc.global_request("acceptable") is not None
+        wait_until(
+            lambda: self.assertIn(
+                "check_global_request",
+                [call[0] for call in self.server.hook_calls],
+            )
+        )
+        assert MSG_CHANNEL_OPEN_FAILURE not in self._server_packet_types()
+        assert MSG_REQUEST_FAILURE not in self._server_packet_types()
 
 
 # TODO: for now this is purely a regression test. It needs actual tests of the
