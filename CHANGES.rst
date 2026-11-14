@@ -4,6 +4,16 @@ Changelog
 Unreleased
 ----------
 
+* New module ``pyrad.acctmerge``: an offline merger that reconstructs
+  accounting session timelines from verified but duplicated, delayed and
+  reordered RADIUS Accounting-Requests.  Retransmissions that only bump
+  Acct-Delay-Time are billed once, the timeline is ordered by event time
+  (Event-Timestamp or receipt minus Acct-Delay-Time) so late records
+  never overwrite known later events, 32-bit counter wraps are
+  corrected (or resolved via Acct-*-Gigawords), and totals resting on
+  incomplete evidence (missing Start, counter regressions) are reported
+  as indeterminate with a lower bound.  Includes a JSON-Lines CLI via
+  ``python -m pyrad.acctmerge``.
 * pyrad no longer depends on netaddr; it was only used by the tests and
   is now in the ``test`` dependency group. ipv6prefix values given as
   ``netaddr.IPNetwork`` are still accepted. Code that imports netaddr
