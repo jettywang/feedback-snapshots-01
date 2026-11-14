@@ -1,0 +1,56 @@
+[
+  {
+    "repo": "pysnmp",
+    "file": ".feedback/specs/rfc3411.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc3411.txt",
+    "sha256": "5cae3a3d7ab2013b5ba9e285e3fc3c9001b7ccba8fafda48bd04b04e0e366016"
+  },
+  {
+    "repo": "pysnmp",
+    "file": ".feedback/specs/rfc3412.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc3412.txt",
+    "sha256": "f424f12923974b94a49ad62343c2d18b1bf6134e3916097e75f14590f793002e"
+  },
+  {
+    "repo": "pysnmp",
+    "file": ".feedback/specs/rfc3413.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc3413.txt",
+    "sha256": "bfe91c30cc727b4a8ce2138544f225c4a3b9e2b919079ac1d0b52241da7d4ccc"
+  },
+  {
+    "repo": "pysnmp",
+    "file": ".feedback/specs/rfc3414.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc3414.txt",
+    "sha256": "636ffdf3f44222d4295e52a846075a3fea826604cd8ba88ae8e69d87664cbb5f"
+  },
+  {
+    "repo": "pysnmp",
+    "file": ".feedback/specs/rfc3415.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc3415.txt",
+    "sha256": "b1f997fd36eb82c49bcc9a3b6faf64f040272401853d3d1ea8fd5e3cce579da9"
+  },
+  {
+    "repo": "pysnmp",
+    "file": ".feedback/specs/rfc3416.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc3416.txt",
+    "sha256": "e310ccf5a9cbbcb6c47d2fc0b50316889588d85447c7be0d40ddf74be70c8ac8"
+  },
+  {
+    "repo": "pysnmp",
+    "file": ".feedback/specs/rfc3826.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc3826.txt",
+    "sha256": "a5a1c5e8b04d45de83f96bfb00751ff43aac77b13ccdd263f02f89bd16738b19"
+  },
+  {
+    "repo": "pysnmp",
+    "file": ".feedback/specs/rfc7860.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc7860.txt",
+    "sha256": "5e5e497766baa89df6e98b578df4227b3503440e49f3f15afb698b92aea14c86"
+  },
+  {
+    "repo": "pysnmp",
+    "file": ".feedback/specs/rfc2576.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc2576.txt",
+    "sha256": "9bb3cd15d231355b6d535cdcff90670133b1f312080b85f84f16e571dcd42eae"
+  }
+]
