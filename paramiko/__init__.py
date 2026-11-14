@@ -21,6 +21,16 @@ from importlib import metadata
 __version__ = metadata.version("paramiko")
 
 # flake8: noqa
+from paramiko.audit import (
+    AUDIT_EVENT_TYPES,
+    AUDIT_HANDSHAKE_COMPLETE,
+    AUDIT_HANDSHAKE_FAILED,
+    AUDIT_HOST_KEY,
+    AUDIT_KEX_AGREEMENT,
+    AUDIT_KEX_PROPOSALS,
+    AUDIT_KEYS_ACTIVATED,
+    AuditEvent,
+)
 from paramiko.transport import (
     SecurityOptions,
     ServiceRequestingTransport,

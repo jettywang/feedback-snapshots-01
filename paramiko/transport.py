@@ -27,6 +27,7 @@ import sys
 import threading
 import time
 import weakref
+from base64 import b64encode
 from hashlib import md5, sha1, sha256, sha512
 
 from cryptography.hazmat.backends import default_backend
@@ -92,6 +93,17 @@ from paramiko.common import (
     cMSG_SERVICE_REQUEST,
     cMSG_UNIMPLEMENTED,
     xffffffff,
+)
+from paramiko.audit import (
+    AUDIT_HANDSHAKE_COMPLETE,
+    AUDIT_HANDSHAKE_FAILED,
+    AUDIT_HOST_KEY,
+    AUDIT_KEX_AGREEMENT,
+    AUDIT_KEX_PROPOSALS,
+    AUDIT_KEYS_ACTIVATED,
+    PHASE_INITIAL,
+    PHASE_REKEY,
+    AuditEvent,
 )
 from paramiko.compress import ZlibCompressor, ZlibDecompressor
 from paramiko.ecdsakey import ECDSAKey
@@ -531,6 +543,12 @@ class Transport(threading.Thread, ClosingContextManager):
         self.global_response = None
         # user-defined event callbacks
         self.completion_event = None
+        # structured security-audit hook; see set_audit_hook()
+        self.audit_hook = None
+        # last handshake stage confirmed on the wire (for failure events)
+        self._audit_stage = "created"
+        # whether the in-progress key exchange is the first one or a rekey
+        self._kex_phase = PHASE_INITIAL
         # how long (seconds) to wait for the SSH banner
         self.banner_timeout = 15
         # how long (seconds) to wait for the handshake to finish after SSH
@@ -1857,13 +1875,31 @@ class Transport(threading.Thread, ClosingContextManager):
             raise SSHException("Unknown host key type")
         # TODO: like, here, can a host offer "ssh-rsa" but request SHA2, or are
         # those baked in?
+        # Audit the host identity and the verification decision.  Only
+        # the public key's fingerprint is recorded, never key material.
+        fingerprint = "SHA256:" + b64encode(
+            sha256(key.asbytes()).digest()
+        ).decode("ascii").rstrip("=")
         if not key.verify_ssh_sig(self.H, Message(sig)):
+            self._emit_audit(
+                AUDIT_HOST_KEY,
+                algorithm=self.host_key_type,
+                fingerprint=fingerprint,
+                verified=False,
+            )
             raise SSHException(
                 "Signature verification ({}) failed.".format(
                     self.host_key_type
                 )
             )  # noqa
         self.host_key = key
+        self._emit_audit(
+            AUDIT_HOST_KEY,
+            algorithm=self.host_key_type,
+            fingerprint=fingerprint,
+            verified=True,
+        )
+        self._audit_stage = "host-key-verified"
 
     def _add_K(self, m):
         # Hybrid post-quantum kex methods (e.g. mlkem768x25519-sha256)
@@ -2145,9 +2181,11 @@ class Transport(threading.Thread, ClosingContextManager):
                 )
                 self._log(ERROR, util.tb_strings())
                 self.saved_exception = e
+                self._audit_handshake_failure(e)
             except EOFError as e:
                 self._log(DEBUG, "EOF in transport thread")
                 self.saved_exception = e
+                self._audit_handshake_failure(e)
             except socket.error as e:
                 if type(e.args) is tuple:
                     if e.args:
@@ -2158,10 +2196,12 @@ class Transport(threading.Thread, ClosingContextManager):
                     emsg = e.args
                 self._log(ERROR, "Socket exception: " + emsg)
                 self.saved_exception = e
+                self._audit_handshake_failure(e)
             except Exception as e:
                 self._log(ERROR, "Unknown exception: " + str(e))
                 self._log(ERROR, util.tb_strings())
                 self.saved_exception = e
+                self._audit_handshake_failure(e)
             _active_threads.remove(self)
             for chan in list(self._channels.values()):
                 chan._unlink()
@@ -2198,6 +2238,59 @@ class Transport(threading.Thread, ClosingContextManager):
         else:
             msg += "local={}, remote={}".format(local, remote)
         self._log(DEBUG, msg)
+
+    # structured security auditing
+
+    def set_audit_hook(self, hook):
+        """
+        Register a callback receiving structured `.AuditEvent` records for
+        every stage of the SSH handshake and any later rekeys: algorithm
+        candidates, final per-direction agreements, host key fingerprint
+        and verification decision, the moment new keys take effect in each
+        direction, and handshake completion or failure.
+
+        ``hook`` is a callable taking a single `.AuditEvent` argument, or
+        ``None`` to disable auditing.  Events contain only non-secret
+        data (algorithm names, host key fingerprints, the session
+        identifier); private keys, shared secrets, and session keys are
+        never included.  Exceptions raised by ``hook`` are logged and
+        swallowed so a faulty auditor cannot break the transport.
+        """
+        self.audit_hook = hook
+
+    def _session_id_hex(self):
+        # The session identifier is the exchange hash H of the *first*
+        # key exchange only; later rekeys produce new H values but the
+        # session id never changes, and we never log the later hashes.
+        if self.session_id is None:
+            return None
+        return self.session_id.hex()
+
+    def _emit_audit(self, event_type, **details):
+        hook = self.audit_hook
+        if hook is None:
+            return
+        event = AuditEvent(
+            type=event_type, phase=self._kex_phase, details=details
+        )
+        try:
+            hook(event)
+        except Exception as e:
+            self._log(ERROR, "Audit hook raised: {!r}".format(e))
+
+    def _audit_handshake_failure(self, exc):
+        # Emit a failure event only if a handshake was actually in
+        # progress; never emit anything resembling a success here, so a
+        # failed handshake cannot be misread as "partially established".
+        if self.audit_hook is None:
+            return
+        if self.initial_kex_done and not self.in_kex:
+            return
+        self._emit_audit(
+            AUDIT_HANDSHAKE_FAILED,
+            last_confirmed_stage=self._audit_stage,
+            error="{}: {}".format(type(exc).__name__, exc),
+        )
 
     # protocol stages
 
@@ -2256,6 +2349,7 @@ class Transport(threading.Thread, ClosingContextManager):
             raise IncompatiblePeer(msg.format(version))
         msg = "Connected (version {}, client {})".format(version, client)
         self._log(INFO, msg)
+        self._audit_stage = "banner"
 
     def _send_kex_init(self):
         """
@@ -2268,6 +2362,11 @@ class Transport(threading.Thread, ClosingContextManager):
         finally:
             self.clear_to_send_lock.release()
         self.in_kex = True
+        # Tag all events of this exchange as the initial handshake or a
+        # rekey; the session identifier is only established by the former.
+        self._kex_phase = (
+            PHASE_INITIAL if not self.initial_kex_done else PHASE_REKEY
+        )
         kex_algos = list(self.preferred_kex)
         if self.server_mode:
             mp_required_prefix = "diffie-hellman-group-exchange-sha"
@@ -2327,6 +2426,7 @@ class Transport(threading.Thread, ClosingContextManager):
         # save a copy for later (needed to compute a hash)
         self.local_kex_init = self._latest_kex_init = m.asbytes()
         self._send_message(m)
+        self._audit_stage = "kexinit-sent"
 
     def _really_parse_kex_init(self, m, ignore_first_byte=False):
         parsed = {}
@@ -2366,6 +2466,26 @@ class Transport(threading.Thread, ClosingContextManager):
         client_lang_list = parsed["client_lang_list"]
         server_lang_list = parsed["server_lang_list"]
         kex_follows = parsed["kex_follows"]
+
+        # Audit both sides' candidate lists exactly as sent on the wire,
+        # before any pseudo-algorithm (ext-info/strict-kex) stripping.
+        proposal_keys = (
+            "kex_algo_list",
+            "server_key_algo_list",
+            "client_encrypt_algo_list",
+            "server_encrypt_algo_list",
+            "client_mac_algo_list",
+            "server_mac_algo_list",
+            "client_compress_algo_list",
+            "server_compress_algo_list",
+        )
+        local_init = self._get_latest_kex_init()
+        self._emit_audit(
+            AUDIT_KEX_PROPOSALS,
+            local={k: list(local_init[k]) for k in proposal_keys},
+            remote={k: list(parsed[k]) for k in proposal_keys},
+        )
+        self._audit_stage = "kexinit-received"
 
         self._log(DEBUG, "=== Key exchange possibilities ===")
         for prefix, value in (
@@ -2580,6 +2700,24 @@ class Transport(threading.Thread, ClosingContextManager):
         )
         self._log(DEBUG, "=== End of kex handshake ===")
 
+        # Audit the final bidirectional agreement.  "inbound" names the
+        # algorithms protecting traffic we receive, "outbound" traffic we
+        # send; nothing here is secret.
+        self._emit_audit(
+            AUDIT_KEX_AGREEMENT,
+            kex=agreed_kex[0],
+            host_key_type=self.host_key_type,
+            cipher_inbound=self.remote_cipher,
+            cipher_outbound=self.local_cipher,
+            mac_inbound=self.remote_mac,
+            mac_outbound=self.local_mac,
+            compression_inbound=self.remote_compression,
+            compression_outbound=self.local_compression,
+            strict_kex=self.agreed_on_strict_kex,
+            session_id=self._session_id_hex(),
+        )
+        self._audit_stage = "algorithms-agreed"
+
         # save for computing hash later...
         # now wait!  openssh has a bug (and others might too) where there are
         # actually some extra bytes (one NUL byte in openssh's case) added to
@@ -2644,6 +2782,16 @@ class Transport(threading.Thread, ClosingContextManager):
                 "Resetting inbound seqno after NEWKEYS due to strict mode",
             )
             self.packetizer.reset_seqno_in()
+        # Audit: inbound packet protection has actually switched over.
+        self._emit_audit(
+            AUDIT_KEYS_ACTIVATED,
+            direction="inbound",
+            cipher=self.remote_cipher,
+            mac=self.remote_mac,
+            compression=self.remote_compression,
+            session_id=self._session_id_hex(),
+        )
+        self._audit_stage = "newkeys-received"
 
     def _activate_outbound(self):
         """switch on newly negotiated encryption parameters for
@@ -2707,6 +2855,16 @@ class Transport(threading.Thread, ClosingContextManager):
         ):
             self._log(DEBUG, "Switching on outbound compression ...")
             self.packetizer.set_outbound_compressor(compress_out())
+        # Audit: outbound packet protection has actually switched over.
+        self._emit_audit(
+            AUDIT_KEYS_ACTIVATED,
+            direction="outbound",
+            cipher=self.local_cipher,
+            mac=self.local_mac,
+            compression=self.local_compression,
+            session_id=self._session_id_hex(),
+        )
+        self._audit_stage = "newkeys-sent"
         if not self.packetizer.need_rekey():
             self.in_kex = False
         # If client indicated extension support, send that packet immediately
@@ -2778,6 +2936,12 @@ class Transport(threading.Thread, ClosingContextManager):
             self.clear_to_send.set()
         finally:
             self.clear_to_send_lock.release()
+        # Audit: both directions are now protected by the newly agreed
+        # keys; only now may a handshake be reported as complete.
+        self._emit_audit(
+            AUDIT_HANDSHAKE_COMPLETE,
+            session_id=self._session_id_hex(),
+        )
         return
 
     def _parse_disconnect(self, m):
