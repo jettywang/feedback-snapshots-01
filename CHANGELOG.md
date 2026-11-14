@@ -3,6 +3,14 @@ Detailed CHANGELOG
 
 olefile.py
 ----------
+* unreleased:
+    - added static MS-OVBA VBA project inventory in the new olefile.vba module:
+      bounded decompression of CompressedContainers, dir stream record parsing
+      with per-record byte ranges, module/reference extraction and correlation
+      of MODULE records with their real module streams; reports missing
+      streams, duplicate stream mappings, out-of-range offsets, compression
+      copy overruns and unknown records without executing macros or using
+      file-name/source-string heuristics; new `--vba` CLI option
 * 2023-11-30 v0.47.dev6:
     - fixed issue #142: isOleFile has a new data parameter to handle files in memory properly
     - fixed issue #156: write_sect now correctly detects when data is larger than the sector size

@@ -25,4 +25,22 @@ from .olefile import *
 # import metadata not covered by *:
 from .olefile import __version__, __author__, __date__, __all__
 
+# Static MS-OVBA VBA project inventory (parsing only, macros are never run):
+from . import vba
+from .vba import (
+    VbaInventory, VbaError, VbaCompressionError, VbaStructureError,
+    vba_inventory, decompress_container, default_limits,
+    DEFAULT_MAX_DECOMPRESSED, DEFAULT_MAX_RECORDS, DEFAULT_MAX_MODULES,
+    DEFAULT_MAX_REFERENCES, DEFAULT_MAX_REFERENCE_DEPTH,
+    DEFAULT_SOURCE_PREVIEW,
+)
+
+__all__ = list(__all__) + [
+    'vba', 'VbaInventory', 'VbaError', 'VbaCompressionError',
+    'VbaStructureError', 'vba_inventory', 'decompress_container',
+    'default_limits', 'DEFAULT_MAX_DECOMPRESSED', 'DEFAULT_MAX_RECORDS',
+    'DEFAULT_MAX_MODULES', 'DEFAULT_MAX_REFERENCES',
+    'DEFAULT_MAX_REFERENCE_DEPTH', 'DEFAULT_SOURCE_PREVIEW',
+]
+
 

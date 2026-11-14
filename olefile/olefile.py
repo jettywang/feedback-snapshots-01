@@ -2568,6 +2568,10 @@ def main():
         help='check all streams (for debugging purposes)')
     parser.add_option("-p", action="store_true", dest="extract_customprop",
                       help='extract all user-defined propertires')
+    parser.add_option("--vba", action="store_true", dest="vba_inventory",
+                      help='print a static MS-OVBA inventory of the VBA '
+                           'project (dir stream records, module streams and '
+                           'references); macros are never executed')
     parser.add_option("-d", action="store_true", dest="debug_mode",
         help='debug mode, shortcut for -l debug (displays a lot of debug information, for developers only)')
     parser.add_option('-l', '--loglevel', dest="loglevel", action="store", default=DEFAULT_LOG_LEVEL,
@@ -2599,6 +2603,13 @@ def main():
             print(filename)
             print("-" * 68)
             ole.dumpdirectory()
+            if options.vba_inventory:
+                # Static MS-OVBA inventory: parsing only, no macro execution.
+                from .vba import vba_inventory
+                inventory = vba_inventory(ole)
+                print('\nVBA static inventory:')
+                print(inventory.to_text())
+                print()
             for streamname in ole.listdir():
                 if streamname[-1][0] == "\005":
                     print("%r: properties" % streamname)

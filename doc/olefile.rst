@@ -28,3 +28,12 @@ olefile module
     :show-inheritance:
 
 
+olefile.vba module
+------------------
+
+.. automodule:: olefile.vba
+    :members:
+    :undoc-members:
+    :show-inheritance:
+
+

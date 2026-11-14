@@ -10,6 +10,12 @@ Features
 -  List all the streams and storages contained in an OLE file
 -  Open streams as files
 -  Parse and read property streams, containing metadata of the file
+-  Build a static inventory of an embedded VBA project according to MS-OVBA:
+   the compressed ``dir`` stream is decompressed and interpreted, modules and
+   external references are listed, and every MODULE record is cross-checked
+   against its real module stream.  Macros are never executed, no file-name or
+   source-string heuristic is used, decompressed output and record counts are
+   bounded, and unknown records mark the inventory as incomplete.
 -  Portable, pure Python module, no dependency
 
 olefile can be used as an independent module or with `PIL <http://www.pythonware.com/products/pil/>`__
