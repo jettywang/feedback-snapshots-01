@@ -54,6 +54,8 @@ from in_toto.common_args import (
     QUIET_KWARGS,
     SIGNING_KEY_ARGS,
     SIGNING_KEY_KWARGS,
+    STRICT_ARGS,
+    STRICT_KWARGS,
     VERBOSE_ARGS,
     VERBOSE_KWARGS,
     parse_password_and_prompt_args,
@@ -139,6 +141,7 @@ file to the target directory (on stop).
     parent_parser.add_argument(*EXCLUDE_ARGS, **EXCLUDE_KWARGS)
     parent_parser.add_argument(*BASE_PATH_ARGS, **BASE_PATH_KWARGS)
     parent_parser.add_argument(*LSTRIP_PATHS_ARGS, **LSTRIP_PATHS_KWARGS)
+    parent_parser.add_argument(*STRICT_ARGS, **STRICT_KWARGS)
     parent_parser.add_argument(*DSSE_ARGS, **DSSE_KWARGS)
 
     verbosity_args = parent_parser.add_mutually_exclusive_group(required=False)
@@ -270,6 +273,7 @@ def main():
                 lstrip_paths=args.lstrip_paths,
                 use_dsse=args.use_dsse,
                 signer=signer,
+                strict=args.strict,
             )
 
         # Mutually exclusiveness is guaranteed by argparser
@@ -285,6 +289,7 @@ def main():
                 lstrip_paths=args.lstrip_paths,
                 metadata_directory=args.metadata_directory,
                 signer=signer,
+                strict=args.strict,
             )
 
     except Exception as e:  # noqa: BLE001

@@ -54,6 +54,8 @@ from in_toto.common_args import (
     RUN_TIMEOUT_KWARGS,
     SIGNING_KEY_ARGS,
     SIGNING_KEY_KWARGS,
+    STRICT_ARGS,
+    STRICT_KWARGS,
     VERBOSE_ARGS,
     VERBOSE_KWARGS,
     parse_password_and_prompt_args,
@@ -206,6 +208,7 @@ e.g. 'document.pdf'.
     parser.add_argument(*EXCLUDE_ARGS, **EXCLUDE_KWARGS)
     parser.add_argument(*BASE_PATH_ARGS, **BASE_PATH_KWARGS)
     parser.add_argument(*LSTRIP_PATHS_ARGS, **LSTRIP_PATHS_KWARGS)
+    parser.add_argument(*STRICT_ARGS, **STRICT_KWARGS)
     parser.add_argument(*METADATA_DIRECTORY_ARGS, **METADATA_DIRECTORY_KWARGS)
     parser.add_argument(*DSSE_ARGS, **DSSE_KWARGS)
     parser.add_argument(*RUN_TIMEOUT_ARGS, **RUN_TIMEOUT_KWARGS)
@@ -307,6 +310,7 @@ def main():
             use_dsse=args.use_dsse,
             timeout=args.run_timeout,
             signer=signer,
+            strict=args.strict,
         )
         # FIXME the link has just been serialized and the payload
         # is being deserialized in order to get the 'return-value'.

@@ -75,6 +75,20 @@ LSTRIP_PATHS_KWARGS = {
     ),
 }
 
+STRICT_ARGS = ["--strict"]
+STRICT_KWARGS = {
+    "dest": "strict",
+    "default": False,
+    "action": "store_true",
+    "help": (
+        "record artifacts with consistency checks. If a path or file is"
+        " observed to change while it is recorded, fail before signing rather"
+        " than store a hash that may not describe the file that was read."
+        " Directory trees are snapshotted before and re-listed after"
+        " recording, but this is not an atomic snapshot of the whole tree."
+    ),
+}
+
 KEY_PASSWORD_ARGS = ["-P", "--password"]
 KEY_PASSWORD_KWARGS = {
     "nargs": "?",

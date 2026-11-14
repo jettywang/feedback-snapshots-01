@@ -28,13 +28,14 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import securesystemslib.exceptions
 import securesystemslib.formats
 
 import in_toto.exceptions
 import in_toto.settings
-from in_toto.exceptions import SignatureVerificationError
+from in_toto.exceptions import SignatureVerificationError, StrictRecordingError
 from in_toto.formats import _check_hash_dict
 from in_toto.models.link import (
     FILENAME_FORMAT,
@@ -1430,6 +1431,166 @@ class TestSigner(unittest.TestCase, TmpDirMixin):
         in_toto_record_start("baz", [], signer=self.ed_signer)
         with self.assertRaises(OSError):
             in_toto_record_stop("baz", [], signer=self.rsa_signer)
+
+
+class TestStrictRecording(unittest.TestCase, TmpDirMixin):
+    """Test strict artifact recording through run and record APIs.
+
+    Failures must happen before any signature is created or metadata written.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.set_up_test_dir()
+        cls.rsa_signer = SignerStore.rsa
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tear_down_test_dir()
+
+    def setUp(self):
+        self.artifact = "artifact"
+        Path(self.artifact).write_text("original content")
+
+    def tearDown(self):
+        for name in os.listdir("."):
+            if name.startswith(".") and name.endswith(".link-unfinished"):
+                os.remove(name)
+            elif name.endswith(".link"):
+                os.remove(name)
+
+    def _replace_hook(self):
+        """Replace the artifact on the first read event."""
+
+        state = {"done": False}
+
+        def hook(event):
+            if event.operation == "open" and not state["done"]:
+                state["done"] = True
+                Path("replacement").write_text("replacement content")
+                os.replace("replacement", self.artifact)
+
+        return hook
+
+    def _unfinished_link_exists(self, step_name):
+        return any(
+            name.startswith(f".{step_name}.")
+            and name.endswith(".link-unfinished")
+            for name in os.listdir(".")
+        )
+
+    def _link_exists(self, step_name):
+        return any(
+            name.startswith(f"{step_name}.")
+            and name.endswith(".link")
+            and not name.startswith(".")
+            for name in os.listdir(".")
+        )
+
+    def test_run_stable_file_succeeds(self):
+        link = in_toto_run(
+            "stable-run",
+            [self.artifact],
+            [self.artifact],
+            [],
+            signer=self.rsa_signer,
+            strict=True,
+        )
+
+        self.assertIn(self.artifact, link.signed.materials)
+        self.assertIn(self.artifact, link.signed.products)
+        self.assertIsNone(link.verify_signature(SignerStore.rsa_pub))
+
+    def test_run_failure_happens_before_signing_and_writing(self):
+        with mock.patch(
+            "in_toto.models.metadata.Metablock.create_signature"
+        ) as create_signature:
+            with self.assertRaises(StrictRecordingError):
+                in_toto_run(
+                    "failing-run",
+                    [self.artifact],
+                    [],
+                    [],
+                    signer=self.rsa_signer,
+                    strict=True,
+                    read_hook=self._replace_hook(),
+                )
+
+            create_signature.assert_not_called()
+
+        self.assertFalse(self._link_exists("failing-run"))
+
+    def test_run_strict_does_not_leave_partial_result_in_materials(self):
+        with self.assertRaises(StrictRecordingError):
+            in_toto_run(
+                "failing-run-products",
+                [],
+                [self.artifact],
+                [],
+                signer=self.rsa_signer,
+                strict=True,
+                read_hook=self._replace_hook(),
+            )
+
+        self.assertFalse(self._link_exists("failing-run-products"))
+
+    def test_record_start_failure_before_signing_and_writing(self):
+        with mock.patch(
+            "in_toto.models.metadata.Metablock.create_signature"
+        ) as create_signature:
+            with self.assertRaises(StrictRecordingError):
+                in_toto_record_start(
+                    "failing-start",
+                    [self.artifact],
+                    signer=self.rsa_signer,
+                    strict=True,
+                    read_hook=self._replace_hook(),
+                )
+
+            create_signature.assert_not_called()
+
+        self.assertFalse(self._unfinished_link_exists("failing-start"))
+
+    def test_record_stop_failure_before_final_signing_and_writing(self):
+        in_toto_record_start(
+            "failing-stop", [], signer=self.rsa_signer, strict=True
+        )
+
+        with mock.patch(
+            "in_toto.models.metadata.Metablock.create_signature"
+        ) as create_signature:
+            with self.assertRaises(StrictRecordingError):
+                in_toto_record_stop(
+                    "failing-stop",
+                    [self.artifact],
+                    signer=self.rsa_signer,
+                    strict=True,
+                    read_hook=self._replace_hook(),
+                )
+
+            create_signature.assert_not_called()
+
+        self.assertTrue(self._unfinished_link_exists("failing-stop"))
+        self.assertFalse(self._link_exists("failing-stop"))
+
+    def test_non_strict_mode_still_succeeds(self):
+        # Control: without strict mode, replacement is not detected and the
+        # call succeeds, showing the behavior difference.
+        link = in_toto_run(
+            "non-strict",
+            [self.artifact],
+            [],
+            [],
+            signer=self.rsa_signer,
+            read_hook=self._replace_hook(),
+        )
+        self.assertIn(self.artifact, link.signed.materials)
+
+    def test_unsupported_scheme_is_rejected(self):
+        with self.assertRaises(StrictRecordingError) as raise_ctx:
+            record_artifacts_as_dict(["ostree:test-branch"], strict=True)
+
+        self.assertEqual(raise_ctx.exception.reason, "unsupported-scheme")
 
 
 if __name__ == "__main__":

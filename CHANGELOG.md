@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Added
+* Strict artifact recording (`strict` API argument and `--strict` CLI option
+  for `in-toto-run` and `in-toto-record`). Strict mode binds hashes to the file
+  that was actually opened and the bytes actually read, fails on observed
+  replacement, truncation, or directory entry changes before metadata is
+  signed, and returns no partial result. See the strict recording documentation
+  for covered and uncovered cases.
+
 ## v3.1.0
 
 This release includes version bumpbs, as well as upgraded debian support , and

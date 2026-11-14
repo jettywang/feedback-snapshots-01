@@ -20,5 +20,6 @@ from in_toto.resolver._resolver import (
     DirectoryResolver,
     FileResolver,
     OSTreeResolver,
+    ReadEvent,
     Resolver,
 )

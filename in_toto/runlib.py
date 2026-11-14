@@ -73,6 +73,8 @@ def record_artifacts_as_dict(  # noqa: PLR0913, PLR0917, RUF100
     follow_symlink_dirs=False,
     normalize_line_endings=False,
     lstrip_paths=None,
+    strict=False,
+    read_hook=None,
 ):
     """
     <Purpose>
@@ -139,9 +141,40 @@ def record_artifacts_as_dict(  # noqa: PLR0913, PLR0917, RUF100
               If a prefix path is passed, the prefix is left stripped from
               the path of every artifact that contains the prefix.
 
+      strict: (optional)
+              If True, record artifacts with consistency checks and raise
+              ``StrictRecordingError`` instead of returning hashes that are
+              known to be inconsistent. See "Strict recording" below.
+
+      read_hook: (optional)
+              Callable invoked at deterministic points during strict reads,
+              receiving a ``ReadEvent``. Intended for tests that simulate
+              concurrent replacement or modification. Ignored unless ``strict``
+              is True.
+
+      Strict recording:
+        - Each file is opened once, and its identity (device and inode) and
+          path are compared before and after reading. A path that now names
+          a different file (even one with identical content) fails; the
+          original path is not re-opened or hashed from the new target.
+        - Content is read only from the originally opened descriptor. Chunk
+          reads are followed by checks of identity, size, mtime and ctime, so
+          truncation or in-place modification observed between chunks fails.
+          A final size check verifies that the bytes actually read match the
+          size observed when the file was opened.
+        - Directory trees are snapshotted before and re-listed after
+          recording. Added, removed or replaced entries (including new
+          directories) and a replaced top directory fail. This is not an
+          atomic snapshot of the whole tree: a path that is swapped away and
+          back, or one changed outside the observed checks, is not detected.
+          Likewise, ordinary file reads cannot prove that the entire tree was
+          in one state at the same instant.
+        - Any failure aborts recording; no partial result is returned.
+
     <Exceptions>
       OSError: cannot change to base path directory.
       ValueError: arguments are malformed.
+      StrictRecordingError: strict recording observed an inconsistency.
 
     <Side Effects>
       Calls functions to generate cryptographic hashes.
@@ -170,6 +203,8 @@ def record_artifacts_as_dict(  # noqa: PLR0913, PLR0917, RUF100
         follow_symlink_dirs,
         normalize_line_endings,
         lstrip_paths,
+        strict=strict,
+        read_hook=read_hook,
     )
 
     # Configure resolver for OSTree
@@ -181,25 +216,38 @@ def record_artifacts_as_dict(  # noqa: PLR0913, PLR0917, RUF100
         follow_symlink_dirs=follow_symlink_dirs,
         normalize_line_endings=normalize_line_endings,
         lstrip_paths=lstrip_paths,
+        strict=strict,
+        read_hook=read_hook,
     )
 
     # Aggregate artifacts per resolver
     resolver_for_uris = defaultdict(list)
     for artifact in artifacts:
         resolver = Resolver.for_uri(artifact)
+        if strict and isinstance(resolver, OSTreeResolver):
+            raise in_toto.exceptions.StrictRecordingError(
+                f"strict recording does not support artifact '{artifact}': "
+                "OSTree artifacts are resolved from repository refs and "
+                "commit objects without consistency checks",
+                path=artifact,
+                reason="unsupported-scheme",
+            )
         resolver_for_uris[resolver].append(artifact)
 
     # Hash artifacts in a batch per resolver
     # FIXME: The behavior may change if we hash each artifact individually,
     # because the left-prefix duplicate check in FileResolver only works for the
     # artifacts hashed in one batch.
-    for resolver, uris in resolver_for_uris.items():
-        artifact_hashes.update(resolver.hash_artifacts(uris))
+    try:
+        for resolver, uris in resolver_for_uris.items():
+            artifact_hashes.update(resolver.hash_artifacts(uris))
 
-    # Clear resolvers to not preserve global state change beyond this function.
-    # FIXME: This also clears resolver registered elsewhere. For now we
-    # assume that we only modify RESOLVER_FOR_URI_SCHEME in this function.
-    RESOLVER_FOR_URI_SCHEME.clear()
+    finally:
+        # Clear resolvers to not preserve global state change beyond this
+        # function, also if strict recording raises.
+        # FIXME: This also clears resolver registered elsewhere. For now we
+        # assume that we only modify RESOLVER_FOR_URI_SCHEME in this function.
+        RESOLVER_FOR_URI_SCHEME.clear()
 
     return artifact_hashes
 
@@ -422,6 +470,8 @@ def in_toto_run(  # noqa: C901, PLR0912, PLR0913, PLR0914, PLR0915, PLR0917, RUF
     use_dsse=False,
     timeout=in_toto.settings.LINK_CMD_EXEC_TIMEOUT,
     signer=None,
+    strict=False,
+    read_hook=None,
 ):
     """Performs a supply chain step or inspection generating link metadata.
 
@@ -489,10 +539,23 @@ def in_toto_run(  # noqa: C901, PLR0912, PLR0913, PLR0914, PLR0915, PLR0917, RUF
     signer (optional): A securesystemslib Signer instance used to
         sign the resulting link metadata.
 
+    strict (optional): A boolean indicating if artifacts should be recorded
+        with consistency checks. If an artifact is observed to change while it
+        is read, ``StrictRecordingError`` is raised before any metadata is
+        signed or written, and no partial result is returned. See
+        ``record_artifacts_as_dict`` for details and limitations.
+
+    read_hook (optional): Callable invoked at deterministic points during
+        strict reads, receiving a ``ReadEvent``. Intended for tests that
+        simulate concurrent replacement or modification. Ignored unless
+        ``strict`` is True.
+
   Raises:
     securesystemslib.exceptions.FormatError: Passed arguments are malformed.
 
     OSError: Cannot change to base path directory.
+
+    StrictRecordingError: Strict recording observed an inconsistent artifact.
 
     securesystemslib.exceptions.StorageError: Cannot hash artifacts.
 
@@ -549,6 +612,8 @@ def in_toto_run(  # noqa: C901, PLR0912, PLR0913, PLR0914, PLR0915, PLR0917, RUF
         follow_symlink_dirs=True,
         normalize_line_endings=normalize_line_endings,
         lstrip_paths=lstrip_paths,
+        strict=strict,
+        read_hook=read_hook,
     )
 
     if link_cmd_args:
@@ -569,6 +634,8 @@ def in_toto_run(  # noqa: C901, PLR0912, PLR0913, PLR0914, PLR0915, PLR0917, RUF
         follow_symlink_dirs=True,
         normalize_line_endings=normalize_line_endings,
         lstrip_paths=lstrip_paths,
+        strict=strict,
+        read_hook=read_hook,
     )
 
     LOG.info("Creating link metadata...")
@@ -632,6 +699,8 @@ def in_toto_record_start(  # noqa: PLR0913, PLR0917, RUF100
     lstrip_paths=None,
     use_dsse=False,
     signer=None,
+    strict=False,
+    read_hook=None,
 ):
     """Generates preliminary link metadata.
 
@@ -683,11 +752,24 @@ def in_toto_record_start(  # noqa: PLR0913, PLR0917, RUF100
     signer (optional): A securesystemslib Signer instance used to
         sign the resulting link metadata.
 
+    strict (optional): A boolean indicating if artifacts should be recorded
+        with consistency checks. If an artifact is observed to change while it
+        is read, ``StrictRecordingError`` is raised before the preliminary
+        link metadata is signed or written, and no partial result is returned.
+        See ``record_artifacts_as_dict`` for details and limitations.
+
+    read_hook (optional): Callable invoked at deterministic points during
+        strict reads, receiving a ``ReadEvent``. Intended for tests that
+        simulate concurrent replacement or modification. Ignored unless
+        ``strict`` is True.
+
   Raises:
     securesystemslib.exceptions.FormatError: Passed arguments are malformed.
 
     ValueError: None of signer, gpg_keyid or gpg_use_default=True is
         passed.
+
+    StrictRecordingError: Strict recording observed an inconsistent artifact.
 
     securesystemslib.exceptions.StorageError: Cannot hash artifacts.
 
@@ -742,6 +824,8 @@ def in_toto_record_start(  # noqa: PLR0913, PLR0917, RUF100
         follow_symlink_dirs=True,
         normalize_line_endings=normalize_line_endings,
         lstrip_paths=lstrip_paths,
+        strict=strict,
+        read_hook=read_hook,
     )
 
     LOG.info("Creating preliminary link metadata...")
@@ -803,6 +887,8 @@ def in_toto_record_stop(  # noqa: C901, PLR0912, PLR0913, PLR0914, PLR0915, PLR0
     byproducts=None,
     environment=None,
     signer=None,
+    strict=False,
+    read_hook=None,
 ):
     """Finalizes preliminary link metadata generated with in_toto_record_start.
 
@@ -869,6 +955,18 @@ def in_toto_record_stop(  # noqa: C901, PLR0912, PLR0913, PLR0914, PLR0915, PLR0
     signer (optional): A securesystemslib Signer instance used to
         sign the resulting link metadata.
 
+    strict (optional): A boolean indicating if artifacts should be recorded
+        with consistency checks. If an artifact is observed to change while it
+        is read, ``StrictRecordingError`` is raised before the final link
+        metadata is signed or written, and the preliminary link file is left
+        in place. No partial result is returned. See
+        ``record_artifacts_as_dict`` for details and limitations.
+
+    read_hook (optional): Callable invoked at deterministic points during
+        strict reads, receiving a ``ReadEvent``. Intended for tests that
+        simulate concurrent replacement or modification. Ignored unless
+        ``strict`` is True.
+
   Raises:
     securesystemslib.exceptions.FormatError: Passed arguments are malformed.
 
@@ -876,6 +974,8 @@ def in_toto_record_stop(  # noqa: C901, PLR0912, PLR0913, PLR0914, PLR0915, PLR0
         passed.
 
     LinkNotFoundError: No preliminary link metadata file found.
+
+    StrictRecordingError: Strict recording observed an inconsistent artifact.
 
     securesystemslib.exceptions.StorageError: Cannot hash artifacts.
 
@@ -1014,6 +1114,8 @@ def in_toto_record_stop(  # noqa: C901, PLR0912, PLR0913, PLR0914, PLR0915, PLR0
         follow_symlink_dirs=True,
         normalize_line_endings=normalize_line_endings,
         lstrip_paths=lstrip_paths,
+        strict=strict,
+        read_hook=read_hook,
     )
 
     if command:

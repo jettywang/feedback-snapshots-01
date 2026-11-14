@@ -25,6 +25,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import in_toto.exceptions
 from in_toto.in_toto_record import main as in_toto_record_main
 from in_toto.models.link import UNFINISHED_FILENAME_FORMAT
 from tests.common import PEMS, CliTestCase, GPGKeysMixin, TmpDirMixin
@@ -181,6 +182,42 @@ class TestInTotoRecordTool(CliTestCase, TmpDirMixin, GPGKeysMixin):
         """Error exit with missing unfinished link file."""
         args = ["--step-name", "no-link", "--signing-key", self.rsa_key_path]
         self.assert_cli_sys_exit(["stop"] + args, 1)
+
+    def test_strict_recording(self):
+        """Strict start/stop succeed on stable files and fail on change."""
+        args = [
+            "--step-name",
+            "strict",
+            "--signing-key",
+            self.rsa_key_path,
+            "--strict",
+        ]
+        link_path = Path("strict.2f685fa7.link")
+        unfinished_link_path = Path(".strict.2f685fa7.link-unfinished")
+
+        # Stable artifacts succeed
+        self.assert_cli_sys_exit(
+            ["start"] + args + ["--materials", self.test_artifact1], 0
+        )
+        self.assertTrue(unfinished_link_path.exists())
+        self.assert_cli_sys_exit(
+            ["stop"] + args + ["--products", self.test_artifact1], 0
+        )
+        self.assertTrue(link_path.exists())
+        link_path.unlink()
+
+        # A change before signing aborts start and writes nothing
+        with mock.patch(
+            "in_toto.resolver._resolver._read_file_strict",
+            side_effect=in_toto.exceptions.StrictRecordingError(
+                "simulated", path=self.test_artifact1
+            ),
+        ):
+            self.assert_cli_sys_exit(
+                ["start"] + args + ["--materials", self.test_artifact1], 1
+            )
+
+        self.assertFalse(unfinished_link_path.exists())
 
     def test_pkcs8_signing_key(self):
         """Test in-toto-record, sign link with pkcs8 key file for each algo."""

@@ -5,4 +5,5 @@
 
 settings
 exclude-patterns
+strict-recording
 ```

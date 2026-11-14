@@ -29,6 +29,7 @@ from unittest import mock
 from in_toto.in_toto_run import main as in_toto_run_main
 from in_toto.models.link import FILENAME_FORMAT
 from in_toto.models.metadata import Metablock, Metadata
+import in_toto.exceptions
 from tests.common import (
     PEMS,
     CliTestCase,
@@ -146,6 +147,45 @@ class TestInTotoRunTool(CliTestCase, TmpDirMixin, GPGKeysMixin):
             list(link_metadata.signed.products.keys()),
             [self.test_artifact[len(strip_prefix) :]],
         )
+
+        # Test strict recording on stable artifacts
+        args6 = named_args + ["--strict"] + positional_args
+        self.assert_cli_sys_exit(args6, 0)
+        link_metadata = Metablock.load(self.test_link_rsa)
+        self.assertListEqual(
+            list(link_metadata.signed.materials.keys()),
+            [self.test_artifact],
+        )
+
+    def test_main_strict_fails_before_signing(self):
+        """Strict CLI recording aborts and writes no metadata on change."""
+
+        with mock.patch(
+            "in_toto.models.metadata.Metablock.create_signature"
+        ) as create_signature:
+            with mock.patch(
+                "in_toto.resolver._resolver._read_file_strict",
+                side_effect=in_toto.exceptions.StrictRecordingError(
+                    "simulated", path=self.test_artifact
+                ),
+            ):
+                args = [
+                    "--step-name",
+                    self.test_step,
+                    "--signing-key",
+                    self.rsa_key_path,
+                    "--materials",
+                    self.test_artifact,
+                    "--strict",
+                    "--",
+                    VersionedPython,
+                    "--version",
+                ]
+                self.assert_cli_sys_exit(args, 1)
+
+            create_signature.assert_not_called()
+
+        self.assertFalse(os.path.exists(self.test_link_rsa))
 
     def test_main_with_metadata_directory(self):
         """Test CLI command with metadata directory."""
