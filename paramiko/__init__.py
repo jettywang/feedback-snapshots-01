@@ -22,6 +22,7 @@ __version__ = metadata.version("paramiko")
 
 # flake8: noqa
 from paramiko.transport import (
+    ForwardingLease,
     SecurityOptions,
     ServiceRequestingTransport,
     Transport,

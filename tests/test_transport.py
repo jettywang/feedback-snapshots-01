@@ -548,6 +548,145 @@ class TransportTest(unittest.TestCase):
         self.tc.cancel_port_forward("127.0.0.1", port)
         self.assertTrue(self.server._listen is None)
 
+    def test_reverse_port_forwarding_lease_enforcement(self):
+        """
+        Verify that forwarded-tcpip channels are only accepted when they
+        match an explicit forwarding lease (requested address + allocated
+        port, not cancelled), and that each lease routes to its own handler.
+        """
+        self.setup_test_server()
+
+        # server side approves each forward with a unique allocated port;
+        # no real listeners are needed since channels are opened directly
+        # over the loopback transport
+        granted = []
+        cancelled = []
+        next_port = itertools.count(40000)
+
+        def check_port_forward_request(addr, port):
+            allocated = next(next_port)
+            granted.append((addr, allocated))
+            return allocated
+
+        def cancel_port_forward_request(addr, port):
+            cancelled.append((addr, port))
+
+        self.server.check_port_forward_request = check_port_forward_request
+        self.server.cancel_port_forward_request = cancel_port_forward_request
+
+        accepted = []  # (lease_key, origin, server) per accepted connection
+        opened = {}  # lease_key -> [Channel] handed to the business handler
+        events = {}
+
+        def make_handler(key):
+            events[key] = threading.Event()
+
+            def handler(chan, origin, server_addr_port):
+                accepted.append((key, origin, server_addr_port))
+                opened.setdefault(key, []).append(chan)
+                events[key].set()
+
+            return handler
+
+        # two concurrent forwards, both with server-allocated ports
+        port_a = self.tc.request_port_forward(
+            "127.0.0.1", 0, make_handler("A")
+        )
+        port_b = self.tc.request_port_forward(
+            "127.0.0.1", 0, make_handler("B")
+        )
+        self.assertNotEqual(port_a, port_b)
+
+        # port-0 allocation is associated with the right leases
+        lease_a = self.tc._forward_leases[("127.0.0.1", port_a)]
+        lease_b = self.tc._forward_leases[("127.0.0.1", port_b)]
+        self.assertEqual(port_a, lease_a.port)
+        self.assertEqual(port_b, lease_b.port)
+        self.assertFalse(lease_a.cancelled)
+        self.assertFalse(lease_b.cancelled)
+
+        # a valid channel to lease A is accepted and routed to A's handler
+        sch = self.ts.open_forwarded_tcpip_channel(
+            ("10.0.0.1", 5000), ("127.0.0.1", port_a)
+        )
+        self.assertTrue(events["A"].wait(2.0))
+        self.assertEqual(
+            [("A", ("10.0.0.1", 5000), ("127.0.0.1", port_a))], accepted
+        )
+        sch.close()
+
+        # a valid channel to lease B routes to B's handler, not A's
+        sch = self.ts.open_forwarded_tcpip_channel(
+            ("10.0.0.2", 5001), ("127.0.0.1", port_b)
+        )
+        self.assertTrue(events["B"].wait(2.0))
+        self.assertEqual(
+            ("B", ("10.0.0.2", 5001), ("127.0.0.1", port_b)), accepted[-1]
+        )
+        sch.close()
+
+        # an unrequested address is rejected without invoking any handler
+        with self.assertRaises(SSHException):
+            self.ts.open_forwarded_tcpip_channel(
+                ("10.0.0.3", 5002), ("192.0.2.1", port_a)
+            )
+        # an unrequested port is rejected without invoking any handler
+        wrong_port = port_a + 1 if port_a + 1 != port_b else port_a + 2
+        with self.assertRaises(SSHException):
+            self.ts.open_forwarded_tcpip_channel(
+                ("10.0.0.3", 5002), ("127.0.0.1", wrong_port)
+            )
+        # a forged origin (mimicking the earlier trusted peer) cannot
+        # smuggle a channel to an unapproved destination either
+        with self.assertRaises(SSHException):
+            self.ts.open_forwarded_tcpip_channel(
+                ("10.0.0.1", 5000), ("192.0.2.1", port_a)
+            )
+        self.assertEqual(2, len(accepted))
+
+        # interleaving: a channel accepted before the cancel stays
+        # established; cancelling does not tear it down
+        events["A"].clear()
+        sch = self.ts.open_forwarded_tcpip_channel(
+            ("10.0.0.4", 5003), ("127.0.0.1", port_a)
+        )
+        self.assertTrue(events["A"].wait(2.0))
+        established = opened["A"][-1]
+        self.tc.cancel_port_forward("127.0.0.1", port_a)
+        self.assertTrue(lease_a.cancelled)
+        self.assertNotIn(("127.0.0.1", port_a), self.tc._forward_leases)
+        # the already-established channel is still usable after the cancel
+        sch.send("ping")
+        self.assertEqual(b"ping", established.recv(4))
+        established.send("pong")
+        self.assertEqual(b"pong", sch.recv(4))
+        sch.close()
+        established.close()
+
+        # a late channel to the cancelled lease is rejected, handler not run
+        with self.assertRaises(SSHException):
+            self.ts.open_forwarded_tcpip_channel(
+                ("10.0.0.5", 5004), ("127.0.0.1", port_a)
+            )
+        self.assertEqual(3, len(accepted))
+
+        # the surviving lease B is unaffected by A's cancellation
+        events["B"].clear()
+        sch = self.ts.open_forwarded_tcpip_channel(
+            ("10.0.0.6", 5005), ("127.0.0.1", port_b)
+        )
+        self.assertTrue(events["B"].wait(2.0))
+        self.assertEqual(
+            ("B", ("10.0.0.6", 5005), ("127.0.0.1", port_b)), accepted[-1]
+        )
+        sch.close()
+
+        self.tc.cancel_port_forward("127.0.0.1", port_b)
+        self.assertEqual({}, self.tc._forward_leases)
+        self.assertEqual(
+            [("127.0.0.1", port_a), ("127.0.0.1", port_b)], cancelled
+        )
+
     def test_port_forwarding(self):
         """
         verify that a client can forward new connections from a locally-

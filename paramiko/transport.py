@@ -151,6 +151,42 @@ import atexit
 atexit.register(_join_lingering_threads)
 
 
+class ForwardingLease:
+    """
+    Record of an approved remote (server-to-client) port forwarding.
+
+    A lease is created by `Transport.request_port_forward` once the server
+    grants a ``tcpip-forward`` request, and is cancelled by
+    `Transport.cancel_port_forward` (or by closing the transport).  The
+    transport only accepts incoming ``forwarded-tcpip`` channels whose
+    connected address & port exactly match an active (non-cancelled) lease;
+    each lease carries its own connection handler, so concurrent forwardings
+    never share routing state.
+
+    .. versionadded:: 5.2
+    """
+
+    __slots__ = ("address", "port", "handler", "cancelled")
+
+    def __init__(self, address, port, handler):
+        #: the address requested via ``tcpip-forward``
+        self.address = address
+        #: the port actually allocated by the server (resolved when the
+        #: request asked for port 0)
+        self.port = port
+        #: callable invoked for each accepted forwarded connection
+        self.handler = handler
+        #: `True` once the forwarding has been cancelled
+        self.cancelled = False
+
+    def __repr__(self):
+        return "<ForwardingLease {}:{:d}{}>".format(
+            self.address,
+            self.port,
+            " (cancelled)" if self.cancelled else "",
+        )
+
+
 class Transport(threading.Thread, ClosingContextManager):
     """
     An SSH Transport attaches to a stream (usually a socket), negotiates an
@@ -517,7 +553,8 @@ class Transport(threading.Thread, ClosingContextManager):
         self.default_window_size = default_window_size
         self._forward_agent_handler = None
         self._x11_handler = None
-        self._tcp_handler = None
+        # approved remote port forwardings: (address, port) -> ForwardingLease
+        self._forward_leases = {}
 
         self.saved_exception = None
         self.clear_to_send = threading.Event()
@@ -864,6 +901,13 @@ class Transport(threading.Thread, ClosingContextManager):
         if not self.active:
             return
         self.stop_thread()
+        self.lock.acquire()
+        try:
+            for lease in self._forward_leases.values():
+                lease.cancelled = True
+            self._forward_leases.clear()
+        finally:
+            self.lock.release()
         for chan in list(self._channels.values()):
             chan._unlink()
         self.sock.close()
@@ -1088,6 +1132,14 @@ class Transport(threading.Thread, ClosingContextManager):
         forwarded connections into the accept queue, to be picked up via
         `accept`.
 
+        Each granted request is tracked as an explicit `.ForwardingLease`
+        recording the requested address, the port actually allocated by the
+        server (which resolves ``port=0`` requests), and its own handler.
+        Only ``forwarded-tcpip`` channels whose connected address & port
+        exactly match an active lease are accepted; each lease routes to its
+        own handler, so concurrent forwardings never interfere with one
+        another.
+
         :param str address: the address to bind when forwarding
         :param int port:
             the port to forward, or 0 to ask the server to allocate any port
@@ -1118,7 +1170,15 @@ class Transport(threading.Thread, ClosingContextManager):
                 self._queue_incoming_channel(channel)
 
             handler = default_handler
-        self._tcp_handler = handler
+        lease = ForwardingLease(address, port, handler)
+        self.lock.acquire()
+        try:
+            previous = self._forward_leases.get((address, port))
+            if previous is not None:
+                previous.cancelled = True
+            self._forward_leases[(address, port)] = lease
+        finally:
+            self.lock.release()
         return port
 
     def cancel_port_forward(self, address, port):
@@ -1127,12 +1187,27 @@ class Transport(threading.Thread, ClosingContextManager):
         connections to the given address & port will be forwarded across this
         ssh connection.
 
+        The matching `.ForwardingLease` is cancelled locally *before* the
+        cancellation is requested from the server, so the boundary is
+        unambiguous: any ``forwarded-tcpip`` channel that arrives after this
+        call begins is rejected, even if the server has not processed the
+        cancellation yet.  Channels already accepted before the cancellation
+        are left alone -- cancelling a forward never tears down established
+        connections; they keep running and close through the normal channel
+        lifetime.
+
         :param str address: the address to stop forwarding
         :param int port: the port to stop forwarding
         """
         if not self.active:
             return
-        self._tcp_handler = None
+        self.lock.acquire()
+        try:
+            lease = self._forward_leases.pop((address, int(port)), None)
+            if lease is not None:
+                lease.cancelled = True
+        finally:
+            self.lock.release()
         self.global_request("cancel-tcpip-forward", (address, port), wait=True)
 
     def open_sftp_client(self):
@@ -2885,6 +2960,7 @@ class Transport(threading.Thread, ClosingContextManager):
         initial_window_size = m.get_int()
         max_packet_size = m.get_int()
         reject = False
+        lease = None
         if (
             kind == "auth-agent@openssh.com"
             and self._forward_agent_handler is not None
@@ -2909,22 +2985,44 @@ class Transport(threading.Thread, ClosingContextManager):
                 my_chanid = self._next_channel()
             finally:
                 self.lock.release()
-        elif (kind == "forwarded-tcpip") and (self._tcp_handler is not None):
+        elif (kind == "forwarded-tcpip") and not self.server_mode:
             server_addr = m.get_text()
             server_port = m.get_int()
             origin_addr = m.get_text()
             origin_port = m.get_int()
-            self._log(
-                DEBUG,
-                "Incoming tcp forwarded connection from {}:{:d}".format(
-                    origin_addr, origin_port
-                ),
-            )
+            # Only accept forwarded connections that match an active
+            # forwarding lease: the connected address & port must be exactly
+            # the ones the server approved for a tcpip-forward request, and
+            # the lease must not have been cancelled.  The origin address is
+            # supplied by the peer and is never used to authorize the
+            # channel, so a forged origin cannot reach an unapproved
+            # destination.
             self.lock.acquire()
             try:
-                my_chanid = self._next_channel()
+                lease = self._forward_leases.get((server_addr, server_port))
+                if (lease is not None) and not lease.cancelled:
+                    my_chanid = self._next_channel()
+                else:
+                    lease = None
             finally:
                 self.lock.release()
+            if lease is None:
+                self._log(
+                    DEBUG,
+                    "Rejecting forwarded-tcpip channel to unapproved "
+                    "destination {}:{:d} (origin {}:{:d}).".format(
+                        server_addr, server_port, origin_addr, origin_port
+                    ),
+                )
+                reject = True
+                reason = OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
+            else:
+                self._log(
+                    DEBUG,
+                    "Incoming tcp forwarded connection from {}:{:d}".format(
+                        origin_addr, origin_port
+                    ),
+                )
         elif not self.server_mode:
             self._log(
                 DEBUG,
@@ -2999,9 +3097,16 @@ class Transport(threading.Thread, ClosingContextManager):
             self._x11_handler(chan, (origin_addr, origin_port))
         elif kind == "forwarded-tcpip":
             chan.origin_addr = (origin_addr, origin_port)
-            self._tcp_handler(
-                chan, (origin_addr, origin_port), (server_addr, server_port)
-            )
+            if lease is not None:
+                lease.handler(
+                    chan,
+                    (origin_addr, origin_port),
+                    (server_addr, server_port),
+                )
+            else:
+                # server-mode transports have no forwarding leases; keep the
+                # historical behavior of queueing the channel for `accept`.
+                self._queue_incoming_channel(chan)
         else:
             self._queue_incoming_channel(chan)
 
