@@ -29,6 +29,7 @@ from spnego._credential import (
     Password,
     unify_credentials,
 )
+from spnego._spn_policy import reject_unsupported_spn_target_policy
 from spnego.channel_bindings import GssChannelBindings
 from spnego.exceptions import (
     InvalidCredentialError,
@@ -161,6 +162,7 @@ class SSPIProxy(ContextProxy):
         options: NegotiateOptions = NegotiateOptions.none,
         **kwargs: t.Any,
     ) -> None:
+        reject_unsupported_spn_target_policy("SSPI", kwargs)
 
         if not HAS_SSPI:
             raise ImportError("SSPIProxy requires the Windows only sspilib python package")

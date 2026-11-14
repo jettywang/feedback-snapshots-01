@@ -23,6 +23,12 @@ from spnego._credential import (
     NTLMHash,
     Password,
 )
+from spnego._spn_policy import (
+    SPNTargetNameStatus,
+    SPNTargetPolicy,
+    SPNTargetPolicyMode,
+    SPNTargetValidationResult,
+)
 from spnego.auth import client, server
 from spnego.exceptions import NegotiateOptions
 
@@ -38,6 +44,10 @@ __all__ = [
     "NTLMHash",
     "Password",
     "NegotiateOptions",
+    "SPNTargetNameStatus",
+    "SPNTargetPolicy",
+    "SPNTargetPolicyMode",
+    "SPNTargetValidationResult",
     "UnwrapResult",
     "WinRMWrapResult",
     "WrapResult",

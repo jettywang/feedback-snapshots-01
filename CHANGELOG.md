@@ -2,6 +2,14 @@
 
 ## 0.13.0 - TBD
 
+* Add an optional SPN target name admission policy for the pure Python NTLM acceptor
+  * New `spnego.SPNTargetPolicy` configures the allowed SPNs and trusted aliases for a service from local configuration; the `MSV_AV_TARGET_NAME` AV pair in the NTLMv2 response is matched against those names only, never extended from client supplied values
+  * `SPNTargetPolicyMode.strict` rejects missing, malformed, wrong service, and untrusted names with the new `SPNTargetPolicyError`; the default `permissive` mode keeps the legacy behaviour and emits a `UserWarning`
+  * Validation distinguishes missing target names, mismatched services, trusted aliases, and representation differences (case and a trailing DNS dot) via `SPNTargetNameStatus` on the acceptor's `spn_target_result` property
+  * The policy is enforced on the NTLM acceptor before the password proof is checked; NTLMv1/LM responses that cannot carry a target name fail closed under strict mode
+  * The GSSAPI, SSPI, and CredSSP providers explicitly reject `spn_target_policy` as they cannot enforce it; the pure Python Negotiate (`use_negotiate`) provider forwards it to its NTLM sub context
+  * The NTLM client logs the `service`/`hostname` configuration that the embedded target name is derived from for traceability
+
 ## 0.12.4 - 2026-10-06
 
 * Fix SSPI acceptor with explicit `Password` or `KerberosKeytab` credentials failing with `SEC_E_LOGON_DENIED` when the username is in the UPN form `user@REALM`

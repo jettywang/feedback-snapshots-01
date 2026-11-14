@@ -6,6 +6,7 @@ import logging
 import os
 import socket
 import typing
+import warnings
 
 from spnego._context import (
     IOV,
@@ -53,6 +54,12 @@ from spnego._ntlm_raw.messages import (
     Version,
 )
 from spnego._ntlm_raw.security import seal, sign
+from spnego._spn_policy import (
+    SPNTargetNameStatus,
+    SPNTargetPolicy,
+    SPNTargetPolicyMode,
+    SPNTargetValidationResult,
+)
 from spnego._text import to_text
 from spnego.channel_bindings import GssChannelBindings
 from spnego.exceptions import (
@@ -64,6 +71,7 @@ from spnego.exceptions import (
     NoContextError,
     OperationNotAvailableError,
     SpnegoError,
+    SPNTargetPolicyError,
     UnsupportedQop,
 )
 from spnego.iov import BufferType, IOVResBuffer
@@ -251,12 +259,19 @@ class NTLMProxy(ContextProxy):
         usage: str = "initiate",
         protocol: str = "ntlm",
         options: NegotiateOptions = NegotiateOptions.none,
+        spn_target_policy: typing.Optional[SPNTargetPolicy] = None,
         **kwargs: typing.Any,
     ) -> None:
         credentials = unify_credentials(username, password, required_protocol="ntlm")
         super(NTLMProxy, self).__init__(
             credentials, hostname, service, channel_bindings, context_req, usage, protocol, options
         )
+
+        if spn_target_policy is not None and not isinstance(spn_target_policy, SPNTargetPolicy):
+            raise TypeError(
+                "spn_target_policy must be a SPNTargetPolicy instance, got %s" % type(spn_target_policy).__name__
+            )
+        self._spn_target_policy = spn_target_policy
 
         self._complete = False
         self._credential: typing.Optional[_NTLMCredential] = None
@@ -314,6 +329,7 @@ class NTLMProxy(ContextProxy):
         self._temp_negotiate: typing.Optional[Negotiate] = None
         self._temp_challenge: typing.Optional[Challenge] = None
         self._mic_required = False
+        self._spn_target_result: typing.Optional[SPNTargetValidationResult] = None
 
         # Crypto state for signing and sealing.
         self._session_key: typing.Optional[bytes] = None
@@ -349,6 +365,16 @@ class NTLMProxy(ContextProxy):
         return "ntlm"
 
     @property
+    def spn_target_policy(self) -> typing.Optional[SPNTargetPolicy]:
+        """The local SPN target name admission policy configured on the acceptor."""
+        return self._spn_target_policy
+
+    @property
+    def spn_target_result(self) -> typing.Optional[SPNTargetValidationResult]:
+        """The result of the last target name validation, or None if not yet performed."""
+        return self._spn_target_result
+
+    @property
     def session_key(self) -> bytes:
         return self._session_key or b""
 
@@ -370,6 +396,7 @@ class NTLMProxy(ContextProxy):
             usage=self.usage,
             protocol=self.protocol,
             options=self.options,
+            spn_target_policy=self._spn_target_policy,
         )
 
     def step(
@@ -572,6 +599,10 @@ class NTLMProxy(ContextProxy):
             client_challenge = nt_challenge.challenge_from_client
             target_info = nt_challenge.av_pairs
 
+            # Enforce the locally configured SPN admission policy before the password proof is checked. The
+            # MSV_AV_TARGET_NAME value is client supplied so it must only ever be compared against local config.
+            self._enforce_spn_target_policy(target_info.get(AvId.target_name))
+
             expected_nt, expected_lm, key_exchange_key = compute_response_v2(
                 nt_hash, server_challenge, client_challenge, time, target_info
             )
@@ -596,6 +627,10 @@ class NTLMProxy(ContextProxy):
 
             elif not auth.nt_challenge_response and not self._lm:
                 raise InvalidTokenError(context_msg="Acceptor settings are set to reject LM responses")
+
+            # NTLMv1/LM responses carry no target name so the policy cannot be satisfied from the token. A strict
+            # policy fails closed rather than admitting a token it cannot attribute to this service.
+            self._enforce_spn_target_policy(None, response_supports_target_name=False)
 
             client_challenge = b"\x00" * 8
             if auth.flags & NegotiateFlags.extended_session_security:
@@ -925,6 +960,59 @@ class NTLMProxy(ContextProxy):
         """Calculates the MIC value for the negotiated context."""
         return hmac_md5(session_key, negotiate + challenge + authenticate)
 
+    def _enforce_spn_target_policy(
+        self,
+        presented_target_name: typing.Optional[str],
+        response_supports_target_name: bool = True,
+    ) -> None:
+        """Apply the locally configured SPN admission policy to a client response.
+
+        The policy is optional; without one the acceptor keeps its historical behaviour of trusting any NTLM response
+        that proves the password. When a policy is present the client supplied ``MSV_AV_TARGET_NAME`` is only matched
+        against names from local configuration. A strict policy rejects a presentation that is missing or not admitted
+        while the default permissive mode records the result and emits a warning for backwards compatibility.
+
+        Args:
+            presented_target_name: The target name AV pair value from the NTLMv2 client challenge, or None when absent.
+            response_supports_target_name: Whether the response format is even able to carry a target name. NTLMv1/LM
+                responses cannot, those are treated as an unsatisfiable policy.
+        """
+        policy = self._spn_target_policy
+        if policy is None:
+            return
+
+        result = policy.validate(presented_target_name)
+        if not response_supports_target_name and result.status == SPNTargetNameStatus.missing:
+            detail = "response does not carry an MSV_AV_TARGET_NAME AV pair (NTLMv1/LM)"
+        elif result.status == SPNTargetNameStatus.missing:
+            detail = "MSV_AV_TARGET_NAME AV pair was missing or empty"
+        else:
+            detail = "presented target name %r is not an allowed name or trusted alias" % result.presented
+
+        self._spn_target_result = result
+        log.debug(
+            "NTLM SPN target policy result: status=%s presented=%r matched=%r allowed=%s",
+            result.status.value,
+            result.presented,
+            result.matched,
+            result.allowed,
+        )
+
+        if result.allowed:
+            return
+
+        message = "NTLM SPN target policy %s the authentication: %s. Allowed names: %s, trusted aliases: %s" % (
+            "rejected" if policy.strict else "did not admit",
+            detail,
+            ", ".join(policy.allowed_names),
+            ", ".join(policy.trusted_aliases) or "<none>",
+        )
+
+        if policy.strict:
+            raise SPNTargetPolicyError(context_msg=message)
+
+        warnings.warn(message, category=UserWarning, stacklevel=3)
+
     def _compute_response(
         self,
         challenge: Challenge,
@@ -948,7 +1036,17 @@ class NTLMProxy(ContextProxy):
             # case. Instead only add the bindings if they have been specified by the caller.
             if channel_bindings:
                 target_info[AvId.channel_bindings] = md5(channel_bindings.pack())
-            target_info[AvId.target_name] = self.spn or ""
+            target_name = self.spn or ""
+            # Record where the value came from so the target name embedded in the NTLMv2 response can be traced back
+            # to the hostname/service configuration of this client context rather than an opaque wire value.
+            log.debug(
+                "NTLM client setting MSV_AV_TARGET_NAME to %r from service=%r hostname=%r (context spn=%r)",
+                target_name,
+                self._service,
+                self._hostname,
+                self.spn,
+            )
+            target_info[AvId.target_name] = target_name
 
             if self._mic_required:
                 target_info[AvId.flags] = target_info.get(AvId.flags, AvFlags(0)) | AvFlags.mic

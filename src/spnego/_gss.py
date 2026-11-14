@@ -28,6 +28,7 @@ from spnego._credential import (
     Password,
     unify_credentials,
 )
+from spnego._spn_policy import reject_unsupported_spn_target_policy
 from spnego._text import to_bytes, to_text
 from spnego.channel_bindings import GssChannelBindings
 from spnego.exceptions import GSSError as NativeError
@@ -346,6 +347,8 @@ class GSSAPIProxy(ContextProxy):
         options: NegotiateOptions = NegotiateOptions.none,
         **kwargs: typing.Any,
     ) -> None:
+        reject_unsupported_spn_target_policy("GSSAPI", kwargs)
+
         if not HAS_GSSAPI:
             raise ImportError("GSSAPIProxy requires the Python gssapi library: %s" % GSSAPI_IMP_ERR)
 

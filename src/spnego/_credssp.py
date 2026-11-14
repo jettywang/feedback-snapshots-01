@@ -32,6 +32,7 @@ from spnego._credssp_structures import (
     TSPasswordCreds,
     TSRequest,
 )
+from spnego._spn_policy import reject_unsupported_spn_target_policy
 from spnego._text import to_text
 from spnego.channel_bindings import GssChannelBindings
 from spnego.exceptions import (
@@ -268,6 +269,8 @@ class CredSSPProxy(ContextProxy):
         options: NegotiateOptions = NegotiateOptions.none,
         **kwargs: typing.Any,
     ) -> None:
+        reject_unsupported_spn_target_policy("CredSSP", kwargs)
+
         credentials = unify_credentials(
             username, password, required_protocol="credssp" if usage == "initiate" else None
         )

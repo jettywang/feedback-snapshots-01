@@ -147,6 +147,7 @@ class ErrorCode(enum.IntEnum):
     unavailable = 16  # OperationNotAvailableError
     # duplicate_element = 17  # Shouldn't happen in our code.
     # name_not_mn = 18  # Shouldn't happen in our code.
+    spn_target_policy = 19  # SPNTargetPolicyError, pyspnego specific NTLM SPN admission failure
 
 
 # Implementation is inspired by the python-gssapi project https://github.com/pythongssapi/python-gssapi.
@@ -293,6 +294,15 @@ class BadNameError(SpnegoError):
     ERROR_CODE = ErrorCode.bad_name
 
     _BASE_MESSAGE = "An invalid name was supplied"
+    _GSSAPI_CODE = 1310722  # GSS_S_BAD_NAME
+    _SSPI_CODE = -2146893053  # SEC_E_TARGET_UNKNOWN
+
+
+class SPNTargetPolicyError(SpnegoError):
+    ERROR_CODE = ErrorCode.spn_target_policy
+
+    _BASE_MESSAGE = "The NTLM target name was rejected by the configured SPN target policy"
+    # The closest native equivalents are GSS_S_BAD_NAME and SEC_E_TARGET_UNKNOWN.
     _GSSAPI_CODE = 1310722  # GSS_S_BAD_NAME
     _SSPI_CODE = -2146893053  # SEC_E_TARGET_UNKNOWN
 

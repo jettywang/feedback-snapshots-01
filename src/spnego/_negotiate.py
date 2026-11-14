@@ -21,6 +21,7 @@ from spnego._context import (
 )
 from spnego._credential import Credential, unify_credentials
 from spnego._gss import GSSAPIProxy
+from spnego._spn_policy import SPNTargetPolicy
 from spnego._spnego import (
     NegState,
     NegTokenInit,
@@ -61,12 +62,19 @@ class NegotiateProxy(ContextProxy):
         usage: str = "initiate",
         protocol: str = "negotiate",
         options: NegotiateOptions = NegotiateOptions.none,
+        spn_target_policy: typing.Optional[SPNTargetPolicy] = None,
         **kwargs: typing.Any,
     ) -> None:
         credentials = unify_credentials(username, password)
         super(NegotiateProxy, self).__init__(
             credentials, hostname, service, channel_bindings, context_req, usage, protocol, options
         )
+
+        if spn_target_policy is not None and not isinstance(spn_target_policy, SPNTargetPolicy):
+            raise TypeError(
+                "spn_target_policy must be a SPNTargetPolicy instance, got %s" % type(spn_target_policy).__name__
+            )
+        self._spn_target_policy = spn_target_policy
 
         self._credentials = credentials
         self._complete = False
@@ -138,6 +146,7 @@ class NegotiateProxy(ContextProxy):
             usage=self.usage,
             protocol=self.protocol,
             options=self.options,
+            spn_target_policy=self._spn_target_policy,
             _negotiate_contexts={m: c[0].new_context() for m, c in self._context_list.items()},
         )
 
@@ -472,6 +481,12 @@ class NegotiateProxy(ContextProxy):
                     options = self.options & ~NegotiateOptions.use_negotiate
                     if protocol == "ntlm" and "ntlm" in SSPIProxy.available_protocols(options=options):
                         options |= NegotiateOptions.use_ntlm
+
+                    # The SPN admission policy can only be enforced by the pure Python NTLM provider.
+                    if protocol == "ntlm" and self._spn_target_policy is not None:
+                        context_kwargs["spn_target_policy"] = self._spn_target_policy
+                    else:
+                        context_kwargs.pop("spn_target_policy", None)
 
                     if self.usage == "accept":
                         context = spnego.server(
