@@ -93,6 +93,12 @@ class Cache:
         del self.__expirationQueue[expireAt]["msgId"][msgId]
         return cacheEntry
 
+    def peek_by_message_id(self, msgId):
+        """Return cached request parameters without removing the entry."""
+        if msgId in self.__msgIdIndex:
+            return self.__msgIdIndex[msgId][0]
+        return None
+
     def pop_by_send_pdu_handle(self, sendPduHandle):
         """Release state information."""
         if sendPduHandle in self.__sendPduHandleIdx:

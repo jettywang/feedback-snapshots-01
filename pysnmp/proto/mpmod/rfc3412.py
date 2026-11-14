@@ -677,6 +677,11 @@ class SnmpV3MessageProcessingModel(AbstractMessageProcessingModel):
 
         # 7.2.6
         smHandler: AbstractSecurityModel = snmpEngine.security_models[securityModel]
+        # An unauthenticated message may only bootstrap engine discovery when
+        # it answers a request this manager actually sent. A msgID with no
+        # in-flight entry means an unsolicited/forged Report.
+        in_flight = self._cache.peek_by_message_id(msgID)
+        discovery_response_requested = in_flight is not None
         try:
             (
                 securityEngineId,
@@ -693,6 +698,7 @@ class SnmpV3MessageProcessingModel(AbstractMessageProcessingModel):
                 securityLevel,
                 wholeMsg,
                 msg,
+                discovery_response_requested=discovery_response_requested,
             )  # type: ignore
             debug.logger & debug.FLAG_MP and debug.logger(
                 "prepareDataElements: SM succeeded"
@@ -798,7 +804,22 @@ class SnmpV3MessageProcessingModel(AbstractMessageProcessingModel):
                 pdu = pdus.getComponent()
                 # Here we assume that authentic/default EngineIDs
                 # come only in the course of engine-to-engine communication.
-                if pdu.tagSet in rfc3411.INTERNAL_CLASS_PDUS:
+                #
+                # An unauthenticated Report is only trusted for the one-time
+                # engine-ID discovery bootstrap (empty security name) and only
+                # when it answers a request this manager actually sent.
+                # Reports carrying a security name but no valid MAC, or whose
+                # msgID matches no in-flight probe, must never seed or
+                # overwrite the peer engine-ID cache, or a forged Report could
+                # pin the manager to an attacker-chosen engine identity.
+                unauthenticated_discovery = (
+                    securityLevel == 1
+                    and not securityName
+                    and discovery_response_requested
+                )
+                if pdu.tagSet in rfc3411.INTERNAL_CLASS_PDUS and (
+                    securityLevel >= 2 or unauthenticated_discovery
+                ):
                     self.__engineIdCache[k] = {
                         "securityEngineId": securityEngineId,
                         "contextEngineId": contextEngineId,
@@ -815,6 +836,13 @@ class SnmpV3MessageProcessingModel(AbstractMessageProcessingModel):
 
                     debug.logger & debug.FLAG_MP and debug.logger(
                         "prepareDataElements: cache securityEngineId {!r} for {!r} {!r}".format(
+                            securityEngineId, transportDomain, transportAddress
+                        )
+                    )
+                elif pdu.tagSet in rfc3411.INTERNAL_CLASS_PDUS:
+                    debug.logger & debug.FLAG_MP and debug.logger(
+                        "prepareDataElements: refusing to cache unauthenticated "
+                        "securityEngineId {!r} for {!r} {!r}".format(
                             securityEngineId, transportDomain, transportAddress
                         )
                     )

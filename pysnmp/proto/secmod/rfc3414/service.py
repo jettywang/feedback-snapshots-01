@@ -959,8 +959,16 @@ class SnmpUSMSecurityModel(AbstractSecurityModel):
         securityLevel,
         wholeMsg,
         msg,
+        discovery_response_requested: bool = False,
     ):
-        """Process incoming SNMP message."""
+        """Process incoming SNMP message.
+
+        ``discovery_response_requested`` is set by the message processing
+        model when the incoming message's msgID matches an in-flight,
+        reportable request. It is the only unauthenticated input allowed to
+        bootstrap the engine timeline; an unsolicited Report whose msgID
+        matches no probe is rejected as a discovery source.
+        """
         mibBuilder = snmpEngine.get_mib_builder()
 
         # 3.2.9 -- moved up here to be able to report
@@ -1247,6 +1255,15 @@ class SnmpUSMSecurityModel(AbstractSecurityModel):
                 )
 
         # 3.2.6
+        # RFC 3414 3.2.6: the local timeline is only updated from a message
+        # whose authenticity has been verified. An unauthenticated message is
+        # trusted solely for the one-time engine-ID discovery bootstrap, i.e.
+        # an engine we do not yet have a timeline for reached with an empty
+        # user name (a noAuthNoPriv discovery Report). Every other
+        # unauthenticated message, including forged Reports injected during an
+        # established session, must not mutate the timeline -- otherwise an
+        # attacker can pin a victim engine's boots/time to arbitrary values.
+        message_authenticated = False
         if securityLevel in (1, 2, 3):
             if securityLevel in (2, 3) and usmUserName:
                 if usmUserAuthProtocol in self.AUTH_SERVICES:
@@ -1282,20 +1299,35 @@ class SnmpUSMSecurityModel(AbstractSecurityModel):
                 debug.logger & debug.FLAG_SM and debug.logger(
                     "processIncomingMsg: incoming msg authenticated"
                 )
+                message_authenticated = True
 
-            # synchronize time with authed peer
-            self.__timeline[msgAuthoritativeEngineId] = (
-                securityParameters.getComponentByPosition(1),
-                securityParameters.getComponentByPosition(2),
-                securityParameters.getComponentByPosition(2),
-                int(time.time()),
+            discovery_bootstrap = (
+                securityLevel == 1
+                and not msgUserName
+                and msgAuthoritativeEngineId not in self.__timeline
+                and discovery_response_requested
             )
 
-            self.__schedule_timeline_expiry(msgAuthoritativeEngineId, snmpEngine)
+            if message_authenticated or discovery_bootstrap:
+                # synchronize time with the authenticated peer, or bootstrap it
+                # once from an unauthenticated discovery Report
+                self.__timeline[msgAuthoritativeEngineId] = (
+                    securityParameters.getComponentByPosition(1),
+                    securityParameters.getComponentByPosition(2),
+                    securityParameters.getComponentByPosition(2),
+                    int(time.time()),
+                )
 
-            debug.logger & debug.FLAG_SM and debug.logger(
-                f"processIncomingMsg: store timeline for securityEngineID {msgAuthoritativeEngineId!r}"
-            )
+                self.__schedule_timeline_expiry(msgAuthoritativeEngineId, snmpEngine)
+
+                debug.logger & debug.FLAG_SM and debug.logger(
+                    f"processIncomingMsg: store timeline for securityEngineID {msgAuthoritativeEngineId!r}"
+                )
+            else:
+                debug.logger & debug.FLAG_SM and debug.logger(
+                    "processIncomingMsg: refusing unauthenticated timeline update "
+                    f"for securityEngineID {msgAuthoritativeEngineId!r}"
+                )
 
         # 3.2.7
         if securityLevel == 3 or securityLevel == 2:
