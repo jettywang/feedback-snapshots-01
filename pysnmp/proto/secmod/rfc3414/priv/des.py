@@ -33,6 +33,9 @@ class Des(base.AbstractEncryptionService):
 
     SERVICE_ID = (1, 3, 6, 1, 6, 3, 10, 1, 2, 2)  # usmDESPrivProtocol
     KEY_SIZE = 16
+    # 8.1.1.2: plaintext is padded with arbitrary octets up to
+    # a multiple of the 8-octet DES block size
+    PADDING_BLOCK_SIZE = 8
 
     local_int = random.randrange(0, 0xFFFFFFFF)
 

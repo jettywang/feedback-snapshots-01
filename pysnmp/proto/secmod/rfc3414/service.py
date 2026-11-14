@@ -1477,6 +1477,34 @@ class SnmpUSMSecurityModel(AbstractSecurityModel):
                 raise error.StatusInformation(
                     errorIndication=errind.decryptionError, msgUserName=msgUserName
                 )
+
+            # 3.2.8a: the decrypted substrate must hold exactly one
+            # scopedPDU. Block ciphers (DES/3DES) may leave up to one
+            # padding block behind; stream ciphers (AES CFB) leave
+            # nothing. Anything beyond that is smuggled data, not
+            # padding, and must not be silently trusted.
+            if len(rest) > privHandler.PADDING_BLOCK_SIZE:
+                debug.logger & debug.FLAG_SM and debug.logger(
+                    "processIncomingMsg: {} trailing octets after scopedPDU "
+                    "exceed {} octets of cipher padding".format(
+                        len(rest), privHandler.PADDING_BLOCK_SIZE
+                    )
+                )
+                (usmStatsDecryptionErrors,) = mibBuilder.import_symbols(  # type: ignore
+                    "__SNMP-USER-BASED-SM-MIB", "usmStatsDecryptionErrors"
+                )
+                usmStatsDecryptionErrors.syntax += 1
+                raise error.StatusInformation(
+                    errorIndication=errind.decryptionError,
+                    oid=usmStatsDecryptionErrors.name,
+                    val=usmStatsDecryptionErrors.syntax,
+                    securityStateReference=securityStateReference,
+                    securityLevel=securityLevel,
+                    contextEngineId=contextEngineId,
+                    contextName=contextName,
+                    msgUserName=msgUserName,
+                    maxSizeResponseScopedPDU=maxSizeResponseScopedPDU,
+                )
         else:
             # 3.2.8b
             scopedPDU = scopedPduData.getComponentByPosition(0)

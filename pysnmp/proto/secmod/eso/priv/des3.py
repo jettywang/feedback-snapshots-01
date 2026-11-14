@@ -36,6 +36,9 @@ class Des3(base.AbstractEncryptionService):
 
     SERVICE_ID = (1, 3, 6, 1, 6, 3, 10, 1, 2, 3)  # usm3DESEDEPrivProtocol
     KEY_SIZE = 32
+    # Plaintext is padded with arbitrary octets up to a multiple
+    # of the 8-octet 3DES block size
+    PADDING_BLOCK_SIZE = 8
     local_int = random.randrange(0, 0xFFFFFFFF)
 
     def hash_passphrase(self, authProtocol, privKey) -> univ.OctetString:
