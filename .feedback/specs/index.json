@@ -1,0 +1,26 @@
+[
+  {
+    "repo": "aiosmtpd",
+    "file": ".feedback/specs/rfc5321.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc5321.txt",
+    "sha256": "7d560eddff1b213c17d4e1e5f95005728b2f05bc2b3947f0fcc91717c6707634"
+  },
+  {
+    "repo": "aiosmtpd",
+    "file": ".feedback/specs/rfc6531.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc6531.txt",
+    "sha256": "4f48303f7b7659d0b3149730b51a03d59799a95b4d2ca7d913533f97b9db4b40"
+  },
+  {
+    "repo": "aiosmtpd",
+    "file": ".feedback/specs/rfc3030.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc3030.txt",
+    "sha256": "e21754fb6e2eece84b0754e31e3b997f1a7ec5731ad8c6449010af70ecfc7794"
+  },
+  {
+    "repo": "aiosmtpd",
+    "file": ".feedback/specs/rfc7628.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc7628.txt",
+    "sha256": "f62bfb2712c737fef6e7d225747d83833f616daf09e51a8a12e090c1e431068a"
+  }
+]
