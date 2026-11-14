@@ -1,0 +1,16 @@
+{
+  "comment": "带标签行与空标签行并存：未登记来源（含已登记 IP 的临时端口）静默获得空标签行身份。",
+  "communities": [
+    {"index": "a-area", "name": "public", "securityName": "nms-area-a", "transportTag": "grpA"},
+    {"index": "fallback", "name": "public", "securityName": "nms-guest"}
+  ],
+  "targetAddresses": [
+    {"name": "src-a", "domain": "udp", "address": ["10.1.0.10", 50000], "tagList": "grpA"}
+  ],
+  "vacmUsers": [
+    {"securityModel": 2, "securityName": "nms-area-a", "securityLevel": "noAuthNoPriv", "readSubTree": [1, 3, 6, 1, 4, 1, 9999, 1]},
+    {"securityModel": 2, "securityName": "nms-guest", "securityLevel": "noAuthNoPriv", "readSubTree": [1, 3, 6, 1, 4, 1, 9999]}
+  ],
+  "probeOids": [[1, 3, 6, 1, 4, 1, 9999, 1, 1, 0], [1, 3, 6, 1, 4, 1, 9999, 2, 1, 0]],
+  "unknownSourceProbe": ["10.9.9.9", 50000]
+}

@@ -1,0 +1,18 @@
+{
+  "comment": "同一来源地址同时出现在两条 targetAddress 里，标签集合取并集后同一 community 解析出两个身份。",
+  "communities": [
+    {"index": "a-area", "name": "public", "securityName": "nms-area-a", "transportTag": "grpA"},
+    {"index": "b-area", "name": "public", "securityName": "nms-area-b", "transportTag": "grpB"}
+  ],
+  "targetAddresses": [
+    {"name": "src-a-1", "domain": "udp", "address": ["10.1.0.10", 50000], "tagList": "grpA"},
+    {"name": "src-a-2", "domain": "udp", "address": ["10.1.0.10", 50000], "tagList": "grpB"},
+    {"name": "src-b", "domain": "udp", "address": ["10.2.0.10", 50000], "tagList": "grpB"}
+  ],
+  "vacmUsers": [
+    {"securityModel": 2, "securityName": "nms-area-a", "securityLevel": "noAuthNoPriv", "readSubTree": [1, 3, 6, 1, 4, 1, 9999, 1]},
+    {"securityModel": 2, "securityName": "nms-area-b", "securityLevel": "noAuthNoPriv", "readSubTree": [1, 3, 6, 1, 4, 1, 9999, 2]}
+  ],
+  "probeOids": [[1, 3, 6, 1, 4, 1, 9999, 1, 1, 0], [1, 3, 6, 1, 4, 1, 9999, 2, 1, 0]],
+  "unknownSourceProbe": ["10.9.9.9", 50000]
+}
