@@ -83,16 +83,24 @@ class BinarySerializer(BaseSerializer):
         return bytes(data)
 
     def deserialize(self, serialized):
-        if len(serialized) == 0:
-            raise ValueError('empty macaroon')
+        from pymacaroons.exceptions import MacaroonDeserializationException
+        if not serialized:
+            raise MacaroonDeserializationException('empty macaroon')
         serialized = convert_to_string(serialized)
-        decoded = raw_b64decode(serialized)
+        try:
+            decoded = raw_b64decode(serialized)
+        except (binascii.Error, ValueError) as exc:
+            raise MacaroonDeserializationException(
+                'cannot decode base64 macaroon: {exc}'.format(exc=exc))
         return self.deserialize_raw(decoded)
 
     def deserialize_raw(self, serialized):
         from pymacaroons.macaroon import MACAROON_V2
         from pymacaroons.exceptions import MacaroonDeserializationException
 
+        serialized = convert_to_bytes(serialized)
+        if not serialized:
+            raise MacaroonDeserializationException('empty macaroon')
         first = six.byte2int(serialized[:1])
         if first == MACAROON_V2:
             return self._deserialize_v2(serialized)
@@ -100,6 +108,18 @@ class BinarySerializer(BaseSerializer):
             return self._deserialize_v1(serialized)
         raise MacaroonDeserializationException(
             'cannot determine data format of binary-encoded macaroon')
+
+    # Parser states for the canonical v1 field grammar:
+    #   location? identifier (cid (vid cl)?)* signature
+    # Each header field appears at most once, the signature exactly once and
+    # always last, and a third-party block is exactly 'cid vid cl' in order.
+    # Enforcing this state machine means two parsers cannot disagree about
+    # which identifier, caveats or signature a token contains.
+    _V1_STATE_HEADER = 'header'
+    _V1_STATE_CAVEATS = 'caveats'
+    _V1_STATE_PENDING_CID = 'pending_cid'
+    _V1_STATE_THIRD_PARTY = 'third_party'
+    _V1_STATE_SIGNED = 'signed'
 
     def _deserialize_v1(self, decoded):
         from pymacaroons.macaroon import Macaroon, MACAROON_V1
@@ -109,34 +129,96 @@ class BinarySerializer(BaseSerializer):
         macaroon = Macaroon(version=MACAROON_V1)
 
         index = 0
+        state = self._V1_STATE_HEADER
+        seen_location = False
+        seen_identifier = False
+        seen_signature = False
+        current_caveat = None
 
         while index < len(decoded):
-            packet_length = int(
-                struct.unpack(
-                    b"4s",
-                    decoded[index:index + self.PACKET_PREFIX_LENGTH]
-                )[0],
-                16
-            )
+            if index + self.PACKET_PREFIX_LENGTH > len(decoded):
+                raise MacaroonDeserializationException(
+                    'truncated packet length prefix')
+            length_prefix = decoded[
+                index:index + self.PACKET_PREFIX_LENGTH
+            ]
+            try:
+                packet_length = int(
+                    struct.unpack(b"4s", length_prefix)[0], 16
+                )
+            except ValueError:
+                raise MacaroonDeserializationException(
+                    'invalid packet length prefix: {prefix}'.format(
+                        prefix=length_prefix))
+            if packet_length < self.PACKET_PREFIX_LENGTH:
+                raise MacaroonDeserializationException(
+                    'zero-length or invalid packet')
+            if packet_length > len(decoded) - index:
+                raise MacaroonDeserializationException(
+                    'packet extends past end of buffer')
+
             packet = decoded[
                 index + self.PACKET_PREFIX_LENGTH:index + packet_length
             ]
-
             key, value = self._depacketize(packet)
 
             if key == b'location':
+                if state != self._V1_STATE_HEADER or seen_location:
+                    raise MacaroonDeserializationException(
+                        'duplicate or misplaced location in macaroon header')
                 macaroon.location = value
+                seen_location = True
             elif key == b'identifier':
+                if state != self._V1_STATE_HEADER or seen_identifier:
+                    raise MacaroonDeserializationException(
+                        'duplicate or misplaced identifier in macaroon '
+                        'header')
                 macaroon.identifier = value
+                seen_identifier = True
+                state = self._V1_STATE_CAVEATS
             elif key == b'cid':
-                macaroon.caveats.append(Caveat(caveat_id=value,
-                                               version=MACAROON_V1))
+                # A new caveat id is legal while scanning the caveat section
+                # or to start the first caveat. A 'vid' may only attach to
+                # the most recent 'cid', so once another 'cid' appears the
+                # previous caveat is fixed as first-party and can never gain
+                # third-party fields.
+                if state not in (self._V1_STATE_CAVEATS,
+                                 self._V1_STATE_PENDING_CID):
+                    raise MacaroonDeserializationException(
+                        'caveat id found outside the caveat section')
+                current_caveat = Caveat(caveat_id=value,
+                                        version=MACAROON_V1)
+                macaroon.caveats.append(current_caveat)
+                state = self._V1_STATE_PENDING_CID
             elif key == b'vid':
-                macaroon.caveats[-1].verification_key_id = value
+                if state != self._V1_STATE_PENDING_CID:
+                    raise MacaroonDeserializationException(
+                        'verification id does not directly follow its '
+                        'caveat id')
+                current_caveat.verification_key_id = value
+                state = self._V1_STATE_THIRD_PARTY
             elif key == b'cl':
-                macaroon.caveats[-1].location = value
+                # 'cl' only exists as the closing packet of a third-party
+                # caveat and therefore must follow a 'vid'.
+                if state != self._V1_STATE_THIRD_PARTY:
+                    raise MacaroonDeserializationException(
+                        'caveat location must directly follow a '
+                        'verification id')
+                current_caveat.location = value
+                state = self._V1_STATE_CAVEATS
             elif key == b'signature':
+                if state == self._V1_STATE_THIRD_PARTY:
+                    raise MacaroonDeserializationException(
+                        'signature found before caveat location')
+                if state == self._V1_STATE_SIGNED:
+                    raise MacaroonDeserializationException(
+                        'duplicate signature in macaroon')
+                if not seen_identifier:
+                    raise MacaroonDeserializationException(
+                        'signature found before identifier')
                 macaroon.signature = binascii.hexlify(value)
+                seen_signature = True
+                state = self._V1_STATE_SIGNED
             else:
                 raise MacaroonDeserializationException(
                     'Key {key} not valid key for this format. '
@@ -146,6 +228,13 @@ class BinarySerializer(BaseSerializer):
                 )
 
             index = index + packet_length
+
+        if not seen_identifier:
+            raise MacaroonDeserializationException(
+                'macaroon header is missing an identifier')
+        if not seen_signature:
+            raise MacaroonDeserializationException(
+                'macaroon is missing a signature')
 
         return macaroon
 
@@ -159,7 +248,7 @@ class BinarySerializer(BaseSerializer):
         serialized, section = self._parse_section_v2(serialized)
         loc = ''
         if len(section) > 0 and section[0].field_type == self._LOCATION:
-            loc = section[0].data.decode('utf-8')
+            loc = self._decode_utf8(section[0].data, 'macaroon location')
             section = section[1:]
         if len(section) != 1 or section[0].field_type != self._IDENTIFIER:
             raise MacaroonDeserializationException('invalid macaroon header')
@@ -175,7 +264,8 @@ class BinarySerializer(BaseSerializer):
                 break
             cav = Caveat(version=MACAROON_V2)
             if len(section) > 0 and section[0].field_type == self._LOCATION:
-                cav.location = section[0].data.decode('utf-8')
+                cav.location = self._decode_utf8(
+                    section[0].data, 'caveat location')
                 section = section[1:]
 
             if len(section) == 0 or section[0].field_type != self._IDENTIFIER:
@@ -205,6 +295,9 @@ class BinarySerializer(BaseSerializer):
         if packet.field_type != self._SIGNATURE:
             raise MacaroonDeserializationException(
                 'unexpected field found instead of signature')
+        if len(serialized) != 0:
+            raise MacaroonDeserializationException(
+                'unexpected data found after signature')
         macaroon.signature = binascii.hexlify(packet.data)
         return macaroon
 
@@ -271,6 +364,20 @@ class BinarySerializer(BaseSerializer):
             prev_field_type = packet.field_type
             data = rest
 
+    def _decode_utf8(self, data, description):
+        ''' Decode a field that the v2 format requires to be valid utf-8.
+
+        Invalid encoding is reported as a structural deserialization error so
+        that it cannot surface as an unrelated UnicodeDecodeError later.
+        '''
+        from pymacaroons.exceptions import MacaroonDeserializationException
+        try:
+            return data.decode('utf-8')
+        except UnicodeDecodeError:
+            raise MacaroonDeserializationException(
+                'invalid utf-8 in {description}'.format(
+                    description=description))
+
     def _parse_packet_v2(self, data):
         ''' Parses a V2 data packet at the start of the given data.
 
@@ -286,12 +393,26 @@ class BinarySerializer(BaseSerializer):
         '''
         from pymacaroons.exceptions import MacaroonDeserializationException
 
-        ft, n = _decode_uvarint(data)
-        data = data[n:]
-        if ft == self._EOS:
-            return data, PacketV2(ft, None)
-        payload_len, n = _decode_uvarint(data)
-        data = data[n:]
+        try:
+            ft, n = _decode_uvarint(data)
+            data = data[n:]
+            if ft == self._EOS:
+                return data, PacketV2(ft, None)
+            payload_len, n = _decode_uvarint(data)
+            data = data[n:]
+        except MacaroonDeserializationException:
+            raise
+        except Exception:
+            raise MacaroonDeserializationException(
+                'cannot read varint from buffer')
+        if ft not in (self._LOCATION, self._IDENTIFIER, self._VID,
+                      self._SIGNATURE):
+            raise MacaroonDeserializationException(
+                'unexpected field type {field_type}'.format(field_type=ft))
+        if payload_len == 0:
+            raise MacaroonDeserializationException(
+                'zero-length field of type {field_type}'.format(
+                    field_type=ft))
         if payload_len > len(data):
             raise MacaroonDeserializationException(
                 'field data extends past end of buffer')
