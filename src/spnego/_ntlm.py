@@ -53,6 +53,13 @@ from spnego._ntlm_raw.messages import (
     Version,
 )
 from spnego._ntlm_raw.security import seal, sign
+from spnego._ntlm_resolver import (
+    FileNTLMCredentialResolver,
+    NTLMCredentialResolver,
+    NTLMCredentialRotationPolicy,
+    NTLMCredentialVersion,
+    ResolvedNTLMCredential,
+)
 from spnego._text import to_text
 from spnego.channel_bindings import GssChannelBindings
 from spnego.exceptions import (
@@ -62,6 +69,7 @@ from spnego.exceptions import (
     InvalidTokenError,
     NegotiateOptions,
     NoContextError,
+    NoCredentialError,
     OperationNotAvailableError,
     SpnegoError,
     UnsupportedQop,
@@ -96,6 +104,13 @@ def _get_credential(
     username: typing.Optional[str] = None,
 ) -> typing.Tuple[typing.Optional[str], typing.Optional[str], bytes, bytes]:
     """Look up NTLM credentials from the common flat file.
+
+    This is the legacy ``NTLM_USER_FILE`` lookup used by initiator contexts and
+    by the backwards compatible acceptor default. New acceptor code that hosts
+    more than one tenant should provide an
+    :class:`spnego.NTLMCredentialResolver` instance instead so credentials are
+    resolved per context rather than through a process wide environment
+    variable.
 
     Retrieves the LM and NT hash for use with authentication or validating a credential from an initiator.
 
@@ -210,6 +225,7 @@ class _NTLMCredential:
     ) -> None:
         self._raw_username: typing.Optional[str] = None
         self._store: typing.Optional[str]
+        self.version: typing.Optional[NTLMCredentialVersion] = None
         if isinstance(credential, Password):
             self._store = "explicit"
             self._raw_username = credential.username
@@ -233,6 +249,19 @@ class _NTLMCredential:
             self._store = _get_credential_file()
             self.domain, self.username, self.lm_hash, self.nt_hash = _get_credential(self._store, domain, username)
 
+    @classmethod
+    def from_resolved(cls, resolved: ResolvedNTLMCredential, raw_username: typing.Optional[str]) -> "_NTLMCredential":
+        """Build the internal credential from an instance resolver result."""
+        credential = cls.__new__(cls)
+        credential._raw_username = raw_username
+        credential._store = "resolver"
+        credential.version = resolved.version
+        credential.domain = resolved.domain
+        credential.username = resolved.username
+        credential.lm_hash = resolved.lm_hash
+        credential.nt_hash = resolved.nt_hash
+        return credential
+
 
 class NTLMProxy(ContextProxy):
     """A context wrapper for a Python managed NTLM context.
@@ -251,6 +280,8 @@ class NTLMProxy(ContextProxy):
         usage: str = "initiate",
         protocol: str = "ntlm",
         options: NegotiateOptions = NegotiateOptions.none,
+        ntlm_credential_resolver: typing.Optional[NTLMCredentialResolver] = None,
+        ntlm_credential_rotation_policy: NTLMCredentialRotationPolicy = NTLMCredentialRotationPolicy.pin,
         **kwargs: typing.Any,
     ) -> None:
         credentials = unify_credentials(username, password, required_protocol="ntlm")
@@ -260,6 +291,11 @@ class NTLMProxy(ContextProxy):
 
         self._complete = False
         self._credential: typing.Optional[_NTLMCredential] = None
+        if not isinstance(ntlm_credential_rotation_policy, NTLMCredentialRotationPolicy):
+            ntlm_credential_rotation_policy = NTLMCredentialRotationPolicy(ntlm_credential_rotation_policy)
+        self._credential_resolver: typing.Optional[NTLMCredentialResolver] = ntlm_credential_resolver
+        self._credential_rotation_policy = ntlm_credential_rotation_policy
+        self._pinned_version: typing.Optional[NTLMCredentialVersion] = None
 
         # Set the default flags, these might change depending on the LM_COMPAT_LEVEL set.
         self._context_req = (
@@ -305,11 +341,17 @@ class NTLMProxy(ContextProxy):
             self._nt_v1 = lm_compat_level < 5
             self._nt_v2 = True
 
-            # Make sure that the credential file is set and exists
-            if not _get_credential_file():
-                raise OperationNotAvailableError(
-                    context_msg="NTLM acceptor requires NTLM credential cache to be provided through the env var NTLM_USER_FILE set to a filepath"
-                )
+            # An explicit instance resolver takes precedence. Without one the
+            # NTLM_USER_FILE flat file remains the documented compatibility
+            # entry; there is no other process wide default to fall back to.
+            if self._credential_resolver is None:
+                credential_file = _get_credential_file()
+                if not credential_file:
+                    raise OperationNotAvailableError(
+                        context_msg="NTLM acceptor requires NTLM credential cache to be provided through the env var "
+                        "NTLM_USER_FILE set to a filepath or an ntlm_credential_resolver instance"
+                    )
+                self._credential_resolver = FileNTLMCredentialResolver(credential_file)
 
         self._temp_negotiate: typing.Optional[Negotiate] = None
         self._temp_challenge: typing.Optional[Challenge] = None
@@ -370,6 +412,8 @@ class NTLMProxy(ContextProxy):
             usage=self.usage,
             protocol=self.protocol,
             options=self.options,
+            ntlm_credential_resolver=self._credential_resolver,
+            ntlm_credential_rotation_policy=self._credential_rotation_policy,
         )
 
     def step(
@@ -543,6 +587,11 @@ class NTLMProxy(ContextProxy):
         self._temp_negotiate = negotiate
         self._temp_challenge = challenge
 
+        # Record the store revision this handshake started against so the
+        # rotation policy can be enforced once the AUTHENTICATE message arrives.
+        if self._credential_resolver is not None:
+            self._pinned_version = self._credential_resolver.current_version()
+
         return challenge.pack()
 
     def _step_accept_authenticate(self, token: bytes, channel_bindings: typing.Optional[GssChannelBindings]) -> None:
@@ -558,10 +607,33 @@ class NTLMProxy(ContextProxy):
         ):
             raise OperationNotAvailableError(context_msg="Anonymous user authentication not implemented")
 
-        username = auth.user_name
-        if auth.domain_name:
-            username = f"{auth.domain_name}\\{username}"
-        self._credential = _NTLMCredential(CredentialCache(username=username))
+        # Resolve through the instance bound resolver using the exact domain
+        # and username from the wire. There is no fallback to another tenant
+        # or a process default; a missing match or resolver failure propagates.
+        resolver = typing.cast(NTLMCredentialResolver, self._credential_resolver)
+        domain = auth.domain_name or ""
+        identity = resolver.diagnostic_id(domain, auth.user_name)
+        resolved = resolver.resolve(domain, auth.user_name)
+
+        if (
+            self._credential_rotation_policy == NTLMCredentialRotationPolicy.pin
+            and self._pinned_version is not None
+            and resolved.version != self._pinned_version
+        ):
+            raise NoCredentialError(
+                context_msg=(
+                    f"NTLM credential rotation detected mid-handshake for {identity}: pinned version "
+                    f"{self._pinned_version} does not match resolved version {resolved.version}"
+                )
+            )
+
+        log.debug(
+            "NTLM acceptor resolved credential for %s using version %s",
+            identity,
+            resolved.version,
+        )
+        raw_username = f"{auth.domain_name}\\{auth.user_name}" if auth.domain_name else auth.user_name
+        self._credential = _NTLMCredential.from_resolved(resolved, raw_username)
         expected_mic = None
 
         if auth.nt_challenge_response and len(auth.nt_challenge_response) > 24:

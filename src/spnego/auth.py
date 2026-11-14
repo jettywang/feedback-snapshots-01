@@ -9,6 +9,7 @@ from spnego._credssp import CredSSPProxy
 from spnego._gss import GSSAPIProxy
 from spnego._negotiate import NegotiateProxy
 from spnego._ntlm import NTLMProxy
+from spnego._ntlm_resolver import NTLMCredentialResolver, NTLMCredentialRotationPolicy
 from spnego._sspi import SSPIProxy
 from spnego.channel_bindings import GssChannelBindings
 from spnego.exceptions import NegotiateOptions
@@ -180,6 +181,8 @@ def server(
     options: NegotiateOptions = NegotiateOptions.none,
     *,
     credentials: typing.Optional[typing.Union[str, Credential, typing.List[Credential]]] = None,
+    ntlm_credential_resolver: typing.Optional[NTLMCredentialResolver] = None,
+    ntlm_credential_rotation_policy: NTLMCredentialRotationPolicy = NTLMCredentialRotationPolicy.pin,
     **kwargs: typing.Any,
 ) -> ContextProxy:
     """Create a server context to be used for authentication.
@@ -187,6 +190,15 @@ def server(
     It is only possible to specify a credential when running on Windows and
     using Kerberos either through Negotiate or Kerberos directly. Other
     platforms and protocols may be supported in the future.
+
+    The Python NTLM acceptor resolves peer credentials through
+    ``ntlm_credential_resolver``. Each acceptor instance gets its own resolver
+    which makes it possible to host multiple tenants, each with a separate
+    credential set, in the same process. A resolver lookup uses the exact
+    domain and username from the NTLM message and never falls back to another
+    tenant or a process default. When no resolver is supplied the acceptor
+    falls back to the ``NTLM_USER_FILE`` flat file for backwards
+    compatibility.
 
     Args:
         hostname: The principal part of the SPN. This is required for Kerberos auth to build the SPN.
@@ -196,11 +208,27 @@ def server(
         protocol: The protocol to authenticate with, can be `ntlm`, `kerberos`, `negotiate`, or `credssp`.
         options: The :class:`spnego.NegotiateOptions` that define pyspnego specific options to control the negotiation.
         credentials: A credential or list or credentials to use with the server auth context.
+        ntlm_credential_resolver: An :class:`spnego.NTLMCredentialResolver` used by the Python NTLM acceptor to
+            resolve peer credentials for this specific instance.
+        ntlm_credential_rotation_policy: The :class:`spnego.NTLMCredentialRotationPolicy` that controls how the
+            acceptor reacts when the resolver store is rotated while a handshake is in flight. The default `pin`
+            rejects the handshake so each completed handshake uses one consistent credential version.
         kwargs: Optional arguments to pass through to the authentiction context.
 
     Returns:
         ContextProxy: The context proxy for a client.
     """
     return _new_context(
-        credentials, None, hostname, service, channel_bindings, context_req, protocol, options, "accept", **kwargs
+        credentials,
+        None,
+        hostname,
+        service,
+        channel_bindings,
+        context_req,
+        protocol,
+        options,
+        "accept",
+        ntlm_credential_resolver=ntlm_credential_resolver,
+        ntlm_credential_rotation_policy=ntlm_credential_rotation_policy,
+        **kwargs,
     )

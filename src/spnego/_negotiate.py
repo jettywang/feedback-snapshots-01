@@ -21,6 +21,10 @@ from spnego._context import (
 )
 from spnego._credential import Credential, unify_credentials
 from spnego._gss import GSSAPIProxy
+from spnego._ntlm_resolver import (
+    NTLMCredentialResolver,
+    NTLMCredentialRotationPolicy,
+)
 from spnego._spnego import (
     NegState,
     NegTokenInit,
@@ -61,6 +65,8 @@ class NegotiateProxy(ContextProxy):
         usage: str = "initiate",
         protocol: str = "negotiate",
         options: NegotiateOptions = NegotiateOptions.none,
+        ntlm_credential_resolver: typing.Optional[NTLMCredentialResolver] = None,
+        ntlm_credential_rotation_policy: NTLMCredentialRotationPolicy = NTLMCredentialRotationPolicy.pin,
         **kwargs: typing.Any,
     ) -> None:
         credentials = unify_credentials(username, password)
@@ -68,6 +74,8 @@ class NegotiateProxy(ContextProxy):
             credentials, hostname, service, channel_bindings, context_req, usage, protocol, options
         )
 
+        self._ntlm_credential_resolver = ntlm_credential_resolver
+        self._ntlm_credential_rotation_policy = ntlm_credential_rotation_policy
         self._credentials = credentials
         self._complete = False
         self._available_contexts: typing.Optional[typing.Dict[GSSMech, ContextProxy]] = kwargs.get(
@@ -138,6 +146,8 @@ class NegotiateProxy(ContextProxy):
             usage=self.usage,
             protocol=self.protocol,
             options=self.options,
+            ntlm_credential_resolver=self._ntlm_credential_resolver,
+            ntlm_credential_rotation_policy=self._ntlm_credential_rotation_policy,
             _negotiate_contexts={m: c[0].new_context() for m, c in self._context_list.items()},
         )
 
@@ -478,6 +488,8 @@ class NegotiateProxy(ContextProxy):
                             credentials=self._credentials,
                             protocol=protocol,
                             options=options,
+                            ntlm_credential_resolver=self._ntlm_credential_resolver,
+                            ntlm_credential_rotation_policy=self._ntlm_credential_rotation_policy,
                             **context_kwargs,
                         )
                     else:

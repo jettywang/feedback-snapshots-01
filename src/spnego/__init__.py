@@ -23,6 +23,13 @@ from spnego._credential import (
     NTLMHash,
     Password,
 )
+from spnego._ntlm_resolver import (
+    FileNTLMCredentialResolver,
+    NTLMCredentialResolver,
+    NTLMCredentialRotationPolicy,
+    NTLMCredentialVersion,
+    ResolvedNTLMCredential,
+)
 from spnego.auth import client, server
 from spnego.exceptions import NegotiateOptions
 
@@ -31,13 +38,18 @@ __all__ = [
     "ContextReq",
     "Credential",
     "CredentialCache",
+    "FileNTLMCredentialResolver",
     "IOVUnwrapResult",
     "IOVWrapResult",
     "KerberosCCache",
     "KerberosKeytab",
+    "NTLMCredentialResolver",
+    "NTLMCredentialRotationPolicy",
+    "NTLMCredentialVersion",
     "NTLMHash",
     "Password",
     "NegotiateOptions",
+    "ResolvedNTLMCredential",
     "UnwrapResult",
     "WinRMWrapResult",
     "WrapResult",
