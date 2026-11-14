@@ -165,9 +165,19 @@ class TestJacobi(unittest.TestCase):
         self.assertIs(pj, INFINITY)
 
     def test_zero_point_multiply_by_one(self):
+        # a point with y == 0 has order 2, so its odd multiples are the
+        # point itself, not the point at infinity
         pj = PointJacobi(curve_256, 0, 0, 1)
 
         pj = pj * 1
+
+        self.assertEqual(pj, PointJacobi(curve_256, 0, 0, 1))
+
+    def test_zero_point_multiply_by_two(self):
+        # even multiples of a point with y == 0 are the point at infinity
+        pj = PointJacobi(curve_256, 0, 0, 1)
+
+        pj = pj * 2
 
         self.assertIs(pj, INFINITY)
 

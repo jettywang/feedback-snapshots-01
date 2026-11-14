@@ -817,7 +817,9 @@ class PointJacobi(AbstractPoint):
         I = 4 * HH % p
         J = H * I
         r = 2 * (Y2 - Y1)
-        if not H and not r:
+        # the coordinates may be unreduced (e.g. negated y), so the
+        # doubling check must compare them modulo p
+        if not H % p and not r % p:
             return self._double_with_z_1(X1, Y1, p, self.__curve.a())
         V = X1 * I
         X3 = (r**2 - J - 2 * V) % p
@@ -948,7 +950,15 @@ class PointJacobi(AbstractPoint):
 
     def __mul__(self, other):
         """Multiply point by an integer."""
-        if not self.__coords[1] or not other:
+        if not self.__coords[1]:
+            # a point with y coordinate equal to zero has order 2 (this
+            # includes the point at infinity with z == 0, any multiple of
+            # which is itself), so its odd multiples are the point itself
+            # and the even ones are the point at infinity
+            if other & 1:
+                return self
+            return INFINITY
+        if not other:
             return INFINITY
         if other == 1:
             return self
