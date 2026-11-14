@@ -44,6 +44,7 @@ __all__ = [
     'RevocationKeyClass',
     'NotationDataFlags',
     'TrustFlags',
+    'IntendedRecipientPolicy',
 ]
 
 
@@ -609,6 +610,18 @@ class SecurityIssues(IntFlag):
             SecurityIssues.Invalid,
             SecurityIssues.NoSelfSignature,
         }
+
+
+class IntendedRecipientPolicy(IntEnum):
+    """Policy for evaluating Intended Recipient signature subpackets when receiving a signed, encrypted message."""
+    #: Do not evaluate Intended Recipient subpackets at all.
+    Ignore = 0
+    #: Accept legacy messages that carry no Intended Recipient subpacket, but enforce any hashed
+    #: Intended Recipient subpackets that are present.
+    Compat = 1
+    #: Require at least one hashed Intended Recipient subpacket, and require it to name the key the
+    #: message was decrypted with. Messages without the subpacket never satisfy this policy.
+    Strict = 2
 
 
 # https://safecurves.cr.yp.to/

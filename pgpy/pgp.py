@@ -26,6 +26,7 @@ from .constants import CompressionAlgorithm
 from .constants import Features
 from .constants import HashAlgorithm
 from .constants import ImageEncoding
+from .constants import IntendedRecipientPolicy
 from .constants import KeyFlags
 from .constants import NotationDataFlags
 from .constants import PacketTag
@@ -306,9 +307,13 @@ class PGPSignature(Armorable, ParentRef, PGPObject):
     @property
     def intended_recipients(self):
         """
-        Returns an iterator over all the primary key fingerprints marked as intended encrypted recipients for this signature.
+        Returns an iterator over all the primary key fingerprints marked as intended encrypted recipients for this
+        signature.
+
+        Only Intended Recipient subpackets in the hashed (i.e. signed) area are considered; subpackets in the
+        unhashed area are not covered by the signature and therefore cannot extend the set of intended recipients.
         """
-        return map(lambda x: x.intended_recipient, self._signature.subpackets['IntendedRecipient'])
+        return map(lambda x: x.intended_recipient, self._signature.subpackets['h_IntendedRecipient'])
 
     @property
     def target_signature(self):
@@ -2594,6 +2599,61 @@ class PGPKey(Armorable, ParentRef, PGPObject):
         decmsg.parse(message.message.decrypt(key, alg))
 
         return decmsg
+
+    def _verified_primary_fingerprint(self):
+        """
+        The fingerprint of the primary key this key belongs to.
+
+        If this key is a subkey, the subkey binding signature issued by the primary key is verified
+        cryptographically before the primary's fingerprint is trusted; the key id alone is never
+        considered sufficient evidence of the binding.
+
+        :raises: :py:exc:`~errors.PGPError` if this is a subkey whose binding to its primary key
+                 could not be verified.
+        """
+        if self.is_primary:
+            return self.fingerprint
+
+        parent = self.parent
+        if parent is None:
+            raise PGPError("Cannot attribute an orphan subkey to a primary key")
+
+        if not parent.verify(self):
+            raise PGPError("Subkey binding signature did not verify; "
+                           "refusing to attribute this subkey to its primary key")
+
+        return parent.fingerprint
+
+    def check_intended_recipient(self, signature, policy=IntendedRecipientPolicy.Strict):
+        """
+        Check whether this key - the key a message was decrypted with - is an intended recipient
+        of ``signature``, according to the Intended Recipient subpackets covered by that signature.
+
+        Only subpackets in the hashed area of the signature are honored; unhashed subpackets are
+        ignored and cannot widen the set of authorized recipients. If this key is a subkey, its
+        binding signature is verified before the primary key's fingerprint is compared.
+
+        :param signature: The :py:obj:`PGPSignature` to evaluate.
+        :param policy: An :py:obj:`~constants.IntendedRecipientPolicy` selecting how messages
+                       without any Intended Recipient subpacket are treated. ``Strict`` (the
+                       default) rejects them; ``Compat`` accepts these legacy messages;
+                       ``Ignore`` disables the check entirely.
+        :returns: ``True`` if the recipient constraint is satisfied under ``policy``.
+        """
+        if not isinstance(signature, PGPSignature):
+            raise TypeError("Unexpected signature value: {:s}".format(str(type(signature))))
+        if not isinstance(policy, IntendedRecipientPolicy):
+            raise TypeError("policy must be an IntendedRecipientPolicy")
+
+        if policy is IntendedRecipientPolicy.Ignore:
+            return True
+
+        intended = set(signature.intended_recipients)
+        if not intended:
+            # legacy message without the subpacket: never satisfies Strict
+            return policy is not IntendedRecipientPolicy.Strict
+
+        return self._verified_primary_fingerprint() in intended
 
     def parse(self, data):
         unarmored = self.ascii_unarmor(data)

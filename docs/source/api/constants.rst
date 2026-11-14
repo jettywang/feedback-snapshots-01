@@ -245,3 +245,19 @@ Constants
     .. autoattribute:: UserID
         :annotation:
 
+
+
+:py:class:`IntendedRecipientPolicy`
+-----------------------------------
+
+.. autoclass:: IntendedRecipientPolicy
+    :no-members:
+
+    .. autoattribute:: Ignore
+        :annotation:
+
+    .. autoattribute:: Compat
+        :annotation:
+
+    .. autoattribute:: Strict
+        :annotation:

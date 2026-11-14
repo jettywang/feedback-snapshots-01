@@ -1575,6 +1575,10 @@ class IntegrityProtectedSKEDataV1(IntegrityProtectedSKEData):
         if not constant_time.bytes_eq(bytes(pt[-22:]), _expected_mdcbytes):
             raise PGPDecryptionError("Decryption failed")  # pragma: no cover
 
+        # the MDC packet is transport-level integrity protection for this encryption layer only;
+        # now that it has been verified, strip it so it is not carried into the decrypted message
+        del pt[-22:]
+
         iv = bytes(pt[:alg.block_size // 8])
         del pt[:alg.block_size // 8]
 
