@@ -214,3 +214,22 @@ each signer is documented below.
    :members: import_, import_via_auth, import_github_actions
    :exclude-members: sign, public_key, from_priv_key_uri
 
+
+.. note::
+
+   ``CompositeKey`` and ``CompositeSigner`` implement an **experimental,
+   custom** Ed25519 + ML-DSA-65 composite scheme that is not an
+   interoperability standard and has no stable format guarantee. They are not
+   registered by default; opt in with
+   :func:`securesystemslib.signer.register_composite_signer`. See
+   `EXPERIMENTAL_COMPOSITE_SIGNER.md
+   <https://github.com/secure-systems-lab/securesystemslib/blob/main/docs/EXPERIMENTAL_COMPOSITE_SIGNER.md>`_
+   for the format specification and failure matrix.
+
+.. autoclass:: securesystemslib.signer.CompositeKey
+   :exclude-members: sign, from_priv_key_uri
+
+.. autoclass:: securesystemslib.signer.CompositeSigner
+   :exclude-members: sign, public_key, from_priv_key_uri
+
+.. autofunction:: securesystemslib.signer.register_composite_signer

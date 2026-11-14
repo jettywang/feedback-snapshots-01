@@ -8,6 +8,15 @@ Some implementations are provided by default but more can be added by users.
 # ruff: noqa: F401
 from securesystemslib.signer._aws_signer import AWSSigner
 from securesystemslib.signer._azure_signer import AzureSigner
+
+# Experimental, custom composite signer/key: opt-in via register_composite_signer()
+from securesystemslib.signer._composite_signer import (
+    COMPOSITE_ED25519_MLDSA65,
+    KEY_TYPE_COMPOSITE,
+    CompositeKey,
+    CompositeSigner,
+    register_composite_signer,
+)
 from securesystemslib.signer._constants import (
     ECDSA_SHA2_NISTP256,
     ECDSA_SHA2_NISTP384,
