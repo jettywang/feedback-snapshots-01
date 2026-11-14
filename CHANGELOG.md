@@ -2,6 +2,14 @@
 
 ## 0.13.0 - TBD
 
+* Added an explicit application authorization gate before a CredSSP initiator delegates the user's credentials
+  * New `credssp_delegation_authorizer` kwarg for a CredSSP client context, called after the TLS handshake and the CredSSP public key exchange have verified the peer but before any credential is packed or sent
+  * The callback receives a `CredSSPDelegationInfo` with the verified peer identity, TLS certificate SHA-256 fingerprint, TLS protocol and cipher, negotiated CredSSP version, and credential type; it never receives the password
+  * Delegation is refused when no callback is configured, when the callback returns a falsy value, when it raises, or when the peer certificate needed to identify the peer is unavailable. In all of these cases no credential package is created or sent and the context does not report `complete`
+  * A grant applies only to the current handshake; `new_context()` asks the callback again instead of reusing the previous decision
+  * Added the `delegation_authorized` extra info value for a CredSSP initiator context and the `DelegationDeniedError` exception
+* Added an `authInfo`/credential-package boundary test that drives two peers through full authentication and asserts only the authorized peer receives delegated credentials
+
 ## 0.12.4 - 2026-10-06
 
 * Fix SSPI acceptor with explicit `Password` or `KerberosKeytab` credentials failing with `SEC_E_LOGON_DENIED` when the username is in the UPN form `user@REALM`

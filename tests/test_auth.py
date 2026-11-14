@@ -996,7 +996,14 @@ def test_credssp_ntlm_creds(options, restrict_tlsv12, version, ntlm_cred, monkey
     else:
         version = spnego._credssp._CREDSSP_VERSION
 
-    c = spnego.client(ntlm_cred[0], ntlm_cred[1], hostname=socket.gethostname(), protocol="credssp", options=options)
+    c = spnego.client(
+        ntlm_cred[0],
+        ntlm_cred[1],
+        hostname=socket.gethostname(),
+        protocol="credssp",
+        options=options,
+        credssp_delegation_authorizer=lambda info: True,
+    )
     s = spnego.server(protocol="credssp", options=options, **context_kwargs)
 
     assert c.get_extra_info("invalid") is None
@@ -1322,7 +1329,12 @@ def test_credssp_multiple_creds(ntlm_cred):
         spnego.NTLMHash(username=ntlm_cred[0], nt_hash=ntowfv1(ntlm_cred[1]).hex()),
         spnego.Password(username="delegate", password="password"),
     ]
-    c = spnego.client(creds, hostname=socket.gethostname(), protocol="credssp")
+    c = spnego.client(
+        creds,
+        hostname=socket.gethostname(),
+        protocol="credssp",
+        credssp_delegation_authorizer=lambda info: True,
+    )
     s = spnego.server(protocol="credssp")
 
     assert c.client_principal is None
@@ -1425,7 +1437,12 @@ def test_credssp_min_protocol_failure_initiator(ntlm_cred, monkeypatch):
     monkeypatch.setattr(spnego._credssp, "_CREDSSP_VERSION", 4)
 
     c = spnego.client(
-        ntlm_cred[0], ntlm_cred[1], hostname=socket.gethostname(), protocol="credssp", credssp_min_protocol=5
+        ntlm_cred[0],
+        ntlm_cred[1],
+        hostname=socket.gethostname(),
+        protocol="credssp",
+        credssp_min_protocol=5,
+        credssp_delegation_authorizer=lambda info: True,
     )
     s = spnego.server(protocol="credssp")
 
@@ -1450,7 +1467,13 @@ def test_credssp_min_protocol_failure_initiator(ntlm_cred, monkeypatch):
 def test_credssp_min_protocol_failure_acceptor(ntlm_cred, monkeypatch):
     monkeypatch.setattr(spnego._credssp, "_CREDSSP_VERSION", 4)
 
-    c = spnego.client(ntlm_cred[0], ntlm_cred[1], hostname=socket.gethostname(), protocol="credssp")
+    c = spnego.client(
+        ntlm_cred[0],
+        ntlm_cred[1],
+        hostname=socket.gethostname(),
+        protocol="credssp",
+        credssp_delegation_authorizer=lambda info: True,
+    )
     s = spnego.server(protocol="credssp", credssp_min_protocol=5)
 
     # The TLS handshake can differ based on the protocol selected, keep on looping until we see the auth_context set up

@@ -744,6 +744,14 @@ class ContextProxy(metaclass=abc.ABCMeta):
                 offered by both parties once the Negotiate authentication stage
                 is complete.
 
+            delegation_authorized - added in 0.13.0:
+                On an `initiate` CredSSP context, whether the application
+                authorized delegating the client's credentials to the peer
+                during this handshake. `None` until the authorization callback
+                has run, `True` when delegation was approved, and `False`
+                when it was denied. A grant is scoped to the current handshake
+                and is not carried over by :meth:`new_context`.
+
         Args:
             name: The name/id of the information to retrieve.
             default: The default value to return if the information is not

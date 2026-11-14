@@ -2,6 +2,7 @@
 # MIT License (see LICENSE or https://opensource.org/licenses/MIT)
 
 import base64
+import dataclasses
 import hashlib
 import logging
 import os
@@ -11,6 +12,9 @@ import ssl
 import struct
 import tempfile
 import typing
+
+from cryptography import x509
+from cryptography.hazmat.backends import default_backend
 
 import spnego
 from spnego._context import (
@@ -36,6 +40,7 @@ from spnego._text import to_text
 from spnego.channel_bindings import GssChannelBindings
 from spnego.exceptions import (
     BadBindingsError,
+    DelegationDeniedError,
     ErrorCode,
     FeatureMissingError,
     InvalidTokenError,
@@ -59,6 +64,87 @@ _CREDSSP_VERSION = 6
 _X509_CERTIFICATE: typing.Optional[typing.Tuple[bytes, bytes, bytes]] = None
 
 F = typing.TypeVar("F", bound=typing.Callable[..., typing.Any])
+
+
+@dataclasses.dataclass(frozen=True)
+class CredSSPDelegationInfo:
+    """The peer details an application uses to authorize credential delegation.
+
+    Passed to a CredSSP delegation authorization callback once the TLS
+    handshake and the CredSSP public key exchange have completed. The values
+    describe the peer that was authenticated during this handshake and never
+    include the password or any other secret from the credentials that would
+    be delegated.
+
+    Attributes:
+        hostname: The hostname the initiator targeted, if one was set.
+        service: The service class the initiator targeted, if one was set.
+        spn: The service principal name the initiator targeted, if one was set.
+        peer_certificate: The DER encoded X.509 certificate presented by the
+            peer during the TLS handshake. ``None`` if the peer did not
+            present a certificate, in which case delegation is refused.
+        peer_certificate_subject: The RFC 4514 subject of the peer certificate.
+        peer_certificate_issuer: The RFC 4514 issuer of the peer certificate.
+        tls_certificate_sha256: The SHA-256 fingerprint of
+            ``peer_certificate`` as lowercase hexadecimal.
+        tls_protocol: The TLS protocol version negotiated with the peer, like
+            ``TLSv1.3``.
+        tls_cipher: The TLS cipher suite negotiated with the peer.
+        protocol_version: The CredSSP protocol version negotiated with the
+            peer.
+        credential_type: The type of credential that would be delegated. Only
+            ``password`` is currently produced by this library.
+    """
+
+    hostname: typing.Optional[str]
+    service: typing.Optional[str]
+    spn: typing.Optional[str]
+    peer_certificate: typing.Optional[bytes]
+    peer_certificate_subject: typing.Optional[str]
+    peer_certificate_issuer: typing.Optional[str]
+    tls_certificate_sha256: typing.Optional[str]
+    tls_protocol: str
+    tls_cipher: str
+    protocol_version: int
+    credential_type: str
+
+    @property
+    def certificate_fingerprint(self) -> typing.Optional[str]:
+        """Alias of :attr:`tls_certificate_sha256`."""
+        return self.tls_certificate_sha256
+
+    @property
+    def peer_certificate_sha256(self) -> typing.Optional[str]:
+        """Alias of :attr:`tls_certificate_sha256`."""
+        return self.tls_certificate_sha256
+
+    @property
+    def peer_identity(self) -> typing.Optional[str]:
+        """The strongest identity available for the peer.
+
+        The certificate subject when the peer presented a certificate,
+        otherwise the target hostname.
+        """
+        return self.peer_certificate_subject or self.hostname
+
+
+# A delegation authorization callback is called with the CredSSPDelegationInfo
+# of the peer that was authenticated. Returning True allows the client's
+# credentials to be packed and sent to that peer; any other value denies the
+# delegation. The callback is invoked once per authentication handshake and a
+# previous grant is never reused, including by ContextProxy.new_context().
+DelegationAuthorizationCallback = typing.Callable[[CredSSPDelegationInfo], bool]
+
+
+def _get_peer_certificate_details(
+    certificate: typing.Optional[bytes],
+) -> typing.Tuple[typing.Optional[str], typing.Optional[str]]:
+    """Extracts the subject and issuer of a DER encoded X.509 certificate."""
+    if not certificate:
+        return None, None
+
+    cert = x509.load_der_x509_certificate(certificate, default_backend())
+    return cert.subject.rfc4514_string(), cert.issuer.rfc4514_string()
 
 
 def _create_tls_context(
@@ -253,6 +339,18 @@ class CredSSPProxy(ContextProxy):
             enforce a better security baseline. The default is 2 which works
             against all CredSSP peers. To ensure the mitigations for
             CVE-2018-0886 is in place set this value to 5 or higher.
+
+        credssp_delegation_authorizer: A callable that decides whether the
+            client's credentials may be delegated to the peer. It is called
+            after the TLS handshake and CredSSP public key exchange have
+            verified the peer, but before the credentials are packed or sent.
+            The callable receives a :class:`CredSSPDelegationInfo` and must
+            return ``True`` to allow the delegation. Returning any other value
+            raises :class:`DelegationDeniedError` and no credential material
+            is packed, sent, or reflected by :attr:`complete`. When this is
+            not set the initiator refuses to delegate at all. The decision
+            only applies to the current handshake; :meth:`new_context` asks
+            the callback again.
     """
 
     def __init__(
@@ -283,11 +381,18 @@ class CredSSPProxy(ContextProxy):
 
         self._auth_context: typing.Optional[ContextProxy] = kwargs.get("credssp_negotiate_context", None)
         self._ts_credential: typing.Optional[TSCredentials] = None
+        self._password_credential: typing.Optional[Password] = None
         self._complete = False
         self._step_gen: typing.Optional[typing.Generator[bytes, typing.Optional[bytes], None]] = None
         self._auth_stage = "TLS Handshake"
         self._min_version: int = kwargs.get("credssp_min_protocol", 2)
         self._selected_version: typing.Optional[int] = None
+        self._delegation_authorizer: typing.Optional[DelegationAuthorizationCallback] = kwargs.get(
+            "credssp_delegation_authorizer", None
+        )
+        self._delegation_authorized: typing.Optional[bool] = None
+        self._delegation_error: typing.Optional[BaseException] = None
+        self._peer_certificate: typing.Optional[bytes] = None
 
         self._tls_context: CredSSPTLSContext
         if "credssp_tls_context" in kwargs:
@@ -305,13 +410,11 @@ class CredSSPProxy(ContextProxy):
         )
 
         if usage == "initiate":
-            for cred in credentials:
-                # There will always be a Password cred as per the check in unify_credentials
-                if isinstance(cred, Password):
-                    domain, username = split_username(cred.username)
-                    password_cred = TSPasswordCreds(domain or "", username or "", cred.password)
-                    self._ts_credential = TSCredentials(credentials=password_cred)
-                    break
+            # The credential struct is deliberately not built here: it is
+            # created only after the delegation authorizer approves this
+            # handshake, so a denied peer never sees a usable credential
+            # package.
+            self._password_credential = self._get_password_credential(credentials)
 
     @classmethod
     def available_protocols(cls, options: typing.Optional[NegotiateOptions] = None) -> typing.List[str]:
@@ -338,7 +441,7 @@ class CredSSPProxy(ContextProxy):
         raise OperationNotAvailableError(context_msg="CredSSP does not have a session key to share")
 
     def new_context(self) -> "CredSSPProxy":
-        return CredSSPProxy(
+        context = CredSSPProxy(
             username=self._credentials,
             hostname=self._hostname,
             service=self._service,
@@ -348,6 +451,102 @@ class CredSSPProxy(ContextProxy):
             protocol=self.protocol,
             options=self.options,
             credssp_negotiate_context=self._auth_context.new_context() if self._auth_context else None,
+            credssp_delegation_authorizer=self._delegation_authorizer,
+        )
+        return context
+
+    @staticmethod
+    def _get_password_credential(credentials: typing.List[Credential]) -> typing.Optional[Password]:
+        for cred in credentials:
+            # There will always be a Password cred as per the check in unify_credentials
+            if isinstance(cred, Password):
+                return cred
+
+        return None
+
+    def _authorize_delegation(self) -> None:
+        """Ask the application whether these credentials may be delegated.
+
+        Called after the peer has been verified by the TLS handshake and the
+        CredSSP public key exchange but before the credential structure is
+        created or packed. A denial, an exception from the callback, or a peer
+        that cannot be identified leaves the context incomplete so no
+        credential package is ever produced for that peer.
+        """
+        if self._password_credential is None or self._selected_version is None:
+            self._delegation_authorized = False
+            raise DelegationDeniedError(
+                context_msg="Cannot authorize CredSSP delegation without the negotiated peer details"
+            )
+
+        if self._delegation_authorized is not None and self._delegation_authorized is not True:
+            self._delegation_error = self._delegation_error or DelegationDeniedError(
+                context_msg="The CredSSP delegation authorizer did not approve delegating credentials to the peer"
+            )
+            raise self._delegation_error
+
+        if self._delegation_authorized is True:
+            # Authorization is evaluated once per handshake, even if the caller
+            # keeps stepping the context.
+            return
+
+        peer_certificate = self._peer_certificate
+        cipher, tls_protocol, _ = self._tls_object.cipher()  # type: ignore[misc]
+        subject, issuer = _get_peer_certificate_details(peer_certificate)
+        info = CredSSPDelegationInfo(
+            hostname=self._hostname,
+            service=self._service,
+            spn=self.spn,
+            peer_certificate=peer_certificate,
+            peer_certificate_subject=subject,
+            peer_certificate_issuer=issuer,
+            tls_certificate_sha256=hashlib.sha256(peer_certificate).hexdigest() if peer_certificate else None,
+            tls_protocol=tls_protocol,
+            tls_cipher=cipher,
+            protocol_version=self._selected_version,
+            credential_type="password",
+        )
+
+        if not peer_certificate or not info.tls_certificate_sha256:
+            # Without the peer certificate there is no verified identity to
+            # bind the decision to, so never produce a credential package.
+            self._delegation_authorized = False
+            self._delegation_error = DelegationDeniedError(
+                context_msg="Cannot authorize CredSSP delegation without the peer TLS certificate"
+            )
+            raise self._delegation_error
+
+        if self._delegation_authorizer is None:
+            self._delegation_authorized = False
+            self._delegation_error = DelegationDeniedError(
+                context_msg="No CredSSP delegation authorizer was configured"
+            )
+            raise self._delegation_error
+
+        # A callback that raises must not result in credential material being
+        # produced. Let the exception propagate but keep the context incomplete.
+        try:
+            authorized = bool(self._delegation_authorizer(info))
+        except BaseException as e:
+            self._delegation_authorized = False
+            self._delegation_error = e
+            self._complete = False
+            raise
+
+        if not authorized:
+            self._delegation_authorized = False
+            self._delegation_error = DelegationDeniedError(
+                context_msg="The CredSSP delegation authorizer denied delegating credentials to the peer"
+            )
+            raise self._delegation_error
+
+        self._delegation_authorized = True
+        if self._ts_credential is not None:
+            return
+
+        domain, username = split_username(self._password_credential.username)
+        self._ts_credential = TSCredentials(
+            credentials=TSPasswordCreds(domain or "", username or "", self._password_credential.password)
         )
 
     def step(
@@ -357,6 +556,11 @@ class CredSSPProxy(ContextProxy):
         channel_bindings: typing.Optional[GssChannelBindings] = None,
     ) -> typing.Optional[bytes]:
         log.debug("CredSSP step input: %s", to_text(base64.b64encode(in_token or b"")))
+
+        if self._delegation_authorized is False and self._delegation_error is not None:
+            # A denied delegation must never look like a completed exchange,
+            # even if the caller keeps stepping the context.
+            raise self._delegation_error
 
         if self._step_gen is None:
             self._step_gen = getattr(self, "_step_%s" % self.usage)(in_token)
@@ -379,6 +583,7 @@ class CredSSPProxy(ContextProxy):
         yield from self._step_tls(in_token)
 
         server_certificate = typing.cast(bytes, self._tls_object.getpeercert(True))
+        self._peer_certificate = server_certificate
         public_key = get_certificate_public_key(server_certificate)
 
         log.debug("Starting CredSSP authentication phase")
@@ -438,13 +643,26 @@ class CredSSPProxy(ContextProxy):
         if expected_key != response_key:
             raise BadBindingsError(context_msg="Public key verification failed, potential man in the middle attack")
 
-        enc_credentials = self._auth_context.wrap(
-            self._ts_credential.pack()  # type: ignore[union-attr] # initiate always has one
-        ).data
+        # The peer is verified at this point, but authentication alone does not
+        # grant it the user's credentials. The application decides before any
+        # credential package is created or sent.
+        self._authorize_delegation()
+        if self._ts_credential is None:  # pragma: no cover - defensive guard
+            raise DelegationDeniedError(
+                context_msg="Refusing to delegate credentials without an authorized credential package"
+            )
+
+        enc_credentials = self._auth_context.wrap(self._ts_credential.pack()).data
         credential_request = TSRequest(_CREDSSP_VERSION, auth_info=enc_credentials)
         self._complete = True
 
-        yield from self._yield_ts_request(credential_request, "Credential exchange")
+        try:
+            yield from self._yield_ts_request(credential_request, "Credential exchange")
+        except BaseException:
+            # A peer that rejected the delegated credentials did not complete
+            # a usable context.
+            self._complete = False
+            raise
 
     def _step_accept(
         self,
@@ -596,6 +814,9 @@ class CredSSPProxy(ContextProxy):
 
         elif name == "protocol_version" and self._selected_version is not None:
             return self._selected_version
+
+        elif name == "delegation_authorized" and self.usage == "initiate":
+            return self._delegation_authorized
 
         else:
             return default

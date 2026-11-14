@@ -143,7 +143,7 @@ class ErrorCode(enum.IntEnum):
     context_expired = 12  # ContextExpiredError
     failure = 13  # This is a generic error with the error coming from the minor code, uses SpnegoError directly.
     bad_qop = 14  # UnsupportedQop
-    # unauthorized = 15  # Shouldn't happen in our code, we don't do any authorization functions.
+    unauthorized = 15  # DelegationDeniedError
     unavailable = 16  # OperationNotAvailableError
     # duplicate_element = 17  # Shouldn't happen in our code.
     # name_not_mn = 18  # Shouldn't happen in our code.
@@ -375,3 +375,16 @@ class OperationNotAvailableError(SpnegoError):
     _BASE_MESSAGE = "Operation not supported or available"
     _GSSAPI_CODE = 1048576  # GSS_S_UNAVAILABLE
     _SSPI_CODE = -2146893054  # SEC_E_UNSUPPORTED_FUNCTION
+
+
+class DelegationDeniedError(SpnegoError):
+    """The application declined to delegate the client's credentials to the CredSSP peer.
+
+    Raised by a CredSSP initiator when its delegation authorization callback
+    rejects the peer or does not supply the identity information required to
+    authorize it. No credential material is packed or sent to the peer.
+    """
+
+    ERROR_CODE = ErrorCode.unauthorized
+
+    _BASE_MESSAGE = "The application denied delegating credentials to the peer"

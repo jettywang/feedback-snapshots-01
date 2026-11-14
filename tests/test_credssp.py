@@ -2,16 +2,24 @@
 # Copyright: (c) 2020, Jordan Borean (@jborean93) <jborean93@gmail.com>
 # MIT License (see LICENSE or https://opensource.org/licenses/MIT)
 
+import dataclasses
+import hashlib
+import pathlib
 import re
 import socket
+import typing
 
 import pytest
+from cryptography import x509
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import hashes
 
 import spnego
 import spnego._credssp as credssp
-from spnego._credssp_structures import NegoData, TSRequest
+from spnego._credssp_structures import NegoData, TSCredentials, TSPasswordCreds, TSRequest
 from spnego.exceptions import (
     BadBindingsError,
+    DelegationDeniedError,
     FeatureMissingError,
     InvalidTokenError,
     NegotiateOptions,
@@ -317,3 +325,360 @@ def test_credssp_no_credential(ntlm_cred):
 
     with pytest.raises(InvalidTokenError, match="No credential received on CredSSP TSRequest from initiator"):
         s.step(c.wrap(request.pack()).data)
+
+
+# Delegation authorization
+
+
+@dataclasses.dataclass
+class _PeerRun:
+    """The result of driving a CredSSP handshake."""
+
+    client: credssp.CredSSPProxy
+    server: credssp.CredSSPProxy
+    credential: typing.Optional[bytes]
+
+
+def _drive_credssp(
+    client: credssp.CredSSPProxy,
+    server: credssp.CredSSPProxy,
+    *,
+    stop_before_credentials: bool = False,
+    fail_on_denial: bool = True,
+) -> _PeerRun:
+    """Drives a CredSSP exchange up to and including the credential exchange.
+
+    Returns the raw ``authInfo`` token the client sent, if any, so a caller
+    can assert on whether a credential package existed at all. When
+    ``stop_before_credentials`` is set the exchange stops right before the
+    client evaluates delegation and sends the credential package.
+    """
+    server_tls_token = None
+    while client.get_extra_info("auth_stage") == "TLS Handshake":
+        client_tls_token = client.step(server_tls_token)
+        assert not client.complete
+        assert not server.complete
+
+        server_tls_token = server.step(client_tls_token)
+        assert not client.complete
+        assert not server.complete
+
+    pub_key_token = client.step(server_tls_token)
+    assert not client.complete
+    server_pub_key = server.step(pub_key_token)
+
+    if stop_before_credentials:
+        return _PeerRun(client=client, server=server, credential=None)
+
+    try:
+        credential_token = client.step(server_pub_key)
+    except DelegationDeniedError:
+        if fail_on_denial:
+            raise
+        return _PeerRun(client=client, server=server, credential=None)
+
+    assert credential_token is not None
+    final_token = server.step(credential_token)
+    assert final_token is None
+
+    return _PeerRun(client=client, server=server, credential=credential_token)
+
+
+def _client(
+    ntlm_cred: typing.Tuple[str, str],
+    authorizer: typing.Optional[credssp.DelegationAuthorizationCallback],
+) -> credssp.CredSSPProxy:
+    kwargs: typing.Dict[str, typing.Any] = {}
+    if authorizer is not None:
+        kwargs["credssp_delegation_authorizer"] = authorizer
+
+    return credssp.CredSSPProxy(
+        ntlm_cred[0],
+        ntlm_cred[1],
+        hostname=socket.gethostname(),
+        protocol="credssp",
+        options=NegotiateOptions.use_ntlm,
+        **kwargs,
+    )
+
+
+def _server(
+    tls_context: typing.Optional[typing.Any] = None,
+) -> credssp.CredSSPProxy:
+    kwargs: typing.Dict[str, typing.Any] = {}
+    if tls_context is not None:
+        kwargs["credssp_tls_context"] = tls_context
+
+    return credssp.CredSSPProxy(
+        None,
+        None,
+        hostname=socket.gethostname(),
+        protocol="credssp",
+        usage="accept",
+        options=NegotiateOptions.use_ntlm,
+        **kwargs,
+    )
+
+
+def _server_tls_context(tmp_path: pathlib.Path) -> typing.Tuple[typing.Any, str]:
+    """Creates an acceptor TLS context with its own cert and its SHA-256 fingerprint."""
+    tls_context = default_tls_context(usage="accept")
+    cert_pem, key_pem, public_key = spnego.tls.generate_tls_certificate()
+
+    fingerprint = x509.load_pem_x509_certificate(cert_pem, default_backend()).fingerprint(hashes.SHA256()).hex()
+
+    cert_path = tmp_path / "ca.pem"
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    cert_path.write_bytes(cert_pem + key_pem)
+
+    tls_context.context.load_cert_chain(str(cert_path))
+    tls_context.public_key = public_key
+
+    return tls_context, fingerprint
+
+
+def test_credssp_delegation_requires_authorizer(ntlm_cred):
+    c = _client(ntlm_cred, None)
+    s = _server()
+
+    with pytest.raises(DelegationDeniedError, match="No CredSSP delegation authorizer was configured"):
+        _drive_credssp(c, s)
+
+    assert not c.complete
+    assert not s.complete
+    assert c._ts_credential is None
+    assert s.get_extra_info("client_credential") is None
+
+
+def test_credssp_delegation_denied_does_not_pack_credentials(ntlm_cred, monkeypatch):
+    calls: typing.List[bytes] = []
+    original_pack = TSCredentials.pack
+    monkeypatch.setattr(TSCredentials, "pack", lambda self: calls.append(b"packed") or original_pack(self))
+
+    seen: typing.List[credssp.CredSSPDelegationInfo] = []
+    c = _client(ntlm_cred, lambda info: seen.append(info) or False)
+    s = _server()
+
+    with pytest.raises(DelegationDeniedError, match="denied delegating credentials"):
+        _drive_credssp(c, s)
+
+    assert calls == []
+    assert c._ts_credential is None
+    assert not c.complete
+    assert not s.complete
+    assert s.get_extra_info("client_credential") is None
+
+    # The callback got the verified peer details, and no secret.
+    assert len(seen) == 1
+    info = seen[0]
+    assert info.hostname == socket.gethostname()
+    assert info.credential_type == "password"
+    assert info.protocol_version == credssp._CREDSSP_VERSION
+    assert info.peer_certificate is not None
+    assert info.tls_certificate_sha256 == hashlib.sha256(info.peer_certificate).hexdigest()
+    assert info.tls_protocol.startswith("TLS")
+    assert info.peer_certificate_subject
+    assert ntlm_cred[1] not in repr(info)
+
+
+@pytest.mark.parametrize("decision", [False, None, 0, ""])
+def test_credssp_delegation_falsy_decision_is_a_denial(ntlm_cred, monkeypatch, decision):
+    calls: typing.List[bytes] = []
+    original_pack = TSCredentials.pack
+    monkeypatch.setattr(TSCredentials, "pack", lambda self: calls.append(b"packed") or original_pack(self))
+
+    c = _client(ntlm_cred, lambda info: decision)
+    s = _server()
+
+    with pytest.raises(DelegationDeniedError):
+        _drive_credssp(c, s)
+
+    assert calls == []
+    assert c._ts_credential is None
+    assert not c.complete
+    assert not s.complete
+
+
+def test_credssp_delegation_exception_does_not_pack_credentials(ntlm_cred, monkeypatch):
+    calls: typing.List[bytes] = []
+    original_pack = TSCredentials.pack
+    monkeypatch.setattr(TSCredentials, "pack", lambda self: calls.append(b"packed") or original_pack(self))
+
+    class AuthorizationFailure(Exception):
+        pass
+
+    def authorizer(info: credssp.CredSSPDelegationInfo) -> bool:
+        raise AuthorizationFailure("The application could not evaluate this peer")
+
+    c = _client(ntlm_cred, authorizer)
+    s = _server()
+
+    with pytest.raises(AuthorizationFailure):
+        _drive_credssp(c, s)
+
+    assert calls == []
+    assert c._ts_credential is None
+    assert not c.complete
+    assert not s.complete
+    assert s.get_extra_info("client_credential") is None
+
+
+def test_credssp_delegation_denied_when_peer_identity_missing(ntlm_cred, monkeypatch):
+    """Without a verified peer identity there is nothing to authorize against."""
+    calls: typing.List[bytes] = []
+    original_pack = TSCredentials.pack
+    monkeypatch.setattr(TSCredentials, "pack", lambda self: calls.append(b"packed") or original_pack(self))
+
+    c = _client(ntlm_cred, lambda info: True)
+    s = _server()
+    run = _drive_credssp(c, s, stop_before_credentials=True)
+
+    # Peer was authenticated, but the verified certificate is unavailable.
+    monkeypatch.setattr(run.client, "_peer_certificate", None, raising=False)
+
+    with pytest.raises(DelegationDeniedError, match="without the peer TLS certificate"):
+        run.client._authorize_delegation()
+
+    assert calls == []
+    assert run.client._ts_credential is None
+    assert not run.client.complete
+    assert not run.server.complete
+
+
+def test_credssp_delegation_only_authorized_peer_gets_credentials(ntlm_cred, monkeypatch, tmp_path):
+    """Two peers complete authentication, only the approved one is delegated to."""
+    calls: typing.List[bytes] = []
+    original_pack = TSCredentials.pack
+
+    def track_pack(self: TSCredentials) -> bytes:
+        calls.append(self.credentials.password.encode())  # type: ignore[union-attr]
+        return original_pack(self)
+
+    monkeypatch.setattr(TSCredentials, "pack", track_pack)
+
+    approved: typing.List[credssp.CredSSPDelegationInfo] = []
+    refused: typing.List[credssp.CredSSPDelegationInfo] = []
+
+    # The application selects the peer by the TLS fingerprint it learned out of
+    # band. Both servers authenticate the same client user.
+    approved_tls, approved_fingerprint = _server_tls_context(tmp_path / "approved")
+    refused_tls, refused_fingerprint = _server_tls_context(tmp_path / "refused")
+    assert approved_fingerprint != refused_fingerprint
+
+    def authorizer(info: credssp.CredSSPDelegationInfo) -> bool:
+        if info.tls_certificate_sha256 == approved_fingerprint:
+            approved.append(info)
+            return True
+
+        refused.append(info)
+        return False
+
+    allowed_client = _client(ntlm_cred, authorizer)
+    allowed_server = _server(approved_tls)
+    allowed = _drive_credssp(allowed_client, allowed_server)
+
+    assert allowed.client.complete
+    assert allowed.server.complete
+    credential = typing.cast(TSPasswordCreds, allowed.server.get_extra_info("client_credential"))
+    assert isinstance(credential, TSPasswordCreds)
+    assert credential.domain_name == ntlm_cred[0].split("\\")[0]
+    assert credential.username == ntlm_cred[0].split("\\")[1]
+    assert credential.password == ntlm_cred[1]
+
+    refused_client = _client(ntlm_cred, authorizer)
+    refused_server = _server(refused_tls)
+    with pytest.raises(DelegationDeniedError):
+        _drive_credssp(refused_client, refused_server)
+
+    assert not refused_client.complete
+    assert not refused_server.complete
+    assert refused_server.get_extra_info("client_credential") is None
+
+    assert len(approved) == 1
+    assert len(refused) == 1
+    assert approved[0].tls_certificate_sha256 == approved_fingerprint
+    assert refused[0].tls_certificate_sha256 == refused_fingerprint
+
+    # Proof at the packing boundary: exactly one usable credential package
+    # existed, and it is the one the authorized peer received.
+    assert calls == [ntlm_cred[1].encode()]
+    assert allowed.credential is not None
+
+
+def test_credssp_new_context_does_not_inherit_delegation_permit(ntlm_cred):
+    decisions: typing.List[bool] = [True]
+    seen: typing.List[credssp.CredSSPDelegationInfo] = []
+
+    def authorizer(info: credssp.CredSSPDelegationInfo) -> bool:
+        seen.append(info)
+        return decisions[-1]
+
+    c = _client(ntlm_cred, authorizer)
+    s = _server()
+    run = _drive_credssp(c, s)
+    assert run.client.complete
+    assert run.client._delegation_authorized is True
+    assert len(seen) == 1
+
+    # The permit belongs to the completed handshake only.
+    new_client = run.client.new_context()
+    assert new_client._delegation_authorized is None
+    assert new_client._ts_credential is None
+
+    # The new handshake asks the application again. Denying it now must stop
+    # the new context even though the previous handshake was authorized.
+    decisions[:] = [False]
+    new_server = _server()
+    with pytest.raises(DelegationDeniedError):
+        _drive_credssp(new_client, new_server)
+
+    assert len(seen) == 2
+    assert seen[0].tls_certificate_sha256 == seen[1].tls_certificate_sha256
+    assert new_client._delegation_authorized is False
+    assert new_client._ts_credential is None
+    assert not new_client.complete
+    assert not new_server.complete
+
+
+def test_credssp_delegation_denial_is_sticky(ntlm_cred):
+    """Stepping a denied context again must not report a usable completion."""
+    c = _client(ntlm_cred, lambda info: False)
+    s = _server()
+
+    server_tls_token = None
+    while c.get_extra_info("auth_stage") == "TLS Handshake":
+        client_tls_token = c.step(server_tls_token)
+        server_tls_token = s.step(client_tls_token)
+
+    assert c.get_extra_info("delegation_authorized") is None
+
+    pub_key_token = c.step(server_tls_token)
+    server_pub_key = s.step(pub_key_token)
+
+    with pytest.raises(DelegationDeniedError):
+        c.step(server_pub_key)
+
+    assert c.get_extra_info("delegation_authorized") is False
+    assert not c.complete
+    assert c._ts_credential is None
+
+    # Repeating the step must fail the same way rather than signalling a
+    # normal end of the exchange.
+    with pytest.raises(DelegationDeniedError):
+        c.step(b"")
+
+    assert not c.complete
+    assert c._ts_credential is None
+    assert not s.complete
+    assert s.get_extra_info("client_credential") is None
+
+
+def test_credssp_delegation_authorized_extra_info(ntlm_cred):
+    c = _client(ntlm_cred, lambda info: True)
+    s = _server()
+
+    assert c.get_extra_info("delegation_authorized") is None
+    run = _drive_credssp(c, s)
+
+    assert run.client.get_extra_info("delegation_authorized") is True
+    assert run.server.get_extra_info("delegation_authorized") is None

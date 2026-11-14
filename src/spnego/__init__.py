@@ -23,6 +23,7 @@ from spnego._credential import (
     NTLMHash,
     Password,
 )
+from spnego._credssp import CredSSPDelegationInfo, DelegationAuthorizationCallback
 from spnego.auth import client, server
 from spnego.exceptions import NegotiateOptions
 
@@ -31,6 +32,8 @@ __all__ = [
     "ContextReq",
     "Credential",
     "CredentialCache",
+    "CredSSPDelegationInfo",
+    "DelegationAuthorizationCallback",
     "IOVUnwrapResult",
     "IOVWrapResult",
     "KerberosCCache",
