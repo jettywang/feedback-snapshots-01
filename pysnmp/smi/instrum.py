@@ -213,6 +213,8 @@ class MibInstrumController(AbstractMibInstrumController):
         outputVarBinds = []
         state, status = "start", "ok"
         origExc = origTraceback = None
+        committed = False
+        undoFailed = False
         while True:
             k = state, status
             if k in fsmTable:
@@ -230,6 +232,13 @@ class MibInstrumController(AbstractMibInstrumController):
             status = "ok"
             if state == "stop":
                 break
+
+            if state == "readTest" and committed:
+                # The write has already been committed. The read-back only
+                # reproduces the new values for the response; it must neither
+                # re-check the write view nor turn a successful SET into an
+                # error (which would report failure after a real side effect).
+                context.pop("acFun", None)
 
             for idx, (name, val) in enumerate(varBinds):
                 mgmtFun = getattr(mibTree, state, None)
@@ -254,16 +263,34 @@ class MibInstrumController(AbstractMibInstrumController):
                             traceback.format_exception(exc_t, exc_v, exc_tb),
                         )
                     )
-                    if origExc is None:  # Take the first exception
+                    if state == "writeUndo":
+                        # rfc3416: 4.2.5 -- a failed rollback must not be
+                        # reported as commitFailed. UndoFailed takes priority
+                        # and its errorIndex is zero. Keep rolling back the
+                        # remaining varbinds: the RFC asks for an undo of
+                        # *all* assignments, so a single failure must not
+                        # abandon the rest.
+                        undoFailed = True
+                        if origTraceback is None:
+                            origTraceback = exc_tb
+                        continue
+                    elif origExc is None:  # Take the first exception
                         origExc, origTraceback = exc_v, exc_tb
                     status = "err"
                     break
                 else:
+                    if state == "writeCommit":
+                        committed = True
                     debug.logger & debug.FLAG_INS and debug.logger(
                         f"flipFlopFsm: fun {mgmtFun} suceeded for {name}={val!r}"
                     )
                     if rval is not None:
                         outputVarBinds.append((rval[0], rval[1]))
+
+        if undoFailed:
+            # Undo errors win over the original commit failure: the outcome
+            # is now undetermined and must be reported as undoFailed.
+            raise error.UndoFailedError(idx=0)
 
         if origExc:
             try:

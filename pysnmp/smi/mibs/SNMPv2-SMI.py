@@ -582,12 +582,14 @@ class MibTree(ObjectType):
         name, val = varBind
 
         if name == self.name:
-            # Make sure variable is writable
+            # rfc3416: 4.2.5 (1)/(9) -- distinguish a view denial from a
+            # column that is simply not writable.
             acFun = context.get("acFun")
             if acFun:
-                if self.maxAccess not in ("read-write", "read-create") or acFun(
-                    "write", (name, self.syntax), **context
-                ):
+                if acFun("write", (name, self.syntax), **context):
+                    raise error.NoAccessError(name=name, idx=context.get("idx"))
+
+                if self.maxAccess not in ("read-write", "read-create"):
                     raise error.NotWritableError(name=name, idx=context.get("idx"))
         else:
             node = self.getBranch(name, **context)
@@ -725,11 +727,15 @@ class MibScalar(MibTree):
         if name == self.name:
             raise error.NoAccessError(name=name, idx=context.get("idx"))
 
+        # rfc3416: 4.2.5 (1)/(9) -- distinguish a view denial from a column
+        # that is simply not writable. Internal callers (e.g. row index
+        # initialization) drop acFun and are not subject to this check.
         acFun = context.get("acFun")
         if acFun:
-            if self.maxAccess not in ("read-write", "read-create") or acFun(
-                "write", (name, self.syntax), **context
-            ):
+            if acFun("write", (name, self.syntax), **context):
+                raise error.NoAccessError(name=name, idx=context.get("idx"))
+
+            if self.maxAccess not in ("read-write", "read-create"):
                 raise error.NotWritableError(name=name, idx=context.get("idx"))
 
         MibTree.writeTest(self, varBind, **context)
@@ -761,6 +767,16 @@ class MibScalarInstance(MibTree):
             # types (e.g. TestAndIncr) whose setValue() does an __ne__ comparison
             # against the value before accepting it. clone() with no args is safe.
             return self.syntax.clone()
+
+        # rfc3416: 4.2.5 (3) -- reject ASN.1 types inconsistent with the
+        # column's SYNTAX as wrongType before any value coercion happens.
+        # Plain Python values (used by the entity config helpers) carry no
+        # tagSet and are left for the syntax class to validate.
+        valueTagSet = getattr(value, "tagSet", None)
+        if valueTagSet is not None and not self.syntax.tagSet.isSuperTagSetOf(
+            valueTagSet
+        ):
+            raise error.WrongTypeError(name=name, idx=context.get("idx"))
 
         try:
             if hasattr(self.syntax, "setValue"):
@@ -871,10 +887,14 @@ class MibScalarInstance(MibTree):
                 if "syntax" in why:
                     self.__newSyntax = why["syntax"]
                     raise why
-                else:
+                elif "idx" not in why:
                     raise error.WrongValueError(
                         name=name, idx=context.get("idx"), msg=sys.exc_info()[1]
                     )
+                else:
+                    # Keep the precise error class (e.g. wrongType) and its
+                    # errorIndex so the response matches the failure.
+                    raise
         else:
             raise error.NoSuchInstanceError(name=name, idx=context.get("idx"))
 
@@ -895,8 +915,11 @@ class MibScalarInstance(MibTree):
 
     # noinspection PyAttributeOutsideInit
     def writeUndo(self, varBind, **context):
-        # Revive previous value
-        self.syntax = self.__oldSyntax
+        # Nothing was staged, so this instance has nothing to roll back.
+        # Leaving self.syntax alone keeps a never-committed instance intact
+        # when a later varbind of the same SET fails to commit.
+        if self.__oldSyntax is not None:
+            self.syntax = self.__oldSyntax
         self.__newSyntax = self.__oldSyntax = None
 
     # Table column instance specifics

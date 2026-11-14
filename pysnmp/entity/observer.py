@@ -75,11 +75,16 @@ class MetaObserver:
     def store_execution_context(self, snmpEngine: "SnmpEngine", execpoint, variables):
         """Store execution context at specified execution point.
 
+        Contexts are kept in a stack per execution point so that a request
+        handled re-entrantly (e.g. an agent serving another context while a
+        SET is still in progress) restores the outer request's context on
+        exit instead of leaving the inner one behind.
+
         Args:
             execpoint (str): Execution point ID.
             variables (dict): Local scope variables to store.
         """
-        self.__execpoints[execpoint] = variables
+        self.__execpoints.setdefault(execpoint, []).append(variables)
         if execpoint in self.__observers:
             for cbFun in self.__observers[execpoint]:
                 cbFun(snmpEngine, execpoint, variables, self.__contexts[cbFun])
@@ -92,7 +97,12 @@ class MetaObserver:
         """
         if execpoints:
             for execpoint in execpoints:
-                del self.__execpoints[execpoint]
+                stack = self.__execpoints.get(execpoint)
+                if not stack:
+                    continue
+                stack.pop()
+                if not stack:
+                    del self.__execpoints[execpoint]
         else:
             self.__execpoints.clear()
 
@@ -105,4 +115,4 @@ class MetaObserver:
         Returns:
             dict: Local scope variables at the specified execution point.
         """
-        return self.__execpoints[execpoint]
+        return self.__execpoints[execpoint][-1]

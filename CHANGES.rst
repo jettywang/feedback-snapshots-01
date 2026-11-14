@@ -1,5 +1,21 @@
 .. current-version: 7.1.32 (managed by bump2version)
 
+Revision 7.1.33, unreleased
+---------------------------
+
+- Fixed multi-varbind SET reporting to follow RFC 3416 section 4.2.5:
+  a denied middle varbind is ``noAccess`` with its own ``errorIndex``, a
+  type-inconsistent value is ``wrongType``, a failed rollback is
+  ``undoFailed`` with a zero ``errorIndex`` instead of ``commitFailed`` or
+  success, and the remaining varbinds are still rolled back after one undo
+  failure.
+- Fixed ``writeUndo`` wiping a scalar instance whose staged value was never
+  committed when a later varbind of the same SET failed.
+- Fixed the post-commit read-back re-checking the write view and turning a
+  successful SET into ``noAccess`` after the MIB had already changed.
+- Fixed re-entrant requests overwriting the observer execution context, which
+  could make a request use another context's authorization basis.
+
 Revision 7.1.32, released on Nov 07, 2026
 -----------------------------------------
 

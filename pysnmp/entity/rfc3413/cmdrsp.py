@@ -230,10 +230,15 @@ class CommandResponderBase:
             try:
                 errorIndex = errorIndication["idx"] + 1
 
-            except KeyError:
+            except (KeyError, TypeError):
                 errorIndex = 1
 
-            if len(varBinds) > errorIndex:
+            # rfc3416: 4.2.5 -- undoFailed is reported with a zero errorIndex
+            if errorStatus == "undoFailed":
+                errorIndex = 0
+
+            # rfc3416: 4.2.1.3 -- errorIndex must stay within the varbind list
+            elif errorIndex > len(varBinds):
                 errorIndex = 1
 
             # rfc1905: 4.2.1.3
