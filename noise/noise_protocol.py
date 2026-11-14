@@ -1,20 +1,23 @@
-import warnings
 from functools import partial
-from typing import Tuple
 
-from noise.exceptions import NoiseProtocolNameError, NoisePSKError, NoiseValidationError
+from noise.configuration import HandshakeConfiguration
+from noise.constants import MAX_PROTOCOL_NAME_LEN, Empty
+from noise.exceptions import NoiseProtocolNameError
 from noise.state import HandshakeState
-from .constants import MAX_PROTOCOL_NAME_LEN, Empty
 
 
 class NoiseProtocol(object):
     """
-    TODO: Document
+    Per-handshake Noise protocol description.
+
+    All startup-affecting inputs live in one ``HandshakeConfiguration``
+    object. Before ``start_handshake`` it may be constructed and validated;
+    after startup it is frozen and ``startup_configuration`` is the sole
+    auditable record of what entered the handshake hash.
     """
     def __init__(self, protocol_name: bytes, backend: 'NoiseBackend'):
-        self.name = protocol_name
         self.backend = backend
-        unpacked_name = UnpackedName.from_protocol_name(self.name)
+        unpacked_name = UnpackedName.from_protocol_name(protocol_name)
         mappings = self.backend.map_protocol_name_to_crypto(unpacked_name)
 
         # A valid Pattern instance (see Section 7 of specification (rev 32))
@@ -24,7 +27,6 @@ class NoiseProtocol(object):
             self.pattern.apply_pattern_modifiers(self.pattern_modifiers)
 
         # Handle PSK handshake options
-        self.psks = None
         self.is_psk_handshake = any([modifier.startswith('psk') for modifier in self.pattern_modifiers])
 
         # Preinitialized
@@ -37,8 +39,7 @@ class NoiseProtocol(object):
         self.cipher_class = mappings['cipher']
         self.keypair_class = mappings['keypair']
 
-        self.prologue = None
-        self.initiator = None
+        self._configuration = HandshakeConfiguration(protocol_name)
         self.handshake_hash = None
 
         self.handshake_state = Empty()
@@ -47,7 +48,131 @@ class NoiseProtocol(object):
         self.cipher_state_encrypt = Empty()
         self.cipher_state_decrypt = Empty()
 
-        self.keypairs = {'s': None, 'e': None, 'rs': None, 're': None}
+    # ------------------------------------------------------------------
+    # Configuration delegation. These properties are the single source of
+    # truth before startup and become frozen afterwards.
+    # ------------------------------------------------------------------
+    @property
+    def configuration(self):
+        return self._configuration
+
+    @property
+    def name(self):
+        return self.configuration.protocol_name
+
+    @name.setter
+    def name(self, value):
+        # The handshake pattern and crypto functions were derived from the
+        # construction-time name, so replacing it is never safe.
+        self.configuration._ensure_mutable()
+        raise NoiseProtocolNameError(
+            'Protocol name is fixed at construction; create a new NoiseConnection instead')
+
+    @property
+    def protocol_name(self):
+        return self.configuration.protocol_name
+
+    @property
+    def initiator(self):
+        return self.configuration.initiator
+
+    @initiator.setter
+    def initiator(self, value):
+        self.configuration.initiator = value
+
+    @property
+    def prologue(self):
+        """Byte string actually mixed into the handshake hash."""
+        return self.configuration.prologue
+
+    @prologue.setter
+    def prologue(self, value):
+        self.configuration.prologue = value
+
+    @property
+    def application_prologue(self):
+        return self.configuration.application_prologue
+
+    @application_prologue.setter
+    def application_prologue(self, value):
+        self.configuration.application_prologue = value
+
+    @property
+    def negotiation_record(self):
+        return self.configuration.negotiation_record
+
+    @negotiation_record.setter
+    def negotiation_record(self, value):
+        self.configuration.negotiation_record = value
+
+    @property
+    def psks(self):
+        return self.configuration.psks
+
+    @psks.setter
+    def psks(self, value):
+        self.configuration.psks = value
+
+    @property
+    def keypairs(self):
+        return self.configuration.keypairs
+
+    @keypairs.setter
+    def keypairs(self, value):
+        self.configuration._ensure_mutable()
+        keypairs = self.configuration.keypairs
+        keypairs.clear()
+        keypairs.update(value)
+
+    @property
+    def startup_configuration(self):
+        return self.configuration.startup_configuration
+
+    @property
+    def frozen(self):
+        return self.configuration.started
+
+    @property
+    def psk_queue(self):
+        return self.configuration.psk_queue
+
+    def consume_psk(self):
+        return self.configuration.consume_psk()
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+    def validate(self):
+        """Validate startup inputs without mutating or consuming anything."""
+        self.configuration.validate(self.pattern)
+
+    def start(self):
+        """
+        Validate, snapshot, freeze and initialise in that order.
+
+        Validation failures leave the connection exactly as it was. Any failure
+        during snapshot/freeze/initialisation rolls the configuration and
+        handshake state back to their pre-start values, so a corrected retry is
+        possible and no list is consumed by the failed attempt.
+        """
+        self.configuration._ensure_mutable()
+        self.validate()
+
+        startup = self.configuration.snapshot_for_startup()
+        rollback = self.configuration.snapshot_for_rollback()
+        handshake_state = self.handshake_state
+        symmetric_state = self.symmetric_state
+        cipher_state_handshake = self.cipher_state_handshake
+        try:
+            self.configuration.freeze(startup)
+            self.initialise_handshake_state()
+        except BaseException:
+            self.configuration.restore(rollback)
+            self.handshake_state = handshake_state
+            self.symmetric_state = symmetric_state
+            self.cipher_state_handshake = cipher_state_handshake
+            raise
+        return startup
 
     def handshake_done(self):
         if self.pattern.one_way:
@@ -56,40 +181,23 @@ class NoiseProtocol(object):
             else:
                 self.cipher_state_encrypt = None
         self.handshake_hash = self.symmetric_state.get_handshake_hash()
+        self.configuration.consume_remaining_psks()
         del self.handshake_state
         del self.symmetric_state
         del self.cipher_state_handshake
-        del self.prologue
-        del self.initiator
-        del self.dh_fn
-        del self.hash_fn
-        del self.keypair_class
-
-    def validate(self):
-        if self.is_psk_handshake:
-            if any([len(psk) != 32 for psk in self.psks]):
-                raise NoisePSKError('Invalid psk length! Has to be 32 bytes long')
-            if len(self.psks) != self.pattern.psk_count:
-                raise NoisePSKError('Bad number of PSKs provided to this protocol! {} are required, '
-                                    'given {}'.format(self.pattern.psk_count, len(self.psks)))
-
-        if self.initiator is None:
-            raise NoiseValidationError('You need to set role with NoiseConnection.set_as_initiator '
-                                       'or NoiseConnection.set_as_responder')
-
-        for keypair in self.pattern.get_required_keypairs(self.initiator):
-            if self.keypairs[keypair] is None:
-                raise NoiseValidationError('Keypair {} has to be set for chosen handshake pattern'.format(keypair))
-
-        if self.keypairs['e'] is not None or self.keypairs['re'] is not None:
-            warnings.warn('One of ephemeral keypairs is already set. '
-                          'This is OK for testing, but should NEVER happen in production!')
 
     def initialise_handshake_state(self):
-        kwargs = {'initiator': self.initiator}
-        if self.prologue:
-            kwargs['prologue'] = self.prologue
-        for keypair, value in self.keypairs.items():
+        if not self.configuration.started:
+            # Direct NoiseProtocol users get the same validate/freeze contract
+            # as NoiseConnection.start_handshake().
+            self.start()
+            return
+        configuration = self.configuration
+        configuration.prepare_psk_queue()
+        kwargs = {'initiator': configuration.initiator}
+        if configuration.prologue:
+            kwargs['prologue'] = configuration.prologue
+        for keypair, value in configuration.keypairs.items():
             if value:
                 kwargs[keypair] = value
         self.handshake_state = HandshakeState.initialize(self, **kwargs)

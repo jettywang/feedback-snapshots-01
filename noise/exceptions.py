@@ -24,3 +24,15 @@ class NoiseMaxNonceError(Exception):
 
 class NoiseValidationError(Exception):
     pass
+
+
+class NoiseConfigurationError(NoiseValidationError):
+    pass
+
+
+class NoiseConfigurationFrozenError(NoiseConfigurationError):
+    pass
+
+
+class NoiseNegotiationError(NoiseValueError):
+    pass

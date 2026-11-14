@@ -1,6 +1,6 @@
 from typing import Union
 
-from noise.exceptions import NoiseMaxNonceError
+from noise.exceptions import NoiseConfigurationFrozenError, NoiseMaxNonceError
 from .constants import Empty, TOKEN_E, TOKEN_S, TOKEN_EE, TOKEN_ES, TOKEN_SE, TOKEN_SS, TOKEN_PSK, MAX_NONCE
 
 
@@ -204,7 +204,7 @@ class SymmetricState(object):
         c1, c2 = CipherState(self.noise_protocol), CipherState(self.noise_protocol)
         c1.initialize_key(temp_k1)
         c2.initialize_key(temp_k2)
-        if self.noise_protocol.handshake_state.initiator:
+        if self.noise_protocol.initiator:
             self.noise_protocol.cipher_state_encrypt = c1
             self.noise_protocol.cipher_state_decrypt = c2
         else:
@@ -222,8 +222,17 @@ class HandshakeState(object):
     Implemented as per Noise Protocol specification - paragraph 5.3.
 
     The initialize() function takes different required argument - noise_protocol, which contains handshake_pattern.
+
+    After initialize() the startup inputs (role, protocol, pre-message keys)
+    are sealed. Only token processing may learn or generate handshake keys,
+    and it does so through private setters.
     """
+    _SEALED_ATTRIBUTES = frozenset(
+        ('_sealed', 'noise_protocol', 'symmetric_state', 'initiator', 's', 'e', 'rs', 're',
+         'message_patterns'))
+
     def __init__(self):
+        object.__setattr__(self, '_sealed', False)
         self.noise_protocol = None
         self.symmetric_state = None
         self.initiator = None
@@ -232,6 +241,15 @@ class HandshakeState(object):
         self.rs = None
         self.re = None
         self.message_patterns = None
+
+    def __setattr__(self, name, value):
+        if name in self._SEALED_ATTRIBUTES and getattr(self, '_sealed', False):
+            raise NoiseConfigurationFrozenError(
+                'Startup configuration is frozen; handshake state keypairs cannot be replaced')
+        object.__setattr__(self, name, value)
+
+    def _set_handshake_keypair(self, name, value):
+        object.__setattr__(self, name, value)
 
     @classmethod
     def initialize(cls, noise_protocol: 'NoiseProtocol', initiator: bool, prologue: bytes=b'', s: '_KeyPair'=None,
@@ -254,6 +272,9 @@ class HandshakeState(object):
         """
         # Create HandshakeState
         instance = cls()
+        if getattr(noise_protocol, 'frozen', False) and bool(initiator) != bool(noise_protocol.initiator):
+            raise NoiseConfigurationFrozenError(
+                'Handshake role does not match the frozen startup configuration')
         instance.noise_protocol = noise_protocol
 
         # Originally in specification:
@@ -287,6 +308,7 @@ class HandshakeState(object):
         # Sets message_patterns to the message patterns from handshake_pattern
         instance.message_patterns = noise_protocol.pattern.tokens.copy()
 
+        object.__setattr__(instance, '_sealed', True)
         return instance
 
     def write_message(self, payload: Union[bytes, bytearray], message_buffer: bytearray):
@@ -303,7 +325,8 @@ class HandshakeState(object):
         for token in message_pattern:
             if token == TOKEN_E:
                 # Sets e = GENERATE_KEYPAIR(). Appends e.public_key to the buffer. Calls MixHash(e.public_key)
-                self.e = self.noise_protocol.dh_fn.generate_keypair() if isinstance(self.e, Empty) else self.e
+                if isinstance(self.e, Empty):
+                    self._set_handshake_keypair('e', self.noise_protocol.dh_fn.generate_keypair())
                 message_buffer += self.e.public_bytes
                 self.symmetric_state.mix_hash(self.e.public_bytes)
                 if self.noise_protocol.is_psk_handshake:
@@ -319,14 +342,14 @@ class HandshakeState(object):
 
             elif token == TOKEN_ES:
                 # Calls MixKey(DH(e, rs)) if initiator, MixKey(DH(s, re)) if responder
-                if self.initiator:
+                if self.noise_protocol.initiator:
                     self.symmetric_state.mix_key(self.noise_protocol.dh_fn.dh(self.e.private, self.rs.public))
                 else:
                     self.symmetric_state.mix_key(self.noise_protocol.dh_fn.dh(self.s.private, self.re.public))
 
             elif token == TOKEN_SE:
                 # Calls MixKey(DH(s, re)) if initiator, MixKey(DH(e, rs)) if responder
-                if self.initiator:
+                if self.noise_protocol.initiator:
                     self.symmetric_state.mix_key(self.noise_protocol.dh_fn.dh(self.s.private, self.re.public))
                 else:
                     self.symmetric_state.mix_key(self.noise_protocol.dh_fn.dh(self.e.private, self.rs.public))
@@ -336,7 +359,7 @@ class HandshakeState(object):
                 self.symmetric_state.mix_key(self.noise_protocol.dh_fn.dh(self.s.private, self.rs.public))
 
             elif token == TOKEN_PSK:
-                self.symmetric_state.mix_key_and_hash(self.noise_protocol.psks.pop(0))
+                self.symmetric_state.mix_key_and_hash(self.noise_protocol.consume_psk())
 
             else:
                 raise NotImplementedError('Pattern token: {}'.format(token))
@@ -363,7 +386,8 @@ class HandshakeState(object):
         for token in message_pattern:
             if token == TOKEN_E:
                 # Sets re to the next DHLEN bytes from the message. Calls MixHash(re.public_key).
-                self.re = self.noise_protocol.keypair_class.from_public_bytes(bytes(message[:dhlen]))
+                self._set_handshake_keypair(
+                    're', self.noise_protocol.keypair_class.from_public_bytes(bytes(message[:dhlen])))
                 message = message[dhlen:]
                 self.symmetric_state.mix_hash(self.re.public_bytes)
                 if self.noise_protocol.is_psk_handshake:
@@ -378,9 +402,10 @@ class HandshakeState(object):
                 else:
                     temp = bytes(message[:dhlen])
                     message = message[dhlen:]
-                self.rs = self.noise_protocol.keypair_class.from_public_bytes(
-                    self.symmetric_state.decrypt_and_hash(temp)
-                )
+                self._set_handshake_keypair(
+                    'rs',
+                    self.noise_protocol.keypair_class.from_public_bytes(
+                        self.symmetric_state.decrypt_and_hash(temp)))
 
             elif token == TOKEN_EE:
                 # Calls MixKey(DH(e, re)).
@@ -388,14 +413,14 @@ class HandshakeState(object):
 
             elif token == TOKEN_ES:
                 # Calls MixKey(DH(e, rs)) if initiator, MixKey(DH(s, re)) if responder
-                if self.initiator:
+                if self.noise_protocol.initiator:
                     self.symmetric_state.mix_key(self.noise_protocol.dh_fn.dh(self.e.private, self.rs.public))
                 else:
                     self.symmetric_state.mix_key(self.noise_protocol.dh_fn.dh(self.s.private, self.re.public))
 
             elif token == TOKEN_SE:
                 # Calls MixKey(DH(s, re)) if initiator, MixKey(DH(e, rs)) if responder
-                if self.initiator:
+                if self.noise_protocol.initiator:
                     self.symmetric_state.mix_key(self.noise_protocol.dh_fn.dh(self.s.private, self.re.public))
                 else:
                     self.symmetric_state.mix_key(self.noise_protocol.dh_fn.dh(self.e.private, self.rs.public))
@@ -405,7 +430,7 @@ class HandshakeState(object):
                 self.symmetric_state.mix_key(self.noise_protocol.dh_fn.dh(self.s.private, self.rs.public))
 
             elif token == TOKEN_PSK:
-                self.symmetric_state.mix_key_and_hash(self.noise_protocol.psks.pop(0))
+                self.symmetric_state.mix_key_and_hash(self.noise_protocol.consume_psk())
 
             else:
                 raise NotImplementedError('Pattern token: {}'.format(token))

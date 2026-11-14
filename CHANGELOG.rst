@@ -1,6 +1,21 @@
 Changelog
 =========
 
+Unreleased
+~~~~~~~~~~
+
+* Added a single startup configuration lifecycle for ``NoiseConnection``.
+  After ``start_handshake()`` the protocol name, prologue, role, PSKs and
+  pre-message keypairs are frozen; further attempts raise
+  ``NoiseConfigurationFrozenError``.
+* Added ``NoiseConnection.validate()``, ``startup_configuration``,
+  ``startup_digest`` and ``audit_configuration()``.
+* Added ``noise.negotiation.NegotiationRecord`` and ``negotiate()``. Records
+  encode both parties' choices and offer lists with unambiguous length-prefixed
+  fields and are bound into the effective prologue.
+* Failed startup validation no longer consumes PSKs and leaves the connection
+  retryable. Caller-owned PSK lists and byte strings are copied.
+
 .. _v0-3-1:
 
 0.3.1 - 2020-03-03
