@@ -1,0 +1,13 @@
+{
+  "scenario": "separated",
+  "description": "All role keys are distinct physical material; no sharing between roles and no overlap between root v1 and v2 key sets.",
+  "physical_labels": {
+    "S-ROOT1": "45f060ab32358ee435835c5b379407b751044820d00eabdf6ed66634f9a4ae74",
+    "S-ROOT2": "09b14469fd8bd52add9a59a961b5367c68c99a080928946909390f7d39d9d3ff",
+    "S-TGT1": "1937803b6409a9beade4fec2d42ab28d41e0d3c00402f9ad76cec81f93f38d29",
+    "S-TGT2": "ba5b2c2c9022ff3fedb92d58dc14d0a8c92a6aa428e901ff0a21aa78f4bf8656",
+    "S-SNAP1": "361edaef4c3dd681ad3b58498d3606c4f90d7cdf4b8f5e8b6711b53e093fa783",
+    "S-SNAP2": "9bc5e3e957200bfbd77627e5d6ee89a8921a3b55bc3802a476a6bdcebccfbfc2",
+    "S-TIME1": "2ccd0c83767c285aeabc022a495ef6f7e3af6ad8820601eeb8ea93b0d85b3cbd"
+  }
+}
