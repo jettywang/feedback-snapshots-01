@@ -7,6 +7,17 @@
 1.4.7 (aiosmtpd-next)
 =====================
 
+Added
+-----
+
+* Added a built-in ``OAUTHBEARER`` SASL mechanism (:rfc:`7628`) for OAuth 2.0
+  bearer tokens. The initial client response (GS2 header and key/value pairs)
+  is parsed strictly, with duplicate or conflicting fields rejected, and the
+  local service enforces TLS, host/port, audience, scope and authzid policy.
+  Token validation is performed by a caller-supplied local callback
+  (``oauth_token_validator``); the library never contacts an identity service
+  itself. Bearer tokens are never written to the logs.
+
 Fixed/Improved
 --------------
 

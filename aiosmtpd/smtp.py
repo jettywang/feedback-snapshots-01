@@ -7,6 +7,7 @@ import binascii
 import collections
 import enum
 import inspect
+import json
 import logging
 import re
 import socket
@@ -37,6 +38,16 @@ import attr
 from public import public
 
 from aiosmtpd import __version__, _get_or_new_eventloop
+from aiosmtpd.oauthbearer import (
+    ERR_INVALID_TOKEN,
+    KVSEP,
+    OAuthBearerError,
+    OAuthBearerRequest,
+    OAuthIdentity,
+    OAuthTokenValidatorType,
+    evaluate_oauthbearer,
+    parse_oauthbearer_request,
+)
 from aiosmtpd.proxy_protocol import ProxyData, get_proxy
 
 
@@ -77,6 +88,10 @@ __all__ = [
     "AuthCallbackType",
     "AuthMechanismType",
     "MISSING",
+    "OAuthBearerError",
+    "OAuthBearerRequest",
+    "OAuthIdentity",
+    "OAuthTokenValidatorType",
     "__version__",
 ]  # Will be added to by @public
 __ident__ = 'Python SMTP {}'.format(__version__)
@@ -337,6 +352,9 @@ class SMTP(asyncio.StreamReaderProtocol):
             auth_callback: Optional[AuthCallbackType] = None,
             command_call_limit: Union[int, Dict[str, int], None] = None,
             authenticator: Optional[AuthenticatorType] = None,
+            oauth_token_validator: Optional[OAuthTokenValidatorType] = None,
+            oauth_service_audience: Optional[str] = None,
+            oauth_required_scopes: Optional[Iterable[str]] = None,
             proxy_protocol_timeout: Optional[Union[int, float]] = None,
             loop: Optional[asyncio.AbstractEventLoop] = None
     ):
@@ -399,6 +417,15 @@ class SMTP(asyncio.StreamReaderProtocol):
             self._authenticator = None
 
         self._auth_required = auth_required
+
+        # RFC 7628 OAUTHBEARER configuration. Token validation is delegated to
+        # this locally-invoked callback; this library never contacts an
+        # identity service itself.
+        self._oauth_token_validator = oauth_token_validator
+        self._oauth_service_audience = oauth_service_audience
+        self._oauth_required_scopes: Tuple[str, ...] = tuple(
+            oauth_required_scopes or ()
+        )
 
         # Get hooks & methods to significantly speedup getattr's
         self._auth_methods: Dict[str, _AuthMechAttr] = {
@@ -1175,6 +1202,120 @@ class SMTP(asyncio.StreamReaderProtocol):
         assert password is not None
 
         return self._authenticate("LOGIN", LoginPassword(login, password))
+
+    def _local_service_endpoint(self) -> Tuple[Optional[str], Optional[int]]:
+        """
+        Return the (host, port) of the local service endpoint, as known to the
+        application server. Used to validate the OAUTHBEARER ``host``/``port``
+        kvpairs. Returns ``(None, None)`` if the transport cannot provide the
+        information (for example in tests using a mock transport).
+        """
+        transport = self.transport
+        sockname = (
+            transport.get_extra_info("sockname") if transport is not None else None
+        )
+        if isinstance(sockname, tuple) and len(sockname) >= 2:
+            return self.hostname, int(sockname[1])
+        return None, None
+
+    async def _oauthbearer_fail(
+        self, error_status: str, scope: Optional[str] = None
+    ) -> None:
+        """
+        Perform the RFC 7628 section 3.2.2/3.2.3 error interaction.
+
+        The JSON error result is sent in a normal (334) message, after which
+        the client must send a dummy response (a single %x01) or abort. The
+        session is only failed once that exchange is complete; it is never
+        marked authenticated by this path.
+        """
+        error: Dict[str, str] = {"status": error_status}
+        if scope:
+            error["scope"] = scope
+        challenge = json.dumps(error, separators=(",", ":")).encode("utf-8")
+        client_response = await self.challenge_auth(challenge)
+        if client_response is MISSING:
+            # The exchange was aborted or the response was malformed; the
+            # appropriate status code has already been sent by challenge_auth.
+            return
+        if client_response != KVSEP:
+            # The client failed to complete the error interaction correctly.
+            await self.push("501 5.5.2 Invalid OAUTHBEARER error response")
+            return
+        await self.push("535 5.7.8 Authentication credentials invalid")
+
+    async def auth_OAUTHBEARER(
+        self, _, args: List[str]
+    ) -> AuthResult:
+        # RFC 7628 section 5: TLS MUST protect the bearer token. smtp_AUTH
+        # already rejects non-TLS attempts when auth_require_tls is set, but
+        # enforce it here as well so a misconfigured server can never accept
+        # a bearer token over a cleartext channel.
+        if not self._tls_protocol:
+            await self.push(
+                "538 5.7.11 Encryption required for requested "
+                "authentication mechanism"
+            )
+            return AuthResult(success=False, handled=True)
+
+        if len(args) == 1:
+            # No initial client response: prompt with an empty challenge.
+            initial_response = await self.challenge_auth("")
+            if initial_response is MISSING:
+                return AuthResult(success=False)
+        else:
+            try:
+                initial_response = b64decode(args[1].encode(), validate=True)
+            except (binascii.Error, ValueError):
+                await self.push("501 5.5.2 Can't decode base64")
+                return AuthResult(success=False, handled=True)
+        assert initial_response is not None
+
+        try:
+            request: OAuthBearerRequest = parse_oauthbearer_request(
+                initial_response
+            )
+        except OAuthBearerError as error:
+            # A malformed initial response still goes through the RFC 7628
+            # error interaction rather than authenticating the session.
+            log.info(
+                "OAUTHBEARER malformed client response: %s",
+                error.error_status,
+            )
+            await self._oauthbearer_fail(error.error_status)
+            return AuthResult(success=False, handled=True)
+
+        expected_host, expected_port = self._local_service_endpoint()
+        try:
+            identity: OAuthIdentity = evaluate_oauthbearer(
+                request,
+                self._oauth_token_validator,
+                expected_audience=self._oauth_service_audience,
+                required_scopes=self._oauth_required_scopes,
+                expected_host=expected_host,
+                expected_port=expected_port,
+            )
+        except OAuthBearerError as error:
+            reason = (
+                "host/port or policy mismatch"
+                if error.error_status == ERR_INVALID_TOKEN
+                else "invalid request"
+            )
+            # Never include the request's bearer token in the log.
+            log.info(
+                "OAUTHBEARER rejected: %s (%s)",
+                error.error_status,
+                reason,
+            )
+            scope = (
+                self._oauth_required_scopes[0]
+                if self._oauth_required_scopes
+                else None
+            )
+            await self._oauthbearer_fail(error.error_status, scope)
+            return AuthResult(success=False, handled=True)
+
+        return AuthResult(success=True, handled=True, auth_data=identity)
 
     def _strip_command_keyword(self, keyword: str, arg: str) -> Optional[str]:
         keylen = len(keyword)

@@ -83,8 +83,9 @@ that the hook will implement.
    Alternatively, you can also use the :func:`~aiosmtpd.smtp.auth_mechanism` decorator,
    which you can import from the :mod:`aiosmtpd.smtp` module.
 
-The SMTP class provides built-in AUTH hooks for the ``LOGIN`` and ``PLAIN``
-mechanisms, named ``auth_LOGIN`` and ``auth_PLAIN``, respectively.
+The SMTP class provides built-in AUTH hooks for the ``LOGIN``, ``PLAIN`` and
+``OAUTHBEARER`` mechanisms, named ``auth_LOGIN``, ``auth_PLAIN`` and
+``auth_OAUTHBEARER``, respectively.
 If the handler class implements ``auth_LOGIN`` and/or ``auth_PLAIN``, then
 the methods of the handler instance will override the built-in methods.
 
@@ -195,6 +196,113 @@ AuthResult API
       where legacy handlers might be looking for ``session.login_data`` for some reasons.
 
 
+.. _oauthbearer:
+
+OAUTHBEARER (RFC 7628)
+======================
+
+The built-in ``OAUTHBEARER`` mechanism implements :rfc:`7628` for OAuth 2.0
+bearer tokens.  It is intended for mail submission where the client presents a
+short-lived OAuth access token instead of a password.
+
+The library performs the strict, token-agnostic parts of the mechanism and
+enforces the local security policy, but it **never** contacts an identity
+service itself.  Token validation is delegated to a caller-supplied, locally
+invoked callback.
+
+Configuring the mechanism
+-------------------------
+
+The mechanism is enabled by passing these :class:`~aiosmtpd.smtp.SMTP`
+arguments:
+
+.. py:attribute:: oauth_token_validator
+   :noindex:
+
+   A :data:`~aiosmtpd.oauthbearer.OAuthTokenValidatorType` callable that
+   receives the parsed :class:`~aiosmtpd.oauthbearer.OAuthBearerRequest` and
+   returns the :class:`~aiosmtpd.oauthbearer.OAuthIdentity` established by the
+   credential, or raises :class:`~aiosmtpd.oauthbearer.OAuthBearerError`.  It
+   runs locally; use it to verify a JWT, consult a local cache, or perform any
+   other validation that does not require this library to make network calls.
+
+.. py:attribute:: oauth_service_audience
+   :noindex:
+
+   The audience that identifies *this* mail service.  A token whose
+   ``audiences`` do not include it is rejected, so a token minted for another
+   service (for example a calendar service) cannot be used to authenticate.
+
+.. py:attribute:: oauth_required_scopes
+   :noindex:
+
+   The scopes a token must carry to use this service (for example an
+   ``SMTP.send`` scope).  A token missing any of them is rejected.
+
+Strict wire validation
+----------------------
+
+The initial client response is parsed strictly according to the RFC 7628
+grammar:
+
+* The GS2 header (:rfc:`5801`) must use the non-channel-binding form ``n,`` or
+  ``n,a=<authzid>,``; channel-binding flags (``y`` or ``p=``) are rejected.
+* Fields are separated by the ``%x01`` separator and must follow the
+  ``key=value`` layout; malformed or empty elements are rejected.
+* The required ``auth`` field must be ``Bearer <token>`` (the scheme name is
+  matched case-insensitively) with a non-empty token.
+* ``port`` must be a decimal positive integer without leading zeros.
+* Repeated or otherwise conflicting fields are rejected.  Unknown fields are
+  ignored as the RFC permits, but duplicates of any field are an error.
+* ``host`` and ``port``, when present, are checked against the service
+  endpoint the client is connected to.
+
+Identity and authzid
+--------------------
+
+The authenticated identity is the ``subject`` returned by your validator,
+never an identity chosen by the client.  If the client asserts an
+``authzid`` (the ``a=`` part of the GS2 header), it must be identical to the
+validated subject; an attempt to assume another user is rejected.  On success
+the :class:`~aiosmtpd.oauthbearer.OAuthIdentity` is stored in
+:attr:`session.auth_data <Session.auth_data>` and its ``subject`` is exposed
+as the legacy ``login_data``; later mail authorization (such as ``MAIL FROM``)
+is therefore based on the validated identity.
+
+TLS and the error interaction
+-----------------------------
+
+Bearer tokens require TLS.  A bearer token presented over a cleartext
+channel is rejected with ``538`` regardless of the ``auth_require_tls``
+setting, and the session is never marked authenticated.
+
+On any failure the server follows the RFC 7628 error interaction: it sends the
+JSON error result (for example ``{"status":"invalid_token", ...}``) in a
+``334`` message, then waits for the client's dummy response (a single
+``%x01``) or an abort (``*``).  Only after that exchange does it return the
+final ``535``.  A failure inside the validator (including an unexpected
+exception) is treated as a validation failure, never as a successful
+authentication.
+
+.. py:class:: OAuthBearerRequest
+   :noindex:
+
+   The strictly parsed initial client response.  Its representation hides the
+   bearer token, so logging this object cannot leak the credential.
+
+.. py:class:: OAuthIdentity
+   :noindex:
+
+   The identity established by the validated token: ``subject``,
+   ``audiences`` and ``scopes``.
+
+.. py:class:: OAuthBearerError
+   :noindex:
+
+   Raised on validation or policy failure; its ``error_status`` carries the
+   OAuth 2.0 error code placed in the JSON error result.
+
+
 Security Considerations
 =======================
 
@@ -202,8 +310,15 @@ We have taken steps to prevent leakage of sensitive information (i.e., password)
 by overriding the ``__repr__`` and ``__str__`` methods of the :class:`~aiosmtpd.smtp.AuthResult` and
 :class:`~aiosmtpd.smtp.LoginPassword` classes.
 
+The same care is applied to OAUTHBEARER:
+:class:`~aiosmtpd.oauthbearer.OAuthBearerRequest` hides the bearer token in
+its ``__repr__``/``__str__``, the raw ``AUTH OAUTHBEARER`` command line is
+sanitized before it is written to the log, and the built-in mechanism never
+logs the token itself or the parsed request's credential.
+
 However, we have no control on the (logging) output of your custom hooks.
-Please be very careful emitting/recording AUTH information to prevent leakage.
+Please be very careful emitting/recording AUTH information (including bearer
+tokens) to prevent leakage.
 
 
 Example
