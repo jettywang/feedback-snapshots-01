@@ -6,6 +6,7 @@ target files with various delegation graphs"""
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 import tempfile
@@ -617,6 +618,237 @@ class TestTargetFileSearch(TestDelegations):
         # order and the corresponding metadata files were persisted
         self.assertListEqual(self.sim.fetch_tracker.metadata, exp_calls)
         self._assert_files_exist(exp_files)
+
+
+@dataclass
+class DiamondLookup:
+    """One target lookup in a diamond graph and the expected updater
+    state afterwards.
+
+    Expectations are derived independently from the signature relations
+    (which parent actually authorized the shared child's keys) and the
+    pre-order DFS traversal order (which edges are exercised, and in
+    which order, for a given target path).
+    """
+
+    targetpath: str
+    # Expected target content, None if the target must not be found.
+    content: bytes | None = None
+    # True if the lookup must fail with UnsignedMetadataError.
+    unsigned: bool = False
+    # Roles expected to be fetched from the remote during this lookup.
+    fetches: list[str] = field(default_factory=list)
+    # (delegator, role) edges that must be authenticated afterwards.
+    edges: list[tuple[str, str]] = field(default_factory=list)
+    # (delegator, role) edges that must NOT be authenticated afterwards.
+    non_edges: list[tuple[str, str]] = field(default_factory=list)
+
+
+@dataclass
+class DiamondTestCase:
+    """A diamond delegation graph: two parents delegate to the same child
+    with different keys, paths and terminating flags.
+
+    'child_signed_by' lists the parents whose keys actually sign the
+    child, 'lookups' are executed in order on a single updater.
+    """
+
+    graph: DelegationsTestCase
+    child_signed_by: list[str]
+    lookups: list[DiamondLookup]
+
+
+# Parents in this diamond graph differ in keys (auto-generated per
+# delegation), paths and terminating flags. The shared child 'release'
+# holds one target per path.
+DIAMOND_DELEGATIONS = [
+    TestDelegation("targets", "parent-a", paths=["a/*"]),
+    TestDelegation("targets", "parent-b", paths=["b/*"]),
+    TestDelegation("parent-a", "release", paths=["a/*"], terminating=True),
+    TestDelegation("parent-b", "release", paths=["b/*"]),
+]
+DIAMOND_TARGETS = [
+    TestTarget("release", b"content-a", "a/file"),
+    TestTarget("release", b"content-b", "b/file"),
+]
+
+
+class TestSharedDelegationEdges(TestDelegations):
+    """Security regression tests for diamond delegation graphs, where a
+    delegated role is reachable through two different parents.
+
+    Verifying the child role against one parent must not authenticate
+    the second edge: every (delegator, role) pair requires its own
+    signature verification. Conversely, a child authorized by both
+    parents must keep working on both edges, and edges excluded by
+    traversal (terminating delegations) must not cause failures.
+
+    The shortest unauthorized candidate path in these graphs is
+    'targets -> parent-b -> release' serving target 'b/file' (two
+    delegation edges): if the client cached 'release' by role name only
+    after authenticating 'targets -> parent-a -> release', the second
+    lookup would serve 'b/file' without parent-b ever authorizing it.
+    """
+
+    diamonds = {
+        # 'release' is signed by parent-a's key only. The second lookup
+        # reaches 'release' through parent-b: the cached metadata must be
+        # re-verified against parent-b and rejected. This is the shortest
+        # unauthorized candidate path: targets -> parent-b -> release.
+        "child authorized by one parent only": DiamondTestCase(
+            graph=DelegationsTestCase(
+                delegations=DIAMOND_DELEGATIONS,
+                target_files=DIAMOND_TARGETS,
+            ),
+            child_signed_by=["parent-a"],
+            lookups=[
+                DiamondLookup(
+                    "a/file",
+                    content=b"content-a",
+                    fetches=["parent-a", "release"],
+                    edges=[("parent-a", "release")],
+                    non_edges=[("parent-b", "release")],
+                ),
+                DiamondLookup(
+                    "b/file",
+                    unsigned=True,
+                    fetches=["parent-b", "release"],
+                    edges=[("parent-a", "release")],
+                    non_edges=[("parent-b", "release")],
+                ),
+            ],
+        ),
+        # 'release' is signed by both parents' keys: both edges must work
+        # and each must be authenticated independently. Shared roles must
+        # not be rejected outright.
+        "child authorized by both parents": DiamondTestCase(
+            graph=DelegationsTestCase(
+                delegations=DIAMOND_DELEGATIONS,
+                target_files=DIAMOND_TARGETS,
+            ),
+            child_signed_by=["parent-a", "parent-b"],
+            lookups=[
+                DiamondLookup(
+                    "a/file",
+                    content=b"content-a",
+                    fetches=["parent-a", "release"],
+                    edges=[("parent-a", "release")],
+                    non_edges=[("parent-b", "release")],
+                ),
+                DiamondLookup(
+                    "b/file",
+                    content=b"content-b",
+                    # 'release' is loaded from local disk and verified
+                    # against parent-b: no remote fetch needed.
+                    fetches=["parent-b"],
+                    edges=[("parent-a", "release"), ("parent-b", "release")],
+                ),
+            ],
+        ),
+        # 'release' is signed by parent-a's key only, but the terminating
+        # delegation to parent-a excludes parent-b from the traversal:
+        # the unauthorized edge is never exercised, so no error occurs
+        # and 'b/file' is simply not found.
+        "parent excluded by terminating delegation": DiamondTestCase(
+            graph=DelegationsTestCase(
+                delegations=[
+                    TestDelegation(
+                        "targets", "parent-a", paths=["*/*"], terminating=True
+                    ),
+                    TestDelegation("targets", "parent-b", paths=["*/*"]),
+                    TestDelegation("parent-a", "release", paths=["a/*"]),
+                    TestDelegation("parent-b", "release", paths=["b/*"]),
+                ],
+                target_files=[TestTarget("release", b"content-a", "a/file")],
+            ),
+            child_signed_by=["parent-a"],
+            lookups=[
+                DiamondLookup(
+                    "a/file",
+                    content=b"content-a",
+                    fetches=["parent-a", "release"],
+                    edges=[("parent-a", "release")],
+                    non_edges=[("parent-b", "release")],
+                ),
+                DiamondLookup(
+                    "b/file",
+                    content=None,
+                    fetches=[],
+                    edges=[("parent-a", "release")],
+                    non_edges=[("parent-b", "release")],
+                ),
+            ],
+        ),
+    }
+
+    def _restrict_child_signers(self, child: str, parents: list[str]) -> None:
+        """Re-sign 'child' with only the keys that 'parents' authorize."""
+        keyids: list[str] = []
+        for parent in parents:
+            delegator = self.sim.md_delegates[parent].signed
+            assert delegator.delegations is not None
+            assert delegator.delegations.roles is not None
+            keyids.extend(delegator.delegations.roles[child].keyids)
+
+        self.sim.signers[child] = {
+            keyid: self.sim.signers[child][keyid] for keyid in keyids
+        }
+        self.sim.md_delegates[child].signed.version += 1
+        self.sim.update_snapshot()
+
+    @utils.run_sub_tests_with_dataset(diamonds)
+    def test_diamond_edge_authentication(
+        self, test_data: DiamondTestCase
+    ) -> None:
+        self._init_repo(test_data.graph)
+        if test_data.child_signed_by != ["parent-a", "parent-b"]:
+            self._restrict_child_signers("release", test_data.child_signed_by)
+        self.setup_subtest()
+
+        updater = self._init_updater()
+        updater.refresh()
+        self.sim.fetch_tracker.metadata.clear()
+
+        for lookup in test_data.lookups:
+            self.sim.fetch_tracker.metadata.clear()
+
+            if lookup.unsigned:
+                with self.assertRaises(UnsignedMetadataError):
+                    updater.get_targetinfo(lookup.targetpath)
+            else:
+                targetinfo = updater.get_targetinfo(lookup.targetpath)
+                if lookup.content is None:
+                    self.assertIsNone(targetinfo)
+                else:
+                    self.assertIsNotNone(targetinfo)
+                    assert targetinfo is not None
+                    # Check that the returned target is the expected one
+                    digest = hashlib.sha256(lookup.content).hexdigest()
+                    self.assertEqual(targetinfo.hashes["sha256"], digest)
+
+            # Check traversal: which roles were fetched from the remote
+            fetched = [role for role, _ in self.sim.fetch_tracker.metadata]
+            self.assertListEqual(fetched, lookup.fetches)
+
+            # Check which delegation edges were (not) authenticated.
+            # Inspect the authenticated (delegator, role) pairs directly
+            # instead of TrustedMetadataSet.contains(), so the check does
+            # not depend on the cache lookup logic under test.
+            authenticated = updater._trusted_set._trusted_delegations
+            for delegator, role in lookup.edges:
+                self.assertIn(
+                    (delegator, role),
+                    authenticated,
+                    f"edge {delegator} -> {role} must be authenticated",
+                )
+            for delegator, role in lookup.non_edges:
+                self.assertNotIn(
+                    (delegator, role),
+                    authenticated,
+                    f"edge {delegator} -> {role} must not be authenticated",
+                )
+
+        self.teardown_subtest()
 
 
 if __name__ == "__main__":
