@@ -1,0 +1,72 @@
+[
+  {
+    "repo": "olefile",
+    "file": ".feedback/specs/MS-CFB.docx",
+    "url": "https://winprotocoldocs-bhdugrdyduf5h2e4.b02.azurefd.net/MS-CFB/%5bMS-CFB%5d-261026.docx",
+    "sha256": "11785769b9e64acfcaad7110a88408a6c7be6b9f5de72e5786d64c9377a352ae",
+    "source_page": "https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cfb/53989ce4-7b05-4f8d-829b-d08d6148375b"
+  },
+  {
+    "repo": "olefile",
+    "file": ".feedback/specs/MS-CFB.txt",
+    "url": "https://winprotocoldocs-bhdugrdyduf5h2e4.b02.azurefd.net/MS-CFB/%5bMS-CFB%5d-261026.docx",
+    "derived_from": ".feedback/specs/MS-CFB.docx",
+    "sha256": "a7b0d9e95b4ee7eb5590f678baf43675b64ca58aad29b7f66e79b3973a771ce9"
+  },
+  {
+    "repo": "olefile",
+    "file": ".feedback/specs/MS-OVBA.docx",
+    "url": "https://officeprotocoldocs-f5hpbjgea6b8gneq.b02.azurefd.net/files/MS-OVBA/%5bMS-OVBA%5d-260519.docx",
+    "sha256": "31fb68ac3ef209cb32247a3060ff775cc0517c4120137cb39945690448b46c79",
+    "source_page": "https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-ovba/575462ba-bf67-4190-9fac-c275523c75fc"
+  },
+  {
+    "repo": "olefile",
+    "file": ".feedback/specs/MS-OVBA.txt",
+    "url": "https://officeprotocoldocs-f5hpbjgea6b8gneq.b02.azurefd.net/files/MS-OVBA/%5bMS-OVBA%5d-260519.docx",
+    "derived_from": ".feedback/specs/MS-OVBA.docx",
+    "sha256": "5411feb79ba527c15b608446d9ec2ac34a820896735e8bbedbae0af7013134e7"
+  },
+  {
+    "repo": "olefile",
+    "file": ".feedback/specs/MS-OLEDS.docx",
+    "url": "https://winprotocoldocs-bhdugrdyduf5h2e4.b02.azurefd.net/MS-OLEDS/%5bMS-OLEDS%5d-240423.docx",
+    "sha256": "42e666e9f1b1c437972bbe601d302ec25e45557eb309c7d854e54facfeddb134",
+    "source_page": "https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-oleds/85583d21-c1cf-4afe-a35f-d6701c5fbb6f"
+  },
+  {
+    "repo": "olefile",
+    "file": ".feedback/specs/MS-OLEDS.txt",
+    "url": "https://winprotocoldocs-bhdugrdyduf5h2e4.b02.azurefd.net/MS-OLEDS/%5bMS-OLEDS%5d-240423.docx",
+    "derived_from": ".feedback/specs/MS-OLEDS.docx",
+    "sha256": "248e475507a651957d677afc2c603431dd83b558e2e58cd2f1c97b8d5c7e4f32"
+  },
+  {
+    "repo": "olefile",
+    "file": ".feedback/specs/MS-OLEPS.docx",
+    "url": "https://winprotocoldocs-bhdugrdyduf5h2e4.b02.azurefd.net/MS-OLEPS/%5bMS-OLEPS%5d-240423.docx",
+    "sha256": "4343243993cd16bda98e5abe5383a82db5f2eea0b34b54dc7d93978a372844ea",
+    "source_page": "https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-oleps/bf7aeae8-c47a-4939-9f45-700158dac3bc"
+  },
+  {
+    "repo": "olefile",
+    "file": ".feedback/specs/MS-OLEPS.txt",
+    "url": "https://winprotocoldocs-bhdugrdyduf5h2e4.b02.azurefd.net/MS-OLEPS/%5bMS-OLEPS%5d-240423.docx",
+    "derived_from": ".feedback/specs/MS-OLEPS.docx",
+    "sha256": "090e4e69ed58d7aa2d2d7d0589058a55a89069f73abda1de946470c25e8d2b46"
+  },
+  {
+    "repo": "olefile",
+    "file": ".feedback/specs/MS-OFFCRYPTO.docx",
+    "url": "https://officeprotocoldocs-f5hpbjgea6b8gneq.b02.azurefd.net/files/MS-OFFCRYPTO/%5bMS-OFFCRYPTO%5d-260217.docx",
+    "sha256": "9b7a67eb5d0408566a61f218792fcd21536dbc970d83695ad94365e535533f33",
+    "source_page": "https://learn.microsoft.com/en-us/openspecs/office_file_formats/ms-offcrypto/"
+  },
+  {
+    "repo": "olefile",
+    "file": ".feedback/specs/MS-OFFCRYPTO.txt",
+    "url": "https://officeprotocoldocs-f5hpbjgea6b8gneq.b02.azurefd.net/files/MS-OFFCRYPTO/%5bMS-OFFCRYPTO%5d-260217.docx",
+    "derived_from": ".feedback/specs/MS-OFFCRYPTO.docx",
+    "sha256": "6d800ee94b76f6013a7d99f24a4bb5337ae057b01106c41067b43cdf5911a2e0"
+  }
+]
