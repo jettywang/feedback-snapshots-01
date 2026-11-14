@@ -3,6 +3,16 @@ Detailed CHANGELOG
 
 olefile.py
 ----------
+* 2026-11-15 (unreleased):
+    - added global sector allocation audit: OleFileIO.check_allocations(),
+      module-level check_allocations() and check_ole_allocations()
+    - covers FAT, DIFAT, directory, MiniFAT, root mini stream and data
+      streams; detects mid-chain cross-links, system sectors used as data,
+      chain loops, out-of-range sectors and chains shorter than their
+      declared size
+    - physical sectors and mini sectors are tracked in separate address
+      spaces, and normal mini stream containment is not reported as overlap
+    - added -a option to the command-line tool
 * 2023-11-30 v0.47.dev6:
     - fixed issue #142: isOleFile has a new data parameter to handle files in memory properly
     - fixed issue #156: write_sect now correctly detects when data is larger than the sector size

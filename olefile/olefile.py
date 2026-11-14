@@ -98,7 +98,11 @@ __all__ = ['isOleFile', 'OleFileIO', 'OleMetadata', 'enable_logging',
            'DEFECT_FATAL', 'DEFAULT_PATH_ENCODING',
            'MAXREGSECT', 'DIFSECT', 'FATSECT', 'ENDOFCHAIN', 'FREESECT',
            'MAXREGSID', 'NOSTREAM', 'UNKNOWN_SIZE', 'WORD_CLSID',
-           'OleFileIONotClosed'
+           'OleFileIONotClosed',
+           'check_allocations', 'check_ole_allocations', 'SectorChain',
+           'AllocationConflict', 'AllocationReport', 'ALLOC_OVERLAP',
+           'ALLOC_SYSTEM_AS_DATA', 'ALLOC_CHAIN_LOOP', 'ALLOC_OUT_OF_BOUNDS',
+           'ALLOC_SIZE_MISMATCH', 'ALLOC_INVALID_LINK'
 ]
 
 import io
@@ -266,6 +270,251 @@ DEFECT_FATAL =     40    # an error which cannot be ignored, parsing is
 # Minimal size of an empty OLE file, with 512-bytes sectors = 1536 bytes
 # (this is used in isOleFile and OleFileIO.open)
 MINIMAL_OLEFILE_SIZE = 1536
+
+# --- allocation audit --------------------------------------------------------
+#: A sector is claimed by two different chains.
+ALLOC_OVERLAP = 'overlap'
+#: A stream/data chain references a sector that belongs to FAT or DIFAT.
+ALLOC_SYSTEM_AS_DATA = 'system_sector_as_data'
+#: A chain revisits one of its own sectors.
+ALLOC_CHAIN_LOOP = 'chain_loop'
+#: A chain points outside the file, or outside the MiniFAT/ministream bounds.
+ALLOC_OUT_OF_BOUNDS = 'out_of_bounds'
+#: The number of sectors reachable from a chain does not cover the declared size.
+ALLOC_SIZE_MISMATCH = 'size_mismatch'
+#: A chain link is not a regular sector and not ENDOFCHAIN.
+ALLOC_INVALID_LINK = 'invalid_link'
+
+
+class SectorChain(object):
+    """
+    Description of one sector chain found in a compound file.
+
+    ``space`` is either ``'fat'`` for physical sectors in the file, or
+    ``'minifat'`` for mini-sector numbers inside the root mini stream. The two
+    numbering spaces are deliberately kept separate: a mini-sector number is
+    never compared with a physical sector number.
+
+    :ivar name: human-readable name, for example ``'Directory'`` or
+        ``'stream:WordDocument'``.
+    :ivar kind: one of ``fat``, ``difat``, ``directory``, ``minifat``,
+        ``ministream``, ``stream``.
+    :ivar space: ``'fat'`` or ``'minifat'``.
+    :ivar sectors: list of sector numbers in the chain, in traversal order.
+    :ivar start: first sector number, or None.
+    :ivar declared_size: size in bytes declared by the header/directory entry,
+        or None when the structure has no byte size.
+    :ivar sid: directory entry id for stream/root chains, otherwise None.
+    :ivar path: stream path as a list of names, when known.
+    """
+
+    def __init__(self, name, kind, space='fat', start=None,
+                 declared_size=None, sid=None, path=None, sectors=None):
+        self.name = name
+        self.kind = kind
+        self.space = space
+        self.start = start
+        self.declared_size = declared_size
+        self.sid = sid
+        self.path = path
+        self.sectors = list(sectors) if sectors is not None else []
+
+    @property
+    def sector_ids(self):
+        """Alias for :attr:`sectors`."""
+        return self.sectors
+
+    @property
+    def address_space(self):
+        """Alias for :attr:`space`."""
+        return self.space
+
+    @property
+    def is_mini(self):
+        return self.space == 'minifat'
+
+    @property
+    def is_system(self):
+        return self.kind in ('fat', 'difat', 'directory', 'minifat', 'ministream')
+
+    def __len__(self):
+        return len(self.sectors)
+
+    def __repr__(self):
+        return '<SectorChain %r kind=%s space=%s sectors=%r>' % (
+            self.name, self.kind, self.space, self.sectors)
+
+    def __str__(self):
+        return '%s (%s/%s, %d sector(s))' % (
+            self.name, self.kind, self.space, len(self.sectors))
+
+    def as_dict(self):
+        return {
+            'name': self.name,
+            'kind': self.kind,
+            'space': self.space,
+            'start': self.start,
+            'declared_size': self.declared_size,
+            'sid': self.sid,
+            'path': list(self.path) if self.path is not None else None,
+            'sectors': list(self.sectors),
+        }
+
+
+class AllocationConflict(object):
+    """
+    One problem found by the global allocation audit.
+
+    For overlapping allocations, :attr:`chain1` and :attr:`chain2` are the two
+    chains claiming the same sector, so a report always names both sources.
+    For single-chain problems (loop, out-of-bounds, size mismatch) only
+    :attr:`chain1` is set.
+    """
+
+    def __init__(self, kind, chain1, chain2=None, sector=None, space='fat',
+                 detail=None, expected=None, actual=None):
+        self.kind = kind
+        # aliases, to make the result easy to consume:
+        self.type = kind
+        self.reason = kind
+        self.chain1 = chain1
+        self.chain2 = chain2
+        self.chains = (chain1, chain2) if chain2 is not None else (chain1,)
+        self.sector = sector
+        self.space = space
+        self.address_space = space
+        self.detail = detail
+        self.expected = expected
+        self.actual = actual
+
+    @property
+    def sector_id(self):
+        return self.sector
+
+    @property
+    def message(self):
+        if self.detail:
+            return self.detail
+        if self.chain2 is not None:
+            return '%s: sector %r claimed by %r and %r' % (
+                self.kind, self.sector, self.chain1.name, self.chain2.name)
+        return '%s: %r at sector %r' % (self.kind, self.chain1.name, self.sector)
+
+    def __str__(self):
+        if self.chain2 is not None:
+            return '%s: sector %r in %s is claimed by %r and %r' % (
+                self.kind, self.sector, self.space,
+                self.chain1.name, self.chain2.name)
+        return '%s: %r %s' % (self.kind, self.chain1.name, self.message)
+
+    def __repr__(self):
+        return '<AllocationConflict %s sector=%r chains=%r>' % (
+            self.kind, self.sector, tuple(c.name for c in self.chains))
+
+    def as_dict(self):
+        return {
+            'kind': self.kind,
+            'sector': self.sector,
+            'space': self.space,
+            'chains': [c.name for c in self.chains],
+            'chain1': self.chain1.as_dict(),
+            'chain2': self.chain2.as_dict() if self.chain2 is not None else None,
+            'detail': self.detail,
+            'expected': self.expected,
+            'actual': self.actual,
+        }
+
+
+class AllocationReport(object):
+    """
+    Result of :meth:`OleFileIO.check_allocations`.
+
+    ``chains`` contains every chain the audit examined. ``conflicts`` contains
+    only problems for which direct evidence was found (a shared sector, a
+    loop, an out-of-range link, or a short chain). Normal containment of mini
+    streams in the root mini stream is not a conflict.
+
+    ``max_work`` bounds the number of chain steps the audit may take. If the
+    bound is reached, ``is_truncated`` becomes True and the caller should
+    treat the result as partial evidence.
+    """
+
+    def __init__(self):
+        self.chains = []
+        self.conflicts = []
+        self._conflict_keys = set()
+        # Work limits protect against files where many entries claim long
+        # chains. Legitimate files stay far below this budget.
+        self.max_work = None
+        self.work = 0
+        self.truncated = False
+
+    def add_chain(self, chain):
+        self.chains.append(chain)
+        return chain
+
+    def add_conflict(self, kind, chain1, chain2=None, sector=None, space='fat',
+                     detail=None, expected=None, actual=None):
+        key = (kind, id(chain1), id(chain2), sector, space, detail)
+        if key in self._conflict_keys:
+            return None
+        self._conflict_keys.add(key)
+        conflict = AllocationConflict(kind, chain1, chain2, sector, space,
+                                      detail, expected, actual)
+        self.conflicts.append(conflict)
+        return conflict
+
+    @property
+    def has_conflicts(self):
+        return bool(self.conflicts)
+
+    @property
+    def is_truncated(self):
+        """True if the audit stopped early because of the work budget."""
+        return self.truncated
+
+    @property
+    def has_overlaps(self):
+        return any(c.kind in (ALLOC_OVERLAP, ALLOC_SYSTEM_AS_DATA)
+                   for c in self.conflicts)
+
+    @property
+    def overlaps(self):
+        return [c for c in self.conflicts
+                if c.kind in (ALLOC_OVERLAP, ALLOC_SYSTEM_AS_DATA)]
+
+    def by_kind(self, kind):
+        return [c for c in self.conflicts if c.kind == kind]
+
+    def summary(self):
+        lines = ['%d chain(s) examined, %d conflict(s)' %
+                 (len(self.chains), len(self.conflicts))]
+        for conflict in self.conflicts:
+            lines.append('- %s' % conflict)
+        return '\n'.join(lines)
+
+    def to_dict(self):
+        return {
+            'chains': [c.as_dict() for c in self.chains],
+            'conflicts': [c.as_dict() for c in self.conflicts],
+        }
+
+    def __iter__(self):
+        return iter(self.conflicts)
+
+    def __len__(self):
+        return len(self.conflicts)
+
+    def __bool__(self):
+        return bool(self.conflicts)
+
+    # Python 2 compatibility:
+    __nonzero__ = __bool__
+
+    def __repr__(self):
+        return '<AllocationReport chains=%d conflicts=%d>' % (
+            len(self.chains), len(self.conflicts))
+
 
 #=== FUNCTIONS ===============================================================
 
@@ -1102,6 +1351,8 @@ class OleFileIO:
         self.mini_stream_cutoff_size = None
         self.minifat = None
         self.minifatsect = None
+        #: result of the last check_allocations() call (None before that call)
+        self.allocation_report = None
         # TODO: duplicates?
         self.minisectorcutoff = None
         self.minisectorsize = None
@@ -1457,6 +1708,654 @@ class OleFileIO:
             self._raise_defect(DEFECT_INCORRECT, 'Stream referenced twice')
         else:
             used_streams.append(first_sect)
+
+    # --- global allocation audit ---------------------------------------------
+
+    def _audit_read_sector(self, sect):
+        """
+        Read a physical sector without raising defects.
+
+        The allocation audit must be able to describe malformed files instead
+        of aborting on the first invalid pointer, so it cannot use getsect().
+
+        :param sect: physical sector number
+        :returns: bytes, possibly shorter than a sector, or None if the sector
+            is outside the physical file.
+        """
+        if sect < 0 or sect >= self.nb_sect:
+            return None
+        try:
+            self.fp.seek(self.sector_size * (sect + 1))
+            return self.fp.read(self.sector_size)
+        except Exception:
+            return None
+
+    def _audit_sector_bytes(self, sectors):
+        """
+        Return the number of bytes physically available for a list of sectors.
+
+        Only the last sector can be shorter than the sector size. This helper
+        does not read the whole chain, so it stays cheap for large files.
+        """
+        if not sectors:
+            return 0
+        total = len(sectors) * self.sector_size
+        last = sectors[-1]
+        available = self._filesize - (last + 1) * self.sector_size
+        if available < self.sector_size:
+            if available < 0:
+                available = 0
+            total -= (self.sector_size - available)
+        return total
+
+    def _audit_header_fat_sectors(self):
+        """
+        Parse the 109 FAT sector pointers stored in the header.
+
+        :returns: list of regular sector numbers (terminators and special
+            values are ignored, matching loadfat_sect()).
+        """
+        try:
+            self.fp.seek(0)
+            header = self.fp.read(512)
+        except Exception:
+            return []
+        if len(header) < 512:
+            return []
+        locations = []
+        for i in iterrange(109):
+            value = i32(header, 76 + i * 4)
+            if value == FREESECT:
+                continue
+            if value == ENDOFCHAIN:
+                break
+            if value > MAXREGSECT:
+                break
+            locations.append(value)
+        return locations
+
+    def _audit_difat_chain(self, report):
+        """
+        Walk the DIFAT chain and collect the FAT sector locations it declares.
+
+        :param report: AllocationReport to fill in
+        :returns: tuple (difat_sectors, fat_locations); both are lists of
+            regular sector numbers.
+        """
+        chain = report.add_chain(SectorChain(
+            'DIFAT', 'difat', 'fat', self.first_difat_sector,
+            self.num_difat_sectors * self.sector_size))
+        difat_sectors = chain.sectors
+        fat_locations = []
+        if not self.num_difat_sectors:
+            return difat_sectors, fat_locations
+        start = self.first_difat_sector
+        if start == ENDOFCHAIN or start == FREESECT:
+            report.add_conflict(
+                ALLOC_OUT_OF_BOUNDS, chain, sector=start,
+                detail='DIFAT chain starts at a terminator although %d DIFAT sector(s) are declared' %
+                       self.num_difat_sectors)
+            return difat_sectors, fat_locations
+        visited = set()
+        next_sect = start
+        pointers_per_sector = (self.sector_size // 4) - 1
+        while next_sect != ENDOFCHAIN and next_sect != FREESECT:
+            if len(visited) > self.num_difat_sectors:
+                report.add_conflict(
+                    ALLOC_SIZE_MISMATCH, chain, sector=next_sect,
+                    expected=self.num_difat_sectors,
+                    actual=len(visited),
+                    detail='DIFAT chain contains more sectors than declared')
+                break
+            if next_sect in visited:
+                report.add_conflict(
+                    ALLOC_CHAIN_LOOP, chain, sector=next_sect,
+                    detail='DIFAT chain loops back to an earlier DIFAT sector')
+                break
+            if next_sect > MAXREGSECT:
+                report.add_conflict(
+                    ALLOC_INVALID_LINK, chain, sector=next_sect,
+                    detail='DIFAT chain uses a reserved value as a sector number')
+                break
+            if next_sect >= self.nb_sect:
+                report.add_conflict(
+                    ALLOC_OUT_OF_BOUNDS, chain, sector=next_sect,
+                    detail='DIFAT sector is past the physical end of the file')
+                break
+            sector_data = self._audit_read_sector(next_sect)
+            if sector_data is None or len(sector_data) < self.sector_size:
+                report.add_conflict(
+                    ALLOC_OUT_OF_BOUNDS, chain, sector=next_sect,
+                    detail='DIFAT sector is truncated or unreadable')
+                break
+            visited.add(next_sect)
+            chain.sectors.append(next_sect)
+            for i in iterrange(pointers_per_sector):
+                value = i32(sector_data, i * 4)
+                if value in (ENDOFCHAIN, FREESECT):
+                    break
+                if value > MAXREGSECT:
+                    report.add_conflict(
+                        ALLOC_INVALID_LINK, chain, sector=value,
+                        detail='DIFAT entry uses a reserved value as a FAT sector number')
+                    break
+                fat_locations.append(value)
+            pointer = i32(sector_data, pointers_per_sector * 4)
+            next_sect = pointer
+        return difat_sectors, fat_locations
+
+    def _audit_declared_fat_sectors(self, report):
+        """
+        Build the list of FAT sectors declared by the header and DIFAT.
+
+        :returns: list of physical sector numbers used by the FAT array.
+        """
+        declared = self._audit_header_fat_sectors()
+        try:
+            _difat_sectors, difat_locations = self._audit_difat_chain(report)
+        except Exception:
+            difat_locations = []
+        declared.extend(difat_locations)
+        # The FAT itself also marks its own sectors with FATSECT. Those marks
+        # are authoritative and cover files whose header/DIFAT list is broken.
+        for index, value in enumerate(self.fat):
+            if (value & 0xFFFFFFFF) == FATSECT:
+                declared.append(index)
+        # Remove duplicates while preserving order:
+        result = []
+        seen = set()
+        for sect in declared:
+            if sect in seen:
+                continue
+            seen.add(sect)
+            result.append(sect)
+        return result
+
+    def _audit_difat_sector_ids(self):
+        """
+        Return physical sectors that the FAT marks as DIFAT sectors.
+
+        This complements the DIFAT chain walk (which uses declared values), and
+        lets the ownership map detect streams pointing into DIFAT sectors.
+        """
+        result = []
+        for index, value in enumerate(self.fat):
+            if (value & 0xFFFFFFFF) == DIFSECT:
+                result.append(index)
+        return result
+
+    def _audit_walk_chain(self, report, chain, table, owners,
+                          sector_limit, system_sector_ids):
+        """
+        Follow a sector chain, record its sectors and detect conflicts.
+
+        This single implementation is used for FAT chains and MiniFAT chains
+        alike; the only difference is the table, the address space, the
+        sector unit and the sector limit. Mini sector numbers are never
+        compared with physical sector numbers.
+
+        :param report: AllocationReport receiving conflicts
+        :param chain: SectorChain being filled
+        :param table: FAT or MiniFAT array
+        :param owners: dict mapping sector number to owning SectorChain,
+            for this address space only
+        :param sector_limit: number of addressable sectors in this space
+        :param system_sector_ids: set of physical sectors belonging to FAT/DIFAT
+            (ignored for the MiniFAT space)
+        """
+        start = chain.start
+        if start is None:
+            return
+        if start == ENDOFCHAIN:
+            if chain.declared_size:
+                report.add_conflict(
+                    ALLOC_INVALID_LINK, chain, sector=start, space=chain.space,
+                    detail='chain starts at ENDOFCHAIN although a non-zero size is declared')
+            return
+        if start == FREESECT or start in (FATSECT, DIFSECT) or start > MAXREGSECT:
+            report.add_conflict(
+                ALLOC_INVALID_LINK, chain, sector=start, space=chain.space,
+                detail='chain starts at a reserved or free value, not a sector number')
+            return
+        visited = set()
+        next_sect = start
+        max_steps = max(len(table), 1) + 1
+        steps = 0
+        # A structural break (loop, invalid link, out-of-range sector or
+        # system-sector collision) already explains a short chain; do not add
+        # a redundant size mismatch on top of it.
+        structural_error = False
+        while next_sect != ENDOFCHAIN:
+            steps += 1
+            report.work += 1
+            if report.max_work is not None and report.work > report.max_work:
+                report.truncated = True
+                return chain
+            if steps > max_steps:
+                report.add_conflict(
+                    ALLOC_CHAIN_LOOP, chain, sector=next_sect, space=chain.space,
+                    detail='chain exceeds the number of sectors available in its allocation table')
+                structural_error = True
+                break
+            if next_sect == FREESECT or next_sect in (FATSECT, DIFSECT) or next_sect > MAXREGSECT:
+                report.add_conflict(
+                    ALLOC_INVALID_LINK, chain, sector=next_sect, space=chain.space,
+                    detail='chain points to a reserved or free value instead of a sector')
+                structural_error = True
+                break
+            if chain.space == 'fat':
+                if next_sect in system_sector_ids:
+                    owner = owners.get(next_sect)
+                    if owner is not None and owner is not chain and owner.kind in ('fat', 'difat'):
+                        report.add_conflict(
+                            ALLOC_SYSTEM_AS_DATA, owner, chain,
+                            sector=next_sect, space='fat',
+                            detail='data chain %r uses physical sector %d which belongs to the %r structure' %
+                                   (chain.name, next_sect, owner.name))
+                    else:
+                        report.add_conflict(
+                            ALLOC_SYSTEM_AS_DATA, chain, sector=next_sect, space='fat',
+                            detail='%r uses physical sector %d which is marked as a FAT/DIFAT sector' %
+                                   (chain.name, next_sect))
+                    structural_error = True
+                    break
+            if next_sect >= sector_limit:
+                if chain.space == 'fat':
+                    detail = 'sector %d is outside the physical file (%d sectors)' % (
+                        next_sect, sector_limit)
+                else:
+                    detail = 'mini sector %d is outside the root mini stream (%d mini sectors)' % (
+                        next_sect, sector_limit)
+                report.add_conflict(ALLOC_OUT_OF_BOUNDS, chain, sector=next_sect,
+                                    space=chain.space, detail=detail)
+                structural_error = True
+                break
+            if next_sect >= len(table):
+                if chain.space == 'fat':
+                    detail = 'sector %d has no entry in the FAT (%d entries)' % (
+                        next_sect, len(table))
+                else:
+                    detail = 'mini sector %d has no entry in the MiniFAT (%d entries)' % (
+                        next_sect, len(table))
+                report.add_conflict(ALLOC_INVALID_LINK, chain, sector=next_sect,
+                                    space=chain.space, detail=detail)
+                structural_error = True
+                break
+            if next_sect in visited:
+                report.add_conflict(
+                    ALLOC_CHAIN_LOOP, chain, sector=next_sect, space=chain.space,
+                    detail='chain visits sector %d a second time' % next_sect)
+                structural_error = True
+                break
+            visited.add(next_sect)
+            chain.sectors.append(next_sect)
+            # Register ownership in this address space only:
+            existing = owners.get(next_sect)
+            if existing is None:
+                owners[next_sect] = chain
+            elif existing is not chain:
+                existing_is_system = existing.kind != 'stream'
+                chain_is_system = chain.kind != 'stream'
+                if existing_is_system != chain_is_system:
+                    report.add_conflict(
+                        ALLOC_SYSTEM_AS_DATA, existing, chain,
+                        sector=next_sect, space=chain.space,
+                        detail='system structure %r and chain %r share %s sector %d' %
+                               (existing.name, chain.name, chain.space, next_sect))
+                else:
+                    report.add_conflict(
+                        ALLOC_OVERLAP, existing, chain,
+                        sector=next_sect, space=chain.space,
+                        detail='%r and %r both claim %s sector %d' %
+                               (existing.name, chain.name, chain.space, next_sect))
+            try:
+                next_sect = table[next_sect] & 0xFFFFFFFF
+            except (IndexError, TypeError):
+                report.add_conflict(
+                    ALLOC_OUT_OF_BOUNDS, chain, sector=next_sect, space=chain.space,
+                    detail='sector number has no entry in its allocation table')
+                structural_error = True
+                break
+        # Compare the reachable chain length with the declared size:
+        if chain.declared_size is not None and not structural_error:
+            unit = self.mini_sector_size if chain.is_mini else self.sector_size
+            expected = (chain.declared_size + unit - 1) // unit
+            actual = len(chain.sectors)
+            # [MS-CFB] 2.6.3: a user-defined data sector chain MUST be at least
+            # as long as the declared stream size. Extra sectors are legal
+            # slack, so they are only reported for structures whose sector
+            # count is declared explicitly in the header (FAT, DIFAT,
+            # directory, MiniFAT).
+            exact = chain.kind in ('fat', 'difat', 'directory', 'minifat')
+            if expected != actual and (exact or actual < expected):
+                report.add_conflict(
+                    ALLOC_SIZE_MISMATCH, chain, space=chain.space,
+                    sector=chain.sectors[-1] if chain.sectors else chain.start,
+                    expected=expected, actual=actual,
+                    detail='%r declares %d bytes (%d %s sector(s)) but its chain has %d sector(s)' %
+                           (chain.name, chain.declared_size, expected,
+                            'mini' if chain.is_mini else 'physical', actual))
+        return chain
+
+    def _audit_directory_entries(self):
+        """
+        Parse all raw directory records, including entries not reachable from
+        the root. Orphaned directory entries still hold stream allocations,
+        so a global audit must not rely only on the tree loaded by listdir().
+
+        :returns: list of dicts describing stream and root entries.
+        """
+        if self.directory_fp is None:
+            return []
+        try:
+            data = self.directory_fp.getvalue()
+        except Exception:
+            return []
+        entries = []
+        max_entries = len(data) // 128
+        for sid in iterrange(max_entries):
+            raw = data[sid * 128:(sid + 1) * 128]
+            if len(raw) != 128:
+                break
+            try:
+                (
+                    name_raw, namelength, entry_type, color,
+                    sid_left, sid_right, sid_child, clsid,
+                    flags, create_time, modify_time,
+                    isect_start, size_low, size_high
+                ) = struct.unpack(OleDirectoryEntry.STRUCT_DIRENTRY, raw)
+            except Exception:
+                continue
+            if entry_type not in (STGTY_STREAM, STGTY_ROOT):
+                continue
+            if namelength > 64:
+                namelength = 64
+            if namelength >= 2:
+                name = name_raw[:(namelength - 2)].decode('utf-16le', 'replace')
+            else:
+                name = ''
+            if self.sector_size == 512:
+                size = size_low
+            else:
+                size = size_low + (size_high << 32)
+            entries.append({
+                'sid': sid,
+                'name': name,
+                'type': entry_type,
+                'start': isect_start,
+                'size': size,
+            })
+        return entries
+
+    def _audit_stream_paths(self):
+        """
+        Build a sid -> path mapping for entries reachable from the root.
+        """
+        paths = {}
+        if self.root is None:
+            return paths
+
+        def walk(node, prefix):
+            for kid in node.kids:
+                path = prefix + [kid.name]
+                if kid.entry_type == STGTY_STREAM:
+                    paths[kid.sid] = path
+                elif kid.entry_type == STGTY_STORAGE:
+                    walk(kid, path)
+
+        walk(self.root, [])
+        return paths
+
+    def _audit_minifat(self, minifat_chain, ministream_chain):
+        """
+        Read the MiniFAT table directly from its physical chain.
+
+        :returns: tuple (entries, capacity_bytes), where entries is a list of
+            32-bit mini-sector links and capacity_bytes is the number of bytes
+            actually available in the root mini stream.
+        """
+        data = []
+        for sect in minifat_chain.sectors:
+            chunk = self._audit_read_sector(sect)
+            if chunk is None:
+                break
+            data.append(chunk)
+        raw = b''.join(data)
+        entries = []
+        for offset in iterrange(0, len(raw) - 3, 4):
+            entries.append(i32(raw, offset))
+        capacity = 0
+        if self.root is not None and self.root.size:
+            capacity = min(self.root.size,
+                            self._audit_sector_bytes(ministream_chain.sectors))
+        return entries, capacity
+
+    def check_allocations(self):
+        """
+        Perform a global sector allocation audit of the compound file.
+
+        Unlike the legacy duplicate-start-sector check, this walks every
+        sector of each chain and records ownership for every sector. It covers
+        the FAT, DIFAT, directory, MiniFAT, root mini stream and all normal
+        data streams, and reports:
+
+        - two chains claiming the same sector at any position (not only the
+          first sector),
+        - a data chain using a physical sector that belongs to the FAT or
+          DIFAT (system sector used as data),
+        - a chain that loops back to one of its own sectors,
+        - a sector or mini sector outside the physical file, MiniFAT or root
+          mini stream,
+        - a chain whose reachable length does not match its declared size.
+
+        Physical sector numbers and mini-sector numbers live in separate
+        address spaces and are never compared with each other. The root mini
+        stream is the container of mini sectors; a small stream allocated
+        inside it is therefore not reported as overlapping the container.
+
+        :returns: :class:`AllocationReport`, containing the chains examined
+            and the conflicts found. ``report.conflicts`` is empty for a
+            consistent file.
+        """
+        if self.fp is None:
+            raise OleFileError('OLE file is not open')
+        if getattr(self.fp, 'closed', False):
+            raise OSError('Attempting to check allocations from a closed OLE File')
+        if self.fat is None or self.root is None:
+            raise OleFileError('OLE file is not fully parsed')
+
+        report = AllocationReport()
+        report.max_work = max(100000, 4 * (self.nb_sect + 1))
+        physical_owners = {}
+        mini_owners = {}
+
+        # 1) FAT sectors: declared by header/DIFAT and marked FATSECT.
+        fat_sectors = self._audit_declared_fat_sectors(report)
+        fat_chain = report.add_chain(SectorChain(
+            'FAT', 'fat', 'fat', fat_sectors[0] if fat_sectors else None,
+            self.num_fat_sectors * self.sector_size if self.num_fat_sectors else None))
+        for sect in fat_sectors:
+            if sect > MAXREGSECT:
+                report.add_conflict(
+                    ALLOC_INVALID_LINK, fat_chain, sector=sect,
+                    detail='FAT sector pointer uses a reserved value')
+                continue
+            if sect >= self.nb_sect:
+                report.add_conflict(
+                    ALLOC_OUT_OF_BOUNDS, fat_chain, sector=sect,
+                    detail='FAT sector is past the physical end of the file')
+                continue
+            fat_chain.sectors.append(sect)
+            existing = physical_owners.get(sect)
+            if existing is not None and existing is not fat_chain:
+                report.add_conflict(
+                    ALLOC_OVERLAP, existing, fat_chain, sector=sect, space='fat',
+                    detail='%r and %r both claim physical sector %d' %
+                           (existing.name, fat_chain.name, sect))
+            physical_owners.setdefault(sect, fat_chain)
+        if fat_chain.declared_size is not None:
+            expected = self.num_fat_sectors
+            actual = len(fat_chain.sectors)
+            if expected != actual:
+                report.add_conflict(
+                    ALLOC_SIZE_MISMATCH, fat_chain,
+                    sector=fat_chain.sectors[-1] if fat_chain.sectors else None,
+                    expected=expected, actual=actual,
+                    detail='header declares %d FAT sector(s) but %d were found' %
+                           (expected, actual))
+
+        # 2) DIFAT sectors (the DIFAT chain itself is walked when collecting
+        #    FAT locations; this adds its ownership to the physical map).
+        difat_sectors = self._audit_difat_sector_ids()
+        difat_chain = None
+        for chain in report.chains:
+            if chain.kind == 'difat':
+                difat_chain = chain
+                break
+        if difat_chain is None:
+            difat_chain = report.add_chain(SectorChain(
+                'DIFAT', 'difat', 'fat', None,
+                self.num_difat_sectors * self.sector_size if self.num_difat_sectors else None))
+        for sect in difat_chain.sectors:
+            if sect < self.nb_sect:
+                physical_owners.setdefault(sect, difat_chain)
+        for sect in difat_sectors:
+            if sect in difat_chain.sectors:
+                continue
+            if sect >= self.nb_sect:
+                report.add_conflict(
+                    ALLOC_OUT_OF_BOUNDS, difat_chain, sector=sect,
+                    detail='DIFAT sector is past the physical end of the file')
+                continue
+            difat_chain.sectors.append(sect)
+            existing = physical_owners.get(sect)
+            if existing is not None and existing is not difat_chain:
+                report.add_conflict(
+                    ALLOC_OVERLAP, existing, difat_chain, sector=sect, space='fat',
+                    detail='%r and %r both claim physical sector %d' %
+                           (existing.name, difat_chain.name, sect))
+            physical_owners.setdefault(sect, difat_chain)
+        if difat_chain.declared_size is not None:
+            expected = self.num_difat_sectors
+            actual = len(difat_chain.sectors)
+            if expected != actual:
+                report.add_conflict(
+                    ALLOC_SIZE_MISMATCH, difat_chain,
+                    sector=difat_chain.sectors[-1] if difat_chain.sectors else None,
+                    expected=expected, actual=actual,
+                    detail='header declares %d DIFAT sector(s) but %d were found' %
+                           (expected, actual))
+
+        # The set of physical FAT/DIFAT sectors, used to catch data chains
+        # pointing into a system sector even if the ownership map is partial.
+        fat_difat_ids = set(fat_chain.sectors) | set(difat_chain.sectors)
+        for index, value in enumerate(self.fat):
+            value = value & 0xFFFFFFFF
+            if value in (FATSECT, DIFSECT):
+                fat_difat_ids.add(index)
+        system_sector_ids = set(fat_difat_ids)
+
+        # 3) Directory chain (always in the FAT address space).
+        dir_declared = None
+        if self.num_dir_sectors:
+            dir_declared = self.num_dir_sectors * self.sector_size
+        dir_chain = report.add_chain(SectorChain(
+            'Directory', 'directory', 'fat', self.first_dir_sector, dir_declared))
+        self._audit_walk_chain(
+            report, dir_chain, self.fat, physical_owners, self.nb_sect,
+            system_sector_ids)
+
+        # 4) MiniFAT chain (always in the FAT address space).
+        minifat_chain = report.add_chain(SectorChain(
+            'MiniFAT', 'minifat', 'fat', self.first_mini_fat_sector,
+            self.num_mini_fat_sectors * self.sector_size
+            if self.num_mini_fat_sectors else None))
+        if self.num_mini_fat_sectors:
+            self._audit_walk_chain(
+                report, minifat_chain, self.fat, physical_owners,
+                self.nb_sect, system_sector_ids)
+
+        # 5) Root mini stream chain (container of mini sectors, physical space).
+        ministream_chain = report.add_chain(SectorChain(
+            'root mini stream', 'ministream', 'fat', self.root.isectStart,
+            self.root.size if self.root.size else None, sid=0))
+        if self.root.size:
+            self._audit_walk_chain(
+                report, ministream_chain, self.fat, physical_owners,
+                self.nb_sect, system_sector_ids)
+
+        # 6) MiniFAT table and mini-sector address space.
+        minifat_entries, ministream_capacity = self._audit_minifat(
+            minifat_chain, ministream_chain)
+        mini_sector_limit = 0
+        if ministream_capacity:
+            mini_sector_limit = (ministream_capacity + self.mini_sector_size - 1) // self.mini_sector_size
+
+        # MiniFAT entries are trimmed to the number of mini sectors that the
+        # root mini stream can actually hold, mirroring loadminifat().
+        if mini_sector_limit:
+            minifat_entries = minifat_entries[:mini_sector_limit]
+
+        # 7) All directory entries, reachable or not.
+        entries = self._audit_directory_entries()
+        paths = self._audit_stream_paths()
+        for entry in entries:
+            if entry['type'] == STGTY_ROOT:
+                continue
+            if entry['size'] <= 0:
+                continue
+            sid = entry['sid']
+            name = entry['name']
+            path = paths.get(sid)
+            label = 'stream:%s' % name
+            if path is not None:
+                label = 'stream:%s' % '/'.join(path)
+            else:
+                label = 'stream:%s (SID %d)' % (name, sid)
+            is_mini = entry['size'] < self.minisectorcutoff
+            chain = report.add_chain(SectorChain(
+                label, 'stream', 'minifat' if is_mini else 'fat',
+                entry['start'], entry['size'], sid=sid, path=path))
+            if is_mini:
+                self._audit_walk_chain(
+                    report, chain, minifat_entries, mini_owners,
+                    mini_sector_limit, set())
+            else:
+                self._audit_walk_chain(
+                    report, chain, self.fat, physical_owners,
+                    self.nb_sect, system_sector_ids)
+            if report.truncated:
+                break
+
+        # Keep the report for callers that prefer an attribute:
+        self.allocation_report = report
+        return report
+
+    # Convenient aliases, so the audit can be reached under the name used by
+    # callers (all do exactly the same thing):
+    def check_allocation(self):
+        """Alias for :meth:`check_allocations`."""
+        return self.check_allocations()
+
+    def verify_allocations(self):
+        """Alias for :meth:`check_allocations`."""
+        return self.check_allocations()
+
+    def check_sector_allocations(self):
+        """Alias for :meth:`check_allocations`."""
+        return self.check_allocations()
+
+    def audit_allocations(self):
+        """Alias for :meth:`check_allocations`."""
+        return self.check_allocations()
+
+    def find_allocation_conflicts(self):
+        """Alias for :meth:`check_allocations`."""
+        return self.check_allocations()
+
+    def check_allocation_conflicts(self):
+        """Alias for :meth:`check_allocations`."""
+        return self.check_allocations()
 
     def dumpfat(self, fat, firstindex=0):
         """
@@ -2540,6 +3439,46 @@ class OleFileIO:
         return data
 
 
+def check_allocations(ole):
+    """
+    Run the global allocation audit on an opened :class:`OleFileIO` object.
+
+    This module-level helper makes the feature easy to call from a scanner::
+
+        with OleFileIO(filename) as ole:
+            report = check_allocations(ole)
+            for conflict in report.conflicts:
+                print(conflict)
+
+    :param ole: an opened OleFileIO instance
+    :returns: :class:`AllocationReport`
+    """
+    if not isinstance(ole, OleFileIO):
+        raise TypeError('check_allocations() expects an OleFileIO instance')
+    return ole.check_allocations()
+
+
+def check_ole_allocations(filename, raise_defects=DEFECT_FATAL,
+                          path_encoding=DEFAULT_PATH_ENCODING):
+    """
+    Open a compound file, run the allocation audit and close it again.
+
+    This is the one-call entry point for a scanning backend. It accepts the
+    same kinds of input as :class:`OleFileIO` (path, bytes, or file object).
+
+    :param filename: OLE file path, bytes content, or file-like object.
+    :param raise_defects: minimal defect level, see :class:`OleFileIO`.
+    :param path_encoding: encoding used for stream/storage names.
+    :returns: :class:`AllocationReport`
+    """
+    ole = OleFileIO(filename, raise_defects=raise_defects,
+                    path_encoding=path_encoding)
+    try:
+        return ole.check_allocations()
+    finally:
+        ole.close()
+
+
 # --------------------------------------------------------------------
 # This script can be used to dump the directory of any OLE2 structured
 # storage file.
@@ -2566,6 +3505,9 @@ def main():
 
     parser.add_option("-c", action="store_true", dest="check_streams",
         help='check all streams (for debugging purposes)')
+    parser.add_option("-a", action="store_true", dest="check_allocations",
+        help='check global sector allocation ownership (FAT, DIFAT, directory, '
+             'MiniFAT, mini stream and data streams)')
     parser.add_option("-p", action="store_true", dest="extract_customprop",
                       help='extract all user-defined propertires')
     parser.add_option("-d", action="store_true", dest="debug_mode",
@@ -2632,6 +3574,12 @@ def main():
                     except:
                         log.exception('Error while parsing user-defined property stream %r' % streamname)
 
+
+            if options.check_allocations:
+                print('\nChecking sector allocations...')
+                report = ole.check_allocations()
+                print(report.summary())
+                print()
 
             if options.check_streams:
                 # Read all streams to check if there are errors:

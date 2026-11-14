@@ -412,6 +412,43 @@ containing user-defined properties.
             print('\t{} {}: {}'.format(index, variable['property_name'],variable['value']))
 
 
+Check global sector allocations (forensics)
+-------------------------------------------
+
+:py:meth:`olefile.OleFileIO.check_allocations` walks the FAT, DIFAT,
+directory, MiniFAT, root mini stream and every data stream, and reports
+sector ownership conflicts. Unlike the legacy first-sector check, it compares
+every sector in every chain, so a cross-link in the middle of two chains is
+detected:
+
+::
+
+    with olefile.OleFileIO(filename) as ole:
+        report = ole.check_allocations()
+        for conflict in report.conflicts:
+            # each conflict names the two source chains when two chains
+            # claim the same sector:
+            print(conflict.kind, conflict.space, conflict.sector,
+                  [chain.name for chain in conflict.chains])
+
+For a scanning backend, the one-call helper opens and closes the file:
+
+::
+
+    report = olefile.check_ole_allocations(filename)
+
+Each conflict has a ``kind``: ``ALLOC_OVERLAP`` (two data chains share a
+sector), ``ALLOC_SYSTEM_AS_DATA`` (a data chain uses a FAT, DIFAT or other
+system sector), ``ALLOC_CHAIN_LOOP``, ``ALLOC_OUT_OF_BOUNDS`` (past the
+physical file or the root mini stream), ``ALLOC_INVALID_LINK`` (a reserved
+or free value used as a link) and ``ALLOC_SIZE_MISMATCH`` (the chain is
+shorter than the declared stream size). A chain with extra allocated slack
+sectors is valid and is not reported.
+
+Physical sector numbers and mini-sector numbers are kept in separate address
+spaces (``conflict.space`` is ``'fat'`` or ``'minifat'``). A small stream
+living inside the root mini stream is normal containment, not an overlap.
+
 Close the OLE file
 ------------------
 
