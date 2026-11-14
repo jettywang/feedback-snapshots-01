@@ -262,6 +262,37 @@ The following example extracts the "Pictures" stream from a PPT file:
     pics = ole.openstream('Pictures')
     data = pics.read()
 
+Read a stream lazily (without loading it all in memory)
+-------------------------------------------------------
+
+:py:meth:`olefile.OleFileIO.openstream` reads the whole stream into memory when
+it is opened. For large streams, or when you only need to inspect a stream
+header, use :py:meth:`olefile.OleFileIO.openstream_lazy` instead. It returns an
+:py:class:`olefile.OleStreamIO` object that fetches physical sectors from the
+underlying file on demand:
+
+::
+
+    with olefile.OleFileIO('large.doc') as ole:
+        stream = ole.openstream_lazy('WordDocument')
+        header = stream.read(512)      # only the first sector is read
+        stream.seek(4096)              # random access, each stream has its
+        chunk = stream.read(256)       # own cursor
+        stream.close()
+
+The lazy stream implements the read-only binary interface ``read``,
+``readinto``, ``seek``, ``tell`` and ``close``. Reads are bounded by the
+declared stream length and its physical sector chain, so they never return data
+from neighbouring streams or unused sector slack. Sectors are kept in a bounded
+LRU cache whose size can be set with the ``max_cached_sectors`` argument, which
+keeps the memory footprint small even for very large streams. Both ordinary
+(FAT) streams and mini streams are supported. Chain loops, truncated sectors and
+a closed underlying file raise an exception when the affected bytes are
+accessed, rather than when the stream is opened.
+
+The original :py:meth:`olefile.OleFileIO.openstream` behaviour (an in-memory
+:py:class:`olefile.OleStream`) is unchanged.
+
 Get information about a stream/storage
 --------------------------------------
 

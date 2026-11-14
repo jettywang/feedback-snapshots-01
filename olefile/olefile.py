@@ -98,12 +98,15 @@ __all__ = ['isOleFile', 'OleFileIO', 'OleMetadata', 'enable_logging',
            'DEFECT_FATAL', 'DEFAULT_PATH_ENCODING',
            'MAXREGSECT', 'DIFSECT', 'FATSECT', 'ENDOFCHAIN', 'FREESECT',
            'MAXREGSID', 'NOSTREAM', 'UNKNOWN_SIZE', 'WORD_CLSID',
-           'OleFileIONotClosed'
+           'OleFileError', 'NotOleFileError', 'OleStream',
+           'OleFileIONotClosed', 'OleStreamIO',
+           'DEFAULT_MAX_CACHED_SECTORS'
 ]
 
 import io
 import sys
 import struct, array, os.path, datetime, logging, warnings, traceback
+from collections import OrderedDict
 
 #=== COMPATIBILITY WORKAROUNDS ================================================
 
@@ -227,6 +230,10 @@ STGTY_ROOT      = 5 #: element is a root storage
 
 # Unknown size for a stream (used by OleStream):
 UNKNOWN_SIZE = 0x7FFFFFFF
+
+# Default maximum number of physical sectors kept in the bounded LRU cache of
+# a lazy OleStreamIO instance. This caps the per-stream memory footprint.
+DEFAULT_MAX_CACHED_SECTORS = 8
 
 #
 # --------------------------------------------------------------------
@@ -725,6 +732,320 @@ class OleStream(io.BytesIO):
         # when all data is read in memory, BytesIO constructor is called
         io.BytesIO.__init__(self, data)
         # Then the OleStream object can be used as a read-only file object.
+
+
+# --- OleStreamIO (lazy stream) ----------------------------------------------
+
+class OleStreamIO(io.RawIOBase):
+    """
+    Read-only, lazy file object for an OLE2 stream.
+
+    Unlike :class:`OleStream`, this does **not** read the whole stream into
+    memory when it is opened. Physical sectors (FAT sectors for ordinary
+    streams, mini sectors for mini streams) are fetched from the underlying
+    file only when the corresponding bytes are actually read.
+
+    It implements the explicit read-only binary stream interface:
+    :meth:`read`, :meth:`readinto`, :meth:`seek`, :meth:`tell`,
+    :meth:`readable`, :meth:`seekable` and :meth:`close`.
+
+    Each instance keeps its own logical cursor, so several streams opened on
+    the same OLE file (including mini streams sharing the same mini stream
+    container) can be read and seeked independently: every physical read seeks
+    the shared file object to the right place first, so interleaved reads never
+    return data from the wrong stream.
+
+    Reads are bounded both by the declared stream size and the physical sector
+    chain: bytes past the declared size are never returned, and no data leaks
+    from neighbouring streams or unused sector slack.
+
+    Sectors are cached in a bounded LRU dictionary, so the in-memory footprint
+    stays limited to ``max_cached_sectors`` sectors even for very large
+    streams. The sector chain itself is resolved lazily and is never larger
+    than the number of sectors declared for the stream.
+
+    Chain loops, truncated sectors/chains and an underlying file closed while
+    the stream is in use raise an :class:`OleFileError` (or the underlying
+    :class:`OSError`) at the time the affected bytes are accessed, not when the
+    stream is opened.
+
+    This class works for both ordinary streams and mini streams, depending on
+    the ``offset``, ``sectorsize`` and ``fat`` arguments. Use
+    :meth:`OleFileIO.openstream_lazy` to create one.
+    """
+
+    def __init__(self, fp, sect, size, offset, sectorsize, fat, filesize,
+                 olefileio, max_cached_sectors=DEFAULT_MAX_CACHED_SECTORS):
+        """
+        Constructor for the lazy OleStreamIO class.
+
+        :param fp: file object, the OLE container or the (lazy) mini stream
+        :param sect: sector index of the first sector in the stream
+        :param size: total declared size of the stream in bytes
+        :param offset: byte offset of the first FAT or MiniFAT sector in fp
+        :param sectorsize: size of one sector (sector or mini sector)
+        :param fat: array/list of sector indexes (FAT or MiniFAT)
+        :param filesize: size of the underlying data (for error messages)
+        :param olefileio: OleFileIO object containing this stream
+        :param max_cached_sectors: maximum number of physical sectors held in
+            the bounded LRU cache (must be >= 1)
+        """
+        log.debug('OleStreamIO.__init__: sect=%d (%X), size=%d, offset=%d, '
+                  'sectorsize=%d, len(fat)=%d'
+                  % (sect, sect, size, offset, sectorsize, len(fat)))
+        self.ole = olefileio
+        self._fp = fp
+        self._start_sect = sect
+        self._offset = offset
+        self._sectorsize = sectorsize
+        self._fat = fat
+        self._filesize = filesize
+        # declared logical size of the stream, and the number of physical
+        # sectors required to store it:
+        self.size = size
+        self._nb_sectors = (size + (sectorsize - 1)) // sectorsize
+        if self._nb_sectors > len(fat):
+            self.ole._raise_defect(DEFECT_INCORRECT,
+                                   'malformed OLE document, stream too large')
+        if size == 0 and sect != ENDOFCHAIN:
+            self.ole._raise_defect(DEFECT_INCORRECT,
+                                   'incorrect OLE sector index for empty stream')
+        # logical read position within the stream:
+        self._pos = 0
+        # lazily resolved list of physical sector indexes, one entry per
+        # sector of the stream already reached:
+        self._sect_chain = []
+        # running pointer to the physical sector following the last one
+        # resolved in _sect_chain (initialized to the first sector):
+        self._next_sect = sect
+        # set once the chain cannot be resolved further (truncation, loop or
+        # out-of-range index). Prevents infinite loops and turns later accesses
+        # into explicit errors even when the defect level is configured to be
+        # non-fatal.
+        self._chain_broken = False
+        # bounded LRU cache mapping sector position -> sector bytes:
+        if not isinstance(max_cached_sectors, int) or max_cached_sectors < 1:
+            raise ValueError('max_cached_sectors must be an integer >= 1')
+        self._max_cached_sectors = max_cached_sectors
+        self._cache = OrderedDict()
+        self._closed = False
+
+    # -- RawIOBase capability flags -----------------------------------------
+
+    def readable(self):
+        return not self._closed
+
+    def seekable(self):
+        return not self._closed
+
+    def writable(self):
+        return False
+
+    # -- sector chain resolution and physical access ------------------------
+
+    def _check_open(self):
+        if self._closed:
+            raise OleFileError('I/O operation on a closed OLE stream')
+        # The underlying file may have been closed independently (for example
+        # the parent OleFileIO was closed). Report it at actual access time.
+        if getattr(self._fp, 'closed', False):
+            raise OleFileError('underlying OLE file is closed')
+
+    def _chain_error(self, message):
+        """
+        Record that the sector chain cannot be resolved further and report the
+        defect. With the default fatal defect level this raises immediately;
+        otherwise it still marks the chain broken so a later access fails with
+        an explicit error instead of looping or returning foreign data.
+        """
+        self._chain_broken = True
+        self.ole._raise_defect(DEFECT_INCORRECT, message)
+
+    def _ensure_chain(self, sector_index):
+        """
+        Resolve the physical sector chain up to (and including) the logical
+        sector at ``sector_index``. Defects (out-of-range index, chain loop or
+        an unexpected end of chain) are raised at access time.
+        """
+        if sector_index >= self._nb_sectors:
+            return
+        sect = self._next_sect
+        while len(self._sect_chain) <= sector_index:
+            if self._chain_broken:
+                raise OleFileError(
+                    'cannot read OLE stream sector %d: sector chain is broken'
+                    % sector_index)
+            if sect == ENDOFCHAIN:
+                self._chain_error('incomplete OLE stream')
+                continue
+            if sect < 0 or sect >= len(self._fat):
+                self._chain_error(
+                    'incorrect OLE FAT, sector index out of range')
+                continue
+            # loop detection: a sector already used in this chain would make
+            # the stream cycle instead of reaching its declared size
+            if sect in self._sect_chain:
+                self._chain_error('cyclic OLE sector chain')
+                continue
+            self._sect_chain.append(sect)
+            try:
+                sect = self._fat[sect] & 0xFFFFFFFF  # JYTHON-WORKAROUND
+            except IndexError:
+                self._chain_error(
+                    'incorrect OLE FAT, sector index out of range')
+        # remember where to resume the next time the chain must be extended:
+        self._next_sect = sect
+
+    def _read_sector(self, sector_index):
+        """
+        Return the (cached) physical bytes of the sector at logical
+        ``sector_index``. Only full sectors are fetched; the last logical
+        sector may contain slack which is never exposed past the declared size.
+        """
+        cached = self._cache.get(sector_index)
+        if cached is not None:
+            # mark it as most recently used
+            self._cache.move_to_end(sector_index)
+            return cached
+        self._ensure_chain(sector_index)
+        # _ensure_chain stops without extending when the index is past the
+        # declared chain or the chain is broken; such a sector must never be
+        # served (which could expose neighbour/slack bytes):
+        if sector_index >= len(self._sect_chain):
+            raise OleFileError('OLE sector index out of range')
+        sect = self._sect_chain[sector_index]
+        target = self._offset + self._sectorsize * sect
+        try:
+            # seek before every read: several streams may share the same
+            # underlying file object, so we cannot rely on a shared cursor.
+            self._fp.seek(target)
+            sector_data = self._fp.read(self._sectorsize)
+        except OleFileError:
+            raise
+        except Exception:
+            log.debug('OleStreamIO._read_sector: sect=%d, seek=%d, '
+                      'filesize=%d' % (sect, target, self._filesize))
+            self._chain_broken = True
+            self.ole._raise_defect(DEFECT_INCORRECT,
+                                   'OLE sector index out of range')
+            raise OleFileError('OLE sector index out of range')
+        if len(sector_data) != self._sectorsize:
+            log.debug('OleStreamIO._read_sector: sect=%d, seek=%d, read=%d, '
+                      'expected=%d' % (sect, target, len(sector_data),
+                                       self._sectorsize))
+            self._chain_broken = True
+            self.ole._raise_defect(DEFECT_INCORRECT,
+                                   'incomplete OLE sector')
+            raise OleFileError('incomplete OLE sector')
+        # store in the bounded LRU cache, evicting the oldest entry first:
+        self._cache[sector_index] = sector_data
+        self._cache.move_to_end(sector_index)
+        while len(self._cache) > self._max_cached_sectors:
+            self._cache.popitem(last=False)
+        return sector_data
+
+    # -- reading -------------------------------------------------------------
+
+    def readinto(self, b):
+        """
+        Read up to ``len(b)`` bytes into the pre-allocated, writable
+        :class:`bytearray`/buffer ``b`` and return the number of bytes stored.
+        Never reads past the declared stream size.
+        """
+        self._check_open()
+        length = len(b)
+        if length == 0 or self._pos >= self.size:
+            return 0
+        # never read beyond the declared logical size:
+        remaining = self.size - self._pos
+        if length > remaining:
+            length = remaining
+        written = 0
+        while written < length:
+            sector_index = (self._pos + written) // self._sectorsize
+            offset_in_sector = (self._pos + written) % self._sectorsize
+            sector_data = self._read_sector(sector_index)
+            take = min(length - written,
+                       self._sectorsize - offset_in_sector)
+            b[written:written + take] = \
+                sector_data[offset_in_sector:offset_in_sector + take]
+            written += take
+        self._pos += written
+        return written
+
+    def read(self, size=-1):
+        """
+        Read up to ``size`` bytes and return them as :class:`bytes`.
+        With ``size`` omitted, negative or larger than the remaining stream,
+        only the remaining bytes up to the declared size are returned.
+        """
+        self._check_open()
+        if size is None or size < 0:
+            size = self.size - self._pos
+        else:
+            size = min(size, self.size - self._pos)
+        if size <= 0:
+            return b''
+        result = bytearray(size)
+        got = self.readinto(result)
+        return bytes(result[:got])
+
+    def readall(self):
+        return self.read(-1)
+
+    # -- positioning ---------------------------------------------------------
+
+    def seek(self, offset, whence=os.SEEK_SET):
+        """
+        Move the stream cursor. Only positions within ``[0, size]`` are
+        accepted, so reads cannot reach neighbour streams or sector slack.
+        """
+        self._check_open()
+        if whence == os.SEEK_SET:
+            target = offset
+        elif whence == os.SEEK_CUR:
+            target = self._pos + offset
+        elif whence == os.SEEK_END:
+            target = self.size + offset
+        else:
+            raise ValueError('invalid whence value: %r' % (whence,))
+        if target < 0:
+            raise ValueError('negative seek position %d' % target)
+        if target > self.size:
+            raise ValueError(
+                'seek position %d is beyond stream size %d'
+                % (target, self.size))
+        self._pos = target
+        return self._pos
+
+    def tell(self):
+        self._check_open()
+        return self._pos
+
+    # -- lifecycle -----------------------------------------------------------
+
+    def close(self):
+        """
+        Close this lazy stream and release its sector cache. The underlying
+        shared file object is not closed: it belongs to the parent OleFileIO
+        (or, for mini streams, the shared mini stream container).
+        """
+        if not self._closed:
+            self._cache.clear()
+            self._sect_chain = []
+            self._next_sect = self._start_sect
+            self._chain_broken = False
+            self._closed = True
+        # RawIOBase.close flushes and invokes this method again safely
+        io.RawIOBase.close(self)
+
+    @property
+    def closed(self):
+        return self._closed
+
+    def __len__(self):
+        return self.size
+
 
 
 # --- OleDirectoryEntry -------------------------------------------------------
@@ -1876,6 +2197,50 @@ class OleFileIO:
                              filesize=self._filesize,
                              olefileio=self)
 
+    def _open_lazy(self, start, size, force_FAT=False,
+                   max_cached_sectors=DEFAULT_MAX_CACHED_SECTORS):
+        """
+        Open a stream lazily, either in FAT or MiniFAT according to its size.
+        (openstream_lazy helper)
+
+        Unlike :meth:`_open`, this returns an :class:`OleStreamIO` which reads
+        physical sectors on demand instead of loading the whole stream.
+
+        :param start: index of first sector
+        :param size: declared size of the stream
+        :param force_FAT: if False (default), open in FAT or MiniFAT according
+            to size. If True, always open in FAT.
+        :param max_cached_sectors: maximum sectors kept in the stream LRU cache
+        """
+        log.debug('OleFileIO._open_lazy(): sect=%Xh, size=%d, force_FAT=%s' %
+            (start, size, str(force_FAT)))
+        # stream size is compared to the mini_stream_cutoff_size threshold:
+        if size < self.minisectorcutoff and not force_FAT:
+            # ministream object
+            if not self.ministream:
+                # load MiniFAT if it wasn't already done:
+                self.loadminifat()
+                # The mini stream itself lives in an ordinary FAT stream. Open
+                # it lazily too, so mini streams are not buffered wholesale:
+                size_ministream = self.root.size
+                log.debug('Opening lazy MiniStream: sect=%Xh, size=%d' %
+                    (self.root.isectStart, size_ministream))
+                self.ministream = self._open_lazy(self.root.isectStart,
+                    size_ministream, force_FAT=True,
+                    max_cached_sectors=max_cached_sectors)
+            return OleStreamIO(fp=self.ministream, sect=start, size=size,
+                               offset=0, sectorsize=self.minisectorsize,
+                               fat=self.minifat,
+                               filesize=self.ministream.size,
+                               olefileio=self,
+                               max_cached_sectors=max_cached_sectors)
+        # standard stream
+        return OleStreamIO(fp=self.fp, sect=start, size=size,
+                           offset=self.sectorsize,
+                           sectorsize=self.sectorsize, fat=self.fat,
+                           filesize=self._filesize, olefileio=self,
+                           max_cached_sectors=max_cached_sectors)
+
     def _list(self, files, prefix, node, streams=True, storages=False):
         """
         listdir helper
@@ -1968,6 +2333,36 @@ class OleFileIO:
         if entry.entry_type != STGTY_STREAM:
             raise IOError("this file is not a stream")
         return self._open(entry.isectStart, entry.size)
+
+    def openstream_lazy(self, filename,
+                        max_cached_sectors=DEFAULT_MAX_CACHED_SECTORS):
+        """
+        Open a stream as a read-only, *lazy* file object
+        (:class:`OleStreamIO`), without reading the whole stream into memory.
+
+        Sectors are fetched from the underlying file on demand as
+        :meth:`~OleStreamIO.read`, :meth:`~OleStreamIO.readinto` or
+        :meth:`~OleStreamIO.seek` are used. This is intended for scanning only
+        the header of large streams, or random access into large streams, while
+        keeping memory usage bounded.
+
+        The existing :meth:`openstream` behaviour (eager :class:`OleStream`) is
+        unchanged. Note: ``filename`` is case-insensitive.
+
+        :param filename: path of stream in the storage tree (see
+            :meth:`openstream` for the accepted syntax)
+        :param max_cached_sectors: maximum number of physical sectors kept in
+            the per-stream bounded LRU cache (default
+            :data:`DEFAULT_MAX_CACHED_SECTORS`)
+        :returns: an :class:`OleStreamIO` lazy, read-only file object
+        :exception IOError: if filename is not found or is not a stream
+        """
+        sid = self._find(filename)
+        entry = self.direntries[sid]
+        if entry.entry_type != STGTY_STREAM:
+            raise IOError("this file is not a stream")
+        return self._open_lazy(entry.isectStart, entry.size,
+                               max_cached_sectors=max_cached_sectors)
 
     def _write_mini_stream(self, entry, data_to_write):
         if not entry.sect_chain:
