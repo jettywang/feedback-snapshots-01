@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Added
+
+* Auditable DSSE envelope merge (`securesystemslib.dsse_merge`):
+  `merge_envelopes()` combines envelopes from independent signing stations
+  only when payload bytes and payloadType match exactly, verifies every
+  signature against trusted keys, deduplicates identical signatures,
+  distinguishes randomized (e.g. RSA-PSS) signatures from deterministic
+  (e.g. Ed25519) conflicts, and returns a per-signature audit report.
+  `publish_merged_envelope()` writes the result atomically so a rejected
+  merge cannot leave a half-published artifact. New
+  `EnvelopeMergeError` carries the audit report on failure.
+
 ## 1.6.0
 
 ### Changed

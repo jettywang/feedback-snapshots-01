@@ -50,3 +50,16 @@ class UnverifiedSignatureError(Error):
 
 class VerificationError(UnverifiedSignatureError):
     """Signature could not be verified because something failed in the process"""
+
+
+class EnvelopeMergeError(Error):
+    """Indicate that DSSE envelopes could not be co-signed.
+
+    The incomplete audit trail describing why the merge was rejected is
+    available on the exception as ``report``. No merged envelope is produced
+    and no input is modified when this error is raised.
+    """
+
+    def __init__(self, message: str, report: object | None = None):
+        super().__init__(message)
+        self.report = report
