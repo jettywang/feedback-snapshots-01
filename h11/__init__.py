@@ -16,6 +16,15 @@ from h11._events import (
     Request,
     Response,
 )
+from h11._h2_adapter import (
+    H2AdapterError,
+    H2Data,
+    H2DownstreamConnection,
+    H2EndOfStream,
+    H2Event,
+    H2Headers,
+    H2StreamAdapter,
+)
 from h11._state import (
     CLIENT,
     CLOSED,
@@ -59,4 +68,11 @@ __all__ = (
     "ProtocolError",
     "LocalProtocolError",
     "RemoteProtocolError",
+    "H2Event",
+    "H2Headers",
+    "H2Data",
+    "H2EndOfStream",
+    "H2AdapterError",
+    "H2StreamAdapter",
+    "H2DownstreamConnection",
 )
