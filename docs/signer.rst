@@ -70,6 +70,13 @@ same signing and verification code works for all signers and public keys.
    :meth:`Key.verify_signature`. The verifying application does not need to
    know where or how the signature was created.
 
+   Applications that verify many signatures with the same key can create a
+   reusable :class:`VerificationContext` with :meth:`Key.verification_context`.
+   The context parses the public key and compiles the verification function
+   only once, and pins them together with the algorithm parameters: later
+   changes to the source key or the key registry do not affect it. To verify
+   with rotated key material, explicitly create a new context.
+
 
 Example
 ~~~~~~~
@@ -127,6 +134,7 @@ API documentation
    :no-value:
 .. autoclass:: securesystemslib.signer.Signer
 .. autoclass:: securesystemslib.signer.Key
+.. autoclass:: securesystemslib.signer.VerificationContext
 .. autoclass:: securesystemslib.signer.Signature
 
 Key type constants

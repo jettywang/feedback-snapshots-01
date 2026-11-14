@@ -10,7 +10,11 @@ import warnings
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
+from unittest import mock
 
+from cryptography.hazmat.primitives.asymmetric.rsa import (
+    generate_private_key as generate_rsa_private_key,
+)
 from cryptography.hazmat.primitives.serialization import (
     load_pem_private_key,
     load_pem_public_key,
@@ -26,6 +30,8 @@ from securesystemslib.exceptions import (
 )
 from securesystemslib.signer import (
     KEY_FOR_TYPE_AND_SCHEME,
+    RSA_PKCS1V15_SHA256,
+    RSASSA_PSS_SHA256,
     SIGNER_FOR_URI_SCHEME,
     CryptoSigner,
     GPGKey,
@@ -35,6 +41,7 @@ from securesystemslib.signer import (
     Signature,
     Signer,
     SSlibKey,
+    VerificationContext,
 )
 from securesystemslib.signer._key import MLDSA_IMPORT_ERROR
 from securesystemslib.signer._utils import compute_default_keyid
@@ -377,6 +384,222 @@ class TestSSlibKey(unittest.TestCase):
             key = SSlibKey("fake", keytype, scheme, {"public": val})
             with self.assertRaises(ValueError):
                 key._verify(b"fakesig", b"fakedata")
+
+
+class TestVerificationContext(unittest.TestCase):
+    """Tests for reusable verification contexts (Key.verification_context)."""
+
+    def test_context_verify_signature_vectors(self):
+        """Contexts verify the same known-signature vectors as Keys."""
+        vectors = json.loads((DATA_DIR / "key_verify_signature.json").read_text())
+        for vector in vectors:
+            with self.subTest(keytype=vector["keytype"], scheme=vector["scheme"]):
+                if vector.get("requires_mldsa") and MLDSA_IMPORT_ERROR is not None:
+                    self.skipTest(MLDSA_IMPORT_ERROR)
+
+                public = vector.get("public")
+                if public is None:
+                    public = (PEMS_DIR / vector["public_file"]).read_text()
+
+                key_dict = {
+                    "keytype": vector["keytype"],
+                    "scheme": vector["scheme"],
+                    "keyval": {
+                        "public": public,
+                    },
+                }
+                if vector["scheme"] in SHA224_SCHEMES:
+                    key = SSlibKey.from_dict(vector["keyid"], key_dict)
+                else:
+                    key = Key.from_dict(vector["keyid"], key_dict)
+
+                sig = Signature.from_dict(
+                    {
+                        "keyid": vector["keyid"],
+                        "sig": vector["signature"],
+                    }
+                )
+
+                ctx = key.verification_context()
+                self.assertEqual(ctx.keyid, vector["keyid"])
+                ctx.verify_signature(sig, b"DATA")
+                with self.assertRaises(UnverifiedSignatureError, msg=vector["scheme"]):
+                    ctx.verify_signature(sig, b"NOT DATA")
+
+    def test_context_reuses_parsed_public_key(self):
+        """Public key parsing happens once per context, not per verify."""
+        signer = CryptoSigner.generate_rsa()
+        sig = signer.sign(b"DATA")
+        key = signer.public_key
+
+        from securesystemslib.signer import _key as key_module
+
+        parse_count = 0
+        real_load_pem_public_key = key_module.load_pem_public_key
+
+        def counting_load_pem_public_key(*args, **kwargs):
+            nonlocal parse_count
+            parse_count += 1
+            return real_load_pem_public_key(*args, **kwargs)
+
+        with mock.patch(
+            "securesystemslib.signer._key.load_pem_public_key",
+            counting_load_pem_public_key,
+        ):
+            # Baseline: the mutable Key API re-parses the PEM on every verify
+            for _ in range(3):
+                key.verify_signature(sig, b"DATA")
+            self.assertEqual(parse_count, 3)
+
+            # The context parses the public key once, at creation time
+            parse_count = 0
+            ctx = key.verification_context()
+            self.assertEqual(parse_count, 1)
+            for _ in range(5):
+                ctx.verify_signature(sig, b"DATA")
+            self.assertEqual(parse_count, 1)
+
+    def test_contexts_with_same_keyid_do_not_share_material(self):
+        """Same keyid with different key material: contexts stay isolated."""
+        signer1 = CryptoSigner.generate_ed25519(keyid="aa")
+        signer2 = CryptoSigner.generate_ed25519(keyid="aa")
+        key1 = signer1.public_key
+        key2 = signer2.public_key
+        self.assertEqual(key1.keyid, key2.keyid)
+        self.assertNotEqual(key1.keyval, key2.keyval)
+
+        sig1 = signer1.sign(b"DATA")
+        sig2 = signer2.sign(b"DATA")
+
+        ctx1 = key1.verification_context()
+
+        # Key rotation: the Key object is mutated in place (same keyid, new
+        # material). The existing context is not silently updated: callers
+        # explicitly create a new context for the new material.
+        key1.keyval["public"] = key2.keyval["public"]
+        key1.keyid = "changed"
+        ctx2 = key2.verification_context()
+
+        self.assertEqual(ctx1.keyid, "aa")
+        self.assertEqual(ctx2.keyid, "aa")
+
+        # Interleaved verification: each context uses its pinned material
+        ctx1.verify_signature(sig1, b"DATA")
+        ctx2.verify_signature(sig2, b"DATA")
+        with self.assertRaises(UnverifiedSignatureError):
+            ctx1.verify_signature(sig2, b"DATA")
+        with self.assertRaises(UnverifiedSignatureError):
+            ctx2.verify_signature(sig1, b"DATA")
+        ctx1.verify_signature(sig1, b"DATA")
+        ctx2.verify_signature(sig2, b"DATA")
+
+    def test_contexts_with_same_material_do_not_share_scheme_policy(self):
+        """Same key material with different schemes: contexts stay isolated."""
+        private_key = generate_rsa_private_key(public_exponent=65537, key_size=2048)
+        key_pss = SSlibKey.from_crypto(
+            private_key.public_key(), "aa", RSASSA_PSS_SHA256
+        )
+        key_pkcs = SSlibKey.from_crypto(
+            private_key.public_key(), "aa", RSA_PKCS1V15_SHA256
+        )
+        self.assertEqual(key_pss.keyval, key_pkcs.keyval)
+
+        sig_pss = CryptoSigner(private_key, key_pss).sign(b"DATA")
+        sig_pkcs = CryptoSigner(private_key, key_pkcs).sign(b"DATA")
+
+        ctx_pss = key_pss.verification_context()
+        ctx_pkcs = key_pkcs.verification_context()
+
+        # Interleaved verification: each context enforces its pinned scheme
+        ctx_pss.verify_signature(sig_pss, b"DATA")
+        ctx_pkcs.verify_signature(sig_pkcs, b"DATA")
+        with self.assertRaises(UnverifiedSignatureError):
+            ctx_pss.verify_signature(sig_pkcs, b"DATA")
+        with self.assertRaises(UnverifiedSignatureError):
+            ctx_pkcs.verify_signature(sig_pss, b"DATA")
+        ctx_pss.verify_signature(sig_pss, b"DATA")
+        ctx_pkcs.verify_signature(sig_pkcs, b"DATA")
+
+    def test_context_isolated_from_registry_mutation(self):
+        """Registry changes after context creation do not affect it."""
+        signer = CryptoSigner.generate_ed25519()
+        sig = signer.sign(b"DATA")
+        key = signer.public_key
+        ctx = key.verification_context()
+
+        type_scheme = (key.keytype, key.scheme)
+        registered = KEY_FOR_TYPE_AND_SCHEME[type_scheme]
+        try:
+            del KEY_FOR_TYPE_AND_SCHEME[type_scheme]
+            # The registry no longer resolves this key type ...
+            with self.assertRaises(ValueError):
+                Key.from_dict(key.keyid, key.to_dict())
+            # ... but the pinned context still verifies
+            ctx.verify_signature(sig, b"DATA")
+        finally:
+            KEY_FOR_TYPE_AND_SCHEME[type_scheme] = registered
+
+    def test_failed_verification_does_not_pollute_context(self):
+        """A failed verification leaves no state in the context."""
+        signer = CryptoSigner.generate_ed25519()
+        sig = signer.sign(b"DATA")
+        ctx = signer.public_key.verification_context()
+
+        bad_sig = Signature(sig.keyid, "00" * 64)
+        for _ in range(3):
+            with self.assertRaises(UnverifiedSignatureError):
+                ctx.verify_signature(bad_sig, b"DATA")
+            ctx.verify_signature(sig, b"DATA")
+
+        # Verification process errors do not pollute the context either
+        with self.assertRaises(VerificationError):
+            ctx.verify_signature(Signature("other-keyid", sig.signature), b"DATA")
+        with self.assertRaises(VerificationError):
+            ctx.verify_signature(Signature(sig.keyid, "not-hex"), b"DATA")
+        ctx.verify_signature(sig, b"DATA")
+
+    def test_context_creation_validates_key(self):
+        """Context creation fails fast for bad key material or scheme."""
+        # Unsupported scheme
+        key = SSlibKey("aa", "ed25519", "no-such-scheme", {"public": "ab" * 32})
+        with self.assertRaises(ValueError):
+            key.verification_context()
+
+        # Key material that does not match keytype/scheme
+        signer = CryptoSigner.generate_ed25519()
+        key = SSlibKey(
+            "aa", "ecdsa", "ecdsa-sha2-nistp256", signer.public_key.keyval
+        )
+        with self.assertRaises(ValueError):
+            key.verification_context()
+
+    def test_default_context_snapshots_custom_key(self):
+        """Default context pins a deep copy of custom Key implementations."""
+
+        class ToyKey(Key):
+            @classmethod
+            def from_dict(cls, keyid: str, key_dict: dict[str, Any]) -> "ToyKey":
+                raise NotImplementedError
+
+            def to_dict(self) -> dict[str, Any]:
+                return self._to_dict()
+
+            def verify_signature(self, signature: Signature, data: bytes) -> None:
+                if self.keyval["public"] != "good":
+                    raise VerificationError("untrusted key material")
+                if signature.signature != "c0ffee":
+                    raise UnverifiedSignatureError("bad signature")
+
+        key = ToyKey("aa", "custom", "custom", {"public": "good"})
+        ctx = key.verification_context()
+        self.assertIsInstance(ctx, VerificationContext)
+
+        # Mutating the source key after context creation does not leak in
+        key.keyval["public"] = "evil"
+        key.keyid = "bb"
+        ctx.verify_signature(Signature("aa", "c0ffee"), b"DATA")
+        with self.assertRaises(VerificationError):
+            key.verify_signature(Signature("bb", "c0ffee"), b"DATA")
 
 
 class TestSigner(unittest.TestCase):

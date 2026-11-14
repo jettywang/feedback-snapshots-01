@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Added
+
+* Reusable signature `VerificationContext` via `Key.verification_context()`:
+  the public key is parsed and the verification function is compiled once, so
+  repeated verification no longer re-parses public key material. A context
+  pins the key material, algorithm parameters and verification implementation
+  at creation time -- later changes to the source `Key`, its `keyval`, or the
+  `KEY_FOR_TYPE_AND_SCHEME` registry do not affect it. Callers explicitly
+  create a new context to pick up rotated key material.
+
 ## 1.6.0
 
 ### Changed

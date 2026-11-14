@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 import warnings
 from abc import ABCMeta, abstractmethod
+from collections.abc import Callable
 from typing import Any, cast
 
 from securesystemslib._internal.utils import make_hashable
@@ -106,6 +108,78 @@ KEY_FOR_TYPE_AND_SCHEME: dict[tuple[str, str], type] = {}
 See ``securesystemslib.signer.KEY_FOR_TYPE_AND_SCHEME`` for default key types
 and schemes, and how to register custom implementations.
 """
+
+
+class VerificationContext(metaclass=ABCMeta):
+    """Reusable, pre-compiled signature verification context.
+
+    A context is created from a ``Key`` with ``Key.verification_context()``.
+    It pins the public key material, the algorithm parameters derived from
+    key type and scheme, and the verification implementation at creation
+    time:
+
+    * Later changes to the source ``Key`` -- including mutations of nested
+      ``keyval`` fields -- do not affect the context.
+    * Later changes to the ``KEY_FOR_TYPE_AND_SCHEME`` registry do not
+      affect the context.
+    * To verify with new key material (key rotation), explicitly create a
+      new context: there is no global cache that expires.
+
+    ``verify_signature()`` has the same contract as
+    ``Key.verify_signature()`` and keeps no state between calls: a failed
+    verification does not affect subsequent verifications.
+    """
+
+    keyid: str
+    """Key identifier that signatures are matched against."""
+
+    @abstractmethod
+    def verify_signature(self, signature: Signature, data: bytes) -> None:
+        """Raises if verification of signature over data fails.
+
+        Args:
+            signature: Signature object.
+            data: Payload bytes.
+
+        Raises:
+            UnverifiedSignatureError: Failed to verify signature.
+            VerificationError: Signature verification process error. If you
+                are only interested in the verify result, just handle
+                UnverifiedSignatureError: it contains VerificationError as well
+        """
+        raise NotImplementedError
+
+
+def _verify_signature(
+    keyid: str,
+    signature: Signature,
+    data: bytes,
+    verify_fn: Callable[[bytes, bytes], None],
+) -> None:
+    """Shared error handling for signature verification entry points.
+
+    Checks the keyid, decodes the signature and calls verify_fn with the
+    signature bytes and data, normalizing the raised errors.
+    """
+    try:
+        if signature.keyid != keyid:
+            raise ValueError(
+                f"keyid mismatch: 'key id: {keyid}"
+                f" != signature keyid: {signature.keyid}'"
+            )
+
+        verify_fn(bytes.fromhex(signature.signature), data)
+
+    except UnverifiedSignatureError as e:
+        raise UnverifiedSignatureError(
+            f"Failed to verify signature by {keyid}"
+        ) from e
+
+    except Exception as e:
+        logger.info("Key %s failed to verify sig: %s", keyid, e)
+        raise VerificationError(
+            f"Unknown failure to verify signature by {keyid}"
+        ) from e
 
 
 class Key(metaclass=ABCMeta):
@@ -249,6 +323,36 @@ class Key(metaclass=ABCMeta):
                 UnverifiedSignatureError: it contains VerificationError as well
         """
         raise NotImplementedError
+
+    def verification_context(self) -> VerificationContext:
+        """Return a reusable verification context for this key.
+
+        The context pins the key material, algorithm parameters and the
+        verification implementation at creation time: later changes to this
+        Key (including nested keyval mutations) or to the
+        KEY_FOR_TYPE_AND_SCHEME registry do not affect the context. To
+        verify with updated key material, explicitly create a new context.
+
+        Key implementations may override this to also avoid repeated public
+        key parsing. The default implementation verifies with a deep copy
+        of this key.
+        """
+        return _KeyVerificationContext(self)
+
+
+class _KeyVerificationContext(VerificationContext):
+    """Default ``VerificationContext`` for arbitrary ``Key`` implementations.
+
+    Pins a deep copy of the key and its ``verify_signature`` implementation
+    at creation time.
+    """
+
+    def __init__(self, key: Key):
+        self._key = copy.deepcopy(key)
+        self.keyid = self._key.keyid
+
+    def verify_signature(self, signature: Signature, data: bytes) -> None:
+        self._key.verify_signature(signature, data)
 
 
 class SSlibKey(Key):
@@ -431,126 +535,182 @@ class SSlibKey(Key):
         except SignatureMismatch as e:
             raise UnverifiedSignatureError from e
 
-    def _verify(self, signature: bytes, data: bytes) -> None:  # noqa: PLR0912, PLR0915
-        """Helper to verify signature using pyca/cryptography (default)."""
+    @staticmethod
+    def _compile_verifier(  # noqa: PLR0912, PLR0915
+        keytype: str, scheme: str, public_key: PublicKeyTypes
+    ) -> Callable[[bytes, bytes], None]:
+        """Compile a verification function for keytype/scheme and public key.
+
+        The returned function is bound to the passed public key material
+        and the algorithm parameters derived from keytype and scheme. It
+        does not consult any Key instance or mutable global state.
+
+        Raises:
+            UnsupportedLibraryError: ML-DSA support not available.
+            ValueError: Unsupported keytype/scheme, or public key does not
+                match keytype/scheme.
+        """
 
         def _validate_type(key: object, type_: type) -> None:
             if not isinstance(key, type_):
-                raise ValueError(f"bad key {key} for {self.scheme}")
+                raise ValueError(f"bad key {key} for {scheme}")
 
         def _validate_curve(
             key: EllipticCurvePublicKey, curve: type[EllipticCurve]
         ) -> None:
             if not isinstance(key.curve, curve):
-                raise ValueError(f"bad curve {key.curve} for {self.scheme}")
+                raise ValueError(f"bad curve {key.curve} for {scheme}")
 
-        if self.keytype == KEY_TYPE_MLDSA and MLDSA_IMPORT_ERROR:
+        def _warn_deprecated_keytype() -> None:
+            warnings.warn(
+                f"keytype '{scheme}' is deprecated, "
+                f"use '{KEY_TYPE_ECDSA}' instead",
+                DeprecationWarning,
+                stacklevel=5,
+            )
+
+        if keytype == KEY_TYPE_MLDSA and MLDSA_IMPORT_ERROR:
             raise UnsupportedLibraryError(MLDSA_IMPORT_ERROR)
 
+        verifier: Callable[[bytes, bytes], None]
+        if keytype == KEY_TYPE_RSA and scheme in [
+            RSASSA_PSS_SHA224,
+            RSASSA_PSS_SHA256,
+            RSASSA_PSS_SHA384,
+            RSASSA_PSS_SHA512,
+            RSA_PKCS1V15_SHA224,
+            RSA_PKCS1V15_SHA256,
+            RSA_PKCS1V15_SHA384,
+            RSA_PKCS1V15_SHA512,
+        ]:
+            _validate_type(public_key, RSAPublicKey)
+            rsa_key = cast(RSAPublicKey, public_key)
+            hash_algorithm = get_hash_algorithm(f"sha{scheme[-3:]}")
+            padding = SSlibKey._get_rsa_padding(
+                scheme.split("-")[1], hash_algorithm
+            )
+
+            def _verify_rsa(signature: bytes, data: bytes) -> None:
+                rsa_key.verify(signature, data, padding, hash_algorithm)
+
+            verifier = _verify_rsa
+
+        elif (
+            keytype in [KEY_TYPE_ECDSA, ECDSA_SHA2_NISTP256]
+            and scheme == ECDSA_SHA2_NISTP256
+        ):
+            if keytype == ECDSA_SHA2_NISTP256:
+                _warn_deprecated_keytype()
+            _validate_type(public_key, EllipticCurvePublicKey)
+            ec_key = cast(EllipticCurvePublicKey, public_key)
+            _validate_curve(ec_key, SECP256R1)
+            sig_algo = ECDSA(SHA256())
+
+            def _verify_ecdsa_p256(signature: bytes, data: bytes) -> None:
+                ec_key.verify(signature, data, sig_algo)
+
+            verifier = _verify_ecdsa_p256
+
+        elif (
+            keytype in [KEY_TYPE_ECDSA, ECDSA_SHA2_NISTP384]
+            and scheme == ECDSA_SHA2_NISTP384
+        ):
+            if keytype == ECDSA_SHA2_NISTP384:
+                _warn_deprecated_keytype()
+            _validate_type(public_key, EllipticCurvePublicKey)
+            ec_key = cast(EllipticCurvePublicKey, public_key)
+            _validate_curve(ec_key, SECP384R1)
+            sig_algo = ECDSA(SHA384())
+
+            def _verify_ecdsa_p384(signature: bytes, data: bytes) -> None:
+                ec_key.verify(signature, data, sig_algo)
+
+            verifier = _verify_ecdsa_p384
+
+        elif (
+            keytype in [KEY_TYPE_ECDSA, ECDSA_SHA2_NISTP521]
+            and scheme == ECDSA_SHA2_NISTP521
+        ):
+            if keytype == ECDSA_SHA2_NISTP521:
+                _warn_deprecated_keytype()
+            _validate_type(public_key, EllipticCurvePublicKey)
+            ec_key = cast(EllipticCurvePublicKey, public_key)
+            _validate_curve(ec_key, SECP521R1)
+            sig_algo = ECDSA(SHA512())
+
+            def _verify_ecdsa_p521(signature: bytes, data: bytes) -> None:
+                ec_key.verify(signature, data, sig_algo)
+
+            verifier = _verify_ecdsa_p521
+
+        elif keytype == KEY_TYPE_ED25519 and scheme == ED25519:
+            _validate_type(public_key, Ed25519PublicKey)
+            ed_key = cast(Ed25519PublicKey, public_key)
+
+            def _verify_ed25519(signature: bytes, data: bytes) -> None:
+                ed_key.verify(signature, data)
+
+            verifier = _verify_ed25519
+
+        elif keytype == KEY_TYPE_MLDSA and scheme == MLDSA_44_1:
+            _validate_type(public_key, MLDSA44PublicKey)
+            mldsa44_key = cast(MLDSA44PublicKey, public_key)
+
+            def _verify_mldsa44(signature: bytes, data: bytes) -> None:
+                mldsa44_key.verify(signature, get_mldsa_payload(data, 1))
+
+            verifier = _verify_mldsa44
+
+        elif keytype == KEY_TYPE_MLDSA and scheme == MLDSA_65_1:
+            _validate_type(public_key, MLDSA65PublicKey)
+            mldsa65_key = cast(MLDSA65PublicKey, public_key)
+
+            def _verify_mldsa65(signature: bytes, data: bytes) -> None:
+                mldsa65_key.verify(signature, get_mldsa_payload(data, 1))
+
+            verifier = _verify_mldsa65
+
+        elif keytype == KEY_TYPE_MLDSA and scheme == MLDSA_87_1:
+            _validate_type(public_key, MLDSA87PublicKey)
+            mldsa87_key = cast(MLDSA87PublicKey, public_key)
+
+            def _verify_mldsa87(signature: bytes, data: bytes) -> None:
+                mldsa87_key.verify(signature, get_mldsa_payload(data, 1))
+
+            verifier = _verify_mldsa87
+
+        else:
+            raise ValueError(f"Unsupported public key {keytype}/{scheme}")
+
+        return verifier
+
+    def _verify(self, signature: bytes, data: bytes) -> None:
+        """Helper to verify signature using pyca/cryptography (default)."""
         try:
-            key: PublicKeyTypes
-            if self.keytype == KEY_TYPE_RSA and self.scheme in [
-                RSASSA_PSS_SHA224,
-                RSASSA_PSS_SHA256,
-                RSASSA_PSS_SHA384,
-                RSASSA_PSS_SHA512,
-                RSA_PKCS1V15_SHA224,
-                RSA_PKCS1V15_SHA256,
-                RSA_PKCS1V15_SHA384,
-                RSA_PKCS1V15_SHA512,
-            ]:
-                key = cast(RSAPublicKey, self._crypto_key())
-                _validate_type(key, RSAPublicKey)
-                hash_name = self.get_hash_algorithm_name()
-                hash_algorithm = get_hash_algorithm(hash_name)
-                padding_name = self.get_padding_name()
-                padding = self._get_rsa_padding(padding_name, hash_algorithm)
-                key.verify(signature, data, padding, hash_algorithm)
-
-            elif (
-                self.keytype in [KEY_TYPE_ECDSA, ECDSA_SHA2_NISTP256]
-                and self.scheme == ECDSA_SHA2_NISTP256
-            ):
-                if self.keytype == ECDSA_SHA2_NISTP256:
-                    warnings.warn(
-                        f"keytype '{ECDSA_SHA2_NISTP256}' is deprecated, "
-                        f"use '{KEY_TYPE_ECDSA}' instead",
-                        DeprecationWarning,
-                        stacklevel=2,
-                    )
-                key = cast(EllipticCurvePublicKey, self._crypto_key())
-                _validate_type(key, EllipticCurvePublicKey)
-                _validate_curve(key, SECP256R1)
-                key.verify(signature, data, ECDSA(SHA256()))
-
-            elif (
-                self.keytype in [KEY_TYPE_ECDSA, ECDSA_SHA2_NISTP384]
-                and self.scheme == ECDSA_SHA2_NISTP384
-            ):
-                if self.keytype == ECDSA_SHA2_NISTP384:
-                    warnings.warn(
-                        f"keytype '{ECDSA_SHA2_NISTP384}' is deprecated, "
-                        f"use '{KEY_TYPE_ECDSA}' instead",
-                        DeprecationWarning,
-                        stacklevel=2,
-                    )
-                key = cast(EllipticCurvePublicKey, self._crypto_key())
-                _validate_type(key, EllipticCurvePublicKey)
-                _validate_curve(key, SECP384R1)
-                key.verify(signature, data, ECDSA(SHA384()))
-
-            elif (
-                self.keytype in [KEY_TYPE_ECDSA, ECDSA_SHA2_NISTP521]
-                and self.scheme == ECDSA_SHA2_NISTP521
-            ):
-                if self.keytype == ECDSA_SHA2_NISTP521:
-                    warnings.warn(
-                        f"keytype '{ECDSA_SHA2_NISTP521}' is deprecated, "
-                        f"use '{KEY_TYPE_ECDSA}' instead",
-                        DeprecationWarning,
-                        stacklevel=2,
-                    )
-                key = cast(EllipticCurvePublicKey, self._crypto_key())
-                _validate_type(key, EllipticCurvePublicKey)
-                _validate_curve(key, SECP521R1)
-                key.verify(signature, data, ECDSA(SHA512()))
-
-            elif self.keytype == KEY_TYPE_ED25519 and self.scheme == ED25519:
-                key = cast(Ed25519PublicKey, self._crypto_key())
-                _validate_type(key, Ed25519PublicKey)
-                key.verify(signature, data)
-
-            elif self.keytype == KEY_TYPE_MLDSA and self.scheme == MLDSA_44_1:
-                key = cast(MLDSA44PublicKey, self._crypto_key())
-                _validate_type(key, MLDSA44PublicKey)
-                key.verify(signature, get_mldsa_payload(data, 1))
-
-            elif self.keytype == KEY_TYPE_MLDSA and self.scheme == MLDSA_65_1:
-                key = cast(MLDSA65PublicKey, self._crypto_key())
-                _validate_type(key, MLDSA65PublicKey)
-                key.verify(signature, get_mldsa_payload(data, 1))
-
-            elif self.keytype == KEY_TYPE_MLDSA and self.scheme == MLDSA_87_1:
-                key = cast(MLDSA87PublicKey, self._crypto_key())
-                _validate_type(key, MLDSA87PublicKey)
-                key.verify(signature, get_mldsa_payload(data, 1))
-
-            else:
-                raise ValueError(f"Unsupported public key {self.keytype}/{self.scheme}")
+            verifier = self._compile_verifier(
+                self.keytype, self.scheme, self._crypto_key()
+            )
+            verifier(signature, data)
 
         except InvalidSignature as e:
             raise UnverifiedSignatureError from e
 
+    def verification_context(self) -> SSlibVerificationContext:
+        """Return a reusable verification context for this key.
+
+        The public key is parsed and the verification function is compiled
+        once, at context creation time: verification does not re-parse the
+        public key or re-derive algorithm parameters.
+
+        Raises:
+            UnsupportedLibraryError: Required crypto library not installed.
+            ValueError: Key material cannot be parsed or does not match
+                keytype/scheme.
+        """
+        return SSlibVerificationContext(self)
+
     def verify_signature(self, signature: Signature, data: bytes) -> None:
-        try:
-            if signature.keyid != self.keyid:
-                raise ValueError(
-                    f"keyid mismatch: 'key id: {self.keyid}"
-                    f" != signature keyid: {signature.keyid}'"
-                )
-
-            signature_bytes = bytes.fromhex(signature.signature)
-
+        def _verify_with_key(signature_bytes: bytes, data: bytes) -> None:
             if CRYPTO_IMPORT_ERROR:
                 if self.scheme != ED25519:
                     raise UnsupportedLibraryError(CRYPTO_IMPORT_ERROR)
@@ -559,13 +719,53 @@ class SSlibKey(Key):
 
             return self._verify(signature_bytes, data)
 
-        except UnverifiedSignatureError as e:
-            raise UnverifiedSignatureError(
-                f"Failed to verify signature by {self.keyid}"
-            ) from e
+        _verify_signature(self.keyid, signature, data, _verify_with_key)
 
-        except Exception as e:
-            logger.info("Key %s failed to verify sig: %s", self.keyid, e)
-            raise VerificationError(
-                f"Unknown failure to verify signature by {self.keyid}"
-            ) from e
+
+class SSlibVerificationContext(VerificationContext):
+    """``VerificationContext`` for ``SSlibKey``.
+
+    The public key is parsed and the verification function is compiled once
+    at creation time. The context pins the key material, algorithm
+    parameters and verification implementation: later changes to the source
+    key or the key registry do not affect it.
+    """
+
+    def __init__(self, key: SSlibKey):
+        self.keyid = key.keyid
+        self.keytype = key.keytype
+        self.scheme = key.scheme
+
+        self._verify_fn: Callable[[bytes, bytes], None]
+        if CRYPTO_IMPORT_ERROR:
+            if key.scheme != ED25519:
+                raise UnsupportedLibraryError(CRYPTO_IMPORT_ERROR)
+
+            public_bytes = bytes.fromhex(key.keyval["public"])
+
+            def _verify_fallback(signature: bytes, data: bytes) -> None:
+                try:
+                    checkvalid(signature, data, public_bytes)
+                except SignatureMismatch as e:
+                    raise UnverifiedSignatureError from e
+
+            self._verify_fn = _verify_fallback
+
+        else:
+            if key.keytype == KEY_TYPE_MLDSA and MLDSA_IMPORT_ERROR:
+                raise UnsupportedLibraryError(MLDSA_IMPORT_ERROR)
+
+            verifier = SSlibKey._compile_verifier(
+                key.keytype, key.scheme, key._crypto_key()
+            )
+
+            def _verify_compiled(signature: bytes, data: bytes) -> None:
+                try:
+                    verifier(signature, data)
+                except InvalidSignature as e:
+                    raise UnverifiedSignatureError from e
+
+            self._verify_fn = _verify_compiled
+
+    def verify_signature(self, signature: Signature, data: bytes) -> None:
+        _verify_signature(self.keyid, signature, data, self._verify_fn)
