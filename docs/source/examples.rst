@@ -9,3 +9,5 @@ Examples
 .. include:: examples/actions.rst
 
 .. include:: examples/exporting.rst
+
+.. include:: examples/certprune.rst
