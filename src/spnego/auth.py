@@ -161,7 +161,9 @@ def client(
         context_req: The :class:`spnego.ContextReq` flags to use when setting up the context.
         protocol: The protocol to authenticate with, can be `ntlm`, `kerberos`, `negotiate`, or `credssp`.
         options: The :class:`spnego.NegotiateOptions` that define pyspnego specific options to control the negotiation.
-        kwargs: Optional arguments to pass through to the authentiction context.
+        kwargs: Optional arguments to pass through to the authentiction context. Use ``ntlm_policy`` with an
+            :class:`spnego.NTLMPolicy` instance to control the NTLM protocols allowed for this context. Providers
+            that cannot enforce a policy fail explicitly when one is supplied.
 
     Returns:
         ContextProxy: The context proxy for a client.
@@ -196,7 +198,9 @@ def server(
         protocol: The protocol to authenticate with, can be `ntlm`, `kerberos`, `negotiate`, or `credssp`.
         options: The :class:`spnego.NegotiateOptions` that define pyspnego specific options to control the negotiation.
         credentials: A credential or list or credentials to use with the server auth context.
-        kwargs: Optional arguments to pass through to the authentiction context.
+        kwargs: Optional arguments to pass through to the authentiction context. Use ``ntlm_policy`` with an
+            :class:`spnego.NTLMPolicy` instance to control the NTLM protocols allowed for this context. Providers
+            that cannot enforce a policy fail explicitly when one is supplied.
 
     Returns:
         ContextProxy: The context proxy for a client.

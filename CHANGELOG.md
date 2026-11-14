@@ -2,6 +2,12 @@
 
 ## 0.13.0 - TBD
 
+* Add `spnego.NTLMPolicy` for per-context NTLM protocol policies
+  * The policy constrains which response types (LM, NTLMv1, NTLMv2) the initiator generates and the acceptor allows, plus the session security options (extended session security, LM key) the context negotiates
+  * Pass it as `ntlm_policy=` to `spnego.client()`/`spnego.server()`; when omitted the policy is derived from the `LM_COMPAT_LEVEL` env var as before, captured at context creation so later env changes cannot affect the context
+  * `NTLMPolicy.from_compat_level(level)` maps the legacy `LM_COMPAT_LEVEL` values 0-5 to an equivalent policy and `NTLMPolicy.strict()` only allows NTLMv2
+  * Invalid policies fail at construction and providers that cannot enforce a policy (SSPI, GSSAPI) fail explicitly instead of silently ignoring it
+
 ## 0.12.4 - 2026-10-06
 
 * Fix SSPI acceptor with explicit `Password` or `KerberosKeytab` credentials failing with `SEC_E_LOGON_DENIED` when the username is in the UPN form `user@REALM`

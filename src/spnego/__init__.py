@@ -23,6 +23,7 @@ from spnego._credential import (
     NTLMHash,
     Password,
 )
+from spnego._ntlm_policy import NTLMPolicy
 from spnego.auth import client, server
 from spnego.exceptions import NegotiateOptions
 
@@ -36,6 +37,7 @@ __all__ = [
     "KerberosCCache",
     "KerberosKeytab",
     "NTLMHash",
+    "NTLMPolicy",
     "Password",
     "NegotiateOptions",
     "UnwrapResult",

@@ -35,6 +35,7 @@ from spnego.exceptions import (
     InvalidCredentialError,
     NegotiateOptions,
     NoContextError,
+    OperationNotAvailableError,
     SpnegoError,
 )
 from spnego.iov import BufferType, IOVBuffer, IOVResBuffer
@@ -346,6 +347,12 @@ class GSSAPIProxy(ContextProxy):
         options: NegotiateOptions = NegotiateOptions.none,
         **kwargs: typing.Any,
     ) -> None:
+        if kwargs.get("ntlm_policy", None) is not None:
+            raise OperationNotAvailableError(
+                context_msg="The GSSAPI provider cannot enforce an explicit NTLM policy, "
+                "use the Python NTLM provider (NegotiateOptions.use_ntlm) instead"
+            )
+
         if not HAS_GSSAPI:
             raise ImportError("GSSAPIProxy requires the Python gssapi library: %s" % GSSAPI_IMP_ERR)
 

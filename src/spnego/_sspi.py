@@ -34,6 +34,7 @@ from spnego.exceptions import (
     InvalidCredentialError,
     NegotiateOptions,
     NoContextError,
+    OperationNotAvailableError,
     SpnegoError,
 )
 from spnego.exceptions import WinError as NativeError
@@ -161,6 +162,11 @@ class SSPIProxy(ContextProxy):
         options: NegotiateOptions = NegotiateOptions.none,
         **kwargs: t.Any,
     ) -> None:
+        if kwargs.get("ntlm_policy", None) is not None:
+            raise OperationNotAvailableError(
+                context_msg="The SSPI provider cannot enforce an explicit NTLM policy, "
+                "use the Python NTLM provider (NegotiateOptions.use_ntlm) instead"
+            )
 
         if not HAS_SSPI:
             raise ImportError("SSPIProxy requires the Windows only sspilib python package")

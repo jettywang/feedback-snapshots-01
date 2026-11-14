@@ -21,6 +21,7 @@ from spnego._context import (
 )
 from spnego._credential import Credential, unify_credentials
 from spnego._gss import GSSAPIProxy
+from spnego._ntlm_policy import NTLMPolicy
 from spnego._spnego import (
     NegState,
     NegTokenInit,
@@ -32,9 +33,11 @@ from spnego._sspi import SSPIProxy
 from spnego.channel_bindings import GssChannelBindings
 from spnego.exceptions import (
     BadMechanismError,
+    ErrorCode,
     InvalidTokenError,
     NegotiateOptions,
     NoContextError,
+    SpnegoError,
 )
 
 log = logging.getLogger(__name__)
@@ -70,6 +73,13 @@ class NegotiateProxy(ContextProxy):
 
         self._credentials = credentials
         self._complete = False
+        self._ntlm_policy: typing.Optional[NTLMPolicy] = kwargs.get("ntlm_policy", None)
+        if self._ntlm_policy is not None and not isinstance(self._ntlm_policy, NTLMPolicy):
+            raise SpnegoError(
+                ErrorCode.failure,
+                context_msg="ntlm_policy must be an spnego.NTLMPolicy instance, got %s"
+                % type(self._ntlm_policy).__name__,
+            )
         self._available_contexts: typing.Optional[typing.Dict[GSSMech, ContextProxy]] = kwargs.get(
             "_negotiate_contexts", None
         )
@@ -473,15 +483,21 @@ class NegotiateProxy(ContextProxy):
                     if protocol == "ntlm" and "ntlm" in SSPIProxy.available_protocols(options=options):
                         options |= NegotiateOptions.use_ntlm
 
+                    mech_kwargs = context_kwargs
+                    if protocol == "ntlm" and self._ntlm_policy is not None:
+                        # Only the Python NTLM provider can enforce an NTLM policy, the Kerberos providers must not
+                        # see this kwarg and providers that cannot enforce it will fail explicitly.
+                        mech_kwargs = dict(context_kwargs, ntlm_policy=self._ntlm_policy)
+
                     if self.usage == "accept":
                         context = spnego.server(
                             credentials=self._credentials,
                             protocol=protocol,
                             options=options,
-                            **context_kwargs,
+                            **mech_kwargs,
                         )
                     else:
-                        context = spnego.client(self._credentials, protocol=protocol, options=options, **context_kwargs)
+                        context = spnego.client(self._credentials, protocol=protocol, options=options, **mech_kwargs)
 
                     context._is_wrapped = True
                     available_contexts[mech] = context

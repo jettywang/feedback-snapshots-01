@@ -32,6 +32,7 @@ from spnego._credssp_structures import (
     TSPasswordCreds,
     TSRequest,
 )
+from spnego._ntlm_policy import NTLMPolicy
 from spnego._text import to_text
 from spnego.channel_bindings import GssChannelBindings
 from spnego.exceptions import (
@@ -281,6 +282,14 @@ class CredSSPProxy(ContextProxy):
         self._credentials = credentials
         self._options = options & ~NegotiateOptions.wrapping_winrm  # WinRM wrapping won't apply for auth context.
 
+        self._ntlm_policy: typing.Optional[NTLMPolicy] = kwargs.get("ntlm_policy", None)
+        if self._ntlm_policy is not None and not isinstance(self._ntlm_policy, NTLMPolicy):
+            raise SpnegoError(
+                ErrorCode.failure,
+                context_msg="ntlm_policy must be an spnego.NTLMPolicy instance, got %s"
+                % type(self._ntlm_policy).__name__,
+            )
+
         self._auth_context: typing.Optional[ContextProxy] = kwargs.get("credssp_negotiate_context", None)
         self._ts_credential: typing.Optional[TSCredentials] = None
         self._complete = False
@@ -388,6 +397,8 @@ class CredSSPProxy(ContextProxy):
                 auth_kwargs["hostname"] = self._hostname
             if self._service:
                 auth_kwargs["service"] = self._service
+            if self._ntlm_policy is not None:
+                auth_kwargs["ntlm_policy"] = self._ntlm_policy
             self._auth_context = spnego.client(
                 self._credentials, protocol="negotiate", options=self._options, **auth_kwargs
             )
@@ -473,6 +484,8 @@ class CredSSPProxy(ContextProxy):
                     auth_kwargs["hostname"] = self._hostname
                 if self._service:
                     auth_kwargs["service"] = self._service
+                if self._ntlm_policy is not None:
+                    auth_kwargs["ntlm_policy"] = self._ntlm_policy
                 self._auth_context = spnego.server(protocol="negotiate", options=self._options, **auth_kwargs)
 
             round = 0

@@ -26,6 +26,7 @@ from spnego._credential import (
     Password,
     unify_credentials,
 )
+from spnego._ntlm_policy import NTLMPolicy
 from spnego._ntlm_raw.crypto import (
     RC4Handle,
     compute_response_v1,
@@ -251,6 +252,7 @@ class NTLMProxy(ContextProxy):
         usage: str = "initiate",
         protocol: str = "ntlm",
         options: NegotiateOptions = NegotiateOptions.none,
+        ntlm_policy: typing.Optional[NTLMPolicy] = None,
         **kwargs: typing.Any,
     ) -> None:
         credentials = unify_credentials(username, password, required_protocol="ntlm")
@@ -276,34 +278,38 @@ class NTLMProxy(ContextProxy):
             | NegotiateFlags.unicode
         )
 
-        # gss-ntlmssp uses the env var 'LM_COMPAT_LEVEL' to control the NTLM compatibility level. To try and make our
-        # NTLM implementation similar in functionality we will also use that behaviour.
+        # The NTLM policy controls which response types this context will generate (initiator) or allow (acceptor)
+        # and the session security options it negotiates. When not explicitly provided it is derived from the
+        # LM_COMPAT_LEVEL env var which gss-ntlmssp also honours. The policy is captured now so that changing the
+        # env var afterwards cannot affect this context.
         # https://github.com/gssapi/gss-ntlmssp/blob/e498737a96e8832a2cb9141ab1fe51e129185a48/src/gss_ntlmssp.c#L159-L170
-        # See the below policy link for more details on what these mean, for now 3 is the sane behaviour.
         # https://docs.microsoft.com/en-us/windows/security/threat-protection/security-policy-settings/network-security-lan-manager-authentication-level
-        lm_compat_level = int(os.environ.get("LM_COMPAT_LEVEL", 3))
-        if lm_compat_level < 0 or lm_compat_level > 5:
+        if ntlm_policy is None:
+            ntlm_policy = NTLMPolicy.from_env()
+        elif not isinstance(ntlm_policy, NTLMPolicy):
             raise SpnegoError(
-                ErrorCode.failure, context_msg="Invalid LM_COMPAT_LEVEL %d, must be between 0 and 5" % lm_compat_level
+                ErrorCode.failure,
+                context_msg="ntlm_policy must be an spnego.NTLMPolicy instance, got %s" % type(ntlm_policy).__name__,
             )
+        self._ntlm_policy = ntlm_policy
 
-        if lm_compat_level == 0:
+        if not ntlm_policy.extended_session_security:
             self._context_req &= ~NegotiateFlags.extended_session_security
+
+        if not ntlm_policy.lm_key:
+            self._context_req &= ~NegotiateFlags.lm_key
 
         if self.usage == "initiate":
             self._credential = _NTLMCredential(next(c for c in credentials if "ntlm" in c.supported_protocols))
 
-            self._lm = lm_compat_level < 2
-            self._nt_v1 = lm_compat_level < 3
-            self._nt_v2 = lm_compat_level > 2
-
-            if lm_compat_level > 1:
-                self._context_req &= ~NegotiateFlags.lm_key
+            self._lm = ntlm_policy.generate_lm
+            self._nt_v1 = ntlm_policy.generate_ntlmv1
+            self._nt_v2 = ntlm_policy.generate_ntlmv2
 
         else:
-            self._lm = lm_compat_level < 4
-            self._nt_v1 = lm_compat_level < 5
-            self._nt_v2 = True
+            self._lm = ntlm_policy.accept_lm
+            self._nt_v1 = ntlm_policy.accept_ntlmv1
+            self._nt_v2 = ntlm_policy.accept_ntlmv2
 
             # Make sure that the credential file is set and exists
             if not _get_credential_file():
@@ -565,6 +571,9 @@ class NTLMProxy(ContextProxy):
         expected_mic = None
 
         if auth.nt_challenge_response and len(auth.nt_challenge_response) > 24:
+            if not self._nt_v2:
+                raise InvalidTokenError(context_msg="Acceptor settings are set to reject NTv2 responses")
+
             nt_hash = ntowfv2(auth.user_name, self._credential.nt_hash, auth.domain_name)
 
             nt_challenge = NTClientChallengeV2.unpack(auth.nt_challenge_response[16:])
