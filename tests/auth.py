@@ -17,16 +17,25 @@ from paramiko import (
     AuthSource,
     AuthStrategy,
     BadAuthenticationType,
+    CredentialResponse,
+    CredentialType,
     Ed25519Key,
     InMemoryPrivateKey,
+    InteractiveAuthPolicy,
+    InteractiveAuthPolicyError,
+    InteractivePrompt,
     NoneAuth,
     OnDiskPrivateKey,
     Password,
     PKey,
     PrivateKey,
     RSAKey,
+    ServiceRequestingTransport,
     SourceResult,
     SSHException,
+    StaticCredentialProvider,
+    password_fallback_policy,
+    reject_unknown_prompt,
 )
 
 from ._util import (
@@ -147,6 +156,391 @@ class AuthHandler_:
             tc.auth_timeout = 1  # 1 second, to speed up test
             tc.auth_password("unresponsive-server", "hello")
             assert "Authentication timeout" in str(info.value)
+
+
+def _mfa_provider(challenge):
+    """
+    Provider that distinguishes a password prompt from an OTP prompt by the
+    verbatim prompt text -- never by the echo flag alone.
+    """
+    prompt = challenge.prompts[0]
+    text = prompt.text.lower()
+    if "verification code" in text:
+        return [CredentialResponse("123456", CredentialType.OTP)]
+    if "password" in text:
+        return [CredentialResponse("secret-pw", CredentialType.PASSWORD)]
+    reject_unknown_prompt(prompt)
+
+
+class InteractiveAuthPolicy_:
+    """
+    End-to-end tests for the explicit keyboard-interactive policy machinery.
+
+    These run over the in-process LoopSocket server, so no real network socket
+    is needed. Each test records which credential *type* was actually put on
+    the wire and at which round the exchange was rejected, and asserts that a
+    refusal never leaves the client marked authenticated.
+    """
+
+    def mfa_password_then_otp_succeeds(self):
+        """
+        a local service that asks for a password and then an OTP is answered
+        with the distinct credential types, in order.
+        """
+        policy = InteractiveAuthPolicy(
+            StaticCredentialProvider(_mfa_provider)
+        )
+        with server(defer=True) as (tc, ts):
+            assert tc.auth_interactive("mfa", None, policy=policy) == []
+            # The transport really is authenticated at both ends.
+            assert tc.is_authenticated()
+            assert ts.is_authenticated()
+        # Two rounds observed, bound to the verified session context.
+        assert [ch.round_number for ch in policy.challenges] == [0, 1]
+        assert all(ch.username == "mfa" for ch in policy.challenges)
+        assert policy.challenges[0].prompts[0].text == "Password: "
+        assert policy.challenges[1].prompts[0].text == "Verification code: "
+        # And the credential types match the prompt semantics exactly.
+        sent = [
+            response.credential_type
+            for round_ in policy.responses
+            for response in round_
+        ]
+        assert sent == [CredentialType.PASSWORD, CredentialType.OTP]
+        secrets = [
+            response.secret
+            for round_ in policy.responses
+            for response in round_
+        ]
+        assert secrets == ["secret-pw", "123456"]
+
+    def echo_flag_alone_never_implies_password(self):
+        """
+        a non-echoing OTP prompt must not be answered with the password just
+        because echo=False.
+        """
+        seen = []
+
+        def provider(challenge):
+            seen.append(challenge.prompts[0])
+            # Both prompts here arrive with echo=False; classification is by
+            # text, so the OTP round still yields an OTP credential.
+            return _mfa_provider(challenge)
+
+        policy = InteractiveAuthPolicy(StaticCredentialProvider(provider))
+        with server(defer=True) as (tc, ts):
+            tc.auth_interactive("mfa", None, policy=policy)
+        assert [prompt.echo for prompt in seen] == [False, False]
+        assert [
+            response.credential_type
+            for round_ in policy.responses
+            for response in round_
+        ] == [CredentialType.PASSWORD, CredentialType.OTP]
+
+    def unknown_single_prompt_rejects_and_sends_nothing(self):
+        """
+        a single malicious/unrecognized prompt aborts before any response and
+        is never fed the saved password.
+        """
+        policy = password_fallback_policy("secret-pw")
+        with (
+            server(defer=True, skip_verify=True) as (tc, ts),
+            raises(InteractiveAuthPolicyError) as info,
+        ):
+            tc.auth_password("malicious", "secret-pw")
+        assert info.value.reason == InteractiveAuthPolicyError.UNKNOWN_PROMPT
+        # Nothing was put on the wire and the client is not authenticated.
+        assert policy.responses == []
+        assert not tc.is_authenticated()
+        assert not ts.is_authenticated()
+
+    def repeated_challenge_hits_round_budget(self):
+        """
+        a server that keeps re-issuing the same challenge is cut off at the
+        configured round budget, without ever authenticating.
+        """
+        policy = password_fallback_policy("secret-pw", max_rounds=2)
+        with (
+            server(defer=True, skip_verify=True) as (tc, ts),
+            raises(InteractiveAuthPolicyError) as info,
+        ):
+            tc.auth_interactive("repeater", None, policy=policy)
+        assert info.value.reason == InteractiveAuthPolicyError.ROUND_BUDGET
+        # Only the budgeted number of rounds were answered, then it stopped.
+        assert policy.rounds == 2
+        assert len(policy.challenges) == 2
+        assert not tc.is_authenticated()
+        assert not ts.is_authenticated()
+
+    def response_count_mismatch_rejects(self):
+        """
+        a provider returning the wrong number of responses is refused and no
+        mismatched payload is sent.
+        """
+
+        def provider(challenge):
+            return [
+                CredentialResponse("a", CredentialType.OTHER),
+                CredentialResponse("b", CredentialType.OTHER),
+            ]
+
+        policy = InteractiveAuthPolicy(StaticCredentialProvider(provider))
+        with (
+            server(defer=True, skip_verify=True) as (tc, ts),
+            raises(InteractiveAuthPolicyError) as info,
+        ):
+            tc.auth_interactive("commie", None, policy=policy)
+        assert (
+            info.value.reason == InteractiveAuthPolicyError.RESPONSE_MISMATCH
+        )
+        assert policy.responses == []
+        assert not tc.is_authenticated()
+
+    def provider_cancellation_rejects(self):
+        """
+        a provider returning None (user cancel) aborts the exchange.
+        """
+        policy = InteractiveAuthPolicy(
+            StaticCredentialProvider(lambda challenge: None)
+        )
+        with (
+            server(defer=True, skip_verify=True) as (tc, ts),
+            raises(InteractiveAuthPolicyError) as info,
+        ):
+            tc.auth_interactive("commie", None, policy=policy)
+        assert info.value.reason == InteractiveAuthPolicyError.CANCELLED
+        assert policy.responses == []
+        assert not tc.is_authenticated()
+
+    def provider_exception_is_treated_as_cancellation(self):
+        def provider(challenge):
+            raise RuntimeError("no UI available")
+
+        policy = InteractiveAuthPolicy(StaticCredentialProvider(provider))
+        with (
+            server(defer=True, skip_verify=True) as (tc, ts),
+            raises(InteractiveAuthPolicyError) as info,
+        ):
+            tc.auth_interactive("commie", None, policy=policy)
+        assert info.value.reason == InteractiveAuthPolicyError.CANCELLED
+        assert not tc.is_authenticated()
+
+    def fallback_can_be_disabled(self):
+        """
+        fallback=False must prevent any keyboard-interactive attempt and
+        surface the server's BadAuthenticationType instead.
+        """
+        with (
+            server(defer=True, skip_verify=True) as (tc, ts),
+            raises(BadAuthenticationType) as info,
+        ):
+            tc.auth_password("commie", "cat", fallback=False)
+        assert info.value.allowed_types == ["keyboard-interactive"]
+        assert not tc.is_authenticated()
+
+    def policy_fallback_still_handles_plain_password_prompt(self):
+        """
+        the policy-based fallback still succeeds for a legitimate password
+        prompt (preserving the historical use case).
+        """
+        with server(defer=True) as (tc, ts):
+            assert tc.auth_password("commie", "cat") == []
+            assert tc.is_authenticated()
+
+    def challenge_is_bound_to_session_context(self):
+        captured = []
+
+        def provider(challenge):
+            captured.append(challenge)
+            return _mfa_provider(challenge)
+
+        policy = InteractiveAuthPolicy(StaticCredentialProvider(provider))
+        with server(defer=True) as (tc, ts):
+            tc.auth_interactive("mfa", None, policy=policy)
+        first = captured[0]
+        assert first.username == "mfa"
+        assert first.round_number == 0
+        assert first.title == "login"
+        assert first.instructions == "Enter your password."
+        # Verbatim prompt text and the raw peer address are carried along.
+        assert first.prompts[0].text == "Password: "
+        assert isinstance(first.peer_address, tuple)
+
+    def requires_credential_provider_instance(self):
+        with raises(TypeError):
+            InteractiveAuthPolicy(provider=object())
+
+    def max_rounds_must_be_positive(self):
+        with raises(ValueError):
+            InteractiveAuthPolicy(
+                StaticCredentialProvider(_mfa_provider), max_rounds=0
+            )
+
+    def works_through_service_requesting_transport(self):
+        """
+        the policy drives the AuthOnlyHandler code path too, including the
+        password-fallback entry point and round-budget enforcement.
+        """
+        # Happy MFA path over the newer service-requesting transport.
+        policy = InteractiveAuthPolicy(
+            StaticCredentialProvider(_mfa_provider)
+        )
+        with server(
+            defer=True,
+            transport_factory=ServiceRequestingTransport,
+        ) as (tc, ts):
+            assert tc.auth_interactive("mfa", None, policy=policy) == []
+            assert tc.is_authenticated()
+            assert ts.is_authenticated()
+        assert policy.rounds == 2
+
+        # Adversarial repeated challenge is still cut off on that path.
+        budget = password_fallback_policy("secret-pw", max_rounds=1)
+        with (
+            server(
+                defer=True,
+                skip_verify=True,
+                transport_factory=ServiceRequestingTransport,
+            ) as (tc, ts),
+            raises(InteractiveAuthPolicyError) as info,
+        ):
+            tc.auth_interactive("repeater", None, policy=budget)
+        assert info.value.reason == InteractiveAuthPolicyError.ROUND_BUDGET
+        assert not tc.is_authenticated()
+
+
+class LegacyInteractiveHandler_:
+    """
+    The plain callable handler keeps working, but response-count mismatches
+    are now refused rather than sent.
+    """
+
+    def plain_handler_still_supported(self):
+        def handler(title, instructions, prompts):
+            return ["cat"]
+
+        with server(defer=True) as (tc, ts):
+            assert tc.auth_interactive("commie", handler) == []
+            assert tc.is_authenticated()
+
+    def mismatched_handler_response_count_rejected(self):
+        def handler(title, instructions, prompts):
+            # One prompt on the wire, but two answers.
+            return ["cat", "dog"]
+
+        with (
+            server(defer=True, skip_verify=True) as (tc, ts),
+            raises(SSHException),
+        ):
+            tc.auth_interactive("commie", handler)
+        assert not tc.is_authenticated()
+        assert not ts.is_authenticated()
+
+
+class InteractiveAuthPolicyUnit_:
+    """
+    Transport-free unit tests for the policy's own enforcement logic.
+    """
+
+    def _transport(self):
+        transport = Mock()
+        transport.hostname = "mfa.example.com"
+        transport.getpeername.return_value = ("10.0.0.9", 22)
+        return transport
+
+    def challenge_binds_verified_host_user_round_and_prompts(self):
+        policy = InteractiveAuthPolicy(
+            StaticCredentialProvider(_mfa_provider)
+        )
+        transport = self._transport()
+        policy.respond(
+            transport,
+            "alice",
+            "login",
+            "enter password",
+            [("Password: ", False)],
+        )
+        challenge = policy.challenges[0]
+        assert challenge.host == "mfa.example.com"
+        assert challenge.peer_address == ("10.0.0.9", 22)
+        assert challenge.username == "alice"
+        assert challenge.round_number == 0
+        assert challenge.prompts == (
+            InteractivePrompt(text="Password: ", echo=False),
+        )
+
+    def echo_true_unknown_prompt_is_still_rejected(self):
+        # An echoing prompt (echo=True) the provider cannot map must be
+        # rejected -- and echo alone never decides credential type.
+        policy = password_fallback_policy("pw")
+        transport = self._transport()
+        with raises(InteractiveAuthPolicyError) as info:
+            policy.respond(
+                transport, "alice", "t", "i", [("First pet? ", True)]
+            )
+        assert info.value.reason == InteractiveAuthPolicyError.UNKNOWN_PROMPT
+        assert policy.responses == []
+
+    def fallback_policy_matches_password_prompt_regardless_of_echo(self):
+        policy = password_fallback_policy("pw")
+        transport = self._transport()
+        # Even an *echoing* password-named prompt is answered, proving the
+        # decision is text-based rather than driven by the echo flag.
+        secrets = policy.respond(
+            transport, "alice", "t", "i", [("PASSWORD", True)]
+        )
+        assert secrets == ["pw"]
+        assert policy.responses[0][0].credential_type == (
+            CredentialType.PASSWORD
+        )
+
+    def round_budget_enforced_without_a_transport_round_trip(self):
+        policy = InteractiveAuthPolicy(
+            StaticCredentialProvider(_mfa_provider), max_rounds=1
+        )
+        transport = self._transport()
+        policy.respond(
+            transport, "alice", "t", "i", [("Password: ", False)]
+        )
+        with raises(InteractiveAuthPolicyError) as info:
+            policy.respond(
+                transport, "alice", "t", "i", [("Password: ", False)]
+            )
+        assert info.value.reason == InteractiveAuthPolicyError.ROUND_BUDGET
+
+    def wrong_response_count_raises_before_recording_response(self):
+        def provider(challenge):
+            return [CredentialResponse("x", CredentialType.OTHER)]
+
+        policy = InteractiveAuthPolicy(StaticCredentialProvider(provider))
+        transport = self._transport()
+        with raises(InteractiveAuthPolicyError) as info:
+            policy.respond(
+                transport,
+                "alice",
+                "t",
+                "i",
+                [("one", False), ("two", False)],
+            )
+        assert (
+            info.value.reason == InteractiveAuthPolicyError.RESPONSE_MISMATCH
+        )
+        assert policy.responses == []
+        assert policy.rounds == 0
+
+    def non_credential_response_value_is_rejected(self):
+        def provider(challenge):
+            return ["bare-string-not-allowed"]
+
+        policy = InteractiveAuthPolicy(StaticCredentialProvider(provider))
+        transport = self._transport()
+        with raises(InteractiveAuthPolicyError) as info:
+            policy.respond(
+                transport, "alice", "t", "i", [("one", False)]
+            )
+        assert (
+            info.value.reason == InteractiveAuthPolicyError.RESPONSE_MISMATCH
+        )
 
 
 class SHA2SignaturePubkeys:

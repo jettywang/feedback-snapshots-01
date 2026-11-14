@@ -157,6 +157,8 @@ class TestServer(ServerInterface):
                 return "password"
         if username == "commie":
             return "keyboard-interactive"
+        if username in ("mfa", "malicious", "repeater"):
+            return "keyboard-interactive"
         if username == "utf8":
             return "password"
         if username == "non-utf8":
@@ -203,12 +205,62 @@ class TestServer(ServerInterface):
             return InteractiveQuery(
                 "password", "Please enter a password.", ("Password", False)
             )
+        if username == "mfa":
+            # Realistic MFA: password first (round 0), then an OTP (round 1).
+            self.username = username
+            self.mfa_round = 0
+            return InteractiveQuery(
+                "login",
+                "Enter your password.",
+                ("Password: ", False),
+            )
+        if username == "malicious":
+            # A single, unrecognized prompt that a blind password fallback
+            # must NOT answer with the saved password.
+            self.username = username
+            return InteractiveQuery(
+                "security",
+                "Verify your identity.",
+                ("Mother's maiden name? ", True),
+            )
+        if username == "repeater":
+            # Emits the same challenge indefinitely, to exercise the client's
+            # round budget.
+            self.username = username
+            self.repeater_rounds = 0
+            return InteractiveQuery(
+                "login",
+                "Again.",
+                ("Password: ", False),
+            )
         return AUTH_FAILED
 
     def check_auth_interactive_response(self, responses):
         if self.username == "commie":
             if (len(responses) == 1) and (responses[0] == "cat"):
                 return AUTH_SUCCESSFUL
+        elif self.username == "mfa":
+            if self.mfa_round == 0:
+                self.mfa_round += 1
+                if (len(responses) == 1) and (responses[0] == "secret-pw"):
+                    return InteractiveQuery(
+                        "otp",
+                        "Enter your one-time code.",
+                        ("Verification code: ", False),
+                    )
+            elif self.mfa_round == 1:
+                self.mfa_round += 1
+                if (len(responses) == 1) and (responses[0] == "123456"):
+                    return AUTH_SUCCESSFUL
+            return AUTH_FAILED
+        elif self.username == "repeater":
+            # Never succeed; keep re-issuing the identical challenge.
+            self.repeater_rounds += 1
+            return InteractiveQuery(
+                "login",
+                "Again.",
+                ("Password: ", False),
+            )
         return AUTH_FAILED
 
 

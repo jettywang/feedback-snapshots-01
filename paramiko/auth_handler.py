@@ -78,6 +78,10 @@ class AuthHandler:
         self.password = None
         self.private_key = None
         self.interactive_handler = None
+        # Explicit, MFA-aware policy for keyboard-interactive rounds, when
+        # one has been configured. When None, the plain interactive_handler
+        # callable is used instead (the long-standing behavior).
+        self.interactive_policy = None
         self.submethods = None
         # for server mode:
         self.auth_username = None
@@ -127,9 +131,17 @@ class AuthHandler:
         finally:
             self.transport.lock.release()
 
-    def auth_interactive(self, username, handler, event, submethods=""):
+    def auth_interactive(
+        self, username, handler, event, submethods="", policy=None
+    ):
         """
         response_list = handler(title, instructions, prompt_list)
+
+        If ``policy`` (an `.InteractiveAuthPolicy`) is given, every
+        keyboard-interactive round is resolved through the policy instead of
+        the plain ``handler`` callable; the policy binds each round to the
+        verified host, username, round number and verbatim prompts, and
+        enforces its round budget and response-count rules.
         """
         self.transport.lock.acquire()
         try:
@@ -137,6 +149,7 @@ class AuthHandler:
             self.auth_method = "keyboard-interactive"
             self.username = username
             self.interactive_handler = handler
+            self.interactive_policy = policy
             self.submethods = submethods
             self._request_auth()
         finally:
@@ -580,9 +593,30 @@ class AuthHandler:
         prompt_list = []
         for i in range(prompts):
             prompt_list.append((m.get_text(), m.get_boolean()))
-        response_list = self.interactive_handler(
-            title, instructions, prompt_list
-        )
+        if self.interactive_policy is not None:
+            # Explicit policy: it enforces round budget, prompt
+            # classification, cancellation and response-count matching, and
+            # never falls back to a saved password on its own.
+            response_list = self.interactive_policy.respond(
+                self.transport,
+                self.username,
+                title,
+                instructions,
+                prompt_list,
+            )
+        else:
+            response_list = self.interactive_handler(
+                title, instructions, prompt_list
+            )
+            if len(response_list) != len(prompt_list):
+                # RFC 4256 requires one response per prompt; refuse to send a
+                # mismatched answer rather than let the server infer anything.
+                raise SSHException(
+                    "Interactive handler returned {} response(s) for {} "
+                    "prompt(s)".format(
+                        len(response_list), len(prompt_list)
+                    )
+                )
 
         m = Message()
         m.add_byte(cMSG_USERAUTH_INFO_RESPONSE)
@@ -744,15 +778,16 @@ class AuthOnlyHandler(AuthHandler):
 
         return self.send_auth_request(username, "password", finish)
 
-    def auth_interactive(self, username, handler, submethods=""):
+    def auth_interactive(self, username, handler, submethods="", policy=None):
         """
         response_list = handler(title, instructions, prompt_list)
         """
         # Unlike most siblings, this auth method _does_ require other
         # superclass handlers (eg userauth info request) to understand
         # what's going on, so we still set some self attributes.
-        self.auth_method = "keyboard_interactive"
+        self.auth_method = "keyboard-interactive"
         self.interactive_handler = handler
+        self.interactive_policy = policy
 
         def finish(m):
             # Empty string for deprecated language tag field, per RFC 4256:

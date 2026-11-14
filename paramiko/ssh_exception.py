@@ -252,3 +252,38 @@ class MessageOrderError(SSHException):
     """
 
     pass
+
+
+class InteractiveAuthPolicyError(AuthenticationException):
+    """
+    A keyboard-interactive authentication exchange violated the configured
+    `.InteractiveAuthPolicy`.
+
+    This is raised (and the exchange is aborted *before* any further credential
+    is sent) when, for example:
+
+    - the credential provider does not recognize one of the server's prompts,
+    - the server issues more challenge rounds than the configured budget,
+    - the provider returns a number of responses that does not match the
+      number of prompts, or
+    - the provider/user cancels the exchange.
+
+    .. versionadded:: 5.1
+    """
+
+    #: The policy considered the prompt unanswerable.
+    UNKNOWN_PROMPT = "unknown prompt"
+    #: The configured round budget was exceeded.
+    ROUND_BUDGET = "round budget exceeded"
+    #: The response count did not match the prompt count.
+    RESPONSE_MISMATCH = "response count mismatch"
+    #: The provider/user explicitly cancelled the exchange.
+    CANCELLED = "user cancelled"
+
+    def __init__(self, reason, detail=""):
+        self.reason = reason
+        self.detail = detail
+        message = reason
+        if detail:
+            message = "{}: {}".format(message, detail)
+        super().__init__(message)

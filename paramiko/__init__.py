@@ -34,6 +34,17 @@ from paramiko.client import (
     WarningPolicy,
 )
 from paramiko.auth_handler import AuthHandler
+from paramiko.interactive_auth import (
+    CredentialProvider,
+    CredentialResponse,
+    CredentialType,
+    InteractiveAuthPolicy,
+    InteractiveChallenge,
+    InteractivePrompt,
+    StaticCredentialProvider,
+    password_fallback_policy,
+    reject_unknown_prompt,
+)
 from paramiko.auth_strategy import (
     AuthFailure,
     AuthStrategy,
@@ -60,6 +71,7 @@ from paramiko.ssh_exception import (
     ConfigParseError,
     CouldNotCanonicalize,
     IncompatiblePeer,
+    InteractiveAuthPolicyError,
     MessageOrderError,
     PasswordRequiredException,
     ProxyCommandFailure,

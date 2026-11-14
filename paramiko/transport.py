@@ -1493,6 +1493,16 @@ class Transport(threading.Thread, ClosingContextManager):
         which turn off plain password authentication in a misguided belief
         that interactive authentication is "more secure".  (It's not.)
 
+        .. warning::
+            The fallback no longer blindly submits the saved password to every
+            non-echoing prompt.  It now goes through an explicit
+            `.InteractiveAuthPolicy` (see `.password_fallback_policy`) which
+            only offers the password on a positively identified password
+            prompt and aborts on unknown prompts, exceeded round budgets or
+            response mismatches.  For MFA flows -- where password and OTP are
+            not interchangeable -- pass ``fallback=False`` and drive
+            `.auth_interactive` with your own `.InteractiveAuthPolicy`.
+
         If the server requires multi-step authentication (which is very rare),
         this method will return a list of auth types permissible for the next
         step.  Otherwise, in the normal case, an empty list is returned.
@@ -1504,7 +1514,8 @@ class Transport(threading.Thread, ClosingContextManager):
             (whether it was successful or not)
         :param bool fallback:
             ``True`` if an attempt at an automated "interactive" password auth
-            should be made if the server doesn't support normal password auth
+            should be made if the server doesn't support normal password auth;
+            ``False`` disables the automatic fallback entirely
         :return:
             list of auth types permissible for the next stage of
             authentication (normally empty)
@@ -1534,25 +1545,24 @@ class Transport(threading.Thread, ClosingContextManager):
             return self.auth_handler.wait_for_response(my_event)
         except BadAuthenticationType as e:
             # if password auth isn't allowed, but keyboard-interactive *is*,
-            # try to fudge it
+            # try to fudge it -- but only via an explicit policy that never
+            # guesses which prompt the saved password may answer.
             if not fallback or ("keyboard-interactive" not in e.allowed_types):
                 raise
+            from paramiko.interactive_auth import password_fallback_policy
+            from paramiko.ssh_exception import InteractiveAuthPolicyError
+
+            policy = password_fallback_policy(password)
             try:
-
-                def handler(title, instructions, fields):
-                    if len(fields) > 1:
-                        raise SSHException("Fallback authentication failed.")
-                    if len(fields) == 0:
-                        # for some reason, at least on os x, a 2nd request will
-                        # be made with zero fields requested.  maybe it's just
-                        # to try to fake out automated scripting of the exact
-                        # type we're doing here.  *shrug* :)
-                        return []
-                    return [password]
-
-                return self.auth_interactive(username, handler)
+                return self.auth_interactive(username, None, policy=policy)
+            except InteractiveAuthPolicyError:
+                # The policy refused to answer (unknown prompt, round budget,
+                # response mismatch or cancellation): surface that explicit
+                # decision instead of masking it as a generic bad-auth-type.
+                raise
             except SSHException:
-                # attempt failed; just raise the original exception
+                # policy-driven attempt failed; just raise the original
+                # BadAuthenticationType so callers see the server's answer.
                 raise e
 
     def auth_publickey(self, username, key, event=None):
@@ -1604,7 +1614,9 @@ class Transport(threading.Thread, ClosingContextManager):
             return []
         return self.auth_handler.wait_for_response(my_event)
 
-    def auth_interactive(self, username, handler, submethods=""):
+    def auth_interactive(
+        self, username, handler, submethods="", policy=None
+    ):
         """
         Authenticate to the server interactively.  A handler is used to answer
         arbitrary questions from the server.  On many servers, this is just a
@@ -1615,19 +1627,27 @@ class Transport(threading.Thread, ClosingContextManager):
         authentication questions.  The handler may be called more than once
         if the server continues to ask questions.
 
-        The handler is expected to be a callable that will handle calls of the
-        form: ``handler(title, instructions, prompt_list)``.  The ``title`` is
-        meant to be a dialog-window title, and the ``instructions`` are user
-        instructions (both are strings).  ``prompt_list`` will be a list of
-        prompts, each prompt being a tuple of ``(str, bool)``.  The string is
-        the prompt and the boolean indicates whether the user text should be
-        echoed.
+        The handler is expected to be a callable that handles calls of the
+        form: ``handler(title, instructions, prompt_list)``.  The ``title``
+        is meant to be a dialog-window title, and the ``instructions`` are
+        user instructions (both are strings).  ``prompt_list`` will be a list
+        of prompts, each prompt being a tuple of ``(str, bool)``.  The string
+        is the prompt and the boolean indicates whether the user text should
+        be echoed.
 
         A sample call would thus be:
         ``handler('title', 'instructions', [('Password:', False)])``.
 
         The handler should return a list or tuple of answers to the server's
         questions.
+
+        Alternatively, pass an explicit ``policy`` (an
+        `.InteractiveAuthPolicy`).  When given, the policy drives every round
+        -- bound to the verified host, username, round number and verbatim
+        prompts -- and ``handler`` is ignored.  The policy enforces its round
+        budget, refuses unknown prompts, verifies response counts and never
+        emits a saved password on its own; this is the recommended way to
+        integrate multi-factor authentication.
 
         If the server requires multi-step authentication (which is very rare),
         this method will return a list of auth types permissible for the next
@@ -1636,13 +1656,19 @@ class Transport(threading.Thread, ClosingContextManager):
         :param str username: the username to authenticate as
         :param callable handler: a handler for responding to server questions
         :param str submethods: a string list of desired submethods (optional)
+        :param InteractiveAuthPolicy policy:
+            explicit, MFA-aware policy handling each challenge round (optional)
         :return:
             list of auth types permissible for the next stage of
             authentication (normally empty).
 
         :raises: `.BadAuthenticationType` -- if public-key authentication isn't
-            allowed by the server for this user
+            allowed for this user
         :raises: `.AuthenticationException` -- if the authentication failed
+        :raises:
+            `.InteractiveAuthPolicyError` -- if a challenge violates the
+            configured policy (unknown prompt, round budget, response mismatch
+            or cancellation)
         :raises: `.SSHException` -- if there was a network error
 
         .. versionadded:: 1.5
@@ -1650,10 +1676,14 @@ class Transport(threading.Thread, ClosingContextManager):
         if (not self.active) or (not self.initial_kex_done):
             # we should never try to authenticate unless we're on a secure link
             raise SSHException("No existing session")
+        if policy is None and handler is None:
+            raise SSHException(
+                "auth_interactive requires a handler or an explicit policy"
+            )
         my_event = threading.Event()
         self.auth_handler = AuthHandler(self)
         self.auth_handler.auth_interactive(
-            username, handler, my_event, submethods
+            username, handler, my_event, submethods, policy=policy
         )
         return self.auth_handler.wait_for_response(my_event)
 
@@ -3262,25 +3292,22 @@ class ServiceRequestingTransport(Transport):
             return self.auth_handler.auth_password(username, password)
         except BadAuthenticationType as e:
             # if password auth isn't allowed, but keyboard-interactive *is*,
-            # try to fudge it
+            # fall back via an explicit policy that never guesses which prompt
+            # the saved password may answer.
             if not fallback or ("keyboard-interactive" not in e.allowed_types):
                 raise
+            from paramiko.interactive_auth import password_fallback_policy
+            from paramiko.ssh_exception import InteractiveAuthPolicyError
+
+            policy = password_fallback_policy(password)
             try:
-
-                def handler(title, instructions, fields):
-                    if len(fields) > 1:
-                        raise SSHException("Fallback authentication failed.")
-                    if len(fields) == 0:
-                        # for some reason, at least on os x, a 2nd request will
-                        # be made with zero fields requested.  maybe it's just
-                        # to try to fake out automated scripting of the exact
-                        # type we're doing here.  *shrug* :)
-                        return []
-                    return [password]
-
-                return self.auth_interactive(username, handler)
+                return self.auth_interactive(username, None, policy=policy)
+            except InteractiveAuthPolicyError:
+                # Explicit policy refusal must not be masked as a generic
+                # bad-auth-type error.
+                raise
             except SSHException:
-                # attempt to fudge failed; just raise the original exception
+                # policy-driven fallback failed; raise the original exception
                 raise e
 
     def auth_publickey(self, username, key):
@@ -3289,12 +3316,18 @@ class ServiceRequestingTransport(Transport):
         self.ensure_session()
         return self.auth_handler.auth_publickey(username, key)
 
-    def auth_interactive(self, username, handler, submethods=""):
+    def auth_interactive(
+        self, username, handler, submethods="", policy=None
+    ):
         # TODO (backwards incompat): merge to parent, preserving (most of)
         # docstring
         self.ensure_session()
+        if policy is None and handler is None:
+            raise SSHException(
+                "auth_interactive requires a handler or an explicit policy"
+            )
         return self.auth_handler.auth_interactive(
-            username, handler, submethods
+            username, handler, submethods, policy=policy
         )
 
     def auth_interactive_dumb(self, username, handler=None, submethods=""):
