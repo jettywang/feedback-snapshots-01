@@ -1,3 +1,12 @@
+Revision 0.4.3, released XX-XX-XXXX
+-----------------------------------
+
+- Added `pyasn1_modules.rfc6211check` module implementing the RFC 6211
+  CMS Algorithm Protection pre-verification checks for `SignerInfo` and
+  `AuthenticatedData`, including semantic comparison of algorithm
+  identifier parameters (RSASSA-PSS defaults, digest NULL/absent
+  parameter equivalence)
+
 Revision 0.4.2, released 27-03-2025
 ---------------------------------------
 
