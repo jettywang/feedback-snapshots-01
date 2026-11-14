@@ -195,6 +195,86 @@ AuthResult API
       where legacy handlers might be looking for ``session.login_data`` for some reasons.
 
 
+Authentication Attempt Policy
+=============================
+
+Limiting the number of ``AUTH`` commands is not enough on its own: a single
+``AUTH LOGIN`` exchange spans several challenge/response round trips, and a
+client can cancel, send illegal encoding, or simply guess wrong. The
+:class:`~aiosmtpd.auth_policy.AuthRateLimitPolicy` therefore budgets complete
+*attempts* and classifies how each one ends.
+
+.. class:: AuthOutcome
+
+   The result of a single AUTH attempt:
+
+   * ``SUCCESS`` — the authenticator accepted the credentials;
+   * ``CREDENTIAL_FAILURE`` — the exchange completed but the credentials were rejected;
+   * ``MALFORMED`` — the client sent illegal base64 or an unparseable value;
+   * ``CANCELLED`` — the client aborted the exchange with ``*`` (RFC 4954);
+   * ``ABANDONED`` — the connection dropped before the exchange completed.
+
+.. class:: AuthAttempt
+
+   An immutable audit record of one settled attempt. It deliberately stores no
+   secret material; only the outcome, mechanism, normalized principal, fake/real
+   clock timestamp, connection identifier, response code and applied delay.
+
+.. class:: AuthRateLimitPolicy(*, connection_limit=5, principal_limit=None, \
+   clock=None, delay_policy=None, count_outcomes=..., \
+   principal_count_outcomes=..., principal_normalizer=normalize_principal, \
+   limit_response="421 4.7.0 Too many authentication attempts")
+
+   Budgets attempts per connection and, when a normalized principal can be
+   determined, per principal.
+
+   * ``connection_limit`` gates the start of each new attempt; once reached the
+     server replies with ``limit_response`` and closes the connection.
+   * ``principal_limit`` closes the connection when the same normalized identity
+     accumulates enough counted failures, even across different connections.
+   * ``count_outcomes`` / ``principal_count_outcomes`` select which
+     :class:`AuthOutcome` values consume each budget. By default every
+     non-success outcome counts against the connection, while only
+     ``CREDENTIAL_FAILURE`` and ``MALFORMED`` (the attempts that actually named a
+     principal) count against the principal.
+   * ``principal_normalizer`` maps the presented login to a stable identity; the
+     default decodes leniently and case-folds so that ``Alice`` and ``alice``
+     share a bucket.
+   * ``delay_policy`` is a callable returning the cooperative delay applied
+     after an attempt. :func:`no_delay` (the default) disables delays and
+     :func:`linear_delay` grows the delay with the failure count.
+
+   Failures recorded in the policy outlive individual commands: ``RSET``,
+   re-``EHLO`` and switching mechanisms never clear them. An unfinished
+   challenge is settled as ``ABANDONED`` exactly once when the connection
+   closes, so it cannot hold resources forever or be double counted.
+
+.. class:: FakeClock(start=0.0)
+
+   Deterministic clock for tests. Time only moves on :meth:`FakeClock.advance`,
+   which runs the callbacks that have become due. Combined with
+   :class:`AuthRateLimitPolicy` this lets tests exercise delays without real
+   waiting and without blocking the event loop.
+
+Delays never call ``time.sleep``; the protocol awaits a future resolved through
+the injected :class:`~aiosmtpd.auth_policy.Clock`, so other connections continue
+to be served while one connection waits.
+
+Example::
+
+    from aiosmtpd.auth_policy import AuthRateLimitPolicy, FakeClock, linear_delay
+
+    clock = FakeClock()
+    policy = AuthRateLimitPolicy(
+        connection_limit=5,
+        principal_limit=10,
+        clock=clock,
+        delay_policy=linear_delay(1.0, maximum=30.0),
+    )
+    smtp = SMTP(handler, authenticator=my_authenticator,
+                auth_policy=policy, auth_clock=clock)
+
+
 Security Considerations
 =======================
 

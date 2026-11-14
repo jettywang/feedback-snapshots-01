@@ -162,7 +162,8 @@ aiosmtpd.smtp
    decode_data=False, hostname=None, ident=None, tls_context=None, \
    require_starttls=False, timeout=300, auth_required=False, \
    auth_require_tls=True, auth_exclude_mechanism=None, auth_callback=None, \
-   authenticator=None, command_call_limit=None, \
+   authenticator=None, auth_policy=None, auth_clock=None, \
+   command_call_limit=None, \
    proxy_protocol_timeout=None, \
    loop=None)
 
@@ -300,6 +301,39 @@ aiosmtpd.smtp
       See :func:`Authenticator` for more information.
 
       .. versionadded:: 1.3
+
+   .. py:attribute:: auth_policy
+      :type: Optional[aiosmtpd.auth_policy.AuthRateLimitPolicy]
+      :value: None
+
+      An injectable policy that budgets authentication *attempts* (not merely
+      the number of ``AUTH`` commands) and schedules non-blocking delays between
+      them. When ``None`` (the default) authentication attempt limiting is not
+      enforced, preserving legacy behavior.
+
+      The policy distinguishes a successful login, a genuine credential
+      rejection, a client cancellation (``*``), a malformed/illegal encoding,
+      and an exchange abandoned because the connection dropped. It can count
+      failures both per connection and per normalized principal. ``RSET``,
+      re-``EHLO`` and switching AUTH mechanism never reset the accumulated
+      failures, and an unfinished challenge is settled exactly once when the
+      connection closes.
+
+      Delays are awaited cooperatively (the event loop keeps serving other
+      connections); use :attr:`auth_clock` together with
+      :class:`~aiosmtpd.auth_policy.FakeClock` for deterministic tests.
+
+      See the :ref:`auth` page for the outcome, budget and delay reference.
+
+   .. py:attribute:: auth_clock
+      :type: Optional[aiosmtpd.auth_policy.Clock]
+      :value: None
+
+      Clock used to schedule policy delays. When ``None`` an
+      :class:`~aiosmtpd.auth_policy.LoopClock` backed by the server's event
+      loop is used. Tests may inject a
+      :class:`~aiosmtpd.auth_policy.FakeClock` so time advances only
+      deterministically.
 
    .. py:attribute:: command_call_limit
       :type: Optional[Union[int, Dict[str, int]]]

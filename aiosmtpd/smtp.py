@@ -37,6 +37,12 @@ import attr
 from public import public
 
 from aiosmtpd import __version__, _get_or_new_eventloop
+from aiosmtpd.auth_policy import (
+    AuthOutcome,
+    AuthRateLimitPolicy,
+    Clock,
+    LoopClock,
+)
 from aiosmtpd.proxy_protocol import ProxyData, get_proxy
 
 
@@ -152,6 +158,52 @@ class LoginPassword(NamedTuple):
 
     def __repr__(self) -> str:
         return str(self)
+
+
+class _AuthFlowError(Exception):
+    """
+    Internal control-flow signal carrying the precise way an AUTH exchange
+    ended. It never carries secret material, only an :class:`AuthOutcome` and
+    the SMTP response that still needs to be pushed (``None`` when the response
+    was already pushed at the point the signal was raised).
+    """
+
+    def __init__(self, outcome: AuthOutcome, response: Optional[str]):
+        super().__init__(outcome.value)
+        self.outcome = outcome
+        self.response = response
+
+
+class _AuthCancelled(_AuthFlowError):
+    def __init__(self) -> None:
+        # challenge_auth() pushes the abort response before raising, so the
+        # settlement stage has nothing left to push.
+        super().__init__(AuthOutcome.CANCELLED, None)
+
+
+class _AuthMalformed(_AuthFlowError):
+    def __init__(self, outcome: AuthOutcome, response: str):
+        # The error response is pushed at the point the malformed input is
+        # detected; settlement must not push it a second time.
+        super().__init__(outcome, None)
+        self.pushed_response = response
+
+
+class _AuthExchange:
+    """
+    Tracks a single in-flight AUTH attempt so it can always be settled, even
+    when the client disconnects mid-challenge. Holds no secret material: the
+    login is only retained once known, for principal attribution.
+    """
+
+    def __init__(self, mechanism: str):
+        self.mechanism = mechanism
+        self.login: Optional[bytes] = None
+        self.settled = False
+
+    def note_login(self, login: Optional[bytes]) -> None:
+        if login is not None:
+            self.login = login
 
 
 @public
@@ -337,6 +389,8 @@ class SMTP(asyncio.StreamReaderProtocol):
             auth_callback: Optional[AuthCallbackType] = None,
             command_call_limit: Union[int, Dict[str, int], None] = None,
             authenticator: Optional[AuthenticatorType] = None,
+            auth_policy: Optional[AuthRateLimitPolicy] = None,
+            auth_clock: Optional[Clock] = None,
             proxy_protocol_timeout: Optional[Union[int, float]] = None,
             loop: Optional[asyncio.AbstractEventLoop] = None
     ):
@@ -399,6 +453,16 @@ class SMTP(asyncio.StreamReaderProtocol):
             self._authenticator = None
 
         self._auth_required = auth_required
+
+        self._auth_policy = auth_policy
+        self._auth_clock = auth_clock or LoopClock(self.loop)
+        if self._auth_policy is not None:
+            self._auth_policy.bind_clock(self._auth_clock)
+        self._auth_connection_id = id(self)
+        self._auth_exchange: Optional[_AuthExchange] = None
+        self._auth_delay_in_progress = False
+        self._auth_attempts = 0
+        """Number of AUTH attempts started on this connection (audit counter)."""
 
         # Get hooks & methods to significantly speedup getattr's
         self._auth_methods: Dict[str, _AuthMechAttr] = {
@@ -536,6 +600,7 @@ class SMTP(asyncio.StreamReaderProtocol):
     def connection_lost(self, error: Optional[Exception]) -> None:
         assert self.session is not None
         log.info('%r connection lost', self.session.peer)
+        self._settle_pending_auth()
         assert self._timeout_handle is not None
         self._timeout_handle.cancel()
         # If STARTTLS was issued, then our transport is the SSL protocol
@@ -947,6 +1012,49 @@ class SMTP(asyncio.StreamReaderProtocol):
         except Exception as error:
             raise TLSSetupException() from error
 
+    async def _apply_auth_delay(self, delay: float) -> None:
+        """
+        Wait out a policy delay without blocking the event loop: other
+        connections keep being served while this one waits on a future that the
+        injected clock resolves.
+        """
+        if not delay or delay <= 0:
+            return
+        future: asyncio.Future[None] = self.loop.create_future()
+        handle = self._auth_clock.call_later(delay, future.set_result, None)
+        self._auth_delay_in_progress = True
+        try:
+            await future
+        except asyncio.CancelledError:
+            handle.cancel()
+            raise
+        finally:
+            self._auth_delay_in_progress = False
+
+    def _settle_pending_auth(self) -> None:
+        """
+        Settle an AUTH exchange that never completed because the connection
+        went away. The pending slot is released and the failure is booked once,
+        so it can neither be counted twice nor hold resources forever.
+        """
+        exchange = self._auth_exchange
+        if exchange is None or exchange.settled:
+            return
+        exchange.settled = True
+        self._auth_exchange = None
+        if self._auth_policy is not None:
+            log.info(
+                "%r AUTH %s abandoned before completion",
+                self.session.peer if self.session is not None else None,
+                exchange.mechanism,
+            )
+            self._auth_policy.register(
+                self._auth_connection_id,
+                AuthOutcome.ABANDONED,
+                exchange.mechanism,
+                exchange.login,
+            )
+
     @syntax("AUTH <mechanism>")
     async def smtp_AUTH(self, arg: str) -> None:
         if await self.check_helo_needed("EHLO"):
@@ -976,53 +1084,116 @@ class SMTP(asyncio.StreamReaderProtocol):
             await self.push('504 5.5.4 Unrecognized authentication type')
             return
 
+        if self._auth_policy is not None:
+            decision = self._auth_policy.check(self._auth_connection_id)
+            if not decision.allowed:
+                log.warning(
+                    "%r AUTH budget exhausted (%s)",
+                    self.session.peer, decision.reason,
+                )
+                await self.push(decision.response or "421 4.7.0 Try again later")
+                assert self.transport is not None
+                self.transport.close()
+                return
+
         CODE_SUCCESS = "235 2.7.0 Authentication successful"
         CODE_INVALID = "535 5.7.8 Authentication credentials invalid"
-        status = await self._call_handler_hook('AUTH', args)
-        if status is MISSING:
-            auth_method = self._auth_methods[mechanism]
-            log.debug(
-                "Using %s auth_ hook for %r",
-                "builtin" if auth_method.is_builtin else "handler",
-                mechanism
-            )
-            # Pass 'self' to method so external methods can leverage this
-            # class's helper methods such as push()
-            auth_result = await auth_method.method(self, args)
-            log.debug("auth_%s returned %r", mechanism, auth_result)
+        exchange = _AuthExchange(mechanism)
+        self._auth_exchange = exchange
+        self._auth_attempts += 1
+        outcome = AuthOutcome.CREDENTIAL_FAILURE
+        status: Optional[str] = CODE_INVALID
+        try:
+            hook_status = await self._call_handler_hook('AUTH', args)
+            if hook_status is MISSING:
+                auth_method = self._auth_methods[mechanism]
+                log.debug(
+                    "Using %s auth_ hook for %r",
+                    "builtin" if auth_method.is_builtin else "handler",
+                    mechanism
+                )
+                # Pass 'self' to method so external methods can leverage this
+                # class's helper methods such as push()
+                auth_result = await auth_method.method(self, args)
+                log.debug("auth_%s returned %r", mechanism, auth_result)
 
-            # New system using `authenticator` and AuthResult
-            if isinstance(auth_result, AuthResult):
-                if auth_result.success:
-                    self.session.authenticated = True
-                    _auth_data = auth_result.auth_data
-                    self.session.auth_data = _auth_data
-                    # Custom mechanisms might not implement the "login" attribute, and
-                    # that's okay.
-                    self.session.login_data = getattr(_auth_data, "login", None)
-                    status = auth_result.message or CODE_SUCCESS
-                else:
-                    if auth_result.handled:
-                        status = None
-                    elif auth_result.message:
-                        status = auth_result.message
+                # New system using `authenticator` and AuthResult
+                if isinstance(auth_result, AuthResult):
+                    if auth_result.success:
+                        self.session.authenticated = True
+                        _auth_data = auth_result.auth_data
+                        self.session.auth_data = _auth_data
+                        # Custom mechanisms might not implement the "login"
+                        # attribute, and that's okay.
+                        login = getattr(_auth_data, "login", None)
+                        exchange.note_login(login)
+                        # Custom mechanisms might not implement the "login"
+                        # attribute, and that's okay.
+                        self.session.login_data = login
+                        outcome = AuthOutcome.SUCCESS
+                        status = auth_result.message or CODE_SUCCESS
                     else:
-                        status = CODE_INVALID
+                        outcome = AuthOutcome.CREDENTIAL_FAILURE
+                        if auth_result.handled:
+                            status = None
+                        elif auth_result.message:
+                            status = auth_result.message
+                        else:
+                            status = CODE_INVALID
 
-            # Old system using `auth_callback` and _TriState
-            elif auth_result is None:
-                # None means there's an error already handled by method and
-                # we don't need to do anything more
-                status = None
-            elif auth_result is MISSING or auth_result is False:
-                # MISSING means no error in AUTH process, but credentials
-                # is rejected / not valid
-                status = CODE_INVALID
+                # Old system using `auth_callback` and _TriState
+                elif auth_result is None:
+                    # None means there's an error already handled by method and
+                    # we don't need to do anything more
+                    outcome = AuthOutcome.CREDENTIAL_FAILURE
+                    status = None
+                elif auth_result is MISSING or auth_result is False:
+                    # MISSING means no error in AUTH process, but credentials
+                    # is rejected / not valid
+                    outcome = AuthOutcome.CREDENTIAL_FAILURE
+                    status = CODE_INVALID
+                else:
+                    outcome = AuthOutcome.SUCCESS
+                    self.session.login_data = auth_result
+                    status = CODE_SUCCESS
             else:
-                self.session.login_data = auth_result
-                status = CODE_SUCCESS
+                status = hook_status
+        except _AuthFlowError as error:
+            outcome = error.outcome
+            status = error.response
+            pushed_response = getattr(error, "pushed_response", None)
+        except asyncio.CancelledError:
+            # Connection dropped mid-challenge; settle once and propagate.
+            self._settle_pending_auth()
+            raise
+        else:
+            pushed_response = None
 
-        if status is not None:  # pragma: no branch
+        exchange.settled = True
+        self._auth_exchange = None
+
+        if self._auth_policy is not None:
+            audit_response = status if status is not None else pushed_response
+            attempt = self._auth_policy.register(
+                self._auth_connection_id,
+                outcome,
+                mechanism,
+                exchange.login,
+                audit_response,
+            )
+            if status is not None:
+                await self.push(status)
+            if attempt.delay > 0:
+                await self._apply_auth_delay(attempt.delay)
+            if self._auth_policy.principal_exhausted(attempt):
+                log.warning(
+                    "%r AUTH principal budget exhausted for %r",
+                    self.session.peer, attempt.principal,
+                )
+                await self.push("421 4.7.0 Too many authentication attempts")
+                assert self.transport is not None
+                self.transport.close()
+        elif status is not None:
             await self.push(status)
 
     async def challenge_auth(
@@ -1040,7 +1211,9 @@ class SMTP(asyncio.StreamReaderProtocol):
         :param log_client_response: Perform logging of client's response.
             WARNING: Might cause leak of sensitive information! Do not turn on
             unless _absolutely_ necessary!
-        :return: Response from client, or MISSING
+        :return: Decoded response from client.
+        :raises _AuthCancelled: if the client aborts with '*' (RFC 4954).
+        :raises _AuthMalformed: if the client's response is not valid base64.
         """
         challenge = (
             challenge.encode() if isinstance(challenge, str) else challenge
@@ -1064,13 +1237,15 @@ class SMTP(asyncio.StreamReaderProtocol):
         if blob == b"*":
             log.warning("%r aborted AUTH with '*'", self.session.peer)
             await self.push("501 5.7.0 Auth aborted")
-            return MISSING
+            raise _AuthCancelled()
         try:
             decoded_blob = b64decode(blob, validate=True)
         except binascii.Error:
             log.debug("%r can't decode base64: %s", self.session.peer, blob)
             await self.push("501 5.5.2 Can't decode base64")
-            return MISSING
+            raise _AuthMalformed(
+                AuthOutcome.MALFORMED, "501 5.5.2 Can't decode base64"
+            )
         return decoded_blob
 
     _334_PREFIX = re.compile(r"^334 ")
@@ -1130,15 +1305,17 @@ class SMTP(asyncio.StreamReaderProtocol):
     async def auth_PLAIN(self, _, args: List[str]) -> AuthResult:
         login_and_password: _TriStateType
         if len(args) == 1:
+            # challenge_auth() raises _AuthFlowError on abort/malformed input;
+            # let it propagate so smtp_AUTH classifies the outcome correctly.
             login_and_password = await self.challenge_auth("")
-            if login_and_password is MISSING:
-                return AuthResult(success=False)
         else:
             try:
                 login_and_password = b64decode(args[1].encode(), validate=True)
             except Exception:
                 await self.push("501 5.5.2 Can't decode base64")
-                return AuthResult(success=False, handled=True)
+                raise _AuthMalformed(
+                    AuthOutcome.MALFORMED, "501 5.5.2 Can't decode base64"
+                )
         try:
             # login data is "{authz_id}\x00{login_id}\x00{password}"
             # authz_id can be null, and currently ignored
@@ -1146,32 +1323,38 @@ class SMTP(asyncio.StreamReaderProtocol):
             _, login, password = login_and_password.split(b"\x00")  # noqa: E501
         except ValueError:  # not enough args
             await self.push("501 5.5.2 Can't split auth value")
-            return AuthResult(success=False, handled=True)
+            raise _AuthMalformed(
+                AuthOutcome.MALFORMED, "501 5.5.2 Can't split auth value"
+            )
         # Verify login data
         assert login is not None
         assert password is not None
+        if self._auth_exchange is not None:
+            self._auth_exchange.note_login(login)
         return self._authenticate("PLAIN", LoginPassword(login, password))
 
     async def auth_LOGIN(self, _, args: List[str]) -> AuthResult:
         login: _TriStateType
         if len(args) == 1:
-            # Client sent only "AUTH LOGIN"
+            # Client sent only "AUTH LOGIN". challenge_auth() raises
+            # _AuthFlowError on abort/malformed input; propagate it so smtp_AUTH
+            # classifies the outcome correctly.
             login = await self.challenge_auth(self.AuthLoginUsernameChallenge)
-            if login is MISSING:
-                return AuthResult(success=False)
         else:
             # Client sent "AUTH LOGIN <b64-encoded-username>"
             try:
                 login = b64decode(args[1].encode(), validate=True)
             except Exception:
                 await self.push("501 5.5.2 Can't decode base64")
-                return AuthResult(success=False, handled=True)
+                raise _AuthMalformed(
+                    AuthOutcome.MALFORMED, "501 5.5.2 Can't decode base64"
+                )
         assert login is not None
+        if self._auth_exchange is not None:
+            self._auth_exchange.note_login(login)
 
         password: _TriStateType
         password = await self.challenge_auth(self.AuthLoginPasswordChallenge)
-        if password is MISSING:
-            return AuthResult(success=False)
         assert password is not None
 
         return self._authenticate("LOGIN", LoginPassword(login, password))
