@@ -39,6 +39,11 @@ TESTS = %w(
     resolver_validation
     release_transport
     release_transport_fixes
+    v2_release_transport
+    v2_zone_transfer_native
+    release_negative_cache
+    release_recursor_cache
+    release_zone_ttls
     release_auxiliary_fixes
     recursor_address_fallback
     release_review_transport
@@ -114,6 +119,7 @@ if have_open_ssl?
   require_relative 'tc_svcb_signed_target.rb'
   require_relative 'tc_dnssec_trust_anchors.rb'
   require_relative 'tc_release_dnssec_fixes.rb'
+  require_relative 'tc_v2_release_dnssec.rb'
   require_relative 'tc_dnssec_trust_races.rb'
   require_relative 'tc_key_cache_identity.rb'
   require_relative 'tc_dnssec_budget.rb'

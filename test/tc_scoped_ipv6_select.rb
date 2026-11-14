@@ -66,7 +66,7 @@ class TestScopedIPv6Select < Minitest::Test
       response.header.tc = true
       packet = response.encode
       packet[6, 2] = [1].pack('n')
-      socket.define_singleton_method(:recvfrom) { |_| [packet, ['AF_INET6', 53, 'fe80::1%7', 'fe80::1%7']] }
+      socket.define_singleton_method(:recvfrom_nonblock) { |_| [packet, ['AF_INET6', 53, 'fe80::1%7', 'fe80::1%7']] }
       removed = []
       selector.stub(:tcp?, false) do
         selector.stub(:remove_id_from_mutex_synchronized_block, ->(id) { removed << id }) do

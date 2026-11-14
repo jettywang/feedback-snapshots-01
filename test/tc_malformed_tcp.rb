@@ -26,7 +26,7 @@ class TestMalformedTcp < Minitest::Test
       @closed = true
     end
 
-    def recvfrom(_length)
+    def recvfrom_nonblock(_length)
       @udp_response
     end
   end

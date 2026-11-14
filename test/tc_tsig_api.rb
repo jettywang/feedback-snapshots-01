@@ -235,12 +235,13 @@ class TestTsigApi < Minitest::Test
   def transfer_query(transfer, clock)
     writes = []
     socket = Object.new
-    socket.define_singleton_method(:send) { |bytes, _flags| writes << bytes; bytes.bytesize }
+    socket.define_singleton_method(:write_nonblock) { |bytes| writes << bytes; bytes.bytesize }
     Time.stub(:now, Time.at(clock)) do
       transfer.send_message(socket, Dnsruby::Message.new('example.', Dnsruby::Types::AXFR))
     end
-    assert_equal(writes.last.bytesize, writes.first.unpack1('n'))
-    Dnsruby::Message.decode(writes.last)
+    frame = writes.join
+    assert_equal(frame.bytesize - 2, frame.unpack1('n'))
+    Dnsruby::Message.decode(frame.byteslice(2..-1))
   end
 
   def unsigned_tsig

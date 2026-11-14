@@ -191,6 +191,7 @@ module Dnsruby
     #  The query will be tried across nameservers retry_times times, with a delay of retry_delay seconds
     #  between each retry. The first time round, retry_delay will be divided by the number of nameservers
     #  being targetted, and a new nameserver will be queried with the resultant delay.
+    #  RFC 9520 caps attempts at three per server address and transport, including protocol retries.
     attr_accessor :retry_times, :retry_delay
 
     #  Use DNSSEC for this Resolver
@@ -921,7 +922,7 @@ module Dnsruby
       timeouts = {}
       retry_delay = @retry_delay
       #       @single_res_mutex.synchronize {
-      @retry_times.times do |retry_count|
+      [@retry_times, 3].min.times do |retry_count|
         if retry_count > 0
           retry_delay *= 2
         end
@@ -960,7 +961,47 @@ module Dnsruby
       @timeouts = {}
       @tick_deadlines = DeadlineQueue.new
       @validation_queries = {}
+      @transmission_budgets = {}
+      @response_cache = Cache::ResolutionCache.new
+      @query_cache_scopes = {}
     end
+    # Completed failures belong to one resolver configuration and validation
+    # policy. Snapshot them at admission, and decline insertion if it changes.
+    def response_cache_scope(query)
+      return unless query.do_caching && @parent.do_caching && !query.send_raw &&
+        query.header.opcode == OpCode.QUERY && !query.is_a?(Update) &&
+        !query.tsig && !query.signed? && !@parent.tsig && query.question.length == 1 &&
+        query.answer.empty? && query.authority.empty? &&
+        query.additional.all? { |rr| rr.type == Types::OPT }
+      return if [Types::AXFR, Types::IXFR].include?(query.question.first.qtype)
+      senders = @parent.single_resolvers
+      return if senders.empty? || senders.any?(&:tsig)
+      settings = senders.map do |sender|
+        [sender.server.to_s.dup, sender.port, sender.use_tcp, sender.no_tcp,
+          sender.dnssec, sender.packet_timeout, sender.src_address.to_s.dup,
+          sender.instance_variable_get(:@src_address6).to_s.dup,
+          sender.src_port.dup, sender.ignore_truncation]
+      end.sort_by(&:inspect)
+      [query.do_validation, query.header.rd, query.header.cd, query.header.ad,
+        query.additional.map { |rr|
+          encoded = MessageEncoder.new { |encoder| rr.encode_rdata(encoder) }.to_s
+          [rr.payloadsize, rr.ttl, encoded]
+        }, settings, @parent.query_timeout, @parent.retry_times, @parent.retry_delay,
+        Cache.validation_scope]
+    end
+
+    def cached_completion(query, scope)
+      @response_cache.find(query, scope)
+    end
+
+    def cache_completion(client_query_id, response, error)
+      current = @query_list[client_query_id]
+      scope = @query_cache_scopes.delete(client_query_id)
+      return unless current && scope && scope == response_cache_scope(current[0])
+      @response_cache.add(current[0], scope, response, error, control: current[4])
+    end
+    private :response_cache_scope, :cached_completion, :cache_completion
+
     def send_async(msg, client_queue, client_query_id=nil)
       #  This is the whole point of the Resolver class.
       #  We want to use multiple SingleResolvers to run a query.
@@ -1021,9 +1062,17 @@ module Dnsruby
           client_queue.push([client_query_id, nil, ArgumentError.new('Client query ID already in use')])
           return
         end
-        outstanding = []
+        scope = response_cache_scope(msg)
         control = QueryControl.current
+        control&.check!
+        if (cached = cached_completion(msg, scope))
+          client_queue.push([client_query_id, *cached])
+          return client_query_id
+        end
+        @query_cache_scopes[client_query_id] = scope
+        outstanding = []
         @query_list[client_query_id]=[msg, client_queue, q, outstanding, control]
+        @transmission_budgets[client_query_id] = SelectThread::TransmissionBudget.current || SelectThread::TransmissionBudget.new
 
         query_timeout = TransportClock.now + @parent.query_timeout
         if @parent.query_timeout == 0
@@ -1057,7 +1106,7 @@ module Dnsruby
       #
       #  These should be absolute, rather than relative
       #  All retry and query deadlines use the same monotonic clock.
-      @parent.generate_timeouts(TransportClock.now)
+      @parent.generate_timeouts(TransportClock.now).sort.to_h
     end
 
     #  Close the Resolver. Unfinished queries are terminated with OtherResolvError.
@@ -1081,6 +1130,7 @@ module Dnsruby
         if current && current[1].equal?(client_queue)
           stop_querying(client_query_id)
           @validation_queries.delete(client_query_id)
+          @query_cache_scopes.delete(client_query_id)
           SelectThread.instance.remove_observer(current[2], self)
           @query_list.delete(client_query_id)
         end
@@ -1101,6 +1151,7 @@ module Dnsruby
     def stop_querying(client_query_id) # :nodoc: all
       @timeouts.delete(client_query_id)
       @tick_deadlines.delete(client_query_id)
+      @transmission_budgets.delete(client_query_id)
     end
 
     # Accept one answer for validation, without losing the total query deadline.
@@ -1127,10 +1178,21 @@ module Dnsruby
       end
     end
 
+    def validation_transmission_budget(select_queue, query_id)
+      client_query_id = query_id[2]
+      @parent.single_res_mutex.synchronize do
+        current = @query_list[client_query_id]
+        if current && current[2].equal?(select_queue) && @validation_queries[client_query_id] == query_id
+          @transmission_budgets[client_query_id]
+        end
+      end
+    end
+
     #  MUST BE CALLED IN A SYNCHRONIZED BLOCK!
     #
     #  Sends the result to the client's queue, and removes the queue observer from the select thread
     def send_result(client_queue, client_query_id, select_queue, msg, error) # :nodoc: all
+      cache_completion(client_query_id, msg, error)
       stop_querying(client_query_id)
       @validation_queries.delete(client_query_id)
       #  We might still get some callbacks, which we should ignore
@@ -1159,7 +1221,7 @@ module Dnsruby
     # MUST BE CALLED WITH THE PARENT MUTEX HELD.
     def update_tick_deadline(client_query_id)
       if (entry = @timeouts[client_query_id])
-        @tick_deadlines[client_query_id] = [entry[0], entry[1].keys.min].compact.min
+        @tick_deadlines[client_query_id] = [entry[0], entry[1].each_key.first].compact.min
       end
     end
     private :update_tick_deadline
@@ -1175,7 +1237,13 @@ module Dnsruby
       sends = []
       @parent.single_res_mutex.synchronize {
         time_now = TransportClock.now
-        query_ids = client_query_id.nil? ? @timeouts.keys : [client_query_id]
+        query_ids = client_query_id.nil? ? [] : [client_query_id]
+        if client_query_id.nil?
+          while (first = @tick_deadlines.first) && first[1] <= time_now
+            query_ids << first[0]
+            @tick_deadlines.delete(first[0])
+          end
+        end
         query_ids.each do |client_query_id|
           next unless @timeouts.key?(client_query_id)
           msg, client_queue, select_queue, outstanding, control = @query_list[client_query_id]
@@ -1187,32 +1255,28 @@ module Dnsruby
                 ResolvTimeout.new(reason))
             next
           end
-          timeouts_done = []
-          timeouts.keys.sort.each do |timeout|
-            if timeout <= time_now
-              #  Send the next query
-              res, retry_count = timeouts[timeout]
-              id = [res, msg, client_query_id, retry_count]
-              Dnsruby.log.debug("Sending msg to #{res.server}")
-              #  We should keep a list of the queries which are outstanding
-              outstanding.push(id)
-              timeouts_done.push(timeout)
-              timeouts.delete(timeout)
+          # The finite retry plan is ordered once when admitted. Hash deletion
+          # retains that order, so no unrelated retry plan needs to be sorted.
+          while (timeout = timeouts.each_key.first) && timeout <= time_now
+            #  Send the next query
+            res, retry_count = timeouts[timeout]
+            id = [res, msg, client_query_id, retry_count]
+            Dnsruby.log.debug("Sending msg to #{res.server}")
+            #  We should keep a list of the queries which are outstanding
+            outstanding.push(id)
+            timeouts.delete(timeout)
 
-              #  Pick a new QID here @TODO@ !!!
-              #               msg.header.id = rand(65535);
-              #               print "New query : #{new_msg}\n"
-              # A query keeps its original retry plan after reconfiguration.
-              # Removed senders may retry, but must not create idle reusable
-              # sockets that this Resolver can no longer reach through close.
-              retired = !@parent.single_resolvers.include?(res)
-              operation = res.prepare_send_async(msg, select_queue, id, retired, control)
-              sends << operation if operation
-            else
-              break
-            end
+            #  Pick a new QID here @TODO@ !!!
+            #               msg.header.id = rand(65535);
+            #               print "New query : #{new_msg}\n"
+            # A query keeps its original retry plan after reconfiguration.
+            # Removed senders may retry, but must not create idle reusable
+            # sockets that this Resolver can no longer reach through close.
+            retired = !@parent.single_resolvers.include?(res)
+            operation = res.prepare_send_async(msg, select_queue, id, retired, control,
+              (@transmission_budgets[client_query_id] ||= SelectThread::TransmissionBudget.new))
+            sends << operation if operation
           end
-          timeouts_done.each { |t| timeouts.delete(t) }
           update_tick_deadline(client_query_id)
         end
       }

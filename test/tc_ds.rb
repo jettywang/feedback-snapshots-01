@@ -79,8 +79,8 @@ class DsTest < Minitest::Test
 
      #  and check it is the same as DS
      right_ds = Dnsruby::RR.create(DS1)
-     ds = Dnsruby::RR::DS.from_key(key, 1);
-     assert_equal(ds.to_s, right_ds.to_s)
+     assert_equal(right_ds.digestbin, right_ds.digest_key(key))
+     assert(right_ds.check_key(key))
   end
 
   def test_sha2
@@ -89,8 +89,8 @@ class DsTest < Minitest::Test
 
      #  and check it is the same as DS
      right_ds = Dnsruby::RR.create(DS2)
-     ds = Dnsruby::RR::DS.from_key(key, 2);
-     assert_equal(ds.to_s, right_ds.to_s)
+     assert_equal(right_ds.digestbin, right_ds.digest_key(key))
+     assert(right_ds.check_key(key))
   end
 
   def test_dlv_from_string

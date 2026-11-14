@@ -80,6 +80,21 @@ class TestResolverValidation < Minitest::Test
     end
   end
 
+  def test_validation_receives_the_original_transmission_budget
+    isolated(<<~'RUBY')
+      start_query(resolver, results)
+      settings = attempts.first
+      engine = resolver.instance_variable_get(:@resolver_ruby)
+      original = engine.instance_variable_get(:@transmission_budgets).fetch(:client)
+      accept_answer(settings)
+      raise 'validation lost transmission history' unless
+        validators.first.instance_variable_get(:@transmission_budget).equal?(original)
+      raise 'replacement queue inherited old transmission history' if
+        engine.validation_transmission_budget(Queue.new, settings.client_query_id)
+      resolver.close
+    RUBY
+  end
+
   def test_validation_finishing_after_deadline_times_out_even_before_next_tick
     isolated(<<~'RUBY')
       start_query(resolver, results)

@@ -77,6 +77,7 @@ module Dnsruby
         begin
           alg = Algorithms.new(a)
           @algorithm = alg
+          @public_key = @key_length = nil
         rescue ArgumentError => e
           raise DecodeError.new(e)
         end
@@ -207,13 +208,13 @@ module Dnsruby
 
       def encode_rdata(msg, canonical=false) #:nodoc: all
         #  2 octets, then 2 sets of 1 octet
-        msg.put_pack('ncc', @flags, @protocol, @algorithm.code)
+        msg.put_pack('nCC', @flags, @protocol, @algorithm.code)
         msg.put_bytes(@key)
       end
 
       def self.decode_rdata(msg) #:nodoc: all
         #  2 octets, then 2 sets of 1 octet
-        flags, protocol, algorithm = msg.get_unpack('ncc')
+        flags, protocol, algorithm = msg.get_unpack('nCC')
         key = msg.get_bytes
         return self.new(
           [flags, protocol, algorithm, key])
@@ -292,9 +293,8 @@ module Dnsruby
 
       def key=(key_text)
         begin
-          key_text.gsub!(/\n/, "")
-          key_text.gsub!(/ /, "")
-          @key=Base64.decode64(key_text)
+          @key=Base64.decode64(key_text.delete("\n "))
+          @public_key = @key_length = nil
           public_key
           get_new_key_tag
         rescue Exception => e
@@ -329,16 +329,32 @@ module Dnsruby
             raise OpenSSL::PKey::PKeyError, "Truncated RSA DNSKEY exponent length"
           end
           exponentLength = @key.byteslice(1, 2).unpack1('n')
+          if exponentLength < 256
+            raise OpenSSL::PKey::PKeyError, "Noncanonical RSA DNSKEY exponent length"
+          end
           pos += 2
         end
         if !exponentLength || exponentLength == 0 || @key.bytesize <= pos + exponentLength
           raise OpenSSL::PKey::PKeyError, "Truncated RSA DNSKEY exponent or modulus"
         end
+        # RFC 3110 section 2 limits both integers to 4096 bits and forbids
+        # leading zero octets. Check bytes before constructing OpenSSL BNs.
+        modulus_length = @key.bytesize - pos - exponentLength
+        if exponentLength > 512 || modulus_length > 512 ||
+            @key.getbyte(pos) == 0 || @key.getbyte(pos + exponentLength) == 0
+          raise OpenSSL::PKey::PKeyError, "Invalid RSA DNSKEY integer encoding or size"
+        end
+        bits = (modulus_length - 1) * 8 + @key.getbyte(pos + exponentLength).bit_length
+        # RFC 3110 section 3 and RFC 5702 section 2 define modulus minima.
+        minimum = @algorithm == Algorithms.RSASHA512 ? 1024 : 512
+        if bits < minimum
+          raise OpenSSL::PKey::PKeyError, "RSA DNSKEY modulus must be at least #{minimum} bits"
+        end
         exponent = RR::get_num(@key[pos, exponentLength])
         pos += exponentLength
 
         modulus = RR::get_num(@key[pos, @key.length])
-        @key_length = (@key.length - pos) * 8
+        @key_length = bits
 
         data_sequence = OpenSSL::ASN1::Sequence([
                                                   OpenSSL::ASN1::Integer(modulus),

@@ -199,6 +199,7 @@ class TestPipelineSend < Minitest::Test
         if kind == :expired
           old.endtime = Dnsruby::TransportClock.now - 1
           K.class_variable_get(:@@timeouts)[kind] = old.endtime
+          SELECTOR.instance_variable_get(:@packet_deadlines)[kind] = K.class_variable_get(:@@timeouts)[kind]
           SELECTOR.process_timeouts
         else
           replacement = settings(FrameSocket.new, kind)
@@ -278,6 +279,7 @@ class TestPipelineSend < Minitest::Test
         writer.define_singleton_method(:tcp_pipeline_socket) do |_|
           old.endtime = Dnsruby::TransportClock.now - 1
           K.class_variable_get(:@@timeouts)[:retry] = old.endtime
+          SELECTOR.instance_variable_get(:@packet_deadlines)[:retry] = K.class_variable_get(:@@timeouts)[:retry]
           SELECTOR.process_timeouts # The original attempt completes during connect.
           @use_counts[socket] = 1
           [socket, new_socket]

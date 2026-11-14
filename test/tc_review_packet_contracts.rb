@@ -350,7 +350,7 @@ class ReviewPacketContractsTest < Minitest::Test
         socket.incoming = [bytes.bytesize].pack('n') + bytes
       else
         socket.define_singleton_method(:getsockopt) { |*| Struct.new(:data).new([Socket::SOCK_DGRAM].pack('i')) }
-        socket.define_singleton_method(:recvfrom) { |*| [bytes, ['AF_INET', 53, '127.0.0.1', '127.0.0.1']] }
+        socket.define_singleton_method(:recvfrom_nonblock) { |*| [bytes, ['AF_INET', 53, '127.0.0.1', '127.0.0.1']] }
       end
     end
   RUBY

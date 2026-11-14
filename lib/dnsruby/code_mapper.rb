@@ -110,7 +110,7 @@ module Dnsruby
     def unknown_code(arg) #:nodoc: all
       #  Be liberal in what you accept...
       #       raise ArgumentError.new("Code #{arg} not a member of #{self.class}")
-      Classes.add_pair(arg.to_s, arg)
+      self.class.add_pair(arg.to_s, arg)
       set_code(arg)
     end
 

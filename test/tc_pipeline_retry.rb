@@ -115,6 +115,7 @@ class TestPipelineRetry < Minitest::Test
           end
         when :expired
           table(:timeouts)[:retry] = Dnsruby::TransportClock.now - 1
+          @selector.instance_variable_get(:@packet_deadlines)[:retry] = table(:timeouts)[:retry]
           @selector.process_timeouts
         when :replaced
           @replacement = settings(RetrySocket.new(true), :retry)

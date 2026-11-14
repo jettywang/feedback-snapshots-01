@@ -34,6 +34,9 @@ module Dnsruby
       # TSIG authentication belongs to this transaction. Verification removes
       # the response's TSIG record, so its absence does not make it cacheable.
       return if query.tsig || query.signed? || response.signed?
+      # Alias-bearing NODATA belongs to the scoped negative cache, even
+      # though its CNAME records make the answer section nonempty.
+      return if Cache.negative_soa(response)
       #  ONLY cache the response if it is not an update response
       question = query.question()[0]
       if (query.do_caching && (query.class != Update) &&
@@ -64,6 +67,7 @@ module Dnsruby
     end
 
     def PacketSender.clear_caches
+      Cache.invalidate_resolutions
       @@recursive_cache.clear
       @@authoritative_cache.clear
     end
@@ -317,12 +321,12 @@ module Dnsruby
     # Reserve ownership while Resolver still holds its query lock, then perform
     # the synchronous public send after releasing that lock. close/timeout can
     # cancel this reservation even before send_async has started.
-    def prepare_send_async(message, queue, id, retire_connection = false, control = QueryControl.current) #:nodoc:
+    def prepare_send_async(message, queue, id, retire_connection = false, control = QueryControl.current, transmission_budget = nil) #:nodoc:
       ensure_current_process
       selector = @selector = SelectThread.instance
       pending = SelectThread::QuerySettings.new(nil, message, @ignore_truncation,
         queue, id, nil, @server, @port, TransportClock.now + @packet_timeout, udp_packet_size, self)
-      pending.send_token = SelectThread::SendToken.new(control)
+      pending.send_token = SelectThread::SendToken.new(control, transmission_budget)
       pending.endtime = [pending.endtime, control&.deadline].compact.min
       pending.retire_connection = retire_connection
       return unless selector.reserve_send(pending)
@@ -555,6 +559,8 @@ module Dnsruby
       ensure_current_process
       st = @selector = SelectThread.instance
       response_settings = response_query_settings(client_query_id)
+      # A configuration change applies to the next attempt, never half of this one.
+      pipeline_mode = use_tcp && @tcp_pipelining
       begin
         check_message_size(query_bytes)
       rescue EncodeError => error
@@ -570,7 +576,7 @@ module Dnsruby
       endtime = response_settings && response_settings.query_bytes.nil? ?
         response_settings.endtime : TransportClock.now + @packet_timeout
       previous_settings = response_settings ||
-        (st.query_settings_for_id(client_query_id) if use_tcp && @tcp_pipelining)
+        (st.query_settings_for_id(client_query_id) if pipeline_mode)
       pending = SelectThread::QuerySettings.new(query_bytes, query,
         @ignore_truncation, client_queue, client_query_id, nil, @server, @port,
         endtime, udp_receive_size(query), self)
@@ -585,10 +591,10 @@ module Dnsruby
       previous_settings = pending
       operation = -> do
         send_dnsruby_with_socket(query_bytes, query, client_query_id, client_queue,
-          use_tcp, endtime, previous_settings)
+          use_tcp, endtime, previous_settings, pipeline_mode)
       end
       send_operation = operation
-      if use_tcp && @tcp_pipelining
+      if pipeline_mode
         # Configuration-only senders remain Marshal-compatible. Allocate the
         # writer mutex only on first use, including senders loaded from storage.
         pipeline_mutex = PIPELINE_MUTEX_CREATION.synchronize { @pipeline_mutex ||= Mutex.new }
@@ -620,7 +626,7 @@ module Dnsruby
       end
       if use_tcp && st.selector_thread?
         begin
-          st.defer_send(@tcp_pipelining ? self : nil, &guarded_operation)
+          st.defer_send(pipeline_mode ? self : nil, &guarded_operation)
         rescue ThreadError => error
           st.fail_query_if_current(client_query_id, client_queue, previous_settings,
             ResolvTimeout.new("Cannot queue TCP send: #{error.message}"))
@@ -726,11 +732,17 @@ module Dnsruby
     end
 
     def send_dnsruby_with_socket(query_bytes, query, client_query_id, client_queue,
-        use_tcp, endtime, previous_settings)
+        use_tcp, endtime, previous_settings, pipeline_mode = use_tcp && @tcp_pipelining)
       #  First send the query (synchronously)
       st = SelectThread.instance
       report_error = ->(error) do
         st.fail_query_if_current(client_query_id, client_queue, previous_settings, error)
+      end
+      return unless st.query_settings_for_id(client_query_id).equal?(previous_settings)
+      return if previous_settings.send_token.cancelled?
+      unless previous_settings.send_token.transmission_budget.admit(@server, @port, use_tcp, query.question.first)
+        report_error.call(ResolvTimeout.new("DNS retry limit reached for server and transport"))
+        return
       end
       socket = nil
       runnextportloop = true
@@ -742,7 +754,7 @@ module Dnsruby
       while (runnextportloop) do
         # A pre-close reservation gets a one-use socket. Recheck on every
         # admission retry without changing ownership or extending its deadline.
-        pipeline = use_tcp && @tcp_pipelining && !previous_settings.retire_connection
+        pipeline = pipeline_mode && !previous_settings.retire_connection
         return unless st.query_settings_for_id(client_query_id).equal?(previous_settings)
         return if previous_settings.send_token.cancelled?
         begin
@@ -802,7 +814,7 @@ module Dnsruby
           if (socket!=nil)
             begin
               #let the select thread close the socket if tcp_pipeli
-              socket.close unless @tcp_pipelining && !new_socket
+              socket.close unless pipeline && !new_socket
             rescue Exception
             end
           end
@@ -816,7 +828,7 @@ module Dnsruby
             Dnsruby.log.error(e.backtrace)
             if e.kind_of?(Errno::ETIMEDOUT) || e.kind_of?(ResolvTimeout)
               report_error.call(ResolvTimeout.new(err_msg))
-            elsif @tcp_pipelining
+            elsif pipeline
               report_error.call(SocketEofResolvError.new(err_msg))
             else
               report_error.call(err)
@@ -905,15 +917,13 @@ module Dnsruby
             @pipeline_socket = nil if @pipeline_socket == socket
           elsif e.kind_of?(ResolvTimeout)
             report_error.call(e)
-          elsif @tcp_pipelining
-            report_error.call(SocketEofResolvError.new(err_msg))
           else
             report_error.call(err)
           end
           begin
             #we let the select_thread close the socket when doing tcp
             #pipelining
-            socket.close unless @tcp_pipelining && !new_socket
+            socket.close unless pipeline && !new_socket
           rescue Exception
           end
           return

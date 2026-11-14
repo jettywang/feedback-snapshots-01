@@ -314,16 +314,18 @@ class TestPipelineRetirement < Minitest::Test
       fixture = RetirementFixture.new
       selector = fixture.selector
       deadline = Dnsruby::TransportClock.now - 1
-      expired = Object.new
-      original = fixture.settings(fixture.socket, endtime: expired)
+      original = fixture.settings(fixture.socket, endtime: deadline)
       replacement = fixture.settings(fixture.socket, register: false)
       replaced = false
-      expired.define_singleton_method(:<=) do |other|
-        # process_timeouts has copied its work and released the selector mutex.
-        # Another sender replaces this ID before the expired entry is claimed.
-        selector.add_to_select(replacement)
-        replaced = true
-        deadline < other
+      claim = selector.method(:claim_query)
+      selector.define_singleton_method(:claim_query) do |settings, *args|
+        # The due heap entry has been popped and the selector lock released.
+        # Another sender replaces the ID before the old settings are claimed.
+        unless replaced
+          add_to_select(replacement)
+          replaced = true
+        end
+        claim.call(settings, *args)
       end
       selector.process_timeouts
       raise 'timeout snapshot hook not reached' unless replaced
@@ -333,6 +335,7 @@ class TestPipelineRetirement < Minitest::Test
       raise 'replacement deadline was removed' unless fixture.table(:timeouts)[:query] == replacement.endtime
       # The replacement can still expire on its own deadline.
       fixture.table(:timeouts)[:query] = Dnsruby::TransportClock.now - 1
+      selector.instance_variable_get(:@packet_deadlines)[:query] = fixture.table(:timeouts)[:query]
       selector.process_timeouts
       events = fixture.events(replacement)
       raise 'replacement did not receive one timeout' unless events.length == 1 &&

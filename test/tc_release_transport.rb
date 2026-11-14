@@ -278,6 +278,7 @@ class TestReleaseTransport < Minitest::Test
       queue = Queue.new
       resolver.send_async(query, queue, :timeout)
       K.class_variable_get(:@@timeouts).transform_values! { Dnsruby::TransportClock.now - 1 }
+      K.class_variable_get(:@@timeouts).each { |id, deadline| SELECTOR.instance_variable_get(:@packet_deadlines)[id] = deadline }
       SELECTOR.process_timeouts
       raise 'packet timeout was not delivered' unless queue.size == 1 && queue.pop.last.is_a?(Dnsruby::ResolvTimeout)
       raise 'last sender moved beyond end of list' unless resolver.single_resolvers == [writer]
@@ -309,6 +310,7 @@ class TestReleaseTransport < Minitest::Test
           SELECTOR.send_queued_validation_responses
         when :timeout
           K.class_variable_get(:@@timeouts)[pending.client_query_id] = Dnsruby::TransportClock.now - 1
+          SELECTOR.instance_variable_get(:@packet_deadlines)[pending.client_query_id] = K.class_variable_get(:@@timeouts)[pending.client_query_id]
           SELECTOR.process_timeouts
         when :error
           SELECTOR.fail_query_if_current(pending.client_query_id, pending.client_queue, pending,
@@ -337,6 +339,7 @@ class TestReleaseTransport < Minitest::Test
       # retiring stream until its already outstanding queries finish.
       K.class_variable_get(:@@tcp_buffers)[socket] = [+"\0", 2, true]
       K.class_variable_get(:@@timeouts)[:expired] = Dnsruby::TransportClock.now - 1
+      SELECTOR.instance_variable_get(:@packet_deadlines)[:expired] = K.class_variable_get(:@@timeouts)[:expired]
       SELECTOR.process_timeouts
       raise 'timeout missing' unless expired.client_queue.size == 1 &&
         expired.client_queue.pop.last.is_a?(Dnsruby::ResolvTimeout)
@@ -390,6 +393,7 @@ class TestReleaseTransport < Minitest::Test
         old_size = old.written.bytesize
         K.class_variable_get(:@@tcp_buffers)[old] = [+'partial', 1000, false]
         K.class_variable_get(:@@timeouts)[0] = Dnsruby::TransportClock.now - 1
+        SELECTOR.instance_variable_get(:@packet_deadlines)[0] = K.class_variable_get(:@@timeouts)[0]
         SELECTOR.process_timeouts
         raise 'incorrect old stream lifetime' unless old.closed? == !keep_peer
         release << true
@@ -431,6 +435,7 @@ class TestReleaseTransport < Minitest::Test
       request.header.id = 123
       writer.send_async(request, Queue.new, :old)
       K.class_variable_get(:@@timeouts)[:old] = Dnsruby::TransportClock.now - 1
+      SELECTOR.instance_variable_get(:@packet_deadlines)[:old] = K.class_variable_get(:@@timeouts)[:old]
       SELECTOR.process_timeouts
       writer.send_async(request, Queue.new, :new)
       raise 'late reply could reach reused ID' unless sockets.size == 2 && sockets.first.closed?
@@ -458,6 +463,7 @@ class TestReleaseTransport < Minitest::Test
       resolver.nameserver = '127.0.0.2'
       original = K.class_variable_get(:@@query_hash).values.first
       K.class_variable_get(:@@timeouts)[original.client_query_id] = Dnsruby::TransportClock.now - 1
+      SELECTOR.instance_variable_get(:@packet_deadlines)[original.client_query_id] = K.class_variable_get(:@@timeouts)[original.client_query_id]
       SELECTOR.process_timeouts
       engine = resolver.instance_variable_get(:@resolver_ruby)
       retry_plan = engine.instance_variable_get(:@timeouts)[:retry][1]
@@ -465,6 +471,7 @@ class TestReleaseTransport < Minitest::Test
       raise 'original retry plan replaced' unless entry.first.equal?(old_writer)
       retry_plan.clear
       retry_plan[Dnsruby::TransportClock.now - 1] = entry
+      engine.send(:update_tick_deadline, :retry)
       engine.tick
       raise 'retry did not make a new connection' unless sockets.size == 2
       response = request.clone
@@ -608,6 +615,7 @@ class TestReleaseTransport < Minitest::Test
         entry = plan.values.first
         plan.clear
         plan[Dnsruby::TransportClock.now - 1] = entry
+        engine.send(:update_tick_deadline, :connect)
         engine.tick
         drain_errors
         raise 'connect timeout did not retry' unless calls == 2
@@ -725,6 +733,7 @@ class TestReleaseTransport < Minitest::Test
         else
           deadlines = K.class_variable_get(:@@timeouts)
           deadlines.keys.each { |id| deadlines[id] = Dnsruby::TransportClock.now - 1 }
+          deadlines.each { |id, deadline| SELECTOR.instance_variable_get(:@packet_deadlines)[id] = deadline }
           SELECTOR.process_timeouts
         end
         expected = cancellation == :close ? Dnsruby::OtherResolvError : Dnsruby::ResolvTimeout

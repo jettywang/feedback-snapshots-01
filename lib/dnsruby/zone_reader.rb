@@ -282,6 +282,18 @@ module Dnsruby
         split = line.split
       end
 
+      # RFC 1035 section 5.1 permits either TTL/class or class/TTL.
+      # Canonicalize the latter before applying the inherited defaults below.
+      if split[2] && /\A(?:[0-9]+[smhdwSMHDW])*[0-9]*\z/.match?(split[2]) && !split[2].empty?
+        begin
+          Classes.new(split[1])
+          split[1], split[2] = split[2], split[1]
+          line = split.join(' ') + "\n"
+        rescue ArgumentError
+          # The second token is a TTL or record type, not a class.
+        end
+      end
+
       #  If the second field is not a number, then we should add the TTL to the line
       #  Remember we can get "m" "w" "y" here! So need to check for appropriate regexp...
       found_ttl_regexp = (split[1]=~/^[0-9]+[smhdwSMHDW]/)
@@ -452,15 +464,15 @@ module Dnsruby
         number = ttl_text[last_index + 1, index-last_index-1].to_i
         new_number = 0
         case letter
-        when 115 then # "s"
+        when "s"
           new_number = number
-        when 109 then # "m"
+        when "m"
           new_number = number * 60
-        when 104 then # "h"
+        when "h"
           new_number = number * 3600
-        when 100 then # "d"
+        when "d"
           new_number = number * 86400
-        when 119 then # "w"
+        when "w"
           new_number = number * 604800
         end
         total += new_number
@@ -468,6 +480,7 @@ module Dnsruby
         last_index = index
         index = ttl_text.index(/[whdms]/, last_index + 1)
       end
+      total += ttl_text[last_index + 1..].to_i
       return total
     end
 

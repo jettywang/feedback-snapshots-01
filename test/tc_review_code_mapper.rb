@@ -29,6 +29,16 @@ class TestReviewCodeMapper < Minitest::Test
     assert_equal('TYPE1099', @mapper.new(1099).to_s)
   end
 
+  def test_unknown_enum_code_is_registered_only_in_its_own_mapping
+    original_class_name = Dnsruby::Classes.to_string(254)
+    value = @mapper.new(254)
+    assert_equal(254, value.code)
+    assert_equal('254', value.to_s)
+    assert_equal('254', @mapper.new(254).to_s)
+    assert_equal(original_class_name, Dnsruby::Classes.to_string(254))
+    assert_equal('NONE', Dnsruby::Classes.new(Dnsruby::Classes::NONE).to_s)
+  end
+
   def test_aliases_reassignment_case_and_setters_preserve_hash_invert_semantics
     strings = maps.strings.dup
     stringsdown = maps.stringsdown.dup

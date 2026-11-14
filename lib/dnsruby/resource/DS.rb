@@ -143,7 +143,17 @@ module Dnsruby
       protected :matching_key_digest?
 
 
-      def DS.from_key(key, digest_type)
+      # Create a DS for current delegation use. Historical records can still
+      # be decoded and checked with digest_key/check_key, but RFC 9905 prohibits
+      # new SHA-1 delegations and DS records for RSA/SHA-1 signing keys.
+      def DS.from_key(key, digest_type = 2)
+        if [Algorithms.RSASHA1, Algorithms.RSASHA1_NSEC3_SHA1].include?(key.algorithm)
+          raise ArgumentError, "RFC 9905 prohibits creating DS records for RSA/SHA-1 keys"
+        end
+        digest_type = get_digest_type(digest_type)
+        if digest_type.code == 1
+          raise ArgumentError, "RFC 9905 prohibits SHA-1 for new DS delegations; use SHA-256 or SHA-384"
+        end
 # # The key must not be a NULL key.
 #    if ((key.flags & 0xc000 ) == 0xc000 )
 # 	puts "\nCreating a DS record for a NULL key is illegal"
@@ -171,7 +181,6 @@ module Dnsruby
 #          return
 #    end
 # 
-        digest_type = get_digest_type(digest_type)
         #  Create a new DS record from the specified key
         ds = RR.create(:name => key.name, :type => "DS", :klass => key.klass, :ttl => key.ttl,
                       :key_tag => key.key_tag,

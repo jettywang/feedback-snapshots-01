@@ -73,7 +73,7 @@ module Dnsruby
     end
 
     def initialize(*args)
-      @client_id, @client_queue, @response, @error, @query, @st, @res = args
+      @client_id, @client_queue, @response, @error, @query, @st, @res, @transmission_budget = args
       @registered = false
       prepare_budget if should_validate
     end
@@ -81,6 +81,10 @@ module Dnsruby
     def prepare_budget
       return @budget if @budget
       deadline = @st.validation_deadline(@client_queue, @client_id) if @st.respond_to?(:validation_deadline)
+      if !@transmission_budget && @st.respond_to?(:validation_transmission_budget)
+        @transmission_budget = @st.validation_transmission_budget(@client_queue, @client_id)
+      end
+      @transmission_budget ||= SelectThread::TransmissionBudget.current || SelectThread::TransmissionBudget.new
       @budget = ValidationBudget.new(deadline: deadline)
     end
     private :prepare_budget
@@ -108,7 +112,9 @@ module Dnsruby
       needs_validation = should_validate
       return if needs_validation && !register
       validated_ok = if needs_validation
-        ValidationBudget.with(@budget) { validate(@query, @response, @res) }
+        SelectThread::TransmissionBudget.with(@transmission_budget) do
+          ValidationBudget.with(@budget) { validate(@query, @response, @res) }
+        end
       else
         validate(@query, @response, @res)
       end

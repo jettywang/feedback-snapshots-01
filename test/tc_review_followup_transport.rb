@@ -42,6 +42,7 @@ class ReviewFollowupTransportTest < Minitest::Test
             else
               engine = resolver.instance_variable_get(:@resolver_ruby)
               engine.instance_variable_get(:@timeouts)[id][0] = Dnsruby::TransportClock.now - 1
+              engine.send(:update_tick_deadline, id)
               engine.tick
             end
           end
@@ -178,6 +179,7 @@ class ReviewFollowupTransportTest < Minitest::Test
         raise 'unauthenticated reply completed query' unless SELECTOR.query_settings_for_id(mode).equal?(live) && live.client_queue.empty?
         if mode == :timeout
           K.class_variable_get(:@@timeouts)[mode] = Dnsruby::TransportClock.now - 1
+          SELECTOR.instance_variable_get(:@packet_deadlines)[mode] = K.class_variable_get(:@@timeouts)[mode]
           SELECTOR.process_timeouts
           raise 'timeout lost TSIG diagnostic' unless live.client_queue.size == 1 &&
             live.client_queue.pop.last.is_a?(Dnsruby::TsigNotSignedResponseError)
@@ -388,7 +390,7 @@ class ReviewFollowupTransportTest < Minitest::Test
           Array.new(count) { '"' + 'x' * 240 + '"' }.join(' ')))
         wire = response.encode
         raise 'fixture did not exceed configured capacity' if count == 7 && wire.bytesize <= configured
-        socket.define_singleton_method(:recvfrom) do |capacity|
+        socket.define_singleton_method(:recvfrom_nonblock) do |capacity|
           [wire.byteslice(0, capacity), ['AF_INET', 53, '127.0.0.1', '127.0.0.1']]
         end
         incoming = SELECTOR.get_incoming_data(socket, live.udp_packet_size)
@@ -456,7 +458,7 @@ class ReviewFollowupTransportTest < Minitest::Test
         response = request.clone
         response.header.qr = true
         wire = response.encode
-        socket.define_singleton_method(:recvfrom) do |capacity|
+        socket.define_singleton_method(:recvfrom_nonblock) do |capacity|
           raise 'receive buffer differs from advertisement' unless capacity == expected
           [wire, ['AF_INET', 53, '127.0.0.1', '127.0.0.1']]
         end

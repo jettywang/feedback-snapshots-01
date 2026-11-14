@@ -113,6 +113,9 @@ module Dnsruby
   #   ;;; FINALLY, THE ANSWER!
   #  Now,DNSSEC validation is performed (unless disabled).
   class Recursor
+    CACHE_LIMIT = 16_384
+    ADDRESS_CACHE_LIMIT = 256
+
     class AddressCache # :nodoc: all
       #  Like an array, but stores the expiration of each record.
       def initialize(*args)
@@ -123,7 +126,9 @@ module Dnsruby
         address, ttl = item
         expiration = Time.now + ttl
         @mutex.synchronize {
+          @hash.delete(address)
           @hash[address] = expiration
+          @hash.shift while @hash.length > ADDRESS_CACHE_LIMIT
         }
       end
       def values
@@ -144,9 +149,7 @@ module Dnsruby
         return ret
       end
       def length
-        @mutex.synchronize {
-          return @hash.length
-        }
+        values.length
       end
       def each()
         values.each {|v|
@@ -164,6 +167,9 @@ module Dnsruby
     @@hints = nil
     @@authority_cache = Hash.new
     @@zones_cache = nil
+    # Keep delegation lifetimes independent of the A/AAAA glue lifetimes.
+    # The stored Hash identity prevents stale metadata from expiring a replacement.
+    @@zone_expirations = {}
     @@nameservers = nil
 
     def dnssec=(dnssec_on)
@@ -183,6 +189,7 @@ module Dnsruby
       end
       @resolver.dnssec = @dnssec
       @ipv6_ok = false
+      @response_cache = Cache::ResolutionCache.new
     end
     # Initialize the hint servers.  Recursive queries need a starting name
     # server to work off of. This method takes a list of IP addresses to use
@@ -390,12 +397,44 @@ module Dnsruby
     end
 
     def Recursor.clear_caches(resolver = Resolver.new)
+      Cache.invalidate_resolutions
       resolver.dnssec = @dnssec
       Recursor.set_hints(Hash.new, resolver)
-      @@zones_cache = Hash.new # key zone_name, values Hash of servers and AddressCaches
-      @@zones_cache["."] = @@hints
+      reset = proc do
+        @@zones_cache = {"." => @@hints}
+        @@zone_expirations = {}
+        @@authority_cache = {}
+      end
+      @@mutex.owned? ? reset.call : @@mutex.synchronize(&reset)
+    end
 
-      @@authority_cache = Hash.new
+    # These helpers are called with the shared cache mutex held. Root hints
+    # are retained as the recursion bootstrap; learned delegations are bounded.
+    def self.cache_authority(name, addresses) # :nodoc:
+      unless @@mutex.owned?
+        return @@mutex.synchronize { cache_authority(name, addresses) }
+      end
+      @@authority_cache.delete(name)
+      @@authority_cache[name] = addresses
+      @@authority_cache.shift while @@authority_cache.length > CACHE_LIMIT
+    end
+
+    def self.cache_zone(name, authorities, ttl) # :nodoc:
+      unless @@mutex.owned?
+        return @@mutex.synchronize { cache_zone(name, authorities, ttl) }
+      end
+      return if name == "."
+      @@zones_cache.delete(name)
+      @@zone_expirations.delete(name)
+      return if ttl.nil? || ttl <= 0
+      @@zones_cache[name] = authorities
+      @@zone_expirations[name] = [authorities, Time.now + ttl]
+      while @@zones_cache.length > CACHE_LIMIT
+        oldest = @@zones_cache.each_key.find { |zone| zone != "." }
+        break unless oldest
+        @@zones_cache.delete(oldest)
+        @@zone_expirations.delete(oldest)
+      end
     end
 
     def query_no_validation_or_recursion(name, type=Types.A, klass=Classes.IN) # :nodoc: all
@@ -411,6 +450,12 @@ module Dnsruby
     # The Recursor maintains a cache of known nameservers.
     # DNSSEC validation is performed unless true is passed as the fourth parameter.
     def query(name, type=Types.A, klass=Classes.IN, no_validation = false)
+      QueryControl.current&.check!
+      unless SelectThread::TransmissionBudget.current
+        return SelectThread::TransmissionBudget.with(SelectThread::TransmissionBudget.new) do
+          query(name, type, klass, no_validation)
+        end
+      end
       #  @TODO@ PROVIDE AN ASYNCHRONOUS SEND WHICH RETURNS MESSAGE WITH ERROR!!!
 
       #  Make sure the hint servers are initialized.
@@ -428,6 +473,16 @@ module Dnsruby
         end
       }
 
+      query_message = Message.new(name, type, klass)
+      query_message.do_validation = !no_validation
+      scope = recursion_cache_scope(no_validation)
+      if scope && (cached = @response_cache.find(query_message, scope))
+        response, error = cached
+        error.response = response if error.is_a?(ResolvError)
+        raise error if error
+        return response
+      end
+
       #  So we have normal hashes, but the array of addresses at the end is now an AddressCache
       #  which respects the ttls of the A/AAAA records
 
@@ -444,11 +499,34 @@ module Dnsruby
 
       #  Seed name servers with the closest known authority
       #       ret =  _dorecursion( name, type, klass, ".", @hints, 0)
-      ret =  _dorecursion( name, type, klass, known_zone, known_authorities, 0, no_validation)
-      Dnssec.validate(ret) if !no_validation
-      #       print "\n\nRESPONSE:\n#{ret}\n"
-      return ret
+      begin
+        ret = _dorecursion(name, type, klass, known_zone, known_authorities, 0, no_validation)
+        Dnssec.validate(ret) if ret && !no_validation
+        if scope && scope == recursion_cache_scope(no_validation)
+          @response_cache.add(query_message, scope, ret, nil,
+            control: QueryControl.current, no_response: ret.nil?)
+        end
+        ret
+      rescue StandardError => error
+        if scope && scope == recursion_cache_scope(no_validation)
+          failed_response = ret || (error.response if error.is_a?(ResolvError))
+          @response_cache.add(query_message, scope, failed_response, error, control: QueryControl.current)
+        end
+        raise
+      end
     end
+
+    def recursion_cache_scope(no_validation)
+      return unless @resolver.respond_to?(:do_caching) && @resolver.do_caching
+      return if @resolver.tsig
+      hints = @@mutex.synchronize do
+        @@hints.map { |name, addresses| [name, addresses.values.map(&:to_s).sort] }.sort_by(&:first)
+      end
+      [no_validation, @dnssec, @ipv6_ok, hints, @resolver.object_id,
+        @resolver.single_resolvers.map { |sender| [sender.server.to_s.dup, sender.port] }.sort,
+        Cache.validation_scope]
+    end
+    private :recursion_cache_scope
 
     def get_closest_known_zone_for(n) # :nodoc:
       #  Find the closest parent of name that we know
@@ -461,7 +539,7 @@ module Dnsruby
         TheLog.error("Name is nil")
         raise  ResolvError.new("Nameserver invalid!")
       end
-      name = n.tr("","")
+      name = n.downcase
       if (name[name.length-1] != ".")
         name = name + "."
       end
@@ -472,6 +550,12 @@ module Dnsruby
         zone = nil
         @@mutex.synchronize{
           zone = @@zones_cache[name]
+          lifetime = @@zone_expirations[name]
+          if lifetime && lifetime[0].equal?(zone) && lifetime[1] <= Time.now
+            @@zones_cache.delete(name)
+            @@zone_expirations.delete(name)
+            zone = nil
+          end
           if (zone != nil)
             return name
           end
@@ -494,8 +578,10 @@ module Dnsruby
         QueryControl.current&.check!
         known_zone = get_closest_known_zone_for(name)
         #         print "GOT KNOWN ZONE : #{known_zone}\n"
+        observed_authorities = nil
         @@mutex.synchronize {
-          known_authorities = @@zones_cache[known_zone] # ".", @hints if nothing else
+          observed_authorities = @@zones_cache[known_zone]
+          known_authorities = observed_authorities&.dup # isolate each recursion's working map
         }
         #         print "Known authorities : #{known_authorities}\n"
 
@@ -505,7 +591,10 @@ module Dnsruby
           done = true
         else
           @@mutex.synchronize{
-            @@zones_cache.delete(known_zone)
+            if @@zones_cache[known_zone].equal?(observed_authorities)
+              @@zones_cache.delete(known_zone)
+              @@zone_expirations.delete(known_zone)
+            end
           }
         end
       end
@@ -531,12 +620,13 @@ module Dnsruby
           addresses = known_authorities[ns_rec]
           cached = @@authority_cache[ns_rec]
           if addresses && !(addresses.respond_to?(:values) ? addresses.values : addresses).empty?
-            @@authority_cache[ns_rec] = known_authorities[ns_rec]
+            Recursor.cache_authority(ns_rec, known_authorities[ns_rec])
             ns.push(@@authority_cache[ns_rec])
           elsif cached && !(cached.respond_to?(:values) ? cached.values : cached).empty?
             known_authorities[ns_rec] = @@authority_cache[ns_rec]
             ns.push(@@authority_cache[ns_rec])
           else
+            @@authority_cache.delete(ns_rec)
             missing_authorities << ns_rec
           end
         end
@@ -552,6 +642,7 @@ module Dnsruby
           # Recursive lookups must run outside the shared cache mutex.
           # Propagate cancellation and validation policy into both workers.
           control = QueryControl.new(parent: QueryControl.current)
+          transmission_budget = SelectThread::TransmissionBudget.current
           hints = @@mutex.synchronize { @@hints.dup }
           workers = []
           results = QueryControl::Queue.new
@@ -561,9 +652,11 @@ module Dnsruby
               workers << Thread.new do
                 Thread.current.report_on_exception = false
                 begin
-                  answer = QueryControl.with(control) do
-                    _dorecursion(ns_rec, address_type, klass, '.', hints.dup,
-                      depth + 1, no_validation)
+                  answer = SelectThread::TransmissionBudget.with(transmission_budget) do
+                    QueryControl.with(control) do
+                      _dorecursion(ns_rec, address_type, klass, '.', hints.dup,
+                        depth + 1, no_validation)
+                    end
                   end
                   results << [answer, nil]
                 rescue StandardError => error
@@ -628,7 +721,7 @@ module Dnsruby
                         unless addresses.is_a?(AddressCache)
                           addresses = known_authorities[server] = AddressCache.new
                         end
-                        @@authority_cache[server] = addresses
+                        Recursor.cache_authority(server, addresses)
                         addresses.push([ip, rr.ttl])
                         found_auth+=1
                         next
@@ -713,6 +806,7 @@ module Dnsruby
             return packet
           elsif (authority.length > 0)
             auth = Hash.new
+            delegation_ttl = nil
             # 	 foreach my $rr (@authority) {
             authority.each do |rr|
               if (rr.type.to_s =~ /^(NS|SOA)$/)
@@ -728,6 +822,9 @@ module Dnsruby
                 elsif (of == known_zone || known_zone.length == 1 || of.end_with?(".#{known_zone}"))
                   TheLog.debug(";; _dorecursion() FOUND closer authority for [#{of}] at [#{server}].")
                   auth[server] ||= AddressCache.new #[] @TODO@ If there is no additional record for this, then we want to use the authority!
+                  if rr.type == Types::NS
+                    delegation_ttl = [delegation_ttl, rr.ttl].compact.min
+                  end
                   if (rr.type == Types.NS)
                       if ((packet.additional.rrset(rr.nsdname, Types::A).length == 0) &&
                             (packet.additional.rrset(rr.nsdname, Types::AAAA).length == 0))
@@ -780,7 +877,7 @@ module Dnsruby
             if (of =~ /#{known_zone}/)
               #                   print "Adding #{of} with :\n#{auth}\nto zones_cache\n"
               @@mutex.synchronize{
-                @@zones_cache[of]=auth
+                Recursor.cache_zone(of, auth.dup, delegation_ttl)
               }
               return _dorecursion( name, type, klass, of, auth, depth+1, no_validation)
             else

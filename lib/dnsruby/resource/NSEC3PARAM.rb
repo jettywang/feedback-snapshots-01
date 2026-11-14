@@ -92,6 +92,7 @@ module Dnsruby
         #         self.salt_length=(salt_length)
 #        self.salt=(salt)
         @salt=salt
+        @salt_length = salt.bytesize
       end
 
       def from_string(input)
@@ -114,10 +115,7 @@ module Dnsruby
 #        s = salt()
         s = @salt
         sl = s.length()
-        if (s == "-")
-          sl == 0
-        end
-        msg.put_pack("ccnc", @hash_alg.code, @flags, @iterations, sl)
+        msg.put_pack("CCnC", @hash_alg.code, @flags, @iterations, sl)
 
         if (sl > 0)
           msg.put_bytes(s)
@@ -125,7 +123,7 @@ module Dnsruby
       end
 
       def self.decode_rdata(msg) #:nodoc: all
-        hash_alg, flags, iterations, salt_length = msg.get_unpack("ccnc")
+        hash_alg, flags, iterations, salt_length = msg.get_unpack("CCnC")
         salt = msg.get_bytes(salt_length)
         return self.new(
           [hash_alg, flags, iterations, salt_length, salt])

@@ -249,6 +249,7 @@ module Dnsruby
 #        self.salt_length=(salt_length)
 #        self.salt=(salt)
         @salt = salt
+        @salt_length = salt.bytesize
         self.hash_length = hash_length
         self.next_hashed = next_hashed
         self.types = types
@@ -334,27 +335,24 @@ module Dnsruby
 #        s = salt()
         s = @salt
         sl = s.length
-        if s == '-'
-          sl = 0
-        end
-        msg.put_pack('ccnc', @hash_alg.code, @flags, @iterations, sl)
+        msg.put_pack('CCnC', @hash_alg.code, @flags, @iterations, sl)
         if sl > 0
           msg.put_bytes(s)
         end
-        msg.put_pack('c', @hash_length)
+        msg.put_pack('C', @hash_length)
         msg.put_bytes(@next_hashed)
         types = NSEC.encode_types(self)
         msg.put_bytes(types)
       end
 
       def self.decode_rdata(msg) #:nodoc: all
-        hash_alg, flags, iterations, salt_length = msg.get_unpack('ccnc')
+        hash_alg, flags, iterations, salt_length = msg.get_unpack('CCnC')
         #  Salt may be omitted
         salt = ''.b
         if salt_length > 0
           salt = msg.get_bytes(salt_length)
         end
-        hash_length, = msg.get_unpack('c')
+        hash_length, = msg.get_unpack('C')
         next_hashed = msg.get_bytes(hash_length)
         types = NSEC.decode_types(msg.get_bytes)
         return self.new(

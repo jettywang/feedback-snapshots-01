@@ -35,6 +35,18 @@ module Dnsruby
     attr_reader :last_tsigstate
     # Sets the connect timeout in seconds
     attr_accessor :connect_timeout
+    # Maximum seconds for one complete DNS frame to be read or written.
+    attr_reader :io_timeout
+    # Optional maximum seconds per server, including connect and IXFR fallback.
+    attr_reader :transfer_timeout
+
+    def io_timeout=(seconds)
+      @io_timeout = positive_timeout(seconds)
+    end
+
+    def transfer_timeout=(seconds)
+      @transfer_timeout = seconds.nil? ? nil : positive_timeout(seconds)
+    end
 
     # Sets the TSIG to sign the zone transfer with.
     # Pass in either a Dnsruby::RR::TSIG, or a key_name and key (or just a key)
@@ -61,6 +73,8 @@ module Dnsruby
       @axfr = nil
       @src_address = nil
       @connect_timeout = 5
+      @io_timeout = 30
+      @transfer_timeout = nil
     end
 
     #  Perform a zone transfer (RFC1995)
@@ -117,19 +131,28 @@ module Dnsruby
       @axfr = @ixfr = nil
       @initialsoa = @end_serial = @current_serial = @rtype = nil
       @last_tsigstate = nil
-      socket = Socket.tcp(server, @port, @src_address, connect_timeout: @connect_timeout)
-      # socket = TCPSocket.new(server, @port, @src_address)
+      @transfer_deadline = @transfer_timeout && TransportClock.now + @transfer_timeout
+      @zone_name = Name.create(zone)
+      socket = nil
       begin
+        connect_limit = [@connect_timeout, @transfer_timeout].compact.min
+        socket = Socket.tcp(server, @port, @src_address, connect_timeout: connect_limit)
         #  Send an initial query
         msg = Message.new(zone, @transfer_type, @klass)
         if @transfer_type == Types.IXFR
-          rr = RR.create("#{zone} 0 IN SOA" + '0 0 %u 0 0 0 0' % @serial)
+          rr = RR.create("#{zone} 0 #{@klass} SOA " + '0 0 %u 0 0 0 0' % @serial)
           msg.add_authority(rr)
         end
+        @request = msg
         send_message(socket, msg)
 
         while (@state != :End)
           response = receive_message(socket)
+          validate_response(response)
+          # An error can terminate a transfer after earlier successful frames.
+          if @state != :InitialSoa && response.rcode != RCode.NOERROR
+            raise ResolvError, response.rcode.string
+          end
 
           if (@state == :InitialSoa)
             rcode = response.rcode
@@ -142,14 +165,11 @@ module Dnsruby
                 @transfer_type=Types.AXFR
                 #  Send an initial AXFR query
                 msg = Message.new(zone, @transfer_type, @klass)
+                @request = msg
                 send_message(socket, msg)
                 next
               end
               raise ResolvError.new(rcode.string);
-            end
-
-            if (response.question[0].qtype != @transfer_type)
-              raise ResolvError.new("invalid question section")
             end
 
             if (response.header.ancount == 0 && @transfer_type == Types.IXFR)
@@ -159,6 +179,7 @@ module Dnsruby
               #  Send an initial AXFR query
               @state = :InitialSoa
               msg = Message.new(zone, @transfer_type, @klass)
+              @request = msg
               send_message(socket, msg)
               next
             end
@@ -192,14 +213,17 @@ module Dnsruby
         #                  serial change) consisting of deleted RRs and added RRs.  The first RR
         #                  of the deleted RRs is the older SOA RR and the first RR of the added
         #                  RRs is the newer SOA RR.
-        socket.close
         if (@axfr!=nil)
-          return @axfr
+          return @axfr.uniq
         end
         return @ixfr
-      rescue Exception => e
-        socket.close
-        raise e
+      ensure
+        begin
+          socket.close if socket && !socket.closed?
+        rescue IOError, SystemCallError
+          # Preserve the transfer's result or original failure if close races.
+        end
+        @transfer_deadline = nil
       end
     end
 
@@ -258,6 +282,9 @@ module Dnsruby
       when :InitialSoa
         if (type != Types.SOA)
           raise ResolvError.new("missing initial SOA")
+        end
+        unless rec.name == @zone_name && rec.klass == Classes.new(@klass)
+          raise ResolvError, "initial SOA does not match transfer zone"
         end
         @initialsoa = rec
         #  Remember the serial number in the initial SOA; we need it
@@ -319,6 +346,9 @@ module Dnsruby
         if (type == Types.SOA)
           soa_serial = rec.serial
           if (soa_serial == @end_serial)
+            unless same_soa?(rec, @initialsoa)
+              raise ResolvError, "closing SOA does not match initial SOA"
+            end
             @state = :End
             return
           elsif (soa_serial != @current_serial)
@@ -338,6 +368,9 @@ module Dnsruby
         if (type == Types.A && rec.klass() != @klass)
         else
           if (type == Types.SOA)
+            unless same_soa?(rec, @initialsoa)
+              raise ResolvError, "closing SOA does not match initial SOA"
+            end
             @state = :End
           else
             @axfr << rec
@@ -367,26 +400,55 @@ module Dnsruby
         @last_tsig_time = @tsig.time_signed
       end
       query_packet = msg.encode
-      lenmsg = [query_packet.length].pack('n')
-      socket.send(lenmsg, 0)
-      socket.send(query_packet, 0)
+      raise EncodeError, "DNS message exceeds the 65535-byte wire limit" if query_packet.bytesize > 65_535
+      frame = [query_packet.bytesize].pack('n') + query_packet
+      deadline = io_deadline
+      offset = 0
+      while offset < frame.bytesize
+        check_deadline(deadline)
+        begin
+          written = socket.write_nonblock(frame.byteslice(offset, frame.bytesize - offset))
+          raise IOError, "zone transfer write made no progress" unless written && written > 0
+          offset += written
+        rescue IO::WaitWritable
+          wait_for_io(socket, deadline, false)
+        rescue IO::WaitReadable
+          wait_for_io(socket, deadline, true)
+        rescue Errno::EINTR
+          next
+        end
+      end
     end
 
-    def tcp_read(socket, len) #:nodoc: all
-      buf=""
-      while (buf.length < len) and not socket.eof? do
-        buf += socket.read(len-buf.length)
+    def tcp_read(socket, len, deadline = io_deadline) #:nodoc: all
+      buf = +"".b
+      while buf.bytesize < len
+        check_deadline(deadline)
+        begin
+          part = socket.read_nonblock(len - buf.bytesize)
+          raise ResolvError, "Server closed an incomplete zone transfer" if part.nil? || part.empty?
+          buf << part
+        rescue IO::WaitReadable
+          wait_for_io(socket, deadline, true)
+        rescue IO::WaitWritable
+          wait_for_io(socket, deadline, false)
+        rescue Errno::EINTR
+          next
+        rescue EOFError
+          raise ResolvError, "Server closed an incomplete zone transfer"
+        end
       end
-      return buf
+      buf
     end
 
     def receive_message(socket) #:nodoc: all
-      buf = tcp_read(socket, 2)
+      deadline = io_deadline
+      buf = tcp_read(socket, 2, deadline)
       answersize = buf.unpack('n')[0]
       #  Some servers (e.g. dnscache) apparently hang up on some connections.
       #  Thanks to Matt Palmer for the fix.
       raise ResolvError.new("Server did not send a valid answer") if answersize.nil?
-      buf = tcp_read(socket, answersize)
+      buf = tcp_read(socket, answersize, deadline)
       msg = Message.decode(buf)
       if (@tsig)
         if !@tsig.verify_envelope(msg, buf)
@@ -396,5 +458,54 @@ module Dnsruby
       end
       return msg
     end
+
+    private
+
+    def positive_timeout(seconds)
+      value = Float(seconds)
+      raise ArgumentError, "timeout must be a positive finite number" unless value.finite? && value > 0
+      value
+    end
+
+    def io_deadline
+      [TransportClock.now + @io_timeout, @transfer_deadline].compact.min
+    end
+
+    def check_deadline(deadline)
+      raise ResolvTimeout, "Zone transfer I/O timed out" if TransportClock.now >= deadline
+    end
+
+    def wait_for_io(socket, deadline, readable)
+      check_deadline(deadline)
+      remaining = deadline - TransportClock.now
+      IO.select(readable ? [socket] : nil, readable ? nil : [socket], nil, [remaining, 0].max)
+    rescue Errno::EINTR
+      retry
+    end
+
+    def validate_response(response)
+      unless response.header.id == @request.header.id && response.header.qr &&
+          response.header.opcode == @request.header.opcode
+        raise ResolvError, "invalid zone transfer response header"
+      end
+      required_question = @state == :InitialSoa || response.rcode != RCode.NOERROR
+      questions = response.question
+      if questions.empty? && !required_question
+        return
+      end
+      request_question = @request.question.first
+      unless questions.length == 1 && questions.first.qname == request_question.qname &&
+          questions.first.qtype == request_question.qtype && questions.first.qclass == request_question.qclass
+        raise ResolvError, "invalid question section"
+      end
+    end
+
+    def same_soa?(left, right)
+      left.name == right.name && left.klass == right.klass && left.ttl == right.ttl &&
+        [:mname, :rname, :serial, :refresh, :retry, :expire, :minimum].all? do |field|
+          left.public_send(field) == right.public_send(field)
+        end
+    end
+
   end
 end

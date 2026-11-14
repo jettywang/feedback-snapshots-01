@@ -7,7 +7,7 @@ class ReleaseReviewTransportTest < Minitest::Test
         socket = FrameSocket.new
         unless tcp
           socket.define_singleton_method(:getsockopt) { |*| Struct.new(:data).new([Socket::SOCK_DGRAM].pack('i')) }
-          socket.define_singleton_method(:recvfrom) do |*|
+          socket.define_singleton_method(:recvfrom_nonblock) do |*|
             [incoming, ['AF_INET', 53, '127.0.0.1', '127.0.0.1']]
           end
         end
@@ -87,6 +87,7 @@ class ReleaseReviewTransportTest < Minitest::Test
         raise 'EOF changed the deadline' unless plan.first == deadline
         if outcome == :deadline
           plan[0] = Dnsruby::TransportClock.now - 1
+          engine.send(:update_tick_deadline, :eof)
           engine.tick
           raise 'expired query reconnected' unless sockets.size == 1
           raise 'wrong deadline completion' unless completion.size == 1 && completion.pop.last.is_a?(Dnsruby::ResolvTimeout)
@@ -94,6 +95,7 @@ class ReleaseReviewTransportTest < Minitest::Test
           retry_value = plan[1].values.first
           plan[1].clear
           plan[1][Dnsruby::TransportClock.now - 1] = retry_value
+          engine.send(:update_tick_deadline, :eof)
           engine.tick
           raise 'retry did not reconnect' unless sockets.size == 2 && !sockets.last.equal?(sockets.first)
           raise 'retry changed logical deadline' unless plan.first == deadline
@@ -143,6 +145,8 @@ class ReleaseReviewTransportTest < Minitest::Test
           next_attempt = plan[1].delete(scheduled)
           raise 'unexpected retry ordering' unless next_attempt.first.server == '127.0.0.2'
           plan[1][Dnsruby::TransportClock.now - 1] = next_attempt
+          plan[1].replace(plan[1].sort.to_h)
+          engine.send(:update_tick_deadline, :update)
           engine.tick
           raise 'second attempt missing' unless sockets.map(&:first) == ['127.0.0.1', '127.0.0.2']
         end

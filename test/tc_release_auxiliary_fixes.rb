@@ -83,10 +83,14 @@ class ReleaseAuxiliaryFixesTest < Minitest::Test
     [soa1, old_address, soa1].each { |rr| responses[0].add_answer!(rr) }
     [soa2, soa1, old_address, soa2, new_address, soa2].each { |rr| responses[1].add_answer!(rr) }
     transfer = Dnsruby::ZoneTransfer.new
-    transfer.define_singleton_method(:send_message) { |*| }
+    transfer.define_singleton_method(:send_message) do |_, request|
+      responses.first.header.id = request.header.id
+      responses.first.header.qr = true
+    end
     transfer.define_singleton_method(:receive_message) { |*| responses.shift }
     socket = Object.new
     socket.define_singleton_method(:close) { }
+    socket.define_singleton_method(:closed?) { false }
     Socket.stub(:tcp, socket) do
       assert_equal([soa1, old_address], transfer.do_transfer('example.', '192.0.2.53'))
       transfer.transfer_type = Dnsruby::Types::IXFR
@@ -172,7 +176,8 @@ class ReleaseAuxiliaryFixesTest < Minitest::Test
           assert_same(name, args[0])
           assert_same(type, args[1])
           assert_equal('example.', args[3])
-          assert_same(zones.fetch('example.'), args[4])
+          assert_equal(zones.fetch('example.'), args[4])
+          refute_same(zones.fetch('example.'), args[4])
         end
       end
     end
@@ -184,7 +189,8 @@ class ReleaseAuxiliaryFixesTest < Minitest::Test
         args = recursor.query(name, 'DS', Dnsruby::Classes::IN, true)
         assert_same(name, args[0])
         assert_equal('.', args[3])
-        assert_same(zones.fetch('.'), args[4])
+        assert_equal(zones.fetch('.'), args[4])
+        refute_same(zones.fetch('.'), args[4])
       end
     end
   end
@@ -194,7 +200,8 @@ class ReleaseAuxiliaryFixesTest < Minitest::Test
       ['DNSKEY', 'A', Dnsruby::Types.new('NS')].each do |type|
         args = recursor.query('child.example.', type, Dnsruby::Classes::IN, true)
         assert_equal('child.example.', args[3])
-        assert_same(zones.fetch('child.example.'), args[4])
+        assert_equal(zones.fetch('child.example.'), args[4])
+        refute_same(zones.fetch('child.example.'), args[4])
       end
     end
   end

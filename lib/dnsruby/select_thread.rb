@@ -210,16 +210,49 @@ module Dnsruby
     end
     private_constant :SocketQueries
 
+    # RFC 9520 section 3.1 limits one resolution to three attempts per
+    # server address and transport, including protocol-driven retries.
+    class TransmissionBudget
+      def self.current
+        Thread.current[:dnsruby_transmission_budget]
+      end
+
+      def self.with(budget)
+        previous = current
+        Thread.current[:dnsruby_transmission_budget] = budget
+        yield
+      ensure
+        Thread.current[:dnsruby_transmission_budget] = previous
+      end
+
+      def initialize
+        @counts = {}
+        @mutex = Mutex.new
+      end
+
+      def admit(server, port, tcp, question = nil)
+        identity = question && [question.qname.canonical, question.qtype.code, question.qclass.code]
+        key = [server.to_s.dup.freeze, port, !!tcp, identity]
+        @mutex.synchronize do
+          count = @counts[key] || 0
+          return false if count >= 3
+          @counts[key] = count + 1
+          true
+        end
+      end
+    end
+
     # Cancellation and each nonblocking write are ordered without holding the
     # selector mutex during I/O. Waiting for a connect or a writable socket never
     # holds this lock, so closing a Resolver remains responsive.
     class SendToken
-      attr_reader :control
+      attr_reader :control, :transmission_budget
 
-      def initialize(control = QueryControl.current)
+      def initialize(control = QueryControl.current, transmission_budget = nil)
         @mutex = Mutex.new
         @cancelled = false
         @control = control
+        @transmission_budget = transmission_budget || TransmissionBudget.current || TransmissionBudget.new
       end
 
       def cancel
@@ -523,7 +556,8 @@ module Dnsruby
     # Claim that exact attempt before publishing a result, just like a wire reply.
     def push_response_for_query(settings, msg, query, resolver)
       return unless claim_query(settings)
-      push_response_to_select(settings.client_query_id, settings.client_queue, msg, query, resolver)
+      push_response_to_select(settings.client_query_id, settings.client_queue, msg, query, resolver,
+        settings.send_token&.transmission_budget)
     end
 
     def claim_query(settings, response_received = false)
@@ -765,7 +799,8 @@ module Dnsruby
               exception = ret
             end
             Dnsruby.log.debug{"Pushing response to client queue"}
-            push_to_client(id, client_queue, msg, exception, query, res)
+            push_to_client(id, client_queue, msg, exception, query, res,
+              settings.send_token&.transmission_budget)
             #             client_queue.push([id, msg, exception])
             #             notify_queue_observers(client_queue, id)
           else
@@ -860,13 +895,20 @@ module Dnsruby
     end
 
     def process_timeouts
-      # NOTE: It's @@timeouts we need to protect; after the clone we're ok
-      timeouts = state_mutex.synchronize do
-        @@timeouts.map { |id, timeout| [@@query_hash[id], timeout] }
-      end
+      # Pop only due owners under the same lock used for registrations. Keep
+      # settings identities so a replacement attempt cannot be expired later.
       time_now = TransportClock.now
-      timeouts.each do |settings, timeout|
-        if timeout <= time_now && settings && claim_query(settings)
+      settings_due = state_mutex.synchronize do
+        due = []
+        while (first = @packet_deadlines&.first) && first[1] <= time_now
+          id, = first
+          @packet_deadlines.delete(id)
+          due << @@query_hash[id] if @@query_hash[id]
+        end
+        due
+      end
+      settings_due.each do |settings|
+        if claim_query(settings)
           deliver_queue_event(settings.client_queue, [settings.client_query_id, Resolver::EventType::ERROR,
             nil, settings.authentication_error || ResolvTimeout.new("Query timed out")])
         end
@@ -969,7 +1011,7 @@ module Dnsruby
         else
           #  @TODO@ Can we get recvfrom to stop issuing PTR queries when we already
           #  know both the FQDN and the IP address?
-          if (ret = socket.recvfrom(packet_size))
+          if (ret = socket.recvfrom_nonblock(packet_size))
             buf = ret[0]
             answerport=ret[1][1]
             answerfrom=ret[1][2]
@@ -982,6 +1024,9 @@ module Dnsruby
             return
           end
         end
+      rescue IO::WaitReadable, Errno::EINTR
+        # Readiness is only a hint; keep the query registered for its next event.
+        return
       rescue Exception => e
         Dnsruby.log.error{"Error - recvfrom failed from #{socket}, exception : #{e}"}
         handle_recvfrom_failure(socket, e)
@@ -1169,7 +1214,7 @@ module Dnsruby
       wake_up_select_thread
     end
 
-    def push_response_to_select(client_id, client_queue, msg, query, res)
+    def push_response_to_select(client_id, client_queue, msg, query, res, transmission_budget = nil)
       #  This needs to queue the response TO THE SELECT THREAD, which then needs
       #  to send it out from its normal loop.
       Dnsruby.log.debug{"Pushing response to client queue direct from resolver or validator"}
@@ -1178,7 +1223,7 @@ module Dnsruby
         if (msg.rcode == RCode.NXDOMAIN)
           err = NXDomain.new
         end
-        @@queued_responses.push([client_id, client_queue, msg, err, query, res])
+        @@queued_responses.push([client_id, client_queue, msg, err, query, res, transmission_budget])
         check_select_thread_synchronized
       }
       wake_up_select_thread
@@ -1217,7 +1262,7 @@ module Dnsruby
       }
 
       responses.each do |item|
-        client_id, client_queue, msg, err, query, res = item
+        client_id, client_queue, msg, err, query, res, transmission_budget = item
         #         push_to_client(client_id, client_queue, msg, err)
         next unless deliver_queue_event(client_queue, [client_id, Resolver::EventType::RECEIVED, msg, err])
         #  Do we need to validate this? The response has come from the cache -
@@ -1227,7 +1272,7 @@ module Dnsruby
         if (((msg.security_level == Message::SecurityLevel.UNCHECKED) ||
                 (msg.security_level == Message::SecurityLevel.INDETERMINATE)) &&
               (ValidatorThread.requires_validation?(query, msg, err, res)))
-          validator = ValidatorThread.new(client_id, client_queue, msg, err, query ,self, res)
+          validator = ValidatorThread.new(client_id, client_queue, msg, err, query, self, res, transmission_budget)
           validator.run
         else
           PacketSender.cache(query, msg) # The validator won't cache it, so we'd better do it now
@@ -1250,14 +1295,14 @@ module Dnsruby
       end
     end
 
-    def push_to_client(client_id, client_queue, msg, err, query, res)
+    def push_to_client(client_id, client_queue, msg, err, query, res, transmission_budget = nil)
       # Notify the resolver before validation so it stops competing attempts
       # while retaining the logical query's total deadline.
       return unless deliver_queue_event(client_queue, [client_id, Resolver::EventType::RECEIVED, msg, err])
 
       if (!err || (err.instance_of?(NXDomain)))
         # The validator owns delivery of the validation result.
-        validator = ValidatorThread.new(client_id, client_queue, msg, err, query ,self, res)
+        validator = ValidatorThread.new(client_id, client_queue, msg, err, query, self, res, transmission_budget)
         validator.run
       end
     end
@@ -1284,6 +1329,13 @@ module Dnsruby
     def validation_deadline(client_queue, client_query_id)
       observer = state_mutex.synchronize { @@observers[client_queue] }
       observer.validation_deadline(client_queue, client_query_id) if observer.respond_to?(:validation_deadline)
+    end
+
+    def validation_transmission_budget(client_queue, client_query_id)
+      observer = state_mutex.synchronize { @@observers[client_queue] }
+      if observer.respond_to?(:validation_transmission_budget)
+        observer.validation_transmission_budget(client_queue, client_query_id)
+      end
     end
 
     def register_validation(client_queue, sender, control)

@@ -127,7 +127,8 @@ class KeyCacheIdentityTest < Minitest::Test
     malformed = Dnsruby::RR.create(@a.to_s)
     # These bytes have the same key tag but are not a valid P-256 point. Decode
     # from wire to exercise lazy public-key parsing without an OpenSSL cache.
-    malformed.key = Base64.strict_encode64("\0" * 62 + [@a.key_tag - 1038].pack('n'))
+    malformed.from_data([malformed.flags, malformed.protocol, malformed.algorithm,
+      "\0" * 62 + [@a.key_tag - 1038].pack('n')])
     message = Dnsruby::Message.new
     message.add_answer(malformed)
     malformed = Dnsruby::Message.decode(message.encode).answer.first
@@ -177,8 +178,7 @@ class KeyCacheIdentityTest < Minitest::Test
     original = Dnsruby::RR.create(File.readlines(fixture).find { |line| line.include?(' IN DNSKEY ') })
     length = original.key.getbyte(0)
     extended = wire_key(8, "\0" + [length].pack('n') + original.key.byteslice(1..-1))
-    assert_equal(original.public_key.e, extended.public_key.e)
-    assert_equal(original.public_key.n, extended.public_key.n)
+    assert_raises(OpenSSL::PKey::PKeyError) { extended.public_key }
 
     # Exercise both octets of the extended length with a 257-byte exponent.
     exponent = "\x01" + "\0" * 255 + "\x03"

@@ -90,6 +90,7 @@ class ReviewControlDeadlinesTest < Minitest::Test
       attempt = plan.values.first
       plan.clear
       plan[Dnsruby::TransportClock.now - 1] = attempt
+      engine.send(:update_tick_deadline, :controlled)
       engine.tick
       raise 'scheduled retry lost its controlling lookup' unless sent.length == 2 &&
         sent.all? { |settings| settings.send_token.control.equal?(control) && settings.endtime <= control.deadline }

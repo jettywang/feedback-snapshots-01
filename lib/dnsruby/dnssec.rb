@@ -65,8 +65,9 @@ module Dnsruby
     class ValidationPolicy
       #  @TODO@ Could do this by getting client to add verifiers in the order they
       #  want them to be used. Could then dispense with all this logic
-      #  Note that any DLV registries which have been configured will only be tried
-      #  after both the root and any local trust anchors (RFC 5074 section 5)
+      # Configured DLV registries are a final fallback for the two ordered
+      # policies, after root/local anchors, when those paths are not bogus.
+      # The two ONLY policies never consult another source of trust.
 
       # * Always use the root and ignore local trust anchors.
       ALWAYS_ROOT_ONLY = 1
@@ -222,7 +223,7 @@ module Dnsruby
       }
       if (found_sigs)
         begin
-          result = verify_result(msg)
+          result = verify_result(msg, nil, operational: true)
           if result == :secure || result == :insecure
             msg.security_level = result == :secure ? Message::SecurityLevel.SECURE : Message::SecurityLevel.INSECURE
             msg.security_error = ''
@@ -271,7 +272,8 @@ module Dnsruby
               Proc.new{|m, q| validate_with_anchors(m, q)}, msg, query)
           end
         end
-        if (last_level != Message::SecurityLevel.SECURE && last_level != Message::SecurityLevel.BOGUS)
+        if (last_level != Message::SecurityLevel.SECURE && last_level != Message::SecurityLevel.BOGUS) &&
+            [ValidationPolicy::LOCAL_ANCHORS_THEN_ROOT, ValidationPolicy::ROOT_THEN_LOCAL_ANCHORS].include?(@@validation_policy)
           last_level, last_error, last_error_level = try_validation(last_level, last_error, last_error_level,
             Proc.new{|m, q| validate_with_dlv(m, q)}, msg, query)
         end
@@ -334,16 +336,26 @@ module Dnsruby
 
     # Keep the result separate from mutable Message state: a previous validation
     # must not turn a newly verified Opt-Out response into a secure response.
-    private_class_method def self.verify_result(msg, keys=nil)
-      ValidationBudget.with { verify_internal(msg, keys) }
+    private_class_method def self.verify_result(msg, keys=nil, operational: false)
+      ValidationBudget.with { verify_internal(msg, keys, operational: operational) }
     end
 
-    private_class_method def self.verify_internal(msg, keys)
+    private_class_method def self.verify_internal(msg, keys, operational: false)
       insecure = false
       last_error = nil
-      [@@anchor_verifier, @@root_verifier, @@dlv_verifier].each do |verifier|
+      verifiers = if operational
+        case @@validation_policy
+        when ValidationPolicy::ALWAYS_ROOT_ONLY then [@@root_verifier]
+        when ValidationPolicy::ALWAYS_LOCAL_ANCHORS_ONLY then [@@anchor_verifier]
+        when ValidationPolicy::ROOT_THEN_LOCAL_ANCHORS then [@@root_verifier, @@anchor_verifier]
+        else [@@anchor_verifier, @@root_verifier]
+        end
+      else
+        [@@anchor_verifier, @@root_verifier, @@dlv_verifier]
+      end
+      verifiers.each do |verifier|
         begin
-          result = verifier.verify_result(msg, keys)
+          result = operational ? verifier.verify_for_validation(msg) : verifier.verify_result(msg, keys)
           return :secure if result == :secure
           insecure ||= result == :insecure
         rescue ValidationLimitError

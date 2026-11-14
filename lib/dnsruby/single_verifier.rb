@@ -27,11 +27,16 @@ module Dnsruby
     # RRsets carry only serializable provenance, never a verifier, mutex or
     # validation budget. The weak registry lets another verifier check whether
     # the original trust source has since been removed.
-    LearnedTrust = Struct.new(:expiration, :signature_expiration, :transaction, :sources)
+    LearnedTrust = Struct.new(:expiration, :signature_expiration, :transaction, :sources, :operational)
     VALIDATION_ALGORITHMS = [Algorithms.RSASHA1, Algorithms.RSASHA1_NSEC3_SHA1,
       Algorithms.RSASHA256, Algorithms.RSASHA512,
       Algorithms.ECDSAP256SHA256, Algorithms.ECDSAP384SHA384].freeze
-    private_constant :LearnedTrust, :VALIDATION_ALGORITHMS
+    # RFC 9905 retains implementation support for RSA/SHA-1 but requires
+    # validating resolvers to treat it as unsupported operationally. Explicit
+    # verify() calls keep their existing cryptographic verification behaviour.
+    OPERATIONAL_ALGORITHMS = (VALIDATION_ALGORITHMS -
+      [Algorithms.RSASHA1, Algorithms.RSASHA1_NSEC3_SHA1]).freeze
+    private_constant :LearnedTrust, :VALIDATION_ALGORITHMS, :OPERATIONAL_ALGORITHMS
     @provenance_mutex = Mutex.new
     @trust_sources = {}
     @next_source_id = 0
@@ -65,6 +70,7 @@ module Dnsruby
     def initialize(vtype)
       @trust_mutex = Mutex.new
       @trust_generation = 0
+      @trust_configuration_generation = 0
       @trust_source_id = SingleVerifier.send(:register_trust_source, self)
       @verifier_type = vtype
       @added_dlv_key = false
@@ -167,6 +173,7 @@ module Dnsruby
     #  Add the
     def add_trust_anchor_with_expiration(k, expiration)
       @trust_mutex.synchronize do
+        @trust_configuration_generation += 1
         if (k.type == Types.DNSKEY)
           @trust_anchors.add_key_with_expiration(k, expiration)
           identity = KeyCache.key_identity(k)
@@ -206,6 +213,16 @@ module Dnsruby
       @trust_mutex.synchronize do
         expire_trust_anchors
         @trust_anchors.keys + @configured_ds_store
+      end
+    end
+
+    # Response/failure caches need a stable, inexpensive identity for the
+    # current trust configuration. Additions invalidate response caches without
+    # invalidating otherwise valid in-flight learned-trust publication.
+    def validation_cache_identity # :nodoc:
+      @trust_mutex.synchronize do
+        expire_trust_anchors
+        [@trust_source_id, @trust_generation, @trust_configuration_generation].freeze
       end
     end
 
@@ -311,7 +328,10 @@ module Dnsruby
           k.rrs.each do |key|
             identity = KeyCache.key_identity(key)
             previous = @trusted_key_provenance[identity]
-            @trusted_key_provenance[identity] = provenance if !previous || previous.expiration < expiration
+            if !previous || (!previous.operational && provenance.operational) ||
+                (previous.operational == provenance.operational && previous.expiration < expiration)
+              @trusted_key_provenance[identity] = provenance
+            end
           end
         end
         result
@@ -319,7 +339,10 @@ module Dnsruby
     end
 
     def add_root_ds(ds)
-      @trust_mutex.synchronize { @configured_ds_store.push(ds) }
+      @trust_mutex.synchronize do
+        @trust_configuration_generation += 1
+        @configured_ds_store.push(ds)
+      end
     end
 
     #  Clear learned trust and configured DS/DLV anchors, retaining DNSKEY anchors.
@@ -404,6 +427,7 @@ module Dnsruby
 
     def usable_provenance?(provenance)
       return false unless provenance
+      return false if trust_operation&.fetch(:operational, false) && !provenance.operational
       now = Time.now.to_i
       return false if provenance.signature_expiration < now
       return false unless provenance.expiration > now ||
@@ -443,7 +467,7 @@ module Dnsruby
       return unless provenance
       raise VerifyError, 'Learned trust is no longer valid' unless usable_provenance?(provenance)
       LearnedTrust.new(provenance.expiration, provenance.signature_expiration,
-        ValidationBudget.current.transaction, provenance.sources).freeze
+        ValidationBudget.current.transaction, provenance.sources, provenance.operational).freeze
     end
 
     def admit_learned_rrset(rrset)
@@ -466,7 +490,8 @@ module Dnsruby
       end
       sources = (parent ? parent.sources : []) + [[@trust_source_id, trust_operation.fetch(:generation)].freeze]
       LearnedTrust.new(expiration, signature_expiration, ValidationBudget.current.transaction,
-        sources.uniq.freeze).freeze
+        sources.uniq.freeze, OPERATIONAL_ALGORITHMS.include?(signature.algorithm) &&
+          (!parent || parent.operational)).freeze
     end
 
     def retain_learned_rrset(rrset, provenance)
@@ -497,7 +522,7 @@ module Dnsruby
       provenance = learned_provenance(ds_rrset)
       return false if provenance && !usable_provenance?(provenance)
       return false if !provenance && expiration < Time.now.to_i
-      ds_rrset.rrs.any? do |ds|
+      preferred_ds_records(ds_rrset.rrs).any? do |ds|
         ValidationBudget.current&.check!(1)
         next false unless ds.check_key(key)
         true
@@ -547,6 +572,8 @@ module Dnsruby
       sections = msg.section_rrsets
       context = { message: msg, proofs: {}, sections: sections,
         verified: {}.compare_by_identity }
+      insecure = trust_operation&.fetch(:insecure_rrsets, {}) || {}
+      insecure_set = ->(set) { insecure[[set.name.canonical, set.klass.code, set.type.code]] }
       sections.each_value do |rrsets|
         #         print "Checking section : #{section}\n"
         ds_rrsets = rrsets.select { |rrset| rrset.type == Types.DS }
@@ -554,6 +581,7 @@ module Dnsruby
           ds_rrsets = rrsets.select { |rrset| rrset.type == Types.DLV }
         end
         ds_rrsets.each {|ds_rrset|
+          next if insecure_set.call(ds_rrset)
           if ((ds_rrset && ds_rrset.rrs.length > 0) && !verify_ds_rrset(ds_rrset, keys, msg, context))
             raise VerifyError.new("Failed to verify DS RRSet")
             #             return false
@@ -562,6 +590,7 @@ module Dnsruby
 
         key_rrsets = rrsets.select { |rrset| rrset.type == Types.DNSKEY }
         key_rrsets.each {|key_rrset|
+          next if insecure_set.call(key_rrset)
           if ((key_rrset && key_rrset.rrs.length > 0) && !verify_key_rrset(key_rrset, keys, context))
             raise VerifyError.new("Failed to verify DNSKEY RRSet")
             #             return false
@@ -572,6 +601,10 @@ module Dnsruby
       #  Then, look through all the remaining RRSets, and verify them all (unless not necessary).
       sections.each do |section, rrsets|
         rrsets.each do |rrset|
+          if section != 'additional' && insecure_set.call(rrset)
+            context[:insecure] = true
+            next
+          end
           # Key learning already authenticated these exact per-message sets.
           next if context[:verified].key?(rrset)
           if section == 'answer' && rrset.type == Types.CNAME && rrset.sigs.empty?
@@ -706,6 +739,10 @@ module Dnsruby
       question = msg.question.first
       return unless question && [RCode.NOERROR, RCode.NXDOMAIN].include?(msg.rcode)
       name, answered = terminal_answer(msg, question)
+      if trust_operation&.fetch(:insecure_names, {})&.key?([name.canonical, question.qclass.code])
+        context[:insecure] = true if context
+        return
+      end
       return if msg.rcode == RCode.NOERROR && answered
       raise VerifyError, 'NXDOMAIN response contains the requested answer' if answered
 
@@ -766,6 +803,9 @@ module Dnsruby
       end
       if insecure
         context[:insecure] = true if context
+        if context && (expirations = trust_operation&.fetch(:insecurity_expirations, nil))
+          expirations << context[:verified].values.map { |verified| verified[:expiration] }.min
+        end
         return true
       end
       raise VerifyError, "No authenticated denial proof for #{name}, #{qtype}"
@@ -1033,20 +1073,21 @@ module Dnsruby
         @discovered_ds_store.reject! { |expiration, _rrset| expiration <= Time.now.to_i }
         [@configured_ds_store.dup, @discovered_ds_store.map(&:last)]
       end
-      stores = configured.map { |ds| [nil, [ds]] }
+      stores = configured.group_by { |ds| [ds.name.canonical, ds.klass.code, ds.type.code] }.
+        values.map { |records| [nil, preferred_ds_records(records)] }
       stores.concat(discovered.filter_map do |rrset|
         provenance = learned_provenance(rrset)
-        [admit_provenance(provenance), rrset.rrs] if usable_provenance?(provenance)
+        [admit_provenance(provenance), preferred_ds_records(rrset.rrs)] if usable_provenance?(provenance)
       end)
       stores.concat((trust_operation&.fetch(:ds) || []).filter_map do |rrset, provenance|
-        [provenance, rrset.rrs] if usable_provenance?(provenance)
+        [provenance, preferred_ds_records(rrset.rrs)] if usable_provenance?(provenance)
       end)
       if explicit_ds
         # Caller-supplied DS records are explicit trust input. If this is a
         # learned DS RRset or a new set wrapping learned records, retain their
         # original absolute deadlines and trust sources.
         provenance = admit_learned_rrset(explicit_ds)
-        stores = explicit_ds.rrs.filter_map do |record|
+        stores = preferred_ds_records(explicit_ds.rrs).filter_map do |record|
           trust = provenance || learned_provenance(record)
           next if trust && !usable_provenance?(trust)
           [admit_provenance(trust), [record]]
@@ -1099,6 +1140,7 @@ module Dnsruby
         enumerator = enumerator.rrs
       end
       enumerator.each {|key|
+        next if trust_operation&.fetch(:operational, false) && !OPERATIONAL_ALGORITHMS.include?(key.algorithm)
         if ((key.revoked?)) # || (key.bad_flags?))
           next
         end
@@ -1531,13 +1573,19 @@ module Dnsruby
       configured, keys, discovered = @trust_mutex.synchronize do
         expire_trust_anchors
         @discovered_ds_store.reject! { |expiration, _rrset| expiration <= Time.now.to_i }
-        [@trust_anchors.keys + @configured_ds_store, cached_trust_keys, @discovered_ds_store.map(&:last)]
+        configured_ds = @configured_ds_store.group_by do |ds|
+          [ds.name.canonical, ds.klass.code, ds.type.code]
+        end.values.map { |records| RRSet.new(records) }
+        [@trust_anchors.keys + configured_ds, cached_trust_keys, @discovered_ds_store.map(&:last)]
       end
       anchors = configured + keys.select { |key| usable_cached_key?(key) } +
         discovered.select { |rrset| usable_provenance?(learned_provenance(rrset)) }
       if trust_operation
         anchors.concat(trust_operation[:keys].values.filter_map { |key, trust| key if usable_provenance?(trust) })
         anchors.concat(trust_operation[:ds].filter_map { |rrset, trust| rrset if usable_provenance?(trust) })
+      end
+      if trust_operation&.fetch(:operational, false)
+        anchors.reject! { |key| key.type == Types.DNSKEY && !OPERATIONAL_ALGORITHMS.include?(key.algorithm) }
       end
       while (true) # n != root)
         #  Try the trusted keys first, then the DS set
@@ -1557,7 +1605,15 @@ module Dnsruby
     #  that authority and remove any keys with the pre-revoked key_tag.
 
     def follow_chain(anchor, name) # :nodoc:
-      with_validation { follow_chain_internal(anchor, name) }
+      with_validation do
+        operation = trust_operation
+        operation[:last_insecure_expiration] = nil
+        result = follow_chain_internal(anchor, name)
+        if !result && operation[:insecurity_expirations]
+          operation[:insecurity_expirations] << operation[:last_insecure_expiration]
+        end
+        result
+      end
     end
 
     private def follow_chain_internal(anchor, name)
@@ -1614,7 +1670,10 @@ module Dnsruby
         records = current_anchor.is_a?(RRSet) ? current_anchor.rrs : [current_anchor]
         # A cached or configured DS is already trusted input, but its learned
         # provenance must still be live before its algorithm policy is used.
-        return false, parent_res unless records.any? { |record| supported_ds?(record) }
+        unless preferred_ds_records(records).any? { |record| supported_ds?(record) }
+          trust_operation[:last_insecure_expiration] = learned_provenance(current_anchor)&.expiration
+          return false, parent_res
+        end
       end
       ds_rrset = current_anchor
       #       print "Trying to discover anchor for #{child} from #{parent}\n"
@@ -1680,7 +1739,8 @@ module Dnsruby
                 # RFC 4035 5.2: a securely authenticated delegation whose DS
                 # records all use unavailable algorithms/digests is insecure.
                 # Mixed sets must still establish trust using a supported DS.
-                unless ds_rrset.rrs.any? { |ds| supported_ds?(ds) }
+                unless preferred_ds_records(ds_rrset.rrs).any? { |ds| supported_ds?(ds) }
+                  trust_operation[:last_insecure_expiration] = learned_provenance(ds_rrset)&.expiration
                   return false, parent_res
                 end
                 # Try the child nameservers only after authenticating its DS.
@@ -1764,9 +1824,17 @@ module Dnsruby
     end
 
     def supported_ds?(record)
-      VALIDATION_ALGORITHMS.include?(record.algorithm) && [1, 2, 4].include?(record.digest_type.code)
+      OPERATIONAL_ALGORITHMS.include?(record.algorithm) && [1, 2, 4].include?(record.digest_type.code)
     end
     private :supported_ds?
+
+    # Apply digest preference to the complete authenticated/trusted RRset,
+    # before matching individual keys (RFC 4509 section 3).
+    def preferred_ds_records(records)
+      return records unless records.any? { |record| record.digest_type.code == 2 }
+      records.reject { |record| record.digest_type.code == 1 }
+    end
+    private :preferred_ds_records
 
     # Authenticate denial against the current parent key before classifying
     # an unsigned delegation. A successful denial at an ordinary name simply
@@ -1779,6 +1847,7 @@ module Dnsruby
       end
       zone = anchor.name
       groups = {}
+      expirations = {}
       (message.authority.rrsets(Types.NSEC) + message.authority.rrsets(Types.NSEC3)).each do |proof|
         ValidationBudget.current&.check!(1)
         next unless proof.klass == anchor.klass
@@ -1788,8 +1857,10 @@ module Dnsruby
         end
         next if signatures.empty?
         begin
-          verify_rrset(RRSet.new(proof.rrs + signatures), anchor)
+          verification = {}
+          verify_rrset(RRSet.new(proof.rrs + signatures), anchor, verification)
           (groups[proof.type] ||= []).concat(proof.rrs)
+          (expirations[proof.type] ||= []) << verification[:expiration]
         rescue VerifyError
           # A second proof/signature may still provide valid denial.
         end
@@ -1798,9 +1869,15 @@ module Dnsruby
         check = type == Types.NSEC3 ? :nsec3_denial : :nsec_denial
         if message.rcode == RCode.NOERROR &&
             send(check, records, child, Types.DS, zone, message.rcode, true) == :insecure
+          operation = trust_operation
+          operation[:last_insecure_expiration] = expirations.fetch(type).compact.min if operation
           return :insecure
         end
         result = send(check, records, child, Types.DS, zone, message.rcode, false)
+        if result == :insecure
+          operation = trust_operation
+          operation[:last_insecure_expiration] = expirations.fetch(type).compact.min if operation
+        end
         return result if result
       end
       raise VerifyError, "No authenticated DS denial proof for #{child}"
@@ -1937,8 +2014,56 @@ module Dnsruby
     end
 
     def validate(msg, query)
-      with_validation { validate_internal(msg, query) }
+      with_operational_validation(msg) { validate_internal(msg, query) }
     end
+
+    # Cached-key verification for Dnssec's validation fast path uses the same
+    # algorithm policy and proof-lifetime accounting as chain discovery.
+    def verify_for_validation(msg) # :nodoc:
+      with_operational_validation(msg) { verify_result(msg) }
+    end
+
+    def with_operational_validation(msg)
+      with_validation do
+        operation = trust_operation
+        previous = operation.values_at(:operational, :insecure_rrsets, :insecure_names,
+          :insecurity_expirations, :last_insecure_expiration)
+        operation[:operational] = true
+        operation[:insecure_rrsets], operation[:insecure_names] = {}, {}
+        operation[:insecurity_expirations] = []
+        begin
+          result = yield
+          if result == :insecure || (result == true && msg.security_level == Message::SecurityLevel.INSECURE)
+            msg.header.ad = false
+            bound_insecure_lifetime(msg, operation[:insecurity_expirations]) if result
+          end
+          result
+        ensure
+          operation[:operational], operation[:insecure_rrsets], operation[:insecure_names],
+            operation[:insecurity_expirations], operation[:last_insecure_expiration] = previous
+        end
+      end
+    end
+    private :with_operational_validation
+
+    # An unsigned answer's TTL does not authenticate how long its insecure
+    # classification is valid. Cache that classification only within the
+    # authenticated no-DS/unsupported-DS proof and its complete trust chain.
+    def bound_insecure_lifetime(msg, expirations)
+      previous = msg.instance_variable_get(:@dnsruby_authenticated_expiration)
+      if expirations.empty? || expirations.any?(&:nil?)
+        msg.remove_instance_variable(:@dnsruby_authenticated_expiration) if previous
+        return
+      end
+      signed_expirations = []
+      msg.each_resource do |rr|
+        deadline = rr.instance_variable_get(:@dnsruby_authenticated_expiration)
+        signed_expirations << deadline if deadline
+      end
+      deadline = (expirations + signed_expirations + Array(previous)).min
+      msg.instance_variable_set(:@dnsruby_authenticated_expiration, deadline)
+    end
+    private :bound_insecure_lifetime
 
     private def validate_internal(msg, query)
       if (msg.rrsets('RRSIG').length == 0)
@@ -2019,7 +2144,18 @@ module Dnsruby
       msg.section_rrsets.each do |section, rrsets|
         next if section == 'additional'
         rrsets.each do |rrset|
-          next if rrset.rrs.empty? || rrset.sigs.empty?
+          next if rrset.rrs.empty?
+          if rrset.sigs.empty? || (trust_operation&.fetch(:operational, false) &&
+              rrset.sigs.none? { |sig| OPERATIONAL_ALGORITHMS.include?(sig.algorithm) })
+            # Unsigned alias targets have no signer to discover. Establish
+            # their security through the parent delegation, never from the
+            # absence of a signature in this response.
+            if discover_insecure_name(rrset.name, rrset.klass)
+              trust_operation[:insecure_rrsets][[rrset.name.canonical, rrset.klass.code, rrset.type.code]] = true
+              attempted = true
+            end
+            next
+          end
           begin
             signatures = valid_signatures(rrset)
           rescue VerifyError
@@ -2043,9 +2179,29 @@ module Dnsruby
           end
         end
       end
+      if trust_operation&.fetch(:insecure_names, {})&.any? && (question = msg.question.first)
+        terminal, answered = terminal_answer(msg, question)
+        discover_insecure_name(terminal, question.qclass) if !answered && terminal != question.qname
+      end
       attempted
     end
     private :discover_signer_keys
+
+    def discover_insecure_name(name, klass)
+      operation = trust_operation
+      return false unless operation && operation[:insecure_names]
+      identity = [name.canonical, klass.code]
+      return true if operation[:insecure_names][identity]
+      ValidationBudget.current&.check!(1)
+      anchor = find_closest_anchor_for(name)
+      anchor ||= find_closest_dlv_anchor_for(name) if @verifier_type == VerifierType::DLV && @added_dlv_key
+      return false unless anchor && anchor.klass == klass
+      return false if follow_chain(anchor, name)
+      operation[:insecure_names][identity] = true
+    rescue VerifyError
+      false # Missing or invalid delegation evidence remains a validation failure.
+    end
+    private :discover_insecure_name
 
     def try_to_follow_from_anchor(closest_anchor, msg, qname) # :nodoc:
       with_validation { try_to_follow_from_anchor_internal(closest_anchor, msg, qname) }
