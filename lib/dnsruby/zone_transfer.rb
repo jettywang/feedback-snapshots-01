@@ -132,13 +132,14 @@ module Dnsruby
       @initialsoa = @end_serial = @current_serial = @rtype = nil
       @last_tsigstate = nil
       @transfer_deadline = @transfer_timeout && TransportClock.now + @transfer_timeout
-      @zone_name = Name.create(zone)
       socket = nil
       begin
         connect_limit = [@connect_timeout, @transfer_timeout].compact.min
         socket = Socket.tcp(server, @port, @src_address, connect_timeout: connect_limit)
         #  Send an initial query
         msg = Message.new(zone, @transfer_type, @klass)
+        # Compare SOA owners with the absolute name sent in the question.
+        @zone_name = msg.question.first.qname
         if @transfer_type == Types.IXFR
           rr = RR.create("#{zone} 0 #{@klass} SOA " + '0 0 %u 0 0 0 0' % @serial)
           msg.add_authority(rr)

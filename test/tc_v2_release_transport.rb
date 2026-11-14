@@ -207,6 +207,46 @@ class V2ReleaseTransportTest < Minitest::Test
     end
   end
 
+  def test_zone_transfer_matches_the_name_sent_in_the_question
+    zones = ['example', 'example.', 'EXAMPLE', Dnsruby::Name.create('example').freeze,
+      Dnsruby::Name.create('example.').freeze, '192.0.2.1']
+    ['AXFR', 'IXFR'].each do |type|
+      zones.each do |zone|
+        owner = zone == '192.0.2.1' ? '1.2.0.192.in-addr.arpa.' : 'example.'
+        soa = Dnsruby::RR.create("#{owner} 300 IN SOA ns.example. hostmaster.example. 4 60 60 3600 60")
+        address = Dnsruby::RR.create("www.#{owner} 300 IN A 192.0.2.1")
+        original_absolute = zone.absolute? if zone.is_a?(Dnsruby::Name)
+        answers = if type == 'AXFR'
+          [soa, address, soa.clone]
+        else
+          [soa, soa.clone.tap { |rr| rr.serial = 2 }, soa.clone, address, soa.clone]
+        end
+        result = transfer_with_answers(zone, type, owner, answers)
+        if type == 'AXFR'
+          assert_equal([soa, address], result, zone.inspect)
+        else
+          assert_equal([[2, 4]], result.map { |delta| [delta.start, delta.end] }, zone.inspect)
+          assert_equal([soa, address], result.first.adds)
+        end
+        assert_equal(original_absolute, zone.absolute?) if zone.is_a?(Dnsruby::Name)
+      end
+    end
+  end
+
+  def test_zone_transfer_still_rejects_an_initial_soa_for_another_zone_or_class
+    ['AXFR', 'IXFR'].each do |type|
+      ['example', 'example.'].each do |zone|
+        ['other. 300 IN', 'example. 300 CH'].each do |owner_and_class|
+          soa = Dnsruby::RR.create("#{owner_and_class} SOA ns.example. hostmaster.example. 4 60 60 3600 60")
+          error = assert_raises(Dnsruby::ResolvError) do
+            transfer_with_answers(zone, type, 'example.', [soa])
+          end
+          assert_equal('initial SOA does not match transfer zone', error.message)
+        end
+      end
+    end
+  end
+
   def test_ixfr_terminal_soa_matches_the_opening_soa
     opening = Dnsruby::RR.create('example. 300 IN SOA ns.example. hostmaster.example. 4 60 60 3600 60')
     [opening.clone, opening.clone.tap { |rr| rr.refresh = 120 }].each do |closing|
@@ -231,6 +271,23 @@ class V2ReleaseTransportTest < Minitest::Test
   end
 
   private
+
+  def transfer_with_answers(zone, type, owner, answers)
+    transfer = Dnsruby::ZoneTransfer.new
+    transfer.transfer_type = type
+    transfer.serial = 2
+    response = Dnsruby::Message.new(owner, type)
+    response.header.qr = true
+    answers.each { |rr| response.add_answer!(rr) }
+    socket = TransferSocket.new
+    transfer.define_singleton_method(:send_message) do |_, request|
+      response.header.id = request.header.id
+    end
+    transfer.define_singleton_method(:receive_message) { |_| Dnsruby::Message.decode(response.encode) }
+    Socket.stub(:tcp, socket) { transfer.do_transfer(zone, '192.0.2.53') }
+  ensure
+    assert(socket.closed?) if socket
+  end
 
   def frame(message)
     wire = message.encode

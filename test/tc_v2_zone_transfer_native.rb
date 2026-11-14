@@ -45,7 +45,7 @@ class V2ZoneTransferNativeTest < Minitest::Test
       ensure
         socket&.close
       end
-      assert_equal([soa, address], Timeout.timeout(5) { transfer.transfer('example.') })
+      assert_equal([soa, address], Timeout.timeout(5) { transfer.transfer('example') })
       assert_equal(:Verified, transfer.last_tsigstate) if signed
       assert_nil(transfer.last_tsigstate) unless signed
       Timeout.timeout(2) { server.value }
