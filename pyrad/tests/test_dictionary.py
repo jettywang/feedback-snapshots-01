@@ -7,9 +7,11 @@ from io import StringIO
 from . import home
 from pyrad.dictionary import Attribute
 from pyrad.dictionary import Dictionary
+from pyrad.dictionary import DictionaryConflictError
 from pyrad.dictionary import ParseError
 from pyrad.tools import DecodeAttr
 from pyrad.dictfile import DictFile
+from pyrad import packet
 
 
 class AttributeTests(unittest.TestCase):
@@ -639,3 +641,364 @@ class DictFileIncludeTests(unittest.TestCase):
     def testIncludeMissingFile(self):
         path = self.write('dictionary', '$INCLUDE dictionary.missing\n')
         self.assertRaises(IOError, Dictionary, path)
+
+
+class StrictDictionaryTests(unittest.TestCase):
+    """Conflict detection and atomic loading of a strict dictionary."""
+
+    def assertBidirectionalIndexConsistent(self, dict):
+        # every name maps to a key whose reverse name resolves to the same
+        # Attribute object; no index entry may point at a different object
+        for (name, key) in dict.attrindex.forward.items():
+            reverse_name = dict.attrindex.backward[key]
+            self.assertIs(dict.attributes[name],
+                          dict.attributes[reverse_name])
+
+    def testLenientModeStillOverrides(self):
+        dict = Dictionary(StringIO('ATTRIBUTE Perm 99 integer'))
+        dict.ReadDictionary(StringIO('ATTRIBUTE Perm 99 byte'))
+        self.assertEqual(dict['Perm'].type, 'byte')
+
+    def testStrictIsParseError(self):
+        self.assertTrue(issubclass(DictionaryConflictError, ParseError))
+
+    def testIntegerVsByteConflictRejectedInBothOrders(self):
+        integer = StringIO('ATTRIBUTE Perm 99 integer\n')
+        byte = StringIO('ATTRIBUTE Perm 99 byte\n')
+        for (first, second, first_type) in (
+                (integer, byte, 'integer'), (byte, integer, 'byte')):
+            first.seek(0)
+            second.seek(0)
+            dict = Dictionary(strict=True)
+            dict.ReadDictionary(first)
+            with self.assertRaises(DictionaryConflictError) as cm:
+                dict.ReadDictionary(second)
+            self.assertIn('Perm', str(cm.exception))
+            # the earlier definition survives untouched
+            self.assertEqual(dict['Perm'].type, first_type)
+            self.assertEqual(len(dict), 1)
+            self.assertBidirectionalIndexConsistent(dict)
+
+    def testSameNameWithAnotherCodeConflicts(self):
+        dict = Dictionary(strict=True)
+        dict.ReadDictionary(StringIO('ATTRIBUTE Same 1 string\n'))
+        with self.assertRaises(DictionaryConflictError) as cm:
+            dict.ReadDictionary(StringIO('ATTRIBUTE Same 2 string\n'))
+        self.assertEqual(cm.exception.line, 1)
+        self.assertIn('already defined', cm.exception.msg)
+        self.assertEqual(dict.attrindex['Same'], 1)
+
+    def testAnotherNameForSameCodeWithDifferentTypeConflicts(self):
+        dict = Dictionary(strict=True)
+        dict.ReadDictionary(StringIO('ATTRIBUTE First 5 integer\n'))
+        with self.assertRaises(DictionaryConflictError) as cm:
+            dict.ReadDictionary(StringIO('ATTRIBUTE Second 5 octets\n'))
+        self.assertIn('First', cm.exception.msg)
+        self.assertNotIn('Second', dict.attributes)
+        # the key still belongs to the original attribute
+        self.assertEqual(dict.attrindex.GetBackward(5), 'First')
+
+    def testHasTagConflict(self):
+        dict = Dictionary(StringIO('ATTRIBUTE Tag 1 string\n'), strict=True)
+        with self.assertRaises(DictionaryConflictError):
+            dict.ReadDictionary(
+                StringIO('ATTRIBUTE Tag 1 string has_tag\n'))
+
+    def testEncryptConflict(self):
+        dict = Dictionary(StringIO('ATTRIBUTE Secret 1 string\n'),
+                          strict=True)
+        with self.assertRaises(DictionaryConflictError):
+            dict.ReadDictionary(
+                StringIO('ATTRIBUTE Secret 1 string encrypt=1\n'))
+
+    def testEncryptValueConflict(self):
+        dict = Dictionary(
+            StringIO('ATTRIBUTE Secret 1 string encrypt=1\n'), strict=True)
+        with self.assertRaises(DictionaryConflictError):
+            dict.ReadDictionary(
+                StringIO('ATTRIBUTE Secret 1 string encrypt=2\n'))
+
+    def testTlvParentPathConflict(self):
+        dict = Dictionary(StringIO(
+            'ATTRIBUTE T1 10 tlv\n'
+            'ATTRIBUTE T2 11 tlv\n'
+            'ATTRIBUTE Sub 10.1 string\n'), strict=True)
+        with self.assertRaises(DictionaryConflictError) as cm:
+            dict.ReadDictionary(StringIO('ATTRIBUTE Sub 11.1 string\n'))
+        self.assertIn('Sub', cm.exception.msg)
+        # the sub-attribute stays attached to its original TLV only
+        self.assertEqual(dict['T1'].sub_attributes, {1: 'Sub'})
+        self.assertEqual(dict['T2'].sub_attributes, {})
+
+    def testTlvSubCodeTypeConflict(self):
+        dict = Dictionary(StringIO(
+            'ATTRIBUTE T1 10 tlv\n'
+            'ATTRIBUTE T1-Int 10.1 integer\n'), strict=True)
+        with self.assertRaises(DictionaryConflictError):
+            dict.ReadDictionary(StringIO('ATTRIBUTE T1-Bytes 10.1 octets\n'))
+
+    def testLegalAliasIsAccepted(self):
+        dict = Dictionary(StringIO(
+            'ATTRIBUTE Real 5 string\n'
+            'ATTRIBUTE Alias 5 string\n'), strict=True)
+        self.assertIs(dict['Real'], dict['Alias'])
+        self.assertEqual(dict.attrindex['Real'], 5)
+        self.assertEqual(dict.attrindex['Alias'], 5)
+        self.assertEqual(dict.attrindex.GetBackward(5), 'Alias')
+        self.assertBidirectionalIndexConsistent(dict)
+
+    def testLegalAliasOfSubAttribute(self):
+        dict = Dictionary(StringIO(
+            'ATTRIBUTE T1 10 tlv\n'
+            'ATTRIBUTE T1-Int 10.1 integer\n'
+            'ATTRIBUTE T1-Int-Alias 10.1 integer\n'), strict=True)
+        self.assertIs(dict['T1-Int'], dict['T1-Int-Alias'])
+        self.assertIs(dict['T1-Int-Alias'].parent, dict['T1'])
+
+    def testExactDuplicateIsAccepted(self):
+        dict = Dictionary(strict=True)
+        dict.ReadDictionary(StringIO('ATTRIBUTE Dup 7 octets has_tag\n'))
+        dict.ReadDictionary(StringIO('ATTRIBUTE Dup 7 octets has_tag\n'))
+        self.assertEqual(len(dict), 1)
+        self.assertTrue(dict['Dup'].has_tag)
+
+    def testValueRenameIsAcceptedButRedefinitionConflicts(self):
+        dict = Dictionary(StringIO(
+            'ATTRIBUTE Acct 40 integer\n'
+            'VALUE Acct Start 1\n'), strict=True)
+        # another name for the same encoded value is an allowed alias
+        dict.ReadDictionary(StringIO('VALUE Acct Begin 1\n'))
+        self.assertEqual(dict['Acct'].values['Start'],
+                         dict['Acct'].values['Begin'])
+        with self.assertRaises(DictionaryConflictError) as cm:
+            dict.ReadDictionary(StringIO('VALUE Acct Start 2\n'))
+        self.assertIn('Start', cm.exception.msg)
+        # original value unchanged
+        self.assertEqual(dict['Acct'].values['Start'], b'\x00\x00\x00\x01')
+
+    def testDeferredValueConflictRollsBack(self):
+        # VALUE precedes its ATTRIBUTE, so it is parsed in the deferred pass
+        dict = Dictionary(StringIO(
+            'ATTRIBUTE Acct 40 integer\nVALUE Acct Start 1\n'), strict=True)
+        with self.assertRaises(DictionaryConflictError):
+            dict.ReadDictionary(StringIO(
+                'VALUE Acct Start 2\nATTRIBUTE Acct 40 integer\n'))
+        self.assertEqual(dict['Acct'].values['Start'], b'\x00\x00\x00\x01')
+
+    def testVendorIdConflict(self):
+        dict = Dictionary(StringIO('VENDOR Alpha 100\n'), strict=True)
+        with self.assertRaises(DictionaryConflictError) as cm:
+            dict.ReadDictionary(StringIO('VENDOR Alpha 200\n'))
+        self.assertIn('Alpha', cm.exception.msg)
+        self.assertEqual(dict.vendors['Alpha'], 100)
+
+    def testVendorNameCollisionOnSameId(self):
+        dict = Dictionary(StringIO('VENDOR Alpha 100\n'), strict=True)
+        with self.assertRaises(DictionaryConflictError):
+            dict.ReadDictionary(StringIO('VENDOR Beta 100\n'))
+
+    def testVendorFormatConflict(self):
+        dict = Dictionary(StringIO('VENDOR Alpha 100 format=1,1\n'),
+                          strict=True)
+        with self.assertRaises(DictionaryConflictError):
+            dict.ReadDictionary(
+                StringIO('VENDOR Alpha 100 format=2,1\n'))
+
+    def testIdenticalVendorDefinitionAccepted(self):
+        dict = Dictionary(strict=True)
+        dict.ReadDictionary(StringIO('VENDOR Alpha 100 format=1,1\n'))
+        dict.ReadDictionary(StringIO('VENDOR Alpha 100\n'))
+        self.assertEqual(dict.vendors['Alpha'], 100)
+
+    def testFailedLoadLeavesPreviousDictionaryIntact(self):
+        dict = Dictionary(StringIO(
+            'ATTRIBUTE Good 1 string\n'
+            'ATTRIBUTE Good-Tlv 9 tlv\n'), strict=True)
+        before = (len(dict.attributes), dict.attrindex.forward.copy(),
+                  dict.vendors.forward.copy(), set(dict.skipped_attributes))
+        with self.assertRaises(DictionaryConflictError):
+            dict.ReadDictionary(StringIO(
+                'ATTRIBUTE New 2 string\n'
+                'ATTRIBUTE New-Sub 9.1 string\n'
+                'ATTRIBUTE Good 3 integer\n'))
+        after = (len(dict.attributes), dict.attrindex.forward.copy(),
+                 dict.vendors.forward.copy(), set(dict.skipped_attributes))
+        self.assertEqual(before, after)
+        self.assertNotIn('New', dict)
+        self.assertNotIn('New-Sub', dict)
+        self.assertEqual(dict['Good-Tlv'].sub_attributes, {})
+        self.assertBidirectionalIndexConsistent(dict)
+
+    def testSyntaxErrorRollsBackStrictLoad(self):
+        dict = Dictionary(StringIO('ATTRIBUTE Good 1 string\n'), strict=True)
+        with self.assertRaises(ParseError):
+            dict.ReadDictionary(StringIO(
+                'ATTRIBUTE New 2 string\n'
+                'ATTRIBUTE Broken\n'))
+        self.assertNotIn('New', dict)
+        self.assertEqual(len(dict), 1)
+        self.assertBidirectionalIndexConsistent(dict)
+
+    def testRollbackKeepsTlvIdentityAndParentLinks(self):
+        dict = Dictionary(StringIO(
+            'ATTRIBUTE Tlv 9 tlv\n'
+            'ATTRIBUTE Tlv-Str 9.1 string\n'), strict=True)
+        tlv = dict['Tlv']
+        sub = dict['Tlv-Str']
+        with self.assertRaises(DictionaryConflictError):
+            dict.ReadDictionary(StringIO(
+                'ATTRIBUTE NewTlv 10 tlv\n'
+                'ATTRIBUTE NewTlv-Str 10.1 string\n'
+                'ATTRIBUTE Tlv 9 integer\n'))
+        # the same objects survive, with their cross-references intact
+        self.assertIs(dict['Tlv'], tlv)
+        self.assertIs(dict['Tlv-Str'], sub)
+        self.assertIs(dict['Tlv-Str'].parent, dict['Tlv'])
+        self.assertIs(dict._tlvs[(0, 9)], dict['Tlv'])
+        self.assertNotIn('NewTlv', dict)
+        # the restored TLV still accepts new sub-attributes afterwards
+        dict.ReadDictionary(StringIO('ATTRIBUTE Tlv-Int 9.2 integer\n'))
+        self.assertIs(dict['Tlv-Int'].parent, dict['Tlv'])
+        self.assertEqual(dict['Tlv'].sub_attributes,
+                         {1: 'Tlv-Str', 2: 'Tlv-Int'})
+
+    def testConstructorAppliesStrictToEveryFile(self):
+        with self.assertRaises(DictionaryConflictError):
+            Dictionary(StringIO('ATTRIBUTE Perm 99 integer\n'),
+                       StringIO('ATTRIBUTE Perm 99 byte\n'), strict=True)
+
+    def testConflictNamesBothDefinitionLocations(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            include = os.path.join(tmpdir, 'vendor')
+            main = os.path.join(tmpdir, 'dictionary')
+            with open(include, 'w') as fd:
+                fd.write('ATTRIBUTE Perm 99 byte\n')
+            with open(main, 'w') as fd:
+                fd.write('ATTRIBUTE Perm 99 integer\n$INCLUDE vendor\n')
+            dict = Dictionary(strict=True)
+            with self.assertRaises(DictionaryConflictError) as cm:
+                dict.ReadDictionary(main)
+            err = cm.exception
+            self.assertEqual(err.file, 'vendor')
+            self.assertEqual(err.line, 1)
+            self.assertEqual(err.other_file, 'dictionary')
+            self.assertEqual(err.other_line, 1)
+            self.assertIn('vendor(1)', str(err))
+            self.assertIn('dictionary(1)', str(err))
+            self.assertEqual(len(dict), 0)
+
+    def testMissingIncludeRollsBack(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            main = os.path.join(tmpdir, 'dictionary')
+            with open(main, 'w') as fd:
+                fd.write('ATTRIBUTE Before 1 string\n'
+                         '$INCLUDE does-not-exist\n')
+            dict = Dictionary(StringIO('ATTRIBUTE Good 9 string\n'),
+                              strict=True)
+            with self.assertRaises(IOError):
+                dict.ReadDictionary(main)
+            # the attribute read before the failed include is rolled back
+            self.assertNotIn('Before', dict)
+            self.assertEqual(len(dict), 1)
+            self.assertIn('Good', dict)
+            self.assertBidirectionalIndexConsistent(dict)
+
+
+class StrictDictionaryPacketTests(unittest.TestCase):
+    """A strict dictionary keeps the standard, vendor and TLV namespaces
+    separate through the decode and re-encode of a real auth packet."""
+
+    dictionary = '''
+VENDOR Alpha 100
+VENDOR Beta  200
+ATTRIBUTE Std-Int     50 integer
+ATTRIBUTE Std-Bytes   51 octets
+ATTRIBUTE Std-Tlv     60 tlv
+ATTRIBUTE Std-Tlv-N   60.1 integer
+BEGIN-VENDOR Alpha
+ATTRIBUTE Alpha-Int    1 integer
+ATTRIBUTE Alpha-Tlv    2 tlv
+ATTRIBUTE Alpha-Tlv-N  2.1 integer
+END-VENDOR Alpha
+BEGIN-VENDOR Beta
+ATTRIBUTE Beta-Bytes   1 octets
+ATTRIBUTE Beta-Tlv     2 tlv
+ATTRIBUTE Beta-Tlv-B   2.1 octets
+END-VENDOR Beta
+'''
+
+    def setUp(self):
+        self.dict = Dictionary(StringIO(self.dictionary), strict=True)
+        self.authenticator = b'0123456789abcdef'
+
+    def testSameWireBytesKeepDistinctMeanings(self):
+        request = packet.AuthPacket(
+            code=packet.AccessRequest, id=7, secret=b'secret',
+            authenticator=self.authenticator, dict=self.dict,
+            **{'Std-Int': 7, 'Std-Bytes': b'\x00\x00\x00\x07',
+               'Std-Tlv-N': 7,
+               'Alpha-Int': 7, 'Alpha-Tlv-N': 7,
+               'Beta-Bytes': b'\x00\x00\x00\x07',
+               'Beta-Tlv-B': b'\x00\x00\x00\x07'})
+        raw = request.RequestPacket()
+
+        decoded = packet.AuthPacket(packet=raw, dict=self.dict,
+                                    secret=b'secret')
+
+        # identical four octets are an integer in one namespace and raw
+        # bytes in the others
+        self.assertEqual(decoded['Std-Int'], [7])
+        self.assertEqual(decoded['Alpha-Int'], [7])
+        self.assertEqual(decoded['Std-Bytes'], [b'\x00\x00\x00\x07'])
+        self.assertEqual(decoded['Beta-Bytes'], [b'\x00\x00\x00\x07'])
+        self.assertEqual(decoded['Std-Tlv-N'], [7])
+        self.assertEqual(decoded['Alpha-Tlv-N'], [7])
+        self.assertEqual(decoded['Beta-Tlv-B'], [b'\x00\x00\x00\x07'])
+
+        # the wire keys prove the namespaces never share an entry
+        self.assertEqual(self.dict.attrindex['Alpha-Int'], (100, 1))
+        self.assertEqual(self.dict.attrindex['Beta-Bytes'], (200, 1))
+        self.assertEqual(self.dict.attrindex['Std-Int'], 50)
+        self.assertEqual(self.dict.attrindex['Alpha-Tlv-N'], (100, 2, 1))
+        self.assertEqual(self.dict.attrindex['Beta-Tlv-B'], (200, 2, 1))
+        self.assertEqual(self.dict.attrindex['Std-Tlv-N'], (60, 1))
+        wire_keys = list(packet.OrderedDict.keys(decoded))
+        self.assertIn((100, 1), wire_keys)
+        self.assertIn((200, 1), wire_keys)
+        self.assertIn(50, wire_keys)
+
+        # re-encoding the decoded packet reproduces the original bytes
+        rebuilt = packet.AuthPacket(
+            code=packet.AccessRequest, id=decoded.id, secret=b'secret',
+            authenticator=decoded.authenticator, dict=self.dict,
+            **{'Std-Int': decoded['Std-Int'],
+               'Std-Bytes': decoded['Std-Bytes'],
+               'Std-Tlv-N': decoded['Std-Tlv-N'],
+               'Alpha-Int': decoded['Alpha-Int'],
+               'Alpha-Tlv-N': decoded['Alpha-Tlv-N'],
+               'Beta-Bytes': decoded['Beta-Bytes'],
+               'Beta-Tlv-B': decoded['Beta-Tlv-B']})
+        self.assertEqual(rebuilt.RequestPacket(), raw)
+
+    def testRealUserPasswordRoundTrip(self):
+        # a full authenticated Access-Request including PwCrypt, which uses
+        # the User-Password encrypt flag of its dictionary definition
+        dict = Dictionary(StringIO(
+            'ATTRIBUTE User-Name 1 string\n'
+            'ATTRIBUTE User-Password 2 string encrypt=1\n'), strict=True)
+        request = packet.AuthPacket(
+            code=packet.AccessRequest, id=3, secret=b'shared',
+            authenticator=self.authenticator, dict=dict, User_Name='alice')
+        request['User-Password'] = request.PwCrypt('password')
+        raw = request.RequestPacket()
+
+        decoded = packet.AuthPacket(packet=raw, dict=dict, secret=b'shared')
+        self.assertEqual(decoded['User-Name'], ['alice'])
+        self.assertEqual(decoded.PwDecrypt(decoded['User-Password'][0]),
+                         'password')
+        self.assertEqual(packet.AuthPacket(
+            code=packet.AccessRequest, id=decoded.id, secret=b'shared',
+            authenticator=decoded.authenticator, dict=dict,
+            User_Name='alice',
+            User_Password=decoded['User-Password']).RequestPacket(), raw)
+

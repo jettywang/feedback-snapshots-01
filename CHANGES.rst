@@ -11,6 +11,17 @@ Unreleased
 * The sdist and the wheel include the test dictionaries of
   ``pyrad/tests/data``, so the bundled tests run from an installed package
   or an unpacked sdist.
+* ``Dictionary`` gains a strict loading mode, ``Dictionary(...,
+  strict=True)``. A strict load rejects a definition that would change the
+  meaning of an existing attribute name, vendor/code, TLV parent path or
+  type/``encrypt``/``has_tag`` options with ``DictionaryConflictError`` (a
+  ``ParseError`` subclass) instead of silently overriding it; exact
+  duplicates and aliases that keep the same meaning remain allowed. Each
+  strict ``ReadDictionary`` call, including ``$INCLUDE`` files and deferred
+  ``VALUE`` definitions, is atomic and rolls back on failure, leaving the
+  previously loaded dictionary and its bidirectional index intact. The
+  error reports the file and line of both definitions. The default
+  behaviour is unchanged.
 
 2.6.0 - Oct 18, 2026
 --------------------

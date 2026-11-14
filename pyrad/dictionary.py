@@ -81,6 +81,37 @@ VALUE definitions for skipped attributes are ignored, and VALUE definitions
 for unknown attributes are ignored with a warning. Received attributes
 that were skipped are decoded as undefined attributes.
 
+Strict loading
+--------------
+
+A :class:`Dictionary` created with ``strict=True`` (or a strict
+:meth:`Dictionary.ReadDictionary` call) merges dictionary files without
+letting a later definition change how the same wire bytes are interpreted.
+
+A new ATTRIBUTE must not contradict an earlier one. It conflicts, and
+raises :class:`DictionaryConflictError`, when:
+
+- an attribute name is bound to another vendor/code or TLV parent path,
+- a vendor/code (the key of the attribute in a packet), including a
+  ``(vendor, code)`` or TLV ``(parent, code)`` key, is already defined
+  with another data type, ``encrypt`` or ``has_tag`` option, or
+- the data type, ``encrypt`` flag, ``has_tag`` flag or TLV parent of the
+  same attribute differs.
+
+Definitions with the same meaning are accepted: an exact duplicate, and
+an alias, which is another name for an attribute with the identical key,
+type, flags and TLV parent. An alias resolves to the same
+:class:`Attribute` object. Likewise a VENDOR may be repeated with the same
+id and format, and a VALUE may add another name for the same encoded
+value; giving an existing VALUE name another encoded value conflicts.
+
+Every strict :meth:`~Dictionary.ReadDictionary` call is an atomic
+transaction, including its ``$INCLUDE`` files and the deferred VALUE
+definitions resolved at the end of the load. Any failure rolls the whole
+call back, restoring the previous vendors, attributes and bidirectional
+index, so no index entry can be left pointing at a half-loaded object.
+The error carries the file and line of both conflicting definitions.
+
 The data types currently supported, and the Python values used for them in
 packets:
 
@@ -206,6 +237,44 @@ class ParseError(Exception):
         return str
 
 
+def _format_location(file, line):
+    """Render a (file, line) definition location for an error message."""
+    loc = file or ''
+    if line > -1:
+        loc += '(%d)' % line
+    return loc or '<unknown>'
+
+
+class DictionaryConflictError(ParseError):
+    """Two dictionary definitions disagree on the same wire data.
+
+    Raised only by a strict :class:`Dictionary` (``strict=True``) when a
+    newly read definition cannot be merged with an earlier one without
+    changing how the same wire bytes are interpreted. It is a subclass of
+    :exc:`ParseError`, so code handling :exc:`ParseError` keeps working.
+
+    In addition to the location of the conflicting definition (``file`` and
+    ``line``) the location of the earlier definition is available as
+    :attr:`other_file` and :attr:`other_line`.
+
+    :ivar other_file: name of the file of the earlier definition, or ``''``
+    :vartype other_file: str
+    :ivar other_line: line number of the earlier definition, or -1
+    :vartype other_line: int
+    """
+
+    def __init__(self, msg=None, other_file='', other_line=-1, **data):
+        ParseError.__init__(self, msg, **data)
+        self.other_file = other_file
+        self.other_line = other_line
+
+    def __str__(self):
+        text = ParseError.__str__(self)
+        text += '; previous definition at %s' % _format_location(
+            self.other_file, self.other_line)
+        return text
+
+
 class Attribute(object):
     """The definition of an attribute in a :class:`Dictionary`.
 
@@ -232,10 +301,14 @@ class Attribute(object):
     :vartype parent: Attribute or None
     :ivar is_sub_attribute: the attribute is a sub-attribute of a TLV
     :vartype is_sub_attribute: bool
+    :ivar file: name of the dictionary file defining the attribute, or ``''``
+    :vartype file: str
+    :ivar line: line number of the definition, or -1
+    :vartype line: int
     """
 
     def __init__(self, name, code, datatype, is_sub_attribute=False, vendor='', values=None,
-                 encrypt=0, has_tag=False):
+                 encrypt=0, has_tag=False, file='', line=-1):
         if datatype not in DATATYPES:
             raise ValueError('Invalid data type')
         self.name = name
@@ -248,6 +321,10 @@ class Attribute(object):
         self.sub_attributes = {}
         self.parent = None
         self.is_sub_attribute = is_sub_attribute
+        self.file = file
+        self.line = line
+        # (file, line) of a VALUE definition, by value name
+        self._value_origins = {}
         if values:
             for (key, value) in values.items():
                 self.values.Add(key, value)
@@ -261,6 +338,16 @@ class Dictionary:
     order, see :meth:`ReadDictionary`. ``dictionary['User-Name']`` returns
     the :class:`Attribute` of that name and ``'User-Name' in dictionary``
     checks whether it is defined.
+
+    With ``strict=True`` the dictionary is loaded strictly: every
+    :meth:`ReadDictionary` call is an all-or-nothing transaction, and a
+    definition that would make the same name, vendor/code, TLV parent path
+    or type options mean something different than an earlier definition
+    raises :class:`DictionaryConflictError` instead of silently overriding
+    it. A failed load leaves the dictionary exactly as it was before the
+    call. Definitions with the same meaning, including an alias (another
+    name for the exact same attribute) and another VALUE name for the same
+    encoded value, remain allowed.
 
     :ivar attributes: attributes by name
     :vartype attributes: dict[str, Attribute]
@@ -276,14 +363,21 @@ class Dictionary:
         because pyrad does not support them; using them raises a
         :exc:`KeyError`
     :vartype skipped_attributes: set[str]
+    :ivar strict: conflicting definitions raise
+        :class:`DictionaryConflictError` instead of overriding earlier ones,
+        and a failed :meth:`ReadDictionary` rolls back completely
+    :vartype strict: bool
     """
 
-    def __init__(self, dict=None, *dicts):
+    def __init__(self, dict=None, *dicts, strict=False):
         """
         :param dict: path of a dictionary file or file-like object to read
         :type  dict: str or io.TextIOBase
         :param dicts: further dictionary files to read
         :type  dicts: str or io.TextIOBase
+        :param strict: reject conflicting definitions and make each load
+            atomic; see the class description
+        :type  strict: bool
         """
         self.vendors = bidict.BiDict()
         self.vendors.Add('', 0)
@@ -299,6 +393,9 @@ class Dictionary:
         # (vendor code, attribute code) of skipped top-level attributes,
         # whose sub-attributes are skipped as well
         self._skipped_codes = set()
+        # (file, line) of a VENDOR definition, by vendor name
+        self._vendor_origins = {'': ('', -1)}
+        self.strict = strict
 
         if dict:
             self.ReadDictionary(dict)
@@ -322,6 +419,154 @@ class Dictionary:
         state['skipped'].append(reason)
         logger.debug('%s(%d): skipping attribute %s: %s',
                      state['file'], state['line'], name, reason)
+
+    def _snapshot(self):
+        """Return a snapshot of every piece of mergeable dictionary state.
+
+        Used to roll a strict load back when it fails. The index and vendor
+        maps are copied with their own (immutable) keys and values, while
+        :class:`Attribute` objects are shared: a restore keeps the original
+        objects and re-links the TLV parent pointers and the TLV registry
+        back onto them, so no index entry can end up pointing at a different
+        object than the restored dictionary.
+        """
+        vendors = bidict.BiDict()
+        vendors.forward = self.vendors.forward.copy()
+        vendors.backward = self.vendors.backward.copy()
+        attrindex = bidict.BiDict()
+        attrindex.forward = self.attrindex.forward.copy()
+        attrindex.backward = self.attrindex.backward.copy()
+
+        def clone_bidict(source):
+            cloned = bidict.BiDict()
+            cloned.forward = source.forward.copy()
+            cloned.backward = source.backward.copy()
+            return cloned
+
+        # per-attribute mutable maps, restored onto the same objects so a
+        # VALUE or sub-attribute added by a failed load does not survive
+        attr_state = {
+            name: (clone_bidict(attrdef.values),
+                   attrdef.sub_attributes.copy(),
+                   attrdef._value_origins.copy())
+            for (name, attrdef) in self.attributes.items()
+        }
+        return {
+            'vendors': vendors,
+            'attrindex': attrindex,
+            'attributes': self.attributes.copy(),
+            'attr_state': attr_state,
+            'defer_parse': self.defer_parse.copy(),
+            'skipped_attributes': self.skipped_attributes.copy(),
+            '_unsupported_vendors': self._unsupported_vendors.copy(),
+            '_tlvs': self._tlvs.copy(),
+            '_skipped_codes': self._skipped_codes.copy(),
+            '_vendor_origins': self._vendor_origins.copy(),
+        }
+
+    def _restore(self, snapshot):
+        """Restore the dictionary to a snapshot taken before a load."""
+        self.vendors = snapshot['vendors']
+        self.attrindex = snapshot['attrindex']
+        self.attributes = snapshot['attributes']
+        self.defer_parse = snapshot['defer_parse']
+        self.skipped_attributes = snapshot['skipped_attributes']
+        self._unsupported_vendors = snapshot['_unsupported_vendors']
+        self._tlvs = snapshot['_tlvs']
+        self._skipped_codes = snapshot['_skipped_codes']
+        self._vendor_origins = snapshot['_vendor_origins']
+
+        # restore the per-attribute VALUE and sub-attribute maps
+        for (name, attrdef) in self.attributes.items():
+            (values, sub_attributes, value_origins) = snapshot['attr_state'][name]
+            attrdef.values = values
+            attrdef.sub_attributes = sub_attributes
+            attrdef._value_origins = value_origins
+
+        # the TLV registry and the sub-attribute parent pointers must refer
+        # to the same restored Attribute objects as ``attributes``
+        for (key, tlv) in list(self._tlvs.items()):
+            restored = self.attributes.get(tlv.name)
+            if restored is not None:
+                self._tlvs[key] = restored
+        for attrdef in self.attributes.values():
+            if attrdef.is_sub_attribute and attrdef.parent is not None:
+                attrdef.parent = self.attributes[attrdef.parent.name]
+
+    @staticmethod
+    def _same_definition(existing, datatype, vendor, encrypt, has_tag, parent):
+        """Whether a new attribute defines the exact same meaning as an
+        existing one, in which case it is a harmless duplicate or alias.
+        """
+        return (existing.type == datatype
+                and existing.vendor == vendor
+                and existing.encrypt == encrypt
+                and existing.has_tag == has_tag
+                and existing.parent is parent)
+
+    def _conflict(self, state, msg, other):
+        """Raise a DictionaryConflictError naming both definitions.
+
+        :param other: the earlier :class:`Attribute`, or a ``(file, line)``
+            tuple for definitions that are not attributes
+        """
+        if isinstance(other, Attribute):
+            other_file = other.file
+            other_line = other.line
+        else:
+            (other_file, other_line) = other
+        raise DictionaryConflictError(
+            msg, file=state['file'], line=state['line'],
+            other_file=other_file, other_line=other_line)
+
+    def _check_attribute(self, state, name, key, datatype, vendor,
+                         encrypt, has_tag, parent):
+        """Validate an attribute definition against earlier ones in strict
+        mode.
+
+        Returns the existing :class:`Attribute` when the new definition is
+        an allowed duplicate or alias (the caller registers the name without
+        building a second object), or ``None`` for a genuinely new
+        attribute. Raises :class:`DictionaryConflictError` on a real
+        conflict.
+        """
+        existing_by_name = self.attributes.get(name)
+        existing_by_key = None
+        if self.attrindex.HasBackward(key):
+            existing_by_key = self.attributes[self.attrindex.GetBackward(key)]
+
+        if existing_by_name is not None \
+                and self.attrindex.HasForward(name) \
+                and self.attrindex.GetForward(name) != key:
+            self._conflict(
+                state,
+                'attribute %s is already defined with key %r, not key %r'
+                % (name, self.attrindex.GetForward(name), key),
+                existing_by_name)
+
+        if existing_by_name is not None \
+                and existing_by_key is not None \
+                and existing_by_name is not existing_by_key:
+            self._conflict(
+                state,
+                'key %r is already defined as %s, not as %s'
+                % (key, existing_by_key.name, name),
+                existing_by_key)
+
+        existing = existing_by_name if existing_by_name is not None \
+            else existing_by_key
+        if existing is None:
+            return None
+
+        if not self._same_definition(existing, datatype, vendor, encrypt,
+                                     has_tag, parent):
+            self._conflict(
+                state,
+                'attribute %s conflicts with %s on key %r: different type, '
+                'flags or TLV parent'
+                % (name, existing.name, key),
+                existing)
+        return existing
 
     def __ParseAttribute(self, state, tokens):
         if len(tokens) not in [4, 5]:
@@ -437,18 +682,36 @@ class Dictionary:
             else:
                 key = code
 
+        if state['strict']:
+            existing = self._check_attribute(
+                state, attribute, key, datatype, vendor, encrypt,
+                has_tag, parent if is_sub_attribute else None)
+            if existing is not None:
+                # an exact duplicate or a legal alias of an existing
+                # attribute: never create a second object for the same wire
+                # definition
+                if existing.name != attribute:
+                    self.attrindex.Add(attribute, key)
+                    self.attributes[attribute] = existing
+                    if is_sub_attribute:
+                        parent.sub_attributes[code] = attribute
+                return
+
+        attrdef = Attribute(attribute, code, datatype, is_sub_attribute,
+                            vendor, encrypt=encrypt, has_tag=has_tag,
+                            file=state['file'], line=state['line'])
         self.attrindex.Add(attribute, key)
-        self.attributes[attribute] = Attribute(attribute, code, datatype, is_sub_attribute, vendor, encrypt=encrypt, has_tag=has_tag)
+        self.attributes[attribute] = attrdef
         if is_sub_attribute:
             # save sub attribute in parent tlv and update their parent field
             parent.sub_attributes[code] = attribute
-            self.attributes[attribute].parent = parent
+            attrdef.parent = parent
         else:
             # a (re)defined top-level attribute replaces a skipped attribute
             # or TLV with the same code
             self._skipped_codes.discard((vendor_code, code))
             if datatype == 'tlv':
-                self._tlvs[(vendor_code, code)] = self.attributes[attribute]
+                self._tlvs[(vendor_code, code)] = attrdef
             else:
                 self._tlvs.pop((vendor_code, code), None)
 
@@ -485,7 +748,17 @@ class Dictionary:
                              % (tokens[3], attr, e),
                              file=state['file'],
                              line=state['line'])
-        self.attributes[attr].values.Add(key, value)
+
+        if state['strict'] and adef.values.HasForward(key) \
+                and adef.values.GetForward(key) != value:
+            self._conflict(
+                state,
+                'value %s of attribute %s redefined with another encoded '
+                'value' % (key, attr),
+                adef._value_origins[key])
+
+        adef.values.Add(key, value)
+        adef._value_origins[key] = (state['file'], state['line'])
 
     def __ParseVendor(self, state, tokens):
         if len(tokens) not in [3, 4]:
@@ -496,6 +769,8 @@ class Dictionary:
 
         (vendorname, vendor) = tokens[1:3]
 
+        # the default format is the RFC 2865 one (1,1), which is supported
+        new_supported = True
         # pyrad only encodes the RFC 2865 vendor attribute format (1 octet
         # type, 1 octet length), attributes of vendors with another format
         # are skipped
@@ -523,10 +798,7 @@ class Dictionary:
                     'Unknown vendor format specification %s' % (fmt[1]),
                     file=state['file'],
                     line=state['line'])
-            if (token, length, continuation) != (1, 1, False):
-                self._unsupported_vendors.add(vendorname)
-            else:
-                self._unsupported_vendors.discard(vendorname)
+            new_supported = (token, length, continuation) == (1, 1, False)
 
         try:
             vendor_code = int(vendor, 0)
@@ -534,7 +806,38 @@ class Dictionary:
             raise ParseError('Illegal vendor code: ' + vendor,
                              file=state['file'],
                              line=state['line'])
+
+        if state['strict']:
+            currently_supported = vendorname not in self._unsupported_vendors
+            if vendorname in self._vendor_origins:
+                existing_code = self.vendors.GetForward(vendorname)
+                if existing_code != vendor_code:
+                    self._conflict(
+                        state,
+                        'vendor %s redefined with another id (%d instead of '
+                        '%d)' % (vendorname, vendor_code, existing_code),
+                        self._vendor_origins[vendorname])
+                if currently_supported != new_supported:
+                    self._conflict(
+                        state,
+                        'vendor %s redefined with a different attribute '
+                        'format' % vendorname,
+                        self._vendor_origins[vendorname])
+            if self.vendors.HasBackward(vendor_code) and \
+                    self.vendors.GetBackward(vendor_code) != vendorname:
+                self._conflict(
+                    state,
+                    'vendor id %d is already defined as %s' %
+                    (vendor_code, self.vendors.GetBackward(vendor_code)),
+                    self._vendor_origins[
+                        self.vendors.GetBackward(vendor_code)])
+
+        if new_supported:
+            self._unsupported_vendors.discard(vendorname)
+        else:
+            self._unsupported_vendors.add(vendorname)
         self.vendors.Add(vendorname, vendor_code)
+        self._vendor_origins[vendorname] = (state['file'], state['line'])
 
     def __ParseBeginVendor(self, state, tokens):
         if len(tokens) not in [2, 3]:
@@ -587,14 +890,23 @@ class Dictionary:
     def ReadDictionary(self, file):
         """Read a dictionary file.
 
-        Its definitions are merged into the dictionary; later definitions
-        replace earlier ones. Unsupported attributes are skipped, listed in
-        ``skipped_attributes``, and reported with one warning on the
-        ``pyrad`` logger.
+        Its definitions are merged into the dictionary. In the default,
+        lenient mode later definitions replace earlier ones. Unsupported
+        attributes are skipped, listed in ``skipped_attributes``, and
+        reported with one warning on the ``pyrad`` logger.
+
+        In strict mode (``strict=True``) the call is atomic: a definition
+        conflicting with an earlier one raises
+        :class:`DictionaryConflictError`, and any other parse failure rolls
+        the whole call back, leaving the previously loaded dictionary
+        intact. Definitions with the same meaning (including legal aliases)
+        are accepted.
 
         :param file: path of a dictionary file or a file-like object
         :type  file: str or io.TextIOBase
         :raises ParseError: for a syntax error or a recursive include
+        :raises DictionaryConflictError: in strict mode, for a definition
+            that changes the meaning of an existing one
         :raises OSError: if a file can't be opened
         """
 
@@ -604,33 +916,40 @@ class Dictionary:
         state['vendor'] = ''
         state['vendor_format'] = None
         state['skipped'] = []
-        self.defer_parse = []
-        for line in fil:
-            state['file'] = fil.File()
-            state['line'] = fil.Line()
-            line = line.split('#', 1)[0].strip()
+        state['strict'] = self.strict
+        snapshot = self._snapshot() if self.strict else None
+        try:
+            self.defer_parse = []
+            for line in fil:
+                state['file'] = fil.File()
+                state['line'] = fil.Line()
+                line = line.split('#', 1)[0].strip()
 
-            tokens = line.split()
-            if not tokens:
-                continue
+                tokens = line.split()
+                if not tokens:
+                    continue
 
-            key = tokens[0].upper()
-            if key == 'ATTRIBUTE':
-                self.__ParseAttribute(state, tokens)
-            elif key == 'VALUE':
-                self.__ParseValue(state, tokens, True)
-            elif key == 'VENDOR':
-                self.__ParseVendor(state, tokens)
-            elif key == 'BEGIN-VENDOR':
-                self.__ParseBeginVendor(state, tokens)
-            elif key == 'END-VENDOR':
-                self.__ParseEndVendor(state, tokens)
+                key = tokens[0].upper()
+                if key == 'ATTRIBUTE':
+                    self.__ParseAttribute(state, tokens)
+                elif key == 'VALUE':
+                    self.__ParseValue(state, tokens, True)
+                elif key == 'VENDOR':
+                    self.__ParseVendor(state, tokens)
+                elif key == 'BEGIN-VENDOR':
+                    self.__ParseBeginVendor(state, tokens)
+                elif key == 'END-VENDOR':
+                    self.__ParseEndVendor(state, tokens)
 
-        for state, tokens in self.defer_parse:
-            key = tokens[0].upper()
-            if key == 'VALUE':
-                self.__ParseValue(state, tokens, False)
-        self.defer_parse = []
+            for deferred_state, tokens in self.defer_parse:
+                key = tokens[0].upper()
+                if key == 'VALUE':
+                    self.__ParseValue(deferred_state, tokens, False)
+            self.defer_parse = []
+        except BaseException:
+            if self.strict:
+                self._restore(snapshot)
+            raise
 
         if state['skipped']:
             reasons = sorted(set(state['skipped']))

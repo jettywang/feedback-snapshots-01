@@ -6,6 +6,9 @@
   .. autoclass:: ParseError
     :members:
 
+  .. autoclass:: DictionaryConflictError
+    :members:
+
   .. autoclass:: Dictionary
     :members:
 
