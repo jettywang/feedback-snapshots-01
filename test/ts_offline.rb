@@ -53,6 +53,7 @@ TESTS = %w(
     review_followup_transport
     review_transport_native
     review_packet_contracts
+    final_review_fixes
     cancelled_send_capacity
     review_code_mapper
     review_presentation
@@ -124,6 +125,7 @@ if have_open_ssl?
   require_relative 'tc_key_cache_identity.rb'
   require_relative 'tc_dnssec_budget.rb'
   require_relative 'tc_dnssec_cache_lifetime.rb'
+  require_relative 'tc_dnssec_cache_bounds.rb'
   require_relative 'tc_dnssec_wildcard_proofs.rb'
   require_relative 'tc_dnssec_alias_validation.rb'
   require_relative 'tc_dnssec_denial_proofs.rb'

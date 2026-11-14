@@ -97,6 +97,13 @@ any DNSSEC or timeout settings your application uses.
   depends on exact converted names.
   [PR #224](https://github.com/alexdalitz/dnsruby/pull/224).
 
+Zone files now resolve relative `$ORIGIN` directives and SOA names against the
+current origin, including names with an escaped final dot. TXT records preserve
+UTF-8 and escaped bytes through wire encoding, and their 255-octet string limit
+is checked before writing. DS, CDS and DLV records preserve private algorithm
+numbers and unknown digest numbers. Name compression also keeps literal dots
+inside labels distinct from the dots that separate labels.
+
 ### More reliable queries and transfers
 
 * TCP pipelining handles concurrent sends, immediate replies, partial writes
@@ -104,7 +111,8 @@ any DNSSEC or timeout settings your application uses.
   slot all respect the controlling query's deadline and cancellation. Malformed
   replies no longer interrupt other queries or cause endless TCP retries.
   UDP reads cannot block after a readiness notification, and changes to TCP
-  pipelining take effect consistently on subsequent attempts.
+  pipelining take effect consistently on subsequent attempts. Updating a source
+  port pool no longer briefly exposes an empty pool to concurrent sends.
   [#155](https://github.com/alexdalitz/dnsruby/issues/155).
 * Cancellation and timeouts wake waiting queries promptly, including while
   validation or nameserver discovery is running. Late replies or callbacks
@@ -137,6 +145,11 @@ any DNSSEC or timeout settings your application uses.
 
 ### Authentication, DNSSEC and caching
 
+* Positive answers are kept separate for different upstream servers, ports,
+  source settings and query options. Truncated replies are not cached. A
+  recursor follows one delegation that encloses the question and still accepts
+  valid sibling glue from the parent zone.
+
 * TSIG queries always require a fresh authenticated exchange and bypass the
   shared response cache. Unsigned replies and invalid MACs are ignored while
   waiting for a valid reply; if none arrives, the timeout reports the
@@ -154,6 +167,10 @@ any DNSSEC or timeout settings your application uses.
   retaining configured DNSKEY anchors. Removing or expiring a configured anchor
   also removes keys learned from it. Keys sharing a tag can coexist, and an
   unusable matching key does not prevent another from validating the answer.
+  Learned DNSKEY and DS records have size limits, and validation looks up only
+  matching candidates. DS anchors now honor their requested expiration times,
+  just as DNSKEY anchors do. Direct RRset verification can try another trusted
+  verifier when the first has no suitable key.
   [#225](https://github.com/alexdalitz/dnsruby/issues/225).
 * Signed aliases can lead to authenticated unsigned zones and correctly return
   `INSECURE`. CNAME and DNAME chains validate through to the terminal answer,

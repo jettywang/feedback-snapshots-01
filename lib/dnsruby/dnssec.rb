@@ -383,9 +383,22 @@ module Dnsruby
 
 
     def self.verify_rrset(rrset, keys = nil)
-      @@anchor_verifier.verify_rrset(rrset, keys) ||
-        @@root_verifier.verify_rrset(rrset, keys) ||
-        @@dlv_verifier.verify_rrset(rrset, keys)
+      ValidationBudget.with do
+        last_error = nil
+        verified = [@@anchor_verifier, @@root_verifier, @@dlv_verifier].any? do |verifier|
+          ValidationBudget.current.check!
+          begin
+            verifier.verify_rrset(rrset, keys)
+          rescue ValidationLimitError
+            raise
+          rescue VerifyError => error
+            last_error = error
+            false
+          end
+        end
+        raise last_error if !verified && last_error
+        verified
+      end
     end
   end
 end

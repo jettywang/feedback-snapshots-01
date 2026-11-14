@@ -49,7 +49,7 @@ class TestTransportFork < Minitest::Test
         selector.defer_send(sender) { started << true; release.pop }
         started.pop
 
-        pid = fork do
+        child_status = ForkTestHelper.run do
           begin
             # A retained reference must be as safe as fetching the singleton.
             raise 'inherited transaction survived' if selector.query_settings_for_id(:parent_stream)
@@ -110,8 +110,7 @@ class TestTransportFork < Minitest::Test
             exit! 1
           end
         end
-        Process.wait(pid)
-        raise 'fork child failed' unless $?.success?
+        raise 'fork child failed' unless child_status.success?
         raise 'parent descriptor closed' if ([socket, pending_socket] + wakeups).any?(&:closed?)
         raise 'parent transaction discarded' unless selector.query_settings_for_id(inherited_attempt)
         raise 'parent observer discarded' unless klass.class_variable_get(:@@observers).size == 1
@@ -124,8 +123,56 @@ class TestTransportFork < Minitest::Test
         [socket, peer, pending_socket, pending_peer].each { |io| io.close unless io.closed? }
       end
     CHILD
+    source = "require #{File.expand_path('fork_test_helper', __dir__).inspect}\n#{code}"
     stdout, stderr, status = Open3.capture3(RbConfig.ruby, '-I',
-      File.expand_path('../lib', __dir__), '-e', code)
+      File.expand_path('../lib', __dir__), '-e', source)
+    assert(status.success?, "#{stdout}\n#{stderr}")
+    assert_empty(stderr)
+  end
+
+  def test_fork_timeout_reaps_the_child_and_closes_its_output_pipes
+    skip 'fork unavailable' unless Process.respond_to?(:fork)
+    source = <<~RUBY
+      require #{File.expand_path('fork_test_helper', __dir__).inspect}
+      # Start the timer service before forking, as the transport tests do.
+      Timeout.timeout(3) do
+        status = ForkTestHelper.run(timeout: 0.05) { sleep }
+        raise 'stalled child reported success' unless status.exitstatus == 1
+      end
+      begin
+        Process.wait(-1, Process::WNOHANG)
+        raise 'child was not reaped'
+      rescue Errno::ECHILD
+      end
+    RUBY
+    stdout, stderr, status = Open3.capture3(RbConfig.ruby, '-e', source)
+    assert(status.success?, "#{stdout}\n#{stderr}")
+    assert_match(/Timeout::Error/, stderr)
+  end
+
+  def test_parent_interruption_also_reaps_its_waiting_child
+    skip 'fork unavailable' unless Process.respond_to?(:fork)
+    source = <<~RUBY
+      require #{File.expand_path('fork_test_helper', __dir__).inspect}
+      class ParentInterrupted < StandardError; end
+      # This thread exists only in the parent, so the child cannot inherit
+      # a pending Timeout request and finish before the parent is interrupted.
+      interrupter = Thread.new { sleep 0.1; Thread.main.raise ParentInterrupted }
+      begin
+        ForkTestHelper.run { sleep }
+        raise 'parent was not interrupted'
+      rescue ParentInterrupted
+      ensure
+        interrupter.kill
+        interrupter.join
+      end
+      begin
+        Process.wait(-1, Process::WNOHANG)
+        raise 'child was not reaped'
+      rescue Errno::ECHILD
+      end
+    RUBY
+    stdout, stderr, status = Open3.capture3(RbConfig.ruby, '-e', source)
     assert(status.success?, "#{stdout}\n#{stderr}")
     assert_empty(stderr)
   end

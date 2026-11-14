@@ -331,7 +331,7 @@ class ReleaseReviewTransportTest < Minitest::Test
       parent.run
       Timeout.timeout(3) { entered.pop }
       [false, true].each do |retire_first|
-        pid = fork do
+        child_status = ForkTestHelper.run do
           SELECTOR.retire_sender(writer) if retire_first
           child_entered, child_release = Queue.new, Queue.new
           child_queue = Queue.new
@@ -349,8 +349,7 @@ class ReleaseReviewTransportTest < Minitest::Test
           end
           exit! 0
         end
-        Process.wait(pid)
-        raise 'child registration lifecycle failed' unless $?.success?
+        raise 'child registration lifecycle failed' unless child_status.success?
         raise 'child cleared parent registration' unless K.class_variable_get(:@@validations).any? { |queue, _, _| queue.equal?(parent_queue) }
       end
       release << true
@@ -364,7 +363,7 @@ class ReleaseReviewTransportTest < Minitest::Test
 
   def isolated(body)
     options = ''.frozen? ? ['--enable-frozen-string-literal'] : []
-    source = "#{TestPipelineSend::FIXTURE}\nTimeout.timeout(12) do\n#{body}\nend"
+    source = "require #{File.expand_path('fork_test_helper', __dir__).inspect}\n#{TestPipelineSend::FIXTURE}\nTimeout.timeout(12) do\n#{body}\nend"
     stdout, stderr, status = Open3.capture3(RbConfig.ruby, *options, '-I',
       File.expand_path('../lib', __dir__), '-e', source)
     assert(status.success?, "#{stdout}\n#{stderr}")

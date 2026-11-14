@@ -244,6 +244,10 @@ updates and TSIG-signed transactions do not populate them. To disable them, set
 Resolver. `PacketSender.clear_caches` and `Recursor.clear_caches` also invalidate
 these entries.
 
+Positive answers are kept separate for each upstream server, port, source
+configuration and query options, including EDNS. Truncated replies are never
+reused from the cache, so a later query can still retry over TCP when needed.
+
 For each question, Dnsruby makes at most **three attempts per server address per
 transport**, including retries without optional EDNS support. UDP and TCP have
 separate limits. Setting `retry_times` above three is still accepted, but does
@@ -251,6 +255,10 @@ not increase this limit.
 
 Recursor caches also have size limits. Cached delegations expire when their NS
 records expire, even if the associated nameserver addresses have longer TTLs.
+
+Learned DNSKEY and DS records also have size limits. Configured trust anchors
+are kept until you remove them or their requested expiration time arrives;
+this applies to both DNSKEY and DS anchors.
 
 ### Zone transfer deadlines
 

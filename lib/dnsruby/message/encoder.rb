@@ -1,7 +1,7 @@
 module Dnsruby
 class MessageEncoder #:nodoc: all
   def initialize
-    @data = +''
+    @data = ''.b
     @names = {}
     yield self if block_given?
   end
@@ -11,7 +11,7 @@ class MessageEncoder #:nodoc: all
   end
 
   def put_bytes(d)
-    @data << d
+    @data << d.b
   end
 
   def put_pack(template, *d)
@@ -36,12 +36,9 @@ class MessageEncoder #:nodoc: all
   end
 
   def put_string(d)
-    begin
-      self.put_pack("C", d.length)
-      @data << d
-    rescue Encoding::CompatibilityError
-      raise Dnsruby::EncodeError.new("IDN support currently requires punycode string")
-    end
+    raise EncodeError, "Character-string exceeds 255 octets: #{d.bytesize}" if d.bytesize > 255
+    self.put_pack("C", d.bytesize)
+    @data << d.b
   end
 
   def put_string_list(ds)
@@ -63,9 +60,16 @@ class MessageEncoder #:nodoc: all
   end
 
   def put_labels(d, do_canonical)
+    if do_canonical
+      d.each { |label| put_label(label) }
+      @data << "\0"
+      return
+    end
     d.each_index do |i|
-      domain = d[i..-1].join('.')
-      if !do_canonical && (idx = @names[domain]) && idx < 0x4000
+      # A dot can itself be a label octet. Keep label boundaries in the key,
+      # and preserve case because compression must not rewrite presentation.
+      domain = d[i..-1].map { |label| label.string.b.freeze }.freeze
+      if (idx = @names[domain]) && idx < 0x4000
         self.put_pack('n', 0xc000 | idx)
         return
       else
@@ -82,7 +86,7 @@ class MessageEncoder #:nodoc: all
   def put_label(d)
     #       s, = Name.encode(d)
     s = d
-    raise RuntimeError, "length of #{s} is #{s.string.length} (larger than 63 octets)" if s.string.length > 63
+    raise EncodeError, "Label exceeds 63 octets: #{s.string.bytesize}" if s.string.bytesize > 63
     self.put_string(s.string)
   end
 end

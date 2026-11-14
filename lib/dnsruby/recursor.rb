@@ -805,89 +805,51 @@ module Dnsruby
             TheLog.debug(";; _dorecursion() Authoritative answer found")
             return packet
           elsif (authority.length > 0)
-            auth = Hash.new
-            delegation_ttl = nil
-            # 	 foreach my $rr (@authority) {
-            authority.each do |rr|
-              if (rr.type.to_s =~ /^(NS|SOA)$/)
-                server = (rr.type == Types::NS ? rr.nsdname : rr.mname).to_s.downcase
-                server.sub!(/\.*$/, ".")
-                of = rr.name.to_s.downcase
-                of.sub!(/\.*$/, ".")
-                TheLog.debug(";; _dorecursion() Received authority [#{of}] [" + rr.type().to_s + "] [#{server}]")
-                if (of.length <= known_zone.length)
-                  TheLog.debug(";; _dorecursion() Deadbeat name server did not provide new information.")
-                  next
-                # elsif (of =~ /#{known_zone}/)
-                elsif (of == known_zone || known_zone.length == 1 || of.end_with?(".#{known_zone}"))
-                  TheLog.debug(";; _dorecursion() FOUND closer authority for [#{of}] at [#{server}].")
-                  auth[server] ||= AddressCache.new #[] @TODO@ If there is no additional record for this, then we want to use the authority!
-                  if rr.type == Types::NS
-                    delegation_ttl = [delegation_ttl, rr.ttl].compact.min
-                  end
-                  if (rr.type == Types.NS)
-                      if ((packet.additional.rrset(rr.nsdname, Types::A).length == 0) &&
-                            (packet.additional.rrset(rr.nsdname, Types::AAAA).length == 0))
-                        auth[server].push([rr.nsdname, rr.ttl])
-                      end
-                  end
-                else
-                  TheLog.debug(";; _dorecursion() Confused name server [" + @answerfrom.to_s + "] thinks " + of.to_s + " is closer than " + known_zone.to_s + "?")
-                  return nil
-                end
-              else
-                TheLog.debug(";; _dorecursion() Ignoring NON NS entry found in authority section: " + rr.inspect)
-              end
-            end
-            # 	 foreach my $rr ($packet->additional)
-            packet.additional.each do |rr|
-              if (rr.type == Types::CNAME)
-                #  Store this CNAME into %auth too
-                server = rr.name.to_s.downcase
-                if (server)
-                  server.sub!(/\.*$/, ".")
-                  if (auth[server]!=nil && auth[server].length > 0)
-                    cname = rr.cname.to_s.downcase
-                    cname.sub!(/\.*$/, ".")
-                    TheLog.debug(";; _dorecursion() FOUND CNAME authority: " + rr.string)
-                    auth[cname] ||= AddressCache.new # []
-                    auth[server] = auth[cname]
-                    next
-                  end
-
-                end
-              elsif (rr.type == Types::A || rr.type == Types::AAAA)
-                server = rr.name.to_s.downcase
-                if (server)
-                  server.sub!(/\.*$/, ".")
-                  if (auth[server]!=nil)
-                    if (rr.type == Types::A)
-                      TheLog.debug(";; _dorecursion() STORING: #{server} IN A    " + rr.address.to_s)
-                    end
-                    if (rr.type == Types::AAAA)
-                      TheLog.debug(";; _dorecursion() STORING: #{server} IN AAAA " + rr.address.to_s)
-                    end
-                    auth[server].push([rr.address.to_s, rr.ttl])
-                    next
-                  end
-                end
-              end
-              TheLog.debug(";; _dorecursion() Ignoring useless: " + rr.inspect)
-            end
-            if (of =~ /#{known_zone}/)
-              #                   print "Adding #{of} with :\n#{auth}\nto zones_cache\n"
-              @@mutex.synchronize{
-                Recursor.cache_zone(of, auth.dup, delegation_ttl)
-              }
-              return _dorecursion( name, type, klass, of, auth, depth+1, no_validation)
-            else
-              return _dorecursion( name, type, klass, known_zone, known_authorities, depth+1, no_validation )
-            end
+            referral = referral_authorities(packet, known_zone, name, klass)
+            return nil unless referral
+            of, auth, delegation_ttl = referral
+            @@mutex.synchronize { Recursor.cache_zone(of, auth.dup, delegation_ttl) }
+            return _dorecursion(name, type, klass, of, auth, depth + 1, no_validation)
           end
         end
       end
 
       return nil
+    end
+
+    # A referral advances one enclosing delegation. SOA records describe
+    # negative answers; unrelated NS owners must not join this delegation.
+    def referral_authorities(packet, known_zone, question_name, question_class) #:nodoc:
+      parent = Name.create(known_zone)
+      parent.absolute = true
+      question = Name.create(question_name)
+      question.absolute = true
+      klass = Classes.new(question_class)
+      candidates = packet.authority.select do |rr|
+        rr.type == Types::NS && rr.klass == klass && rr.name.subdomain_of?(parent) &&
+          (question == rr.name || question.subdomain_of?(rr.name))
+      end
+      delegation = candidates.max_by { |rr| rr.name.labels.length }&.name
+      return unless delegation
+      records = candidates.select { |rr| rr.name == delegation }
+      authorities = {}
+      records.each do |rr|
+        server = rr.nsdname.to_s(true).downcase
+        addresses = authorities[server] ||= AddressCache.new
+        # RFC 9471 permits sibling glue. Trust addresses within the responding
+        # parent's zone, then look up out-of-bailiwick names independently.
+        glue = packet.additional.select do |address|
+          [Types::A, Types::AAAA].include?(address.type) && address.klass == klass &&
+            address.name == rr.nsdname &&
+            (address.name == parent || address.name.subdomain_of?(parent))
+        end
+        if glue.empty?
+          addresses.push([rr.nsdname, rr.ttl])
+        else
+          glue.each { |address| addresses.push([address.address.to_s, address.ttl]) }
+        end
+      end
+      [delegation.to_s(true).downcase, authorities, records.map(&:ttl).min]
     end
 
     def prune_rrsets_to_rfc5452(packet, zone)

@@ -58,12 +58,19 @@ module Dnsruby
         in_string = false
         count = -1
         strings = []
-        current_binary = ""
+        input_encoding = input.encoding
+        finish_strings = lambda do
+          strings.each do |string|
+            string.force_encoding(input_encoding)
+            string.force_encoding(Encoding::BINARY) unless string.valid_encoding?
+          end
+        end
+        current_binary = +""
         current_quote_char = '"'
         unquoted = false
         seen_strings = false
         pos = 0
-        input = input.sub(/^\s*\(\s*/, "")
+        input = input.b.sub(/^\s*\(\s*/, "")
         input.sub!(/\s*\)\s*$/, "")
         input.each_char {|c|
           if (((c == "'") || (c == '"')) && (!in_escaped) && (!unquoted))
@@ -72,24 +79,24 @@ module Dnsruby
               current_quote_char = c
               in_string = true
               count+=1
-              strings[count] = ""
+              strings[count] = "".b
             else
               if (c == current_quote_char)
                 in_string = false
               else
-                strings[count]+=c
+                strings[count] << c
               end
             end
           else
             if (seen_strings && !in_string)
               if (c == ";")
                  # Comment in zone file!
-                 return strings
+                 return finish_strings.call
               end
               if (c != " " && c != "\t")
                 in_string = true
                 count+=1
-                strings[count] = ""
+                strings[count] = "".b
               else
                 next
               end
@@ -97,11 +104,11 @@ module Dnsruby
             if (pos == 0)
               unquoted = true
               count+=1
-              strings[count] = ""
+              strings[count] = "".b
             elsif (unquoted)
               if (c == " ")
                 count+=1
-                strings[count] = ""
+                strings[count] = "".b
                 pos += 1
                 next
               end
@@ -110,7 +117,7 @@ module Dnsruby
             if (c == "\\")
               if (in_escaped)
                 in_escaped = false
-                strings[count]+=(c)
+                strings[count] << c
               else
                 in_escaped = true
               end
@@ -118,63 +125,48 @@ module Dnsruby
               if (in_escaped)
                 #  Build up the binary
                 if (c == ";") || (c == '"')
-                  strings[count]+=c
+                  strings[count] << c
                   in_escaped = false
                 elsif (ESCAPE_CHARS[c])
                   in_escaped=false
-                  strings[count]+=ESCAPE_CHARS[c].chr
+                  strings[count] << ESCAPE_CHARS[c].chr
                 elsif (c<"0" || c>"9")
                   in_escaped = false
-                  strings[count]+=c
+                  strings[count] << c
                 else
                   #  Must be building up three digit string to identify binary value?
 #                  if (c >= "0" && c <= "9")
-                    current_binary += c
+                    current_binary << c
 #                  end
                   if ((current_binary.length == 3) ) # || (c < "0" || c > "9"))
-                    strings[count]+=current_binary.to_i.chr
+                    strings[count] << current_binary.to_i.chr
                     in_escaped = false
-                    current_binary = ""
+                    current_binary = +""
                   end
                 end
               else
-                strings[count]+=(c)
+                strings[count] << c
               end
             end
           end
           pos += 1
         }
-        return strings
+        finish_strings.call
       end
 
       def TXT.display(str, do_escapes = true)
-        output = ""
-        #  Probably need to scan through each string manually
-        #  Make sure to remember to escape binary characters.
-        #  Go through copying to output, and adding "\" characters as necessary?
-        str.each_byte {|c|
-          if (c == 34) || (c == 92) # || (c == 59)
-            if (do_escapes)
-            output+='\\'
-            end
-            output+=c.chr
-          elsif (c < 32) # c is binary
-            if (ESCAPE_CODES[c])
-              output +=  c.chr
-            else
-              output+= '\\'
-              num = c.to_i.to_s
-              (3-num.length).times {|i|
-                num="0"+num
-              }
-              output+= num # Need a 3 digit number here.
-            end
-
+        output = "".b
+        str.each_byte do |octet|
+          if octet == 34 || octet == 92
+            output << 92 if do_escapes
+            output << octet
+          elsif octet < 32 && !ESCAPE_CODES.key?(octet)
+            output << format('\\%03d', octet)
           else
-            output += c.chr
+            output << octet
           end
-        }
-        return output
+        end
+        output
       end
 
       def rdata_to_string

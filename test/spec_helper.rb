@@ -18,6 +18,9 @@ require 'minitest'
 require 'minitest/autorun'
 require 'minitest/display'
 
+# CI prints the active test and fails with thread backtraces if it stalls.
+require_relative 'ci_watchdog' if ENV.key?('DNSRUBY_TEST_TIMEOUT')
+
 Minitest::Display.options = {
   suite_names: true,
   color: true,

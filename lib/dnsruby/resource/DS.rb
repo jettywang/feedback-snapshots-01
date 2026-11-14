@@ -75,13 +75,10 @@ module Dnsruby
       end
 
       def DS.get_digest_type(d)
-        if (d.instance_of?String)
-          if (d.length == 1)
-            d = d.to_i
-          end
-        end
+        d = d.to_i if d.is_a?(String) && /\A[0-9]+\z/.match?(d)
         begin
           digest = DigestTypes.new(d)
+          raise ArgumentError, 'DS digest type must fit in an unsigned octet' unless (0..255).cover?(digest.code)
           return digest
         rescue ArgumentError => e
           raise DecodeError.new(e)
@@ -89,13 +86,10 @@ module Dnsruby
       end
 
       def algorithm=(a)
-        if (a.instance_of?String)
-          if (a.length < 3)
-            a = a.to_i
-          end
-        end
+        a = a.to_i if a.is_a?(String) && /\A[0-9]+\z/.match?(a)
         begin
           alg = Algorithms.new(a)
+          raise ArgumentError, 'DS algorithm must fit in an unsigned octet' unless (0..255).cover?(alg.code)
           @algorithm = alg
         rescue ArgumentError => e
           raise DecodeError.new(e)
@@ -243,12 +237,12 @@ module Dnsruby
       end
 
       def encode_rdata(msg, canonical=false) #:nodoc: all
-        msg.put_pack("ncc", @key_tag, @algorithm.code, @digest_type.code)
+        msg.put_pack("nCC", @key_tag, @algorithm.code, @digest_type.code)
         msg.put_bytes(@digestbin)
       end
 
       def self.decode_rdata(msg) #:nodoc: all
-        key_tag, algorithm, digest_type = msg.get_unpack("ncc")
+        key_tag, algorithm, digest_type = msg.get_unpack("nCC")
         digest = msg.get_bytes
         return self.new(
           [key_tag, algorithm, digest_type, digest])

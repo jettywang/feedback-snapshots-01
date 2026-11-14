@@ -24,6 +24,10 @@ require 'securerandom'
 # This class should only be used by Dnsruby
 module Dnsruby
   class SingleVerifier # :nodoc: all
+    # Configured anchors are separate; only learned trust is capacity-limited.
+    MAX_LEARNED_KEYS = 4096
+    MAX_LEARNED_DS_RECORDS = 4096
+
     # RRsets carry only serializable provenance, never a verifier, mutex or
     # validation budget. The weak registry lets another verifier check whether
     # the original trust source has since been removed.
@@ -83,17 +87,19 @@ module Dnsruby
       @configured_dnskey_identities = {}
 
       #  The set of keys which are trusted.
-      @trusted_keys = KeyCache.new
+      @trusted_keys = KeyCache.new(max_keys: MAX_LEARNED_KEYS)
       @trusted_key_provenance = {}
 
       #  The set of keys which have been indicated by a DS RRSet which has been
       #  signed by a trusted key. Although we have not yet located these keys, we
       #  have the details (tag and digest) which can identify the keys when we
       #  see them. At that point, they will be added to our trusted keys.
-      @discovered_ds_store = []
+      @discovered_ds_store = DSCache.new(max_records: MAX_LEARNED_DS_RECORDS)
       #  The configured_ds_store is the set of DS records which have been configured
       #  by the client as trust anchors. Use Dnssec#add_trust_anchor to add these
       @configured_ds_store = []
+      @configured_ds_expirations = {}
+      @configured_ds_index = DSCache.new(max_records: nil)
     end
 
     def set_hints(hints)
@@ -180,7 +186,11 @@ module Dnsruby
           @configured_dnskey_identities[identity] = [@configured_dnskey_identities[identity] || expiration, expiration].max
           TheLog.info("Adding trust anchor for #{k.name}")
         elsif ((k.type == Types.DS) || ((k.type == Types.DLV) && (@verifier_type == VerifierType::DLV)))
-          @configured_ds_store.push(k)
+          identity = ds_identity(k)
+          previous = @configured_ds_expirations[identity]
+          @configured_ds_store.push(k) unless previous
+          @configured_ds_expirations[identity] = [previous || expiration, expiration].max
+          index_configured_ds
         end
       end
     end
@@ -191,8 +201,13 @@ module Dnsruby
         removed = if (t.type == Types.DNSKEY)
           configured = @configured_dnskey_identities.delete(KeyCache.key_identity(t))
           @trust_anchors.delete(t)
-        else
-          @configured_ds_store.delete(t)
+        elsif t.type == Types.DS || t.type == Types.DLV
+          identity = ds_identity(t)
+          configured = @configured_ds_expirations.delete(identity)
+          found = @configured_ds_store.find { |record| ds_identity(record) == identity }
+          @configured_ds_store.delete(found) if found
+          index_configured_ds
+          found
         end
         # Cached keys and in-flight discoveries may depend on this anchor.
         clear_learned_keys if removed || configured
@@ -205,6 +220,8 @@ module Dnsruby
         @trust_anchors = KeyCache.new
         @configured_dnskey_identities = {}
         @configured_ds_store = []
+        @configured_ds_expirations = {}
+        index_configured_ds
         clear_learned_keys
       end
     end
@@ -227,17 +244,37 @@ module Dnsruby
     end
 
     # Caller holds @trust_mutex. As with explicit removal, cached descendants
-    # cannot outlive a configured DNSKEY anchor. Other configured anchors remain
+    # cannot outlive a configured anchor. Other configured anchors remain
     # available and can establish fresh trust without retaining stale descendants.
     def expire_trust_anchors
       now = Time.now.to_i
-      expired = @configured_dnskey_identities.any? { |_identity, expiration| expiration <= now }
+      expired = @configured_dnskey_identities.any? { |_identity, expiration| expiration <= now } ||
+        @configured_ds_expirations.any? { |_identity, expiration| expiration <= now }
       return unless expired
       @configured_dnskey_identities.delete_if { |_identity, expiration| expiration <= now }
       @trust_anchors.remove_expired_keys
+      @configured_ds_expirations.delete_if { |_identity, expiration| expiration <= now }
+      @configured_ds_store.select! { |record| @configured_ds_expirations.key?(ds_identity(record)) }
+      index_configured_ds
       clear_learned_keys
     end
-    private :expire_trust_anchors
+    def ds_identity(record)
+      [record.name.canonical.freeze, record.klass.code, record.type.code,
+        record.key_tag, record.algorithm.code, record.digest_type.code, record.digestbin&.dup&.freeze].freeze
+    end
+
+    # Caller holds @trust_mutex. Configured anchors are never capacity-evicted.
+    def index_configured_ds
+      @configured_ds_index = DSCache.new(max_records: nil)
+      @configured_ds_store.group_by { |record| DSCache.set_identity(record) }.each_value do |records|
+        rrset = RRSet.new
+        # Explicit anchors keep their configured objects and TTLs. Their
+        # deadlines are tracked separately from RRset TTL normalization.
+        records.each { |record| rrset.privateAdd(record) }
+        @configured_ds_index.add(rrset, Float::INFINITY)
+      end
+    end
+    private :expire_trust_anchors, :ds_identity, :index_configured_ds
 
     #  Check that the RRSet and RRSIG record are compatible
     def check_rr_data(rrset, sigrec)#:nodoc: all
@@ -334,6 +371,7 @@ module Dnsruby
             end
           end
         end
+        @trusted_key_provenance.delete_if { |identity, _trust| !@trusted_keys.include_identity?(identity) }
         result
       end
     end
@@ -341,7 +379,10 @@ module Dnsruby
     def add_root_ds(ds)
       @trust_mutex.synchronize do
         @trust_configuration_generation += 1
-        @configured_ds_store.push(ds)
+        identity = ds_identity(ds)
+        @configured_ds_store.push(ds) unless @configured_ds_expirations.key?(identity)
+        @configured_ds_expirations[identity] = Float::INFINITY
+        index_configured_ds
       end
     end
 
@@ -350,24 +391,25 @@ module Dnsruby
       @trust_mutex.synchronize do
         clear_learned_keys
         @configured_ds_store = []
+        @configured_ds_expirations = {}
+        index_configured_ds
       end
     end
 
     # Caller holds @trust_mutex, also used by every learned-trust publication.
     def clear_learned_keys
       @trust_generation += 1
-      @trusted_keys = KeyCache.new
+      @trusted_keys = KeyCache.new(max_keys: MAX_LEARNED_KEYS)
       @trusted_key_provenance = {}
       @res = nil
-      @discovered_ds_store = []
+      @discovered_ds_store = DSCache.new(max_records: MAX_LEARNED_DS_RECORDS)
     end
     private :clear_learned_keys
 
     def trusted_keys
       keys, configured, discovered = @trust_mutex.synchronize do
         expire_trust_anchors
-        @discovered_ds_store.reject! { |expiration, _rrset| expiration <= Time.now.to_i }
-        [cached_trust_keys, @configured_ds_store.dup, @discovered_ds_store.map(&:last)]
+        [cached_trust_keys, @configured_ds_store.dup, @discovered_ds_store.rrsets]
       end
       keys.select { |key| usable_cached_key?(key) } + configured +
         discovered.select { |rrset| usable_provenance?(learned_provenance(rrset)) }.flat_map(&:rrs)
@@ -456,10 +498,11 @@ module Dnsruby
     end
 
     # Caller holds @trust_mutex. Keep provenance bounded by the live key cache.
-    def cached_trust_keys
-      keys = @trusted_keys.keys
-      identities = keys.to_h { |key| [KeyCache.key_identity(key), true] }
-      @trusted_key_provenance.delete_if { |identity, _provenance| !identities.key?(identity) }
+    def cached_trust_keys(signatures = nil)
+      keys = signatures ? @trusted_keys.matching_keys(signatures) : @trusted_keys.keys
+      unless signatures
+        @trusted_key_provenance.delete_if { |identity, _trust| !@trusted_keys.include_identity?(identity) }
+      end
       keys
     end
 
@@ -1018,10 +1061,7 @@ module Dnsruby
               same_set = lambda { |set| set.name == ds_rrset.name && set.klass == ds_rrset.klass && set.type == ds_rrset.type }
               trust_operation[:ds].reject! { |set, _trust| same_set.call(set) }
               trust_operation[:ds] << [ds_rrset, provenance]
-              @discovered_ds_store.reject! { |_expiration, set| same_set.call(set) }
-              if provenance.expiration > Time.now.to_i
-                @discovered_ds_store.push([provenance.expiration, ds_rrset])
-              end
+              @discovered_ds_store.add(ds_rrset, provenance.expiration)
             end
           end
           return true
@@ -1070,11 +1110,9 @@ module Dnsruby
     def ds_candidate_keys(key_rrset, explicit_ds = nil)
       configured, discovered = @trust_mutex.synchronize do
         expire_trust_anchors
-        @discovered_ds_store.reject! { |expiration, _rrset| expiration <= Time.now.to_i }
-        [@configured_ds_store.dup, @discovered_ds_store.map(&:last)]
+        [@configured_ds_index.matching_rrsets(key_rrset.rrs), @discovered_ds_store.matching_rrsets(key_rrset.rrs)]
       end
-      stores = configured.group_by { |ds| [ds.name.canonical, ds.klass.code, ds.type.code] }.
-        values.map { |records| [nil, preferred_ds_records(records)] }
+      stores = configured.map { |rrset| [nil, preferred_ds_records(rrset.rrs)] }
       stores.concat(discovered.filter_map do |rrset|
         provenance = learned_provenance(rrset)
         [admit_provenance(provenance), preferred_ds_records(rrset.rrs)] if usable_provenance?(provenance)
@@ -1094,10 +1132,23 @@ module Dnsruby
         end
         raise VerifyError, 'Learned DS trust is no longer valid' if stores.empty?
       end
+      # Apply digest preference above to whole RRsets before indexing. Otherwise
+      # an unrelated SHA-256 record could accidentally permit a SHA-1 fallback.
+      indexed = {}
+      stores.each do |provenance, records|
+        records.each do |record|
+          candidate = DSCache.candidate_identity(record)
+          (indexed[candidate] ||= []) << [provenance, record]
+        end
+      end
       candidates = {}
       key_rrset.rrs.each do |key|
-        stores.each do |provenance, records|
-          next unless records.any? { |ds| ValidationBudget.current&.check!(1); ds.check_key(key) }
+        matches = [key.name.canonical, nil].flat_map do |owner|
+          indexed[[owner, key.klass.code, key.algorithm.code, key.key_tag]] || []
+        end
+        matches.each do |provenance, ds|
+          ValidationBudget.current&.check!(1)
+          next unless ds.check_key(key)
           identity = KeyCache.key_identity(key)
           previous = candidates[identity]
           if !previous || (previous.last && (!provenance || provenance.expiration > previous.last.expiration))
@@ -1109,10 +1160,11 @@ module Dnsruby
     end
     private :ds_candidate_keys
 
-    def get_keys_to_check # :nodoc:
+    def get_keys_to_check(signatures = nil) # :nodoc:
       anchors, keys = @trust_mutex.synchronize do
         expire_trust_anchors
-        [@trust_anchors.keys, cached_trust_keys]
+        [signatures ? @trust_anchors.matching_keys(signatures) : @trust_anchors.keys,
+          cached_trust_keys(signatures)]
       end
       local = (trust_operation&.fetch(:keys)&.values || []).filter_map do |key, provenance|
         key if usable_provenance?(provenance)
@@ -1139,19 +1191,21 @@ module Dnsruby
       if (enumerator.class == RRSet)
         enumerator = enumerator.rrs
       end
+      signatures_by_key = sigrecs.group_by do |sig|
+        KeyCache.candidate_identity(sig.signers_name, sig.klass, sig.algorithm, sig.key_tag)
+      end
       enumerator.each {|key|
+        ValidationBudget.current&.check!(1)
         next if trust_operation&.fetch(:operational, false) && !OPERATIONAL_ALGORITHMS.include?(key.algorithm)
         if ((key.revoked?)) # || (key.bad_flags?))
           next
         end
 
-        sigrecs.each {|sig|
+        candidate = KeyCache.candidate_identity(key.name, key.klass, key.algorithm, key.key_tag)
+        (signatures_by_key[candidate] || []).each do |sig|
           ValidationBudget.current&.check!(1)
-          if key.key_tag == sig.key_tag && key.algorithm == sig.algorithm &&
-              key.name.canonical == sig.signers_name.canonical && key.klass == sig.klass
-            yield key, sig
-          end
-        }
+          yield key, sig
+        end
       }
     end
     private :each_matching_key
@@ -1184,6 +1238,7 @@ module Dnsruby
       raise ArgumentError.new("Expecting DNSKEY, DLV, DS, RRSet, Array or nil for keys : got #{keys.class} instead") if
       (keys && (![Array, RR::IN::DNSKEY, RR::IN::DLV, RR::IN::DS].include?keys.class) && (keys.class != RRSet))
 
+      proof_keys = keys
       explicit_keys = !keys.nil?
       explicit_provenance = admit_learned_rrset(keys)
       # Wrap a single DS or DLV record without losing its learned provenance.
@@ -1199,7 +1254,7 @@ module Dnsruby
         ds_keys = ds_candidate_keys(rrset, explicit_ds)
       end
       if keys.nil? || explicit_ds
-        keys = get_keys_to_check + ds_keys.values.map(&:first)
+        keys = get_keys_to_check(sigrecs) + ds_keys.values.map(&:first)
       end
 
       error = VerifyError.new("Signing key not found")
@@ -1224,7 +1279,7 @@ module Dnsruby
             rr.instance_variable_get(:@dnsruby_authenticated_expiration)
           end.compact
           verify_rrset_with_key(rrset, keyrec, sigrec, canonical_data)
-          check_wildcard_proof(rrset, sigrec, keys, context) if context[:message]
+          check_wildcard_proof(rrset, sigrec, proof_keys, context) if context[:message]
           if parent_provenance && !usable_provenance?(parent_provenance)
             raise VerifyError, 'Learned trust expired during verification'
           end
@@ -1572,11 +1627,10 @@ module Dnsruby
       root = Name.create(".")
       configured, keys, discovered = @trust_mutex.synchronize do
         expire_trust_anchors
-        @discovered_ds_store.reject! { |expiration, _rrset| expiration <= Time.now.to_i }
         configured_ds = @configured_ds_store.group_by do |ds|
           [ds.name.canonical, ds.klass.code, ds.type.code]
         end.values.map { |records| RRSet.new(records) }
-        [@trust_anchors.keys + configured_ds, cached_trust_keys, @discovered_ds_store.map(&:last)]
+        [@trust_anchors.keys + configured_ds, cached_trust_keys, @discovered_ds_store.rrsets]
       end
       anchors = configured + keys.select { |key| usable_cached_key?(key) } +
         discovered.select { |rrset| usable_provenance?(learned_provenance(rrset)) }

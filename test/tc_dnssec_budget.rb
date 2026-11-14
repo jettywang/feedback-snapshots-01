@@ -397,19 +397,19 @@ class DnssecBudgetTest < Minitest::Test
       job.define_singleton_method(:do_validate) { completed << true }
       raise 'initial admission failed' unless Dnsruby::ValidatorThread.enqueue(job)
       Timeout.timeout(3) { completed.pop }
-      pid = fork do
+      child_status = ForkTestHelper.run do
         raise 'child rejected' unless Dnsruby::ValidatorThread.enqueue(job)
         Timeout.timeout(3) { completed.pop }
         exit! 0
       end
-      Process.wait(pid)
-      raise 'child worker did not run' unless $?.success?
+      raise 'child worker did not run' unless child_status.success?
       # Emulate external termination of otherwise idle workers.
       Dnsruby::ValidatorThread.instance_variable_get(:@workers).each { |worker| worker.kill; worker.join }
       raise 'replacement rejected' unless Dnsruby::ValidatorThread.enqueue(job)
       Timeout.timeout(3) { completed.pop }
     RUBY
-    stdout, stderr, status = Open3.capture3(RbConfig.ruby, '-I', File.expand_path('../lib', __dir__), '-e', code)
+    source = "require #{File.expand_path('fork_test_helper', __dir__).inspect}\n#{code}"
+    stdout, stderr, status = Open3.capture3(RbConfig.ruby, '-I', File.expand_path('../lib', __dir__), '-e', source)
     assert(status.success?, "#{stdout}\n#{stderr}")
     assert_empty(stderr)
   end

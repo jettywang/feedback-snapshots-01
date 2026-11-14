@@ -97,6 +97,7 @@ module Dnsruby
     end
 
     def add(message, scope: nil, error: nil)
+      return if message.header.tc
       q = message.question.first
       return unless q
       soa = Cache.negative_soa(message)

@@ -10,12 +10,14 @@ class ReviewPacketContractsTest < Minitest::Test
         writer.define_singleton_method(:send_dnsruby) { |*args| sent << args }
         internet = cache_query('IN')
         internet.header.rd = recursive
-        Dnsruby::PacketSender.cache(internet, answer(internet, 'internet'))
+        writer.make_query_packet(internet)
+        Dnsruby::PacketSender.cache(internet, answer(internet, 'internet'), scope: writer.positive_cache_scope(internet))
         chaos = cache_query('CH')
         chaos.header.rd = recursive
         writer.send_async(chaos, Queue.new, :miss)
         raise 'wrong class hit cached IN answer' unless sent.length == 1
-        Dnsruby::PacketSender.cache(chaos, answer(chaos, 'chaos'))
+        writer.make_query_packet(chaos)
+        Dnsruby::PacketSender.cache(chaos, answer(chaos, 'chaos'), scope: writer.positive_cache_scope(chaos))
         [['CH', 'chaos'], ['IN', 'internet']].each do |klass, text|
           queue = Queue.new
           writer.send_async(cache_query(klass), queue, klass)
@@ -42,7 +44,8 @@ class ReviewPacketContractsTest < Minitest::Test
           writer.define_singleton_method(:send_dnsruby) { |*args| sent << args }
           plain = cache_query('IN')
           plain.header.rd = recursive
-          Dnsruby::PacketSender.cache(plain, answer(plain, 'unsigned cache'))
+          writer.make_query_packet(plain)
+          Dnsruby::PacketSender.cache(plain, answer(plain, 'unsigned cache'), scope: writer.positive_cache_scope(plain))
           key = signing_key
           signed = cache_query('IN')
           signed.header.rd = recursive

@@ -25,11 +25,8 @@ module Dnsruby
     #  Create a new ZoneReader. The zone origin is required. If the desired SOA minimum
     #  and TTL are passed in, then they are used as default values.
     def initialize(origin, soa_minimum = nil, soa_ttl = nil)
-      @origin = origin.to_s
-
-      if (!Name.create(@origin).absolute?)
-        @origin = @origin.to_s + "."
-      end
+      origin_name = parse_zone_name(origin)
+      @origin = Name.new(origin_name.labels, true).to_s(true)
       @soa_ttl = soa_ttl
       if (soa_minimum && !@last_explicit_ttl)
         @last_explicit_ttl = soa_minimum
@@ -108,7 +105,7 @@ module Dnsruby
       return nil if line.strip.empty?
 
       if (line.index("$ORIGIN") == 0)
-        @origin = line.split()[1].strip #  $ORIGIN <domain-name> [<comment>]
+        @origin = absolute_name(line.split()[1].strip).to_s(true) # $ORIGIN <domain-name>
         #                 print "Setting $ORIGIN to #{@origin}\n"
         return nil
       end
@@ -248,39 +245,19 @@ module Dnsruby
         line = @last_name + " " + line
       end
       line.chomp!
-      line.sub!(/\s+@$/, " #{@origin}") # IN CNAME @
-      line.sub!(/^@\s+/, "#{@origin} ") # IN CNAME @
-      line.sub!(/\s+@\s+/, " #{@origin} ")
+      line.sub!(/\s+@$/) { " #{@origin}" } # IN CNAME @
+      line.sub!(/^@\s+/) { "#{@origin} " } # IN CNAME @
+      line.sub!(/\s+@\s+/) { " #{@origin} " }
       line.strip!
 
 
       #  o We need to identify the domain name in the record, and then
       split = line.split(' ') # split on whitespace
       name = split[0].strip
-      if (name.index"\\")
-
-        ls =[]
-        Name.create(name).labels.each {|el| ls.push(Name.decode(el.to_s))}
-        new_name = ls.join('.')
-
-
-        if (!(/\.\z/ =~ name))
-          new_name += "." + @origin
-        else
-          new_name += "."
-        end
-        line = new_name + " "
-        (split.length - 1).times {|i| line += "#{split[i+1]} "}
-        line += "\n"
-        name = new_name
-        split = line.split
-        #  o add $ORIGIN to it if it is not absolute
-      elsif !(/\.\z/ =~ name)
-        new_name = name + "." + @origin
-        line.sub!(name, new_name)
-        name = new_name
-        split = line.split
-      end
+      new_name = absolute_name(name).to_s(true)
+      line.sub!(name) { new_name }
+      name = new_name
+      split = line.split
 
       # RFC 1035 section 5.1 permits either TTL/class or class/TTL.
       # Canonicalize the latter before applying the inherited defaults below.
@@ -387,44 +364,22 @@ module Dnsruby
         line += stored_line.strip
       end
 
-      #  We need to fix up any non-absolute names in the RR
-      #  Some RRs have a single name, at the end of the string -
-      #    to do these, we can just check the last character for "." and add the
-      #    "." + origin string if necessary
-      if ([Types::MX, Types::NS, Types::AFSDB, Types::NAPTR, Types::RT,
-            Types::SRV, Types::CNAME, Types::MB, Types::MG, Types::MR,
-            Types::PTR, Types::DNAME].include?type_was)
-        #         if (line[line.length-1, 1] != ".")
-        if (!(/\.\z/ =~ line))
-          line = line + "." + @origin.to_s
-        end
+      # Qualify parsed labels so an escaped final dot stays inside its label.
+      if [Types::MX, Types::NS, Types::AFSDB, Types::NAPTR, Types::RT,
+          Types::SRV, Types::CNAME, Types::MB, Types::MG, Types::MR,
+          Types::PTR, Types::DNAME].include?(type_was)
+        line = line.sub(/\S+\z/) { |target| absolute_name(target).to_s(true) }
       end
-      #  Other RRs have several names. These should be parsed by Dnsruby,
-      #    and the names adjusted there.
-      if ([Types::MINFO, Types::PX, Types::RP].include?type_was)
+      name_fields = case type_was
+      when Types::SOA then [:mname, :rname]
+      when Types::MINFO then [:rmailbx, :emailbx]
+      when Types::PX then [:map822, :mapx400]
+      when Types::RP then [:mailbox, :txtdomain]
+      end
+      if name_fields
         parsed_rr = Dnsruby::RR.send(:new_from_normalised_string, line)
-        case parsed_rr.type
-        when Types::MINFO
-          if (!parsed_rr.rmailbx.absolute?)
-            parsed_rr.rmailbx = parsed_rr.rmailbx.to_s + "." + @origin.to_s
-          end
-          if (!parsed_rr.emailbx.absolute?)
-            parsed_rr.emailbx = parsed_rr.emailbx.to_s + "." + @origin.to_s
-          end
-        when Types::PX
-          if (!parsed_rr.map822.absolute?)
-            parsed_rr.map822 = parsed_rr.map822.to_s + "." + @origin.to_s
-          end
-          if (!parsed_rr.mapx400.absolute?)
-            parsed_rr.mapx400 = parsed_rr.mapx400.to_s + "." + @origin.to_s
-          end
-        when Types::RP
-          if (!parsed_rr.mailbox.absolute?)
-            parsed_rr.mailbox = parsed_rr.mailbox.to_s + "." + @origin.to_s
-          end
-          if (!parsed_rr.txtdomain.absolute?)
-            parsed_rr.txtdomain = parsed_rr.txtdomain.to_s + "." + @origin.to_s
-          end
+        name_fields.each do |field|
+          parsed_rr.public_send("#{field}=", absolute_name(parsed_rr.public_send(field)))
         end
         line = parsed_rr.to_s
       end
@@ -446,6 +401,24 @@ module Dnsruby
       return line+"\n"
     end
     private :normalise_scanned_line
+
+    def absolute_name(value)
+      name = parse_zone_name(value)
+      return name if name.absolute?
+      Name.new(name.labels + parse_zone_name(@origin).labels, true)
+    end
+    private :absolute_name
+
+    # Zone-file ASCII already represents wire octets. Preserve its case for
+    # record types such as SVCB whose signed TargetName is not case-folded.
+    def parse_zone_name(value)
+      if value.is_a?(String) && value.ascii_only?
+        Name.new(Name.split_escaped(value), /(?<!\\)(?:\\\\)*\.\z/.match?(value))
+      else
+        Name.create(value)
+      end
+    end
+    private :parse_zone_name
 
     #  Get the TTL in seconds from the m, h, d, w format
     def get_ttl(ttl_text_in)

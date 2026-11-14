@@ -155,7 +155,7 @@ module Dnsruby
       attr_accessor :query_bytes, :query, :ignore_truncation, :client_queue,
         :client_query_id, :socket, :dest_server, :dest_port, :endtime, :udp_packet_size,
         :single_resolver, :is_persistent_socket, :tcp_pipelining_max_queries, :send_token,
-        :retire_connection, :disable_edns, :authentication_error
+        :retire_connection, :disable_edns, :authentication_error, :cache_scope
       #  new(query_bytes, query, ignore_truncation, client_queue, client_query_id,
       #      socket, dest_server, dest_port, endtime, , udp_packet_size, single_resolver)
       def initialize(*args)

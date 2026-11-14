@@ -5,6 +5,7 @@ on: [push, pull_request]
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -14,7 +15,7 @@ jobs:
           - ruby: '3.4'
             rubyopt: "--enable-frozen-string-literal --debug-frozen-string-literal"
 
-    name: Ruby ${{ matrix.ruby }} tests
+    name: Ruby ${{ matrix.ruby }} tests${{ matrix.rubyopt != '' && ' (frozen strings)' || '' }}
     steps:
       - uses: actions/checkout@v7
       - name: Setup Ruby
@@ -23,7 +24,10 @@ jobs:
           ruby-version: ${{ matrix.ruby }}
           bundler-cache: true
       - name: Run tests ${{ matrix.rubyopt }}
-        run: bundle exec rake test RUBYOPT="${{ matrix.rubyopt }}"
+        timeout-minutes: 10
+        env:
+          DNSRUBY_TEST_TIMEOUT: '120'
+        run: timeout --kill-after=10s 8m bundle exec rake test RUBYOPT="${{ matrix.rubyopt }}"
       - name: Upload coverage
         if: matrix.ruby == '3.4' && matrix.rubyopt == ''
         uses: coverallsapp/github-action@v2

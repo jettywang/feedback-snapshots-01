@@ -25,6 +25,17 @@ class DnssecWildcardProofsTest < Minitest::Test
     assert_equal(Dnsruby::Message::SecurityLevel.SECURE, message.security_level)
   end
 
+  def test_wildcard_and_denial_can_use_different_keys_in_the_same_zone
+    proof_key = @key.clone
+    proof_key.flags = 256
+    refute_equal(@key.key_tag, proof_key.key_tag)
+    @verifier.add_trust_anchor(proof_key)
+    message = wildcard_message
+    proof = Dnsruby::RR.create('a.collision.invalid. 300 IN NSEC z.collision.invalid. TXT NSEC RRSIG')
+    signed(proof, key: proof_key).each { |rr| message.add_authority(rr) }
+    assert(@verifier.verify(message))
+  end
+
   def test_nsec_proof_does_not_need_the_answer_type_in_its_bitmap
     message = wildcard_message
     add_nsec(message, types: 'TXT NSEC RRSIG')

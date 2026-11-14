@@ -29,8 +29,8 @@ module Dnsruby
     private_constant :PIPELINE_MUTEX_CREATION
 
 
-    def PacketSender.cache(query, response)
-      return if response.cached
+    def PacketSender.cache(query, response, scope: response.instance_variable_get(:@dnsruby_cache_scope))
+      return if response.cached || query.send_raw || scope == false
       # TSIG authentication belongs to this transaction. Verification removes
       # the response's TSIG record, so its absence does not make it cacheable.
       return if query.tsig || query.signed? || response.signed?
@@ -49,21 +49,21 @@ module Dnsruby
         if (!question.qname.to_s.include? "*")
           #  Now cache response RRSets
           if (query.header.rd)
-            PacketSender.cache_recursive(response);
+            PacketSender.cache_recursive(response, scope: scope)
           else
-            PacketSender.cache_authoritative(response);
+            PacketSender.cache_authoritative(response, scope: scope)
           end
         end
       end
     end
 
-    def PacketSender.cache_authoritative(answer)
+    def PacketSender.cache_authoritative(answer, scope: nil)
       return if !answer.header.aa
-      @@authoritative_cache.add(answer)
+      @@authoritative_cache.add(answer, scope: scope)
     end
 
-    def PacketSender.cache_recursive(answer)
-      @@recursive_cache.add(answer)
+    def PacketSender.cache_recursive(answer, scope: nil)
+      @@recursive_cache.add(answer, scope: scope)
     end
 
     def PacketSender.clear_caches
@@ -434,13 +434,15 @@ module Dnsruby
         return
       end
 
-      if (msg.do_caching && (msg.class != Update) && !@tsig && !msg.tsig && !msg.signed?)
+      if (msg.do_caching && !msg.send_raw && (msg.class != Update) && !@tsig && !msg.tsig && !msg.signed?)
         #  Check the cache!!
         cachedanswer = nil
         if (msg.header.rd)
-          cachedanswer = @@recursive_cache.find(msg.question()[0].qname, msg.question()[0].type, msg.question()[0].qclass)
+          cachedanswer = @@recursive_cache.find(msg.question()[0].qname, msg.question()[0].type, msg.question()[0].qclass,
+            scope: positive_cache_scope(msg, query_packet))
         else
-          cachedanswer = @@authoritative_cache.find(msg.question()[0].qname, msg.question()[0].type, msg.question()[0].qclass)
+          cachedanswer = @@authoritative_cache.find(msg.question()[0].qname, msg.question()[0].type, msg.question()[0].qclass,
+            scope: positive_cache_scope(msg, query_packet))
         end
         if (cachedanswer)
           TheLog.debug("Sending cached answer to client\n")
@@ -585,6 +587,7 @@ module Dnsruby
       # thread-local control may differ from the thread which admitted it.
       endtime = pending.endtime = [endtime, pending.send_token.control&.deadline].compact.min
       pending.disable_edns = disable_edns || (previous_settings && previous_settings.disable_edns)
+      pending.cache_scope = positive_cache_scope(query, query_bytes)
       # A protocol retry starts its own packet deadline at dispatch, including
       # time queued for a worker. Retire the old socket membership atomically.
       return unless st.reserve_send(pending, previous_settings)
@@ -849,6 +852,7 @@ module Dnsruby
         query_settings = SelectThread::QuerySettings.new(query_bytes, query, @ignore_truncation, client_queue, client_query_id, socket, @server, @port, endtime, previous_settings.udp_packet_size, self)
         query_settings.send_token = previous_settings.send_token
         query_settings.disable_edns = previous_settings.disable_edns
+        query_settings.cache_scope = previous_settings.cache_scope
         query_settings.is_persistent_socket = pipeline
         query_settings.tcp_pipelining_max_queries = (@pipeline_socket_max_queries || @tcp_pipelining_max_queries) if pipeline
         if use_tcp
@@ -947,10 +951,8 @@ module Dnsruby
     # 
     #  Defaults to 0 - random port
     def src_port
-      if (@src_port.length == 1)
-        return @src_port[0]
-      end
-      return @src_port
+      ports = @src_port
+      ports.length == 1 ? ports[0] : ports
     end
 
     #  Can be a single Integer or a Range or an Array
@@ -962,8 +964,9 @@ module Dnsruby
     #         res.src_port=60015..60115
     # 
     def src_port=(p)
-      @src_port=[]
-      add_src_port(p)
+      ports = Resolver.get_ports_from(p)
+      raise ArgumentError, 'Source port pool must not be empty' if ports.empty?
+      @src_port = ports if Resolver.check_port(ports)
     end
 
     #  Can be a single Integer or a Range or an Array
@@ -979,14 +982,10 @@ module Dnsruby
     #         res.add_src_port(60015..60115)
     # 
     def add_src_port(p)
-      if (Resolver.check_port(p, @src_port))
-        a = Resolver.get_ports_from(p)
-        a.each do |x|
-          if ((@src_port.length > 0) && (x == 0))
-            raise ArgumentError.new("src_port of 0 only allowed as only src_port value (currently #{@src_port.length} values")
-          end
-          @src_port.push(x)
-        end
+      ports = @src_port
+      additions = Resolver.get_ports_from(p)
+      if Resolver.check_port(additions, ports)
+        @src_port = ports + additions
       end
     end
 
@@ -994,10 +993,19 @@ module Dnsruby
     def get_next_src_port
       # Preserve the existing high-port range and configured pools, using
       # unpredictable choices for the source-port contribution to DNS IDs.
-      if (@src_port[0] == 0)
+      ports = @src_port.dup
+      if (ports[0] == 0)
         return 50_000 + SecureRandom.random_number(15_536)
       end
-      @src_port[SecureRandom.random_number(@src_port.length)]
+      ports[SecureRandom.random_number(ports.length)]
+    end
+
+    # Retain the request actually sent, including EDNS options, but not its
+    # transaction ID. Never share answers across upstream or source routes.
+    def positive_cache_scope(query, query_bytes = query.encode) #:nodoc:
+      [@server.to_s.dup.freeze, @port, @src_address.to_s.dup.freeze,
+        @src_address6.to_s.dup.freeze, @src_port.dup.freeze, query.send_raw,
+        query_bytes.byteslice(2..-1).b.freeze].freeze
     end
 
     def check_response(response, response_bytes, query, client_queue, client_query_id, tcp)
@@ -1068,6 +1076,14 @@ module Dnsruby
             return false
           end
         end
+      end
+      settings = response_query_settings(client_query_id)
+      if settings && settings.cache_scope && settings.cache_scope == positive_cache_scope(query, settings.query_bytes)
+        response.instance_variable_set(:@dnsruby_cache_scope, settings.cache_scope)
+      else
+        # Configuration changed during this exchange, or this response has no
+        # tracked transport. Do not seed a cache with an ambiguous route.
+        response.instance_variable_set(:@dnsruby_cache_scope, false)
       end
       return true
     end
