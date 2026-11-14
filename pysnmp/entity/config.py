@@ -108,6 +108,27 @@ USM_KEY_TYPE_PASSPHRASE = 0
 USM_KEY_TYPE_MASTER = 1
 USM_KEY_TYPE_LOCALIZED = 2
 
+USM_KEY_TYPES = USM_KEY_TYPE_PASSPHRASE, USM_KEY_TYPE_MASTER, USM_KEY_TYPE_LOCALIZED
+
+# Length of the master/localized key produced by the password-to-key
+# algorithm of each authentication protocol (RFC 3414 A.2, RFC 7860 9.3)
+USM_AUTH_KEY_LENGTHS = {
+    USM_AUTH_HMAC96_MD5: 16,
+    USM_AUTH_HMAC96_SHA: 20,
+    USM_AUTH_HMAC128_SHA224: hmacsha2.HmacSha2.KEY_LENGTH[
+        hmacsha2.HmacSha2.SHA224_SERVICE_ID
+    ],
+    USM_AUTH_HMAC192_SHA256: hmacsha2.HmacSha2.KEY_LENGTH[
+        hmacsha2.HmacSha2.SHA256_SERVICE_ID
+    ],
+    USM_AUTH_HMAC256_SHA384: hmacsha2.HmacSha2.KEY_LENGTH[
+        hmacsha2.HmacSha2.SAH384_SERVICE_ID
+    ],
+    USM_AUTH_HMAC384_SHA512: hmacsha2.HmacSha2.KEY_LENGTH[
+        hmacsha2.HmacSha2.SHA512_SERVICE_ID
+    ],
+}
+
 # Auth services
 AUTH_SERVICES = SnmpUSMSecurityModel.AUTH_SERVICES
 
@@ -223,6 +244,69 @@ def __cook_v3_user_info(snmpEngine: SnmpEngine, securityName, securityEngineId):
     return securityEngineId, usmUserEntry, tblIdx1, pysnmpUsmSecretEntry, tblIdx2
 
 
+def __validate_v3_key_material(
+    authProtocol,
+    authKey,
+    authKeyType,
+    privProtocol,
+    privKey,
+    privKeyType,
+):
+    """Validate USM key material before it is committed to the LCD.
+
+    Master and localized keys must carry the exact length of the key
+    the authentication protocol's password-to-key algorithm produces
+    (RFC 3414 A.2, RFC 7860 9.3). A localized privacy key must be at
+    least as long as the privacy protocol key size; longer keys are
+    truncated by the privacy service at use time.
+    """
+    if authProtocol not in AUTH_SERVICES:
+        raise error.PySnmpError(f"Unknown auth protocol {authProtocol}")
+
+    if privProtocol not in PRIV_SERVICES:
+        raise error.PySnmpError(f"Unknown privacy protocol {privProtocol}")
+
+    if authKeyType not in USM_KEY_TYPES:
+        raise error.PySnmpError(f"Unknown auth key type {authKeyType}")
+
+    if privKeyType not in USM_KEY_TYPES:
+        raise error.PySnmpError(f"Unknown privacy key type {privKeyType}")
+
+    if (
+        authKey is not None
+        and authKeyType >= USM_KEY_TYPE_MASTER
+        and authProtocol in USM_AUTH_KEY_LENGTHS
+        and len(authKey) != USM_AUTH_KEY_LENGTHS[authProtocol]
+    ):
+        raise error.PySnmpError(
+            "Master/localized auth key length %d does not match "
+            "auth protocol key length %d"
+            % (len(authKey), USM_AUTH_KEY_LENGTHS[authProtocol])
+        )
+
+    if privKey is None or privProtocol == USM_PRIV_NONE:
+        return
+
+    if (
+        privKeyType == USM_KEY_TYPE_MASTER
+        and authProtocol in USM_AUTH_KEY_LENGTHS
+        and len(privKey) != USM_AUTH_KEY_LENGTHS[authProtocol]
+    ):
+        raise error.PySnmpError(
+            "Master privacy key length %d does not match key "
+            "derivation hash length %d"
+            % (len(privKey), USM_AUTH_KEY_LENGTHS[authProtocol])
+        )
+
+    if privKeyType == USM_KEY_TYPE_LOCALIZED:
+        privKeySize = getattr(PRIV_SERVICES[privProtocol], "KEY_SIZE", 0)
+        if len(privKey) < privKeySize:
+            raise error.PySnmpError(
+                "Localized privacy key length %d is shorter than "
+                "privacy protocol key size %d" % (len(privKey), privKeySize)
+            )
+
+
 def add_v3_user(
     snmpEngine: SnmpEngine,
     userName,
@@ -257,24 +341,15 @@ def add_v3_user(
     # Load clone-from (may not be needed)
     (zeroDotZero,) = mibBuilder.import_symbols("SNMPv2-SMI", "zeroDotZero")  # type: ignore
 
-    snmpEngine.message_dispatcher.mib_instrum_controller.write_variables(
-        (usmUserEntry.name + (13,) + tblIdx1, "destroy"), **dict(snmpEngine=snmpEngine)
-    )
-    snmpEngine.message_dispatcher.mib_instrum_controller.write_variables(
-        (usmUserEntry.name + (2,) + tblIdx1, userName),
-        (usmUserEntry.name + (3,) + tblIdx1, securityName),
-        (usmUserEntry.name + (4,) + tblIdx1, zeroDotZero.name),
-        (usmUserEntry.name + (5,) + tblIdx1, authProtocol),
-        (usmUserEntry.name + (8,) + tblIdx1, privProtocol),
-        (usmUserEntry.name + (13,) + tblIdx1, "createAndGo"),
-        **dict(snmpEngine=snmpEngine),
-    )
+    # Reject bad key material up front so that a failed attempt neither
+    # destroys an existing user nor leaves a half-configured one behind
 
-    if authProtocol not in AUTH_SERVICES:
-        raise error.PySnmpError(f"Unknown auth protocol {authProtocol}")
+    authKey = authKey and rfc1902.OctetString(authKey)
+    privKey = privKey and rfc1902.OctetString(privKey)
 
-    if privProtocol not in PRIV_SERVICES:
-        raise error.PySnmpError(f"Unknown privacy protocol {privProtocol}")
+    __validate_v3_key_material(
+        authProtocol, authKey, authKeyType, privProtocol, privKey, privKeyType
+    )
 
     (pysnmpUsmKeyType,) = mibBuilder.import_symbols(  # type: ignore
         "__PYSNMP-USM-MIB", "pysnmpUsmKeyType"
@@ -283,8 +358,6 @@ def add_v3_user(
     authKeyType = pysnmpUsmKeyType.syntax.clone(authKeyType)
 
     # Localize authentication key unless given
-
-    authKey = authKey and rfc1902.OctetString(authKey)
 
     masterAuthKey = localAuthKey = authKey
 
@@ -300,8 +373,6 @@ def add_v3_user(
 
     privKeyType = pysnmpUsmKeyType.syntax.clone(privKeyType)
 
-    privKey = privKey and rfc1902.OctetString(privKey)
-
     masterPrivKey = localPrivKey = privKey
 
     if privKeyType < USM_KEY_TYPE_MASTER:  # pass phrase is given
@@ -313,6 +384,21 @@ def add_v3_user(
         localPrivKey = PRIV_SERVICES[privProtocol].localize_key(
             authProtocol, masterPrivKey, securityEngineId
         )
+
+    # Key material is consistent -- commit it to the LCD
+
+    snmpEngine.message_dispatcher.mib_instrum_controller.write_variables(
+        (usmUserEntry.name + (13,) + tblIdx1, "destroy"), **dict(snmpEngine=snmpEngine)
+    )
+    snmpEngine.message_dispatcher.mib_instrum_controller.write_variables(
+        (usmUserEntry.name + (2,) + tblIdx1, userName),
+        (usmUserEntry.name + (3,) + tblIdx1, securityName),
+        (usmUserEntry.name + (4,) + tblIdx1, zeroDotZero.name),
+        (usmUserEntry.name + (5,) + tblIdx1, authProtocol),
+        (usmUserEntry.name + (8,) + tblIdx1, privProtocol),
+        (usmUserEntry.name + (13,) + tblIdx1, "createAndGo"),
+        **dict(snmpEngine=snmpEngine),
+    )
 
     # Commit only the keys we have
 
