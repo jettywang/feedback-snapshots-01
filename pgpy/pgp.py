@@ -12,6 +12,7 @@ import contextlib
 import copy
 import functools
 import itertools
+import logging
 import operator
 import os
 import re
@@ -82,7 +83,13 @@ __all__ = ['PGPSignature',
            'PGPUID',
            'PGPMessage',
            'PGPKey',
-           'PGPKeyring']
+           'PGPKeyring',
+           'HiddenRecipientPolicy']
+
+#: Wildcard Key ID used to mark a "hidden" recipient (RFC 4880 5.1): all eight octets are zero.
+WILDCARD_KEYID = '0000000000000000'
+
+_logger = logging.getLogger(__name__)
 
 
 class PGPSignature(Armorable, ParentRef, PGPObject):
@@ -1291,6 +1298,161 @@ class PGPMessage(Armorable, PGPObject):
         else:
             while len(data) > 0:
                 self |= Packet(data)
+
+
+class HiddenRecipientPolicy(object):
+    """
+    Bounds and algorithm policy for hidden-recipient (wildcard Key ID) decryption.
+
+    These limits are deliberately fixed rather than discovered from the key directory: they cap the work an
+    attacker or malformed message can force, and they keep legacy/insecure ciphers out of the speculative path.
+    """
+
+    #: Hard upper bound on the number of candidate private keys tried against a hidden recipient message.
+    MAX_CANDIDATES = 8
+
+    #: Hard upper bound on the number of PKESK packets examined for a single hidden recipient message.
+    MAX_PKESKS = 16
+
+    #: The only symmetric algorithms permitted when attempting a hidden recipient message.
+    ALLOWED_SYMALGS = frozenset(
+        alg for alg in SymmetricKeyAlgorithm
+        if alg not in {SymmetricKeyAlgorithm.Plaintext, SymmetricKeyAlgorithm.IDEA, SymmetricKeyAlgorithm.Twofish256}
+        and alg.is_supported
+    )
+
+    class _Worker(object):
+        """
+        Speculative decryption of a message whose recipient is hidden behind a wildcard (all-zero) Key ID.
+
+        All machinery is private: only the caller-provided candidate private keys are considered (the key directory
+        is never walked), both the number of candidates and the number of PKESK packets examined are bounded, and a
+        candidate counts as a match only when the full message decrypts *and* its integrity protection verifies --
+        a well-formed session key alone is not success. Per-attempt diagnostics go to the logger only; every failure
+        raises the same generic error so the outside world cannot tell which candidate or algorithm came closest.
+        """
+
+        class _Success(Exception):
+            """Internal control-flow signal carrying the one verified plaintext. Never raised to callers."""
+
+            def __init__(self, message):
+                super(HiddenRecipientPolicy._Worker._Success, self).__init__()
+                self.message = message
+
+        @staticmethod
+        def _expand_candidates(owner, supplied):
+            """Flatten the caller-supplied candidates (plus usable subkeys) into de-duplicated private keys."""
+            seen = set()
+            candidates = []
+
+            def _consider(pgpkey):
+                if not isinstance(pgpkey, PGPKey) or pgpkey.is_public or pgpkey._key is None:
+                    return
+                if not pgpkey.is_unlocked:
+                    # a locked candidate cannot be tried; record and skip rather than failing the whole attempt
+                    _logger.debug("hidden recipient: skipping locked candidate keyid=%s",
+                                  pgpkey.fingerprint.keyid if pgpkey.fingerprint else '?')
+                    return
+                token = id(pgpkey._key)
+                if token in seen:
+                    return
+                seen.add(token)
+                candidates.append(pgpkey)
+
+            # the caller-supplied candidates (and their subkeys) keep their ordering and take priority;
+            # the acting key is only consulted afterwards, and only if it was not already supplied
+            for source in supplied:
+                if not isinstance(source, PGPKey):
+                    raise PGPError("hidden_recipients must contain PGPKey objects")
+                _consider(source)
+                for subkey in source.subkeys.values():
+                    _consider(subkey)
+
+            _consider(owner)
+            for subkey in owner.subkeys.values():
+                _consider(subkey)
+
+            return candidates
+
+        @classmethod
+        def decrypt(cls, message, owner, supplied):
+            wildcard_pkesks = [pk for pk in message._sessionkeys
+                               if isinstance(pk, PKESessionKey) and pk.encrypter == WILDCARD_KEYID]
+            if not wildcard_pkesks:  # pragma: no cover - guarded by the encrypters check in the caller
+                raise PGPDecryptionError("Decryption failed")
+
+            max_pkesks = max(1, HiddenRecipientPolicy.MAX_PKESKS)
+            if len(wildcard_pkesks) > max_pkesks:
+                _logger.debug("hidden recipient: %d PKESKs exceeds bound %d; truncating",
+                              len(wildcard_pkesks), max_pkesks)
+                wildcard_pkesks = wildcard_pkesks[:max_pkesks]
+
+            candidates = cls._expand_candidates(owner, supplied)
+            max_candidates = max(1, HiddenRecipientPolicy.MAX_CANDIDATES)
+            if len(candidates) > max_candidates:
+                _logger.debug("hidden recipient: %d candidates exceeds bound %d; truncating",
+                              len(candidates), max_candidates)
+                candidates = candidates[:max_candidates]
+
+            if not candidates:
+                _logger.debug("hidden recipient: no usable private candidate keys were supplied")
+                raise PGPDecryptionError("Decryption failed")
+
+            # Detailed per-attempt diagnostics stay internal. They deliberately identify the failing stage
+            # (algorithm mismatch, malformed session key, integrity failure, ...) but are only emitted to the log,
+            # never surfaced in the exception raised to the caller.
+            diagnostics = {'pkesk_attempts': 0, 'session_key_unseals': 0, 'integrity_failures': 0,
+                           'algorithm_mismatches': 0, 'errors': []}
+
+            def _record(stage, keyid, pkalg, error):
+                diagnostics['errors'].append((stage, keyid, pkalg, type(error).__name__))
+                _logger.debug("hidden recipient: stage=%s keyid=%s pkalg=%s error=%s: %s",
+                              stage, keyid, pkalg, type(error).__name__, error)
+
+            for pkesk in wildcard_pkesks:
+                for candidate in candidates:
+                    diagnostics['pkesk_attempts'] += 1
+
+                    # public-key algorithm mismatch: this PKESK cannot be opened by this key; cheap to reject up front
+                    if pkesk.pkalg != candidate.key_algorithm:
+                        diagnostics['algorithm_mismatches'] += 1
+                        _record('pkalg-mismatch', candidate.fingerprint.keyid, pkesk.pkalg.name,
+                                PGPError("{} != {}".format(pkesk.pkalg.name, candidate.key_algorithm.name)))
+                        continue
+
+                    try:
+                        symalg, session_key = pkesk.decrypt_sk(candidate._key)
+                        diagnostics['session_key_unseals'] += 1
+                    except (TypeError, ValueError, NotImplementedError, PGPDecryptionError) as error:
+                        # includes bad/incorrect passphrase material and unsupported or malformed PKESK contents
+                        _record('session-key-unseal', candidate.fingerprint.keyid, pkesk.pkalg.name, error)
+                        continue
+
+                    # bound the symmetric algorithms we are willing to drive, and reject unsupported/insecure ciphers
+                    if symalg not in HiddenRecipientPolicy.ALLOWED_SYMALGS:
+                        diagnostics['algorithm_mismatches'] += 1
+                        _record('symalg-rejected', candidate.fingerprint.keyid, pkesk.pkalg.name,
+                                PGPError("symmetric algorithm {} not in allowed set".format(symalg.name)))
+                        continue
+
+                    try:
+                        # A plausible session key is not success: this only returns once integrity protection (the MDC,
+                        # or the quick-check for a legacy packet) has verified the decrypted payload.
+                        decrypted = message.message.decrypt(session_key, symalg)
+                        decmsg = PGPMessage()
+                        decmsg.parse(decrypted)
+                    except (TypeError, ValueError, NotImplementedError, PGPDecryptionError) as error:
+                        diagnostics['integrity_failures'] += 1
+                        _record('integrity-check', candidate.fingerprint.keyid, pkesk.pkalg.name, error)
+                        continue
+
+                    _logger.debug("hidden recipient: verified match with keyid=%s after %s",
+                                  candidate.fingerprint.keyid, diagnostics)
+                    raise cls._Success(decmsg)
+
+            _logger.debug("hidden recipient: exhausted all attempts without a verified plaintext: %s", diagnostics)
+            # Single, uniform failure: no hint about which candidate, PKESK, or algorithm got closest.
+            raise PGPDecryptionError("Decryption failed")
 
 
 class PGPKey(Armorable, ParentRef, PGPObject):
@@ -2564,11 +2726,23 @@ class PGPKey(Armorable, ParentRef, PGPObject):
         return _m
 
     @KeyAction(is_unlocked=True, is_public=False)
-    def decrypt(self, message):
+    def decrypt(self, message, hidden_recipients=None):
         """
         Decrypt a PGPMessage using this key.
 
+        Messages that name an explicit recipient continue to use exact Key ID selection: the single PKESK packet
+        addressed to this key (or one of its subkeys) is used, with no speculative work.
+
+        A message whose PKESK carries a wildcard Key ID of all zeroes addresses a "hidden" recipient (RFC 4880,
+        section 5.1). Such a packet names no key, so the recipient can only be found by trying candidate private
+        keys and confirming the result against the message's integrity protection. This speculative path is only
+        used when explicitly enabled with ``hidden_recipients``.
+
         :param message: An encrypted :py:obj:`PGPMessage`
+        :param hidden_recipients: Optional, explicit opt-in for hidden (wildcard Key ID) recipients. An iterable of
+               candidate :py:obj:`PGPKey` private keys to try. The key directory is never scanned on its own; only
+               the keys supplied here are considered. Ignored unless ``message`` carries a wildcard Key ID PKESK.
+        :type hidden_recipients: iterable of :py:obj:`PGPKey` or ``None``
         :raises: :py:exc:`~errors.PGPError` if the key is not private, or protected but not unlocked.
         :raises: :py:exc:`~errors.PGPDecryptionError` if decryption fails for any other reason.
         :returns: A new :py:obj:`PGPMessage` with the decrypted contents of ``message``.
@@ -2576,6 +2750,19 @@ class PGPKey(Armorable, ParentRef, PGPObject):
         if not message.is_encrypted:
             warnings.warn("This message is not encrypted", stacklevel=3)
             return message
+
+        if WILDCARD_KEYID in message.encrypters:
+            if hidden_recipients is None:
+                # hidden recipients must be opted into explicitly; never guess by scanning the key directory
+                raise PGPError("Message is addressed to a hidden recipient; provide hidden_recipients to attempt it")
+
+            try:
+                HiddenRecipientPolicy._Worker.decrypt(message, self, hidden_recipients)
+            except HiddenRecipientPolicy._Worker._Success as success:
+                # exactly one fully verified plaintext is ever returned; no partial candidate results escape
+                return success.message
+
+            raise PGPDecryptionError("Decryption failed")
 
         if self.fingerprint.keyid not in message.encrypters:
             sks = set(self.subkeys)
