@@ -27,6 +27,9 @@ from .der import (
     encode_bitstring,
     encode_integer,
     encode_octet_string,
+    encode_constructed,
+    encode_implicit,
+    topem,
 )
 from .util import (
     sigencode_string,
@@ -35,8 +38,9 @@ from .util import (
     sigdecode_string,
     sigdecode_der,
     sigdecode_strings,
+    oid_ecPublicKey,
 )
-from .curves import NIST256p, Curve, BRAINPOOLP160r1, Ed25519, Ed448
+from .curves import NIST256p, NIST384p, Curve, BRAINPOOLP160r1, Ed25519, Ed448
 from .ellipticcurve import Point, PointJacobi, CurveFp, INFINITY
 from .ecdsa import generator_brainpoolp160r1
 
@@ -561,6 +565,295 @@ class TestSigningKey(unittest.TestCase):
             b"\x8bU{\x9c \x99\xf3l",
         )
 
+    def _ec_private_key(self, private_key, curve, public_key=None):
+        elements = [
+            encode_integer(1),
+            encode_octet_string(private_key),
+            encode_constructed(0, curve.to_der()),
+        ]
+        if public_key is not None:
+            elements.append(
+                encode_constructed(1, encode_bitstring(public_key, 0))
+            )
+        return encode_sequence(*elements)
+
+    def _pkcs8_key(
+        self, private_key, outer_curve, inner_curve=None, public_key=None
+    ):
+        inner = [encode_integer(1), encode_octet_string(private_key)]
+        if inner_curve is not None:
+            inner.append(encode_constructed(0, inner_curve.to_der()))
+        inner_key = encode_sequence(*inner)
+        elements = [
+            encode_integer(0),
+            encode_sequence(
+                encode_oid(*oid_ecPublicKey), outer_curve.to_der()
+            ),
+            encode_octet_string(inner_key),
+        ]
+        if public_key is not None:
+            elements.append(
+                encode_constructed(1, encode_bitstring(public_key, 0))
+            )
+        return encode_sequence(*elements)
+
+    def test_sec1_embedded_public_key_matches(self):
+        private_key = self.sk1.to_string()
+        encoded = self._ec_private_key(
+            private_key,
+            self.sk1.curve,
+            self.sk1.verifying_key.to_string("uncompressed"),
+        )
+
+        sk = SigningKey.from_der(encoded)
+
+        self.assertEqual(sk, self.sk1)
+
+    def test_sec1_embedded_public_key_mismatch(self):
+        encoded = self._ec_private_key(
+            self.sk1.to_string(),
+            self.sk1.curve,
+            self.sk2.verifying_key.to_string("uncompressed"),
+        )
+
+        with self.assertRaises(UnexpectedDER) as e:
+            SigningKey.from_der(encoded)
+
+        self.assertNotIn(self.sk1.to_string().hex(), str(e.exception))
+
+    def test_sec1_embedded_public_key_compressed(self):
+        encoded = self._ec_private_key(
+            self.sk1.to_string(),
+            self.sk1.curve,
+            self.sk1.verifying_key.to_string("compressed"),
+        )
+
+        sk = SigningKey.from_der(encoded)
+
+        self.assertEqual(sk, self.sk1)
+        self.assertEqual(
+            sk.verifying_key.to_string("uncompressed"),
+            self.sk1.verifying_key.to_string("uncompressed"),
+        )
+
+    def test_sec1_embedded_public_key_wrong_curve(self):
+        # Point is valid, but encoded on a different curve than the scalar.
+        encoded = self._ec_private_key(
+            self.sk1.to_string(),
+            self.sk1.curve,
+            SigningKey.generate(curve=NIST384p).verifying_key.to_string(
+                "uncompressed"
+            ),
+        )
+
+        with self.assertRaises(UnexpectedDER):
+            SigningKey.from_der(encoded)
+
+    def test_sec1_embedded_public_key_malformed(self):
+        encoded = self._ec_private_key(
+            self.sk1.to_string(), self.sk1.curve, b"\x04" + b"\x01" * 64
+        )
+
+        with self.assertRaises(UnexpectedDER):
+            SigningKey.from_der(encoded)
+
+    def test_sec1_embedded_public_key_not_bitstring(self):
+        encoded = encode_sequence(
+            encode_integer(1),
+            encode_octet_string(self.sk1.to_string()),
+            encode_constructed(0, self.sk1.curve.to_der()),
+            encode_constructed(1, b"\x00"),
+        )
+
+        with self.assertRaises(UnexpectedDER):
+            SigningKey.from_der(encoded)
+
+    def test_sec1_without_embedded_public_key(self):
+        encoded = self._ec_private_key(self.sk1.to_string(), self.sk1.curve)
+
+        sk = SigningKey.from_der(encoded)
+
+        self.assertEqual(sk, self.sk1)
+
+    def test_pkcs8_embedded_public_key_matches(self):
+        encoded = self._pkcs8_key(
+            self.sk1.to_string(),
+            self.sk1.curve,
+            public_key=self.sk1.verifying_key.to_string("uncompressed"),
+        )
+
+        sk = SigningKey.from_der(encoded)
+
+        self.assertEqual(sk, self.sk1)
+
+    def test_pkcs8_embedded_public_key_mismatch(self):
+        encoded = self._pkcs8_key(
+            self.sk1.to_string(),
+            self.sk1.curve,
+            public_key=self.sk2.verifying_key.to_string("uncompressed"),
+        )
+
+        with self.assertRaises(UnexpectedDER) as e:
+            SigningKey.from_der(encoded)
+
+        self.assertNotIn(self.sk1.to_string().hex(), str(e.exception))
+
+    def test_pkcs8_conflicting_inner_curve_parameters(self):
+        encoded = self._pkcs8_key(
+            self.sk1.to_string(), self.sk1.curve, inner_curve=NIST384p
+        )
+
+        with self.assertRaises(UnexpectedDER) as e:
+            SigningKey.from_der(encoded)
+
+        self.assertIn("do not match", str(e.exception))
+
+    def test_pkcs8_matching_inner_curve_parameters(self):
+        encoded = self._pkcs8_key(
+            self.sk1.to_string(), self.sk1.curve, inner_curve=self.sk1.curve
+        )
+
+        sk = SigningKey.from_der(encoded)
+
+        self.assertEqual(sk, self.sk1)
+
+    def test_pkcs8_embedded_keys_round_trip(self):
+        encoded = self._pkcs8_key(
+            self.sk1.to_string(),
+            self.sk1.curve,
+            inner_curve=self.sk1.curve,
+            public_key=self.sk1.verifying_key.to_string("uncompressed"),
+        )
+
+        sk = SigningKey.from_der(encoded)
+
+        self.assertEqual(sk, self.sk1)
+
+        for format in ("ssleay", "pkcs8"):
+            for point_encoding in ("uncompressed", "compressed"):
+                reimported = SigningKey.from_der(
+                    sk.to_der(point_encoding=point_encoding, format=format)
+                )
+                self.assertEqual(reimported, sk)
+                sig = reimported.sign(b"round trip")
+                self.assertTrue(
+                    self.sk1.verifying_key.verify(sig, b"round trip")
+                )
+
+    def test_pkcs8_outer_public_key_mismatch(self):
+        encoded = encode_sequence(
+            encode_integer(0),
+            encode_sequence(
+                encode_oid(*oid_ecPublicKey), self.sk1.curve.to_der()
+            ),
+            encode_octet_string(self.sk1.to_der(format="ssleay")),
+            encode_constructed(
+                1,
+                encode_bitstring(
+                    self.sk2.verifying_key.to_string("uncompressed"), 0
+                ),
+            ),
+        )
+
+        with self.assertRaises(UnexpectedDER) as e:
+            SigningKey.from_der(encoded)
+
+        self.assertNotIn(self.sk1.to_string().hex(), str(e.exception))
+
+    def test_pkcs8_equivalent_explicit_inner_curve_parameters(self):
+        # Same curve, different but equivalent representation.
+        inner = [
+            encode_integer(1),
+            encode_octet_string(self.sk1.to_string()),
+            encode_constructed(0, self.sk1.curve.to_der(encoding="explicit")),
+        ]
+        encoded = encode_sequence(
+            encode_integer(0),
+            encode_sequence(
+                encode_oid(*oid_ecPublicKey),
+                self.sk1.curve.to_der(encoding="named_curve"),
+            ),
+            encode_octet_string(encode_sequence(*inner)),
+        )
+
+        sk = SigningKey.from_der(encoded)
+
+        self.assertEqual(sk, self.sk1)
+
+    def test_pkcs8_implicit_bitstring_public_key(self):
+        # RFC5958 encodes publicKey as an IMPLICIT BIT STRING.
+        public_key = self.sk1.verifying_key.to_string("uncompressed")
+        encoded = encode_sequence(
+            encode_integer(0),
+            encode_sequence(
+                encode_oid(*oid_ecPublicKey), self.sk1.curve.to_der()
+            ),
+            encode_octet_string(self.sk1.to_der(format="ssleay")),
+            encode_implicit(1, b"\x00" + public_key),
+        )
+
+        sk = SigningKey.from_der(encoded)
+
+        self.assertEqual(sk, self.sk1)
+
+    def test_pkcs8_implicit_bitstring_public_key_mismatch(self):
+        encoded = encode_sequence(
+            encode_integer(0),
+            encode_sequence(
+                encode_oid(*oid_ecPublicKey), self.sk1.curve.to_der()
+            ),
+            encode_octet_string(self.sk1.to_der(format="ssleay")),
+            encode_implicit(
+                1, b"\x00" + self.sk2.verifying_key.to_string("uncompressed")
+            ),
+        )
+
+        with self.assertRaises(UnexpectedDER):
+            SigningKey.from_der(encoded)
+
+    def test_pkcs8_public_key_with_unused_bits(self):
+        encoded = encode_sequence(
+            encode_integer(0),
+            encode_sequence(
+                encode_oid(*oid_ecPublicKey), self.sk1.curve.to_der()
+            ),
+            encode_octet_string(self.sk1.to_der(format="ssleay")),
+            encode_implicit(
+                1, b"\x01" + self.sk1.verifying_key.to_string("uncompressed")
+            ),
+        )
+
+        with self.assertRaises(UnexpectedDER):
+            SigningKey.from_der(encoded)
+
+    def test_pkcs8_duplicate_public_key(self):
+        public_key = self.sk1.verifying_key.to_string("uncompressed")
+        encoded = encode_sequence(
+            encode_integer(0),
+            encode_sequence(
+                encode_oid(*oid_ecPublicKey), self.sk1.curve.to_der()
+            ),
+            encode_octet_string(self.sk1.to_der(format="ssleay")),
+            encode_implicit(1, b"\x00" + public_key),
+            encode_implicit(1, b"\x00" + public_key),
+        )
+
+        with self.assertRaises(UnexpectedDER):
+            SigningKey.from_der(encoded)
+
+    def test_pkcs8_unknown_optional_field(self):
+        encoded = encode_sequence(
+            encode_integer(0),
+            encode_sequence(
+                encode_oid(*oid_ecPublicKey), self.sk1.curve.to_der()
+            ),
+            encode_octet_string(self.sk1.to_der(format="ssleay")),
+            encode_constructed(5, b"\x00"),
+        )
+
+        with self.assertRaises(UnexpectedDER):
+            SigningKey.from_der(encoded)
+
     def test_decoding_explicit_curve_parameters(self):
         prv_key_str = (
             "-----BEGIN PRIVATE KEY-----\n"
@@ -604,6 +897,32 @@ class TestSigningKey(unittest.TestCase):
             SigningKey.from_pem(
                 prv_key_str, valid_curve_encodings=["named_curve"]
             )
+
+    def test_ec_parameters_section_matches_curve(self):
+        key = self.sk2.to_der()
+        pem = self.sk2.curve.to_pem() + topem(key, "EC PRIVATE KEY")
+
+        sk = SigningKey.from_pem(pem)
+
+        self.assertEqual(sk, self.sk2)
+
+    def test_ec_parameters_section_conflicts_with_curve(self):
+        key = SigningKey.generate(curve=NIST384p).to_der()
+        pem = NIST256p.to_pem() + topem(key, "EC PRIVATE KEY")
+
+        with self.assertRaises(UnexpectedDER) as e:
+            SigningKey.from_pem(pem)
+
+        self.assertIn("EC PARAMETERS", str(e.exception))
+
+    def test_ec_parameters_section_does_not_leak_private_key(self):
+        sk = SigningKey.generate(curve=NIST384p)
+        pem = NIST256p.to_pem() + topem(sk.to_der(), "EC PRIVATE KEY")
+
+        with self.assertRaises(UnexpectedDER) as e:
+            SigningKey.from_pem(pem)
+
+        self.assertNotIn(sk.to_string().hex(), str(e.exception))
 
     def test_equality_on_signing_keys(self):
         sk = SigningKey.from_secret_exponent(
@@ -669,6 +988,59 @@ class TestSigningKey(unittest.TestCase):
         )
 
         self.assertEqual(sk, sk_str)
+
+    def test_ed25519_pkcs8v2_outer_public_key_matches(self):
+        sk = SigningKey.generate(Ed25519)
+
+        encoded = encode_sequence(
+            encode_integer(1),
+            encode_sequence(encode_oid(*Ed25519.oid)),
+            encode_octet_string(encode_octet_string(sk.to_string())),
+            encode_constructed(
+                1,
+                encode_bitstring(
+                    sk.verifying_key.to_string("uncompressed"), 0
+                ),
+            ),
+        )
+
+        decoded = SigningKey.from_der(encoded)
+
+        self.assertEqual(decoded, sk)
+
+    def test_ed25519_pkcs8v2_outer_public_key_mismatch(self):
+        sk = SigningKey.generate(Ed25519)
+        other = SigningKey.generate(Ed25519)
+
+        encoded = encode_sequence(
+            encode_integer(1),
+            encode_sequence(encode_oid(*Ed25519.oid)),
+            encode_octet_string(encode_octet_string(sk.to_string())),
+            encode_constructed(
+                1,
+                encode_bitstring(
+                    other.verifying_key.to_string("uncompressed"), 0
+                ),
+            ),
+        )
+
+        with self.assertRaises(UnexpectedDER) as e:
+            SigningKey.from_der(encoded)
+
+        self.assertNotIn(sk.to_string().hex(), str(e.exception))
+
+    def test_ed25519_pkcs8v2_malformed_public_key(self):
+        sk = SigningKey.generate(Ed25519)
+
+        encoded = encode_sequence(
+            encode_integer(1),
+            encode_sequence(encode_oid(*Ed25519.oid)),
+            encode_octet_string(encode_octet_string(sk.to_string())),
+            encode_constructed(1, encode_bitstring(b"\x01" * 31, 0)),
+        )
+
+        with self.assertRaises(UnexpectedDER):
+            SigningKey.from_der(encoded)
 
     def test_ed25519_from_der_bad_alg_id_params(self):
         der_str = encode_sequence(

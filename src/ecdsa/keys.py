@@ -21,10 +21,9 @@ from .util import (
     oid_ecMQV,
     MalformedSignature,
 )
-from ._compat import normalise_bytes
+from ._compat import normalise_bytes, str_idx_as_int
 from .errors import MalformedPointError
 from .ellipticcurve import PointJacobi, CurveEdTw
-
 
 __all__ = [
     "BadSignatureError",
@@ -58,6 +57,7 @@ class BadDigestError(Exception):
 
 def _truncate_and_convert_digest(digest, curve, allow_truncate):
     """Truncates and converts digest to an integer."""
+
     if not allow_truncate:
         if len(digest) > curve.baselen:
             raise BadDigestError(
@@ -86,6 +86,158 @@ def _truncate_and_convert_digest(digest, curve, allow_truncate):
         number >>= max(0, length - max_length)
 
     return number
+
+
+def _parse_ec_private_key(data, valid_curve_encodings, version=None):
+    """Parse the contents of an RFC5915 ECPrivateKey structure.
+
+    `data` is the body of the ECPrivateKey SEQUENCE, starting with the
+    privateKey octet string if `version` was already decoded by the caller.
+    Returns the private key octet string, the curve from the optional
+    ``parameters`` field (or ``None`` if absent) and the public key bytes
+    from the optional ``publicKey`` field (or ``None`` if absent).
+    """
+    if version is None:
+        version, data = der.remove_integer(data)
+    if version != 1:
+        raise der.UnexpectedDER(
+            "expected version '1' at start of DER privkey, got %d" % version
+        )
+
+    privkey_str, data = der.remove_octet_string(data)
+
+    curve = None
+    public_key = None
+    while data:
+        tag, value, data = der.remove_constructed(data)
+        if tag == 0:
+            if curve is not None:
+                raise der.UnexpectedDER("duplicate parameters in DER privkey")
+            if public_key is not None:
+                raise der.UnexpectedDER(
+                    "parameters after publicKey in DER privkey"
+                )
+            curve = Curve.from_der(value, valid_curve_encodings)
+        elif tag == 1:
+            if public_key is not None:
+                raise der.UnexpectedDER("duplicate publicKey in DER privkey")
+            public_key, empty = der.remove_bitstring(value, 0)
+            if empty:
+                raise der.UnexpectedDER(
+                    "trailing junk after DER privkey publicKey"
+                )
+        else:
+            raise der.UnexpectedDER("unexpected tag %d in DER privkey" % tag)
+
+    return privkey_str, curve, public_key
+
+
+def _decode_pkcs8_public_key(value, constructed):
+    """Decode the value of the optional PKCS#8 ``publicKey`` field.
+
+    RFC5958 encodes the field as an IMPLICIT BIT STRING (primitive
+    context-specific tag), but some implementations use an explicit
+    BIT STRING inside a constructed context-specific tag. Both forms
+    are accepted, provided that the number of unused bits is zero, as
+    required for an encoded elliptic curve point.
+    """
+    if constructed:
+        # Explicitly encoded BIT STRING.
+        public_key, empty = der.remove_bitstring(value, 0)
+        if empty:
+            raise der.UnexpectedDER("trailing junk after PKCS #8 publicKey")
+        return public_key
+
+    # Implicitly encoded BIT STRING: the first byte is the number of
+    # unused bits.
+    if not value:
+        raise der.UnexpectedDER("empty PKCS #8 publicKey")
+    unused = str_idx_as_int(value, 0)
+    if unused:
+        raise der.UnexpectedDER("PKCS #8 publicKey must not have unused bits")
+    return value[1:]
+
+
+def _remove_context_specific_field(data):
+    """Remove a context-specific field, returning its tag and payload.
+
+    Returns the tag number, whether the field was constructed and the
+    value bytes. Both primitive and constructed encodings are accepted
+    because RFC 5958 uses implicit (primitive) tagging for ``publicKey``
+    while some implementations wrap a full ASN.1 object in it.
+    """
+    if not data:
+        raise der.UnexpectedDER("empty PKCS #8 structure")
+    first = str_idx_as_int(data, 0)
+    if (first & 0xC0) != 0x80:
+        raise der.UnexpectedDER(
+            "wanted class context-specific, got 0x%02x tag" % first
+        )
+    if first & 0x20:
+        tag, value, rest = der.remove_constructed(data)
+        return tag, True, value, rest
+    tag, value, rest = der.remove_implicit(data, "context-specific")
+    return tag, False, value, rest
+
+
+def _parse_pkcs8_optional_fields(data):
+    """Parse the optional fields that follow the PKCS#8 privateKey.
+
+    The `attributes` field is ignored. The `publicKey` field is returned
+    as raw bytes (or ``None`` when absent). Unknown, duplicate or
+    out-of-order fields are rejected.
+    """
+    attributes = False
+    public_key = None
+    while data:
+        tag, constructed, value, data = _remove_context_specific_field(data)
+        if tag == 0:
+            if attributes:
+                raise der.UnexpectedDER("duplicate attributes in PKCS #8")
+            if public_key is not None:
+                raise der.UnexpectedDER(
+                    "attributes after publicKey in PKCS #8"
+                )
+            attributes = True
+        elif tag == 1:
+            if public_key is not None:
+                raise der.UnexpectedDER("duplicate publicKey in PKCS #8")
+            public_key = _decode_pkcs8_public_key(value, constructed)
+        else:
+            raise der.UnexpectedDER(
+                "unexpected tag %d in PKCS #8 structure" % tag
+            )
+    return public_key
+
+
+def _check_embedded_public_key(signing_key, public_key, field_name):
+    """Verify that an embedded public key matches the private key.
+
+    The point is decoded on the curve selected for the private key, so
+    this also verifies that it uses the same curve. Error messages never
+    include the private scalar.
+    """
+    curve = signing_key.curve
+    try:
+        if isinstance(curve.curve, CurveEdTw):
+            embedded = VerifyingKey.from_string(public_key, curve)
+        else:
+            embedded = VerifyingKey.from_string(
+                public_key,
+                curve,
+                valid_encodings=("uncompressed", "compressed", "hybrid"),
+            )
+    except (MalformedPointError, ValueError):
+        raise der.UnexpectedDER(
+            "malformed {0} or point not on the selected curve".format(
+                field_name
+            )
+        )
+
+    if embedded != signing_key.verifying_key:
+        raise der.UnexpectedDER(
+            "{0} does not match the private key".format(field_name)
+        )
 
 
 class VerifyingKey(object):
@@ -973,11 +1125,27 @@ class SigningKey(object):
         if private_key_index == -1:
             private_key_index = string.index(b"-----BEGIN PRIVATE KEY-----")
 
-        return cls.from_der(
+        signing_key = cls.from_der(
             der.unpem(string[private_key_index:]),
             hashfunc,
             valid_curve_encodings,
         )
+
+        # OpenSSL commonly writes the curve as a separate "EC PARAMETERS"
+        # section. When present it is authoritative enough to be checked
+        # against the curve selected for the key: a conflicting declaration
+        # must not be silently ignored.
+        parameters_index = string.find(b"-----BEGIN EC PARAMETERS-----")
+        if 0 <= parameters_index < private_key_index:
+            declared_curve = Curve.from_pem(
+                string[parameters_index:], valid_curve_encodings
+            )
+            if declared_curve != signing_key.curve:
+                raise der.UnexpectedDER(
+                    "EC PARAMETERS section does not match the curve "
+                    "of the private key"
+                )
+        return signing_key
 
     @classmethod
     def from_der(cls, string, hashfunc=sha1, valid_curve_encodings=None):
@@ -998,14 +1166,20 @@ class SigningKey(object):
               publicKey  [1] BIT STRING OPTIONAL
             }
 
-        `publicKey` field is ignored completely (errors, if any, in it will
-        be undetected).
+        If present, the `publicKey` field is decoded and must match the
+        point derived from the private scalar on the same curve. The
+        encoding accepted is the one supported by
+        :func:`~VerifyingKey.from_string` (so uncompressed, compressed and
+        hybrid points are valid). The field is optional and its absence
+        is not an error.
 
         Two formats are supported for the `parameters` field: the named
         curve and the explicit encoding of curve parameters.
         In the legacy ssleay format, this implementation requires the optional
         `parameters` field to get the curve name. In PKCS #8 format, the curve
-        is part of the PrivateKeyAlgorithmIdentifier.
+        is part of the PrivateKeyAlgorithmIdentifier. If an ECPrivateKey
+        inside a PKCS #8 structure has its own `parameters` field, that field
+        must be present in both places and specify an equivalent curve.
 
         The PKCS #8 format includes an ECPrivateKey object as the `privateKey`
         field within a larger structure::
@@ -1020,8 +1194,12 @@ class SigningKey(object):
                 ...
             }
 
-        The `attributes` and `publicKey` fields are completely ignored; errors
-        in them will not be detected.
+        The `attributes` field is ignored. The outer `publicKey` field, when
+        present, is decoded and must be a valid point on the selected curve
+        that matches the private scalar. If the wrapped ECPrivateKey also
+        carries a `publicKey`, both fields must describe the same point.
+        The DER-encoded point in a `publicKey` may use any point encoding
+        supported by :func:`~VerifyingKey.from_string`.
 
         :param string: binary string with DER-encoded private ECDSA key
         :type string: :term:`bytes-like object`
@@ -1041,7 +1219,9 @@ class SigningKey(object):
         :rtype: SigningKey
         """
         s = normalise_bytes(string)
-        curve = None
+        inner_public_key = None
+        public_key = None
+        public_key_field = "publicKey in PKCS #8 structure"
 
         s, empty = der.remove_sequence(s)
         if empty != b"":
@@ -1071,16 +1251,7 @@ class SigningKey(object):
                         "Non NULL parameters for a EdDSA key"
                     )
                 key_str_der, s = der.remove_octet_string(s)
-
-                # As RFC5958 describe, there are may be optional Attributes
-                # and Publickey. Don't raise error if something after
-                # Privatekey
-
-                # TODO parse attributes or validate publickey
-                # if s:
-                #     raise der.UnexpectedDER(
-                #         "trailing junk inside the privateKey"
-                #     )
+                public_key = _parse_pkcs8_optional_fields(s)
                 key_str, s = der.remove_octet_string(key_str_der)
                 if s:
                     raise der.UnexpectedDER(
@@ -1093,7 +1264,14 @@ class SigningKey(object):
                     assert algorithm_oid == Ed448.oid
                     curve = Ed448
 
-                return cls.from_string(key_str, curve, None)
+                signing_key = cls.from_string(key_str, curve, None)
+                if public_key is not None:
+                    _check_embedded_public_key(
+                        signing_key,
+                        public_key,
+                        "publicKey in PKCS #8 structure",
+                    )
+                return signing_key
 
             if algorithm_oid not in (oid_ecPublicKey, oid_ecDH, oid_ecMQV):
                 raise der.UnexpectedDER(
@@ -1102,56 +1280,59 @@ class SigningKey(object):
 
             curve = Curve.from_der(algorithm_identifier, valid_curve_encodings)
 
-            # Up next is an octet string containing an ECPrivateKey. Ignore
-            # the optional "attributes" and "publicKey" fields that come after.
-            s, _ = der.remove_octet_string(s)
+            # The octet string contains an ECPrivateKey, the optional
+            # attributes and publicKey fields follow it in the outer structure.
+            inner_key, s = der.remove_octet_string(s)
+            public_key = _parse_pkcs8_optional_fields(s)
 
             # Unpack the ECPrivateKey to get to the key data octet string,
             # and rejoin the ssleay parsing path.
-            s, empty = der.remove_sequence(s)
+            inner_key, empty = der.remove_sequence(inner_key)
             if empty != b"":
                 raise der.UnexpectedDER(
                     "trailing junk after DER privkey: %s"
                     % binascii.hexlify(empty)
                 )
 
-            version, s = der.remove_integer(s)
-
-        # The version of the ECPrivateKey must be 1.
-        if version != 1:
-            raise der.UnexpectedDER(
-                "expected version '1' at start of DER privkey, got %d"
-                % version
+            privkey_str, inner_curve, inner_public_key = _parse_ec_private_key(
+                inner_key, valid_curve_encodings
             )
 
-        privkey_str, s = der.remove_octet_string(s)
-
-        if not curve:
-            tag, curve_oid_str, s = der.remove_constructed(s)
-            if tag != 0:
+            # An ECParameters field in the wrapped ECPrivateKey is allowed,
+            # but it must describe the same curve as the algorithm identifier.
+            if inner_curve is not None and inner_curve != curve:
                 raise der.UnexpectedDER(
-                    "expected tag 0 in DER privkey, got %d" % tag
+                    "curve parameters in the ECPrivateKey do not match "
+                    "the algorithm identifier"
                 )
-            curve = Curve.from_der(curve_oid_str, valid_curve_encodings)
-
-        # we don't actually care about the following fields
-        #
-        # tag, pubkey_bitstring, s = der.remove_constructed(s)
-        # if tag != 1:
-        #     raise der.UnexpectedDER("expected tag 1 in DER privkey, got %d"
-        #                             % tag)
-        # pubkey_str = der.remove_bitstring(pubkey_bitstring, 0)
-        # if empty != "":
-        #     raise der.UnexpectedDER("trailing junk after DER privkey "
-        #                             "pubkeystr: %s"
-        #                             % binascii.hexlify(empty))
+        else:
+            privkey_str, curve, public_key = _parse_ec_private_key(
+                s, valid_curve_encodings, version
+            )
+            public_key_field = "publicKey in ECPrivateKey"
+            if curve is None:
+                raise der.UnexpectedDER("expected tag 0 in DER privkey")
 
         # our from_string method likes fixed-length privkey strings
         if len(privkey_str) < curve.baselen:
             privkey_str = (
                 b"\x00" * (curve.baselen - len(privkey_str)) + privkey_str
             )
-        return cls.from_string(privkey_str, curve, hashfunc)
+        signing_key = cls.from_string(privkey_str, curve, hashfunc)
+
+        if inner_public_key is not None:
+            _check_embedded_public_key(
+                signing_key,
+                inner_public_key,
+                "publicKey in ECPrivateKey",
+            )
+        if public_key is not None:
+            _check_embedded_public_key(
+                signing_key,
+                public_key,
+                public_key_field,
+            )
+        return signing_key
 
     def to_string(self):
         """

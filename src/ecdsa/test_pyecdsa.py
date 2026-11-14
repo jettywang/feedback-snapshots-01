@@ -607,9 +607,7 @@ class ECDSA(unittest.TestCase):
         privkey_der = der.encode_octet_string(b"\x00\xff")
         curve_oid_der = der.encode_oid(*(1, 2, 840, 10045, 3, 1, 1))
         const_der = der.encode_constructed(0, curve_oid_der)
-        to_decode = der.encode_sequence(
-            ver_der, privkey_der, const_der, curve_oid_der
-        )
+        to_decode = der.encode_sequence(ver_der, privkey_der, const_der)
 
         sk = SigningKey.from_der(to_decode)
         self.assertEqual(sk.privkey.secret_multiplier, 255)
