@@ -29,14 +29,11 @@ import unittest
 from datetime import datetime, timezone
 from unittest.mock import patch
 
+import in_toto.exceptions
+import in_toto.settings
 import securesystemslib._gpg.functions
 import securesystemslib.exceptions
 from dateutil.relativedelta import relativedelta
-from securesystemslib._gpg.constants import have_gpg
-from securesystemslib._gpg.exceptions import KeyExpirationError
-
-import in_toto.exceptions
-import in_toto.settings
 from in_toto.exceptions import (
     BadReturnValueError,
     LayoutExpiredError,
@@ -73,6 +70,10 @@ from in_toto.verifylib import (
     verify_sublayouts,
     verify_threshold_constraints,
 )
+from securesystemslib._gpg.constants import have_gpg
+from securesystemslib._gpg.exceptions import KeyExpirationError
+from securesystemslib.signer import CryptoSigner
+
 from tests.common import GPGKeysMixin, SignerStore, TmpDirMixin, VersionedPython
 
 
@@ -1344,6 +1345,362 @@ class TestInTotoVerifyThresholds(unittest.TestCase):
         }
 
         verify_threshold_constraints(layout, chain_link_dict)
+
+
+class TestInTotoVerifyConsensusThresholds(unittest.TestCase, TmpDirMixin):
+    """Test the explicit "consensus" step threshold mode.
+
+    A step with four independent authorized functionaries and threshold two:
+    only two agreeing links are required, extra differing links must not fail
+    verification, but the result must be a single unambiguous artifact group.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.foo_hash = (
+            "d65165279105ca6773180500688df4bdc69a2c7b771752f0a46ef120b7fd8ec3"
+        )
+        cls.bar_hash = (
+            "8f5ee7c0e5b3f0e5f3e6c0d3c5c3d2ff2ffdbfb1a4c8c9d0ad03b7f4f5b3ff1a"
+        )
+
+        cls.signers = {
+            "alice": SignerStore.rsa,
+            "bob": SignerStore.ecdsa,
+            "carl": SignerStore.ed25519,
+        }
+        cls.key_dicts = {
+            "alice": SignerStore.rsa_pub,
+            "bob": SignerStore.ecdsa_pub,
+            "carl": SignerStore.ed25519_pub,
+        }
+
+        # Fourth independent key, generated for this test so that all four
+        # functionaries have distinct identities.
+        dave = CryptoSigner.generate_ed25519(keyid="d" * 64)
+        cls.signers["dave"] = dave
+        key_dict = dave.public_key.to_dict()
+        key_dict["keyid"] = dave.public_key.keyid
+        cls.key_dicts["dave"] = key_dict
+
+        cls.keyids = {
+            name: key_dict["keyid"] for name, key_dict in cls.key_dicts.items()
+        }
+
+    def _make_link(self, name, materials=None, products=None):
+        return Link(
+            name=name,
+            materials=materials or {},
+            products=products or {},
+        )
+
+    def _make_metadata(self, link, functionary):
+        metadata = Metablock(signed=link)
+        metadata.create_signature(self.signers[functionary])
+        return metadata
+
+    def _make_layout(self, step_name="test", threshold=2):
+        return Layout(
+            keys={
+                key_dict["keyid"]: key_dict
+                for key_dict in self.key_dicts.values()
+            },
+            steps=[
+                Step(
+                    name=step_name,
+                    pubkeys=[
+                        key_dict["keyid"]
+                        for key_dict in self.key_dicts.values()
+                    ],
+                    threshold=threshold,
+                )
+            ],
+        )
+
+    def test_consensus_unique_majority(self):
+        """Two agreeing links satisfy the threshold despite a differing link."""
+        artifacts = {"foo": {"sha256": self.foo_hash}}
+        other = {"bar": {"sha256": self.bar_hash}}
+
+        chain_link_dict = {
+            "test": {
+                self.keyids["alice"]: self._make_link(
+                    "test", products=artifacts
+                ),
+                self.keyids["bob"]: self._make_link("test", products=artifacts),
+                self.keyids["carl"]: self._make_link("test", products=other),
+            }
+        }
+
+        reduced = verify_threshold_constraints(
+            self._make_layout(), chain_link_dict, "consensus"
+        )
+
+        # The selected representative must come from the majority group.
+        self.assertEqual(reduced["test"].products, artifacts)
+
+        # The same must hold for the signed, end-to-end verification path.
+        links_per_functionary = [
+            ("alice", chain_link_dict["test"][self.keyids["alice"]]),
+            ("bob", chain_link_dict["test"][self.keyids["bob"]]),
+            ("carl", chain_link_dict["test"][self.keyids["carl"]]),
+        ]
+        steps_metadata = {
+            "test": {
+                self.keyids[name]: self._make_metadata(link, name)
+                for name, link in links_per_functionary
+            }
+        }
+        layout = self._make_layout()
+        verified = verify_link_signature_thresholds(layout, steps_metadata)
+        chain_link_dict = verify_sublayouts(layout, verified, ".", 10)
+        reduced = verify_threshold_constraints(
+            layout, chain_link_dict, "consensus"
+        )
+        self.assertEqual(reduced["test"].products, artifacts)
+
+    def test_consensus_tie_fails(self):
+        """Two disjoint groups of two cannot both satisfy a threshold of two."""
+        group_a = {"foo": {"sha256": self.foo_hash}}
+        group_b = {"bar": {"sha256": self.bar_hash}}
+
+        chain_link_dict = {
+            "test": {
+                self.keyids["alice"]: self._make_link("test", products=group_a),
+                self.keyids["bob"]: self._make_link("test", products=group_a),
+                self.keyids["carl"]: self._make_link("test", products=group_b),
+                self.keyids["dave"]: self._make_link("test", products=group_b),
+            }
+        }
+
+        with self.assertRaises(ThresholdVerificationError) as ctx:
+            verify_threshold_constraints(
+                self._make_layout(), chain_link_dict, "consensus"
+            )
+        message = str(ctx.exception)
+        self.assertIn("ambiguous", message)
+        # The failure must list the conflicting evidence for both groups,
+        # instead of returning an arbitrary result.
+        self.assertIn("Ambiguous groups:", message)
+        for keyid in self.keyids.values():
+            self.assertIn(
+                FILENAME_FORMAT.format(step_name="test", keyid=keyid),
+                message,
+            )
+
+    def test_consensus_duplicate_vote_is_not_double_counted(self):
+        """A keyid aliasing another key must not create a second vote."""
+        artifacts = {"foo": {"sha256": self.foo_hash}}
+
+        # A fifth keyid that carries the same public key as alice. The layout
+        # stores both keyids, so both signatures verify, but they are one
+        # functionary and must count once.
+        alias_key = dict(self.key_dicts["alice"])
+        alias_key["keyid"] = "a" * 64
+
+        layout = self._make_layout()
+        layout.keys[alias_key["keyid"]] = alias_key
+
+        chain_link_dict = {
+            "test": {
+                self.keyids["alice"]: self._make_link(
+                    "test", products=artifacts
+                ),
+                self.keyids["bob"]: self._make_link("test", products=artifacts),
+                alias_key["keyid"]: self._make_link("test", products=artifacts),
+            }
+        }
+
+        # Although three keyids report the same artifacts, only two distinct
+        # functionaries do. Threshold three must therefore fail.
+        layout_threshold_three = self._make_layout(threshold=3)
+        layout_threshold_three.keys[alias_key["keyid"]] = alias_key
+        with self.assertRaises(ThresholdVerificationError):
+            verify_threshold_constraints(
+                layout_threshold_three, chain_link_dict, "consensus"
+            )
+
+        # With an honest threshold of two the same evidence passes.
+        reduced = verify_threshold_constraints(
+            layout, chain_link_dict, "consensus"
+        )
+        self.assertEqual(reduced["test"].products, artifacts)
+
+    def test_consensus_ignores_bad_signature(self):
+        """A bad signature cannot help a group reach the threshold."""
+        group_a = {"foo": {"sha256": self.foo_hash}}
+        group_b = {"bar": {"sha256": self.bar_hash}}
+
+        layout = self._make_layout(threshold=2)
+
+        # Alice claims group_a but her link is tampered with after signing, so
+        # her claim is invalid. Only bob remains in group_a, while carl and
+        # dave form a valid majority for group_b.
+        broken = self._make_metadata(
+            self._make_link("test", products=group_a), "alice"
+        )
+        broken.signed.products = group_b
+        steps_metadata = {
+            "test": {
+                self.keyids["alice"]: broken,
+                self.keyids["bob"]: self._make_metadata(
+                    self._make_link("test", products=group_a), "bob"
+                ),
+                self.keyids["carl"]: self._make_metadata(
+                    self._make_link("test", products=group_b), "carl"
+                ),
+                self.keyids["dave"]: self._make_metadata(
+                    self._make_link("test", products=group_b), "dave"
+                ),
+            }
+        }
+
+        verified = verify_link_signature_thresholds(layout, steps_metadata)
+        self.assertNotIn(self.keyids["alice"], verified["test"])
+
+        chain_link_dict = verify_sublayouts(layout, verified, ".", 10)
+        reduced = verify_threshold_constraints(
+            layout, chain_link_dict, "consensus"
+        )
+        # Only the genuinely signed majority is selected; alice's tampered
+        # claim must not be resurrected into group_a.
+        self.assertEqual(reduced["test"].products, group_b)
+
+    def test_consensus_contradictory_same_identity_cannot_vote_twice(self):
+        """One identity with contradictory links cannot vote in two groups."""
+        group_a = {"foo": {"sha256": self.foo_hash}}
+        group_b = {"bar": {"sha256": self.bar_hash}}
+
+        # Alias keyid carrying alice's public key. With this alias alice could
+        # vote for group_a and for group_b at once, which must not be allowed.
+        alias_key = dict(self.key_dicts["alice"])
+        alias_key["keyid"] = "a" * 64
+
+        layout = self._make_layout(threshold=2)
+        layout.keys[alias_key["keyid"]] = alias_key
+        layout.steps[0].pubkeys.append(alias_key["keyid"])
+
+        chain_link_dict = {
+            "test": {
+                self.keyids["alice"]: self._make_link("test", products=group_a),
+                alias_key["keyid"]: self._make_link("test", products=group_b),
+                self.keyids["bob"]: self._make_link("test", products=group_a),
+            }
+        }
+
+        with self.assertRaises(ThresholdVerificationError) as ctx:
+            verify_threshold_constraints(layout, chain_link_dict, "consensus")
+        self.assertIn("Contradictory", str(ctx.exception))
+        self.assertIn("excluded from all groups", str(ctx.exception))
+
+    def test_consensus_strict_is_default_and_still_fails_on_extra_link(self):
+        """Default mode keeps requiring all valid links to agree."""
+        group_a = {"foo": {"sha256": self.foo_hash}}
+        group_b = {"bar": {"sha256": self.bar_hash}}
+
+        layout = self._make_layout(threshold=2)
+        chain_link_dict = {
+            "test": {
+                self.keyids["alice"]: self._make_link("test", products=group_a),
+                self.keyids["bob"]: self._make_link("test", products=group_a),
+                self.keyids["carl"]: self._make_link("test", products=group_b),
+            }
+        }
+
+        with self.assertRaises(ThresholdVerificationError):
+            verify_threshold_constraints(layout, chain_link_dict)
+
+        # The same evidence passes the explicit consensus mode.
+        verify_threshold_constraints(layout, chain_link_dict, "consensus")
+
+    def test_consensus_selected_group_drives_rules_match_and_summary(self):
+        """MATCH, rule consumption and summary all use the selected group."""
+        group_a = {
+            "foo.py": {"sha256": self.foo_hash},
+        }
+        group_b = {
+            "foo.py": {"sha256": self.bar_hash},
+        }
+
+        step_a = Step(
+            name="build",
+            pubkeys=[key_dict["keyid"] for key_dict in self.key_dicts.values()],
+            threshold=2,
+            expected_products=[["CREATE", "foo.py"]],
+        )
+        step_match = Step(
+            name="package",
+            pubkeys=[key_dict["keyid"] for key_dict in self.key_dicts.values()],
+            threshold=2,
+            expected_materials=[
+                ["MATCH", "foo.py", "WITH", "PRODUCTS", "FROM", "build"]
+            ],
+        )
+
+        layout = Layout(
+            keys={
+                key_dict["keyid"]: key_dict
+                for key_dict in self.key_dicts.values()
+            },
+            steps=[step_a, step_match],
+        )
+        layout.steps[0].expected_products = [["CREATE", "foo.py"]]
+        layout.steps[1].expected_materials = [
+            ["MATCH", "foo.py", "WITH", "PRODUCTS", "FROM", "build"]
+        ]
+
+        links = {
+            "build": {
+                self.keyids["alice"]: self._make_link(
+                    "build", products=group_a
+                ),
+                self.keyids["bob"]: self._make_link("build", products=group_a),
+                self.keyids["carl"]: self._make_link("build", products=group_b),
+                self.keyids["dave"]: self._make_link("build", products=group_b),
+            },
+            "package": {
+                self.keyids["alice"]: self._make_link(
+                    "package", materials=group_a
+                ),
+                self.keyids["bob"]: self._make_link(
+                    "package", materials=group_a
+                ),
+                self.keyids["carl"]: self._make_link(
+                    "package", materials=group_b
+                ),
+                self.keyids["dave"]: self._make_link(
+                    "package", materials=group_b
+                ),
+            },
+        }
+
+        # Two groups of two: ambiguous for a threshold of two, must fail and
+        # report both groups, not silently pick the first link.
+        with self.assertRaises(ThresholdVerificationError) as ctx:
+            verify_threshold_constraints(layout, links, "consensus")
+        self.assertIn("ambiguous", str(ctx.exception))
+
+        # Make a unique majority for both steps (alice, bob, carl agree). The
+        # selected links must be the ones carrying group_a hashes.
+        links["build"][self.keyids["carl"]] = self._make_link(
+            "build", products=group_a
+        )
+        links["package"][self.keyids["carl"]] = self._make_link(
+            "package", materials=group_a
+        )
+
+        reduced = verify_threshold_constraints(layout, links, "consensus")
+        verify_all_item_rules(layout.steps, reduced)
+
+        # MATCH consumed foo.py, so the package step's material queue is empty
+        # and no rule failure was raised. The summary link must use the same
+        # group: first step materials and last step products.
+        summary = get_summary_link(layout, reduced, "summary")
+        self.assertEqual(summary.materials, {})
+        self.assertEqual(summary.products, {})
+        self.assertIn("build", reduced)
+        self.assertEqual(reduced["build"].products, group_a)
+        self.assertEqual(reduced["package"].materials, group_a)
 
 
 @unittest.skipIf(not have_gpg(), "gpg not found")

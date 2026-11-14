@@ -249,6 +249,39 @@ class TestInTotoVerifySubjectPublicKeyInfoKeysAndUseDSSE(
         ] + self.public_key_paths
         self.assert_cli_sys_exit(args, 0)
 
+    def test_main_explicit_strict_threshold_mode(self):
+        """The default strict threshold mode can be selected explicitly."""
+        args = [
+            "--layout",
+            "demo.layout",
+            "--threshold-mode",
+            "strict",
+            "--verification-keys",
+        ] + self.public_key_paths
+        self.assert_cli_sys_exit(args, 0)
+
+    def test_main_explicit_consensus_threshold_mode(self):
+        """The consensus threshold mode can be selected explicitly."""
+        args = [
+            "--layout",
+            "demo.layout",
+            "--threshold-mode",
+            "consensus",
+            "--verification-keys",
+        ] + self.public_key_paths
+        self.assert_cli_sys_exit(args, 0)
+
+    def test_main_invalid_threshold_mode(self):
+        """An unsupported threshold mode is rejected by argument parsing."""
+        args = [
+            "--layout",
+            "demo.layout",
+            "--threshold-mode",
+            "bogus",
+            "--verification-keys",
+        ] + self.public_key_paths
+        self.assert_cli_sys_exit(args, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Added
+* Explicit step threshold consensus mode. `in_toto_verify` accepts
+  `threshold_mode="consensus"`, and `in-toto-verify` accepts
+  `--threshold-mode consensus`. Links are grouped by their complete materials
+  and products, and exactly one group must reach the step threshold, counting
+  only distinct authorized functionaries. Ambiguous majorities, absent
+  majorities, and contradictory claims from the same functionary fail with a
+  conflict evidence summary instead of an arbitrary result. The default
+  `strict` mode keeps requiring all valid links to agree. The selected group is
+  used consistently for MATCH rules, rule consumption, inspections and the
+  summary link.
+
 ## v3.1.0
 
 This release includes version bumpbs, as well as upgraded debian support , and

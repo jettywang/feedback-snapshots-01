@@ -73,6 +73,13 @@ The verification includes the following checks:
   * the materials and products for each step, as reported by the corresponding
     link files, adhere to the artifact rules specified by the step.
 
+By default ('--threshold-mode strict') all valid links of a step must report
+identical materials and products. With '--threshold-mode consensus' links are
+grouped by their complete materials and products, and exactly one group must
+reach the step threshold, counting only distinct authorized functionaries.
+Ambiguous majorities, absent majorities, and contradictory claims by the same
+functionary fail verification with a summary of the conflicting evidence.
+
 Additionally, inspection commands defined in the layout are executed
 sequentially, followed by processing the inspections' artifact rules.
 
@@ -173,6 +180,23 @@ for which the public part can be found in the GPG keyring at '~/.gnupg'.
         ),
     )
 
+    parser.add_argument(
+        "--threshold-mode",
+        dest="threshold_mode",
+        type=str,
+        choices=verifylib.THRESHOLD_MODES,
+        default=verifylib.THRESHOLD_MODE_STRICT,
+        help=(
+            "step threshold policy. 'strict' (default) requires all valid"
+            " links of a step to report identical materials and products."
+            " 'consensus' groups links by complete materials and products and"
+            " requires exactly one group to reach the step threshold, counting"
+            " distinct authorized functionaries. Ambiguous or absent majorities"
+            " fail verification. The selected group is used consistently for"
+            " MATCH rules, rule consumption and the summary link."
+        ),
+    )
+
     parser.add_argument(*GPG_HOME_ARGS, **GPG_HOME_KWARGS)
     parser.add_argument(
         "--inspection-timeout",
@@ -238,6 +262,7 @@ def main():
             layout_key_dict,
             args.link_dir,
             inspect_timeout=args.inspect_timeout,
+            threshold_mode=args.threshold_mode,
         )
 
     except Exception as e:  # noqa: BLE001

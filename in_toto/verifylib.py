@@ -27,6 +27,8 @@
 
 import datetime
 import fnmatch
+import hashlib
+import json
 import logging
 import os
 
@@ -453,6 +455,10 @@ def verify_link_signature_thresholds(layout, steps_metadata):  # noqa: C901, PLR
     # Dict for valid and authorized links of all steps of the layout
     verified_steps_metadata = {}
 
+    # Resolve keyids to functionary identities, so that master keys and their
+    # subkeys, as well as keyids aliasing the same public key, count only once.
+    functionary_identities = _functionary_identities(layout)
+
     # For each step of the layout check the signatures of corresponding links.
     # Consider only links where the signature is valid and keys are authorized,
     # and discard others.
@@ -463,8 +469,6 @@ def verify_link_signature_thresholds(layout, steps_metadata):  # noqa: C901, PLR
     for step in layout.steps:
         # Dict for valid and authorized links of a given step
         verified_key_link_dict = {}
-        # List of used keyids
-        used_main_keyids = []
 
         # Do per step link threshold verification
         for link_keyid, link in steps_metadata.get(step.name, {}).items():
@@ -520,29 +524,18 @@ def verify_link_signature_thresholds(layout, steps_metadata):  # noqa: C901, PLR
                 LOG.info("Skipping link. %s", e)
                 continue
 
-            # Warn if there are links signed by different subkeys of same main key
-            if verification_key["keyid"] in used_main_keyids:
-                LOG.warning(
-                    "Found links signed by different subkeys of the same main"
-                    " key '%s' for step '%s'. Only one of them is counted towards the"
-                    " step threshold.",
-                    verification_key["keyid"],
-                    step.name,
-                )
-
-            used_main_keyids.append(verification_key["keyid"])
-
             # Keep only links with valid and authorized signature
             verified_key_link_dict[link_keyid] = link
 
         # For each step, verify that we have enough validly signed links from
-        # distinct authorized functionaries. Links signed by different subkeys of
-        # the same main key are counted only once towards the threshold.
-        valid_authorized_links_cnt = len(set(used_main_keyids))
-        # TODO: To guarantee that links are signed by different functionaries
-        # we rely on the layout to not carry duplicate verification keys under
-        # different dictionary keys, e.g. {keyid1: KEY1, keyid2: KEY1}
-        # Maybe we should add such a check to the layout validation? Or here?
+        # distinct authorized functionaries. Links signed by different subkeys
+        # of the same main key, and keys that alias the same public key, are
+        # counted only once towards the threshold.
+        distinct_identities = {
+            _get_identity(functionary_identities, link_keyid)
+            for link_keyid in verified_key_link_dict
+        }
+        valid_authorized_links_cnt = len(distinct_identities)
         if valid_authorized_links_cnt < step.threshold:
             raise ThresholdVerificationError(
                 f"Step '{step.name}' requires at least '{step.threshold}' links"
@@ -607,14 +600,22 @@ def verify_all_steps_command_alignment(layout, chain_link_dict):
               A Layout object to extract the expected commands from.
 
       chain_link_dict:
-              A dictionary containing link metadata per functionary per step,
-              e.g.:
+              A dictionary containing either one selected Link per step or
+              link metadata per functionary per step, e.g.:
+              {
+                <link name> : <Link object>,
+                ...
+              }
+              or
               {
                 <link name> : {
                   <functionary key id> : <Link object>,
                   ...
                 }, ...
               }
+              When per-functionary links are passed, all of them are checked.
+              Final product verification passes the per-step selected links,
+              so that commands of discarded artifact groups are not aligned.
 
     <Exceptions>
       None.
@@ -626,11 +627,15 @@ def verify_all_steps_command_alignment(layout, chain_link_dict):
     for step in layout.steps:
         # Find the according link for this step
         expected_command = step.expected_command
-        key_link_dict = chain_link_dict[step.name]
+        step_links = chain_link_dict[step.name]
 
-        # FIXME: I think we could do this for one link per step only
-        # providing that we verify command alignment AFTER threshold equality
-        for keyid, link in key_link_dict.items():
+        # Accept both a single selected Link and a per-functionary dict.
+        if hasattr(step_links, "command"):
+            links_per_keyid = {step.name: step_links}
+        else:
+            links_per_keyid = step_links
+
+        for keyid, link in links_per_keyid.items():
             LOG.info(
                 "Verifying command alignment for '%s'...",
                 in_toto.models.link.FILENAME_FORMAT.format(
@@ -1187,16 +1192,324 @@ def verify_all_item_rules(items, links):
         verify_item_rules(item.name, "products", item.expected_products, links)
 
 
-def verify_threshold_constraints(layout, chain_link_dict):
+# Threshold verification modes. In "strict" mode (default) all valid links of a
+# step must report identical materials and products. In "consensus" mode links
+# are grouped by their complete materials and products, and exactly one group
+# must reach the step threshold, counting distinct authorized functionaries.
+THRESHOLD_MODE_STRICT = "strict"
+THRESHOLD_MODE_CONSENSUS = "consensus"
+THRESHOLD_MODES = (THRESHOLD_MODE_STRICT, THRESHOLD_MODE_CONSENSUS)
+
+
+def _check_threshold_mode(threshold_mode):
+    """Raises FormatError if the passed threshold mode is not supported."""
+    if threshold_mode not in THRESHOLD_MODES:
+        raise securesystemslib.exceptions.FormatError(
+            "Invalid threshold mode '{}'. Must be one of: {}".format(
+                threshold_mode, ", ".join(THRESHOLD_MODES)
+            )
+        )
+
+
+def _link_payload(link):
+    """Returns the Link payload of a Link object or metadata container.
+
+    ``verify_threshold_constraints`` historically accepted both raw Link
+    objects and metadata containers (Metablock/Envelope) in
+    ``chain_link_dict``. Grouping and evidence formatting operate on the Link
+    payload, so unwrap containers here.
+    """
+    payload = getattr(link, "signed", None)
+    if payload is None and hasattr(link, "get_payload"):
+        payload = link.get_payload()
+    return payload if payload is not None else link
+
+
+def _artifacts_fingerprint(link):
+    """Returns a stable digest over a link's complete materials and products.
+
+    The digest covers every artifact path together with every reported hash
+    algorithm and digest. Artifact paths (and hash algorithm names) are sorted
+    so that semantically equal recordings always produce the same fingerprint,
+    regardless of the serialization order.
+
+    <Arguments>
+      link:
+              A Link object whose artifacts are fingerprinted.
+
+    <Returns>
+      A hex digest string.
+    """
+    payload = _link_payload(link)
+    canonical = json.dumps(
+        {"materials": payload.materials, "products": payload.products},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _conflict_evidence(step, links):
+    """Build a concise, deterministic summary of conflicting link evidence.
+
+    Each line identifies a link by its expected filename and keyid, reports the
+    number of recorded materials and products, and includes a short digest of
+    the complete artifact recording. This is enough to tell groups apart without
+    dumping potentially huge artifact lists.
+
+    <Arguments>
+      step:
+              The Step whose evidence conflicts.
+
+      links:
+              A dictionary of Link objects per functionary keyid.
+
+    <Returns>
+      A string with one line per link, sorted by keyid.
+    """
+    evidence = []
+    for keyid, link in sorted(links.items()):
+        payload = _link_payload(link)
+        evidence.append(
+            "  {} (keyid {}, materials: {}, products: {}, artifacts: {})".format(
+                in_toto.models.link.FILENAME_FORMAT.format(
+                    step_name=step.name, keyid=keyid
+                ),
+                keyid,
+                len(payload.materials),
+                len(payload.products),
+                _artifacts_fingerprint(payload)[:12],
+            )
+        )
+    return "\n".join(evidence)
+
+
+def _key_identity(key):
+    """Returns a stable functionary identity digest for a public key dict.
+
+    The digest deliberately ignores the keyid and subkey bundle. This way two
+    keyids that alias the same public key (or a master key and its subkeys)
+    resolve to the same identity and cannot vote more than once.
+
+    <Arguments>
+      key:
+              A public key dictionary as stored in the layout's key store.
+
+    <Returns>
+      A hex digest string.
+    """
+    key_content = {
+        "keytype": key.get("keytype") or key.get("type"),
+        "scheme": key.get("scheme") or key.get("method"),
+        "public": key.get("keyval", {}).get("public"),
+    }
+    canonical = json.dumps(
+        key_content, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def _functionary_identities(layout):
+    """Returns a mapping from keyid to the distinct functionary identity.
+
+    in-toto keyids identify keys, not functionaries: a single functionary can
+    hold multiple keys, e.g. a master key and its signing subkeys, or the same
+    public key stored under two keyids. All such keys must count as one vote.
+    The returned mapping collapses subkeys to their main key's identity and
+    derives the identity from the actual key material, so aliasing does not
+    create additional votes.
+
+    <Arguments>
+      layout:
+              The layout whose key store defines main-key/subkey relations.
+
+    <Returns>
+      A dictionary mapping keyids to hashable functionary identities.
+    """
+    identities = {}
+    subkey_ids = {
+        sub_keyid
+        for key in layout.keys.values()
+        for sub_keyid in key.get("subkeys", {})
+    }
+
+    # Anchor each main key and all of its subkeys to the main key's identity.
+    for keyid, key in layout.keys.items():
+        if keyid in subkey_ids:
+            # A subkey listed both as a top-level key and as another key's
+            # subkey is handled when its main key is visited below.
+            continue
+
+        identity = _key_identity(key)
+        identities[keyid] = identity
+        for sub_keyid in key.get("subkeys", {}):
+            identities[sub_keyid] = identity
+
+    # Remaining keys are standalone (e.g. a subkey whose main key is not in
+    # this layout); derive their identity from their own key material.
+    for keyid, key in layout.keys.items():
+        identities.setdefault(keyid, _key_identity(key))
+
+    return identities
+
+
+def _get_identity(identities, keyid):
+    """Returns the functionary identity for a keyid, defaulting to the keyid."""
+    return identities.get(keyid, keyid)
+
+
+def _select_consensus_group(step, links, identities):
+    """Select the unique artifact group that reaches the step threshold.
+
+    Links are grouped by their complete materials and products recording. Only
+    distinct functionary identities count towards a group, i.e. a functionary
+    that submits contradictory links cannot cast a vote in multiple groups. Such
+    a functionary is excluded from all groups: its contradictory evidence is
+    reported if verification fails, but it never helps a group reach the
+    threshold.
+
+    Exactly one group must reach the threshold. If none does, or if more than
+    one group does, a ``ThresholdVerificationError`` with conflict evidence is
+    raised. Selection never depends on file or dictionary order.
+
+    <Arguments>
+      step:
+              The Step whose evidence is grouped.
+
+      links:
+              A dictionary of validly signed, authorized Link objects per
+              keyid.
+
+      identities:
+              A dictionary mapping keyids to functionary identities (see
+              `_functionary_identities`).
+
+    <Returns>
+      A tuple ``(representative_keyid, group_links)``, where ``group_links`` is
+      the dictionary of links in the selected group and
+      ``representative_keyid`` is chosen deterministically among them.
+    """
+    links_by_identity = {}
+    fingerprints_by_identity = {}
+    for keyid, link in links.items():
+        identity = _get_identity(identities, keyid)
+        links_by_identity.setdefault(identity, {})[keyid] = link
+        fingerprints_by_identity.setdefault(identity, set()).add(
+            _artifacts_fingerprint(link)
+        )
+
+    # An identity whose keys report different artifacts must not vote in more
+    # than one group. Exclude it from every group instead of silently choosing
+    # one of its recordings.
+    contradictory_identities = sorted(
+        identity
+        for identity, fingerprints in fingerprints_by_identity.items()
+        if len(fingerprints) > 1
+    )
+    if contradictory_identities:
+        LOG.warning(
+            "Step '%s' has contradictory evidence from the same authorized"
+            " functionary/functionaries %s. Their votes are excluded from every"
+            " artifact group.",
+            step.name,
+            contradictory_identities,
+        )
+
+    groups = {}
+    for identity, identity_links in links_by_identity.items():
+        if identity in contradictory_identities:
+            continue
+
+        for keyid, link in identity_links.items():
+            group = groups.setdefault(
+                _artifacts_fingerprint(link),
+                {"identities": set(), "links": {}},
+            )
+            group["identities"].add(identity)
+            group["links"][keyid] = link
+
+    qualifying = [
+        (fingerprint, group)
+        for fingerprint, group in groups.items()
+        if len(group["identities"]) >= step.threshold
+    ]
+
+    # Sort by fingerprint so ambiguity detection and messages are stable,
+    # independent of link loading or dictionary iteration order.
+    qualifying.sort(key=lambda item: item[0])
+
+    contradiction_note = ""
+    if contradictory_identities:
+        contradictory_keyids = sorted(
+            keyid
+            for identity in contradictory_identities
+            for keyid in links_by_identity[identity]
+        )
+        contradiction_note = (
+            "\nContradictory evidence from the same functionary/functionaries"
+            f" (keyids {contradictory_keyids}) is excluded from all groups."
+        )
+
+    if not qualifying:
+        raise ThresholdVerificationError(
+            f"Step '{step.name}' requires at least '{step.threshold}' links from distinct authorized"
+            " functionaries that agree on the complete materials and products,"
+            " but no artifact group reached the threshold. Conflicting"
+            f" evidence:\n{_conflict_evidence(step, links)}{contradiction_note}"
+        )
+
+    if len(qualifying) > 1:
+        ambiguous = "\n".join(
+            "  group {} ({} distinct functionaries):\n{}".format(
+                fingerprint,
+                len(group["identities"]),
+                _conflict_evidence(step, group["links"]),
+            )
+            for fingerprint, group in qualifying
+        )
+        raise ThresholdVerificationError(
+            f"Step '{step.name}' has an ambiguous consensus: more than one artifact"
+            f" group reached the threshold '{step.threshold}'. Ambiguous groups:\n{ambiguous}{contradiction_note}"
+        )
+
+    _, group = qualifying[0]
+    representative_keyid = min(group["links"])
+
+    return representative_keyid, group["links"]
+
+
+def _resolve_threshold_mode(threshold_mode):
+    """Resolve and validate the effective threshold mode.
+
+    The mode is chosen explicitly by the verifier (API or CLI) and is never
+    read from the signed layout. This prevents a layout from silently
+    downgrading verification policy, and keeps existing layout signatures
+    backwards compatible.
+    """
+    if threshold_mode is None:
+        return THRESHOLD_MODE_STRICT
+
+    _check_threshold_mode(threshold_mode)
+
+    return threshold_mode
+
+
+def verify_threshold_constraints(layout, chain_link_dict, threshold_mode=None):
     """
     <Purpose>
-      Verifies that all links corresponding to a given step report the same
-      materials and products.
+      Verifies the step threshold for every step of the layout and returns the
+      single Link per step that subsequent verification must use.
 
-      NOTE: This function does not verify if the signatures of each link
-      corresponding to a step are valid or created by a different authorized
-      functionary. This should be done earlier, using the function
-      `verify_link_signature_thresholds`.
+      In the default "strict" mode all links for a step must report identical
+      materials and products. In "consensus" mode links are grouped by their
+      complete materials and products, and exactly one group must reach the
+      step threshold, counting only distinct functionaries per group.
+
+    NOTE: This function does not verify if the signatures of each link
+    corresponding to a step are valid or created by a different authorized
+    functionary. This should be done earlier, using the function
+    `verify_link_signature_thresholds`, whose output keyids are used to
+    determine distinct functionaries here.
 
     <Arguments>
       layout:
@@ -1214,67 +1527,120 @@ def verify_threshold_constraints(layout, chain_link_dict):
 
     <Exceptions>
       ThresholdVerificationError
-          If there are not enough (threshold) links for a steps
-
-          If the artifacts for all links of a step are not equal
-
+          If there are not enough (threshold) links for a step, if the links
+          do not agree as required by the threshold mode, or if consensus is
+          ambiguous or a functionary submitted contradictory evidence.
 
     <Side Effects>
       None.
 
+    <Returns>
+      A dictionary containing exactly one Link object per step, e.g.:
+      {
+        <link name> : <Link object>,
+        ...
+      }
+      The returned links are guaranteed to belong to the single selected
+      artifact group per step, so that MATCH rules and the summary link never
+      mix evidence of different groups.
     """
+    threshold_mode = _resolve_threshold_mode(threshold_mode)
+    functionary_identities = _functionary_identities(layout)
+    reduced_chain_link_dict = {}
 
     # We are only interested in links that are related to steps defined in the
     # Layout, so iterate over layout.steps
     for step in layout.steps:
-        # Skip steps that don't require multiple functionaries
-        if step.threshold <= 1:
+        # Extract the key_link_dict for this step from the passed chain_link_dict
+        key_link_dict = chain_link_dict[step.name]
+
+        if threshold_mode == THRESHOLD_MODE_STRICT:
             LOG.info(
-                "Skipping threshold verification for step '%s' with"
+                "Verifying threshold in 'strict' mode for step '%s' with"
                 " threshold '%s'...",
                 step.name,
                 step.threshold,
             )
+
+            # Preserve the historical strict behavior: equality of all valid
+            # links is enforced for steps that require multiple functionaries.
+            # For single-functionary steps the upstream signature check already
+            # guarantees exactly one valid identity.
+            if step.threshold > 1:
+                _verify_strict_threshold(
+                    step, key_link_dict, functionary_identities
+                )
+
+            reduced_chain_link_dict[step.name] = key_link_dict[
+                min(key_link_dict)
+            ]
             continue
 
         LOG.info(
-            "Verifying threshold for step '%s' with threshold '%s'...",
+            "Verifying threshold in 'consensus' mode for step '%s' with"
+            " threshold '%s'...",
             step.name,
             step.threshold,
         )
-        # Extract the key_link_dict for this step from the passed chain_link_dict
-        key_link_dict = chain_link_dict[step.name]
 
-        # Check if we have at least <threshold> links for this step
-        # NOTE: This is already done in `verify_link_signature_thresholds`,
-        # Should we remove the check?
-        if len(key_link_dict) < step.threshold:
+        representative_keyid, group_links = _select_consensus_group(
+            step,
+            key_link_dict,
+            functionary_identities,
+        )
+        reduced_chain_link_dict[step.name] = group_links[representative_keyid]
+
+    return reduced_chain_link_dict
+
+
+def _verify_strict_threshold(step, key_link_dict, identities):
+    """Verifies that all links of a step report identical artifacts.
+
+    Also verifies that enough distinct authorized functionaries provided
+    evidence.
+
+    Raises:
+      ThresholdVerificationError: The step has too few distinct functionaries
+      or the links report different materials or products.
+    """
+    if len(key_link_dict) < step.threshold:
+        raise ThresholdVerificationError(
+            f"Step '{step.name}' not performed by enough functionaries! Conflicting"
+            f" evidence:\n{_conflict_evidence(step, key_link_dict)}"
+        )
+
+    distinct_identities = {
+        _get_identity(identities, keyid) for keyid in key_link_dict
+    }
+    if len(distinct_identities) < step.threshold:
+        raise ThresholdVerificationError(
+            f"Step '{step.name}' requires at least '{step.threshold}' links from different authorized"
+            f" functionaries, but only '{len(distinct_identities)}' distinct functionaries contributed"
+            f" evidence. Conflicting evidence:\n{_conflict_evidence(step, key_link_dict)}"
+        )
+
+    # Deterministically pick a reference link, not the first one inserted.
+    reference_keyid = min(key_link_dict)
+    reference_link = _link_payload(key_link_dict[reference_keyid])
+
+    for keyid, link in key_link_dict.items():
+        link = _link_payload(link)
+        if (
+            reference_link.materials != link.materials
+            or reference_link.products != link.products
+        ):
             raise ThresholdVerificationError(
-                f"Step '{step.name}' not performed by enough functionaries!"
-            )
-
-        # Take a reference link (e.g. the first in the step_link_dict)
-        reference_keyid = next(iter(key_link_dict.keys()))
-        reference_link = key_link_dict[reference_keyid]
-
-        # Iterate over all links to compare their properties with a reference_link
-        for keyid, link in key_link_dict.items():
-            # TODO: Do we only care for artifacts, or do we want to
-            # assert equality of other properties as well?
-            if (
-                reference_link.materials != link.materials
-                or reference_link.products != link.products
-            ):
-                raise ThresholdVerificationError(
-                    "Links '{}' and '{}' have different artifacts!".format(
-                        in_toto.models.link.FILENAME_FORMAT.format(
-                            step_name=step.name, keyid=reference_keyid
-                        ),
-                        in_toto.models.link.FILENAME_FORMAT.format(
-                            step_name=step.name, keyid=keyid
-                        ),
-                    )
+                "Links '{}' and '{}' have different artifacts! Conflicting"
+                " evidence:\n{}".format(
+                    in_toto.models.link.FILENAME_FORMAT.format(
+                        step_name=step.name, keyid=reference_keyid
+                    ),
+                    in_toto.models.link.FILENAME_FORMAT.format(
+                        step_name=step.name, keyid=keyid
+                    ),
+                    _conflict_evidence(step, key_link_dict),
                 )
+            )
 
 
 def reduce_chain_links(chain_link_dict):
@@ -1282,14 +1648,13 @@ def reduce_chain_links(chain_link_dict):
     <Purpose>
       Iterates through the passed chain_link_dict and builds a dict with
       step-name as keys and link objects as values.
-      We already check if the links of different functionaries are
-      identical.
+
+      This helper is kept for backwards compatibility with callers that
+      already hold one Link per step. Final product verification uses
+      `verify_threshold_constraints`, which returns the representative links
+      of the single artifact group selected per step.
 
     <Arguments>
-      layout:
-              The layout specified by the project owner against which the
-              threshold will be verified.
-
       chain_link_dict:
               A dictionary containing link metadata per functionary per step,
               e.g.:
@@ -1307,24 +1672,24 @@ def reduce_chain_links(chain_link_dict):
       None.
 
     <Returns>
-      A dictionary containing one Link metadata object per step only if
-      the link artifacts of all link objects are identical for a step.
-
+      A dictionary containing one Link metadata object per step, picked
+      deterministically by keyid.
     """
 
     reduced_chain_link_dict = {}
 
     for step_name, key_link_dict in chain_link_dict.items():
-        # Extract the key_link_dict for this step from the passed chain_link_dict
-        # take one exemplary link (e.g. the first in the step_link_dict)
-        # form the reduced_chain_link_dict to return
-        reduced_chain_link_dict[step_name] = next(iter(key_link_dict.values()))
+        reduced_chain_link_dict[step_name] = key_link_dict[min(key_link_dict)]
 
     return reduced_chain_link_dict
 
 
 def verify_sublayouts(
-    layout, steps_metadata, superlayout_link_dir_path, inspect_timeout
+    layout,
+    steps_metadata,
+    superlayout_link_dir_path,
+    inspect_timeout,
+    threshold_mode=None,
 ):
     """
     <Purpose>
@@ -1357,6 +1722,11 @@ def verify_sublayouts(
       inspect_timeout:
               Integer value that is the number of seconds to pass to the run
               command to timeout the subprocess within.
+
+      threshold_mode (optional):
+              The threshold policy passed down to recursive sublayout
+              verification, so that nested layouts use the same evidence
+              selection model as the superlayout.
 
     <Exceptions>
       raises an Exception if verification of the delegated step fails.
@@ -1413,6 +1783,7 @@ def verify_sublayouts(
                     link_dir_path=sublayout_link_dir_path,
                     step_name=step_name,
                     inspect_timeout=inspect_timeout,
+                    threshold_mode=threshold_mode,
                 )
 
                 # Replace the layout object with the link object returned
@@ -1489,6 +1860,7 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
     step_name="",
     persist_inspection_links=True,
     inspect_timeout=in_toto.settings.LINK_CMD_EXEC_TIMEOUT,
+    threshold_mode=None,
 ):
     """Performs complete in-toto supply chain verification for a final product.
 
@@ -1501,11 +1873,12 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
     4.  Load link metadata
     5.  Verify link signatures with keys in layout
     6.  Recurse into sublayout verification
-    7.  Soft-verify alignment of reported and expected commands. Note:
+    7.  Verify threshold artifact constraints and select one artifact group
+        per step
+    8.  Soft-verify alignment of reported and expected commands. Note:
         verification does not fail if commands don't match, instead a warning is
         logged as per the in-toto specification --
         https://github.com/in-toto/docs/blob/master/in-toto-spec.md#431-steps
-    8.  Verify threshold artifact constraints
     9.  Process step product and material rules
     10. Execute inspection commands and generate inspection links
     11. Process inspection product and material rules
@@ -1547,6 +1920,16 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
           in_toto.settings.LINK_CMD_EXEC_TIMEOUT in seconds which ends up timing
           out the run command subprocess if it runs over.
 
+      threshold_mode (optional): The step threshold policy, either "strict"
+          (default) or "consensus". In "strict" mode all valid links of a step
+          must report identical materials and products. In "consensus" mode
+          links are grouped by their complete materials and products, and
+          exactly one group must reach the step threshold, counting distinct
+          authorized functionaries; ambiguous or unique-less majorities are
+          rejected. The selected group is used for command alignment, step
+          rules, inspections and the summary link. The mode is chosen by the
+          verifier and is not read from the (signed) layout.
+
     Raises:
       securesystemslib.exceptions.FormatError: Passed parameters are malformed.
 
@@ -1562,7 +1945,9 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
           different authorized functionaries, who agree on the recorded materials
           and products, can be found for a step of the layout. (Links with
           invalid signatures or signatures by unauthorized functionaries are
-          ignored.)
+          ignored.) In consensus mode, an ambiguous majority (more than one
+          artifact group reaching the threshold) and a unique majority with
+          contradictory claims by the same functionary also raise this error.
 
       RuleVerificationError: A DISALLOW rule matches disallowed artifacts, or
           a REQUIRE rule does not find a required artifact.
@@ -1582,6 +1967,9 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
 
     LOG.info("Verifying layout metadata signatures...")
     verify_metadata_signatures(metadata, layout_key_dict)
+
+    # Validate the verifier-selected threshold policy before doing any work.
+    threshold_mode = _resolve_threshold_mode(threshold_mode)
 
     # For the rest of the verification we only care about the layout payload
     # (Layout) that carries all the information and not about the layout
@@ -1605,15 +1993,22 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
 
     LOG.info("Verifying sublayouts...")
     chain_link_dict = verify_sublayouts(
-        layout, steps_metadata, link_dir_path, inspect_timeout
+        layout,
+        steps_metadata,
+        link_dir_path,
+        inspect_timeout,
+        threshold_mode=threshold_mode,
+    )
+
+    LOG.info("Verifying threshold constraints...")
+    reduced_chain_link_dict = verify_threshold_constraints(
+        layout, chain_link_dict, threshold_mode
     )
 
     LOG.info("Verifying alignment of reported commands...")
-    verify_all_steps_command_alignment(layout, chain_link_dict)
-
-    LOG.info("Verifying threshold constraints...")
-    verify_threshold_constraints(layout, chain_link_dict)
-    reduced_chain_link_dict = reduce_chain_links(chain_link_dict)
+    # Only the selected artifact group is relevant downstream. Aligning
+    # commands of discarded links would reintroduce evidence from other groups.
+    verify_all_steps_command_alignment(layout, reduced_chain_link_dict)
 
     # NOTE: Processing step rules before executing inspections guarantees that
     # inspection commands don't run on compromised target files, however, this
