@@ -98,6 +98,58 @@ verified = v.verify(
 # all caveats were met
 ```
 
+## Discharge routing safety
+
+A third-party caveat's `location` is attacker-controlled metadata: it is not
+covered by the macaroon signature. Never build a discharge URL from it.
+
+`DischargeRegistry` treats locally configured services as the only source of
+service identity and endpoints. It resolves a caveat by exact caveat id;
+`location` is used only to break a tie when several configured services
+explicitly claim the same id, and an ambiguous or unknown hint is refused.
+Requests contain only the requested `caveat_id`, never the root macaroon,
+other caveats, or previously obtained discharges.
+
+```python
+from pymacaroons import (
+    DischargeClient, DischargeRegistry, DischargeService, Endpoint,
+)
+
+registry = DischargeRegistry([
+    DischargeService(
+        'org-a', Endpoint('https://org-a.example/discharge'),
+        location_hints=['org-a'], caveat_ids=['shared-id'],
+    ),
+    DischargeService(
+        'org-b', Endpoint('https://org-b.example/discharge'),
+        location_hints=['org-b'], caveat_ids=['shared-id'],
+    ),
+])
+client = DischargeClient(registry, transport)
+result = client.fetch(root_macaroon.caveats[0])
+binding = result.bind(root_macaroon)
+```
+
+`transport.send(request)` receives `request.method`, `request.headers`, and
+`request.body` (the minimal JSON payload). The transport must not follow
+redirects; the client also refuses redirect statuses and any final URL that
+differs from the configured endpoint.
+
+Keep three separate conclusions when auditing a discharge:
+
+- **Destination**: which configured endpoint received which caveat id. The
+  caveat `location` is only an untrusted routing hint.
+- **Authentication**: the target service authenticates the discharge with the
+  caveat key derived from the root macaroon. HTTPS only protects the
+  configured transport; it does not authenticate the returned macaroon.
+- **Root binding**: `result.bind(root)` binds the discharge to one specific
+  root signature. A discharge obtained from the wrong organization will bind
+  structurally but fail signature verification at the target.
+
+`build_report(result, binding, target_verified=...)` returns these three
+sections separately rather than a single "success" flag. A complete example
+is in `examples/discharge_routing_demo.py`.
+
 ## Documentation
 
 The latest documentation can always be found on [ReadTheDocs](http://pymacaroons.readthedocs.org/en/latest/).

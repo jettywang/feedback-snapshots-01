@@ -24,3 +24,31 @@ class MacaroonSerializationException(MacaroonException):
 
 class MacaroonDeserializationException(MacaroonException):
     pass
+
+
+class DischargeRoutingException(MacaroonException):
+    pass
+
+
+class UnknownDischargeService(DischargeRoutingException):
+    pass
+
+
+class AmbiguousDischargeCaveat(DischargeRoutingException):
+    pass
+
+
+class DischargeRequestException(DischargeRoutingException):
+    pass
+
+
+class UnsafeDischargeTransport(DischargeRequestException):
+    pass
+
+
+class DischargeRedirectRefused(DischargeRequestException):
+    pass
+
+
+class InvalidDischargeResponse(DischargeRequestException):
+    pass

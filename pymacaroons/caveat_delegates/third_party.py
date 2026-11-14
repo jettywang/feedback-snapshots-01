@@ -10,7 +10,10 @@ from pymacaroons.utils import (
     generate_derived_key,
     sign_third_party_caveat,
 )
-from pymacaroons.exceptions import MacaroonUnmetCaveatException
+from pymacaroons.exceptions import (
+    MacaroonInvalidSignatureException,
+    MacaroonUnmetCaveatException,
+)
 from .base_third_party import (
     BaseThirdPartyCaveatDelegate,
     BaseThirdPartyCaveatVerifierDelegate,
@@ -56,10 +59,11 @@ class ThirdPartyCaveatVerifierDelegate(BaseThirdPartyCaveatVerifierDelegate):
 
     def __init__(self, discharge_macaroons=None, *args, **kwargs):
         super(ThirdPartyCaveatVerifierDelegate, self).__init__(*args, **kwargs)
-        if discharge_macaroons:
-            self.discharge_macaroons = {
-                m.identifier_bytes: m for m in discharge_macaroons
-            }
+        self.discharge_macaroons = {}
+        for macaroon in discharge_macaroons or []:
+            self.discharge_macaroons.setdefault(
+                macaroon.identifier_bytes, []
+            ).append(macaroon)
 
     def verify_third_party_caveat(self,
                                   verifier,
@@ -67,24 +71,72 @@ class ThirdPartyCaveatVerifierDelegate(BaseThirdPartyCaveatVerifierDelegate):
                                   root,
                                   macaroon,
                                   signature):
-        caveat_macaroon = self._caveat_macaroon(caveat)
         caveat_key = self._extract_caveat_key(signature, caveat)
+        candidates = list(self.discharge_macaroons.get(
+            caveat.caveat_id_bytes, []
+        ))
+        if not candidates:
+            raise MacaroonUnmetCaveatException(
+                'Caveat not met. No discharge macaroon found for identifier: '
+                '{}'.format(caveat.caveat_id_bytes)
+            )
 
-        discharge = self.discharge_macaroons[caveat.caveat_id_bytes]
-        del self.discharge_macaroons[caveat.caveat_id_bytes]
+        # Multiple organizations may use the same short caveat identifier.
+        # A discharge macaroon is authenticated by the caveat key, so try
+        # each candidate instead of letting insertion order decide.  Restore
+        # the available set after a failed attempt so retries do not consume
+        # nested discharges.
+        last_error = None
+        for candidate in candidates:
+            snapshot = self._snapshot()
+            self._remove(caveat.caveat_id_bytes, candidate)
+            caveat_met = False
+            try:
+                try:
+                    caveat_met = verifier.verify_discharge(
+                        root,
+                        candidate,
+                        caveat_key,
+                    )
+                except MacaroonInvalidSignatureException as error:
+                    last_error = error
+                except MacaroonUnmetCaveatException as error:
+                    last_error = error
+            finally:
+                if not caveat_met:
+                    self._restore(snapshot)
+            if caveat_met:
+                return True
 
-        caveat_met = verifier.verify_discharge(
-            root,
-            caveat_macaroon,
-            caveat_key,
+        if last_error is not None:
+            raise last_error
+        raise MacaroonUnmetCaveatException(
+            'Caveat not met. No matching discharge macaroon found for '
+            'identifier: {}'.format(caveat.caveat_id_bytes)
         )
 
-        # if the caveat wasn't successfully discharged,
-        # restore the discharge macaroon to the available set
-        if not caveat_met:
-            self.discharge_macaroons[caveat.caveat_id_bytes] = discharge
+    def _snapshot(self):
+        return {
+            caveat_id: list(macaroons)
+            for caveat_id, macaroons in self.discharge_macaroons.items()
+        }
 
-        return caveat_met
+    def _restore(self, snapshot):
+        self.discharge_macaroons = {
+            caveat_id: list(macaroons)
+            for caveat_id, macaroons in snapshot.items()
+        }
+
+    def _remove(self, caveat_id, candidate):
+        remaining = [
+            macaroon for macaroon in self.discharge_macaroons.get(
+                caveat_id, []
+            ) if macaroon is not candidate
+        ]
+        if remaining:
+            self.discharge_macaroons[caveat_id] = remaining
+        else:
+            self.discharge_macaroons.pop(caveat_id, None)
 
     def update_signature(self, signature, caveat):
         return binascii.unhexlify(
@@ -94,18 +146,6 @@ class ThirdPartyCaveatVerifierDelegate(BaseThirdPartyCaveatVerifierDelegate):
                 caveat._caveat_id
             )
         )
-
-    def _caveat_macaroon(self, caveat):
-        caveat_macaroon = self.discharge_macaroons.get(
-            caveat.caveat_id_bytes, None)
-
-        if not caveat_macaroon:
-            raise MacaroonUnmetCaveatException(
-                'Caveat not met. No discharge macaroon found for identifier: '
-                '{}'.format(caveat.caveat_id_bytes)
-            )
-
-        return caveat_macaroon
 
     def _extract_caveat_key(self, signature, caveat):
         key = truncate_or_pad(signature)

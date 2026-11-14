@@ -3,6 +3,12 @@ from .macaroon import Macaroon
 from .macaroon import MACAROON_V1
 from .macaroon import MACAROON_V2
 from .verifier import Verifier
+from .discharge_routing import (
+    DischargeClient,
+    DischargeRegistry,
+    DischargeService,
+    Endpoint,
+)
 
 
 __all__ = [
@@ -10,7 +16,11 @@ __all__ = [
     'Caveat',
     'Verifier',
     'MACAROON_V1',
-    'MACAROON_V2'
+    'MACAROON_V2',
+    'DischargeClient',
+    'DischargeRegistry',
+    'DischargeService',
+    'Endpoint',
 ]
 
 
