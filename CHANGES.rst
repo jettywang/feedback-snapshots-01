@@ -4,6 +4,11 @@ Changelog
 Unreleased
 ----------
 
+* New example ``example/proxy.py``: a two-hop RADIUS proxy on
+  ``pyrad.Proxy`` with a different shared secret per hop, correlating
+  requests with a Proxy-State token instead of the Identifier, and an
+  in-memory three-party demo of a successful request and of dropped
+  tampered, forged, wrong-source, late and duplicate upstream replies.
 * pyrad no longer depends on netaddr; it was only used by the tests and
   is now in the ``test`` dependency group. ipv6prefix values given as
   ``netaddr.IPNetwork`` are still accepted. Code that imports netaddr
