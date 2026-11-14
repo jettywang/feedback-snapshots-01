@@ -18,7 +18,9 @@ from typing import (
     TYPE_CHECKING,
     Any,
     ClassVar,
+    Protocol,
     TypeVar,
+    runtime_checkable,
 )
 
 from securesystemslib import exceptions as sslib_exceptions
@@ -69,6 +71,24 @@ def _hash_file(f: IO[bytes], algo: str) -> str:
     f.seek(0)
     digest = hashlib.file_digest(f, lambda: _get_digest(algo))  # type: ignore[arg-type]
     return digest.hexdigest()
+
+
+@runtime_checkable
+class DigestPolicyType(Protocol):
+    """Structural type implemented by client digest policies.
+
+    The low-level metadata layer does not depend on the concrete
+    ``tuf.ngclient`` policy: it only requires an object able to enforce an
+    algorithm policy and verify the accepted digests of ``data``.
+    """
+
+    require_digest: bool
+
+    def check_hashes(self, hashes: dict[str, str] | None) -> None: ...
+
+    def verify_hashes(
+        self, data: bytes | IO[bytes], hashes: dict[str, str] | None
+    ) -> None: ...
 
 
 class Signed(metaclass=abc.ABCMeta):
@@ -895,21 +915,35 @@ class MetaFile(BaseFile):
 
         return res_dict
 
-    def verify_length_and_hashes(self, data: bytes | IO[bytes]) -> None:
+    def verify_length_and_hashes(
+        self,
+        data: bytes | IO[bytes],
+        digest_policy: DigestPolicyType | None = None,
+    ) -> None:
         """Verify that the length and hashes of ``data`` match expected values.
 
         Args:
             data: File object or its content in bytes.
+            digest_policy: Optional policy deciding which hash algorithms are
+                acceptable. When ``None``, every present digest is verified
+                directly (the historical, permissive behavior). TUF allows a
+                metadata description to omit hashes, so a policy configured
+                for metadata treats ``self.hashes is None`` as valid.
 
         Raises:
             LengthOrHashMismatchError: Calculated length or hashes do not
                 match expected values or hash algorithm is not supported.
+            DigestPolicyError: The digest policy is not satisfied (unknown,
+                disabled, or missing digest).
         """
         if self.length is not None:
             self._verify_length(data, self.length)
 
         if self.hashes is not None:
-            self._verify_hashes(data, self.hashes)
+            if digest_policy is None:
+                self._verify_hashes(data, self.hashes)
+            else:
+                digest_policy.verify_hashes(data, self.hashes)
 
 
 class Timestamp(Signed):
@@ -1655,18 +1689,32 @@ class TargetFile(BaseFile):
         length, hashes = cls._get_length_and_hashes(data, hash_algorithms)
         return cls(length, hashes, target_file_path)
 
-    def verify_length_and_hashes(self, data: bytes | IO[bytes]) -> None:
+    def verify_length_and_hashes(
+        self,
+        data: bytes | IO[bytes],
+        digest_policy: DigestPolicyType | None = None,
+    ) -> None:
         """Verify that length and hashes of ``data`` match expected values.
 
         Args:
             data: Target file object or its content in bytes.
+            digest_policy: Optional policy deciding which hash algorithms are
+                acceptable. When ``None``, every present digest is verified
+                directly (the historical, permissive behavior). Target
+                metadata always carries at least one digest, so a target
+                policy is configured to require a digest.
 
         Raises:
             LengthOrHashMismatchError: Calculated length or hashes do not
                 match expected values or hash algorithm is not supported.
+            DigestPolicyError: The digest policy is not satisfied (unknown,
+                disabled, or missing digest).
         """
         self._verify_length(data, self.length)
-        self._verify_hashes(data, self.hashes)
+        if digest_policy is None:
+            self._verify_hashes(data, self.hashes)
+        else:
+            digest_policy.verify_hashes(data, self.hashes)
 
     def get_prefixed_paths(self) -> list[str]:
         """

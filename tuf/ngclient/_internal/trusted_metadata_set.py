@@ -86,6 +86,8 @@ if TYPE_CHECKING:
 
     from securesystemslib.signer import Signature
 
+    from tuf.ngclient._internal.digest_policy import DigestPolicy
+
 logger = logging.getLogger(__name__)
 
 Delegator = Root | Targets
@@ -100,7 +102,12 @@ class TrustedMetadataSet(abc.Mapping):
     what is updated.
     """
 
-    def __init__(self, root_data: bytes, envelope_type: EnvelopeType):
+    def __init__(
+        self,
+        root_data: bytes,
+        envelope_type: EnvelopeType,
+        digest_policy: DigestPolicy | None = None,
+    ):
         """Initialize ``TrustedMetadataSet`` by loading trusted root metadata.
 
         Args:
@@ -109,6 +116,10 @@ class TrustedMetadataSet(abc.Mapping):
                 all metadata in the ``TrustedMetadataSet``
             envelope_type: Configures deserialization and verification mode of
                 TUF metadata.
+            digest_policy: Policy applied to the digests in metadata
+                descriptions (timestamp's snapshot meta and snapshot's meta
+                entries). When ``None``, the historical permissive
+                verification is used.
 
         Raises:
             RepositoryError: Metadata failed to load or verify. The actual
@@ -117,6 +128,7 @@ class TrustedMetadataSet(abc.Mapping):
         self._trusted_set: dict[str, Signed] = {}
         self._trusted_delegations: set[tuple[str, str]] = set()
         self.reference_time = datetime.now(UTC)
+        self._digest_policy = digest_policy
 
         if envelope_type is EnvelopeType.SIMPLE:
             self._load_data = _load_from_simple_envelope
@@ -330,7 +342,7 @@ class TrustedMetadataSet(abc.Mapping):
         # Verify non-trusted data against the hashes in timestamp, if any.
         # Trusted snapshot data has already been verified once.
         if not trusted:
-            snapshot_meta.verify_length_and_hashes(data)
+            snapshot_meta.verify_length_and_hashes(data, self._digest_policy)
 
         new_snapshot, _, _ = self._load_data(Snapshot, data, self.root)
 
@@ -431,7 +443,7 @@ class TrustedMetadataSet(abc.Mapping):
                 f"Snapshot does not contain information for '{role_name}'"
             )
 
-        meta.verify_length_and_hashes(data)
+        meta.verify_length_and_hashes(data, self._digest_policy)
 
         new_delegate, _, _ = self._load_data(
             Targets, data, delegator, role_name

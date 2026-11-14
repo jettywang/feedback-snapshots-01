@@ -43,6 +43,38 @@ class LengthOrHashMismatchError(RepositoryError):
     """An error while checking the length and hash values of an object."""
 
 
+class DigestPolicyError(LengthOrHashMismatchError):
+    """Base class for digest policy violations.
+
+    A digest policy decides which hash algorithms are acceptable for a
+    metadata description (``MetaFile``) or a target file (``TargetFile``).
+    These errors are subclasses of :class:`LengthOrHashMismatchError` so that
+    existing callers which only handle the broader mismatch error keep
+    working.
+    """
+
+
+class UnknownAlgorithmError(DigestPolicyError):
+    """A digest uses an algorithm the client does not recognize.
+
+    The digest cannot be verified, so accepting it would amount to trusting
+    an unauthenticated label. Fail closed instead.
+    """
+
+
+class DisabledAlgorithmError(DigestPolicyError):
+    """None of the digests use an algorithm accepted by the policy.
+
+    Typically the only available digests are computed with algorithms the
+    deployment has phased out (for example a legacy algorithm present on its
+    own).
+    """
+
+
+class MissingDigestError(DigestPolicyError):
+    """The policy requires at least one digest but the metadata has none."""
+
+
 #### Download Errors ####
 
 

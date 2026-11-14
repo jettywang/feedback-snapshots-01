@@ -142,7 +142,9 @@ class Updater:
 
         # Load the initial root, make sure it's cached
         self._trusted_set = TrustedMetadataSet(
-            bootstrap, self.config.envelope_type
+            bootstrap,
+            self.config.envelope_type,
+            self.config.metadata_digest_policy,
         )
         self._persist_root(self._trusted_set.root.version, bootstrap)
         self._update_root_symlink()
@@ -239,9 +241,15 @@ class Updater:
 
         try:
             with open(filepath, "rb") as target_file:
-                targetinfo.verify_length_and_hashes(target_file)
+                targetinfo.verify_length_and_hashes(
+                    target_file, self.config.target_digest_policy
+                )
             return filepath
-        except (OSError, exceptions.LengthOrHashMismatchError):
+        except (
+            OSError,
+            exceptions.LengthOrHashMismatchError,
+            exceptions.DigestPolicyError,
+        ):
             return None
 
     def download_target(
@@ -289,6 +297,9 @@ class Updater:
         target_filepath = targetinfo.path
         consistent_snapshot = self._trusted_set.root.consistent_snapshot
         if consistent_snapshot and self.config.prefix_targets_with_hash:
+            # The hash prefix only locates the file on a consistent-snapshot
+            # repository: it grants no trust by itself. The downloaded content
+            # is fully verified against the digest policy below.
             hashes = list(targetinfo.hashes.values())
             dirname, sep, basename = target_filepath.rpartition("/")
             target_filepath = f"{dirname}{sep}{hashes[0]}.{basename}"
@@ -297,7 +308,9 @@ class Updater:
         with self._fetcher.download_file(
             full_url, targetinfo.length
         ) as target_file:
-            targetinfo.verify_length_and_hashes(target_file)
+            targetinfo.verify_length_and_hashes(
+                target_file, self.config.target_digest_policy
+            )
 
             target_file.seek(0)
             with open(filepath, "wb") as destination_file:

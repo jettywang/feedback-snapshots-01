@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Flag, unique
+
+from tuf.ngclient._internal.digest_policy import DigestPolicy
 
 
 @unique
@@ -43,6 +45,16 @@ class UpdaterConfig:
             -based TUF Metadata.
         app_user_agent: Application user agent, e.g. "MyApp/1.0.0". This will be
             prefixed to ngclient user agent when the default fetcher is used.
+        metadata_digest_policy: Policy for the digests in metadata
+            descriptions (the ``MetaFile`` hashes in timestamp and snapshot).
+            The default accepts every supported algorithm and, per the TUF
+            specification, allows a description to omit hashes entirely.
+        target_digest_policy: Policy for target file digests (the
+            ``TargetFile`` hashes in targets metadata). Targets always carry
+            at least one digest; the default accepts every supported
+            algorithm. Both policies are applied to remote downloads and to
+            the local cache, and a consistent-snapshot filename prefix is
+            treated as a locator only, never as trusted content.
     """
 
     max_root_rotations: int = 256
@@ -54,3 +66,9 @@ class UpdaterConfig:
     prefix_targets_with_hash: bool = True
     envelope_type: EnvelopeType = EnvelopeType.METADATA
     app_user_agent: str | None = None
+    metadata_digest_policy: DigestPolicy = field(
+        default_factory=lambda: DigestPolicy(require_digest=False)
+    )
+    target_digest_policy: DigestPolicy = field(
+        default_factory=lambda: DigestPolicy(require_digest=True)
+    )
