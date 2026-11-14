@@ -41,6 +41,9 @@ from .decorators import KeyAction
 from .errors import PGPDecryptionError
 from .errors import PGPError
 
+from .revocation import RevocationVerification
+from .revocation import verify_revocation
+
 from .packet import Key
 from .packet import MDC
 from .packet import Packet
@@ -259,9 +262,29 @@ class PGPSignature(Armorable, ParentRef, PGPObject):
 
     @property
     def revocation_key(self):
-        if 'RevocationKey' in self._signature.subpackets:
-            raise NotImplementedError()
-        return None
+        """The first *hashed* Revocation Key subpacket on this signature, or ``None``.
+
+        Only hashed subpackets are returned: a Revocation Key placed in the
+        unhashed area is not covered by the signature and therefore cannot be
+        trusted as an authorization. Use :py:attr:`hashed_revocation_keys` to
+        iterate over every hashed Revocation Key subpacket.
+        """
+        rks = self.hashed_revocation_keys
+        return rks[0] if rks else None
+
+    @property
+    def hashed_revocation_keys(self):
+        """A ``list`` of all *hashed* Revocation Key subpackets on this signature."""
+        return self._signature.subpackets.hashed('RevocationKey')
+
+    @property
+    def unhashed_revocation_keys(self):
+        """A ``list`` of Revocation Key subpackets present only in the unhashed area.
+
+        These are exposed for diagnostics. They never confer revocation
+        authority because they are not bound by the signature.
+        """
+        return self._signature.subpackets.unhashed('RevocationKey')
 
     @property
     def revocation_reason(self):
@@ -2494,6 +2517,26 @@ class PGPKey(Armorable, ParentRef, PGPObject):
                     sigv.add_sigsubj(sig, self, subj, SecurityIssues.WrongSig if not verified else SecurityIssues.OK)
 
         return sigv
+
+    def verify_revocation(self, signature, candidate_keys, at=None):
+        """Verify a revocation signature against this key, fully offline.
+
+        Unlike :py:meth:`verify`, a successful cryptographic check here is not
+        enough to conclude the key is revoked: the signer must first be shown
+        to be authorized to revoke *this* key. All candidate revoker public
+        keys are supplied explicitly by the caller and nothing is downloaded.
+
+        :param signature: The revocation signature to evaluate.
+        :type signature: :py:obj:`~pgpy.PGPSignature`
+        :param candidate_keys: Public keys that might have issued the
+            revocation. This key's own public half is considered automatically.
+        :type candidate_keys: iterable of :py:obj:`PGPKey`
+        :param at: Fixed verification moment for time-based decisions; defaults
+            to the current UTC time.
+        :type at: :py:obj:`~datetime.datetime`
+        :returns: :py:obj:`~pgpy.revocation.RevocationVerification`
+        """
+        return verify_revocation(self, signature, candidate_keys, at=at)
 
     @KeyAction(KeyFlags.EncryptCommunications, KeyFlags.EncryptStorage, is_public=True)
     def encrypt(self, message, sessionkey=None, **prefs):

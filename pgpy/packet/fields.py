@@ -176,6 +176,14 @@ class SubPackets(collections_abc.MutableMapping, Field):
     def __contains__(self, key):
         return key in set(k for k, _ in itertools.chain(self._hashed_sp, self._unhashed_sp))
 
+    def hashed(self, name):
+        """Return all *hashed* subpackets whose class name matches ``name``."""
+        return [v for k, v in self._hashed_sp.items() if k[0] == name]
+
+    def unhashed(self, name):
+        """Return all *unhashed* subpackets whose class name matches ``name``."""
+        return [v for k, v in self._unhashed_sp.items() if k[0] == name]
+
     def __copy__(self):
         sp = SubPackets()
         sp._hashed_sp = self._hashed_sp.copy()

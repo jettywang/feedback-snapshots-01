@@ -6,6 +6,8 @@ from .pgp import PGPKeyring
 from .pgp import PGPMessage
 from .pgp import PGPSignature
 from .pgp import PGPUID
+from .revocation import RevocationVerification
+from .revocation import verify_revocation
 
 __all__ = ['constants',
            'errors',
@@ -13,4 +15,6 @@ __all__ = ['constants',
            'PGPKeyring',
            'PGPMessage',
            'PGPSignature',
-           'PGPUID', ]
+           'PGPUID',
+           'RevocationVerification',
+           'verify_revocation', ]

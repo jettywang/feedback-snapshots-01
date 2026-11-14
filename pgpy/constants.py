@@ -42,6 +42,7 @@ __all__ = [
     'KeyFlags',
     'Features',
     'RevocationKeyClass',
+    'RevocationStatus',
     'NotationDataFlags',
     'TrustFlags',
 ]
@@ -573,6 +574,84 @@ class Features(FlagEnum):
 class RevocationKeyClass(FlagEnum):
     Sensitive = 0x40
     Normal = 0x80
+
+
+class RevocationStatus(IntEnum):
+    """Outcome of evaluating a revocation signature against a target key.
+
+    The status deliberately distinguishes three layers that a plain
+    cryptographic signature check conflates:
+
+      1. whether a usable authorization material exists at all,
+      2. whether that authorization is one that the *target* key actually
+         granted to this revoker, and
+      3. whether the signature is cryptographically valid *for this target*.
+
+    Only :py:attr:`SelfRevoked` and :py:attr:`AuthorizedRevoked` mean the
+    target key is revoked.  Every other status leaves the key usable.
+    """
+
+    #: The target key revoked itself (the signature is its own).
+    SelfRevoked = 1
+
+    #: A designated revoker, authorized by the target key in a hashed
+    #: self-signature, produced a valid revocation of the target.
+    AuthorizedRevoked = 2
+
+    #: No Revocation Key authorization exists anywhere on the target key.
+    #: This is missing authorization material, not an invalid revocation.
+    NoAuthorization = 10
+
+    #: Authorization exists, but only in an unhashed subpacket area. Such a
+    #: claim is not bound by the self-signature and cannot authorize anything.
+    AuthorizationNotHashed = 11
+
+    #: The only authorization(s) found were granted by a different primary key,
+    #: not by the target key.
+    AuthorizationFromOtherKey = 12
+
+    #: An authorization exists for a different revoker, or its algorithm or
+    #: fingerprint does not match the key that actually signed.
+    RevokerNotAuthorized = 13
+
+    #: A structurally valid authorization exists, but the self-signature that
+    #: carries it is no longer within its validity window at the verification
+    #: moment, so it cannot be relied upon.
+    AuthorizationExpired = 14
+
+    #: The signature is cryptographically valid, but for a different key than
+    #: the target under evaluation (the target is not what was signed).
+    WrongTarget = 20
+
+    #: The signature is not cryptographically valid for the target, and could
+    #: not be shown to be valid for any supplied key.
+    BadSignature = 21
+
+    #: The signer identified by the signature is not among the supplied
+    #: candidate keys, so it cannot be checked offline.
+    UnknownSigner = 22
+
+    @property
+    def is_revoked(self):
+        """``True`` only when the target key is actually revoked."""
+        return self in {RevocationStatus.SelfRevoked, RevocationStatus.AuthorizedRevoked}
+
+    @property
+    def missing_authorization(self):
+        """``True`` when no usable authorization material is present.
+
+        This groups the "no material" case with material that fails the
+        structural requirements (unhashed, foreign, wrong revoker) but
+        remains distinct from :py:attr:`BadSignature`, which is an invalid
+        revocation rather than a missing authorization.
+        """
+        return self in {
+            RevocationStatus.NoAuthorization,
+            RevocationStatus.AuthorizationNotHashed,
+            RevocationStatus.AuthorizationFromOtherKey,
+            RevocationStatus.RevokerNotAuthorized,
+            RevocationStatus.AuthorizationExpired,
+        }
 
 
 class NotationDataFlags(FlagEnum):
