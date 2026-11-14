@@ -1,0 +1,5100 @@
+{
+  "summary": {
+    "domain": "S/MIME ESS signed receipt correlation",
+    "levels": {
+      "signatureLocated": "字段逐字节关联，不依赖验签",
+      "receiptTrusted": "回执自身可信 + msgSigDigest 绑定到原签名者的 SignedAttributes",
+      "expectedRecipientConfirmed": "原签名验签 valid + 回执签名者属于请求范围"
+    },
+    "attestationOnlyInputs": [
+      "receipt signature status",
+      "receipt certificate trust",
+      "original message signer status (per layer and signer)"
+    ],
+    "neverUpgraded": "absent/unknown attestations remain unknown and cannot satisfy any level"
+  },
+  "decodeIssues": [],
+  "messages": [
+    {
+      "message": "MSG-A",
+      "derSha256": "26c430ecc71c9015bebd83002faed168bcb0537f1973cac92441a84809cdd5e8",
+      "bodySha256": "38336f65828267f3254fe7768a1c291758eb512aff06993aa491035276c02087",
+      "layers": [
+        {
+          "path": "layers[0]",
+          "eContentType": "1.2.840.113549.1.7.1",
+          "signers": 1,
+          "mlExpansionHistory": null
+        }
+      ],
+      "signers": [
+        {
+          "path": "layers[0].signerInfos[0]",
+          "signature": "0x5052494d4152592d5349474e41545552452d41",
+          "signatureSha256": "0cd008a7bc5c7ad04cd352b8c6f2b75abe064377392a39a827318aa0934de407",
+          "contentType": "1.2.840.113549.1.7.1",
+          "contentIdentifier": "0x5343492d5052494d4152592d41",
+          "receiptRequest": {
+            "signedContentIdentifier": "0x5343492d5052494d4152592d41",
+            "receiptsFrom": "allOrFirstTier",
+            "receiptsTo": [
+              [
+                {
+                  "kind": "rfc822Name",
+                  "value": "alice@example.com"
+                }
+              ]
+            ],
+            "der": "0x3029040d5343492d5052494d4152592d41800100301530138111616c696365406578616d706c652e636f6d"
+          },
+          "verification": {
+            "status": "valid",
+            "reason": "fixture",
+            "source": "attestation"
+          },
+          "certificateEmails": [
+            "alice@example.com"
+          ]
+        }
+      ],
+      "parseIssues": []
+    },
+    {
+      "message": "MSG-B",
+      "derSha256": "7fca2fb8995c14e22d6f5365a382c55d17b76aa47e63658962f8ab5bbe682a84",
+      "bodySha256": "38336f65828267f3254fe7768a1c291758eb512aff06993aa491035276c02087",
+      "layers": [
+        {
+          "path": "layers[0]",
+          "eContentType": "1.2.840.113549.1.7.1",
+          "signers": 1,
+          "mlExpansionHistory": null
+        }
+      ],
+      "signers": [
+        {
+          "path": "layers[0].signerInfos[0]",
+          "signature": "0x5052494d4152592d5349474e41545552452d42",
+          "signatureSha256": "a4b3eaa9bf37eea9ffc913e7c586bb477c963e66c8a48e10d2456424e7a66e55",
+          "contentType": "1.2.840.113549.1.7.1",
+          "contentIdentifier": "0x5343492d5052494d4152592d42",
+          "receiptRequest": {
+            "signedContentIdentifier": "0x5343492d5052494d4152592d42",
+            "receiptsFrom": "allOrFirstTier",
+            "receiptsTo": [
+              [
+                {
+                  "kind": "rfc822Name",
+                  "value": "alice@example.com"
+                }
+              ]
+            ],
+            "der": "0x3029040d5343492d5052494d4152592d42800100301530138111616c696365406578616d706c652e636f6d"
+          },
+          "verification": {
+            "status": "valid",
+            "reason": "fixture",
+            "source": "attestation"
+          },
+          "certificateEmails": [
+            "alice@example.com"
+          ]
+        }
+      ],
+      "parseIssues": []
+    },
+    {
+      "message": "MSG-RESIGN",
+      "derSha256": "cbe3def63e705f2997eac35807562aec4f8835c51abc0ca4b10020bf6bc496d1",
+      "bodySha256": "38336f65828267f3254fe7768a1c291758eb512aff06993aa491035276c02087",
+      "layers": [
+        {
+          "path": "layers[0]",
+          "eContentType": "1.2.840.113549.1.7.1",
+          "signers": 1,
+          "mlExpansionHistory": null
+        }
+      ],
+      "signers": [
+        {
+          "path": "layers[0].signerInfos[0]",
+          "signature": "0x52455349474e45442d5349474e41545552452d4132",
+          "signatureSha256": "0da57ece9b40079d30c356e753cbe46c14284f55b9759c05aff9acff74e85a68",
+          "contentType": "1.2.840.113549.1.7.1",
+          "contentIdentifier": "0x5343492d52455349474e2d4132",
+          "receiptRequest": {
+            "signedContentIdentifier": "0x5343492d52455349474e2d4132",
+            "receiptsFrom": "allOrFirstTier",
+            "receiptsTo": [
+              [
+                {
+                  "kind": "rfc822Name",
+                  "value": "alice@example.com"
+                }
+              ]
+            ],
+            "der": "0x3029040d5343492d52455349474e2d4132800100301530138111616c696365406578616d706c652e636f6d"
+          },
+          "verification": {
+            "status": "unknown",
+            "reason": "verification not performed",
+            "source": "attestation"
+          },
+          "certificateEmails": [
+            "alice@example.com"
+          ]
+        }
+      ],
+      "parseIssues": []
+    },
+    {
+      "message": "MSG-FWD",
+      "derSha256": "edda87b3c615706602a6a2ed74728f44c315af1c4e5e97e61d24f29a0d956394",
+      "bodySha256": "38336f65828267f3254fe7768a1c291758eb512aff06993aa491035276c02087",
+      "layers": [
+        {
+          "path": "layers[0]",
+          "eContentType": "1.2.840.113549.1.7.2",
+          "signers": 1,
+          "mlExpansionHistory": null
+        },
+        {
+          "path": "layers[1]",
+          "eContentType": "1.2.840.113549.1.7.1",
+          "signers": 1,
+          "mlExpansionHistory": null
+        }
+      ],
+      "signers": [
+        {
+          "path": "layers[0].signerInfos[0]",
+          "signature": "0x464f52574152442d5349474e41545552452d424f42",
+          "signatureSha256": "75400f69cdf890e8276ae21c5ed1aa474db4e4ce40633167494b941fec459b69",
+          "contentType": "1.2.840.113549.1.7.2",
+          "contentIdentifier": null,
+          "receiptRequest": null,
+          "verification": {
+            "status": "unknown",
+            "reason": "no attestation matches signatureSha256 75400f69cdf890e8276ae21c5ed1aa474db4e4ce40633167494b941fec459b69",
+            "source": "attestation"
+          },
+          "certificateEmails": [
+            "bob@example.com"
+          ]
+        },
+        {
+          "path": "layers[1].signerInfos[0]",
+          "signature": "0x5052494d4152592d5349474e41545552452d41",
+          "signatureSha256": "0cd008a7bc5c7ad04cd352b8c6f2b75abe064377392a39a827318aa0934de407",
+          "contentType": "1.2.840.113549.1.7.1",
+          "contentIdentifier": "0x5343492d5052494d4152592d41",
+          "receiptRequest": {
+            "signedContentIdentifier": "0x5343492d5052494d4152592d41",
+            "receiptsFrom": "allOrFirstTier",
+            "receiptsTo": [
+              [
+                {
+                  "kind": "rfc822Name",
+                  "value": "alice@example.com"
+                }
+              ]
+            ],
+            "der": "0x3029040d5343492d5052494d4152592d41800100301530138111616c696365406578616d706c652e636f6d"
+          },
+          "verification": {
+            "status": "valid",
+            "reason": "inner signature retained",
+            "source": "attestation"
+          },
+          "certificateEmails": [
+            "alice@example.com"
+          ]
+        }
+      ],
+      "parseIssues": []
+    },
+    {
+      "message": "MSG-MULTI",
+      "derSha256": "a8af7f6ad50e18872642226c7529a29a74cb84e814dd5a4288b8db78bdb6d214",
+      "bodySha256": "cda4c502d54530d9c7449f88ce0612b0baeb377077661b02bf5e088cddb33a35",
+      "layers": [
+        {
+          "path": "layers[0]",
+          "eContentType": "1.2.840.113549.1.7.1",
+          "signers": 2,
+          "mlExpansionHistory": null
+        }
+      ],
+      "signers": [
+        {
+          "path": "layers[0].signerInfos[0]",
+          "signature": "0x4d554c54492d5349474e41545552452d4341524f4c",
+          "signatureSha256": "c4f837e6b84cb4685ff1a4357a295a5dfb28d558d4139fec00bc86113a1b2a70",
+          "contentType": "1.2.840.113549.1.7.1",
+          "contentIdentifier": "0x5343492d4d554c54492d5345434f4e44415259",
+          "receiptRequest": null,
+          "verification": {
+            "status": "invalid",
+            "reason": "second signature fails",
+            "source": "attestation"
+          },
+          "certificateEmails": [
+            "carol@example.com"
+          ]
+        },
+        {
+          "path": "layers[0].signerInfos[1]",
+          "signature": "0x4d554c54492d5349474e41545552452d414c494345",
+          "signatureSha256": "f8e2eb169b0c631120aa9cbc5abad435e11f2a43975ac820d35f932f586a202c",
+          "contentType": "1.2.840.113549.1.7.1",
+          "contentIdentifier": "0x5343492d4d554c54492d5052494d415259",
+          "receiptRequest": {
+            "signedContentIdentifier": "0x5343492d4d554c54492d5052494d415259",
+            "receiptsFrom": "allOrFirstTier",
+            "receiptsTo": [
+              [
+                {
+                  "kind": "rfc822Name",
+                  "value": "alice@example.com"
+                }
+              ]
+            ],
+            "der": "0x302d04115343492d4d554c54492d5052494d415259800100301530138111616c696365406578616d706c652e636f6d"
+          },
+          "verification": {
+            "status": "valid",
+            "reason": "fixture",
+            "source": "attestation"
+          },
+          "certificateEmails": [
+            "alice@example.com"
+          ]
+        }
+      ],
+      "parseIssues": []
+    },
+    {
+      "message": "MSG-LIST-NONE",
+      "derSha256": "5a6760b71806178ee04dd2dda787337bd107dc24be4420fe59a7ac9d25bd00fd",
+      "bodySha256": "860f19b7472bb2d2ea4e49813b7af1117cc4d85c3fe8aac031e09b9766fb4558",
+      "layers": [
+        {
+          "path": "layers[0]",
+          "eContentType": "1.2.840.113549.1.7.2",
+          "signers": 1,
+          "mlExpansionHistory": {
+            "entries": [
+              {
+                "mailListIdentifier": "issuer=2.5.4.3=Announce List, 1.2.840.113549.1.9.1=announce@example.com, serial=3003",
+                "expansionTime": "20261113090000Z",
+                "mlReceiptPolicy": {
+                  "kind": "none",
+                  "names": []
+                }
+              }
+            ],
+            "conflictAcrossSigners": false,
+            "derSha256": "52b47d55c4df65ee70a1408fa8898cd3bf821d02c360d7dbf31f951eff024e43"
+          }
+        },
+        {
+          "path": "layers[1]",
+          "eContentType": "1.2.840.113549.1.7.1",
+          "signers": 1,
+          "mlExpansionHistory": null
+        }
+      ],
+      "signers": [
+        {
+          "path": "layers[0].signerInfos[0]",
+          "signature": "0x4c4953542d4f555445522d5349474e4154555245",
+          "signatureSha256": "ca545054d342ff86dbd3d241deb2556768327db8eac88520a4d52e72bc33dca5",
+          "contentType": "1.2.840.113549.1.7.2",
+          "contentIdentifier": null,
+          "receiptRequest": null,
+          "verification": {
+            "status": "valid",
+            "reason": "list agent",
+            "source": "attestation"
+          },
+          "certificateEmails": [
+            "announce@example.com"
+          ]
+        },
+        {
+          "path": "layers[1].signerInfos[0]",
+          "signature": "0x4c4953542d4e4f4e452d5349474e4154555245",
+          "signatureSha256": "6b228881d9b26b60e36153beae5b425f22e473c97d508250ccfb7840d5c8a57d",
+          "contentType": "1.2.840.113549.1.7.1",
+          "contentIdentifier": "0x5343492d4c4953542d4e4f4e45",
+          "receiptRequest": {
+            "signedContentIdentifier": "0x5343492d4c4953542d4e4f4e45",
+            "receiptsFrom": "allOrFirstTier",
+            "receiptsTo": [
+              [
+                {
+                  "kind": "rfc822Name",
+                  "value": "alice@example.com"
+                }
+              ]
+            ],
+            "der": "0x3029040d5343492d4c4953542d4e4f4e45800100301530138111616c696365406578616d706c652e636f6d"
+          },
+          "verification": {
+            "status": "valid",
+            "reason": "originator",
+            "source": "attestation"
+          },
+          "certificateEmails": [
+            "alice@example.com"
+          ]
+        }
+      ],
+      "parseIssues": []
+    },
+    {
+      "message": "MSG-LIST-ADD",
+      "derSha256": "48e89cc69631a875fae289611c32ac21d88673bcf7bae916e0ce90b553069f7a",
+      "bodySha256": "860f19b7472bb2d2ea4e49813b7af1117cc4d85c3fe8aac031e09b9766fb4558",
+      "layers": [
+        {
+          "path": "layers[0]",
+          "eContentType": "1.2.840.113549.1.7.2",
+          "signers": 1,
+          "mlExpansionHistory": {
+            "entries": [
+              {
+                "mailListIdentifier": "issuer=2.5.4.3=Announce List, 1.2.840.113549.1.9.1=announce@example.com, serial=3003",
+                "expansionTime": "20261113090000Z",
+                "mlReceiptPolicy": {
+                  "kind": "inAdditionTo",
+                  "names": [
+                    {
+                      "kind": "rfc822Name",
+                      "value": "dave@example.com"
+                    }
+                  ]
+                }
+              }
+            ],
+            "conflictAcrossSigners": false,
+            "derSha256": "335b812a498b34f6dcc689d497a7731b528504301920624bd29b081734b15211"
+          }
+        },
+        {
+          "path": "layers[1]",
+          "eContentType": "1.2.840.113549.1.7.1",
+          "signers": 1,
+          "mlExpansionHistory": null
+        }
+      ],
+      "signers": [
+        {
+          "path": "layers[0].signerInfos[0]",
+          "signature": "0x4c4953542d4f555445522d5349474e4154555245",
+          "signatureSha256": "ca545054d342ff86dbd3d241deb2556768327db8eac88520a4d52e72bc33dca5",
+          "contentType": "1.2.840.113549.1.7.2",
+          "contentIdentifier": null,
+          "receiptRequest": null,
+          "verification": {
+            "status": "valid",
+            "reason": "list agent",
+            "source": "attestation"
+          },
+          "certificateEmails": [
+            "announce@example.com"
+          ]
+        },
+        {
+          "path": "layers[1].signerInfos[0]",
+          "signature": "0x4c4953542d4144442d5349474e4154555245",
+          "signatureSha256": "b8de7a2c1c731cdec8c5470022aad08b41e285c8cc4d8be3a3b475fe8d393e34",
+          "contentType": "1.2.840.113549.1.7.1",
+          "contentIdentifier": "0x5343492d4c4953542d414444",
+          "receiptRequest": {
+            "signedContentIdentifier": "0x5343492d4c4953542d414444",
+            "receiptsFrom": "receiptList",
+            "receiptsTo": [
+              [
+                {
+                  "kind": "rfc822Name",
+                  "value": "alice@example.com"
+                }
+              ]
+            ],
+            "der": "0x303b040c5343492d4c4953542d414444a1143012811064617665406578616d706c652e636f6d301530138111616c696365406578616d706c652e636f6d"
+          },
+          "verification": {
+            "status": "valid",
+            "reason": "originator",
+            "source": "attestation"
+          },
+          "certificateEmails": [
+            "alice@example.com"
+          ]
+        }
+      ],
+      "parseIssues": []
+    },
+    {
+      "message": "MSG-LIST-FIRST",
+      "derSha256": "f6ca35495385125df6ce27e44344a86d367b77f39303b79254c56d7fd473e809",
+      "bodySha256": "860f19b7472bb2d2ea4e49813b7af1117cc4d85c3fe8aac031e09b9766fb4558",
+      "layers": [
+        {
+          "path": "layers[0]",
+          "eContentType": "1.2.840.113549.1.7.2",
+          "signers": 1,
+          "mlExpansionHistory": {
+            "entries": [
+              {
+                "mailListIdentifier": "issuer=2.5.4.3=Announce List, 1.2.840.113549.1.9.1=announce@example.com, serial=3003",
+                "expansionTime": "20261113090000Z",
+                "mlReceiptPolicy": {
+                  "kind": null,
+                  "names": []
+                }
+              }
+            ],
+            "conflictAcrossSigners": false,
+            "derSha256": "29686ad98ed204fcaa966453c8bf0466eec246bd22aca2bf52a433a7276ddfcf"
+          }
+        },
+        {
+          "path": "layers[1]",
+          "eContentType": "1.2.840.113549.1.7.1",
+          "signers": 1,
+          "mlExpansionHistory": null
+        }
+      ],
+      "signers": [
+        {
+          "path": "layers[0].signerInfos[0]",
+          "signature": "0x4c4953542d4f555445522d5349474e4154555245",
+          "signatureSha256": "ca545054d342ff86dbd3d241deb2556768327db8eac88520a4d52e72bc33dca5",
+          "contentType": "1.2.840.113549.1.7.2",
+          "contentIdentifier": null,
+          "receiptRequest": null,
+          "verification": {
+            "status": "valid",
+            "reason": "list agent",
+            "source": "attestation"
+          },
+          "certificateEmails": [
+            "announce@example.com"
+          ]
+        },
+        {
+          "path": "layers[1].signerInfos[0]",
+          "signature": "0x4c4953542d46495253542d5349474e4154555245",
+          "signatureSha256": "bdb6803c71076eb50e64c7fb6220eb43f96d9ab71ff08e5db60248f1897ecb27",
+          "contentType": "1.2.840.113549.1.7.1",
+          "contentIdentifier": "0x5343492d4c4953542d4649525354",
+          "receiptRequest": {
+            "signedContentIdentifier": "0x5343492d4c4953542d4649525354",
+            "receiptsFrom": "allOrFirstTier",
+            "receiptsTo": [
+              [
+                {
+                  "kind": "rfc822Name",
+                  "value": "alice@example.com"
+                }
+              ]
+            ],
+            "der": "0x302a040e5343492d4c4953542d4649525354800101301530138111616c696365406578616d706c652e636f6d"
+          },
+          "verification": {
+            "status": "valid",
+            "reason": "originator",
+            "source": "attestation"
+          },
+          "certificateEmails": [
+            "alice@example.com"
+          ]
+        }
+      ],
+      "parseIssues": []
+    },
+    {
+      "message": "MSG-NO-RR",
+      "derSha256": "91b42fc9c0c0fff3c22f31bb9c5faae7ceb36fd90386d64097695c89001601e3",
+      "bodySha256": "05d6150e53c02f98c301bcf78ee44072dac06044d535401bca205e6686c51bdd",
+      "layers": [
+        {
+          "path": "layers[0]",
+          "eContentType": "1.2.840.113549.1.7.1",
+          "signers": 1,
+          "mlExpansionHistory": null
+        }
+      ],
+      "signers": [
+        {
+          "path": "layers[0].signerInfos[0]",
+          "signature": "0x4e4f2d524551554553542d5349474e4154555245",
+          "signatureSha256": "9506fbc6c7c6d1ec5824aa898d30af972451f398822861f258677d9d29c83ffa",
+          "contentType": "1.2.840.113549.1.7.1",
+          "contentIdentifier": "0x5343492d4e4f2d5252",
+          "receiptRequest": null,
+          "verification": {
+            "status": "valid",
+            "reason": "fixture",
+            "source": "attestation"
+          },
+          "certificateEmails": [
+            "alice@example.com"
+          ]
+        }
+      ],
+      "parseIssues": []
+    }
+  ],
+  "identicalBodyGroups": [
+    {
+      "bodySha256": "38336f65828267f3254fe7768a1c291758eb512aff06993aa491035276c02087",
+      "messages": [
+        "MSG-A",
+        "MSG-B",
+        "MSG-RESIGN",
+        "MSG-FWD"
+      ]
+    },
+    {
+      "bodySha256": "860f19b7472bb2d2ea4e49813b7af1117cc4d85c3fe8aac031e09b9766fb4558",
+      "messages": [
+        "MSG-LIST-NONE",
+        "MSG-LIST-ADD",
+        "MSG-LIST-FIRST"
+      ]
+    }
+  ],
+  "receipts": [
+    {
+      "receipt": "RECEIPT-B",
+      "derSha256": "09a6e80bc28a987182c8ef8f8351ec4354067ee073bf58f3decdc9ffeffdc97c",
+      "receiptFields": {
+        "contentType": "1.2.840.113549.1.7.1",
+        "signedContentIdentifier": "0x5343492d5052494d4152592d42",
+        "originatorSignatureValue": "0x5052494d4152592d5349474e41545552452d42",
+        "version": 1,
+        "receiptContentSha256": "a156ae230ec228d6f9af494f3cbdf8c72fa84113d0528ccb17b9edc5d1152af4"
+      },
+      "receiptSigner": {
+        "signerInfosIndex": 0,
+        "signatureAlgorithm": "1.2.840.10045.4.3.2",
+        "digestAlgorithm": "2.16.840.1.101.3.4.2.1",
+        "messageDigest": "0xa156ae230ec228d6f9af494f3cbdf8c72fa84113d0528ccb17b9edc5d1152af4",
+        "msgSigDigest": "0xd0893436d3022f294a1585c2f86ed17b73027f3b6a1a13e268649c5416e30f08",
+        "certificateEmails": [
+          "bob@example.com"
+        ]
+      },
+      "attestation": {
+        "signatureStatus": "valid",
+        "certificateTrust": "trusted",
+        "reason": "fixture",
+        "signerNames": [
+          "bob@example.com"
+        ]
+      },
+      "structuralChecks": [
+        {
+          "path": "RECEIPT-B: SignedData.encapContentInfo.eContentType",
+          "field": "eContentType",
+          "observed": "1.2.840.113549.1.9.16.1.1",
+          "expected": "1.2.840.113549.1.9.16.1.1",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-B: Receipt.version",
+          "field": "version",
+          "observed": "1",
+          "expected": "v1 (1)",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-B: signerInfos[0].signedAttrs contentType",
+          "field": "contentType",
+          "observed": "1.2.840.113549.1.9.16.1.1",
+          "expected": "1.2.840.113549.1.9.16.1.1",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-B: signerInfos[0].signedAttrs receiptRequest",
+          "field": "id-aa-receiptRequest presence",
+          "observed": "absent",
+          "expected": "absent (RFC 2634 section 2.2)",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-B: Receipt.contentType",
+          "field": "contentType",
+          "observed": "1.2.840.113549.1.7.1",
+          "expected": "originator contentType attribute"
+        }
+      ],
+      "writeChecks": [
+        {
+          "name": "receipt content digest",
+          "path": "RECEIPT-B: signerInfos[0].signedAttrs messageDigest",
+          "algorithm": "2.16.840.1.101.3.4.2.1",
+          "status": "ok",
+          "detail": null,
+          "observed": "0xa156ae230ec228d6f9af494f3cbdf8c72fa84113d0528ccb17b9edc5d1152af4",
+          "computed": "0xa156ae230ec228d6f9af494f3cbdf8c72fa84113d0528ccb17b9edc5d1152af4",
+          "matched": true
+        }
+      ],
+      "parseIssues": [],
+      "candidates": [
+        {
+          "message": "MSG-B",
+          "signer": "layers[0].signerInfos[0]"
+        }
+      ],
+      "digestCrossReference": [
+        {
+          "message": "MSG-B",
+          "signer": "layers[0].signerInfos[0]",
+          "algorithm": "2.16.840.1.101.3.4.2.1",
+          "digest": "0xd0893436d3022f294a1585c2f86ed17b73027f3b6a1a13e268649c5416e30f08",
+          "nestedLayer": false
+        }
+      ],
+      "levels": {
+        "signatureLocated": true,
+        "receiptTrusted": true,
+        "expectedRecipientConfirmed": true
+      },
+      "levelDetails": {
+        "signatureLocated": {
+          "status": "satisfied",
+          "citations": [
+            {
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.3",
+              "field": "contentType attribute",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "1.2.840.113549.1.7.1",
+              "match": true
+            },
+            {
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.1",
+              "field": "receiptRequest.signedContentIdentifier (or contentIdentifier when absent)",
+              "observed": "0x5343492d5052494d4152592d42",
+              "expected": "0x5343492d5052494d4152592d42",
+              "match": true
+            },
+            {
+              "path": "layers[0].signerInfos[0].signature",
+              "field": "SignerInfo.signature",
+              "observed": "0x5052494d4152592d5349474e41545552452d42",
+              "expected": "0x5052494d4152592d5349474e41545552452d42",
+              "match": true
+            }
+          ],
+          "structural": [
+            {
+              "path": "RECEIPT-B: SignedData.encapContentInfo.eContentType",
+              "field": "eContentType",
+              "observed": "1.2.840.113549.1.9.16.1.1",
+              "expected": "1.2.840.113549.1.9.16.1.1",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-B: Receipt.version",
+              "field": "version",
+              "observed": "1",
+              "expected": "v1 (1)",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-B: signerInfos[0].signedAttrs contentType",
+              "field": "contentType",
+              "observed": "1.2.840.113549.1.9.16.1.1",
+              "expected": "1.2.840.113549.1.9.16.1.1",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-B: signerInfos[0].signedAttrs receiptRequest",
+              "field": "id-aa-receiptRequest presence",
+              "observed": "absent",
+              "expected": "absent (RFC 2634 section 2.2)",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-B: Receipt.contentType",
+              "field": "contentType",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "originator contentType attribute"
+            }
+          ],
+          "failedStructural": [],
+          "note": "三字段逐字节吻合仅证明回执自称指向该 SignerInfo；不证明任何签名通过验签。"
+        },
+        "receiptTrusted": {
+          "status": "satisfied",
+          "checks": [
+            {
+              "name": "receipt signature status (explicit input)",
+              "value": "valid",
+              "required": "valid",
+              "ok": true,
+              "source": "attestation"
+            },
+            {
+              "name": "receipt certificate trust (explicit input)",
+              "value": "trusted",
+              "required": "trusted",
+              "ok": true,
+              "source": "attestation"
+            },
+            {
+              "name": "Receipt content messageDigest",
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.4",
+              "observed": "0xa156ae230ec228d6f9af494f3cbdf8c72fa84113d0528ccb17b9edc5d1152af4",
+              "computed": "0xa156ae230ec228d6f9af494f3cbdf8c72fa84113d0528ccb17b9edc5d1152af4",
+              "algorithm": "2.16.840.1.101.3.4.2.1",
+              "ok": true,
+              "detail": null
+            },
+            {
+              "name": "msgSigDigest over matched SignerInfo SignedAttributes",
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.5",
+              "observed": "0xd0893436d3022f294a1585c2f86ed17b73027f3b6a1a13e268649c5416e30f08",
+              "computed": "0xd0893436d3022f294a1585c2f86ed17b73027f3b6a1a13e268649c5416e30f08",
+              "algorithm": "2.16.840.1.101.3.4.2.1",
+              "setOfDerSha256": "d0893436d3022f294a1585c2f86ed17b73027f3b6a1a13e268649c5416e30f08",
+              "ok": true,
+              "detail": null
+            },
+            {
+              "name": "matched SignerInfo signedAttrs present",
+              "path": "layers[0].signerInfos[0].signedAttrs",
+              "ok": true
+            }
+          ],
+          "reasonCodes": [],
+          "note": "本层只证明回执自身可信且绑定到该签名者的 SignedAttributes；尚未要求原签名验签通过，也不判断回执是否来自预期收件人。"
+        },
+        "expectedRecipientConfirmed": {
+          "status": "satisfied",
+          "originalSignerAttestation": {
+            "message": "MSG-B",
+            "signer": "layers[0].signerInfos[0]",
+            "status": "valid",
+            "reason": "fixture",
+            "required": "valid",
+            "ok": true
+          },
+          "recipientEvaluation": {
+            "status": "confirmed",
+            "identity": [
+              "bob@example.com"
+            ],
+            "identityBasis": "attestation signerNames",
+            "attestationSuppliedIdentity": true,
+            "reasons": [
+              "receipt signer matches an archived To/Cc recipient and allReceipts permits that recipient to respond"
+            ],
+            "scope": [
+              {
+                "path": "layers[0].signerInfos[0].signedAttrs receiptRequest.receiptsFrom.allOrFirstTier",
+                "value": "allReceipts"
+              }
+            ],
+            "claimedRecipients": [
+              {
+                "source": "archived body To/Cc",
+                "names": [
+                  "rfc822Name:bob@example.com"
+                ]
+              }
+            ],
+            "matchedNames": [
+              "rfc822Name:bob@example.com"
+            ]
+          },
+          "scope": [
+            {
+              "scope": "allOrFirstTier",
+              "value": "allReceipts"
+            },
+            {
+              "scope": "mlExpansionHistory",
+              "status": "absent",
+              "detail": "最外层 SignedData 没有任何签名者携带 mlExpansionHistory"
+            }
+          ],
+          "reasonCodes": [],
+          "note": "仅当原签名验签结果明确为 valid 且回执签名者属于 ReceiptRequest 允许的收件人范围时，才可将回执解释为预期收件人的投递确认。未知验签状态一律不满足。"
+        }
+      },
+      "conclusion": "找到对应签名：MSG-B layers[0].signerInfos[0] 的 contentType、signedContentIdentifier、originatorSignatureValue 与回执逐字吻合。 回执可信：回执签名=valid，证书=trusted，msgSigDigest 与签名者的 SignedAttributes 摘要一致。 预期收件人确认：回执签名者可被认定为该 ReceiptRequest 范围内的收件人。",
+      "matched": {
+        "message": "MSG-B",
+        "signer": "layers[0].signerInfos[0]",
+        "link": {
+          "checks": {
+            "signedAttrsPresent": {
+              "path": "layers[0].signerInfos[0].signedAttrs",
+              "field": "SignedAttributes presence",
+              "observed": "present",
+              "expected": "present",
+              "match": true
+            },
+            "contentType": {
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.3",
+              "field": "contentType attribute",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "1.2.840.113549.1.7.1",
+              "match": true
+            },
+            "signedContentIdentifier": {
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.1",
+              "field": "receiptRequest.signedContentIdentifier (or contentIdentifier when absent)",
+              "observed": "0x5343492d5052494d4152592d42",
+              "expected": "0x5343492d5052494d4152592d42",
+              "match": true
+            },
+            "originatorSignatureValue": {
+              "path": "layers[0].signerInfos[0].signature",
+              "field": "SignerInfo.signature",
+              "observed": "0x5052494d4152592d5349474e41545552452d42",
+              "expected": "0x5052494d4152592d5349474e41545552452d42",
+              "match": true
+            }
+          },
+          "matched": {
+            "signedAttrsPresent": true,
+            "contentType": true,
+            "signedContentIdentifier": true,
+            "originatorSignatureValue": true
+          }
+        },
+        "messageBodySha256": "38336f65828267f3254fe7768a1c291758eb512aff06993aa491035276c02087"
+      },
+      "structuralViolations": []
+    },
+    {
+      "receipt": "RECEIPT-SPLICED",
+      "derSha256": "f07d2ee6787ac3a08c7243c9e17e4636ba02e97470260bf90c411a07a1f8e36a",
+      "receiptFields": {
+        "contentType": "1.2.840.113549.1.7.1",
+        "signedContentIdentifier": "0x5343492d5052494d4152592d42",
+        "originatorSignatureValue": "0x5052494d4152592d5349474e41545552452d42",
+        "version": 1,
+        "receiptContentSha256": "a156ae230ec228d6f9af494f3cbdf8c72fa84113d0528ccb17b9edc5d1152af4"
+      },
+      "receiptSigner": {
+        "signerInfosIndex": 0,
+        "signatureAlgorithm": "1.2.840.10045.4.3.2",
+        "digestAlgorithm": "2.16.840.1.101.3.4.2.1",
+        "messageDigest": "0xa156ae230ec228d6f9af494f3cbdf8c72fa84113d0528ccb17b9edc5d1152af4",
+        "msgSigDigest": "0x0e316a120f8ff6d459d3a88b577128326d71d42cff71b8c462ef0fc27eaea22d",
+        "certificateEmails": [
+          "dave@example.com"
+        ]
+      },
+      "attestation": {
+        "signatureStatus": "valid",
+        "certificateTrust": "trusted",
+        "reason": "signature internally consistent but digest points elsewhere",
+        "signerNames": [
+          "dave@example.com"
+        ]
+      },
+      "structuralChecks": [
+        {
+          "path": "RECEIPT-SPLICED: SignedData.encapContentInfo.eContentType",
+          "field": "eContentType",
+          "observed": "1.2.840.113549.1.9.16.1.1",
+          "expected": "1.2.840.113549.1.9.16.1.1",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-SPLICED: Receipt.version",
+          "field": "version",
+          "observed": "1",
+          "expected": "v1 (1)",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-SPLICED: signerInfos[0].signedAttrs contentType",
+          "field": "contentType",
+          "observed": "1.2.840.113549.1.9.16.1.1",
+          "expected": "1.2.840.113549.1.9.16.1.1",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-SPLICED: signerInfos[0].signedAttrs receiptRequest",
+          "field": "id-aa-receiptRequest presence",
+          "observed": "absent",
+          "expected": "absent (RFC 2634 section 2.2)",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-SPLICED: Receipt.contentType",
+          "field": "contentType",
+          "observed": "1.2.840.113549.1.7.1",
+          "expected": "originator contentType attribute"
+        }
+      ],
+      "writeChecks": [
+        {
+          "name": "receipt content digest",
+          "path": "RECEIPT-SPLICED: signerInfos[0].signedAttrs messageDigest",
+          "algorithm": "2.16.840.1.101.3.4.2.1",
+          "status": "ok",
+          "detail": null,
+          "observed": "0xa156ae230ec228d6f9af494f3cbdf8c72fa84113d0528ccb17b9edc5d1152af4",
+          "computed": "0xa156ae230ec228d6f9af494f3cbdf8c72fa84113d0528ccb17b9edc5d1152af4",
+          "matched": true
+        }
+      ],
+      "parseIssues": [],
+      "candidates": [
+        {
+          "message": "MSG-B",
+          "signer": "layers[0].signerInfos[0]"
+        }
+      ],
+      "digestCrossReference": [
+        {
+          "message": "MSG-A",
+          "signer": "layers[0].signerInfos[0]",
+          "algorithm": "2.16.840.1.101.3.4.2.1",
+          "digest": "0x0e316a120f8ff6d459d3a88b577128326d71d42cff71b8c462ef0fc27eaea22d",
+          "nestedLayer": false
+        },
+        {
+          "message": "MSG-FWD",
+          "signer": "layers[1].signerInfos[0]",
+          "algorithm": "2.16.840.1.101.3.4.2.1",
+          "digest": "0x0e316a120f8ff6d459d3a88b577128326d71d42cff71b8c462ef0fc27eaea22d",
+          "nestedLayer": true
+        }
+      ],
+      "levels": {
+        "signatureLocated": true,
+        "receiptTrusted": false,
+        "expectedRecipientConfirmed": false
+      },
+      "levelDetails": {
+        "signatureLocated": {
+          "status": "satisfied",
+          "citations": [
+            {
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.3",
+              "field": "contentType attribute",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "1.2.840.113549.1.7.1",
+              "match": true
+            },
+            {
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.1",
+              "field": "receiptRequest.signedContentIdentifier (or contentIdentifier when absent)",
+              "observed": "0x5343492d5052494d4152592d42",
+              "expected": "0x5343492d5052494d4152592d42",
+              "match": true
+            },
+            {
+              "path": "layers[0].signerInfos[0].signature",
+              "field": "SignerInfo.signature",
+              "observed": "0x5052494d4152592d5349474e41545552452d42",
+              "expected": "0x5052494d4152592d5349474e41545552452d42",
+              "match": true
+            }
+          ],
+          "structural": [
+            {
+              "path": "RECEIPT-SPLICED: SignedData.encapContentInfo.eContentType",
+              "field": "eContentType",
+              "observed": "1.2.840.113549.1.9.16.1.1",
+              "expected": "1.2.840.113549.1.9.16.1.1",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-SPLICED: Receipt.version",
+              "field": "version",
+              "observed": "1",
+              "expected": "v1 (1)",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-SPLICED: signerInfos[0].signedAttrs contentType",
+              "field": "contentType",
+              "observed": "1.2.840.113549.1.9.16.1.1",
+              "expected": "1.2.840.113549.1.9.16.1.1",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-SPLICED: signerInfos[0].signedAttrs receiptRequest",
+              "field": "id-aa-receiptRequest presence",
+              "observed": "absent",
+              "expected": "absent (RFC 2634 section 2.2)",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-SPLICED: Receipt.contentType",
+              "field": "contentType",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "originator contentType attribute"
+            }
+          ],
+          "failedStructural": [],
+          "note": "三字段逐字节吻合仅证明回执自称指向该 SignerInfo；不证明任何签名通过验签。"
+        },
+        "receiptTrusted": {
+          "status": "blocked",
+          "checks": [
+            {
+              "name": "receipt signature status (explicit input)",
+              "value": "valid",
+              "required": "valid",
+              "ok": true,
+              "source": "attestation"
+            },
+            {
+              "name": "receipt certificate trust (explicit input)",
+              "value": "trusted",
+              "required": "trusted",
+              "ok": true,
+              "source": "attestation"
+            },
+            {
+              "name": "Receipt content messageDigest",
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.4",
+              "observed": "0xa156ae230ec228d6f9af494f3cbdf8c72fa84113d0528ccb17b9edc5d1152af4",
+              "computed": "0xa156ae230ec228d6f9af494f3cbdf8c72fa84113d0528ccb17b9edc5d1152af4",
+              "algorithm": "2.16.840.1.101.3.4.2.1",
+              "ok": true,
+              "detail": null
+            },
+            {
+              "name": "msgSigDigest over matched SignerInfo SignedAttributes",
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.5",
+              "observed": "0x0e316a120f8ff6d459d3a88b577128326d71d42cff71b8c462ef0fc27eaea22d",
+              "computed": "0xd0893436d3022f294a1585c2f86ed17b73027f3b6a1a13e268649c5416e30f08",
+              "algorithm": "2.16.840.1.101.3.4.2.1",
+              "setOfDerSha256": "d0893436d3022f294a1585c2f86ed17b73027f3b6a1a13e268649c5416e30f08",
+              "ok": false,
+              "detail": null
+            },
+            {
+              "name": "matched SignerInfo signedAttrs present",
+              "path": "layers[0].signerInfos[0].signedAttrs",
+              "ok": true
+            }
+          ],
+          "reasonCodes": [
+            "msgSigDigest_mismatch"
+          ],
+          "note": "本层只证明回执自身可信且绑定到该签名者的 SignedAttributes；尚未要求原签名验签通过，也不判断回执是否来自预期收件人。"
+        },
+        "expectedRecipientConfirmed": {
+          "status": "blocked",
+          "originalSignerAttestation": {
+            "message": "MSG-B",
+            "signer": "layers[0].signerInfos[0]",
+            "status": "valid",
+            "reason": "fixture",
+            "required": "valid",
+            "ok": true
+          },
+          "recipientEvaluation": {
+            "status": "unconfirmed",
+            "identity": [
+              "dave@example.com"
+            ],
+            "identityBasis": "attestation signerNames",
+            "attestationSuppliedIdentity": true,
+            "reasons": [
+              "回执签名者不在归档正文的 To/Cc 收件人中，无法导出预期收件人确认"
+            ],
+            "scope": [
+              {
+                "path": "layers[0].signerInfos[0].signedAttrs receiptRequest.receiptsFrom.allOrFirstTier",
+                "value": "allReceipts"
+              }
+            ],
+            "claimedRecipients": [
+              {
+                "source": "archived body To/Cc",
+                "names": [
+                  "rfc822Name:bob@example.com"
+                ]
+              }
+            ]
+          },
+          "scope": [
+            {
+              "scope": "allOrFirstTier",
+              "value": "allReceipts"
+            },
+            {
+              "scope": "mlExpansionHistory",
+              "status": "absent",
+              "detail": "最外层 SignedData 没有任何签名者携带 mlExpansionHistory"
+            }
+          ],
+          "reasonCodes": [
+            "recipient_scope:unconfirmed"
+          ],
+          "note": "仅当原签名验签结果明确为 valid 且回执签名者属于 ReceiptRequest 允许的收件人范围时，才可将回执解释为预期收件人的投递确认。未知验签状态一律不满足。"
+        }
+      },
+      "conclusion": "找到对应签名：MSG-B layers[0].signerInfos[0] 的 contentType、signedContentIdentifier、originatorSignatureValue 与回执逐字吻合。 回执未达可信层：msgSigDigest 与匹配签名者的 SignedAttributes 摘要不符。 预期收件人确认未评估（第二层未成立）。",
+      "matched": {
+        "message": "MSG-B",
+        "signer": "layers[0].signerInfos[0]",
+        "link": {
+          "checks": {
+            "signedAttrsPresent": {
+              "path": "layers[0].signerInfos[0].signedAttrs",
+              "field": "SignedAttributes presence",
+              "observed": "present",
+              "expected": "present",
+              "match": true
+            },
+            "contentType": {
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.3",
+              "field": "contentType attribute",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "1.2.840.113549.1.7.1",
+              "match": true
+            },
+            "signedContentIdentifier": {
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.1",
+              "field": "receiptRequest.signedContentIdentifier (or contentIdentifier when absent)",
+              "observed": "0x5343492d5052494d4152592d42",
+              "expected": "0x5343492d5052494d4152592d42",
+              "match": true
+            },
+            "originatorSignatureValue": {
+              "path": "layers[0].signerInfos[0].signature",
+              "field": "SignerInfo.signature",
+              "observed": "0x5052494d4152592d5349474e41545552452d42",
+              "expected": "0x5052494d4152592d5349474e41545552452d42",
+              "match": true
+            }
+          },
+          "matched": {
+            "signedAttrsPresent": true,
+            "contentType": true,
+            "signedContentIdentifier": true,
+            "originatorSignatureValue": true
+          }
+        },
+        "messageBodySha256": "38336f65828267f3254fe7768a1c291758eb512aff06993aa491035276c02087"
+      },
+      "structuralViolations": []
+    },
+    {
+      "receipt": "RECEIPT-NO-MSGDIGEST",
+      "derSha256": "8732a79e48525f70168b03df14ab652ce83155b000f5cc2b0758c64fa1426317",
+      "receiptFields": {
+        "contentType": "1.2.840.113549.1.7.1",
+        "signedContentIdentifier": "0x5343492d5052494d4152592d42",
+        "originatorSignatureValue": "0x5052494d4152592d5349474e41545552452d42",
+        "version": 1,
+        "receiptContentSha256": "a156ae230ec228d6f9af494f3cbdf8c72fa84113d0528ccb17b9edc5d1152af4"
+      },
+      "receiptSigner": {
+        "signerInfosIndex": 0,
+        "signatureAlgorithm": "1.2.840.10045.4.3.2",
+        "digestAlgorithm": "2.16.840.1.101.3.4.2.1",
+        "messageDigest": "0xa156ae230ec228d6f9af494f3cbdf8c72fa84113d0528ccb17b9edc5d1152af4",
+        "msgSigDigest": null,
+        "certificateEmails": [
+          "bob@example.com"
+        ]
+      },
+      "attestation": {
+        "signatureStatus": "valid",
+        "certificateTrust": "trusted",
+        "reason": "",
+        "signerNames": [
+          "bob@example.com"
+        ]
+      },
+      "structuralChecks": [
+        {
+          "path": "RECEIPT-NO-MSGDIGEST: SignedData.encapContentInfo.eContentType",
+          "field": "eContentType",
+          "observed": "1.2.840.113549.1.9.16.1.1",
+          "expected": "1.2.840.113549.1.9.16.1.1",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-NO-MSGDIGEST: Receipt.version",
+          "field": "version",
+          "observed": "1",
+          "expected": "v1 (1)",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-NO-MSGDIGEST: signerInfos[0].signedAttrs contentType",
+          "field": "contentType",
+          "observed": "1.2.840.113549.1.9.16.1.1",
+          "expected": "1.2.840.113549.1.9.16.1.1",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-NO-MSGDIGEST: signerInfos[0].signedAttrs receiptRequest",
+          "field": "id-aa-receiptRequest presence",
+          "observed": "absent",
+          "expected": "absent (RFC 2634 section 2.2)",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-NO-MSGDIGEST: Receipt.contentType",
+          "field": "contentType",
+          "observed": "1.2.840.113549.1.7.1",
+          "expected": "originator contentType attribute"
+        }
+      ],
+      "writeChecks": [
+        {
+          "name": "receipt content digest",
+          "path": "RECEIPT-NO-MSGDIGEST: signerInfos[0].signedAttrs messageDigest",
+          "algorithm": "2.16.840.1.101.3.4.2.1",
+          "status": "ok",
+          "detail": null,
+          "observed": "0xa156ae230ec228d6f9af494f3cbdf8c72fa84113d0528ccb17b9edc5d1152af4",
+          "computed": "0xa156ae230ec228d6f9af494f3cbdf8c72fa84113d0528ccb17b9edc5d1152af4",
+          "matched": true
+        }
+      ],
+      "parseIssues": [],
+      "candidates": [
+        {
+          "message": "MSG-B",
+          "signer": "layers[0].signerInfos[0]"
+        }
+      ],
+      "digestCrossReference": [],
+      "levels": {
+        "signatureLocated": true,
+        "receiptTrusted": false,
+        "expectedRecipientConfirmed": false
+      },
+      "levelDetails": {
+        "signatureLocated": {
+          "status": "satisfied",
+          "citations": [
+            {
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.3",
+              "field": "contentType attribute",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "1.2.840.113549.1.7.1",
+              "match": true
+            },
+            {
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.1",
+              "field": "receiptRequest.signedContentIdentifier (or contentIdentifier when absent)",
+              "observed": "0x5343492d5052494d4152592d42",
+              "expected": "0x5343492d5052494d4152592d42",
+              "match": true
+            },
+            {
+              "path": "layers[0].signerInfos[0].signature",
+              "field": "SignerInfo.signature",
+              "observed": "0x5052494d4152592d5349474e41545552452d42",
+              "expected": "0x5052494d4152592d5349474e41545552452d42",
+              "match": true
+            }
+          ],
+          "structural": [
+            {
+              "path": "RECEIPT-NO-MSGDIGEST: SignedData.encapContentInfo.eContentType",
+              "field": "eContentType",
+              "observed": "1.2.840.113549.1.9.16.1.1",
+              "expected": "1.2.840.113549.1.9.16.1.1",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-NO-MSGDIGEST: Receipt.version",
+              "field": "version",
+              "observed": "1",
+              "expected": "v1 (1)",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-NO-MSGDIGEST: signerInfos[0].signedAttrs contentType",
+              "field": "contentType",
+              "observed": "1.2.840.113549.1.9.16.1.1",
+              "expected": "1.2.840.113549.1.9.16.1.1",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-NO-MSGDIGEST: signerInfos[0].signedAttrs receiptRequest",
+              "field": "id-aa-receiptRequest presence",
+              "observed": "absent",
+              "expected": "absent (RFC 2634 section 2.2)",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-NO-MSGDIGEST: Receipt.contentType",
+              "field": "contentType",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "originator contentType attribute"
+            }
+          ],
+          "failedStructural": [],
+          "note": "三字段逐字节吻合仅证明回执自称指向该 SignerInfo；不证明任何签名通过验签。"
+        },
+        "receiptTrusted": {
+          "status": "blocked",
+          "checks": [
+            {
+              "name": "receipt signature status (explicit input)",
+              "value": "valid",
+              "required": "valid",
+              "ok": true,
+              "source": "attestation"
+            },
+            {
+              "name": "receipt certificate trust (explicit input)",
+              "value": "trusted",
+              "required": "trusted",
+              "ok": true,
+              "source": "attestation"
+            },
+            {
+              "name": "Receipt content messageDigest",
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.4",
+              "observed": "0xa156ae230ec228d6f9af494f3cbdf8c72fa84113d0528ccb17b9edc5d1152af4",
+              "computed": "0xa156ae230ec228d6f9af494f3cbdf8c72fa84113d0528ccb17b9edc5d1152af4",
+              "algorithm": "2.16.840.1.101.3.4.2.1",
+              "ok": true,
+              "detail": null
+            },
+            {
+              "name": "msgSigDigest over matched SignerInfo SignedAttributes",
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.5",
+              "observed": null,
+              "computed": "0xd0893436d3022f294a1585c2f86ed17b73027f3b6a1a13e268649c5416e30f08",
+              "algorithm": "2.16.840.1.101.3.4.2.1",
+              "setOfDerSha256": "d0893436d3022f294a1585c2f86ed17b73027f3b6a1a13e268649c5416e30f08",
+              "ok": false,
+              "detail": null
+            },
+            {
+              "name": "matched SignerInfo signedAttrs present",
+              "path": "layers[0].signerInfos[0].signedAttrs",
+              "ok": true
+            }
+          ],
+          "reasonCodes": [
+            "msgSigDigest_absent"
+          ],
+          "note": "本层只证明回执自身可信且绑定到该签名者的 SignedAttributes；尚未要求原签名验签通过，也不判断回执是否来自预期收件人。"
+        },
+        "expectedRecipientConfirmed": {
+          "status": "blocked",
+          "originalSignerAttestation": {
+            "message": "MSG-B",
+            "signer": "layers[0].signerInfos[0]",
+            "status": "valid",
+            "reason": "fixture",
+            "required": "valid",
+            "ok": true
+          },
+          "recipientEvaluation": {
+            "status": "confirmed",
+            "identity": [
+              "bob@example.com"
+            ],
+            "identityBasis": "attestation signerNames",
+            "attestationSuppliedIdentity": true,
+            "reasons": [
+              "receipt signer matches an archived To/Cc recipient and allReceipts permits that recipient to respond"
+            ],
+            "scope": [
+              {
+                "path": "layers[0].signerInfos[0].signedAttrs receiptRequest.receiptsFrom.allOrFirstTier",
+                "value": "allReceipts"
+              }
+            ],
+            "claimedRecipients": [
+              {
+                "source": "archived body To/Cc",
+                "names": [
+                  "rfc822Name:bob@example.com"
+                ]
+              }
+            ],
+            "matchedNames": [
+              "rfc822Name:bob@example.com"
+            ]
+          },
+          "scope": [
+            {
+              "scope": "allOrFirstTier",
+              "value": "allReceipts"
+            },
+            {
+              "scope": "mlExpansionHistory",
+              "status": "absent",
+              "detail": "最外层 SignedData 没有任何签名者携带 mlExpansionHistory"
+            }
+          ],
+          "reasonCodes": [],
+          "note": "仅当原签名验签结果明确为 valid 且回执签名者属于 ReceiptRequest 允许的收件人范围时，才可将回执解释为预期收件人的投递确认。未知验签状态一律不满足。"
+        }
+      },
+      "conclusion": "找到对应签名：MSG-B layers[0].signerInfos[0] 的 contentType、signedContentIdentifier、originatorSignatureValue 与回执逐字吻合。 回执未达可信层：缺少 msgSigDigest 关联属性。 预期收件人确认未评估（第二层未成立）。",
+      "matched": {
+        "message": "MSG-B",
+        "signer": "layers[0].signerInfos[0]",
+        "link": {
+          "checks": {
+            "signedAttrsPresent": {
+              "path": "layers[0].signerInfos[0].signedAttrs",
+              "field": "SignedAttributes presence",
+              "observed": "present",
+              "expected": "present",
+              "match": true
+            },
+            "contentType": {
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.3",
+              "field": "contentType attribute",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "1.2.840.113549.1.7.1",
+              "match": true
+            },
+            "signedContentIdentifier": {
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.1",
+              "field": "receiptRequest.signedContentIdentifier (or contentIdentifier when absent)",
+              "observed": "0x5343492d5052494d4152592d42",
+              "expected": "0x5343492d5052494d4152592d42",
+              "match": true
+            },
+            "originatorSignatureValue": {
+              "path": "layers[0].signerInfos[0].signature",
+              "field": "SignerInfo.signature",
+              "observed": "0x5052494d4152592d5349474e41545552452d42",
+              "expected": "0x5052494d4152592d5349474e41545552452d42",
+              "match": true
+            }
+          },
+          "matched": {
+            "signedAttrsPresent": true,
+            "contentType": true,
+            "signedContentIdentifier": true,
+            "originatorSignatureValue": true
+          }
+        },
+        "messageBodySha256": "38336f65828267f3254fe7768a1c291758eb512aff06993aa491035276c02087"
+      },
+      "structuralViolations": []
+    },
+    {
+      "receipt": "RECEIPT-SIG-MISMATCH",
+      "derSha256": "95b0fd0bf9031eaf680c3510d1d0df92c4ccb172d98b30a1bab35c6a071d7c51",
+      "receiptFields": {
+        "contentType": "1.2.840.113549.1.7.1",
+        "signedContentIdentifier": "0x5343492d5052494d4152592d42",
+        "originatorSignatureValue": "0x5152494d4152592d5349474e41545552452d42",
+        "version": 1,
+        "receiptContentSha256": "f51021fe7d7a8fa91110488f383f1a8ce4aafb45d7240389819ba32a4109f8b3"
+      },
+      "receiptSigner": {
+        "signerInfosIndex": 0,
+        "signatureAlgorithm": "1.2.840.10045.4.3.2",
+        "digestAlgorithm": "2.16.840.1.101.3.4.2.1",
+        "messageDigest": "0xf51021fe7d7a8fa91110488f383f1a8ce4aafb45d7240389819ba32a4109f8b3",
+        "msgSigDigest": "0xd0893436d3022f294a1585c2f86ed17b73027f3b6a1a13e268649c5416e30f08",
+        "certificateEmails": [
+          "bob@example.com"
+        ]
+      },
+      "attestation": {
+        "signatureStatus": "invalid",
+        "certificateTrust": "untrusted",
+        "reason": "",
+        "signerNames": [
+          "bob@example.com"
+        ]
+      },
+      "structuralChecks": [
+        {
+          "path": "RECEIPT-SIG-MISMATCH: SignedData.encapContentInfo.eContentType",
+          "field": "eContentType",
+          "observed": "1.2.840.113549.1.9.16.1.1",
+          "expected": "1.2.840.113549.1.9.16.1.1",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-SIG-MISMATCH: Receipt.version",
+          "field": "version",
+          "observed": "1",
+          "expected": "v1 (1)",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-SIG-MISMATCH: signerInfos[0].signedAttrs contentType",
+          "field": "contentType",
+          "observed": "1.2.840.113549.1.9.16.1.1",
+          "expected": "1.2.840.113549.1.9.16.1.1",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-SIG-MISMATCH: signerInfos[0].signedAttrs receiptRequest",
+          "field": "id-aa-receiptRequest presence",
+          "observed": "absent",
+          "expected": "absent (RFC 2634 section 2.2)",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-SIG-MISMATCH: Receipt.contentType",
+          "field": "contentType",
+          "observed": "1.2.840.113549.1.7.1",
+          "expected": "originator contentType attribute"
+        }
+      ],
+      "writeChecks": [
+        {
+          "name": "receipt content digest",
+          "path": "RECEIPT-SIG-MISMATCH: signerInfos[0].signedAttrs messageDigest",
+          "algorithm": "2.16.840.1.101.3.4.2.1",
+          "status": "ok",
+          "detail": null,
+          "observed": "0xf51021fe7d7a8fa91110488f383f1a8ce4aafb45d7240389819ba32a4109f8b3",
+          "computed": "0xf51021fe7d7a8fa91110488f383f1a8ce4aafb45d7240389819ba32a4109f8b3",
+          "matched": true
+        }
+      ],
+      "parseIssues": [],
+      "candidates": [],
+      "digestCrossReference": [
+        {
+          "message": "MSG-B",
+          "signer": "layers[0].signerInfos[0]",
+          "algorithm": "2.16.840.1.101.3.4.2.1",
+          "digest": "0xd0893436d3022f294a1585c2f86ed17b73027f3b6a1a13e268649c5416e30f08",
+          "nestedLayer": false
+        }
+      ],
+      "levels": {
+        "signatureLocated": false,
+        "receiptTrusted": false,
+        "expectedRecipientConfirmed": false
+      },
+      "levelDetails": {},
+      "conclusion": "未找到字段完全吻合的签名者；最接近的是 MSG-B layers[0].signerInfos[0]（3/4 项可比字段吻合），不吻合字段：originatorSignatureValue。",
+      "closest": [
+        {
+          "message": "MSG-B",
+          "signer": "layers[0].signerInfos[0]",
+          "score": 3,
+          "checks": {
+            "signedAttrsPresent": {
+              "path": "layers[0].signerInfos[0].signedAttrs",
+              "field": "SignedAttributes presence",
+              "observed": "present",
+              "expected": "present",
+              "match": true
+            },
+            "contentType": {
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.3",
+              "field": "contentType attribute",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "1.2.840.113549.1.7.1",
+              "match": true
+            },
+            "signedContentIdentifier": {
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.1",
+              "field": "receiptRequest.signedContentIdentifier (or contentIdentifier when absent)",
+              "observed": "0x5343492d5052494d4152592d42",
+              "expected": "0x5343492d5052494d4152592d42",
+              "match": true
+            },
+            "originatorSignatureValue": {
+              "path": "layers[0].signerInfos[0].signature",
+              "field": "SignerInfo.signature",
+              "observed": "0x5052494d4152592d5349474e41545552452d42",
+              "expected": "0x5152494d4152592d5349474e41545552452d42",
+              "match": false
+            }
+          }
+        },
+        {
+          "message": "MSG-A",
+          "signer": "layers[0].signerInfos[0]",
+          "score": 2,
+          "checks": {
+            "signedAttrsPresent": {
+              "path": "layers[0].signerInfos[0].signedAttrs",
+              "field": "SignedAttributes presence",
+              "observed": "present",
+              "expected": "present",
+              "match": true
+            },
+            "contentType": {
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.3",
+              "field": "contentType attribute",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "1.2.840.113549.1.7.1",
+              "match": true
+            },
+            "signedContentIdentifier": {
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.1",
+              "field": "receiptRequest.signedContentIdentifier (or contentIdentifier when absent)",
+              "observed": "0x5343492d5052494d4152592d41",
+              "expected": "0x5343492d5052494d4152592d42",
+              "match": false
+            },
+            "originatorSignatureValue": {
+              "path": "layers[0].signerInfos[0].signature",
+              "field": "SignerInfo.signature",
+              "observed": "0x5052494d4152592d5349474e41545552452d41",
+              "expected": "0x5152494d4152592d5349474e41545552452d42",
+              "match": false
+            }
+          }
+        },
+        {
+          "message": "MSG-RESIGN",
+          "signer": "layers[0].signerInfos[0]",
+          "score": 2,
+          "checks": {
+            "signedAttrsPresent": {
+              "path": "layers[0].signerInfos[0].signedAttrs",
+              "field": "SignedAttributes presence",
+              "observed": "present",
+              "expected": "present",
+              "match": true
+            },
+            "contentType": {
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.3",
+              "field": "contentType attribute",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "1.2.840.113549.1.7.1",
+              "match": true
+            },
+            "signedContentIdentifier": {
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.1",
+              "field": "receiptRequest.signedContentIdentifier (or contentIdentifier when absent)",
+              "observed": "0x5343492d52455349474e2d4132",
+              "expected": "0x5343492d5052494d4152592d42",
+              "match": false
+            },
+            "originatorSignatureValue": {
+              "path": "layers[0].signerInfos[0].signature",
+              "field": "SignerInfo.signature",
+              "observed": "0x52455349474e45442d5349474e41545552452d4132",
+              "expected": "0x5152494d4152592d5349474e41545552452d42",
+              "match": false
+            }
+          }
+        },
+        {
+          "message": "MSG-FWD",
+          "signer": "layers[1].signerInfos[0]",
+          "score": 2,
+          "checks": {
+            "signedAttrsPresent": {
+              "path": "layers[1].signerInfos[0].signedAttrs",
+              "field": "SignedAttributes presence",
+              "observed": "present",
+              "expected": "present",
+              "match": true
+            },
+            "contentType": {
+              "path": "layers[1].signerInfos[0].signedAttrs 1.2.840.113549.1.9.3",
+              "field": "contentType attribute",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "1.2.840.113549.1.7.1",
+              "match": true
+            },
+            "signedContentIdentifier": {
+              "path": "layers[1].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.1",
+              "field": "receiptRequest.signedContentIdentifier (or contentIdentifier when absent)",
+              "observed": "0x5343492d5052494d4152592d41",
+              "expected": "0x5343492d5052494d4152592d42",
+              "match": false
+            },
+            "originatorSignatureValue": {
+              "path": "layers[1].signerInfos[0].signature",
+              "field": "SignerInfo.signature",
+              "observed": "0x5052494d4152592d5349474e41545552452d41",
+              "expected": "0x5152494d4152592d5349474e41545552452d42",
+              "match": false
+            }
+          }
+        },
+        {
+          "message": "MSG-MULTI",
+          "signer": "layers[0].signerInfos[1]",
+          "score": 2,
+          "checks": {
+            "signedAttrsPresent": {
+              "path": "layers[0].signerInfos[1].signedAttrs",
+              "field": "SignedAttributes presence",
+              "observed": "present",
+              "expected": "present",
+              "match": true
+            },
+            "contentType": {
+              "path": "layers[0].signerInfos[1].signedAttrs 1.2.840.113549.1.9.3",
+              "field": "contentType attribute",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "1.2.840.113549.1.7.1",
+              "match": true
+            },
+            "signedContentIdentifier": {
+              "path": "layers[0].signerInfos[1].signedAttrs 1.2.840.113549.1.9.16.2.1",
+              "field": "receiptRequest.signedContentIdentifier (or contentIdentifier when absent)",
+              "observed": "0x5343492d4d554c54492d5052494d415259",
+              "expected": "0x5343492d5052494d4152592d42",
+              "match": false
+            },
+            "originatorSignatureValue": {
+              "path": "layers[0].signerInfos[1].signature",
+              "field": "SignerInfo.signature",
+              "observed": "0x4d554c54492d5349474e41545552452d414c494345",
+              "expected": "0x5152494d4152592d5349474e41545552452d42",
+              "match": false
+            }
+          }
+        },
+        {
+          "message": "MSG-LIST-NONE",
+          "signer": "layers[1].signerInfos[0]",
+          "score": 2,
+          "checks": {
+            "signedAttrsPresent": {
+              "path": "layers[1].signerInfos[0].signedAttrs",
+              "field": "SignedAttributes presence",
+              "observed": "present",
+              "expected": "present",
+              "match": true
+            },
+            "contentType": {
+              "path": "layers[1].signerInfos[0].signedAttrs 1.2.840.113549.1.9.3",
+              "field": "contentType attribute",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "1.2.840.113549.1.7.1",
+              "match": true
+            },
+            "signedContentIdentifier": {
+              "path": "layers[1].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.1",
+              "field": "receiptRequest.signedContentIdentifier (or contentIdentifier when absent)",
+              "observed": "0x5343492d4c4953542d4e4f4e45",
+              "expected": "0x5343492d5052494d4152592d42",
+              "match": false
+            },
+            "originatorSignatureValue": {
+              "path": "layers[1].signerInfos[0].signature",
+              "field": "SignerInfo.signature",
+              "observed": "0x4c4953542d4e4f4e452d5349474e4154555245",
+              "expected": "0x5152494d4152592d5349474e41545552452d42",
+              "match": false
+            }
+          }
+        },
+        {
+          "message": "MSG-LIST-ADD",
+          "signer": "layers[1].signerInfos[0]",
+          "score": 2,
+          "checks": {
+            "signedAttrsPresent": {
+              "path": "layers[1].signerInfos[0].signedAttrs",
+              "field": "SignedAttributes presence",
+              "observed": "present",
+              "expected": "present",
+              "match": true
+            },
+            "contentType": {
+              "path": "layers[1].signerInfos[0].signedAttrs 1.2.840.113549.1.9.3",
+              "field": "contentType attribute",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "1.2.840.113549.1.7.1",
+              "match": true
+            },
+            "signedContentIdentifier": {
+              "path": "layers[1].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.1",
+              "field": "receiptRequest.signedContentIdentifier (or contentIdentifier when absent)",
+              "observed": "0x5343492d4c4953542d414444",
+              "expected": "0x5343492d5052494d4152592d42",
+              "match": false
+            },
+            "originatorSignatureValue": {
+              "path": "layers[1].signerInfos[0].signature",
+              "field": "SignerInfo.signature",
+              "observed": "0x4c4953542d4144442d5349474e4154555245",
+              "expected": "0x5152494d4152592d5349474e41545552452d42",
+              "match": false
+            }
+          }
+        },
+        {
+          "message": "MSG-LIST-FIRST",
+          "signer": "layers[1].signerInfos[0]",
+          "score": 2,
+          "checks": {
+            "signedAttrsPresent": {
+              "path": "layers[1].signerInfos[0].signedAttrs",
+              "field": "SignedAttributes presence",
+              "observed": "present",
+              "expected": "present",
+              "match": true
+            },
+            "contentType": {
+              "path": "layers[1].signerInfos[0].signedAttrs 1.2.840.113549.1.9.3",
+              "field": "contentType attribute",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "1.2.840.113549.1.7.1",
+              "match": true
+            },
+            "signedContentIdentifier": {
+              "path": "layers[1].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.1",
+              "field": "receiptRequest.signedContentIdentifier (or contentIdentifier when absent)",
+              "observed": "0x5343492d4c4953542d4649525354",
+              "expected": "0x5343492d5052494d4152592d42",
+              "match": false
+            },
+            "originatorSignatureValue": {
+              "path": "layers[1].signerInfos[0].signature",
+              "field": "SignerInfo.signature",
+              "observed": "0x4c4953542d46495253542d5349474e4154555245",
+              "expected": "0x5152494d4152592d5349474e41545552452d42",
+              "match": false
+            }
+          }
+        }
+      ],
+      "structuralViolations": []
+    },
+    {
+      "receipt": "RECEIPT-MULTI-CAROL",
+      "derSha256": "9dc6af45c5452abc3ff6dac79777398eb58294e0c127d47827134eff5ef97bd1",
+      "receiptFields": {
+        "contentType": "1.2.840.113549.1.7.1",
+        "signedContentIdentifier": "0x5343492d4d554c54492d5345434f4e44415259",
+        "originatorSignatureValue": "0x4d554c54492d5349474e41545552452d4341524f4c",
+        "version": 1,
+        "receiptContentSha256": "9e9e239dec66ce8b0f1571c183f47fe510a9a89edfc122c91c64af678df111db"
+      },
+      "receiptSigner": {
+        "signerInfosIndex": 0,
+        "signatureAlgorithm": "1.2.840.10045.4.3.2",
+        "digestAlgorithm": "2.16.840.1.101.3.4.2.1",
+        "messageDigest": "0x9e9e239dec66ce8b0f1571c183f47fe510a9a89edfc122c91c64af678df111db",
+        "msgSigDigest": "0x1ac4bba0b302e6804af9d0bd6cdadf10e6e35ae70629b623299c314a007d7144",
+        "certificateEmails": [
+          "carol@example.com"
+        ]
+      },
+      "attestation": {
+        "signatureStatus": "valid",
+        "certificateTrust": "trusted",
+        "reason": "internally valid receipt for a signer that requested nothing",
+        "signerNames": [
+          "carol@example.com"
+        ]
+      },
+      "structuralChecks": [
+        {
+          "path": "RECEIPT-MULTI-CAROL: SignedData.encapContentInfo.eContentType",
+          "field": "eContentType",
+          "observed": "1.2.840.113549.1.9.16.1.1",
+          "expected": "1.2.840.113549.1.9.16.1.1",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-MULTI-CAROL: Receipt.version",
+          "field": "version",
+          "observed": "1",
+          "expected": "v1 (1)",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-MULTI-CAROL: signerInfos[0].signedAttrs contentType",
+          "field": "contentType",
+          "observed": "1.2.840.113549.1.9.16.1.1",
+          "expected": "1.2.840.113549.1.9.16.1.1",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-MULTI-CAROL: signerInfos[0].signedAttrs receiptRequest",
+          "field": "id-aa-receiptRequest presence",
+          "observed": "absent",
+          "expected": "absent (RFC 2634 section 2.2)",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-MULTI-CAROL: Receipt.contentType",
+          "field": "contentType",
+          "observed": "1.2.840.113549.1.7.1",
+          "expected": "originator contentType attribute"
+        }
+      ],
+      "writeChecks": [
+        {
+          "name": "receipt content digest",
+          "path": "RECEIPT-MULTI-CAROL: signerInfos[0].signedAttrs messageDigest",
+          "algorithm": "2.16.840.1.101.3.4.2.1",
+          "status": "ok",
+          "detail": null,
+          "observed": "0x9e9e239dec66ce8b0f1571c183f47fe510a9a89edfc122c91c64af678df111db",
+          "computed": "0x9e9e239dec66ce8b0f1571c183f47fe510a9a89edfc122c91c64af678df111db",
+          "matched": true
+        }
+      ],
+      "parseIssues": [],
+      "candidates": [
+        {
+          "message": "MSG-MULTI",
+          "signer": "layers[0].signerInfos[0]"
+        }
+      ],
+      "digestCrossReference": [
+        {
+          "message": "MSG-MULTI",
+          "signer": "layers[0].signerInfos[0]",
+          "algorithm": "2.16.840.1.101.3.4.2.1",
+          "digest": "0x1ac4bba0b302e6804af9d0bd6cdadf10e6e35ae70629b623299c314a007d7144",
+          "nestedLayer": false
+        }
+      ],
+      "levels": {
+        "signatureLocated": true,
+        "receiptTrusted": true,
+        "expectedRecipientConfirmed": false
+      },
+      "levelDetails": {
+        "signatureLocated": {
+          "status": "satisfied",
+          "citations": [
+            {
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.3",
+              "field": "contentType attribute",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "1.2.840.113549.1.7.1",
+              "match": true
+            },
+            {
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.1",
+              "field": "receiptRequest.signedContentIdentifier (or contentIdentifier when absent)",
+              "observed": "0x5343492d4d554c54492d5345434f4e44415259",
+              "expected": "0x5343492d4d554c54492d5345434f4e44415259",
+              "match": true
+            },
+            {
+              "path": "layers[0].signerInfos[0].signature",
+              "field": "SignerInfo.signature",
+              "observed": "0x4d554c54492d5349474e41545552452d4341524f4c",
+              "expected": "0x4d554c54492d5349474e41545552452d4341524f4c",
+              "match": true
+            }
+          ],
+          "structural": [
+            {
+              "path": "RECEIPT-MULTI-CAROL: SignedData.encapContentInfo.eContentType",
+              "field": "eContentType",
+              "observed": "1.2.840.113549.1.9.16.1.1",
+              "expected": "1.2.840.113549.1.9.16.1.1",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-MULTI-CAROL: Receipt.version",
+              "field": "version",
+              "observed": "1",
+              "expected": "v1 (1)",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-MULTI-CAROL: signerInfos[0].signedAttrs contentType",
+              "field": "contentType",
+              "observed": "1.2.840.113549.1.9.16.1.1",
+              "expected": "1.2.840.113549.1.9.16.1.1",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-MULTI-CAROL: signerInfos[0].signedAttrs receiptRequest",
+              "field": "id-aa-receiptRequest presence",
+              "observed": "absent",
+              "expected": "absent (RFC 2634 section 2.2)",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-MULTI-CAROL: Receipt.contentType",
+              "field": "contentType",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "originator contentType attribute"
+            }
+          ],
+          "failedStructural": [],
+          "note": "三字段逐字节吻合仅证明回执自称指向该 SignerInfo；不证明任何签名通过验签。"
+        },
+        "receiptTrusted": {
+          "status": "satisfied",
+          "checks": [
+            {
+              "name": "receipt signature status (explicit input)",
+              "value": "valid",
+              "required": "valid",
+              "ok": true,
+              "source": "attestation"
+            },
+            {
+              "name": "receipt certificate trust (explicit input)",
+              "value": "trusted",
+              "required": "trusted",
+              "ok": true,
+              "source": "attestation"
+            },
+            {
+              "name": "Receipt content messageDigest",
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.4",
+              "observed": "0x9e9e239dec66ce8b0f1571c183f47fe510a9a89edfc122c91c64af678df111db",
+              "computed": "0x9e9e239dec66ce8b0f1571c183f47fe510a9a89edfc122c91c64af678df111db",
+              "algorithm": "2.16.840.1.101.3.4.2.1",
+              "ok": true,
+              "detail": null
+            },
+            {
+              "name": "msgSigDigest over matched SignerInfo SignedAttributes",
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.5",
+              "observed": "0x1ac4bba0b302e6804af9d0bd6cdadf10e6e35ae70629b623299c314a007d7144",
+              "computed": "0x1ac4bba0b302e6804af9d0bd6cdadf10e6e35ae70629b623299c314a007d7144",
+              "algorithm": "2.16.840.1.101.3.4.2.1",
+              "setOfDerSha256": "1ac4bba0b302e6804af9d0bd6cdadf10e6e35ae70629b623299c314a007d7144",
+              "ok": true,
+              "detail": null
+            },
+            {
+              "name": "matched SignerInfo signedAttrs present",
+              "path": "layers[0].signerInfos[0].signedAttrs",
+              "ok": true
+            }
+          ],
+          "reasonCodes": [],
+          "note": "本层只证明回执自身可信且绑定到该签名者的 SignedAttributes；尚未要求原签名验签通过，也不判断回执是否来自预期收件人。"
+        },
+        "expectedRecipientConfirmed": {
+          "status": "blocked",
+          "originalSignerAttestation": {
+            "message": "MSG-MULTI",
+            "signer": "layers[0].signerInfos[0]",
+            "status": "invalid",
+            "reason": "second signature fails",
+            "required": "valid",
+            "ok": false
+          },
+          "recipientEvaluation": {
+            "status": "not_requested",
+            "identity": [
+              "carol@example.com"
+            ],
+            "identityBasis": "attestation signerNames",
+            "attestationSuppliedIdentity": true,
+            "reasons": [
+              "匹配的 SignerInfo 上没有 ReceiptRequest 属性（RFC 2634 第 2.3 节：未请求则不得生成回执）；回执仍可与该签名者的字节关联，但不能解释为被请求的投递确认"
+            ],
+            "scope": []
+          },
+          "scope": [
+            {
+              "scope": "none",
+              "status": "not_requested",
+              "detail": "匹配的 SignerInfo 没有 ReceiptRequest"
+            }
+          ],
+          "reasonCodes": [
+            "original_signature_not_valid:invalid",
+            "recipient_scope:not_requested"
+          ],
+          "note": "仅当原签名验签结果明确为 valid 且回执签名者属于 ReceiptRequest 允许的收件人范围时，才可将回执解释为预期收件人的投递确认。未知验签状态一律不满足。"
+        }
+      },
+      "conclusion": "找到对应签名：MSG-MULTI layers[0].signerInfos[0] 的 contentType、signedContentIdentifier、originatorSignatureValue 与回执逐字吻合。 回执可信：回执签名=valid，证书=trusted，msgSigDigest 与签名者的 SignedAttributes 摘要一致。 预期收件人确认不成立：原签名验签状态为 invalid，不是 valid；匹配的 SignerInfo 上没有 ReceiptRequest 属性（RFC 2634 第 2.3 节：未请求则不得生成回执）；回执仍可与该签名者的字节关联，但不能解释为被请求的投递确认。",
+      "matched": {
+        "message": "MSG-MULTI",
+        "signer": "layers[0].signerInfos[0]",
+        "link": {
+          "checks": {
+            "signedAttrsPresent": {
+              "path": "layers[0].signerInfos[0].signedAttrs",
+              "field": "SignedAttributes presence",
+              "observed": "present",
+              "expected": "present",
+              "match": true
+            },
+            "contentType": {
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.3",
+              "field": "contentType attribute",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "1.2.840.113549.1.7.1",
+              "match": true
+            },
+            "signedContentIdentifier": {
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.1",
+              "field": "receiptRequest.signedContentIdentifier (or contentIdentifier when absent)",
+              "observed": "0x5343492d4d554c54492d5345434f4e44415259",
+              "expected": "0x5343492d4d554c54492d5345434f4e44415259",
+              "match": true
+            },
+            "originatorSignatureValue": {
+              "path": "layers[0].signerInfos[0].signature",
+              "field": "SignerInfo.signature",
+              "observed": "0x4d554c54492d5349474e41545552452d4341524f4c",
+              "expected": "0x4d554c54492d5349474e41545552452d4341524f4c",
+              "match": true
+            }
+          },
+          "matched": {
+            "signedAttrsPresent": true,
+            "contentType": true,
+            "signedContentIdentifier": true,
+            "originatorSignatureValue": true
+          }
+        },
+        "messageBodySha256": "cda4c502d54530d9c7449f88ce0612b0baeb377077661b02bf5e088cddb33a35"
+      },
+      "structuralViolations": []
+    },
+    {
+      "receipt": "RECEIPT-NO-RR",
+      "derSha256": "731a516c7c0308f2486e1c0100d9cae84fb5c6ebe259f0c1a58e228378d150e1",
+      "receiptFields": {
+        "contentType": "1.2.840.113549.1.7.1",
+        "signedContentIdentifier": "0x5343492d4e4f2d5252",
+        "originatorSignatureValue": "0x4e4f2d524551554553542d5349474e4154555245",
+        "version": 1,
+        "receiptContentSha256": "7cb37c47c66565ac1aa5efd2b1b2b0acdcf8882ab18d861353b086eec3332495"
+      },
+      "receiptSigner": {
+        "signerInfosIndex": 0,
+        "signatureAlgorithm": "1.2.840.10045.4.3.2",
+        "digestAlgorithm": "2.16.840.1.101.3.4.2.1",
+        "messageDigest": "0x7cb37c47c66565ac1aa5efd2b1b2b0acdcf8882ab18d861353b086eec3332495",
+        "msgSigDigest": "0x5537dabcb4f208a7e7c74b54f412638a6c8be7e13f3fc1bd6d63192f18e32b74",
+        "certificateEmails": [
+          "bob@example.com"
+        ]
+      },
+      "attestation": {
+        "signatureStatus": "valid",
+        "certificateTrust": "trusted",
+        "reason": "internally valid receipt for a message with no ReceiptRequest",
+        "signerNames": [
+          "bob@example.com"
+        ]
+      },
+      "structuralChecks": [
+        {
+          "path": "RECEIPT-NO-RR: SignedData.encapContentInfo.eContentType",
+          "field": "eContentType",
+          "observed": "1.2.840.113549.1.9.16.1.1",
+          "expected": "1.2.840.113549.1.9.16.1.1",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-NO-RR: Receipt.version",
+          "field": "version",
+          "observed": "1",
+          "expected": "v1 (1)",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-NO-RR: signerInfos[0].signedAttrs contentType",
+          "field": "contentType",
+          "observed": "1.2.840.113549.1.9.16.1.1",
+          "expected": "1.2.840.113549.1.9.16.1.1",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-NO-RR: signerInfos[0].signedAttrs receiptRequest",
+          "field": "id-aa-receiptRequest presence",
+          "observed": "absent",
+          "expected": "absent (RFC 2634 section 2.2)",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-NO-RR: Receipt.contentType",
+          "field": "contentType",
+          "observed": "1.2.840.113549.1.7.1",
+          "expected": "originator contentType attribute"
+        }
+      ],
+      "writeChecks": [
+        {
+          "name": "receipt content digest",
+          "path": "RECEIPT-NO-RR: signerInfos[0].signedAttrs messageDigest",
+          "algorithm": "2.16.840.1.101.3.4.2.1",
+          "status": "ok",
+          "detail": null,
+          "observed": "0x7cb37c47c66565ac1aa5efd2b1b2b0acdcf8882ab18d861353b086eec3332495",
+          "computed": "0x7cb37c47c66565ac1aa5efd2b1b2b0acdcf8882ab18d861353b086eec3332495",
+          "matched": true
+        }
+      ],
+      "parseIssues": [],
+      "candidates": [
+        {
+          "message": "MSG-NO-RR",
+          "signer": "layers[0].signerInfos[0]"
+        }
+      ],
+      "digestCrossReference": [
+        {
+          "message": "MSG-NO-RR",
+          "signer": "layers[0].signerInfos[0]",
+          "algorithm": "2.16.840.1.101.3.4.2.1",
+          "digest": "0x5537dabcb4f208a7e7c74b54f412638a6c8be7e13f3fc1bd6d63192f18e32b74",
+          "nestedLayer": false
+        }
+      ],
+      "levels": {
+        "signatureLocated": true,
+        "receiptTrusted": true,
+        "expectedRecipientConfirmed": false
+      },
+      "levelDetails": {
+        "signatureLocated": {
+          "status": "satisfied",
+          "citations": [
+            {
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.3",
+              "field": "contentType attribute",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "1.2.840.113549.1.7.1",
+              "match": true
+            },
+            {
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.1",
+              "field": "receiptRequest.signedContentIdentifier (or contentIdentifier when absent)",
+              "observed": "0x5343492d4e4f2d5252",
+              "expected": "0x5343492d4e4f2d5252",
+              "match": true
+            },
+            {
+              "path": "layers[0].signerInfos[0].signature",
+              "field": "SignerInfo.signature",
+              "observed": "0x4e4f2d524551554553542d5349474e4154555245",
+              "expected": "0x4e4f2d524551554553542d5349474e4154555245",
+              "match": true
+            }
+          ],
+          "structural": [
+            {
+              "path": "RECEIPT-NO-RR: SignedData.encapContentInfo.eContentType",
+              "field": "eContentType",
+              "observed": "1.2.840.113549.1.9.16.1.1",
+              "expected": "1.2.840.113549.1.9.16.1.1",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-NO-RR: Receipt.version",
+              "field": "version",
+              "observed": "1",
+              "expected": "v1 (1)",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-NO-RR: signerInfos[0].signedAttrs contentType",
+              "field": "contentType",
+              "observed": "1.2.840.113549.1.9.16.1.1",
+              "expected": "1.2.840.113549.1.9.16.1.1",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-NO-RR: signerInfos[0].signedAttrs receiptRequest",
+              "field": "id-aa-receiptRequest presence",
+              "observed": "absent",
+              "expected": "absent (RFC 2634 section 2.2)",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-NO-RR: Receipt.contentType",
+              "field": "contentType",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "originator contentType attribute"
+            }
+          ],
+          "failedStructural": [],
+          "note": "三字段逐字节吻合仅证明回执自称指向该 SignerInfo；不证明任何签名通过验签。"
+        },
+        "receiptTrusted": {
+          "status": "satisfied",
+          "checks": [
+            {
+              "name": "receipt signature status (explicit input)",
+              "value": "valid",
+              "required": "valid",
+              "ok": true,
+              "source": "attestation"
+            },
+            {
+              "name": "receipt certificate trust (explicit input)",
+              "value": "trusted",
+              "required": "trusted",
+              "ok": true,
+              "source": "attestation"
+            },
+            {
+              "name": "Receipt content messageDigest",
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.4",
+              "observed": "0x7cb37c47c66565ac1aa5efd2b1b2b0acdcf8882ab18d861353b086eec3332495",
+              "computed": "0x7cb37c47c66565ac1aa5efd2b1b2b0acdcf8882ab18d861353b086eec3332495",
+              "algorithm": "2.16.840.1.101.3.4.2.1",
+              "ok": true,
+              "detail": null
+            },
+            {
+              "name": "msgSigDigest over matched SignerInfo SignedAttributes",
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.5",
+              "observed": "0x5537dabcb4f208a7e7c74b54f412638a6c8be7e13f3fc1bd6d63192f18e32b74",
+              "computed": "0x5537dabcb4f208a7e7c74b54f412638a6c8be7e13f3fc1bd6d63192f18e32b74",
+              "algorithm": "2.16.840.1.101.3.4.2.1",
+              "setOfDerSha256": "5537dabcb4f208a7e7c74b54f412638a6c8be7e13f3fc1bd6d63192f18e32b74",
+              "ok": true,
+              "detail": null
+            },
+            {
+              "name": "matched SignerInfo signedAttrs present",
+              "path": "layers[0].signerInfos[0].signedAttrs",
+              "ok": true
+            }
+          ],
+          "reasonCodes": [],
+          "note": "本层只证明回执自身可信且绑定到该签名者的 SignedAttributes；尚未要求原签名验签通过，也不判断回执是否来自预期收件人。"
+        },
+        "expectedRecipientConfirmed": {
+          "status": "blocked",
+          "originalSignerAttestation": {
+            "message": "MSG-NO-RR",
+            "signer": "layers[0].signerInfos[0]",
+            "status": "valid",
+            "reason": "fixture",
+            "required": "valid",
+            "ok": true
+          },
+          "recipientEvaluation": {
+            "status": "not_requested",
+            "identity": [
+              "bob@example.com"
+            ],
+            "identityBasis": "attestation signerNames",
+            "attestationSuppliedIdentity": true,
+            "reasons": [
+              "匹配的 SignerInfo 上没有 ReceiptRequest 属性（RFC 2634 第 2.3 节：未请求则不得生成回执）；回执仍可与该签名者的字节关联，但不能解释为被请求的投递确认"
+            ],
+            "scope": []
+          },
+          "scope": [
+            {
+              "scope": "none",
+              "status": "not_requested",
+              "detail": "匹配的 SignerInfo 没有 ReceiptRequest"
+            }
+          ],
+          "reasonCodes": [
+            "recipient_scope:not_requested"
+          ],
+          "note": "仅当原签名验签结果明确为 valid 且回执签名者属于 ReceiptRequest 允许的收件人范围时，才可将回执解释为预期收件人的投递确认。未知验签状态一律不满足。"
+        }
+      },
+      "conclusion": "找到对应签名：MSG-NO-RR layers[0].signerInfos[0] 的 contentType、signedContentIdentifier、originatorSignatureValue 与回执逐字吻合。 回执可信：回执签名=valid，证书=trusted，msgSigDigest 与签名者的 SignedAttributes 摘要一致。 预期收件人确认不成立：匹配的 SignerInfo 上没有 ReceiptRequest 属性（RFC 2634 第 2.3 节：未请求则不得生成回执）；回执仍可与该签名者的字节关联，但不能解释为被请求的投递确认。",
+      "matched": {
+        "message": "MSG-NO-RR",
+        "signer": "layers[0].signerInfos[0]",
+        "link": {
+          "checks": {
+            "signedAttrsPresent": {
+              "path": "layers[0].signerInfos[0].signedAttrs",
+              "field": "SignedAttributes presence",
+              "observed": "present",
+              "expected": "present",
+              "match": true
+            },
+            "contentType": {
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.3",
+              "field": "contentType attribute",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "1.2.840.113549.1.7.1",
+              "match": true
+            },
+            "signedContentIdentifier": {
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.1",
+              "field": "receiptRequest.signedContentIdentifier (or contentIdentifier when absent)",
+              "observed": "0x5343492d4e4f2d5252",
+              "expected": "0x5343492d4e4f2d5252",
+              "match": true
+            },
+            "originatorSignatureValue": {
+              "path": "layers[0].signerInfos[0].signature",
+              "field": "SignerInfo.signature",
+              "observed": "0x4e4f2d524551554553542d5349474e4154555245",
+              "expected": "0x4e4f2d524551554553542d5349474e4154555245",
+              "match": true
+            }
+          },
+          "matched": {
+            "signedAttrsPresent": true,
+            "contentType": true,
+            "signedContentIdentifier": true,
+            "originatorSignatureValue": true
+          }
+        },
+        "messageBodySha256": "05d6150e53c02f98c301bcf78ee44072dac06044d535401bca205e6686c51bdd"
+      },
+      "structuralViolations": []
+    },
+    {
+      "receipt": "RECEIPT-RESIGN",
+      "derSha256": "84d8ee12e0d068490ad9721244a31f252c12cb97e797faa5dd3b24380cef9c1c",
+      "receiptFields": {
+        "contentType": "1.2.840.113549.1.7.1",
+        "signedContentIdentifier": "0x5343492d52455349474e2d4132",
+        "originatorSignatureValue": "0x52455349474e45442d5349474e41545552452d4132",
+        "version": 1,
+        "receiptContentSha256": "6a68b00c354b8c3e38a516702072c60a1a0d113e070f9fc9e4c80c26426b0278"
+      },
+      "receiptSigner": {
+        "signerInfosIndex": 0,
+        "signatureAlgorithm": "1.2.840.10045.4.3.2",
+        "digestAlgorithm": "2.16.840.1.101.3.4.2.1",
+        "messageDigest": "0x6a68b00c354b8c3e38a516702072c60a1a0d113e070f9fc9e4c80c26426b0278",
+        "msgSigDigest": "0xd7fd38e5885133e6191cf622e453d8b55803a50490a0cf20d832f3c00db5a681",
+        "certificateEmails": [
+          "bob@example.com"
+        ]
+      },
+      "attestation": {
+        "signatureStatus": "valid",
+        "certificateTrust": "trusted",
+        "reason": "receipt is sound but the originator signature was never verified",
+        "signerNames": [
+          "bob@example.com"
+        ]
+      },
+      "structuralChecks": [
+        {
+          "path": "RECEIPT-RESIGN: SignedData.encapContentInfo.eContentType",
+          "field": "eContentType",
+          "observed": "1.2.840.113549.1.9.16.1.1",
+          "expected": "1.2.840.113549.1.9.16.1.1",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-RESIGN: Receipt.version",
+          "field": "version",
+          "observed": "1",
+          "expected": "v1 (1)",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-RESIGN: signerInfos[0].signedAttrs contentType",
+          "field": "contentType",
+          "observed": "1.2.840.113549.1.9.16.1.1",
+          "expected": "1.2.840.113549.1.9.16.1.1",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-RESIGN: signerInfos[0].signedAttrs receiptRequest",
+          "field": "id-aa-receiptRequest presence",
+          "observed": "absent",
+          "expected": "absent (RFC 2634 section 2.2)",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-RESIGN: Receipt.contentType",
+          "field": "contentType",
+          "observed": "1.2.840.113549.1.7.1",
+          "expected": "originator contentType attribute"
+        }
+      ],
+      "writeChecks": [
+        {
+          "name": "receipt content digest",
+          "path": "RECEIPT-RESIGN: signerInfos[0].signedAttrs messageDigest",
+          "algorithm": "2.16.840.1.101.3.4.2.1",
+          "status": "ok",
+          "detail": null,
+          "observed": "0x6a68b00c354b8c3e38a516702072c60a1a0d113e070f9fc9e4c80c26426b0278",
+          "computed": "0x6a68b00c354b8c3e38a516702072c60a1a0d113e070f9fc9e4c80c26426b0278",
+          "matched": true
+        }
+      ],
+      "parseIssues": [],
+      "candidates": [
+        {
+          "message": "MSG-RESIGN",
+          "signer": "layers[0].signerInfos[0]"
+        }
+      ],
+      "digestCrossReference": [
+        {
+          "message": "MSG-RESIGN",
+          "signer": "layers[0].signerInfos[0]",
+          "algorithm": "2.16.840.1.101.3.4.2.1",
+          "digest": "0xd7fd38e5885133e6191cf622e453d8b55803a50490a0cf20d832f3c00db5a681",
+          "nestedLayer": false
+        }
+      ],
+      "levels": {
+        "signatureLocated": true,
+        "receiptTrusted": true,
+        "expectedRecipientConfirmed": false
+      },
+      "levelDetails": {
+        "signatureLocated": {
+          "status": "satisfied",
+          "citations": [
+            {
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.3",
+              "field": "contentType attribute",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "1.2.840.113549.1.7.1",
+              "match": true
+            },
+            {
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.1",
+              "field": "receiptRequest.signedContentIdentifier (or contentIdentifier when absent)",
+              "observed": "0x5343492d52455349474e2d4132",
+              "expected": "0x5343492d52455349474e2d4132",
+              "match": true
+            },
+            {
+              "path": "layers[0].signerInfos[0].signature",
+              "field": "SignerInfo.signature",
+              "observed": "0x52455349474e45442d5349474e41545552452d4132",
+              "expected": "0x52455349474e45442d5349474e41545552452d4132",
+              "match": true
+            }
+          ],
+          "structural": [
+            {
+              "path": "RECEIPT-RESIGN: SignedData.encapContentInfo.eContentType",
+              "field": "eContentType",
+              "observed": "1.2.840.113549.1.9.16.1.1",
+              "expected": "1.2.840.113549.1.9.16.1.1",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-RESIGN: Receipt.version",
+              "field": "version",
+              "observed": "1",
+              "expected": "v1 (1)",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-RESIGN: signerInfos[0].signedAttrs contentType",
+              "field": "contentType",
+              "observed": "1.2.840.113549.1.9.16.1.1",
+              "expected": "1.2.840.113549.1.9.16.1.1",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-RESIGN: signerInfos[0].signedAttrs receiptRequest",
+              "field": "id-aa-receiptRequest presence",
+              "observed": "absent",
+              "expected": "absent (RFC 2634 section 2.2)",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-RESIGN: Receipt.contentType",
+              "field": "contentType",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "originator contentType attribute"
+            }
+          ],
+          "failedStructural": [],
+          "note": "三字段逐字节吻合仅证明回执自称指向该 SignerInfo；不证明任何签名通过验签。"
+        },
+        "receiptTrusted": {
+          "status": "satisfied",
+          "checks": [
+            {
+              "name": "receipt signature status (explicit input)",
+              "value": "valid",
+              "required": "valid",
+              "ok": true,
+              "source": "attestation"
+            },
+            {
+              "name": "receipt certificate trust (explicit input)",
+              "value": "trusted",
+              "required": "trusted",
+              "ok": true,
+              "source": "attestation"
+            },
+            {
+              "name": "Receipt content messageDigest",
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.4",
+              "observed": "0x6a68b00c354b8c3e38a516702072c60a1a0d113e070f9fc9e4c80c26426b0278",
+              "computed": "0x6a68b00c354b8c3e38a516702072c60a1a0d113e070f9fc9e4c80c26426b0278",
+              "algorithm": "2.16.840.1.101.3.4.2.1",
+              "ok": true,
+              "detail": null
+            },
+            {
+              "name": "msgSigDigest over matched SignerInfo SignedAttributes",
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.5",
+              "observed": "0xd7fd38e5885133e6191cf622e453d8b55803a50490a0cf20d832f3c00db5a681",
+              "computed": "0xd7fd38e5885133e6191cf622e453d8b55803a50490a0cf20d832f3c00db5a681",
+              "algorithm": "2.16.840.1.101.3.4.2.1",
+              "setOfDerSha256": "d7fd38e5885133e6191cf622e453d8b55803a50490a0cf20d832f3c00db5a681",
+              "ok": true,
+              "detail": null
+            },
+            {
+              "name": "matched SignerInfo signedAttrs present",
+              "path": "layers[0].signerInfos[0].signedAttrs",
+              "ok": true
+            }
+          ],
+          "reasonCodes": [],
+          "note": "本层只证明回执自身可信且绑定到该签名者的 SignedAttributes；尚未要求原签名验签通过，也不判断回执是否来自预期收件人。"
+        },
+        "expectedRecipientConfirmed": {
+          "status": "blocked",
+          "originalSignerAttestation": {
+            "message": "MSG-RESIGN",
+            "signer": "layers[0].signerInfos[0]",
+            "status": "unknown",
+            "reason": "verification not performed",
+            "required": "valid",
+            "ok": false
+          },
+          "recipientEvaluation": {
+            "status": "confirmed",
+            "identity": [
+              "bob@example.com"
+            ],
+            "identityBasis": "attestation signerNames",
+            "attestationSuppliedIdentity": true,
+            "reasons": [
+              "receipt signer matches an archived To/Cc recipient and allReceipts permits that recipient to respond"
+            ],
+            "scope": [
+              {
+                "path": "layers[0].signerInfos[0].signedAttrs receiptRequest.receiptsFrom.allOrFirstTier",
+                "value": "allReceipts"
+              }
+            ],
+            "claimedRecipients": [
+              {
+                "source": "archived body To/Cc",
+                "names": [
+                  "rfc822Name:bob@example.com"
+                ]
+              }
+            ],
+            "matchedNames": [
+              "rfc822Name:bob@example.com"
+            ]
+          },
+          "scope": [
+            {
+              "scope": "allOrFirstTier",
+              "value": "allReceipts"
+            },
+            {
+              "scope": "mlExpansionHistory",
+              "status": "absent",
+              "detail": "最外层 SignedData 没有任何签名者携带 mlExpansionHistory"
+            }
+          ],
+          "reasonCodes": [
+            "original_signature_not_valid:unknown"
+          ],
+          "note": "仅当原签名验签结果明确为 valid 且回执签名者属于 ReceiptRequest 允许的收件人范围时，才可将回执解释为预期收件人的投递确认。未知验签状态一律不满足。"
+        }
+      },
+      "conclusion": "找到对应签名：MSG-RESIGN layers[0].signerInfos[0] 的 contentType、signedContentIdentifier、originatorSignatureValue 与回执逐字吻合。 回执可信：回执签名=valid，证书=trusted，msgSigDigest 与签名者的 SignedAttributes 摘要一致。 预期收件人确认不成立：原签名验签状态为 unknown，不是 valid。",
+      "matched": {
+        "message": "MSG-RESIGN",
+        "signer": "layers[0].signerInfos[0]",
+        "link": {
+          "checks": {
+            "signedAttrsPresent": {
+              "path": "layers[0].signerInfos[0].signedAttrs",
+              "field": "SignedAttributes presence",
+              "observed": "present",
+              "expected": "present",
+              "match": true
+            },
+            "contentType": {
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.3",
+              "field": "contentType attribute",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "1.2.840.113549.1.7.1",
+              "match": true
+            },
+            "signedContentIdentifier": {
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.1",
+              "field": "receiptRequest.signedContentIdentifier (or contentIdentifier when absent)",
+              "observed": "0x5343492d52455349474e2d4132",
+              "expected": "0x5343492d52455349474e2d4132",
+              "match": true
+            },
+            "originatorSignatureValue": {
+              "path": "layers[0].signerInfos[0].signature",
+              "field": "SignerInfo.signature",
+              "observed": "0x52455349474e45442d5349474e41545552452d4132",
+              "expected": "0x52455349474e45442d5349474e41545552452d4132",
+              "match": true
+            }
+          },
+          "matched": {
+            "signedAttrsPresent": true,
+            "contentType": true,
+            "signedContentIdentifier": true,
+            "originatorSignatureValue": true
+          }
+        },
+        "messageBodySha256": "38336f65828267f3254fe7768a1c291758eb512aff06993aa491035276c02087"
+      },
+      "structuralViolations": []
+    },
+    {
+      "receipt": "RECEIPT-B-UNATTESTED",
+      "derSha256": "09a6e80bc28a987182c8ef8f8351ec4354067ee073bf58f3decdc9ffeffdc97c",
+      "receiptFields": {
+        "contentType": "1.2.840.113549.1.7.1",
+        "signedContentIdentifier": "0x5343492d5052494d4152592d42",
+        "originatorSignatureValue": "0x5052494d4152592d5349474e41545552452d42",
+        "version": 1,
+        "receiptContentSha256": "a156ae230ec228d6f9af494f3cbdf8c72fa84113d0528ccb17b9edc5d1152af4"
+      },
+      "receiptSigner": {
+        "signerInfosIndex": 0,
+        "signatureAlgorithm": "1.2.840.10045.4.3.2",
+        "digestAlgorithm": "2.16.840.1.101.3.4.2.1",
+        "messageDigest": "0xa156ae230ec228d6f9af494f3cbdf8c72fa84113d0528ccb17b9edc5d1152af4",
+        "msgSigDigest": "0xd0893436d3022f294a1585c2f86ed17b73027f3b6a1a13e268649c5416e30f08",
+        "certificateEmails": [
+          "bob@example.com"
+        ]
+      },
+      "attestation": {
+        "signatureStatus": "unknown",
+        "certificateTrust": "unknown",
+        "reason": "",
+        "signerNames": []
+      },
+      "structuralChecks": [
+        {
+          "path": "RECEIPT-B-UNATTESTED: SignedData.encapContentInfo.eContentType",
+          "field": "eContentType",
+          "observed": "1.2.840.113549.1.9.16.1.1",
+          "expected": "1.2.840.113549.1.9.16.1.1",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-B-UNATTESTED: Receipt.version",
+          "field": "version",
+          "observed": "1",
+          "expected": "v1 (1)",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-B-UNATTESTED: signerInfos[0].signedAttrs contentType",
+          "field": "contentType",
+          "observed": "1.2.840.113549.1.9.16.1.1",
+          "expected": "1.2.840.113549.1.9.16.1.1",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-B-UNATTESTED: signerInfos[0].signedAttrs receiptRequest",
+          "field": "id-aa-receiptRequest presence",
+          "observed": "absent",
+          "expected": "absent (RFC 2634 section 2.2)",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-B-UNATTESTED: Receipt.contentType",
+          "field": "contentType",
+          "observed": "1.2.840.113549.1.7.1",
+          "expected": "originator contentType attribute"
+        }
+      ],
+      "writeChecks": [
+        {
+          "name": "receipt content digest",
+          "path": "RECEIPT-B-UNATTESTED: signerInfos[0].signedAttrs messageDigest",
+          "algorithm": "2.16.840.1.101.3.4.2.1",
+          "status": "ok",
+          "detail": null,
+          "observed": "0xa156ae230ec228d6f9af494f3cbdf8c72fa84113d0528ccb17b9edc5d1152af4",
+          "computed": "0xa156ae230ec228d6f9af494f3cbdf8c72fa84113d0528ccb17b9edc5d1152af4",
+          "matched": true
+        }
+      ],
+      "parseIssues": [],
+      "candidates": [
+        {
+          "message": "MSG-B",
+          "signer": "layers[0].signerInfos[0]"
+        }
+      ],
+      "digestCrossReference": [
+        {
+          "message": "MSG-B",
+          "signer": "layers[0].signerInfos[0]",
+          "algorithm": "2.16.840.1.101.3.4.2.1",
+          "digest": "0xd0893436d3022f294a1585c2f86ed17b73027f3b6a1a13e268649c5416e30f08",
+          "nestedLayer": false
+        }
+      ],
+      "levels": {
+        "signatureLocated": true,
+        "receiptTrusted": false,
+        "expectedRecipientConfirmed": false
+      },
+      "levelDetails": {
+        "signatureLocated": {
+          "status": "satisfied",
+          "citations": [
+            {
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.3",
+              "field": "contentType attribute",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "1.2.840.113549.1.7.1",
+              "match": true
+            },
+            {
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.1",
+              "field": "receiptRequest.signedContentIdentifier (or contentIdentifier when absent)",
+              "observed": "0x5343492d5052494d4152592d42",
+              "expected": "0x5343492d5052494d4152592d42",
+              "match": true
+            },
+            {
+              "path": "layers[0].signerInfos[0].signature",
+              "field": "SignerInfo.signature",
+              "observed": "0x5052494d4152592d5349474e41545552452d42",
+              "expected": "0x5052494d4152592d5349474e41545552452d42",
+              "match": true
+            }
+          ],
+          "structural": [
+            {
+              "path": "RECEIPT-B-UNATTESTED: SignedData.encapContentInfo.eContentType",
+              "field": "eContentType",
+              "observed": "1.2.840.113549.1.9.16.1.1",
+              "expected": "1.2.840.113549.1.9.16.1.1",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-B-UNATTESTED: Receipt.version",
+              "field": "version",
+              "observed": "1",
+              "expected": "v1 (1)",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-B-UNATTESTED: signerInfos[0].signedAttrs contentType",
+              "field": "contentType",
+              "observed": "1.2.840.113549.1.9.16.1.1",
+              "expected": "1.2.840.113549.1.9.16.1.1",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-B-UNATTESTED: signerInfos[0].signedAttrs receiptRequest",
+              "field": "id-aa-receiptRequest presence",
+              "observed": "absent",
+              "expected": "absent (RFC 2634 section 2.2)",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-B-UNATTESTED: Receipt.contentType",
+              "field": "contentType",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "originator contentType attribute"
+            }
+          ],
+          "failedStructural": [],
+          "note": "三字段逐字节吻合仅证明回执自称指向该 SignerInfo；不证明任何签名通过验签。"
+        },
+        "receiptTrusted": {
+          "status": "blocked",
+          "checks": [
+            {
+              "name": "receipt signature status (explicit input)",
+              "value": "unknown",
+              "required": "valid",
+              "ok": false,
+              "source": "attestation"
+            },
+            {
+              "name": "receipt certificate trust (explicit input)",
+              "value": "unknown",
+              "required": "trusted",
+              "ok": false,
+              "source": "attestation"
+            },
+            {
+              "name": "Receipt content messageDigest",
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.4",
+              "observed": "0xa156ae230ec228d6f9af494f3cbdf8c72fa84113d0528ccb17b9edc5d1152af4",
+              "computed": "0xa156ae230ec228d6f9af494f3cbdf8c72fa84113d0528ccb17b9edc5d1152af4",
+              "algorithm": "2.16.840.1.101.3.4.2.1",
+              "ok": true,
+              "detail": null
+            },
+            {
+              "name": "msgSigDigest over matched SignerInfo SignedAttributes",
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.5",
+              "observed": "0xd0893436d3022f294a1585c2f86ed17b73027f3b6a1a13e268649c5416e30f08",
+              "computed": "0xd0893436d3022f294a1585c2f86ed17b73027f3b6a1a13e268649c5416e30f08",
+              "algorithm": "2.16.840.1.101.3.4.2.1",
+              "setOfDerSha256": "d0893436d3022f294a1585c2f86ed17b73027f3b6a1a13e268649c5416e30f08",
+              "ok": true,
+              "detail": null
+            },
+            {
+              "name": "matched SignerInfo signedAttrs present",
+              "path": "layers[0].signerInfos[0].signedAttrs",
+              "ok": true
+            }
+          ],
+          "reasonCodes": [
+            "receipt_signature_not_valid:unknown",
+            "receipt_certificate_not_trusted:unknown"
+          ],
+          "note": "本层只证明回执自身可信且绑定到该签名者的 SignedAttributes；尚未要求原签名验签通过，也不判断回执是否来自预期收件人。"
+        },
+        "expectedRecipientConfirmed": {
+          "status": "blocked",
+          "originalSignerAttestation": {
+            "message": "MSG-B",
+            "signer": "layers[0].signerInfos[0]",
+            "status": "valid",
+            "reason": "fixture",
+            "required": "valid",
+            "ok": true
+          },
+          "recipientEvaluation": {
+            "status": "identity_unverified",
+            "identity": [
+              "bob@example.com"
+            ],
+            "identityBasis": "embedded certificate (unattested identity)",
+            "attestationSuppliedIdentity": true,
+            "reasons": [
+              "回执签名者身份仅来自其自带的证书，未由验签输入确认；不能升级为预期收件人"
+            ],
+            "scope": []
+          },
+          "scope": [
+            {
+              "scope": "allOrFirstTier",
+              "value": "allReceipts"
+            },
+            {
+              "scope": "mlExpansionHistory",
+              "status": "absent",
+              "detail": "最外层 SignedData 没有任何签名者携带 mlExpansionHistory"
+            }
+          ],
+          "reasonCodes": [
+            "recipient_scope:identity_unverified"
+          ],
+          "note": "仅当原签名验签结果明确为 valid 且回执签名者属于 ReceiptRequest 允许的收件人范围时，才可将回执解释为预期收件人的投递确认。未知验签状态一律不满足。"
+        }
+      },
+      "conclusion": "找到对应签名：MSG-B layers[0].signerInfos[0] 的 contentType、signedContentIdentifier、originatorSignatureValue 与回执逐字吻合。 回执未达可信层：回执签名状态不是 valid(unknown)、回执证书链不是 trusted(unknown)。 预期收件人确认未评估（第二层未成立）。",
+      "matched": {
+        "message": "MSG-B",
+        "signer": "layers[0].signerInfos[0]",
+        "link": {
+          "checks": {
+            "signedAttrsPresent": {
+              "path": "layers[0].signerInfos[0].signedAttrs",
+              "field": "SignedAttributes presence",
+              "observed": "present",
+              "expected": "present",
+              "match": true
+            },
+            "contentType": {
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.3",
+              "field": "contentType attribute",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "1.2.840.113549.1.7.1",
+              "match": true
+            },
+            "signedContentIdentifier": {
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.1",
+              "field": "receiptRequest.signedContentIdentifier (or contentIdentifier when absent)",
+              "observed": "0x5343492d5052494d4152592d42",
+              "expected": "0x5343492d5052494d4152592d42",
+              "match": true
+            },
+            "originatorSignatureValue": {
+              "path": "layers[0].signerInfos[0].signature",
+              "field": "SignerInfo.signature",
+              "observed": "0x5052494d4152592d5349474e41545552452d42",
+              "expected": "0x5052494d4152592d5349474e41545552452d42",
+              "match": true
+            }
+          },
+          "matched": {
+            "signedAttrsPresent": true,
+            "contentType": true,
+            "signedContentIdentifier": true,
+            "originatorSignatureValue": true
+          }
+        },
+        "messageBodySha256": "38336f65828267f3254fe7768a1c291758eb512aff06993aa491035276c02087"
+      },
+      "structuralViolations": []
+    },
+    {
+      "receipt": "RECEIPT-LIST-NONE",
+      "derSha256": "237bf30ebf7666d92c5df76cec4bcc53a44d78949961e3efaa3e5c367c28290e",
+      "receiptFields": {
+        "contentType": "1.2.840.113549.1.7.1",
+        "signedContentIdentifier": "0x5343492d4c4953542d4e4f4e45",
+        "originatorSignatureValue": "0x4c4953542d4e4f4e452d5349474e4154555245",
+        "version": 1,
+        "receiptContentSha256": "3f87e2f7fb94e3f4252ff1c60ede7894b4631aa1e0c783f75dd3ea7ba0ad3299"
+      },
+      "receiptSigner": {
+        "signerInfosIndex": 0,
+        "signatureAlgorithm": "1.2.840.10045.4.3.2",
+        "digestAlgorithm": "2.16.840.1.101.3.4.2.1",
+        "messageDigest": "0x3f87e2f7fb94e3f4252ff1c60ede7894b4631aa1e0c783f75dd3ea7ba0ad3299",
+        "msgSigDigest": "0xbad2833ca47ae10af78a7fa36d32d0aeaa01590e4b2d457aa1683651f8acc42e",
+        "certificateEmails": [
+          "bob@example.com"
+        ]
+      },
+      "attestation": {
+        "signatureStatus": "valid",
+        "certificateTrust": "trusted",
+        "reason": "receipt is genuine; list policy forbids creating it",
+        "signerNames": [
+          "bob@example.com"
+        ]
+      },
+      "structuralChecks": [
+        {
+          "path": "RECEIPT-LIST-NONE: SignedData.encapContentInfo.eContentType",
+          "field": "eContentType",
+          "observed": "1.2.840.113549.1.9.16.1.1",
+          "expected": "1.2.840.113549.1.9.16.1.1",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-LIST-NONE: Receipt.version",
+          "field": "version",
+          "observed": "1",
+          "expected": "v1 (1)",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-LIST-NONE: signerInfos[0].signedAttrs contentType",
+          "field": "contentType",
+          "observed": "1.2.840.113549.1.9.16.1.1",
+          "expected": "1.2.840.113549.1.9.16.1.1",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-LIST-NONE: signerInfos[0].signedAttrs receiptRequest",
+          "field": "id-aa-receiptRequest presence",
+          "observed": "absent",
+          "expected": "absent (RFC 2634 section 2.2)",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-LIST-NONE: Receipt.contentType",
+          "field": "contentType",
+          "observed": "1.2.840.113549.1.7.1",
+          "expected": "originator contentType attribute"
+        }
+      ],
+      "writeChecks": [
+        {
+          "name": "receipt content digest",
+          "path": "RECEIPT-LIST-NONE: signerInfos[0].signedAttrs messageDigest",
+          "algorithm": "2.16.840.1.101.3.4.2.1",
+          "status": "ok",
+          "detail": null,
+          "observed": "0x3f87e2f7fb94e3f4252ff1c60ede7894b4631aa1e0c783f75dd3ea7ba0ad3299",
+          "computed": "0x3f87e2f7fb94e3f4252ff1c60ede7894b4631aa1e0c783f75dd3ea7ba0ad3299",
+          "matched": true
+        }
+      ],
+      "parseIssues": [],
+      "candidates": [
+        {
+          "message": "MSG-LIST-NONE",
+          "signer": "layers[1].signerInfos[0]"
+        }
+      ],
+      "digestCrossReference": [
+        {
+          "message": "MSG-LIST-NONE",
+          "signer": "layers[1].signerInfos[0]",
+          "algorithm": "2.16.840.1.101.3.4.2.1",
+          "digest": "0xbad2833ca47ae10af78a7fa36d32d0aeaa01590e4b2d457aa1683651f8acc42e",
+          "nestedLayer": true
+        }
+      ],
+      "levels": {
+        "signatureLocated": true,
+        "receiptTrusted": true,
+        "expectedRecipientConfirmed": false
+      },
+      "levelDetails": {
+        "signatureLocated": {
+          "status": "satisfied",
+          "citations": [
+            {
+              "path": "layers[1].signerInfos[0].signedAttrs 1.2.840.113549.1.9.3",
+              "field": "contentType attribute",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "1.2.840.113549.1.7.1",
+              "match": true
+            },
+            {
+              "path": "layers[1].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.1",
+              "field": "receiptRequest.signedContentIdentifier (or contentIdentifier when absent)",
+              "observed": "0x5343492d4c4953542d4e4f4e45",
+              "expected": "0x5343492d4c4953542d4e4f4e45",
+              "match": true
+            },
+            {
+              "path": "layers[1].signerInfos[0].signature",
+              "field": "SignerInfo.signature",
+              "observed": "0x4c4953542d4e4f4e452d5349474e4154555245",
+              "expected": "0x4c4953542d4e4f4e452d5349474e4154555245",
+              "match": true
+            }
+          ],
+          "structural": [
+            {
+              "path": "RECEIPT-LIST-NONE: SignedData.encapContentInfo.eContentType",
+              "field": "eContentType",
+              "observed": "1.2.840.113549.1.9.16.1.1",
+              "expected": "1.2.840.113549.1.9.16.1.1",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-LIST-NONE: Receipt.version",
+              "field": "version",
+              "observed": "1",
+              "expected": "v1 (1)",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-LIST-NONE: signerInfos[0].signedAttrs contentType",
+              "field": "contentType",
+              "observed": "1.2.840.113549.1.9.16.1.1",
+              "expected": "1.2.840.113549.1.9.16.1.1",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-LIST-NONE: signerInfos[0].signedAttrs receiptRequest",
+              "field": "id-aa-receiptRequest presence",
+              "observed": "absent",
+              "expected": "absent (RFC 2634 section 2.2)",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-LIST-NONE: Receipt.contentType",
+              "field": "contentType",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "originator contentType attribute"
+            }
+          ],
+          "failedStructural": [],
+          "note": "三字段逐字节吻合仅证明回执自称指向该 SignerInfo；不证明任何签名通过验签。"
+        },
+        "receiptTrusted": {
+          "status": "satisfied",
+          "checks": [
+            {
+              "name": "receipt signature status (explicit input)",
+              "value": "valid",
+              "required": "valid",
+              "ok": true,
+              "source": "attestation"
+            },
+            {
+              "name": "receipt certificate trust (explicit input)",
+              "value": "trusted",
+              "required": "trusted",
+              "ok": true,
+              "source": "attestation"
+            },
+            {
+              "name": "Receipt content messageDigest",
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.4",
+              "observed": "0x3f87e2f7fb94e3f4252ff1c60ede7894b4631aa1e0c783f75dd3ea7ba0ad3299",
+              "computed": "0x3f87e2f7fb94e3f4252ff1c60ede7894b4631aa1e0c783f75dd3ea7ba0ad3299",
+              "algorithm": "2.16.840.1.101.3.4.2.1",
+              "ok": true,
+              "detail": null
+            },
+            {
+              "name": "msgSigDigest over matched SignerInfo SignedAttributes",
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.5",
+              "observed": "0xbad2833ca47ae10af78a7fa36d32d0aeaa01590e4b2d457aa1683651f8acc42e",
+              "computed": "0xbad2833ca47ae10af78a7fa36d32d0aeaa01590e4b2d457aa1683651f8acc42e",
+              "algorithm": "2.16.840.1.101.3.4.2.1",
+              "setOfDerSha256": "bad2833ca47ae10af78a7fa36d32d0aeaa01590e4b2d457aa1683651f8acc42e",
+              "ok": true,
+              "detail": null
+            },
+            {
+              "name": "matched SignerInfo signedAttrs present",
+              "path": "layers[1].signerInfos[0].signedAttrs",
+              "ok": true
+            }
+          ],
+          "reasonCodes": [],
+          "note": "本层只证明回执自身可信且绑定到该签名者的 SignedAttributes；尚未要求原签名验签通过，也不判断回执是否来自预期收件人。"
+        },
+        "expectedRecipientConfirmed": {
+          "status": "blocked",
+          "originalSignerAttestation": {
+            "message": "MSG-LIST-NONE",
+            "signer": "layers[1].signerInfos[0]",
+            "status": "valid",
+            "reason": "originator",
+            "required": "valid",
+            "ok": true
+          },
+          "recipientEvaluation": {
+            "status": "blocked",
+            "identity": [
+              "bob@example.com"
+            ],
+            "identityBasis": "attestation signerNames",
+            "attestationSuppliedIdentity": true,
+            "reasons": [
+              "mlReceiptPolicy 为 none：RFC 2634 第 2.3 节步骤 1.2.1 规定必须不生成回执"
+            ],
+            "scope": [
+              {
+                "path": "layers[0].signerInfos[*].signedAttrs mlExpansionHistory[-1].mlReceiptPolicy",
+                "kind": "none"
+              }
+            ]
+          },
+          "scope": [
+            {
+              "scope": "allOrFirstTier",
+              "value": "allReceipts"
+            },
+            {
+              "scope": "mlExpansionHistory",
+              "layer": "layers[0]",
+              "history": [
+                {
+                  "mailListIdentifier": "issuer=2.5.4.3=Announce List, 1.2.840.113549.1.9.1=announce@example.com, serial=3003",
+                  "expansionTime": "20261113090000Z",
+                  "mlReceiptPolicy": {
+                    "kind": "none",
+                    "names": []
+                  }
+                }
+              ],
+              "policyKind": "none",
+              "policyNames": [],
+              "conflictAcrossSigners": false
+            }
+          ],
+          "reasonCodes": [
+            "recipient_scope:blocked"
+          ],
+          "note": "仅当原签名验签结果明确为 valid 且回执签名者属于 ReceiptRequest 允许的收件人范围时，才可将回执解释为预期收件人的投递确认。未知验签状态一律不满足。"
+        }
+      },
+      "conclusion": "找到对应签名：MSG-LIST-NONE layers[1].signerInfos[0] 的 contentType、signedContentIdentifier、originatorSignatureValue 与回执逐字吻合。 回执可信：回执签名=valid，证书=trusted，msgSigDigest 与签名者的 SignedAttributes 摘要一致。 预期收件人确认不成立：mlReceiptPolicy 为 none：RFC 2634 第 2.3 节步骤 1.2.1 规定必须不生成回执。",
+      "matched": {
+        "message": "MSG-LIST-NONE",
+        "signer": "layers[1].signerInfos[0]",
+        "link": {
+          "checks": {
+            "signedAttrsPresent": {
+              "path": "layers[1].signerInfos[0].signedAttrs",
+              "field": "SignedAttributes presence",
+              "observed": "present",
+              "expected": "present",
+              "match": true
+            },
+            "contentType": {
+              "path": "layers[1].signerInfos[0].signedAttrs 1.2.840.113549.1.9.3",
+              "field": "contentType attribute",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "1.2.840.113549.1.7.1",
+              "match": true
+            },
+            "signedContentIdentifier": {
+              "path": "layers[1].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.1",
+              "field": "receiptRequest.signedContentIdentifier (or contentIdentifier when absent)",
+              "observed": "0x5343492d4c4953542d4e4f4e45",
+              "expected": "0x5343492d4c4953542d4e4f4e45",
+              "match": true
+            },
+            "originatorSignatureValue": {
+              "path": "layers[1].signerInfos[0].signature",
+              "field": "SignerInfo.signature",
+              "observed": "0x4c4953542d4e4f4e452d5349474e4154555245",
+              "expected": "0x4c4953542d4e4f4e452d5349474e4154555245",
+              "match": true
+            }
+          },
+          "matched": {
+            "signedAttrsPresent": true,
+            "contentType": true,
+            "signedContentIdentifier": true,
+            "originatorSignatureValue": true
+          }
+        },
+        "messageBodySha256": "860f19b7472bb2d2ea4e49813b7af1117cc4d85c3fe8aac031e09b9766fb4558"
+      },
+      "structuralViolations": []
+    },
+    {
+      "receipt": "RECEIPT-LIST-ADD",
+      "derSha256": "00554938fc76442fa3e05717e6315a4e4ddba70a61f0459cba2d54a88aebe44f",
+      "receiptFields": {
+        "contentType": "1.2.840.113549.1.7.1",
+        "signedContentIdentifier": "0x5343492d4c4953542d414444",
+        "originatorSignatureValue": "0x4c4953542d4144442d5349474e4154555245",
+        "version": 1,
+        "receiptContentSha256": "3da4208d9b6972b6f1c8f8fc33e6a684377fba4883b3e55e68aca5659ce5abab"
+      },
+      "receiptSigner": {
+        "signerInfosIndex": 0,
+        "signatureAlgorithm": "1.2.840.10045.4.3.2",
+        "digestAlgorithm": "2.16.840.1.101.3.4.2.1",
+        "messageDigest": "0x3da4208d9b6972b6f1c8f8fc33e6a684377fba4883b3e55e68aca5659ce5abab",
+        "msgSigDigest": "0x4b0918d557e35e7091b4ab807fdf67e30d17ea54647f9d19a33cb12eebeb3dce",
+        "certificateEmails": [
+          "dave@example.com"
+        ]
+      },
+      "attestation": {
+        "signatureStatus": "valid",
+        "certificateTrust": "trusted",
+        "reason": "receipt is genuine",
+        "signerNames": [
+          "dave@example.com"
+        ]
+      },
+      "structuralChecks": [
+        {
+          "path": "RECEIPT-LIST-ADD: SignedData.encapContentInfo.eContentType",
+          "field": "eContentType",
+          "observed": "1.2.840.113549.1.9.16.1.1",
+          "expected": "1.2.840.113549.1.9.16.1.1",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-LIST-ADD: Receipt.version",
+          "field": "version",
+          "observed": "1",
+          "expected": "v1 (1)",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-LIST-ADD: signerInfos[0].signedAttrs contentType",
+          "field": "contentType",
+          "observed": "1.2.840.113549.1.9.16.1.1",
+          "expected": "1.2.840.113549.1.9.16.1.1",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-LIST-ADD: signerInfos[0].signedAttrs receiptRequest",
+          "field": "id-aa-receiptRequest presence",
+          "observed": "absent",
+          "expected": "absent (RFC 2634 section 2.2)",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-LIST-ADD: Receipt.contentType",
+          "field": "contentType",
+          "observed": "1.2.840.113549.1.7.1",
+          "expected": "originator contentType attribute"
+        }
+      ],
+      "writeChecks": [
+        {
+          "name": "receipt content digest",
+          "path": "RECEIPT-LIST-ADD: signerInfos[0].signedAttrs messageDigest",
+          "algorithm": "2.16.840.1.101.3.4.2.1",
+          "status": "ok",
+          "detail": null,
+          "observed": "0x3da4208d9b6972b6f1c8f8fc33e6a684377fba4883b3e55e68aca5659ce5abab",
+          "computed": "0x3da4208d9b6972b6f1c8f8fc33e6a684377fba4883b3e55e68aca5659ce5abab",
+          "matched": true
+        }
+      ],
+      "parseIssues": [],
+      "candidates": [
+        {
+          "message": "MSG-LIST-ADD",
+          "signer": "layers[1].signerInfos[0]"
+        }
+      ],
+      "digestCrossReference": [
+        {
+          "message": "MSG-LIST-ADD",
+          "signer": "layers[1].signerInfos[0]",
+          "algorithm": "2.16.840.1.101.3.4.2.1",
+          "digest": "0x4b0918d557e35e7091b4ab807fdf67e30d17ea54647f9d19a33cb12eebeb3dce",
+          "nestedLayer": true
+        }
+      ],
+      "levels": {
+        "signatureLocated": true,
+        "receiptTrusted": true,
+        "expectedRecipientConfirmed": true
+      },
+      "levelDetails": {
+        "signatureLocated": {
+          "status": "satisfied",
+          "citations": [
+            {
+              "path": "layers[1].signerInfos[0].signedAttrs 1.2.840.113549.1.9.3",
+              "field": "contentType attribute",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "1.2.840.113549.1.7.1",
+              "match": true
+            },
+            {
+              "path": "layers[1].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.1",
+              "field": "receiptRequest.signedContentIdentifier (or contentIdentifier when absent)",
+              "observed": "0x5343492d4c4953542d414444",
+              "expected": "0x5343492d4c4953542d414444",
+              "match": true
+            },
+            {
+              "path": "layers[1].signerInfos[0].signature",
+              "field": "SignerInfo.signature",
+              "observed": "0x4c4953542d4144442d5349474e4154555245",
+              "expected": "0x4c4953542d4144442d5349474e4154555245",
+              "match": true
+            }
+          ],
+          "structural": [
+            {
+              "path": "RECEIPT-LIST-ADD: SignedData.encapContentInfo.eContentType",
+              "field": "eContentType",
+              "observed": "1.2.840.113549.1.9.16.1.1",
+              "expected": "1.2.840.113549.1.9.16.1.1",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-LIST-ADD: Receipt.version",
+              "field": "version",
+              "observed": "1",
+              "expected": "v1 (1)",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-LIST-ADD: signerInfos[0].signedAttrs contentType",
+              "field": "contentType",
+              "observed": "1.2.840.113549.1.9.16.1.1",
+              "expected": "1.2.840.113549.1.9.16.1.1",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-LIST-ADD: signerInfos[0].signedAttrs receiptRequest",
+              "field": "id-aa-receiptRequest presence",
+              "observed": "absent",
+              "expected": "absent (RFC 2634 section 2.2)",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-LIST-ADD: Receipt.contentType",
+              "field": "contentType",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "originator contentType attribute"
+            }
+          ],
+          "failedStructural": [],
+          "note": "三字段逐字节吻合仅证明回执自称指向该 SignerInfo；不证明任何签名通过验签。"
+        },
+        "receiptTrusted": {
+          "status": "satisfied",
+          "checks": [
+            {
+              "name": "receipt signature status (explicit input)",
+              "value": "valid",
+              "required": "valid",
+              "ok": true,
+              "source": "attestation"
+            },
+            {
+              "name": "receipt certificate trust (explicit input)",
+              "value": "trusted",
+              "required": "trusted",
+              "ok": true,
+              "source": "attestation"
+            },
+            {
+              "name": "Receipt content messageDigest",
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.4",
+              "observed": "0x3da4208d9b6972b6f1c8f8fc33e6a684377fba4883b3e55e68aca5659ce5abab",
+              "computed": "0x3da4208d9b6972b6f1c8f8fc33e6a684377fba4883b3e55e68aca5659ce5abab",
+              "algorithm": "2.16.840.1.101.3.4.2.1",
+              "ok": true,
+              "detail": null
+            },
+            {
+              "name": "msgSigDigest over matched SignerInfo SignedAttributes",
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.5",
+              "observed": "0x4b0918d557e35e7091b4ab807fdf67e30d17ea54647f9d19a33cb12eebeb3dce",
+              "computed": "0x4b0918d557e35e7091b4ab807fdf67e30d17ea54647f9d19a33cb12eebeb3dce",
+              "algorithm": "2.16.840.1.101.3.4.2.1",
+              "setOfDerSha256": "4b0918d557e35e7091b4ab807fdf67e30d17ea54647f9d19a33cb12eebeb3dce",
+              "ok": true,
+              "detail": null
+            },
+            {
+              "name": "matched SignerInfo signedAttrs present",
+              "path": "layers[1].signerInfos[0].signedAttrs",
+              "ok": true
+            }
+          ],
+          "reasonCodes": [],
+          "note": "本层只证明回执自身可信且绑定到该签名者的 SignedAttributes；尚未要求原签名验签通过，也不判断回执是否来自预期收件人。"
+        },
+        "expectedRecipientConfirmed": {
+          "status": "satisfied",
+          "originalSignerAttestation": {
+            "message": "MSG-LIST-ADD",
+            "signer": "layers[1].signerInfos[0]",
+            "status": "valid",
+            "reason": "originator",
+            "required": "valid",
+            "ok": true
+          },
+          "recipientEvaluation": {
+            "status": "confirmed",
+            "identity": [
+              "dave@example.com"
+            ],
+            "identityBasis": "attestation signerNames",
+            "attestationSuppliedIdentity": true,
+            "reasons": [
+              "回执签名者出现在 receiptRequest.receiptsFrom.receiptList 中"
+            ],
+            "scope": [
+              {
+                "path": "layers[0].signerInfos[*].signedAttrs mlExpansionHistory[-1].mlReceiptPolicy",
+                "kind": "inAdditionTo"
+              },
+              {
+                "path": "layers[1].signerInfos[0].signedAttrs receiptRequest.receiptsFrom.receiptList",
+                "names": [
+                  "rfc822Name:dave@example.com"
+                ]
+              }
+            ],
+            "matchedNames": [
+              "rfc822Name:dave@example.com"
+            ]
+          },
+          "scope": [
+            {
+              "scope": "receiptList",
+              "names": [
+                {
+                  "kind": "rfc822Name",
+                  "value": "dave@example.com"
+                }
+              ]
+            },
+            {
+              "scope": "mlExpansionHistory",
+              "layer": "layers[0]",
+              "history": [
+                {
+                  "mailListIdentifier": "issuer=2.5.4.3=Announce List, 1.2.840.113549.1.9.1=announce@example.com, serial=3003",
+                  "expansionTime": "20261113090000Z",
+                  "mlReceiptPolicy": {
+                    "kind": "inAdditionTo",
+                    "names": [
+                      {
+                        "kind": "rfc822Name",
+                        "value": "dave@example.com"
+                      }
+                    ]
+                  }
+                }
+              ],
+              "policyKind": "inAdditionTo",
+              "policyNames": [
+                {
+                  "kind": "rfc822Name",
+                  "value": "dave@example.com"
+                }
+              ],
+              "conflictAcrossSigners": false
+            }
+          ],
+          "reasonCodes": [],
+          "note": "仅当原签名验签结果明确为 valid 且回执签名者属于 ReceiptRequest 允许的收件人范围时，才可将回执解释为预期收件人的投递确认。未知验签状态一律不满足。"
+        }
+      },
+      "conclusion": "找到对应签名：MSG-LIST-ADD layers[1].signerInfos[0] 的 contentType、signedContentIdentifier、originatorSignatureValue 与回执逐字吻合。 回执可信：回执签名=valid，证书=trusted，msgSigDigest 与签名者的 SignedAttributes 摘要一致。 预期收件人确认：回执签名者可被认定为该 ReceiptRequest 范围内的收件人。",
+      "matched": {
+        "message": "MSG-LIST-ADD",
+        "signer": "layers[1].signerInfos[0]",
+        "link": {
+          "checks": {
+            "signedAttrsPresent": {
+              "path": "layers[1].signerInfos[0].signedAttrs",
+              "field": "SignedAttributes presence",
+              "observed": "present",
+              "expected": "present",
+              "match": true
+            },
+            "contentType": {
+              "path": "layers[1].signerInfos[0].signedAttrs 1.2.840.113549.1.9.3",
+              "field": "contentType attribute",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "1.2.840.113549.1.7.1",
+              "match": true
+            },
+            "signedContentIdentifier": {
+              "path": "layers[1].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.1",
+              "field": "receiptRequest.signedContentIdentifier (or contentIdentifier when absent)",
+              "observed": "0x5343492d4c4953542d414444",
+              "expected": "0x5343492d4c4953542d414444",
+              "match": true
+            },
+            "originatorSignatureValue": {
+              "path": "layers[1].signerInfos[0].signature",
+              "field": "SignerInfo.signature",
+              "observed": "0x4c4953542d4144442d5349474e4154555245",
+              "expected": "0x4c4953542d4144442d5349474e4154555245",
+              "match": true
+            }
+          },
+          "matched": {
+            "signedAttrsPresent": true,
+            "contentType": true,
+            "signedContentIdentifier": true,
+            "originatorSignatureValue": true
+          }
+        },
+        "messageBodySha256": "860f19b7472bb2d2ea4e49813b7af1117cc4d85c3fe8aac031e09b9766fb4558"
+      },
+      "structuralViolations": []
+    },
+    {
+      "receipt": "RECEIPT-LIST-UNEXPECTED",
+      "derSha256": "ed544d7f59516b6694583987c5b20fcfde25b455c5bd94bf2c9b08fa7138259e",
+      "receiptFields": {
+        "contentType": "1.2.840.113549.1.7.1",
+        "signedContentIdentifier": "0x5343492d4c4953542d414444",
+        "originatorSignatureValue": "0x4c4953542d4144442d5349474e4154555245",
+        "version": 1,
+        "receiptContentSha256": "3da4208d9b6972b6f1c8f8fc33e6a684377fba4883b3e55e68aca5659ce5abab"
+      },
+      "receiptSigner": {
+        "signerInfosIndex": 0,
+        "signatureAlgorithm": "1.2.840.10045.4.3.2",
+        "digestAlgorithm": "2.16.840.1.101.3.4.2.1",
+        "messageDigest": "0x3da4208d9b6972b6f1c8f8fc33e6a684377fba4883b3e55e68aca5659ce5abab",
+        "msgSigDigest": "0x4b0918d557e35e7091b4ab807fdf67e30d17ea54647f9d19a33cb12eebeb3dce",
+        "certificateEmails": [
+          "carol@example.com"
+        ]
+      },
+      "attestation": {
+        "signatureStatus": "valid",
+        "certificateTrust": "trusted",
+        "reason": "receipt is genuine but carol is outside the receiptList",
+        "signerNames": [
+          "carol@example.com"
+        ]
+      },
+      "structuralChecks": [
+        {
+          "path": "RECEIPT-LIST-UNEXPECTED: SignedData.encapContentInfo.eContentType",
+          "field": "eContentType",
+          "observed": "1.2.840.113549.1.9.16.1.1",
+          "expected": "1.2.840.113549.1.9.16.1.1",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-LIST-UNEXPECTED: Receipt.version",
+          "field": "version",
+          "observed": "1",
+          "expected": "v1 (1)",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-LIST-UNEXPECTED: signerInfos[0].signedAttrs contentType",
+          "field": "contentType",
+          "observed": "1.2.840.113549.1.9.16.1.1",
+          "expected": "1.2.840.113549.1.9.16.1.1",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-LIST-UNEXPECTED: signerInfos[0].signedAttrs receiptRequest",
+          "field": "id-aa-receiptRequest presence",
+          "observed": "absent",
+          "expected": "absent (RFC 2634 section 2.2)",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-LIST-UNEXPECTED: Receipt.contentType",
+          "field": "contentType",
+          "observed": "1.2.840.113549.1.7.1",
+          "expected": "originator contentType attribute"
+        }
+      ],
+      "writeChecks": [
+        {
+          "name": "receipt content digest",
+          "path": "RECEIPT-LIST-UNEXPECTED: signerInfos[0].signedAttrs messageDigest",
+          "algorithm": "2.16.840.1.101.3.4.2.1",
+          "status": "ok",
+          "detail": null,
+          "observed": "0x3da4208d9b6972b6f1c8f8fc33e6a684377fba4883b3e55e68aca5659ce5abab",
+          "computed": "0x3da4208d9b6972b6f1c8f8fc33e6a684377fba4883b3e55e68aca5659ce5abab",
+          "matched": true
+        }
+      ],
+      "parseIssues": [],
+      "candidates": [
+        {
+          "message": "MSG-LIST-ADD",
+          "signer": "layers[1].signerInfos[0]"
+        }
+      ],
+      "digestCrossReference": [
+        {
+          "message": "MSG-LIST-ADD",
+          "signer": "layers[1].signerInfos[0]",
+          "algorithm": "2.16.840.1.101.3.4.2.1",
+          "digest": "0x4b0918d557e35e7091b4ab807fdf67e30d17ea54647f9d19a33cb12eebeb3dce",
+          "nestedLayer": true
+        }
+      ],
+      "levels": {
+        "signatureLocated": true,
+        "receiptTrusted": true,
+        "expectedRecipientConfirmed": false
+      },
+      "levelDetails": {
+        "signatureLocated": {
+          "status": "satisfied",
+          "citations": [
+            {
+              "path": "layers[1].signerInfos[0].signedAttrs 1.2.840.113549.1.9.3",
+              "field": "contentType attribute",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "1.2.840.113549.1.7.1",
+              "match": true
+            },
+            {
+              "path": "layers[1].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.1",
+              "field": "receiptRequest.signedContentIdentifier (or contentIdentifier when absent)",
+              "observed": "0x5343492d4c4953542d414444",
+              "expected": "0x5343492d4c4953542d414444",
+              "match": true
+            },
+            {
+              "path": "layers[1].signerInfos[0].signature",
+              "field": "SignerInfo.signature",
+              "observed": "0x4c4953542d4144442d5349474e4154555245",
+              "expected": "0x4c4953542d4144442d5349474e4154555245",
+              "match": true
+            }
+          ],
+          "structural": [
+            {
+              "path": "RECEIPT-LIST-UNEXPECTED: SignedData.encapContentInfo.eContentType",
+              "field": "eContentType",
+              "observed": "1.2.840.113549.1.9.16.1.1",
+              "expected": "1.2.840.113549.1.9.16.1.1",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-LIST-UNEXPECTED: Receipt.version",
+              "field": "version",
+              "observed": "1",
+              "expected": "v1 (1)",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-LIST-UNEXPECTED: signerInfos[0].signedAttrs contentType",
+              "field": "contentType",
+              "observed": "1.2.840.113549.1.9.16.1.1",
+              "expected": "1.2.840.113549.1.9.16.1.1",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-LIST-UNEXPECTED: signerInfos[0].signedAttrs receiptRequest",
+              "field": "id-aa-receiptRequest presence",
+              "observed": "absent",
+              "expected": "absent (RFC 2634 section 2.2)",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-LIST-UNEXPECTED: Receipt.contentType",
+              "field": "contentType",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "originator contentType attribute"
+            }
+          ],
+          "failedStructural": [],
+          "note": "三字段逐字节吻合仅证明回执自称指向该 SignerInfo；不证明任何签名通过验签。"
+        },
+        "receiptTrusted": {
+          "status": "satisfied",
+          "checks": [
+            {
+              "name": "receipt signature status (explicit input)",
+              "value": "valid",
+              "required": "valid",
+              "ok": true,
+              "source": "attestation"
+            },
+            {
+              "name": "receipt certificate trust (explicit input)",
+              "value": "trusted",
+              "required": "trusted",
+              "ok": true,
+              "source": "attestation"
+            },
+            {
+              "name": "Receipt content messageDigest",
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.4",
+              "observed": "0x3da4208d9b6972b6f1c8f8fc33e6a684377fba4883b3e55e68aca5659ce5abab",
+              "computed": "0x3da4208d9b6972b6f1c8f8fc33e6a684377fba4883b3e55e68aca5659ce5abab",
+              "algorithm": "2.16.840.1.101.3.4.2.1",
+              "ok": true,
+              "detail": null
+            },
+            {
+              "name": "msgSigDigest over matched SignerInfo SignedAttributes",
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.5",
+              "observed": "0x4b0918d557e35e7091b4ab807fdf67e30d17ea54647f9d19a33cb12eebeb3dce",
+              "computed": "0x4b0918d557e35e7091b4ab807fdf67e30d17ea54647f9d19a33cb12eebeb3dce",
+              "algorithm": "2.16.840.1.101.3.4.2.1",
+              "setOfDerSha256": "4b0918d557e35e7091b4ab807fdf67e30d17ea54647f9d19a33cb12eebeb3dce",
+              "ok": true,
+              "detail": null
+            },
+            {
+              "name": "matched SignerInfo signedAttrs present",
+              "path": "layers[1].signerInfos[0].signedAttrs",
+              "ok": true
+            }
+          ],
+          "reasonCodes": [],
+          "note": "本层只证明回执自身可信且绑定到该签名者的 SignedAttributes；尚未要求原签名验签通过，也不判断回执是否来自预期收件人。"
+        },
+        "expectedRecipientConfirmed": {
+          "status": "blocked",
+          "originalSignerAttestation": {
+            "message": "MSG-LIST-ADD",
+            "signer": "layers[1].signerInfos[0]",
+            "status": "valid",
+            "reason": "originator",
+            "required": "valid",
+            "ok": true
+          },
+          "recipientEvaluation": {
+            "status": "unexpected_recipient",
+            "identity": [
+              "carol@example.com"
+            ],
+            "identityBasis": "attestation signerNames",
+            "attestationSuppliedIdentity": true,
+            "reasons": [
+              "回执签名者不在 receiptList 中：RFC 2634 第 2.3 节步骤 3.2 规定必须不生成回执"
+            ],
+            "scope": [
+              {
+                "path": "layers[0].signerInfos[*].signedAttrs mlExpansionHistory[-1].mlReceiptPolicy",
+                "kind": "inAdditionTo"
+              },
+              {
+                "path": "layers[1].signerInfos[0].signedAttrs receiptRequest.receiptsFrom.receiptList",
+                "names": [
+                  "rfc822Name:dave@example.com"
+                ]
+              }
+            ]
+          },
+          "scope": [
+            {
+              "scope": "receiptList",
+              "names": [
+                {
+                  "kind": "rfc822Name",
+                  "value": "dave@example.com"
+                }
+              ]
+            },
+            {
+              "scope": "mlExpansionHistory",
+              "layer": "layers[0]",
+              "history": [
+                {
+                  "mailListIdentifier": "issuer=2.5.4.3=Announce List, 1.2.840.113549.1.9.1=announce@example.com, serial=3003",
+                  "expansionTime": "20261113090000Z",
+                  "mlReceiptPolicy": {
+                    "kind": "inAdditionTo",
+                    "names": [
+                      {
+                        "kind": "rfc822Name",
+                        "value": "dave@example.com"
+                      }
+                    ]
+                  }
+                }
+              ],
+              "policyKind": "inAdditionTo",
+              "policyNames": [
+                {
+                  "kind": "rfc822Name",
+                  "value": "dave@example.com"
+                }
+              ],
+              "conflictAcrossSigners": false
+            }
+          ],
+          "reasonCodes": [
+            "recipient_scope:unexpected_recipient"
+          ],
+          "note": "仅当原签名验签结果明确为 valid 且回执签名者属于 ReceiptRequest 允许的收件人范围时，才可将回执解释为预期收件人的投递确认。未知验签状态一律不满足。"
+        }
+      },
+      "conclusion": "找到对应签名：MSG-LIST-ADD layers[1].signerInfos[0] 的 contentType、signedContentIdentifier、originatorSignatureValue 与回执逐字吻合。 回执可信：回执签名=valid，证书=trusted，msgSigDigest 与签名者的 SignedAttributes 摘要一致。 预期收件人确认不成立：回执签名者不在 receiptList 中：RFC 2634 第 2.3 节步骤 3.2 规定必须不生成回执。",
+      "matched": {
+        "message": "MSG-LIST-ADD",
+        "signer": "layers[1].signerInfos[0]",
+        "link": {
+          "checks": {
+            "signedAttrsPresent": {
+              "path": "layers[1].signerInfos[0].signedAttrs",
+              "field": "SignedAttributes presence",
+              "observed": "present",
+              "expected": "present",
+              "match": true
+            },
+            "contentType": {
+              "path": "layers[1].signerInfos[0].signedAttrs 1.2.840.113549.1.9.3",
+              "field": "contentType attribute",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "1.2.840.113549.1.7.1",
+              "match": true
+            },
+            "signedContentIdentifier": {
+              "path": "layers[1].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.1",
+              "field": "receiptRequest.signedContentIdentifier (or contentIdentifier when absent)",
+              "observed": "0x5343492d4c4953542d414444",
+              "expected": "0x5343492d4c4953542d414444",
+              "match": true
+            },
+            "originatorSignatureValue": {
+              "path": "layers[1].signerInfos[0].signature",
+              "field": "SignerInfo.signature",
+              "observed": "0x4c4953542d4144442d5349474e4154555245",
+              "expected": "0x4c4953542d4144442d5349474e4154555245",
+              "match": true
+            }
+          },
+          "matched": {
+            "signedAttrsPresent": true,
+            "contentType": true,
+            "signedContentIdentifier": true,
+            "originatorSignatureValue": true
+          }
+        },
+        "messageBodySha256": "860f19b7472bb2d2ea4e49813b7af1117cc4d85c3fe8aac031e09b9766fb4558"
+      },
+      "structuralViolations": []
+    },
+    {
+      "receipt": "RECEIPT-LIST-FIRST",
+      "derSha256": "35f7e27f8bf191a2c1e0ee97925b6eb90e9ba5d2a66ec543a1de40cb7ed748a6",
+      "receiptFields": {
+        "contentType": "1.2.840.113549.1.7.1",
+        "signedContentIdentifier": "0x5343492d4c4953542d4649525354",
+        "originatorSignatureValue": "0x4c4953542d46495253542d5349474e4154555245",
+        "version": 1,
+        "receiptContentSha256": "aaa246782d71f67858070aef36d0ff8d7caa66cb3e48dc1cbcd2cd8da8482215"
+      },
+      "receiptSigner": {
+        "signerInfosIndex": 0,
+        "signatureAlgorithm": "1.2.840.10045.4.3.2",
+        "digestAlgorithm": "2.16.840.1.101.3.4.2.1",
+        "messageDigest": "0xaaa246782d71f67858070aef36d0ff8d7caa66cb3e48dc1cbcd2cd8da8482215",
+        "msgSigDigest": "0xe27eababa6aa2e32c54539a79947198a1e36974727c6bff6ee7b172fc20bce29",
+        "certificateEmails": [
+          "bob@example.com"
+        ]
+      },
+      "attestation": {
+        "signatureStatus": "valid",
+        "certificateTrust": "trusted",
+        "reason": "receipt is genuine; list expansion blocks first-tier response",
+        "signerNames": [
+          "bob@example.com"
+        ]
+      },
+      "structuralChecks": [
+        {
+          "path": "RECEIPT-LIST-FIRST: SignedData.encapContentInfo.eContentType",
+          "field": "eContentType",
+          "observed": "1.2.840.113549.1.9.16.1.1",
+          "expected": "1.2.840.113549.1.9.16.1.1",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-LIST-FIRST: Receipt.version",
+          "field": "version",
+          "observed": "1",
+          "expected": "v1 (1)",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-LIST-FIRST: signerInfos[0].signedAttrs contentType",
+          "field": "contentType",
+          "observed": "1.2.840.113549.1.9.16.1.1",
+          "expected": "1.2.840.113549.1.9.16.1.1",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-LIST-FIRST: signerInfos[0].signedAttrs receiptRequest",
+          "field": "id-aa-receiptRequest presence",
+          "observed": "absent",
+          "expected": "absent (RFC 2634 section 2.2)",
+          "match": true
+        },
+        {
+          "path": "RECEIPT-LIST-FIRST: Receipt.contentType",
+          "field": "contentType",
+          "observed": "1.2.840.113549.1.7.1",
+          "expected": "originator contentType attribute"
+        }
+      ],
+      "writeChecks": [
+        {
+          "name": "receipt content digest",
+          "path": "RECEIPT-LIST-FIRST: signerInfos[0].signedAttrs messageDigest",
+          "algorithm": "2.16.840.1.101.3.4.2.1",
+          "status": "ok",
+          "detail": null,
+          "observed": "0xaaa246782d71f67858070aef36d0ff8d7caa66cb3e48dc1cbcd2cd8da8482215",
+          "computed": "0xaaa246782d71f67858070aef36d0ff8d7caa66cb3e48dc1cbcd2cd8da8482215",
+          "matched": true
+        }
+      ],
+      "parseIssues": [],
+      "candidates": [
+        {
+          "message": "MSG-LIST-FIRST",
+          "signer": "layers[1].signerInfos[0]"
+        }
+      ],
+      "digestCrossReference": [
+        {
+          "message": "MSG-LIST-FIRST",
+          "signer": "layers[1].signerInfos[0]",
+          "algorithm": "2.16.840.1.101.3.4.2.1",
+          "digest": "0xe27eababa6aa2e32c54539a79947198a1e36974727c6bff6ee7b172fc20bce29",
+          "nestedLayer": true
+        }
+      ],
+      "levels": {
+        "signatureLocated": true,
+        "receiptTrusted": true,
+        "expectedRecipientConfirmed": false
+      },
+      "levelDetails": {
+        "signatureLocated": {
+          "status": "satisfied",
+          "citations": [
+            {
+              "path": "layers[1].signerInfos[0].signedAttrs 1.2.840.113549.1.9.3",
+              "field": "contentType attribute",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "1.2.840.113549.1.7.1",
+              "match": true
+            },
+            {
+              "path": "layers[1].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.1",
+              "field": "receiptRequest.signedContentIdentifier (or contentIdentifier when absent)",
+              "observed": "0x5343492d4c4953542d4649525354",
+              "expected": "0x5343492d4c4953542d4649525354",
+              "match": true
+            },
+            {
+              "path": "layers[1].signerInfos[0].signature",
+              "field": "SignerInfo.signature",
+              "observed": "0x4c4953542d46495253542d5349474e4154555245",
+              "expected": "0x4c4953542d46495253542d5349474e4154555245",
+              "match": true
+            }
+          ],
+          "structural": [
+            {
+              "path": "RECEIPT-LIST-FIRST: SignedData.encapContentInfo.eContentType",
+              "field": "eContentType",
+              "observed": "1.2.840.113549.1.9.16.1.1",
+              "expected": "1.2.840.113549.1.9.16.1.1",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-LIST-FIRST: Receipt.version",
+              "field": "version",
+              "observed": "1",
+              "expected": "v1 (1)",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-LIST-FIRST: signerInfos[0].signedAttrs contentType",
+              "field": "contentType",
+              "observed": "1.2.840.113549.1.9.16.1.1",
+              "expected": "1.2.840.113549.1.9.16.1.1",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-LIST-FIRST: signerInfos[0].signedAttrs receiptRequest",
+              "field": "id-aa-receiptRequest presence",
+              "observed": "absent",
+              "expected": "absent (RFC 2634 section 2.2)",
+              "match": true
+            },
+            {
+              "path": "RECEIPT-LIST-FIRST: Receipt.contentType",
+              "field": "contentType",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "originator contentType attribute"
+            }
+          ],
+          "failedStructural": [],
+          "note": "三字段逐字节吻合仅证明回执自称指向该 SignerInfo；不证明任何签名通过验签。"
+        },
+        "receiptTrusted": {
+          "status": "satisfied",
+          "checks": [
+            {
+              "name": "receipt signature status (explicit input)",
+              "value": "valid",
+              "required": "valid",
+              "ok": true,
+              "source": "attestation"
+            },
+            {
+              "name": "receipt certificate trust (explicit input)",
+              "value": "trusted",
+              "required": "trusted",
+              "ok": true,
+              "source": "attestation"
+            },
+            {
+              "name": "Receipt content messageDigest",
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.4",
+              "observed": "0xaaa246782d71f67858070aef36d0ff8d7caa66cb3e48dc1cbcd2cd8da8482215",
+              "computed": "0xaaa246782d71f67858070aef36d0ff8d7caa66cb3e48dc1cbcd2cd8da8482215",
+              "algorithm": "2.16.840.1.101.3.4.2.1",
+              "ok": true,
+              "detail": null
+            },
+            {
+              "name": "msgSigDigest over matched SignerInfo SignedAttributes",
+              "path": "layers[0].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.5",
+              "observed": "0xe27eababa6aa2e32c54539a79947198a1e36974727c6bff6ee7b172fc20bce29",
+              "computed": "0xe27eababa6aa2e32c54539a79947198a1e36974727c6bff6ee7b172fc20bce29",
+              "algorithm": "2.16.840.1.101.3.4.2.1",
+              "setOfDerSha256": "e27eababa6aa2e32c54539a79947198a1e36974727c6bff6ee7b172fc20bce29",
+              "ok": true,
+              "detail": null
+            },
+            {
+              "name": "matched SignerInfo signedAttrs present",
+              "path": "layers[1].signerInfos[0].signedAttrs",
+              "ok": true
+            }
+          ],
+          "reasonCodes": [],
+          "note": "本层只证明回执自身可信且绑定到该签名者的 SignedAttributes；尚未要求原签名验签通过，也不判断回执是否来自预期收件人。"
+        },
+        "expectedRecipientConfirmed": {
+          "status": "blocked",
+          "originalSignerAttestation": {
+            "message": "MSG-LIST-FIRST",
+            "signer": "layers[1].signerInfos[0]",
+            "status": "valid",
+            "reason": "originator",
+            "required": "valid",
+            "ok": true
+          },
+          "recipientEvaluation": {
+            "status": "blocked",
+            "identity": [
+              "bob@example.com"
+            ],
+            "identityBasis": "attestation signerNames",
+            "attestationSuppliedIdentity": true,
+            "reasons": [
+              "receiptsFrom 为 firstTierRecipients 且存在 mlExpansionHistory：RFC 2634 第 2.3 节步骤 2.2.1 规定必须不生成回执"
+            ],
+            "scope": [
+              {
+                "path": "layers[0].signerInfos[*].signedAttrs mlExpansionHistory[-1].mlReceiptPolicy",
+                "kind": null
+              },
+              {
+                "path": "layers[1].signerInfos[0].signedAttrs receiptRequest.receiptsFrom.allOrFirstTier",
+                "value": "firstTierRecipients"
+              }
+            ]
+          },
+          "scope": [
+            {
+              "scope": "allOrFirstTier",
+              "value": "firstTierRecipients"
+            },
+            {
+              "scope": "mlExpansionHistory",
+              "layer": "layers[0]",
+              "history": [
+                {
+                  "mailListIdentifier": "issuer=2.5.4.3=Announce List, 1.2.840.113549.1.9.1=announce@example.com, serial=3003",
+                  "expansionTime": "20261113090000Z",
+                  "mlReceiptPolicy": {
+                    "kind": null,
+                    "names": []
+                  }
+                }
+              ],
+              "policyKind": null,
+              "policyNames": [],
+              "conflictAcrossSigners": false
+            }
+          ],
+          "reasonCodes": [
+            "recipient_scope:blocked"
+          ],
+          "note": "仅当原签名验签结果明确为 valid 且回执签名者属于 ReceiptRequest 允许的收件人范围时，才可将回执解释为预期收件人的投递确认。未知验签状态一律不满足。"
+        }
+      },
+      "conclusion": "找到对应签名：MSG-LIST-FIRST layers[1].signerInfos[0] 的 contentType、signedContentIdentifier、originatorSignatureValue 与回执逐字吻合。 回执可信：回执签名=valid，证书=trusted，msgSigDigest 与签名者的 SignedAttributes 摘要一致。 预期收件人确认不成立：receiptsFrom 为 firstTierRecipients 且存在 mlExpansionHistory：RFC 2634 第 2.3 节步骤 2.2.1 规定必须不生成回执。",
+      "matched": {
+        "message": "MSG-LIST-FIRST",
+        "signer": "layers[1].signerInfos[0]",
+        "link": {
+          "checks": {
+            "signedAttrsPresent": {
+              "path": "layers[1].signerInfos[0].signedAttrs",
+              "field": "SignedAttributes presence",
+              "observed": "present",
+              "expected": "present",
+              "match": true
+            },
+            "contentType": {
+              "path": "layers[1].signerInfos[0].signedAttrs 1.2.840.113549.1.9.3",
+              "field": "contentType attribute",
+              "observed": "1.2.840.113549.1.7.1",
+              "expected": "1.2.840.113549.1.7.1",
+              "match": true
+            },
+            "signedContentIdentifier": {
+              "path": "layers[1].signerInfos[0].signedAttrs 1.2.840.113549.1.9.16.2.1",
+              "field": "receiptRequest.signedContentIdentifier (or contentIdentifier when absent)",
+              "observed": "0x5343492d4c4953542d4649525354",
+              "expected": "0x5343492d4c4953542d4649525354",
+              "match": true
+            },
+            "originatorSignatureValue": {
+              "path": "layers[1].signerInfos[0].signature",
+              "field": "SignerInfo.signature",
+              "observed": "0x4c4953542d46495253542d5349474e4154555245",
+              "expected": "0x4c4953542d46495253542d5349474e4154555245",
+              "match": true
+            }
+          },
+          "matched": {
+            "signedAttrsPresent": true,
+            "contentType": true,
+            "signedContentIdentifier": true,
+            "originatorSignatureValue": true
+          }
+        },
+        "messageBodySha256": "860f19b7472bb2d2ea4e49813b7af1117cc4d85c3fe8aac031e09b9766fb4558"
+      },
+      "structuralViolations": []
+    }
+  ],
+  "coverageMatrix": [
+    {
+      "receipt": "RECEIPT-B",
+      "fieldLink": {
+        "signedAttrsPresent": true,
+        "contentType": true,
+        "signedContentIdentifier": true,
+        "originatorSignatureValue": true
+      },
+      "msgSigDigest": {
+        "observed": "0xd0893436d3022f294a1585c2f86ed17b73027f3b6a1a13e268649c5416e30f08",
+        "computed": "0xd0893436d3022f294a1585c2f86ed17b73027f3b6a1a13e268649c5416e30f08",
+        "match": true
+      },
+      "receiptSignatureStatus": "valid",
+      "certificateTrust": "trusted",
+      "originalSignatureStatus": "valid",
+      "recipientStatus": "confirmed",
+      "levels": {
+        "signatureLocated": true,
+        "receiptTrusted": true,
+        "expectedRecipientConfirmed": true
+      }
+    },
+    {
+      "receipt": "RECEIPT-SPLICED",
+      "fieldLink": {
+        "signedAttrsPresent": true,
+        "contentType": true,
+        "signedContentIdentifier": true,
+        "originatorSignatureValue": true
+      },
+      "msgSigDigest": {
+        "observed": "0x0e316a120f8ff6d459d3a88b577128326d71d42cff71b8c462ef0fc27eaea22d",
+        "computed": "0xd0893436d3022f294a1585c2f86ed17b73027f3b6a1a13e268649c5416e30f08",
+        "match": false
+      },
+      "receiptSignatureStatus": "valid",
+      "certificateTrust": "trusted",
+      "originalSignatureStatus": "valid",
+      "recipientStatus": "unconfirmed",
+      "levels": {
+        "signatureLocated": true,
+        "receiptTrusted": false,
+        "expectedRecipientConfirmed": false
+      }
+    },
+    {
+      "receipt": "RECEIPT-NO-MSGDIGEST",
+      "fieldLink": {
+        "signedAttrsPresent": true,
+        "contentType": true,
+        "signedContentIdentifier": true,
+        "originatorSignatureValue": true
+      },
+      "msgSigDigest": {
+        "observed": null,
+        "computed": "0xd0893436d3022f294a1585c2f86ed17b73027f3b6a1a13e268649c5416e30f08",
+        "match": false
+      },
+      "receiptSignatureStatus": "valid",
+      "certificateTrust": "trusted",
+      "originalSignatureStatus": "valid",
+      "recipientStatus": "confirmed",
+      "levels": {
+        "signatureLocated": true,
+        "receiptTrusted": false,
+        "expectedRecipientConfirmed": false
+      }
+    },
+    {
+      "receipt": "RECEIPT-SIG-MISMATCH",
+      "fieldLink": null,
+      "msgSigDigest": {
+        "observed": "0xd0893436d3022f294a1585c2f86ed17b73027f3b6a1a13e268649c5416e30f08",
+        "computed": null,
+        "match": null
+      },
+      "receiptSignatureStatus": "invalid",
+      "certificateTrust": "untrusted",
+      "originalSignatureStatus": null,
+      "recipientStatus": null,
+      "levels": {
+        "signatureLocated": false,
+        "receiptTrusted": false,
+        "expectedRecipientConfirmed": false
+      }
+    },
+    {
+      "receipt": "RECEIPT-MULTI-CAROL",
+      "fieldLink": {
+        "signedAttrsPresent": true,
+        "contentType": true,
+        "signedContentIdentifier": true,
+        "originatorSignatureValue": true
+      },
+      "msgSigDigest": {
+        "observed": "0x1ac4bba0b302e6804af9d0bd6cdadf10e6e35ae70629b623299c314a007d7144",
+        "computed": "0x1ac4bba0b302e6804af9d0bd6cdadf10e6e35ae70629b623299c314a007d7144",
+        "match": true
+      },
+      "receiptSignatureStatus": "valid",
+      "certificateTrust": "trusted",
+      "originalSignatureStatus": "invalid",
+      "recipientStatus": "not_requested",
+      "levels": {
+        "signatureLocated": true,
+        "receiptTrusted": true,
+        "expectedRecipientConfirmed": false
+      }
+    },
+    {
+      "receipt": "RECEIPT-NO-RR",
+      "fieldLink": {
+        "signedAttrsPresent": true,
+        "contentType": true,
+        "signedContentIdentifier": true,
+        "originatorSignatureValue": true
+      },
+      "msgSigDigest": {
+        "observed": "0x5537dabcb4f208a7e7c74b54f412638a6c8be7e13f3fc1bd6d63192f18e32b74",
+        "computed": "0x5537dabcb4f208a7e7c74b54f412638a6c8be7e13f3fc1bd6d63192f18e32b74",
+        "match": true
+      },
+      "receiptSignatureStatus": "valid",
+      "certificateTrust": "trusted",
+      "originalSignatureStatus": "valid",
+      "recipientStatus": "not_requested",
+      "levels": {
+        "signatureLocated": true,
+        "receiptTrusted": true,
+        "expectedRecipientConfirmed": false
+      }
+    },
+    {
+      "receipt": "RECEIPT-RESIGN",
+      "fieldLink": {
+        "signedAttrsPresent": true,
+        "contentType": true,
+        "signedContentIdentifier": true,
+        "originatorSignatureValue": true
+      },
+      "msgSigDigest": {
+        "observed": "0xd7fd38e5885133e6191cf622e453d8b55803a50490a0cf20d832f3c00db5a681",
+        "computed": "0xd7fd38e5885133e6191cf622e453d8b55803a50490a0cf20d832f3c00db5a681",
+        "match": true
+      },
+      "receiptSignatureStatus": "valid",
+      "certificateTrust": "trusted",
+      "originalSignatureStatus": "unknown",
+      "recipientStatus": "confirmed",
+      "levels": {
+        "signatureLocated": true,
+        "receiptTrusted": true,
+        "expectedRecipientConfirmed": false
+      }
+    },
+    {
+      "receipt": "RECEIPT-B-UNATTESTED",
+      "fieldLink": {
+        "signedAttrsPresent": true,
+        "contentType": true,
+        "signedContentIdentifier": true,
+        "originatorSignatureValue": true
+      },
+      "msgSigDigest": {
+        "observed": "0xd0893436d3022f294a1585c2f86ed17b73027f3b6a1a13e268649c5416e30f08",
+        "computed": "0xd0893436d3022f294a1585c2f86ed17b73027f3b6a1a13e268649c5416e30f08",
+        "match": true
+      },
+      "receiptSignatureStatus": "unknown",
+      "certificateTrust": "unknown",
+      "originalSignatureStatus": "valid",
+      "recipientStatus": "identity_unverified",
+      "levels": {
+        "signatureLocated": true,
+        "receiptTrusted": false,
+        "expectedRecipientConfirmed": false
+      }
+    },
+    {
+      "receipt": "RECEIPT-LIST-NONE",
+      "fieldLink": {
+        "signedAttrsPresent": true,
+        "contentType": true,
+        "signedContentIdentifier": true,
+        "originatorSignatureValue": true
+      },
+      "msgSigDigest": {
+        "observed": "0xbad2833ca47ae10af78a7fa36d32d0aeaa01590e4b2d457aa1683651f8acc42e",
+        "computed": "0xbad2833ca47ae10af78a7fa36d32d0aeaa01590e4b2d457aa1683651f8acc42e",
+        "match": true
+      },
+      "receiptSignatureStatus": "valid",
+      "certificateTrust": "trusted",
+      "originalSignatureStatus": "valid",
+      "recipientStatus": "blocked",
+      "levels": {
+        "signatureLocated": true,
+        "receiptTrusted": true,
+        "expectedRecipientConfirmed": false
+      }
+    },
+    {
+      "receipt": "RECEIPT-LIST-ADD",
+      "fieldLink": {
+        "signedAttrsPresent": true,
+        "contentType": true,
+        "signedContentIdentifier": true,
+        "originatorSignatureValue": true
+      },
+      "msgSigDigest": {
+        "observed": "0x4b0918d557e35e7091b4ab807fdf67e30d17ea54647f9d19a33cb12eebeb3dce",
+        "computed": "0x4b0918d557e35e7091b4ab807fdf67e30d17ea54647f9d19a33cb12eebeb3dce",
+        "match": true
+      },
+      "receiptSignatureStatus": "valid",
+      "certificateTrust": "trusted",
+      "originalSignatureStatus": "valid",
+      "recipientStatus": "confirmed",
+      "levels": {
+        "signatureLocated": true,
+        "receiptTrusted": true,
+        "expectedRecipientConfirmed": true
+      }
+    },
+    {
+      "receipt": "RECEIPT-LIST-UNEXPECTED",
+      "fieldLink": {
+        "signedAttrsPresent": true,
+        "contentType": true,
+        "signedContentIdentifier": true,
+        "originatorSignatureValue": true
+      },
+      "msgSigDigest": {
+        "observed": "0x4b0918d557e35e7091b4ab807fdf67e30d17ea54647f9d19a33cb12eebeb3dce",
+        "computed": "0x4b0918d557e35e7091b4ab807fdf67e30d17ea54647f9d19a33cb12eebeb3dce",
+        "match": true
+      },
+      "receiptSignatureStatus": "valid",
+      "certificateTrust": "trusted",
+      "originalSignatureStatus": "valid",
+      "recipientStatus": "unexpected_recipient",
+      "levels": {
+        "signatureLocated": true,
+        "receiptTrusted": true,
+        "expectedRecipientConfirmed": false
+      }
+    },
+    {
+      "receipt": "RECEIPT-LIST-FIRST",
+      "fieldLink": {
+        "signedAttrsPresent": true,
+        "contentType": true,
+        "signedContentIdentifier": true,
+        "originatorSignatureValue": true
+      },
+      "msgSigDigest": {
+        "observed": "0xe27eababa6aa2e32c54539a79947198a1e36974727c6bff6ee7b172fc20bce29",
+        "computed": "0xe27eababa6aa2e32c54539a79947198a1e36974727c6bff6ee7b172fc20bce29",
+        "match": true
+      },
+      "receiptSignatureStatus": "valid",
+      "certificateTrust": "trusted",
+      "originalSignatureStatus": "valid",
+      "recipientStatus": "blocked",
+      "levels": {
+        "signatureLocated": true,
+        "receiptTrusted": true,
+        "expectedRecipientConfirmed": false
+      }
+    }
+  ],
+  "controls": [
+    {
+      "control": "same_body_resignature",
+      "question": "正文摘要相同能否把回执扩展到另一封邮件？",
+      "bodyGroups": [
+        {
+          "bodySha256": "38336f65828267f3254fe7768a1c291758eb512aff06993aa491035276c02087",
+          "messages": [
+            "MSG-A",
+            "MSG-B",
+            "MSG-RESIGN",
+            "MSG-FWD"
+          ]
+        },
+        {
+          "bodySha256": "860f19b7472bb2d2ea4e49813b7af1117cc4d85c3fe8aac031e09b9766fb4558",
+          "messages": [
+            "MSG-LIST-NONE",
+            "MSG-LIST-ADD",
+            "MSG-LIST-FIRST"
+          ]
+        }
+      ],
+      "observations": [
+        {
+          "receipt": "RECEIPT-B",
+          "matched": "MSG-B",
+          "levels": {
+            "signatureLocated": true,
+            "receiptTrusted": true,
+            "expectedRecipientConfirmed": true
+          },
+          "otherMessagesWithSameBody": [
+            [
+              "MSG-A",
+              "MSG-B",
+              "MSG-RESIGN",
+              "MSG-FWD"
+            ]
+          ]
+        },
+        {
+          "receipt": "RECEIPT-SPLICED",
+          "matched": "MSG-B",
+          "levels": {
+            "signatureLocated": true,
+            "receiptTrusted": false,
+            "expectedRecipientConfirmed": false
+          },
+          "otherMessagesWithSameBody": [
+            [
+              "MSG-A",
+              "MSG-B",
+              "MSG-RESIGN",
+              "MSG-FWD"
+            ]
+          ]
+        },
+        {
+          "receipt": "RECEIPT-NO-MSGDIGEST",
+          "matched": "MSG-B",
+          "levels": {
+            "signatureLocated": true,
+            "receiptTrusted": false,
+            "expectedRecipientConfirmed": false
+          },
+          "otherMessagesWithSameBody": [
+            [
+              "MSG-A",
+              "MSG-B",
+              "MSG-RESIGN",
+              "MSG-FWD"
+            ]
+          ]
+        },
+        {
+          "receipt": "RECEIPT-SIG-MISMATCH",
+          "matched": null,
+          "levels": {
+            "signatureLocated": false,
+            "receiptTrusted": false,
+            "expectedRecipientConfirmed": false
+          },
+          "otherMessagesWithSameBody": []
+        },
+        {
+          "receipt": "RECEIPT-MULTI-CAROL",
+          "matched": "MSG-MULTI",
+          "levels": {
+            "signatureLocated": true,
+            "receiptTrusted": true,
+            "expectedRecipientConfirmed": false
+          },
+          "otherMessagesWithSameBody": []
+        },
+        {
+          "receipt": "RECEIPT-NO-RR",
+          "matched": "MSG-NO-RR",
+          "levels": {
+            "signatureLocated": true,
+            "receiptTrusted": true,
+            "expectedRecipientConfirmed": false
+          },
+          "otherMessagesWithSameBody": []
+        },
+        {
+          "receipt": "RECEIPT-RESIGN",
+          "matched": "MSG-RESIGN",
+          "levels": {
+            "signatureLocated": true,
+            "receiptTrusted": true,
+            "expectedRecipientConfirmed": false
+          },
+          "otherMessagesWithSameBody": [
+            [
+              "MSG-A",
+              "MSG-B",
+              "MSG-RESIGN",
+              "MSG-FWD"
+            ]
+          ]
+        },
+        {
+          "receipt": "RECEIPT-B-UNATTESTED",
+          "matched": "MSG-B",
+          "levels": {
+            "signatureLocated": true,
+            "receiptTrusted": false,
+            "expectedRecipientConfirmed": false
+          },
+          "otherMessagesWithSameBody": [
+            [
+              "MSG-A",
+              "MSG-B",
+              "MSG-RESIGN",
+              "MSG-FWD"
+            ]
+          ]
+        },
+        {
+          "receipt": "RECEIPT-LIST-NONE",
+          "matched": "MSG-LIST-NONE",
+          "levels": {
+            "signatureLocated": true,
+            "receiptTrusted": true,
+            "expectedRecipientConfirmed": false
+          },
+          "otherMessagesWithSameBody": [
+            [
+              "MSG-LIST-NONE",
+              "MSG-LIST-ADD",
+              "MSG-LIST-FIRST"
+            ]
+          ]
+        },
+        {
+          "receipt": "RECEIPT-LIST-ADD",
+          "matched": "MSG-LIST-ADD",
+          "levels": {
+            "signatureLocated": true,
+            "receiptTrusted": true,
+            "expectedRecipientConfirmed": true
+          },
+          "otherMessagesWithSameBody": [
+            [
+              "MSG-LIST-NONE",
+              "MSG-LIST-ADD",
+              "MSG-LIST-FIRST"
+            ]
+          ]
+        },
+        {
+          "receipt": "RECEIPT-LIST-UNEXPECTED",
+          "matched": "MSG-LIST-ADD",
+          "levels": {
+            "signatureLocated": true,
+            "receiptTrusted": true,
+            "expectedRecipientConfirmed": false
+          },
+          "otherMessagesWithSameBody": [
+            [
+              "MSG-LIST-NONE",
+              "MSG-LIST-ADD",
+              "MSG-LIST-FIRST"
+            ]
+          ]
+        },
+        {
+          "receipt": "RECEIPT-LIST-FIRST",
+          "matched": "MSG-LIST-FIRST",
+          "levels": {
+            "signatureLocated": true,
+            "receiptTrusted": true,
+            "expectedRecipientConfirmed": false
+          },
+          "otherMessagesWithSameBody": [
+            [
+              "MSG-LIST-NONE",
+              "MSG-LIST-ADD",
+              "MSG-LIST-FIRST"
+            ]
+          ]
+        }
+      ],
+      "finding": "回执只绑定 originatorSignatureValue 与 msgSigDigest；同正文的其他签名者即使正文摘要一致也不匹配，正文摘要不得作为签收证据。"
+    },
+    {
+      "control": "forwarded_encapsulation",
+      "messages": [
+        {
+          "message": "MSG-FWD",
+          "layers": [
+            "1.2.840.113549.1.7.2",
+            "1.2.840.113549.1.7.1"
+          ],
+          "outerSignerStatus": [
+            {
+              "signer": "layers[0].signerInfos[0]",
+              "status": "unknown",
+              "receiptRequest": false
+            }
+          ],
+          "innerSignerStatus": [
+            {
+              "signer": "layers[1].signerInfos[0]",
+              "status": "valid",
+              "receiptRequest": true
+            }
+          ]
+        },
+        {
+          "message": "MSG-LIST-NONE",
+          "layers": [
+            "1.2.840.113549.1.7.2",
+            "1.2.840.113549.1.7.1"
+          ],
+          "outerSignerStatus": [
+            {
+              "signer": "layers[0].signerInfos[0]",
+              "status": "valid",
+              "receiptRequest": false
+            }
+          ],
+          "innerSignerStatus": [
+            {
+              "signer": "layers[1].signerInfos[0]",
+              "status": "valid",
+              "receiptRequest": true
+            }
+          ]
+        },
+        {
+          "message": "MSG-LIST-ADD",
+          "layers": [
+            "1.2.840.113549.1.7.2",
+            "1.2.840.113549.1.7.1"
+          ],
+          "outerSignerStatus": [
+            {
+              "signer": "layers[0].signerInfos[0]",
+              "status": "valid",
+              "receiptRequest": false
+            }
+          ],
+          "innerSignerStatus": [
+            {
+              "signer": "layers[1].signerInfos[0]",
+              "status": "valid",
+              "receiptRequest": true
+            }
+          ]
+        },
+        {
+          "message": "MSG-LIST-FIRST",
+          "layers": [
+            "1.2.840.113549.1.7.2",
+            "1.2.840.113549.1.7.1"
+          ],
+          "outerSignerStatus": [
+            {
+              "signer": "layers[0].signerInfos[0]",
+              "status": "valid",
+              "receiptRequest": false
+            }
+          ],
+          "innerSignerStatus": [
+            {
+              "signer": "layers[1].signerInfos[0]",
+              "status": "valid",
+              "receiptRequest": true
+            }
+          ]
+        }
+      ],
+      "finding": "外层转发签名不携带 ReceiptRequest，内层 SignedData 逐字节保留；回执只能匹配内层签名者，外层签名状态不能替代内层，未知外层状态也不影响已由 msgSigDigest 绑定的内层结论；反之，外层签名通过也不能把回执归给转发者。"
+    },
+    {
+      "control": "missing_required_linkage_attribute",
+      "cases": [
+        {
+          "receipt": "RECEIPT-NO-MSGDIGEST",
+          "missingField": "1.2.840.113549.1.9.16.2.5",
+          "levels": {
+            "signatureLocated": true,
+            "receiptTrusted": false,
+            "expectedRecipientConfirmed": false
+          },
+          "reasonCodes": [
+            "msgSigDigest_absent"
+          ]
+        }
+      ],
+      "finding": "msgSigDigest 是收据与原始 SignedAttributes 的必要关联证据；删除后仍可通过签名者身份与 contentIdentifier 找到候选，但无法证明收件人收到的是原签名者签署的字节，因此停在第一层。"
+    },
+    {
+      "control": "multiple_originator_signers",
+      "messages": [
+        {
+          "message": "MSG-MULTI",
+          "signers": [
+            {
+              "signer": "layers[0].signerInfos[0]",
+              "signature": "0x4d554c54492d5349474e41545552452d4341524f4c",
+              "contentType": "1.2.840.113549.1.7.1",
+              "contentIdentifier": "0x5343492d4d554c54492d5345434f4e44415259",
+              "receiptRequest": false,
+              "verification": "invalid",
+              "receiptsLocatingIt": [
+                "RECEIPT-MULTI-CAROL"
+              ]
+            },
+            {
+              "signer": "layers[0].signerInfos[1]",
+              "signature": "0x4d554c54492d5349474e41545552452d414c494345",
+              "contentType": "1.2.840.113549.1.7.1",
+              "contentIdentifier": "0x5343492d4d554c54492d5052494d415259",
+              "receiptRequest": true,
+              "verification": "valid",
+              "receiptsLocatingIt": []
+            }
+          ],
+          "requestConsistency": {
+            "requestingSigners": 1,
+            "identical": true
+          }
+        }
+      ],
+      "finding": "每个 SignerInfo 独立承载自己的 receiptRequest；只有一个签名者带 ReceiptRequest 时，回执即使指向另一签名者也不构成该签名者的签收请求。RFC 2634 section 2.2.1 要求带请求的多个 SignerInfo 的 receiptRequest 必须完全相同；不一致时必须不生成回执。"
+    },
+    {
+      "control": "mailing_list_expansion",
+      "cases": [
+        {
+          "message": "MSG-LIST-NONE",
+          "outerLayer": "layers[0]",
+          "policy": {
+            "kind": "none",
+            "names": []
+          },
+          "receiptsTo": [
+            [
+              {
+                "kind": "rfc822Name",
+                "value": "alice@example.com"
+              }
+            ]
+          ],
+          "innerReceiptsFrom": [
+            {
+              "signer": "layers[1].signerInfos[0]",
+              "form": "allOrFirstTier",
+              "names": []
+            }
+          ],
+          "receiptOutcomes": [
+            {
+              "receipt": "RECEIPT-LIST-NONE",
+              "receiptSigner": [
+                "bob@example.com"
+              ],
+              "levels": {
+                "signatureLocated": true,
+                "receiptTrusted": true,
+                "expectedRecipientConfirmed": false
+              },
+              "recipientStatus": "blocked"
+            }
+          ]
+        },
+        {
+          "message": "MSG-LIST-ADD",
+          "outerLayer": "layers[0]",
+          "policy": {
+            "kind": "inAdditionTo",
+            "names": [
+              {
+                "kind": "rfc822Name",
+                "value": "dave@example.com"
+              }
+            ]
+          },
+          "receiptsTo": [
+            [
+              {
+                "kind": "rfc822Name",
+                "value": "alice@example.com"
+              }
+            ]
+          ],
+          "innerReceiptsFrom": [
+            {
+              "signer": "layers[1].signerInfos[0]",
+              "form": "receiptList",
+              "names": [
+                {
+                  "kind": "rfc822Name",
+                  "value": "dave@example.com"
+                }
+              ]
+            }
+          ],
+          "receiptOutcomes": [
+            {
+              "receipt": "RECEIPT-LIST-ADD",
+              "receiptSigner": [
+                "dave@example.com"
+              ],
+              "levels": {
+                "signatureLocated": true,
+                "receiptTrusted": true,
+                "expectedRecipientConfirmed": true
+              },
+              "recipientStatus": "confirmed"
+            },
+            {
+              "receipt": "RECEIPT-LIST-UNEXPECTED",
+              "receiptSigner": [
+                "carol@example.com"
+              ],
+              "levels": {
+                "signatureLocated": true,
+                "receiptTrusted": true,
+                "expectedRecipientConfirmed": false
+              },
+              "recipientStatus": "unexpected_recipient"
+            }
+          ]
+        },
+        {
+          "message": "MSG-LIST-FIRST",
+          "outerLayer": "layers[0]",
+          "policy": {
+            "kind": null,
+            "names": []
+          },
+          "receiptsTo": [
+            [
+              {
+                "kind": "rfc822Name",
+                "value": "alice@example.com"
+              }
+            ]
+          ],
+          "innerReceiptsFrom": [
+            {
+              "signer": "layers[1].signerInfos[0]",
+              "form": "allOrFirstTier",
+              "names": []
+            }
+          ],
+          "receiptOutcomes": [
+            {
+              "receipt": "RECEIPT-LIST-FIRST",
+              "receiptSigner": [
+                "bob@example.com"
+              ],
+              "levels": {
+                "signatureLocated": true,
+                "receiptTrusted": true,
+                "expectedRecipientConfirmed": false
+              },
+              "recipientStatus": "blocked"
+            }
+          ]
+        }
+      ],
+      "finding": "mlExpansionHistory 只在最外层签名者上生效：mlReceiptPolicy none 抑制回执；firstTierRecipients 在发生列表扩展后不得回执；insteadOf/inAdditionTo 改变回执的发送对象（receiptsTo 路由），不扩大有权回执的收件人集合——后者仍由 receiptsFrom 的 receiptList 或 allOrFirstTier 决定。上述规则不改变回执与内层签名者的字段绑定。"
+    }
+  ],
+  "method": {
+    "receiptStruct": "1.2.840.113549.1.9.16.1.1",
+    "msgSigDigestOid": "1.2.840.113549.1.9.16.2.5",
+    "receiptRequestOid": "1.2.840.113549.1.9.16.2.1",
+    "signedAttributesDigestRule": "RFC 5652 section 5.4: digest the DER SET OF encoding, replacing the IMPLICIT [0] tag with the EXPLICIT SET OF tag",
+    "normalization": "rfc822Name values compared case-insensitively; other GeneralName forms are case-sensitive"
+  }
+}

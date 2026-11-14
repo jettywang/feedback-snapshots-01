@@ -102,11 +102,11 @@ MLReceiptPolicy.componentType = namedtype.NamedTypes(
     namedtype.NamedType('insteadOf', univ.SequenceOf(
         componentType=GeneralNames()).subtype(
         sizeSpec=constraint.ValueSizeConstraint(1, MAX)).subtype(
-        implicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatSimple, 1))),
+        implicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatConstructed, 1))),
     namedtype.NamedType('inAdditionTo', univ.SequenceOf(
         componentType=GeneralNames()).subtype(
         sizeSpec=constraint.ValueSizeConstraint(1, MAX)).subtype(
-        implicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatSimple, 2)))
+        implicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatConstructed, 2)))
 )
 
 
@@ -268,7 +268,7 @@ ReceiptsFrom.componentType = namedtype.NamedTypes(
         implicitTag=tag.Tag(tag.tagClassContext, tag.tagFormatSimple, 0))),
     namedtype.NamedType('receiptList', univ.SequenceOf(
         componentType=GeneralNames()).subtype(implicitTag=tag.Tag(
-        tag.tagClassContext, tag.tagFormatSimple, 1)))
+        tag.tagClassContext, tag.tagFormatConstructed, 1)))
 )
 
 
