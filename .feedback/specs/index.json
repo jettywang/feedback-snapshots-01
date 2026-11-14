@@ -1,0 +1,32 @@
+[
+  {
+    "repo": "paramiko",
+    "file": ".feedback/specs/rfc4252.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc4252.txt",
+    "sha256": "a36b882cf77b107335d49921b5e955b4ba78e253205dfbce5096ebc0e78bdf14"
+  },
+  {
+    "repo": "paramiko",
+    "file": ".feedback/specs/rfc4251.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc4251.txt",
+    "sha256": "23a5052796d29edc2f0ff4f5be557df244544d129cfc26ed51971a6485eff4ef"
+  },
+  {
+    "repo": "paramiko",
+    "file": ".feedback/specs/rfc4254.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc4254.txt",
+    "sha256": "bfc727e9350067eaa49edeecc3d32f1e3518dd57cf3c36ceed02177156c5703f"
+  },
+  {
+    "repo": "paramiko",
+    "file": ".feedback/specs/rfc4253.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc4253.txt",
+    "sha256": "b471173305154f6c66facffcf7a4a25fc5c32765cb30542120be6c20a88f1ed3"
+  },
+  {
+    "repo": "paramiko",
+    "file": ".feedback/specs/PROTOCOL.certkeys",
+    "url": "https://raw.githubusercontent.com/openssh/openssh-portable/V_9_9_P2/PROTOCOL.certkeys",
+    "sha256": "d3184cfc1cf787bb5eca3bb063ba28005db815163836f934b069804fd863f18b"
+  }
+]
