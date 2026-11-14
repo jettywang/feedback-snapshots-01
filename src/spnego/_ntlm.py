@@ -355,8 +355,17 @@ class NTLMProxy(ContextProxy):
     def new_context(self) -> "NTLMProxy":
         cred: typing.Optional[NTLMHash] = None
         if self._credential and self.usage == "initiate":
+            # Use the username that was resolved from a cache so a retry does not reselect a different entry from
+            # NTLM_USER_FILE. The identity's raw username is None when the cache supplied the first entry.
+            username = self._credential._raw_username
+            if not username:
+                username = (
+                    f"{self._credential.domain}\\{self._credential.username}"
+                    if self._credential.domain
+                    else self._credential.username
+                )
             cred = NTLMHash(
-                username=self._credential._raw_username or "",
+                username=username or "",
                 lm_hash=base64.b16encode(self._credential.lm_hash).decode(),
                 nt_hash=base64.b16encode(self._credential.nt_hash).decode(),
             )

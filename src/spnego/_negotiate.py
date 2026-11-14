@@ -130,7 +130,18 @@ class NegotiateProxy(ContextProxy):
         return self._context.session_key if self._context_list else b""
 
     def new_context(self) -> "NegotiateProxy":
+        # Only injected contexts are configuration. A context list built from the credentials is renegotiated from
+        # scratch so the new context has the full allowed mech list rather than the mech the old session chose.
+        available_contexts: typing.Optional[typing.Dict[GSSMech, ContextProxy]] = None
+        if self._available_contexts is not None:
+            available_contexts = {}
+            for mech, context in self._available_contexts.items():
+                new_context = context.new_context()
+                new_context._is_wrapped = True
+                available_contexts[mech] = new_context
+
         return NegotiateProxy(
+            self._credentials,
             hostname=self._hostname,
             service=self._service,
             channel_bindings=self.channel_bindings,
@@ -138,7 +149,7 @@ class NegotiateProxy(ContextProxy):
             usage=self.usage,
             protocol=self.protocol,
             options=self.options,
-            _negotiate_contexts={m: c[0].new_context() for m, c in self._context_list.items()},
+            _negotiate_contexts=available_contexts,
         )
 
     def step(

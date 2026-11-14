@@ -348,6 +348,10 @@ class CredSSPProxy(ContextProxy):
             protocol=self.protocol,
             options=self.options,
             credssp_negotiate_context=self._auth_context.new_context() if self._auth_context else None,
+            # Preserve the caller supplied policy and TLS context. The SSLContext is settings, not session state,
+            # and each CredSSPProxy still creates its own BIO pair and SSLObject around it.
+            credssp_min_protocol=self._min_version,
+            credssp_tls_context=self._tls_context,
         )
 
     def step(

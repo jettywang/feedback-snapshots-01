@@ -425,6 +425,18 @@ class ContextProxy(metaclass=abc.ABCMeta):
         options of the current context. This is useful when needing to set up a
         new security context without having to retrieve the credentials again.
 
+        The new context copies the configuration (credentials, SPN, channel
+        bindings, ``context_req``, options, and any provider policy such as the
+        CredSSP minimum protocol or caller supplied TLS context) but not the
+        session state. It always starts a fresh negotiation: the complete
+        flag, session key, sequence numbers, MIC bookkeeping, and any TLS
+        buffers or objects are not inherited from the current context. A
+        message protected by the returned context cannot be unprotected by the
+        current context, or vice versa, even if both are currently usable.
+
+        This means a failed or partially completed context can safely be
+        replaced with a retry built by this method.
+
         Returns:
             ContextProxy: The new security context.
         """
