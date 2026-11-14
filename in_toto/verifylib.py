@@ -27,6 +27,7 @@
 
 import datetime
 import fnmatch
+import json
 import logging
 import os
 
@@ -45,12 +46,19 @@ import in_toto.settings
 from in_toto.exceptions import (
     BadReturnValueError,
     LayoutExpiredError,
+    LinkReadError,
     RuleVerificationError,
     SignatureVerificationError,
     ThresholdVerificationError,
 )
 from in_toto.formats import _check_parameter_dict, _check_public_keys
 from in_toto.models.metadata import Metadata
+from in_toto.verificationreport import (
+    NullVerificationReport,
+    Phase,
+    PhaseStatus,
+    VerificationReport,
+)
 
 # Inherits from in_toto base logger (c.f. in_toto.log)
 LOG = logging.getLogger(__name__)
@@ -97,7 +105,7 @@ def _raise_on_bad_retval(return_value, command=None):
         raise BadReturnValueError(msg.format(what="zero"))
 
 
-def load_links_for_layout(layout, link_dir_path):
+def load_links_for_layout(layout, link_dir_path, report=None):
     """
     <Purpose>
       Try to load all existing metadata files for each Step of the Layout
@@ -106,6 +114,14 @@ def load_links_for_layout(layout, link_dir_path):
       For each step the metadata might consist of multiple (thresholds) Link
       or Layout (sub-layouts) files.
 
+      Authorized functionaries are not required to submit a link. Therefore a
+      candidate file that simply does not exist is skipped and only counted as
+      missing. However, a file that *does* exist but cannot be read or parsed
+      (denied permissions, an I/O error while reading, corrupted or invalid
+      metadata) is never treated as missing: it raises a LinkReadError so that
+      an environment or evidence-integrity problem cannot be hidden by other
+      candidates that happen to satisfy the threshold.
+
     <Arguments>
       layout:
             Layout object
@@ -113,14 +129,22 @@ def load_links_for_layout(layout, link_dir_path):
       link_dir_path:
             A path to directory where links are loaded from
 
+      report (optional):
+            A VerificationReport to record the per-step candidate-discovery
+            phase on.
 
     <Side Effects>
       Calls function to read files from disk
 
     <Exceptions>
+      in_toto.exceptions.LinkReadError,
+              if an existing candidate file cannot be read or parsed. The
+              exception message carries the evidence path but never the file
+              payload.
+
       in_toto.exceptions.LinkNotFoundError,
-              if fewer than `threshold` link files can be found for any given
-              step of the supply chain (preliminary threshold check)
+              if fewer than `threshold` readable link files can be found for
+              any given step of the supply chain (preliminary threshold check)
 
     <Returns>
       A dictionary carrying all the found metadata corresponding to the
@@ -135,15 +159,21 @@ def load_links_for_layout(layout, link_dir_path):
 
 
     """
+    if report is None:
+        report = NullVerificationReport()
+
     steps_metadata = {}
 
     # Iterate over all the steps in the layout
     for step in layout.steps:
         links_per_step = {}
+        candidates = []
+        # An unreadable existing candidate is a hard failure, even if other
+        # readable candidates would still meet the step threshold.
+        read_failure = None
 
         # We try to load a link for every authorized functionary, but don't fail
         # if the file does not exist (authorized != required)
-        # FIXME: Should we really pass on IOError, or just skip inexistent links?
         for authorized_keyid in step.pubkeys:
             # Iterate over the authorized key and if present over subkeys
             for keyid in [authorized_keyid] + list(
@@ -154,22 +184,119 @@ def load_links_for_layout(layout, link_dir_path):
                 )
                 filepath = os.path.join(link_dir_path, filename)
 
+                # A genuinely missing file means the functionary did not submit
+                # this optional candidate and may be skipped.
+                if not os.path.exists(filepath):
+                    candidates.append(
+                        {"path": filepath, "keyid": keyid, "outcome": "missing"}
+                    )
+                    continue
+
                 try:
                     metadata = Metadata.load(filepath)
-                    links_per_step[keyid] = metadata
 
-                except OSError:
-                    pass
+                except FileNotFoundError:
+                    # Vanished between the existence check and the open() call:
+                    # treat as a missing, not-yet-submitted candidate.
+                    candidates.append(
+                        {"path": filepath, "keyid": keyid, "outcome": "missing"}
+                    )
+                    LOG.info(
+                        "Candidate link disappeared while loading: %s",
+                        filepath,
+                    )
+                    continue
+
+                except OSError as exc:
+                    # Permission denied, an I/O error mid-read, etc. The
+                    # evidence exists but cannot be read reliably, so this
+                    # must fail.
+                    read_failure = LinkReadError(
+                        f"Cannot read existing link metadata"
+                        f" '{filepath}': {exc}"
+                    )
+                    candidates.append(
+                        {
+                            "path": filepath,
+                            "keyid": keyid,
+                            "outcome": "unreadable",
+                        }
+                    )
+                    break
+
+                except (
+                    json.JSONDecodeError,
+                    TypeError,
+                    KeyError,
+                    securesystemslib.exceptions.FormatError,
+                    in_toto.exceptions.InvalidMetadata,
+                ) as exc:
+                    # The file exists and was read, but its contents cannot be
+                    # parsed into valid metadata (corrupted/truncated evidence).
+                    # Only the exception type and the evidence path are
+                    # reported, never the file's payload contents.
+                    read_failure = LinkReadError(
+                        f"Cannot parse existing link metadata '{filepath}': "
+                        f"{type(exc).__name__}"
+                    )
+                    candidates.append(
+                        {"path": filepath, "keyid": keyid, "outcome": "corrupt"}
+                    )
+                    break
+
+                links_per_step[keyid] = metadata
+                candidates.append(
+                    {"path": filepath, "keyid": keyid, "outcome": "loaded"}
+                )
+
+            if read_failure is not None:
+                break
+
+        if read_failure is not None:
+            report.record(
+                Phase.CANDIDATE_DISCOVERY,
+                PhaseStatus.FAILED,
+                detail={"step": step.name, "candidates": candidates},
+                evidence_paths=[c["path"] for c in candidates],
+                error=read_failure,
+            )
+            report.skip_remaining(Phase.CANDIDATE_DISCOVERY)
+            raise read_failure
 
         # This is only a preliminary threshold check, based on (authorized)
         # filenames, to fail early. A more thorough signature-based threshold
         # check is indispensable.
         if len(links_per_step) < step.threshold:
-            raise in_toto.exceptions.LinkNotFoundError(
+            error = in_toto.exceptions.LinkNotFoundError(
                 f"Step '{step.name}' requires '{step.threshold}'"
                 f" link metadata file(s), found '{len(links_per_step)}'."
             )
+            report.record(
+                Phase.CANDIDATE_DISCOVERY,
+                PhaseStatus.FAILED,
+                detail={
+                    "step": step.name,
+                    "threshold": step.threshold,
+                    "found": len(links_per_step),
+                    "candidates": candidates,
+                },
+                evidence_paths=[c["path"] for c in candidates],
+                error=error,
+            )
+            report.skip_remaining(Phase.CANDIDATE_DISCOVERY)
+            raise error
 
+        report.record(
+            Phase.CANDIDATE_DISCOVERY,
+            PhaseStatus.PASSED,
+            detail={
+                "step": step.name,
+                "threshold": step.threshold,
+                "found": len(links_per_step),
+                "candidates": candidates,
+            },
+            evidence_paths=[c["path"] for c in candidates],
+        )
         steps_metadata[step.name] = links_per_step
 
     return steps_metadata
@@ -399,7 +526,9 @@ def verify_metadata_signatures(metadata, keys_dict):
         metadata.verify_signature(verify_key)
 
 
-def verify_link_signature_thresholds(layout, steps_metadata):  # noqa: C901, PLR0912
+def verify_link_signature_thresholds(  # noqa: C901, PLR0912
+    layout, steps_metadata, report=None
+):
     """
     <Purpose>
       Verify that for each step of the layout there are at least `threshold`
@@ -439,6 +568,8 @@ def verify_link_signature_thresholds(layout, steps_metadata):  # noqa: C901, PLR
 
     """
     # pylint: disable=too-many-locals
+    if report is None:
+        report = NullVerificationReport()
 
     # Create an inverse keys-subkeys dictionary, with subkey keyids as
     # dictionary keys and main keys as dictionary values. This will be
@@ -465,9 +596,14 @@ def verify_link_signature_thresholds(layout, steps_metadata):  # noqa: C901, PLR
         verified_key_link_dict = {}
         # List of used keyids
         used_main_keyids = []
+        # Per-candidate signature/threshold outcomes for the verification report
+        outcomes = []
 
         # Do per step link threshold verification
         for link_keyid, link in steps_metadata.get(step.name, {}).items():
+            evidence_path = in_toto.models.link.FILENAME_FORMAT.format(
+                step_name=step.name, keyid=link_keyid
+            )
             # Iterate over authorized keyids to find a key or subkey corresponding
             # to the given link and check if the link's keyid is authorized.
             # Subkeys of authorized main keys are authorized implicitly.
@@ -501,23 +637,49 @@ def verify_link_signature_thresholds(layout, steps_metadata):  # noqa: C901, PLR
                     link_keyid,
                     step.name,
                 )
+                outcomes.append(
+                    {
+                        "path": evidence_path,
+                        "keyid": link_keyid,
+                        "outcome": "skipped",
+                        "reason": "unauthorized",
+                    }
+                )
                 continue
 
             # Verify signature and skip invalidly signed links
             try:
                 link.verify_signature(verification_key)
 
-            except SignatureVerificationError:
+            except SignatureVerificationError as sig_error:
                 LOG.info(
                     "Skipping link. Broken link signature with keyid '%s'"
                     " for step '%s'",
                     link_keyid,
                     step.name,
                 )
+                # The signature failure remains individually observable and is
+                # not folded into a generic "missing link" report.
+                outcomes.append(
+                    {
+                        "path": evidence_path,
+                        "keyid": link_keyid,
+                        "outcome": "skipped",
+                        "reason": f"{type(sig_error).__name__}: {sig_error}",
+                    }
+                )
                 continue
 
             except KeyExpirationError as e:
                 LOG.info("Skipping link. %s", e)
+                outcomes.append(
+                    {
+                        "path": evidence_path,
+                        "keyid": link_keyid,
+                        "outcome": "skipped",
+                        "reason": f"{type(e).__name__}: {e}",
+                    }
+                )
                 continue
 
             # Warn if there are links signed by different subkeys of same main key
@@ -534,6 +696,13 @@ def verify_link_signature_thresholds(layout, steps_metadata):  # noqa: C901, PLR
 
             # Keep only links with valid and authorized signature
             verified_key_link_dict[link_keyid] = link
+            outcomes.append(
+                {
+                    "path": evidence_path,
+                    "keyid": link_keyid,
+                    "outcome": "accepted",
+                }
+            )
 
         # For each step, verify that we have enough validly signed links from
         # distinct authorized functionaries. Links signed by different subkeys of
@@ -544,11 +713,37 @@ def verify_link_signature_thresholds(layout, steps_metadata):  # noqa: C901, PLR
         # different dictionary keys, e.g. {keyid1: KEY1, keyid2: KEY1}
         # Maybe we should add such a check to the layout validation? Or here?
         if valid_authorized_links_cnt < step.threshold:
-            raise ThresholdVerificationError(
+            error = ThresholdVerificationError(
                 f"Step '{step.name}' requires at least '{step.threshold}' links"
                 " validly signed by different authorized functionaries. Only"
                 f" found '{valid_authorized_links_cnt}'"
             )
+            report.record(
+                Phase.SIGNER_THRESHOLDS,
+                PhaseStatus.FAILED,
+                detail={
+                    "step": step.name,
+                    "threshold": step.threshold,
+                    "valid": valid_authorized_links_cnt,
+                    "outcomes": outcomes,
+                },
+                evidence_paths=[o["path"] for o in outcomes],
+                error=error,
+            )
+            report.skip_remaining(Phase.SIGNER_THRESHOLDS)
+            raise error
+
+        report.record(
+            Phase.SIGNER_THRESHOLDS,
+            PhaseStatus.PASSED,
+            detail={
+                "step": step.name,
+                "threshold": step.threshold,
+                "valid": valid_authorized_links_cnt,
+                "outcomes": outcomes,
+            },
+            evidence_paths=[o["path"] for o in outcomes],
+        )
 
         # Add all good links of this step to the dictionary of links of all steps
         verified_steps_metadata[step.name] = verified_key_link_dict
@@ -1324,7 +1519,11 @@ def reduce_chain_links(chain_link_dict):
 
 
 def verify_sublayouts(
-    layout, steps_metadata, superlayout_link_dir_path, inspect_timeout
+    layout,
+    steps_metadata,
+    superlayout_link_dir_path,
+    inspect_timeout,
+    report=None,
 ):
     """
     <Purpose>
@@ -1332,6 +1531,15 @@ def verify_sublayouts(
       any step has been delegated by the functionary, recurses into the
       delegation, and replaces the layout object with an equivalent link object.
       Returns the extracted link objects in a dict called chain_link_dict.
+
+      A failed sublayout never produces a summary link: its exception aborts
+      verification before a (possibly misleading) summary link can participate
+      in the superlayout's artifact rules, and before any inspection that
+      depends on the delegated step gets started. Read failures of a
+      sublayout's own evidence are re-raised as LinkReadError annotated with
+      the sublayout's evidence directory; signature and threshold failures
+      propagate with their original exception types so they can still be
+      caught individually.
 
     <Arguments>
       layout:
@@ -1358,6 +1566,10 @@ def verify_sublayouts(
               Integer value that is the number of seconds to pass to the run
               command to timeout the subprocess within.
 
+      report (optional):
+              A VerificationReport to record the sublayout-verification phase
+              and the nested sublayout reports on.
+
     <Exceptions>
       raises an Exception if verification of the delegated step fails.
 
@@ -1376,14 +1588,20 @@ def verify_sublayouts(
       }
 
     """
+    if report is None:
+        report = NullVerificationReport()
+
     chain_link_dict = {}
 
     for step_name, metadata_dict in steps_metadata.items():
         key_link_dict = {}
+        subreports = []
+        sublayout_seen = False
         for keyid, metadata in metadata_dict.items():
             payload = metadata.get_payload()
 
             if payload.type_ == "layout":
+                sublayout_seen = True
                 LOG.info("Verifying sublayout %s...", step_name)
                 layout_key_dict = {}
 
@@ -1405,21 +1623,71 @@ def verify_sublayouts(
                     superlayout_link_dir_path, sub_link_dir
                 )
 
-                # Make a recursive call to in_toto_verify with the
-                # layout and the extracted key object
-                summary_link = in_toto_verify(
-                    metadata,
-                    layout_key_dict,
-                    link_dir_path=sublayout_link_dir_path,
-                    step_name=step_name,
-                    inspect_timeout=inspect_timeout,
-                )
+                subreport = report.child(step_name)
+                subreports.append(subreport)
 
-                # Replace the layout object with the link object returned
-                # by in-toto-verify
+                try:
+                    # Make a recursive call to in_toto_verify with the
+                    # layout and the extracted key object
+                    summary_link = in_toto_verify(
+                        metadata,
+                        layout_key_dict,
+                        link_dir_path=sublayout_link_dir_path,
+                        step_name=step_name,
+                        inspect_timeout=inspect_timeout,
+                        report=subreport,
+                    )
+
+                except LinkReadError as exc:
+                    # Annotate the unreadable sublayout evidence with the
+                    # sublayout evidence directory and preserve the original
+                    # exception chain. No summary link is produced.
+                    failure = LinkReadError(
+                        f"Sublayout '{step_name}' could not be verified"
+                        f" because its evidence in"
+                        f" '{sublayout_link_dir_path}' could not be read"
+                        f" reliably: {exc}"
+                    )
+                    report.record(
+                        Phase.SUBLAYOUT_VERIFICATION,
+                        PhaseStatus.FAILED,
+                        detail={"step": step_name, "keyid": keyid},
+                        evidence_paths=[sublayout_link_dir_path],
+                        error=failure,
+                        subreports=subreports,
+                    )
+                    report.skip_remaining(Phase.SUBLAYOUT_VERIFICATION)
+                    raise failure from exc
+
+                except Exception as exc:
+                    # Signature/threshold/rule/return-value failures keep their
+                    # original, individually catchable exception types. The
+                    # nested report still carries the failing phase and path.
+                    report.record(
+                        Phase.SUBLAYOUT_VERIFICATION,
+                        PhaseStatus.FAILED,
+                        detail={"step": step_name, "keyid": keyid},
+                        evidence_paths=[sublayout_link_dir_path],
+                        error=exc,
+                        subreports=subreports,
+                    )
+                    report.skip_remaining(Phase.SUBLAYOUT_VERIFICATION)
+                    raise
+
+                # Only a fully verified sublayout is replaced by its summary
+                # link, which is then allowed to participate in superlayout
+                # artifact rules.
                 payload = summary_link
 
             key_link_dict[keyid] = payload
+
+        if sublayout_seen:
+            report.record(
+                Phase.SUBLAYOUT_VERIFICATION,
+                PhaseStatus.PASSED,
+                detail={"step": step_name},
+                subreports=subreports,
+            )
         chain_link_dict[step_name] = key_link_dict
 
     return chain_link_dict
@@ -1489,6 +1757,7 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
     step_name="",
     persist_inspection_links=True,
     inspect_timeout=in_toto.settings.LINK_CMD_EXEC_TIMEOUT,
+    report=None,
 ):
     """Performs complete in-toto supply chain verification for a final product.
 
@@ -1547,6 +1816,10 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
           in_toto.settings.LINK_CMD_EXEC_TIMEOUT in seconds which ends up timing
           out the run command subprocess if it runs over.
 
+      report (optional): A VerificationReport that records the outcome of each
+          verification phase, including recursively verified sublayouts. If
+          omitted, phase tracking is disabled (a no-op report is used).
+
     Raises:
       securesystemslib.exceptions.FormatError: Passed parameters are malformed.
 
@@ -1556,7 +1829,13 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
       LayoutExpiredError: The layout is expired.
 
       LinkNotFoundError: Fewer than threshold link metadata files can be found
-          for a step of the layout.
+          for a step of the layout. This only covers candidates that were never
+          submitted; unreadable existing evidence raises LinkReadError instead.
+
+      LinkReadError: An existing link or sublayout evidence file cannot be read
+          or parsed reliably (e.g. denied permissions, an I/O error, or
+          corrupted content). The message carries the evidence path but never
+          the file payload.
 
       ThresholdVerificationError: Fewer than threshold links, validly signed by
           different authorized functionaries, who agree on the recorded materials
@@ -1579,9 +1858,12 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
       verification.
 
     """
+    if report is None:
+        report = NullVerificationReport()
 
-    LOG.info("Verifying layout metadata signatures...")
-    verify_metadata_signatures(metadata, layout_key_dict)
+    with report.phase(Phase.LAYOUT_SIGNATURES):
+        LOG.info("Verifying layout metadata signatures...")
+        verify_metadata_signatures(metadata, layout_key_dict)
 
     # For the rest of the verification we only care about the layout payload
     # (Layout) that carries all the information and not about the layout
@@ -1589,49 +1871,59 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
     LOG.info("Extracting layout from metadata...")
     layout = metadata.get_payload()
 
-    LOG.info("Verifying layout expiration...")
-    verify_layout_expiration(layout)
+    with report.phase(Phase.LAYOUT_EXPIRATION):
+        LOG.info("Verifying layout expiration...")
+        verify_layout_expiration(layout)
 
     # If there are parameters sent to the translation layer, substitute them
     if substitution_parameters is not None:
-        LOG.info("Performing parameter substitution...")
-        substitute_parameters(layout, substitution_parameters)
+        with report.phase(Phase.PARAMETER_SUBSTITUTION):
+            LOG.info("Performing parameter substitution...")
+            substitute_parameters(layout, substitution_parameters)
 
     LOG.info("Reading link metadata files...")
-    steps_metadata = load_links_for_layout(layout, link_dir_path)
+    steps_metadata = load_links_for_layout(layout, link_dir_path, report)
 
     LOG.info("Verifying link metadata signatures...")
-    steps_metadata = verify_link_signature_thresholds(layout, steps_metadata)
+    steps_metadata = verify_link_signature_thresholds(
+        layout, steps_metadata, report
+    )
 
     LOG.info("Verifying sublayouts...")
     chain_link_dict = verify_sublayouts(
-        layout, steps_metadata, link_dir_path, inspect_timeout
+        layout, steps_metadata, link_dir_path, inspect_timeout, report
     )
 
-    LOG.info("Verifying alignment of reported commands...")
-    verify_all_steps_command_alignment(layout, chain_link_dict)
+    with report.phase(Phase.COMMAND_ALIGNMENT):
+        LOG.info("Verifying alignment of reported commands...")
+        verify_all_steps_command_alignment(layout, chain_link_dict)
 
-    LOG.info("Verifying threshold constraints...")
-    verify_threshold_constraints(layout, chain_link_dict)
-    reduced_chain_link_dict = reduce_chain_links(chain_link_dict)
+    with report.phase(Phase.THRESHOLD_CONSTRAINTS):
+        LOG.info("Verifying threshold constraints...")
+        verify_threshold_constraints(layout, chain_link_dict)
+        reduced_chain_link_dict = reduce_chain_links(chain_link_dict)
 
     # NOTE: Processing step rules before executing inspections guarantees that
     # inspection commands don't run on compromised target files, however, this
     # also precludes step match rules from referencing inspection artifacts.
-    LOG.info("Verifying Step rules...")
-    verify_all_item_rules(layout.steps, reduced_chain_link_dict)
+    with report.phase(Phase.STEP_RULES):
+        LOG.info("Verifying Step rules...")
+        verify_all_item_rules(layout.steps, reduced_chain_link_dict)
 
-    LOG.info("Executing Inspection commands...")
-    inspection_link_dict = run_all_inspections(
-        layout, persist_inspection_links, inspect_timeout
-    )
+    with report.phase(Phase.INSPECTION_EXECUTION):
+        LOG.info("Executing Inspection commands...")
+        inspection_link_dict = run_all_inspections(
+            layout, persist_inspection_links, inspect_timeout
+        )
 
-    LOG.info("Verifying Inspection rules...")
-    # Artifact rules for inspections can reference links that correspond to
-    # Steps or Inspections, hence the concatenation of both collections of links
-    combined_links = reduced_chain_link_dict.copy()
-    combined_links.update(inspection_link_dict)
-    verify_all_item_rules(layout.inspect, combined_links)
+    with report.phase(Phase.INSPECTION_RULES):
+        LOG.info("Verifying Inspection rules...")
+        # Artifact rules for inspections can reference links that correspond to
+        # Steps or Inspections, hence the concatenation of both collections of
+        # links
+        combined_links = reduced_chain_link_dict.copy()
+        combined_links.update(inspection_link_dict)
+        verify_all_item_rules(layout.inspect, combined_links)
 
     # We made it this far without exception that means, verification passed
     LOG.info("The software product passed all verification.")

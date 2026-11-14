@@ -31,6 +31,19 @@ class LinkNotFoundError(Error):
     """Indicates that a link file was not found."""
 
 
+class LinkReadError(Error):
+    """Indicates that an existing link or sublayout metadata file could not be
+    read or parsed reliably.
+
+    Unlike :class:`LinkNotFoundError`, which means that an authorized
+    functionary simply did not submit a (still optional) candidate, this error
+    means that evidence was present on disk but could not be loaded, e.g. due
+    to denied permissions, an I/O failure while reading, or corrupted content.
+    Such evidence must fail verification explicitly instead of being silently
+    treated as a missing file.
+    """
+
+
 class UnsupportedKeyTypeError(Error):
     """Indicates that the specified key type is not yet supported."""
 

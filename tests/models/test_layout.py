@@ -340,11 +340,18 @@ class TestLayoutValidator(unittest.TestCase):
         metadata.signed._type = "wrong-type"
         metadata.dump(link_path)
 
-        # Add the single step to the test layout and try to read the failing link
+        # Add the single step to the test layout and try to read the failing
+        # link. Existing evidence with an invalid type is an evidence-integrity
+        # problem: it must surface as LinkReadError (wrapping the format error)
+        # rather than being treated as a missing file.
         self.layout.steps.append(Step(name=name, pubkeys=[functionary_keyid]))
 
-        with self.assertRaises(securesystemslib.exceptions.FormatError):
+        with self.assertRaises(in_toto.exceptions.LinkReadError) as ctx:
             in_toto.verifylib.load_links_for_layout(self.layout, ".")
+
+        # The evidence path is reported, the malformed payload is not.
+        self.assertIn(link_name, str(ctx.exception))
+        self.assertIn("FormatError", str(ctx.exception))
 
         # Clean up
         os.remove(link_path)

@@ -41,3 +41,22 @@ documented [in-toto#663](https://github.com/in-toto/in-toto/issues/663).
 ```{eval-rst}
 .. autofunction:: in_toto.verifylib.in_toto_verify
 ```
+
+### Verification phase report
+
+Pass a `VerificationReport` to `in_toto_verify` to record the outcome of each
+verification phase (candidate discovery, signer thresholds, sublayout
+verification, etc.), including recursively verified sublayouts. The report
+only stores evidence *paths*, statuses and exception type/message strings,
+never link or layout payload contents.
+
+```{eval-rst}
+.. autoclass:: in_toto.verificationreport.VerificationReport
+   :members:
+
+.. autoclass:: in_toto.verificationreport.Phase
+   :members:
+
+.. autoclass:: in_toto.verificationreport.PhaseStatus
+   :members:
+```

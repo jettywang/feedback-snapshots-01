@@ -1,5 +1,23 @@
 # Changelog
 
+## Unreleased
+
+### Added
+* `in_toto.verificationreport.VerificationReport` records each verification
+  phase (candidate discovery, signer thresholds, sublayout verification, ...)
+  with status, evidence paths and error type/message, including nested
+  sublayouts, without storing payload contents
+* `in_toto.exceptions.LinkReadError` for evidence that exists but cannot be
+  read or parsed reliably
+
+### Changed
+* `load_links_for_layout` no longer treats an unreadable or corrupt existing
+  link/sublayout file as a missing file: unsubmitted optional candidates are
+  still skipped, but permission errors, mid-read I/O failures and invalid
+  metadata raise `LinkReadError`, even when other files meet the threshold
+* A failed sublayout no longer produces a summary link that can participate
+  in superlayout rules and prevents dependent inspections from starting
+
 ## v3.1.0
 
 This release includes version bumpbs, as well as upgraded debian support , and
