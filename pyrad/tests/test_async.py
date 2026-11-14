@@ -295,6 +295,291 @@ class AsyncRoundTripTests(unittest.TestCase):
         self.assertEqual(self.run_with(test).code, packet.AccessAccept)
 
 
+class AsyncEapMd5WireTests(unittest.TestCase):
+    """The EAP-MD5 exchange of ClientAsync with a scripted server behind
+    a fake transport of the real DatagramProtocolClient.
+
+    All packets are really encoded and decoded and the replies go through
+    the real datagram_received verification; the requests on the wire and
+    the input of every MD5 hash involving a password are recorded, to
+    prove that a password is only used for the legitimate challenge of
+    its own authentication.
+    """
+
+    password_a = b's0leil'
+    password_b = b'm0tdepasse'
+    challenge_a = b'0123456789abcdef'
+    challenge_b = b'fedcba9876543210'
+
+    def setUp(self):
+        self.dict = Dictionary(StringIO(DICTIONARY))
+        self.received = []    # the decoded requests, in arrival order
+        self.raw = []         # the raw requests, in arrival order
+        self.md5_inputs = []  # data of every hashlib.md5 call with a password
+        real_md5 = hashlib.md5
+        passwords = (self.password_a, self.password_b)
+
+        def recording_md5(data=b'', **kwargs):
+            if any(password in data for password in passwords):
+                self.md5_inputs.append(data)
+            return real_md5(data, **kwargs)
+
+        self.real_md5 = real_md5
+        patcher = mock.patch('pyrad.client.hashlib.md5', recording_md5)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def run_with(self, script, test):
+        """Run test(client) with a ClientAsync whose auth protocol is the
+        real DatagramProtocolClient; sendto() of its fake transport runs
+        script(request) and the replies go through datagram_received."""
+        received = self.received
+        raw = self.raw
+        dictionary = self.dict
+
+        async def run():
+            loop = asyncio.get_running_loop()
+            client = ClientAsync(server=LOCALHOST, secret=SECRET, dict=dictionary,
+                                 loop=loop, timeout=0.3, retries=1)
+            protocol = DatagramProtocolClient(LOCALHOST, 1812,
+                                              logging.getLogger('pyrad'),
+                                              client, retries=1, timeout=0.3)
+
+            def deliver(data):
+                raw.append(data)
+                request = packet.AuthPacket(secret=SECRET, dict=dictionary, packet=data)
+                received.append(request)
+                for reply in script(request):
+                    protocol.datagram_received(reply, (LOCALHOST, 1812))
+
+            class FakeTransport:
+                def sendto(self, data):
+                    loop.call_soon(deliver, data)
+
+                def is_closing(self):
+                    return False
+
+                def get_extra_info(self, name):
+                    sock = mock.Mock()
+                    sock.getsockname.return_value = (LOCALHOST, 12345)
+                    return sock
+
+                def close(self):
+                    pass
+
+            protocol.connection_made(FakeTransport())
+            client.protocol_auth = protocol
+            try:
+                return await test(client)
+            finally:
+                await protocol.close_transport()
+
+        return asyncio.run(run())
+
+    def reply(self, request, code, attributes={}):
+        reply = request.CreateReply()
+        reply.code = code
+        for (key, value) in attributes.items():
+            reply[key] = value
+        return reply.ReplyPacket()
+
+    def challenge(self, request, eap_id, value, state):
+        return self.reply(request, packet.AccessChallenge,
+                          {79: [struct.pack('!BBHBB', 1, eap_id, 22, 4, 16) + value],
+                           24: [state]})
+
+    def eap_request(self, client, user, password):
+        req = client.CreateAuthPacket(auth_type='eap-md5')
+        req[1] = [user]
+        req[2] = [password]
+        return req
+
+    def hash_input(self, eap_id, password, challenge):
+        return struct.pack('!B', eap_id) + password + challenge
+
+    def testInterleavedAuthentications(self):
+        # two EAP-MD5 authentications at the same time: each password is
+        # only hashed with the challenge of its own transaction
+        def script(request):
+            eap = request[79][0]
+            if eap[4] == 1:  # EAP-Response/Identity
+                if request['User-Name'] == ['alice']:
+                    return [self.challenge(request, 7, self.challenge_a, b'state-a')]
+                return [self.challenge(request, 9, self.challenge_b, b'state-b')]
+            return [self.reply(request, packet.AccessAccept)]
+
+        async def test(client):
+            alice = self.eap_request(client, b'alice', self.password_a)
+            bob = self.eap_request(client, b'bob', self.password_b)
+            (reply_a, reply_b) = await asyncio.gather(client.SendPacket(alice),
+                                                      client.SendPacket(bob))
+            return reply_a, reply_b, alice, bob
+
+        (reply_a, reply_b, alice, bob) = self.run_with(script, test)
+        self.assertEqual(reply_a.code, packet.AccessAccept)
+        self.assertEqual(reply_b.code, packet.AccessAccept)
+        # RFC 3579 section 3.3: no cleartext User-Password on the wire
+        self.assertEqual(len(self.received), 4)
+        for request in self.received:
+            self.assertNotIn(2, request)
+        self.assertNotIn(self.password_a, b''.join(self.raw))
+        self.assertNotIn(self.password_b, b''.join(self.raw))
+        # each transaction answered its own challenge only
+        (identities, responses) = ({}, {})
+        for request in self.received:
+            eap = request[79][0]
+            target = identities if eap[4] == 1 else responses
+            target[request['User-Name'][0]] = request
+        digest_a = self.real_md5(self.hash_input(7, self.password_a,
+                                                 self.challenge_a)).digest()
+        digest_b = self.real_md5(self.hash_input(9, self.password_b,
+                                                 self.challenge_b)).digest()
+        self.assertEqual(responses['alice'][79],
+                         [struct.pack('!BBHBB', 2, 7, 22, 4, 16) + digest_a])
+        self.assertEqual(responses['alice'][24], [b'state-a'])
+        self.assertNotEqual(responses['alice'].id, identities['alice'].id)
+        self.assertEqual(responses['bob'][79],
+                         [struct.pack('!BBHBB', 2, 9, 22, 4, 16) + digest_b])
+        self.assertEqual(responses['bob'][24], [b'state-b'])
+        self.assertNotEqual(responses['bob'].id, identities['bob'].id)
+        # each password was hashed exactly once, for its own challenge
+        self.assertEqual(sorted(self.md5_inputs),
+                         sorted([self.hash_input(7, self.password_a, self.challenge_a),
+                                 self.hash_input(9, self.password_b, self.challenge_b)]))
+        self.assertEqual(alice[2], [self.password_a])
+        self.assertEqual(bob[2], [self.password_b])
+
+    def testStrayChallengesAreIgnored(self):
+        # stray challenges are dropped by the reply verification; the
+        # password is only hashed for the legitimate challenge
+        def stray(id, authenticator):
+            challenge = packet.AuthPacket(code=packet.AccessChallenge, id=id,
+                                          secret=SECRET, authenticator=authenticator,
+                                          dict=self.dict)
+            challenge[79] = [struct.pack('!BBHBB', 1, 7, 22, 4, 16) + self.challenge_a]
+            return challenge.ReplyPacket()
+
+        def script(request):
+            if len(self.received) == 1:
+                # the Identifier of another transaction, and this
+                # Identifier with a wrong Request Authenticator
+                return [stray((request.id + 1) % 256, request.authenticator),
+                        stray(request.id, bytes(16)),
+                        self.challenge(request, 7, self.challenge_a, b'state-a')]
+            return [self.reply(request, packet.AccessAccept)]
+
+        async def test(client):
+            req = self.eap_request(client, b'alice', self.password_a)
+            return await client.SendPacket(req), req
+
+        (reply, req) = self.run_with(script, test)
+        self.assertEqual(reply.code, packet.AccessAccept)
+        self.assertEqual(len(self.received), 2)
+        self.assertEqual(self.md5_inputs,
+                         [self.hash_input(7, self.password_a, self.challenge_a)])
+        self.assertEqual(req[2], [self.password_a])
+
+    def testMalformedChallengeIsNotAnswered(self):
+        # a malformed challenge neither fails the task nor uses the
+        # password; it is returned to the caller as the reply
+        malformed = [
+            # declared Length smaller than the MD5-Challenge header
+            struct.pack('!BBHBB', 1, 7, 5, 4, 16) + self.challenge_a,
+            struct.pack('!BBHBB', 1, 7, 4, 4, 16) + self.challenge_a,
+            # declared Length beyond the received EAP packet
+            struct.pack('!BBH', 1, 7, 60) + b'\x04\x10' + self.challenge_a,
+            # Value-Size doesn't fit in the declared Length
+            struct.pack('!BBHBB', 1, 7, 22, 4, 32) + self.challenge_a,
+        ]
+
+        def script(request):
+            eap = malformed[len(self.received) - 1]
+            return [self.reply(request, packet.AccessChallenge, {79: [eap]})]
+
+        async def test(client):
+            replies = []
+            for _ in malformed:
+                req = self.eap_request(client, b'alice', self.password_a)
+                replies.append(await client.SendPacket(req))
+                self.assertEqual(req[2], [self.password_a])
+            return replies
+
+        replies = self.run_with(script, test)
+        self.assertEqual([reply.code for reply in replies],
+                         [packet.AccessChallenge] * len(malformed))
+        # no malformed challenge was answered
+        self.assertEqual(len(self.received), len(malformed))
+        self.assertEqual(self.md5_inputs, [])
+
+    def testDuplicateChallengeIsNotAnsweredAgain(self):
+        # a retransmitted challenge is not answered a second time
+        def script(request):
+            return [self.challenge(request, 7, self.challenge_a, b'state-a')]
+
+        async def test(client):
+            req = self.eap_request(client, b'alice', self.password_a)
+            return await client.SendPacket(req), req
+
+        (reply, req) = self.run_with(script, test)
+        self.assertEqual(reply.code, packet.AccessChallenge)
+        self.assertEqual(len(self.received), 2)
+        self.assertEqual(self.md5_inputs,
+                         [self.hash_input(7, self.password_a, self.challenge_a)])
+        self.assertEqual(req[2], [self.password_a])
+
+    def testChallengeAfterRejectIsIgnored(self):
+        # a challenge after the final reply doesn't use the password
+        def script(request):
+            return [self.reply(request, packet.AccessReject),
+                    self.challenge(request, 7, self.challenge_a, b'state-a')]
+
+        async def test(client):
+            req = self.eap_request(client, b'alice', self.password_a)
+            return await client.SendPacket(req), req
+
+        (reply, req) = self.run_with(script, test)
+        self.assertEqual(reply.code, packet.AccessReject)
+        self.assertEqual(len(self.received), 1)
+        self.assertEqual(self.md5_inputs, [])
+        self.assertEqual(req[2], [self.password_a])
+
+    def testTimeoutRestoresUserPassword(self):
+        async def test(client):
+            req = self.eap_request(client, b'alice', self.password_a)
+            with self.assertRaises(TimeoutError):
+                await client.SendPacket(req)
+            return req
+
+        req = self.run_with(lambda request: [], test)
+        self.assertEqual(req[2], [self.password_a])
+        self.assertEqual(self.md5_inputs, [])
+        # the request was sent and retransmitted once, without the password
+        self.assertEqual(len(self.received), 2)
+        for request in self.received:
+            self.assertNotIn(2, request)
+
+    def testCancelledAfterChallengeRestoresUserPassword(self):
+        def script(request):
+            if len(self.received) == 1:
+                return [self.challenge(request, 7, self.challenge_a, b'state-a')]
+            return []  # the answer to the challenge is never replied to
+
+        async def test(client):
+            req = self.eap_request(client, b'alice', self.password_a)
+            with self.assertRaises(asyncio.TimeoutError):
+                await asyncio.wait_for(client.SendPacket(req), 0.2)
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            return req, dict(client.protocol_auth.pending_requests)
+
+        (req, pending) = self.run_with(script, test)
+        self.assertEqual(pending, {})
+        self.assertEqual(req[2], [self.password_a])
+        self.assertEqual(self.md5_inputs,
+                         [self.hash_input(7, self.password_a, self.challenge_a)])
+        self.assertEqual(len(self.received), 2)
+
+
 class AsyncClientTests(unittest.TestCase):
     def setUp(self):
         self.loop = asyncio.new_event_loop()

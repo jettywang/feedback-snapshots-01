@@ -4,6 +4,12 @@ Changelog
 Unreleased
 ----------
 
+* The EAP-MD5 authentication of Client and ClientAsync validates the
+  declared Length and the Value-Size of an EAP-MD5 challenge before
+  answering it. A malformed challenge no longer crashes the client with
+  an IndexError and is not answered with an MD5 hash of the password;
+  it is returned to the caller like any other reply which is not an
+  EAP-MD5 challenge.
 * pyrad no longer depends on netaddr; it was only used by the tests and
   is now in the ``test`` dependency group. ipv6prefix values given as
   ``netaddr.IPNetwork`` are still accepted. Code that imports netaddr

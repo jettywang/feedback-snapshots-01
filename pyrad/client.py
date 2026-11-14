@@ -72,10 +72,17 @@ def _EapMd5Response(pkt, reply, password):
         # not an EAP-MD5 challenge
         return False
     eap_id = eap[1]
-    eap = eap[:struct.unpack('!H', eap[2:4])[0]]
+    length = struct.unpack('!H', eap[2:4])[0]
+    if length < 6 or length > len(eap):
+        # a malformed or truncated challenge: the password is not used
+        return False
+    eap = eap[:length]
     # RFC 3748 section 5.4: Type-Data is Value-Size, Value and an optional
     # Name; the response is the MD5 hash of the EAP Identifier, the
     # password and the Value (RFC 1994 section 4.1)
+    if 6 + eap[5] > length:
+        # the Value doesn't fit in the declared Length
+        return False
     value = eap[6:6 + eap[5]]
     digest = hashlib.md5(struct.pack('!B', eap_id) + password + value).digest()
     pkt[79] = [struct.pack('!BBHBB', EAP_CODE_RESPONSE, eap_id,
