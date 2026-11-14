@@ -128,6 +128,38 @@ Key unlocking is quite simple::
         # ukey is just a reference to enc_key in this case
         ...
 
+Unlock scopes can be nested on the same ``PGPKey`` instance. An inner block only verifies the passphrase and shares
+the outer scope; it never re-decrypts or clears anything, so material an outer block still holds survives the inner
+block's exit. This matters when one helper unlocks the key while an outer routine needs to sign a second document::
+
+    with enc_key.unlock("C0rrectPassphr@se"):
+        enc_key.sign(first_document)
+
+        with enc_key.unlock("C0rrectPassphr@se"):
+            # the inner block verifies the same passphrase and changes nothing else
+            enc_key.sign(inner_document)
+
+        # the key is still unlocked here; the second signature is valid
+        enc_key.sign(second_document)
+
+    # only the outermost block removes the decrypted private material
+
+The scope rules are:
+
+* A nested block with a different passphrase raises :py:exc:`~pgpy.errors.PGPDecryptionError` before its body runs and
+  leaves the outer scope untouched. There is no reference counting that would let an unmatched passphrase attach to an
+  existing scope.
+* If any protected component (the primary key or a subkey) rejects the passphrase, entry fails atomically: components
+  decrypted during the attempt are cleared again, already-locked components stay locked, and the block body never runs.
+* Public keys and unprotected private keys are not managed; ``unlock`` emits a ``UserWarning`` and yields the key
+  unchanged.
+* A ``PGPKey`` is a shared, mutable object. If another thread already holds an unlock scope on the same instance, a
+  second thread's ``unlock`` raises :py:exc:`~pgpy.errors.PGPError` instead of sharing the decrypted state. The owning
+  thread may still nest scopes freely.
+* On scope exit PGPy re-initializes the private MPI fields it owns to zero. This removes plaintext from PGPy's own
+  objects, but it does not guarantee physical erasure from Python process memory; copies may remain in interpreter and
+  allocator internals.
+
 Exporting Keys
 ^^^^^^^^^^^^^^
 

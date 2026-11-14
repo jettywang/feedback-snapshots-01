@@ -1236,6 +1236,20 @@ class PrivKey(PubKey):
         del pt
         self.clear()
 
+    def verify_passphrase(self, passphrase):
+        """
+        Check whether ``passphrase`` decrypts this protected key material without
+        mutating any state. The decrypted plaintext is discarded, so both a correct
+        and an incorrect passphrase leave this object exactly as it was.
+
+        :raises: :py:exc:`~pgpy.errors.PGPDecryptionError` if the passphrase is incorrect
+        """
+        if not self.s2k:
+            return
+
+        pt = self.decrypt_keyblob(passphrase)
+        del pt
+
     @abc.abstractmethod
     def decrypt_keyblob(self, passphrase):
         if not self.s2k:  # pragma: no cover
@@ -1289,6 +1303,9 @@ class OpaquePrivKey(PrivKey, OpaquePubKey):  # pragma: no cover
         raise NotImplementedError()
 
     def decrypt_keyblob(self, passphrase):
+        return NotImplemented
+
+    def verify_passphrase(self, passphrase):
         return NotImplemented
 
 

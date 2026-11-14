@@ -15,6 +15,7 @@ import itertools
 import operator
 import os
 import re
+import threading
 import warnings
 import weakref
 
@@ -1632,6 +1633,12 @@ class PGPKey(Armorable, ParentRef, PGPObject):
         self._sibling = None
         self._self_verified = None
         self._require_usage_flags = True
+        # unlock scope bookkeeping; a PGPKey is a shared, mutable object, so
+        # nested and concurrent unlock() calls must be reconciled explicitly
+        self.__unlock_guard = threading.Lock()
+        self.__unlock_owner = None
+        self.__unlock_depth = 0
+        self.__unlock_components = []
 
     def __bytearray__(self):
         _bytes = bytearray()
@@ -1768,7 +1775,34 @@ class PGPKey(Armorable, ParentRef, PGPObject):
         Context manager method for unlocking passphrase-protected private keys. Has no effect if the key is not both
         private and passphrase-protected.
 
-        When the context managed block is exited, the unprotected private key material is removed.
+        When the outermost managed block is exited, the decrypted private key material of every component that this
+        scope unlocked is removed again, even if the block raised an exception. Components that were already
+        unlocked by an enclosing scope are left untouched until that enclosing scope ends.
+
+        Scope contract:
+
+        * **Nested scopes on the same instance.** Calls may nest within one thread. An inner block does not
+          re-decrypt or clear anything; it only verifies that its passphrase matches the one currently in effect and
+          then shares the outer scope. Exiting the inner block never removes material the outer scope still holds, so
+          a second signature after the inner block returns remains valid. The material is cleared once the outermost
+          block exits.
+        * **Different passphrases.** A nested block whose passphrase does not match raises
+          :py:exc:`~pgpy.errors.PGPDecryptionError` *before* entering the block and changes nothing: the outer scope
+          keeps working and no component is relocked. There is no reference-counting shortcut that would let an
+          unmatched identity attach to an existing scope.
+        * **Partial subkey failure.** All protected components (primary key and each subkey) are unlocked with the
+          same passphrase. If any component rejects it, the whole entry fails atomically: components already
+          decrypted during the attempt are cleared again, components that were already locked stay locked, and the
+          block body never runs.
+        * **Unprotected keys.** Public keys and keys without a passphrase are not managed; a :py:obj:`UserWarning`
+          is emitted and the block yields the key unchanged. Nothing is recorded or cleared for such components.
+        * **Shared instances across threads.** A :py:class:`~pgpy.errors.PGPError` is raised if another thread
+          already holds an active unlock scope on this exact instance. The owning thread may nest freely; other
+          threads must wait for the scope to end rather than share mutable decrypted state.
+        * **Cleanup boundary.** On scope exit PGPy re-initializes the private MPI fields it owns to zero (see
+          :py:meth:`pgpy.packet.fields.PrivKey.clear`). This removes the plaintext from PGPy's own objects; it cannot
+          guarantee physical erasure from Python process memory, since copies may linger in interpreter and
+          allocator internals.
 
         Example::
 
@@ -1792,7 +1826,9 @@ class PGPKey(Armorable, ParentRef, PGPObject):
 
         :param passphrase: The passphrase to be used to unlock this key.
         :type passphrase: ``str``
-        :raises: :py:exc:`~pgpy.errors.PGPDecryptionError` if the passphrase is incorrect
+        :raises: :py:exc:`~pgpy.errors.PGPDecryptionError` if the passphrase is incorrect, including a mismatched
+                 passphrase in a nested scope
+        :raises: :py:exc:`~pgpy.errors.PGPError` if another thread already holds an unlock scope on this instance
         """
         if self.is_public:
             # we can't unprotect public keys because only private key material is ever protected
@@ -1806,16 +1842,50 @@ class PGPKey(Armorable, ParentRef, PGPObject):
             yield self
             return
 
-        try:
-            for sk in itertools.chain([self], self.subkeys.values()):
-                sk._key.unprotect(passphrase)
-            del passphrase
-            yield self
+        components = [sk for sk in itertools.chain([self], self.subkeys.values()) if sk.is_protected]
 
+        with self.__unlock_guard:
+            if self.__unlock_owner is not None and self.__unlock_owner != threading.get_ident():
+                # another thread holds the decrypted material; sharing it would hide an identity mismatch
+                raise PGPError("This key is already unlocked in another thread; "
+                               "concurrent unlock scopes on a shared PGPKey instance are not supported")
+
+            if self.__unlock_depth > 0:
+                # nested scope on this thread: prove the identities match without touching any state
+                for component in components:
+                    component._key.verify_passphrase(passphrase)
+                del passphrase
+                self.__unlock_depth += 1
+                is_nested = True
+            else:
+                # outermost scope: decrypt every protected component, atomically with respect to failure
+                unlocked = []
+                try:
+                    for component in components:
+                        component._key.unprotect(passphrase)
+                        unlocked.append(component)
+                except BaseException:
+                    # roll back only what this attempt decrypted; leave everything else as it was
+                    for component in unlocked:
+                        component._key.keymaterial.clear()
+                    raise
+                del passphrase
+                self.__unlock_owner = threading.get_ident()
+                self.__unlock_depth = 1
+                self.__unlock_components = unlocked
+                is_nested = False
+
+        try:
+            yield self
         finally:
-            # clean up here by deleting the previously decrypted secret key material
-            for sk in itertools.chain([self], self.subkeys.values()):
-                sk._key.keymaterial.clear()
+            with self.__unlock_guard:
+                self.__unlock_depth -= 1
+                if self.__unlock_depth == 0 and not is_nested:
+                    # clean up by deleting the previously decrypted secret key material
+                    for component in self.__unlock_components:
+                        component._key.keymaterial.clear()
+                    self.__unlock_components = []
+                    self.__unlock_owner = None
 
     def add_uid(self, uid, selfsign=True, **prefs):
         """

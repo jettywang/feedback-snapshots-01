@@ -941,6 +941,10 @@ class PrivKeyV4(PrivKey, PubKeyV4):
         self.keymaterial.decrypt_keyblob(passphrase)
         del passphrase
 
+    def verify_passphrase(self, passphrase):
+        self.keymaterial.verify_passphrase(passphrase)
+        del passphrase
+
     def sign(self, sigdata, hash_alg):
         return self.keymaterial.sign(sigdata, hash_alg)
 
