@@ -28,6 +28,7 @@ ATTRIBUTE User-Password         2  string
 ATTRIBUTE Reply-Message         18 string
 ATTRIBUTE Acct-Status-Type      40 integer
 ATTRIBUTE Acct-Session-Id       44 string
+ATTRIBUTE Acct-Delay-Time       41 integer
 ATTRIBUTE State                 24 octets
 ATTRIBUTE Tunnel-Password       69 string has_tag,encrypt=2
 ATTRIBUTE EAP-Message           79 octets
@@ -714,6 +715,389 @@ class AsyncClientTests(unittest.TestCase):
         logger.warning.assert_called_once()
         protocol.connection_lost(None)
         logger.info.assert_called_once()
+
+
+class FakeDatagramTransport:
+    """Controllable stand-in for an asyncio datagram transport.
+
+    It records the raw bytes written with sendto and never opens a socket,
+    so the transaction/reuse tests run fully offline, without a NAS.
+    """
+
+    def __init__(self):
+        self.sent = []
+        self.closed = False
+
+    def sendto(self, data, addr=None):
+        self.sent.append(data)
+
+    def close(self):
+        self.closed = True
+
+    def is_closing(self):
+        return self.closed
+
+    def get_extra_info(self, name):
+        if name == 'socket':
+            sock = mock.Mock()
+            sock.getsockname.return_value = (LOCALHOST, 40000)
+            return sock
+        if name == 'sockname':
+            return (LOCALHOST, 40000)
+        return None
+
+
+class AsyncTransactionReuseTests(unittest.TestCase):
+    """ID exhaustion, release, reuse, stale and duplicate replies and the
+    Future lifecycle of the async client, driven through
+    FakeDatagramTransport without a real NAS or a socket.
+
+    Every reply that completes a request is recorded together with the
+    exact request bytes of the pending entry it completed. This proves that
+    a reply only ever completes the transaction it was authenticated for,
+    never a later request that reused the same 8-bit identifier.
+    """
+
+    def setUp(self):
+        self.loop = asyncio.new_event_loop()
+        self.dict = Dictionary(StringIO(DICTIONARY))
+        # (raw reply, request packet, raw request bytes completed by it)
+        self.matched = []
+
+    def tearDown(self):
+        self.loop.close()
+
+    def start_protocol(self, client, attr, port, retries, timeout):
+        protocol = DatagramProtocolClient(LOCALHOST, port, mock.Mock(), client,
+                                          retries=retries, timeout=timeout)
+        protocol.transport = FakeDatagramTransport()
+        setattr(client, attr, protocol)
+        protocol.timeout_future = self.loop.create_task(
+            protocol.__timeout_handler__())
+        return protocol
+
+    def start_client(self, retries=1, timeout=0.15, enable_acct=False):
+        client = ClientAsync(server=LOCALHOST, secret=SECRET, dict=self.dict,
+                             loop=self.loop, retries=retries, timeout=timeout)
+        self.start_protocol(client, 'protocol_auth', 1812, retries, timeout)
+        if enable_acct:
+            self.start_protocol(client, 'protocol_acct', 1813, retries, timeout)
+        return client
+
+    def deliver(self, protocol, data, addr=(LOCALHOST, 1812)):
+        """Feed a datagram to the protocol and record which pending request
+        the reply completes, with the exact bytes of that request."""
+        before = dict((id, dict(req)) for id, req in protocol.pending_requests.items())
+        protocol.datagram_received(data, addr)
+        for id, req in before.items():
+            if id in protocol.pending_requests:
+                continue
+            future = req['future']
+            if future.done() and not future.cancelled() and future.exception() is None:
+                self.matched.append((data, req['packet'], req['raw']))
+
+    def assert_every_reply_matches_its_request(self, client):
+        self.assertTrue(self.matched)
+        for reply_bytes, request_packet, request_raw in self.matched:
+            decoded = packet.Packet(packet=reply_bytes, dict=self.dict)
+            self.assertTrue(request_packet.VerifyReply(
+                decoded, reply_bytes, enforce_ma=client.enforce_ma))
+            # the proof recorded the bytes actually sent for this transaction
+            self.assertEqual(request_packet.RequestPacket(), request_raw)
+
+    async def stop_timer(self, protocol):
+        task = protocol.timeout_future
+        self.assertFalse(task.done())
+        task.cancel()
+        await asyncio.wait([task])
+        self.assertTrue(task.cancelled())
+        self.assertEqual(protocol.pending_requests, {})
+
+    def testAllIdsExhaustedThenReleasedAndReused(self):
+        async def test():
+            client = self.start_client()
+            protocol = client.protocol_auth
+            futures = []
+            for _ in range(256):
+                pkt = packet.AuthPacket(id=protocol.create_id(), secret=SECRET,
+                                        dict=self.dict)
+                future = self.loop.create_future()
+                protocol.send_packet(pkt, future)
+                futures.append(future)
+            self.assertEqual(sorted(protocol.pending_requests), list(range(256)))
+            with self.assertRaisesRegex(Exception, 'No free packet id'):
+                protocol.create_id()
+
+            # cancellation releases an id, which is then handed out again
+            protocol.pending_requests[42]['future'].cancel()
+            await asyncio.sleep(0)
+            self.assertNotIn(42, protocol.pending_requests)
+            self.assertEqual(protocol.create_id(), 42)
+
+            # every id and every pending entry is reclaimed in the end
+            for future in futures:
+                future.cancel()
+            await asyncio.sleep(0)
+            self.assertEqual(protocol.pending_requests, {})
+            # the whole id range is available again
+            self.assertEqual(len({protocol.create_id() for _ in range(256)}), 256)
+            await self.stop_timer(protocol)
+        self.loop.run_until_complete(test())
+
+    def testStaleReplyAfterTimeoutCannotCompleteReusedId(self):
+        async def test():
+            client = self.start_client(retries=0, timeout=0.15)
+            protocol = client.protocol_auth
+            old = client.CreateAuthPacket(User_Name='alice')
+            reused_id = old.id
+            old_future = client.SendPacket(old)
+            old_raw = protocol.pending_requests[reused_id]['raw']
+            old_reply = old.CreateReply().ReplyPacket()
+
+            # the request times out and its id is recycled
+            await asyncio.sleep(0.4)
+            self.assertTrue(old_future.done())
+            self.assertIsInstance(old_future.exception(), TimeoutError)
+            self.assertEqual(protocol.pending_requests, {})
+
+            # a new transaction gets the same id but a fresh authenticator
+            new = packet.AuthPacket(id=reused_id, secret=SECRET, dict=self.dict,
+                                    User_Name='bob')
+            new_future = self.loop.create_future()
+            protocol.send_packet(new, new_future)
+            self.assertEqual(new.id, reused_id)
+            self.assertNotEqual(new.authenticator, old.authenticator)
+            new_raw = protocol.pending_requests[reused_id]['raw']
+            self.assertNotEqual(old_raw, new_raw)
+
+            # the still valid reply of the old transaction arrives late, from
+            # another endpoint: real authentication fails against the new
+            # request, so it must not complete or remove it
+            protocol.datagram_received(old_reply, ('198.51.100.7', 4900))
+            self.assertFalse(new_future.done())
+            self.assertIn(reused_id, protocol.pending_requests)
+            self.assertEqual(self.matched, [])
+
+            # only a reply signed for the new transaction completes it
+            self.deliver(protocol, new.CreateReply().ReplyPacket(),
+                         (LOCALHOST, 1812))
+            self.assertTrue(new_future.done())
+            self.assertEqual(new_future.result().code, packet.AccessAccept)
+            self.assertEqual(protocol.pending_requests, {})
+            self.assertEqual(len(self.matched), 1)
+            self.assertEqual(self.matched[0][2], new_raw)
+            self.assert_every_reply_matches_its_request(client)
+            await self.stop_timer(protocol)
+        self.loop.run_until_complete(test())
+
+    def testStaleReplyAfterCancelCannotCompleteReusedId(self):
+        async def test():
+            client = self.start_client(retries=0)
+            protocol = client.protocol_auth
+            old = client.CreateAuthPacket(User_Name='alice')
+            reused_id = old.id
+            old_future = client.SendPacket(old)
+            old_reply = old.CreateReply().ReplyPacket()
+            old_future.cancel()
+            await asyncio.sleep(0)
+            self.assertEqual(protocol.pending_requests, {})
+
+            # the id is reused by a new request while the old Future is done
+            new = packet.AuthPacket(id=reused_id, secret=SECRET, dict=self.dict,
+                                    User_Name='bob')
+            new_future = self.loop.create_future()
+            protocol.send_packet(new, new_future)
+            self.assertIn(reused_id, protocol.pending_requests)
+
+            # the late reply to the cancelled request must not touch the new
+            # Future, and the old done-callback must not remove the new entry
+            protocol.datagram_received(old_reply, ('198.51.100.7', 4900))
+            self.assertFalse(new_future.done())
+            self.assertIs(protocol.pending_requests[reused_id]['future'], new_future)
+            self.assertTrue(old_future.cancelled())
+            self.assertEqual(self.matched, [])
+
+            self.deliver(protocol, new.CreateReply().ReplyPacket())
+            self.assertEqual(new_future.result().code, packet.AccessAccept)
+            self.assertEqual(len(self.matched), 1)
+            self.assert_every_reply_matches_its_request(client)
+            await self.stop_timer(protocol)
+        self.loop.run_until_complete(test())
+
+    def testDuplicateRepliesCompleteOnlyOnce(self):
+        async def test():
+            client = self.start_client()
+            protocol = client.protocol_auth
+            req = client.CreateAuthPacket(User_Name='alice')
+            future = client.SendPacket(req)
+            reply = req.CreateReply().ReplyPacket()
+
+            self.deliver(protocol, reply, (LOCALHOST, 1812))
+            self.assertEqual(future.result().code, packet.AccessAccept)
+            # the replayed duplicate finds no pending request and is ignored
+            self.deliver(protocol, reply, ('198.51.100.7', 4900))
+            self.assertEqual(future.result().code, packet.AccessAccept)
+            self.assertEqual(protocol.pending_requests, {})
+            self.assertEqual(len(self.matched), 1)
+            self.assertEqual(self.matched[0][0], reply)
+            self.assert_every_reply_matches_its_request(client)
+            await self.stop_timer(protocol)
+        self.loop.run_until_complete(test())
+
+    def testRepliesFromDifferentSourceEndpoints(self):
+        async def test():
+            client = self.start_client()
+            protocol = client.protocol_auth
+
+            # matching is by id and authenticator, not by source endpoint:
+            # a correctly signed reply from another endpoint is accepted
+            req = client.CreateAuthPacket(User_Name='alice')
+            future = client.SendPacket(req)
+            self.deliver(protocol, req.CreateReply().ReplyPacket(),
+                         ('10.0.0.99', 5000))
+            self.assertEqual(future.result().code, packet.AccessAccept)
+
+            # a forged reply (wrong secret), regardless of its source, is
+            # rejected and leaves the request pending
+            other = client.CreateAuthPacket(User_Name='mallory')
+            other_future = client.SendPacket(other)
+            forged = other.CreateReply()
+            forged.secret = b'wrong'
+            protocol.datagram_received(forged.ReplyPacket(), ('8.8.8.8', 1))
+            self.assertFalse(other_future.done())
+            self.assertIn(other.id, protocol.pending_requests)
+            self.assertEqual(len(self.matched), 1)
+
+            self.deliver(protocol, other.CreateReply().ReplyPacket(),
+                         ('10.0.0.99', 5001))
+            self.assertEqual(other_future.result().code, packet.AccessAccept)
+            self.assertEqual(protocol.pending_requests, {})
+            self.assert_every_reply_matches_its_request(client)
+            await self.stop_timer(protocol)
+        self.loop.run_until_complete(test())
+
+    def testAccountingRetransmissionContract(self):
+        async def test():
+            client = self.start_client(retries=3, timeout=0.15, enable_acct=True)
+            acct = client.protocol_acct
+            # the handler is created in start_client before requests are sent,
+            # and sleeps before its first scan; restart it after sending so
+            # the retransmission timing below is deterministic
+            acct.timeout_future.cancel()
+            await asyncio.wait([acct.timeout_future])
+
+            # the client retransmits the identical datagram, it does not add
+            # Acct-Delay-Time or re-sign the request
+            req = client.CreateAcctPacket(Acct_Status_Type='Start',
+                                          Acct_Session_Id='session-1')
+            future = client.SendPacket(req)
+            original_raw = acct.transport.sent[-1]
+            acct.timeout_future = self.loop.create_task(
+                acct.__timeout_handler__())
+            await asyncio.sleep(0.3)
+            self.assertEqual(acct.transport.sent, [original_raw, original_raw])
+            self.assertIn(req.id, acct.pending_requests)
+
+            # contract: a response to the original attempt, still valid for
+            # the request bytes the client actually sent, completes it
+            self.deliver(acct, req.CreateReply().ReplyPacket(),
+                         (LOCALHOST, 1813))
+            self.assertEqual(future.result().code, packet.AccountingResponse)
+
+            # a server that re-signed a retransmitted request after changing
+            # Acct-Delay-Time (and hence its Request Authenticator) must not
+            # match the pending transaction
+            req2 = client.CreateAcctPacket(Acct_Status_Type='Start',
+                                           Acct_Session_Id='session-2')
+            future2 = client.SendPacket(req2)
+            rebuilt = packet.AcctPacket(id=req2.id, secret=SECRET, dict=self.dict,
+                                        Acct_Status_Type='Start',
+                                        Acct_Session_Id='session-2',
+                                        Acct_Delay_Time=5)
+            rebuilt_raw = rebuilt.RequestPacket()
+            self.assertNotEqual(rebuilt.authenticator, req2.authenticator)
+            self.assertNotEqual(rebuilt_raw, acct.pending_requests[req2.id]['raw'])
+            rebuilt_reply = rebuilt.CreateReply().ReplyPacket()
+            self.assertFalse(req2.VerifyReply(
+                packet.Packet(packet=rebuilt_reply, dict=self.dict), rebuilt_reply))
+            acct.datagram_received(rebuilt_reply, (LOCALHOST, 1813))
+            self.assertFalse(future2.done())
+            self.assertIn(req2.id, acct.pending_requests)
+
+            # the response signed for the actual request still completes it
+            self.deliver(acct, req2.CreateReply().ReplyPacket(),
+                         (LOCALHOST, 1813))
+            self.assertEqual(future2.result().code, packet.AccountingResponse)
+            self.assertEqual(acct.pending_requests, {})
+            self.assert_every_reply_matches_its_request(client)
+            await self.stop_timer(acct)
+            await self.stop_timer(client.protocol_auth)
+        self.loop.run_until_complete(test())
+
+    def testCloseTransportReclaimsIdsFuturesAndTimers(self):
+        async def test():
+            client = self.start_client(enable_acct=True)
+            auth, acct = client.protocol_auth, client.protocol_acct
+            auth_future = client.SendPacket(
+                client.CreateAuthPacket(User_Name='alice'))
+            acct_future = client.SendPacket(
+                client.CreateAcctPacket(Acct_Status_Type='Start',
+                                        Acct_Session_Id='session'))
+            timers = [auth.timeout_future, acct.timeout_future]
+
+            await client.deinitialize_transports()
+            for future in (auth_future, acct_future):
+                with self.assertRaises(ConnectionAbortedError):
+                    await future
+            for timer in timers:
+                self.assertTrue(timer.cancelled())
+            self.assertIsNone(client.protocol_auth)
+            self.assertIsNone(client.protocol_acct)
+        self.loop.run_until_complete(test())
+
+    def testFullClientLifecycleOffline(self):
+        # the public ClientAsync API end to end, with create_datagram_endpoint
+        # replaced by the fake transport, so no socket and no NAS are used
+        async def fake_endpoint(protocol, **kwargs):
+            transport = FakeDatagramTransport()
+            protocol.connection_made(transport)
+            return transport, protocol
+
+        async def test():
+            self.loop.create_datagram_endpoint = fake_endpoint
+            client = ClientAsync(server=LOCALHOST, secret=SECRET, dict=self.dict,
+                                 loop=self.loop, retries=0, timeout=0.15)
+            await client.initialize_transports(enable_auth=True)
+            protocol = client.protocol_auth
+            self.assertIsInstance(protocol.transport, FakeDatagramTransport)
+
+            futures = []
+            for _ in range(256):
+                futures.append(client.SendPacket(
+                    client.CreateAuthPacket(User_Name='alice')))
+            self.assertEqual(len(protocol.pending_requests), 256)
+            with self.assertRaisesRegex(Exception, 'No free packet id'):
+                client.CreateAuthPacket()
+
+            for future in futures:
+                future.cancel()
+            await asyncio.sleep(0)
+            self.assertEqual(protocol.pending_requests, {})
+
+            # ids are reusable and a normal transaction still works, recording
+            # the request bytes its reply was matched against
+            req = client.CreateAuthPacket(User_Name='bob')
+            future = client.SendPacket(req)
+            self.deliver(protocol, req.CreateReply().ReplyPacket(),
+                         ('198.51.100.7', 4900))
+            self.assertEqual(future.result().code, packet.AccessAccept)
+            self.assert_every_reply_matches_its_request(client)
+
+            timer = protocol.timeout_future
+            await client.deinitialize_transports()
+            self.assertTrue(timer.cancelled())
+            self.assertIsNone(client.protocol_auth)
+        self.loop.run_until_complete(test())
 
 
 class AsyncServerProtocolTests(unittest.TestCase):
