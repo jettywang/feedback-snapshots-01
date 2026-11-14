@@ -113,6 +113,24 @@ class HeaderTable:
         self.resized = False
         self.dynamic_entries: deque[tuple[bytes, bytes]] = deque()
 
+        # Auxiliary indexes over the dynamic table, kept in sync with
+        # ``dynamic_entries`` so that ``search`` does not need to scan it
+        # linearly. Both map to deques of insertion "ticks" (monotonically
+        # increasing sequence numbers handed out by ``add``). Ticks are used
+        # instead of table indices because every prepended entry shifts the
+        # absolute index of all existing entries, while an entry's tick never
+        # changes: its current position is always ``head_tick - tick``.
+        #
+        # Each deque holds ticks in ascending order, so the most recent
+        # (lowest-indexed) matching entry is always the rightmost tick and
+        # eviction of the oldest entry is a ``popleft``. A key is dropped as
+        # soon as its deque empties, so the indexes never retain references
+        # to evicted entries and their total size stays proportional to the
+        # number of live dynamic entries, however adversarial the traffic.
+        self._next_tick = 0
+        self._name_ticks: dict[bytes, deque[int]] = {}
+        self._perfect_ticks: dict[tuple[bytes, bytes], deque[int]] = {}
+
     def get_by_index(self, index: int) -> tuple[bytes, bytes]:
         """
         Returns the entry specified by index
@@ -156,9 +174,15 @@ class HeaderTable:
         if size > self._maxsize:
             self.dynamic_entries.clear()
             self._current_size = 0
+            self._name_ticks.clear()
+            self._perfect_ticks.clear()
         else:
             # Add new entry
+            tick = self._next_tick
+            self._next_tick += 1
             self.dynamic_entries.appendleft((name, value))
+            self._name_ticks.setdefault(name, deque()).append(tick)
+            self._perfect_ticks.setdefault((name, value), deque()).append(tick)
             self._current_size += size
             self._shrink()
 
@@ -183,13 +207,38 @@ class HeaderTable:
                 partial = (header_name_search_result[0], name, None)
 
         offset = HeaderTable.STATIC_TABLE_LENGTH + 1
-        for (i, (n, v)) in enumerate(self.dynamic_entries):
-            if n == name:
-                if v == value:
-                    return i + offset, n, v
-                elif partial is None:
-                    partial = (i + offset, n, None)
+        head_tick = self._next_tick - 1
+
+        # A perfect match in the dynamic table wins over any partial match,
+        # and the most recent matching entry (rightmost tick) has the
+        # lowest table index, exactly as the linear scan found it first.
+        ticks = self._perfect_ticks.get((name, value))
+        if ticks:
+            return head_tick - ticks[-1] + offset, name, value
+
+        if partial is None:
+            ticks = self._name_ticks.get(name)
+            if ticks:
+                partial = (head_tick - ticks[-1] + offset, name, None)
         return partial
+
+    def _forget_entry(self, name: bytes, value: bytes) -> None:
+        """
+        Drops the auxiliary index entries for the oldest dynamic table
+        entry, which is always the leftmost tick of each deque.
+        """
+        ticks = self._name_ticks.get(name)
+        if ticks is not None:
+            ticks.popleft()
+            if not ticks:
+                del self._name_ticks[name]
+
+        perfect_key = (name, value)
+        ticks = self._perfect_ticks.get(perfect_key)
+        if ticks is not None:
+            ticks.popleft()
+            if not ticks:
+                del self._perfect_ticks[perfect_key]
 
     @property
     def maxsize(self) -> int:
@@ -205,6 +254,8 @@ class HeaderTable:
         if newmax <= 0:
             self.dynamic_entries.clear()
             self._current_size = 0
+            self._name_ticks.clear()
+            self._perfect_ticks.clear()
         elif oldmax > newmax:
             self._shrink()
 
@@ -216,6 +267,7 @@ class HeaderTable:
         while cursize > self._maxsize:
             name, value = self.dynamic_entries.pop()
             cursize -= table_entry_size(name, value)
+            self._forget_entry(name, value)
             log.debug("Evicting %s: %s from the header table", name, value)
         self._current_size = cursize
 
