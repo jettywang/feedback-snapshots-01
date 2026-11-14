@@ -3,6 +3,19 @@ Changelog
 =========
 
 - :release:`5.1.0 <2026-10-17>`
+- :feature:`-` Added restricted issuance of OpenSSH user certificates via the
+  new `paramiko.cert` module. `CertificateAuthority
+  <paramiko.cert.CertificateAuthority>` accepts a fixed Ed25519 CA key plus a
+  server-owned `CertificatePolicy <paramiko.cert.CertificatePolicy>`; caller
+  requests may only narrow the approved principals, validity window, and
+  extensions, and empty principal lists are rejected rather than encoded as
+  "valid for all principals". ``force-command`` and ``source-address`` critical
+  options use the nested inner-string encoding required by
+  ``PROTOCOL.certkeys``; unknown or duplicate options are refused. Only
+  plain Ed25519 user and CA keys are supported, so CA and end-entity roles
+  cannot be conflated. Issuance returns the public certificate plus public
+  audit fields only - never CA private key material, and never an
+  authentication/authorisation decision.
 - :release:`5.0.1 <2026-10-17>`
 - :bug:`2462` (w/ earlier fix attempts :issue:`2475` and :issue:`2465`) An API
   gap between `~paramiko.agent.AgentKey` and the other, 'concrete'

@@ -81,6 +81,15 @@ from paramiko.packet import Packetizer
 from paramiko.file import BufferedFile
 from paramiko.agent import Agent, AgentKey
 from paramiko.pkey import PKey, PublicBlob, UnknownKeyType
+from paramiko.cert import (
+    CertificateAudit,
+    CertificateAuthority,
+    CertificateError,
+    CertificatePolicy,
+    CertificateRequest,
+    SignedCertificate,
+    issue_user_certificate,
+)
 from paramiko.hostkeys import HostKeys
 from paramiko.config import SSHConfig, SSHConfigDict
 from paramiko.proxy import ProxyCommand
