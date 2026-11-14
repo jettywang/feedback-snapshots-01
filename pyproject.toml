@@ -107,6 +107,11 @@ ignore = [
     "S",      # bandit: Not running bandit on examples
     "T201",   # print is ok in examples
 ]
+"install_planner/demo.py" = [
+    "D",      # pydocstyle: runnable demo mirrors the examples/ style
+    "S",      # bandit: demo assertions are intentional
+    "T201",   # print is the output channel of the demo
+]
 "verify_release" = [
     "ERA001", # commented code is fine here
     "S603",   # bandit: this flags all uses of subprocess.run as vulnerable
