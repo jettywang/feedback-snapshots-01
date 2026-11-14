@@ -7,6 +7,10 @@ Thus, they concern AuthHandler and AuthStrategy, with a side of Transport.
 from logging import Logger
 from unittest.mock import Mock
 
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from pytest import raises
 
 from paramiko import (
@@ -19,6 +23,7 @@ from paramiko import (
     BadAuthenticationType,
     Ed25519Key,
     InMemoryPrivateKey,
+    Message,
     NoneAuth,
     OnDiskPrivateKey,
     Password,
@@ -27,7 +32,15 @@ from paramiko import (
     RSAKey,
     SourceResult,
     SSHException,
+    Transport,
 )
+from paramiko.agent import (
+    SSH2_AGENT_SIGN_RESPONSE,
+    SSH_AGENT_RSA_SHA2_256,
+    SSH_AGENT_RSA_SHA2_512,
+    cSSH2_AGENTC_SIGN_REQUEST,
+)
+from paramiko.common import cMSG_USERAUTH_REQUEST
 
 from ._util import (
     _support,
@@ -214,6 +227,382 @@ class SHA2SignaturePubkeys:
         ) as (tc, ts):
             assert tc.is_authenticated()
             assert tc._agreed_pubkey_algorithm == "rsa-sha2-256"
+
+
+class _RecordingClientTransport(Transport):
+    """
+    Client-side Transport recording every raw userauth request it sends.
+
+    This lets tests assert on what actually went over the wire, instead of
+    trusting log output or other display-layer names.
+    """
+
+    def __init__(self, *args, **kwargs):
+        self.recorded_userauth_requests = []
+        super().__init__(*args, **kwargs)
+
+    def _send_message(self, data):
+        raw = data.asbytes()
+        if raw[:1] == cMSG_USERAUTH_REQUEST:
+            self.recorded_userauth_requests.append(raw)
+        return super()._send_message(data)
+
+
+def _server_advertising(pubkeys):
+    """
+    Build a server Transport class advertising a custom server-sig-algs list.
+    """
+
+    class CustomServerTransport(Transport):
+        @property
+        def preferred_pubkeys(self):
+            return pubkeys
+
+    return CustomServerTransport
+
+
+def _parse_publickey_request(raw):
+    """
+    Parse a raw SSH_MSG_USERAUTH_REQUEST into its publickey-auth fields.
+    """
+    msg = Message(raw)
+    msg.get_byte()  # SSH_MSG_USERAUTH_REQUEST
+    request = dict(
+        username=msg.get_text(),
+        service=msg.get_text(),
+        method=msg.get_text(),
+        has_signature=msg.get_boolean(),
+        algorithm=msg.get_text(),
+        key_blob=msg.get_binary(),
+    )
+    request["signature"] = (
+        msg.get_binary() if request["has_signature"] else None
+    )
+    return request
+
+
+def _single_signed_request(tc):
+    signed = [
+        _parse_publickey_request(raw)
+        for raw in tc.recorded_userauth_requests
+    ]
+    signed = [
+        request
+        for request in signed
+        if request["method"] == "publickey" and request["has_signature"]
+    ]
+    assert len(signed) == 1
+    return signed[0]
+
+
+def _rsa_public_key_from_blob(key_blob):
+    """
+    Extract the RSA public key straight out of a wire-format key blob.
+
+    Works for both plain ``ssh-rsa`` blobs and
+    ``ssh-rsa-cert-v01@openssh.com`` blobs (where e/n follow the nonce), so
+    verification uses the key the client actually sent, not test fixtures.
+    """
+    msg = Message(key_blob)
+    blob_type = msg.get_text()
+    if blob_type.endswith("-cert-v01@openssh.com"):
+        msg.get_string()  # nonce
+    public_numbers = rsa.RSAPublicNumbers(e=msg.get_mpint(), n=msg.get_mpint())
+    return blob_type, public_numbers.public_key(default_backend())
+
+
+def _session_blob(session_id, request):
+    """
+    Rebuild the signed session blob (RFC 4253 section 7) from wire fields.
+    """
+    blob = Message()
+    blob.add_string(session_id)
+    blob.add_byte(cMSG_USERAUTH_REQUEST)
+    blob.add_string(request["username"])
+    blob.add_string(request["service"])
+    blob.add_string("publickey")
+    blob.add_boolean(True)
+    blob.add_string(request["algorithm"])
+    blob.add_string(request["key_blob"])
+    return blob.asbytes()
+
+
+def _verify_independently(public_key, signature, data, hash_algorithm):
+    """
+    Verify a signature using ``cryptography`` directly (no Paramiko code).
+    """
+    public_key.verify(
+        signature, data, padding.PKCS1v15(), hash_algorithm
+    )
+
+
+class _SigningFakeAgent:
+    """
+    Minimal in-process agent which really signs, recording request flags.
+
+    Flag semantics per RFC 8332: 0 means "default" (SHA-1 for RSA keys),
+    so a SHA-1-free client must always send a nonzero flag for RSA.
+    """
+
+    FLAG_HASHES = {
+        0: hashes.SHA1,
+        SSH_AGENT_RSA_SHA2_256: hashes.SHA256,
+        SSH_AGENT_RSA_SHA2_512: hashes.SHA512,
+    }
+    FLAG_NAMES = {
+        0: "ssh-rsa",
+        SSH_AGENT_RSA_SHA2_256: "rsa-sha2-256",
+        SSH_AGENT_RSA_SHA2_512: "rsa-sha2-512",
+    }
+
+    def __init__(self, pkey):
+        self.pkey = pkey
+        self.sign_requests = []
+
+    def _send_message(self, msg):
+        msg.rewind()
+        assert msg.get_byte() == cSSH2_AGENTC_SIGN_REQUEST
+        self.sign_requests.append(
+            dict(
+                key_blob=msg.get_string(),
+                data=msg.get_string(),
+                flags=msg.get_int(),
+            )
+        )
+        request = self.sign_requests[-1]
+        signature = self.pkey.key.sign(
+            request["data"],
+            padding.PKCS1v15(),
+            self.FLAG_HASHES[request["flags"]](),
+        )
+        blob = Message()
+        blob.add_string(self.FLAG_NAMES[request["flags"]])
+        blob.add_string(signature)
+        response = Message()
+        response.add_string(bytes(blob))
+        response.rewind()
+        return SSH2_AGENT_SIGN_RESPONSE, response
+
+
+class SHA1FreeRSAUserauth:
+    """
+    Proof that RSA userauth never silently falls back to SHA-1 (ssh-rsa).
+
+    Every scenario inspects the actual wire traffic - the algorithm field of
+    the userauth request, the algorithm name inside the signature blob, and
+    agent sign-request flags - and then independently verifies the emitted
+    signature with ``cryptography`` at the local peer. Log messages are never
+    consulted, and the legacy ``ssh-rsa`` name inside the public key blob is
+    explicitly distinguished from the signature algorithm in use.
+    """
+
+    _SIG_HASHES = {
+        "rsa-sha2-256": hashes.SHA256,
+        "rsa-sha2-512": hashes.SHA512,
+    }
+
+    def _assert_sha2_userauth(
+        self, tc, ts, algorithm, sig_name, blob_type
+    ):
+        request = _single_signed_request(tc)
+        # The algorithm field of the request is a SHA2 variant, never ssh-rsa
+        assert request["algorithm"] == algorithm
+        assert request["algorithm"] != "ssh-rsa"
+        # The public key blob still uses its legacy ssh-rsa key-type name;
+        # that name identifies the key, NOT the signature algorithm
+        wire_blob_type, public_key = _rsa_public_key_from_blob(
+            request["key_blob"]
+        )
+        assert wire_blob_type == blob_type
+        # The signature blob's inner name carries the real algorithm
+        sig_message = Message(request["signature"])
+        wire_sig_name = sig_message.get_text()
+        assert wire_sig_name == sig_name
+        signature = sig_message.get_binary()
+        # Internal bookkeeping agrees with what went over the wire
+        assert tc._agreed_pubkey_algorithm == algorithm
+        # Independent cryptographic verification at the local peer: the
+        # signature is genuine RSA-SHA2...
+        blob = _session_blob(ts.session_id, request)
+        _verify_independently(
+            public_key, signature, blob, self._SIG_HASHES[sig_name]()
+        )
+        # ...and is positively NOT SHA-1
+        with raises(InvalidSignature):
+            _verify_independently(
+                public_key, signature, blob, hashes.SHA1()
+            )
+
+    def local_key_with_full_server_sig_algs(self):
+        privkey = RSAKey.from_private_key_file(_support("rsa.key"))
+        with server(
+            pubkeys=[privkey],
+            connect=dict(username="slowdive", pkey=privkey),
+            transport_factory=_RecordingClientTransport,
+        ) as (tc, ts):
+            self._assert_sha2_userauth(
+                tc,
+                ts,
+                algorithm="rsa-sha2-512",
+                sig_name="rsa-sha2-512",
+                blob_type="ssh-rsa",
+            )
+
+    def local_cert_with_full_server_sig_algs(self):
+        privkey = RSAKey.from_private_key_file(_support("rsa.key"))
+        privkey.load_certificate(_support("rsa.key-cert.pub"))
+        with server(
+            pubkeys=[privkey],
+            connect=dict(username="slowdive", pkey=privkey),
+            transport_factory=_RecordingClientTransport,
+        ) as (tc, ts):
+            self._assert_sha2_userauth(
+                tc,
+                ts,
+                algorithm="rsa-sha2-512-cert-v01@openssh.com",
+                sig_name="rsa-sha2-512",
+                blob_type="ssh-rsa-cert-v01@openssh.com",
+            )
+
+    def agent_key_with_full_server_sig_algs(self):
+        privkey = RSAKey.from_private_key_file(_support("rsa.key"))
+        agent = _SigningFakeAgent(privkey)
+        agent_key = AgentKey(agent=agent, blob=privkey.asbytes())
+        with server(
+            pubkeys=[privkey],
+            connect=dict(username="slowdive", pkey=agent_key),
+            transport_factory=_RecordingClientTransport,
+        ) as (tc, ts):
+            self._assert_sha2_userauth(
+                tc,
+                ts,
+                algorithm="rsa-sha2-512",
+                sig_name="rsa-sha2-512",
+                blob_type="ssh-rsa",
+            )
+            # Agent was explicitly asked for SHA2-512; never the legacy
+            # default (flags=0, i.e. SHA-1)
+            assert [r["flags"] for r in agent.sign_requests] == [
+                SSH_AGENT_RSA_SHA2_512
+            ]
+
+    def agent_cert_with_full_server_sig_algs(self):
+        privkey = RSAKey.from_private_key_file(_support("rsa.key"))
+        privkey.load_certificate(_support("rsa.key-cert.pub"))
+        agent = _SigningFakeAgent(privkey)
+        agent_key = AgentKey(
+            agent=agent, blob=privkey.public_blob.key_blob
+        )
+        with server(
+            pubkeys=[privkey],
+            connect=dict(username="slowdive", pkey=agent_key),
+            transport_factory=_RecordingClientTransport,
+        ) as (tc, ts):
+            self._assert_sha2_userauth(
+                tc,
+                ts,
+                algorithm="rsa-sha2-512-cert-v01@openssh.com",
+                sig_name="rsa-sha2-512",
+                # NOTE: agent-held certs send the plain key blob on the wire
+                # (AgentKey.asbytes prefers the inner key; cf the RSA-CERT
+                # degradation comment in AgentKey.sign_ssh_data). The
+                # signature algorithm is still SHA2, which is what matters.
+                blob_type="ssh-rsa",
+            )
+            assert [r["flags"] for r in agent.sign_requests] == [
+                SSH_AGENT_RSA_SHA2_512
+            ]
+
+    def missing_server_sig_algs_still_sha2(self):
+        privkey = RSAKey.from_private_key_file(_support("rsa.key"))
+        with server(
+            pubkeys=[privkey],
+            connect=dict(username="slowdive", pkey=privkey),
+            transport_factory=_RecordingClientTransport,
+            server_init=dict(server_sig_algs=False),
+        ) as (tc, ts):
+            # No server-sig-algs at all: client falls back to its own first
+            # preferred RSA algorithm, which is SHA2-512, not legacy ssh-rsa
+            self._assert_sha2_userauth(
+                tc,
+                ts,
+                algorithm="rsa-sha2-512",
+                sig_name="rsa-sha2-512",
+                blob_type="ssh-rsa",
+            )
+
+    def only_legacy_algorithms_advertised_fails_before_any_signature(self):
+        privkey = RSAKey.from_private_key_file(_support("rsa.key"))
+        with server(
+            pubkeys=[privkey],
+            connect=dict(username="slowdive", pkey=privkey),
+            transport_factory=_RecordingClientTransport,
+            server_transport_factory=_server_advertising(("ssh-rsa",)),
+            catch_error=True,
+        ) as (tc, ts, err):
+            # Server only allows the disabled ssh-rsa: no agreement exists
+            assert isinstance(err, AuthenticationException)
+            assert "Unable to agree" in str(err)
+            # ...and the client failed BEFORE sending any signed request,
+            # rather than emitting a non-compliant SHA-1 signature
+            assert tc.recorded_userauth_requests == []
+
+    def conflicting_server_list_fails_before_any_signature(self):
+        privkey = RSAKey.from_private_key_file(_support("rsa.key"))
+        with server(
+            pubkeys=[privkey],
+            connect=dict(username="slowdive", pkey=privkey),
+            transport_factory=_RecordingClientTransport,
+            # Server demands exactly the algorithm the client has disabled
+            server_transport_factory=_server_advertising(("rsa-sha2-256",)),
+            client_init=dict(
+                disabled_algorithms=dict(pubkeys=["rsa-sha2-256"])
+            ),
+            catch_error=True,
+        ) as (tc, ts, err):
+            assert isinstance(err, AuthenticationException)
+            assert "Unable to agree" in str(err)
+            assert tc.recorded_userauth_requests == []
+
+    def legacy_explicitly_allowed_uses_sha1_compat_control(self, monkeypatch):
+        # Compat control: explicitly re-enable legacy ssh-rsa/SHA-1 on both
+        # peers (the moral equivalent of `PubkeyAcceptedAlgorithms +ssh-rsa`
+        # in OpenSSH). This proves the wire-level assertions above are not
+        # vacuous: when SHA-1 IS used, these exact checks detect it.
+        monkeypatch.setitem(RSAKey.HASHES, "ssh-rsa", hashes.SHA1)
+        monkeypatch.setitem(Transport._key_info, "ssh-rsa", RSAKey)
+        monkeypatch.setattr(
+            Transport,
+            "_preferred_pubkeys",
+            ("ssh-rsa",) + Transport._preferred_pubkeys,
+        )
+        privkey = RSAKey.from_private_key_file(_support("rsa.key"))
+        with server(
+            pubkeys=[privkey],
+            connect=dict(username="slowdive", pkey=privkey),
+            transport_factory=_RecordingClientTransport,
+        ) as (tc, ts):
+            request = _single_signed_request(tc)
+            # With legacy explicitly allowed, the old algorithm really does
+            # show up on the wire...
+            assert request["algorithm"] == "ssh-rsa"
+            assert tc._agreed_pubkey_algorithm == "ssh-rsa"
+            sig_message = Message(request["signature"])
+            assert sig_message.get_text() == "ssh-rsa"
+            signature = sig_message.get_binary()
+            _, public_key = _rsa_public_key_from_blob(request["key_blob"])
+            blob = _session_blob(ts.session_id, request)
+            # ...and the independent verifier positively identifies it as
+            # SHA-1 (so "SHA-1 does not verify" in the other tests is a real
+            # signal, not a broken verifier)...
+            _verify_independently(
+                public_key, signature, blob, hashes.SHA1()
+            )
+            # ...while SHA-2 correctly fails against a SHA-1 signature
+            with raises(InvalidSignature):
+                _verify_independently(
+                    public_key, signature, blob, hashes.SHA512()
+                )
 
 
 class AuthSource_:
