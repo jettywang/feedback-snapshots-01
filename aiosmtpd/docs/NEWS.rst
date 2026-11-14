@@ -17,6 +17,20 @@ Fixed/Improved
   ``salt`` column, so re-run ``make_user_db.py`` if you already have one.
   (Closes #475)
 
+Security
+--------
+
+* Added a ``TrustedProxies`` admission policy
+  (``proxy_protocol_trusted_proxies``) so the PROXY protocol is honoured only
+  for directly-connected peers on a configured allowlist. The trust decision is
+  based on the real transport peer before any PROXY header is parsed, so a
+  public client cannot masquerade as an internal source by sending a PROXY
+  preamble. ``Session.actual_peer`` always exposes the real adjacent endpoint and
+  ``Session.proxied_peer`` the proxy-claimed origin. A PROXYv2 SSL TLV is treated
+  purely as reported data and can no longer (and never could) establish local
+  TLS or satisfy the AUTH TLS requirement; STARTTLS/RSET preserve the admitted
+  proxy metadata.
+
 
 1.4.6 (2024-05-18)
 ==================

@@ -8,13 +8,21 @@ import struct
 from collections import deque
 from enum import IntEnum
 from functools import partial
-from ipaddress import IPv4Address, IPv6Address, ip_address
-from typing import Any, Dict, Optional, Protocol, Tuple, Union
+from ipaddress import (
+    IPv4Address,
+    IPv4Network,
+    IPv6Address,
+    IPv6Network,
+    ip_address,
+    ip_network,
+)
+from typing import Any, Dict, Iterable, List, Optional, Protocol, Set, Tuple, Union
 
 import attr
 from public import public
 
 V2_SIGNATURE = b"\r\n\r\n\x00\r\nQUIT\n"
+V1_SIGNATURE = b"PROXY"
 
 
 class V2_CMD(IntEnum):
@@ -77,6 +85,102 @@ __all__.extend(
 _NOT_FOUND = object()
 
 log = logging.getLogger("mail.debug")
+
+
+@public
+def is_proxy_signature(data: Union[bytes, bytearray, memoryview]) -> bool:
+    """
+    Return True if the given bytes begin with either a PROXYv1 (``PROXY``) or a
+    PROXYv2 signature. Only the signature prefix is inspected; no parsing is done.
+    """
+    head = bytes(data[: len(V2_SIGNATURE)])
+    return head.startswith(V1_SIGNATURE) or head.startswith(V2_SIGNATURE)
+
+
+_IPNetwork = Union[IPv4Network, IPv6Network]
+# The "peer" reported by transport.get_extra_info("peername"):
+#   - INET:  (ip_str, port)
+#   - INET6: (ip_str, port, flowinfo, scopeid)
+#   - UNIX:  path_str (or bytes)
+PeerName = Union[tuple, str, bytes, None]
+
+
+@public
+class TrustedProxies:
+    """
+    Admission policy deciding which *directly connected* peers are allowed to
+    speak the PROXY protocol.
+
+    The decision is based solely on the real transport-level peer (the address of
+    the machine that opened the TCP connection), never on any address claimed
+    inside a PROXY header. A PROXY header is therefore only ever honoured when it
+    arrives over a connection whose real peer is already trusted.
+
+    Entries can be:
+
+      * an IPv4/IPv6 address (e.g. ``"10.0.0.1"``)
+      * an IPv4/IPv6 network in CIDR notation (e.g. ``"10.0.0.0/8"``)
+      * a UNIX socket path (anything that is not a valid IP/network); the path is
+        matched verbatim against a UNIX peername.
+
+    An *empty* policy trusts nobody: every INET/UNIX/UNSPEC peer is rejected.
+    """
+
+    def __init__(
+        self, entries: Optional[Iterable[Union[str, bytes, _IPNetwork]]] = None
+    ):
+        self._networks: List[_IPNetwork] = []
+        self._unix_paths: Set[Union[str, bytes]] = set()
+        for entry in entries or ():
+            if isinstance(entry, (IPv4Network, IPv6Network)):
+                self._networks.append(entry)
+                continue
+            if isinstance(entry, bytes):
+                self._unix_paths.add(entry)
+                continue
+            try:
+                self._networks.append(ip_network(entry, strict=False))
+            except ValueError:
+                # Not an IP address/network -> treat as a UNIX socket path.
+                self._unix_paths.add(entry)
+
+    @property
+    def networks(self) -> Tuple[_IPNetwork, ...]:
+        return tuple(self._networks)
+
+    @property
+    def unix_paths(self) -> Tuple[Union[str, bytes], ...]:
+        return tuple(self._unix_paths)
+
+    def is_trusted(self, peername: PeerName) -> bool:
+        """
+        Return True only if the transport-level *peername* belongs to a configured
+        trusted proxy.
+
+        :param peername: The value of ``transport.get_extra_info("peername")``.
+        """
+        if peername is None:
+            return False
+        if isinstance(peername, (str, bytes)):
+            # UNIX domain socket peername is the peer's socket path.
+            return peername in self._unix_paths
+        if not peername:
+            return False
+        host = peername[0]
+        try:
+            addr = ip_address(host)
+        except ValueError:
+            return False
+        return any(addr in network for network in self._networks)
+
+    def __bool__(self) -> bool:
+        return bool(self._networks) or bool(self._unix_paths)
+
+    def __repr__(self) -> str:
+        return (
+            f"TrustedProxies(networks={self._networks!r}, "
+            f"unix_paths={self._unix_paths!r})"
+        )
 
 
 # region #### Custom Types ############################################################
@@ -518,19 +622,35 @@ async def _get_v2(reader: AsyncReader, initial: Union[bytes, bytearray, memoryvi
 
 
 @public
-async def get_proxy(reader_func: AsyncReader) -> ProxyData:
+async def get_proxy(
+    reader_func: AsyncReader,
+    initial: Union[bytes, bytearray, memoryview] = b"",
+) -> ProxyData:
     """
     :param reader_func: Async function that implements the AsyncReader protocol.
+    :param initial: Signature bytes already read from the stream. Must be either
+        the 5-octet v1 signature (``PROXY``) or the full 12-octet v2 signature.
+        The caller is responsible for having verified (via
+        :func:`is_proxy_signature`) that these begin a PROXY header; they are
+        handed straight to the parser so they are not read twice.
     :return: Proxy Data
     """
     log.debug("Waiting for PROXY signature")
-    signature = await reader_func.readexactly(5)
+    signature = bytes(initial)
+    if len(signature) < 5:
+        signature += await reader_func.readexactly(5 - len(signature))
     try:
         if signature == b"PROXY":
             log.debug("PROXY version 1")
             return await _get_v1(reader_func, signature)
-        elif signature == V2_SIGNATURE[0:5]:
+        elif signature[:5] == V2_SIGNATURE[0:5]:
             log.debug("PROXY version 2")
+            # The v2 parser wants the complete 12-octet signature. If only the
+            # 5-octet prefix was pre-read, fetch the remainder now.
+            if len(signature) < len(V2_SIGNATURE):
+                signature += await reader_func.readexactly(
+                    len(V2_SIGNATURE) - len(signature)
+                )
             return await _get_v2(reader_func, signature)
         else:
             return ProxyData(version=None).with_error("PROXY unrecognized signature")

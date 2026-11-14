@@ -37,7 +37,13 @@ import attr
 from public import public
 
 from aiosmtpd import __version__, _get_or_new_eventloop
-from aiosmtpd.proxy_protocol import ProxyData, get_proxy
+from aiosmtpd.proxy_protocol import (
+    V2_SIGNATURE,
+    ProxyData,
+    TrustedProxies,
+    get_proxy,
+    is_proxy_signature,
+)
 
 
 # region #### Custom Data Types #######################################################
@@ -177,6 +183,35 @@ class Session:
         """
 
         self.authenticated: Optional[bool] = None
+
+    @property
+    def actual_peer(self) -> PeerType:
+        """
+        The real, transport-level peer of this connection.
+
+        This is always the directly adjacent endpoint (e.g. the load balancer),
+        taken from the socket, and is *never* influenced by anything a client
+        claims inside a PROXY header. Identical to :attr:`peer`; provided under an
+        explicit name so handlers can state which identity they are trusting.
+        """
+        return self.peer
+
+    @property
+    def proxied_peer(self) -> Optional[Tuple[Any, Any]]:
+        """
+        The origin *claimed* by a trusted proxy's PROXY header, as an
+        ``(address, port)`` tuple, or ``None`` if there is no usable PROXY data.
+
+        This value is self-reported by the (already-admitted) proxy and must not be
+        treated as more trustworthy than :attr:`actual_peer`. For an
+        ``UNKNOWN``/``UNSPEC`` header or a UNIX-family header it returns ``None``.
+        """
+        proxy_data = self.proxy_data
+        if proxy_data is None or not proxy_data.valid:
+            return None
+        if proxy_data.src_addr is None or proxy_data.src_port is None:
+            return None
+        return proxy_data.src_addr, proxy_data.src_port
 
     @property
     def login_data(self) -> Any:
@@ -338,6 +373,9 @@ class SMTP(asyncio.StreamReaderProtocol):
             command_call_limit: Union[int, Dict[str, int], None] = None,
             authenticator: Optional[AuthenticatorType] = None,
             proxy_protocol_timeout: Optional[Union[int, float]] = None,
+            proxy_protocol_trusted_proxies: Optional[
+                Union[TrustedProxies, Iterable[Union[str, bytes]]]
+            ] = None,
             loop: Optional[asyncio.AbstractEventLoop] = None
     ):
         self.__ident__ = ident or __ident__
@@ -388,6 +426,17 @@ class SMTP(asyncio.StreamReaderProtocol):
             elif proxy_protocol_timeout < 3.0:
                 log.warning("proxy_protocol_timeout < 3.0")
         self._proxy_timeout = proxy_protocol_timeout
+
+        if proxy_protocol_trusted_proxies is None:
+            # No explicit admission policy. Keep the historical behaviour: when
+            # PROXY support is enabled any directly connected peer may send a
+            # PROXY header. Deployments exposed to untrusted networks should pass
+            # an explicit TrustedProxies policy instead.
+            self._trusted_proxies: Optional[TrustedProxies] = None
+        elif isinstance(proxy_protocol_trusted_proxies, TrustedProxies):
+            self._trusted_proxies = proxy_protocol_trusted_proxies
+        else:
+            self._trusted_proxies = TrustedProxies(proxy_protocol_trusted_proxies)
 
         self._authenticator: Optional[AuthenticatorType]
         self._auth_callback: Optional[AuthCallbackType]
@@ -503,10 +552,18 @@ class SMTP(asyncio.StreamReaderProtocol):
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         # Reset state due to rfc3207 part 4.2.
         self._set_rset_state()
+        seen_starttls = (self._original_transport is not None)
+        # A STARTTLS upgrade swaps the transport but not the connection's trust
+        # boundary: the real peer is unchanged and the proxy metadata still derives
+        # from the same (already admitted) PROXY header. Carry it across instead of
+        # letting the freshly created Session silently drop it. RSET/STARTTLS must
+        # never change the source from which this metadata is trusted.
+        prior_proxy_data = self.session.proxy_data if self.session else None
         self.session = self._create_session()
         self.session.peer = transport.get_extra_info('peername')
+        if seen_starttls:
+            self.session.proxy_data = prior_proxy_data
         self._reset_timeout()
-        seen_starttls = (self._original_transport is not None)
         if self.transport is not None and seen_starttls:
             # It is STARTTLS connection over normal connection.
             self._reader._transport = transport  # type: ignore[attr-defined]
@@ -587,6 +644,27 @@ class SMTP(asyncio.StreamReaderProtocol):
         self._reader = reader
         self._writer = writer
 
+    def _is_trusted_proxy_peer(self) -> bool:
+        """
+        Decide whether the *real* transport peer is allowed to speak PROXY.
+
+        The decision uses only the socket-level peer (``session.peer``), never any
+        address claimed inside a PROXY header. With no explicit policy the legacy
+        "trust any adjacent peer" behaviour is preserved.
+        """
+        if self._trusted_proxies is None:
+            return True
+        assert self.session is not None
+        return self._trusted_proxies.is_trusted(self.session.peer)
+
+    def _prepend_to_reader(self, data: bytes) -> None:
+        """Put already-consumed bytes back at the front of the read buffer."""
+        if data:
+            # StreamReader requires its buffer to remain a mutable bytearray.
+            self._reader._buffer = (  # type: ignore[attr-defined]
+                bytearray(data) + self._reader._buffer
+            )
+
     def _set_post_data_state(self):
         """Reset state variables to their post-DATA state."""
         self.envelope = self._create_envelope()
@@ -625,20 +703,67 @@ class SMTP(asyncio.StreamReaderProtocol):
         if self._proxy_timeout is not None:
             self._reset_timeout(self._proxy_timeout)
             log.debug("%r waiting PROXY handshake", self.session.peer)
-            self.session.proxy_data = await get_proxy(self._reader)
-            if self.session.proxy_data:
-                log.info("%r valid PROXY handshake", self.session.peer)
-                status = await self._call_handler_hook("PROXY", self.session.proxy_data)
-                log.debug("%r handle_PROXY returned %r", self.session.peer, status)
-            else:
-                log.warning("%r invalid PROXY handshake", self.session.peer)
-                status = False
-            if status is MISSING or not status:
-                log.info("%r rejected by handle_PROXY", self.session.peer)
+            # Read the full 5-octet signature prefix first so the admission
+            # decision can be made from the real peer before any PROXY header is
+            # parsed or trusted. A short read means the peer disconnected before a
+            # complete signature (and thus before any valid PROXY header) existed.
+            try:
+                initial = await self._reader.readexactly(5)
+            except asyncio.IncompleteReadError:
+                log.info("%r closed before PROXY handshake", self.session.peer)
                 assert self.transport is not None
                 self.transport.close()
                 return
-            self._reset_timeout()
+
+            # A v2 signature is 12 octets; finish reading it before the trust
+            # decision so a v2 preamble cannot slip through the 5-byte check.
+            if initial == V2_SIGNATURE[0:5]:
+                try:
+                    initial += await self._reader.readexactly(
+                        len(V2_SIGNATURE) - len(initial)
+                    )
+                except asyncio.IncompleteReadError:
+                    log.info("%r closed during PROXYv2 signature", self.session.peer)
+                    assert self.transport is not None
+                    self.transport.close()
+                    return
+
+            if not self._is_trusted_proxy_peer():
+                if is_proxy_signature(initial):
+                    # An untrusted, directly reachable client is trying to pass
+                    # itself off as an internal proxy. Refuse before parsing any of
+                    # its self-reported fields.
+                    log.warning(
+                        "%r sent PROXY preamble but is not a trusted proxy; "
+                        "rejecting",
+                        self.session.peer,
+                    )
+                    assert self.transport is not None
+                    self.transport.close()
+                    return
+                # Not a PROXY header at all: restore the bytes and fall through to
+                # the normal SMTP greeting. session.peer stays the real peer and no
+                # proxy_data is recorded.
+                self._prepend_to_reader(initial)
+                self.session.proxy_data = None
+                self._reset_timeout()
+            else:
+                self.session.proxy_data = await get_proxy(self._reader, initial)
+                if self.session.proxy_data:
+                    log.info("%r valid PROXY handshake", self.session.peer)
+                    status = await self._call_handler_hook(
+                        "PROXY", self.session.proxy_data
+                    )
+                    log.debug("%r handle_PROXY returned %r", self.session.peer, status)
+                else:
+                    log.warning("%r invalid PROXY handshake", self.session.peer)
+                    status = False
+                if status is MISSING or not status:
+                    log.info("%r rejected by handle_PROXY", self.session.peer)
+                    assert self.transport is not None
+                    self.transport.close()
+                    return
+                self._reset_timeout()
 
         await self.push('220 {} {}'.format(self.hostname, self.__ident__))
         if self._enforce_call_limit:

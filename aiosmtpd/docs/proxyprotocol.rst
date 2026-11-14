@@ -58,6 +58,81 @@ The `PROXY Protocol documentation suggests`_ that the timeout should not be less
 .. _as specified: https://github.com/haproxy/haproxy/blob/v2.3.0/doc/proxy-protocol.txt#L176-L180
 
 
+Trusted-proxy admission policy
+==============================
+
+A PROXY header is only trustworthy if it arrives from a proxy you actually
+control.  Without an admission policy, any host that can open a TCP connection
+could send a PROXY preamble and *claim* an arbitrary internal source address.
+
+Pass a :class:`~aiosmtpd.proxy_protocol.TrustedProxies` policy via the
+``proxy_protocol_trusted_proxies`` parameter of the SMTP class to admit only
+specific directly-connected peers:
+
+.. code-block:: python
+
+   from aiosmtpd.proxy_protocol import TrustedProxies
+
+   policy = TrustedProxies([
+       "10.0.0.0/8",        # IPv4/IPv6 address or CIDR network
+       "2001:db8::/32",
+       "/run/haproxy.sock", # UNIX socket path
+   ])
+   server = SMTP(
+       handler,
+       proxy_protocol_timeout=5.0,
+       proxy_protocol_trusted_proxies=policy,
+   )
+
+The decision is made from the **real, transport-level peer**
+(``transport.get_extra_info("peername")``) *before* any PROXY header is parsed,
+and never from an address claimed inside the header itself.
+
+* A trusted peer sending a PROXY header has it parsed and delivered to the
+  ``handle_PROXY`` hook as usual.
+* An untrusted peer that nevertheless sends a PROXY preamble is rejected and
+  the connection closed; its self-reported fields are never parsed or trusted.
+* An untrusted peer that sends ordinary (E)SMTP instead of a PROXY header is
+  still served (this supports mixed deployments reachable both through a load
+  balancer and directly); no proxy metadata is attached to such a session.
+* An *empty* :class:`~aiosmtpd.proxy_protocol.TrustedProxies` trusts nobody.
+
+If ``proxy_protocol_trusted_proxies`` is left unset, the legacy behaviour is
+retained (every adjacent peer is allowed to send a PROXY header).  Deployments
+exposed to untrusted networks should always pass an explicit policy.
+
+
+Actual peer vs. claimed origin
+==============================
+
+The handler can always tell the two identities apart on the
+:class:`~aiosmtpd.smtp.Session`:
+
+* :attr:`~aiosmtpd.smtp.Session.peer` /
+  :attr:`~aiosmtpd.smtp.Session.actual_peer`: the real, socket-level adjacent
+  endpoint.  This is never overwritten by a PROXY header and is the value that
+  should be used for trust decisions.
+* :attr:`~aiosmtpd.smtp.Session.proxied_peer`: the ``(address, port)`` origin
+  *claimed* by an admitted proxy's PROXY header, or ``None`` when there is no
+  usable PROXY data (e.g. an ``UNKNOWN``/``UNSPEC`` header).
+
+SSL TLV is informational only
+=============================
+
+A PROXYv2 header may carry an ``SSL`` TLV reporting whether the
+client-to-proxy leg was encrypted.  This is purely data reported by the proxy
+and is exposed through :attr:`ProxyData.tlv`.  It does **not** set
+:attr:`Session.ssl`, does not create a local TLS transport, and therefore cannot
+satisfy the ``auth_require_tls`` requirement: AUTH still demands a real TLS
+session established by this process (via STARTTLS/SMTPS), never a self-reported
+TLS claim.
+
+The trust source of the connection metadata is fixed at admission time and is
+not altered by later SMTP commands.  In particular, STARTTLS and RSET reset
+transaction/envelope state but preserve the real peer and the admitted proxy
+metadata.
+
+
 ``handle_PROXY`` Hook
 =====================
 
@@ -104,6 +179,32 @@ the ``aiosmtpd.proxy_protocol`` module contains the full parsing logic.
 All you need to do is to *validate* the parsed result in the ``handle_PROXY`` hook.
 
 .. py:module:: aiosmtpd.proxy_protocol
+
+Admission policy
+================
+
+.. py:class:: TrustedProxies(entries=None)
+
+   Decides which directly-connected peers may speak the PROXY protocol, based
+   solely on the real transport-level peer.
+
+   :param entries: An iterable of IPv4/IPv6 addresses, CIDR networks (strings or
+      :class:`ipaddress.IPv4Network`/:class:`ipaddress.IPv6Network`), or UNIX
+      socket paths. ``None`` or an empty iterable yields a policy that trusts
+      nobody.
+
+   .. py:method:: is_trusted(peername) -> bool
+
+      :param peername: The value of
+         ``transport.get_extra_info("peername")`` — an ``(host, port)`` tuple
+         for INET sockets, a socket path for UNIX sockets, or ``None``.
+      :return: ``True`` only if the real peer matches a configured entry.
+
+.. py:function:: is_proxy_signature(data) -> bool
+
+   :param data: The leading bytes of a connection.
+   :return: ``True`` if the bytes begin with a PROXYv1 (``PROXY``) or PROXYv2
+      signature. Only the signature prefix is inspected.
 
 Enums
 =====
