@@ -2,6 +2,7 @@
 # MIT License (see LICENSE or https://opensource.org/licenses/MIT)
 
 import base64
+import datetime
 import logging
 import os
 import socket
@@ -52,6 +53,14 @@ from spnego._ntlm_raw.messages import (
     TargetInfo,
     Version,
 )
+from spnego._ntlm_challenge import (
+    FixedClock,
+    InMemoryNTLMChallengeStore,
+    NTLMChallengeState,
+    NTLMChallengeStore,
+    NTLMClock,
+    SystemClock,
+)
 from spnego._ntlm_raw.security import seal, sign
 from spnego._text import to_text
 from spnego.channel_bindings import GssChannelBindings
@@ -62,6 +71,7 @@ from spnego.exceptions import (
     InvalidTokenError,
     NegotiateOptions,
     NoContextError,
+    NTLMChallengeMismatchError,
     OperationNotAvailableError,
     SpnegoError,
     UnsupportedQop,
@@ -69,6 +79,34 @@ from spnego.exceptions import (
 from spnego.iov import BufferType, IOVResBuffer
 
 log = logging.getLogger(__name__)
+
+# The AV_PAIR id used to bind an Authenticate message to the exact CHALLENGE
+# that issued it.  The value is in the private range so it is simply ignored by
+# initiators that do not know it, and it is included in the NTLMv2 response
+# hash so it cannot be changed or moved to another challenge.
+CHALLENGE_ID_AV_ID = 0x8001
+
+# Flags an initiator may omit from the CHALLENGE when producing its
+# Authenticate message.  All other flags must match the issued negotiation.
+_INITIATOR_OPTIONAL_FLAGS = NegotiateFlags.sign | NegotiateFlags.seal
+
+DEFAULT_CHALLENGE_LIFETIME = datetime.timedelta(seconds=300)
+
+
+def _coerce_clock(clock: typing.Optional[typing.Any]) -> NTLMClock:
+    """Convert an explicit time value into a clock.
+
+    A ``datetime`` is accepted as a convenience for callers that want a fixed
+    clock without importing the clock type.  Anything with a ``now()`` method is
+    used as the clock as is.
+    """
+    if clock is None:
+        return SystemClock()
+
+    if isinstance(clock, datetime.datetime):
+        return FixedClock(clock)
+
+    return typing.cast(NTLMClock, clock)
 
 
 def _get_credential_file() -> typing.Optional[str]:
@@ -238,6 +276,13 @@ class NTLMProxy(ContextProxy):
     """A context wrapper for a Python managed NTLM context.
 
     This is a context that can be used on Linux to generate NTLM without any system dependencies.
+
+    An acceptor can be made stateless across HTTP requests by passing a shared
+    ``challenge_store``.  The CHALLENGE is saved with an identifier that the
+    initiator echoes back in its NTLMv2 response, so a new acceptor instance can
+    find and validate the original challenge.  ``challenge_lifetime`` and
+    ``clock`` control when the saved challenge expires.  See
+    :mod:`spnego._ntlm_challenge` for the store, clock, and state interfaces.
     """
 
     def __init__(
@@ -251,6 +296,10 @@ class NTLMProxy(ContextProxy):
         usage: str = "initiate",
         protocol: str = "ntlm",
         options: NegotiateOptions = NegotiateOptions.none,
+        *,
+        challenge_store: typing.Optional[NTLMChallengeStore] = None,
+        challenge_lifetime: typing.Optional[typing.Union[datetime.timedelta, float, int]] = None,
+        clock: typing.Optional[typing.Union[NTLMClock, datetime.datetime]] = None,
         **kwargs: typing.Any,
     ) -> None:
         credentials = unify_credentials(username, password, required_protocol="ntlm")
@@ -315,6 +364,24 @@ class NTLMProxy(ContextProxy):
         self._temp_challenge: typing.Optional[Challenge] = None
         self._mic_required = False
 
+        # Challenge replay state.  Every context has a store so the acceptor
+        # can be exercised directly, acceptors that need to survive across
+        # requests should inject a shared store.
+        self._challenge_store: NTLMChallengeStore = challenge_store or InMemoryNTLMChallengeStore()
+        self._challenge_clock: NTLMClock = _coerce_clock(clock)
+        if challenge_lifetime is None:
+            self._challenge_lifetime = DEFAULT_CHALLENGE_LIFETIME
+        elif isinstance(challenge_lifetime, datetime.timedelta):
+            self._challenge_lifetime = challenge_lifetime
+        else:
+            self._challenge_lifetime = datetime.timedelta(seconds=float(challenge_lifetime))
+
+        if self._challenge_lifetime <= datetime.timedelta(0):
+            raise ValueError("challenge_lifetime must be greater than zero")
+
+        # The challenge this acceptor is currently working on.
+        self._challenge: typing.Optional[NTLMChallengeState] = None
+
         # Crypto state for signing and sealing.
         self._session_key: typing.Optional[bytes] = None
         self._sign_key_out: typing.Optional[bytes] = None
@@ -323,6 +390,20 @@ class NTLMProxy(ContextProxy):
         self._handle_in: typing.Optional[RC4Handle] = None
         self.__seq_num_in = 0
         self.__seq_num_out = 0
+
+    @property
+    def challenge(self) -> typing.Optional[NTLMChallengeState]:
+        """The challenge state this acceptor issued or completed.
+
+        This is mainly for observability; the shared store is the source of
+        truth for a request-scoped acceptor.
+        """
+        return self._challenge
+
+    @property
+    def challenge_store(self) -> NTLMChallengeStore:
+        """The challenge store backing the acceptor."""
+        return self._challenge_store
 
     @classmethod
     def available_protocols(cls, options: typing.Optional[NegotiateOptions] = None) -> typing.List[str]:
@@ -370,6 +451,9 @@ class NTLMProxy(ContextProxy):
             usage=self.usage,
             protocol=self.protocol,
             options=self.options,
+            challenge_store=self._challenge_store,
+            challenge_lifetime=self._challenge_lifetime,
+            clock=self._challenge_clock,
         )
 
     def step(
@@ -481,15 +565,36 @@ class NTLMProxy(ContextProxy):
         *,
         channel_bindings: typing.Optional[GssChannelBindings] = None,
     ) -> typing.Optional[bytes]:
-        if not self._temp_negotiate:
-            return self._step_accept_negotiate(in_token)
+        if self._complete:
+            raise InvalidTokenError(
+                context_msg="NTLM acceptor context is already complete, cannot process another token"
+            )
 
-        else:
+        if self._temp_negotiate:
             self._step_accept_authenticate(
                 in_token,
                 channel_bindings=channel_bindings or self.channel_bindings,
             )
             return None
+
+        # A stateless acceptor may receive the Authenticate message on a fresh
+        # instance.  It is identified by the message type in the token, not by
+        # the local instance state.
+        if self._is_authenticate_message(in_token):
+            self._step_accept_authenticate(
+                in_token,
+                channel_bindings=channel_bindings or self.channel_bindings,
+            )
+            return None
+
+        return self._step_accept_negotiate(in_token)
+
+    @staticmethod
+    def _is_authenticate_message(token: bytes) -> bool:
+        if not token or not token.startswith(b"NTLMSSP\x00") or len(token) < 12:
+            return False
+
+        return token[8:12] == b"\x03\x00\x00\x00"
 
     def _step_accept_negotiate(self, token: bytes) -> bytes:
         """Process the Negotiate message from the initiator."""
@@ -520,11 +625,18 @@ class NTLMProxy(ContextProxy):
         server_challenge = os.urandom(8)
         target_name = to_text(socket.gethostname()).upper()
 
+        # The challenge identifier is echoed by the initiator inside the
+        # NTLMv2 client challenge.  It lets a different acceptor instance
+        # locate this challenge and, because it is part of the hashed AV pairs,
+        # also binds the Authenticate message to this specific challenge.
+        challenge_id = base64.b16encode(os.urandom(16)).decode("ascii")
+
         target_info = TargetInfo()
         target_info[AvId.nb_computer_name] = target_name
         target_info[AvId.nb_domain_name] = "WORKSTATION"
         target_info[AvId.dns_computer_name] = to_text(socket.gethostname())
         target_info[AvId.timestamp] = FileTime.now()
+        target_info[AvId(CHALLENGE_ID_AV_ID)] = challenge_id.encode("ascii")
 
         # The Version field is only present when the flag is set, strict
         # decoders like gss-ntlmssp reject the message if it is missing.
@@ -539,18 +651,122 @@ class NTLMProxy(ContextProxy):
             target_info=target_info,
             **challenge_kwargs,
         )
+        challenge_bytes = challenge.pack()
+
+        now = self._challenge_clock.now()
+        state = NTLMChallengeState(
+            challenge_id=challenge_id,
+            server_challenge=server_challenge,
+            negotiate_message=negotiate.pack(),
+            challenge_message=challenge_bytes,
+            flags=flags,
+            target_info=target_info.pack(),
+            issued_at=now,
+            expires_at=now + self._challenge_lifetime,
+        )
+        typing.cast(NTLMChallengeStore, self._challenge_store).issue(state)
 
         self._temp_negotiate = negotiate
         self._temp_challenge = challenge
+        self._challenge = state
 
-        return challenge.pack()
+        return challenge_bytes
 
     def _step_accept_authenticate(self, token: bytes, channel_bindings: typing.Optional[GssChannelBindings]) -> None:
         """Process the Authenticate message from the initiator."""
-        negotiate = typing.cast(Negotiate, self._temp_negotiate)
-        challenge = typing.cast(Challenge, self._temp_challenge)
-        server_challenge = challenge.server_challenge
         auth = Authenticate.unpack(token)
+        store = typing.cast(NTLMChallengeStore, self._challenge_store)
+        now = self._challenge_clock.now()
+
+        challenge_id = self._extract_challenge_id(auth)
+        if not challenge_id:
+            # NTLMv1 and legacy NTLMv2 initiators cannot echo the challenge
+            # identifier.  They are only supported by the acceptor instance
+            # that issued the CHALLENGE; there is no way to recover that state
+            # in a new process.
+            if self._challenge is None:
+                raise NTLMChallengeMismatchError(
+                    context_msg="NTLM Authenticate message does not reference an issued challenge"
+                )
+
+            challenge_id = self._challenge.challenge_id
+
+        # If this acceptor issued a challenge, the Authenticate must be a
+        # response to that exact challenge.  A fresh acceptor with no local
+        # state is the process recovery case and resolves any pending challenge
+        # through the shared store instead.
+        if self._challenge is not None and self._challenge.challenge_id != challenge_id:
+            store.reject(challenge_id, now=now, reason="response bound to a different challenge")
+            raise NTLMChallengeMismatchError(
+                context_msg="NTLM response is bound to a different challenge than the one issued by this acceptor"
+            )
+
+        state = store.reserve(challenge_id, now=now)
+        try:
+            self._verify_authenticate(auth, state, channel_bindings)
+        except Exception:
+            store.release(challenge_id, now=now, reason="validation failed")
+            raise
+
+        principal = self._credential_principal()
+        completed = store.complete(challenge_id, principal=principal, now=now)
+
+        # Only use state stored with the challenge.  Nothing is taken from the
+        # current NTLMProxy instance except the channel bindings and settings.
+        self._challenge = completed
+        self._temp_negotiate = Negotiate.unpack(completed.negotiate_message)
+        self._temp_challenge = Challenge.unpack(completed.challenge_message)
+        self._context_attr = completed.flags
+        self._complete = True
+
+    def _extract_challenge_id(self, auth: Authenticate) -> typing.Optional[str]:
+        """Get the server challenge identifier echoed in the Authenticate message."""
+        if not auth.nt_challenge_response or len(auth.nt_challenge_response) <= 24:
+            return None
+
+        try:
+            nt_challenge = NTClientChallengeV2.unpack(auth.nt_challenge_response[16:])
+        except ValueError:
+            return None
+
+        raw_id = nt_challenge.av_pairs.get(AvId(CHALLENGE_ID_AV_ID))
+        if not raw_id:
+            return None
+
+        try:
+            return typing.cast(bytes, raw_id).decode("ascii")
+        except (AttributeError, UnicodeDecodeError):
+            raise NTLMChallengeMismatchError(
+                context_msg="NTLM Authenticate message contains an invalid challenge identifier"
+            )
+
+    def _credential_principal(self) -> str:
+        credential = typing.cast(_NTLMCredential, self._credential)
+        domain_part = credential.domain + "\\" if credential.domain else ""
+        return "%s%s" % (domain_part, credential.username)
+
+    def _verify_authenticate(
+        self,
+        auth: Authenticate,
+        state: NTLMChallengeState,
+        channel_bindings: typing.Optional[GssChannelBindings],
+    ) -> None:
+        """Validate the Authenticate message against the original challenge."""
+        server_challenge = state.server_challenge
+        negotiate = Negotiate.unpack(state.negotiate_message)
+        challenge = Challenge.unpack(state.challenge_message)
+
+        # The Authenticate must use the flags negotiated in the original
+        # CHALLENGE.  A response to a different challenge would otherwise be
+        # accepted because the server nonce alone is not enough to bind the
+        # full negotiation state.  The bits the initiator is allowed to clear
+        # are the optional integrity/confidentiality extensions.
+        auth_flags = auth.flags & ~_INITIATOR_OPTIONAL_FLAGS
+        challenge_flags = state.flags & ~_INITIATOR_OPTIONAL_FLAGS
+        if auth_flags != challenge_flags:
+            raise NTLMChallengeMismatchError(
+                context_msg="NTLM Authenticate flags do not match the challenge negotiation state"
+            )
 
         # TODO: Add anonymous user support.
         if not auth.user_name or (
@@ -572,6 +788,8 @@ class NTLMProxy(ContextProxy):
             client_challenge = nt_challenge.challenge_from_client
             target_info = nt_challenge.av_pairs
 
+            # The client timestamp is authenticated as part of the response
+            # but it never controls the lifetime of the server challenge.
             expected_nt, expected_lm, key_exchange_key = compute_response_v2(
                 nt_hash, server_challenge, client_challenge, time, target_info
             )
@@ -635,9 +853,6 @@ class NTLMProxy(ContextProxy):
 
             if actual_mic != expected_mic:
                 raise InvalidTokenError(context_msg="Invalid MIC in NTLM authentication message")
-
-        self._context_attr = auth.flags
-        self._complete = True
 
     def query_message_sizes(self) -> SecPkgContextSizes:
         if not self.complete:

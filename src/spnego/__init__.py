@@ -25,19 +25,43 @@ from spnego._credential import (
 )
 from spnego.auth import client, server
 from spnego.exceptions import NegotiateOptions
+from spnego.ntlm_challenge import (
+    FixedClock,
+    FixedNTLMClock,
+    InMemoryNTLMChallengeStore,
+    MemoryNTLMChallengeStore,
+    NTLMChallengeState,
+    NTLMChallengeStatus,
+    NTLMChallengeStore,
+    NTLMChallengeTransition,
+    NTLMClock,
+    SystemClock,
+    SystemNTLMClock,
+)
 
 __all__ = [
     "ContextProxy",
     "ContextReq",
     "Credential",
     "CredentialCache",
+    "FixedClock",
+    "FixedNTLMClock",
     "IOVUnwrapResult",
     "IOVWrapResult",
+    "InMemoryNTLMChallengeStore",
     "KerberosCCache",
     "KerberosKeytab",
+    "MemoryNTLMChallengeStore",
+    "NTLMChallengeState",
+    "NTLMChallengeStatus",
+    "NTLMChallengeStore",
+    "NTLMChallengeTransition",
+    "NTLMClock",
     "NTLMHash",
     "Password",
     "NegotiateOptions",
+    "SystemClock",
+    "SystemNTLMClock",
     "UnwrapResult",
     "WinRMWrapResult",
     "WrapResult",

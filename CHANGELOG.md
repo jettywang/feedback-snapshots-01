@@ -2,6 +2,14 @@
 
 ## 0.13.0 - TBD
 
+* Add replay-safe NTLMv2 challenge handling to the pure Python acceptor
+  * The acceptor accepts `challenge_store`, `challenge_lifetime`, and `clock` kwargs (also through `spnego.server`)
+  * Each CHALLENGE carries an opaque identifier in a private AV pair, so a fresh acceptor can resolve it through a shared store and the Authenticate response is bound to the issued challenge and flags
+  * Challenges expire from the server issue time; a client supplied timestamp or a retry never extends the lifetime
+  * A challenge is consumed exactly once on success, concurrent submissions produce one completion, and a duplicate after success raises `NTLMChallengeReplayError`
+  * A failed password releases only its own challenge so it can be retried
+  * `InMemoryNTLMChallengeStore.snapshot()`/`restore()` support process recovery and record every state transition
+
 ## 0.12.4 - 2026-10-06
 
 * Fix SSPI acceptor with explicit `Password` or `KerberosKeytab` credentials failing with `SEC_E_LOGON_DENIED` when the username is in the UPN form `user@REALM`

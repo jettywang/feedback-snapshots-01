@@ -63,6 +63,17 @@ Kerberos also needs to be configured to talk to the domain but that is outside t
 
 See [the examples section](docs/examples) for examples on how to use the authentication side of the library.
 
+### Stateless NTLM acceptor
+
+The pure Python NTLM acceptor can keep its CHALLENGE state across requests and
+process restarts. Pass a shared `spnego.ntlm_challenge.NTLMChallengeStore` and a
+fixed clock to `spnego.server(...)`; the challenge is identified by an AV pair
+the initiator echoes back, expires after `challenge_lifetime` from the server
+issue time, and is consumed exactly once on success. See
+[`examples/ntlm_challenge_replay.py`](examples/ntlm_challenge_replay.py) for a
+deterministic walk through concurrent completion, expiry, cross-challenge
+substitution, password failures, and snapshot restore.
+
 _Note: While server/acceptor authentication is available for all protocols it is highly recommended you have the system GSSAPI and NTLM system libraries present for acceptor authentication. Pyspnego NTLM acceptor authentication should work but it is not as thoroughly tested as the GSSAPI implementation._
 
 

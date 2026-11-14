@@ -180,6 +180,9 @@ def server(
     options: NegotiateOptions = NegotiateOptions.none,
     *,
     credentials: typing.Optional[typing.Union[str, Credential, typing.List[Credential]]] = None,
+    challenge_store: typing.Optional[typing.Any] = None,
+    challenge_lifetime: typing.Optional[typing.Any] = None,
+    clock: typing.Optional[typing.Any] = None,
     **kwargs: typing.Any,
 ) -> ContextProxy:
     """Create a server context to be used for authentication.
@@ -187,6 +190,10 @@ def server(
     It is only possible to specify a credential when running on Windows and
     using Kerberos either through Negotiate or Kerberos directly. Other
     platforms and protocols may be supported in the future.
+
+    The pure Python NTLM acceptor can persist its challenge state across
+    requests with ``challenge_store``, ``challenge_lifetime``, and ``clock``.
+    See :mod:`spnego.ntlm_challenge` for the store and clock interfaces.
 
     Args:
         hostname: The principal part of the SPN. This is required for Kerberos auth to build the SPN.
@@ -196,11 +203,22 @@ def server(
         protocol: The protocol to authenticate with, can be `ntlm`, `kerberos`, `negotiate`, or `credssp`.
         options: The :class:`spnego.NegotiateOptions` that define pyspnego specific options to control the negotiation.
         credentials: A credential or list or credentials to use with the server auth context.
+        challenge_store: The :class:`spnego.ntlm_challenge.NTLMChallengeStore` used by the Python NTLM acceptor.
+        challenge_lifetime: How long a Python NTLM challenge remains valid. Can be a timedelta or seconds.
+        clock: The :class:`spnego.ntlm_challenge.NTLMClock` used to timestamp Python NTLM challenges, or a fixed
+            datetime.
         kwargs: Optional arguments to pass through to the authentiction context.
 
     Returns:
         ContextProxy: The context proxy for a client.
     """
+    if challenge_store is not None:
+        kwargs["challenge_store"] = challenge_store
+    if challenge_lifetime is not None:
+        kwargs["challenge_lifetime"] = challenge_lifetime
+    if clock is not None:
+        kwargs["clock"] = clock
+
     return _new_context(
         credentials, None, hostname, service, channel_bindings, context_req, protocol, options, "accept", **kwargs
     )

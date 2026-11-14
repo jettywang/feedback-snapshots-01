@@ -147,6 +147,11 @@ class ErrorCode(enum.IntEnum):
     unavailable = 16  # OperationNotAvailableError
     # duplicate_element = 17  # Shouldn't happen in our code.
     # name_not_mn = 18  # Shouldn't happen in our code.
+    challenge_not_found = 19  # NTLMChallengeNotFoundError
+    challenge_expired = 20  # NTLMChallengeExpiredError
+    challenge_replay = 21  # NTLMChallengeReplayError
+    challenge_busy = 22  # NTLMChallengeBusyError
+    challenge_mismatch = 23  # NTLMChallengeMismatchError
 
 
 # Implementation is inspired by the python-gssapi project https://github.com/pythongssapi/python-gssapi.
@@ -375,3 +380,47 @@ class OperationNotAvailableError(SpnegoError):
     _BASE_MESSAGE = "Operation not supported or available"
     _GSSAPI_CODE = 1048576  # GSS_S_UNAVAILABLE
     _SSPI_CODE = -2146893054  # SEC_E_UNSUPPORTED_FUNCTION
+
+
+class NTLMChallengeNotFoundError(InvalidTokenError):
+    """The NTLM challenge referenced by an Authenticate message is unknown.
+
+    This is also used when the challenge was evicted from the store after it
+    expired and the store does not retain expired entries.
+    """
+
+    ERROR_CODE = ErrorCode.challenge_not_found
+
+    _BASE_MESSAGE = "The NTLM challenge was not found or is no longer active"
+
+
+class NTLMChallengeExpiredError(InvalidTokenError):
+    """The NTLM challenge is older than the lifetime the acceptor issued it with."""
+
+    ERROR_CODE = ErrorCode.challenge_expired
+
+    _BASE_MESSAGE = "The NTLM challenge has expired"
+
+
+class NTLMChallengeReplayError(InvalidTokenError):
+    """The NTLM challenge was already consumed by a successful authentication."""
+
+    ERROR_CODE = ErrorCode.challenge_replay
+
+    _BASE_MESSAGE = "The NTLM challenge has already been consumed"
+
+
+class NTLMChallengeBusyError(InvalidTokenError):
+    """Another acceptor currently holds the reservation for the challenge."""
+
+    ERROR_CODE = ErrorCode.challenge_busy
+
+    _BASE_MESSAGE = "The NTLM challenge is already being validated"
+
+
+class NTLMChallengeMismatchError(InvalidTokenError):
+    """The Authenticate message is bound to a different challenge or negotiation."""
+
+    ERROR_CODE = ErrorCode.challenge_mismatch
+
+    _BASE_MESSAGE = "The NTLM response is not bound to the issued challenge"
