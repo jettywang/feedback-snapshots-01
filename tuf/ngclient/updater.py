@@ -54,7 +54,10 @@ Custom ``FetcherInterface`` implementations are possible. The alternative
 
 from __future__ import annotations
 
+import base64
 import contextlib
+import hashlib
+import json
 import logging
 import os
 import shutil
@@ -74,6 +77,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Name of the directory (inside a shared cache root) that stores the
+# repository identifier -> trusted root bindings for namespaced caches
+_BINDINGS_DIR_NAME = ".tuf-namespace-bindings"
+
 
 class Updater:
     """Creates a new ``Updater`` instance and loads trusted root metadata.
@@ -82,6 +89,9 @@ class Updater:
         metadata_dir: Local metadata directory. Directory must be
             writable. If ``bootstrap`` is ``None``, this directory must contain
             a trusted root.json file.
+            If ``namespace`` is set, ``metadata_dir`` is used as a shared
+            cache root and all metadata is stored in a per-repository
+            subdirectory instead.
         metadata_base_url: Base URL for all remote metadata downloads
         target_dir: Local targets directory. Directory must be writable. It
             will be used as the default target download directory by
@@ -97,10 +107,22 @@ class Updater:
             Pass ``None`` only if you explicitly want to use the cached
             root.json as the trust anchor (not recommended for most
             deployments).
+        namespace: ``Optional``; Repository identifier that isolates this
+            repository's cache from other repositories sharing
+            ``metadata_dir``. The identifier is caller-chosen: remote
+            metadata can never influence which directory is used. The
+            identifier is bound to ``bootstrap`` (the trusted initial root)
+            on first use: later uses of the same identifier with an
+            incompatible trust root are rejected. Migrating an existing
+            single-repository cache into a namespace never happens
+            implicitly: use ``migrate_to_namespace()``.
 
     Raises:
         OSError: Local root.json cannot be read
-        RepositoryError: Local root.json is invalid
+        RepositoryError: Local root.json is invalid, or ``namespace``
+            conflicts with the trust root bound to it, or the cache root
+            contains an unmigrated legacy single-repository cache
+        ValueError: ``namespace`` is not a valid repository identifier
     """
 
     def __init__(  # noqa: PLR0917
@@ -113,8 +135,18 @@ class Updater:
         config: UpdaterConfig | None = None,
         *,
         bootstrap: bytes | None,
+        namespace: str | None = None,
     ):
-        self._dir = metadata_dir
+        self._metadata_root = metadata_dir
+        self._namespace: str | None = None
+        if namespace is not None:
+            namespace = _validate_namespace(namespace)
+            self._raise_on_legacy_cache(namespace)
+            self._namespace = namespace
+            self._dir = os.path.join(metadata_dir, namespace)
+            os.makedirs(self._dir, exist_ok=True)
+        else:
+            self._dir = metadata_dir
         self._metadata_base_url = _ensure_trailing_slash(metadata_base_url)
         self.target_dir = target_dir
         if target_base_url is None:
@@ -144,8 +176,166 @@ class Updater:
         self._trusted_set = TrustedMetadataSet(
             bootstrap, self.config.envelope_type
         )
+        if self._namespace is not None:
+            self._verify_namespace_binding(self._namespace, bootstrap)
         self._persist_root(self._trusted_set.root.version, bootstrap)
         self._update_root_symlink()
+        if self._namespace is not None:
+            self._persist_namespace_binding(self._namespace, bootstrap)
+
+    @staticmethod
+    def migrate_to_namespace(metadata_dir: str, namespace: str) -> None:
+        """Explicitly migrate a legacy single-repository cache.
+
+        Moves the legacy metadata files (``root.json``, ``root_history/``
+        and all cached role files) from ``metadata_dir`` into the
+        subdirectory used by ``namespace``. Migration is never done
+        implicitly by ``Updater()``: applications must call this method
+        to opt in.
+
+        Args:
+            metadata_dir: Shared cache root containing a legacy
+                single-repository cache.
+            namespace: Repository identifier to migrate the cache into.
+
+        Raises:
+            RepositoryError: No legacy cache was found, or the namespace
+                directory already exists.
+            ValueError: ``namespace`` is not a valid repository identifier.
+        """
+        namespace = _validate_namespace(namespace)
+        namespace_dir = os.path.join(metadata_dir, namespace)
+
+        if not os.path.exists(
+            os.path.join(metadata_dir, "root.json")
+        ) and not os.path.exists(os.path.join(metadata_dir, "root_history")):
+            raise exceptions.RepositoryError(
+                f"namespace '{namespace}': no legacy single-repository "
+                f"cache found in '{metadata_dir}'"
+            )
+        if os.path.exists(namespace_dir):
+            raise exceptions.RepositoryError(
+                f"namespace '{namespace}': directory already exists in "
+                f"'{metadata_dir}': refusing to migrate"
+            )
+
+        entries = list(os.scandir(metadata_dir))
+        os.makedirs(namespace_dir)
+        for entry in entries:
+            # Leave hidden entries (e.g. the bindings directory) and other
+            # namespace directories in place: everything else is legacy
+            # cache content (root.json, root_history/, cached role files)
+            if entry.name.startswith("."):
+                continue
+            if entry.is_dir(follow_symlinks=False) and (
+                entry.name != "root_history"
+            ):
+                continue
+            shutil.move(entry.path, os.path.join(namespace_dir, entry.name))
+        logger.info(
+            "Migrated legacy cache in '%s' to namespace '%s'",
+            metadata_dir,
+            namespace,
+        )
+
+    def _raise_on_legacy_cache(self, namespace: str) -> None:
+        """Refuse to share a cache root with unmigrated legacy metadata."""
+        if os.path.exists(
+            os.path.join(self._metadata_root, "root.json")
+        ) or os.path.exists(os.path.join(self._metadata_root, "root_history")):
+            raise exceptions.RepositoryError(
+                f"namespace '{namespace}': '{self._metadata_root}' contains "
+                "a legacy single-repository cache: call "
+                "Updater.migrate_to_namespace() to explicitly migrate it "
+                "before using a namespace"
+            )
+
+    def _namespace_binding_path(self, namespace: str) -> str:
+        encoded_name = parse.quote(namespace, "")
+        return os.path.join(
+            self._metadata_root, _BINDINGS_DIR_NAME, f"{encoded_name}.json"
+        )
+
+    def _verify_namespace_binding(
+        self, namespace: str, bootstrap: bytes
+    ) -> None:
+        """Verify bootstrap root is compatible with the bound trust root.
+
+        The first use of a namespace binds the caller-provided repository
+        identifier to the trusted initial root. Later uses must provide a
+        root from the same trust chain: either the identical root or a
+        newer version that chains (through the cached root history of this
+        namespace) from the bound root.
+        """
+        path = self._namespace_binding_path(namespace)
+        if not os.path.exists(path):
+            return
+
+        with open(path, "rb") as f:
+            binding = json.load(f)
+
+        bound_version = binding["root_version"]
+        if hashlib.sha256(bootstrap).hexdigest() == binding["root_sha256"]:
+            return
+
+        new_version = self._trusted_set.root.version
+        conflict_msg = (
+            f"namespace '{namespace}': bootstrap root v{new_version} "
+            "is not compatible with the trust root bound to this "
+            f"repository identifier (bound root v{bound_version})"
+        )
+        if new_version <= bound_version:
+            raise exceptions.RepositoryError(conflict_msg)
+
+        # Verify that bootstrap chains from the bound root through the
+        # cached root history of this namespace
+        try:
+            chain = TrustedMetadataSet(
+                base64.b64decode(binding["root"]), self.config.envelope_type
+            )
+            for version in range(bound_version + 1, new_version + 1):
+                if version == new_version:
+                    data = bootstrap
+                else:
+                    root_path = os.path.join(
+                        self._dir, "root_history", f"{version}.root.json"
+                    )
+                    with open(root_path, "rb") as f:
+                        data = f.read()
+                chain.update_root(data)
+        except (OSError, exceptions.RepositoryError) as e:
+            raise exceptions.RepositoryError(conflict_msg) from e
+
+    def _persist_namespace_binding(
+        self, namespace: str, bootstrap: bytes
+    ) -> None:
+        """Bind the namespace to the trusted initial root (first use only)."""
+        path = self._namespace_binding_path(namespace)
+        if os.path.exists(path):
+            return
+
+        binding = {
+            "repository": namespace,
+            "root_version": self._trusted_set.root.version,
+            "root_sha256": hashlib.sha256(bootstrap).hexdigest(),
+            "root": base64.b64encode(bootstrap).decode("ascii"),
+        }
+        data = json.dumps(binding, indent=2).encode()
+        bindings_dir = os.path.dirname(path)
+        os.makedirs(bindings_dir, exist_ok=True)
+        temp_file_name = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                dir=bindings_dir, delete=False
+            ) as temp_file:
+                temp_file_name = temp_file.name
+                temp_file.write(data)
+            os.replace(temp_file.name, path)
+        except OSError as e:
+            if temp_file_name is not None:
+                with contextlib.suppress(FileNotFoundError):
+                    os.remove(temp_file_name)
+            raise e
 
     def refresh(self) -> None:
         """Refresh top-level metadata.
@@ -578,3 +768,23 @@ class Updater:
 def _ensure_trailing_slash(url: str) -> str:
     """Return url guaranteed to end in a slash."""
     return url if url.endswith("/") else f"{url}/"
+
+
+def _validate_namespace(namespace: str) -> str:
+    """Validate a caller-provided repository identifier.
+
+    The identifier is used as a directory name inside the shared cache
+    root: it must be a single, safe path component. It is never derived
+    from remote metadata.
+    """
+    if (
+        not namespace
+        or namespace.startswith(".")
+        or parse.quote(namespace, "") != namespace
+    ):
+        raise ValueError(
+            f"Invalid repository namespace {namespace!r}: must be a "
+            "non-empty single path component of unreserved characters "
+            "and must not start with '.'"
+        )
+    return namespace
