@@ -16,6 +16,9 @@ Summary
     olefile.isOleFile
     olefile.OleFileIO
     olefile.OleMetadata
+    olefile.PropertySetInspection
+    olefile.PropertySectionReport
+    olefile.PropertyRecord
     olefile.enable_logging
 
 

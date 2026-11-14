@@ -3,6 +3,20 @@ Detailed CHANGELOG
 
 olefile.py
 ----------
+* 2026-11-15 v0.47.dev7:
+    - added OleFileIO.inspect_property_sets, a fidelity property inspection
+      that keeps every property identifier table row across all sections
+      instead of collapsing duplicate ids into a convenience dictionary
+    - new PropertySetInspection, PropertySectionReport and PropertyRecord
+      classes report each property id, type, section/stream offset and the
+      byte range actually consumed, with explicit labels for duplicate ids,
+      overlapping values and offsets pointing into index tables,
+      dictionaries, other sections or outside the stream
+    - unknown-length property types only report finite evidence and never
+      guess a boundary that could swallow following properties
+    - fixed VT_LPWSTR decoding (the character count is read at the value
+      offset rather than offset+4) and bounded VT_VECTOR parsing so a corrupt
+      element count cannot loop forever
 * 2023-11-30 v0.47.dev6:
     - fixed issue #142: isOleFile has a new data parameter to handle files in memory properly
     - fixed issue #156: write_sect now correctly detects when data is larger than the sector size

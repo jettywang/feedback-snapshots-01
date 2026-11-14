@@ -98,7 +98,16 @@ __all__ = ['isOleFile', 'OleFileIO', 'OleMetadata', 'enable_logging',
            'DEFECT_FATAL', 'DEFAULT_PATH_ENCODING',
            'MAXREGSECT', 'DIFSECT', 'FATSECT', 'ENDOFCHAIN', 'FREESECT',
            'MAXREGSID', 'NOSTREAM', 'UNKNOWN_SIZE', 'WORD_CLSID',
-           'OleFileIONotClosed'
+           'OleFileIONotClosed',
+           'PropertyRecord', 'PropertySectionReport', 'PropertySetInspection',
+           'PROPERTY_ISSUE_DUPLICATE_ID', 'PROPERTY_ISSUE_OVERLAPPING_VALUES',
+           'PROPERTY_ISSUE_OFFSET_IN_INDEX',
+           'PROPERTY_ISSUE_OFFSET_IN_DICTIONARY',
+           'PROPERTY_ISSUE_OFFSET_OTHER_SECTION',
+           'PROPERTY_ISSUE_OFFSET_OUTSIDE_STREAM',
+           'PROPERTY_ISSUE_VALUE_OUTSIDE_SECTION',
+           'PROPERTY_ISSUE_UNKNOWN_LENGTH', 'PROPERTY_ISSUE_UNPARSED_TYPE',
+           'PROPERTY_ISSUE_PARSE_ERROR', 'PROPERTY_ISSUE_TRUNCATED_TABLE',
 ]
 
 import io
@@ -262,6 +271,35 @@ DEFECT_INCORRECT = 30    # an error according to specifications, but parsing
                          # can go on
 DEFECT_FATAL =     40    # an error which cannot be ignored, parsing is
                          # impossible
+
+# Issue labels reported by the fidelity property inspection
+# (OleFileIO.inspect_property_sets). They describe why a property record
+# cannot be interpreted without ambiguity, without dropping any record:
+PROPERTY_ISSUE_DUPLICATE_ID =          'duplicate_id'
+PROPERTY_ISSUE_OVERLAPPING_VALUES =    'overlapping_values'
+PROPERTY_ISSUE_OFFSET_IN_INDEX =       'offset_in_index'
+PROPERTY_ISSUE_OFFSET_IN_DICTIONARY =  'offset_in_dictionary'
+PROPERTY_ISSUE_OFFSET_OTHER_SECTION =  'offset_other_section'
+PROPERTY_ISSUE_OFFSET_OUTSIDE_STREAM = 'offset_outside_stream'
+PROPERTY_ISSUE_VALUE_OUTSIDE_SECTION = 'value_outside_section'
+PROPERTY_ISSUE_UNKNOWN_LENGTH =        'unknown_length'
+PROPERTY_ISSUE_UNPARSED_TYPE =         'unparsed_type'
+PROPERTY_ISSUE_PARSE_ERROR =           'parse_error'
+PROPERTY_ISSUE_TRUNCATED_TABLE =       'truncated_index_table'
+
+# Fixed value sizes (excluding the 4-byte type tag), per [MS-OLEPS]:
+_VT_FIXED_SIZES = {
+    VT_EMPTY: 0, VT_NULL: 0, VT_I1: 1, VT_UI1: 1,
+    VT_I2: 2, VT_UI2: 2, VT_BOOL: 2,
+    VT_I4: 4, VT_UI4: 4, VT_INT: 4, VT_UINT: 4, VT_ERROR: 4,
+    VT_R4: 4, VT_R8: 8, VT_CY: 8, VT_DATE: 8, VT_FILETIME: 8,
+    VT_I8: 8, VT_UI8: 8, VT_CLSID: 16, VT_DECIMAL: 14,
+}
+
+# Variable-length types whose value starts with a 32-bit byte count:
+# (the value length is 4 bytes for the count + "count" data bytes)
+_VT_COUNTED_BLOB_TYPES = (VT_BSTR, VT_LPSTR, VT_BLOB, VT_CF, VT_BLOB_OBJECT)
+# VT_LPWSTR starts with a 32-bit character count instead of a byte count.
 
 # Minimal size of an empty OLE file, with 512-bytes sectors = 1536 bytes
 # (this is used in isOleFile and OleFileIO.open)
@@ -556,6 +594,219 @@ class OleMetadata:
         for prop in self.DOCSUM_ATTRIBS:
             value = getattr(self, prop)
             print('- {}: {}'.format(prop, repr(value)))
+
+
+class PropertyRecord:
+    """
+    A single property record as listed in the property identifier table of a
+    property set section, preserving all on-disk evidence even when it is
+    ambiguous or malformed.
+
+    Unlike the dictionaries returned by :meth:`OleFileIO.getproperties`, one
+    object is created for *every* row of the table: duplicate property ids,
+    overlapping values and offsets pointing outside the value area are all
+    kept and flagged instead of being resolved by picking one record.
+
+    Attributes:
+
+    :ivar int section_index: index of the section within the property set
+        stream (0-based, in section array order)
+    :ivar str fmtid: format id (CLSID string) of the containing section
+    :ivar int index: row number of this record in the property identifier
+        table (0-based)
+    :ivar int property_id: property id read from the table
+    :ivar int property_type: raw VARTYPE tag read at the value offset
+        (0 when the offset cannot be dereferenced)
+    :ivar str type_name: name of the VARTYPE (see the VT map), 'UNKNOWN'
+        when it is not a known type
+    :ivar int section_offset: offset of the value, relative to the start of
+        the section (points at the 4-byte type tag)
+    :ivar int stream_offset: same offset relative to the start of the whole
+        property set stream
+    :ivar value: decoded value, produced with the same best-effort parser as
+        :meth:`OleFileIO.getproperties`; None when it cannot be decoded
+    :ivar int consumed_start: first byte actually consumed by the value,
+        relative to the section start (after the 4-byte type tag)
+    :ivar int consumed_end: byte immediately after the last byte actually
+        consumed by the value, relative to the section start; for
+        unknown-length types this is only the end of the finite evidence
+        that can be read (the type tag and any count prefix), not a guessed
+        boundary
+    :ivar bool length_known: True when the full value length is defined by
+        the type; False for types whose boundary cannot be determined
+    :ivar list issues: list of PROPERTY_ISSUE_* label strings describing
+        ambiguities affecting this record (empty for a clean record)
+    """
+
+    def __init__(self, section_index, fmtid, index, property_id,
+                 property_type, type_name, section_offset, stream_offset,
+                 value, consumed_start, consumed_end, length_known, issues):
+        self.section_index = section_index
+        self.fmtid = fmtid
+        self.index = index
+        self.property_id = property_id
+        self.property_type = property_type
+        self.type_name = type_name
+        self.section_offset = section_offset
+        self.stream_offset = stream_offset
+        self.value = value
+        self.consumed_start = consumed_start
+        self.consumed_end = consumed_end
+        self.length_known = length_known
+        self.issues = list(issues)
+
+    @property
+    def ambiguous(self):
+        """True when the record carries at least one ambiguity/issue."""
+        return bool(self.issues)
+
+    @property
+    def consumed_range(self):
+        """
+        Tuple (start, end) of the bytes actually consumed by the value,
+        relative to the section start. For unknown-length types the end is
+        finite evidence only (see :attr:`length_known`).
+        """
+        return self.consumed_start, self.consumed_end
+
+    def dump(self):
+        """Print this record, for debugging purposes."""
+        print('section #%d row #%d: id=%d type=%d/%s offset=0x%X '
+              '(stream 0x%X) consumed=[%d:%d]%s'
+              % (self.section_index, self.index, self.property_id,
+                 self.property_type, self.type_name, self.section_offset,
+                 self.stream_offset, self.consumed_start, self.consumed_end,
+                 '' if self.length_known else ' (length unknown)'))
+        print('  value: %r' % (self.value,))
+        if self.issues:
+            print('  issues: %s' % ', '.join(self.issues))
+
+    def __repr__(self):
+        return ('PropertyRecord(section=%d, index=%d, id=%d, type=%s, '
+                'offset=0x%X, issues=%r)' % (
+                    self.section_index, self.index, self.property_id,
+                    self.type_name, self.section_offset, self.issues))
+
+
+class PropertySectionReport:
+    """
+    Fidelity report for one section of a property set stream.
+
+    :ivar int section_index: 0-based index of the section in the stream
+    :ivar str fmtid: section format id (CLSID string)
+    :ivar int section_offset: offset of the section relative to the start
+        of the stream
+    :ivar int section_size: declared size of the section in bytes
+    :ivar int index_table_end: first byte after the property identifier
+        table (and the code page / dictionary), i.e. the start of the value
+        area
+    :ivar bool has_dictionary: True when a code page / property name
+        dictionary is present
+    :ivar dict dictionary: property id to name mapping, parsed from the
+        dictionary (may be empty)
+    :ivar list records: list of :class:`PropertyRecord` objects, one per
+        row of the property identifier table, in table order
+    :ivar list issues: section-level PROPERTY_ISSUE_* labels
+    """
+
+    def __init__(self, section_index, fmtid, section_offset, section_size,
+                 index_table_end, has_dictionary, dictionary, records, issues):
+        self.section_index = section_index
+        self.fmtid = fmtid
+        self.section_offset = section_offset
+        self.section_size = section_size
+        self.index_table_end = index_table_end
+        self.has_dictionary = has_dictionary
+        self.dictionary = dict(dictionary)
+        self.records = list(records)
+        self.issues = list(issues)
+
+    def records_for_id(self, property_id):
+        """
+        Return every record declaring the given property id in this section.
+        Always returns a list, so duplicate ids yield several records.
+        """
+        return [record for record in self.records
+                if record.property_id == property_id]
+
+    def ambiguous_records(self):
+        """Return the subset of records carrying at least one issue."""
+        return [record for record in self.records if record.ambiguous]
+
+    @property
+    def ambiguous(self):
+        """True when the section or any of its records has an issue."""
+        if self.issues:
+            return True
+        return any(record.ambiguous for record in self.records)
+
+    def dump(self):
+        """Print this section report, for debugging purposes."""
+        print('section #%d fmtid=%s offset=0x%X size=%d%s'
+              % (self.section_index, self.fmtid, self.section_offset,
+                 self.section_size, '' if not self.issues else
+                 ' issues=' + ','.join(self.issues)))
+        if self.dictionary:
+            print('  dictionary: %r' % self.dictionary)
+        for record in self.records:
+            record.dump()
+
+
+class PropertySetInspection:
+    """
+    Fidelity report for a whole property set stream.
+
+    It keeps one :class:`PropertyRecord` per row of every property
+    identifier table, including duplicates and malformed entries, and
+    records the exact byte range consumed by each value so that strict
+    callers can detect ambiguity instead of trusting a convenience
+    dictionary.
+
+    :ivar str stream_name: path of the parsed stream
+    :ivar list sections: list of :class:`PropertySectionReport`
+    """
+
+    def __init__(self, stream_name, sections):
+        self.stream_name = stream_name
+        self.sections = list(sections)
+
+    @property
+    def records(self):
+        """Flat list of all :class:`PropertyRecord` objects, in stream order."""
+        result = []
+        for section in self.sections:
+            result.extend(section.records)
+        return result
+
+    def records_for_id(self, property_id):
+        """Every record declaring the given id, across all sections."""
+        return [record for record in self.records
+                if record.property_id == property_id]
+
+    @property
+    def ambiguous(self):
+        """True when any section or record has an issue."""
+        return any(section.ambiguous for section in self.sections)
+
+    def ambiguous_records(self):
+        """All records carrying at least one issue, in stream order."""
+        return [record for record in self.records if record.ambiguous]
+
+    def issues(self):
+        """Set of every PROPERTY_ISSUE_* label present in the report."""
+        labels = set()
+        for section in self.sections:
+            labels.update(section.issues)
+            for record in section.records:
+                labels.update(record.issues)
+        return labels
+
+    def dump(self):
+        """Print the whole report, for debugging purposes."""
+        print('Property set stream %r:' % self.stream_name)
+        for section in self.sections:
+            section.dump()
+
 
 class OleFileIONotClosed(RuntimeWarning):
     """
@@ -2222,10 +2473,18 @@ class OleFileIO:
             off = 4
             count = i32(s, offset)
             values = []
-            for _ in range(count):
-                property_type = i32(s, offset + off)
-                v, sz  = self._parse_property_basic(s, offset + off + 4, property_id, property_type, convert_time, no_conversion)
+            for index in iterrange(count):
+                # stop at the end of the section instead of trusting a
+                # corrupt element count, which could otherwise loop forever:
+                if offset + off + 4 > len(s):
+                    break
+                element_type = i32(s, offset + off)
+                v, sz  = self._parse_property_basic(s, offset + off + 4, property_id, element_type, convert_time, no_conversion)
                 values.append(v)
+                # stop on an unimplemented element type (size 0) to avoid
+                # spinning forever on the same bytes:
+                if sz <= 0:
+                    break
                 off += sz + 4
             v = values
 
@@ -2235,9 +2494,16 @@ class OleFileIO:
             off = 4
             count = i32(s, offset)
             values = []
-            for _ in range(count):
+            for index in iterrange(count):
+                # bound the loop by the actual section size (see above):
+                if offset + off >= len(s):
+                    break
                 v, sz = self._parse_property_basic(s, offset + off, property_id, property_type & ~VT_VECTOR, convert_time, no_conversion)
                 values.append(v)
+                # an unimplemented element type reports size 0; refuse to
+                # loop forever on the same byte and stop decoding here:
+                if sz <= 0:
+                    break
                 off += sz
             v = values
         else:
@@ -2288,7 +2554,9 @@ class OleFileIO:
                 # see https://msdn.microsoft.com/en-us/library/dd942313.aspx
                 # "the string should NOT contain embedded or additional trailing
                 # null characters."
-                count = i32(s, offset+4)
+                # offset points at the value, which starts with the 32-bit
+                # character count, followed by count UTF-16 code units:
+                count = i32(s, offset)
                 value = self._decode_utf16_str(s[offset+4:offset+4+count*2])
                 size = 4 + count * 2
             elif property_type == VT_FILETIME:
@@ -2538,6 +2806,405 @@ class OleFileIO:
             return data
 
         return data
+
+    # ------------------------------------------------------------------
+    # Fidelity property inspection (keeps every property identifier table
+    # row instead of collapsing duplicate ids into a dictionary)
+    # ------------------------------------------------------------------
+
+    def inspect_property_sets(self, filename, convert_time=False,
+                              no_conversion=None):
+        """
+        Parse a property set stream without hiding ambiguous data.
+
+        Every row of every property identifier table is returned as a
+        :class:`PropertyRecord`, including duplicate property ids, values
+        sharing the same bytes, and offsets pointing into an index table, a
+        dictionary or another section. No record is dropped and no record is
+        silently chosen as "the" value: ambiguous or malformed records carry
+        PROPERTY_ISSUE_* labels instead.
+
+        Each record gives its property id, raw type, offset within its
+        section, the corresponding stream offset, the decoded value (best
+        effort) and the byte range actually consumed. Types whose length is
+        not defined by the specification only report the finite bytes that
+        can be evidenced (type tag and count prefix); their boundary is
+        never guessed, which is signalled by ``length_known=False`` and the
+        :data:`PROPERTY_ISSUE_UNKNOWN_LENGTH` label.
+
+        :param filename: path of stream in storage tree (see openstream for
+            syntax)
+        :param convert_time: bool, if True timestamps will be converted to
+            Python datetime
+        :param no_conversion: None or list of int, timestamps not to be
+            converted (for example total editing time is not a real
+            timestamp)
+        :returns: a :class:`PropertySetInspection` report
+        """
+        #REFERENCE: [MS-OLEPS] https://msdn.microsoft.com/en-us/library/dd942421.aspx
+        if no_conversion is None:
+            no_conversion = []
+        streampath = filename
+        if not isinstance(streampath, str):
+            streampath = '/'.join(streampath)
+        fp = self.openstream(filename)
+        stream = fp.read()
+
+        # PropertySetStream header: byte order(2) at 0, version(2) at 2,
+        # reserved dword(4) at 4, clsid(16) at 8, csections(4) at 24, then
+        # csections * section entries (fmtid 16 + offset 4 = 20 bytes each).
+        if len(stream) < 28:
+            self._raise_defect(
+                DEFECT_INCORRECT,
+                'Property set stream %s is shorter than its header'
+                % repr(streampath))
+            return PropertySetInspection(streampath, [])
+        csections = i32(stream, 24)
+        section_array_start = 28
+        section_array_end = section_array_start + csections * 20
+        if section_array_end > len(stream):
+            self._raise_defect(
+                DEFECT_INCORRECT,
+                'Truncated section array in property set stream %s'
+                % repr(streampath))
+            # keep only the entries that actually fit in the stream:
+            csections = max(0, (len(stream) - section_array_start) // 20)
+            section_array_end = section_array_start + csections * 20
+
+        # pre-compute the absolute (stream-relative) span of every section,
+        # so that offsets pointing at another section can be identified:
+        section_spans = []
+        for section_index in iterrange(csections):
+            entry_offset = 28 + section_index * 20
+            section_offset = i32(stream, entry_offset + 16)
+            section_size = 0
+            if section_offset + 4 <= len(stream):
+                section_size = i32(stream, section_offset)
+            section_spans.append((section_offset, section_size))
+
+        sections = []
+        for section_index in iterrange(csections):
+            section = self._inspect_property_section(
+                stream, section_index, section_spans,
+                convert_time, no_conversion)
+            sections.append(section)
+        return PropertySetInspection(streampath, sections)
+
+    def _inspect_property_section(self, stream, section_index, section_spans,
+                                  convert_time, no_conversion):
+        """Parse one section of a property set stream into a report."""
+        entry_offset = 28 + section_index * 20
+        fmtid = _clsid(stream[entry_offset:entry_offset + 16])
+        section_offset = i32(stream, entry_offset + 16)
+        section_issues = []
+
+        if section_offset + 4 > len(stream):
+            section_issues.append(PROPERTY_ISSUE_OFFSET_OUTSIDE_STREAM)
+            self._raise_defect(
+                DEFECT_INCORRECT,
+                'Section #%d starts outside the property set stream'
+                % section_index)
+            return PropertySectionReport(
+                section_index, fmtid, section_offset, 0, 0,
+                False, {}, [], section_issues)
+
+        section_size = i32(stream, section_offset)
+        # the size field covers itself, so the section content (whose
+        # offsets start at 0) begins 4 bytes after section_offset and spans
+        # section_size - 4 bytes:
+        content_length = section_size - 4
+        if content_length < 0:
+            section_issues.append(PROPERTY_ISSUE_VALUE_OUTSIDE_SECTION)
+            content_length = 0
+        if section_offset + 4 + content_length > len(stream):
+            section_issues.append(PROPERTY_ISSUE_OFFSET_OUTSIDE_STREAM)
+            content_length = max(0, len(stream) - section_offset - 4)
+        section = stream[section_offset + 4:
+                         section_offset + 4 + content_length]
+
+        # section layout: num_props(4), then num_props *
+        # (property id(4), offset(4)) rows, then an optional dictionary,
+        # then the value area. The declared offsets are relative to the
+        # whole section (including its size field), so value offsets below
+        # are shifted by 4 to become relative to `section`, which starts at
+        # the num_props field.
+        if len(section) < 4:
+            section_issues.append(PROPERTY_ISSUE_TRUNCATED_TABLE)
+            return PropertySectionReport(
+                section_index, fmtid, section_offset, section_size, 0,
+                False, {}, [], section_issues)
+        # Identifier table end expressed in content-relative offsets:
+        # content[0:4] is num_props, then num_props * 8-byte rows, so the
+        # table ends at content offset 4 + num_props*8.
+        num_props = i32(section, 0)
+        content_table_end = 4 + num_props * 8
+        if content_table_end > len(section):
+            section_issues.append(PROPERTY_ISSUE_TRUNCATED_TABLE)
+            num_props = max(0, (len(section) - 4) // 8)
+            content_table_end = 4 + num_props * 8
+
+        # the code page / property name dictionary, if present, sits
+        # immediately after the property identifier table. Its offsets are
+        # returned as content-relative offsets:
+        dictionary, dict_start, dict_end = self._parse_property_dictionary(
+            section, content_table_end, len(section))
+        index_area_end = dict_end if dict_start == content_table_end \
+            else content_table_end
+
+        records = []
+        seen_ids = set()
+        for row in iterrange(num_props):
+            property_id = i32(section, 4 + row * 8)
+            declared_offset = i32(section, 8 + row * 8)
+            # `section` starts 4 bytes into the on-disk section (the size
+            # field was stripped), so shift the declared section offset:
+            value_offset = declared_offset - 4
+            record_issues = []
+
+            if property_id in seen_ids:
+                record_issues.append(PROPERTY_ISSUE_DUPLICATE_ID)
+            seen_ids.add(property_id)
+
+            # structural checks on the declared (section-relative) offset:
+            if declared_offset < 4 + content_table_end:
+                record_issues.append(PROPERTY_ISSUE_OFFSET_IN_INDEX)
+            elif (dict_start == content_table_end and dict_end > dict_start
+                  and value_offset < dict_end):
+                record_issues.append(PROPERTY_ISSUE_OFFSET_IN_DICTIONARY)
+            outside_section = (value_offset >= len(section)
+                               or value_offset < 0)
+            if outside_section:
+                record_issues.append(PROPERTY_ISSUE_OFFSET_OUTSIDE_STREAM)
+            # checked independently: an offset beyond this section may still
+            # land inside another section's bytes, which is its own defect:
+            if self._offset_in_other_section(
+                    section_index, section_offset + declared_offset,
+                    section_spans):
+                record_issues.append(PROPERTY_ISSUE_OFFSET_OTHER_SECTION)
+
+            property_type = 0
+            type_name = 'UNKNOWN'
+            value = None
+            consumed_start = value_offset
+            consumed_end = value_offset
+            length_known = False
+            if 0 <= value_offset and value_offset + 4 <= len(section):
+                property_type = i32(section, value_offset)
+                type_name = VT.get(property_type, 'UNKNOWN')
+
+                # measure the value before decoding it, so unknown-length
+                # types never swallow the following properties:
+                measured_end, length_known = self._measure_property(
+                    section, value_offset, property_type)
+                if measured_end > len(section):
+                    record_issues.append(
+                        PROPERTY_ISSUE_VALUE_OUTSIDE_SECTION)
+                    measured_end = min(measured_end, len(section))
+                consumed_start = value_offset
+                consumed_end = measured_end
+                if not length_known:
+                    record_issues.append(PROPERTY_ISSUE_UNKNOWN_LENGTH)
+
+                try:
+                    value = self._parse_property(
+                        section, value_offset + 4, property_id,
+                        property_type, convert_time, no_conversion)
+                    if property_type not in VT:
+                        record_issues.append(PROPERTY_ISSUE_UNPARSED_TYPE)
+                except BaseException as exc:
+                    record_issues.append(PROPERTY_ISSUE_PARSE_ERROR)
+                    msg = ('Error while parsing property id %d in section #%d: '
+                           '%s' % (property_id, section_index, exc))
+                    self._raise_defect(DEFECT_INCORRECT, msg, type(exc))
+            else:
+                record_issues.append(PROPERTY_ISSUE_UNKNOWN_LENGTH)
+
+            records.append(PropertyRecord(
+                section_index=section_index,
+                fmtid=fmtid,
+                index=row,
+                property_id=property_id,
+                property_type=property_type,
+                type_name=type_name,
+                section_offset=declared_offset,
+                stream_offset=section_offset + declared_offset,
+                value=value,
+                consumed_start=declared_offset + (consumed_start - value_offset),
+                consumed_end=declared_offset + (consumed_end - value_offset),
+                length_known=length_known,
+                issues=record_issues))
+
+        # overlap analysis is based on the finite byte ranges and therefore
+        # gives the same pairs no matter in which order records are walked:
+        self._flag_overlapping_values(records)
+
+        # index_area_end is content-relative; convert it back to a
+        # section-relative offset (the 4-byte size field is re-added):
+        index_area_section_end = index_area_end + 4
+        return PropertySectionReport(
+            section_index=section_index,
+            fmtid=fmtid,
+            section_offset=section_offset,
+            section_size=section_size,
+            index_table_end=index_area_section_end,
+            has_dictionary=dict_start == content_table_end
+            and dict_end > dict_start,
+            dictionary=dictionary,
+            records=records,
+            issues=section_issues)
+
+    @staticmethod
+    def _offset_in_other_section(section_index, absolute_offset,
+                                 section_spans):
+        """True when an absolute stream offset falls inside another section."""
+        for other_index, (other_offset, other_size) in enumerate(section_spans):
+            if other_index == section_index or other_size == 0:
+                continue
+            if other_offset <= absolute_offset < other_offset + other_size:
+                return True
+        return False
+
+    @staticmethod
+    def _flag_overlapping_values(records):
+        """
+        Mark every pair of records whose evidenced byte ranges share at least
+        one byte. Only finite ranges are compared, and the comparison is
+        symmetric so traversal order cannot change the conclusion.
+        """
+        bounded = [record for record in records
+                   if record.consumed_end > record.consumed_start]
+        for position, record in enumerate(bounded):
+            for other in bounded[position + 1:]:
+                start = max(record.consumed_start, other.consumed_start)
+                end = min(record.consumed_end, other.consumed_end)
+                if start < end:
+                    if PROPERTY_ISSUE_OVERLAPPING_VALUES not in record.issues:
+                        record.issues.append(PROPERTY_ISSUE_OVERLAPPING_VALUES)
+                    if PROPERTY_ISSUE_OVERLAPPING_VALUES not in other.issues:
+                        other.issues.append(PROPERTY_ISSUE_OVERLAPPING_VALUES)
+
+    def _parse_property_dictionary(self, section, table_end, section_size):
+        """
+        Parse the optional code page / property name dictionary located right
+        after the property identifier table.
+
+        :returns: (dictionary dict, dict_start, dict_end); dict_start differs
+            from table_end when no dictionary is present.
+        """
+        dictionary = {}
+        # a dictionary only exists when the first property id is 0:
+        if len(section) < table_end + 4:
+            return dictionary, -1, table_end
+        has_dictionary = False
+        if i32(section, 4) == 0:
+            has_dictionary = True
+        if not has_dictionary:
+            return dictionary, -1, table_end
+
+        offset = table_end
+        if offset + 4 > len(section):
+            return dictionary, table_end, offset
+        entry_count = i32(section, offset)
+        offset += 4
+        for _ in iterrange(entry_count):
+            if offset + 8 > len(section):
+                break
+            property_id = i32(section, offset)
+            name_length = i32(section, offset + 4)
+            name_start = offset + 8
+            name_end = name_start + name_length
+            if name_end > len(section):
+                break
+            try:
+                name = section[name_start:name_end].decode(
+                    'utf_16_le', errors='replace').rstrip('\x00')
+            except BaseException:
+                name = None
+            dictionary[property_id] = name
+            offset = name_end
+        return dictionary, table_end, offset
+
+    def _measure_property(self, section, offset, property_type):
+        """
+        Measure the bytes occupied by a property value starting at the
+        4-byte type tag located at offset.
+
+        :returns: (end_offset, length_known); end_offset is relative to the
+            section start. When the type does not define a knowable boundary,
+            end_offset only covers the finite evidence available and
+            length_known is False, so callers must not assume the next
+            property starts there.
+        """
+        vector_count = None
+        base_type = property_type
+        if property_type & VT_VECTOR:
+            base_type = property_type & ~VT_VECTOR
+            # 4 bytes for the element count, then the elements:
+            if offset + 8 > len(section):
+                return min(offset + 4, len(section)), False
+            vector_count = i32(section, offset + 4)
+            cursor = offset + 8
+        else:
+            cursor = offset + 4
+
+        if base_type in _VT_FIXED_SIZES:
+            element_size = _VT_FIXED_SIZES[base_type]
+            if vector_count is None:
+                return cursor + element_size, True
+            end = cursor + vector_count * element_size
+            # a declared element count running past the section means the
+            # boundary cannot actually be evidenced: clamp and report it
+            if end > len(section):
+                return len(section), False
+            return end, True
+
+        if base_type in _VT_COUNTED_BLOB_TYPES:
+            # each element: uint32 byte count + that many bytes
+            end = cursor
+            for _ in iterrange(vector_count if vector_count is not None else 1):
+                if end + 4 > len(section):
+                    return end, False
+                count = i32(section, end)
+                end += 4 + count
+                if end > len(section):
+                    # declared data runs past the section: only the bytes
+                    # actually present are finite evidence
+                    return len(section), False
+            return end, True
+
+        if base_type == VT_LPWSTR:
+            # each element: uint32 char count + count * 2 bytes
+            end = cursor
+            for _ in iterrange(vector_count if vector_count is not None else 1):
+                if end + 4 > len(section):
+                    return end, False
+                count = i32(section, end)
+                end += 4 + count * 2
+                if end > len(section):
+                    return len(section), False
+            return end, True
+
+        if base_type == VT_VARIANT and vector_count is not None:
+            # VT_VECTOR|VT_VARIANT: count variants, each one tagged with its
+            # own type. A single unknowable element bounds the whole vector.
+            end = cursor
+            length_known = True
+            for _ in iterrange(vector_count):
+                if end + 4 > len(section):
+                    return end, False
+                element_type = i32(section, end)
+                element_end, element_known = self._measure_property(
+                    section, end, element_type)
+                if not element_known:
+                    length_known = False
+                end = element_end
+            return end, length_known
+
+        # VT_STREAM, VT_STORAGE, VT_STREAMED_OBJECT, VT_STORED_OBJECT,
+        # VT_SAFEARRAY, VT_CARRAY, VT_USERDEFINED, ... have no length defined
+        # in the section itself: only the type tag (and a vector count when
+        # present) is finite evidence, the boundary is never guessed.
+        return cursor, False
 
 
 # --------------------------------------------------------------------
