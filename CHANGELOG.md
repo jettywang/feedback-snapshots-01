@@ -2,6 +2,13 @@
 
 ## 0.13.0 - TBD
 
+* Add a configurable first-packet encapsulation policy for the Python SPNEGO context
+  * `spnego.EncapsulationPolicy` (`any`, `spnego`, `raw`) can be passed as `encapsulation=` to `spnego.client`/`spnego.server` or the `NegotiateProxy` directly; the default `any` keeps the previous permissive behaviour
+  * The encapsulation chosen by the first token (SPNEGO wrapper or a bare NTLM/Kerberos token) is pinned to the context for the whole exchange, so a bare `NTLMSSP` message or a repeated `InitialContextToken` after a SPNEGO `NegTokenInit` can no longer bypass the outer SPNEGO state machine
+  * The `raw` policy preserves the legacy bare NTLM handshake for old clients while `spnego` rejects bare first tokens
+  * Input tokens are now classified by their ASN.1 tags and OIDs instead of searching the payload for the `NTLMSSP` signature, so empty tokens, unknown OIDs, nested SPNEGO wrappers, and the server-first `NegTokenInit2` hint are handled based on the exchange state
+  * Once a token is rejected the context is marked as failed; trailing bytes cannot be processed as a new authentication on the same context
+
 ## 0.12.4 - 2026-10-06
 
 * Fix SSPI acceptor with explicit `Password` or `KerberosKeytab` credentials failing with `SEC_E_LOGON_DENIED` when the username is in the UPN form `user@REALM`

@@ -23,6 +23,7 @@ from spnego._credential import (
     NTLMHash,
     Password,
 )
+from spnego._spnego import EncapsulationPolicy
 from spnego.auth import client, server
 from spnego.exceptions import NegotiateOptions
 
@@ -31,6 +32,7 @@ __all__ = [
     "ContextReq",
     "Credential",
     "CredentialCache",
+    "EncapsulationPolicy",
     "IOVUnwrapResult",
     "IOVWrapResult",
     "KerberosCCache",

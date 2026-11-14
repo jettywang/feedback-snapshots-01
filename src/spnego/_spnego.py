@@ -1,6 +1,7 @@
 # Copyright: (c) 2020, Jordan Borean (@jborean93) <jborean93@gmail.com>
 # MIT License (see LICENSE or https://opensource.org/licenses/MIT)
 
+import dataclasses
 import enum
 import struct
 import typing
@@ -28,6 +29,9 @@ from spnego._asn1 import (
 from spnego._context import GSSMech
 from spnego._kerberos import KerberosV5Msg
 from spnego._ntlm_raw.messages import NTLMMessage
+from spnego.exceptions import InvalidTokenError
+
+_NTLM_SIGNATURE = b"NTLMSSP\x00"
 
 
 def pack_mech_type_list(
@@ -74,7 +78,7 @@ def unpack_token(
         any: The unpacked SPNEGO, Kerberos, or NTLM token.
     """
     # First check if the message is an NTLM message.
-    if b_data.startswith(b"NTLMSSP\x00"):
+    if b_data.startswith(_NTLM_SIGNATURE):
         if unwrap:
             return NTLMMessage.unpack(b_data, encoding=encoding)
 
@@ -131,6 +135,180 @@ def unpack_token(
 
     else:
         return b_data
+
+
+class EncapsulationPolicy(enum.Enum):
+    """Policy for how the first token of an exchange may be encapsulated.
+
+    A GSSAPI/SPNEGO exchange either runs inside the SPNEGO wrapper
+    (:class:`NegTokenInit`/:class:`NegTokenResp` inside an
+    :class:`InitialContextToken`) or as a bare mechanism token (a raw
+    ``NTLMSSP`` message or a Kerberos token). The choice made by the first
+    token of an exchange must be honoured by every subsequent token; it is not
+    valid to switch encapsulation halfway through a negotiation.
+
+    The policy is evaluated once, when the first token is seen, and the chosen
+    encapsulation is then pinned on the context for the lifetime of that
+    exchange:
+
+    spnego:
+        Only accept the SPNEGO wrapper. A bare mechanism token on the first
+        packet is rejected and a bare token later in the exchange can never
+        bypass the SPNEGO state machine.
+
+    raw:
+        Only accept a bare mechanism token. This preserves the legacy
+        handshake used by old clients that send raw NTLM directly.
+
+    any:
+        Accept either encapsulation on the first packet and pin whichever one
+        the peer actually used. This is the backwards compatible default.
+    """
+
+    any = "any"
+    spnego = "spnego"
+    raw = "raw"
+
+    @classmethod
+    def native(cls, value: typing.Union["EncapsulationPolicy", str]) -> "EncapsulationPolicy":
+        """Coerces a string or enum member into an :class:`EncapsulationPolicy`."""
+        if isinstance(value, EncapsulationPolicy):
+            return value
+
+        try:
+            return cls(str(value).lower())
+        except ValueError:
+            raise ValueError(
+                "Invalid encapsulation policy '%s', must be one of %s" % (value, ", ".join(p.value for p in cls))
+            )
+
+
+@dataclasses.dataclass(frozen=True)
+class ClassifiedToken:
+    """The result of classifying a token against the SPNEGO state machine.
+
+    The classifier relies on the ASN.1 structure of the token rather than
+    searching for the ``NTLMSSP`` byte signature to guess a type.
+
+    Attributes:
+        kind: The encapsulation of the token.
+        token: The parsed SPNEGO message for ``spnego`` tokens, or the raw
+            mechanism byte string for ``ntlm`` and ``kerberos`` tokens.
+        mech: The mechanism of a raw token, ``None`` for SPNEGO tokens.
+    """
+
+    kind: str
+    token: typing.Any
+    mech: typing.Optional[GSSMech] = None
+
+
+def classify_negotiate_token(b_data: bytes) -> ClassifiedToken:
+    """Classifies a token by its wire structure for the SPNEGO state machine.
+
+    Unlike :func:`unpack_token`, which is a lenient parser used for the packet
+    inspector, this enforces the shapes that a single SPNEGO context is
+    permitted to process. The classification is driven entirely by the ASN.1
+    tags and OIDs of the token, never by scanning the payload for an
+    ``NTLMSSP`` signature.
+
+    Args:
+        b_data: The raw token received from the peer.
+
+    Returns:
+        ClassifiedToken: The classified token with ``kind`` set to ``spnego``,
+        ``ntlm``, or ``kerberos``.
+
+    Raises:
+        InvalidTokenError: if the token is empty, uses an unknown OID, is an
+            InitialContextToken nested inside another wrapper, or otherwise
+            does not match a permitted token shape.
+    """
+    if not b_data:
+        raise InvalidTokenError(context_msg="Received an empty authentication token")
+
+    # A bare NTLM message is the only non ASN.1 token the Negotiate context understands. Anything else must parse as a
+    # valid ASN.1 structure so the classification cannot fall back to byte signature guessing.
+    if b_data.startswith(_NTLM_SIGNATURE):
+        return ClassifiedToken("ntlm", b_data, GSSMech.ntlm)
+
+    try:
+        raw_data = unpack_asn1(b_data)[0]
+    except (struct.error, ValueError, TypeError) as e:
+        raise InvalidTokenError(base_error=e, context_msg="Failed to unpack input token")
+
+    if raw_data.tag_class == TagClass.application:
+        # The first token of a GSSAPI exchange is wrapped in an InitialContextToken.
+        if raw_data.tag_number != 0:
+            raise InvalidTokenError(
+                context_msg="Expecting a tag number of 0 not %s for InitialContextToken" % raw_data.tag_number
+            )
+
+        initial_context_token: typing.Optional[InitialContextToken]
+        try:
+            initial_context_token = InitialContextToken.unpack(raw_data.b_data)
+            this_mech = GSSMech.from_oid(initial_context_token.this_mech)
+        except ValueError as e:
+            oid = initial_context_token.this_mech if initial_context_token is not None else "unknown"
+            raise InvalidTokenError(
+                base_error=e,
+                context_msg="InitialContextToken uses an unknown mechanism OID '%s'" % oid,
+            )
+
+        if this_mech == GSSMech.spnego:
+            # Reject a SPNEGO wrapper nested inside another wrapper. A valid exchange carries a single
+            # InitialContextToken on the first packet and bare NegTokenResp values afterwards.
+            try:
+                inner = unpack_asn1(initial_context_token.inner_context_token)[0]
+            except (struct.error, ValueError, TypeError) as e:
+                raise InvalidTokenError(base_error=e, context_msg="Failed to unpack inner SPNEGO token")
+
+            if inner.tag_class == TagClass.application:
+                raise InvalidTokenError(
+                    context_msg="Received a nested InitialContextToken, the SPNEGO wrapper cannot contain another wrapper"
+                )
+
+            if inner.tag_class != TagClass.context_specific or inner.tag_number not in (0, 1):
+                raise InvalidTokenError(
+                    context_msg="Unknown NegotiationToken CHOICE %s, only expecting 0 or 1" % inner.tag_number
+                )
+
+            try:
+                if inner.tag_number == 0:
+                    message: typing.Any = NegTokenInit.unpack(inner.b_data)
+                else:
+                    message = NegTokenResp.unpack(inner.b_data)
+            except (struct.error, ValueError, TypeError) as e:
+                raise InvalidTokenError(base_error=e, context_msg="Failed to unpack inner SPNEGO token")
+
+            return ClassifiedToken("spnego", message)
+
+        if this_mech == GSSMech.ntlm:
+            return ClassifiedToken("ntlm", initial_context_token.inner_context_token, GSSMech.ntlm)
+
+        if this_mech.is_kerberos_oid:
+            return ClassifiedToken("kerberos", b_data, GSSMech.kerberos)
+
+        raise InvalidTokenError(context_msg="InitialContextToken uses unsupported mechanism OID '%s'" % this_mech.value)
+
+    if raw_data.tag_class == TagClass.context_specific:
+        # A bare NegotiationToken CHOICE (no InitialContextToken) is only valid as a SPNEGO follow up token.
+        if raw_data.tag_number == 0:
+            try:
+                return ClassifiedToken("spnego", NegTokenInit.unpack(raw_data.b_data))
+            except (struct.error, ValueError, TypeError) as e:
+                raise InvalidTokenError(base_error=e, context_msg="Failed to unpack NegTokenInit")
+
+        elif raw_data.tag_number == 1:
+            try:
+                return ClassifiedToken("spnego", NegTokenResp.unpack(raw_data.b_data))
+            except (struct.error, ValueError, TypeError) as e:
+                raise InvalidTokenError(base_error=e, context_msg="Failed to unpack NegTokenResp")
+
+        raise InvalidTokenError(
+            context_msg="Unknown NegotiationToken CHOICE %d, only expecting 0 or 1" % raw_data.tag_number
+        )
+
+    raise InvalidTokenError(context_msg="Token does not match a SPNEGO, NTLM, or Kerberos message structure")
 
 
 # https://www.rfc-editor.org/rfc/rfc4178.html#section-4.2.1 - ContextFlags

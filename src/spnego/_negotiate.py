@@ -3,7 +3,6 @@
 
 import base64
 import logging
-import struct
 import typing
 
 import spnego
@@ -22,11 +21,12 @@ from spnego._context import (
 from spnego._credential import Credential, unify_credentials
 from spnego._gss import GSSAPIProxy
 from spnego._spnego import (
+    EncapsulationPolicy,
     NegState,
     NegTokenInit,
     NegTokenResp,
+    classify_negotiate_token,
     pack_mech_type_list,
-    unpack_token,
 )
 from spnego._sspi import SSPIProxy
 from spnego.channel_bindings import GssChannelBindings
@@ -35,6 +35,7 @@ from spnego.exceptions import (
     InvalidTokenError,
     NegotiateOptions,
     NoContextError,
+    SpnegoError,
 )
 
 log = logging.getLogger(__name__)
@@ -61,6 +62,7 @@ class NegotiateProxy(ContextProxy):
         usage: str = "initiate",
         protocol: str = "negotiate",
         options: NegotiateOptions = NegotiateOptions.none,
+        encapsulation: typing.Union[EncapsulationPolicy, str] = EncapsulationPolicy.any,
         **kwargs: typing.Any,
     ) -> None:
         credentials = unify_credentials(username, password)
@@ -69,6 +71,12 @@ class NegotiateProxy(ContextProxy):
         )
 
         self._credentials = credentials
+        self._encapsulation_policy = EncapsulationPolicy.native(encapsulation)
+        # The encapsulation actually used by the exchange, pinned when the first token is produced or received. It is
+        # not valid to switch between a SPNEGO wrapper and a bare mechanism token halfway through an exchange.
+        self._encapsulation: typing.Optional[str] = None
+        # Once a token is rejected the exchange is dead; any trailing bytes must not be treated as a new auth.
+        self._failed = False
         self._complete = False
         self._available_contexts: typing.Optional[typing.Dict[GSSMech, ContextProxy]] = kwargs.get(
             "_negotiate_contexts", None
@@ -81,6 +89,7 @@ class NegotiateProxy(ContextProxy):
         self._supported_mech: typing.Optional[str] = None
 
         self._init_sent = False
+        self._init_received = False
         self._mech_sent = False
         self._mic_sent = False
         self._mic_recv = False
@@ -138,6 +147,7 @@ class NegotiateProxy(ContextProxy):
             usage=self.usage,
             protocol=self.protocol,
             options=self.options,
+            encapsulation=self._encapsulation_policy,
             _negotiate_contexts={m: c[0].new_context() for m, c in self._context_list.items()},
         )
 
@@ -149,6 +159,28 @@ class NegotiateProxy(ContextProxy):
     ) -> typing.Optional[bytes]:
         log.debug("SPNEGO step input: %s", base64.b64encode(in_token or b"").decode())
 
+        if self._failed:
+            raise InvalidTokenError(
+                context_msg="The SPNEGO exchange has already failed, remaining bytes cannot start a new authentication"
+            )
+
+        try:
+            out_token = self._step(in_token=in_token, channel_bindings=channel_bindings)
+        except SpnegoError:
+            # Mark the context dead so any trailing bytes after a rejection are not processed as another exchange.
+            self._failed = True
+            raise
+
+        log.debug("SPNEGO step output: %s" % base64.b64encode(out_token or b"").decode())
+
+        return out_token
+
+    def _step(
+        self,
+        in_token: typing.Optional[bytes] = None,
+        *,
+        channel_bindings: typing.Optional[GssChannelBindings] = None,
+    ) -> typing.Optional[bytes]:
         # Step 1. Process SPNEGO mechs.
         mech_token_in, mech_list_mic, is_spnego = self._step_spnego_input(
             in_token=in_token,
@@ -176,9 +208,32 @@ class NegotiateProxy(ContextProxy):
             # Remove the leftover contexts if there are still others remaining.
             self._context_list = {self._chosen_mech: (self._context, None)}
 
-        log.debug("SPNEGO step output: %s" % base64.b64encode(out_token or b"").decode())
-
         return out_token
+
+    def _pin_encapsulation(self, encapsulation: str) -> None:
+        """Pins the encapsulation used by the exchange and enforces the policy.
+
+        The first token decides whether the exchange runs inside the SPNEGO wrapper or as a bare mechanism token. That
+        choice is fixed for the lifetime of the context and is checked against the configured
+        :class:`EncapsulationPolicy`.
+        """
+        if self._encapsulation is not None:
+            if self._encapsulation != encapsulation:
+                raise InvalidTokenError(
+                    context_msg="Encapsulation cannot change mid-exchange, the exchange is pinned to '%s' but received "
+                    "a '%s' token" % (self._encapsulation, encapsulation)
+                )
+
+            return
+
+        policy = self._encapsulation_policy
+        if policy != EncapsulationPolicy.any and policy.value != encapsulation:
+            raise InvalidTokenError(
+                context_msg="Encapsulation policy '%s' does not permit a '%s' first token"
+                % (policy.value, encapsulation)
+            )
+
+        self._encapsulation = encapsulation
 
     def _step_spnego_input(
         self,
@@ -189,51 +244,91 @@ class NegotiateProxy(ContextProxy):
         token = None
         is_spnego = True
 
-        if in_token:
-            try:
-                in_token = unpack_token(in_token)
-            except struct.error as e:
-                raise InvalidTokenError(base_error=e, context_msg=f"Failed to unpack input token {e!s}")
+        if not in_token:
+            # An empty token is only meaningful to start an exchange, either the initiator generating its first
+            # NegTokenInit or the acceptor emitting its NegTokenInit2 hint. Once the exchange has started an empty
+            # token is invalid rather than being treated as a fresh (empty) authentication.
+            if self._encapsulation is not None:
+                raise InvalidTokenError(context_msg="Received an empty token after the SPNEGO exchange had started")
 
-            if isinstance(in_token, NegTokenInit):
-                mech_list_mic = in_token.mech_list_mic
-                token = in_token.mech_token
+            self._mech_list = self._rebuild_context_list(
+                channel_bindings=channel_bindings,
+            )
+            return token, mech_list_mic, is_spnego
 
-                # This is the first token of the exchange, we should build our context list based on the mechs the
-                # opposite end supports.
-                mech_list = self._rebuild_context_list(
-                    mech_types=in_token.mech_types,
-                    channel_bindings=channel_bindings,
-                )
+        classified = classify_negotiate_token(in_token)
 
+        if classified.kind == "spnego":
+            self._pin_encapsulation("spnego")
+            in_message = classified.token
+
+            if isinstance(in_message, NegTokenInit):
+                # A second NegTokenInit (including a repeated InitialContextToken) cannot restart the outer SPNEGO
+                # state machine. The only init an initiator processes is the acceptor NegTokenInit2 hint, which only
+                # arrives before the initiator has sent its own NegTokenInit.
                 if self.usage == "initiate":
+                    if self._init_sent:
+                        raise InvalidTokenError(
+                            context_msg="Received a duplicate NegTokenInit after the SPNEGO exchange had started"
+                        )
+
+                    self._init_received = True
+                    mech_list_mic = in_message.mech_list_mic
+                    token = in_message.mech_token
+
+                    mech_list = self._rebuild_context_list(
+                        mech_types=in_message.mech_types,
+                        channel_bindings=channel_bindings,
+                    )
                     # If initiate processes a NegTokenInit2 token that's just used as a hint, use the actually
                     # supported mechs as the true mech list.
                     self._mech_list = mech_list
 
                 else:
+                    # The acceptor may have already emitted its own NegTokenInit2 hint, but a NegTokenInit from the
+                    # initiator is only valid while the acceptor is still waiting for that first initiator token.
+                    if self._init_received:
+                        raise InvalidTokenError(
+                            context_msg="Received a duplicate NegTokenInit after the SPNEGO exchange had started"
+                        )
+
+                    mech_list_mic = in_message.mech_list_mic
+                    token = in_message.mech_token
+
+                    # This is the first token of the exchange, build the context list based on the mechs offered.
+                    self._rebuild_context_list(
+                        mech_types=in_message.mech_types,
+                        channel_bindings=channel_bindings,
+                    )
+
                     # If accept processes a NegTokenInit token we treat that as an actual init is sent so it does not
                     # send it's own and uses the initiate mech list as the true mech list.
                     self._init_sent = True
-                    self._mech_list = in_token.mech_types
+                    self._init_received = True
+                    self._mech_list = in_message.mech_types
 
                     # Windows rejects a supportedMech that does not echo the OID it offered, even when it is an alias
                     # of the same mech like the MS Kerberos OID. Reply with the first OID the initiator used for the
                     # chosen mech.
                     chosen_mech = self._chosen_mech
                     self._supported_mech = next(
-                        oid for oid in in_token.mech_types if self._is_same_mech(chosen_mech, oid)
+                        oid for oid in in_message.mech_types if self._is_same_mech(chosen_mech, oid)
                     )
 
                     # If the preferred initiator token does not match the preferred acceptor token then the acceptor
                     # must send the request-mic negState.
                     preferred_mech = self._preferred_mech_list()[0]
-                    if not self._is_same_mech(preferred_mech, in_token.mech_types[0]):
+                    if not self._is_same_mech(preferred_mech, in_message.mech_types[0]):
                         self._mic_required = True
 
-            elif isinstance(in_token, NegTokenResp):
-                mech_list_mic = in_token.mech_list_mic
-                token = in_token.response_token
+            else:
+                if not self._init_sent:
+                    raise InvalidTokenError(
+                        context_msg="Received a NegTokenResp before the SPNEGO exchange had started"
+                    )
+
+                mech_list_mic = in_message.mech_list_mic
+                token = in_message.response_token
 
                 # https://github.com/jborean93/smbprotocol/issues/137
                 # Some really old SPNEGO implementations have mechListMIC with the same value as responseToken. This is
@@ -242,8 +337,8 @@ class NegotiateProxy(ContextProxy):
                     mech_list_mic = None
 
                 # If we have received the supported_mech then we don't need to send our own.
-                if in_token.supported_mech:
-                    supported_mech = in_token.supported_mech
+                if in_message.supported_mech:
+                    supported_mech = in_message.supported_mech
                     self.__chosen_mech = next(
                         (m for m in self._context_list if self._is_same_mech(m, supported_mech)),
                         GSSMech.from_oid(supported_mech),
@@ -251,31 +346,27 @@ class NegotiateProxy(ContextProxy):
                     self._mech_sent = True
 
                 # Raise exception if we are rejected and have no error info (mechToken) that will give us more info.
-                if in_token.neg_state == NegState.reject and not token:
+                if in_message.neg_state == NegState.reject and not token:
                     raise InvalidTokenError(context_msg="Received SPNEGO rejection with no token error message")
 
-                if in_token.neg_state == NegState.request_mic:
+                if in_message.neg_state == NegState.request_mic:
                     self._mic_required = True
-                elif in_token.neg_state == NegState.accept_complete:
+                elif in_message.neg_state == NegState.accept_complete:
                     self._complete = True
 
-            else:
-                # This usually indicates the token is a raw NTLM or Kerberos token, return as is.
-                is_spnego = False
-                token = in_token
-
-                self.__chosen_mech = GSSMech.ntlm if token and token.startswith(b"NTLMSSP\x00") else GSSMech.kerberos
-
-                if not self._context_list:
-                    self._rebuild_context_list(
-                        mech_types=[self.__chosen_mech.value],
-                        channel_bindings=channel_bindings,
-                    )
-
         else:
-            self._mech_list = self._rebuild_context_list(
-                channel_bindings=channel_bindings,
-            )
+            # A bare mechanism token. The encapsulation pin enforces the policy and rejects the token once the
+            # exchange is running inside the SPNEGO wrapper, so a raw NTLM message can never skip the outer state.
+            self._pin_encapsulation("raw")
+            is_spnego = False
+            token = classified.token
+            self.__chosen_mech = typing.cast(GSSMech, classified.mech)
+
+            if not self._context_list:
+                self._rebuild_context_list(
+                    mech_types=[self.__chosen_mech.value],
+                    channel_bindings=channel_bindings,
+                )
 
         return token, mech_list_mic, is_spnego
 
@@ -336,6 +427,10 @@ class NegotiateProxy(ContextProxy):
 
         if not self._init_sent:
             self._init_sent = True
+            # Generating a NegTokenInit (or NegTokenInit2 hint) commits this side of the exchange to the SPNEGO
+            # wrapper. The policy is checked here as well so a locally generated first token honours the
+            # configuration even before any peer token arrives.
+            self._pin_encapsulation("spnego")
 
             init_kwargs: typing.Dict[str, typing.Any] = {
                 "mech_token": out_token,
