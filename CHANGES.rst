@@ -4,6 +4,16 @@ Changelog
 Unreleased
 ----------
 
+* Restricted support for the long extended attributes of RFC 6929:
+  ``ATTRIBUTE name 245 long-extended`` (or 246) dictionary definitions
+  register the container, and ``245.<code>``/``246.<code>`` definitions
+  the attributes. Values longer than 253 octets are fragmented over
+  consecutive attributes when a packet is encoded and reassembled when
+  it is decoded; truncated, interleaved and attributes larger than
+  ``Packet.max_long_extended_size`` (4096 octets by default) are
+  rejected with a PacketError. Undefined extended types are kept as raw
+  values keyed by a ``pyrad.packet.LongExtendedKey``. Packet
+  authentication keeps using the attributes exactly as received.
 * pyrad no longer depends on netaddr; it was only used by the tests and
   is now in the ``test`` dependency group. ipv6prefix values given as
   ``netaddr.IPNetwork`` are still accepted. Code that imports netaddr

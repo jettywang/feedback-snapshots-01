@@ -15,7 +15,9 @@ The commands supported are:
 ``ATTRIBUTE <attribute> <code> <type> [<vendor>|<flags>]``
   Define an attribute and its data type. The code is decimal, or
   hexadecimal with a ``0x`` prefix (octal with ``0o``), and
-  ``<tlv code>.<code>`` for a sub-attribute of a TLV.
+  ``<tlv code>.<code>`` for a sub-attribute of a TLV. After the
+  ``long-extended`` container of type 245 or 246 (RFC 6929) is defined,
+  ``245.<code>`` or ``246.<code>`` defines a long extended attribute.
 
 ``VALUE <attribute> <valuename> <value>``
   Define a named value of an attribute.
@@ -66,16 +68,24 @@ FreeRADIUS dictionaries also define attributes that pyrad cannot encode or
 decode. These are skipped with a warning, so that the FreeRADIUS dictionary
 files can be read as they are:
 
-- attributes of the data types ``vsa``, ``extended``, ``long-extended``,
-  ``evs`` (the RFC 6929 extended attributes), ``ipv4prefix``,
-  ``combo-ip``, ``bool``, ``uint16`` and ``uint32``, and their
-  sub-attributes
+- attributes of the data types ``vsa``, ``extended``, ``evs`` (the
+  RFC 6929 extended attributes other than the long extended ones),
+  ``ipv4prefix``, ``combo-ip``, ``bool``, ``uint16`` and ``uint32``, and
+  their sub-attributes
+- attributes of the data type ``long-extended`` other than the type 245
+  and 246 containers (RFC 6929)
 - attributes with the ``array`` flag
 - TLVs nested more than one level deep
 - attributes of vendors with a format other than ``format=1,1``
   (``VENDOR``)
 - vendor attributes in a ``BEGIN-VENDOR`` block with a ``format=``
   option, which are extended vendor-specific attributes (RFC 6929)
+
+Long extended attributes (RFC 6929) are supported in a restricted form:
+``ATTRIBUTE <name> 245 long-extended`` (or 246) defines the container of
+a long extended type space, and ``ATTRIBUTE <name> 245.<code> <type>``
+defines a long extended attribute in it. Their values are fragmented
+over several attributes on the wire, see :class:`pyrad.packet.Packet`.
 
 VALUE definitions for skipped attributes are ignored, and VALUE definitions
 for unknown attributes are ignored with a warning. Received attributes
@@ -232,10 +242,14 @@ class Attribute(object):
     :vartype parent: Attribute or None
     :ivar is_sub_attribute: the attribute is a sub-attribute of a TLV
     :vartype is_sub_attribute: bool
+    :ivar extended: attribute type of the long extended attribute
+        (RFC 6929) this attribute belongs to, 245 or 246, or 0 if it is
+        not a long extended attribute
+    :vartype extended: int
     """
 
     def __init__(self, name, code, datatype, is_sub_attribute=False, vendor='', values=None,
-                 encrypt=0, has_tag=False):
+                 encrypt=0, has_tag=False, extended=0):
         if datatype not in DATATYPES:
             raise ValueError('Invalid data type')
         self.name = name
@@ -244,6 +258,7 @@ class Attribute(object):
         self.vendor = vendor
         self.encrypt = encrypt
         self.has_tag = has_tag
+        self.extended = extended
         self.values = bidict.BiDict()
         self.sub_attributes = {}
         self.parent = None
@@ -296,6 +311,8 @@ class Dictionary:
         # TLVs by (vendor code, attribute code), kept across ReadDictionary
         # calls so that sub-attributes can be defined in another file
         self._tlvs = {}
+        # attribute types registered as long extended (RFC 6929), 245/246
+        self._long_extended = set()
         # (vendor code, attribute code) of skipped top-level attributes,
         # whose sub-attributes are skipped as well
         self._skipped_codes = set()
@@ -400,6 +417,13 @@ class Dictionary:
                 state, attribute, 'extended vendor-specific attribute')
         if vendor in self._unsupported_vendors:
             return self.__SkipAttribute(state, attribute, 'vendor format')
+        if datatype == 'long-extended' and len(codes) == 1 \
+                and codes[0] in (245, 246) and not vendor:
+            # container of the long extended attributes (RFC 6929); only
+            # the reserved types 245 and 246 are supported
+            self._long_extended.add(codes[0])
+            self._skipped_codes.discard((vendor_code, codes[0]))
+            return
         if datatype in UNSUPPORTED_DATATYPES:
             if len(codes) == 1:
                 self._skipped_codes.add((vendor_code, codes[0]))
@@ -412,7 +436,14 @@ class Dictionary:
             return self.__SkipAttribute(state, attribute, 'nested TLV')
 
         is_sub_attribute = (len(codes) > 1)
-        if len(codes) == 2:
+        extended = 0
+        if len(codes) == 2 and not vendor and codes[0] in self._long_extended:
+            # long extended attribute (RFC 6929) in the 245/246 type space
+            is_sub_attribute = False
+            extended = codes[0]
+            code = int(codes[1])
+            parent = None
+        elif len(codes) == 2:
             code = int(codes[1])
             parent_code = int(codes[0])
             parent = self._tlvs.get((vendor_code, parent_code))
@@ -426,7 +457,9 @@ class Dictionary:
             code = int(codes[0])
             parent_code = None
 
-        if vendor:
+        if extended:
+            key = (extended, code)
+        elif vendor:
             if is_sub_attribute:
                 key = (vendor_code, parent_code, code)
             else:
@@ -438,15 +471,16 @@ class Dictionary:
                 key = code
 
         self.attrindex.Add(attribute, key)
-        self.attributes[attribute] = Attribute(attribute, code, datatype, is_sub_attribute, vendor, encrypt=encrypt, has_tag=has_tag)
+        self.attributes[attribute] = Attribute(attribute, code, datatype, is_sub_attribute, vendor, encrypt=encrypt, has_tag=has_tag, extended=extended)
         if is_sub_attribute:
             # save sub attribute in parent tlv and update their parent field
             parent.sub_attributes[code] = attribute
             self.attributes[attribute].parent = parent
-        else:
+        elif not extended:
             # a (re)defined top-level attribute replaces a skipped attribute
             # or TLV with the same code
             self._skipped_codes.discard((vendor_code, code))
+            self._long_extended.discard(code)
             if datatype == 'tlv':
                 self._tlvs[(vendor_code, code)] = self.attributes[attribute]
             else:

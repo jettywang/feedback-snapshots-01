@@ -212,6 +212,63 @@ class DictionaryParsingTests(unittest.TestCase):
                 StringIO('ATTRIBUTE Test-Ext-String 241.5 string'))
         self.assertIn('Test-Ext-String', dict.skipped_attributes)
 
+    def testAttributeLongExtended(self):
+        self.dict.ReadDictionary(StringIO(
+            'ATTRIBUTE Long-Extended-Type-1 245 long-extended\n'
+            'ATTRIBUTE Long-Extended-Type-2 246 long-extended\n'
+            'ATTRIBUTE Test-Long-String 245.1 string\n'
+            'ATTRIBUTE Test-Long-Integer 246.7 integer\n'
+            'VALUE Test-Long-Integer Zero 0\n'
+            'VALUE Test-Long-Integer One 1'))
+        attr = self.dict['Test-Long-String']
+        self.assertEqual(attr.code, 1)
+        self.assertEqual(attr.type, 'string')
+        self.assertEqual(attr.extended, 245)
+        self.assertFalse(attr.is_sub_attribute)
+        self.assertEqual(self.dict.attrindex['Test-Long-String'], (245, 1))
+        self.assertEqual(self.dict.attrindex['Test-Long-Integer'], (246, 7))
+        self.assertEqual(self.dict['Test-Long-Integer'].extended, 246)
+        self.assertEqual(
+            self.dict['Test-Long-Integer'].values.GetBackward(b'\x00\x00\x00\x00'),
+            'Zero')
+
+    def testAttributeLongExtendedContainerInOtherFile(self):
+        dict = Dictionary(
+            StringIO('ATTRIBUTE Long-Extended-Type-1 245 long-extended'),
+            StringIO('ATTRIBUTE Test-Long-String 245.1 string'))
+        self.assertEqual(dict['Test-Long-String'].extended, 245)
+
+    def testAttributeLongExtendedWithoutContainer(self):
+        with self.assertRaises(ParseError) as cm:
+            self.dict.ReadDictionary(StringIO(
+                'ATTRIBUTE Test-Long-String 245.1 string'))
+        self.assertIn('unknown TLV 245', str(cm.exception))
+
+    def testAttributeLongExtendedOtherCodeIsSkipped(self):
+        with self.assertLogs('pyrad', 'WARNING') as cm:
+            self.dict.ReadDictionary(StringIO(
+                'ATTRIBUTE Test-Long 100 long-extended'))
+        self.assertFalse('Test-Long' in self.dict)
+        self.assertIn('Test-Long', self.dict.skipped_attributes)
+        self.assertIn('data type long-extended', cm.output[0])
+
+    def testAttributeLongExtendedContainerIsNotAnAttribute(self):
+        self.dict.ReadDictionary(StringIO(
+            'ATTRIBUTE Long-Extended-Type-1 245 long-extended'))
+        self.assertFalse('Long-Extended-Type-1' in self.dict)
+        self.assertNotIn('Long-Extended-Type-1',
+                         self.dict.skipped_attributes)
+
+    def testAttributeLongExtendedRedefinedContainer(self):
+        self.dict.ReadDictionary(StringIO(
+            'ATTRIBUTE Long-Extended-Type-1 245 long-extended\n'
+            'ATTRIBUTE Test-Long-String 245.1 string\n'
+            'ATTRIBUTE Test-Other 245 string'))
+        self.assertEqual(self.dict['Test-Other'].extended, 0)
+        with self.assertRaises(ParseError):
+            self.dict.ReadDictionary(StringIO(
+                'ATTRIBUTE Test-Long-Other 245.2 string'))
+
     def testRedefinedSkippedAttributeAsTlv(self):
         with self.assertLogs('pyrad', 'WARNING'):
             dict = Dictionary(StringIO('ATTRIBUTE Test-Bool 200 bool'))
@@ -275,7 +332,7 @@ class DictionaryParsingTests(unittest.TestCase):
         self.assertEqual(dict['EAP-Message'].type, 'octets')
         self.assertEqual(dict.skipped_attributes, set([
             'Vendor-Specific', 'Mobile-Node-Home-Address-IPv4',
-            'Extended-Attribute-1', 'Extended-Attribute-5',
+            'Extended-Attribute-1',
             'Extended-Vendor-Specific-1', 'Extended-Vendor-Specific-5',
             'Allowed-Called-Station-Id', 'FreeRADIUS-Attr',
             'FreeRADIUS-EAP-FAST-PAC', 'FreeRADIUS-EAP-FAST-PAC-Key',

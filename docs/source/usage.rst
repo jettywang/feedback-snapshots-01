@@ -37,7 +37,8 @@ this::
     VALUE       Tunnel-Medium-Type   IEEE-802  6
 
 The FreeRADIUS dictionary files can be read as they are. Attributes that
-pyrad cannot encode, such as the RFC 6929 extended attributes, are skipped
+pyrad cannot encode, such as the RFC 6929 extended attributes other than
+the long extended ones, are skipped
 with a warning and listed in ``Dictionary.skipped_attributes``; see
 :mod:`pyrad.dictionary` for the data types.
 

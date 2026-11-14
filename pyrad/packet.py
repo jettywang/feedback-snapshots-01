@@ -43,6 +43,31 @@ class PacketError(Exception):
     an invalid length."""
 
 
+# Attribute type codes of the long extended attributes (RFC 6929 section 3)
+LONG_EXTENDED_TYPES = (245, 246)
+
+
+class LongExtendedKey(tuple):
+    """Key of a long extended attribute (RFC 6929): a
+    ``(type, extended type)`` tuple, e.g. ``(245, 1)`` for the attribute
+    "245.1". The type is 245 (Long-Extended-Type-1) or 246
+    (Long-Extended-Type-2).
+
+    It compares and hashes equal to a plain tuple with the same numbers,
+    so ``pkt[(245, 1)]`` finds it, but unlike a plain tuple it is not
+    encoded as a vendor-specific attribute.
+    """
+
+    def __new__(cls, type, extended_type):
+        if type not in LONG_EXTENDED_TYPES:
+            raise ValueError('Invalid long extended attribute type %d'
+                             % type)
+        return tuple.__new__(cls, (type, extended_type))
+
+    def __repr__(self):
+        return 'LongExtendedKey(%d, %d)' % (self[0], self[1])
+
+
 class Packet(OrderedDict):
     """A RADIUS packet, with a dictionary interface to its attributes.
 
@@ -67,6 +92,17 @@ class Packet(OrderedDict):
     The value of a TLV attribute is a dict which maps the sub-attribute
     names to their values. Sub-attributes can also be read, set, deleted
     and tested with ``in`` by their own name.
+
+    Long extended attributes (RFC 6929), defined in the dictionary with a
+    code in the 245 or 246 type space, are fragmented over several
+    attributes when they are encoded and reassembled when they are
+    decoded; the packet only shows the reassembled value. Undefined
+    extended types are kept as raw values keyed by a
+    :class:`LongExtendedKey`. Reassembly rejects truncated, interleaved
+    and longer than ``max_long_extended_size`` attributes with a
+    :exc:`PacketError`. Packet authentication (Message-Authenticator,
+    Request Authenticator) always uses the attributes exactly as
+    received, not the reassembled and re-encoded form.
 
     Normally you will not use this class directly, but one of the
     :class:`AuthPacket`, :class:`AcctPacket` or :class:`CoAPacket`
@@ -93,6 +129,12 @@ class Packet(OrderedDict):
                                  encrypted attributes
     :type request_authenticator: bytes
     """
+
+    #: Maximum size in octets of a reassembled long extended attribute
+    #: (RFC 6929 section 2.2); larger ones are rejected with a
+    #: :exc:`PacketError` when decoding and a :exc:`ValueError` when
+    #: encoding. Override it in a subclass or on an instance to change it.
+    max_long_extended_size = 4096
 
     def __init__(self, code=0, id=None, secret=b'', authenticator=None,
                  **attributes):
@@ -346,6 +388,14 @@ class Packet(OrderedDict):
         result = ''
         if attr.values.HasForward(value):
             result = attr.values.GetForward(value)
+        elif attr.extended and attr.type == 'string' \
+                and isinstance(value, str):
+            # a long extended attribute (RFC 6929) carries more than 253
+            # octets; its size is checked when the packet is encoded
+            result = value.encode('utf-8')
+        elif attr.extended and attr.type in ('string', 'octets') \
+                and isinstance(value, (bytes, bytearray)):
+            result = bytes(value)
         else:
             result = tools.EncodeAttr(attr.type, value)
 
@@ -415,6 +465,8 @@ class Packet(OrderedDict):
         attr = self.dict.attributes[key]
         if attr.vendor and not attr.is_sub_attribute:  # sub attribute keys don't need vendor
             return (self.dict.vendors.GetForward(attr.vendor), attr.code)
+        elif attr.extended:
+            return LongExtendedKey(attr.extended, attr.code)
         else:
             return attr.code
 
@@ -696,6 +748,8 @@ class Packet(OrderedDict):
                              % (key, length))
 
     def _PktEncodeAttribute(self, key, value):
+        if isinstance(key, LongExtendedKey):
+            return self._PktEncodeLongExtended(key, value)
         if isinstance(key, tuple):
             inner = self._PktEncodeAttribute(key[1], value)
             # vendor id and vendor attribute inside a Vendor-Specific
@@ -707,6 +761,29 @@ class Packet(OrderedDict):
             self._CheckAttributeLength(key, len(value))
 
         return struct.pack('!BB', key, (len(value) + 2)) + value
+
+    def _PktEncodeLongExtended(self, key, value):
+        """Encode a long extended attribute (RFC 6929 section 2.2). A
+        value longer than 251 octets is fragmented over consecutive
+        attributes with the More flag set on all but the last one.
+        """
+        if not value:
+            raise ValueError('Value of long extended attribute %r is empty'
+                             % (key,))
+        if len(value) > self.max_long_extended_size:
+            raise ValueError('Value of attribute %r is too long (%d octets, '
+                             'at most %d)'
+                             % (key, len(value), self.max_long_extended_size))
+        result = b''
+        offset = 0
+        while offset < len(value):
+            fragment = value[offset:offset + 251]
+            offset += len(fragment)
+            # the More flag is the high bit of the fourth octet
+            more = 0x80 if offset < len(value) else 0
+            result += struct.pack('!BBBB', key[0], 4 + len(fragment),
+                                  key[1], more) + fragment
+        return result
 
     def _PktEncodeTlv(self, tlv_key, tlv_value):
         tlv_attr = self.dict.attributes[self._DecodeKey(tlv_key)]
@@ -812,6 +889,44 @@ class Packet(OrderedDict):
         attr = self.dict.attributes.get(self._DecodeKey(code))
         return (attr is not None and attr.type == 'tlv')
 
+    def _PktDecodeLongExtended(self, pending, key, attrlen, value):
+        """Reassemble a fragment of a long extended attribute (RFC 6929
+        section 2.2) and return the new reassembly state.
+
+        The fragments of one attribute are consecutive and carry the same
+        Type and Extended Type; all but the last one have the More flag
+        set and a Length of 255. Only a complete attribute is added to
+        the packet, keyed by a :class:`LongExtendedKey`.
+
+        :param pending: reassembly state of an incomplete attribute, None
+                        if no fragment is pending
+        :raise PacketError: the fragment is truncated, interleaved with
+                            another extended attribute or longer than
+                            ``max_long_extended_size``
+        """
+        if attrlen < 5 or len(value) < 3:
+            raise PacketError('Long extended attribute is too short (%d)'
+                              % attrlen)
+        (extended_type, flags) = struct.unpack('!BB', value[:2])
+        more = flags & 0x80
+        if more and attrlen != 255:
+            raise PacketError('Long extended fragment with the More flag '
+                              'set is not 255 octets (%d)' % attrlen)
+        if pending is None:
+            pending = [key, extended_type, bytearray()]
+        elif pending[0] != key or pending[1] != extended_type:
+            raise PacketError('Fragments of different long extended '
+                              'attributes are interleaved')
+        pending[2] += value[2:]
+        if len(pending[2]) > self.max_long_extended_size:
+            raise PacketError('Long extended attribute is longer than %d '
+                              'octets' % self.max_long_extended_size)
+        if more:
+            return pending
+        self.setdefault(LongExtendedKey(pending[0], pending[1]), []) \
+            .append(bytes(pending[2]))
+        return None
+
     def DecodePacket(self, packet):
         """Decode a packet as received from the network.
 
@@ -842,6 +957,9 @@ class Packet(OrderedDict):
         self.clear()
 
         packet = packet[20:]
+        # reassembly state of an incomplete long extended attribute
+        # (RFC 6929): [type, extended type, fragments received so far]
+        pending = None
         while packet:
             try:
                 (key, attrlen) = struct.unpack('!BB', packet[0:2])
@@ -859,12 +977,19 @@ class Packet(OrderedDict):
                 # POST: Message Authenticator AVP is present.
                 self.message_authenticator = True
                 self.setdefault(key, []).append(value)
+            elif key in LONG_EXTENDED_TYPES:
+                pending = self._PktDecodeLongExtended(pending, key,
+                                                      attrlen, value)
             elif self._PktIsTlvAttribute(key):
                 self._PktDecodeTlvAttribute(key, value)
             else:
                 self.setdefault(key, []).append(value)
 
             packet = packet[attrlen:]
+
+        if pending is not None:
+            raise PacketError('Truncated long extended attribute: the '
+                              'last fragment has the More flag set')
 
     def _salt_vector(self):
         """Return the authenticator used for salt encryption."""
