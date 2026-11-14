@@ -9,6 +9,11 @@ class HPACKError(Exception):
     The base class for all ``hpack`` exceptions.
     """
 
+    #: Whether the HPACK decoding context remains usable after this error.
+    #: Decoding errors are fatal: callers must not reuse the same decoder
+    #: (or continue the HTTP/2 connection) after receiving one.
+    connection_usable = False
+
 
 
 class HPACKDecodingError(HPACKError):
@@ -39,6 +44,12 @@ class OversizedHeaderListError(HPACKDecodingError):
     A header list that was larger than we allow has been received. This may be
     a DoS attack.
 
+    In the default strict decoding mode this exception is fatal: the HPACK
+    decoding context is no longer usable and the connection must be closed.
+    When using :meth:`hpack.Decoder.decode` in discard mode, an oversized
+    header list is instead reported as a :class:`hpack.DiscardedHeaderList`
+    result after the block has been fully validated.
+
     .. versionadded:: 2.3.0
     """
 
@@ -50,4 +61,26 @@ class InvalidTableSizeError(HPACKDecodingError):
     table size.
 
     .. versionadded:: 3.0.0
+    """
+
+
+class DecodeWorkBudgetExceededError(HPACKDecodingError):
+    """
+    The decoder exhausted the configured work budget for a single header
+    block.
+
+    This is a fatal decoding error. A block that cannot be validated within the
+    budget must not be treated as an application-level rejection of just one
+    header list: the decoder is no longer able to establish that its HPACK
+    context matches the peer's, so the connection must be closed.
+
+    .. versionadded:: 4.3.0
+    """
+
+
+class DecodeWorkBudgetExceeded(DecodeWorkBudgetExceededError):  # noqa: N818
+    """
+    Alias of :class:`DecodeWorkBudgetExceededError`.
+
+    .. versionadded:: 4.3.0
     """

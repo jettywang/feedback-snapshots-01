@@ -4,9 +4,15 @@ Implements the HPACK header compression algorithm as detailed by RFC 7541.
 from __future__ import annotations
 
 import logging
+from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from .exceptions import HPACKDecodingError, InvalidTableSizeError, OversizedHeaderListError
+from .exceptions import (
+    DecodeWorkBudgetExceededError,
+    HPACKDecodingError,
+    InvalidTableSizeError,
+    OversizedHeaderListError,
+)
 from .huffman import HuffmanEncoder
 from .huffman_constants import REQUEST_CODES, REQUEST_CODES_LENGTH
 from .huffman_table import decode_huffman
@@ -34,6 +40,152 @@ _PREFIX_BIT_MAX_NUMBERS = [(2 ** i) - 1 for i in range(9)]
 DEFAULT_MAX_HEADER_LIST_SIZE = 2 ** 16
 
 
+class DecodeMode(Enum):
+    """
+    Selects how :meth:`Decoder.decode` treats an oversized header list.
+
+    ``STRICT`` is the default and preserves historical behaviour: the block is
+    abandoned as soon as the application header list limit is exceeded and an
+    :class:`OversizedHeaderListError` is raised. The decoding context is
+    unusable afterwards, so the whole connection must be closed.
+
+    ``DISCARD`` validates the rest of the block and applies all dynamic table
+    updates, but returns a :class:`DiscardedHeaderList` instead of any decoded
+    business headers. The decoding context remains usable.
+
+    .. versionadded:: 4.3.0
+    """
+
+    STRICT = "strict"
+    DISCARD = "discard"
+
+
+class DecodeStats:
+    """
+    Observability counters for a single :meth:`Decoder.decode` call.
+
+    These counters make the memory bound of discard mode testable: in discard
+    mode ``peak_retained_header_bytes`` and ``peak_retained_headers`` stop
+    growing once the application limit is crossed, no matter how many further
+    headers the block contains. ``peak_dynamic_table_size`` is bounded by the
+    configured HPACK table size, as required by RFC 7541.
+
+    The values describe the most recent decode call. ``header_count`` and
+    ``header_list_size`` cover the whole block, including headers decoded after
+    the application limit was crossed. The ``peak_*`` values are maxima over
+    the whole call; in discard mode the retained-header peaks are bounded by
+    the application limit rather than by the number of discarded headers, and
+    ``peak_dynamic_table_size`` is bounded by the configured table size.
+
+    .. versionadded:: 4.3.0
+    """
+
+    __slots__ = (
+        "header_count",
+        "header_list_size",
+        "peak_dynamic_table_size",
+        "peak_retained_header_bytes",
+        "peak_retained_headers",
+        "table_update_count",
+    )
+
+    def __init__(self) -> None:
+        self.header_count = 0
+        self.header_list_size = 0
+        self.peak_retained_headers = 0
+        self.peak_retained_header_bytes = 0
+        self.peak_dynamic_table_size = 0
+        self.table_update_count = 0
+
+    def as_dict(self) -> dict[str, int]:
+        """Return the counters as a plain dictionary."""
+        return {slot: getattr(self, slot) for slot in self.__slots__}
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, DecodeStats):
+            return NotImplemented
+        return self.as_dict() == other.as_dict()
+
+    def __hash__(self) -> int:
+        return hash(tuple(self.as_dict().items()))
+
+    def __repr__(self) -> str:
+        values = ", ".join(f"{k}={v}" for k, v in self.as_dict().items())
+        return f"{self.__class__.__name__}({values})"
+
+
+class DiscardedHeaderList(list[HeaderTuple]):
+    """
+    The result of a successfully validated header block whose header list was
+    discarded because it exceeded the application limit.
+
+    This object intentionally behaves like an empty list: it never exposes any
+    of the decoded header names or values, not even a prefix. The HPACK
+    decoding context has been fully updated, so the decoder may continue to be
+    used for subsequent header blocks on the same connection.
+
+    :param max_header_list_size: The application limit that was exceeded.
+    :param header_list_size: The full inflated size of the discarded list.
+    :param header_count: The number of header fields in the discarded list.
+
+    .. versionadded:: 4.3.0
+    """
+
+    __slots__ = ("header_count", "header_list_size", "max_header_list_size", "stats")
+
+    discarded = True
+    oversized = True
+    connection_usable = True
+    fatal = False
+
+    def __init__(
+        self,
+        *,
+        max_header_list_size: int,
+        header_list_size: int,
+        header_count: int,
+        stats: DecodeStats | None = None,
+    ) -> None:
+        super().__init__()
+        self.max_header_list_size = max_header_list_size
+        self.header_list_size = header_list_size
+        self.header_count = header_count
+        self.stats = stats
+
+    @property
+    def size(self) -> int:
+        """Alias for :attr:`header_list_size`."""
+        return self.header_list_size
+
+    @property
+    def headers(self) -> tuple[HeaderTuple, ...]:
+        """The discarded headers are never retained or exposed."""
+        return ()
+
+    def __repr__(self) -> str:
+        return (
+            f"{self.__class__.__name__}("
+            f"max_header_list_size={self.max_header_list_size}, "
+            f"header_list_size={self.header_list_size}, "
+            f"header_count={self.header_count})"
+        )
+
+
+def _coerce_decode_mode(mode: DecodeMode | str) -> DecodeMode:
+    """
+    Accept a :class:`DecodeMode` or its string value.
+    """
+    if isinstance(mode, DecodeMode):
+        return mode
+    if isinstance(mode, str):
+        try:
+            return DecodeMode(mode)
+        except ValueError:
+            pass
+    msg = f"mode must be a DecodeMode or one of its values, got {mode!r}"
+    raise ValueError(msg)
+
+
 def _unicode_if_needed(header: HeaderWeaklyTyped, raw: bool) -> HeaderTuple:
     """
     Provides a header as a unicode string if raw is False, otherwise returns
@@ -45,6 +197,114 @@ def _unicode_if_needed(header: HeaderWeaklyTyped, raw: bool) -> HeaderTuple:
     if not raw:
         return header.__class__(name.decode("utf-8"), value.decode("utf-8"))  # type: ignore
     return header.__class__(name, value)  # type: ignore
+
+
+def _validate_header_utf8(headers: Iterable[HeaderTuple], raw: bool) -> None:
+    """
+    Validate that discarded headers would decode as UTF-8 when ``raw`` is
+    false, without retaining the decoded strings.
+
+    Invalid UTF-8 is corrupt input, not an application-level oversized-list
+    rejection, so it must stay fatal even while discarding business headers.
+    """
+    if raw:
+        return
+    for header in headers:
+        try:
+            _unicode_if_needed(header, raw)
+        except UnicodeDecodeError as err:
+            msg = "Unable to decode headers as UTF-8"
+            raise HPACKDecodingError(msg) from err
+
+
+class _HeaderAccumulator:
+    """
+    Accumulates a decoded header list, enforcing the application limit.
+
+    In strict mode crossing the limit raises immediately, preserving the
+    historical contract. In discard mode the accumulated prefix is dropped at
+    that point and every later field is validated and applied to the dynamic
+    table without being retained.
+    """
+
+    __slots__ = (
+        "discarding",
+        "header_count",
+        "headers",
+        "inflated_size",
+        "max_header_list_size",
+        "max_retained_bytes",
+        "max_retained_headers",
+        "mode",
+        "raw",
+        "retained_bytes",
+    )
+
+    def __init__(
+        self,
+        max_header_list_size: int,
+        raw: bool,
+        mode: DecodeMode,
+    ) -> None:
+        self.max_header_list_size = max_header_list_size
+        self.raw = raw
+        self.mode = mode
+        self.headers: list[HeaderTuple] = []
+        self.discarding = False
+        self.header_count = 0
+        self.inflated_size = 0
+        self.retained_bytes = 0
+        self.max_retained_headers = 0
+        self.max_retained_bytes = 0
+
+    def add(self, header: HeaderTuple) -> None:
+        """Account for one decoded header field."""
+        self.header_count += 1
+        entry_size = table_entry_size(header[0], header[1])
+        self.inflated_size += entry_size
+
+        if self.discarding:
+            _validate_header_utf8((header,), self.raw)
+            return
+
+        if self.inflated_size > self.max_header_list_size:
+            if self.mode is DecodeMode.STRICT:
+                msg = f"A header list larger than {self.max_header_list_size} has been received"
+                raise OversizedHeaderListError(msg)
+            # Validate both the retained prefix and the field that crossed the
+            # limit: invalid UTF-8 is corrupt input, not an application-level
+            # rejection, so it must stay fatal in discard mode too.
+            _validate_header_utf8((*self.headers, header), self.raw)
+            self.headers.clear()
+            self.discarding = True
+            self.retained_bytes = 0
+            return
+
+        self.headers.append(header)
+        self.retained_bytes += entry_size
+        self.max_retained_headers = max(self.max_retained_headers, len(self.headers))
+        self.max_retained_bytes = max(self.max_retained_bytes, self.retained_bytes)
+
+    def finish(self, stats: DecodeStats) -> list[HeaderTuple] | DiscardedHeaderList:
+        """Produce the decode result and fill in the statistics."""
+        stats.header_count = self.header_count
+        stats.header_list_size = self.inflated_size
+        stats.peak_retained_headers = self.max_retained_headers
+        stats.peak_retained_header_bytes = self.max_retained_bytes
+
+        if self.discarding:
+            return DiscardedHeaderList(
+                max_header_list_size=self.max_header_list_size,
+                header_list_size=self.inflated_size,
+                header_count=self.header_count,
+                stats=stats,
+            )
+
+        try:
+            return [_unicode_if_needed(h, self.raw) for h in self.headers]
+        except UnicodeDecodeError as err:
+            msg = "Unable to decode headers as UTF-8"
+            raise HPACKDecodingError(msg) from err
 
 
 def encode_integer(integer: int, prefix_bits: int) -> bytearray:
@@ -428,16 +688,31 @@ class Decoder:
         amount of data into a really large header list, allowing enormous
         amounts of memory to be allocated.
 
-        If this amount of data is exceeded, a `OversizedHeaderListError
-        <hpack.OversizedHeaderListError>` exception will be raised. At this
-        point the connection should be shut down, as the HPACK state will no
-        longer be usable.
+        If this amount of data is exceeded, the outcome depends on the ``mode``
+        argument to :meth:`decode`. The default strict mode raises
+        `OversizedHeaderListError <hpack.OversizedHeaderListError>` and leaves
+        the connection unusable. :attr:`DecodeMode.DISCARD` instead validates
+        the rest of the block, keeps the HPACK context in sync, and returns a
+        :class:`DiscardedHeaderList` without any business headers.
 
         Defaults to 64kB.
     :type max_header_list_size: ``int``
+    :param max_decode_work: The maximum number of header field representations
+        to process from a single header block, or ``None`` for no limit. See
+        :attr:`max_decode_work`. Defaults to ``None``.
+    :type max_decode_work: ``int | None``
+
+    .. versionchanged:: 4.3.0
+       Added the ``mode`` argument to :meth:`decode`, the :meth:`decode_discard`
+       convenience method, the ``max_decode_work`` limit, and
+       ``connection_usable``.
     """
 
-    def __init__(self, max_header_list_size: int = DEFAULT_MAX_HEADER_LIST_SIZE) -> None:
+    def __init__(
+        self,
+        max_header_list_size: int = DEFAULT_MAX_HEADER_LIST_SIZE,
+        max_decode_work: int | None = None,
+    ) -> None:
         self.header_table = HeaderTable()
 
         #: The maximum decompressed size we will allow for any single header
@@ -446,10 +721,11 @@ class Decoder:
         #: into a really large header list, allowing enormous amounts of memory
         #: to be allocated.
         #:
-        #: If this amount of data is exceeded, a `OversizedHeaderListError
-        #: <hpack.OversizedHeaderListError>` exception will be raised. At this
-        #: point the connection should be shut down, as the HPACK state will no
-        #: longer be usable.
+        #: If this amount of data is exceeded, the default strict decoding mode
+        #: raises `OversizedHeaderListError
+        #: <hpack.OversizedHeaderListError>` and the connection must be shut
+        #: down. :attr:`DecodeMode.DISCARD` instead returns a
+        #: :class:`DiscardedHeaderList` after keeping the HPACK context in sync.
         #:
         #: Defaults to 64kB.
         #:
@@ -465,6 +741,42 @@ class Decoder:
         #: to confirm that it fits in this size.
         self.max_allowed_table_size = self.header_table.maxsize
 
+        #: The maximum number of header field representations that may be
+        #: processed from a single header block, or ``None`` for no limit.
+        #:
+        #: This bounds the amount of decoding work spent on a block independently
+        #: of the size of the decoded header list. It protects against blocks
+        #: made from a very large number of tiny representations.
+        #:
+        #: Exhausting this budget raises :class:`DecodeWorkBudgetExceeded
+        #: <hpack.DecodeWorkBudgetExceeded>`. That error is fatal: the decoder
+        #: cannot know whether its dynamic table matches the peer's, so the
+        #: connection must be closed. It is never converted into a discarded
+        #: header list.
+        #:
+        #: Defaults to ``None`` (no limit), preserving historical behaviour.
+        #:
+        #: .. versionadded:: 4.3.0
+        self.max_decode_work: int | None = max_decode_work
+
+        #: Whether this decoder may still be used with the same connection.
+        #:
+        #: This starts as ``True``. A fatal decoding error sets it to ``False``,
+        #: because the dynamic table may no longer match the encoder and no
+        #: further blocks can be trusted. An oversized header list handled in
+        #: :attr:`DecodeMode.DISCARD` mode does not clear this flag: the block
+        #: has been fully validated and the connection can continue.
+        #:
+        #: .. versionadded:: 4.3.0
+        self.connection_usable = True
+
+        #: Counters for the most recent successful :meth:`decode` call, or
+        #: ``None`` if the last call raised a decoding error. See
+        #: :class:`DecodeStats`.
+        #:
+        #: .. versionadded:: 4.3.0
+        self.last_decode_stats: DecodeStats | None = None
+
     @property
     def header_table_size(self) -> int:
         """
@@ -476,7 +788,10 @@ class Decoder:
     def header_table_size(self, value: int) -> None:
         self.header_table.maxsize = value
 
-    def decode(self, data: bytes, raw: bool = False) -> Iterable[HeaderTuple]:
+    def decode(self,
+               data: bytes,
+               raw: bool = False,
+               mode: DecodeMode | str = DecodeMode.STRICT) -> list[HeaderTuple] | DiscardedHeaderList:
         """
         Takes an HPACK-encoded header block and decodes it into a header set.
 
@@ -486,65 +801,123 @@ class Decoder:
                     byte strings or to decode them as UTF-8 before returning
                     them. The default value is False, which returns tuples of
                     Unicode strings
+        :param mode: (optional) How to handle a header list that exceeds
+                    :attr:`max_header_list_size`.
+
+                    With the default :attr:`DecodeMode.STRICT`, an
+                    :class:`OversizedHeaderListError` is raised as soon as the
+                    limit is exceeded. That error is fatal to the decoding
+                    context: the connection must be closed.
+
+                    With :attr:`DecodeMode.DISCARD`, the whole block is still
+                    parsed, including all dynamic table updates, but decoded
+                    headers stop being accumulated once the limit is exceeded.
+                    The call then returns a :class:`DiscardedHeaderList` that
+                    exposes no headers at all. No partial header list is ever
+                    returned, and the decoding context remains usable for later
+                    blocks on the same connection.
+
         :returns: A list of two-tuples of ``(name, value)`` representing the
-                  HPACK-encoded headers, in the order they were decoded.
+                  HPACK-encoded headers, in the order they were decoded, or a
+                  :class:`DiscardedHeaderList` in discard mode.
         :raises HPACKDecodingError: If an error is encountered while decoding
-                                    the header block.
+                                    the header block. This includes
+                                    :class:`DecodeWorkBudgetExceededError` when
+                                    :attr:`max_decode_work` is exhausted; such
+                                    errors always mean the connection cannot
+                                    continue.
         """
         log.debug("Decoding %s", data)
 
+        mode = _coerce_decode_mode(mode)
+
+        return self._decode(data, raw, mode)
+
+    def decode_discard(
+        self,
+        data: bytes,
+        raw: bool = False,
+    ) -> list[HeaderTuple] | DiscardedHeaderList:
+        """
+        Decode a header block, discarding business headers that exceed the
+        application limit while keeping the HPACK context usable.
+
+        This is equivalent to calling :meth:`decode` with
+        :attr:`DecodeMode.DISCARD`. It differs from the default strict mode in
+        one important way: an oversized header list does not invalidate the
+        connection. Everything else remains fatal. Corrupt compressed input,
+        an exhausted work budget and an invalid table size still raise
+        :class:`HPACKDecodingError` (or its subclasses), in which case the
+        connection must be closed and no result is returned.
+
+        The returned :class:`DiscardedHeaderList` is empty: it does not retain
+        or reveal any of the discarded header names or values, not even a
+        prefix. Memory used while validating the remainder of the block is
+        bounded by the dynamic table and the work budget, not by the number of
+        discarded headers.
+
+        :param data: A bytestring representing a complete HPACK-encoded header
+                     block.
+        :param raw: (optional) Whether to return the headers as tuples of raw
+                    byte strings or to decode them as UTF-8.
+        :returns: The decoded headers, or a :class:`DiscardedHeaderList`.
+        :raises HPACKDecodingError: For any fatal decoding error.
+        """
+        return self.decode(data, raw, mode=DecodeMode.DISCARD)
+
+    def _decode(
+        self,
+        data: bytes,
+        raw: bool,
+        mode: DecodeMode,
+    ) -> list[HeaderTuple] | DiscardedHeaderList:
+        try:
+            return self._decode_block(data, raw, mode)
+        except HPACKDecodingError:
+            # The compressed input could not be validated: the dynamic table
+            # may have been partially updated, so the connection cannot
+            # continue. An application-level oversized-list rejection in
+            # discard mode is returned as a value instead of raised.
+            self.connection_usable = False
+            raise
+
+    def _decode_block(
+        self,
+        data: bytes,
+        raw: bool,
+        mode: DecodeMode,
+    ) -> list[HeaderTuple] | DiscardedHeaderList:
+        self.last_decode_stats = None
         data_mem = memoryview(data)
-        headers: list[HeaderTuple] = []
-        data_len = len(data)
-        inflated_size = 0
+        accumulator = _HeaderAccumulator(self.max_header_list_size, raw, mode)
+        stats = DecodeStats()
+        stats.peak_dynamic_table_size = self.header_table.current_size
         current_index = 0
+        work = 0
 
-        while current_index < data_len:
-            # Work out what kind of header we're decoding.
-            # If the high bit is 1, it's an indexed field.
-            current = data[current_index]
-            indexed = bool(current & 0x80)
+        while current_index < len(data):
+            if self.max_decode_work is not None:
+                work += 1
+                if work > self.max_decode_work:
+                    msg = (
+                        f"Decoding work budget of {self.max_decode_work} "
+                        "header field representations was exhausted"
+                    )
+                    raise DecodeWorkBudgetExceededError(msg)
 
-            # Otherwise, if the second-highest bit is 1 it's a field that does
-            # alter the header table.
-            literal_index = bool(current & 0x40)
+            header, consumed, context_update = self._decode_representation(
+                data_mem, current_index, accumulator.header_count,
+            )
 
-            # Otherwise, if the third-highest bit is 1 it's an encoding context
-            # update.
-            encoding_update = bool(current & 0x20)
+            if context_update:
+                stats.table_update_count += 1
+            elif header is not None:
+                accumulator.add(header)
 
-            if indexed:
-                header, consumed = self._decode_indexed(
-                    data_mem[current_index:],
-                )
-            elif literal_index:
-                # It's a literal header that does affect the header table.
-                header, consumed = self._decode_literal_index(
-                    data_mem[current_index:],
-                )
-            elif encoding_update:
-                # It's an update to the encoding context. These are forbidden
-                # in a header block after any actual header.
-                if headers:
-                    msg = "Table size update not at the start of the block"
-                    raise HPACKDecodingError(msg)
-                consumed = self._update_encoding_context(
-                    data_mem[current_index:],
-                )
-                header = None
-            else:
-                # It's a literal header that does not affect the header table.
-                header, consumed = self._decode_literal_no_index(
-                    data_mem[current_index:],
-                )
-
-            if header:
-                headers.append(header)
-                inflated_size += table_entry_size(header[0], header[1])
-
-                if inflated_size > self.max_header_list_size:
-                    msg = f"A header list larger than {self.max_header_list_size} has been received"
-                    raise OversizedHeaderListError(msg)
+            stats.peak_dynamic_table_size = max(
+                stats.peak_dynamic_table_size,
+                self.header_table.current_size,
+            )
 
             current_index += consumed
 
@@ -553,11 +926,56 @@ class Decoder:
         # remote peer hasn't actually done that.
         self._assert_valid_table_size()
 
-        try:
-            return [_unicode_if_needed(h, raw) for h in headers]
-        except UnicodeDecodeError as err:
-            msg = "Unable to decode headers as UTF-8"
-            raise HPACKDecodingError(msg) from err
+        result = accumulator.finish(stats)
+        self.last_decode_stats = stats
+        return result
+
+    def _decode_representation(
+        self,
+        data_mem: memoryview,
+        current_index: int,
+        header_count: int,
+    ) -> tuple[HeaderTuple | None, int, bool]:
+        """
+        Decode one header field representation at ``current_index``.
+
+        Returns ``(header, consumed, context_update)``. ``header`` is ``None``
+        for a dynamic table size update, which is flagged by
+        ``context_update``.
+        """
+        current = data_mem[current_index]
+
+        # If the high bit is 1, it's an indexed field.
+        if current & 0x80:
+            header, consumed = self._decode_indexed(data_mem[current_index:])
+            return header, consumed, False
+
+        # Otherwise, if the second-highest bit is 1 it's a field that does
+        # alter the header table.
+        if current & 0x40:
+            header, consumed = self._decode_literal_index(
+                data_mem[current_index:],
+            )
+            return header, consumed, False
+
+        # Otherwise, if the third-highest bit is 1 it's an encoding context
+        # update. These are forbidden in a header block after any actual
+        # header.
+        if current & 0x20:
+            if header_count:
+                msg = "Table size update not at the start of the block"
+                raise HPACKDecodingError(msg)
+            consumed = self._update_encoding_context(
+                data_mem[current_index:],
+            )
+            return None, consumed, True
+
+        # Otherwise, it's a literal header that does not affect the header
+        # table.
+        header, consumed = self._decode_literal_no_index(
+            data_mem[current_index:],
+        )
+        return header, consumed, False
 
     def _assert_valid_table_size(self) -> None:
         """
@@ -598,10 +1016,12 @@ class Decoder:
     def _decode_literal(self, data: bytes | memoryview, should_index: bool) -> tuple[HeaderTuple, int]:
         """
         Decodes a header represented with a literal.
-        """
-        if isinstance(data, memoryview):
-            data = data.tobytes()  # pragma: no cover
 
+        ``data`` may be a memoryview of the remainder of the header block. Only
+        the bytes belonging to this field are copied, so decoding cost and
+        transitory memory stay proportional to the field size rather than the
+        size of the rest of the block.
+        """
         total_consumed = 0
 
         # When should_index is true, if the low six bits of the first byte are
@@ -631,7 +1051,7 @@ class Decoder:
             data = data[1:]
 
             length, consumed = decode_integer(data, 7)
-            name = data[consumed:consumed + length]
+            name = bytes(data[consumed:consumed + length])
             if len(name) != length:
                 msg = "Truncated header block"
                 raise HPACKDecodingError(msg)
@@ -644,7 +1064,7 @@ class Decoder:
 
         # The header value is definitely length-based.
         length, consumed = decode_integer(data, 7)
-        value = data[consumed:consumed + length]
+        value = bytes(data[consumed:consumed + length])
         if len(value) != length:
             msg = "Truncated header block"
             raise HPACKDecodingError(msg)

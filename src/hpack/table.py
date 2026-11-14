@@ -192,6 +192,16 @@ class HeaderTable:
         return partial
 
     @property
+    def current_size(self) -> int:
+        """
+        The current size of the dynamic table, as defined by RFC 7541
+        Section 4.1.
+
+        .. versionadded:: 4.3.0
+        """
+        return self._current_size
+
+    @property
     def maxsize(self) -> int:
         return self._maxsize
 

@@ -10,7 +10,27 @@ dev
 
 **API Changes (Backward Compatible)**
 
+- Added an explicit discard mode for HPACK decoding. ``Decoder.decode`` accepts
+  a ``mode`` argument and ``Decoder.decode_discard`` is a shorthand for
+  ``DecodeMode.DISCARD``. In this mode an oversized header list no longer
+  invalidates the decoding context: the rest of the block is validated, all
+  dynamic table updates are applied, and only a ``DiscardedHeaderList`` result
+  is returned, with no business headers retained or exposed. The default remains
+  the strict behaviour, which raises ``OversizedHeaderListError`` as soon as the
+  limit is exceeded.
+- Added ``Decoder.max_decode_work`` to bound the number of header field
+  representations processed from one block. Exhausting it raises
+  ``DecodeWorkBudgetExceeded``; that error is always fatal. Both defaults
+  preserve existing behaviour.
+- Added ``Decoder.last_decode_stats`` and ``DecodeStats`` so callers can observe
+  the peak retained header bytes and peak dynamic table size of a decode call.
+- Added ``HeaderTable.current_size``.
+
 **Bugfixes**
+
+- Literal header decoding no longer copies the entire remaining block for every
+  field. Decoding cost and transitory memory now scale with the field being
+  decoded instead of quadratically with the block length.
 
 
 4.2.0 (2026-06-22)
