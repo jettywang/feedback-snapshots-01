@@ -3,6 +3,12 @@
 import hashlib
 from ._sha3 import shake_256
 from . import ellipticcurve
+from . import eddsa_policy
+from .eddsa_policy import (
+    DEFAULT_POLICY,
+    STRICT_POLICY,
+    SignatureEquationError,
+)
 from ._compat import (
     remove_whitespace,
     bit_length,
@@ -83,7 +89,7 @@ generator_ed448 = ellipticcurve.PointEdwards(
 class PublicKey(object):
     """Public key for the Edwards Digital Signature Algorithm."""
 
-    def __init__(self, generator, public_key, public_point=None):
+    def __init__(self, generator, public_key, public_point=None, policy=None):
         self.generator = generator
         self.curve = generator.curve()
         self.__encoded = public_key
@@ -95,12 +101,35 @@ class PublicKey(object):
                     self.baselen
                 )
             )
+        # The policy is resolved through the process-wide registry so the
+        # choice cannot be changed by importing a symbol through another entry
+        # point.  ``None`` means "use whatever the current default is", which
+        # keeps the historical behaviour for keys constructed without one.
+        self.__policy = eddsa_policy.get_policy(policy)
         if public_point:
+            # A point supplied directly still has to satisfy the identity and
+            # prime-subgroup requirements of the selected policy.
+            point = eddsa_policy._extended(
+                self.curve, public_point.x(), public_point.y()
+            )
+            self.__policy.check_point(self.curve, point, "public key")
             self.__point = public_point
         else:
-            self.__point = ellipticcurve.PointEdwards.from_bytes(
-                self.curve, public_key
+            # Decode the key according to the selected policy.  Under the
+            # default policy this is the same permissive decode as before.
+            point = self.__policy.decode_point(
+                self.curve, public_key, "public key"
             )
+            self.__policy.check_point(self.curve, point, "public key")
+            x, y = eddsa_policy._affine(point, self.curve.p())
+            self.__point = ellipticcurve.PointEdwards(
+                self.curve, x, y, 1, x * y % self.curve.p()
+            )
+
+    @property
+    def policy(self):
+        """The :class:`~ecdsa.eddsa_policy.EdDSAPolicy` applied by this key."""
+        return self.__policy
 
     def __eq__(self, other):
         if isinstance(other, PublicKey):
@@ -128,21 +157,58 @@ class PublicKey(object):
     def public_key(self):
         return self.__encoded
 
-    def verify(self, data, signature):
-        """Verify a Pure EdDSA signature over data."""
+    def verify(self, data, signature, policy=None):
+        """Verify a Pure EdDSA signature over data.
+
+        :param policy: the verification policy to apply.  May be an
+            :class:`~ecdsa.eddsa_policy.EdDSAPolicy`, a registered policy name
+            or ``None``.  ``None`` uses the policy bound to this key (which
+            defaults to the historical permissive policy).  Passing
+            :data:`~ecdsa.eddsa_policy.STRICT_POLICY` (or ``"strict"``)
+            enforces canonical encodings and prime-order subgroup membership.
+        :raises ecdsa.eddsa_policy.EdDSAPolicyError: for a structural policy
+            violation, with a specific subclass for each rejection reason.
+        :raises ValueError: when the signature has the wrong length or, under
+            the default policy, does not verify (historical behaviour).
+        """
         data = compat26_str(data)
+        # An explicit per-call policy always wins; otherwise use the policy
+        # that was selected when the key was constructed.  Both are resolved
+        # via the same registry.
+        active_policy = (
+            self.__policy
+            if policy is None
+            else eddsa_policy.get_policy(policy)
+        )
+
         if len(signature) != 2 * self.baselen:
             raise ValueError(
                 "Invalid signature length, expected: {0} bytes".format(
                     2 * self.baselen
                 )
             )
-        R = ellipticcurve.PointEdwards.from_bytes(
-            self.curve, signature[: self.baselen]
+
+        # Decode and validate R exactly like the public key: canonical
+        # encoding, identity and subgroup requirements follow the policy.
+        r_point = active_policy.decode_point(
+            self.curve, signature[: self.baselen], "signature nonce R"
         )
+        active_policy.check_point(self.curve, r_point, "signature nonce R")
+        r_x, r_y = eddsa_policy._affine(r_point, self.curve.p())
+        R = ellipticcurve.PointEdwards(
+            self.curve, r_x, r_y, 1, r_x * r_y % self.curve.p()
+        )
+
         S = bytes_to_int(signature[self.baselen :], "little")
-        if S >= self.generator.order():
-            raise ValueError("Invalid signature")
+        order = self.generator.order()
+        if active_policy.check_s_range:
+            if not (0 <= S < order):
+                # Preserve the original exception text on the default path.
+                if active_policy is DEFAULT_POLICY:
+                    raise ValueError("Invalid signature")
+                raise SignatureEquationError(
+                    "Signature scalar S is outside the range 0 <= S < L"
+                )
 
         dom = bytearray()
         if self.curve == curve_ed448:
@@ -154,7 +220,11 @@ class PublicKey(object):
         )
 
         if self.generator * S != self.__point * k + R:
-            raise ValueError("Invalid signature")
+            if active_policy is DEFAULT_POLICY:
+                raise ValueError("Invalid signature")
+            raise SignatureEquationError(
+                "EdDSA signature verification equation does not hold"
+            )
 
         return True
 

@@ -17,6 +17,7 @@ Submodules
    ecdsa.ecdh
    ecdsa.ecdsa
    ecdsa.eddsa
+   ecdsa.eddsa_policy
    ecdsa.ellipticcurve
    ecdsa.errors
    ecdsa.keys

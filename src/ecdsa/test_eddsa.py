@@ -18,6 +18,7 @@ from .eddsa import (
     PrivateKey,
     PublicKey,
 )
+from . import eddsa_policy
 from .ecdsa import generator_256, curve_256
 from .errors import MalformedPointError
 from ._compat import a2b_hex, compat26_str
@@ -1122,3 +1123,10 @@ def test_vectors(generator, private_key, public_key, message, signature):
     assert gen_sig == signature
 
     assert ver_key.verify(message, signature)
+
+    # Every RFC 8032 test vector must also pass the strict policy: legitimate
+    # keys and signatures use canonical encodings and prime-order points.
+    strict_key = PublicKey(
+        generator, public_key, policy=eddsa_policy.STRICT_POLICY
+    )
+    assert strict_key.verify(message, signature, policy="strict")
