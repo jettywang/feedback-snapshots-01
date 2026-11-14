@@ -2,6 +2,28 @@
 Changelog
 =========
 
+- :feature:`-` Added a forensic, consistency-diagnostic check mode for the
+  SFTP ``check-file`` extension: `SFTPFile.check_snapshot
+  <paramiko.sftp_file.SFTPFile.check_snapshot>` (backed by
+  `paramiko.sftp_snapshot.check_snapshot`). It keeps the single existing
+  handle open (never re-opening the path, so a same-named replacement cannot
+  be stitched into a result), snapshots handle metadata before and after,
+  independently re-reads and locally hashes every covered byte with
+  :mod:`hashlib`, records the real ``[start, end)`` range each returned
+  digest covers (including block size, EOF and short-read handling), and
+  returns a `~paramiko.sftp_snapshot.SnapshotConsistencyReport` whose state
+  is ``stable``, ``unstable`` or ``unverifiable``. Hash names are validated
+  against a fixed client allow-list (arbitrary, caller-supplied hash names
+  are never instantiated), total read work is bounded by ``max_bytes``, and
+  remote digests are only compared with local hashes -- never treated as
+  proof of file provenance.
+- :bug:`-` Hardened the server-side ``check-file`` handler in
+  `~paramiko.sftp.SFTPServer`: it no longer loops forever on a short read or
+  EOF (returning only the digests actually computed instead), fixes an
+  offset-accumulation error across 64 KB read chunks, rejects over-large
+  ranges with a bounded read ceiling, supports ``sha256``/``sha512`` in
+  addition to ``md5``/``sha1``, and returns a valid empty reply for a
+  zero-length range.
 - :release:`5.1.0 <2026-10-17>`
 - :release:`5.0.1 <2026-10-17>`
 - :bug:`2462` (w/ earlier fix attempts :issue:`2475` and :issue:`2465`) An API

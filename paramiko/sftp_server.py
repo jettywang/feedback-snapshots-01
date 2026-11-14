@@ -23,7 +23,7 @@ Server-mode SFTP support.
 import errno
 import os
 import sys
-from hashlib import md5, sha1
+from hashlib import md5, sha1, sha256, sha512
 
 from paramiko import util
 from paramiko.common import DEBUG
@@ -80,7 +80,16 @@ from paramiko.sftp_si import SFTPServerInterface
 from paramiko.util import b
 
 # TODO: nuke or update w/ newer algs, see below
-_hash_class = {"sha1": sha1, "md5": md5}
+_hash_class = {
+    "sha1": sha1,
+    "md5": md5,
+    "sha256": sha256,
+    "sha512": sha512,
+}
+
+# Upper bound on the bytes a single check-file request is allowed to hash.
+# It keeps one request from forcing unbounded server-side read work.
+CHECK_FILE_MAX_BYTES = 64 * 1024 * 1024
 
 
 class SFTPServer(BaseSFTP, SubsystemHandler):
@@ -321,9 +330,26 @@ class SFTPServer(BaseSFTP, SubsystemHandler):
                 self._send_status(request_number, st, "Unable to stat file")
                 return
             length = st.st_size - start
+        if length < 0 or start < 0:
+            self._send_status(
+                request_number, SFTP_BAD_MESSAGE, "Invalid offset or length"
+            )
+            return
+        if length > CHECK_FILE_MAX_BYTES:
+            self._send_status(
+                request_number, SFTP_FAILURE, "Requested range too large"
+            )
+            return
+        if length == 0:
+            # An empty range has no blocks: a valid, empty reply.
+            self._reply_check_file(request_number, algname, b"")
+            return
         if block_size == 0:
+            # One block over the whole segment; a short file may legitimately
+            # be smaller than the 256-byte minimum, which only applies to an
+            # explicitly requested block size.
             block_size = length
-        if block_size < 256:
+        elif block_size < 256:
             self._send_status(
                 request_number, SFTP_FAILURE, "Block size too small"
             )
@@ -331,8 +357,9 @@ class SFTPServer(BaseSFTP, SubsystemHandler):
 
         sum_out = bytes()
         offset = start
-        while offset < start + length:
-            blocklen = min(block_size, start + length - offset)
+        end = start + length
+        while offset < end:
+            blocklen = min(block_size, end - offset)
             # don't try to read more than about 64KB at a time
             chunklen = min(blocklen, 65536)
             count = 0
@@ -344,11 +371,22 @@ class SFTPServer(BaseSFTP, SubsystemHandler):
                         request_number, data, "Unable to hash file"
                     )
                     return
+                if len(data) == 0:
+                    # Short read / EOF: the file shrank or ended early.
+                    # Stop here and return only the digests actually
+                    # computed, instead of looping forever on an empty read.
+                    if count > 0:
+                        sum_out += hash_obj.digest()
+                    self._reply_check_file(request_number, algname, sum_out)
+                    return
                 hash_obj.update(data)
                 count += len(data)
-                offset += count
+                offset += len(data)
             sum_out += hash_obj.digest()
 
+        self._reply_check_file(request_number, algname, sum_out)
+
+    def _reply_check_file(self, request_number, algname, sum_out):
         msg = Message()
         msg.add_int(request_number)
         msg.add_string("check-file")

@@ -158,7 +158,7 @@ class BaseSFTP:
             raise SFTPError("Incompatible sftp protocol")
         version = struct.unpack(">I", data[:4])[0]
         # advertise that we support "check-file"
-        extension_pairs = ["check-file", "md5,sha1"]
+        extension_pairs = ["check-file", "md5,sha1,sha256,sha512"]
         msg = Message()
         msg.add_int(_VERSION)
         msg.add(*extension_pairs)

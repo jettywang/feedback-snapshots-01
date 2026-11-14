@@ -76,6 +76,16 @@ from paramiko.sftp_attr import SFTPAttributes
 from paramiko.sftp_handle import SFTPHandle
 from paramiko.sftp_si import SFTPServerInterface
 from paramiko.sftp_file import SFTPFile
+from paramiko.sftp_snapshot import (
+    ALLOWED_HASH_ALGORITHMS,
+    DEFAULT_MAX_BYTES,
+    DigestCoverage,
+    SnapshotConsistencyReport,
+    STATE_STABLE,
+    STATE_UNSTABLE,
+    STATE_UNVERIFIABLE,
+    check_snapshot,
+)
 from paramiko.message import Message
 from paramiko.packet import Packetizer
 from paramiko.file import BufferedFile

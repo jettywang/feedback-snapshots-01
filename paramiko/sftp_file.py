@@ -415,6 +415,61 @@ class SFTPFile(BufferedFile):
         data = msg.get_remainder()
         return data
 
+    def check_snapshot(
+        self,
+        hash_algorithm,
+        offset=0,
+        length=0,
+        block_size=0,
+        max_bytes=None,
+    ):
+        """
+        Verify ``check-file`` digests against an independently read snapshot.
+
+        Unlike `.check`, which returns the server's digests verbatim, this
+        diagnostic mode keeps the single existing handle open (the path is
+        never re-opened, so a same-named replacement file cannot be stitched
+        into the result), records handle metadata before and after the work,
+        re-reads every covered byte through that same handle, hashes each
+        block locally with :mod:`hashlib`, and reports the actual
+        ``[start, end)`` range each digest covers together with a stability
+        verdict.
+
+        The hash name is checked against a fixed client-side allow-list
+        before anything is sent (arbitrary, client-supplied hash names are
+        never instantiated), and total read work is bounded by
+        ``max_bytes``.  Remote digests are only compared with local ones;
+        they are never treated as proof of file provenance.
+
+        :param str hash_algorithm:
+            allow-listed hash name (see
+            `paramiko.sftp_snapshot.ALLOWED_HASH_ALGORITHMS`)
+        :param int offset: byte offset to start at
+        :param int length: bytes to cover (0 means to end of file)
+        :param int block_size: bytes per digest, minimum 256; 0 means one
+            digest over the whole segment
+        :param int max_bytes: hard ceiling on bytes read back; defaults to
+            `paramiko.sftp_snapshot.DEFAULT_MAX_BYTES`
+        :return: a `.SnapshotConsistencyReport`
+
+        .. versionadded:: 5.2
+        """
+        from paramiko.sftp_snapshot import (
+            DEFAULT_MAX_BYTES,
+            check_snapshot,
+        )
+
+        if max_bytes is None:
+            max_bytes = DEFAULT_MAX_BYTES
+        return check_snapshot(
+            self,
+            hash_algorithm,
+            offset=offset,
+            length=length,
+            block_size=block_size,
+            max_bytes=max_bytes,
+        )
+
     def set_pipelined(self, pipelined=True):
         """
         Turn on/off the pipelining of write operations to this file.  When
