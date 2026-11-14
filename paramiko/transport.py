@@ -115,6 +115,7 @@ from paramiko.ssh_exception import (
     IncompatiblePeer,
     MessageOrderError,
     ProxyCommandFailure,
+    RenegotiationError,
     SSHException,
 )
 from paramiko.util import (
@@ -523,6 +524,23 @@ class Transport(threading.Thread, ClosingContextManager):
         self.clear_to_send = threading.Event()
         self.clear_to_send_lock = threading.Lock()
         self.clear_to_send_timeout = 30.0
+        # Overall deadline (measured through ``self._time``) for a single key
+        # renegotiation.  Unlike ``clear_to_send_timeout`` this bounds the
+        # whole renegotiation from the first MSG_KEXINIT until NEWKEYS has been
+        # processed in both directions; unrelated packets never extend it.
+        self.renegotiation_timeout = 30.0
+        # Deadline (in ``self._time()`` units) of the in-flight renegotiation,
+        # or ``None`` when no renegotiation is in progress.  Set once when the
+        # first MSG_KEXINIT goes out and only cleared/re-armed when the exchange
+        # fully completes (or the transport dies), so it cannot be renewed by
+        # receiving unrelated packets mid-exchange.
+        self._renegotiation_deadline = None
+        # Serializes a deadline-driven shutdown so concurrent waiters cannot
+        # tear the session down twice.
+        self._renegotiation_lock = threading.Lock()
+        # Indirection over the wall clock so tests can drive a deterministic
+        # fake clock instead of sleeping.
+        self._time = time.time
         self.log_name = "paramiko.transport"
         self.logger = util.get_logger(self.log_name)
         self.packetizer.set_log(self.logger)
@@ -1047,18 +1065,28 @@ class Transport(threading.Thread, ClosingContextManager):
         finally:
             self.lock.release()
         self._send_user_message(m)
-        start_ts = time.time()
+        start_ts = self._time()
         while True:
             event.wait(0.1)
             if not self.active:
-                e = self.get_exception()
+                # Peek rather than consuming: other waiters need the same
+                # root cause.
+                e = self.saved_exception
                 if e is None:
                     e = SSHException("Unable to open channel.")
                 raise e
             if event.is_set():
                 break
-            elif start_ts + timeout < time.time():
+            elif start_ts + timeout < self._time():
                 raise SSHException("Timeout opening channel.")
+            if self._renegotiation_timed_out():
+                error = RenegotiationError(
+                    "Key renegotiation timed out after {} seconds".format(
+                        self.renegotiation_timeout
+                    )
+                )
+                self._fail_renegotiation(error)
+                raise error
         chan = self._channels.get(chanid)
         if chan is not None:
             return chan
@@ -1177,18 +1205,15 @@ class Transport(threading.Thread, ClosingContextManager):
         :raises:
             `.SSHException` -- if the key renegotiation failed (which causes
             the session to end)
+
+        .. versionchanged:: 5.2
+            The renegotiation is now bounded as a whole by
+            ``self.renegotiation_timeout``.  On timeout a `.RenegotiationError`
+            is raised and the session is closed instead of hanging.
         """
         self.completion_event = threading.Event()
         self._send_kex_init()
-        while True:
-            self.completion_event.wait(0.1)
-            if not self.active:
-                e = self.get_exception()
-                if e is not None:
-                    raise e
-                raise SSHException("Negotiation failed.")
-            if self.completion_event.is_set():
-                break
+        self._wait_for_completion(self.completion_event)
         return
 
     def set_keepalive(self, interval):
@@ -1237,12 +1262,7 @@ class Transport(threading.Thread, ClosingContextManager):
         self._send_user_message(m)
         if not wait:
             return None
-        while True:
-            self.completion_event.wait(0.1)
-            if not self.active:
-                return None
-            if self.completion_event.is_set():
-                break
+        self._wait_for_completion(self.completion_event)
         return self.global_response
 
     def accept(self, timeout=None):
@@ -1807,6 +1827,126 @@ class Transport(threading.Thread, ClosingContextManager):
         """used by a Channel to remove itself from the active channel list"""
         self._channels.delete(chanid)
 
+    def _arm_renegotiation_deadline(self):
+        """
+        Start (once) the overall deadline of an in-progress renegotiation.
+
+        The deadline is armed only when no exchange is currently tracked, so
+        repeated MSG_KEXINIT messages -- including the peer's KEXINIT and any
+        unrelated packets arriving mid-exchange -- never extend the budget.
+        """
+        if self._renegotiation_deadline is None and self.initial_kex_done:
+            self._renegotiation_deadline = (
+                self._time() + self.renegotiation_timeout
+            )
+
+    def _renegotiation_timed_out(self):
+        deadline = self._renegotiation_deadline
+        return deadline is not None and self._time() >= deadline
+
+    def _check_renegotiation_deadline(self):
+        """
+        Raise `RenegotiationError` if the current renegotiation has outlived
+        its overall deadline.  Only meaningful while an exchange is in flight.
+        """
+        if self._renegotiation_timed_out():
+            raise RenegotiationError(
+                "Key renegotiation timed out after {} seconds".format(
+                    self.renegotiation_timeout
+                )
+            )
+
+    def _fail_renegotiation(self, error):
+        """
+        Shut the session down in a consistent way after a failed renegotiation.
+
+        Ensures every thread blocked on the exchange (senders, channel
+        openers, global requests, explicit ``renegotiate_keys``) wakes up and
+        observes the same root cause, and that no further application data can
+        be sent under the old, partially-rotated keys.
+
+        The shutdown is performed inline by the detecting thread because, with
+        an injectable clock (or a wedged socket), the transport thread may be
+        parked in a blocking read and unable to notice the deadline itself.
+        """
+        # Multiple waiters can notice the deadline at once; let only the first
+        # one run the shutdown, the rest simply observe the recorded cause.
+        with self._renegotiation_lock:
+            if not self.active:
+                return
+            self._renegotiation_deadline = None
+            self._save_exception(error)
+            self.active = False
+            self.packetizer.close()
+            if self.completion_event is not None:
+                self.completion_event.set()
+            if self.auth_handler is not None:
+                self.auth_handler.abort()
+            for chan in list(self._channels.values()):
+                chan._unlink()
+            for event in self.channel_events.values():
+                event.set()
+            try:
+                self.lock.acquire()
+                self.server_accept_cv.notify()
+            finally:
+                self.lock.release()
+        # Reap the transport thread if we are not it; its blocked read now
+        # fails on the closed socket and its shutdown block becomes a no-op
+        # thanks to the ``active`` flag already being False.
+        if self is not threading.current_thread():
+            self.stop_thread()
+
+    def _save_exception(self, error):
+        """
+        Record the transport's fatal root cause without overwriting one that
+        was already recorded (eg. a renegotiation timeout that then surfaces
+        as an EOF/socket error while the socket is being torn down).
+        """
+        if self.saved_exception is None:
+            self.saved_exception = error
+
+    def _wait_for_completion(self, event):
+        """
+        Block until ``event`` is set or the session stops, honoring the
+        renegotiation deadline.
+
+        :param event:
+            completion event signaled when the awaited protocol reply arrives.
+
+        Every iteration re-checks the renegotiation deadline instead of
+        sleeping a fixed per-call amount, so unrelated packets cannot renew
+        the budget.
+        """
+        while True:
+            event.wait(0.1)
+            # Take the same lock used by a deadline-driven shutdown so the
+            # liveness flag and completion event can never be observed in a
+            # torn intermediate state.
+            with self._renegotiation_lock:
+                if not self.active:
+                    # Peek instead of consuming: several waiters may wake up
+                    # from the same shutdown and each needs the real root
+                    # cause.
+                    error = self.saved_exception
+                    if error is None:
+                        error = SSHException("Negotiation failed.")
+                    raise error
+                if event.is_set():
+                    return
+                if self._renegotiation_timed_out():
+                    error = RenegotiationError(
+                        "Key renegotiation timed out after {} seconds".format(
+                            self.renegotiation_timeout
+                        )
+                    )
+                else:
+                    continue
+            # Consistently shut the session down so every other waiter is
+            # released and the same root cause is observable everywhere.
+            self._fail_renegotiation(error)
+            raise error
+
     def _send_message(self, data):
         self.packetizer.send_message(data)
 
@@ -1815,7 +1955,7 @@ class Transport(threading.Thread, ClosingContextManager):
         send a message, but block if we're in key negotiation.  this is used
         for user-initiated requests.
         """
-        start = time.time()
+        start = self._time()
         while True:
             self.clear_to_send.wait(0.1)
             if not self.active:
@@ -1827,7 +1967,22 @@ class Transport(threading.Thread, ClosingContextManager):
             if self.clear_to_send.is_set():
                 break
             self.clear_to_send_lock.release()
-            if time.time() > start + self.clear_to_send_timeout:
+            # A renegotiation deadline covers the whole exchange: fail the
+            # whole session rather than outliving it and sending application
+            # data under stale keys.
+            if self._renegotiation_timed_out():
+                self._fail_renegotiation(
+                    RenegotiationError(
+                        "Key renegotiation timed out after {} seconds".format(
+                            self.renegotiation_timeout
+                        )
+                    )
+                )
+                self._log(
+                    DEBUG, "Dropping user packet because connection is dead."
+                )  # noqa
+                return
+            if self._time() > start + self.clear_to_send_timeout:
                 raise SSHException(
                     "Key-exchange timed out waiting for key negotiation"
                 )  # noqa
@@ -2055,6 +2210,9 @@ class Transport(threading.Thread, ClosingContextManager):
                 while self.active:
                     if self.packetizer.need_rekey() and not self.in_kex:
                         self._send_kex_init()
+                    # The renegotiation deadline covers the whole exchange;
+                    # reading here is where a stalled peer would hang us.
+                    self._check_renegotiation_deadline()
                     try:
                         ptype, m = self.packetizer.read_message()
                     except NeedRekeyException:
@@ -2144,10 +2302,14 @@ class Transport(threading.Thread, ClosingContextManager):
                     ),
                 )
                 self._log(ERROR, util.tb_strings())
-                self.saved_exception = e
+                self._save_exception(e)
             except EOFError as e:
                 self._log(DEBUG, "EOF in transport thread")
-                self.saved_exception = e
+                # If another thread already failed the session (eg. a
+                # renegotiation timeout), this EOF is just the socket being
+                # closed out from under us; do not replace that root cause.
+                if self.active:
+                    self._save_exception(e)
             except socket.error as e:
                 if type(e.args) is tuple:
                     if e.args:
@@ -2157,16 +2319,18 @@ class Transport(threading.Thread, ClosingContextManager):
                 else:
                     emsg = e.args
                 self._log(ERROR, "Socket exception: " + emsg)
-                self.saved_exception = e
+                if self.active:
+                    self._save_exception(e)
             except Exception as e:
                 self._log(ERROR, "Unknown exception: " + str(e))
                 self._log(ERROR, util.tb_strings())
-                self.saved_exception = e
+                self._save_exception(e)
             _active_threads.remove(self)
             for chan in list(self._channels.values()):
                 chan._unlink()
             if self.active:
                 self.active = False
+                self._renegotiation_deadline = None
                 self.packetizer.close()
                 if self.completion_event is not None:
                     self.completion_event.set()
@@ -2268,6 +2432,7 @@ class Transport(threading.Thread, ClosingContextManager):
         finally:
             self.clear_to_send_lock.release()
         self.in_kex = True
+        self._arm_renegotiation_deadline()
         kex_algos = list(self.preferred_kex)
         if self.server_mode:
             mp_required_prefix = "diffie-hellman-group-exchange-sha"
@@ -2773,6 +2938,13 @@ class Transport(threading.Thread, ClosingContextManager):
         # it's now okay to send data again (if this was a re-key)
         if not self.packetizer.need_rekey():
             self.in_kex = False
+            # The whole exchange finished: retire the deadline instead of
+            # carrying stale time into the next renegotiation.
+            self._renegotiation_deadline = None
+        else:
+            # A further rekey was requested before this one finished; give the
+            # next exchange its own full, non-renewed budget.
+            self._arm_renegotiation_deadline()
         self.clear_to_send_lock.acquire()
         try:
             self.clear_to_send.set()

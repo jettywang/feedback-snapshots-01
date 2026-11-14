@@ -4,6 +4,18 @@ Changelog
 
 - :release:`5.1.0 <2026-10-17>`
 - :release:`5.0.1 <2026-10-17>`
+- :feature:`-` Key renegotiation (rekey) is now bounded by a single,
+  configurable overall deadline, ``Transport.renegotiation_timeout`` (default
+  30 seconds), measured from the first ``MSG_KEXINIT`` until ``NEWKEYS`` has
+  been processed in both directions. Previously, a peer that initiated a
+  rekey and then stalled could leave the transport (and any threads blocked on
+  the send window, opening a channel, a global request, or an explicit
+  `~paramiko.transport.Transport.renegotiate_keys` call) hung indefinitely.
+  Unrelated packets (such as ``MSG_IGNORE``) no longer renew the budget. On
+  timeout the session is shut down consistently and every blocked waiter
+  surfaces the same new `~paramiko.ssh_exception.RenegotiationError` root
+  cause; application data can no longer be sent under the old, partially
+  rotated keys. Successful renegotiations continue to preserve open channels.
 - :bug:`2462` (w/ earlier fix attempts :issue:`2475` and :issue:`2465`) An API
   gap between `~paramiko.agent.AgentKey` and the other, 'concrete'
   `~paramiko.pkey.PKey` subclasses was triggering ``AttributeError`` anytime

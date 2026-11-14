@@ -252,3 +252,19 @@ class MessageOrderError(SSHException):
     """
 
     pass
+
+
+class RenegotiationError(SSHException):
+    """
+    A key renegotiation (rekey) did not complete within its allotted deadline.
+
+    When raised, the underlying `.Transport` has already been shut down: any
+    call that was blocked on the renegotiation (sending application data,
+    opening a channel, a global request, or an explicit
+    `~.Transport.renegotiate_keys` call) is unblocked and surfaces this same
+    root cause. The old keys must not be used to send further application data.
+
+    .. versionadded:: 5.2
+    """
+
+    pass
