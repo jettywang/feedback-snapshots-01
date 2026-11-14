@@ -19,6 +19,35 @@ into pyasn1 code.
 **NOTE:** The package is now maintained by *Christian Heimes* and
 *Simon Pichugin* in project https://github.com/pyasn1/pyasn1-modules.
 
+RPKI ROA semantic fuzzing
+-------------------------
+
+The `tools/roa_fuzz` package guards against treating "the ROA DER decodes"
+as "a route is authorized".  It keeps three decisions separate:
+
+* structural validity of the RFC 6482 `RouteOriginAttestation` DER,
+* containment of every ROA prefix in the EE certificate's RFC 3779
+  IP resources,
+* authorization of one concrete route (AFI, prefix, origin AS).
+
+The AS 0 negative attestation (RFC 6483) and the absent-`maxLength`
+default (exact prefix only, RFC 6482 section 3.3) have their own
+predicates.  Expected results come from an independent oracle built only
+on the standard library, never from the checker under test.
+
+Run the deterministic, fixed-seed fuzzing tests with:
+
+```sh
+python -m unittest tests.test_roa_fuzz
+```
+
+Persist any minimal failing artifact (DER, EE resources, route triple)
+with:
+
+```sh
+python -m tools.roa_fuzz.persist --output findings.json
+```
+
 Feedback
 --------
 
