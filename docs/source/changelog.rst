@@ -17,6 +17,7 @@ New Features
 
 Bugs Fixed
 ----------
+* accept RFC 6637 size-obfuscation padding (13 or 21 octets) when unwrapping ECDH session keys
 * accept passphrases formatted as ``bytes``
 * default to 3DES when no preferred algorithms are supported
 * generate TZ-aware datetime objects

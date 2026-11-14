@@ -1767,10 +1767,17 @@ class ECDHCipherText(CipherText):
         z = km.kdf.derive_key(s, km.oid, PubKeyAlgorithm.ECDH, pk.fingerprint)
 
         # unwrap and unpad m
-        _m = aes_key_unwrap(z, self.c, default_backend())
+        _m = bytearray(aes_key_unwrap(z, self.c, default_backend()))
 
-        padder = PKCS7(64).unpadder()
-        return padder.update(_m) + padder.finalize()
+        # RFC 6637 permits padding beyond a single 8-octet block in order to obfuscate the
+        # session key size (for example, 21 octets of padding for AES-128).  PKCS7's
+        # unpadder rejects those lengths, so validate the padding directly instead.
+        padlen = _m[-1]
+        if padlen == 0 or padlen > len(_m) - 3 or _m[-padlen:] != bytearray([padlen]) * padlen:
+            raise PGPDecryptionError("ECDH session key decryption failed")
+
+        del _m[-padlen:]
+        return _m
 
     def __init__(self):
         super(ECDHCipherText, self).__init__()
