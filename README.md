@@ -109,6 +109,40 @@ if __name__ == '__main__':
         conn.sendall(noise.encrypt(received))
 ```
 
+#### Byte-stream framing
+
+`NoiseConnection` exchanges whole messages, but sockets and pipes are byte
+streams: a message can arrive split into many fragments and several messages
+can be coalesced into one read. `noise.stream.NoiseStream` is a thin adapter
+that adds an explicit 4-byte big-endian length prefix in front of every
+handshake and transport frame so framing is reconstructed automatically. It
+wraps either a file-like object (`read`/`write`) or a socket (`recv`/`send`).
+
+```python
+import socket
+from noise.connection import NoiseConnection
+from noise.stream import NoiseStream
+
+sock = socket.create_connection(('localhost', 2000))
+proto = NoiseConnection.from_name(b'Noise_NN_25519_ChaChaPoly_SHA256')
+proto.set_as_initiator()
+proto.start_handshake()
+
+stream = NoiseStream(proto, sock)
+stream.write_handshake()   # framed handshake message
+stream.read_handshake()
+
+stream.send(b'any payload')   # encrypted, length-prefixed frame
+print(stream.recv())
+```
+
+The adapter validates every advertised length against the size the current
+phase can actually produce (AEAD tag and handshake tokens included) before
+reading the body, treats a half-frame EOF as a `NoiseTruncatedError` rather
+than an empty message, retries short writes with the same ciphertext (so no
+extra nonce is consumed), and closes the session if a write is cancelled after
+partial ciphertext has left the process.
+
 #### Wireguard integration example
 In *examples* directory, there is an example of interoperation of this package with Wireguard VPN solution. Please refer to [README.md](examples/wireguard/README.md) of that example for details.
 

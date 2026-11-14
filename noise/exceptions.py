@@ -24,3 +24,23 @@ class NoiseMaxNonceError(Exception):
 
 class NoiseValidationError(Exception):
     pass
+
+
+class NoiseStreamError(Exception):
+    """Base class for failures raised by the byte-stream adapter."""
+    pass
+
+
+class NoiseFrameTooLargeError(NoiseStreamError):
+    """A length prefix advertised more bytes than the current phase allows."""
+    pass
+
+
+class NoiseTruncatedError(NoiseStreamError):
+    """The stream ended (EOF) in the middle of an advertised frame."""
+    pass
+
+
+class NoiseStreamClosedError(NoiseStreamError):
+    """An operation was attempted on a stream that was torn down after an error."""
+    pass

@@ -17,6 +17,10 @@ Documentation for the Code
 .. automodule:: noise.state
    :members:
 
+.. automodule:: noise.stream
+   :members:
+   :member-order: bysource
+
 
 Indices and tables
 ==================
