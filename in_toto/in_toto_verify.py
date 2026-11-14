@@ -82,6 +82,16 @@ to that sublayout must exist. The sublayout itself must be in the same
 directory as the other links of the superlayout. (i.e. '<step name>.<keyid
 prefix>.link')
 
+If two authorized functionaries share the same eight character keyid prefix,
+the traditional filenames and sublayout directory names cannot tell their
+evidence apart. An optional evidence index can be passed with
+'--evidence-index'. It maps step names and *full* keyids to link files and
+sublayout directories. The index is only a location hint: it never authorizes
+a key, and payload, signature and step bindings are still verified. Indexed
+paths must stay inside the evidence package ('--link-dir'). If
+'--evidence-index' is not passed, an 'evidence-index.json' file inside
+'--link-dir' is used automatically when present.
+
 The verification workflow is performed in isolation and does not rely on
 information about keys that are available through external sources. For example,
 in-toto does not rely on the creation time, revocation status, and usage flags
@@ -169,7 +179,24 @@ for which the public part can be found in the GPG keyring at '~/.gnupg'.
         help=(
             "path to directory from which link metadata files for steps defined"
             " in the root layout should be loaded. If not passed, links are"
-            " loaded from the current working directory."
+            " loaded from the current working directory. With an evidence index"
+            " this directory also bounds all indexed evidence paths."
+        ),
+    )
+
+    parser.add_argument(
+        "--evidence-index",
+        dest="evidence_index",
+        type=str,
+        metavar="<path>",
+        default=None,
+        help=(
+            "path to an optional JSON evidence index that locates link files"
+            " and sublayout directories by step name and full functionary"
+            " keyid. Use it when authorized functionaries share a short keyid"
+            " prefix. The index is a location hint only and does not authorize"
+            " keys. Indexed paths must stay inside '--link-dir'. If not passed,"
+            " an 'evidence-index.json' inside '--link-dir' is used if present."
         ),
     )
 
@@ -238,6 +265,7 @@ def main():
             layout_key_dict,
             args.link_dir,
             inspect_timeout=args.inspect_timeout,
+            evidence_index=args.evidence_index,
         )
 
     except Exception as e:  # noqa: BLE001

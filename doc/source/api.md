@@ -41,3 +41,20 @@ documented [in-toto#663](https://github.com/in-toto/in-toto/issues/663).
 ```{eval-rst}
 .. autofunction:: in_toto.verifylib.in_toto_verify
 ```
+
+### Evidence Index
+
+An optional evidence index locates link metadata and sublayout evidence by
+step name and full functionary keyid. It is useful when authorized
+functionaries share the eight character keyid prefix used by traditional
+filenames. An index is a location hint only: it does not authorize keys, and
+payload, signature and step bindings are still verified.
+
+```{eval-rst}
+.. autoclass:: in_toto.evidence_index.EvidenceIndex
+  :members: load, from_dict, entries_for_step, entry_for, link_path, sublayout_path, validate_for_layout
+```
+
+```{eval-rst}
+.. autoexception:: in_toto.exceptions.EvidenceIndexError
+```

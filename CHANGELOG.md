@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Added
+* Optional evidence index (`in-toto-verify --evidence-index`, or an
+  `evidence-index.json` in `--link-dir`) that locates link metadata and
+  sublayout evidence by step name and full functionary keyid. It resolves the
+  eight character keyid prefix collision in traditional filenames without
+  changing the trust model: the index is a location hint that does not
+  authorize keys, and payload, signature and step bindings are still verified.
+  Ambiguous legacy filenames now fail verification instead of guessing, and an
+  index may not bind one file to two steps or functionaries or escape the
+  evidence package.
+
 ## v3.1.0
 
 This release includes version bumpbs, as well as upgraded debian support , and

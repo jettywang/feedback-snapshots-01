@@ -118,6 +118,43 @@ For a detailed list of all command line arguments and their usage, run
 [online
 documentation](https://in-toto.readthedocs.io/en/latest/command-line-tools/in-toto-verify.html).
 
+##### Evidence index
+
+Traditional link filenames (and sublayout directory names) contain only the
+first eight characters of a functionary keyid. If two authorized functionaries
+share that prefix, those names cannot tell their evidence apart. An optional
+evidence index maps a step name and a full keyid to a link file and, for
+sublayouts, an evidence directory:
+
+```json
+{
+  "version": 1,
+  "entries": [
+    {
+      "step": "write-code",
+      "keyid": "<full functionary keyid>",
+      "link": "evidence/write-code.alice.link"
+    },
+    {
+      "step": "package",
+      "keyid": "<full functionary keyid>",
+      "link": "evidence/package.bob.link",
+      "sublayout": "evidence/package.bob"
+    }
+  ]
+}
+```
+
+Pass it with `in-toto-verify --evidence-index <path>`, or place a file named
+`evidence-index.json` in `--link-dir` to have it picked up automatically. The
+index is only a location hint: it never authorizes a key, and payload,
+signature and step bindings are still verified. All indexed paths must stay
+inside the evidence directory (`--link-dir`); sublayout directories are
+independent evidence packages and cannot use an index to leave their own
+directory. Legacy filenames keep working when they are unambiguous, but an
+ambiguous legacy name fails verification instead of guessing, and one evidence
+file cannot be bound to two steps or two functionaries.
+
 #### Signatures
 `in-toto-sign` is a metadata signature helper tool to add, replace, and
 verify signatures within in-toto Link or Layout metadata, with options to:

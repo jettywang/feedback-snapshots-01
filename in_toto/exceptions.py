@@ -31,6 +31,11 @@ class LinkNotFoundError(Error):
     """Indicates that a link file was not found."""
 
 
+class EvidenceIndexError(Error):
+    """Indicates that an evidence index is malformed, out of scope, or binds
+    evidence to a step or identity inconsistently."""
+
+
 class UnsupportedKeyTypeError(Error):
     """Indicates that the specified key type is not yet supported."""
 

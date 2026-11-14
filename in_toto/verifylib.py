@@ -42,8 +42,10 @@ import in_toto.models.link
 import in_toto.rulelib
 import in_toto.runlib
 import in_toto.settings
+from in_toto.evidence_index import resolve_evidence_index
 from in_toto.exceptions import (
     BadReturnValueError,
+    EvidenceIndexError,
     LayoutExpiredError,
     RuleVerificationError,
     SignatureVerificationError,
@@ -97,7 +99,135 @@ def _raise_on_bad_retval(return_value, command=None):
         raise BadReturnValueError(msg.format(what="zero"))
 
 
-def load_links_for_layout(layout, link_dir_path):
+def _authorized_keyids(layout, step):
+    """Return (main, sub) authorized keyid candidates for a step.
+
+    Legacy link filenames and sublayout directory names are derived from a
+    main keyid or one of its subkeys. Return each exact keyid spelling from
+    the layout once, in order, because the same subkey may be reachable both
+    directly and through its main key.
+    """
+    seen = set()
+    for authorized_keyid in step.pubkeys:
+        if authorized_keyid not in seen:
+            seen.add(authorized_keyid)
+            yield authorized_keyid
+        key = layout.keys.get(authorized_keyid, {})
+        for subkey in key.get("subkeys", {}):
+            if subkey not in seen:
+                seen.add(subkey)
+                yield subkey
+
+
+def _legacy_filename(step_name, keyid):
+    return in_toto.models.link.FILENAME_FORMAT.format(
+        step_name=step_name, keyid=keyid
+    )
+
+
+def _legacy_collisions(layout, step):
+    """Map legacy filename -> exact keyids that would produce it.
+
+    More than one keyid for a filename means the legacy name is ambiguous
+    about which functionary the evidence belongs to.
+    """
+    by_filename = {}
+    for keyid in _authorized_keyids(layout, step):
+        by_filename.setdefault(_legacy_filename(step.name, keyid), []).append(
+            keyid
+        )
+    return by_filename
+
+
+def _metadata_signature_keyids(metadata):
+    """Return the set of keyids that created signatures on metadata."""
+    signatures = getattr(metadata, "signatures", None)
+    if signatures is None:
+        return set()
+
+    keyids = set()
+    if isinstance(signatures, dict):
+        # DSSE Envelope: mapping of keyid -> Signature
+        values = signatures.values()
+        for signature in values:
+            keyids.add(signature.keyid.lower())
+    else:
+        for signature in signatures:
+            keyids.add(signature["keyid"].lower())
+    return keyids
+
+
+def _check_indexed_signature_binding(layout, step, keyid, metadata, path):
+    """Check that indexed evidence carries a signature by the indexed identity.
+
+    This is a location/identity consistency check only. It does not authorize
+    the key: signature verification against the layout still happens later.
+    """
+    signature_keyids = _metadata_signature_keyids(metadata)
+    expected = keyid.lower()
+    subkey_keyids = {
+        subkey.lower()
+        for subkey in layout.keys.get(keyid, {}).get("subkeys", {})
+    }
+
+    if expected in signature_keyids or signature_keyids & subkey_keyids:
+        return
+
+    raise EvidenceIndexError(
+        "Evidence index identity binding failed: indexed evidence"
+        f" '{path}' for step '{step.name}' and keyid '{keyid}' does not carry"
+        " a signature by that keyid (signature keyids:"
+        f" {', '.join(sorted(signature_keyids)) or 'none'})."
+    )
+
+
+def _check_step_binding(entry, payload, path):
+    """Check that the indexed payload belongs to the indexed step."""
+    if payload.type_ == "link" and payload.name != entry.step:
+        raise EvidenceIndexError(
+            "Evidence index step binding failed: indexed evidence"
+            f" '{path}' is bound to step '{entry.step}' and keyid"
+            f" '{entry.keyid}', but its link payload is named"
+            f" '{payload.name}'."
+        )
+
+
+def _same_file(first, second):
+    """Return True if two paths refer to the same file object."""
+    try:
+        first_stat = os.stat(first)
+        second_stat = os.stat(second)
+    except OSError:
+        return False
+    return (first_stat.st_dev, first_stat.st_ino) == (
+        second_stat.st_dev,
+        second_stat.st_ino,
+    )
+
+
+def _remember_evidence_path(used_paths, path, step_name, keyid, kind="file"):
+    """Register an evidence path used by an index binding.
+
+    Two index entries must not point at the same file or directory: that would
+    let one piece of evidence stand in for two steps or two functionaries, and
+    it would make the binding ambiguous. Legacy loading is deliberately not
+    checked here, because a single signed link may legitimately satisfy several
+    functionaries of a step.
+    """
+    for used_path, used_step, used_keyid, used_kind in used_paths:
+        if path == used_path or _same_file(path, used_path):
+            raise EvidenceIndexError(
+                f"Evidence index {kind} binding failed: the same evidence"
+                f" {used_kind} '{path}' is bound to step '{step_name}' keyid"
+                f" '{keyid}' and to step '{used_step}' keyid '{used_keyid}'."
+                f" One evidence {kind} cannot stand in for two steps or two"
+                " functionaries."
+            )
+
+    used_paths.append((path, step_name, keyid, kind))
+
+
+def load_links_for_layout(layout, link_dir_path, evidence_index=None):
     """
     <Purpose>
       Try to load all existing metadata files for each Step of the Layout
@@ -106,13 +236,29 @@ def load_links_for_layout(layout, link_dir_path):
       For each step the metadata might consist of multiple (thresholds) Link
       or Layout (sub-layouts) files.
 
+      By default, evidence is located with the traditional
+      ``STEP-NAME.KEYID-PREFIX.link`` naming. If an optional evidence index is
+      passed (or a default ``evidence-index.json`` exists in
+      ``link_dir_path``), entries in that index locate evidence by step name
+      and full keyid instead.
+
+      Index entries are location hints only and never grant signing authority.
+      Payload type, payload name, signature keyids and (later) signatures
+      against the layout are still verified. Index paths must stay inside the
+      evidence package rooted at ``link_dir_path``.
+
     <Arguments>
       layout:
             Layout object
 
       link_dir_path:
-            A path to directory where links are loaded from
+            A path to directory where links are loaded from. With an evidence
+            index this directory is the evidence package boundary.
 
+      evidence_index (optional):
+            An EvidenceIndex instance, a path to an index file, or None. If
+            None, ``evidence-index.json`` inside ``link_dir_path`` is used if
+            present.
 
     <Side Effects>
       Calls function to read files from disk
@@ -121,6 +267,11 @@ def load_links_for_layout(layout, link_dir_path):
       in_toto.exceptions.LinkNotFoundError,
               if fewer than `threshold` link files can be found for any given
               step of the supply chain (preliminary threshold check)
+
+      in_toto.exceptions.EvidenceIndexError,
+              if an index is malformed, escapes the evidence package, or binds
+              evidence to a step or identity inconsistently, or if a legacy
+              filename is ambiguous between authorized functionaries.
 
     <Returns>
       A dictionary carrying all the found metadata corresponding to the
@@ -135,31 +286,73 @@ def load_links_for_layout(layout, link_dir_path):
 
 
     """
+    index = resolve_evidence_index(link_dir_path, evidence_index)
+    if index is not None:
+        index.validate_for_layout(layout)
+
     steps_metadata = {}
+    used_paths = []
 
     # Iterate over all the steps in the layout
     for step in layout.steps:
         links_per_step = {}
+        collisions = _legacy_collisions(layout, step)
+        indexed_keyids = set()
 
-        # We try to load a link for every authorized functionary, but don't fail
-        # if the file does not exist (authorized != required)
-        # FIXME: Should we really pass on IOError, or just skip inexistent links?
-        for authorized_keyid in step.pubkeys:
-            # Iterate over the authorized key and if present over subkeys
-            for keyid in [authorized_keyid] + list(
-                layout.keys.get(authorized_keyid, {}).get("subkeys", {}).keys()
-            ):
-                filename = in_toto.models.link.FILENAME_FORMAT.format(
-                    step_name=step.name, keyid=keyid
+        # First load evidence that the index locates by full keyid.
+        for entry in index.entries_for_step(step.name) if index else []:
+            # validate_for_layout resolved the layout's canonical spelling of
+            # the keyid, which later signature verification keys on.
+            keyid = entry.layout_keyid
+            path = index.link_path(entry)
+            try:
+                metadata = Metadata.load(path)
+            except OSError as e:
+                raise EvidenceIndexError(
+                    "Evidence index link path binding failed for step"
+                    f" '{step.name}' and keyid '{keyid}':"
+                    f" could not read '{path}': {e}"
+                ) from e
+
+            _check_step_binding(entry, metadata.get_payload(), path)
+            _check_indexed_signature_binding(
+                layout, step, keyid, metadata, path
+            )
+            _remember_evidence_path(
+                used_paths, path, step.name, keyid, kind="file"
+            )
+
+            links_per_step[keyid] = metadata
+            indexed_keyids.add(keyid)
+
+        # Fall back to legacy filenames for identities not located by the
+        # index. A legacy filename is only usable if it maps to exactly one
+        # authorized identity; otherwise the evidence cannot be attributed.
+        for keyid in _authorized_keyids(layout, step):
+            if keyid in indexed_keyids:
+                continue
+
+            filename = _legacy_filename(step.name, keyid)
+            filepath = os.path.join(link_dir_path, filename)
+            candidates = collisions.get(filename, [])
+
+            if len(candidates) > 1 and os.path.isfile(filepath):
+                raise EvidenceIndexError(
+                    "Legacy evidence filename binding failed:"
+                    f" '{filename}' is ambiguous between functionary keyids"
+                    f" {', '.join(repr(k) for k in candidates)} for step"
+                    f" '{step.name}' (they share the eight character keyid"
+                    " prefix used by the legacy filename). Provide evidence"
+                    " index entries that locate each identity's evidence by"
+                    " full keyid."
                 )
-                filepath = os.path.join(link_dir_path, filename)
 
-                try:
-                    metadata = Metadata.load(filepath)
-                    links_per_step[keyid] = metadata
+            try:
+                metadata = Metadata.load(filepath)
+            except OSError:
+                continue
 
-                except OSError:
-                    pass
+            links_per_step[keyid] = metadata
 
         # This is only a preliminary threshold check, based on (authorized)
         # filenames, to fail early. A more thorough signature-based threshold
@@ -1324,7 +1517,11 @@ def reduce_chain_links(chain_link_dict):
 
 
 def verify_sublayouts(
-    layout, steps_metadata, superlayout_link_dir_path, inspect_timeout
+    layout,
+    steps_metadata,
+    superlayout_link_dir_path,
+    inspect_timeout,
+    evidence_index=None,
 ):
     """
     <Purpose>
@@ -1352,14 +1549,24 @@ def verify_sublayouts(
               A path to a directory, where links of the superlayout are loaded
               from. Links of the sublayout are expected to be in a subdirectory
               relative to this path, with a name in the format
-              in_toto.models.layout.SUBLAYOUT_LINK_DIR_FORMAT.
+              in_toto.models.layout.SUBLAYOUT_LINK_DIR_FORMAT, unless an
+              evidence index entry for the step and keyid names a sublayout
+              directory instead.
 
       inspect_timeout:
               Integer value that is the number of seconds to pass to the run
               command to timeout the subprocess within.
 
+      evidence_index (optional):
+              An EvidenceIndex instance, a path to an index file, or None.
+              Index sublayout directories are resolved relative to the
+              evidence package and must not leave it.
+
     <Exceptions>
       raises an Exception if verification of the delegated step fails.
+
+      in_toto.exceptions.EvidenceIndexError if a sublayout directory escapes
+      the evidence package or is shared by two functionaries.
 
     <Side Effects>
       None.
@@ -1376,41 +1583,58 @@ def verify_sublayouts(
       }
 
     """
+    index = resolve_evidence_index(superlayout_link_dir_path, evidence_index)
     chain_link_dict = {}
+    used_sublayout_dirs = []
 
     for step_name, metadata_dict in steps_metadata.items():
         key_link_dict = {}
+        step = layout.get_step_by_name(step_name)
+        step_collisions = _legacy_collisions(layout, step)
+
+        # Resolve and register every delegated evidence directory for this
+        # step before recursing, so that a directory shared by two
+        # functionaries is rejected even if one nested verification would
+        # otherwise pass first.
+        sublayout_dirs = {}
+        for keyid, metadata in metadata_dict.items():
+            if metadata.get_payload().type_ != "layout":
+                continue
+            path = _resolve_sublayout_dir(
+                index,
+                step_name,
+                keyid,
+                superlayout_link_dir_path,
+                step_collisions,
+            )
+            _remember_evidence_path(
+                used_sublayout_dirs,
+                path,
+                step_name,
+                keyid,
+                kind="sublayout directory",
+            )
+            sublayout_dirs[keyid] = path
+
         for keyid, metadata in metadata_dict.items():
             payload = metadata.get_payload()
 
             if payload.type_ == "layout":
                 LOG.info("Verifying sublayout %s...", step_name)
-                layout_key_dict = {}
 
                 # Retrieve the entire key object for the keyid
                 # corresponding to the link
                 layout_key_dict = {keyid: layout.keys.get(keyid)}
 
-                # Sublayout links are expected to be in a directory with the following
-                # name relative the the current link directory path, i.e. if there
-                # are multiple levels of sublayout nesting, the links are expected to
-                # be nested accordingly
-                sub_link_dir = (
-                    in_toto.models.layout.SUBLAYOUT_LINK_DIR_FORMAT.format(
-                        name=step_name, keyid=keyid
-                    )
-                )
-
-                sublayout_link_dir_path = os.path.join(
-                    superlayout_link_dir_path, sub_link_dir
-                )
-
                 # Make a recursive call to in_toto_verify with the
-                # layout and the extracted key object
+                # layout and the extracted key object. A sublayout is its own
+                # evidence package, so the parent index is not passed down; an
+                # evidence-index.json inside the sublayout directory is used
+                # automatically.
                 summary_link = in_toto_verify(
                     metadata,
                     layout_key_dict,
-                    link_dir_path=sublayout_link_dir_path,
+                    link_dir_path=sublayout_dirs[keyid],
                     step_name=step_name,
                     inspect_timeout=inspect_timeout,
                 )
@@ -1423,6 +1647,53 @@ def verify_sublayouts(
         chain_link_dict[step_name] = key_link_dict
 
     return chain_link_dict
+
+
+def _resolve_sublayout_dir(
+    index, step_name, keyid, superlayout_link_dir_path, step_collisions
+):
+    """Resolve the delegated evidence directory for a sublayout step.
+
+    Prefers an index entry (full keyid binding), enforces evidence package
+    scope, and rejects the ambiguous legacy directory name if another
+    authorized functionary would produce the same directory name.
+    """
+    package_root = os.path.realpath(os.path.abspath(superlayout_link_dir_path))
+
+    if index is not None:
+        entry = index.entry_for(step_name, keyid)
+        if entry is not None and entry.sublayout is not None:
+            sublayout_path = index.sublayout_path(entry)
+            if not os.path.isdir(sublayout_path):
+                raise EvidenceIndexError(
+                    "Evidence index sublayout path binding failed for step"
+                    f" '{step_name}' and keyid '{keyid}':"
+                    f" '{sublayout_path}' is not a directory."
+                )
+            return sublayout_path
+
+    legacy_dir = in_toto.models.layout.SUBLAYOUT_LINK_DIR_FORMAT.format(
+        name=step_name, keyid=keyid
+    )
+    legacy_path = os.path.join(superlayout_link_dir_path, legacy_dir)
+
+    if len(step_collisions.get(_legacy_filename(step_name, keyid), [])) > 1:
+        raise EvidenceIndexError(
+            "Legacy sublayout directory binding failed:"
+            f" '{legacy_dir}' is ambiguous between functionary keyids that"
+            f" share the eight character keyid prefix for step '{step_name}'."
+            " Provide an evidence index entry with an explicit 'sublayout'"
+            " directory for each full keyid."
+        )
+
+    resolved = os.path.realpath(os.path.abspath(legacy_path))
+    if os.path.commonpath([package_root, resolved]) != package_root:
+        raise EvidenceIndexError(
+            "Legacy sublayout directory binding failed:"
+            f" '{legacy_path}' escapes evidence package '{package_root}'."
+        )
+
+    return legacy_path
 
 
 def get_summary_link(layout, reduced_chain_link_dict, name):
@@ -1489,6 +1760,7 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
     step_name="",
     persist_inspection_links=True,
     inspect_timeout=in_toto.settings.LINK_CMD_EXEC_TIMEOUT,
+    evidence_index=None,
 ):
     """Performs complete in-toto supply chain verification for a final product.
 
@@ -1533,6 +1805,10 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
           superlayout. The expected directory name format is
           ``SUBLAYOUT-STEP-NAME.KEYID-PREFIX``.
 
+          If ``link_dir_path`` contains an ``evidence-index.json`` file, it is
+          used automatically to locate evidence by step name and full keyid
+          instead (see ``evidence_index``).
+
       substitution_parameters (optional): A dictionary with substitution values
           for artifact rules (steps and inspections), the expected command
           attribute (steps), and the run attribute (inspections) in the layout.
@@ -1547,6 +1823,15 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
           in_toto.settings.LINK_CMD_EXEC_TIMEOUT in seconds which ends up timing
           out the run command subprocess if it runs over.
 
+      evidence_index (optional): An optional evidence index that locates link
+          files and sublayout directories by step name and full functionary
+          keyid. It can be an ``in_toto.evidence_index.EvidenceIndex``, a path
+          to an index file, or None. An index is an untrusted location hint: it
+          does not authorize keys, and payload, signature and step bindings are
+          still verified. Indexed paths must stay inside the evidence package
+          rooted at ``link_dir_path``. If None and an ``evidence-index.json``
+          exists in ``link_dir_path``, that file is loaded.
+
     Raises:
       securesystemslib.exceptions.FormatError: Passed parameters are malformed.
 
@@ -1557,6 +1842,10 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
 
       LinkNotFoundError: Fewer than threshold link metadata files can be found
           for a step of the layout.
+
+      EvidenceIndexError: An evidence index is malformed, escapes the evidence
+          package, binds evidence to an unauthorized identity or wrong step, or
+          lets one piece of evidence stand in for two steps or functionaries.
 
       ThresholdVerificationError: Fewer than threshold links, validly signed by
           different authorized functionaries, who agree on the recorded materials
@@ -1598,14 +1887,19 @@ def in_toto_verify(  # noqa: PLR0913, PLR0917, RUF100
         substitute_parameters(layout, substitution_parameters)
 
     LOG.info("Reading link metadata files...")
-    steps_metadata = load_links_for_layout(layout, link_dir_path)
+    steps_metadata = load_links_for_layout(
+        layout, link_dir_path, evidence_index
+    )
 
     LOG.info("Verifying link metadata signatures...")
     steps_metadata = verify_link_signature_thresholds(layout, steps_metadata)
 
     LOG.info("Verifying sublayouts...")
+    # Sublayout evidence lives in its own package/directory. Any index passed
+    # by the caller applies only to the root package; each recursive call will
+    # pick up an index file inside the sublayout's directory, if present.
     chain_link_dict = verify_sublayouts(
-        layout, steps_metadata, link_dir_path, inspect_timeout
+        layout, steps_metadata, link_dir_path, inspect_timeout, evidence_index
     )
 
     LOG.info("Verifying alignment of reported commands...")
