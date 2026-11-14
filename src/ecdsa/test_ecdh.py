@@ -2,6 +2,7 @@ import os
 import sys
 import shutil
 import subprocess
+import threading
 import pytest
 from binascii import unhexlify
 
@@ -27,6 +28,7 @@ from .ecdh import (
     InvalidSharedSecretError,
     NoKeyError,
     NoCurveError,
+    ConcurrentUseError,
 )
 from .keys import SigningKey, VerifyingKey
 from .ellipticcurve import CurveEdTw
@@ -344,6 +346,299 @@ def test_ecdh_der():
     sharedsecret = ecdh.generate_sharedsecret_bytes()
 
     assert sharedsecret == unhexlify(gshared_secret)
+
+
+class TestECDHSessionConfiguration(unittest.TestCase):
+    """Tests for the atomic session API and its legacy-API interplay."""
+
+    def setUp(self):
+        self.priv_a = SigningKey.generate(curve=NIST256p)
+        self.priv_b = SigningKey.generate(curve=NIST256p)
+        self.peer_a = SigningKey.generate(curve=NIST256p)
+        self.peer_b = SigningKey.generate(curve=NIST256p)
+
+    def _expected_secret(self, private_key, peer_key):
+        """Shared secret computed independently of session state."""
+        ecdh = ECDH(
+            curve=NIST256p,
+            private_key=private_key,
+            public_key=peer_key.get_verifying_key(),
+        )
+        return ecdh.generate_sharedsecret_bytes()
+
+    def test_interleaved_peers_each_success_matches_unique_session(self):
+        ecdh = ECDH()
+        secret_a = self._expected_secret(self.priv_a, self.peer_a)
+        secret_b = self._expected_secret(self.priv_a, self.peer_b)
+        self.assertNotEqual(secret_a, secret_b)
+
+        # alternate two peers on a single reused object, pool-style
+        for _ in range(2):
+            ecdh.configure_session(
+                curve=NIST256p,
+                private_key=self.priv_a,
+                public_key=self.peer_a.get_verifying_key(),
+            )
+            self.assertEqual(secret_a, ecdh.generate_sharedsecret_bytes())
+
+            ecdh.configure_session(
+                curve=NIST256p,
+                private_key=self.priv_a,
+                public_key=self.peer_b.get_verifying_key(),
+            )
+            self.assertEqual(secret_b, ecdh.generate_sharedsecret_bytes())
+
+    def test_configure_session_switches_curve_and_keys_atomically(self):
+        other_priv = SigningKey.generate(curve=NIST192p)
+        other_peer = SigningKey.generate(curve=NIST192p)
+
+        ecdh = ECDH()
+        ecdh.configure_session(
+            curve=NIST256p,
+            private_key=self.priv_a,
+            public_key=self.peer_a.get_verifying_key(),
+        )
+        ecdh.configure_session(
+            curve=NIST192p,
+            private_key=other_priv,
+            public_key=other_peer.get_verifying_key(),
+        )
+
+        expected = ECDH(
+            curve=NIST192p,
+            private_key=other_priv,
+            public_key=other_peer.get_verifying_key(),
+        ).generate_sharedsecret_bytes()
+        self.assertEqual(expected, ecdh.generate_sharedsecret_bytes())
+
+    def test_failed_configuration_keeps_old_session(self):
+        ecdh = ECDH()
+        ecdh.configure_session(
+            curve=NIST256p,
+            private_key=self.priv_a,
+            public_key=self.peer_a.get_verifying_key(),
+        )
+        secret_before = ecdh.generate_sharedsecret_bytes()
+
+        wrong_curve_key = SigningKey.generate(curve=NIST192p)
+        failing_configurations = [
+            # peer key from a different curve
+            dict(
+                curve=NIST256p,
+                private_key=self.priv_b,
+                public_key=wrong_curve_key.get_verifying_key(),
+            ),
+            # local key from a different curve
+            dict(
+                curve=NIST256p,
+                private_key=wrong_curve_key,
+                public_key=self.peer_b.get_verifying_key(),
+            ),
+            # keys consistent with each other but not the session curve
+            dict(
+                curve=NIST192p,
+                private_key=self.priv_b,
+                public_key=self.peer_b.get_verifying_key(),
+            ),
+            # incomplete configurations
+            dict(private_key=self.priv_b, public_key=self.peer_b),
+            dict(curve=NIST256p, public_key=self.peer_b.get_verifying_key()),
+            dict(curve=NIST256p, private_key=self.priv_b),
+        ]
+        expected_errors = [
+            InvalidCurveError,
+            InvalidCurveError,
+            InvalidCurveError,
+            NoCurveError,
+            NoKeyError,
+            NoKeyError,
+        ]
+        for kwargs, error in zip(failing_configurations, expected_errors):
+            with self.assertRaises(error):
+                ecdh.configure_session(**kwargs)
+            # no mixed state: the old session is still fully usable
+            self.assertEqual(
+                secret_before, ecdh.generate_sharedsecret_bytes()
+            )
+
+    def test_failed_configuration_of_fresh_object_stays_non_computable(self):
+        ecdh = ECDH()
+        with self.assertRaises(InvalidCurveError):
+            ecdh.configure_session(
+                curve=NIST256p,
+                private_key=self.priv_a,
+                public_key=SigningKey.generate(
+                    curve=NIST192p
+                ).get_verifying_key(),
+            )
+        with self.assertRaises(NoKeyError):
+            ecdh.generate_sharedsecret_bytes()
+
+    def test_configuration_failure_injected_during_update(self):
+        class ExplodingKey(object):
+            """Private key that fails while the session is being set up."""
+
+            curve = NIST256p
+
+            def get_verifying_key(self):
+                raise RuntimeError("injected failure")
+
+        ecdh = ECDH()
+        ecdh.configure_session(
+            curve=NIST256p,
+            private_key=self.priv_a,
+            public_key=self.peer_a.get_verifying_key(),
+        )
+        secret_before = ecdh.generate_sharedsecret_bytes()
+
+        with self.assertRaises(RuntimeError):
+            ecdh.configure_session(
+                curve=NIST256p,
+                private_key=ExplodingKey(),
+                public_key=self.peer_b.get_verifying_key(),
+            )
+
+        # failure mid-update must not leave a mixed session behind
+        self.assertEqual(secret_before, ecdh.generate_sharedsecret_bytes())
+
+    def test_reset_enters_explicit_non_computable_state(self):
+        ecdh = ECDH()
+        ecdh.configure_session(
+            curve=NIST256p,
+            private_key=self.priv_a,
+            public_key=self.peer_a.get_verifying_key(),
+        )
+        ecdh.reset()
+
+        self.assertIsNone(ecdh.curve)
+        self.assertIsNone(ecdh.private_key)
+        self.assertIsNone(ecdh.public_key)
+        with self.assertRaises(NoKeyError):
+            ecdh.generate_sharedsecret_bytes()
+
+        # object can be reused after a reset
+        ecdh.configure_session(
+            curve=NIST256p,
+            private_key=self.priv_b,
+            public_key=self.peer_b.get_verifying_key(),
+        )
+        self.assertEqual(
+            self._expected_secret(self.priv_b, self.peer_b),
+            ecdh.generate_sharedsecret_bytes(),
+        )
+
+    def test_legacy_rekey_drops_stale_peer_key(self):
+        ecdh = ECDH(curve=NIST256p)
+        ecdh.load_private_key(self.priv_a)
+        ecdh.load_received_public_key(self.peer_a.get_verifying_key())
+        ecdh.generate_sharedsecret_bytes()
+
+        # new local key: the old peer must not be reused silently
+        ecdh.load_private_key(self.priv_b)
+        self.assertIsNone(ecdh.public_key)
+        with self.assertRaises(NoKeyError):
+            ecdh.generate_sharedsecret_bytes()
+
+        # explicit recovery: load the peer that belongs to this exchange
+        ecdh.load_received_public_key(self.peer_b.get_verifying_key())
+        self.assertEqual(
+            self._expected_secret(self.priv_b, self.peer_b),
+            ecdh.generate_sharedsecret_bytes(),
+        )
+
+    def test_legacy_curve_change_drops_session_keys(self):
+        ecdh = ECDH(curve=NIST256p)
+        ecdh.load_private_key(self.priv_a)
+        ecdh.load_received_public_key(self.peer_a.get_verifying_key())
+
+        ecdh.set_curve(NIST192p)
+        self.assertIsNone(ecdh.private_key)
+        self.assertIsNone(ecdh.public_key)
+        with self.assertRaises(NoKeyError):
+            ecdh.generate_sharedsecret_bytes()
+
+        # setting the same curve again is a no-op for the session
+        ecdh.set_curve(NIST256p)
+        ecdh.load_private_key(self.priv_a)
+        ecdh.load_received_public_key(self.peer_a.get_verifying_key())
+        ecdh.set_curve(NIST256p)
+        self.assertEqual(
+            self._expected_secret(self.priv_a, self.peer_a),
+            ecdh.generate_sharedsecret_bytes(),
+        )
+
+    def test_legacy_peer_key_before_private_key_still_works(self):
+        # handshake order used by the legacy API: peer key first,
+        # local key generated afterwards completes the same session
+        ecdh = ECDH(curve=NIST256p)
+        ecdh.load_received_public_key(self.peer_a.get_verifying_key())
+        ecdh.load_private_key(self.priv_a)
+        self.assertEqual(
+            self._expected_secret(self.priv_a, self.peer_a),
+            ecdh.generate_sharedsecret_bytes(),
+        )
+
+    def test_concurrent_use_is_reliably_rejected(self):
+        entered = threading.Event()
+        may_leave = threading.Event()
+        priv_a = self.priv_a
+
+        class SlowKey(object):
+            """Private key that blocks inside the session update."""
+
+            curve = NIST256p
+
+            def get_verifying_key(self):
+                entered.set()
+                may_leave.wait(timeout=60)
+                return priv_a.get_verifying_key()
+
+        results = {}
+
+        def configure():
+            try:
+                ecdh.configure_session(
+                    curve=NIST256p,
+                    private_key=SlowKey(),
+                    public_key=self.peer_a.get_verifying_key(),
+                )
+                results["error"] = None
+            except Exception as exc:  # pragma: no cover
+                results["error"] = exc
+
+        ecdh = ECDH()
+        worker = threading.Thread(target=configure)
+        worker.start()
+        try:
+            self.assertTrue(entered.wait(timeout=60))
+            # while the session update is in progress, every other
+            # operation must be rejected, not queued or mixed in
+            with self.assertRaises(ConcurrentUseError):
+                ecdh.generate_sharedsecret()
+            with self.assertRaises(ConcurrentUseError):
+                ecdh.configure_session(
+                    curve=NIST256p,
+                    private_key=self.priv_b,
+                    public_key=self.peer_b.get_verifying_key(),
+                )
+            with self.assertRaises(ConcurrentUseError):
+                ecdh.reset()
+        finally:
+            may_leave.set()
+        worker.join(timeout=60)
+
+        self.assertIsNone(results.get("error"))
+        # the object is still consistent and reusable after the
+        # concurrent calls were rejected
+        ecdh.configure_session(
+            curve=NIST256p,
+            private_key=self.priv_a,
+            public_key=self.peer_a.get_verifying_key(),
+        )
+        self.assertEqual(
+            self._expected_secret(self.priv_a, self.peer_a),
+            ecdh.generate_sharedsecret_bytes(),
+        )
 
 
 # Exception classes used by run_openssl.

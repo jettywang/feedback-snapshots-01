@@ -42,6 +42,7 @@ from .ecdh import (
     NoCurveError,
     InvalidCurveError,
     InvalidSharedSecretError,
+    ConcurrentUseError,
 )
 from .der import UnexpectedDER
 from . import _version
@@ -69,6 +70,7 @@ _hush_pyflakes = [
     InvalidCurveError,
     NoKeyError,
     InvalidSharedSecretError,
+    ConcurrentUseError,
     ECDH,
     NoCurveError,
     NIST192p,
