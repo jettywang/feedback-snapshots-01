@@ -7,10 +7,12 @@ The names chosen for TUF Exception classes should end in 'Error' except where
 there is a good reason not to, and provide that reason in those cases.
 """
 
-
-#### Repository errors ####
+from datetime import datetime
 
 from securesystemslib.exceptions import StorageError  # noqa: F401
+
+
+#### Repository errors ####
 
 
 class RepositoryError(Exception):
@@ -41,6 +43,38 @@ class ExpiredMetadataError(RepositoryError):
 
 class LengthOrHashMismatchError(RepositoryError):
     """An error while checking the length and hash values of an object."""
+
+
+class TargetExpiredError(ExpiredMetadataError):
+    """A target cannot be delivered because a trusted role it depends on has
+    expired at the caller-provided usage time.
+
+    This is raised by the optional usage-time checks in ``Updater``: unlike
+    regular refresh-time expiry checks it also names the role that blocks
+    delivery and that role's expiry time.
+
+    Args:
+        role: Name of the trusted role whose metadata has expired.
+        expires: Expiry time of that role's metadata (timezone-aware).
+    """
+
+    def __init__(self, role: str, expires: datetime):
+        super().__init__(
+            f"Target delivery blocked by expired role '{role}' "
+            f"(expires {expires.isoformat()})"
+        )
+        self.role = role
+        self.expires = expires
+
+
+class TargetUsageContextError(RepositoryError):
+    """Target information has no usage-time trust chain recorded by this
+    ``Updater``.
+
+    This is raised in usage-time checking mode when a ``TargetFile`` was not
+    returned by ``Updater.get_targetinfo()`` (or was copied after lookup), so
+    the trusted role chain that authorized it is unknown.
+    """
 
 
 #### Download Errors ####

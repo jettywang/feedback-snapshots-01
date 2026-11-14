@@ -59,20 +59,47 @@ import logging
 import os
 import shutil
 import tempfile
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from urllib import parse
 
 from tuf.api import exceptions
-from tuf.api.metadata import Root, Snapshot, TargetFile, Targets, Timestamp
+from tuf.api.metadata import (
+    Root,
+    Snapshot,
+    TargetFile,
+    Targets,
+    Timestamp,
+)
 from tuf.ngclient._internal.trusted_metadata_set import TrustedMetadataSet
 from tuf.ngclient.config import EnvelopeType, UpdaterConfig
 from tuf.ngclient.urllib3_fetcher import Urllib3Fetcher
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from tuf.ngclient.fetcher import FetcherInterface
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _TargetUsageContext:
+    """Trust chain recorded when a target was found.
+
+    The chain contains the top-level roles and the actual delegation path that
+    authorized the target. Expiry times are copied so that later usage checks
+    do not depend on mutable metadata objects.
+    """
+
+    chain: tuple[tuple[str, datetime], ...]
+    blocked: tuple[str, datetime] | None = None
+
+
+# A target's authenticated description: path, length, and hashes.
+_TargetKey = tuple[str, int, tuple[tuple[str, str], ...]]
 
 
 class Updater:
@@ -97,6 +124,15 @@ class Updater:
             Pass ``None`` only if you explicitly want to use the cached
             root.json as the trust anchor (not recommended for most
             deployments).
+        usage_clock: ``Optional``; callable returning the caller's current
+            timezone-aware usage time. When given, target lookup, cache
+            hits, and target downloads re-check the expiry of the complete
+            trusted role chain that authorized the target, against this
+            clock instead of the fixed refresh reference time. Expiry of the
+            refresh workflow itself is not changed. Usage time is
+            monotonic: once a context has been found expired it stays
+            expired even if the clock later moves backwards. Without this
+            argument the legacy behaviour is unchanged.
 
     Raises:
         OSError: Local root.json cannot be read
@@ -113,6 +149,7 @@ class Updater:
         config: UpdaterConfig | None = None,
         *,
         bootstrap: bytes | None,
+        usage_clock: Callable[[], datetime] | None = None,
     ):
         self._dir = metadata_dir
         self._metadata_base_url = _ensure_trailing_slash(metadata_base_url)
@@ -123,6 +160,10 @@ class Updater:
             self._target_base_url = _ensure_trailing_slash(target_base_url)
 
         self.config = config or UpdaterConfig()
+        self._usage_clock = usage_clock
+        self._usage_high_water: datetime | None = None
+        self._usage_contexts: dict[_TargetKey, _TargetUsageContext] = {}
+
         if fetcher is not None:
             self._fetcher = fetcher
         else:
@@ -184,6 +225,108 @@ class Updater:
         filename = parse.quote(targetinfo.path, "")
         return os.path.join(self.target_dir, filename)
 
+    def _usage_time(self) -> datetime:
+        """Return caller-provided usage time, never lower than an earlier
+        usage time.
+
+        A clock moving backwards must not make a context that has already
+        been found expired usable again.
+        """
+        assert self._usage_clock is not None  # noqa: S101
+        now = self._usage_clock()
+        if not isinstance(now, datetime) or now.utcoffset() is None:
+            raise ValueError(
+                "usage_clock must return a timezone-aware datetime"
+            )
+        if self._usage_high_water is not None and now < self._usage_high_water:
+            now = self._usage_high_water
+        self._usage_high_water = now
+        return now
+
+    def _trusted_chain(
+        self, path: tuple[str, ...]
+    ) -> tuple[tuple[str, datetime], ...]:
+        """Return (role, expiry) pairs for the actual chain that authorized
+        a target.
+
+        The chain always contains root, timestamp, snapshot, and top-level
+        targets, followed by the delegated roles in ``path`` (from top-level
+        targets towards the role that contains the target).
+        """
+        chain_roles = (Root.type, Timestamp.type, Snapshot.type, Targets.type)
+        chain = []
+        for role in (*chain_roles, *path):
+            signed = self._trusted_set[role]
+            chain.append((role, signed.expires))
+        return tuple(chain)
+
+    def _record_target_usage(
+        self, target: TargetFile, path: tuple[str, ...]
+    ) -> None:
+        """Remember the trusted chain that authorized ``target``.
+
+        The context is keyed by the target's authenticated description, so a
+        shallow copy with the same path, length, and hashes refers to the
+        same authorization. A different description, even at the same path,
+        is a different target.
+
+        A context that has already been judged expired stays blocked even if
+        it is recorded again: clock rollback cannot make it usable.
+        """
+        key = _target_key(target)
+        previous = self._usage_contexts.get(key)
+        blocked = previous.blocked if previous is not None else None
+        self._usage_contexts[key] = _TargetUsageContext(
+            self._trusted_chain(path), blocked
+        )
+
+    def _get_usage_context(
+        self, targetinfo: TargetFile
+    ) -> _TargetUsageContext:
+        context = self._usage_contexts.get(_target_key(targetinfo))
+        if context is None:
+            raise exceptions.TargetUsageContextError(
+                "Target information was not returned by this Updater's "
+                "get_targetinfo(), so its trusted role chain is unknown"
+            )
+        return context
+
+    def _check_target_usage(self, targetinfo: TargetFile) -> None:
+        """Raise if the target's trusted role chain has expired.
+
+        Checks complete chain (top-level roles and actual delegated path)
+        against the caller usage clock. Once a context is found expired it
+        remains blocked, even if the clock later moves backwards. No refresh
+        is attempted: an expired target is not silently replaced.
+        """
+        if self._usage_clock is None:
+            return
+
+        context = self._get_usage_context(targetinfo)
+
+        if context.blocked is not None:
+            role, expires = context.blocked
+            raise exceptions.TargetExpiredError(role, expires)
+
+        usage_time = self._usage_time()
+        expired = [
+            (role, expires)
+            for role, expires in context.chain
+            if usage_time >= expires
+        ]
+        if expired:
+            # Report the earliest expiry: it is the first point in time at
+            # which delivery should have been refused.
+            role, expires = min(expired, key=lambda item: item[1])
+            context.blocked = (role, expires)
+            logger.debug(
+                "Target %s blocked by expired role %s (expires %s)",
+                targetinfo.path,
+                role,
+                expires.isoformat(),
+            )
+            raise exceptions.TargetExpiredError(role, expires)
+
     def get_targetinfo(self, target_path: str) -> TargetFile | None:
         """Return ``TargetFile`` instance with information for ``target_path``.
 
@@ -205,6 +348,8 @@ class Updater:
             OSError: New metadata could not be written to disk
             RepositoryError: Metadata failed to verify in some way
             DownloadError: Download of a metadata file failed in some way
+            TargetExpiredError: Usage-time checking is enabled and a role
+                needed to authorize the found target has expired
 
         Returns:
             ``TargetFile`` instance or ``None``.
@@ -212,7 +357,14 @@ class Updater:
 
         if Targets.type not in self._trusted_set:
             self.refresh()
-        return self._preorder_depth_first_walk(target_path)
+        found = self._preorder_depth_first_walk(target_path)
+        if found is None:
+            return None
+        target, path = found
+        if self._usage_clock is not None:
+            self._record_target_usage(target, path)
+            self._check_target_usage(target)
+        return target
 
     def find_cached_target(
         self,
@@ -228,12 +380,18 @@ class Updater:
 
         Raises:
             ValueError: Incorrect arguments
+            TargetUsageContextError: Usage-time checking is enabled but
+                ``targetinfo`` was not returned by this Updater's
+                ``get_targetinfo()``
+            TargetExpiredError: Usage-time checking is enabled and a role
+                needed to authorize this target has expired
 
         Returns:
             Local file path if the file is an up to date target file.
             ``None`` if file is not found or it is not up to date.
         """
 
+        self._check_target_usage(targetinfo)
         if filepath is None:
             filepath = self._generate_target_file_path(targetinfo)
 
@@ -263,6 +421,11 @@ class Updater:
 
         Raises:
             ValueError: Invalid arguments
+            TargetUsageContextError: Usage-time checking is enabled but
+                ``targetinfo`` was not returned by this Updater's
+                ``get_targetinfo()``
+            TargetExpiredError: Usage-time checking is enabled and a role
+                needed to authorize this target has expired
             DownloadError: Download of the target file failed in some way
             RepositoryError: Downloaded target failed to be verified in some way
             OSError: Failed to write target to file
@@ -270,6 +433,11 @@ class Updater:
         Returns:
             Local path to downloaded file
         """
+
+        # Refuse before any network or filesystem work: do not let a stale
+        # target appear downloadable just because the repository may have
+        # newer metadata.
+        self._check_target_usage(targetinfo)
 
         if filepath is None:
             filepath = self._generate_target_file_path(targetinfo)
@@ -506,16 +674,20 @@ class Updater:
 
     def _preorder_depth_first_walk(
         self, target_filepath: str
-    ) -> TargetFile | None:
+    ) -> tuple[TargetFile, tuple[str, ...]] | None:
         """
         Interrogates the tree of target delegations in order of appearance
         (which implicitly order trustworthiness), and returns the matching
         target found in the most trusted role.
+
+        Returns the target and the delegation path (from top-level targets
+        towards the role containing the target) that actually authorized it.
         """
 
-        # List of delegations to be interrogated. A (role, parent role) pair
-        # is needed to load and verify the delegated targets metadata.
-        delegations_to_visit = [(Targets.type, Root.type)]
+        # List of delegations to be interrogated. A (role, parent role, path)
+        # triple is needed to load and verify the delegated targets metadata:
+        # the path records the exact delegation edges that led to the role.
+        delegations_to_visit = [(Targets.type, Root.type, ())]
         visited_role_names: set[str] = set()
 
         # Preorder depth-first traversal of the graph of target delegations.
@@ -524,7 +696,7 @@ class Updater:
             and len(delegations_to_visit) > 0
         ):
             # Pop the role name from the top of the stack.
-            role_name, parent_role = delegations_to_visit.pop(-1)
+            role_name, parent_role, path = delegations_to_visit.pop(-1)
 
             # Skip any visited current role to prevent cycles.
             if role_name in visited_role_names:
@@ -539,7 +711,7 @@ class Updater:
 
             if target is not None:
                 logger.debug("Found target in current role %s", role_name)
-                return target
+                return target, path
 
             # After preorder check, add current role to set of visited roles.
             visited_role_names.add(role_name)
@@ -553,7 +725,9 @@ class Updater:
                     terminating,
                 ) in targets.delegations.get_roles_for_target(target_filepath):
                     logger.debug("Adding child role %s", child_name)
-                    child_roles_to_visit.append((child_name, role_name))
+                    child_roles_to_visit.append(
+                        (child_name, role_name, (*path, child_name))
+                    )
                     if terminating:
                         logger.debug("Not backtracking to other roles")
                         delegations_to_visit = []
@@ -573,6 +747,11 @@ class Updater:
 
         # If this point is reached then target is not found, return None
         return None
+
+
+def _target_key(target: TargetFile) -> _TargetKey:
+    """Return the authenticated description that identifies a target."""
+    return target.path, target.length, tuple(sorted(target.hashes.items()))
 
 
 def _ensure_trailing_slash(url: str) -> str:
