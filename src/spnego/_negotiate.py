@@ -14,6 +14,7 @@ from spnego._context import (
     GSSMech,
     IOVUnwrapResult,
     IOVWrapResult,
+    MechPolicy,
     SecPkgContextSizes,
     UnwrapResult,
     WinRMWrapResult,
@@ -32,14 +33,22 @@ from spnego._sspi import SSPIProxy
 from spnego.channel_bindings import GssChannelBindings
 from spnego.exceptions import (
     BadMechanismError,
+    FeatureMissingError,
     InvalidTokenError,
     NegotiateOptions,
     NoContextError,
+    NoCredentialError,
+    OperationNotAvailableError,
 )
 
 log = logging.getLogger(__name__)
 
 _KERBEROS_ALIASES = frozenset([GSSMech._ms_kerberos.value, GSSMech._kerberos_draft.value])
+
+# Errors that indicate a mechanism is not usable locally and justify trying the next allowed mechanism. Credential
+# and token validation failures are deliberately excluded so they surface to the caller rather than silently
+# downgrading the negotiation to a weaker mechanism.
+_MECH_UNAVAILABLE_ERRORS = (FeatureMissingError, ImportError, NoCredentialError, OperationNotAvailableError)
 
 
 class NegotiateProxy(ContextProxy):
@@ -61,6 +70,7 @@ class NegotiateProxy(ContextProxy):
         usage: str = "initiate",
         protocol: str = "negotiate",
         options: NegotiateOptions = NegotiateOptions.none,
+        mech_policy: typing.Optional[MechPolicy] = None,
         **kwargs: typing.Any,
     ) -> None:
         credentials = unify_credentials(username, password)
@@ -70,6 +80,7 @@ class NegotiateProxy(ContextProxy):
 
         self._credentials = credentials
         self._complete = False
+        self._mech_policy = mech_policy or MechPolicy.default()
         self._available_contexts: typing.Optional[typing.Dict[GSSMech, ContextProxy]] = kwargs.get(
             "_negotiate_contexts", None
         )
@@ -122,6 +133,11 @@ class NegotiateProxy(ContextProxy):
         return self._context.context_attr if self._context_list else ContextReq.none
 
     @property
+    def mech_policy(self) -> MechPolicy:
+        """The mechanism admission policy this context enforces during the SPNEGO exchange."""
+        return self._mech_policy
+
+    @property
     def negotiated_protocol(self) -> typing.Optional[str]:
         return self._context.negotiated_protocol if self._context_list else None
 
@@ -138,6 +154,7 @@ class NegotiateProxy(ContextProxy):
             usage=self.usage,
             protocol=self.protocol,
             options=self.options,
+            mech_policy=self._mech_policy,
             _negotiate_contexts={m: c[0].new_context() for m, c in self._context_list.items()},
         )
 
@@ -244,6 +261,22 @@ class NegotiateProxy(ContextProxy):
                 # If we have received the supported_mech then we don't need to send our own.
                 if in_token.supported_mech:
                     supported_mech = in_token.supported_mech
+
+                    # The peer must not be able to talk the context into a mechanism the policy does not admit.
+                    if not self._mech_policy.allows(supported_mech):
+                        raise BadMechanismError(
+                            context_msg="Peer selected the mechanism %s which is not allowed by the context "
+                            "mechanism policy" % supported_mech
+                        )
+
+                    # A mechanism that was already chosen must not be replaced by a different one later in the
+                    # exchange, that is a downgrade attempt rather than negotiation.
+                    if self.__chosen_mech and not self._is_same_mech(self.__chosen_mech, supported_mech):
+                        raise InvalidTokenError(
+                            context_msg="Peer attempted to switch the negotiated mechanism from %s to %s after it "
+                            "was already chosen" % (self.__chosen_mech.value, supported_mech)
+                        )
+
                     self.__chosen_mech = next(
                         (m for m in self._context_list if self._is_same_mech(m, supported_mech)),
                         GSSMech.from_oid(supported_mech),
@@ -264,7 +297,22 @@ class NegotiateProxy(ContextProxy):
                 is_spnego = False
                 token = in_token
 
-                self.__chosen_mech = GSSMech.ntlm if token and token.startswith(b"NTLMSSP\x00") else GSSMech.kerberos
+                raw_mech = GSSMech.ntlm if token and token.startswith(b"NTLMSSP\x00") else GSSMech.kerberos
+
+                # A raw token must not bypass the policy, it is subject to the same admission rules as a mechanism
+                # negotiated through SPNEGO.
+                if not self._mech_policy.allows(raw_mech):
+                    raise BadMechanismError(
+                        context_msg="Raw %s tokens are not allowed by the context mechanism policy" % raw_mech.name
+                    )
+
+                if self.__chosen_mech and self.__chosen_mech != raw_mech:
+                    raise InvalidTokenError(
+                        context_msg="Peer attempted to switch the negotiated mechanism from %s to %s after it was "
+                        "already chosen" % (self.__chosen_mech.value, raw_mech.value)
+                    )
+
+                self.__chosen_mech = raw_mech
 
                 if not self._context_list:
                     self._rebuild_context_list(
@@ -440,7 +488,7 @@ class NegotiateProxy(ContextProxy):
     def _preferred_mech_list(self) -> typing.List[GSSMech]:
         """Get a list of mechs that can be used in priority order (highest to lowest)."""
         available_protocols = [p for p in self.available_protocols(self.options) if p != "negotiate"]
-        return [getattr(GSSMech, p) for p in available_protocols]
+        return [m for m in (getattr(GSSMech, p) for p in available_protocols) if self._mech_policy.allows(m)]
 
     def _rebuild_context_list(
         self,
@@ -451,6 +499,10 @@ class NegotiateProxy(ContextProxy):
         available_contexts = self._available_contexts or {}
         last_err = None
 
+        if available_contexts:
+            # Explicitly provided contexts are still subject to the mechanism policy.
+            available_contexts = {m: c for m, c in available_contexts.items() if self._mech_policy.allows(m)}
+
         if not available_contexts:
             context_kwargs: typing.Dict[str, typing.Any] = {
                 "hostname": self._hostname,
@@ -459,6 +511,10 @@ class NegotiateProxy(ContextProxy):
                 "context_req": self.context_req,
             }
             all_protocols = self._preferred_mech_list()
+            if not all_protocols:
+                raise BadMechanismError(
+                    context_msg="No locally available mechanism is allowed by the context mechanism policy"
+                )
 
             for mech in all_protocols:
                 if mech_types and not any(self._is_same_mech(mech, oid) for oid in mech_types):
@@ -485,7 +541,7 @@ class NegotiateProxy(ContextProxy):
 
                     context._is_wrapped = True
                     available_contexts[mech] = context
-                except Exception as e:
+                except _MECH_UNAVAILABLE_ERRORS as e:
                     last_err = e
                     log.debug("Failed to create context for SPNEGO protocol %s: %s", protocol, str(e))
                     continue
@@ -495,7 +551,7 @@ class NegotiateProxy(ContextProxy):
         for mech, context in available_contexts.items():
             try:
                 first_token = context.step(channel_bindings=channel_bindings) if self.usage == "initiate" else None
-            except Exception as e:
+            except _MECH_UNAVAILABLE_ERRORS as e:
                 last_err = e
                 log.debug("Failed to create first token for SPNEGO protocol %s: %s", mech.name, str(e))
                 continue

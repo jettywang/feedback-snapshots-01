@@ -2,6 +2,12 @@
 
 ## 0.13.0 - TBD
 
+* Add `spnego.MechPolicy`, an explicit mechanism admission policy carried by every Python SPNEGO (`NegotiateProxy`) context
+  * The policy is passed with `mech_policy=` to `spnego.client`/`spnego.server` and defaults to allowing Kerberos and NTLM
+  * The allowed set is applied before the optimistic token is emitted, when the peer offers or selects a mechanism, and when a raw NTLM or Kerberos token is received
+  * A peer selecting a mechanism the policy does not admit, switching the mechanism after one was chosen, or sending a raw token for a disallowed mechanism is now rejected
+  * Context setup failures are classified so only local mechanism unavailability (missing provider, no credentials) falls back to the next allowed mechanism; credential and token validation failures are raised to the caller instead of silently downgrading the negotiation
+
 ## 0.12.4 - 2026-10-06
 
 * Fix SSPI acceptor with explicit `Password` or `KerberosKeytab` credentials failing with `SEC_E_LOGON_DENIED` when the username is in the UPN form `user@REALM`

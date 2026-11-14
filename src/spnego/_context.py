@@ -231,6 +231,90 @@ class GSSMech(str, enum.Enum):
             raise ValueError("'%s' is not a valid GSSMech OID" % oid)
 
 
+class MechPolicy:
+    """An explicit mechanism admission policy for SPNEGO negotiation.
+
+    A policy carries the set of mechanisms a negotiate context is allowed to
+    use. The policy is enforced before the optimistic token is emitted, when
+    the peer offers or selects a mechanism, and when a raw (non SPNEGO) token
+    is received. Mechanisms can be referenced by their
+    :class:`GSSMech` value, their name (``kerberos``, ``ntlm``), or their OID
+    string. The known Kerberos aliases, like the MS Kerberos OID, are
+    normalised to ``kerberos``.
+
+    Args:
+        allowed_mechs: The mechanisms the policy admits, at least one entry is
+            required.
+    """
+
+    def __init__(
+        self,
+        allowed_mechs: typing.Iterable[typing.Union[str, GSSMech]],
+    ) -> None:
+        mechs = {self._normalize_mech(mech) for mech in allowed_mechs}
+        if not mechs:
+            raise ValueError("MechPolicy requires at least one allowed mechanism")
+
+        self._allowed_mechs = frozenset(mechs)
+
+    @classmethod
+    def default(cls) -> "MechPolicy":
+        """The default policy that admits Kerberos and NTLM."""
+        return cls([GSSMech.kerberos, GSSMech.ntlm])
+
+    @property
+    def allowed_mechs(self) -> typing.FrozenSet[GSSMech]:
+        """The mechanisms the policy admits, Kerberos aliases are normalised to kerberos."""
+        return self._allowed_mechs
+
+    def allows(self, mech: typing.Union[str, GSSMech]) -> bool:
+        """Checks whether the policy admits the mechanism.
+
+        Args:
+            mech: The mechanism to check, as a :class:`GSSMech`, name, or OID.
+
+        Returns:
+            bool: Whether the mechanism is admitted (True) or not (False).
+        """
+        try:
+            normalized = self._normalize_mech(mech)
+        except ValueError:
+            return False
+
+        return normalized in self._allowed_mechs
+
+    @staticmethod
+    def _normalize_mech(mech: typing.Union[str, GSSMech]) -> GSSMech:
+        if isinstance(mech, GSSMech):
+            normalized = mech
+
+        elif isinstance(mech, str):
+            try:
+                normalized = GSSMech[mech]
+            except KeyError:
+                normalized = GSSMech.from_oid(mech)
+
+        else:
+            raise ValueError("MechPolicy entry %r is not a GSSMech, name, or OID" % (mech,))
+
+        if normalized.is_kerberos_oid:
+            return GSSMech.kerberos
+
+        return normalized
+
+    def __eq__(self, other: typing.Any) -> bool:
+        if not isinstance(other, MechPolicy):
+            return NotImplemented
+
+        return self.allowed_mechs == other.allowed_mechs
+
+    def __hash__(self) -> int:
+        return hash(self._allowed_mechs)
+
+    def __repr__(self) -> str:
+        return "MechPolicy([%s])" % ", ".join(sorted(m.name for m in self._allowed_mechs))
+
+
 class ContextProxy(metaclass=abc.ABCMeta):
     """Base class for a authentication context.
 
