@@ -15,7 +15,8 @@ from pyrad.packet import Packet, AccessAccept, AccessReject, \
     CoAACK, CoANAK, AccessRequest, AuthPacket, AcctPacket, CoAPacket, \
     PacketError
 
-from pyrad.server import ServerPacketError, CheckMessageAuthenticator, _LookupHost
+from pyrad.server import ServerPacketError, CheckMessageAuthenticator, \
+    _LookupHost, SelectSecret, _host_ring
 
 
 def _endpoint_options():
@@ -112,7 +113,13 @@ class DatagramProtocolServer(asyncio.Protocol):
                 req = AuthPacket(secret=remote_host.secret,
                                  dict=self.server.dict,
                                  packet=data)
-                CheckMessageAuthenticator(req, self.server.enforce_ma)
+                multi = _host_ring(remote_host).rotation_configured
+                # SelectSecret verifies the Message-Authenticator against
+                # the candidate secrets when more than one is configured
+                # and pins the one that matches to the request
+                SelectSecret(remote_host, req)
+                if not multi:
+                    CheckMessageAuthenticator(req, self.server.enforce_ma)
 
             elif self.server_type == ServerType.Coa:
                 if req.code != DisconnectRequest and req.code != CoARequest:
@@ -120,7 +127,11 @@ class DatagramProtocolServer(asyncio.Protocol):
                 req = CoAPacket(secret=remote_host.secret,
                                 dict=self.server.dict,
                                 packet=data)
-                if self.server.enable_pkt_verify:
+                multi = _host_ring(remote_host).rotation_configured
+                # with several candidates the matching secret already
+                # verified the Request Authenticator
+                SelectSecret(remote_host, req)
+                if not multi and self.server.enable_pkt_verify:
                     if not req.VerifyCoARequest():
                         raise PacketError('Packet verification failed')
 
@@ -131,7 +142,11 @@ class DatagramProtocolServer(asyncio.Protocol):
                 req = AcctPacket(secret=remote_host.secret,
                                  dict=self.server.dict,
                                  packet=data)
-                if self.server.enable_pkt_verify:
+                multi = _host_ring(remote_host).rotation_configured
+                # with several candidates the matching secret already
+                # verified the Request Authenticator
+                SelectSecret(remote_host, req)
+                if not multi and self.server.enable_pkt_verify:
                     if not req.VerifyAcctRequest():
                         raise PacketError('Packet verification failed')
 

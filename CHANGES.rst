@@ -11,6 +11,23 @@ Unreleased
 * The sdist and the wheel include the test dictionaries of
   ``pyrad/tests/data``, so the bundled tests run from an installed package
   or an unpacked sdist.
+* A trusted peer can now be configured with a current shared secret and
+  one or more retired secrets for rolling secret rotation, via the new
+  ``secrets`` parameter of :class:`pyrad.server.RemoteHost` and the new
+  :mod:`pyrad.secrets` module (``SharedSecret`` and ``SecretRing``). Each
+  retired secret has an explicit expiry time (``valid_after_retirement``)
+  and an optional attempt limit (``max_attempts``). The server
+  authenticates every request against the still-valid candidate secrets
+  only and pins the secret that verifies it to the whole processing of
+  that request, so the Response Authenticator, Message-Authenticator and
+  hidden attributes (User-Password, Tunnel-Password, salt-encrypted
+  attributes) all use that same secret; reloading the configuration while
+  a request is handled does not change its key. Candidates come only from
+  the peer configuration and successful matches are never cached, so an
+  expired or removed secret can not be re-admitted by a retry or a
+  duplicate packet. Single-secret peers keep the previous behaviour. Log
+  messages identify secrets only by a non-secret label and the
+  configuration version and never contain secret material.
 
 2.6.0 - Oct 18, 2026
 --------------------

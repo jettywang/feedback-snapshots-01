@@ -7,6 +7,7 @@
 from pyrad.server import ServerPacketError
 from pyrad.server import Server
 from pyrad.server import _LookupHost
+from pyrad.server import SelectSecret
 from pyrad import packet
 import select
 import socket
@@ -71,7 +72,10 @@ class Proxy(Server):
         remote_host = _LookupHost(self.hosts, pkt.source[0])
         if remote_host is None:
             raise ServerPacketError('Received packet from unknown host')
-        pkt.secret = remote_host.secret
+        # pin the home server's secret to the reply processing; a peer
+        # with a single secret keeps the legacy behaviour and no attempt
+        # budget is charged to a current secret
+        SelectSecret(remote_host, pkt)
 
         if pkt.code not in _REPLY_CODES:
             raise ServerPacketError('Received non-response on proxy socket')

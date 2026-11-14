@@ -349,6 +349,55 @@ Before a handler is called the server drops invalid requests:
   authenticator, which proves that the client knows the secret. This
   check can be disabled with ``enable_pkt_verify=False``.
 
+Rotating shared secrets
+~~~~~~~~~~~~~~~~~~~~~~~
+
+When clients roll over their shared secret they keep sending the old one
+for a while. A :class:`~pyrad.server.RemoteHost` can therefore hold a
+current secret together with one or more retired secrets, each with an
+explicit expiry time and an optional attempt limit, through the
+:mod:`pyrad.secrets` module. The server accepts a request only if one of
+the still-valid candidate secrets authenticates it, pins that secret to
+the whole processing of the request, and signs the reply (Response
+Authenticator and Message-Authenticator) and the hidden attributes
+(User-Password, Tunnel-Password and other salt-encrypted attributes)
+with that same secret.
+
+.. code-block:: python
+
+    from datetime import timedelta
+    from pyrad.secrets import SharedSecret
+    from pyrad.server import RemoteHost
+
+    host = RemoteHost("10.0.0.5", secrets=[
+        # the new, current secret
+        SharedSecret(b"new-secret", label="current", version=2),
+        # the old secret stays valid for 7 days and at most 1000 requests
+        SharedSecret(
+            b"old-secret",
+            label="retired-2026-05",
+            version=1,
+            retired_at=rotation_moment,
+            valid_after_retirement=timedelta(days=7),
+            max_attempts=1000,
+        ),
+    ])
+
+The candidate secrets come only from this configuration: nothing is
+learned from a request and a successful match is never cached, so an
+expired secret, or one whose attempt budget is exhausted, is not
+re-admitted by a retry or a duplicate packet. Reloading the configuration
+by replacing the entry in ``hosts`` (or assigning a new ring to
+``host.secrets``) does not affect a request already being handled, which
+keeps the secret it was authenticated with. A peer created with a single
+``secret`` behaves exactly as before. Access-Requests need a
+Message-Authenticator to be attributed to one of several secrets; without
+one the current secret is used.
+
+Log messages identify a secret only by its non-secret ``label`` and the
+configuration ``version``; the secret itself and any derived key material
+are never logged.
+
 asyncio
 -------
 

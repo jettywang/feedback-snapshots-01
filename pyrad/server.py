@@ -5,8 +5,11 @@
 import ipaddress
 import select
 import socket
+import hashlib
+import hmac
 from pyrad import host
 from pyrad import packet
+from pyrad.secrets import SecretRing, SharedSecret
 import logging
 
 
@@ -14,17 +17,29 @@ logger = logging.getLogger('pyrad')
 
 
 class RemoteHost:
-    """A RADIUS client or server and its shared secret.
+    """A RADIUS client or server and its shared secrets.
 
     Used as the values of the ``hosts`` mapping of :class:`Server`,
     :class:`pyrad.server_async.ServerAsync` and :class:`pyrad.proxy.Proxy`.
-    pyrad only uses ``secret``: the servers look up the client by the
+    pyrad only uses the secrets: the servers look up the client by the
     key of the ``hosts`` mapping (the IP address as the socket reports it),
     not by ``address``. The address, name and ports are stored for the
     application and are not used by pyrad.
+
+    A peer normally has one secret, passed as ``secret``. To rotate the
+    secret without dropping the requests of clients that still use the old
+    one, pass a list of :class:`~pyrad.secrets.SharedSecret` entries to
+    ``secrets`` instead: one current secret and retired secrets, each with
+    an expiry time and an attempt limit. The server then authenticates each
+    request against the still-valid candidates and pins the secret that
+    verified it to the whole processing of that request, including the
+    reply. Assign a new :class:`RemoteHost` (or a new ring) to the
+    ``hosts`` mapping to reload the configuration; a request already being
+    processed keeps the secret it was authenticated with.
     """
 
-    def __init__(self, address, secret, name, authport=1812, acctport=1813, coaport=3799):
+    def __init__(self, address, secret=None, name=None, authport=1812,
+                 acctport=1813, coaport=3799, secrets=None, clock=None):
         """
         :param  address: IP address of the host (informational)
         :type   address: str
@@ -38,13 +53,52 @@ class RemoteHost:
         :type  acctport: int
         :param  coaport: CoA port of the host (informational)
         :type   coaport: int
+        :param secrets: current and retired shared secrets with their
+            validity constraints, instead of a single ``secret``
+        :type  secrets: list[pyrad.secrets.SharedSecret]
+        :param clock: callable returning the current timezone-aware
+            moment, used to evaluate retired-secret expiry; inject a fake
+            clock in tests
         """
         self.address = address
-        self.secret = secret
         self.authport = authport
         self.acctport = acctport
         self.coaport = coaport
         self.name = name
+        if secrets is not None:
+            if secret is not None:
+                raise ValueError('pass either secret or secrets, not both')
+            self._secrets = SecretRing(secrets, clock=clock)
+        else:
+            self._secrets = SecretRing(
+                [SharedSecret(secret if secret is not None else b'')],
+                clock=clock)
+
+    @property
+    def secret(self):
+        """The current shared secret (bytes).
+
+        Retired secrets are not exposed here; they are only tried while a
+        request is authenticated. Assigning a secret replaces the whole
+        ring with a single current secret, as the single-secret API did.
+        """
+        return self._secrets.secret
+
+    @secret.setter
+    def secret(self, value):
+        self._secrets = SecretRing([SharedSecret(value)])
+
+    @property
+    def secrets(self):
+        """The :class:`~pyrad.secrets.SecretRing` with the current and
+        retired secrets of the peer."""
+        return self._secrets
+
+    @secrets.setter
+    def secrets(self, ring):
+        if not isinstance(ring, SecretRing):
+            raise TypeError('expected a SecretRing')
+        self._secrets = ring
 
 
 class ServerPacketError(Exception):
@@ -81,6 +135,128 @@ def CheckMessageAuthenticator(pkt, enforce_ma=False):
     elif enforce_ma:
         raise ServerPacketError(
             'Received Access-Request without Message-Authenticator')
+
+
+def _verify_with_secret(pkt, secret):
+    """Return True if ``secret`` authenticates the received ``pkt``.
+
+    Access-Requests are authenticated with their Message-Authenticator;
+    Accounting, CoA and Disconnect requests with their Request
+    Authenticator. A packet without a Message-Authenticator cannot be
+    distinguished between secrets, so the current secret is assumed for it
+    (the legacy single-secret behaviour).
+
+    :param pkt: received packet
+    :type  pkt: pyrad.packet.Packet
+    :param secret: candidate shared secret
+    :type  secret: bytes
+    :return: True if the secret authenticates the packet
+    :rtype: bool
+    """
+    if pkt.code == packet.AccessRequest:
+        if not pkt.message_authenticator:
+            return False
+        return pkt.verify_message_authenticator(secret=secret)
+    if pkt.code in (packet.AccountingRequest, packet.CoARequest,
+                    packet.DisconnectRequest):
+        return _request_authenticator_matches(pkt, secret)
+    return False
+
+
+def _request_authenticator_matches(pkt, secret):
+    hash = hashlib.md5(pkt.raw_packet[0:4] + 16 * b'\x00' +
+                       pkt.raw_packet[20:] + secret).digest()
+    return hmac.compare_digest(hash, pkt.authenticator)
+
+
+def _host_ring(remote_host):
+    """Return the :class:`~pyrad.secrets.SecretRing` of a peer.
+
+    Accepts both a :class:`RemoteHost` and a plain object with a single
+    ``secret`` attribute (the historical hosts value).
+
+    :param remote_host: configured peer or a legacy single-secret object
+    :return: secret ring of the peer
+    :rtype: pyrad.secrets.SecretRing
+    """
+    ring = getattr(remote_host, 'secrets', None)
+    if isinstance(ring, SecretRing):
+        return ring
+    return SecretRing([SharedSecret(getattr(remote_host, 'secret', b''))])
+
+
+def SelectSecret(remote_host, pkt):
+    """Authenticate a received packet against the peer's candidate secrets.
+
+    The candidates are only the still-valid secrets configured for the
+    peer (the current secret first, then retired secrets inside their
+    compatibility window and attempt budget); nothing is learned from the
+    packet and a successful match is not cached, so an expired or removed
+    secret can not be re-admitted by a retry. The secret that verifies the
+    packet is pinned to it: it is stored on the packet as ``pkt.secret``
+    together with its non-secret label as ``pkt.matched_secret_label`` and
+    the configuration version as ``pkt.matched_secret_version``, and the
+    reply and hidden attributes use that same secret. An accepted retired
+    secret has one attempt charged to it.
+
+    A single-secret peer keeps the legacy behaviour: the secret is used
+    without verification here, and the caller performs the usual checks.
+    A peer configured for rotation (current plus retired secrets) is always
+    authenticated against the candidates, even once the retired secrets
+    have expired and only the current secret is still valid.
+
+    :param remote_host: configuration of the peer the packet came from
+    :type  remote_host: RemoteHost
+    :param pkt: received packet, with ``raw_packet`` set
+    :type  pkt: pyrad.packet.Packet
+    :return: the selected secret entry
+    :rtype: pyrad.secrets.SharedSecret
+    :raise ServerPacketError: if no secret is configured, or if the peer is
+        configured for rotation and no candidate authenticates the packet
+    """
+    ring = _host_ring(remote_host)
+    entries = ring.candidates()
+    if not entries:
+        raise ServerPacketError('No shared secret configured for peer')
+
+    if not ring.rotation_configured:
+        # legacy single-secret peer: trust the secret, the caller runs
+        # the existing Message-Authenticator / Request-Authenticator checks
+        entry = entries[0]
+        pkt.secret = entry.secret
+        pkt.matched_secret_label = entry.label
+        pkt.matched_secret_version = entry.version
+        if not entry.current:
+            ring.record_attempt(entry)
+        return entry
+
+    if pkt.code == packet.AccessRequest and not pkt.message_authenticator:
+        # without a Message-Authenticator an Access-Request can not be
+        # attributed to one of several secrets; keep the current one
+        entry = ring.current
+        if entry is None or entry.expired(ring.clock()):
+            raise ServerPacketError(
+                'No current secret for Access-Request without '
+                'Message-Authenticator')
+        pkt.secret = entry.secret
+        pkt.matched_secret_label = entry.label
+        pkt.matched_secret_version = entry.version
+        return entry
+
+    for entry in entries:
+        if _verify_with_secret(pkt, entry.secret):
+            pkt.secret = entry.secret
+            pkt.matched_secret_label = entry.label
+            pkt.matched_secret_version = entry.version
+            ring.record_attempt(entry)
+            logger.debug('Authenticated request with secret label=%s '
+                         'config version=%s', entry.label, entry.version)
+            return entry
+
+    logger.info('Dropping packet: no configured shared secret '
+                'authenticates it')
+    raise ServerPacketError(
+        'Received packet that no configured shared secret authenticates')
 
 
 def _HostAddresses(address):
@@ -352,21 +528,22 @@ class Server(host.Host):
         :type  pkt: pyrad.packet.CoAPacket
         """
 
-    def _AddSecret(self, pkt):
-        """Add the secret of the client to a received packet.
+    def _ResolveHost(self, pkt):
+        """Return the configured peer of a received packet.
 
         Raises :class:`ServerPacketError` for unknown hosts.
 
         :param pkt: packet to process
         :type  pkt: pyrad.packet.Packet
+        :return: the peer configuration
+        :rtype: RemoteHost
         """
         remote_host = _LookupHost(self.hosts, pkt.source[0])
-        if remote_host is not None:
-            pkt.secret = remote_host.secret
-        elif '0.0.0.0' in self.hosts:
-            pkt.secret = self.hosts['0.0.0.0'].secret
-        else:
+        if remote_host is None and '0.0.0.0' in self.hosts:
+            remote_host = self.hosts['0.0.0.0']
+        if remote_host is None:
             raise ServerPacketError('Received packet from unknown host')
+        return remote_host
 
     def _HandleAuthPacket(self, pkt):
         """Process a packet received on the authentication port.
@@ -378,10 +555,11 @@ class Server(host.Host):
         :param pkt: packet to process
         :type  pkt: pyrad.packet.Packet
         """
-        self._AddSecret(pkt)
+        remote_host = self._ResolveHost(pkt)
         if pkt.code != packet.AccessRequest:
             raise ServerPacketError(
                 'Received non-authentication packet on authentication port')
+        SelectSecret(remote_host, pkt)
         CheckMessageAuthenticator(pkt, self.enforce_ma)
         self.HandleAuthPacket(pkt)
 
@@ -395,11 +573,17 @@ class Server(host.Host):
         :param pkt: packet to process
         :type  pkt: pyrad.packet.Packet
         """
-        self._AddSecret(pkt)
+        remote_host = self._ResolveHost(pkt)
         if pkt.code != packet.AccountingRequest:
             raise ServerPacketError(
                     'Received non-accounting packet on accounting port')
-        if self.enable_pkt_verify and not pkt.VerifyAcctRequest():
+        multi = self._multiple_secrets(remote_host)
+        # with several candidates SelectSecret only returns once the
+        # Request Authenticator has been verified, so the legacy check is
+        # skipped in that case
+        SelectSecret(remote_host, pkt)
+        if not multi and self.enable_pkt_verify and \
+                not pkt.VerifyAcctRequest():
             raise packet.PacketError('Packet verification failed')
         self.HandleAcctPacket(pkt)
 
@@ -413,15 +597,27 @@ class Server(host.Host):
         :param pkt: packet to process
         :type  pkt: pyrad.packet.Packet
         """
-        self._AddSecret(pkt)
+        remote_host = self._ResolveHost(pkt)
         if pkt.code not in (packet.CoARequest, packet.DisconnectRequest):
             raise ServerPacketError('Received non-coa packet on coa port')
-        if self.enable_pkt_verify and not pkt.VerifyCoARequest():
+        multi = self._multiple_secrets(remote_host)
+        # with several candidates SelectSecret only returns once the
+        # Request Authenticator has been verified, so the legacy check is
+        # skipped in that case
+        SelectSecret(remote_host, pkt)
+        if not multi and self.enable_pkt_verify and \
+                not pkt.VerifyCoARequest():
             raise packet.PacketError('Packet verification failed')
         if pkt.code == packet.CoARequest:
             self.HandleCoaPacket(pkt)
         else:
             self.HandleDisconnectPacket(pkt)
+
+    @staticmethod
+    def _multiple_secrets(remote_host):
+        """Whether the peer is configured for secret rotation, so that
+        :func:`SelectSecret` already authenticated the request."""
+        return _host_ring(remote_host).rotation_configured
 
     def _GrabPacket(self, pktgen, fd):
         """Read a packet from a network connection.
