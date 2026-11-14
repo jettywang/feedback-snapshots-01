@@ -83,8 +83,25 @@ class EncCommon(CoseMessage, metaclass=abc.ABCMeta):
 
         if nonce is None and self.key.base_iv != b'':
             partial_iv = self.get_attr(headers.PartialIV)
-            nonce = int.from_bytes(partial_iv, "big") ^ int.from_bytes(self.key.base_iv, "big")
-            nonce = nonce.to_bytes((nonce.bit_length() + 7) // 8, byteorder="big")
+            if partial_iv is None:
+                raise CoseException('No IV found')
+
+            # RFC 9052, Section 3.1: left-pad the Partial IV with zeros to the
+            # IV length and XOR it with the Context IV.  The result must keep
+            # that full length; trimming leading zero bytes would silently
+            # shorten the nonce for algorithms with long all-zero prefixes.
+            iv_length = getattr(self.get_attr(headers.Algorithm), 'get_nonce_length', None)
+            iv_length = iv_length() if iv_length is not None else len(self.key.base_iv)
+
+            if len(self.key.base_iv) != iv_length:
+                raise CoseException(
+                    f"Context IV must be {iv_length} bytes, found {len(self.key.base_iv)} bytes")
+            if len(partial_iv) > iv_length:
+                raise CoseException(
+                    f"Partial IV cannot be longer than the {iv_length}-byte IV, found {len(partial_iv)} bytes")
+
+            padded_partial_iv = partial_iv.rjust(iv_length, b'\x00')
+            nonce = bytes(a ^ b for a, b in zip(padded_partial_iv, self.key.base_iv))
 
         if nonce is None and self.key.base_iv == b'':
             raise CoseException('No IV found')

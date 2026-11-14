@@ -3,7 +3,7 @@ from binascii import hexlify, unhexlify
 from hashlib import sha512, sha384, sha256
 from typing import TYPE_CHECKING, Optional, TypeVar
 
-from cryptography.exceptions import InvalidSignature
+from cryptography.exceptions import InvalidSignature, InvalidTag
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.asymmetric import ec, padding, rsa
 from cryptography.hazmat.primitives.asymmetric.ec import ECDH
@@ -20,7 +20,7 @@ from ecdsa.curves import Curve, NIST521p, NIST384p, NIST256p
 from ecdsa.ellipticcurve import Point
 from ecdsa.keys import SigningKey, VerifyingKey, BadSignatureError
 
-from pycose.exceptions import CoseException
+from pycose.exceptions import CoseException, CoseInvalidParameter, CoseInvalidTag
 from pycose.headers import Algorithm
 from pycose.utils import _CoseAttribute
 
@@ -324,21 +324,119 @@ class _AesGcm(_EncAlg, ABC):
 
 
 class _AesCcm(_EncAlg, ABC):
+    """ AES-CCM content encryption with parameters bound per algorithm identifier.
+
+    The three parameters are fixed by the algorithm identifier (RFC 9053,
+    Section 4.2, Table 6):
+
+    * ``ccm_L`` is the CCM length field size in bits.  It both bounds the
+      message length and determines the nonce length: 15 - L/8 bytes.
+    * ``ccm_M`` is the authentication tag length in bits.
+    * ``ccm_key_length`` is the AES key length in bits.
+
+    They are validated before the cryptography backend is invoked so that a
+    nonce, key, tag, or message of the wrong size for the selected algorithm
+    number is rejected regardless of what the backend happens to accept.
+    """
+
+    #: CCM length field size in bits (16 or 64).
+    ccm_L: int
+    #: Authentication tag size in bits (64 or 128).
+    ccm_M: int
+    #: AES key size in bits (128 or 256).
+    ccm_key_length: int
 
     @classmethod
-    @abstractmethod
     def get_tag_length(cls) -> int:
-        raise NotImplementedError()
+        """ Authentication tag length in bytes. """
+        return cls.ccm_M // 8
+
+    @classmethod
+    def get_key_length(cls) -> int:
+        """ AES key length in bytes. """
+        return cls.ccm_key_length // 8
+
+    @classmethod
+    def get_nonce_length(cls) -> int:
+        """ Nonce length in bytes (CCM nonce is 15 - L bytes). """
+        return 15 - cls.ccm_L // 8
+
+    @classmethod
+    def get_max_message_length(cls) -> int:
+        """ Maximum plaintext length in bytes for this CCM length field. """
+        return (1 << cls.ccm_L) - 1
+
+    @classmethod
+    def _validate_key(cls, key: 'SK') -> None:
+        key_bytes = getattr(key, 'k', None)
+        if not isinstance(key_bytes, bytes) or len(key_bytes) != cls.get_key_length():
+            raise CoseInvalidParameter(
+                f"{cls.fullname} requires a {cls.ccm_key_length}-bit key, "
+                f"found {len(key_bytes) * 8 if isinstance(key_bytes, bytes) else 'no'} bits")
+
+    @classmethod
+    def _validate_nonce(cls, nonce: bytes) -> None:
+        if not isinstance(nonce, bytes):
+            raise CoseInvalidParameter(f"{cls.fullname} nonce must be bytes")
+        if len(nonce) != cls.get_nonce_length():
+            raise CoseInvalidParameter(
+                f"{cls.fullname} requires a {cls.get_nonce_length()}-byte nonce (L={cls.ccm_L}), "
+                f"found {len(nonce)} bytes")
+
+    @classmethod
+    def _declared_length(cls, value, what: str) -> int:
+        """ Return only the declared length of ``value``, never its contents.
+
+        Length validation must not allocate or inspect a large input, so this
+        intentionally calls ``len`` only.  A declared length that cannot even
+        be represented by the platform is treated as an invalid parameter.
+        """
+        try:
+            return len(value)
+        except (TypeError, OverflowError) as e:
+            raise CoseInvalidParameter(
+                f"{cls.fullname} {what} declared length is not representable") from e
+
+    @classmethod
+    def _validate_message_length(cls, length: int) -> None:
+        max_length = cls.get_max_message_length()
+        if length < 0 or length > max_length:
+            raise CoseInvalidParameter(
+                f"{cls.fullname} message length {length} exceeds the {max_length}-byte limit (L={cls.ccm_L})")
+
+    @classmethod
+    def _validate_encrypt_input(cls, key: 'SK', nonce: bytes, data: bytes) -> None:
+        cls._validate_key(key)
+        cls._validate_nonce(nonce)
+        cls._validate_message_length(cls._declared_length(data, "plaintext"))
+
+    @classmethod
+    def _validate_decrypt_input(cls, key: 'SK', nonce: bytes, ciphertext: bytes) -> None:
+        cls._validate_key(key)
+        cls._validate_nonce(nonce)
+
+        tag_length = cls.get_tag_length()
+        ciphertext_length = cls._declared_length(ciphertext, "ciphertext")
+        if ciphertext_length < tag_length:
+            raise CoseInvalidTag(
+                f"{cls.fullname} ciphertext is shorter than its {tag_length}-byte authentication tag")
+
+        cls._validate_message_length(ciphertext_length - tag_length)
 
     @classmethod
     def encrypt(cls, key: 'SK', nonce: bytes, data: bytes, aad: bytes) -> bytes:
+        cls._validate_encrypt_input(key, nonce, data)
         cipher = AESCCM(key.k, tag_length=cls.get_tag_length())
         return cipher.encrypt(nonce, data=data, associated_data=aad)
 
     @classmethod
     def decrypt(cls, key: 'SK', nonce: bytes, ciphertext: bytes, aad: bytes) -> bytes:
+        cls._validate_decrypt_input(key, nonce, ciphertext)
         cipher = AESCCM(key=key.k, tag_length=cls.get_tag_length())
-        return cipher.decrypt(nonce, data=ciphertext, associated_data=aad)
+        try:
+            return cipher.decrypt(nonce, data=ciphertext, associated_data=aad)
+        except InvalidTag as e:
+            raise CoseInvalidTag(f"{cls.fullname} authentication tag verification failed") from e
 
 
 ##################################################
@@ -1254,56 +1352,36 @@ class HMAC512(_HMAC):
 class AESCCM1664128(_AesCcm):
     identifier = 10
     fullname = 'AES_CCM_16_64_128'
-
-    @classmethod
-    def get_tag_length(cls) -> int:
-        return 8
-
-    @classmethod
-    def get_key_length(cls) -> int:
-        return 16
+    ccm_L = 16
+    ccm_M = 64
+    ccm_key_length = 128
 
 
 @CoseAlgorithm.register_attribute()
 class AESCCM1664256(_AesCcm):
     identifier = 11
     fullname = 'AES_CCM_16_64_256'
-
-    @classmethod
-    def get_tag_length(cls) -> int:
-        return 8
-
-    @classmethod
-    def get_key_length(cls) -> int:
-        return 32
+    ccm_L = 16
+    ccm_M = 64
+    ccm_key_length = 256
 
 
 @CoseAlgorithm.register_attribute()
 class AESCCM6464128(_AesCcm):
     identifier = 12
     fullname = 'AES_CCM_64_64_128'
-
-    @classmethod
-    def get_tag_length(cls) -> int:
-        return 8
-
-    @classmethod
-    def get_key_length(cls) -> int:
-        return 16
+    ccm_L = 64
+    ccm_M = 64
+    ccm_key_length = 128
 
 
 @CoseAlgorithm.register_attribute()
 class AESCCM6464256(_AesCcm):
     identifier = 13
     fullname = 'AES_CCM_64_64_256'
-
-    @classmethod
-    def get_key_length(cls) -> int:
-        return 32
-
-    @classmethod
-    def get_tag_length(cls) -> int:
-        return 8
+    ccm_L = 64
+    ccm_M = 64
+    ccm_key_length = 256
 
 
 @CoseAlgorithm.register_attribute()
@@ -1365,58 +1443,37 @@ class AESMAC256128(_AesMac):
 @CoseAlgorithm.register_attribute()
 class AESCCM16128128(_AesCcm):
     identifier = 30
-    tag_length = 16
     fullname = 'AES_CCM_16_128_128'
-
-    @classmethod
-    def get_tag_length(cls) -> int:
-        return 16
-
-    @classmethod
-    def get_key_length(cls) -> int:
-        return 16
+    ccm_L = 16
+    ccm_M = 128
+    ccm_key_length = 128
 
 
 @CoseAlgorithm.register_attribute()
 class AESCCM16128256(_AesCcm):
     identifier = 31
     fullname = 'AES_CCM_16_128_256'
-
-    @classmethod
-    def get_tag_length(cls) -> int:
-        return 16
-
-    @classmethod
-    def get_key_length(cls) -> int:
-        return 32
+    ccm_L = 16
+    ccm_M = 128
+    ccm_key_length = 256
 
 
 @CoseAlgorithm.register_attribute()
 class AESCCM64128128(_AesCcm):
     identifier = 32
     fullname = 'AES_CCM_64_128_128'
-
-    @classmethod
-    def get_tag_length(cls) -> int:
-        return 16
-
-    @classmethod
-    def get_key_length(cls) -> int:
-        return 16
+    ccm_L = 64
+    ccm_M = 128
+    ccm_key_length = 128
 
 
 @CoseAlgorithm.register_attribute()
 class AESCCM64128256(_AesCcm):
     identifier = 33
     fullname = 'AES_CCM_64_128_256'
-
-    @classmethod
-    def get_tag_length(cls) -> int:
-        return 16
-
-    @classmethod
-    def get_key_length(cls) -> int:
-        return 32
+    ccm_L = 64
+    ccm_M = 128
+    ccm_key_length = 256
 
 
 # set parser

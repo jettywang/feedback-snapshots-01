@@ -24,3 +24,11 @@ class CoseInvalidKey(Exception):
 
 class CoseException(Exception):
     pass
+
+
+class CoseInvalidParameter(CoseException, ValueError):
+    pass
+
+
+class CoseInvalidTag(CoseException):
+    pass
