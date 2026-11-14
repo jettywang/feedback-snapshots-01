@@ -22,10 +22,15 @@ from pymacaroons.utils import (
 
 class Verifier(object):
 
-    def __init__(self, discharge_macaroons=None):
+    def __init__(self, discharge_macaroons=None, signature_cache=None):
         self.predicates = []
         self.callbacks = [self.verify_exact]
         self.calculated_signature = None
+        # Optional SignatureCache shared across verify() calls. Only
+        # intermediate HMAC chain state is cached; every caveat check,
+        # discharge consumption, and final signature comparison still
+        # runs per request.
+        self.signature_cache = signature_cache
         self.first_party_caveat_verifier_delegate = (
             FirstPartyCaveatVerifierDelegate()
         )
@@ -56,13 +61,42 @@ class Verifier(object):
             key,
         )
 
+    def verify_batch(self, macaroons, key):
+        '''Verify a batch of macaroons, returning one result per item.
+
+        Each item is verified independently: every caveat check runs and
+        the final signature is compared for every macaroon. When the
+        verifier was given a signature_cache, intermediate signature
+        chain state shared between macaroons (e.g. a long common caveat
+        prefix) is computed only once.
+
+        :return: a list with True for each verified macaroon, or the
+        raised exception for each macaroon that failed verification.
+        '''
+        results = []
+        for macaroon in macaroons:
+            try:
+                results.append(self.verify(macaroon, key))
+            except Exception as exc:
+                results.append(exc)
+        return results
+
     def verify_discharge(self, root, discharge, key):
-        calculated_signature = hmac_digest(
-            key, discharge.identifier_bytes
-        )
+        cache_prefix = None
+        calculated_signature = None
+        if self.signature_cache is not None:
+            cache_prefix = (key, discharge.identifier_bytes)
+            calculated_signature = self.signature_cache.get(cache_prefix)
+        if calculated_signature is None:
+            calculated_signature = hmac_digest(
+                key, discharge.identifier_bytes
+            )
+            if self.signature_cache is not None:
+                self.signature_cache.put(cache_prefix, calculated_signature)
 
         calculated_signature = self._verify_caveats(
-            root, discharge, calculated_signature
+            root, discharge, calculated_signature,
+            cache_prefix=cache_prefix,
         )
 
         if root != discharge:
@@ -79,14 +113,36 @@ class Verifier(object):
 
         return True
 
-    def _verify_caveats(self, root, macaroon, signature):
+    def _verify_caveats(self, root, macaroon, signature, cache_prefix=None):
         for caveat in macaroon.caveats:
             if self._caveat_met(root,
                                 caveat,
                                 macaroon,
                                 signature):
+                if cache_prefix is not None:
+                    cache_prefix = cache_prefix + (
+                        self._caveat_cache_contribution(caveat),
+                    )
+                    cached_signature = self.signature_cache.get(cache_prefix)
+                    if cached_signature is not None:
+                        signature = cached_signature
+                        continue
                 signature = self._update_signature(caveat, signature)
+                if cache_prefix is not None:
+                    self.signature_cache.put(cache_prefix, signature)
         return signature
+
+    def _caveat_cache_contribution(self, caveat):
+        # The exact signing input of this caveat, so that a cache key is
+        # fully determined by (root key, identifier, caveat prefix) and
+        # changes whenever the caller tampers with any caveat bytes.
+        if caveat.first_party():
+            return (b'fp', caveat.caveat_id_bytes)
+        return (
+            b'tp',
+            caveat._verification_key_id,
+            caveat._caveat_id,
+        )
 
     def _caveat_met(self, root, caveat, macaroon, signature):
         if caveat.first_party():
