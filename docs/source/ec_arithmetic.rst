@@ -135,3 +135,64 @@ the regular implementation:
 All the other operations, like scalar multiplication or point addition work
 on projective points the same as with affine representation, but they
 are much more effective computationally.
+
+Multi-scalar multiplication of public points
+=============================================
+
+When a verification routine needs a linear combination of several public
+points, :math:`s_0 P_0 + s_1 P_1 + \ldots + s_k P_k`, the
+:py:mod:`~ecdsa.multi_mul` module provides a single bounded entry point,
+:py:func:`~ecdsa.multi_mul.multi_scalar_mul`.
+
+The interface is deliberately restricted so that one oversized request
+cannot exhaust a worker process:
+
+* only the five NIST prime curves and ``secp256k1`` are accepted, matched
+  against the named curves in :py:mod:`~ecdsa.curves` (an ad-hoc curve that
+  merely compares equal is rejected);
+* at most :py:data:`~ecdsa.multi_mul.MAX_TERMS` (16) point/scalar terms per
+  request;
+* the precomputation table never exceeds
+  :py:data:`~ecdsa.multi_mul.MAX_TABLE_ENTRIES` (512) point entries and the
+  window never exceeds :py:data:`~ecdsa.multi_mul.MAX_WINDOW` (8);
+* every point is checked against the curve equation, points from different
+  curves are rejected, and all of these checks run **before** any table
+  entry is allocated.
+
+Zero, negative and order-boundary scalars are accepted; scalars are reduced
+modulo the curve order, so repeated points and mutually cancelling terms
+evaluate correctly (including to the point at infinity). The caller's point
+objects are never modified: the implementation works on private copies.
+
+.. code:: python
+
+    from ecdsa.curves import NIST256p
+    from ecdsa.multi_mul import multi_scalar_mul
+
+    generator = NIST256p.generator
+    points = [generator * 2, generator * 3, generator * 5]
+    scalars = [7, 11, 13]
+    result = multi_scalar_mul(points, scalars)
+    assert result == generator * (2 * 7 + 3 * 11 + 5 * 13)
+
+Pass ``return_stats=True`` to additionally receive the selected window, the
+allocated table size and the number of point additions and doublings
+performed.
+
+For one or two terms the existing
+:py:meth:`~ecdsa.ellipticcurve.PointJacobi.mul_add` is at least as fast and
+allocates no table, so :py:func:`~ecdsa.multi_mul.public_point_combination`
+routes such small requests there automatically (the threshold is
+:py:data:`~ecdsa.multi_mul.MUL_ADD_TERMS_THRESHOLD`, three terms).
+
+.. warning::
+
+    This interface is intended for **public verification material only**.
+    It is a size-bounded, input-validating front end; it is **not**
+    constant time and is not a side-channel resistant implementation. Do
+    not use it with private keys or secret scalars.
+
+The ECDSA verifier exposes the same public point combination through
+:py:meth:`~ecdsa.ecdsa.Public_key.verifies_via_multi_scalar`. It verifies
+one signature at a time; it is not a batch verification scheme and does not
+merge the verification equations of distinct signatures.

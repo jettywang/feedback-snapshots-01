@@ -20,6 +20,7 @@ Submodules
    ecdsa.ellipticcurve
    ecdsa.errors
    ecdsa.keys
+   ecdsa.multi_mul
    ecdsa.numbertheory
    ecdsa.rfc6979
    ecdsa.util

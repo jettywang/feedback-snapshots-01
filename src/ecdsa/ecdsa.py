@@ -206,6 +206,46 @@ class Public_key(object):
         v = xy.x() % n
         return v == r
 
+    def verifies_via_multi_scalar(self, hash, signature):
+        """Verify a signature using the bounded public multi-scalar path.
+
+        This computes the exact same public point combination as
+        :py:meth:`verifies` (``u1*G + u2*Q``, two terms) but routes it through
+        :py:func:`ecdsa.multi_mul.public_point_combination`, which validates
+        the public points against the fixed curve allow-list and the term
+        budget. It is a per-signature verification: it does not merge
+        signatures and is not a batch verification scheme.
+
+        Returns False (never raises for invalid signatures) whenever the
+        multi-scalar policy rejects the inputs, e.g. for a curve that is not
+        on the allow-list.
+        """
+        G = self.generator
+        n = G.order()
+        r = signature.r
+        s = signature.s
+        if r < 1 or r > n - 1:
+            return False
+        if s < 1 or s > n - 1:
+            return False
+        c = numbertheory.inverse_mod(s, n)
+        u1 = (hash * c) % n
+        u2 = (r * c) % n
+        from .multi_mul import (
+            MultiScalarError,
+            public_point_combination,
+        )
+
+        try:
+            xy = public_point_combination(
+                [G, self.point], [u1, u2]
+            )
+        except MultiScalarError:
+            return False
+        if xy == ellipticcurve.INFINITY:
+            return False
+        return xy.x() % n == r
+
 
 class Private_key(object):
     """Private key for ECDSA."""

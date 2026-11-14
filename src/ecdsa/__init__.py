@@ -45,6 +45,11 @@ from .ecdh import (
 )
 from .der import UnexpectedDER
 from . import _version
+from .multi_mul import (
+    MultiScalarError,
+    multi_scalar_mul,
+    public_point_combination,
+)
 
 # This code comes from http://github.com/tlsfuzzer/python-ecdsa
 __all__ = [
@@ -53,6 +58,7 @@ __all__ = [
     "ecdsa",
     "ellipticcurve",
     "keys",
+    "multi_mul",
     "numbertheory",
     "test_pyecdsa",
     "util",
@@ -71,6 +77,9 @@ _hush_pyflakes = [
     InvalidSharedSecretError,
     ECDH,
     NoCurveError,
+    MultiScalarError,
+    multi_scalar_mul,
+    public_point_combination,
     NIST192p,
     NIST224p,
     NIST256p,
