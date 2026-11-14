@@ -376,6 +376,9 @@ class SMTP(asyncio.StreamReaderProtocol):
         self.envelope: Optional[Envelope] = None
         self.transport: Optional[asyncio.BaseTransport] = None
         self._handler_coroutine: Optional[asyncio.Task[None]] = None
+        # Set when the client connection is gone (EOF or lost); in-flight
+        # hook results arriving after this point must be discarded.
+        self._session_closed = False
         if not auth_require_tls and auth_required:
             warn("Requiring AUTH while not requiring TLS "
                  "can lead to security vulnerabilities!")
@@ -479,6 +482,12 @@ class SMTP(asyncio.StreamReaderProtocol):
         if hook is None:
             return MISSING
         status = await hook(self, self.session, self.envelope, *args)
+        if self._session_closed:
+            # The connection was torn down (disconnect, timeout, ...) while
+            # the hook was in flight, and the hook suppressed the resulting
+            # cancellation.  The late result must not be applied to the
+            # transaction nor answered, so resume the aborted cancellation.
+            raise asyncio.CancelledError
         return status
 
     @property
@@ -536,6 +545,7 @@ class SMTP(asyncio.StreamReaderProtocol):
     def connection_lost(self, error: Optional[Exception]) -> None:
         assert self.session is not None
         log.info('%r connection lost', self.session.peer)
+        self._session_closed = True
         assert self._timeout_handle is not None
         self._timeout_handle.cancel()
         # If STARTTLS was issued, then our transport is the SSL protocol
@@ -553,6 +563,7 @@ class SMTP(asyncio.StreamReaderProtocol):
     def eof_received(self) -> Optional[bool]:
         assert self.session is not None
         log.info('%r EOF received', self.session.peer)
+        self._session_closed = True
         assert self._handler_coroutine is not None
         self._handler_coroutine.cancel()
         if self.session.ssl is not None:
@@ -651,7 +662,7 @@ class SMTP(asyncio.StreamReaderProtocol):
             call_limit = {}
         bogus_budget = BOGUS_LIMIT
 
-        while self.transport is not None:   # pragma: nobranch
+        while self.transport is not None and not self._session_closed:
             try:
                 try:
                     line: bytes = await self._reader.readuntil()
@@ -795,10 +806,14 @@ class SMTP(asyncio.StreamReaderProtocol):
                         self.transport.close()  # pytype: disable=attribute-error
                         self.connection_lost(error)
                     else:
-                        # The value of status is being set with ex-except and it
-                        # shouldn't be None, but pytype isn't able to infer that
-                        # so ignore the error related to wrong argument types.
-                        await self.push(status)  # pytype: disable=wrong-arg-types
+                        # The connection might have been torn down while the
+                        # error was being handled; answering a dead connection
+                        # would only mask the original error with a new one.
+                        if self.transport is not None:
+                            # The value of status is being set with ex-except and it
+                            # shouldn't be None, but pytype isn't able to infer that
+                            # so ignore the error related to wrong argument types.
+                            await self.push(status)  # pytype: disable=wrong-arg-types
 
     async def check_helo_needed(self, helo: str = "HELO") -> bool:
         """
@@ -1338,7 +1353,22 @@ class SMTP(asyncio.StreamReaderProtocol):
             await self.push(
                 '555 MAIL FROM parameters not recognized or not implemented')
             return
-        status = await self._call_handler_hook('MAIL', address, mail_options)
+        envelope = self.envelope
+        try:
+            status = await self._call_handler_hook('MAIL', address, mail_options)
+        except BaseException:
+            # A failed (or cancelled) hook must not leave a half-established
+            # sender on the transaction.
+            envelope.mail_from = None
+            del envelope.mail_options[:]
+            raise
+        if envelope is not self.envelope:
+            # The transaction was reset while the hook was in flight; the
+            # late result belongs to the old transaction and must not be
+            # applied to (or answered on) the new one.
+            envelope.mail_from = None
+            del envelope.mail_options[:]
+            return
         if status is MISSING:
             self.envelope.mail_from = address
             self.envelope.mail_options.extend(mail_options)
@@ -1391,7 +1421,25 @@ class SMTP(asyncio.StreamReaderProtocol):
             )
             return
 
-        status = await self._call_handler_hook('RCPT', address, rcpt_options)
+        envelope = self.envelope
+        # Snapshot the already-confirmed recipients so that a recipient
+        # whose hook fails (or whose result arrives too late) is not
+        # mistaken for an accepted one.
+        accepted_tos = len(envelope.rcpt_tos)
+        accepted_options = len(envelope.rcpt_options)
+        try:
+            status = await self._call_handler_hook('RCPT', address, rcpt_options)
+        except BaseException:
+            del envelope.rcpt_tos[accepted_tos:]
+            del envelope.rcpt_options[accepted_options:]
+            raise
+        if envelope is not self.envelope:
+            # The transaction was reset while the hook was in flight; the
+            # late result belongs to the old transaction and must not be
+            # applied to (or answered on) the new one.
+            del envelope.rcpt_tos[accepted_tos:]
+            del envelope.rcpt_options[accepted_options:]
+            return
         if status is MISSING:
             self.envelope.rcpt_tos.append(address)
             self.envelope.rcpt_options.extend(rcpt_options)
@@ -1521,29 +1569,51 @@ class SMTP(asyncio.StreamReaderProtocol):
         self.envelope.content = content
         self.envelope.original_content = original_content
 
-        # Call the new API first if it's implemented.
-        if "DATA" in self._handle_hooks:
-            status = await self._call_handler_hook('DATA')
-        else:
-            # Backward compatibility.
-            status = MISSING
-            if hasattr(self.event_handler, 'process_message'):
-                warn('Use handler.handle_DATA() instead of .process_message()',
-                     DeprecationWarning)
-                assert self.session is not None
-                args = (self.session.peer, self.envelope.mail_from,
-                        self.envelope.rcpt_tos, self.envelope.content)
-                if inspect.iscoroutinefunction(
-                        self.event_handler.process_message):
-                    status = await self.event_handler.process_message(*args)
-                else:
-                    status = self.event_handler.process_message(*args)
-                # The deprecated API can return None which means, return the
-                # default status.  Don't worry about coverage for this case as
-                # it's a deprecated API that will go away after 1.0.
-                if status is None:                  # pragma: nocover
-                    status = MISSING
+        envelope = self.envelope
+        try:
+            # Call the new API first if it's implemented.
+            if "DATA" in self._handle_hooks:
+                status = await self._call_handler_hook('DATA')
+            else:
+                # Backward compatibility.
+                status = MISSING
+                if hasattr(self.event_handler, 'process_message'):
+                    warn('Use handler.handle_DATA() instead of .process_message()',
+                         DeprecationWarning)
+                    assert self.session is not None
+                    args = (self.session.peer, self.envelope.mail_from,
+                            self.envelope.rcpt_tos, self.envelope.content)
+                    if inspect.iscoroutinefunction(
+                            self.event_handler.process_message):
+                        status = await self.event_handler.process_message(*args)
+                    else:
+                        status = self.event_handler.process_message(*args)
+                    # The deprecated API can return None which means, return the
+                    # default status.  Don't worry about coverage for this case as
+                    # it's a deprecated API that will go away after 1.0.
+                    if status is None:                  # pragma: nocover
+                        status = MISSING
+        except BaseException:
+            # The delivery hook failed (or the connection was torn down while
+            # it was in flight).  The failed transaction must not leak into
+            # the next one; reset the state, but a cleanup failure must not
+            # mask the original error.
+            try:
+                self._set_post_data_state()
+            except Exception:
+                log.exception(
+                    '%r Error resetting state after failed DATA',
+                    self.session.peer if self.session is not None else None)
+            raise
+        if envelope is not self.envelope:
+            # The transaction was reset while the hook was in flight; the
+            # late result must not be answered.
+            return
         self._set_post_data_state()
+        if self._session_closed:
+            # The connection went away while the hook was in flight; do not
+            # send a (success) response to a dead connection.
+            return
         await self.push('250 OK' if status is MISSING else status)
 
     # Commands that have not been implemented.

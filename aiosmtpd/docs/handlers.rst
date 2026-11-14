@@ -73,6 +73,21 @@ Supported Hooks
 
 The following hooks are currently supported (in alphabetical order):
 
+.. important::
+
+   If the client connection is lost (disconnect, timeout) while a hook is
+   in flight, the hook is cancelled.  A result produced after that point is
+   discarded: it will not be applied to the transaction and no response will
+   be sent for it.  Hooks therefore MUST NOT suppress
+   :exc:`asyncio.CancelledError`.
+
+   If a ``MAIL``/``RCPT`` hook raises an exception, the changes it made to
+   the envelope for the failed command are rolled back (in particular, a
+   recipient whose hook did not complete is not considered accepted).  If a
+   ``DATA`` hook raises an exception, the transaction state is reset before
+   the error is reported to the client, so a failed transaction cannot leak
+   into the next one.
+
 .. py:method:: handle_AUTH(server, session, envelope, args)
    :noindex:
 
