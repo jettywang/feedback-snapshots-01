@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Added
+
+* DSSE `Envelope.verify_parallel()`: optional bounded, parallel signature
+  verification with the same threshold semantics as `verify()`. It snapshots
+  the envelope and trusted keys before scheduling, bounds both concurrency and
+  total plugin work, counts each signer at most once, distinguishes bad
+  signatures from plugin failures, and supports cooperative cancellation and
+  timeouts that drain (but never force-kill) in-flight verifications
+
 ## 1.6.0
 
 ### Changed
