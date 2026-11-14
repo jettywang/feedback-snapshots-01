@@ -1,0 +1,149 @@
+{
+  "proven_pairs": [
+    {
+      "pair_id": 1,
+      "request": {
+        "kind": "request",
+        "range": [
+          0,
+          98
+        ],
+        "headers": [
+          [
+            "Host",
+            "example.test"
+          ],
+          [
+            "Expect",
+            "100-continue"
+          ],
+          [
+            "Content-Length",
+            "11"
+          ]
+        ],
+        "framing": "content-length",
+        "framing_reason": "Content-Length: 11",
+        "body": {
+          "range": [
+            87,
+            98
+          ],
+          "length": 11,
+          "sha256": "3d011e09502a84552a0f8ae112d024cc2c115597e3a577d5f49007902c221dc5",
+          "preview_hex": "68656c6c6f3d776f726c64"
+        },
+        "complete": true,
+        "method": "POST",
+        "target": "/submit"
+      },
+      "informational": [
+        {
+          "kind": "informational",
+          "range": [
+            0,
+            25
+          ],
+          "headers": [],
+          "framing": "none",
+          "framing_reason": "1xx 无正文",
+          "body": {
+            "length": 0
+          },
+          "complete": true,
+          "status": 100
+        }
+      ],
+      "response": {
+        "kind": "response",
+        "range": [
+          25,
+          94
+        ],
+        "headers": [
+          [
+            "Content-Length",
+            "5"
+          ],
+          [
+            "Content-Type",
+            "text/plain"
+          ]
+        ],
+        "framing": "content-length",
+        "framing_reason": "Content-Length: 5",
+        "body": {
+          "range": [
+            89,
+            94
+          ],
+          "length": 5,
+          "sha256": "a5213bae59cb90a6a964a446d6d56ab2e2c8e8fd7921594c265bd129cfca6eeb",
+          "preview_hex": "61636b2d31"
+        },
+        "complete": true,
+        "status": 200
+      },
+      "missing": []
+    }
+  ],
+  "pending": [
+    {
+      "pair_id": 2,
+      "request": {
+        "kind": "request",
+        "range": [
+          98,
+          143
+        ],
+        "headers": [
+          [
+            "Host",
+            "example.test"
+          ]
+        ],
+        "framing": "none",
+        "framing_reason": "无 Content-Length / Transfer-Encoding，请求无正文",
+        "body": {
+          "length": 0
+        },
+        "complete": true,
+        "method": "HEAD",
+        "target": "/status"
+      },
+      "informational": [],
+      "response": null,
+      "missing": [
+        "未见响应起始行"
+      ]
+    }
+  ],
+  "unparsed_buffered": {
+    "c2s": [
+      [
+        143,
+        309,
+        "字节已在捕获中，但因前序消息缺失/截断，状态机暂停解析"
+      ]
+    ]
+  },
+  "post_protocol_material": {
+    "c2s": [],
+    "s2c": []
+  },
+  "undetermined": {
+    "s2c": [
+      [
+        152,
+        288,
+        "偏移不连续：期望 94，实到 152（缺失 58 字节）"
+      ]
+    ]
+  },
+  "integrity": {
+    "tainted": true,
+    "first_failure_ts": 1.35,
+    "reason": "s2c 方向：偏移不连续：期望 94，实到 152（缺失 58 字节）"
+  },
+  "sync_errors": []
+}

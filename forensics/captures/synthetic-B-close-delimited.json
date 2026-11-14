@@ -1,0 +1,33 @@
+{
+  "capture_id": "synthetic-B-close-delimited",
+  "eof": {
+    "c2s": true,
+    "s2c": true
+  },
+  "segments": [
+    {
+      "dir": "c2s",
+      "ts": 2.0,
+      "offset": 0,
+      "data_hex": "474554202f6c656761637920485454502f312e300d0a0d0a"
+    },
+    {
+      "dir": "s2c",
+      "ts": 2.05,
+      "offset": 0,
+      "data_hex": "485454502f312e3020323030204f4b0d0a436f6e74656e742d547970653a20746578742f706c61696e0d0a0d0a"
+    },
+    {
+      "dir": "s2c",
+      "ts": 2.1,
+      "offset": 45,
+      "data_hex": "636c6f73652d64656c696d697465642d626f64792d70617274313b"
+    },
+    {
+      "dir": "s2c",
+      "ts": 2.15,
+      "offset": 72,
+      "data_hex": "70617274322d656e64"
+    }
+  ]
+}

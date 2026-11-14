@@ -1,0 +1,64 @@
+{
+  "proven_pairs": [
+    {
+      "pair_id": 1,
+      "request": {
+        "kind": "request",
+        "range": [
+          0,
+          24
+        ],
+        "headers": [],
+        "framing": "none",
+        "framing_reason": "无 Content-Length / Transfer-Encoding，请求无正文",
+        "body": {
+          "length": 0
+        },
+        "complete": true,
+        "method": "GET",
+        "target": "/legacy"
+      },
+      "informational": [],
+      "response": {
+        "kind": "response",
+        "range": [
+          0,
+          81
+        ],
+        "headers": [
+          [
+            "Content-Type",
+            "text/plain"
+          ]
+        ],
+        "framing": "close-delimited",
+        "framing_reason": "无长度声明，正文由连接关闭定界",
+        "body": {
+          "range": [
+            45,
+            81
+          ],
+          "length": 36,
+          "sha256": "27674ecc52ca6d2936b68d421578d6f4ed9afc71788f6ec01b1904f370fb5b86",
+          "preview_hex": "636c6f73652d64656c696d697465642d626f64792d70617274313b7061727432"
+        },
+        "complete": true,
+        "status": 200
+      },
+      "missing": []
+    }
+  ],
+  "pending": [],
+  "unparsed_buffered": {},
+  "post_protocol_material": {
+    "c2s": [],
+    "s2c": []
+  },
+  "undetermined": {},
+  "integrity": {
+    "tainted": false,
+    "first_failure_ts": null,
+    "reason": null
+  },
+  "sync_errors": []
+}
