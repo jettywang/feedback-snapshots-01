@@ -360,6 +360,24 @@ def i32(c, o = 0):
     return struct.unpack("<I", c[o:o+4])[0]
 
 
+def _unicode_name_key(unicode_name):
+    """
+    Compute the comparison key of a directory entry name, following [MS-CFB]
+    section 2.6.4: names are ordered/compared by their length in UTF-16 code
+    units first, then case-insensitively using an uppercase mapping.
+
+    Using the code-unit length as first key component also avoids false
+    aliases where Unicode case mapping changes the string length (e.g.
+    'ß'.upper() == 'SS'): such names are distinct per [MS-CFB].
+
+    :param unicode_name: str, name decoded from UTF-16LE
+    :return: tuple (length in UTF-16 code units, uppercased name), usable as
+        a hashable, case-insensitive identity key for the name
+    """
+    utf16_length = len(unicode_name.encode('utf-16-le', 'surrogatepass')) // 2
+    return (utf16_length, unicode_name.upper())
+
+
 def _clsid(clsid):
     """
     Converts a CLSID to a human-readable string.
@@ -772,8 +790,12 @@ class OleDirectoryEntry:
         # (list of OleDirectoryEntry objects)
         self.kids = []
         # kids_dict is a dictionary of children entries, indexed by their
-        # name in lowercase: used to quickly find an entry, and to detect
-        # duplicates
+        # MS-CFB name key (see _unicode_name_key): used to quickly find an
+        # entry, and to detect duplicates.
+        # Each value is a LIST of OleDirectoryEntry objects: entries whose
+        # names collide (case-insensitively, or after UTF-16 decoding with
+        # replacement) are all kept so that lookups can detect the ambiguity
+        # deterministically instead of silently overwriting one another.
         self.kids_dict = {}
         # flag used to detect if the entry is referenced more than once in
         # directory:
@@ -805,17 +827,68 @@ class OleDirectoryEntry:
         # log.debug(struct.unpack(fmt_entry, entry[:len_entry]))
         # name should be at most 31 unicode characters + null character,
         # so 64 bytes in total (31*2 + 2):
-        if self.namelength > 64:
-            ole_file._raise_defect(DEFECT_INCORRECT, 'incorrect DirEntry name length >64 bytes')
-            # if exception not raised, namelength is set to the maximum value:
-            self.namelength = 64
-        # only characters without ending null char are kept:
-        self.name_utf16 = self.name_raw[:(self.namelength-2)]
-        # TODO: check if the name is actually followed by a null unicode character ([MS-CFB] 2.6.1)
-        # TODO: check if the name does not contain forbidden characters:
-        # [MS-CFB] 2.6.1: "The following characters are illegal and MUST NOT be part of the name: '/', '\', ':', '!'."
-        # name is converted from UTF-16LE to the path encoding specified in the OleFileIO:
-        self.name = ole_file._decode_utf16_str(self.name_utf16)
+        # Note: self.namelength always keeps the value DECLARED in the
+        # directory entry (for forensic purposes); a sanitized local value
+        # is used to slice the name buffer safely.
+        # ([MS-CFB] 2.6.1: unused entries have a null name length, the name
+        # checks below only apply to actual entries)
+        namelength = self.namelength
+        if self.entry_type == STGTY_EMPTY:
+            namelength = 2
+        else:
+            if namelength > 64:
+                ole_file._raise_defect(DEFECT_INCORRECT, 'incorrect DirEntry name length >64 bytes')
+                # if exception not raised, namelength is set to the maximum value:
+                namelength = 64
+            # [MS-CFB] 2.6.1: namelength counts bytes including the
+            # terminating null UTF-16 character, so it must be even and at
+            # least 2:
+            if namelength < 2:
+                ole_file._raise_defect(DEFECT_INCORRECT,
+                    'incorrect DirEntry name length <2 bytes')
+                namelength = 2
+            if namelength % 2 != 0:
+                ole_file._raise_defect(DEFECT_INCORRECT,
+                    'incorrect DirEntry name length (odd byte count)')
+                # round down to avoid cutting a UTF-16 code unit in half:
+                namelength -= 1
+            # [MS-CFB] 2.6.1: the name MUST be terminated by a null
+            # character (16 bits) right after the name:
+            if self.name_raw[namelength-2:namelength] != b'\x00\x00':
+                ole_file._raise_defect(DEFECT_INCORRECT,
+                    'DirEntry name is not followed by a null character')
+        # only characters without ending null char are kept, as raw UTF-16LE
+        # bytes (original code units preserved, undecodable ones included).
+        # [MS-CFB] 2.6.1: the name ends at its null terminator, anything
+        # beyond the first null character is not part of the name (this
+        # matters when namelength had to be clamped to 64 bytes):
+        self.name_utf16 = self.name_raw[:(namelength-2)]
+        for index in range(0, len(self.name_utf16) - 1, 2):
+            if self.name_utf16[index:index+2] == b'\x00\x00':
+                self.name_utf16 = self.name_utf16[:index]
+                break
+        # decode to unicode, keeping undecodable code units as U+FFFD:
+        unicode_name = self.name_utf16.decode('UTF-16LE', 'replace')
+        if self.entry_type != STGTY_EMPTY:
+            # [MS-CFB] 2.6.1: "The following characters are illegal and MUST
+            # NOT be part of the name: '/', '\', ':', '!'."
+            if any(char in unicode_name for char in '/\\:!'):
+                ole_file._raise_defect(DEFECT_INCORRECT,
+                    'DirEntry name contains forbidden characters')
+            if '\ufffd' in unicode_name:
+                # undecodable UTF-16 (e.g. lone surrogate): distinct raw
+                # names may collide once replaced by U+FFFD, so this must
+                # be visible:
+                ole_file._raise_defect(DEFECT_POTENTIAL,
+                    'DirEntry name contains undecodable UTF-16 (U+FFFD)')
+        # case-insensitive identity key of the name, per [MS-CFB] 2.6.4:
+        self.name_key = _unicode_name_key(unicode_name)
+        # name is converted from UTF-16LE to the path encoding specified in
+        # the OleFileIO:
+        if ole_file.path_encoding:
+            self.name = unicode_name.encode(ole_file.path_encoding, 'replace')
+        else:
+            self.name = unicode_name
 
         log.debug('DirEntry SID=%d: %s' % (self.sid, repr(self.name)))
         log.debug(' - type: %d' % self.entry_type)
@@ -935,15 +1008,27 @@ class OleDirectoryEntry:
             # (cf. Wikipedia for details)
             # First walk through left side of the tree:
             self.append_kids(child.sid_left)
-            # Check if its name is not already used (case-insensitive):
-            name_lower = child.name.lower()
-            if name_lower in self.kids_dict:
-                self.olefile._raise_defect(DEFECT_INCORRECT,
-                    "Duplicate filename in OLE storage")
+            # Check if its name key is not already used (case-insensitive,
+            # per [MS-CFB] 2.6.4). Collisions include: identical names, case
+            # variants, and distinct raw UTF-16 names which decode to the
+            # same string (e.g. undecodable code units replaced by U+FFFD):
+            name_key = child.name_key
+            if name_key in self.kids_dict:
+                if child.name_utf16 == self.kids_dict[name_key][0].name_utf16:
+                    msg = "Duplicate filename in OLE storage"
+                else:
+                    msg = ("Filename collision in OLE storage: distinct "
+                           "names share the same case-insensitive key")
+                self.olefile._raise_defect(DEFECT_INCORRECT, msg)
+                # do NOT overwrite the existing entry: all colliding entries
+                # are kept in the list so that lookups can detect the
+                # ambiguity deterministically (see OleFileIO._find):
+                self.kids_dict[name_key].append(child)
+            else:
+                self.kids_dict[name_key] = [child]
             # Then the child_sid OleDirectoryEntry object is appended to the
-            # kids list and dictionary:
+            # kids list:
             self.kids.append(child)
-            self.kids_dict[name_lower] = child
             # Finally walk through right side of the tree:
             self.append_kids(child.sid_right)
             # Afterwards build kid's own tree if it's also a storage:
@@ -1917,6 +2002,86 @@ class OleFileIO:
         self._list(files, [], self.root, streams, storages)
         return files
 
+    def _name_to_unicode(self, name):
+        """
+        Convert a path component provided by the caller (str or bytes) to a
+        unicode string, so that it can be compared to directory entry names.
+
+        :param name: str or bytes, single path component (no slash)
+        :return: str
+        """
+        if isinstance(name, bytes):
+            # if a path encoding was specified, use it; otherwise assume
+            # UTF-8 (undecodable bytes become U+FFFD and simply won't match
+            # any well-formed entry name):
+            return name.decode(self.path_encoding or 'utf-8', 'replace')
+        return name
+
+    def _find_all(self, filename, exact_match_preferred=True):
+        """
+        Returns the list of all directory entries matching the given
+        filename. (_find and find_sids helper)
+
+        Name resolution contract (per [MS-CFB] 2.6.4):
+        - comparison is case-insensitive: each path component is matched
+          against the entries' name keys (UTF-16 code-unit length, then
+          uppercase mapping), so 'WordDocument' and 'worddocument' identify
+          the same entry;
+        - if several entries of a storage share the same key (duplicate or
+          decoding collision), an exact match on the raw UTF-16 code units
+          is used to disambiguate;
+        - otherwise the path is ambiguous and an IOError is raised: the
+          result never depends on the red-black tree traversal order.
+
+        :param filename: path of stream in storage tree (except root entry),
+            either a string using Unix path syntax, or a list of path
+            components (see _find)
+        :param exact_match_preferred: if True (default), an exact match on
+            the raw UTF-16 code units narrows the result to a single entry
+            for the last path component; if False, all entries matching the
+            last component (case-insensitively) are returned
+        :returns: list of OleDirectoryEntry objects matching the last path
+            component (more than one entry only in case of ambiguity)
+        :exception IOError: if file not found, or if an intermediate path
+            component is ambiguous
+        """
+        # if filename is a string instead of a list, split it on slashes to
+        # convert to a list (bytes paths are split too, each component is
+        # decoded later using the path encoding):
+        if isinstance(filename, bytes):
+            filename = filename.split(b'/')
+        elif isinstance(filename, basestring):
+            filename = filename.split('/')
+        # walk across storage tree, following given path:
+        node = self.root
+        if not filename:
+            return [node]
+        for index, name in enumerate(filename):
+            last = (index == len(filename) - 1)
+            key = _unicode_name_key(self._name_to_unicode(name))
+            matches = node.kids_dict.get(key)
+            if not matches:
+                raise IOError("file not found")
+            if len(matches) > 1 and (exact_match_preferred or not last):
+                # several entries share this case-insensitive key: try an
+                # exact match on the raw UTF-16 code units to disambiguate:
+                name_utf16 = self._name_to_unicode(name).encode(
+                    'utf-16-le', 'surrogatepass')
+                exact = [entry for entry in matches
+                         if entry.name_utf16 == name_utf16]
+                if len(exact) == 1:
+                    matches = exact
+                elif not last:
+                    raise IOError(
+                        "ambiguous storage name %r matches %d directory "
+                        "entries (SIDs %s)"
+                        % (name, len(matches),
+                           [entry.sid for entry in matches]))
+                # else: keep all matches, the caller handles the ambiguity
+            if last:
+                return matches
+            node = matches[0]
+
     def _find(self, filename):
         """
         Returns directory entry of given filename. (openstream helper)
@@ -1930,23 +2095,42 @@ class OleFileIO:
               Example: ['storage_1', 'storage_1.2', 'stream']
 
         :returns: sid of requested filename
-        :exception IOError: if file not found
+        :exception IOError: if file not found, or if the path is ambiguous
+            (several directory entries share the same case-insensitive name)
         """
+        matches = self._find_all(filename)
+        if len(matches) > 1:
+            raise IOError(
+                "ambiguous filename %r matches %d directory entries (SIDs "
+                "%s): use find_sids() to list them"
+                % (filename, len(matches),
+                   [entry.sid for entry in matches]))
+        return matches[0].sid
 
-        # if filename is a string instead of a list, split it on slashes to
-        # convert to a list:
-        if isinstance(filename, basestring):
-            filename = filename.split('/')
-        # walk across storage tree, following given path:
-        node = self.root
-        for name in filename:
-            for kid in node.kids:
-                if kid.name.lower() == name.lower():
-                    break
-            else:
-                raise IOError("file not found")
-            node = kid
-        return node.sid
+    def find_sids(self, filename):
+        """
+        Returns the SIDs of all directory entries matching the given
+        filename (case-insensitive). This is a forensic helper: in a
+        well-formed file the result always contains exactly one SID, but a
+        malformed file may contain several entries with colliding names
+        (duplicates, or distinct raw UTF-16 names decoding to the same
+        string). In that case listdir()/find_sids() still list all of them,
+        while openstream()/get_type()/get_size() refuse to pick one
+        arbitrarily and raise an IOError.
+
+        :param filename: path of stream in storage tree (except root entry),
+            either a string using Unix path syntax, or a list of path
+            components (see openstream for syntax)
+        :returns: sorted list of SIDs (integers), empty if no entry matches
+
+        new in version 0.47
+        """
+        try:
+            return sorted(entry.sid
+                          for entry in self._find_all(
+                              filename, exact_match_preferred=False))
+        except IOError:
+            return []
 
     def openstream(self, filename):
         """

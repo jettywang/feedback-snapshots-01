@@ -3,6 +3,24 @@ Detailed CHANGELOG
 
 olefile.py
 ----------
+* 2026-11-15 v0.47.dev7:
+    - fixed directory name resolution to follow MS-CFB 2.6.4: names are now
+      compared by UTF-16 code-unit length then uppercase mapping, and
+      listdir/exists/get_type/openstream resolve the same identity for a
+      given path
+    - name collisions (duplicates, case variants, or distinct raw UTF-16
+      names decoding to the same string, e.g. via U+FFFD replacement) no
+      longer silently overwrite kids_dict: all colliding entries are kept,
+      an exact raw-name match wins, otherwise lookups raise a deterministic
+      ambiguity error instead of returning a stream picked by the red-black
+      tree traversal order
+    - added OleFileIO.find_sids() to list all SIDs matching a path
+      (forensic mode); strict mode (raise_defects=DEFECT_INCORRECT) rejects
+      files with ambiguous names at parse time
+    - directory entry parsing now validates namelength (even, >= 2, <= 64),
+      the null terminator and forbidden characters ('/', '\', ':', '!'), and
+      preserves the declared namelength and raw UTF-16 code units
+    - bytes paths are now supported when path_encoding is set
 * 2023-11-30 v0.47.dev6:
     - fixed issue #142: isOleFile has a new data parameter to handle files in memory properly
     - fixed issue #156: write_sect now correctly detects when data is larger than the sector size

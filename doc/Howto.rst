@@ -246,6 +246,28 @@ Test if known streams/storages exist:
         if ole.exists('macros/vba'):
              print("This document seems to contain VBA macros.")
 
+Name resolution and ambiguous names (new in v0.47):
+---------------------------------------------------
+
+Stream and storage names are compared case-insensitively, following
+[MS-CFB] section 2.6.4 (comparison by name length in UTF-16 code units,
+then uppercase mapping), so ``ole.exists('worddocument')`` and
+``ole.exists('WordDocument')`` identify the same entry.
+
+A malformed file may contain several entries whose names collide, either
+because they only differ by case, or because distinct raw UTF-16 names
+decode to the same string (undecodable code units are replaced by U+FFFD).
+Such collisions are recorded in ``ole.parsing_issues``, and parsing in
+strict mode (``raise_defects=olefile.DEFECT_INCORRECT``) rejects the file.
+
+When a path is ambiguous, :py:meth:`olefile.OleFileIO.openstream`,
+:py:meth:`olefile.OleFileIO.get_type` and the other lookup methods never
+pick an entry based on the directory traversal order: an exact match on
+the raw UTF-16 name wins, otherwise an IOError is raised (and
+:py:meth:`olefile.OleFileIO.exists` returns False).
+:py:meth:`olefile.OleFileIO.find_sids` lists the SIDs of all matching
+entries for forensic analysis.
+
 Read data from a stream
 -----------------------
 
