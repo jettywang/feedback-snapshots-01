@@ -4,7 +4,6 @@ Primary classes for performing signing and verification operations.
 
 import binascii
 from hashlib import sha1
-import os
 from six import PY2
 from . import ecdsa, eddsa
 from . import der, ssh
@@ -12,7 +11,7 @@ from . import rfc6979
 from . import ellipticcurve
 from .curves import NIST192p, Curve, Ed25519, Ed448
 from .ecdsa import RSZeroError
-from .util import string_to_number, number_to_string, randrange
+from .util import string_to_number, number_to_string, randrange, entropy_bytes
 from .util import sigencode_string, sigdecode_string, bit_length
 from .util import (
     oid_ecPublicKey,
@@ -24,6 +23,15 @@ from .util import (
 from ._compat import normalise_bytes
 from .errors import MalformedPointError
 from .ellipticcurve import PointJacobi, CurveEdTw
+
+
+# How many nonces may be drawn from an entropy source while looking for one
+# that yields neither r == 0 nor s == 0.  Each draw independently succeeds
+# with probability ~1 - 2/order, so 128 draws fail only for a broken or stuck
+# source.  This budget is owned by SigningKey.sign_number (the nonce layer);
+# it is separate from randrange's rejection budget and from the RFC6979
+# retry_gen loop used by the deterministic signing path.
+_MAX_NONCE_ATTEMPTS = 128
 
 
 __all__ = [
@@ -782,9 +790,10 @@ class SigningKey(object):
     @classmethod
     def _twisted_edwards_keygen(cls, curve, entropy):
         """Generate a private key on a Twisted Edwards curve."""
-        if not entropy:
-            entropy = os.urandom
-        random = entropy(curve.baselen)
+        # Select the default source only for an unset argument.  Using a
+        # truthiness test would also replace a valid callable that happens to
+        # define __bool__/__len__ and, worse, would mask a failing source.
+        random = entropy_bytes(entropy, curve.baselen)
         private_key = eddsa.PrivateKey(curve.generator, random)
         public_key = private_key.public_key()
 
@@ -816,7 +825,13 @@ class SigningKey(object):
         :type curve: ~ecdsa.curves.Curve
         :param entropy: Source of randomness for generating the private keys,
             should provide cryptographically secure random numbers if the keys
-            need to be secure. Uses os.urandom() by default.
+            need to be secure. It must behave like :func:`os.urandom`: accept
+            the number of bytes requested and return exactly that many bytes.
+            A short read, empty read or non-bytes return value raises
+            :class:`~ecdsa.errors.EntropySourceError`; exceptions raised by
+            the callback propagate unchanged. Uses :func:`os.urandom` only
+            when the argument is ``None`` (it is never used as a fallback
+            after a failure).
         :type entropy: callable
         :param hashfunc: The default hash function that will be used for
             signing, needs to implement the same interface
@@ -1479,7 +1494,12 @@ class SigningKey(object):
         :param data: data that will be hashed for signing
         :type data: :term:`bytes-like object`
         :param callable entropy: randomness source, :func:`os.urandom` by
-            default. Ignored with EdDSA.
+            default. It must return exactly the number of bytes requested.
+            A short read, empty read or non-bytes return value raises
+            :class:`~ecdsa.errors.EntropySourceError`; exceptions raised by
+            the callback propagate unchanged. A failing source is never
+            replaced by a time-, constant- or PRNG-derived value.
+            Ignored with EdDSA (which signs deterministically).
         :param hashfunc: hash function to use for hashing the provided
             ``data``.
             If unspecified the default hash function selected during
@@ -1520,11 +1540,11 @@ class SigningKey(object):
             default.
             Ignored for EdDSA.
 
-        :raises RSZeroError: in the unlikely event when *r* parameter or
-            *s* parameter of the created signature is equal 0, as that would
-            leak the key. Caller should try a better entropy source, retry with
-            different ``k``, or use the
-            :func:`~SigningKey.sign_deterministic` in such case.
+        :raises RSZeroError: only if an explicit ``k`` was supplied and the
+            computed *r* or *s* is 0.  When *k* is drawn from ``entropy``,
+            :meth:`sign_number` re-draws a bounded number of times instead;
+            a failing entropy source raises
+            :class:`~ecdsa.errors.EntropyError` rather than RSZeroError.
 
         :return: encoded signature of the hash of `data`
         :rtype: bytes or sigencode function dependent type
@@ -1558,7 +1578,11 @@ class SigningKey(object):
 
         :param digest: hash value that will be signed
         :type digest: :term:`bytes-like object`
-        :param callable entropy: randomness source, os.urandom by default
+        :param callable entropy: randomness source, os.urandom by default.
+            Must return exactly the number of bytes requested; short, empty
+            or non-bytes returns raise
+            :class:`~ecdsa.errors.EntropySourceError`, exceptions from the
+            callback propagate unchanged, and no other source is substituted.
         :param sigencode: function used to encode the signature.
             The function needs to accept three parameters: the two integers
             that are the signature and the order of the curve over which the
@@ -1574,11 +1598,11 @@ class SigningKey(object):
             the end of the digest) will be truncated. Use it when signing
             SHA-384 output using NIST256p or in similar situations.
 
-        :raises RSZeroError: in the unlikely event when "r" parameter or
-            "s" parameter of the created signature is equal 0, as that would
-            leak the key. Caller should try a better entropy source, retry with
-            different 'k', or use the
-            :func:`~SigningKey.sign_digest_deterministic` in such case.
+        :raises RSZeroError: only if an explicit ``k`` was supplied and the
+            computed *r* or *s* is 0.  When *k* is drawn from ``entropy``,
+            :meth:`sign_number` re-draws a bounded number of times instead;
+            a failing entropy source raises
+            :class:`~ecdsa.errors.EntropyError` rather than RSZeroError.
 
         :return: encoded signature for the `digest` hash
         :rtype: bytes or sigencode function dependent type
@@ -1604,15 +1628,26 @@ class SigningKey(object):
 
         :param int number: number to sign using the probabilistic ECDSA
             algorithm.
-        :param callable entropy: entropy source, os.urandom by default
+        :param callable entropy: entropy source, os.urandom by default. Must
+            return exactly the number of bytes requested; short, empty or
+            non-bytes returns raise
+            :class:`~ecdsa.errors.EntropySourceError`, exceptions from the
+            callback propagate unchanged, and no other source is substituted
+            (in particular, no time- or constant-derived fallback).
         :param int k: pre-selected nonce for signature operation. If unset
-            it will be selected at random using the entropy source.
+            it will be selected at random using the entropy source.  A
+            caller-supplied ``k`` that produces r == 0 or s == 0 raises
+            :class:`~ecdsa.ecdsa.RSZeroError` immediately and is never
+            replaced; re-selection only applies to nonces drawn from
+            ``entropy`` and is bounded (see below), so a stuck source cannot
+            loop forever.
 
-        :raises RSZeroError: in the unlikely event when "r" parameter or
-            "s" parameter of the created signature is equal 0, as that would
-            leak the key. Caller should try a better entropy source, retry with
-            different 'k', or use the
-            :func:`~SigningKey.sign_digest_deterministic` in such case.
+        :raises RSZeroError: only if an explicit ``k`` was supplied and the
+            computed r or s is 0, or if every nonce drawn from ``entropy``
+            within the bounded re-selection budget produced r == 0 or s == 0.
+            The budget for re-selection is owned by this method (the
+            entropy-derived nonce layer); it is distinct from the rejection
+            budget owned by :func:`ecdsa.util.randrange`.
 
         :return: the "r" and "s" parameters of the signature
         :rtype: tuple of ints
@@ -1622,10 +1657,27 @@ class SigningKey(object):
         order = self.privkey.order
 
         if k is not None:
-            _k = k
-        else:
-            _k = randrange(order, entropy)
+            # A caller-supplied nonce is an explicit contract: never silently
+            # replace it, and surface RSZeroError so deterministic callers
+            # (sign_digest_deterministic) can advance their retry_gen.
+            assert 1 <= k < order
+            sig = self.privkey.sign(number, k)
+            return sig.r, sig.s
 
-        assert 1 <= _k < order
-        sig = self.privkey.sign(number, _k)
-        return sig.r, sig.s
+        # A nonce drawn from entropy may legitimately produce r == 0 or s == 0
+        # (probability about 1/order each).  That is normal, not an entropy
+        # failure, so draw a fresh nonce from the *same* source.  The budget
+        # lives here, not in the entropy callback, and keeps a broken source
+        # from hanging the process.  A failing source raises
+        # EntropySourceError/EntropyExhaustedError and is never replaced.
+        for _ in range(_MAX_NONCE_ATTEMPTS):
+            _k = randrange(order, entropy)
+            try:
+                sig = self.privkey.sign(number, _k)
+            except RSZeroError:
+                continue
+            return sig.r, sig.s
+        raise RSZeroError(
+            "no valid nonce after {0} draws from the entropy source "
+            "(r or s was 0 every time)".format(_MAX_NONCE_ATTEMPTS)
+        )

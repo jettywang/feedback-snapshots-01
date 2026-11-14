@@ -1,3 +1,20 @@
+New API:
+* ``ecdsa.errors.EntropyError``, ``EntropySourceError`` and
+  ``EntropyExhaustedError``. The random key generation and probabilistic
+  signing paths now validate the entropy callback strictly and fail closed
+  instead of degrading to predictable values.
+
+Security:
+* Entropy source failures no longer degrade into predictable signatures or
+  keys. A callback that returns fewer/empty/more bytes than requested, or
+  non-bytes, raises ``EntropySourceError``; exceptions from the callback
+  propagate unchanged. ``ecdsa.util.randrange`` retains unbiased rejection
+  sampling but bounds it (``EntropyExhaustedError`` instead of looping
+  forever) and never reduces modulo the order. ``SigningKey.sign_number``
+  re-selects a nonce on ``RSZeroError`` only for entropy-derived nonces, with
+  its own bounded budget; an explicit ``k`` and the deterministic RFC6979
+  path keep their existing contracts.
+
 * Release 0.19.2 (26 Mar 2026)
 
 Bug fixes:

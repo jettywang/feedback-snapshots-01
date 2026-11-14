@@ -8,6 +8,11 @@ from .keys import (
     BadDigestError,
     MalformedPointError,
 )
+from .errors import (
+    EntropyError,
+    EntropySourceError,
+    EntropyExhaustedError,
+)
 from .curves import (
     NIST192p,
     NIST224p,
@@ -65,6 +70,9 @@ _hush_pyflakes = [
     BadSignatureError,
     BadDigestError,
     MalformedPointError,
+    EntropyError,
+    EntropySourceError,
+    EntropyExhaustedError,
     UnexpectedDER,
     InvalidCurveError,
     NoKeyError,

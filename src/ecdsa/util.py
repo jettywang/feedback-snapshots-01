@@ -21,6 +21,12 @@ from hashlib import sha256
 from six import PY2, int2byte, next
 from . import der
 from ._compat import normalise_bytes
+from .errors import EntropySourceError, EntropyExhaustedError
+
+try:
+    _memoryview = memoryview
+except NameError:  # pragma: no cover
+    _memoryview = None
 
 
 # RFC5480:
@@ -75,10 +81,70 @@ def orderlen(order):
     return (1 + len("%x" % order)) // 2  # bytes
 
 
+def entropy_bytes(entropy, numbytes):
+    """Read exactly ``numbytes`` bytes from an entropy callback.
+
+    ``entropy`` must be callable and accept a single integer argument (the
+    number of bytes requested), returning a byte string of *exactly* that
+    length.  This mirrors the contract of :func:`os.urandom`.  A callback that
+    returns too few bytes (a short read), no bytes at all (an empty read), too
+    many bytes, or something that is not a byte string violates the contract
+    and raises :class:`~ecdsa.errors.EntropySourceError`.
+
+    Exceptions raised by the callback itself are *not* wrapped: they propagate
+    unchanged so the caller can tell a failing entropy source apart from a
+    callback that returns malformed data.
+
+    The default source is :func:`os.urandom`; it is selected only when
+    ``entropy is None``, never as a fallback after a failure.
+    """
+    if entropy is None:
+        entropy = os.urandom
+    ent = entropy(numbytes)
+    # Reject non-byte returns (int, None, text) before they reach the
+    # sampling loop, where they would raise a confusing TypeError or, worse,
+    # produce a truncated value.  memoryview() is available on Python 2.7+;
+    # older interpreters fall back to an isinstance check.
+    if _memoryview is None:  # pragma: no cover
+        is_bytes = isinstance(ent, (bytes, bytearray))
+    else:
+        try:
+            _memoryview(ent)
+            is_bytes = True
+        except TypeError:
+            is_bytes = False
+    if not is_bytes:
+        raise EntropySourceError(
+            "entropy callback must return a bytes-like object, "
+            "got {0!r}".format(type(ent).__name__)
+        )
+    if len(ent) != numbytes:
+        raise EntropySourceError(
+            "entropy callback returned {0} bytes, expected {1} "
+            "(exact-length contract violated)".format(len(ent), numbytes)
+        )
+    return ent
+
+
 def randrange(order, entropy=None):
     """Return a random integer k such that 1 <= k < order, uniformly
     distributed across that range. Worst case should be a mean of 2 loops at
     (2**k)+2.
+
+    ``entropy`` is a callable that behaves like :func:`os.urandom`: it takes
+    the number of bytes requested and must return exactly that many bytes.
+    A short or empty read, or a non-bytes return value, raises
+    :class:`~ecdsa.errors.EntropySourceError`; an exception raised by the
+    callback itself propagates unchanged.  A callback is never silently
+    replaced by another source.
+
+    Uniformity is achieved by masking the requested byte string down to the
+    bit length of ``order`` and *rejecting* out-of-range samples; there is no
+    ``% order`` reduction, so no modulo bias is introduced.  Rejection is
+    legitimate and expected, but the number of consecutive rejections is
+    bounded: a source that keeps producing out-of-range values raises
+    :class:`~ecdsa.errors.EntropyExhaustedError` instead of spinning forever.
+    The rejection budget is owned by this function.
 
     Note that this function is not declared to be forwards-compatible: we may
     change the behavior in future releases. The entropy= argument (which
@@ -87,16 +153,22 @@ def randrange(order, entropy=None):
     should not be used as a long-term-compatible key generation algorithm.
     """
     assert order > 1
-    if entropy is None:
-        entropy = os.urandom
     upper_2 = bit_length(order - 2)
     upper_256 = upper_2 // 8 + 1
-    while True:  # I don't think this needs a counter with bit-wise randrange
-        ent_256 = entropy(upper_256)
+    # Rejection probability per sample is at most 1/2 (because 2**(upper_2-1)
+    # <= order-2 for every order > 2), so a healthy source is rejected this
+    # many times in a row with probability <= 2**-128.  A deterministic bound
+    # keeps a stuck source from hanging the process indefinitely.
+    for _ in range(128):
+        ent_256 = entropy_bytes(entropy, upper_256)
         ent_2 = entropy_to_bits(ent_256)
         rand_num = int(ent_2[:upper_2], base=2) + 1
         if 0 < rand_num < order:
             return rand_num
+    raise EntropyExhaustedError(
+        "entropy source produced only out-of-range samples for order {0} "
+        "after {1} attempts".format(order, 128)
+    )
 
 
 class PRNG:
