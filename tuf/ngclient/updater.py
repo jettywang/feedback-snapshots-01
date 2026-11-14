@@ -30,6 +30,21 @@ High-level description of ``Updater`` functionality:
       * ``Updater.download_target()`` downloads a target file and ensures it is
         verified correct by the metadata.
 
+For applications that forward target information between components (for
+example a download backend that receives target information from another
+component that may have built it itself), ``Updater`` also provides a
+trusted download permit API:
+
+  * ``Updater.get_trusted_targetinfo()`` performs the same authenticated
+    lookup as ``get_targetinfo()`` but returns a ``TrustedTarget`` permit
+    instead of a plain ``TargetFile``.
+  * ``Updater.find_cached_trusted_target()`` and
+    ``Updater.download_trusted_target()`` only accept these permits: a permit
+    is cryptographically bound to both the exact target description that was
+    authenticated at lookup time and the ``Updater`` (trust context) that
+    issued it. Fabricated, altered or foreign permits are refused before any
+    network or cache access happens.
+
 Note that applications using ``Updater`` should be 'single instance'
 applications: running multiple instances that use the same cache directories at
 the same time is not supported.
@@ -55,8 +70,13 @@ Custom ``FetcherInterface`` implementations are possible. The alternative
 from __future__ import annotations
 
 import contextlib
+import copy
+import hashlib
+import hmac
+import json
 import logging
 import os
+import secrets
 import shutil
 import tempfile
 from pathlib import Path
@@ -73,6 +93,92 @@ if TYPE_CHECKING:
     from tuf.ngclient.fetcher import FetcherInterface
 
 logger = logging.getLogger(__name__)
+
+# Token that only this module can pass to TrustedTarget(): this prevents
+# application code from fabricating trusted download permits.
+_PERMIT_CONSTRUCTION_TOKEN = object()
+
+
+class TrustedTarget:
+    """A trusted download permit for a specific target description.
+
+    ``TrustedTarget`` instances can only be created by
+    ``Updater.get_trusted_targetinfo()``: each permit is cryptographically
+    bound to
+
+    * the exact target description (path, length, hashes and any custom
+      data) that the issuing ``Updater`` found and authenticated during the
+      lookup, and
+    * the trust context that produced it, that is the issuing ``Updater``
+      instance itself.
+
+    Unlike a plain ``TargetFile``, a ``TrustedTarget`` cannot be fabricated
+    or repurposed by application code: ``Updater.download_trusted_target()``
+    and ``Updater.find_cached_trusted_target()`` re-verify the permit before
+    any download or cache access, and refuse permits whose description was
+    altered, that were issued by another ``Updater`` (for example one
+    connected to a different repository), or that were not issued by an
+    ``Updater`` at all.
+
+    The permit is an in-memory capability: it is not serializable and is
+    only meaningful to the ``Updater`` that issued it.
+    """
+
+    __slots__ = ("_issuer", "_tag", "_targetinfo")
+
+    def __init__(
+        self,
+        targetinfo: TargetFile,
+        tag: bytes,
+        issuer: Updater,
+        *,
+        _token: object | None = None,
+    ):
+        if _token is not _PERMIT_CONSTRUCTION_TOKEN:
+            raise TypeError(
+                "TrustedTarget cannot be constructed directly: "
+                "use Updater.get_trusted_targetinfo()"
+            )
+        self._targetinfo = targetinfo
+        self._tag = tag
+        self._issuer = issuer
+
+    @property
+    def targetinfo(self) -> TargetFile:
+        """Target description this permit authorizes.
+
+        The description is informational: modifying it invalidates the
+        permit and subsequent trusted downloads will be refused.
+        """
+        return self._targetinfo
+
+    @property
+    def issuer(self) -> Updater:
+        """The ``Updater`` that issued this permit.
+
+        Only the issuer can verify the permit: permits are bound to the
+        trust context that created them.
+        """
+        return self._issuer
+
+    def authenticate(self, expected_tag: bytes) -> TargetFile:
+        """Return the bound target description if ``expected_tag`` matches.
+
+        ``expected_tag`` is computed by the issuing ``Updater`` from its
+        secret permit key: this is part of the permit verification
+        machinery and application code should not need to call it.
+
+        Raises:
+            ValueError: The permit's target description was altered
+        """
+        if not hmac.compare_digest(self._tag, expected_tag):
+            raise ValueError(
+                "Permit target description was altered: refusing to use it"
+            )
+        return self._targetinfo
+
+    def __repr__(self) -> str:
+        return f"TrustedTarget({self._targetinfo.path!r})"
 
 
 class Updater:
@@ -147,6 +253,10 @@ class Updater:
         self._persist_root(self._trusted_set.root.version, bootstrap)
         self._update_root_symlink()
 
+        # Secret used to authenticate the TrustedTarget permits issued by
+        # this updater: permits from other trust contexts will not verify
+        self._permit_key = secrets.token_bytes(32)
+
     def refresh(self) -> None:
         """Refresh top-level metadata.
 
@@ -214,12 +324,158 @@ class Updater:
             self.refresh()
         return self._preorder_depth_first_walk(target_path)
 
+    def get_trusted_targetinfo(self, target_path: str) -> TrustedTarget | None:
+        """Return a ``TrustedTarget`` download permit for ``target_path``.
+
+        This performs the same authenticated lookup as ``get_targetinfo()``,
+        but instead of a plain ``TargetFile`` returns a permit that
+        ``download_trusted_target()`` and ``find_cached_trusted_target()``
+        accept as proof that this exact target description was found and
+        authenticated by this ``Updater``.
+
+        Use this instead of ``get_targetinfo()`` whenever the target
+        information crosses a trust boundary (for example when another
+        component decides what gets downloaded): the permit guarantees that
+        only targets this client actually looked up and authenticated can be
+        downloaded or accepted from cache through the trusted API.
+
+        Args:
+            target_path: `path-relative-URL string
+                <https://url.spec.whatwg.org/#path-relative-url-string>`_
+                that uniquely identifies the target within the repository.
+
+        Raises:
+            OSError: New metadata could not be written to disk
+            RepositoryError: Metadata failed to verify in some way
+            DownloadError: Download of a metadata file failed in some way
+
+        Returns:
+            ``TrustedTarget`` permit or ``None`` if the target is not found.
+        """
+
+        targetinfo = self.get_targetinfo(target_path)
+        if targetinfo is None:
+            return None
+
+        # Snapshot the description so that later changes to the object
+        # returned by get_targetinfo() cannot affect the permit
+        snapshot = copy.deepcopy(targetinfo)
+        return TrustedTarget(
+            snapshot,
+            self._compute_permit_tag(snapshot),
+            self,
+            _token=_PERMIT_CONSTRUCTION_TOKEN,
+        )
+
+    def _compute_permit_tag(self, targetinfo: TargetFile) -> bytes:
+        """Compute the authentication tag of a permit for ``targetinfo``."""
+        canonical = json.dumps(
+            {"path": targetinfo.path, "target": targetinfo.to_dict()},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        return hmac.new(self._permit_key, canonical, hashlib.sha256).digest()
+
+    def _resolve_trusted_target(self, permit: TrustedTarget) -> TargetFile:
+        """Verify ``permit`` and return the bound target description.
+
+        Raises:
+            TypeError: ``permit`` is not a ``TrustedTarget``
+            ValueError: Permit was not issued by this ``Updater`` or its
+                target description was altered
+        """
+        if not isinstance(permit, TrustedTarget):
+            raise TypeError(
+                "Expected a TrustedTarget permit issued by "
+                "get_trusted_targetinfo(), got "
+                f"'{type(permit).__name__}': plain TargetFile objects can "
+                "only be used with download_target()/find_cached_target()"
+            )
+        if permit.issuer is not self:
+            raise ValueError(
+                "Permit was issued by a different Updater: trusted permits "
+                "are bound to the trust context that created them"
+            )
+        return permit.authenticate(self._compute_permit_tag(permit.targetinfo))
+
+    def find_cached_trusted_target(
+        self,
+        permit: TrustedTarget,
+        filepath: str | None = None,
+    ) -> str | None:
+        """Check whether a local file is an up to date permitted target.
+
+        Like ``find_cached_target()``, but only accepts a ``TrustedTarget``
+        permit issued by this ``Updater``'s ``get_trusted_targetinfo()``:
+        the permit is verified before the cache is consulted.
+
+        Args:
+            permit: ``TrustedTarget`` from ``get_trusted_targetinfo()``.
+            filepath: Local path to file. If ``None``, a file path is
+                generated based on ``target_dir`` constructor argument.
+
+        Raises:
+            TypeError: ``permit`` is not a ``TrustedTarget``
+            ValueError: Incorrect arguments, or permit verification failed
+
+        Returns:
+            Local file path if the file is an up to date target file.
+            ``None`` if file is not found or it is not up to date.
+        """
+
+        targetinfo = self._resolve_trusted_target(permit)
+        return self.find_cached_target(targetinfo, filepath)
+
+    def download_trusted_target(
+        self,
+        permit: TrustedTarget,
+        filepath: str | None = None,
+        target_base_url: str | None = None,
+    ) -> str:
+        """Download the target file authorized by ``permit``.
+
+        Like ``download_target()``, but only accepts a ``TrustedTarget``
+        permit issued by this ``Updater``'s ``get_trusted_targetinfo()``:
+        the permit is verified before any download happens, so a component
+        that can build or modify ``TargetFile`` objects cannot use this
+        entry point to download or poison the cache with anything the
+        client did not authenticate.
+
+        Args:
+            permit: ``TrustedTarget`` from ``get_trusted_targetinfo()``.
+            filepath: Local path to download into. If ``None``, the file is
+                downloaded into directory defined by ``target_dir`` constructor
+                argument using a generated filename. If file already exists,
+                it is overwritten.
+            target_base_url: Base URL used to form the final target
+                download URL. Default is the value provided in ``Updater()``
+
+        Raises:
+            TypeError: ``permit`` is not a ``TrustedTarget``
+            ValueError: Invalid arguments, or permit verification failed
+            DownloadError: Download of the target file failed in some way
+            RepositoryError: Downloaded target failed to be verified in some way
+            OSError: Failed to write target to file
+
+        Returns:
+            Local path to downloaded file
+        """
+
+        targetinfo = self._resolve_trusted_target(permit)
+        return self.download_target(targetinfo, filepath, target_base_url)
+
     def find_cached_target(
         self,
         targetinfo: TargetFile,
         filepath: str | None = None,
     ) -> str | None:
         """Check whether a local file is an up to date target.
+
+        .. note::
+            This method accepts any ``TargetFile``: the caller is
+            responsible for ensuring it comes from ``get_targetinfo()``.
+            Use ``find_cached_trusted_target()`` if the target information
+            crosses a trust boundary and this must be enforced.
 
         Args:
             targetinfo: ``TargetFile`` from ``get_targetinfo()``.
@@ -251,6 +507,12 @@ class Updater:
         target_base_url: str | None = None,
     ) -> str:
         """Download the target file specified by ``targetinfo``.
+
+        .. note::
+            This method accepts any ``TargetFile``: the caller is
+            responsible for ensuring it comes from ``get_targetinfo()``.
+            Use ``download_trusted_target()`` if the target information
+            crosses a trust boundary and this must be enforced.
 
         Args:
             targetinfo: ``TargetFile`` from ``get_targetinfo()``.
