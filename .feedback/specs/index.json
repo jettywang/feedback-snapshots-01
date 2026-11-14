@@ -1,0 +1,56 @@
+[
+  {
+    "repo": "pyrad",
+    "file": ".feedback/specs/rfc2865.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc2865.txt",
+    "sha256": "f0e29bff65ae4be6bf1511e31b02a8ab4d60d7f852c2d171ecdd8d664d0562d4"
+  },
+  {
+    "repo": "pyrad",
+    "file": ".feedback/specs/rfc2866.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc2866.txt",
+    "sha256": "b8d0fbab82c0397de674274822343765ff92a441278a4ac9308d0b087a42b08c"
+  },
+  {
+    "repo": "pyrad",
+    "file": ".feedback/specs/rfc2868.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc2868.txt",
+    "sha256": "9e25c6fb25b770d016070eb6f1209a70dd6393ad5e0bfd708753acd8d7642516"
+  },
+  {
+    "repo": "pyrad",
+    "file": ".feedback/specs/rfc3579.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc3579.txt",
+    "sha256": "9b8b209a72edf51ad74d634d556086dcbdb7fb13911d9f41b3c1ccd85f1b3cf6"
+  },
+  {
+    "repo": "pyrad",
+    "file": ".feedback/specs/rfc3748.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc3748.txt",
+    "sha256": "47b3a35dcc8b52f8e0ff67477a8d38b3d801a5478e62b9f6b3c20246428d1d74"
+  },
+  {
+    "repo": "pyrad",
+    "file": ".feedback/specs/rfc5176.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc5176.txt",
+    "sha256": "084ee4d8a99866ad6a121847861cb3eed1dd5623ef00515d0a7985fce791e958"
+  },
+  {
+    "repo": "pyrad",
+    "file": ".feedback/specs/rfc6614.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc6614.txt",
+    "sha256": "ca8de65cc14a6b37779ad99218d8cf0bd304dc289377a5068613c72427c0e8f5"
+  },
+  {
+    "repo": "pyrad",
+    "file": ".feedback/specs/rfc6929.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc6929.txt",
+    "sha256": "60b91ebf617adab6dc278dd3e86058a736426b1e6b68b319df1632aa60a5c9e1"
+  },
+  {
+    "repo": "pyrad",
+    "file": ".feedback/specs/rfc5216.txt",
+    "url": "https://www.rfc-editor.org/rfc/rfc5216.txt",
+    "sha256": "4cb073306d1fd4f33290b8e4a0ba4a985980b984d071567d624983b39de53185"
+  }
+]
