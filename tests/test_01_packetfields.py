@@ -1,5 +1,8 @@
 """ test field parsing
 """
+import hashlib
+import math
+
 import pytest
 
 import itertools
@@ -8,6 +11,8 @@ from pgpy.constants import HashAlgorithm
 from pgpy.constants import String2KeyType
 from pgpy.constants import SymmetricKeyAlgorithm
 from pgpy.constants import S2KGNUExtension
+from pgpy.errors import PGPDecryptionError
+from pgpy.packet import fields as packetfields
 from pgpy.packet.fields import String2Key
 from pgpy.packet.types import Header
 from pgpy.packet.subpackets import Signature
@@ -385,3 +390,215 @@ class TestString2Key(object):
         assert s.gnuext in S2KGNUExtension
         if s.gnuext == S2KGNUExtension.Smartcard:
             assert s.scserial is not None and len(s.scserial) <= 16
+
+
+# ---------------------------------------------------------------------------
+# Independent RFC 4880 section 3.7.1 reference used only as a test oracle.
+# It builds the fully expanded input string (the obviously-correct naive
+# formulation), deliberately without importing any PGPy S2K code path.
+# ---------------------------------------------------------------------------
+
+def _rfc4880_expanded_count(octet):
+    return (16 + (octet & 15)) << ((octet >> 4) + 6)
+
+
+def _rfc4880_s2k(specifier, hashname, salt, count_octet, passphrase, key_size):
+    prefix = b'' if specifier == String2KeyType.Simple else bytes(salt)
+    block = prefix + passphrase
+
+    if specifier == String2KeyType.Iterated:
+        expanded = _rfc4880_expanded_count(count_octet)
+        # Mirror PGPy's long-standing semantics: when the encoded count is not
+        # larger than one salt+passphrase block, the whole block is hashed once.
+        total = expanded if expanded > len(block) else len(block)
+    else:
+        total = len(block)
+
+    repeats, remainder = divmod(total, len(block)) if block else (0, 0)
+    synthesised = block * repeats + block[:remainder]
+
+    out = b''
+    context = 0
+    while len(out) < key_size // 8:
+        hasher = hashlib.new(hashname)
+        hasher.update(b'\x00' * context)
+        hasher.update(synthesised)
+        out += hasher.digest()
+        context += 1
+    return out[:key_size // 8]
+
+
+def _build_s2k(specifier, halg, encalg, salt=b'', count_octet=None):
+    s2k = String2Key()
+    s2k.usage = 254
+    s2k.specifier = specifier
+    s2k.halg = halg
+    s2k.encalg = encalg
+    if specifier >= String2KeyType.Salted:
+        s2k.salt = bytearray(salt)
+    if specifier == String2KeyType.Iterated:
+        s2k.count = count_octet
+    return s2k
+
+
+_s2k_salt = b'\x01\x02\x03\x04\x05\x06\x07\x08'
+_s2k_passphrases = [
+    '',
+    'a',
+    'password',
+    'P@ss wörd中文\U0001f600',
+    b'',
+    b'\x00\x01\xfe\xff',
+]
+_s2k_hashes = [
+    HashAlgorithm.MD5,
+    HashAlgorithm.SHA1,
+    HashAlgorithm.SHA256,
+    HashAlgorithm.SHA384,
+    HashAlgorithm.SHA512,
+    HashAlgorithm.SHA224,
+]
+_s2k_ciphers = [
+    SymmetricKeyAlgorithm.AES128,
+    SymmetricKeyAlgorithm.AES192,
+    SymmetricKeyAlgorithm.AES256,
+]
+
+
+class TestString2KeyDerivation(object):
+    @pytest.mark.parametrize('halg', _s2k_hashes)
+    @pytest.mark.parametrize('encalg', _s2k_ciphers)
+    @pytest.mark.parametrize('passphrase', _s2k_passphrases)
+    def test_simple_matches_reference(self, halg, encalg, passphrase):
+        s2k = _build_s2k(String2KeyType.Simple, halg, encalg)
+        raw = passphrase if isinstance(passphrase, bytes) else passphrase.encode('utf-8')
+
+        assert s2k.derive_key(passphrase) == \
+            _rfc4880_s2k(String2KeyType.Simple, halg.name, b'', None, raw, encalg.key_size)
+
+    @pytest.mark.parametrize('halg', _s2k_hashes)
+    @pytest.mark.parametrize('encalg', _s2k_ciphers)
+    @pytest.mark.parametrize('passphrase', _s2k_passphrases)
+    def test_salted_matches_reference(self, halg, encalg, passphrase):
+        s2k = _build_s2k(String2KeyType.Salted, halg, encalg, _s2k_salt)
+        raw = passphrase if isinstance(passphrase, bytes) else passphrase.encode('utf-8')
+
+        assert s2k.derive_key(passphrase) == \
+            _rfc4880_s2k(String2KeyType.Salted, halg.name, _s2k_salt, None, raw, encalg.key_size)
+
+    @pytest.mark.parametrize('halg', _s2k_hashes)
+    @pytest.mark.parametrize('encalg', _s2k_ciphers)
+    @pytest.mark.parametrize('passphrase', _s2k_passphrases)
+    @pytest.mark.parametrize('count_octet', [0x00, 0x01, 0x10, 0x40, 0x80, 0xff])
+    def test_iterated_matches_reference(self, halg, encalg, passphrase, count_octet):
+        s2k = _build_s2k(String2KeyType.Iterated, halg, encalg, _s2k_salt, count_octet)
+        raw = passphrase if isinstance(passphrase, bytes) else passphrase.encode('utf-8')
+
+        assert s2k.derive_key(passphrase) == \
+            _rfc4880_s2k(String2KeyType.Iterated, halg.name, _s2k_salt,
+                         count_octet, raw, encalg.key_size)
+
+    def test_count_smaller_than_one_round_keeps_full_block(self):
+        # count (2048) is smaller than the salt+passphrase block length here.
+        passphrase = 'z' * 5000
+        s2k = _build_s2k(String2KeyType.Iterated, HashAlgorithm.SHA256,
+                         SymmetricKeyAlgorithm.AES256, _s2k_salt, 0x10)
+        raw = passphrase.encode('utf-8')
+
+        assert s2k.derive_key(passphrase) == \
+            _rfc4880_s2k(String2KeyType.Iterated, 'sha256', _s2k_salt, 0x10,
+                         raw, SymmetricKeyAlgorithm.AES256.key_size)
+
+    @pytest.mark.parametrize('encalg', [SymmetricKeyAlgorithm.AES192, SymmetricKeyAlgorithm.AES256])
+    @pytest.mark.parametrize('halg', [HashAlgorithm.SHA1, HashAlgorithm.MD5])
+    def test_output_spanning_multiple_digest_blocks(self, halg, encalg):
+        # A key longer than one digest forces more than one hash context.
+        contexts = int(math.ceil(encalg.key_size / (halg.digest_size * 8)))
+        assert contexts >= 2
+        s2k = _build_s2k(String2KeyType.Iterated, halg, encalg, _s2k_salt, 0x40)
+
+        key = s2k.derive_key('multi-block')
+        assert len(key) == encalg.key_size // 8
+        assert key == _rfc4880_s2k(String2KeyType.Iterated, halg.name, _s2k_salt,
+                                   0x40, b'multi-block', encalg.key_size)
+
+    def test_empty_passphrase_does_not_crash(self):
+        # Simple S2K with an empty passphrase previously raised ZeroDivisionError.
+        simple = _build_s2k(String2KeyType.Simple, HashAlgorithm.SHA256,
+                            SymmetricKeyAlgorithm.AES256)
+        assert simple.derive_key('') == hashlib.sha256(b'').digest()
+
+        salted = _build_s2k(String2KeyType.Salted, HashAlgorithm.SHA256,
+                            SymmetricKeyAlgorithm.AES256, _s2k_salt)
+        assert salted.derive_key('') == hashlib.sha256(_s2k_salt).digest()
+
+    def test_non_ascii_uses_utf8(self):
+        s2k = _build_s2k(String2KeyType.Iterated, HashAlgorithm.SHA256,
+                         SymmetricKeyAlgorithm.AES128, _s2k_salt, 0x20)
+        text = 'kéy中\U0001f511'
+        assert s2k.derive_key(text) == s2k.derive_key(text.encode('utf-8'))
+
+    def test_incremental_feed_never_materialises_expanded_string(self):
+        # A max-count specifier expands to ~62 MiB per context; peak working
+        # memory must stay bounded by the fixed feed chunk instead.
+        s2k = _build_s2k(String2KeyType.Iterated, HashAlgorithm.SHA256,
+                         SymmetricKeyAlgorithm.AES256, _s2k_salt, 0xff)
+
+        largest_update = []
+        real_hasher = s2k.halg.hasher
+
+        class _RecordingHasher(object):
+            def __init__(self):
+                self._hasher = real_hasher.copy()
+
+            def update(self, data):
+                largest_update.append(len(data))
+                self._hasher.update(data)
+
+            def digest(self):
+                return self._hasher.digest()
+
+        class _RecordingHash(object):
+            digest_size = HashAlgorithm.SHA256.digest_size
+            name = 'sha256'
+
+            @property
+            def hasher(self):
+                return _RecordingHasher()
+
+        s2k._halg = _RecordingHash()
+        derived = s2k.derive_key('pw')
+
+        assert max(largest_update) <= packetfields._S2K_FEED_CHUNK
+        assert derived == _rfc4880_s2k(String2KeyType.Iterated, 'sha256', _s2k_salt,
+                                       0xff, b'pw', SymmetricKeyAlgorithm.AES256.key_size)
+
+    def test_chunking_is_offset_continuous_across_chunks(self, monkeypatch):
+        # Force many tiny chunks so a ring that restarts at offset zero would
+        # corrupt the result; continuity must reproduce the reference exactly.
+        monkeypatch.setattr(packetfields, '_S2K_FEED_CHUNK', 7)
+        s2k = _build_s2k(String2KeyType.Iterated, HashAlgorithm.SHA256,
+                         SymmetricKeyAlgorithm.AES256, _s2k_salt, 0x40)
+        assert s2k.derive_key('continuous') == \
+            _rfc4880_s2k(String2KeyType.Iterated, 'sha256', _s2k_salt, 0x40,
+                         b'continuous', SymmetricKeyAlgorithm.AES256.key_size)
+
+    def test_count_policy_checked_before_any_hashing(self, monkeypatch):
+        s2k = _build_s2k(String2KeyType.Iterated, HashAlgorithm.SHA256,
+                         SymmetricKeyAlgorithm.AES256, _s2k_salt, 0xff)
+
+        def _boom(self, hasher, block, total):  # pragma: no cover - must never run
+            raise AssertionError('hashing started before the count policy check')
+
+        monkeypatch.setattr(packetfields, '_S2K_MAX_COUNT', 1024)
+        monkeypatch.setattr(String2Key, '_feed_s2k_input', _boom)
+
+        with pytest.raises(PGPDecryptionError):
+            s2k.derive_key('pw')
+
+    def test_legal_max_count_is_accepted(self):
+        s2k = _build_s2k(String2KeyType.Iterated, HashAlgorithm.SHA256,
+                         SymmetricKeyAlgorithm.AES256, _s2k_salt, 0xff)
+        # count byte 255 expands exactly to the RFC maximum and must pass.
+        assert s2k.count == packetfields._S2K_MAX_COUNT
+        assert len(s2k.derive_key('pw')) == SymmetricKeyAlgorithm.AES256.key_size // 8

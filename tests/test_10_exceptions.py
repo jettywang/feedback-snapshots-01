@@ -10,6 +10,7 @@ from pgpy import PGPKeyring
 from pgpy import PGPMessage
 from pgpy import PGPSignature
 from pgpy import PGPUID
+from pgpy.constants import CompressionAlgorithm
 from pgpy.constants import EllipticCurveOID
 from pgpy.constants import HashAlgorithm
 from pgpy.constants import KeyFlags
@@ -181,6 +182,28 @@ class TestPGPKey(object):
         with pytest.raises(PGPDecryptionError):
             with rsa_enc.unlock('ClearlyTheWrongPassword'):
                 pass
+
+    def test_wrong_passphrase_leaves_no_decrypted_material(self, rsa_enc):
+        keymaterial = rsa_enc._key.keymaterial
+        assert rsa_enc.is_unlocked is False
+
+        with pytest.raises(PGPDecryptionError):
+            with rsa_enc.unlock('ClearlyTheWrongPassword'):
+                pass
+
+        # the rejected attempt must not leave any partially decrypted private MPI
+        assert rsa_enc.is_unlocked is False
+        assert all(int(getattr(keymaterial, name)) == 0
+                   for name in keymaterial.__privfields__)
+
+    def test_passphrase_message_roundtrip_uses_bounded_s2k(self):
+        plaintext = 'roundtrip 中文 \U0001f511'
+        message = PGPMessage.new(plaintext, compression=CompressionAlgorithm.ZLIB)
+        encrypted = PGPMessage.encrypt(message, passphrase='QwertyUiop',
+                                       cipher=SymmetricKeyAlgorithm.AES256,
+                                       hash=HashAlgorithm.SHA256)
+        decrypted = encrypted.decrypt(passphrase='QwertyUiop')
+        assert decrypted.message == plaintext
 
     def test_sign_protected_key(self, rsa_enc):
         with pytest.raises(PGPError), warnings.catch_warnings():

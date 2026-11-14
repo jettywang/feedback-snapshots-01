@@ -102,6 +102,15 @@ __all__ = ['SubPackets',
            'ElGCipherText',
            'ECDHCipherText', ]
 
+# Largest expanded iteration count an iterated-and-salted S2K specifier can
+# legally encode, per RFC 4880 section 3.7.1.3 (count byte 255 -> 65011712).
+_S2K_MAX_COUNT = 65011712
+
+# Maximum size of a single temporary buffer used while streaming data into a
+# hash context.  Peak working memory therefore stays bounded by this value plus
+# the salt+passphrase block and the hash contexts, regardless of the count.
+_S2K_FEED_CHUNK = 1 << 16
+
 
 class SubPackets(collections_abc.MutableMapping, Field):
     _spmodule = signature
@@ -1021,40 +1030,74 @@ class String2Key(Field):
 
         ctx = int(math.ceil((keylen / hashlen)))
 
-        # Simple S2K - always done
-        hsalt = b''
+        # passphrase is hashed as its UTF-8 encoding (RFC 4880 3.7.1)
         if isinstance(passphrase, bytes):
             hpass = passphrase
         else:
             hpass = passphrase.encode('utf-8')
 
-        # salted, iterated S2K
+        # Build the single salt+passphrase block that defines each S2K form.
+        # Simple S2K feeds just the passphrase; salted and iterated-salted S2K
+        # prepend the eight salt octets.
         if self.specifier >= String2KeyType.Salted:
-            hsalt = bytes(self.salt)
+            block = bytes(self.salt) + hpass
+        else:
+            block = hpass
 
-        count = len(hsalt + hpass)
-        if self.specifier == String2KeyType.Iterated and self.count > len(hsalt + hpass):
-            count = self.count
+        # The number of block octets streamed into every hash context.  This is
+        # resolved up front so an invalid count is rejected before any of the
+        # potentially expensive hashing work begins.
+        if self.specifier == String2KeyType.Iterated:
+            if self.count > _S2K_MAX_COUNT:
+                raise PGPDecryptionError(
+                    "S2K iteration count {0} exceeds the maximum permitted value {1}".format(
+                        self.count, _S2K_MAX_COUNT))
+            total = self.count if self.count > len(block) else len(block)
+        else:
+            total = len(block)
 
-        hcount = (count // len(hsalt + hpass))
-        hleft = count - (hcount * len(hsalt + hpass))
-
-        hashdata = ((hsalt + hpass) * hcount) + (hsalt + hpass)[:hleft]
-
-        h = []
+        # One hash context per digest block, each prefixed with its zero octets
+        # and fed the synthesised input incrementally.  The expanded byte string
+        # is never materialised, so peak memory stays independent of the count.
+        digests = []
         for i in range(0, ctx):
-            _h = self.halg.hasher
-            _h.update(b'\x00' * i)
-            _h.update(hashdata)
-            h.append(_h)
+            hasher = self.halg.hasher
+            hasher.update(b'\x00' * i)
+            self._feed_s2k_input(hasher, block, total)
+            digests.append(hasher.digest())
 
-        # GC some stuff
-        del hsalt
-        del hpass
-        del hashdata
+        return b''.join(digests)[:(keylen // 8)]
 
-        # and return the key!
-        return b''.join(hc.digest() for hc in h)[:(keylen // 8)]
+    @staticmethod
+    def _feed_s2k_input(hasher, block, total):
+        """Stream ``total`` octets of the repeating ``block`` into ``hasher``.
+
+        The iterated-and-salted construction reuses the salt+passphrase block as
+        a ring rather than allocating the full expanded string.  Feeding fixed
+        size chunks keeps the largest temporary buffer bounded while still
+        producing exactly the same hash input as the naive concatenation.
+        """
+        if total <= 0 or not block:
+            return
+
+        blocklen = len(block)
+        remaining = total
+        offset = 0
+        while remaining:
+            size = min(remaining, _S2K_FEED_CHUNK)
+
+            # Slice from the current ring position, wrapping around as needed.
+            piece = block[offset:offset + size]
+            if len(piece) < size:
+                need = size - len(piece)
+                repeats, tail = divmod(need, blocklen)
+                piece = piece + block * repeats
+                if tail:
+                    piece = piece + block[:tail]
+            hasher.update(piece)
+
+            remaining -= size
+            offset = (offset + size) % blocklen
 
 
 class ECKDF(Field):
@@ -1261,11 +1304,13 @@ class PrivKey(PubKey):
         if self.s2k.usage == 254 and not pt[-20:] == hashlib.new('sha1', pt[:-20]).digest():
             # if the usage byte is 254, key material is followed by a 20-octet sha-1 hash of the rest
             # of the key material block
+            self.clear()
             raise PGPDecryptionError("Passphrase was incorrect!")
 
         if self.s2k.usage == 255 and not self.bytes_to_int(pt[-2:]) == (sum(bytearray(pt[:-2])) % 65536):  # pragma: no cover
             # if the usage byte is 255, key material is followed by a 2-octet checksum of the rest
             # of the key material block
+            self.clear()
             raise PGPDecryptionError("Passphrase was incorrect!")
 
         return bytearray(pt)
