@@ -1,0 +1,9 @@
+From: "CEO" <ceo@example.com>
+From: alice@example.com
+To: carol@example.com
+Reply-To: attacker@evil.example
+Subject: Wire transfer details
+Date: Sat, 14 Nov 2026 10:15:00 +0000
+Message-ID: <m4@example.com>
+
+Please see the attached report.

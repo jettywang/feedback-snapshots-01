@@ -1,0 +1,14 @@
+Received: from mx1.example.com by archive.example.com;
+ Sat, 14 Nov 2026 10:12:03 +0000
+Received: from mail.example.com by mx1.example.com;
+ Sat, 14 Nov 2026 10:11:58 +0000
+From: alice@example.com
+To: carol@example.com
+Subject: Launch
+  plan
+Date: Sat, 14 Nov 2026 10:10:00 +0000
+Message-ID: <m3@example.com>
+X-Spam-Score: 0.1
+X-Confidential-Note: *** replaced by DCA ***
+
+Please see the attached report.
