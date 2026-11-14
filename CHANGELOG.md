@@ -3,6 +3,11 @@ Detailed CHANGELOG
 
 olefile.py
 ----------
+* 2026-11-15 v0.48.dev1:
+    - added module olefile.forensic with revise_streams_copy: forensic-grade
+      multi-stream revision on an independent verified copy (allocation
+      audit, read-back verification, non-target region check, atomic
+      publish), based on write_stream
 * 2023-11-30 v0.47.dev6:
     - fixed issue #142: isOleFile has a new data parameter to handle files in memory properly
     - fixed issue #156: write_sect now correctly detects when data is larger than the sector size
