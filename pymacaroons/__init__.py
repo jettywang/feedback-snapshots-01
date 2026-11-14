@@ -1,3 +1,11 @@
+from .access import (
+    RequestContext,
+    canonicalize_path,
+    expires_caveat,
+    method_caveat,
+    resource_caveat,
+    restrict,
+)
 from .caveat import Caveat
 from .macaroon import Macaroon
 from .macaroon import MACAROON_V1
@@ -10,7 +18,13 @@ __all__ = [
     'Caveat',
     'Verifier',
     'MACAROON_V1',
-    'MACAROON_V2'
+    'MACAROON_V2',
+    'RequestContext',
+    'canonicalize_path',
+    'resource_caveat',
+    'method_caveat',
+    'expires_caveat',
+    'restrict',
 ]
 
 

@@ -143,6 +143,15 @@ class Macaroon(object):
             self, predicate, **kwargs
         )
 
+    def add_access_caveat(self, resource=None, method=None, expires=None):
+        from pymacaroons.access import restrict
+        return restrict(
+            self,
+            resource=resource,
+            method=method,
+            expires=expires,
+        )
+
     def add_third_party_caveat(self, location, key, key_id, **kwargs):
         return self.third_party_caveat_delegate.add_third_party_caveat(
             self, location, key, key_id, **kwargs

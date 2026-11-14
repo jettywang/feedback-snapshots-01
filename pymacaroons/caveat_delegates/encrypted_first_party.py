@@ -53,6 +53,4 @@ class EncryptedFirstPartyCaveatVerifierDelegate(
                     predicate
                 )
 
-        caveat_met = sum(callback(predicate)
-                         for callback in verifier.callbacks)
-        return caveat_met
+        return verifier._predicate_met(predicate)

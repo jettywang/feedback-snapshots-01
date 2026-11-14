@@ -34,6 +34,17 @@ The project is licensed under the MIT license.
 
 .. comment: split here
 
+Structured access caveats
+-------------------------
+
+The ``access`` namespace adds interpreter-owned constraints for a resource
+scope (``access.resource``), an HTTP method (``access.method``), and a UTC
+deadline (``access.expires``). Each predicate has exactly one interpreter;
+unknown or malformed constraints are rejected and never fall through to
+``satisfy_general`` callbacks. Appending another caveat for the same field
+intersects with earlier values. See the "Structured access caveats" section
+of the README for usage.
+
 Contents:
 
 .. toctree::

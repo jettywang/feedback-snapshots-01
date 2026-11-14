@@ -6,8 +6,16 @@ try:
 except ImportError:
     from pymacaroons.utils import equals as constant_time_compare
 
+from pymacaroons.access import (
+    RequestContext,
+    StructuredCaveatVerifier,
+)
 from pymacaroons.binders import HashSignaturesBinder
-from pymacaroons.exceptions import MacaroonInvalidSignatureException
+from pymacaroons.exceptions import (
+    MacaroonAccessException,
+    MacaroonInvalidSignatureException,
+    MacaroonUnmetCaveatException,
+)
 from pymacaroons.caveat_delegates import (
     FirstPartyCaveatVerifierDelegate,
     ThirdPartyCaveatVerifierDelegate,
@@ -34,6 +42,7 @@ class Verifier(object):
                 discharge_macaroons=discharge_macaroons
             )
         )
+        self.structured_caveat_verifier = StructuredCaveatVerifier()
 
     def satisfy_exact(self, predicate):
         if predicate is None:
@@ -45,8 +54,49 @@ class Verifier(object):
             raise TypeError('General caveat verifiers must be callable.')
         self.callbacks.append(func)
 
+    def satisfy_access(self, method, path, now):
+        '''Set the single request context used for structured caveats.
+
+        ``path`` must be the request path before any proxy or framework
+        re-decoding; percent-encoding is decoded exactly once here.
+        '''
+        self.set_request_context(RequestContext(method, path, now))
+        return self
+
+    def set_request_context(self, request_context):
+        if not isinstance(request_context, RequestContext):
+            raise TypeError(
+                'Request context must be a RequestContext instance.'
+            )
+        self.structured_caveat_verifier = StructuredCaveatVerifier(
+            request_context
+        )
+
     def verify_exact(self, predicate):
         return predicate in self.predicates
+
+    def _predicate_met(self, predicate):
+        '''Evaluate a first-party predicate exactly once.
+
+        Structured predicates are owned by their interpreter and never fall
+        through to general callbacks, even when a callback would accept
+        everything.
+        '''
+        if self.structured_caveat_verifier.claims(predicate):
+            try:
+                satisfied = self.structured_caveat_verifier.check(predicate)
+            except MacaroonAccessException as error:
+                raise MacaroonUnmetCaveatException(
+                    'Structured caveat rejected: {0} ({1})'.format(
+                        predicate, error
+                    )
+                )
+            if not satisfied:
+                raise MacaroonUnmetCaveatException(
+                    'Structured caveat not satisfied: {0}'.format(predicate)
+                )
+            return True
+        return sum(callback(predicate) for callback in self.callbacks)
 
     def verify(self, macaroon, key):
         key = generate_derived_key(convert_to_bytes(key))

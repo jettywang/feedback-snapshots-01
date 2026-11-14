@@ -38,9 +38,7 @@ class FirstPartyCaveatVerifierDelegate(BaseFirstPartyCaveatVerifierDelegate):
 
     def verify_first_party_caveat(self, verifier, caveat, signature):
         predicate = convert_to_string(caveat.caveat_id)
-        caveat_met = sum(callback(predicate)
-                         for callback in verifier.callbacks)
-        return caveat_met
+        return verifier._predicate_met(predicate)
 
     def update_signature(self, signature, caveat):
         return binascii.unhexlify(

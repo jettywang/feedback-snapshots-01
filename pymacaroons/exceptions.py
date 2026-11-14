@@ -24,3 +24,15 @@ class MacaroonSerializationException(MacaroonException):
 
 class MacaroonDeserializationException(MacaroonException):
     pass
+
+
+class MacaroonAccessException(MacaroonException):
+    pass
+
+
+class MacaroonAccessCaveatException(MacaroonAccessException):
+    pass
+
+
+class MacaroonAccessContextException(MacaroonAccessException):
+    pass

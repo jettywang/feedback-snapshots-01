@@ -98,6 +98,84 @@ verified = v.verify(
 # all caveats were met
 ```
 
+## Structured access caveats
+
+The core library keeps `satisfy_general` callbacks for application predicates
+such as `picture_id = bobs_cool_cat.jpg`. Access constraints that a backend
+must enforce against a request are expressed through a small, closed
+structured layer instead. Its predicates use a reserved `access.` namespace:
+
+| Predicate | Meaning |
+| --- | --- |
+| `access.resource = /v1/documents` | Request path is that path or a descendant of it |
+| `access.method = GET` | Request method is exactly `GET` |
+| `access.expires = 2026-11-14T13:00:00Z` | Request time is at or before this UTC deadline |
+
+Every predicate is handled by exactly one interpreter. Unknown fields,
+malformed syntax, invalid methods, and timestamps without a UTC offset are
+rejected when the caveat is issued and again when it is verified. A structured
+caveat is never handed to a general callback, even one that returns `True`
+for everything.
+
+### Issuing and attenuating
+
+```python
+import datetime
+from pymacaroons import Macaroon, Verifier
+
+m = Macaroon(
+    location='https://api.example.test/',
+    identifier='key-for-bob',
+    key='issuer secret',
+)
+
+# A resource scope, a method, and a deadline in one call.
+m.add_access_caveat(
+    resource='/v1/documents',
+    method='GET',
+    expires=datetime.datetime(2026, 11, 14, 13, 0, tzinfo=datetime.timezone.utc),
+)
+
+# Delegation can only narrow access. Each predicate is evaluated
+# independently, so appending another value for the same field intersects
+# with the earlier one instead of replacing it.
+delegated = m.copy()
+delegated.add_access_caveat(resource='/v1/documents/42')
+delegated.add_access_caveat(method='HEAD')
+```
+
+`resource_caveat()`, `method_caveat()`, and `expires_caveat()` are exported
+if individual predicates are preferred over `add_access_caveat()`.
+
+### Verifying
+
+The backend constructs one `RequestContext` per request and passes it to the
+`Verifier`. It owns proxy/forwarded-header resolution and gives the verifier
+the path exactly as received, before any framework re-decoding.
+
+```python
+verifier = Verifier()
+verifier.satisfy_access(
+    method='HEAD',
+    path='/v1/documents/42',
+    now=datetime.datetime(2026, 11, 14, 12, 0, tzinfo=datetime.timezone.utc),
+)
+verifier.verify(delegated, 'issuer secret')
+```
+
+`RequestContext` is immutable and canonicalizes both issue-time and
+request-time paths the same way: percent-encoding is decoded exactly once,
+then dot segments, empty segments, encoded path delimiters (`%2F`, `%5C`,
+`%00`, ...), double encoding, and non-UTF-8 input are rejected. A malformed
+request path fails closed rather than being reinterpreted by a callback.
+
+The expiry boundary is inclusive at microsecond resolution: `now <=
+expires` succeeds and one microsecond later fails.
+
+See `examples/access_attenuation.py` for a runnable demonstration of
+progressive narrowing, conflicting methods, encoded paths, and the deadline
+boundary.
+
 ## Documentation
 
 The latest documentation can always be found on [ReadTheDocs](http://pymacaroons.readthedocs.org/en/latest/).
