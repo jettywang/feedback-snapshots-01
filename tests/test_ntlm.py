@@ -7,6 +7,7 @@ import os
 import pathlib
 import re
 import socket
+import typing
 
 import pytest
 
@@ -15,7 +16,7 @@ import spnego._ntlm as ntlm
 import spnego.channel_bindings
 import spnego.iov
 from spnego._credential import CredentialCache
-from spnego._ntlm_raw.crypto import md4
+from spnego._ntlm_raw.crypto import compute_response_v1, hmac_md5, lmowfv1, md4, ntowfv1
 from spnego._ntlm_raw.messages import (
     Authenticate,
     AvId,
@@ -1004,3 +1005,419 @@ def test_ntlm_iov_unwrapping_as_stream(ntlm_cred):
     assert res4.qop == 0
     assert len(res4.buffers) == 2
     assert res4.buffers[1].data == b"data"
+
+
+# NTLM flag negotiation regression tests. These build real challenge responses with the Python initiator and then
+# exercise what the acceptor does with the flags it receives in the Authenticate message.
+_NTLM_FLAG_CAPABILITIES = {
+    "sign": NegotiateFlags.sign,
+    "seal": NegotiateFlags.seal,
+    "key_exch": NegotiateFlags.key_exch,
+    "extended_session_security": NegotiateFlags.extended_session_security,
+    "key_128": NegotiateFlags.key_128,
+    "key_56": NegotiateFlags.key_56,
+    "lm_key": NegotiateFlags.lm_key,
+}
+_NTLM_CONTEXT_CAPABILITY_MASK = int(
+    NegotiateFlags.sign
+    | NegotiateFlags.seal
+    | NegotiateFlags.key_exch
+    | NegotiateFlags.extended_session_security
+    | NegotiateFlags.key_128
+    | NegotiateFlags.key_56
+    | NegotiateFlags.lm_key
+)
+
+
+def _ntlm_flag_exchange(
+    credentials: typing.Tuple[str, str],
+    request_flags: int,
+) -> typing.Tuple[spnego.ContextProxy, spnego.ContextProxy, Negotiate, Challenge, Authenticate]:
+    """Runs a real NTLM exchange and returns the 3 messages with the two contexts."""
+    c = spnego.client(
+        credentials[0],
+        credentials[1],
+        hostname=socket.gethostname(),
+        options=spnego.NegotiateOptions.use_ntlm,
+        protocol="ntlm",
+    )
+    s = spnego.server(options=spnego.NegotiateOptions.use_ntlm, protocol="ntlm")
+    c._context_req = request_flags
+
+    b_negotiate = c.step()
+    b_challenge = s.step(b_negotiate)
+    b_authenticate = c.step(b_challenge)
+
+    return (
+        c,
+        s,
+        Negotiate.unpack(b_negotiate),
+        Challenge.unpack(b_challenge),
+        Authenticate.unpack(b_authenticate),
+    )
+
+
+def _ntlm_rebuild_authenticate(
+    auth: Authenticate,
+    flags: int,
+    session_key: bytes,
+    negotiate: Negotiate,
+    challenge: Challenge,
+) -> bytes:
+    """Rebuilds an Authenticate message with arbitrary self-declared flags and a valid MIC.
+
+    The MIC is computed with the session key the initiator really derived so the only thing the acceptor can use to
+    reject the message is the flag validation itself.
+    """
+    new_auth = Authenticate(
+        flags=flags,
+        lm_challenge_response=auth.lm_challenge_response,
+        nt_challenge_response=auth.nt_challenge_response,
+        domain_name=auth.domain_name,
+        username=auth.user_name,
+        workstation=auth.workstation,
+        encrypted_session_key=auth.encrypted_random_session_key,
+        version=auth.version,
+    )
+    new_auth.flags = flags
+    new_auth.mic = b"\x00" * 16
+    new_auth.mic = hmac_md5(session_key, negotiate.pack() + challenge.pack() + new_auth.pack())
+    return new_auth.pack()
+
+
+def _ntlm_assert_bidirectional_crypto(
+    client: spnego.ContextProxy,
+    server: spnego.ContextProxy,
+    sign: bool,
+    seal: bool,
+) -> None:
+    """Checks the established context really supports the capabilities it exported, in both directions."""
+    data = os.urandom(32)
+
+    if seal:
+        s_wrap = server.wrap(data)
+        assert s_wrap.encrypted
+        assert s_wrap.data[16:] != data
+        assert client.unwrap(s_wrap.data).data == data
+
+        c_wrap = client.wrap(data)
+        assert c_wrap.encrypted
+        assert c_wrap.data[16:] != data
+        assert server.unwrap(c_wrap.data).data == data
+
+    if sign:
+        c_sig = client.sign(data)
+        server.verify(data, c_sig)
+
+        s_sig = server.sign(data)
+        client.verify(data, s_sig)
+
+    if sign or seal:
+        expected = 0
+        if sign:
+            expected |= spnego.ContextReq.integrity
+            expected |= spnego.ContextReq.replay_detect
+            expected |= spnego.ContextReq.sequence_detect
+        if seal:
+            expected |= spnego.ContextReq.confidentiality
+
+        assert server.context_attr == expected
+        assert client.context_attr == expected
+
+
+@pytest.mark.parametrize(
+    "capabilities",
+    [
+        pytest.param(names, id="-".join(names) or "plain")
+        for names in [
+            [],
+            ["sign"],
+            ["seal"],
+            ["sign", "seal"],
+            ["key_exch"],
+            ["sign", "key_exch"],
+            ["sign", "seal", "key_exch"],
+            ["extended_session_security", "sign", "seal", "key_exch"],
+            ["extended_session_security", "sign", "seal", "key_exch", "key_128"],
+            ["extended_session_security", "sign", "seal", "key_exch", "key_56"],
+        ]
+    ],
+)
+def test_ntlm_negotiated_capabilities_consistent(capabilities, ntlm_cred):
+    """A legitimate exchange only enables the capabilities both parties advertised."""
+    request_flags = int(NegotiateFlags.unicode | NegotiateFlags.ntlm | NegotiateFlags.request_target)
+    for name in capabilities:
+        request_flags |= int(_NTLM_FLAG_CAPABILITIES[name])
+
+    c, s, negotiate, challenge, auth = _ntlm_flag_exchange(ntlm_cred, request_flags)
+
+    # The capability flags the initiator reports must be a subset of what both parties advertised.
+    negotiated_capabilities = int(negotiate.flags & challenge.flags) & _NTLM_CONTEXT_CAPABILITY_MASK
+    assert int(auth.flags) & _NTLM_CONTEXT_CAPABILITY_MASK & ~negotiated_capabilities == 0
+
+    s.step(auth.pack())
+
+    assert c.complete
+    assert s.complete
+    assert c.session_key == s.session_key
+
+    _ntlm_assert_bidirectional_crypto(
+        c,
+        s,
+        sign=bool(auth.flags & NegotiateFlags.sign),
+        seal=bool(auth.flags & NegotiateFlags.seal),
+    )
+
+
+@pytest.mark.parametrize(
+    "capability",
+    [
+        "sign",
+        "seal",
+        "key_exch",
+        "extended_session_security",
+        "key_128",
+        "key_56",
+        "lm_key",
+    ],
+)
+def test_ntlm_authenticate_rejects_unnegotiated_capability(capability, ntlm_cred):
+    """An Authenticate message cannot self-declare a capability the Challenge never advertised."""
+    request_flags = int(NegotiateFlags.unicode | NegotiateFlags.ntlm | NegotiateFlags.request_target)
+    flag = _NTLM_FLAG_CAPABILITIES[capability]
+
+    c, s, negotiate, challenge, auth = _ntlm_flag_exchange(ntlm_cred, request_flags)
+    assert not (challenge.flags & flag)
+
+    forged = int(auth.flags) | int(flag)
+    msg = _ntlm_rebuild_authenticate(auth, forged, c.session_key, negotiate, challenge)
+
+    with pytest.raises(InvalidTokenError, match="not negotiated by both parties"):
+        s.step(msg)
+
+    # The rejected context must not become usable and must not expose the self-declared capability.
+    assert not s.complete
+    assert s.context_attr == spnego.ContextReq.none
+
+
+@pytest.mark.parametrize(
+    "challenge_clear, capability",
+    [
+        (NegotiateFlags.sign, "sign"),
+        (NegotiateFlags.seal, "seal"),
+        (NegotiateFlags.key_exch, "key_exch"),
+        (NegotiateFlags.extended_session_security, "extended_session_security"),
+        (NegotiateFlags.key_128, "key_128"),
+        (NegotiateFlags.key_56, "key_56"),
+    ],
+)
+def test_ntlm_authenticate_rejects_capability_not_in_challenge(challenge_clear, capability, ntlm_cred):
+    """A client that offered a capability still cannot use it if the acceptor removed it from the Challenge."""
+    request_flags = int(
+        NegotiateFlags.unicode
+        | NegotiateFlags.ntlm
+        | NegotiateFlags.request_target
+        | NegotiateFlags.sign
+        | NegotiateFlags.seal
+        | NegotiateFlags.key_exch
+        | NegotiateFlags.extended_session_security
+        | NegotiateFlags.key_128
+        | NegotiateFlags.key_56
+    )
+    flag = _NTLM_FLAG_CAPABILITIES[capability]
+
+    c, s, negotiate, challenge, auth = _ntlm_flag_exchange(ntlm_cred, request_flags)
+    assert challenge.flags & flag
+
+    # Replay just the Challenge stage through a fresh client with the capability stripped, this is what the acceptor
+    # would have sent if it did not support the capability.
+    stripped_flags = int(challenge.flags) & ~int(challenge_clear)
+    b_challenge = Challenge.unpack(challenge.pack())
+    b_challenge.flags = stripped_flags
+    b_challenge = b_challenge.pack()
+
+    c = spnego.client(
+        ntlm_cred[0],
+        ntlm_cred[1],
+        hostname=socket.gethostname(),
+        options=spnego.NegotiateOptions.use_ntlm,
+        protocol="ntlm",
+    )
+    c._context_req = request_flags
+    b_negotiate = c.step()
+    negotiate = Negotiate.unpack(b_negotiate)
+    b_authenticate = c.step(b_challenge)
+    auth = Authenticate.unpack(b_authenticate)
+    challenge = Challenge.unpack(b_challenge)
+
+    s = spnego.server(options=spnego.NegotiateOptions.use_ntlm, protocol="ntlm")
+    s.step(b_negotiate)
+    s._temp_challenge = Challenge.unpack(b_challenge)
+
+    # The initiator echoes the stripped Challenge, so re-add the flag it thinks it negotiated.
+    forged = int(auth.flags) | int(flag)
+    msg = _ntlm_rebuild_authenticate(auth, forged, c.session_key, negotiate, challenge)
+
+    with pytest.raises(InvalidTokenError, match="not negotiated by both parties"):
+        s.step(msg)
+
+    assert not s.complete
+
+
+def test_ntlm_authenticate_rejects_full_escalation(ntlm_cred):
+    """The minimal repro for the reported issue: a rogue initiator grants itself every crypto capability."""
+    request_flags = int(NegotiateFlags.unicode | NegotiateFlags.ntlm | NegotiateFlags.request_target)
+
+    c, s, negotiate, challenge, auth = _ntlm_flag_exchange(ntlm_cred, request_flags)
+    assert not (challenge.flags & (NegotiateFlags.sign | NegotiateFlags.seal | NegotiateFlags.key_exch))
+
+    forged = int(
+        auth.flags
+        | NegotiateFlags.sign
+        | NegotiateFlags.seal
+        | NegotiateFlags.key_exch
+        | NegotiateFlags.extended_session_security
+        | NegotiateFlags.key_128
+    )
+    msg = _ntlm_rebuild_authenticate(auth, forged, c.session_key, negotiate, challenge)
+
+    with pytest.raises(InvalidTokenError, match="not negotiated by both parties"):
+        s.step(msg)
+
+    assert not s.complete
+    assert s.context_attr == spnego.ContextReq.none
+    with pytest.raises(OperationNotAvailableError):
+        s.wrap(b"data")
+
+
+def test_ntlm_authenticate_accepts_flags_different_from_negotiate(ntlm_cred):
+    """The validation must not require the Negotiate, Challenge and Authenticate flags to be identical.
+
+    The acceptor adds flags like target_info and target_type_server to the Challenge and removes oem in favour of
+    unicode, so a legitimate exchange has 3 different flag values.
+    """
+    request_flags = int(
+        NegotiateFlags.unicode
+        | NegotiateFlags.oem
+        | NegotiateFlags.ntlm
+        | NegotiateFlags.request_target
+        | NegotiateFlags.sign
+        | NegotiateFlags.seal
+        | NegotiateFlags.key_exch
+        | NegotiateFlags.extended_session_security
+        | NegotiateFlags.key_128
+        | NegotiateFlags.key_56
+    )
+
+    c, s, negotiate, challenge, auth = _ntlm_flag_exchange(ntlm_cred, request_flags)
+    s.step(auth.pack())
+
+    assert c.complete
+    assert s.complete
+    assert negotiate.flags != challenge.flags
+    assert negotiate.flags != auth.flags
+    assert challenge.flags == auth.flags
+    assert c.session_key == s.session_key
+
+    _ntlm_assert_bidirectional_crypto(c, s, sign=True, seal=True)
+
+
+@pytest.mark.parametrize("level", ["0", "1", "2", "3"])
+def test_ntlm_lm_compat_level_capabilities(level, ntlm_cred, monkeypatch):
+    """Every LM compatibility level still negotiates a working set of context capabilities."""
+    monkeypatch.setenv("LM_COMPAT_LEVEL", level)
+
+    c = spnego.client(ntlm_cred[0], ntlm_cred[1], hostname=socket.gethostname(), protocol="ntlm")
+    s = spnego.server(protocol="ntlm")
+
+    s.step(c.step(s.step(c.step())))
+
+    assert c.complete
+    assert s.complete
+    assert c.session_key == s.session_key
+
+    auth_flags = int(s._context_attr)
+    sign = bool(auth_flags & NegotiateFlags.sign)
+    seal = bool(auth_flags & NegotiateFlags.seal)
+
+    data = os.urandom(16)
+    if seal:
+        assert c.unwrap(s.wrap(data).data).data == data
+        assert s.unwrap(c.wrap(data).data).data == data
+    if sign:
+        c.verify(data, s.sign(data))
+        s.verify(data, c.sign(data))
+
+
+def test_ntlm_v1_authenticate_rejects_ess_not_negotiated(ntlm_cred):
+    """NTLMv1 cannot enable ESS through the Authenticate flags.
+
+    Without the check the acceptor derives the NTLMv1 client challenge and the KXKEY from the untrusted Authenticate
+    flags, so a rogue initiator can both pass the response check and change the session key derivation by declaring
+    ESS that neither the Negotiate nor Challenge message advertised.
+    """
+    domain, username = ntlm_cred[0].split("\\", 1)
+    nt_hash = ntowfv1(ntlm_cred[1])
+    lm_hash = lmowfv1(ntlm_cred[1])
+
+    negotiate_flags = int(
+        NegotiateFlags.unicode
+        | NegotiateFlags.ntlm
+        | NegotiateFlags.request_target
+        | NegotiateFlags.sign
+        | NegotiateFlags.seal
+        | NegotiateFlags.key_exch
+    )
+    negotiate = Negotiate(negotiate_flags, version=Version.get_current())
+
+    s = spnego.server(options=spnego.NegotiateOptions.use_ntlm, protocol="ntlm")
+    challenge = Challenge.unpack(s.step(negotiate.pack()))
+    assert not (challenge.flags & NegotiateFlags.extended_session_security)
+
+    # Build a valid NTLMv1 response for the ESS algorithm even though ESS was never negotiated.
+    client_challenge = os.urandom(8)
+    nt_response, lm_response, _ = compute_response_v1(
+        int(challenge.flags) | int(NegotiateFlags.extended_session_security),
+        nt_hash,
+        lm_hash,
+        challenge.server_challenge,
+        client_challenge,
+    )
+    assert lm_response[:8] == client_challenge
+
+    forged_flags = int(challenge.flags) | int(NegotiateFlags.extended_session_security)
+    auth = Authenticate(
+        flags=forged_flags,
+        lm_challenge_response=lm_response,
+        nt_challenge_response=nt_response,
+        domain_name=domain,
+        username=username,
+        workstation="WORKSTATION",
+        encrypted_session_key=b"\x00",
+    )
+    auth.flags = forged_flags
+
+    with pytest.raises(InvalidTokenError, match="not negotiated by both parties: extended_session_security"):
+        s.step(auth.pack())
+
+    assert not s.complete
+    assert s.context_attr == spnego.ContextReq.none
+
+
+def test_ntlm_rejected_flags_error_lists_only_violations(ntlm_cred):
+    """The rejection names the exact capability flags the Authenticate message tried to add."""
+    c, s, negotiate, challenge, auth = _ntlm_flag_exchange(
+        ntlm_cred,
+        int(NegotiateFlags.unicode | NegotiateFlags.ntlm | NegotiateFlags.request_target | NegotiateFlags.sign),
+    )
+
+    forged = int(auth.flags) | int(NegotiateFlags.seal) | int(NegotiateFlags.key_exch)
+    msg = _ntlm_rebuild_authenticate(auth, forged, c.session_key, negotiate, challenge)
+
+    with pytest.raises(InvalidTokenError) as err:
+        s.step(msg)
+
+    message = str(err.value)
+    assert "seal" in message
+    assert "key_exch" in message
+    assert "sign" not in message

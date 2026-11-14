@@ -2,6 +2,16 @@
 
 ## 0.13.0 - TBD
 
+* Fix NTLM acceptor to reject `Authenticate` messages that enable capability flags neither party negotiated
+  * The `NTLMSSP_NEGOTIATE_SIGN`, `SEAL`, `KEY_EXCH`, `EXTENDED_SESSIONSECURITY` and key length flags in the
+    `Authenticate` message are sent by the initiator and were used as the established context attributes without
+    checking the `Negotiate` and `Challenge` flags
+  * A rogue initiator could grant itself signing, sealing or a different session key derivation, for example by
+    adding `SEAL`/`SIGN` to a context that only negotiated integrity, or `EXTENDED_SESSIONSECURITY` to an NTLMv1
+    context
+  * Each capability flag in the `Authenticate` message must now be set in both the `Negotiate` and `Challenge`
+    messages, the 3 flag values are not compared as a whole so legitimate exchanges that differ still work
+
 ## 0.12.4 - 2026-10-06
 
 * Fix SSPI acceptor with explicit `Password` or `KerberosKeytab` credentials failing with `SEC_E_LOGON_DENIED` when the username is in the UPN form `user@REALM`

@@ -70,6 +70,21 @@ from spnego.iov import BufferType, IOVResBuffer
 
 log = logging.getLogger(__name__)
 
+# The flags that control what the established security context can do. Any of these flags in the Authenticate message
+# must have been advertised by both parties in the Negotiate and Challenge messages before they can be used.
+_CONTEXT_CAPABILITY_FLAGS = (
+    NegotiateFlags.sign
+    | NegotiateFlags.seal
+    | NegotiateFlags.key_exch
+    | NegotiateFlags.extended_session_security
+    | NegotiateFlags.key_128
+    | NegotiateFlags.key_56
+    | NegotiateFlags.lm_key
+    | NegotiateFlags.datagram
+    | NegotiateFlags.non_nt_session_key
+)
+_CONTEXT_CAPABILITY_MASK = int(_CONTEXT_CAPABILITY_FLAGS)
+
 
 def _get_credential_file() -> typing.Optional[str]:
     """Get the path to the NTLM credential store.
@@ -558,6 +573,12 @@ class NTLMProxy(ContextProxy):
         ):
             raise OperationNotAvailableError(context_msg="Anonymous user authentication not implemented")
 
+        # The Authenticate flags are sent by the initiator and cannot be trusted on their own. Only capabilities that
+        # both the initiator and acceptor advertised in the Negotiate and Challenge messages may be enabled for the
+        # context, otherwise the initiator could grant itself signing, sealing or a different key derivation that
+        # neither side negotiated. Do this before the flags are used to validate the response or derive the keys.
+        self._validate_context_flags(negotiate.flags, challenge.flags, auth.flags)
+
         username = auth.user_name
         if auth.domain_name:
             username = f"{auth.domain_name}\\{username}"
@@ -638,6 +659,36 @@ class NTLMProxy(ContextProxy):
 
         self._context_attr = auth.flags
         self._complete = True
+
+    def _validate_context_flags(self, negotiate_flags: int, challenge_flags: int, auth_flags: int) -> None:
+        """Validates the Authenticate flags against what was negotiated by both parties.
+
+        NTLM negotiates with 3 different flag sets, the Negotiate flags from the initiator, the Challenge flags from
+        the acceptor, and the Authenticate flags from the initiator that state the flags used for the context. The
+        Authenticate flags are not a simple copy of either of the other messages, the acceptor adds flags like
+        `target_info` or `target_type_server` and removes `oem` in favour of `unicode`, so the 3 values must not be
+        compared as a whole. Only the capability flags that affect signing, sealing and the session key derivation are
+        checked here, each one must have been advertised by both parties and the Authenticate message must not
+        advertise a capability that was not negotiated.
+
+        Args:
+            negotiate_flags: The flags from the initiator Negotiate message.
+            challenge_flags: The flags the acceptor set in the Challenge message.
+            auth_flags: The flags the initiator set in the Authenticate message.
+        """
+        mutually_advertised = negotiate_flags & challenge_flags
+        unnegotiated = (auth_flags & _CONTEXT_CAPABILITY_MASK) & ~mutually_advertised
+
+        if unnegotiated:
+            names = ", ".join(
+                f.name for f in NegotiateFlags if f.value & _CONTEXT_CAPABILITY_MASK and f.value & unnegotiated
+            )
+            raise InvalidTokenError(
+                context_msg=(
+                    "NTLM Authenticate message set capability flags that were not negotiated by both parties: "
+                    f"{names}"
+                )
+            )
 
     def query_message_sizes(self) -> SecPkgContextSizes:
         if not self.complete:
