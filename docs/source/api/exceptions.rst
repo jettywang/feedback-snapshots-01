@@ -9,6 +9,11 @@ Exceptions
 
 .. autoexception:: PGPError
 
+:py:class:`PGPStructureError`
+-----------------------------
+
+.. autoexception:: PGPStructureError
+
 
 :py:class:`PGPEncryptionError`
 ------------------------------

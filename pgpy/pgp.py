@@ -40,6 +40,7 @@ from .decorators import KeyAction
 
 from .errors import PGPDecryptionError
 from .errors import PGPError
+from .errors import PGPStructureError
 
 from .packet import Key
 from .packet import MDC
@@ -860,8 +861,182 @@ class PGPUID(ParentRef):
 
         raise NotImplementedError
 
-
 class PGPMessage(Armorable, PGPObject):
+
+    @staticmethod
+    def _validate_structure(packets, level=0):
+        """
+        Validate that a sequence of fully-parsed packets forms a valid OpenPGP
+        message according to the packet composition grammar in RFC 4880 11.3.
+
+        The check runs against the *original* packet sequence, before high-level
+        assembly folds compression layers, drops one-pass signatures, or collapses
+        the packets into a single literal body.  Raising here means a malformed
+        composition can never be silently reshaped into something that looks
+        verifiable.
+
+        The grammar being enforced (RFC 4880 11.3) is::
+
+            OpenPGP Message      :- Encrypted Message | Signed Message |
+                                    Compressed Message | Literal Message.
+            Compressed Message   :- Compressed Data Packet.
+            Literal Message      :- Literal Data Packet.
+            Signed Message       :- Signature Packet, OpenPGP Message |
+                                    One-Pass Signed Message.
+            One-Pass Signed Msg  :- One-Pass Signature Packet,
+                                    OpenPGP Message, Corresponding Signature.
+
+        Marker packets (tag 10) are legacy and may appear anywhere, so they are
+        ignored.  Multiple independent signatures over the same data are allowed;
+        each one-pass packet still has to be closed by a matching signature in the
+        reverse order it was opened.
+        """
+        context = "compressed layer" if level else "message"
+
+        # Marker packets are legacy and may be interspersed anywhere.
+        packets = [pkt for pkt in packets if not isinstance(pkt, Marker)]
+
+        if not packets:
+            raise PGPStructureError("Empty OpenPGP {:s}: no packets found".format(context))
+
+        # A Modification Detection Code packet only ever appears as the final
+        # packet of a decrypted integrity-protected data payload.  Strip it so
+        # the remainder can be validated as an ordinary OpenPGP message.
+        if isinstance(packets[-1], MDC):
+            packets = packets[:-1]
+            if not packets:
+                raise PGPStructureError(
+                    "Integrity-protected data payload contains only an MDC packet")
+
+        # An Encrypted Message is an ESK sequence followed by a single encrypted
+        # data packet.  The plaintext inside can only be validated after decrypt.
+        esk = (PKESessionKey, SKESessionKey)
+        index = 0
+        while index < len(packets) and isinstance(packets[index], esk):
+            index += 1
+
+        if index > 0:
+            if index + 1 != len(packets) or not isinstance(
+                    packets[index], (SKEData, IntegrityProtectedSKEData)):
+                raise PGPStructureError(
+                    "Encrypted session key packet(s) must be followed by exactly one "
+                    "encrypted data packet")
+            return
+
+        # Split off any leading one-pass signature packets.  They must form a
+        # contiguous run at the very beginning of the sequence.
+        onepass = []
+        while index < len(packets) and isinstance(packets[index], OnePassSignature):
+            onepass.append(packets[index])
+            index += 1
+
+        if onepass:
+            # RFC 4880 5.4 describes the nested flag in terms of a zero/non-zero
+            # byte, but real-world implementations disagree on the polarity of the
+            # boolean they store.  GnuPG marks the packets followed by another
+            # one-pass packet, while PGPy marks the innermost one.  What is
+            # unambiguous is that, within a single stack, exactly one packet is
+            # marked differently: the boundary packet next to the message data.
+            boundary = len(onepass) - 1
+            marked = [position for position, ops in enumerate(onepass) if ops.nested]
+
+            if len(onepass) == 1:
+                # A lone one-pass packet has no convention to violate; its flag
+                # carries no structural information either way.
+                pass
+            elif marked != list(range(boundary)) and marked != [boundary]:
+                raise PGPStructureError(
+                    "One-pass signature stack of {:d} packets has malformed nested "
+                    "flags; exactly the boundary packet must differ".format(len(onepass)))
+
+            # The remainder must contain the signed OpenPGP message followed by
+            # exactly as many signature packets as there were one-pass packets.
+            if len(packets) <= index + len(onepass):
+                raise PGPStructureError(
+                    "One-pass signature stack is missing its closing signature packet(s)")
+
+            body = packets[index:len(packets) - len(onepass)]
+            closing = packets[len(packets) - len(onepass):]
+
+            if len(body) == 0:
+                raise PGPStructureError(
+                    "One-pass signature does not cover any message content")
+
+            if not all(isinstance(pkt, Signature) for pkt in closing):
+                raise PGPStructureError(
+                    "One-pass signature stack must be closed by signature packets, "
+                    "but a non-signature packet appears in the closing position")
+
+            # The signature packets bracket the message: the first closing
+            # signature corresponds to the last one-pass packet and vice versa.
+            for ops, sig in zip(reversed(onepass), closing):
+                if ops.signer != sig.signer:
+                    raise PGPStructureError(
+                        "One-pass signature claims signer {:s} but the closing "
+                        "signature is from {:s}".format(ops.signer, sig.signer))
+                if ops.sigtype != sig.sigtype:
+                    raise PGPStructureError(
+                        "One-pass signature claims signature type {:s} but the "
+                        "closing signature has type {:s}".format(
+                            ops.sigtype.name, sig.sigtype.name))
+                if ops.halg != sig.halg:
+                    raise PGPStructureError(
+                        "One-pass signature claims hash algorithm {:s} but the "
+                        "closing signature uses {:s}".format(
+                            ops.halg.name if hasattr(ops.halg, 'name') else ops.halg,
+                            sig.halg.name if hasattr(sig.halg, 'name') else sig.halg))
+                if ops.pubalg != sig.pubalg:
+                    raise PGPStructureError(
+                        "One-pass signature claims public-key algorithm {:s} but "
+                        "the closing signature uses {:s}".format(
+                            ops.pubalg.name if hasattr(ops.pubalg, 'name') else ops.pubalg,
+                            sig.pubalg.name if hasattr(sig.pubalg, 'name') else sig.pubalg))
+
+            # Recurse into the covered content (which is itself an OpenPGP message).
+            PGPMessage._validate_structure(body, level=level + 1)
+            return
+
+        # No one-pass signatures.  A leading signature packet followed by a
+        # complete message is the non-one-pass form of a Signed Message.
+        if isinstance(packets[0], Signature):
+            if len(packets) < 2:
+                raise PGPStructureError(
+                    "Signature packet is not followed by any message content")
+            PGPMessage._validate_structure(packets[1:], level=level + 1)
+            return
+
+        # Compressed data must decompress to exactly one valid OpenPGP message.
+        # It is legal either as the whole message or as the content covered by a
+        # signature, but it still has to be the sole packet at this level so the
+        # compression layer cannot hide a second, uncovered body next to it.
+        if isinstance(packets[0], CompressedData):
+            if len(packets) != 1:
+                raise PGPStructureError(
+                    "A Compressed Data packet must be the only packet at this level; "
+                    "additional packet(s) would bypass the compressed message")
+            PGPMessage._validate_structure(packets[0].packets, level=level + 1)
+            return
+
+        # Encrypted data without a preceding ESK sequence must be the only packet
+        # present; its plaintext is validated separately after decryption.
+        if isinstance(packets[0], (SKEData, IntegrityProtectedSKEData)):
+            if len(packets) != 1:
+                raise PGPStructureError(
+                    "Unexpected packet(s) following the encrypted data packet")
+            return
+
+        # The remaining legal content packet is a single Literal Data packet.
+        if isinstance(packets[0], LiteralData):
+            if len(packets) != 1:
+                raise PGPStructureError(
+                    "A literal message must contain a single Literal Data packet; "
+                    "additional packet(s) are not covered by any signature")
+            return
+
+        raise PGPStructureError(
+            "Unexpected {:s} packet at the start of the OpenPGP {:s}".format(
+                packets[0].__class__.__name__, context))
+
     @staticmethod
     def dash_unescape(text):
         return re.subn(r'^- ', '', text, flags=re.MULTILINE)[0]
@@ -1289,8 +1464,20 @@ class PGPMessage(Armorable, PGPObject):
                 self |= PGPSignature() | pkt
 
         else:
+            # Parse the entire packet sequence first, while the original
+            # structure (one-pass signatures, literal packets, compression
+            # layers and their ordering) is still fully visible.
+            packets = []
             while len(data) > 0:
-                self |= Packet(data)
+                packets.append(Packet(data))
+
+            # Reject structurally invalid messages before anything is folded
+            # away by __ior__ (which would drop one-pass packets and any
+            # packets beyond the first literal data packet).
+            PGPMessage._validate_structure(packets)
+
+            for pkt in packets:
+                self |= pkt
 
 
 class PGPKey(Armorable, ParentRef, PGPObject):

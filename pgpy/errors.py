@@ -7,11 +7,24 @@ __all__ = ('PGPError',
            'PGPIncompatibleECPointFormatError',
            'PGPOpenSSLCipherNotSupportedError',
            'PGPInsecureCipherError',
+           'PGPStructureError',
            'WontImplementError',)
 
 
 class PGPError(Exception):
     """Raised as a general error in PGPy"""
+    pass
+
+
+class PGPStructureError(PGPError):
+    """Raised when an OpenPGP message's packet structure does not conform to
+    the packet composition grammar in RFC 4880 section 11.3.
+
+    This is raised while the original packet sequence is still available,
+    before any packets are folded away or discarded, so that structural
+    defects (such as a one-pass signature whose claims do not match the
+    signature that closes it) cannot be hidden by high-level assembly.
+    """
     pass
 
 
