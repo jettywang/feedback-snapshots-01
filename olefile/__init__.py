@@ -24,5 +24,8 @@ See source code and LICENSE.txt for information on usage and redistribution.
 from .olefile import *
 # import metadata not covered by *:
 from .olefile import __version__, __author__, __date__, __all__
+# independent conservative recovery entry point (opt-in, does not affect
+# the strict default behaviour of OleFileIO):
+from . import recovery
 
 

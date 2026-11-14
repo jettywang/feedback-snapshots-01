@@ -3,6 +3,14 @@ Detailed CHANGELOG
 
 olefile.py
 ----------
+* 2026-11-15 v0.48.dev1:
+    - added olefile.recovery, an independent conservative recovery entry point
+      for OLE files with damaged FAT chains: recovers stream fragments only
+      along verifiable FAT/MiniFAT allocation relations, stops at bad
+      pointers, cycles and sectors claimed by other streams, and reports
+      logical ranges, physical origins, gaps, contested sectors and orphan
+      directory entries. The strict default behaviour of OleFileIO is
+      unchanged.
 * 2023-11-30 v0.47.dev6:
     - fixed issue #142: isOleFile has a new data parameter to handle files in memory properly
     - fixed issue #156: write_sect now correctly detects when data is larger than the sector size
