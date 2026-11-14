@@ -8,6 +8,7 @@ import unittest
 
 suite = unittest.TestLoader().loadTestsFromNames(
     ['tests.test_pem.suite',
+     'tests.test_proxychain.suite',
      'tests.test_rfc2314.suite',
      'tests.test_rfc2315.suite',
      'tests.test_rfc2437.suite',
