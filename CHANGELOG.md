@@ -3,6 +3,21 @@ Detailed CHANGELOG
 
 olefile.py
 ----------
+* 2026-11-15:
+    - reworked OLE property parsing so each property section uses its own
+      CodePage to decode LPSTR/BSTR strings and dictionary names; two sections
+      in one stream no longer share state
+    - LPSTR values are now decoded to text (including CP_WINUNICODE/UTF-16 and
+      per-section code pages) instead of being returned as raw bytes with null
+      characters stripped
+    - handled VT_VECTOR|VT_VARIANT and typed vectors with correct element
+      lengths and 4-byte alignment, including vector tail misalignment checks
+    - undecodable strings, truncated UTF-16, unknown types and malformed vectors
+      now return a PropertyParseError object that retains the original type,
+      raw bytes and reason, instead of being replaced by a plausible value or
+      confused with a real empty value (None)
+    - fixed the UserDefinedProperties FMTID constant (D5CDD502 instead of
+      D5CDD505) and made get_userdefined_properties reuse the section parser
 * 2023-11-30 v0.47.dev6:
     - fixed issue #142: isOleFile has a new data parameter to handle files in memory properly
     - fixed issue #156: write_sect now correctly detects when data is larger than the sector size
