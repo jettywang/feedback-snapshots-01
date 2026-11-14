@@ -135,15 +135,29 @@ class Updater:
                 f"config: envelope_type must be one of {supported_envelopes}, "
                 f"got '{self.config.envelope_type}'"
             )
+        if (
+            self.config.envelope_migration is not None
+            and self.config.envelope_type is not EnvelopeType.METADATA
+        ):
+            raise ValueError(
+                "config: envelope_migration replaces envelope_type; do not "
+                "set both"
+            )
 
         if bootstrap is None:
             # if no root was provided, use the cached non-versioned root.json
             bootstrap = self._load_local_metadata(Root.type)
 
         # Load the initial root, make sure it's cached
-        self._trusted_set = TrustedMetadataSet(
-            bootstrap, self.config.envelope_type
-        )
+        if self.config.envelope_migration is not None:
+            self._trusted_set = TrustedMetadataSet(
+                bootstrap,
+                envelope_migration=self.config.envelope_migration,
+            )
+        else:
+            self._trusted_set = TrustedMetadataSet(
+                bootstrap, self.config.envelope_type
+            )
         self._persist_root(self._trusted_set.root.version, bootstrap)
         self._update_root_symlink()
 
@@ -306,16 +320,20 @@ class Updater:
         logger.debug("Downloaded target %s", targetinfo.path)
         return filepath
 
+    def _metadata_url(self, rolename: str, version: int | None) -> str:
+        """Return the URL used to download ``rolename`` at ``version``."""
+        encoded_name = parse.quote(rolename, "")
+        if version is None:
+            return f"{self._metadata_base_url}{encoded_name}.json"
+        return f"{self._metadata_base_url}{version}.{encoded_name}.json"
+
     def _download_metadata(
         self, rolename: str, length: int, version: int | None = None
     ) -> bytes:
         """Download a metadata file and return it as bytes."""
-        encoded_name = parse.quote(rolename, "")
-        if version is None:
-            url = f"{self._metadata_base_url}{encoded_name}.json"
-        else:
-            url = f"{self._metadata_base_url}{version}.{encoded_name}.json"
-        return self._fetcher.download_bytes(url, length)
+        return self._fetcher.download_bytes(
+            self._metadata_url(rolename, version), length
+        )
 
     def _load_local_metadata(self, rolename: str) -> bytes:
         encoded_name = parse.quote(rolename, "")
@@ -399,8 +417,14 @@ class Updater:
                         self._dir, "root_history", f"{next_version}.root.json"
                     )
                     with open(root_path, "rb") as f:
-                        self._trusted_set.update_root(f.read())
+                        data = f.read()
+                    try:
+                        self._trusted_set.update_root(data)
+                    except exceptions.EnvelopePolicyError as e:
+                        raise e.with_source(root_path) from e
                     continue
+                except exceptions.EnvelopePolicyError:
+                    raise
                 except (OSError, exceptions.RepositoryError) as e:
                     # this root did not exist locally or is invalid
                     logger.debug("Local root is not valid: %s", e)
@@ -415,6 +439,10 @@ class Updater:
                     self._trusted_set.update_root(data)
                     self._persist_root(next_version, data)
 
+                except exceptions.EnvelopePolicyError as e:
+                    raise e.with_source(
+                        self._metadata_url(Root.type, next_version)
+                    ) from e
                 except exceptions.DownloadHTTPError as exception:
                     if exception.status_code not in {403, 404}:
                         raise
@@ -426,9 +454,14 @@ class Updater:
 
     def _load_timestamp(self) -> None:
         """Load local and remote timestamp metadata."""
+        local_path = os.path.join(
+            self._dir, f"{parse.quote(Timestamp.type, '')}.json"
+        )
         try:
             data = self._load_local_metadata(Timestamp.type)
             self._trusted_set.update_timestamp(data)
+        except exceptions.EnvelopePolicyError as e:
+            raise e.with_source(local_path) from e
         except (OSError, exceptions.RepositoryError) as e:
             # Local timestamp does not exist or is invalid
             logger.debug("Local timestamp not valid as final: %s", e)
@@ -439,6 +472,8 @@ class Updater:
         )
         try:
             self._trusted_set.update_timestamp(data)
+        except exceptions.EnvelopePolicyError as e:
+            raise e.with_source(self._metadata_url(Timestamp.type, None)) from e
         except exceptions.EqualVersionNumberError:
             # If the new timestamp version is the same as current, discard the
             # new timestamp. This is normal and it shouldn't raise any error.
@@ -448,10 +483,15 @@ class Updater:
 
     def _load_snapshot(self) -> None:
         """Load local (and if needed remote) snapshot metadata."""
+        local_path = os.path.join(
+            self._dir, f"{parse.quote(Snapshot.type, '')}.json"
+        )
         try:
             data = self._load_local_metadata(Snapshot.type)
             self._trusted_set.update_snapshot(data, trusted=True)
             logger.debug("Local snapshot is valid: not downloading new one")
+        except exceptions.EnvelopePolicyError as e:
+            raise e.with_source(local_path) from e
         except (OSError, exceptions.RepositoryError) as e:
             # Local snapshot does not exist or is invalid: update from remote
             logger.debug("Local snapshot not valid as final: %s", e)
@@ -463,7 +503,12 @@ class Updater:
                 version = snapshot_meta.version
 
             data = self._download_metadata(Snapshot.type, length, version)
-            self._trusted_set.update_snapshot(data)
+            try:
+                self._trusted_set.update_snapshot(data)
+            except exceptions.EnvelopePolicyError as e:
+                raise e.with_source(
+                    self._metadata_url(Snapshot.type, version)
+                ) from e
             self._persist_metadata(Snapshot.type, data)
 
     def _load_targets(self, role: str, parent_role: str) -> Targets:
@@ -473,6 +518,7 @@ class Updater:
         if self._trusted_set.contains(role, parent_role):
             return cast("Targets", self._trusted_set[role])
 
+        local_path = os.path.join(self._dir, f"{parse.quote(role, '')}.json")
         try:
             data = self._load_local_metadata(role)
             delegated_targets = self._trusted_set.update_delegated_targets(
@@ -480,6 +526,8 @@ class Updater:
             )
             logger.debug("Local %s is valid: not downloading new one", role)
             return delegated_targets
+        except exceptions.EnvelopePolicyError as e:
+            raise e.with_source(local_path) from e
         except (OSError, exceptions.RepositoryError) as e:
             # Local 'role' does not exist or is invalid: update from remote
             logger.debug("Failed to load local %s: %s", role, e)
@@ -497,9 +545,12 @@ class Updater:
                 version = metainfo.version
 
             data = self._download_metadata(role, length, version)
-            delegated_targets = self._trusted_set.update_delegated_targets(
-                data, role, parent_role
-            )
+            try:
+                delegated_targets = self._trusted_set.update_delegated_targets(
+                    data, role, parent_role
+                )
+            except exceptions.EnvelopePolicyError as e:
+                raise e.with_source(self._metadata_url(role, version)) from e
             self._persist_metadata(role, data)
 
             return delegated_targets

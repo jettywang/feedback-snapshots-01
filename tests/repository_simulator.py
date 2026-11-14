@@ -57,6 +57,7 @@ from urllib import parse
 
 from securesystemslib.signer import CryptoSigner, Signer
 
+from tuf.api.dsse import SimpleEnvelope
 from tuf.api.exceptions import DownloadHTTPError
 from tuf.api.metadata import (
     SPECIFICATION_VERSION,
@@ -73,6 +74,7 @@ from tuf.api.metadata import (
     Timestamp,
 )
 from tuf.api.serialization.json import JSONSerializer
+from tuf.ngclient.config import EnvelopeType
 from tuf.ngclient.fetcher import FetcherInterface
 
 if TYPE_CHECKING:
@@ -123,6 +125,10 @@ class RepositorySimulator(FetcherInterface):
 
         # Enable hash-prefixed target file names
         self.prefix_targets_with_hash = True
+
+        # Envelope type used when serving each role. Roles not listed use
+        # traditional canonical JSON metadata.
+        self.envelope_types: dict[str, EnvelopeType] = {}
 
         self.dump_dir: str | None = None
         self.dump_version = 0
@@ -185,14 +191,27 @@ class RepositorySimulator(FetcherInterface):
 
         self.publish_root()
 
+    def envelope_type(self, role: str) -> EnvelopeType:
+        """Return the envelope type used when serving ``role``."""
+        return self.envelope_types.get(role, EnvelopeType.METADATA)
+
     def publish_root(self) -> None:
         """Sign and store a new serialized version of root."""
-        self.md_root.signatures.clear()
-        for signer in self.signers[Root.type].values():
-            self.md_root.sign(signer, append=True)
-
-        self.signed_roots.append(self.md_root.to_bytes(JSONSerializer()))
+        self.signed_roots.append(self._serialize_role(Root.type, self.md_root))
         logger.debug("Published root v%d", self.root.version)
+
+    def _serialize_role(self, role: str, md: Metadata) -> bytes:
+        """Sign and serialize ``md`` using the role's configured envelope."""
+        if self.envelope_type(role) is EnvelopeType.SIMPLE:
+            envelope = SimpleEnvelope.from_signed(md.signed)
+            for signer in self.signers[role].values():
+                envelope.sign(signer)
+            return envelope.to_bytes()
+
+        md.signatures.clear()
+        for signer in self.signers[role].values():
+            md.sign(signer, append=True)
+        return md.to_bytes(JSONSerializer())
 
     def _fetch(self, url: str) -> Iterator[bytes]:
         """Fetches data from the given url and returns an Iterator (or yields
@@ -278,9 +297,7 @@ class RepositorySimulator(FetcherInterface):
         if md is None:
             raise DownloadHTTPError(f"Unknown role {role}", 404)
 
-        md.signatures.clear()
-        for signer in self.signers[role].values():
-            md.sign(signer, append=True)
+        data = self._serialize_role(role, md)
 
         logger.debug(
             "fetched %s v%d with %d sigs",
@@ -288,7 +305,7 @@ class RepositorySimulator(FetcherInterface):
             md.signed.version,
             len(self.signers[role]),
         )
-        return md.to_bytes(JSONSerializer())
+        return data
 
     def _compute_hashes_and_length(
         self, role: str

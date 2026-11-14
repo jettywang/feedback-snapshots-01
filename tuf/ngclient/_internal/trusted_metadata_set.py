@@ -63,6 +63,7 @@ Example of loading root, timestamp and snapshot:
 
 from __future__ import annotations
 
+import json
 import logging
 from collections import abc
 from datetime import UTC, datetime
@@ -79,7 +80,7 @@ from tuf.api.metadata import (
     Targets,
     Timestamp,
 )
-from tuf.ngclient.config import EnvelopeType
+from tuf.ngclient.config import EnvelopeMigrationPolicy, EnvelopeType
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -100,7 +101,13 @@ class TrustedMetadataSet(abc.Mapping):
     what is updated.
     """
 
-    def __init__(self, root_data: bytes, envelope_type: EnvelopeType):
+    def __init__(
+        self,
+        root_data: bytes,
+        envelope_type: EnvelopeType | None = None,
+        *,
+        envelope_migration: EnvelopeMigrationPolicy | None = None,
+    ):
         """Initialize ``TrustedMetadataSet`` by loading trusted root metadata.
 
         Args:
@@ -108,20 +115,34 @@ class TrustedMetadataSet(abc.Mapping):
                 will only be verified by itself: it is the source of trust for
                 all metadata in the ``TrustedMetadataSet``
             envelope_type: Configures deserialization and verification mode of
-                TUF metadata.
+                TUF metadata. Ignored when ``envelope_migration`` is set.
+            envelope_migration: Caller-configured role/version based envelope
+                policy. When set, every loaded version must use exactly the
+                envelope selected by the policy for its role and version.
 
         Raises:
             RepositoryError: Metadata failed to load or verify. The actual
                 error type and content will contain more details.
+            ValueError: Both ``envelope_type`` and ``envelope_migration``
+                were provided.
+            EnvelopePolicyError: The root envelope violates the migration
+                policy.
         """
+        if envelope_migration is not None and envelope_type is not None:
+            raise ValueError(
+                "EnvelopeType and EnvelopeMigrationPolicy are mutually "
+                "exclusive"
+            )
+
         self._trusted_set: dict[str, Signed] = {}
         self._trusted_delegations: set[tuple[str, str]] = set()
         self.reference_time = datetime.now(UTC)
-
-        if envelope_type is EnvelopeType.SIMPLE:
-            self._load_data = _load_from_simple_envelope
-        else:
-            self._load_data = _load_from_metadata
+        self._envelope_migration = envelope_migration
+        self._fixed_envelope_type = (
+            None
+            if envelope_migration is not None
+            else envelope_type or EnvelopeType.METADATA
+        )
 
         # Load and validate the local root metadata. Valid initial trusted root
         # metadata is required
@@ -133,6 +154,85 @@ class TrustedMetadataSet(abc.Mapping):
         against ``delegator``.
         """
         return (delegator, role) in self._trusted_delegations
+
+    def _check_envelope(
+        self, role_name: str, data: bytes, version: int
+    ) -> None:
+        """Reject ``data`` unless it uses the policy's envelope for the version.
+
+        The check is structural and does not depend on fields inside the
+        signed payload: a role cannot choose its own envelope. It is called
+        before hash verification so a wrong-format file is reported as a
+        policy violation rather than a generic repository error.
+        """
+        if self._envelope_migration is None:
+            return
+
+        actual = _detect_envelope_type(data, role_name, version)
+        self._enforce_envelope(role_name, actual, version)
+
+    def _enforce_envelope(
+        self, role_name: str, actual: EnvelopeType, version: int
+    ) -> None:
+        """Raise unless ``actual`` is the policy's envelope for the version."""
+        if self._envelope_migration is None:
+            return
+
+        expected = self._envelope_migration.envelope_type_for(
+            role_name, version
+        )
+        if actual is not expected:
+            raise exceptions.EnvelopePolicyError(
+                role_name, version, expected, actual
+            )
+
+    def _load_data(
+        self,
+        role: type[T],
+        data: bytes,
+        delegator: Delegator | None = None,
+        role_name: str | None = None,
+        version: int | None = None,
+    ) -> tuple[T, bytes, dict[str, Signature]]:
+        """Load exactly one envelope selected for ``role`` and ``version``.
+
+        Without a migration policy, the configured fixed envelope type is
+        used. With a migration policy, the policy selects the only allowed
+        envelope. The alternative loader is never attempted after a failure.
+        """
+        if role_name is None:
+            role_name = role.type
+
+        if self._envelope_migration is None:
+            if self._fixed_envelope_type is EnvelopeType.SIMPLE:
+                return _load_from_simple_envelope(
+                    role, data, delegator, role_name
+                )
+            return _load_from_metadata(role, data, delegator, role_name)
+
+        actual = _detect_envelope_type(data, role_name, version)
+
+        # If the version is known from the surrounding metadata, select the
+        # envelope before parsing or trusting any payload content.
+        if version is not None:
+            self._enforce_envelope(role_name, actual, version)
+
+        loader = (
+            _load_from_simple_envelope
+            if actual is EnvelopeType.SIMPLE
+            else _load_from_metadata
+        )
+        signed, signed_bytes, signatures = loader(role, data, None, role_name)
+
+        # Timestamp metadata is unversioned: its version only becomes known
+        # after parsing, so the policy is applied before signature trust.
+        if version is None:
+            self._enforce_envelope(role_name, actual, signed.version)
+
+        if delegator is not None:
+            delegator.verify_delegate(role_name, signed_bytes, signatures)
+
+        return signed, signed_bytes, signatures
 
     def _add(self, role: str, signed: Signed, delegator: str) -> None:
         """Add role to trusted set, keep track of delegator(s)"""
@@ -196,8 +296,9 @@ class TrustedMetadataSet(abc.Mapping):
             raise RuntimeError("Cannot update root after timestamp")
         logger.debug("Updating root")
 
+        expected_version = self.root.version + 1
         new_root, new_root_bytes, new_root_signatures = self._load_data(
-            Root, data, self.root
+            Root, data, self.root, version=expected_version
         )
         if new_root.version != self.root.version + 1:
             raise exceptions.BadVersionNumberError(
@@ -205,7 +306,9 @@ class TrustedMetadataSet(abc.Mapping):
                 f" instead got version {new_root.version}"
             )
 
-        # Verify that new root is signed by itself
+        # Both authorizations are required, independent of envelope type:
+        # _load_data() already verified with the previous root, verify with
+        # the new root itself here.
         new_root.verify_delegate(Root.type, new_root_bytes, new_root_signatures)
 
         self._add(Root.type, new_root, Root.type)
@@ -327,12 +430,21 @@ class TrustedMetadataSet(abc.Mapping):
 
         snapshot_meta = self.timestamp.snapshot_meta
 
+        # A trusted local snapshot may be an older intermediate version used
+        # for rollback protection, so check its own signed version. Fresh
+        # (remote) data occupies the timestamp slot: check that version first.
+        version = None if trusted else snapshot_meta.version
+        if version is not None:
+            self._check_envelope(Snapshot.type, data, version)
+
         # Verify non-trusted data against the hashes in timestamp, if any.
         # Trusted snapshot data has already been verified once.
         if not trusted:
             snapshot_meta.verify_length_and_hashes(data)
 
-        new_snapshot, _, _ = self._load_data(Snapshot, data, self.root)
+        new_snapshot, _, _ = self._load_data(
+            Snapshot, data, self.root, version=version
+        )
 
         # version not checked against meta version to allow old snapshot to be
         # used in rollback protection: it is checked when targets is updated
@@ -431,10 +543,12 @@ class TrustedMetadataSet(abc.Mapping):
                 f"Snapshot does not contain information for '{role_name}'"
             )
 
+        self._check_envelope(role_name, data, meta.version)
+
         meta.verify_length_and_hashes(data)
 
         new_delegate, _, _ = self._load_data(
-            Targets, data, delegator, role_name
+            Targets, data, delegator, role_name, version=meta.version
         )
 
         version = new_delegate.version
@@ -464,6 +578,51 @@ class TrustedMetadataSet(abc.Mapping):
 
         self._add(Root.type, new_root, Root.type)
         logger.debug("Loaded trusted root v%d", new_root.version)
+
+
+def _detect_envelope_type(
+    data: bytes, role_name: str, version: int | None
+) -> EnvelopeType:
+    """Return the envelope type of ``data``, without parsing its payload.
+
+    Detection is structural and deterministic: DSSE envelopes carry
+    ``payload``/``payloadType``, traditional TUF metadata carries ``signed``.
+    Data that matches neither or both is rejected explicitly. This is not a
+    fallback mechanism: the caller parses with exactly the detected format.
+    """
+    try:
+        body = json.loads(data.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        raise exceptions.EnvelopePolicyError(
+            role_name,
+            version,
+            detail=f"metadata is not valid JSON: {e}",
+        ) from e
+
+    if not isinstance(body, dict):
+        raise exceptions.EnvelopePolicyError(
+            role_name, version, detail="metadata is not a JSON object"
+        )
+
+    is_simple = "payload" in body and "payloadType" in body
+    is_metadata = "signed" in body
+
+    if is_simple and is_metadata:
+        raise exceptions.EnvelopePolicyError(
+            role_name,
+            version,
+            detail="metadata matches both METADATA and SIMPLE envelopes",
+        )
+    if is_simple:
+        return EnvelopeType.SIMPLE
+    if is_metadata:
+        return EnvelopeType.METADATA
+
+    raise exceptions.EnvelopePolicyError(
+        role_name,
+        version,
+        detail="metadata has no recognizable METADATA or SIMPLE envelope",
+    )
 
 
 def _load_from_metadata(

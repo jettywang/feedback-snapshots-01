@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Added
+
+* ngclient: Caller-configured `EnvelopeMigrationPolicy` for staged migration
+  from traditional METADATA to SIMPLE envelopes. Rules select the only allowed
+  envelope per role and version range, for both cached and downloaded
+  metadata, including root rotation. Policy violations raise
+  `EnvelopePolicyError` with the role, version and metadata source.
+
 ### Changed
 
 * Add Python 3.15 to tested versions, remove 3.10 from tested versions.
