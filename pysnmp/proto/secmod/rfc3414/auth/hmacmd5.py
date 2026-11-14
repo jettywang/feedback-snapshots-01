@@ -4,6 +4,7 @@
 # Copyright (c) 2005-2020, Ilya Etingof <etingof@gmail.com>
 # License: https://www.pysnmp.com/pysnmp/license.html
 #
+import hmac as hmac_module
 from hashlib import md5
 
 from pyasn1.type import univ
@@ -13,6 +14,7 @@ from pysnmp.proto.secmod.rfc3414.auth import base
 
 TWELVE_ZEROS = univ.OctetString((0,) * 12).asOctets()
 FORTY_EIGHT_ZEROS = (0,) * 48
+DIGEST_LENGTH = 12
 
 
 # rfc3414: 6.2.4
@@ -39,89 +41,83 @@ class HmacMd5(base.AbstractAuthenticationService):
     @property
     def digest_length(self):
         """Return digest length."""
-        return 12
+        return DIGEST_LENGTH
 
-    # 6.3.1
-    def authenticate_outgoing_message(self, authKey, wholeMsg):
-        """Authenticate outgoing message."""
-        # Here we expect calling secmod to indicate where the digest
-        # should be in the substrate. Also, it pre-sets digest placeholder
-        # so we hash wholeMsg out of the box.
-        # Yes, that's ugly but that's rfc...
-        value = wholeMsg.find(TWELVE_ZEROS)
-        if value == -1:
-            raise error.ProtocolError("Cant locate digest placeholder")
-        wholeHead = wholeMsg[:value]
-        wholeTail = wholeMsg[value + 12 :]
+    def _resolve_location(self, wholeMsg, authParametersLocation):
+        """Return the (offset, length) of the auth parameter value octets."""
+        if authParametersLocation is None:
+            # Legacy entry point: recover the location from the BER structure
+            # rather than scanning the substrate for matching bytes.
+            authParametersLocation = base.locate_authentication_parameters(wholeMsg)
+        offset, length = authParametersLocation
+        if length != DIGEST_LENGTH or offset + length > len(wholeMsg):
+            raise error.ProtocolError("Invalid digest placeholder location")
+        return offset, length
 
-        # 6.3.1.1
-
+    @staticmethod
+    def _compute_mac(authKey, message):
+        """Compute the 12-byte HMAC-MD5-96 MAC over *message* (RFC 3414 6.3)."""
         # 6.3.1.2a
         extendedAuthKey = authKey.asNumbers() + FORTY_EIGHT_ZEROS
 
-        # 6.3.1.2b --> no-op
-
         # 6.3.1.2c
-        k1 = univ.OctetString(map(lambda x, y: x ^ y, extendedAuthKey, self.IPAD))
-
-        # 6.3.1.2d --> no-op
+        k1 = univ.OctetString(map(lambda x, y: x ^ y, extendedAuthKey, HmacMd5.IPAD))
 
         # 6.3.1.2e
-        k2 = univ.OctetString(map(lambda x, y: x ^ y, extendedAuthKey, self.OPAD))
+        k2 = univ.OctetString(map(lambda x, y: x ^ y, extendedAuthKey, HmacMd5.OPAD))
 
         # 6.3.1.3
-        # noinspection PyDeprecation,PyCallingNonCallable
-        d1 = md5(k1.asOctets() + wholeMsg).digest()
+        d1 = md5(k1.asOctets() + message).digest()
 
         # 6.3.1.4
-        # noinspection PyDeprecation,PyCallingNonCallable
         d2 = md5(k2.asOctets() + d1).digest()
-        mac = d2[:12]
+        return d2[:DIGEST_LENGTH]
 
-        # 6.3.1.5 & 6
-        return wholeHead + mac + wholeTail
+    # 6.3.1
+    def authenticate_outgoing_message(
+        self, authKey, wholeMsg, authParametersLocation=None
+    ):
+        """Authenticate outgoing message."""
+        offset, length = self._resolve_location(wholeMsg, authParametersLocation)
+
+        # The caller is required to zero the whole msgAuthenticationParameters
+        # value before hashing; verify rather than assume that the located
+        # octets are that placeholder, keeping every other wire byte intact.
+        if wholeMsg[offset : offset + length] != TWELVE_ZEROS:
+            raise error.ProtocolError("Digest placeholder is not zeroed")
+
+        mac = self._compute_mac(authKey, wholeMsg)
+
+        # 6.3.1.5 & 6 -- splice the MAC into the located value only
+        return wholeMsg[:offset] + mac + wholeMsg[offset + length :]
 
     # 6.3.2
-    def authenticate_incoming_message(self, authKey, authParameters, wholeMsg):
+    def authenticate_incoming_message(
+        self, authKey, authParameters, wholeMsg, authParametersLocation=None
+    ):
         """Authenticate incoming message."""
         # 6.3.2.1 & 2
-        if len(authParameters) != 12:
+        if len(authParameters) != DIGEST_LENGTH:
             raise error.StatusInformation(errorIndication=errind.authenticationError)
 
-        # 6.3.2.3
-        value = wholeMsg.find(authParameters.asOctets())
-        if value == -1:
-            raise error.ProtocolError("Cant locate digest in wholeMsg")
-        wholeHead = wholeMsg[:value]
-        wholeTail = wholeMsg[value + 12 :]
-        authenticatedWholeMsg = wholeHead + TWELVE_ZEROS + wholeTail
+        offset, length = self._resolve_location(wholeMsg, authParametersLocation)
 
-        # 6.3.2.4a
-        extendedAuthKey = authKey.asNumbers() + FORTY_EIGHT_ZEROS
+        # The structural location must delimit exactly the received digest;
+        # a mismatch means the decoded parameters do not match the wire layout.
+        if wholeMsg[offset : offset + length] != authParameters.asOctets():
+            raise error.StatusInformation(
+                errorIndication=errind.authenticationFailure
+            )
 
-        # 6.3.2.4b --> no-op
+        # 6.3.2.3 -- zero the located value, preserving all other wire bytes
+        authenticatedWholeMsg = (
+            wholeMsg[:offset] + TWELVE_ZEROS + wholeMsg[offset + length :]
+        )
 
-        # 6.3.2.4c
-        k1 = univ.OctetString(map(lambda x, y: x ^ y, extendedAuthKey, self.IPAD))
-
-        # 6.3.2.4d --> no-op
-
-        # 6.3.2.4e
-        k2 = univ.OctetString(map(lambda x, y: x ^ y, extendedAuthKey, self.OPAD))
-
-        # 6.3.2.5a
-        # noinspection PyDeprecation,PyCallingNonCallable
-        d1 = md5(k1.asOctets() + authenticatedWholeMsg).digest()
-
-        # 6.3.2.5b
-        # noinspection PyDeprecation,PyCallingNonCallable
-        d2 = md5(k2.asOctets() + d1).digest()
-
-        # 6.3.2.5c
-        mac = d2[:12]
+        mac = self._compute_mac(authKey, authenticatedWholeMsg)
 
         # 6.3.2.6
-        if mac != authParameters:
+        if not hmac_module.compare_digest(mac, authParameters.asOctets()):
             raise error.StatusInformation(errorIndication=errind.authenticationFailure)
 
         return authenticatedWholeMsg

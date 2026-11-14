@@ -20,7 +20,10 @@ from pysnmp.proto import api, errind, error, rfc1155, rfc3411
 from pysnmp.proto.secmod.base import AbstractSecurityModel
 from pysnmp.proto.secmod.eso.priv import aes192, aes256, des3
 from pysnmp.proto.secmod.rfc3414.auth import hmacmd5, hmacsha, noauth
-from pysnmp.proto.secmod.rfc3414.auth.base import AbstractAuthenticationService
+from pysnmp.proto.secmod.rfc3414.auth.base import (
+    AbstractAuthenticationService,
+    locate_authentication_parameters,
+)
 from pysnmp.proto.secmod.rfc3414.priv import des, nopriv
 from pysnmp.proto.secmod.rfc3414.priv.base import AbstractEncryptionService
 from pysnmp.proto.secmod.rfc3826.priv import aes
@@ -837,9 +840,26 @@ class SnmpUSMSecurityModel(AbstractSecurityModel):
                 )
                 raise error.StatusInformation(errorIndication=errind.serializationError)
 
+            # Locate the digest placeholder from the message BER structure so
+            # that an identical run of zero bytes anywhere else in the
+            # substrate (e.g. inside msgAuthoritativeEngineID) cannot redirect
+            # where the MAC gets written. Only the located value octets are
+            # ever replaced; the rest of the wire bytes stay untouched.
+            try:
+                authParametersLocation = (
+                    locate_authentication_parameters(wholeMsg)
+                )
+
+            except error.ProtocolError:
+                debug.logger & debug.FLAG_SM and debug.logger(
+                    "__generateRequestOrResponseMsg: failed to locate auth parameters: %s"
+                    % sys.exc_info()[1]
+                )
+                raise error.StatusInformation(errorIndication=errind.serializationError)
+
             # noinspection PyUnboundLocalVariable
             authenticatedWholeMsg = authHandler.authenticate_outgoing_message(
-                usmUserAuthKeyLocalized, wholeMsg
+                usmUserAuthKeyLocalized, wholeMsg, authParametersLocation
             )
 
         # 3.1.8b
@@ -974,9 +994,16 @@ class SnmpUSMSecurityModel(AbstractSecurityModel):
         )
 
         # 3.2.1
-        securityParameters, rest = decoder.decode(
-            securityParameters, asn1Spec=self.__securityParametersSpec
-        )
+        try:
+            securityParameters, rest = decoder.decode(
+                securityParameters, asn1Spec=self.__securityParametersSpec
+            )
+        except PyAsn1Error:
+            debug.logger & debug.FLAG_SM and debug.logger(
+                "processIncomingMsg: securityParameters parse error: %s"
+                % sys.exc_info()[1]
+            )
+            raise error.StatusInformation(errorIndication=errind.parseError)
 
         debug.logger & debug.FLAG_SM and debug.logger(
             f"processIncomingMsg: {securityParameters.prettyPrint()}"
@@ -1257,9 +1284,44 @@ class SnmpUSMSecurityModel(AbstractSecurityModel):
                     )
 
                 authenticationParameters = securityParameters.getComponentByPosition(4)
+
+                # Locate the received digest from the message BER structure
+                # instead of searching the whole substrate for its bytes.
+                # This rejects truncated or structurally malformed messages
+                # before any authentication success can be reported and before
+                # the plaintext PDU is delivered.
+                try:
+                    authParametersLocation = locate_authentication_parameters(
+                        wholeMsg
+                    )
+
+                except error.ProtocolError:
+                    debug.logger & debug.FLAG_SM and debug.logger(
+                        "processIncomingMsg: failed to locate auth parameters: %s"
+                        % sys.exc_info()[1]
+                    )
+                    (usmStatsWrongDigests,) = mibBuilder.import_symbols(  # type: ignore
+                        "__SNMP-USER-BASED-SM-MIB", "usmStatsWrongDigests"
+                    )
+                    usmStatsWrongDigests.syntax += 1
+                    raise error.StatusInformation(
+                        errorIndication=errind.authenticationFailure,
+                        oid=usmStatsWrongDigests.name,
+                        val=usmStatsWrongDigests.syntax,
+                        securityStateReference=securityStateReference,
+                        securityLevel=securityLevel,
+                        contextEngineId=contextEngineId,
+                        contextName=contextName,
+                        msgUserName=msgUserName,
+                        maxSizeResponseScopedPDU=maxSizeResponseScopedPDU,
+                    )
+
                 try:
                     authHandler.authenticate_incoming_message(
-                        usmUserAuthKeyLocalized, authenticationParameters, wholeMsg
+                        usmUserAuthKeyLocalized,
+                        authenticationParameters,
+                        wholeMsg,
+                        authParametersLocation,
                     )
 
                 except error.StatusInformation:

@@ -46,9 +46,6 @@ class HmacSha2(base.AbstractAuthenticationService):
         SHA512_SERVICE_ID: sha512,
     }
 
-    IPAD = [0x36] * 64
-    OPAD = [0x5C] * 64
-
     def __init__(self, oid):
         """Create a HMAC-SHA2 authentication service."""
         if oid not in self.HASH_ALGORITHM:
@@ -72,15 +69,29 @@ class HmacSha2(base.AbstractAuthenticationService):
         """Return digest length."""
         return self.__digestLength
 
+    def _resolve_location(self, wholeMsg, authParametersLocation):
+        """Return the (offset, length) of the auth parameter value octets."""
+        if authParametersLocation is None:
+            # Legacy entry point: recover the location from the BER structure
+            # rather than scanning the substrate for matching bytes.
+            authParametersLocation = base.locate_authentication_parameters(wholeMsg)
+        offset, length = authParametersLocation
+        if length != self.__digestLength or offset + length > len(wholeMsg):
+            raise error.ProtocolError("Invalid digest placeholder location")
+        return offset, length
+
     # 7.3.1
-    def authenticate_outgoing_message(self, authKey, wholeMsg):
+    def authenticate_outgoing_message(
+        self, authKey, wholeMsg, authParametersLocation=None
+    ):
         """Authenticate outgoing message."""
-        # 7.3.1.1
-        location = wholeMsg.find(self.__placeHolder)
-        if location == -1:
-            raise error.ProtocolError("Can't locate digest placeholder")
-        wholeHead = wholeMsg[:location]
-        wholeTail = wholeMsg[location + self.__digestLength :]
+        offset, length = self._resolve_location(wholeMsg, authParametersLocation)
+
+        # The caller is required to zero the whole msgAuthenticationParameters
+        # value before hashing; verify rather than assume that the located
+        # octets are that placeholder, keeping every other wire byte intact.
+        if wholeMsg[offset : offset + length] != self.__placeHolder:
+            raise error.ProtocolError("Digest placeholder is not zeroed")
 
         # 7.3.1.2, 7.3.1.3
         try:
@@ -90,38 +101,48 @@ class HmacSha2(base.AbstractAuthenticationService):
             raise error.StatusInformation(errorIndication=sys.exc_info()[1])
 
         # 7.3.1.4
-        mac = mac.digest()[: self.__digestLength]
+        mac = mac.digest()[:length]
 
-        # 7.3.1.5 & 6
-        return wholeHead + mac + wholeTail
+        # 7.3.1.5 & 6 -- splice the MAC into the located value only
+        return wholeMsg[:offset] + mac + wholeMsg[offset + length :]
 
     # 7.3.2
-    def authenticate_incoming_message(self, authKey, authParameters, wholeMsg):
+    def authenticate_incoming_message(
+        self, authKey, authParameters, wholeMsg, authParametersLocation=None
+    ):
         """Authenticate incoming message."""
         # 7.3.2.1 & 2
         if len(authParameters) != self.__digestLength:
             raise error.StatusInformation(errorIndication=errind.authenticationError)
 
-        # 7.3.2.3
-        location = wholeMsg.find(authParameters.asOctets())
-        if location == -1:
-            raise error.ProtocolError("Can't locate digest in wholeMsg")
-        wholeHead = wholeMsg[:location]
-        wholeTail = wholeMsg[location + self.__digestLength :]
-        authenticatedWholeMsg = wholeHead + self.__placeHolder + wholeTail
+        offset, length = self._resolve_location(wholeMsg, authParametersLocation)
+
+        # The structural location must delimit exactly the received digest;
+        # a mismatch means the decoded parameters do not match the wire layout.
+        if wholeMsg[offset : offset + length] != authParameters.asOctets():
+            raise error.StatusInformation(
+                errorIndication=errind.authenticationFailure
+            )
+
+        # 7.3.2.3 -- zero the located value, preserving all other wire bytes
+        authenticatedWholeMsg = (
+            wholeMsg[:offset] + self.__placeHolder + wholeMsg[offset + length :]
+        )
 
         # 7.3.2.4
         try:
-            mac = hmac.new(authKey.asOctets(), authenticatedWholeMsg, self.__hashAlgo)
+            mac = hmac.new(
+                authKey.asOctets(), authenticatedWholeMsg, self.__hashAlgo
+            )
 
         except errind.ErrorIndication:
             raise error.StatusInformation(errorIndication=sys.exc_info()[1])
 
         # 7.3.2.5
-        mac = mac.digest()[: self.__digestLength]
+        mac = mac.digest()[:length]
 
         # 7.3.2.6
-        if mac != authParameters:
+        if not hmac.compare_digest(mac, authParameters.asOctets()):
             raise error.StatusInformation(errorIndication=errind.authenticationFailure)
 
         return authenticatedWholeMsg
