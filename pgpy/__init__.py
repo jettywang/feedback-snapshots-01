@@ -6,6 +6,10 @@ from .pgp import PGPKeyring
 from .pgp import PGPMessage
 from .pgp import PGPSignature
 from .pgp import PGPUID
+from .merge import MergeConflict
+from .merge import MergeResult
+from .merge import merge
+from .merge import merge_certificates
 
 __all__ = ['constants',
            'errors',
@@ -13,4 +17,8 @@ __all__ = ['constants',
            'PGPKeyring',
            'PGPMessage',
            'PGPSignature',
-           'PGPUID', ]
+           'PGPUID',
+           'MergeConflict',
+           'MergeResult',
+           'merge',
+           'merge_certificates', ]

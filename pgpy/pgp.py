@@ -1817,6 +1817,30 @@ class PGPKey(Armorable, ParentRef, PGPObject):
             for sk in itertools.chain([self], self.subkeys.values()):
                 sk._key.keymaterial.clear()
 
+    def merge(self, other, label=None):
+        """
+        Merge another copy of this certificate into a new, combined certificate.
+
+        This operation is non-destructive: neither this key nor ``other`` are
+        modified. The two certificates are only combined when their primary key
+        packets identify the exact same key (full fingerprint and identical public
+        key material); a matching short key id alone is never sufficient. User IDs,
+        subkeys and signature material are combined idempotently, with self-issued
+        signatures cryptographically verified before being treated as facts, and any
+        conflicting or unverifiable material quarantined inside the returned report
+        instead of overwriting existing history.
+
+        :param other: another copy of the same certificate
+        :type other: :py:obj:`PGPKey`
+        :param label: optional label identifying the source copy of ``other`` in the
+                      resulting conflict report
+        :type label: ``str``
+        :returns: a :py:obj:`~pgpy.merge.MergeResult`; the merged certificate is its
+                  ``merged`` attribute
+        """
+        from .merge import merge as _merge
+        return _merge(self, other, label=label)
+
     def add_uid(self, uid, selfsign=True, **prefs):
         """
         Add a User ID to this key.

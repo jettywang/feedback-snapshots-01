@@ -126,6 +126,42 @@ Classes
     :members:
 
 
+Certificate Merging
+===================
+
+.. py:currentmodule:: pgpy
+
+A public key directory can receive many independently observed copies of the same
+certificate, possibly out of order, truncated, duplicated, or even containing forged
+material. The merge entry point combines those copies without modifying any of the
+input objects and without letting unverified updates erase previously verifiable
+history.
+
+Copies are combined only when their primary key packets express the exact same
+identity: the full fingerprint must match *and* the rendered public key material must
+be byte-identical. A matching short key id is never sufficient. Self-issued signatures
+are cryptographically verified against the primary key material before being treated
+as facts; anything that cannot be verified (for example a third-party certification,
+or a forged revocation) is either retained as an observation or quarantined in the
+result report rather than merged blindly.
+
+.. autofunction:: merge_certificates
+
+.. autofunction:: merge
+
+:py:class:`MergeResult`
+-----------------------
+
+.. autoclass:: MergeResult
+    :members:
+
+:py:class:`MergeConflict`
+-------------------------
+
+.. autoclass:: MergeConflict
+    :members:
+
+
 Other Objects
 =============
 
