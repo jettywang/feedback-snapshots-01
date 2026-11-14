@@ -3,12 +3,20 @@ from .macaroon import Macaroon
 from .macaroon import MACAROON_V1
 from .macaroon import MACAROON_V2
 from .verifier import Verifier
+from .provenance import Candidate
+from .provenance import ProvenanceReport
+from .provenance import ProvenanceVerifier
+from .provenance import verify_provenance
 
 
 __all__ = [
     'Macaroon',
     'Caveat',
     'Verifier',
+    'Candidate',
+    'ProvenanceReport',
+    'ProvenanceVerifier',
+    'verify_provenance',
     'MACAROON_V1',
     'MACAROON_V2'
 ]

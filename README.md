@@ -98,6 +98,56 @@ verified = v.verify(
 # all caveats were met
 ```
 
+## Verifying Attenuation Provenance
+
+A relying party that has already verified a parent macaroon can check whether
+presented tokens are genuine append-only descendants without giving the
+verifier the root key:
+
+```python
+from pymacaroons import ProvenanceVerifier, Candidate
+
+# `parent` has already been verified against the root key by the caller.
+# The provenance verifier starts from its authenticated signature only.
+verifier = ProvenanceVerifier(parent)
+
+report = verifier.verify(child, label='child from partner')
+if report.is_valid_attenuation:
+    print(report.explain())
+```
+
+The verifier compares every parent caveat by signed content (caveat id,
+verification key id, and ordering) and replays the appended first-party and
+third-party caveat updates from the parent signature. Deleting, reordering,
+or replacing an existing caveat is rejected. A same-root sibling branch is
+reported as `different_branch` because lineage cannot be proven from a
+different parent; a token that changes an old caveat is reported as a
+`pseudo_descendant`.
+
+Locations are not covered by macaroon signatures. Location changes are
+reported in `location_findings` and are never treated as authorization.
+
+Request-bound discharge macaroons are not ordinary child tokens. Pass them
+with `kind='discharge'` and their unbound original as `unbound=` to prove
+that the binding matches; otherwise they are reported as unbound/unknown
+discharges rather than as descendants:
+
+```python
+report = verifier.verify(Candidate(
+    bound_discharge, kind='discharge', unbound=unbound_discharge
+))
+```
+
+Provenance only proves the signed append chain. First-party predicates and
+third-party discharge conditions still need the actual request context;
+`report.conditions_requiring_context` lists them. Exact predicates already
+checked by the caller can be passed as `satisfied_conditions=[...]`, which
+changes only the report, not the provenance result.
+
+See `examples/provenance_demo.py` for a runnable demonstration covering a
+valid descendant, a same-root sibling branch, a pseudo descendant, a
+relocated third-party caveat, and a request-bound discharge.
+
 ## Documentation
 
 The latest documentation can always be found on [ReadTheDocs](http://pymacaroons.readthedocs.org/en/latest/).
