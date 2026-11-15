@@ -82,7 +82,9 @@ class RegistryHive:
         return self._root
 
     def cell(self, offset: int) -> CellType:
-        return self.parse_cell_data(self.cell_data(offset))
+        cell = self.parse_cell_data(self.cell_data(offset))
+        cell.offset = offset
+        return cell
 
     def _cell_data(self, offset: int) -> tuple[bool, bytes]:
         self.fh.seek(self._hbin_offset + offset)
@@ -147,6 +149,7 @@ class Cell:
 
     def __init__(self, hive: RegistryHive, data: bytes, strict: bool = True):
         self.hive = hive
+        self.offset: int | None = None
 
         if data[:2] != self.__signature__:
             raise Error(f"Invalid {self.__class__.__name__} signature {data[:2]!r}, expected {self.__signature__!r}")
@@ -279,7 +282,9 @@ class ValueList:
                 log.warning("Invalid cell signature %r at offset 0x%x", data[:2], entry)
                 continue
 
-            yield KeyValue(self.hive, data)
+            value = KeyValue(self.hive, data)
+            value.offset = entry
+            yield value
 
 
 class KeyValue(Cell):

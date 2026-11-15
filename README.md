@@ -20,6 +20,22 @@ pip install dissect.regf
 
 This module is also automatically installed if you install the `dissect` package.
 
+## Service persistence analysis
+
+`dissect.regf.services` provides a structured, evidence-based analysis of service persistence configuration in an
+offline SYSTEM hive:
+
+```bash
+python -m dissect.regf.services /path/to/SYSTEM
+```
+
+It selects the control set from the actual content of the `Select` key (never assuming `ControlSet001`), enumerates
+services with their start mode, `ImagePath` and `Parameters\ServiceDll`, and reports the cell offset of every key and
+value so each finding can be traced back to its source cell. Conflicting or dangling `Select` pointers are reported as
+uncertainty, environment variables are kept unexpanded, unquoted paths with spaces yield all candidate
+interpretations, and shared-process (`svchost`) services are correlated with their `ServiceDll`. The presence of a
+configuration is never reported as evidence of execution, and no path is checked against the local filesystem.
+
 ## Build and test instructions
 
 This project uses `tox` to build source and wheel distributions. Run the following command from the root folder to build
