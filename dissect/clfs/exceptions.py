@@ -19,3 +19,7 @@ class InvalidSymbolTableError(Error):
 
 class InvalidContextError(Error):
     """Exception raised when the context type doesn't match the context to be parsed."""
+
+
+class InvalidChainStartError(Error):
+    """Exception raised when a chain walk is started outside the caller-specified stream or valid log range."""
