@@ -976,9 +976,14 @@ module Net; module SFTP
 
       # Parses the packet, finds the associated Request instance, and tells
       # the Request instance to respond to the packet (see Request#respond_to).
+      # A packet whose request id is not pending is a duplicate or an orphan;
+      # the request it answered was already removed from #pending_requests, so
+      # there is nothing to deliver it to and it is reported as a protocol
+      # error rather than being silently accepted.
       def dispatch_request(packet)
         id = packet.read_long
-        request = pending_requests.delete(id) or raise Net::SFTP::Exception, "no such request `#{id}'"
+        request = pending_requests.delete(id) or
+          raise MalformedPacketError, "received response for request `#{id}', but no such request is pending"
         request.respond_to(packet)
       end
   end

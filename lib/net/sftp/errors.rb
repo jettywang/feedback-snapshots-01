@@ -11,6 +11,15 @@ module Net; module SFTP
     end
   end
 
+  # Raised when a response packet cannot be parsed, or when its type or
+  # status code does not satisfy the contract of the request it answers.
+  # A matching request id is not enough: an FXP_OPEN, for instance, is only
+  # answered by FXP_HANDLE (or an error FXP_STATUS), so a bare FXP_STATUS
+  # with FX_OK cannot stand in for a handle. The offending request is failed
+  # with this error and no success response or callback is delivered.
+  class MalformedPacketError < Net::SFTP::Exception
+  end
+
   # A exception class for reporting a non-success result of an operation.
   class StatusException < Net::SFTP::Exception
 

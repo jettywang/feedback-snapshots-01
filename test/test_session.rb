@@ -4,6 +4,7 @@ class SessionTest < Net::SFTP::TestCase
   include Net::SFTP::Constants
   include Net::SFTP::Constants::OpenFlags
   include Net::SFTP::Constants::PacketTypes
+  include Net::SFTP::Constants::StatusCodes
 
   (1..6).each do |version|
     define_method("test_server_reporting_version_#{version}_should_cause_version_#{version}_to_be_used") do
@@ -207,6 +208,201 @@ class SessionTest < Net::SFTP::TestCase
     expect_open("/path/to/file", "r", nil, :fail => 5)
     assert_raises(Net::SFTP::StatusException) do
       assert_synchronous_command(:open!, "/path/to/file", "r")
+    end
+  end
+
+  def test_open_should_not_accept_status_ok_without_a_handle
+    expect_sftp_session :server_version => 3 do |channel|
+      channel.sends_packet(FXP_OPEN, :long, 0, :string, "/path/to/file", :long, 0x01, :long, 0)
+      channel.gets_packet(FXP_STATUS, :long, 0, :long, FX_OK, :string, "", :string, "")
+    end
+
+    assert_malformed_response(:open!, "/path/to/file") do |error|
+      assert_match(/FXP_HANDLE/, error.message)
+    end
+  end
+
+  def test_opendir_should_not_accept_status_ok_without_a_handle
+    expect_sftp_session do |channel|
+      channel.sends_packet(FXP_OPENDIR, :long, 0, :string, "/path/to/dir")
+      channel.gets_packet(FXP_STATUS, :long, 0, :long, FX_OK, :string, "", :string, "")
+    end
+
+    assert_malformed_response(:opendir!, "/path/to/dir") do |error|
+      assert_match(/FXP_HANDLE/, error.message)
+    end
+  end
+
+  def test_read_should_not_accept_status_ok_instead_of_data
+    expect_sftp_session do |channel|
+      channel.sends_packet(FXP_READ, :long, 0, :string, "handle", :int64, 0, :long, 1024)
+      channel.gets_packet(FXP_STATUS, :long, 0, :long, FX_OK, :string, "", :string, "")
+    end
+
+    assert_malformed_response(:read!, "handle", 0, 1024) do |error|
+      assert_match(/FXP_DATA/, error.message)
+    end
+  end
+
+  def test_read_should_still_treat_eof_status_as_nil
+    expect_sftp_session do |channel|
+      channel.sends_packet(FXP_READ, :long, 0, :string, "handle", :int64, 0, :long, 1024)
+      channel.gets_packet(FXP_STATUS, :long, 0, :long, FX_EOF, :string, "", :string, "")
+    end
+
+    assert_nil assert_synchronous_command(:read!, "handle", 0, 1024)
+  end
+
+  def test_readdir_should_still_treat_eof_status_as_nil
+    expect_sftp_session do |channel|
+      channel.sends_packet(FXP_READDIR, :long, 0, :string, "handle")
+      channel.gets_packet(FXP_STATUS, :long, 0, :long, FX_EOF, :string, "", :string, "")
+    end
+
+    assert_nil assert_synchronous_command(:readdir!, "handle")
+  end
+
+  def test_non_read_operation_should_reject_eof_status
+    expect_sftp_session do |channel|
+      channel.sends_packet(FXP_CLOSE, :long, 0, :string, "handle")
+      channel.gets_packet(FXP_STATUS, :long, 0, :long, FX_EOF, :string, "", :string, "")
+    end
+
+    assert_malformed_response(:close!, "handle") do |error|
+      assert_match(/FX_EOF status is not a valid response for the close request/, error.message)
+    end
+  end
+
+  def test_cross_wired_open_and_read_responses_are_rejected_and_pending_is_cleaned
+    expect_sftp_session :server_version => 3 do |channel|
+      channel.sends_packet(FXP_OPEN, :long, 0, :string, "/path/to/file", :long, 0x01, :long, 0)
+      channel.sends_packet(FXP_READ, :long, 1, :string, "handle", :int64, 0, :long, 1024)
+      # The two replies are swapped: id 0 (open) gets DATA, id 1 (read) gets HANDLE.
+      channel.gets_packet(FXP_DATA, :long, 0, :string, "belongs to a read")
+      channel.gets_packet(FXP_HANDLE, :long, 1, :string, "belongs to an open")
+    end
+
+    open_callbacks = []
+    read_callbacks = []
+    Net::SSH::Test::Extensions::IO.with_test_extension do
+      sftp.connect!
+      open_request = sftp.open("/path/to/file") { |response| open_callbacks << response }
+      read_request = sftp.read("handle", 0, 1024) { |response| read_callbacks << response }
+
+      assert_raises(Net::SFTP::MalformedPacketError) { sftp.loop }
+
+      # The first, mismatched packet is consumed and its request is removed.
+      refute sftp.pending_requests.key?(open_request.id)
+      assert open_request.instance_variable_get(:@error).is_a?(Net::SFTP::MalformedPacketError)
+      assert_nil open_request.response
+      assert_empty open_callbacks
+
+      # The unrelated in-flight request must keep waiting for its own reply.
+      assert sftp.pending_requests.key?(read_request.id)
+      assert read_request.pending?
+      assert_empty read_callbacks
+
+      second_error = assert_raises(Net::SFTP::MalformedPacketError) { sftp.loop }
+      assert_match(/FXP_DATA response for read/, second_error.message)
+
+      refute read_request.pending?
+      assert read_request.instance_variable_get(:@error).is_a?(Net::SFTP::MalformedPacketError)
+      assert_nil read_request.response
+      assert_empty read_callbacks
+      assert_empty sftp.pending_requests
+
+      [open_request, read_request].each do |request|
+        assert_raises(Net::SFTP::MalformedPacketError) { request.wait }
+      end
+    end
+  end
+
+  def test_duplicate_response_is_rejected_and_does_not_redeliver_the_callback
+    expect_sftp_session do |channel|
+      channel.sends_packet(FXP_CLOSE, :long, 0, :string, "handle")
+      channel.gets_packet(FXP_STATUS, :long, 0, :long, FX_OK, :string, "", :string, "")
+      channel.gets_packet(FXP_STATUS, :long, 0, :long, FX_OK, :string, "", :string, "")
+    end
+
+    deliveries = 0
+    Net::SSH::Test::Extensions::IO.with_test_extension do
+      sftp.connect!
+      request = sftp.close("handle") { deliveries += 1 }
+
+      # Both buffered packets are polled together; the duplicate aborts the
+      # poll with a protocol error after the first response was delivered.
+      error = assert_raises(Net::SFTP::MalformedPacketError) { sftp.loop }
+      assert_match(/no such request is pending/, error.message)
+
+      # The legitimate first response completed the request exactly once and
+      # no pending entry survives.
+      assert request.response.ok?
+      refute request.pending?
+      assert_equal 1, deliveries
+      assert_empty sftp.pending_requests
+
+      # A later loop is a no-op; the duplicate never redelivers or reopens it.
+      sftp.loop
+      assert_equal 1, deliveries
+      assert request.response.ok?
+      refute request.pending?
+    end
+  end
+
+  def test_status_error_remains_delivered_to_the_matching_request
+    expect_sftp_session :server_version => 3 do |channel|
+      channel.sends_packet(FXP_OPEN, :long, 0, :string, "/path/to/file", :long, 0x01, :long, 0)
+      channel.gets_packet(FXP_STATUS, :long, 0, :long, FX_NO_SUCH_FILE, :string, "missing", :string, "en")
+    end
+
+    assert_command_with_callback(:open, "/path/to/file") do |response|
+      refute response.ok?
+      assert_equal FX_NO_SUCH_FILE, response.code
+    end
+  end
+
+  def test_status_only_operation_rejects_an_unexpected_payload_packet
+    expect_sftp_session :server_version => 3 do |channel|
+      channel.sends_packet(FXP_WRITE, :long, 0, :string, "handle", :int64, 0, :string, "data")
+      channel.gets_packet(FXP_ATTRS, :long, 0, :long, 0)
+    end
+
+    assert_malformed_response(:write!, "handle", 0, "data") do |error|
+      assert_match(/FXP_STATUS response for write/, error.message)
+    end
+  end
+
+  def test_v1_status_error_without_message_is_still_delivered
+    expect_sftp_session :server_version => 1 do |channel|
+      channel.sends_packet(FXP_REMOVE, :long, 0, :string, "/path/to/file")
+      channel.gets_packet(FXP_STATUS, :long, 0, :long, FX_PERMISSION_DENIED)
+    end
+
+    assert_command_with_callback(:remove, "/path/to/file") do |response|
+      refute response.ok?
+      assert_equal FX_PERMISSION_DENIED, response.code
+    end
+  end
+
+  def test_unparseable_packet_fails_the_request_without_a_callback_or_success
+    expect_sftp_session :server_version => 3 do |channel|
+      channel.sends_packet(FXP_READDIR, :long, 0, :string, "handle")
+      # Claims three name entries but carries none.
+      channel.gets_packet(FXP_NAME, :long, 0, :long, 3)
+    end
+
+    deliveries = 0
+    Net::SSH::Test::Extensions::IO.with_test_extension do
+      sftp.connect!
+      request = sftp.readdir("handle") { deliveries += 1 }
+
+      error = assert_raises(Net::SFTP::Exception) { sftp.loop }
+      assert_match(/name entries/, error.message)
+      assert_nil request.response
+      refute request.pending?
+      assert_empty sftp.pending_requests
+      assert_equal 0, deliveries
+      assert_same error, request.instance_variable_get(:@error)
     end
   end
 
@@ -826,6 +1022,19 @@ class SessionTest < Net::SFTP::TestCase
       Net::SSH::Test::Extensions::IO.with_test_extension do
         sftp.connect!
         assert_raises(NotImplementedError) { sftp.send(command, *args) }
+      end
+    end
+
+    # Drives a synchronous (!) operation whose server reply violates its
+    # response contract. The malformed packet must surface from the event
+    # loop, fail the request, and never be turned into a success result.
+    def assert_malformed_response(command, *args)
+      Net::SSH::Test::Extensions::IO.with_test_extension do
+        sftp.connect!
+        error = assert_raises(Net::SFTP::MalformedPacketError) { sftp.send(command, *args) }
+        yield error if block_given?
+        assert_empty sftp.pending_requests
+        error
       end
     end
 

@@ -1,0 +1,9 @@
+Validate that each response packet honors the contract of the request it
+answers, instead of trusting the request id alone. A structurally valid packet
+of the wrong type (such as FXP_DATA or FXP_HANDLE for an unrelated request), a
+bare FXP_STATUS with FX_OK where a FXP_HANDLE, FXP_DATA, FXP_NAME or FXP_ATTRS
+payload is required, or FX_EOF outside read/readdir now fails the request with
+Net::SFTP::MalformedPacketError rather than being delivered as a successful
+response. Duplicate or orphaned response packets raise the same error, and the
+failed request is removed from the pending set without invoking its success
+callback or swallowing the exception.
