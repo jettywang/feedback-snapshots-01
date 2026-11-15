@@ -39,8 +39,14 @@ class MessageDecoder #:nodoc: all
   # Gets the byte value at the specified position
   def get_byte_at(position)
     assert_buffer_position_valid(position)
-    return nil if @data[position].nil?
-    @data[position].getbyte(0)
+    # Wire strings have byte offsets. Avoid allocating a one-character
+    # String for every label octet, retaining historical character indexing
+    # for direct callers that supply a multibyte text encoding.
+    if @data.encoding == Encoding::BINARY || @data.ascii_only?
+      @data.getbyte(position)
+    else
+      @data[position]&.getbyte(0)
+    end
   end
 
   # Gets a 16-bit length field from the binary string and yields to the block.

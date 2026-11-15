@@ -236,14 +236,10 @@ module Dnsruby
 
       def from_string(input)
         if input.length > 0
-          data = input.split(' ')
-          self.next_domain = data[0]
-          len = data[0].length+ 1
-          if data[1] == '('
-            len += data[1].length
-          end
-          self.types = input[len, input.length-len]
-          @types = NSEC.get_types(input[len, input.length-len])
+          data = Presentation.tokens(input)
+          self.next_domain = data.shift
+          data.shift if data.first == '('
+          self.types = data.join(' ')
         end
       end
 

@@ -81,7 +81,11 @@ module Dnsruby
         property_tag = msg.get_string
         # The final string has no length byte - its length is implicit as the remainder of the packet length
         property_value = msg.get_bytes
-        self.new([flag, property_tag, property_value])
+        record = self.new([flag, property_tag, property_value])
+        # Keep the public construction-time rdata String used by Comparable
+        # and older serializers, without reparsing arbitrary wire value bytes.
+        record.rdata = record.rdata_to_string
+        record
       end
 
       def validate_fields

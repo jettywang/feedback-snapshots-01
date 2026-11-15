@@ -155,7 +155,7 @@ module Dnsruby
       attr_accessor :query_bytes, :query, :ignore_truncation, :client_queue,
         :client_query_id, :socket, :dest_server, :dest_port, :endtime, :udp_packet_size,
         :single_resolver, :is_persistent_socket, :tcp_pipelining_max_queries, :send_token,
-        :retire_connection, :disable_edns, :authentication_error, :cache_scope
+        :retire_connection, :disable_edns, :authentication_error, :cache_scope, :transport_configuration
       #  new(query_bytes, query, ignore_truncation, client_queue, client_query_id,
       #      socket, dest_server, dest_port, endtime, , udp_packet_size, single_resolver)
       def initialize(*args)
@@ -175,6 +175,14 @@ module Dnsruby
         @send_token = SendToken.new
         @retire_connection = false
         @disable_edns = false
+      end
+
+      def no_tcp
+        transport_configuration ? transport_configuration[:no_tcp] : single_resolver.no_tcp
+      end
+
+      def tcp_idle_timeout
+        transport_configuration ? transport_configuration[:tcp_idle_timeout] : single_resolver.tcp_idle_timeout
       end
     end
 
@@ -880,7 +888,7 @@ module Dnsruby
         # Idle time starts after the last outstanding response, never while a
         # query or pipeline writer still owns the socket.
         (@@socket_idle_deadlines ||= {})[socket] =
-          TransportClock.now + settings.single_resolver.tcp_idle_timeout
+          TransportClock.now + settings.tcp_idle_timeout
         (@idle_deadlines ||= DeadlineQueue.new)[socket] = @@socket_idle_deadlines[socket]
       end
     end
@@ -1110,7 +1118,7 @@ module Dnsruby
         if !is_tcp && (DecodeError === e) && e.partial_message && e.partial_message.header.tc
           settings = state_mutex.synchronize do
             current = @@query_hash[client_id]
-            if current && current.socket == socket && !current.ignore_truncation && !current.single_resolver.no_tcp
+            if current && current.socket == socket && !current.ignore_truncation && !current.no_tcp
               current
             end
           end

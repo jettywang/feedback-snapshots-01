@@ -37,7 +37,7 @@ module Dnsruby
 
       def from_string(input) #:nodoc: all
         if (input.length > 0)
-          names = input.split(" ")
+          names = Presentation.tokens(input)
           if(names.size != 2)
             raise DecodeError.new("MX record expects preference and domain")
           end

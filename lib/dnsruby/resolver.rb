@@ -745,15 +745,10 @@ module Dnsruby
     #         res.add_src_port(60015..60115)
     #
     def add_src_port(p)
-      if Resolver.check_port(p, @src_port)
-        a = Resolver.get_ports_from(p)
-        a.each do |x|
-          if (@src_port.length > 0) && (x == 0)
-            Dnsruby.log_and_raise("src_port of 0 only allowed as only src_port value (currently #{@src_port.length} values",
-                ArgumentError)
-          end
-          @src_port.push(x)
-        end
+      additions = Resolver.get_ports_from(p)
+      ports = @src_port == [0] && !additions.empty? && !additions.include?(0) ? [] : @src_port
+      if Resolver.check_port(additions, ports)
+        @src_port = ports + additions
       end
       update
     end
@@ -770,7 +765,10 @@ module Dnsruby
         return true
       end
       if Resolver.port_in_range(p)
-        return ! ((p == 0) && (src_port.length > 0))
+        if (p == 0 && !src_port.empty?) || (p != 0 && src_port.include?(0))
+          raise ArgumentError, 'Source port 0 must be the only member of a source port pool'
+        end
+        return true
       else
         Dnsruby.log.error("Illegal port (#{p})")
         Dnsruby.log_and_raise("Illegal port #{p}", ArgumentError)

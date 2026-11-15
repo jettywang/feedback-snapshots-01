@@ -397,7 +397,7 @@ class ReleaseConfigurationFixesTest < Minitest::Test
 
   def test_root_refresh_failure_stops_address_discovery_without_repeated_bootstrap
     [{bootstrap_error: Dnsruby::Refused.new}, {bootstrap_error: IOError.new},
-      {bootstrap_ttl: 0}, {bootstrap_ttl: nil}].each do |options|
+      {bootstrap_ttl: nil}].each do |options|
       with_root_expiry_during_lookup(**options) do |run, trace|
         assert_nil(run.call)
         assert_equal(1, trace[:bootstraps].length)
@@ -405,6 +405,16 @@ class ReleaseConfigurationFixesTest < Minitest::Test
         assert(trace[:hops].all?(&:closed))
         refute(Dnsruby::Recursor.class_variable_get(:@@hints_mutex).locked?)
       end
+    end
+  end
+
+  def test_zero_ttl_root_refresh_completes_the_current_lookup
+    with_root_expiry_during_lookup(bootstrap_ttl: 0) do |run, trace|
+      assert_equal('192.0.2.1', run.call.answer.first.address.to_s)
+      assert_equal(1, trace[:bootstraps].length)
+      assert_equal(['www.child.example.', 'ns.external.', 'www.child.example.'], trace[:calls].map(&:first))
+      assert_empty(Dnsruby::Recursor.class_variable_get(:@@hints).values.first.values)
+      assert(trace[:hops].all?(&:closed))
     end
   end
 

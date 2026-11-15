@@ -9,6 +9,23 @@ module Dnsruby
       text.scan(/(?:\\.|[^\s])+/m)
     end
 
+    # Decimal escapes keep escaped whitespace intact through older record
+    # parsers and layout normalization, without changing the represented octet.
+    def self.escape_whitespace(text)
+      text.gsub(/\\(.)/m) do |escaped|
+        /\s/.match?(escaped[1]) ? format('\\%03d', escaped[1].ord) : escaped
+      end
+    end
+
+    # TXT.parse historically accepts C-style escapes. Zone files instead use
+    # RFC 1035's literal nonnumeric escapes; express them as octets before
+    # handing the string to that compatibility parser.
+    def self.character_string_escapes(text)
+      text.gsub(/\\([^0-9])/m) do |escaped|
+        escaped[1].bytes.map { |octet| format('\\%03d', octet) }.join
+      end
+    end
+
     def self.unescaped_quote(text)
       position = 0
       while (token = /\\.|"/m.match(text, position))

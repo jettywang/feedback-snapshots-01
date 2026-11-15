@@ -254,6 +254,9 @@ these entries.
 Positive answers are kept separate for each upstream server, port, source
 configuration and query options, including EDNS. Truncated replies are never
 reused from the cache, so a later query can still retry over TCP when needed.
+Each send attempt uses one snapshot of its transport configuration; subsequent
+attempts can use newer settings. Adding an explicit source port replaces the
+default `[0]` pool (random source ports). A pool cannot mix zero and explicit ports.
 
 For each question, Dnsruby makes at most **three attempts per server address per
 transport**, including retries without optional EDNS support. UDP and TCP have
@@ -262,6 +265,11 @@ not increase this limit.
 
 Recursor caches also have size limits. Cached delegations expire when their NS
 records expire, even if the associated nameserver addresses have longer TTLs.
+Their reusable lifetimes are also bounded by the parent route through which
+they were learned, so a child cannot keep that route alive indefinitely. An
+unrelated parent-cache eviction does not discard an already admitted child.
+Root NS TTLs govern bootstrap reuse, and missing addresses are resolved even
+when a priming reply includes addresses for only some root nameservers.
 Fresh nameserver addresses with a zero TTL remain usable for the current
 lookup, but are not retained in shared caches.
 When you supply a Resolver to `Recursor.new`, its transport and source-address

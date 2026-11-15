@@ -150,6 +150,21 @@ module Dnsruby
         @mutex.synchronize { @workers -= 1 }
       end
 
+      # Zero-TTL priming data remains usable by the lookup that received it,
+      # including its address workers, but never by an independent lookup.
+      def retain_hints(generation, hints)
+        @mutex.synchronize { @hints = [generation, hints] }
+      end
+
+      def hints_for(generation)
+        @mutex.synchronize do
+          if @hints && @hints.first == generation &&
+              @hints.last.any? { |_name, addresses| !addresses.current_values.empty? }
+            @hints.last
+          end
+        end
+      end
+
       def with_dependency(name, type, klass)
         previous = Thread.current[:dnsruby_recursion_dependencies] || []
         identity = [Name.create(name).canonical, Types.new(type).code, Classes.new(klass).code]
@@ -238,11 +253,12 @@ module Dnsruby
       end
       # Shared caches contain only reusable addresses. Copies also keep later
       # updates to one lookup's working map out of another lookup's view.
-      def snapshot
+      def snapshot(include_current: false)
         copy = self.class.new
         @mutex.synchronize do
           expire
           copy.instance_variable_set(:@hash, @hash.dup)
+          copy.instance_variable_set(:@fresh, @fresh.dup) if include_current
         end
         copy
       end
@@ -353,11 +369,16 @@ module Dnsruby
 
     def self.ensure_hints(resolver)
       generation = @@mutex.synchronize do
-        @@hints_generation if hints_ready?
+        if hints_ready?
+          current_budget&.retain_hints(@@hints_generation, @@hints)
+          @@hints_generation
+        elsif current_budget&.hints_for(@@hints_generation)
+          @@hints_generation
+        end
       end
       return generation if generation
       with_hints_configuration do
-        configured = @@mutex.synchronize { hints_ready? }
+        configured = @@mutex.synchronize { hints_ready? || current_budget&.hints_for(@@hints_generation) }
         configure_hints({}, resolver) unless configured
         @@mutex.synchronize { @@hints_generation }
       end
@@ -367,10 +388,18 @@ module Dnsruby
     # Called with the cache mutex held. A retained bootstrap is usable only
     # while at least one root address is live and no reset has superseded it.
     def self.hints_ready?
+      lifetime = @@zone_expirations['.']
+      return false if lifetime && lifetime.first.equal?(@@hints) && lifetime[1] <= Time.now
       @@hints && @@zones_cache && !@@hints.equal?(@@stale_hints) &&
         @@hints.any? { |_name, addresses| !addresses.values.empty? }
     end
     private_class_method :hints_ready?
+
+    # Caller holds the cache mutex. Fresh hints belong to this query's budget.
+    def self.query_hints
+      current_budget&.hints_for(@@hints_generation) || @@hints
+    end
+    private_class_method :query_hints
 
     def self.set_hints(hints, resolver)
       with_limits(resolver) do
@@ -389,7 +418,9 @@ module Dnsruby
       budget = current_budget
       budget&.step!
       packet=resolver.query_no_validation_or_recursion(".", "NS", "IN")
+      received_at = Time.now
       hints = Hash.new
+      root_expiration = nil
       if (packet)
         if (ans = packet.answer)
           ans.each do |rr|
@@ -400,16 +431,20 @@ module Dnsruby
               server.sub!(/\.$/,"")
               TheLog.debug(";; FOUND HINT: #{server}\n")
               hints[server] = AddressCache.new
+              receipt = rr.instance_variable_get(:@dnsruby_received_at)
+              expiration = (receipt ? Time.at(receipt) : received_at) + rr.ttl
+              root_expiration = [root_expiration, expiration].compact.min
             end
           end
-          if ((packet.additional.length == 0) ||
-                 ((packet.additional.length == 1) && (packet.additional()[0].type == Types.OPT)))
+          packet.additional.each { |rr| add_to_hints(hints, rr) }
+          missing = hints.keys.select { |server| hints[server].current_values.empty? }
+          unless missing.empty?
             # Resolve missing root addresses in bounded batches. All of the
             # queries keep the bootstrap's deadline and transmission budget.
             control = QueryControl.current
             q = control ? QueryControl::Queue.new : Queue.new
             batch_size = budget ? budget.limits[:max_workers] : DEFAULT_RECURSION_LIMITS[:max_workers]
-            hints.keys.product(['A', 'AAAA']).each_slice(batch_size) do |batch|
+            missing.product(['A', 'AAAA']).each_slice(batch_size) do |batch|
               query_ids = []
               begin
                 batch.each do |server, type|
@@ -434,17 +469,11 @@ module Dnsruby
                 end
               end
             end
-          else
-            packet.additional.each do |rr|
-              TheLog.debug(";; ADDITIONAL: "+rr.inspect+"\n")
-              add_to_hints(hints, rr)
-
-            end
           end
         end
         #                       foreach my $server (keys %hints) {
         hints.keys.each do |server|
-          if (!hints[server] || hints[server].length == 0)
+          if (!hints[server] || hints[server].current_values.empty?)
             #  Wipe the servers without lookups
             hints.delete(server)
           end
@@ -455,13 +484,14 @@ module Dnsruby
       # Publish a complete bootstrap, replacing delegations learned through the
       # old hints. An unsuccessful bootstrap leaves the previous state intact.
       @@mutex.synchronize do
-        hints = hints.transform_values(&:snapshot)
-        @@hints = hints
+        fresh_hints = hints
+        @@hints = hints.transform_values(&:snapshot)
         @@stale_hints = nil
         @@hints_generation += 1
         @@nameservers = hints.keys
-        @@zones_cache = {'.' => hints}
-        @@zone_expirations = {}
+        @@zones_cache = {'.' => @@hints}
+        @@zone_expirations = {'.' => [@@hints, root_expiration]}
+        budget&.retain_hints(@@hints_generation, fresh_hints)
         @@authority_cache = {}
         Cache.invalidate_resolutions
       end
@@ -539,19 +569,37 @@ module Dnsruby
       @@authority_cache.shift while @@authority_cache.length > CACHE_LIMIT
     end
 
-    def self.cache_zone(name, authorities, ttl) # :nodoc:
+    def self.cache_zone(name, authorities, ttl, parent: nil) # :nodoc:
       unless @@mutex.owned?
-        return @@mutex.synchronize { cache_zone(name, authorities, ttl) }
+        return @@mutex.synchronize { cache_zone(name, authorities, ttl, parent: parent) }
       end
       generation = Thread.current[:dnsruby_recursor_generation]
       return if generation && generation != @@hints_generation
+      name = Name.create(name)
+      name.absolute = true
+      name = name.to_s(true).downcase
+      if parent
+        parent = Name.create(parent)
+        parent.absolute = true
+        parent = parent.to_s(true).downcase
+      end
       return if name == "."
       @@zones_cache.delete(name)
       @@zone_expirations.delete(name)
       return if ttl.nil? || ttl <= 0
+      expiration = Time.now + ttl
+      if parent
+        lifetime = @@zone_expirations[parent]
+        # Retain the parent's deadline, not a reference to its cache entry.
+        # LRU eviction must not invalidate descendants already learned, while
+        # a descendant cannot extend its route beyond the parent admission.
+        return unless lifetime && lifetime.first.equal?(@@zones_cache[parent])
+        expiration = [expiration, lifetime[1]].min
+        return if expiration <= Time.now
+      end
       snapshot = authorities.transform_values { |addresses| addresses.is_a?(AddressCache) ? addresses.snapshot : addresses.dup }
       @@zones_cache[name] = snapshot
-      @@zone_expirations[name] = [snapshot, Time.now + ttl]
+      @@zone_expirations[name] = [snapshot, expiration]
       while @@zones_cache.length > CACHE_LIMIT
         oldest = @@zones_cache.each_key.find { |zone| zone != "." }
         break unless oldest
@@ -772,26 +820,19 @@ module Dnsruby
     private :recursion_cache_scope
 
     def get_closest_known_zone_for(n) # :nodoc:
-      #  Find the closest parent of name that we know
-      #  e.g. for nominet.org.uk, try nominet.org.uk., org.uk., uk., .
-      #  does @zones_cache contain the name we're after
-      if (Name === n)
-        n = n.to_s # @TODO@ This is a bit crap!
-      end
       if (n == nil)
         TheLog.error("Name is nil")
         raise  ResolvError.new("Nameserver invalid!")
       end
-      name = n.downcase
-      if (name[name.length-1] != ".")
-        name = name + "."
-      end
-
-      while (true)
+      candidate = Name.create(n)
+      candidate.absolute = true
+      loop do
         QueryControl.current&.check!
-        #         print "Checking for known zone : #{name}\n"
-        zone = nil
+        name = candidate.to_s(true).downcase
         @@mutex.synchronize{
+          if name == '.' && Recursor.send(:current_budget)&.hints_for(@@hints_generation)
+            return name
+          end
           zone = @@zones_cache[name]
           lifetime = @@zone_expirations[name]
           if lifetime && lifetime[0].equal?(zone) && lifetime[1] <= Time.now
@@ -803,14 +844,8 @@ module Dnsruby
             return name
           end
         }
-        return false if name=="."
-        #  strip the name up to the first dot
-        first_dot = name.index(".")
-        if (first_dot == (name.length-1))
-          name = "."
-        else
-          name = name[first_dot+1, name.length]
-        end
+        return false if candidate.labels.empty?
+        candidate = candidate.strip_label
       end
     end
 
@@ -823,9 +858,11 @@ module Dnsruby
         #         print "GOT KNOWN ZONE : #{known_zone}\n"
         observed_authorities = nil
         @@mutex.synchronize {
-          observed_authorities = @@zones_cache[known_zone]
+          observed_authorities = known_zone == '.' ? Recursor.send(:query_hints) : @@zones_cache[known_zone]
           known_authorities = observed_authorities&.dup # isolate each recursion's working map
-          known_authorities&.transform_values! { |addresses| addresses.is_a?(AddressCache) ? addresses.snapshot : addresses.dup }
+          known_authorities&.transform_values! do |addresses|
+            addresses.is_a?(AddressCache) ? addresses.snapshot(include_current: known_zone == '.') : addresses.dup
+          end
         }
         #         print "Known authorities : #{known_authorities}\n"
 
@@ -887,7 +924,7 @@ module Dnsruby
           # finding an address for a delegated server. Refresh the bootstrap
           # instead of recursively looking up root servers against empty hints.
           Recursor.send(:ensure_hints, @resolver)
-          ns = @@mutex.synchronize { @@hints.values.map(&:values).reject(&:empty?) }
+          ns = @@mutex.synchronize { Recursor.send(:query_hints).values.map(&:current_values).reject(&:empty?) }
           raise ResolvError, 'Root hints expired before use' if ns.empty?
           # Retain this query's original generation: a refresh or reset must
           # not let earlier traversal work populate the replacement caches.
@@ -909,7 +946,7 @@ module Dnsruby
           control = QueryControl.new(parent: QueryControl.current)
           transmission_budget = SelectThread::TransmissionBudget.current
           hints_generation = Thread.current[:dnsruby_recursor_generation]
-          hints = @@mutex.synchronize { @@hints.dup }
+          hints = @@mutex.synchronize { Recursor.send(:query_hints).dup }
           workers = []
           budget = Recursor.send(:current_budget)
           dependencies = Thread.current[:dnsruby_recursion_dependencies]
@@ -924,7 +961,9 @@ module Dnsruby
                 begin
                   answer = SelectThread::TransmissionBudget.with(transmission_budget) do
                     QueryControl.with(control) do
-                      local_hints = hints.transform_values { |addresses| addresses.is_a?(AddressCache) ? addresses.snapshot : addresses.dup }
+                      local_hints = hints.transform_values do |addresses|
+                        addresses.is_a?(AddressCache) ? addresses.snapshot(include_current: true) : addresses.dup
+                      end
                       recurse = -> { follow_aliases(ns_rec, address_type, klass, '.', local_hints,
                         depth + 1, no_validation) }
                       budget ? budget.with_dependency(ns_rec, address_type, klass, &recurse) : recurse.call
@@ -1121,7 +1160,7 @@ module Dnsruby
             referral = referral_authorities(packet, known_zone, name, klass)
             return nil unless referral
             of, auth, delegation_ttl = referral
-            @@mutex.synchronize { Recursor.cache_zone(of, auth.dup, delegation_ttl) }
+            @@mutex.synchronize { Recursor.cache_zone(of, auth.dup, delegation_ttl, parent: known_zone) }
             return _dorecursion(name, type, klass, of, auth, depth + 1, no_validation)
           end
         end

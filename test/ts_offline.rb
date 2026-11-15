@@ -22,7 +22,10 @@ Dnsruby.log.level = Logger::FATAL
 TESTS = %w(
     dnskey
     cache_keys
+    attempt_configuration
     caa
+    review_record_compatibility
+    review_validation_priming
     review_cache
     escapedchars
     edns_retry_regressions

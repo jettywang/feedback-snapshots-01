@@ -106,7 +106,7 @@ module Dnsruby
       return nil if line.strip.empty?
 
       if (line.index("$ORIGIN") == 0)
-        @origin = absolute_name(line.split()[1].strip).to_s(true) # $ORIGIN <domain-name>
+        @origin = absolute_name(Presentation.tokens(line)[1]).to_s(true) # $ORIGIN <domain-name>
         #                 print "Setting $ORIGIN to #{@origin}\n"
         return nil
       end
@@ -222,6 +222,8 @@ module Dnsruby
     end
 
     def normalise_scanned_line(line, do_prefix_hack = false)
+
+      line = Presentation.escape_whitespace(line) if line.include?('\\')
 
       #  Note that a freestanding "@" is used to denote the current origin - we can simply replace that straight away
       #  Note that no domain name may be specified in the RR - in that case, last_name should be used. How do we tell? Tab or space at start of line.
@@ -376,6 +378,14 @@ module Dnsruby
       if generic_rdata
         return line + "\n", type_string, @last_name if do_prefix_hack
         return line + "\n"
+      end
+
+      if [Types::TXT, Types::SPF].include?(type_was) && line.include?('\\')
+        header_and_data = line.split(/\s+/, 5)
+        if header_and_data[4]
+          header_and_data[4] = Presentation.character_string_escapes(header_and_data[4])
+          line = header_and_data.join(' ')
+        end
       end
 
       # Qualify parsed labels so an escaped final dot stays inside its label.

@@ -111,7 +111,11 @@ any DNSSEC or timeout settings your application uses.
 Zone files now resolve relative `$ORIGIN` directives and SOA names against the
 current origin, including names with an escaped final dot. TXT records preserve
 UTF-8 and escaped bytes through wire encoding, and their 255-octet string limit
-is checked before writing. DS, CDS and DLV records preserve private algorithm
+is checked before writing. ZoneReader treats nonnumeric escapes literally under
+DNS zone-file rules, including `\n` as `n`; direct `RR::TXT.parse` and
+`RR.create` retain their legacy C-style escapes for compatibility. Escaped
+whitespace also works in `$ORIGIN`, MX and NSEC names.
+DS, CDS and DLV records preserve private algorithm
 numbers and unknown digest numbers. Name compression also keeps literal dots
 inside labels distinct from the dots that separate labels.
 
@@ -126,6 +130,9 @@ inside labels distinct from the dots that separate labels.
   port pool no longer briefly exposes an empty pool to concurrent sends.
   Invalid replacements leave the previous configuration intact, and an occupied
   port no longer prevents a send from trying the other configured ports.
+  Each attempt retains one transport configuration snapshot through connection
+  setup, reply matching and caching. Adding an explicit source port replaces
+  the default `[0]` pool; zero cannot be mixed with explicit ports.
   A zero retry delay keeps every scheduled nameserver attempt.
   [#155](https://github.com/alexdalitz/dnsruby/issues/155).
 * Cancellation and timeouts wake waiting queries promptly, including while
@@ -151,7 +158,10 @@ inside labels distinct from the dots that separate labels.
   honors the transport and source settings of its supplied Resolver and applies
   its query timeout to the complete lookup. Changes to DNSSEC root hints take
   effect on subsequent lookups. Root hints are also refreshed when all their
-  cached addresses expire, including during a lookup.
+  cached addresses expire, including during a lookup. Root NS TTLs separately
+  bound bootstrap reuse, partial priming replies trigger discovery of missing
+  root addresses, and zero-TTL priming addresses remain usable by their current
+  lookup. Ancestor lookup preserves escaped label boundaries and relative names.
   [#179](https://github.com/alexdalitz/dnsruby/issues/179),
   [#184](https://github.com/alexdalitz/dnsruby/issues/184),
   [PR #221](https://github.com/alexdalitz/dnsruby/pull/221).
@@ -202,6 +212,10 @@ inside labels distinct from the dots that separate labels.
   the synthesized CNAME also work. Cross-zone aliases discover the target's
   chain within the same validation budget. An unsigned delegation requires
   authenticated proof: lookup failures cannot become insecure results.
+  A provisional insecure classification never suppresses a required record's
+  verification error; unsigned alias responses check every required owner and
+  the terminal name. Signed records discover their signer zones without extra
+  DS queries for each record owner.
   Signer zones, DNSKEY Zone Key flags and DS owner/class bindings are checked.
   A key authenticating a DNSKEY RRset must also be present in that set.
   Missing NSEC or RRSIG bitmap bits do not prove those types absent.
@@ -222,7 +236,9 @@ inside labels distinct from the dots that separate labels.
   caches follow RFC 9520. Entries respect the question class, configuration and
   trust changes. Cancellation, raw messages, UPDATE and TSIG bypass these new
   negative and failure caches. Recursive delegation caches are also bounded,
-  and delegation and glue-address lifetimes are tracked separately.
+  and delegation and glue-address lifetimes are tracked separately. Cached
+  child routes cannot outlive the parent route through which they were learned;
+  parent-cache eviction alone does not discard an already admitted child.
 * Changing a DNSKEY's key or algorithm clears its cached public key.
   `verify_rrset` accepts a single DS/DLV anchor as well as an RRSet. NSEC3 and
   NSEC3PARAM correctly handle unsigned length octets and retain salt lengths.
@@ -234,6 +250,8 @@ inside labels distinct from the dots that separate labels.
 * CAA accepts extensible alphanumeric tags and empty or binary values, including
   an empty `issue` value. Wire decoding preserves the value independently of
   presentation parsing. Private RRSIG algorithm numbers round-trip unchanged.
+  Decoded CAA records retain the historical String form of `rdata`, including
+  comparisons with text-created records and existing JSONDNS serialization.
   Received ordinary TTLs with their high bit set become zero under RFC 2181;
   OPT fields and TSIG's zero-TTL rule retain their special handling. Mandatory
   names require their wire encoding, while valid empty UPDATE markers still
@@ -258,6 +276,9 @@ inside labels distinct from the dots that separate labels.
   RRset grouping uses an index and avoids cloning unrelated records. It
   preserves section order and TTL normalization, and charges validation work
   while grouping records and checking duplicates.
+  Canonical RRset sorting also avoids repeated duplicate scans, and binary
+  message decoding avoids temporary one-byte strings while retaining bounds
+  checks, compression safeguards and legacy nonbinary input behavior.
 * Recursive answers now complete CNAME and DNAME chains within the original
   lookup's deadline and work limits. Zero-TTL nameserver addresses are usable
   during the lookup that obtained them without entering shared caches. DNSSEC

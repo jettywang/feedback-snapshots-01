@@ -208,7 +208,7 @@ class ReleaseDnssecCompletionTest < Minitest::Test
     policies = Dnsruby::Dnssec::ValidationPolicy
     [policies::ALWAYS_ROOT_ONLY, policies::LOCAL_ANCHORS_THEN_ROOT, policies::ROOT_THEN_LOCAL_ANCHORS].each do |policy|
       root = Dnsruby::SingleVerifier.new(Dnsruby::SingleVerifier::VerifierType::ANCHOR)
-      root.define_singleton_method(:find_closest_anchor_for) { |_| :configured_root }
+      root.add_trust_anchor(Dnsruby::RR.create(". 300 IN DS 12345 13 2 #{'AB' * 32}"))
       deadline = @now + 7
       root.define_singleton_method(:follow_chain) do |*|
         send(:trust_operation)[:insecurity_expirations] << deadline

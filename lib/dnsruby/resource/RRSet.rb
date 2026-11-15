@@ -73,6 +73,10 @@ class RRSet
       return ret
     end
     @membership_index = nil unless do_clone
+    add_record(rin, do_clone)
+  end
+
+  private def add_record(rin, do_clone)
     # Reject unrelated records before copying their wire data.
     first = @rrs.first
     return false if first && !rin.sameRRset(first)
@@ -117,10 +121,17 @@ class RRSet
     end
 
     return_rrs = RRSet.new
-    canonical_rrs.keys.sort.each { |rdata|
-      return_rrs.add(canonical_rrs[rdata], false)
-    }
+    return_rrs.send(:add_canonical_records, canonical_rrs.keys.sort.map { |rdata| canonical_rrs[rdata] })
     return return_rrs
+  end
+
+  private def add_canonical_records(records)
+    # Preserve the original references and TTL normalization of add(rr, false).
+    # The index exists only while building; callers can mutate records later.
+    @membership_index = {}
+    records.each { |record| add_record(record, false) }
+  ensure
+    @membership_index = nil
   end
 
   def ==(other)

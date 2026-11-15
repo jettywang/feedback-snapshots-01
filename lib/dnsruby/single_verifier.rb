@@ -2176,46 +2176,25 @@ module Dnsruby
     end
 
     private def validate_no_rrsigs_internal(msg)
-      #       print "Validating unsigned response\n"
-      #  WHAT IF THERE ARE NO RRSIGS IN MSG?
-      #  Then we need to check that we do not expect any RRSIGs
       if (!msg.question()[0] && msg.answer.length == 0)
-        #         print "Returning Message insecure OK\n"
         msg.security_level = Message::SecurityLevel.INSECURE
         return true
       end
-      qname = msg.question()[0].qname
-      closest_anchor = find_closest_anchor_for(qname)
-      #       print "Found closest anchor :#{closest_anchor}\n"
-      if (closest_anchor)
-        actual_anchor = follow_chain(closest_anchor, qname)
-        #         print "Actual anchor : #{actual_anchor}\n"
-        if (actual_anchor)
-          #           print("Anchor exists for #{qname}, but no signatures in #{msg}\n")
-          TheLog.error("Anchor exists for #{qname}, but no signatures in #{msg}")
-          msg.security_level = Message::SecurityLevel.BOGUS
-          return false
-        end
+      # An unsigned alias can lead into another zone. Insecurity of the
+      # original QNAME says nothing about that zone's required records.
+      operation = trust_operation
+      operation[:insecure_names] ||= {}
+      question = msg.question.first
+      terminal, = terminal_answer(msg, question)
+      names = [[question.qname, question.qclass], [terminal, question.qclass]]
+      msg.section_rrsets.each do |section, rrsets|
+        next if section == 'additional'
+        rrsets.each { |rrset| names << [rrset.name, rrset.klass] unless rrset.rrs.empty? }
       end
-      if ((@verifier_type == VerifierType::DLV) &&
-            @added_dlv_key)
-        #  Remember to check DLV registry as well (if appropriate!)
-        #         print "Checking DLV for closest anchor\n"
-        dlv_anchor = find_closest_dlv_anchor_for(qname)
-        #         print "Found DLV closest anchor :#{dlv_anchor}\n"
-        if (dlv_anchor)
-          actual_anchor = follow_chain(dlv_anchor, qname)
-          #           print "Actual anchor : #{actual_anchor}\n"
-          if (actual_anchor)
-            #             print("DLV Anchor exists for #{qname}, but no signatures in #{msg}\n")
-            TheLog.error("DLV Anchor exists for #{qname}, but no signatures in #{msg}")
-            msg.security_level = Message::SecurityLevel.BOGUS
-            return false
-          end
-
-        end
+      unless names.uniq.all? { |name, klass| discover_insecure_name(name, klass) }
+        msg.security_level = Message::SecurityLevel.BOGUS
+        return false
       end
-      #       print "Returning Message insecure OK\n"
       msg.security_level = Message::SecurityLevel.INSECURE
       return true
     end
@@ -2233,10 +2212,11 @@ module Dnsruby
     def with_operational_validation(msg)
       with_validation do
         operation = trust_operation
-        previous = operation.values_at(:operational, :insecure_rrsets, :insecure_names,
+        previous = operation.values_at(:operational, :insecure_rrsets, :insecure_names, :name_security,
           :insecurity_expirations, :last_insecure_expiration)
         operation[:operational] = true
         operation[:insecure_rrsets], operation[:insecure_names] = {}, {}
+        operation[:name_security] = {}
         operation[:insecurity_expirations] = []
         begin
           result = yield
@@ -2246,7 +2226,7 @@ module Dnsruby
           end
           result
         ensure
-          operation[:operational], operation[:insecure_rrsets], operation[:insecure_names],
+          operation[:operational], operation[:insecure_rrsets], operation[:insecure_names], operation[:name_security],
             operation[:insecurity_expirations], operation[:last_insecure_expiration] = previous
         end
       end
@@ -2326,7 +2306,9 @@ module Dnsruby
             set_verified_security_level(msg, result)
             return true
           end
-        rescue VerifyError
+          error ||= VerifyError.new('Required DNSSEC records did not validate')
+        rescue VerifyError => verification_error
+          error ||= verification_error
         end
       end
       if (error)
@@ -2355,31 +2337,45 @@ module Dnsruby
           next if rrset.rrs.empty?
           if rrset.sigs.empty? || (trust_operation&.fetch(:operational, false) &&
               rrset.sigs.none? { |sig| algorithm_supported?(sig.algorithm, operational: true) })
-            # Unsigned alias targets have no signer to discover. Establish
-            # their security through the parent delegation, never from the
-            # absence of a signature in this response.
-            if discover_insecure_name(rrset.name, rrset.klass)
-              trust_operation[:insecure_rrsets][[rrset.name.canonical, rrset.klass.code, rrset.type.code]] = true
-              attempted = true
-            end
+            attempted = true if discover_insecure_rrset(rrset)
             next
           end
           begin
             signatures = valid_signatures(rrset)
           rescue VerifyError
+            attempted = true if discover_insecure_rrset(rrset)
             next # Ordinary verification will report the invalid RRset.
           end
           signatures.map(&:signers_name).uniq.each do |zone|
             ValidationBudget.current&.check!(1)
-            next if qname && within_zone?(qname, zone) # The original chain already visited this zone.
-            next if discovered[zone.canonical]
-            discovered[zone.canonical] = true
+            if qname && within_zone?(qname, zone) # The original chain already visited this zone.
+              if msg.security_level == Message::SecurityLevel.INSECURE
+                attempted = true if discover_insecure_rrset(rrset)
+              end
+              next
+            end
+            if discovered.key?(zone.canonical)
+              attempted = true if discovered[zone.canonical] == :insecure && discover_insecure_rrset(rrset)
+              next
+            end
+            discovered[zone.canonical] = :failed
             anchor = find_closest_anchor_for(zone)
             anchor ||= find_closest_dlv_anchor_for(zone) if @verifier_type == VerifierType::DLV && @added_dlv_key
-            next unless anchor
+            unless anchor
+              discovered[zone.canonical] = :insecure
+              attempted = true if discover_insecure_rrset(rrset)
+              next
+            end
             attempted = true
             begin
-              follow_chain(anchor, zone)
+              if follow_chain(anchor, zone)
+                discovered[zone.canonical] = :secure
+              else
+                discovered[zone.canonical] = :insecure
+                # Honor a more-specific configured anchor at the owner, even
+                # when the signature names an unsigned ancestor zone.
+                discover_insecure_rrset(rrset)
+              end
             rescue VerifyError
               # An alternative signature may still validate this RRset. A
               # budget abort deliberately propagates past this fallback.
@@ -2395,17 +2391,33 @@ module Dnsruby
     end
     private :discover_signer_keys
 
+    private def discover_insecure_rrset(rrset)
+      return false unless discover_insecure_name(rrset.name, rrset.klass)
+      trust_operation[:insecure_rrsets][[rrset.name.canonical, rrset.klass.code, rrset.type.code]] = true
+    end
+
     def discover_insecure_name(name, klass)
       operation = trust_operation
       return false unless operation && operation[:insecure_names]
       identity = [name.canonical, klass.code]
       return true if operation[:insecure_names][identity]
+      classifications = operation[:name_security] ||= {}
+      return classifications[identity] if classifications.key?(identity)
       ValidationBudget.current&.check!(1)
-      anchor = find_closest_anchor_for(name)
-      anchor ||= find_closest_dlv_anchor_for(name) if @verifier_type == VerifierType::DLV && @added_dlv_key
-      return false unless anchor && anchor.klass == klass
-      return false if follow_chain(anchor, name)
+      anchors = [find_closest_anchor_for(name)]
+      anchors << find_closest_dlv_anchor_for(name) if @verifier_type == VerifierType::DLV && @added_dlv_key
+      anchors = anchors.select { |anchor| anchor && anchor.klass == klass }.uniq
+      # No applicable anchor is an unanchored result for this verifier. It
+      # must not turn into a reusable authenticated proof of insecurity.
+      operation[:insecurity_expirations]&.push(nil) if anchors.empty?
+      if anchors.any? { |anchor| follow_chain(anchor, name) }
+        classifications[identity] = false
+        return false
+      end
       operation[:insecure_names][identity] = true
+      classifications[identity] = true
+    rescue ValidationLimitError
+      raise
     rescue VerifyError
       false # Missing or invalid delegation evidence remains a validation failure.
     end
