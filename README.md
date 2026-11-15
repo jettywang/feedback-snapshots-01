@@ -406,6 +406,67 @@ by the values of binding and NameID:
              )
 ```
 
+### Importing a Restricted Entity from an EntitiesDescriptor
+
+`IdpMetadataParser` selects the first matching descriptor and does not establish
+where its certificate came from. When the metadata is a collection of many
+entities, use `OneLogin::RubySaml::TrustedMetadata` instead. The caller supplies
+the trust anchor, the single entityID that may be adopted, and the time used for
+signature-chain and validity checks:
+
+```ruby
+trust_anchor = OpenSSL::X509::Certificate.new(File.read("metadata-signer.pem"))
+
+result = OneLogin::RubySaml::TrustedMetadata.import(
+  xml,
+  trust_anchors: trust_anchor,
+  entity_id: "https://idp.example.com/metadata",
+  verification_time: Time.now
+)
+
+if result.adopted?
+  settings = result.settings
+else
+  result.errors   # reasons the target was not adopted
+  result.evidence # signatures, coverage and candidates that were left out
+end
+```
+
+The importer applies these rules:
+
+* Every XML signature is verified against a certificate chain rooted in one of
+  the supplied `trust_anchors`. Certificates published inside the metadata
+  (`ds:KeyInfo` or `md:KeyDescriptor`) are never added to the trust store.
+* A signature may cover only the element that is its direct parent. A signature
+  on one `EntityDescriptor` does not cover a sibling, and a signature below an
+  entity cannot vouch for the enclosing `EntitiesDescriptor`.
+* The effective validity is the earliest of `validUntil` and `cacheDuration`
+  found on the ancestors, the target `EntityDescriptor` and its
+  `IDPSSODescriptor`. The metadata is rejected when `verification_time` is at
+  or after that limit.
+* Duplicate `ID` attributes, duplicate entityIDs and an `entityID` that is
+  missing make the target ambiguous and reject the import.
+* Only the signing certificates published by the target entity are copied into
+  `settings.idp_cert`, `settings.idp_cert_fingerprint` and
+  `settings.idp_cert_multi`. Other entities' certificates are kept in
+  `result.evidence[:not_adopted]` as evidence and are never merged into a
+  shared trust pool.
+
+`TrustedMetadata.import` returns a `Result` and records rejection reasons. Use
+`TrustedMetadata.import!` to raise `OneLogin::RubySaml::ValidationError` instead.
+
+`IdpMetadataParser#parse_restricted` accepts the same arguments for code that
+already uses the parser object:
+
+```ruby
+result = OneLogin::RubySaml::IdpMetadataParser.new.parse_restricted(
+  xml,
+  trust_anchors: trust_anchor,
+  entity_id: "https://idp.example.com/metadata",
+  verification_time: Time.now
+)
+```
+
 ### Parsing Metadata into an Hash
 
 The `OneLogin::RubySaml::IdpMetadataParser` also provides the methods `#parse_to_hash` and `#parse_remote_to_hash`.

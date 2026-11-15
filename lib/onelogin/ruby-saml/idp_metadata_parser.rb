@@ -4,6 +4,8 @@ require "net/https"
 require "rexml/document"
 require "rexml/xpath"
 
+require "onelogin/ruby-saml/trusted_metadata"
+
 # Only supports SAML 2.0
 module OneLogin
   module RubySaml
@@ -184,6 +186,33 @@ module OneLogin
         end
 
         idpsso_descriptors.map {|id| IdpMetadata.new(id, id.parent.attributes["entityID"])}
+      end
+
+      # Restricted import of one entity from a metadata collection.
+      #
+      # Unlike #parse, this method requires the caller to name the trust anchor,
+      # the only entityID that may be adopted, and the time used to evaluate
+      # signature chains and metadata validity. It returns a
+      # TrustedMetadata::Result with the adopted settings and evidence for every
+      # candidate that was left out.
+      #
+      # @param idp_metadata [String, Nokogiri::XML::Document]
+      # @param trust_anchors [OpenSSL::X509::Certificate, String, Array]
+      # @param entity_id [String]
+      # @param verification_time [Time, String]
+      # @param retrieved_at [Time, String, nil] used for cacheDuration
+      # @param options [Hash] :settings, :sso_binding, :slo_binding and :name_id_format
+      # @return [OneLogin::RubySaml::TrustedMetadata::Result]
+      def parse_restricted(idp_metadata, trust_anchors:, entity_id:, verification_time:,
+                           retrieved_at: nil, options: {})
+        TrustedMetadata.import(
+          idp_metadata,
+          :trust_anchors => trust_anchors,
+          :entity_id => entity_id,
+          :verification_time => verification_time,
+          :retrieved_at => retrieved_at,
+          :options => options
+        )
       end
 
       # Retrieve the remote IdP metadata from the URL or a cached copy.

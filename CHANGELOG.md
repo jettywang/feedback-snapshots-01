@@ -1,5 +1,12 @@
 # Ruby SAML Changelog
 
+### Unreleased
+* Add `OneLogin::RubySaml::TrustedMetadata` for restricted metadata import from
+  an `EntitiesDescriptor`. It verifies signature coverage with caller-supplied
+  trust anchors at a caller-supplied time, applies inherited `validUntil` and
+  `cacheDuration`, rejects duplicate entityIDs and ambiguous targets, and keeps
+  non-adopted entities as evidence instead of merging their certificates.
+
 ### 1.18.1  (Jul 29, 2025)
 * Fix vulnerability CVE-2025-54572 Prevent DOS due large SAML Message
 * Adapt tests to be able to execute signature validation sooner
