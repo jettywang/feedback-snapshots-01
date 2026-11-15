@@ -7,17 +7,25 @@ the newest extent -- keyed by the slice id that wrote it, which is the only reli
 global recency signal. Sparse gaps between intervals are genuine unallocated space and
 read back as zeros. Only the segments backing a requested range are fetched and
 decompressed, so reads are fully lazy.
+
+For forensic provenance, :meth:`TibxVolume.range_sources` explains the same resolution
+for an arbitrary byte range without materialising the volume: which extent, slice and
+segment position finally supplies every byte, which older extents a newer fragment
+overrides, and which parts are unallocated (sparse holes versus explicit discard markers)
+or cannot be recovered at all (a missing or truncated segment).
 """
 
 from __future__ import annotations
 
 import datetime
+import enum
 import heapq
 import re
 import uuid
 from array import array
 from bisect import bisect_right
 from collections import OrderedDict, defaultdict
+from collections.abc import Iterator
 from itertools import compress, groupby, islice, repeat
 from operator import add, itemgetter, le, ne
 from pathlib import Path
@@ -63,7 +71,7 @@ if TYPE_CHECKING:
     from typing_extensions import Self
 
     from dissect.archive.tibx.lsm import ArchiveHeader
-    from dissect.archive.tibx.map import Extent, ExtentTable
+    from dissect.archive.tibx.map import Extent, ExtentTable, SegmentLocator
 
 # Decompressed segments are cached per archive under a memory budget rather than a fixed
 # count: random-access workloads (MFT, registry hives) touch thousands of distinct
@@ -146,6 +154,153 @@ class ItemStream(NamedTuple):
     index: int
     id: int
     size: int
+
+
+class RangeKind(enum.Enum):
+    """What one piece of a queried byte range resolves to.
+
+    :data:`DATA` bytes come from a stored segment; the other three are ranges a read
+    surfaces as zeros but a forensic report must keep apart.
+    """
+
+    DATA = "data"
+    HOLE = "hole"
+    DISCARD = "discard"
+    MISSING = "missing"
+
+
+class RangeSource(NamedTuple):
+    """One contiguous piece of a range-source report, in volume-offset order.
+
+    The pieces partition the queried range without gaps or overlaps. Fields that do not
+    apply to a :attr:`kind` (e.g. the segment of a sparse hole) are zero, and
+    :attr:`overridden_slices` lists the slices whose extents lost this range to a newer
+    one -- the empty tuple when nothing was overridden.
+
+    Attributes:
+        kind: What supplies the bytes of ``[start, end)``.
+        start: Inclusive volume offset where the piece starts.
+        end: Exclusive volume offset where the piece ends.
+        extent: The winning data_map extent for a :data:`~RangeKind.DATA` or
+            :data:`~RangeKind.DISCARD` piece, otherwise ``None``.
+        slice_id: The slice (backup) that wrote the winning extent, or 0.
+        segment_id: The segment backing a :data:`~RangeKind.DATA` piece, or 0
+            (a discard marker uses 0 by definition).
+        extent_index: The winning extent's index inside its segment
+            (``EXTENT_INDEX_WHOLE_SEGMENT`` for a whole-segment extent), else 0.
+        segment_offset: Byte offset of the first byte of the piece within the
+            decompressed segment, else 0.
+        overridden_slices: Slice ids of the extents the winner masks here, newest first.
+        reason: A human-readable explanation of the resolution.
+    """
+
+    kind: RangeKind
+    start: int
+    end: int
+    extent: Extent | None
+    slice_id: int
+    segment_id: int
+    extent_index: int
+    segment_offset: int
+    overridden_slices: tuple[int, ...]
+    reason: str
+
+    @property
+    def length(self) -> int:
+        """How many volume bytes the piece covers."""
+        return self.end - self.start
+
+    @property
+    def recoverable(self) -> bool:
+        """Whether the bytes are backed by stored data rather than a hole, discard or damage."""
+        return self.kind is RangeKind.DATA
+
+
+class RangeSources:
+    """The provenance report of :meth:`TibxVolume.range_sources`.
+
+    The :class:`RangeSource` pieces in :attr:`sources` partition the queried range. They
+    are kept as explicit pieces rather than re-resolved on access so a report stays
+    consistent as the archive or the selected recovery point changes, and can be handed
+    around or serialised without re-resolving the extent table.
+    """
+
+    __slots__ = ("query_end", "query_offset", "_recovery_points", "_volume", "sources")
+
+    def __init__(
+        self,
+        volume: TibxVolume,
+        offset: int,
+        length: int,
+        sources: list[RangeSource],
+        recovery_points: dict[int, RecoveryPoint],
+    ) -> None:
+        self._volume = volume
+        self.query_offset = offset
+        self.query_end = offset + length
+        self.sources = sources
+        self._recovery_points = recovery_points
+
+    def __iter__(self) -> Iterator[RangeSource]:
+        return iter(self.sources)
+
+    def __len__(self) -> int:
+        return len(self.sources)
+
+    def __repr__(self) -> str:
+        return f"<RangeSources [{self.query_offset}, {self.query_end}) pieces={len(self.sources)}>"
+
+    def of_kind(self, kind: RangeKind) -> list[RangeSource]:
+        """The report pieces of one :class:`RangeKind`."""
+        return [source for source in self.sources if source.kind is kind]
+
+    @property
+    def data(self) -> list[RangeSource]:
+        """The pieces backed by stored segment bytes."""
+        return self.of_kind(RangeKind.DATA)
+
+    @property
+    def unallocated(self) -> list[RangeSource]:
+        """The pieces no backup in view ever wrote: sparse holes and explicit discard markers."""
+        return [source for source in self.sources if source.kind in (RangeKind.HOLE, RangeKind.DISCARD)]
+
+    @property
+    def holes(self) -> list[RangeSource]:
+        """The sparse-hole pieces: gaps between extents, reading as zeros."""
+        return self.of_kind(RangeKind.HOLE)
+
+    @property
+    def discarded(self) -> list[RangeSource]:
+        """The pieces a newer backup explicitly marked unallocated (segment id 0)."""
+        return self.of_kind(RangeKind.DISCARD)
+
+    @property
+    def unavailable(self) -> list[RangeSource]:
+        """The pieces that cannot be recovered: a missing or truncated backing segment."""
+        return self.of_kind(RangeKind.MISSING)
+
+    def recovery_point(self, source: RangeSource) -> RecoveryPoint | None:
+        """The :class:`RecoveryPoint` that wrote ``source``, if the slices tree names it."""
+        return self._recovery_points.get(source.slice_id)
+
+    def read_bytes(self) -> bytes:
+        """What a :meth:`TibxVolume.read` over the same range returns, piece by piece.
+
+        Data pieces are read lazily through the volume; holes, discard markers and
+        unavailable ranges are zero-filled. A :data:`~RangeKind.MISSING` piece whose read
+        itself raises (a segment absent from the segment_map, rather than a merely short
+        one) is zero-filled too, so the report stays usable on a damaged archive.
+        """
+        parts = []
+        for source in self.sources:
+            if source.kind is RangeKind.DATA:
+                try:
+                    parts.append(self._volume.read(source.start, source.length))
+                except Error:
+                    parts.append(bytes(source.length))
+            else:
+                parts.append(bytes(source.length))
+        return b"".join(parts)
 
 
 class TIBX:
@@ -691,9 +846,7 @@ class TIBX:
             self._segment_cache.move_to_end(segment_id)
             return cached
 
-        if self._segment_index is None:
-            self._segment_index = load_segment_index(self.store, self.header)
-        locator = self._segment_index.get(segment_id)
+        locator = self._segment_locator(segment_id)
         if locator is None:
             raise CorruptArchiveError(f"segment id {segment_id} not in segment_map")
 
@@ -706,6 +859,16 @@ class TIBX:
             _, evicted = self._segment_cache.popitem(last=False)
             self._segment_cache_bytes -= len(evicted)
         return plain
+
+    def _segment_locator(self, segment_id: int) -> SegmentLocator | None:
+        """The segment_map locator of ``segment_id``, or None if the map has no live record for it."""
+        if self._segment_index is None:
+            self._segment_index = load_segment_index(self.store, self.header)
+        return self._segment_index.get(segment_id)
+
+    def _recovery_point_map(self) -> dict[int, RecoveryPoint]:
+        """The recovery points of the archive keyed by the slice id that wrote them."""
+        return {point.slice_id: point for point in self.recovery_points()}
 
 
 class TibxVolume:
@@ -808,6 +971,183 @@ class TibxVolume:
         if cursor < end:
             parts.append(bytes(end - cursor))
         return b"".join(parts)
+
+    def range_sources(self, offset: int, length: int) -> RangeSources:
+        """Explain where the bytes of ``[offset, offset + length)`` come from, without materialising the volume.
+
+        The returned :class:`RangeSources` partitions the queried range into in-order
+        :class:`RangeSource` pieces, one per resolution:
+
+        - :data:`RangeKind.DATA`: the winning extent's bytes, naming the slice (backup)
+          that wrote them, the extent itself, and the exact segment and within-segment
+          offset they are read from. ``overridden_slices`` names the older extents the
+          winner masks there, which is why a newer fragment is adopted.
+        - :data:`RangeKind.HOLE`: a sparse gap no extent in view covers -- unallocated
+          space, read as zeros.
+        - :data:`RangeKind.DISCARD`: a newer slice's discard marker (segment id 0) that
+          explicitly freed the range, masking older data underneath.
+        - :data:`RangeKind.MISSING`: the winning extent's segment is absent from the
+          segment_map or shorter than the mapped bytes, so the range cannot be fully
+          recovered. These are kept separate from holes: the space was allocated, but the
+          archive is damaged.
+
+        Only the segments backing the queried range are touched, and only when needed to
+        measure a segment's plaintext length, so the report is as lazy as :meth:`read`.
+        Recency follows the slice order of the archive, never the backup timestamps.
+
+        Raises:
+            ValueError: If ``offset`` or ``length`` is negative.
+        """
+        if offset < 0 or length < 0:
+            raise ValueError("offset and length must be non-negative")
+        if length == 0:
+            return RangeSources(self, offset, 0, [], self.tibx._recovery_point_map())
+
+        query_end = offset + length
+        table, first = self._table, self._first
+        starts, stops, covering = self._starts, self._stops, self._covering
+        pieces: list[RangeSource] = []
+
+        def append(piece: RangeSource) -> None:
+            # Adjacent gaps produced by consecutive intervals merge into one hole; a data
+            # interval's winning extent never changes underneath it, so other kinds do not repeat.
+            previous = pieces[-1] if pieces else None
+            if (
+                previous is not None
+                and previous.kind is RangeKind.HOLE
+                and piece.kind is RangeKind.HOLE
+                and previous.end == piece.start
+            ):
+                pieces[-1] = piece._replace(start=previous.start)
+            else:
+                pieces.append(piece)
+
+        hole_reason = "no extent covers this range: sparse unallocated space, read as zeros"
+
+        def hole(begin: int, finish: int) -> RangeSource:
+            return RangeSource(
+                kind=RangeKind.HOLE, start=begin, end=finish, extent=None, slice_id=0, segment_id=0,
+                extent_index=0, segment_offset=0, overridden_slices=(), reason=hole_reason)
+
+        index = bisect_right(starts, offset) - 1
+        if index < 0 or stops[index] <= offset:
+            index += 1
+        cursor = offset
+        while cursor < query_end:
+            if index >= len(starts) or starts[index] >= query_end:
+                append(hole(cursor, query_end))
+                break
+
+            start, stop = starts[index], stops[index]
+            row = first + covering[index]
+            index += 1
+            begin, finish = max(start, cursor), min(stop, query_end)
+            if begin > cursor:
+                append(hole(cursor, begin))
+
+            extent = table[row]
+            overridden = self._overridden_slices(begin, row)
+            if extent.segment_id == 0:
+                reason = (
+                    f"slice {extent.slice_id} marked this range unallocated (discard marker); "
+                    "older data underneath is masked and reads as zeros"
+                )
+                append(RangeSource(
+                    kind=RangeKind.DISCARD, start=begin, end=finish, extent=extent, slice_id=extent.slice_id,
+                    segment_id=0, extent_index=0, segment_offset=0, overridden_slices=overridden, reason=reason))
+                cursor = finish
+                continue
+
+            base = self.tibx._extent_base(extent.segment_id, extent.extent_index)
+            segment_offset = base + begin - extent.source_offset
+            available, problem = self._segment_availability(extent, begin, finish, segment_offset)
+            reason = (
+                f"slice {extent.slice_id} wrote the most recent extent covering this range"
+                + (f", overriding slices {', '.join(map(str, overridden))}" if overridden else "")
+                + f"; read from segment {extent.segment_id}"
+                + ("" if extent.extent_index == EXTENT_INDEX_WHOLE_SEGMENT else f" extent index {extent.extent_index}")
+                + f" at byte {segment_offset}"
+            )
+            if available > begin:
+                append(RangeSource(
+                    kind=RangeKind.DATA, start=begin, end=available, extent=extent, slice_id=extent.slice_id,
+                    segment_id=extent.segment_id, extent_index=extent.extent_index, segment_offset=segment_offset,
+                    overridden_slices=overridden, reason=reason))
+            if available < finish:
+                reason = (
+                    f"the extent of slice {extent.slice_id} maps these bytes to segment {extent.segment_id}, "
+                    f"but {problem}; this part cannot be recovered and reads as zeros"
+                )
+                append(RangeSource(
+                    kind=RangeKind.MISSING, start=available, end=finish, extent=extent, slice_id=extent.slice_id,
+                    segment_id=extent.segment_id, extent_index=extent.extent_index,
+                    segment_offset=segment_offset + (available - begin), overridden_slices=overridden, reason=reason))
+            cursor = finish
+
+        return RangeSources(self, offset, length, pieces, self.tibx._recovery_point_map())
+
+    def _overridden_slices(self, position: int, winning_row: int) -> tuple[int, ...]:
+        """The distinct slices of the extents the winner at ``position`` masks, newest first.
+
+        The table rows are in offset order, so the last row starting at or before the
+        position anchors a bounded walk in both directions through the rows that still
+        cover it -- a long older extent spanning several intervals is found behind the
+        anchor. Ranking is the same ``(slice_id, extent_id, segment_id)`` order
+        :func:`resolve_extents` applies.
+        """
+        table, first, last = self._table, self._first, self._last
+        winner = table[winning_row]
+        anchor = bisect_right(table.source_offsets, position, first, last) - 1
+        losers: set[int] = set()
+        probe = anchor
+        while probe >= first and table.source_offsets[probe] <= position:
+            if probe != winning_row and position < table.source_offsets[probe] + table.extent_lengths[probe]:
+                candidate = table[probe]
+                if (candidate.slice_id, candidate.extent_id, candidate.segment_id) < (
+                    winner.slice_id,
+                    winner.extent_id,
+                    winner.segment_id,
+                ):
+                    losers.add(candidate.slice_id)
+            probe -= 1
+        probe = anchor + 1
+        while probe < last and table.source_offsets[probe] <= position:
+            if probe != winning_row and position < table.source_offsets[probe] + table.extent_lengths[probe]:
+                candidate = table[probe]
+                if (candidate.slice_id, candidate.extent_id, candidate.segment_id) < (
+                    winner.slice_id,
+                    winner.extent_id,
+                    winner.segment_id,
+                ):
+                    losers.add(candidate.slice_id)
+            probe += 1
+        return tuple(sorted(losers, reverse=True))
+
+    def _segment_availability(self, extent: Extent, begin: int, finish: int, segment_offset: int) -> tuple[int, str]:
+        """How far ``[begin, finish)`` of ``extent`` is backed by its segment.
+
+        Returns ``(available_end, problem)``: ``available_end == finish`` when every byte
+        is recoverable, otherwise the first offset the segment cannot supply and why. The
+        check never raises: an unreadable (e.g. locked or missing) segment makes the whole
+        piece unavailable rather than failing the report.
+        """
+        locator = self.tibx._segment_locator(extent.segment_id)
+        if locator is None:
+            return begin, "the segment is absent from the segment_map"
+        try:
+            segment = self.tibx.read_segment(extent.segment_id)
+        except Error:
+            return begin, "the segment cannot be read or decompressed"
+        segment_end = extent.source_offset + extent.extent_length
+        plain_end = extent.source_offset + max(
+            0, len(segment) - self.tibx._extent_base(extent.segment_id, extent.extent_index)
+        )
+        if plain_end < segment_end:
+            return min(finish, max(begin, begin + max(0, len(segment) - segment_offset))), (
+                f"the segment holds {len(segment)} plaintext bytes, fewer than the {extent.extent_length} "
+                "the extent maps"
+            )
+        return finish, ""
 
 
 def resolve_extents(extents: ExtentTable, start: int = 0, stop: int | None = None) -> tuple[array, array, array]:

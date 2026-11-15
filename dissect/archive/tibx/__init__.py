@@ -10,7 +10,15 @@ from dissect.archive.tibx.exception import (
     UnsupportedFormatError,
 )
 from dissect.archive.tibx.stream import TibxVolumeStream
-from dissect.archive.tibx.tibx import TIBX, RecoveryPoint, TibxVolume, find_split_parts
+from dissect.archive.tibx.tibx import (
+    TIBX,
+    RangeKind,
+    RangeSource,
+    RangeSources,
+    RecoveryPoint,
+    TibxVolume,
+    find_split_parts,
+)
 
 __all__ = [
     "TIBX",
@@ -19,6 +27,9 @@ __all__ = [
     "InvalidArchiveError",
     "InvalidPasswordError",
     "MissingVolumeError",
+    "RangeKind",
+    "RangeSource",
+    "RangeSources",
     "RecoveryPoint",
     "TibxError",
     "TibxVolume",
