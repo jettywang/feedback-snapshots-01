@@ -247,6 +247,240 @@ def _parseFib(blob):
     return fib
 
 
+FIB_BASE_LENGTH = 0x20
+
+#: MS-DOC 2.1: FibBase and the beginning of the FIB (0x44 bytes) are stored
+#: unencrypted in the WordDocument stream.
+FIB_LENGTH_UNENCRYPTED = 0x44
+
+
+def _parseFibRgFcLcb(blob):
+    r"""Return ``(pairs, end_offset)`` for the FIB hub following FibBase.
+
+    The pairs are offsets and sizes into the table stream
+    (MS-DOC 2.1.2 FibRgFcLcb97). Truncation anywhere inside the FIB hub is
+    reported as a ParseError instead of a struct.error.
+    """
+
+    def read_exact(offset, size, label):
+        blob.seek(offset)
+        raw = blob.read(size)
+        if len(raw) != size:
+            raise exceptions.ParseError(
+                "WordDocument stream is truncated in the FIB {} at offset "
+                "{:#x}: needed {} bytes, found {}".format(
+                    label, offset, size, len(raw)
+                )
+            )
+        return raw
+
+    (csw,) = unpack("<H", read_exact(FIB_BASE_LENGTH, 2, "csw"))
+    offset = FIB_BASE_LENGTH + 2 + csw * 2
+    (cslw,) = unpack("<H", read_exact(offset, 2, "cslw"))
+    offset += 2 + cslw * 4
+    (cb,) = unpack("<H", read_exact(offset, 2, "cbRgFcLcb"))
+    offset += 2
+    pairs = []
+    for _ in range(cb):
+        pairs.append(unpack("<II", read_exact(offset, 8, "fc/lcb pairs")))
+        offset += 8
+    return pairs, offset
+
+
+#: Index 87 of FibRgFcLcb97 is ftModified (an 8-byte FILETIME), not an
+#: fc/lcb pair. It must not be interpreted as an offset/size pair.
+_FIB_FTMODIFIED_INDEX = 87
+
+#: Index of fcClx in FibRgFcLcb97: the CLX holding the piece table.
+_FIB_FC_CLX_INDEX = 33
+
+
+def _validate_table_extents(pairs, table_size, table_name):
+    """Reject a table stream that is shorter than the FIB says it is."""
+    for index, (fc, lcb) in enumerate(pairs):
+        if index == _FIB_FTMODIFIED_INDEX or lcb == 0:
+            continue
+        if fc == 0xFFFFFFFF:
+            continue
+        if lcb > table_size or fc + lcb > table_size:
+            raise exceptions.ParseError(
+                "FIB fc/lcb pair {} (fc={:#x}, lcb={:#x}, end={:#x}) lies outside "
+                "the {}-byte {} stream; the table stream is truncated".format(
+                    index, fc, lcb, fc + lcb, table_size, table_name
+                )
+            )
+
+
+def _text_extents_from_clx(clx):
+    r"""Return the highest byte offset referenced by a CLX piece table.
+
+    MS-DOC 2.8.35 PlcPcd: each piece stores a file offset (``fc``). The two
+    low flag bits of a compressed piece's fc are used as a compression marker,
+    so ``fc & 0x3FFFFFFF`` is the real offset; a compressed piece stores two
+    characters per byte, so one byte per character position is a safe outer
+    bound for the stream range the piece table references.
+    """
+    highest = 0
+    pos = 0
+    while pos < len(clx):
+        kind = clx[pos]
+        if kind == 0x01:  # Prc: 2-byte cbGrpprl then the grpprl
+            (cb,) = unpack("<H", clx[pos + 1:pos + 3])
+            pos += 3 + cb
+        elif kind == 0x02:  # Pcdt: 4-byte lcb then a PlcPcd
+            (lcb,) = unpack("<I", clx[pos + 1:pos + 5])
+            plc = clx[pos + 5:pos + 5 + lcb]
+            if len(plc) != lcb or lcb < 4:
+                raise exceptions.ParseError(
+                    "CLX piece table is truncated (needs {} bytes, found {})".format(
+                        lcb, len(plc)
+                    )
+                )
+            # PlcPcd = (n+1) CPs then n 8-byte PCDs; n = (lcb - 4) / 12.
+            if (lcb - 4) % 12:
+                raise exceptions.ParseError(
+                    "CLX piece table has an invalid length {}".format(lcb)
+                )
+            count = (lcb - 4) // 12
+            pcd_base = (count + 1) * 4
+            for index in range(count):
+                start = pcd_base + index * 8
+                (fc,) = unpack("<I", plc[start + 2:start + 6])
+                highest = max(highest, fc & 0x3FFFFFFF)
+            pos += 5 + lcb
+        else:
+            raise exceptions.ParseError(
+                "CLX starts with unsupported record type {:#x}".format(kind)
+            )
+    return highest
+
+
+def _validate_worddocument_text(pairs, table_plain, worddocument_size):
+    """Reject a WordDocument stream shorter than its piece table addresses."""
+    if not pairs:
+        return
+    fc, lcb = pairs[_FIB_FC_CLX_INDEX]
+    if lcb == 0:
+        return
+    clx = table_plain[fc:fc + lcb]
+    highest = _text_extents_from_clx(clx)
+    if highest > worddocument_size:
+        raise exceptions.ParseError(
+            "piece table addresses WordDocument byte {:#x} but the stream is "
+            "only {} bytes; the WordDocument stream is truncated".format(
+                highest, worddocument_size
+            )
+        )
+
+
+EncryptionHeaderProbe = namedtuple(
+    "EncryptionHeaderProbe",
+    ["valid", "stream", "version", "header_size", "size", "reason"],
+)
+
+
+def _probe_encryption_header(ole, stream_name, declared_size):
+    r"""Check whether a table stream could carry this file's key header.
+
+    This is structural validation only; nothing is decrypted and the password
+    is not involved. Three independent facts are checked:
+
+    * the stream starts with a known EncryptionVersionInfo (MS-OFFCRYPTO
+      2.3.2 / 2.3.3);
+    * the header plus verifier fit inside the stream;
+    * FibBase.lKey, defined as the size of the EncryptionHeader at the start
+      of the table stream (MS-DOC 2.1), covers the EncryptionHeader and does
+      not exceed the stream.
+
+    The exact byte consumption of ``load_key`` is mirrored, because the
+    CryptoAPI CSP name is decoded from the remainder of the stream: a stream
+    that merely looks like it starts with a header but has no room for the
+    verifier is rejected.
+    """
+    if not ole.exists(stream_name):
+        return EncryptionHeaderProbe(
+            False, stream_name, None, 0, 0, "stream is missing"
+        )
+    stream_size = ole.get_size(stream_name)
+    if stream_size < 4:
+        return EncryptionHeaderProbe(
+            False, stream_name, None, 0, 0,
+            "stream is only {} bytes long".format(stream_size),
+        )
+    with ole.openstream(stream_name) as stream:
+        head = stream.read(min(stream_size, 12))
+    vMajor, vMinor = unpack("<HH", head[:4])
+    version = (vMajor, vMinor)
+    if version not in (
+        (0x0001, 0x0001),
+        (0x0002, 0x0002),
+        (0x0003, 0x0002),
+        (0x0004, 0x0002),
+    ):
+        return EncryptionHeaderProbe(
+            False, stream_name, version, 0, 0,
+            "no known encryption version info (found {}.{})".format(vMajor, vMinor),
+        )
+    if version == (0x0001, 0x0001):
+        # Version (4) + salt (16) + verifier (16) + verifier hash (16).
+        required = 4 + 16 + 16 + 16
+        header_size = 0
+    else:
+        if len(head) < 12:
+            return EncryptionHeaderProbe(
+                False, stream_name, version, 0, 0,
+                "RC4 CryptoAPI header needs 12 bytes but the stream has {}".format(
+                    stream_size
+                ),
+            )
+        (header_size,) = unpack("<I", head[8:12])
+        # flags(4) + headerSize field(4) + EncryptionHeader(header_size)
+        # + saltSize(4) + salt(16) + verifier(16) + verifierHashSize(4)
+        # + verifierHash(20, RC4).
+        required = 12 + header_size + 4 + 16 + 16 + 4 + 20
+    if required > stream_size:
+        return EncryptionHeaderProbe(
+            False, stream_name, version, header_size, required,
+            "key header needs {} bytes but the stream has only {}".format(
+                required, stream_size
+            ),
+        )
+    if declared_size:
+        # FibBase.lKey is the size of the encryption header at the start of
+        # the table stream. It must at least cover the EncryptionHeader
+        # itself, and it cannot exceed the stream.
+        header_region = 12 + header_size
+        if declared_size < header_region:
+            return EncryptionHeaderProbe(
+                False, stream_name, version, header_size, required,
+                "FibBase.lKey is {} but the EncryptionHeader alone needs {} "
+                "bytes".format(declared_size, header_region),
+            )
+        if declared_size > stream_size:
+            return EncryptionHeaderProbe(
+                False, stream_name, version, header_size, required,
+                "FibBase.lKey is {} but the stream has only {} bytes".format(
+                    declared_size, stream_size
+                ),
+            )
+    try:
+        with ole.openstream(stream_name) as stream:
+            body = io.BytesIO(stream.read())
+        if version == (0x0001, 0x0001):
+            _parse_header_RC4(body)
+        else:
+            body.read(4)
+            _parse_header_RC4CryptoAPI(body)
+    except Exception as exc:  # struct.error, UnicodeDecodeError, ...
+        return EncryptionHeaderProbe(
+            False, stream_name, version, header_size, required,
+            "malformed key header ({})".format(exc),
+        )
+    return EncryptionHeaderProbe(
+        True, stream_name, version, header_size, required, None
+    )
+
+
 def _parse_header_RC4(encryptionHeader):
     # RC4: https://msdn.microsoft.com/en-us/library/dd908560(v=office.12).aspx
     salt = encryptionHeader.read(16)
@@ -286,16 +520,91 @@ class Doc97File(base.BaseOfficeFile):
         self.salt = None
 
         # https://msdn.microsoft.com/en-us/library/dd944620(v=office.12).aspx
+        if not ole.exists("wordDocument"):
+            raise exceptions.FileFormatError(
+                "MS-DOC file has no WordDocument stream"
+            )
         with ole.openstream("wordDocument") as stream:
             fib = _parseFib(stream)
+        if fib.base.wIdent != 0xA5EC:
+            raise exceptions.FileFormatError(
+                "Not a MS-DOC WordDocument stream (wIdent={:#x})".format(
+                    fib.base.wIdent
+                )
+            )
 
         # https://msdn.microsoft.com/en-us/library/dd923367(v=office.12).aspx
-        tablename = "1Table" if fib.base.fWhichTblStm == 1 else "0Table"
+        declared = "1Table" if fib.base.fWhichTblStm == 1 else "0Table"
+        tablename, table_stream_notes = self._resolve_table_stream(fib, declared)
 
         Info = namedtuple("Info", ["fib", "tablename"])
         self.info = Info(
             fib=fib,
             tablename=tablename,
+        )
+        self.table_stream = table_stream_notes
+
+    def _resolve_table_stream(self, fib, declared):
+        r"""Return the table stream selected by FibBase.fWhichTblStm.
+
+        MS-DOC 2.1.1 defines fWhichTblStm as the authority: 1 means 1Table,
+        0 means 0Table. That stream is used for both the encryption header and
+        the table data. The other stream is never substituted, because doing
+        so would silently reinterpret the document as a different one; if the
+        declared stream cannot hold the key header, that is reported instead.
+
+        The returned notes record the structural evidence so callers and tests
+        can state exactly which stream was used and why.
+        """
+        if fib.base.fEncrypted == 0:
+            # Unencrypted documents have no key header; only the declared
+            # stream must exist because its fc/lcb offsets point into it.
+            if not self.ole.exists(declared):
+                raise exceptions.ParseError(
+                    "FibBase.fWhichTblStm selects {} but the file has no {} "
+                    "stream (present: {})".format(
+                        declared, declared, self._table_stream_names()
+                    )
+                )
+            return declared, {"declared": declared, "probes": {}}
+
+        probes = {
+            name: _probe_encryption_header(self.ole, name, fib.base.IKey)
+            for name in ("0Table", "1Table")
+        }
+        notes = {
+            "declared": declared,
+            "probes": {name: probe._asdict() for name, probe in probes.items()},
+        }
+        if not probes[declared].valid:
+            raise exceptions.ParseError(
+                "FibBase.fWhichTblStm={} selects {}, which cannot hold this "
+                "file's encryption header ({}). Refusing to substitute the "
+                "other stream; {}={}, {}={}".format(
+                    fib.base.fWhichTblStm,
+                    declared,
+                    probes[declared].reason,
+                    "0Table",
+                    probes["0Table"].reason,
+                    "1Table",
+                    probes["1Table"].reason,
+                )
+            )
+        alternate = "0Table" if declared == "1Table" else "1Table"
+        if probes[alternate].valid:
+            notes["warning"] = (
+                "both 0Table and 1Table start with a key header; "
+                "FibBase.fWhichTblStm={} selects {}".format(
+                    fib.base.fWhichTblStm, declared
+                )
+            )
+        return declared, notes
+
+    def _table_stream_names(self):
+        return sorted(
+            "/".join(entry)
+            for entry in self.ole.listdir(streams=True, storages=False)
+            if entry[-1] in ("0Table", "1Table", "Data")
         )
 
     def load_key(self, password=None):
@@ -305,25 +614,32 @@ class Doc97File(base.BaseOfficeFile):
                 fib.base.fEncrypted, fib.base.fObfuscation
             )
         )
+        logger.debug(
+            "table stream: declared={}, probes={}".format(
+                self.table_stream["declared"],
+                {
+                    name: probe["reason"]
+                    for name, probe in self.table_stream["probes"].items()
+                },
+            )
+        )
 
         if fib.base.fEncrypted == 1:
             if fib.base.fObfuscation == 1:  # Using XOR obfuscation
-                xor_obf_password_verifier = fib.base.IKey
-                logger.debug(hex(xor_obf_password_verifier))
+                raise exceptions.DecryptionError(
+                    "XOR-obfuscated MS-DOC is not supported"
+                )
             else:  # elif fib.base.fObfuscation == 0:
                 encryptionHeader_size = fib.base.IKey
                 logger.debug(
                     "encryptionHeader_size: {}".format(hex(encryptionHeader_size))
                 )
                 with self.ole.openstream(self.info.tablename) as table:
-                    encryptionHeader = (
-                        table  # TODO why create a 2nd reference to same stream?
-                    )
                     encryptionVersionInfo = table.read(4)
                     vMajor, vMinor = unpack("<HH", encryptionVersionInfo)
                     logger.debug("Version: {} {}".format(vMajor, vMinor))
                     if vMajor == 0x0001 and vMinor == 0x0001:  # RC4
-                        info = _parse_header_RC4(encryptionHeader)
+                        info = _parse_header_RC4(table)
                         if DocumentRC4.verifypw(
                             password,
                             info["salt"],
@@ -340,7 +656,7 @@ class Doc97File(base.BaseOfficeFile):
                     elif (
                         vMajor in [0x0002, 0x0003, 0x0004] and vMinor == 0x0002
                     ):  # RC4 CryptoAPI
-                        info = _parse_header_RC4CryptoAPI(encryptionHeader)
+                        info = _parse_header_RC4CryptoAPI(table)
                         if DocumentRC4CryptoAPI.verifypw(
                             password,
                             info["salt"],
@@ -362,6 +678,53 @@ class Doc97File(base.BaseOfficeFile):
                         )
         else:
             raise exceptions.DecryptionError("File is not encrypted")
+
+    def _decrypt_stream(self, data):
+        if self.type == "rc4":
+            return DocumentRC4.decrypt(self.key, self.salt, io.BytesIO(data)).read()
+        elif self.type == "rc4_cryptoapi":
+            return DocumentRC4CryptoAPI.decrypt(
+                self.key, self.salt, self.keySize, io.BytesIO(data)
+            ).read()
+        raise exceptions.DecryptionError(
+            "Unsupported encryption method: {}".format(self.type)
+        )
+
+    def _decrypted_worddocument(self):
+        """Return (raw, plaintext) for the WordDocument stream.
+
+        MS-DOC 2.1: the first 0x44 bytes of the stream (FibBase plus the start
+        of the FIB) are not encrypted. RC4 in MS-DOC is keyed and re-keyed by
+        absolute stream offset, so the ciphertext must be decrypted from
+        offset 0; only then are the leading 0x44 plaintext bytes spliced back.
+        Decrypting from 0x44 instead would shift every RC4 block index.
+        """
+        with self.ole.openstream("wordDocument") as stream:
+            raw = stream.read()
+        if len(raw) < FIB_BASE_LENGTH:
+            raise exceptions.ParseError(
+                "WordDocument stream is only {} bytes; at least {} are needed "
+                "for FibBase".format(len(raw), FIB_BASE_LENGTH)
+            )
+        plain = bytearray(self._decrypt_stream(raw))
+        keep = min(FIB_LENGTH_UNENCRYPTED, len(raw))
+        plain[:keep] = raw[:keep]
+        return raw, bytes(plain)
+
+    def _decrypted_table_stream(self, name):
+        """Return (raw, plaintext) for the whole table stream.
+
+        The stream starts with the key header (lKey bytes), which is plaintext
+        in the input; the payload after it is ciphertext keyed to absolute
+        stream offsets. Decryption therefore starts at offset 0, exactly as
+        MS-OFFCRYPTO describes: the header bytes are written over the
+        encrypted stream after encryption, they are not a separate keystream
+        segment. Decrypting from lKey instead shifts every RC4 block index and
+        corrupts the payload.
+        """
+        with self.ole.openstream(name) as stream:
+            raw = stream.read()
+        return raw, self._decrypt_stream(raw)
 
     def decrypt(self, outfile):
         # fd, _outfile_path = tempfile.mkstemp()
@@ -405,69 +768,38 @@ class Doc97File(base.BaseOfficeFile):
         )
         FIB_LENGTH = 0x44
 
+        raw_wd, plain_wd = self._decrypted_worddocument()
+        if len(raw_wd) < FIB_LENGTH:
+            raise exceptions.ParseError(
+                "WordDocument stream is only {} bytes but the FIB is {} bytes; "
+                "the stream is truncated".format(len(raw_wd), FIB_LENGTH)
+            )
+        # The first 0x44 bytes of the FIB are rewritten as plaintext, but every
+        # other byte of the stream keeps its original laid-out contents.
         header = _packFibBase(fibbase).read()
-        logger.debug(len(header))
-        obuf1.seek(0)
         obuf1.write(header)
-
-        with self.ole.openstream("wordDocument") as worddocument:
-            worddocument.seek(len(header))
-            header = worddocument.read(FIB_LENGTH - len(header))
-            worddocument.seek(0)
-            logger.debug(len(header))
-            obuf1.write(header)
-
-            if self.type == "rc4":
-                dec1 = DocumentRC4.decrypt(self.key, self.salt, worddocument)
-            elif self.type == "rc4_cryptoapi":
-                dec1 = DocumentRC4CryptoAPI.decrypt(
-                    self.key, self.salt, self.keySize, worddocument
-                )
-            else:
-                raise exceptions.DecryptionError(
-                    "Unsupported encryption method: {}".format(self.type)
-                )
-
-            dec1.seek(FIB_LENGTH)
-            obuf1.write(dec1.read())
-            obuf1.seek(0)
+        obuf1.write(plain_wd[len(header):])
+        obuf1.seek(0)
 
         # TODO: Preserve header
-        obuf2 = io.BytesIO()
-
-        if self.type == "rc4":
-            with self.ole.openstream(self.info.tablename) as stream:
-                dec2 = DocumentRC4.decrypt(self.key, self.salt, stream)
-        elif self.type == "rc4_cryptoapi":
-            with self.ole.openstream(self.info.tablename) as stream:
-                dec2 = DocumentRC4CryptoAPI.decrypt(
-                    self.key, self.salt, self.keySize, stream
-                )
-        else:
-            raise exceptions.DecryptionError(
-                "Unsupported encryption method: {}".format(self.type)
-            )
-
-        obuf2.write(dec2.read())
-        obuf2.seek(0)
+        raw_table, plain_table = self._decrypted_table_stream(self.info.tablename)
+        obuf2 = io.BytesIO(plain_table)
 
         obuf3 = None
         if self.ole.exists("Data"):
-            obuf3 = io.BytesIO()
-            if self.type == "rc4":
-                with self.ole.openstream("Data") as data_stream:
-                    dec3 = DocumentRC4.decrypt(self.key, self.salt, data_stream)
-            elif self.type == "rc4_cryptoapi":
-                with self.ole.openstream("Data") as data_stream:
-                    dec3 = DocumentRC4CryptoAPI.decrypt(
-                        self.key, self.salt, self.keySize, data_stream
-                    )
-            else:
-                raise exceptions.DecryptionError(
-                    "Unsupported encryption method: {}".format(self.type)
-                )
-            obuf3.write(dec3.read())
-            obuf3.seek(0)
+            raw_data, plain_data = self._decrypted_table_stream("Data")
+            obuf3 = io.BytesIO(plain_data)
+
+        # Verify the FIB's fc/lcb ranges against the decrypted streams before
+        # writing an output that only looks structurally plausible.
+        pairs, fib_end = _parseFibRgFcLcb(io.BytesIO(plain_wd))
+        if fib_end > len(plain_wd):
+            raise exceptions.ParseError(
+                "FIB ends at {:#x} but the WordDocument stream is only {} "
+                "bytes; the stream is truncated".format(fib_end, len(plain_wd))
+            )
+        _validate_table_extents(pairs, len(plain_table), self.info.tablename)
+        _validate_worddocument_text(pairs, plain_table, len(plain_wd))
 
         with tempfile.TemporaryFile() as _outfile:
             self.file.seek(0)

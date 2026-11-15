@@ -1,4 +1,11 @@
 
+v6.1.1 / unreleased
+===================
+
+  * Fix(doc97): select the table stream from `FibBase.fWhichTblStm` only. A document whose flag points at a stream that cannot hold its key header now raises `ParseError` with both streams' diagnostics instead of silently picking the other one.
+  * Fix(doc97): raise `ParseError` for FIB / table-stream / piece-table truncation instead of writing a partially recovered document. Truncation was previously either an opaque `struct.error` or a silently short output stream.
+  * Fix(doc97): reject `fObfuscation=1` (XOR-obfuscated MS-DOC, unimplemented) with a clear error instead of failing later with a missing attribute.
+
 v6.1.0 / 2026-11-04
 ===================
 
