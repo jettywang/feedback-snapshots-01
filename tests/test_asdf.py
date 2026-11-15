@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import zlib
 from io import BytesIO
-from typing import TYPE_CHECKING
 
 import pytest
 
-from dissect.evidence.asdf.asdf import AsdfSnapshot
+from dissect.evidence.asdf.asdf import (
+    BLOCK_MAGIC,
+    AsdfSnapshot,
+    AsdfWriter,
+    BlockSource,
+    BlockStatus,
+)
+from dissect.evidence.asdf.c_asdf import c_asdf
 from dissect.evidence.asdf.stream import CompressedStream, Crc32Stream, HashedStream
 from dissect.evidence.exception import InvalidSnapshot
-
-if TYPE_CHECKING:
-    from dissect.evidence.asdf.asdf import AsdfWriter
 
 
 def test_asdf(asdf_writer: AsdfWriter) -> None:
@@ -262,3 +265,173 @@ def test_asdf_scrape(asdf_writer: AsdfWriter) -> None:
             (b"\xff" * 0x1000),
         ]
     )
+
+
+def _multi_index_snapshot() -> bytes:
+    """Build a closed, valid ASDF snapshot spanning two disks and a metadata stream."""
+    fh = BytesIO()
+    fh.close = lambda: None
+    writer = AsdfWriter(fh)
+    writer.add_bytes(b"\x00" * 0x1000, idx=0, base=0)
+    writer.add_bytes(b"\x02" * 0x1000, idx=0, base=0x4000)
+    writer.add_bytes(b"\x04" * 0x1000, idx=0, base=0x8000)
+    writer.add_bytes(b"\x08" * 0x1000, idx=1, base=0x2000)
+    writer.add_metadata_file("info", BytesIO(b"forensic metadata"))
+    writer.close()
+    return fh.getvalue()
+
+
+def _table_offset(data: bytes) -> int:
+    return c_asdf.footer(data[-len(c_asdf.footer) :]).table_offset
+
+
+def test_asdf_report_valid_footer() -> None:
+    data = _multi_index_snapshot()
+    reader = AsdfSnapshot(BytesIO(data))
+
+    report = reader.report
+    assert report.footer_valid is True
+    assert report.recovered is False
+    assert report.complete is True
+    assert report.source is BlockSource.FOOTER_TABLE
+    assert {block.source for block in report.blocks} == {BlockSource.FOOTER_TABLE}
+    assert all(block.status is BlockStatus.VERIFIED for block in report.blocks)
+
+    coverage = report.coverage[0]
+    assert coverage.extent == (0, 0x9000)
+    assert coverage.verified_ranges == [(0, 0x1000), (0x4000, 0x1000), (0x8000, 0x1000)]
+    # The holes between captured blocks are reported as sparse gaps, not as lost data.
+    assert coverage.sparse_gaps == [(0x1000, 0x3000), (0x5000, 0x3000)]
+    assert coverage.partial_ranges == []
+    assert coverage.rejected_ranges == []
+
+
+def test_asdf_recover_without_footer_matches_snapshot() -> None:
+    data = _multi_index_snapshot()
+    original = AsdfSnapshot(BytesIO(data))
+    original_0 = original.open(0).read()
+    original_1 = original.open(1).read()
+
+    # Interrupted writer: blocks are present but the block table and footer were never written.
+    interrupted = data[: _table_offset(data)]
+    reader = AsdfSnapshot(BytesIO(interrupted), recover=True)
+    report = reader.report
+
+    assert report.footer_valid is False
+    assert report.recovered is True
+    # A recovery scan can never claim a complete, proven mirror.
+    assert report.complete is False
+    assert report.source is BlockSource.RECOVERY_SCAN
+    assert {block.source for block in report.blocks} == {BlockSource.RECOVERY_SCAN}
+    assert all(block.status is BlockStatus.VERIFIED for block in report.blocks)
+    assert all(block.crc_valid is True for block in report.blocks)
+
+    # Recovered bytes must be segment-for-segment identical to the healthy snapshot.
+    assert reader.open(0).read() == original_0
+    assert reader.open(1).read() == original_1
+
+
+def test_asdf_recover_rejects_fake_block_header() -> None:
+    data = _multi_index_snapshot()
+    interrupted = data[: _table_offset(data)]
+
+    # Embed a plausible but bogus block header inside the second block's payload. Its magic bytes
+    # are found by the scraper, but it cannot survive checksum / nesting validation.
+    fake_header = c_asdf.block(
+        magic=BLOCK_MAGIC,
+        flags=c_asdf.BLOCK_FLAG.CRC32,
+        idx=0,
+        offset=999,
+        size=1234,
+    ).dumps()
+    # Second block header starts after the first block (48 header + 4096 payload + 4 CRC).
+    embed_pos = 48 + 24 + 4096 + 4 + 24 + 64
+    corrupted = interrupted[:embed_pos] + fake_header + interrupted[embed_pos + len(fake_header) :]
+
+    reader = AsdfSnapshot(BytesIO(corrupted), recover=True)
+    fake_evidence = [block for block in reader.report.blocks if block.file_offset == embed_pos]
+
+    assert len(fake_evidence) == 1
+    assert fake_evidence[0].status is BlockStatus.REJECTED
+    assert fake_evidence[0].selected_range is None
+    # The fake record must not create a readable stream range.
+    assert all(block.selected_range != (999, 1234) for block in reader.report.blocks)
+
+    # The first, untouched block is still fully usable.
+    stream = reader.open(0)
+    assert stream.read(0x1000) == b"\x00" * 0x1000
+
+
+def test_asdf_recover_truncated_tail_block() -> None:
+    data = _multi_index_snapshot()
+    interrupted = data[: _table_offset(data)]
+    healthy = AsdfSnapshot(BytesIO(data))
+
+    # The metadata block is the last block on disk. Cut it so the header and a short payload
+    # prefix remain, but the rest of the payload and the checksum are gone.
+    last_evidence = max(healthy.report.blocks, key=lambda block: block.file_offset)
+    cut_pos = last_evidence.file_offset + 24 + 128
+    truncated = interrupted[:cut_pos]
+
+    reader = AsdfSnapshot(BytesIO(truncated), recover=True)
+    tail = [block for block in reader.report.blocks if block.file_offset == last_evidence.file_offset]
+    assert len(tail) == 1
+    assert tail[0].status is BlockStatus.PARTIAL
+    assert tail[0].readable_size == 128
+    assert reader.report.undetermined(last_evidence.idx) == [tail[0].claimed_range]
+
+    # Earlier, fully captured blocks are still byte identical to the healthy snapshot.
+    assert reader.open(0).read() == healthy.open(0).read()
+    assert reader.open(1).read() == healthy.open(1).read()
+
+
+def test_asdf_recover_corrupt_tail_checksum_is_rejected() -> None:
+    data = _multi_index_snapshot()
+    interrupted = bytearray(data[: _table_offset(data)])
+    healthy = AsdfSnapshot(BytesIO(data))
+
+    # Flip a payload byte in the last block while keeping its (now wrong) checksum in place. This is
+    # data corruption, not truncation, so the block must be rejected rather than marked partial.
+    last_evidence = max(healthy.report.blocks, key=lambda block: block.file_offset)
+    interrupted[last_evidence.file_offset + 24 + 10] ^= 0xFF
+
+    reader = AsdfSnapshot(BytesIO(interrupted), recover=True)
+    tail = [block for block in reader.report.blocks if block.file_offset == last_evidence.file_offset]
+    assert tail[0].status is BlockStatus.REJECTED
+    assert tail[0].crc_valid is False
+
+
+def test_asdf_recover_records_overlap_selection() -> None:
+    fh = BytesIO()
+    fh.close = lambda: None
+    writer = AsdfWriter(fh)
+    writer.add_bytes(b"\x01" * 100, base=0)
+    writer.add_bytes(b"\x02" * 100, base=200)
+    writer.add_bytes(b"\x03" * 100, base=50)
+    writer.add_bytes(b"\x06" * 400, base=0)
+
+    reader = AsdfSnapshot(BytesIO(fh.getvalue()), recover=True)
+    by_claim = {block.claimed_range: block for block in reader.report.blocks}
+
+    # The last block claims (0, 400); overlap resolution keeps only the part not already covered
+    # by earlier blocks, shrinking it to (150, 250). The decision is recorded, not hidden.
+    assert by_claim[(100, 300)].status is BlockStatus.VERIFIED
+    assert by_claim[(100, 300)].selected_range == (150, 250)
+    assert by_claim[(0, 100)].selected_range == (0, 100)
+    assert by_claim[(100, 50)].selected_range == (100, 50)
+
+    stream = reader.open(0)
+    assert stream.read() == (b"\x01" * 100) + (b"\x03" * 50) + (b"\x06" * 250)
+
+
+def test_asdf_recover_does_not_mutate_source() -> None:
+    data = _multi_index_snapshot()
+    interrupted = data[: _table_offset(data)]
+    original_bytes = bytearray(interrupted)
+
+    reader = AsdfSnapshot(BytesIO(interrupted), recover=True)
+    # Reading streams must not rewrite or append a footer to the underlying file.
+    for stream in reader.streams():
+        stream.read()
+
+    assert bytes(interrupted) == bytes(original_bytes)
