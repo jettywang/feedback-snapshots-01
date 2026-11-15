@@ -21,6 +21,18 @@ Revision 0.7.0, released XX-XX-2026
   qualifies for a private advisory and a CVE versus what is handled
   as an ordinary public bug report
   [issue #96](https://github.com/pyasn1/pyasn1/issues/96)
+- Added the ``pyasn1.forensics`` subpackage for structured forensic export
+  and dual-schema comparison of one ASN.1 substrate. A schema-neutral TLV
+  walker records byte spans, tag class/number and content octets without
+  interpreting values; per-schema interpretations keep field paths, CHOICE
+  branch, implicit/explicit tagging, presence (present, omitted OPTIONAL,
+  schema-injected DEFAULT) and full integer/octet values. Comparison is
+  anchored on the raw TLVs rather than rendered text, leaves unknown ANY
+  open types untyped, verifies whole-tree encoding reconstruction, redacts
+  caller-designated sensitive paths with a length and SHA-256 digest without
+  mutating the original objects, and reports semantic equivalence across
+  differently constructed messages so an internal ``typeId`` difference is
+  not mistaken for a permission change. Zero new runtime dependencies.
 
 Revision 0.6.5, released 26-10-2026
 ---------------------------------------

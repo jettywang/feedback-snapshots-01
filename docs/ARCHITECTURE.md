@@ -88,6 +88,10 @@ The package is thirty-two modules; four carry most of the weight:
 | `codec/ber/eoo.py` | The end-of-octets singleton |
 | `codec/cer/*`, `codec/der/*` | Derived codecs, sharing BER's objects by identity |
 | `codec/native/*` | Conversion to and from Python dicts, lists and scalars |
+| `forensics/raw.py` | Schema-neutral TLV dissection (`walk_tlv`, `RawNode`); parses identifier/length octets without interpreting values, capped by `MAX_NESTING_DEPTH` |
+| `forensics/evidence.py` | Per-schema `Interpretation`/`FieldEvidence`: path, tag class/number, CHOICE branch, presence, full values; unknown ANY stays untyped |
+| `forensics/interpret.py` | `ForensicExporter` runs explicit schemas and `redact` hashes sensitive content without mutating decoded objects |
+| `forensics/compare.py` | `compare` (raw-TLV-anchored divergence, encoding reconstruction) and `semantic_equivalence` (value-only, ignores `typeId`/construction) |
 | `compat/integer.py` | A single `to_bytes` helper |
 | `debug.py` | The logging facility; see [The debug hook](#the-debug-hook) |
 | `error.py` | The exception hierarchy rooted at `PyAsn1Error` |
