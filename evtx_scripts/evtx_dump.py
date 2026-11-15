@@ -24,7 +24,19 @@ import Evtx.Views as e_views
 def main():
     import argparse
 
+    import Evtx.XmlEncoding as e_xml
+
     parser = argparse.ArgumentParser(description="Dump a binary EVTX file into XML.")
+    parser.add_argument(
+        "--mode",
+        choices=(e_xml.STRICT_MODE, e_xml.DISPLAY_MODE),
+        default=e_xml.STRICT_MODE,
+        help=(
+            "strict (default): reject records with unrepresentable XML characters and report the "
+            "offending field; display: emit parser readable XML with an anomaly ledger that retains "
+            "the raw data"
+        ),
+    )
     parser.add_argument("evtx", type=str, help="Path to the Windows EVTX event log file")
     args = parser.parse_args()
 
@@ -32,7 +44,10 @@ def main():
         print(e_views.XML_HEADER)
         print("<Events>")
         for record in log.records():
-            print(record.xml())
+            if args.mode == e_xml.DISPLAY_MODE:
+                print(record.xml_display())
+            else:
+                print(record.xml())
         print("</Events>")
 
 

@@ -42,6 +42,36 @@ Note the length of the `evtx_dump.py` script: its only 20 lines.  Now, review th
 Working with python-evtx is really easy!
 
 
+Forensic XML output contract
+----------------------------
+BinXML values are evidence and are never silently rewritten or deleted.
+Some raw values cannot appear directly in a well formed XML document:
+C0 control characters other than tab, LF and CR, and lone UTF-16
+surrogate code points (U+D800..U+DFFF).  Two explicit rendering modes
+are provided through `Evtx.XmlEncoding`:
+
+- strict mode (the default, `Record.xml()`): the first unrepresentable
+  value raises `InvalidXmlCharacterError` carrying the field location,
+  the reason (`control-character` or `lone-utf16-surrogate`), the code
+  point and the unaltered original value.  Nothing is dropped.
+- display mode (`Record.xml_display()`, or `evtx_dump.py --mode display`):
+  produces a standard-parser-readable document.  Each unrepresentable
+  code point is replaced in place by a unique, self describing marker
+  (`EVTX-INVALID-CHAR-<index>-U+<codepoint>`), and every replacement is
+  recorded in an anomaly ledger that keeps the raw UTF-16LE bytes
+  (base64) and the field/reason/codepoint.  Because markers are unique
+  per anomaly and the ledger holds the originals, display output can
+  never flow back into the evidence and two different raw values can
+  never collapse into an indistinguishable report.
+
+Ordinary XML markup (`&`, `<`, `>` and the attribute quote) is escaped
+with the standard entities, attribute values use quote escaping while
+element text does not, and non-BMP characters (for example emoji) are
+emitted as numeric character references that round trip losslessly.  The
+underlying record bytes are identical before and after rendering in
+either mode.
+
+
 Installation
 ------------
 Updates to python-evtx are pushed to PyPi, so you can install the module using `pip`.  For example:

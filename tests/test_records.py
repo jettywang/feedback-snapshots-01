@@ -5,6 +5,8 @@ import pytest
 
 import Evtx.Evtx as evtx
 import Evtx.Nodes as e_nodes
+import Evtx.XmlEncoding as e_xml
+from Evtx.XmlEncoding import InvalidXmlCharacterError
 
 if importlib.util.find_spec("lxml"):
     no_lxml = False
@@ -512,13 +514,68 @@ def test_render_records2(security):
     """
     regression test demonstrating formatting records to xml.
 
+    security.evtx contains one record (number 55) whose raw data holds a
+    C0 control character (U+0003).  strict rendering must reject it with
+    a field/reason diagnostic instead of silently deleting the character,
+    while every other record renders normally.
+
     Args:
       security (bytes): the security.evtx test file contents. pytest fixture.
     """
     fh = evtx.FileHeader(security, 0x0)
+    strict_failures = 0
+    rendered = 0
     for chunk in fh.chunks():
         for record in chunk.records():
-            assert record.xml() is not None
+            try:
+                assert record.xml() is not None
+                rendered += 1
+            except InvalidXmlCharacterError as e:
+                strict_failures += 1
+                assert record.record_num() == 55
+                assert e.reason == e_xml.AnomalyReason.CONTROL_CHARACTER
+                assert e.codepoint == 0x03
+                assert e.original == "\x03"
+                assert "EventData" in e.field
+
+    assert rendered == 2260
+    assert strict_failures == 1
+
+
+def test_render_records_display(security):
+    """
+    display mode must render every record, including the one with an
+    unrepresentable control character, into standard parser readable XML
+    while recording a reviewable anomaly.
+
+    Args:
+      security (bytes): the security.evtx test file contents. pytest fixture.
+    """
+    import xml.etree.ElementTree as ET
+
+    fh = evtx.FileHeader(security, 0x0)
+    count = 0
+    for chunk in fh.chunks():
+        for record in chunk.records():
+            display = record.xml_display()
+            # a conforming parser must accept every display document.
+            ET.fromstring(display)
+            count += 1
+
+    bad = fh.get_record(55)
+    display_xml = bad.xml_display()
+    doc = ET.fromstring(display_xml)
+    ns = {"evtx": e_xml.ANOMALIES_NAMESPACE}
+    anomalies = doc.findall(".//evtx:Anomaly", ns)
+    # the raw U+0003 appears in two distinct substitution fields.
+    assert len(anomalies) == 2
+    for anomaly in anomalies:
+        assert anomaly.get("Reason") == e_xml.AnomalyReason.CONTROL_CHARACTER.value
+        assert anomaly.get("Codepoint") == "U+0003"
+        # each occurrence gets a distinct, in-document marker.
+        assert anomaly.get("Marker") in display_xml
+    assert anomalies[0].get("Marker") != anomalies[1].get("Marker")
+    assert count == 2261
 
 
 @pytest.mark.skipif(no_lxml, reason="lxml not installed")
@@ -540,10 +597,27 @@ def test_render_records_lxml2(security):
     """
     regression test demonstrating formatting records to xml.
 
+    strict mode rejects the single control-character record, but the
+    display document of every record (including that one) parses with lxml.
+
     Args:
       security (bytes): the security.evtx test file contents. pytest fixture.
     """
     fh = evtx.FileHeader(security, 0x0)
+    for i, chunk in enumerate(fh.chunks()):
+        for j, record in enumerate(chunk.records()):
+            assert record.lxml_display() is not None
+
+
+@pytest.mark.skipif(no_lxml, reason="lxml not installed")
+def test_render_records_lxml(system):
+    """
+    regression test demonstrating formatting records to xml.
+
+    Args:
+      system (bytes): the system.evtx test file contents. pytest fixture.
+    """
+    fh = evtx.FileHeader(system, 0x0)
     for i, chunk in enumerate(fh.chunks()):
         for j, record in enumerate(chunk.records()):
             assert record.lxml() is not None

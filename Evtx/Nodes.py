@@ -1552,7 +1552,7 @@ class WstringArrayTypeNode(VariantTypeNode):
             if match:
                 frag = match.group()
                 acc.append("<string>")
-                acc.append(frag.decode("utf16"))
+                acc.append(frag.decode("utf16", "surrogatepass"))
                 acc.append("</string>\n")
                 binary = binary[len(frag) + 2 :]
                 if len(binary) == 0:

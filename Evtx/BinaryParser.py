@@ -487,15 +487,18 @@ class Block(object):
         Arguments:
         - `offset`: The relative offset from the start of the block.
         - `length`: The length of the string.
-        Throws:
-        - `UnicodeDecodeError`
+
+        Lone UTF-16 surrogate code units are preserved with the
+        "surrogatepass" error handler instead of raising UnicodeDecodeError,
+        so the parsed evidence stays byte faithful.  The XML rendering layer
+        (Evtx.XmlEncoding) is responsible for rejecting or diagnosing them.
         """
         start = self._offset + offset
         end = self._offset + offset + 2 * length
         try:
-            return bytes(self._buf[start:end]).decode("utf16")
+            return bytes(self._buf[start:end]).decode("utf16", "surrogatepass")
         except AttributeError:  # already a 'str' ?
-            return bytes(self._buf[start:end]).decode("utf16")
+            return bytes(self._buf[start:end]).decode("utf16", "surrogatepass")
 
     def unpack_dosdate(self, offset):
         """

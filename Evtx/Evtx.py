@@ -487,15 +487,38 @@ class Record(Block):
         """
         return self._buf[self.offset() : self.offset() + self.size()]
 
-    def xml(self):
+    def xml(self, mode=e_views.e_xml.STRICT_MODE):
         """
         render the record into XML.
         does not include the xml declaration header.
 
+        in strict mode (the default), values containing characters that
+        XML cannot represent raise InvalidXmlCharacterError instead of
+        being silently deleted.  pass ``mode=e_views.e_xml.DISPLAY_MODE``
+        (or use :meth:`xml_display`) for a parser readable rendering with
+        an anomaly ledger that retains the unrepresentable raw data.
+
+        Args:
+          mode (str): STRICT_MODE or DISPLAY_MODE.
+
         Returns:
           str: the rendered xml document.
         """
-        return e_views.evtx_record_xml_view(self)
+        return e_views.evtx_record_xml_view(self, mode=mode)
+
+    def xml_display(self):
+        """
+        render the record into a parser readable display document.
+
+        unrepresentable characters are replaced by unique, self
+        describing marker tokens and recorded in an anomaly ledger
+        carrying the raw UTF-16LE bytes.  the record bytes themselves
+        are never modified.
+
+        Returns:
+          str: the rendered xml document wrapped in an anomaly envelope.
+        """
+        return e_views.evtx_record_xml_display_view(self)
 
     def lxml(self):
         """
@@ -513,3 +536,22 @@ class Record(Block):
         import lxml.etree
 
         return lxml.etree.fromstring((e_views.XML_HEADER + self.xml()).encode("utf-8"))
+
+    def lxml_display(self):
+        """
+        render the display mode document into a lxml document.
+
+        unlike :meth:`lxml`, this never fails on characters that XML
+        cannot represent: those are captured in the anomaly ledger.
+
+        note: lxml must be installed.
+
+        Returns:
+          lxml.etree.ElementTree: the rendered and parsed display document.
+
+        Raises:
+          ImportError: if lxml is not installed.
+        """
+        import lxml.etree
+
+        return lxml.etree.fromstring((e_views.XML_HEADER + self.xml_display()).encode("utf-8"))
