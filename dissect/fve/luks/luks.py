@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import io
 from typing import TYPE_CHECKING, BinaryIO
 from uuid import UUID
 
 from dissect.fve.crypto import argon2, create_cipher
-from dissect.fve.crypto.dmcrypt import CryptStream
+from dissect.fve.crypto.dmcrypt import CryptStream, SegmentedCryptStream, SegmentStream
 from dissect.fve.luks import af
 from dissect.fve.luks.c_luks import (
     LUKS2_MAGIC_1ST,
@@ -182,7 +183,7 @@ class LUKS:
 
     def find_digest(self, keyslot: int) -> Digest:
         """Find digest metadata corresponding to the given keyslot."""
-        digests = [digest for digest in self.metadata.digests.values() if keyslot in digest.keyslots]
+        digests = [digest for digest in self.metadata.digests.values() if keyslot in (digest.keyslots or [])]
         if not digests:
             raise ValueError(f"No digest found for keyslot {keyslot}")
 
@@ -190,24 +191,40 @@ class LUKS:
 
     def find_segment(self, keyslot: int) -> Segment:
         """Find segment metadata corresponding to the given keyslot."""
-        digest = self.find_digest(keyslot)
-        segments = [segment for segment_id, segment in self.metadata.segments.items() if segment_id in digest.segments]
-        if not segments:
-            raise ValueError(f"No segment found for keyslot {keyslot}")
-
+        segments = self.find_segments(keyslot)
         if len(segments) > 1:
             raise NotImplementedError(f"Keyslot {keyslot} has more than one segment")
 
         return segments[0]
 
-    def open(self) -> CryptStream:
-        """Open this volume and return a readable (decrypted) stream."""
+    def find_segments(self, keyslot: int) -> list[Segment]:
+        """Find all segment metadata corresponding to the given keyslot, in logical order."""
+        digest = self.find_digest(keyslot)
+        segments = [
+            (segment_id, segment)
+            for segment_id, segment in self.metadata.segments.items()
+            if segment_id in (digest.segments or [])
+        ]
+        if not segments:
+            raise ValueError(f"No segment found for keyslot {keyslot}")
+
+        return [segment for _, segment in sorted(segments, key=lambda item: item[0])]
+
+    def open(self) -> CryptStream | SegmentedCryptStream:
+        """Open this volume and return a readable (decrypted) stream.
+
+        For a single-segment volume this returns the traditional :class:`CryptStream` with unchanged behavior.
+        For a multi-segment volume it returns the restricted, read-only segmented view from :meth:`open_segments`,
+        or raises if that layout cannot be proven to use the verified volume key.
+        """
         if not self.unlocked:
             raise ValueError("Volume is locked")
 
-        # Technically LUKS supports multiple segments, but practically it only ever has one
-        # Don't bother with supporting multiple segments for now
-        segment = self.find_segment(self._active_keyslot_id)
+        segments = self.find_segments(self._active_keyslot_id)
+        if len(segments) > 1:
+            return self.open_segments()
+
+        segment = segments[0]
 
         return CryptStream(
             self.fh,
@@ -219,6 +236,192 @@ class LUKS:
             segment.iv_tweak,
             segment.sector_size,
         )
+
+    def open_segments(self) -> SegmentedCryptStream:
+        """Open a restricted, read-only view over all segments bound to the active keyslot.
+
+        This view only supports layouts where each segment is provably encrypted with the single, already verified
+        volume key and has a fully determined physical extent. A segment keeps its own cipher configuration,
+        sector size and IV start, and reads crossing segment boundaries are handled by each segment in turn.
+
+        The view is read-only; writes, truncation and similar mutation operations are not supported. Segments that
+        are not part of the active keyslot's verified digest binding are never silently substituted or masked.
+
+        Raises:
+            ValueError: If the volume is locked, or the layout is ambiguous, overlapping, incomplete, unsupported,
+                or cannot be proven to use the verified volume key.
+        """
+        if not self.unlocked:
+            raise ValueError("Volume is locked")
+
+        keyslot = self.metadata.keyslots[self._active_keyslot_id]
+        key_size = keyslot.key_size * 8
+
+        bound_segments = self._bound_segments(self._active_keyslot_id)
+
+        segments = []
+        for segment_id, segment in bound_segments:
+            if segment.type != "crypt":
+                raise NotImplementedError(f"Unsupported segment type for segment {segment_id}: {segment.type}")
+            if segment.encryption is None:
+                raise NotImplementedError(f"Segment {segment_id} has no cipher configuration")
+            if segment.integrity is not None or segment.flags:
+                raise NotImplementedError(f"Segment {segment_id} uses unsupported flags or integrity metadata")
+            if segment.iv_tweak is None or segment.sector_size is None:
+                raise ValueError(f"Segment {segment_id} is missing required crypt parameters")
+            if segment.iv_tweak < 0:
+                raise ValueError(f"Segment {segment_id} has a negative IV start")
+            if segment.sector_size < 512 or segment.sector_size % 512:
+                raise ValueError(f"Unsupported sector size for segment {segment_id}: {segment.sector_size}")
+            if segment.offset < 0:
+                raise ValueError(f"Segment {segment_id} has a negative physical offset")
+
+            size = _resolve_segment_size(segment, segment_id, self.fh)
+
+            segments.append(
+                SegmentStream(
+                    self.fh,
+                    segment_id,
+                    segment.encryption,
+                    self._active_volume_key,
+                    key_size,
+                    segment.offset,
+                    size,
+                    segment.iv_tweak,
+                    segment.sector_size,
+                )
+            )
+
+        _validate_segment_layout(segments)
+
+        return SegmentedCryptStream(segments)
+
+    def _bound_segments(self, keyslot: int) -> list[tuple[int, Segment]]:
+        """Return the segments bound to a keyslot through exactly one complete digest."""
+        digests = [
+            (digest_id, digest)
+            for digest_id, digest in self.metadata.digests.items()
+            if keyslot in (digest.keyslots or [])
+        ]
+        if not digests:
+            raise ValueError(f"No digest binding found for keyslot {keyslot}")
+        if len(digests) > 1:
+            raise ValueError(f"Keyslot {keyslot} is bound to multiple digests, refusing an ambiguous layout")
+
+        digest_id, digest = digests[0]
+        if not digest.keyslots:
+            raise ValueError(f"Digest {digest_id} has no keyslot evidence for keyslot {keyslot}")
+        if not digest.segments:
+            raise ValueError(f"Digest {digest_id} has no segment binding for keyslot {keyslot}")
+
+        if len(set(digest.segments)) != len(digest.segments):
+            raise ValueError(f"Digest {digest_id} binds the same segment more than once")
+
+        missing_keyslots = sorted(set(digest.keyslots or []) - set(self.metadata.keyslots))
+        if missing_keyslots:
+            raise ValueError(f"Digest {digest_id} references missing keyslots: {missing_keyslots}")
+
+        active_key_size = self.metadata.keyslots[keyslot].key_size
+        for digest_keyslot in digest.keyslots or []:
+            if self.metadata.keyslots[digest_keyslot].key_size != active_key_size:
+                raise ValueError(
+                    f"Digest {digest_id} binds keyslots with different key sizes "
+                    f"({keyslot}: {active_key_size}, {digest_keyslot}: "
+                    f"{self.metadata.keyslots[digest_keyslot].key_size})"
+                )
+
+        bound_ids = set(digest.segments)
+        missing_ids = set(self.metadata.segments) - bound_ids
+        if missing_ids:
+            raise ValueError(
+                f"Digest {digest_id} does not bind all volume segments, refusing to expose an unproven area: "
+                f"{sorted(missing_ids)}"
+            )
+
+        result = []
+        for segment_id in digest.segments:
+            if segment_id not in self.metadata.segments:
+                raise ValueError(f"Digest {digest_id} references missing segment {segment_id}")
+
+            other_digests = sorted(
+                other_id
+                for other_id, other in self.metadata.digests.items()
+                if other_id != digest_id and segment_id in (other.segments or [])
+            )
+            if other_digests:
+                raise ValueError(
+                    f"Segment {segment_id} is bound to multiple digests ({digest_id} and {other_digests}), "
+                    "refusing to assume it uses the verified volume key"
+                )
+
+            result.append((segment_id, self.metadata.segments[segment_id]))
+
+        return sorted(result, key=lambda item: item[0])
+
+
+def _fh_size(fh: BinaryIO) -> int | None:
+    """Return the size of a file-like object without permanently changing its position."""
+    size = getattr(fh, "size", None)
+    if isinstance(size, int) and not isinstance(size, bool):
+        return size
+
+    position = None
+    try:
+        position = fh.tell()
+        fh.seek(0, io.SEEK_END)
+        return fh.tell()
+    except Exception:
+        return None
+    finally:
+        if position is not None:
+            fh.seek(position)
+
+
+def _resolve_segment_size(segment: Segment, segment_id: int, fh: BinaryIO) -> int:
+    """Resolve and validate the fully determined physical extent of a segment."""
+    size = segment.size
+    total_size: int | None = _fh_size(fh)
+
+    if size in (None, "dynamic"):
+        # A dynamic segment extends to the end of the backing volume. This is only determinate if the backing
+        # size is known; layouts where that extent swallows another segment are rejected by the overlap check.
+        if total_size is None:
+            raise ValueError(f"Segment {segment_id} has a dynamic size that cannot be determined")
+        size = total_size - segment.offset
+    elif isinstance(size, str) and size.isdigit():
+        size = int(size)
+
+    if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+        raise ValueError(f"Segment {segment_id} has an indeterminate or unsupported size: {segment.size!r}")
+
+    sector_size = segment.sector_size or 512
+    if size % sector_size:
+        raise ValueError(f"Segment {segment_id} size {size} is not aligned to its sector size {sector_size}")
+
+    if segment.offset < 0:
+        raise ValueError(f"Segment {segment_id} has a negative physical offset")
+
+    if total_size is not None and segment.offset + size > total_size:
+        raise ValueError(
+            f"Segment {segment_id} extends beyond the backing volume: {segment.offset} + {size} > {total_size}"
+        )
+
+    return size
+
+
+def _validate_segment_layout(segments: list[SegmentStream]) -> None:
+    """Validate that a set of segments forms an unambiguous, non-overlapping physical layout."""
+    if not segments:
+        raise ValueError("A segmented volume requires at least one segment")
+
+    previous = None
+    for segment in sorted(segments, key=lambda item: item.offset):
+        if previous is not None and segment.offset < previous.offset + previous.size:
+            raise ValueError(
+                f"Segments {previous.id} and {segment.id} overlap: "
+                f"{previous.offset} + {previous.size} > {segment.offset}"
+            )
+        previous = segment
 
 
 def derive_passphrase_key(passphrase: bytes, keyslot: Keyslot) -> bytes:

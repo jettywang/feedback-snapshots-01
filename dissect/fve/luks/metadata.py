@@ -125,8 +125,8 @@ class Keyslot(JsonItem):
 @dataclass
 class Digest(JsonItem):
     type: str
-    keyslots: list[int]
-    segments: list[int]
+    keyslots: list[int] | None
+    segments: list[int] | None
     salt: bytes
     digest: bytes
     # if type == "pbkdf2"
