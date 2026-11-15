@@ -65,6 +65,15 @@ module Net; module SFTP; module Protocol; module V04
       send_request(FXP_FSTAT, :string, handle, :long, flags || DEFAULT_FLAGS)
     end
 
+    # Sends a FXP_LSETSTAT packet to the server to update the attributes of the
+    # given remote +path+ without following a symbolic link: if the final
+    # component is a link, the link's own attributes are changed rather than
+    # its target's. The +attrs+ parameter is a hash that defines the
+    # attributes to set. This packet exists in protocol versions 4 and 5.
+    def lsetstat(path, attrs)
+      send_request(FXP_LSETSTAT, :string, path, :raw, attribute_factory.new(attrs).to_s)
+    end
+
     protected
 
       # The default flags used if the +flags+ parameter is nil for any of the

@@ -87,6 +87,7 @@ module Net; module SFTP
       @state      = :closed
       @extensions = {}
       @pending_requests = {}
+      @nofollow_handles = {}
 
       connect(&block)
     end
@@ -164,8 +165,8 @@ module Net; module SFTP
     public # low-level SFTP operations
 
       # :call-seq:
-      #   open(path, flags="r", options={}) -> request
-      #   open(path, flags="r", options={}) { |response| ... } -> request
+      #   open(path, flags="r", options={}, no_follow: false) -> request
+      #   open(path, flags="r", options={}, no_follow: false) { |response| ... } -> request
       #
       # Opens a file on the remote server. The +flags+ parameter determines
       # how the flag is open, and accepts the same format as IO#open (e.g.,
@@ -173,6 +174,14 @@ module Net; module SFTP
       # The +options+ parameter is a hash of attributes to be associated
       # with the file, and varies greatly depending on the SFTP protocol
       # version in use, but some (like :permissions) are always available.
+      #
+      # Pass <tt>no_follow: true</tt> to open the symbolic link itself rather
+      # than its target. This uses the SSH_FXF_NOFOLLOW flag, which exists only
+      # in protocol version 6, so the request is refused up front (raising
+      # Net::SFTP::UnsupportedOperation) on older negotiated versions instead of
+      # silently opening the target. Handles opened this way are remembered and
+      # are the only ones accepted by #flsetstat, so that an attribute change
+      # through them applies to the link rather than what it points at.
       #
       # Returns immediately with a Request object. If a block is given, it will
       # be invoked when the server responds, with a Response object as the only
@@ -185,8 +194,17 @@ module Net; module SFTP
       #     sftp.close(response[:handle])
       #   end
       #   sftp.loop
-      def open(path, flags="r", options={}, &callback)
-        request :open, path, flags, options, &callback
+      def open(path, flags="r", options={}, no_follow: false, &callback)
+        request = if no_follow && protocol.version < 6
+            raise UnsupportedOperation,
+              "the SSH_FXF_NOFOLLOW open flag requires SFTP protocol version 6; " \
+              "the negotiated version is #{protocol.version}, so opening the link " \
+              "itself cannot be requested and the target would be opened instead"
+          else
+            request(:open, path, flags, options, no_follow, &callback)
+          end
+        remember_nofollow_handle(request, path) if no_follow
+        request
       end
 
       # Identical to #open, but blocks until the server responds. It will raise
@@ -194,8 +212,8 @@ module Net; module SFTP
       # return the handle of the newly opened file.
       #
       #   handle = sftp.open!("/path/to/file")
-      def open!(path, flags="r", options={}, &callback)
-        wait_for(open(path, flags, options, &callback), :handle)
+      def open!(path, flags="r", options={}, no_follow: false, &callback)
+        wait_for(open(path, flags, options, no_follow: no_follow, &callback), :handle)
       end
 
       # :call-seq:
@@ -212,7 +230,10 @@ module Net; module SFTP
       #   end
       #   sftp.loop
       def close(handle, &callback)
-        request :close, handle, &callback
+        request(:close, handle) do |response|
+          @nofollow_handles.delete(handle) if response.ok?
+          callback.call(response) if callback
+        end
       end
 
       # Identical to #close, but blocks until the server responds. It will
@@ -397,6 +418,90 @@ module Net; module SFTP
       #   sftp.fsetstat!(handle, :permissions => 0644)
       def fsetstat!(handle, attrs, &callback)
         wait_for(fsetstat(handle, attrs, &callback))
+      end
+
+      # :call-seq:
+      #   lsetstat(path, attrs) -> request
+      #   lsetstat(path, attrs) { |response| ... } -> request
+      #
+      # Sets file metadata on the symbolic link at +path+ itself, never on the
+      # file it points to. This is the link-safe counterpart of #setstat (which
+      # follows links). The mechanism is chosen from what the connected server
+      # actually supports, in order of preference:
+      #
+      # 1. the +lsetstat@openssh.com+ extension advertised in the server's
+      #    FXP_VERSION packet (an FXP_EXTENDED request), available on any
+      #    negotiated protocol version; or
+      # 2. the native FXP_LSETSTAT packet of protocol versions 4 and 5; or
+      # 3. the native FXP_SETSTAT packet of protocol version 6, whose defined
+      #    semantics do not follow the link in the final path component.
+      #
+      # If none of these is available (for example, a version 3 server that did
+      # not advertise the extension), the request is refused before anything is
+      # sent by raising Net::SFTP::UnsupportedOperation. It never falls back to
+      # an ordinary #setstat, and a prior #lstat followed by #setstat is not
+      # treated as equivalent, since the target can change between the two.
+      #
+      # When the server accepts the request but cannot apply a particular
+      # attribute, its FXP_STATUS failure (for example, FX_OP_UNSUPPORTED or
+      # FX_FAILURE) is returned in the response rather than hidden.
+      #
+      #   request = sftp.lsetstat("/path/to/link", :permissions => 0777)
+      #   request.wait
+      def lsetstat(path, attrs, &callback)
+        operation = link_safe_setstat_operation
+        unless operation
+          raise UnsupportedOperation,
+            "the server does not advertise a link-safe setstat capability " \
+            "(no #{Constants::Extensions::LSETSTAT} extension and the negotiated " \
+            "protocol version is #{protocol.version}); refusing to setstat a " \
+            "possibly symbolic path, which would modify the link target"
+        end
+        request(operation, path, attrs, &callback)
+      end
+
+      # Identical to #lsetstat, but blocks until the server responds. It raises
+      # Net::SFTP::UnsupportedOperation before sending anything when the server
+      # has no link-safe setstat capability, and StatusException if the server
+      # rejects or cannot fully apply the change.
+      #
+      #   sftp.lsetstat!("/path/to/link", :permissions => 0777)
+      def lsetstat!(path, attrs, &callback)
+        wait_for(lsetstat(path, attrs, &callback))
+      end
+
+      # :call-seq:
+      #   flsetstat(handle, attrs) -> request
+      #   flsetstat(handle, attrs) { |response| ... } -> request
+      #
+      # Sets file metadata through an open +handle+, on the object the handle
+      # refers to. A handle is link-safe only when it was opened with
+      # <tt>no_follow: true</tt> (see #open); such a handle identifies the
+      # symbolic link itself, so the resulting FXP_FSETSTAT changes the link's
+      # own attributes rather than its target's. A normal handle refers to the
+      # link target, so passing one here raises Net::SFTP::UnknownHandle before
+      # any packet is sent, rather than modifying the target.
+      #
+      # FSETSTAT never dereferences a link itself; the guarantee comes from how
+      # the handle was opened, which is why only remembered no-follow handles
+      # are accepted. Server-side failures to apply individual attributes are
+      # surfaced in the response.
+      def flsetstat(handle, attrs, &callback)
+        unless @nofollow_handles.key?(handle)
+          raise UnknownHandle,
+            "handle #{handle.inspect} was not opened with no_follow: true, so " \
+            "it does not identify a symbolic link; refusing to fsetstat it and " \
+            "modify the link target"
+        end
+        request(:fsetstat, handle, attrs, &callback)
+      end
+
+      # Identical to #flsetstat, but blocks until the server responds. It raises
+      # Net::SFTP::UnknownHandle before sending anything for a handle that was
+      # not opened with <tt>no_follow: true</tt>, and StatusException if the
+      # server rejects or cannot fully apply the change.
+      def flsetstat!(handle, attrs, &callback)
+        wait_for(flsetstat(handle, attrs, &callback))
       end
 
       # :call-seq:
@@ -845,6 +950,30 @@ module Net; module SFTP
         pending_requests[request.id] = request
       end
 
+      # Selects the protocol operation that expresses link-safe (no symlink
+      # following) setstat on the negotiated connection, in order of
+      # preference. Returns the protocol driver method name as a symbol, or nil
+      # when the server offers no such capability.
+      def link_safe_setstat_operation
+        if extensions.key?(Constants::Extensions::LSETSTAT)
+          :extended_lsetstat
+        elsif protocol.version >= 4
+          :lsetstat
+        end
+      end
+
+      # Remembers the handle returned by a successful no-follow #open so that
+      # #flsetstat can prove the handle identifies the link itself. The handle
+      # only exists once the server responds, so registration is deferred to
+      # the response.
+      def remember_nofollow_handle(request, path)
+        original = request.callback
+        request.instance_variable_set(:@callback, Proc.new do |response|
+          @nofollow_handles[response[:handle]] = path if response.ok?
+          original.call(response) if original
+        end)
+      end
+
       # Waits for the given request to complete. If the response is
       # EOF, nil is returned. If the response was not successful
       # (e.g., !response.ok?), a StatusException will be raised.
@@ -968,6 +1097,7 @@ module Net; module SFTP
 
         @protocol = Protocol.load(self, negotiated_version)
         @pending_requests = {}
+        @nofollow_handles = {}
 
         @state = :open
         @on_ready.each { |callback| callback.call(self) }

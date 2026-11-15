@@ -41,6 +41,18 @@ class Protocol::TestBase < Net::SFTP::TestCase
     assert_raises(NotImplementedError) { @base.parse(packet) }
   end
 
+  def test_parse_with_extended_reply_packet_should_delegate_to_parser
+    packet = stub('packet', :type => FXP_EXTENDED_REPLY)
+    @base.expects(:parse_extended_reply_packet).with(packet).returns(:result)
+    assert_equal :result, @base.parse(packet)
+  end
+
+  def test_parse_extended_reply_packet_should_return_remaining_payload
+    packet = Net::SSH::Buffer.from(:string, "extension-specific data")
+    assert_equal({ :data => Net::SSH::Buffer.from(:string, "extension-specific data").to_s },
+      @base.parse_extended_reply_packet(packet))
+  end
+
   def test_send_request_should_wrap_request_ids_at_uint32_boundary
     @base.instance_variable_set(:@request_id_counter, 0xfffffffe)
     @session.expects(:send_packet).with(FXP_READ, :long, 0xffffffff)

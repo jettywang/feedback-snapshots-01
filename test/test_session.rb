@@ -458,6 +458,185 @@ class SessionTest < Net::SFTP::TestCase
     assert response.ok?
   end
 
+  def test_lsetstat_on_v3_with_extension_should_send_extended_packet
+    extension = Net::SFTP::Constants::Extensions::LSETSTAT
+    expect_sftp_session :server_version => 3, :extensions => { extension => "1" } do |channel|
+      channel.sends_packet(FXP_EXTENDED, :long, 0, :string, extension, :string, "/path/to/link", :long, 0x4, :long, 0777)
+      channel.gets_packet(FXP_STATUS, :long, 0, :long, 0)
+    end
+
+    assert_command_with_callback(:lsetstat, "/path/to/link", :permissions => 0777) do |response|
+      assert response.ok?
+    end
+  end
+
+  def test_lsetstat_should_prefer_advertised_extension_over_native_packet
+    extension = Net::SFTP::Constants::Extensions::LSETSTAT
+    expect_sftp_session :server_version => 4, :extensions => { extension => "1" } do |channel|
+      channel.sends_packet(FXP_EXTENDED, :long, 0, :string, extension, :string, "/path/to/link", :long, 0x4, :byte, 1, :long, 0777)
+      channel.gets_packet(FXP_STATUS, :long, 0, :long, 0)
+    end
+
+    assert_command_with_callback(:lsetstat, "/path/to/link", :permissions => 0777)
+  end
+
+  def test_v4_lsetstat_without_extension_should_send_native_lsetstat_packet
+    expect_sftp_session :server_version => 4 do |channel|
+      channel.sends_packet(FXP_LSETSTAT, :long, 0, :string, "/path/to/link", :long, 0x4, :byte, 1, :long, 0777)
+      channel.gets_packet(FXP_STATUS, :long, 0, :long, 0)
+    end
+
+    assert_command_with_callback(:lsetstat, "/path/to/link", :permissions => 0777)
+  end
+
+  def test_v6_lsetstat_without_extension_should_send_native_setstat_packet
+    expect_sftp_session :server_version => 6 do |channel|
+      channel.sends_packet(FXP_SETSTAT, :long, 0, :string, "/path/to/link", :long, 0x4, :byte, 1, :long, 0777)
+      channel.gets_packet(FXP_STATUS, :long, 0, :long, 0)
+    end
+
+    assert_command_with_callback(:lsetstat, "/path/to/link", :permissions => 0777)
+  end
+
+  def test_lsetstat_on_v3_without_extension_should_refuse_before_sending_anything
+    expect_sftp_session :server_version => 3
+
+    assert_scripted_command do
+      error = assert_raises(Net::SFTP::UnsupportedOperation) do
+        sftp.lsetstat("/path/to/link", :permissions => 0777)
+      end
+      assert_match(/lsetstat@openssh\.com/, error.message)
+      assert sftp.pending_requests.empty?
+    end
+  end
+
+  def test_lsetstat_bang_without_capability_should_raise_before_sending_anything
+    expect_sftp_session :server_version => 1
+
+    assert_scripted_command do
+      assert_raises(Net::SFTP::UnsupportedOperation) do
+        sftp.lsetstat!("/path/to/link", :permissions => 0777)
+      end
+      assert sftp.pending_requests.empty?
+    end
+  end
+
+  def test_lsetstat_should_keep_server_failure_reason_in_response
+    extension = Net::SFTP::Constants::Extensions::LSETSTAT
+    expect_sftp_session :server_version => 3, :extensions => { extension => "1" } do |channel|
+      channel.sends_packet(FXP_EXTENDED, :long, 0, :string, extension, :string, "/path/to/link", :long, 0x4, :long, 0777)
+      channel.gets_packet(FXP_STATUS, :long, 0, :long, 8, :string, "operation unsupported", :string, "en")
+    end
+
+    assert_command_with_callback(:lsetstat, "/path/to/link", :permissions => 0777) do |response|
+      refute response.ok?
+      assert_equal 8, response.code
+      assert_equal "operation unsupported", response.message
+    end
+  end
+
+  def test_lsetstat_bang_should_raise_status_exception_with_server_failure
+    extension = Net::SFTP::Constants::Extensions::LSETSTAT
+    expect_sftp_session :server_version => 3, :extensions => { extension => "1" } do |channel|
+      channel.sends_packet(FXP_EXTENDED, :long, 0, :string, extension, :string, "/path/to/link", :long, 0x4, :long, 0777)
+      channel.gets_packet(FXP_STATUS, :long, 0, :long, 4, :string, "failure", :string, "en")
+    end
+
+    assert_scripted_command do
+      error = assert_raises(Net::SFTP::StatusException) do
+        sftp.lsetstat!("/path/to/link", :permissions => 0777)
+      end
+      assert_equal 4, error.code
+    end
+  end
+
+  def test_open_with_no_follow_on_v6_should_send_nofollow_flag_and_remember_handle
+    expect_sftp_session :server_version => 6 do |channel|
+      channel.sends_packet(FXP_OPEN, :long, 0, :string, "/path/to/link",
+        :long, ACE::Mask::READ_DATA | ACE::Mask::READ_ATTRIBUTES,
+        :long, FV5::OPEN_EXISTING | FV6::NOFOLLOW, :long, 0, :byte, 1)
+      channel.gets_packet(FXP_HANDLE, :long, 0, :string, "link-handle")
+    end
+
+    assert_scripted_command do
+      handle = sftp.open!("/path/to/link", "r", {}, :no_follow => true)
+      assert_equal "link-handle", handle
+      assert_equal({ "link-handle" => "/path/to/link" }, sftp.instance_variable_get(:@nofollow_handles))
+    end
+  end
+
+  def test_open_with_no_follow_on_v3_should_refuse_before_sending_anything
+    expect_sftp_session :server_version => 3
+
+    assert_scripted_command do
+      assert_raises(Net::SFTP::UnsupportedOperation) do
+        sftp.open("/path/to/link", "r", {}, :no_follow => true)
+      end
+      assert sftp.pending_requests.empty?
+    end
+  end
+
+  def test_open_without_no_follow_keeps_original_signature_working
+    expect_sftp_session :server_version => 3 do |channel|
+      channel.sends_packet(FXP_OPEN, :long, 0, :string, "/path/to/file", :long, 0x01, :long, 0)
+      channel.gets_packet(FXP_HANDLE, :long, 0, :string, "handle")
+    end
+
+    assert_command_with_callback(:open, "/path/to/file") do |response|
+      assert response.ok?
+      assert_equal "handle", response[:handle]
+    end
+  end
+
+  def test_flsetstat_on_nofollow_handle_should_send_fsetstat
+    expect_sftp_session :server_version => 6 do |channel|
+      channel.sends_packet(FXP_OPEN, :long, 0, :string, "/path/to/link",
+        :long, ACE::Mask::READ_DATA | ACE::Mask::READ_ATTRIBUTES,
+        :long, FV5::OPEN_EXISTING | FV6::NOFOLLOW, :long, 0, :byte, 1)
+      channel.gets_packet(FXP_HANDLE, :long, 0, :string, "link-handle")
+      channel.sends_packet(FXP_FSETSTAT, :long, 1, :string, "link-handle", :long, 0x4, :byte, 1, :long, 0777)
+      channel.gets_packet(FXP_STATUS, :long, 1, :long, 0)
+    end
+
+    assert_scripted_command do
+      handle = sftp.open!("/path/to/link", "r", {}, :no_follow => true)
+      response = sftp.flsetstat!(handle, :permissions => 0777)
+      assert response.ok?
+    end
+  end
+
+  def test_flsetstat_on_unknown_handle_should_refuse_before_sending_anything
+    expect_sftp_session :server_version => 6
+
+    assert_scripted_command do
+      error = assert_raises(Net::SFTP::UnknownHandle) do
+        sftp.flsetstat("plain-handle", :permissions => 0777)
+      end
+      assert_match(/no_follow/, error.message)
+      assert sftp.pending_requests.empty?
+    end
+  end
+
+  def test_closing_nofollow_handle_should_forget_it_and_then_flsetstat_refuses
+    expect_sftp_session :server_version => 6 do |channel|
+      channel.sends_packet(FXP_OPEN, :long, 0, :string, "/path/to/link",
+        :long, ACE::Mask::READ_DATA | ACE::Mask::READ_ATTRIBUTES,
+        :long, FV5::OPEN_EXISTING | FV6::NOFOLLOW, :long, 0, :byte, 1)
+      channel.gets_packet(FXP_HANDLE, :long, 0, :string, "link-handle")
+      channel.sends_packet(FXP_CLOSE, :long, 1, :string, "link-handle")
+      channel.gets_packet(FXP_STATUS, :long, 1, :long, 0)
+    end
+
+    assert_scripted_command do
+      handle = sftp.open!("/path/to/link", "r", {}, :no_follow => true)
+      sftp.close!(handle)
+      assert_empty sftp.instance_variable_get(:@nofollow_handles)
+      assert_raises(Net::SFTP::UnknownHandle) do
+        sftp.flsetstat(handle, :permissions => 0777)
+      end
+    end
+  end
+
   def test_opendir_should_send_opendir_request_and_invoke_callback
     expect_sftp_session do |channel|
       channel.sends_packet(FXP_OPENDIR, :long, 0, :string, "/path/to/dir")

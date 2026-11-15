@@ -18,6 +18,24 @@ class Protocol::V06::TestBase < Protocol::V05::TestBase
   undef test_block_should_raise_not_implemented_error
   undef test_unblock_should_raise_not_implemented_error
   undef test_symlink_should_send_symlink_packet
+  undef test_open_with_no_follow_should_refuse_before_sending_any_packet
+  undef test_lsetstat_should_send_lsetstat_packet_without_following_links
+
+  def test_open_with_no_follow_should_set_nofollow_flag
+    @session.expects(:send_packet).with(FXP_OPEN, :long, 0,
+      :string, "/path/to/link",
+      :long, ACE::Mask::READ_DATA | ACE::Mask::READ_ATTRIBUTES,
+      :long, FV5::OPEN_EXISTING | FV6::NOFOLLOW,
+      :raw, attributes.new.to_s)
+    assert_equal 0, @base.open("/path/to/link", "r", {}, true)
+  end
+
+  def test_lsetstat_should_delegate_to_native_setstat_packet
+    @session.expects(:send_packet).with(FXP_SETSTAT, :long, 0,
+      :string, "/path/to/link",
+      :raw, attributes.new(:permissions => 0777).to_s)
+    assert_equal 0, @base.lsetstat("/path/to/link", :permissions => 0777)
+  end
 
   def test_link_should_send_link_packet
     @session.expects(:send_packet).with(FXP_LINK, :long, 0, :string, "/path/to/link", :string, "/path/to/file", :bool, true)

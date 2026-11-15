@@ -6,8 +6,6 @@ module Net module SFTP
   module Constants
 
     # The various packet types supported by SFTP protocol versions 1 through 6.
-    # The FXP_EXTENDED and FXP_EXTENDED_REPLY packet types are not currently
-    # understood by Net::SFTP.
     module PacketTypes
       FXP_INIT           = 1
       FXP_VERSION        = 2
@@ -33,6 +31,13 @@ module Net module SFTP
       FXP_LINK           = 21
       FXP_BLOCK          = 22
       FXP_UNBLOCK        = 23
+
+      # SSH_FXP_LSETSTAT was defined by protocol version 4 drafts as packet
+      # type 21; the final version 6 reuses that number for SSH_FXP_LINK, so
+      # this constant is only meaningful for the version 4 and 5 drivers. It
+      # sets attributes on the path itself without following a final symbolic
+      # link, mirroring lstat vs stat.
+      FXP_LSETSTAT       = 21
                          
       FXP_STATUS         = 101
       FXP_HANDLE         = 102
@@ -42,6 +47,14 @@ module Net module SFTP
                          
       FXP_EXTENDED       = 200
       FXP_EXTENDED_REPLY = 201
+    end
+
+    # Names of SFTP extensions negotiated in the server's FXP_VERSION packet.
+    module Extensions
+      # Link-safe setstat: attributes are applied to the named path itself,
+      # never to the target of a final symbolic link. Carried by an
+      # FXP_EXTENDED request; the server answers with a normal FXP_STATUS.
+      LSETSTAT = "lsetstat@openssh.com"
     end
 
     # Beginning in version 5 of the protocol, Net::SFTP::Session#rename accepts

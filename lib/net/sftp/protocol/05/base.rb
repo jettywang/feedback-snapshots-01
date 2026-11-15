@@ -32,7 +32,15 @@ module Net; module SFTP; module Protocol; module V05
     # be one of the mode strings that IO::open accepts). The +options+
     # parameter is a hash that is used to construct a new Attribute object,
     # to pass as part of the FXP_OPEN request.
-    def open(path, flags, options)
+    #
+    # A truthy +no_follow+ adds the SSH_FXF_NOFOLLOW flag, which is only
+    # defined for protocol version 6; version 5 refuses it here instead of
+    # sending a request that could open the symlink's target.
+    def open(path, flags, options, no_follow=false)
+      if no_follow && version < 6
+        not_implemented! :open_no_follow
+      end
+
       flags = normalize_open_flags(flags)
 
       sftp_flags = if flags & (IO::CREAT | IO::EXCL) == (IO::CREAT | IO::EXCL)
@@ -46,6 +54,8 @@ module Net; module SFTP; module Protocol; module V05
           else
             FV5::OPEN_EXISTING
           end
+
+      sftp_flags |= FV6::NOFOLLOW if no_follow
 
       desired_access = if flags & (IO::WRONLY | IO::RDWR) != 0
           access = ACE::Mask::WRITE_DATA | ACE::Mask::WRITE_ATTRIBUTES

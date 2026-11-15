@@ -11,6 +11,18 @@ module Net; module SFTP
     end
   end
 
+  # Raised when a request cannot be expressed with a link-safe ("do not
+  # follow symbolic links") semantic on the negotiated protocol version and
+  # server extensions. The request is refused before any packet is sent, so
+  # the link target is never modified by a fallback that follows links.
+  class UnsupportedOperation < Net::SFTP::Exception; end
+
+  # Raised when a handle-based, link-safe operation is asked to use a handle
+  # that was not opened with the no-follow flag. Such a handle refers to the
+  # link's target, so changing its attributes would modify the target rather
+  # than the link itself; the request is refused before any packet is sent.
+  class UnknownHandle < Net::SFTP::Exception; end
+
   # A exception class for reporting a non-success result of an operation.
   class StatusException < Net::SFTP::Exception
 

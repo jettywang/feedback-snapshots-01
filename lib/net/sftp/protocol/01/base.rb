@@ -71,7 +71,15 @@ module Net; module SFTP; module Protocol; module V01
     # be one of the mode strings that IO::open accepts). The +options+
     # parameter is a hash that is used to construct a new Attribute object,
     # to pass as part of the FXP_OPEN request.
-    def open(path, flags, options)
+    #
+    # The no-follow open flag (SSH_FXF_NOFOLLOW) only exists in protocol
+    # version 6, so a truthy +no_follow+ is refused here instead of sending a
+    # request that could open the symlink's target.
+    def open(path, flags, options, no_follow=false)
+      if no_follow
+        not_implemented! :open_no_follow
+      end
+
       flags = normalize_open_flags(flags)
 
       if flags & (IO::WRONLY | IO::RDWR) != 0
@@ -142,6 +150,18 @@ module Net; module SFTP; module Protocol; module V01
     # the attributes to set.
     def fsetstat(handle, attrs)
       send_request(FXP_FSETSTAT, :string, handle, :raw, attribute_factory.new(attrs).to_s)
+    end
+
+    # Sends an FXP_EXTENDED request for the +lsetstat@openssh.com+ extension,
+    # which applies +attrs+ to the path itself without following a final
+    # symbolic link. The extension must be advertised by the server in its
+    # FXP_VERSION packet (callers are responsible for checking); the server
+    # replies with an ordinary FXP_STATUS packet.
+    def extended_lsetstat(path, attrs)
+      send_request(FXP_EXTENDED,
+        :string, Constants::Extensions::LSETSTAT,
+        :string, path,
+        :raw, attribute_factory.new(attrs).to_s)
     end
 
     # Sends a FXP_OPENDIR packet to the server, to request a handle for

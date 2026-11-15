@@ -33,6 +33,15 @@ module Net; module SFTP; module Protocol; module V06
       link(path, target, true)
     end
 
+    # Version 6 folds the old LSETSTAT operation into SETSTAT: the server is
+    # required not to follow a symbolic link in the final component of the
+    # path, so SETSTAT on a link changes the link's own attributes. This simply
+    # delegates to #setstat and exists so callers can request link-safe
+    # semantics uniformly across protocol versions.
+    def lsetstat(path, attrs)
+      setstat(path, attrs)
+    end
+
     # Sends a FXP_BLOCK packet to the server to request that a byte-range lock
     # be obtained on the given +handle+, for the given byte +offset+ and
     # +length+. The +mask+ parameter is a bitfield indicating what kind of

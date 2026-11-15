@@ -34,8 +34,17 @@ module Net; module SFTP; module Protocol
       when FXP_DATA   then parse_data_packet(packet)
       when FXP_NAME   then parse_name_packet(packet)
       when FXP_ATTRS  then parse_attrs_packet(packet)
+      when FXP_EXTENDED_REPLY then parse_extended_reply_packet(packet)
       else raise NotImplementedError, "unknown packet type: #{packet.type}"
       end
+    end
+
+    # Parses the given FXP_EXTENDED_REPLY packet and returns a hash with one
+    # key, :data, which references the unparsed remainder of the packet. The
+    # layout of that data is specific to the extension named in the original
+    # FXP_EXTENDED request.
+    def parse_extended_reply_packet(packet)
+      { :data => packet.read }
     end
 
     private

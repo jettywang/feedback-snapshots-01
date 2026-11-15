@@ -140,6 +140,22 @@ class Protocol::V01::TestBase < Net::SFTP::TestCase
     assert_equal 0, @base.fsetstat("handle", :atime => 1, :mtime => 2, :permissions => 0755)
   end
 
+  def test_extended_lsetstat_should_send_extended_packet_without_following_links
+    extension = Net::SFTP::Constants::Extensions::LSETSTAT
+    @session.expects(:send_packet).with(FXP_EXTENDED, :long, 0,
+      :string, extension,
+      :string, "/path/to/link",
+      :raw, attributes.new(:permissions => 0777).to_s)
+    assert_equal 0, @base.extended_lsetstat("/path/to/link", :permissions => 0777)
+  end
+
+  def test_open_with_no_follow_should_refuse_before_sending_any_packet
+    @session.expects(:send_packet).never
+    assert_raises(NotImplementedError) do
+      @base.open("/path/to/link", "r", {}, true)
+    end
+  end
+
   def test_opendir_should_send_opendir_packet
     @session.expects(:send_packet).with(FXP_OPENDIR, :long, 0, :string, "/path/to/dir")
     assert_equal 0, @base.opendir("/path/to/dir")

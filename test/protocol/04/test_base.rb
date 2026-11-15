@@ -69,6 +69,13 @@ class Protocol::V04::TestBase < Protocol::V03::TestBase
     assert_equal 0, @base.stat("/path/to/file", 1234)
   end
 
+  def test_lsetstat_should_send_lsetstat_packet_without_following_links
+    @session.expects(:send_packet).with(FXP_LSETSTAT, :long, 0,
+      :string, "/path/to/link",
+      :raw, attributes.new(:permissions => 0777).to_s)
+    assert_equal 0, @base.lsetstat("/path/to/link", :permissions => 0777)
+  end
+
   def test_parse_name_packet_should_reject_count_larger_than_remaining_data
     packet = Net::SSH::Buffer.from(:long, 500_000, :string, "name1", :long, 0, :byte, 1)
     assert_raises(Net::SFTP::Exception) { @base.parse_name_packet(packet) }
