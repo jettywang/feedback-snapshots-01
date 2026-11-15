@@ -12,7 +12,7 @@ struct VolumeHeader {
     char        magic[4];           // b"VERA"
     uint16      version;
     uint16      client_version;
-    char        crc32[4];           // CRC32 checksum of bytes 256-511
+    char        crc32[4];           // CRC32 checksum of the master key area (bytes 192-447 of this structure)
     char        reserved_1[16];     // 16 * 0x00
     uint64      hidden_volume_size;
     uint64      volume_size;
@@ -23,7 +23,7 @@ struct VolumeHeader {
                                     // bit 2-31 = reserved
     uint32      sector_size;
     char        reserved_2[120];    // 120 * 0x00
-    char        crc32_decrypted[4]; // CRC32 checksum of decrypted bytes 64-251
+    char        crc32_decrypted[4]; // CRC32 checksum of bytes 0-187 of this structure
     char        master_keys[256];   // concatenated primary and secondary master keys
 };
 """
@@ -31,3 +31,14 @@ struct VolumeHeader {
 c_veracrypt = cstruct(endian=">").load(veracrypt_def)
 
 TC_BOOT_VOLUME_HEADER_SECTOR_OFFSET = (63 - 1) * 512  # 31744
+
+# Layout constants from VeraCrypt's Common/Tcdefs.h and the volume format specification.
+# The encrypted header (salt excluded) is 512 bytes, but only the first 448 bytes are used.
+TC_VOLUME_HEADER_SALT_SIZE = 64
+TC_VOLUME_HEADER_SIZE = 512
+TC_VOLUME_HEADER_EFFECTIVE_SIZE = 448
+TC_VOLUME_HEADER_GROUP_SIZE = 64 * 1024
+TC_VOLUME_DATA_OFFSET = TC_VOLUME_HEADER_GROUP_SIZE * 2  # 131072
+TC_HIDDEN_VOLUME_HEADER_OFFSET = TC_VOLUME_HEADER_GROUP_SIZE  # 65536
+TC_VOLUME_HEADER_BACKUP_OFFSET = TC_VOLUME_HEADER_GROUP_SIZE * 2  # from the end of the volume
+TC_HIDDEN_VOLUME_HEADER_BACKUP_OFFSET = TC_VOLUME_HEADER_GROUP_SIZE  # from the end of the volume
