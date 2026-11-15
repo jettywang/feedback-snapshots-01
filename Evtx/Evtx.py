@@ -33,6 +33,9 @@ from .BinaryParser import Block, ParseException
 
 logger = logging.getLogger(__name__)
 
+# An EVTX chunk is always 64KiB.
+CHUNK_SIZE = 0x10000
+
 
 class InvalidRecordException(ParseException):
     def __init__(self):
@@ -116,6 +119,10 @@ class Evtx(object):
         """
         Get a Record by record number.
 
+        This keeps the legacy single-result contract: when several physical
+        records share the number, the first in physical order is returned.
+        Use `get_records` to reach every matching record.
+
         @type record_num:  int
         @param record_num: The record number of the the record to fetch.
         @rtype Record or None
@@ -123,6 +130,35 @@ class Evtx(object):
           the record is not found.
         """
         return self._fh.get_record(record_num)
+
+    @ensure_contexted
+    def get_records(self, record_num):
+        """
+        Get every Record carrying the given record number.
+
+        Duplicate record numbers in different physical locations are all
+        returned, in physical (scan) order.
+
+        @type record_num:  int
+        @param record_num: The record number of the records to fetch.
+        @rtype tuple of Record
+        @return All matching records; an empty tuple if none exist.
+        """
+        return self._fh.get_records(record_num)
+
+    @ensure_contexted
+    def index(self):
+        """
+        Get the reusable, chunk-level candidate index for this open view.
+
+        The index is built lazily on first use and cached for the lifetime of
+        this Evtx object.  It belongs to this open file view only; it is never
+        shared by path name with another (e.g. copied) evidence file.
+
+        @rtype Evtx.Index.RecordIndex
+        @return The record-number candidate index for this view.
+        """
+        return self._fh.index()
 
     @ensure_contexted
     def get_file_header(self):
@@ -133,6 +169,7 @@ class FileHeader(Block):
     def __init__(self, buf, offset):
         logger.debug("FILE HEADER at {}.".format(hex(offset)))
         super(FileHeader, self).__init__(buf, offset)
+        self._record_index = None
         self.declare_field("string", "magic", 0x0, length=8)
         self.declare_field("qword", "oldest_chunk")
         self.declare_field("qword", "current_chunk_number")
@@ -241,9 +278,51 @@ class FileHeader(Block):
             ofs += 0x10000
             i += 1
 
+    def index(self):
+        """
+        Get (lazily building and caching) the chunk-level record index for
+        this open file view.
+
+        The index is derived by physically walking the records rather than
+        trusting the header-advertised number ranges, and is bound to this
+        FileHeader's buffer.  It is not keyed by file name, so distinct
+        evidence copies never share an index even when opened from one path.
+
+        @rtype Evtx.Index.RecordIndex
+        @return The reusable candidate index for this view.
+        """
+        # imported lazily to avoid a circular import between Evtx and Index.
+        from .Index import RecordIndex
+
+        if self._record_index is None:
+            self._record_index = RecordIndex(self).build()
+        return self._record_index
+
+    def get_records(self, record_num):
+        """
+        Get every Record carrying the given record number.
+
+        Lookup goes through the physically-derived index, so an untruthful
+        chunk header range cannot hide a candidate or point us at the wrong
+        chunk.  Duplicate record numbers are all returned, in physical order.
+
+        @type record_num:  int
+        @param record_num: The record number of the records to fetch.
+        @rtype tuple of Record
+        @return All matching records; an empty tuple if none exist.
+        """
+        return self.index().get_records(record_num)
+
     def get_record(self, record_num):
         """
         Get a Record by record number.
+
+        The lookup is served by the chunk-level candidate index, which is built
+        from the records themselves rather than from the header-advertised
+        number ranges.  This preserves the legacy single-result contract: when
+        more than one physical record shares the number, the first in physical
+        order is returned (use `get_records` for all of them), and None is
+        returned when the number does not exist.
 
         @type record_num:  int
         @param record_num: The record number of the the record to fetch.
@@ -251,15 +330,7 @@ class FileHeader(Block):
         @return The record request by record number, or None if the
           record is not found.
         """
-        for chunk in self.chunks():
-            first_record = chunk.log_first_record_number()
-            last_record = chunk.log_last_record_number()
-            if not (first_record <= record_num <= last_record):
-                continue
-            for record in chunk.records():
-                if record.record_num() == record_num:
-                    return record
-        return None
+        return self.index().get_record(record_num)
 
 
 class Template(object):

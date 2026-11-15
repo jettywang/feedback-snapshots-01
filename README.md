@@ -42,6 +42,35 @@ Note the length of the `evtx_dump.py` script: its only 20 lines.  Now, review th
 Working with python-evtx is really easy!
 
 
+Looking up records by number
+----------------------------
+Repeatedly fetching events by EVTX record number is common during forensics.
+`Evtx.get_record` is backed by a reusable, chunk-level candidate index
+(`Evtx.index`) that is built lazily on first use and cached for the lifetime of
+the open file view.  The index is produced by physically walking the records,
+not by trusting the record-number ranges advertised in the file/chunk headers,
+so overlapping ranges, duplicate record numbers, non-monotonic numbering, and
+truncated chunks are handled explicitly.  Structural irregularities are exposed
+through `index().diagnostics()` rather than silently assumed away:
+
+    with Evtx.Evtx("Security.evtx") as log:
+        index = log.index()
+        print(index.stats())        # work performed by the one-time build
+        print(index.diagnostics())  # overlaps, duplicates, non-monotonic, truncation
+
+        # legacy single-result contract: first physical hit, or None
+        record = log.get_record(508)
+
+        # every physical record sharing a number, each at its own location
+        records = log.get_records(508)
+        for candidate in index.candidates(508):
+            print(candidate.chunk_offset, candidate.record_offset)
+
+The index belongs to the single open view (its mmap-backed buffer).  It is
+never keyed by path name, so two different evidence copies opened from the same
+path do not share an index.
+
+
 Installation
 ------------
 Updates to python-evtx are pushed to PyPi, so you can install the module using `pip`.  For example:
