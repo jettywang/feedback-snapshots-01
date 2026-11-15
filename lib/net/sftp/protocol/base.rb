@@ -1,6 +1,7 @@
 require 'net/ssh/loggable'
 require 'net/sftp/constants'
 require 'net/sftp/protocol/bounded_read'
+require 'net/sftp/protocol/open_intent'
 
 module Net; module SFTP; module Protocol
 
@@ -39,6 +40,13 @@ module Net; module SFTP; module Protocol
     end
 
     private
+
+      # Resolve the +flags+ argument of an open request into a validated
+      # Protocol::OpenIntent. Shared by every protocol version so that the
+      # meaning of a call does not depend on the negotiated version.
+      def open_intent(flags)
+        OpenIntent.from_flags(flags)
+      end
 
       # Send a new packet of the given type, and with the given data arguments.
       # A new request identifier will be allocated to this request, and will

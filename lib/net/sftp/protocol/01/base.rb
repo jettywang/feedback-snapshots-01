@@ -71,20 +71,23 @@ module Net; module SFTP; module Protocol; module V01
     # be one of the mode strings that IO::open accepts). The +options+
     # parameter is a hash that is used to construct a new Attribute object,
     # to pass as part of the FXP_OPEN request.
+    #
+    # Versions 1-4 encode the request as a single +pflags+ field. The caller's
+    # flags are first resolved into an explicit intent (see
+    # Protocol::OpenIntent), so a request that cannot be honored is refused
+    # before any packet is sent instead of being widened into another
+    # permission set.
     def open(path, flags, options)
-      flags = normalize_open_flags(flags)
+      intent = open_intent(flags)
+      intent.assert_expressible!(version)
 
-      if flags & (IO::WRONLY | IO::RDWR) != 0
-        sftp_flags = FV1::WRITE
-        sftp_flags |= FV1::READ if flags & IO::RDWR != 0
-        sftp_flags |= FV1::APPEND if flags & IO::APPEND != 0
-      else
-        sftp_flags = FV1::READ
-      end
-
-      sftp_flags |= FV1::CREAT if flags & IO::CREAT != 0
-      sftp_flags |= FV1::TRUNC if flags & IO::TRUNC != 0
-      sftp_flags |= FV1::EXCL  if flags & IO::EXCL  != 0
+      sftp_flags = 0
+      sftp_flags |= FV1::READ   if intent.read?
+      sftp_flags |= FV1::WRITE  if intent.write?
+      sftp_flags |= FV1::APPEND if intent.append?
+      sftp_flags |= FV1::CREAT  if intent.create?
+      sftp_flags |= FV1::TRUNC  if intent.truncate?
+      sftp_flags |= FV1::EXCL   if intent.exclusive?
 
       attributes = attribute_factory.new(options)
 
@@ -236,21 +239,10 @@ module Net; module SFTP; module Protocol; module V01
       end
 
       # Normalizes the given flags parameter, converting it into a combination
-      # of IO constants.
+      # of IO constants. Kept for backwards compatibility; new code should use
+      # Protocol::OpenIntent, which also validates the combination.
       def normalize_open_flags(flags)
-        if String === flags
-          case flags.tr("b", "")
-          when "r"  then IO::RDONLY
-          when "r+" then IO::RDWR
-          when "w"  then IO::WRONLY | IO::TRUNC | IO::CREAT
-          when "w+" then IO::RDWR | IO::TRUNC | IO::CREAT
-          when "a"  then IO::APPEND | IO::CREAT | IO::WRONLY
-          when "a+" then IO::APPEND | IO::CREAT | IO::RDWR
-          else raise ArgumentError, "unsupported flags: #{flags.inspect}"
-          end
-        else
-          flags.to_i
-        end
+        OpenIntent.normalize(flags)
       end
 
       # Returns the Attributes class used by this version of the protocol

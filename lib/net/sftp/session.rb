@@ -174,6 +174,13 @@ module Net; module SFTP
       # with the file, and varies greatly depending on the SFTP protocol
       # version in use, but some (like :permissions) are always available.
       #
+      # The flags are resolved into a single intent before the request is
+      # encoded, so a call means the same thing on every protocol version.
+      # A combination that the negotiated version cannot express exactly (for
+      # example O_NOFOLLOW on a server older than version 6) raises
+      # Net::SFTP::Protocol::OpenIntent::Unsupported before any packet is sent,
+      # rather than falling back to a wider permission set.
+      #
       # Returns immediately with a Request object. If a block is given, it will
       # be invoked when the server responds, with a Response object as the only
       # parameter. The :handle property of the response is the handle of the

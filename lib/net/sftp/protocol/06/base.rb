@@ -53,6 +53,12 @@ module Net; module SFTP; module Protocol; module V06
 
     protected
 
+      # Version 6 defines NOFOLLOW, so a caller who asked not to follow a
+      # symlink can be honored exactly.
+      def nofollow_flag
+        OpenFlags::FV6::NOFOLLOW
+      end
+
       # Returns the Attributes class used by this version of the protocol
       # (Net::SFTP::Protocol::V06::Attributes, in this case)
       def attribute_factory
