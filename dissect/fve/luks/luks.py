@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import io
 from typing import TYPE_CHECKING, BinaryIO
 from uuid import UUID
 
 from dissect.fve.crypto import argon2, create_cipher
-from dissect.fve.crypto.dmcrypt import CryptStream
+from dissect.fve.crypto.dmcrypt import CryptStream, MultiSegmentStream, SegmentStream
+from dissect.fve.exception import UnsupportedLayoutError
 from dissect.fve.luks import af
 from dissect.fve.luks.c_luks import (
     LUKS2_MAGIC_1ST,
@@ -90,6 +92,7 @@ class LUKS:
 
         self._active_volume_key = None
         self._active_keyslot_id = None
+        self._active_digest_id = None
 
     @property
     def unlocked(self) -> bool:
@@ -101,10 +104,16 @@ class LUKS:
 
     def unlock(self, key: bytes, keyslot: int) -> None:
         """Unlock the volume with the volume encryption key."""
-        if not self._verify_volume_key(key, keyslot):
+        verified = [
+            (digest_id, digest) for digest_id, digest in self._find_digests(keyslot) if self._verify_digest(key, digest)
+        ]
+
+        if not verified:
             raise ValueError(f"Invalid volume key for keyslot {keyslot}")
+
         self._active_volume_key = key
         self._active_keyslot_id = keyslot
+        self._active_digest_id = verified[0][0]
 
     def unlock_with_key_file(self, path: Path, offset: int = 0, size: int = -1, keyslot: int | None = None) -> None:
         with path.open("rb") as fh:
@@ -169,9 +178,8 @@ class LUKS:
             keyslot_obj.af.hash,
         )
 
-    def _verify_volume_key(self, key: bytes, keyslot: int) -> None:
-        """Verify the given key for the given keyslot."""
-        digest = self.find_digest(keyslot)
+    def _verify_digest(self, key: bytes, digest: Digest) -> bool:
+        """Verify the given volume key against a digest."""
         if digest.type == "pbkdf2":
             result = hashlib.pbkdf2_hmac(digest.hash, key, digest.salt, digest.iterations, len(digest.digest))
         else:
@@ -180,13 +188,19 @@ class LUKS:
 
         return result == digest.digest
 
-    def find_digest(self, keyslot: int) -> Digest:
-        """Find digest metadata corresponding to the given keyslot."""
-        digests = [digest for digest in self.metadata.digests.values() if keyslot in digest.keyslots]
+    def _find_digests(self, keyslot: int) -> list[tuple[int, Digest]]:
+        """Find all digest metadata corresponding to the given keyslot."""
+        digests = [
+            (digest_id, digest) for digest_id, digest in self.metadata.digests.items() if keyslot in digest.keyslots
+        ]
         if not digests:
             raise ValueError(f"No digest found for keyslot {keyslot}")
 
-        return digests[0]
+        return digests
+
+    def find_digest(self, keyslot: int) -> Digest:
+        """Find digest metadata corresponding to the given keyslot."""
+        return self._find_digests(keyslot)[0][1]
 
     def find_segment(self, keyslot: int) -> Segment:
         """Find segment metadata corresponding to the given keyslot."""
@@ -200,25 +214,294 @@ class LUKS:
 
         return segments[0]
 
-    def open(self) -> CryptStream:
-        """Open this volume and return a readable (decrypted) stream."""
+    def find_segments(self, keyslot: int) -> list[Segment]:
+        """Find all segment metadata corresponding to the given keyslot, in logical order."""
+        digest = self.find_digest(keyslot)
+        segments = [segment for segment_id, segment in self.metadata.segments.items() if segment_id in digest.segments]
+        if not segments:
+            raise ValueError(f"No segment found for keyslot {keyslot}")
+
+        return segments
+
+    def open(self) -> CryptStream | MultiSegmentStream:
+        """Open this volume and return a readable (decrypted) stream.
+
+        Single-segment volumes are opened as a plain :class:`~dissect.fve.crypto.dmcrypt.CryptStream`, preserving the
+        existing behaviour. Multi-segment volumes are opened as a restricted read-only
+        :class:`~dissect.fve.crypto.dmcrypt.MultiSegmentStream`, but only when every segment can be proven to use the
+        verified volume key and every physical range is unambiguous.
+
+        Raises:
+            UnsupportedLayoutError: If the segment layout cannot be safely presented.
+        """
         if not self.unlocked:
             raise ValueError("Volume is locked")
 
-        # Technically LUKS supports multiple segments, but practically it only ever has one
-        # Don't bother with supporting multiple segments for now
-        segment = self.find_segment(self._active_keyslot_id)
+        if len(self.metadata.segments) == 1:
+            segment_id, segment = next(iter(self.metadata.segments.items()))
+            digest = self.metadata.digests[self._active_digest_id]
+            if segment_id in digest.segments:
+                return CryptStream(
+                    self.fh,
+                    segment.encryption,
+                    self._active_volume_key,
+                    self.metadata.keyslots[self._active_keyslot_id].key_size * 8,
+                    segment.offset,
+                    segment.size,
+                    segment.iv_tweak,
+                    segment.sector_size,
+                )
 
-        return CryptStream(
-            self.fh,
-            segment.encryption,
-            self._active_volume_key,
-            self.metadata.keyslots[self._active_keyslot_id].key_size * 8,
-            segment.offset,
-            segment.size,
-            segment.iv_tweak,
-            segment.sector_size,
-        )
+        return self.open_multi()
+
+    def open_multi(self) -> MultiSegmentStream:
+        """Open this volume as a restricted read-only multi-segment stream.
+
+        Unlike :meth:`open`, this never falls back to single-segment behaviour and always validates the complete
+        segment layout. It can also be used to explicitly obtain the multi-segment view of a volume with one segment.
+
+        Raises:
+            UnsupportedLayoutError: If the segment layout cannot be safely presented.
+            ValueError: If the volume is not unlocked.
+        """
+        if not self.unlocked:
+            raise ValueError("Volume is locked")
+
+        segment_ids = sorted(self.metadata.segments)
+        if not segment_ids:
+            raise UnsupportedLayoutError("Volume has no data segments")
+
+        return MultiSegmentStream(self._open_multi_segment(self._active_keyslot_id, segment_ids))
+
+    def _open_multi_segment(self, keyslot_id: int, segment_ids: list[int]) -> list[SegmentStream]:
+        """Validate a multi-segment layout and return a decrypting view for every segment.
+
+        A layout is only accepted when:
+
+        - every data segment in the metadata has at least one digest binding it,
+        - every digest binding a segment was verified with the same active volume key,
+        - at least one verified digest binding the segment also binds the keyslot used to unlock,
+        - no digest references a segment that is missing from the metadata,
+        - every segment has a fully determinate physical range and crypto configuration,
+        - segments do not overlap in the physical data area,
+        - segments do not touch LUKS headers, the keyslot area or keyslot metadata.
+
+        Args:
+            keyslot_id: The keyslot that was used to unlock the volume.
+            segment_ids: The IDs of all data segments in the metadata, in logical order.
+
+        Raises:
+            UnsupportedLayoutError: If the layout does not satisfy the above requirements.
+        """
+        if self.header.version != 2:
+            raise UnsupportedLayoutError("Multi-segment volumes are only supported for LUKS2")
+
+        if keyslot_id not in self.metadata.keyslots:
+            raise UnsupportedLayoutError(f"Keyslot {keyslot_id} is not present in the metadata")
+
+        keyslot = self.metadata.keyslots[keyslot_id]
+        if keyslot.key_size * 8 != len(self._active_volume_key) * 8:
+            raise UnsupportedLayoutError("Verified volume key size does not match the keyslot key size")
+
+        # Prove which digests are backed by the same validated volume key. This is the only evidence that all data
+        # segments use the key we unlocked with.
+        verified_digest_ids = set()
+        for digest_id, digest in self.metadata.digests.items():
+            try:
+                if self._verify_digest(self._active_volume_key, digest):
+                    verified_digest_ids.add(digest_id)
+            except NotImplementedError:
+                if digest_id == self._active_digest_id:
+                    raise
+
+        known_segment_ids = set(segment_ids)
+        for digest_id, digest in self.metadata.digests.items():
+            unknown = sorted(set(digest.segments) - known_segment_ids)
+            if unknown:
+                raise UnsupportedLayoutError(
+                    f"Digest {digest_id} references segments that are not present in the metadata: {unknown}"
+                )
+
+        # Map every segment to the digests that bind it, and reject segments whose binding cannot be proven.
+        bindings: dict[int, list[int]] = {segment_id: [] for segment_id in segment_ids}
+        for digest_id, digest in self.metadata.digests.items():
+            for segment_id in digest.segments:
+                bindings[segment_id].append(digest_id)
+
+        # Any alternate layout reachable from the same keyslot is a conflict: without additional evidence there is
+        # no way to tell which data segments are authoritative.
+        conflicting_digests = [
+            digest_id
+            for digest_id, digest in self.metadata.digests.items()
+            if keyslot_id in digest.keyslots and digest_id not in verified_digest_ids
+        ]
+        if conflicting_digests:
+            raise UnsupportedLayoutError(
+                f"Keyslot {keyslot_id} is also bound to digest(s) {conflicting_digests} that were not verified "
+                "with the active volume key"
+            )
+
+        # Every verified digest may describe the layout, as long as they all agree on the set of segments.
+        segment_sets = {
+            frozenset(digest.segments)
+            for digest_id, digest in self.metadata.digests.items()
+            if digest_id in verified_digest_ids
+        }
+        if len(segment_sets) > 1:
+            raise UnsupportedLayoutError(
+                "Verified digests describe conflicting segment layouts: "
+                + ", ".join(str(sorted(segment_set)) for segment_set in sorted(segment_sets, key=sorted))
+            )
+
+        for segment_id, digest_ids in bindings.items():
+            if not digest_ids:
+                raise UnsupportedLayoutError(f"Segment {segment_id} has no digest binding")
+
+            unverified = sorted(set(digest_ids) - verified_digest_ids)
+            if unverified:
+                raise UnsupportedLayoutError(
+                    f"Segment {segment_id} is bound to digest(s) {unverified} that were not verified with the "
+                    "active volume key"
+                )
+
+            if not any(keyslot_id in self.metadata.digests[digest_id].keyslots for digest_id in digest_ids):
+                raise UnsupportedLayoutError(
+                    f"Segment {segment_id} has no digest binding to keyslot {keyslot_id}, "
+                    "so it cannot be proven to use the verified volume key"
+                )
+
+        end_of_volume = self._volume_size()
+        layout = [
+            self._validate_segment(segment_id, self.metadata.segments[segment_id], end_of_volume)
+            for segment_id in segment_ids
+        ]
+
+        # Check for physical overlaps independently of the logical segment order.
+        by_physical_offset = sorted(layout, key=lambda item: item[1])
+        previous_end = None
+        previous_segment = None
+        for _, physical_offset, physical_size, _, segment, _ in by_physical_offset:
+            if previous_end is not None and physical_offset < previous_end:
+                raise UnsupportedLayoutError(
+                    f"Segment {segment} overlaps segment {previous_segment} in the physical data area"
+                )
+            previous_end = physical_offset + physical_size
+            previous_segment = segment
+
+        # Preserve the logical segment order from the metadata.
+        layout.sort(key=lambda item: item[0])
+
+        return [
+            SegmentStream(
+                self.fh,
+                physical_offset,
+                physical_size,
+                cipher,
+                segment.encryption,
+                segment.iv_tweak,
+                sector_size,
+                segment_id,
+            )
+            for segment_id, physical_offset, physical_size, sector_size, segment, cipher in layout
+        ]
+
+    def _validate_segment(self, segment_id: int, segment: Segment, end_of_volume: int) -> tuple:
+        """Validate the crypto configuration and physical range of a single segment."""
+        if segment.type != "crypt":
+            raise UnsupportedLayoutError(f"Unsupported segment {segment_id} type: {segment.type}")
+
+        if segment.integrity is not None:
+            raise UnsupportedLayoutError(f"Segment {segment_id} has integrity metadata, which is not supported")
+
+        if segment.flags:
+            raise UnsupportedLayoutError(f"Segment {segment_id} has unsupported flags: {segment.flags}")
+
+        if not segment.encryption:
+            raise UnsupportedLayoutError(f"Segment {segment_id} has no cipher specification")
+
+        if not isinstance(segment.offset, int) or segment.offset < 0:
+            raise UnsupportedLayoutError(f"Segment {segment_id} has an invalid offset: {segment.offset!r}")
+
+        if segment.size == "dynamic":
+            raise UnsupportedLayoutError(
+                f"Segment {segment_id} has a dynamic size, which cannot be determined unambiguously"
+            )
+
+        if not isinstance(segment.size, int) or segment.size < 0:
+            raise UnsupportedLayoutError(f"Segment {segment_id} has an invalid size: {segment.size!r}")
+
+        sector_size = segment.sector_size
+        if not isinstance(sector_size, int) or sector_size <= 0 or sector_size % 512:
+            raise UnsupportedLayoutError(f"Segment {segment_id} has an unsupported sector size: {sector_size!r}")
+
+        if segment.size % sector_size:
+            raise UnsupportedLayoutError(
+                f"Segment {segment_id} size {segment.size} is not aligned to its sector size {sector_size}"
+            )
+
+        if not isinstance(segment.iv_tweak, int) or segment.iv_tweak < 0:
+            raise UnsupportedLayoutError(f"Segment {segment_id} has an invalid IV tweak: {segment.iv_tweak!r}")
+
+        physical_offset = segment.offset
+        physical_size = segment.size
+
+        if physical_size == 0:
+            raise UnsupportedLayoutError(f"Segment {segment_id} is empty")
+
+        if physical_offset + physical_size > end_of_volume:
+            raise UnsupportedLayoutError(
+                f"Segment {segment_id} extends beyond the end of the volume "
+                f"({physical_offset} + {physical_size} > {end_of_volume})"
+            )
+
+        try:
+            cipher = create_cipher(segment.encryption, self._active_volume_key, sector_size=sector_size)
+        except (ValueError, NotImplementedError) as exc:
+            raise UnsupportedLayoutError(f"Unsupported cipher for segment {segment_id}: {exc}") from exc
+
+        self._check_data_region(segment_id, physical_offset, physical_size)
+
+        return segment_id, physical_offset, physical_size, sector_size, segment, cipher
+
+    def _check_data_region(self, segment_id: int, physical_offset: int, physical_size: int) -> None:
+        """Ensure a segment does not overlap the LUKS headers, JSON area or keyslot areas."""
+        metadata_ranges = []
+        config = self.metadata.config
+        keyslots_size = config.keyslots_size if config is not None else None
+
+        # The primary header starts at offset 0. The secondary header (if present) starts at its header size.
+        primary_size = self.header1.hdr_size if self.header1 is not None else 0
+        metadata_ranges.append((0, primary_size, "LUKS header"))
+
+        keyslots_start = primary_size
+        if self.header2 is not None:
+            secondary_start = getattr(self.header2, "hdr_offset", primary_size)
+            secondary_end = secondary_start + self.header2.hdr_size
+            metadata_ranges.append((secondary_start, secondary_end, "LUKS secondary header"))
+            keyslots_start = max(keyslots_start, secondary_end)
+
+        if isinstance(keyslots_size, int) and keyslots_size > 0:
+            metadata_ranges.append((keyslots_start, keyslots_start + keyslots_size, "LUKS keyslots area"))
+
+        for keyslot_id, keyslot in self.metadata.keyslots.items():
+            area = keyslot.area
+            if area.type != "raw" or not isinstance(area.offset, int) or not isinstance(area.size, int):
+                continue
+            metadata_ranges.append((area.offset, area.offset + area.size, f"keyslot {keyslot_id}"))
+
+        for start, end, description in metadata_ranges:
+            if physical_offset < end and start < physical_offset + physical_size:
+                raise UnsupportedLayoutError(
+                    f"Segment {segment_id} overlaps with {description} metadata at {start:#x}-{end:#x}"
+                )
+
+    def _volume_size(self) -> int:
+        """Return the size of the encrypted volume."""
+        stored_position = self.fh.tell()
+        try:
+            return self.fh.seek(0, io.SEEK_END)
+        finally:
+            self.fh.seek(stored_position)
 
 
 def derive_passphrase_key(passphrase: bytes, keyslot: Keyslot) -> bytes:
