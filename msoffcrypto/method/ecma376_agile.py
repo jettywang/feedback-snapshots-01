@@ -37,7 +37,34 @@ blkKey_dataIntegrity2 = bytearray([0xA0, 0x67, 0x7F, 0x02, 0xB2, 0x2C, 0x84, 0x3
 
 
 def _random_buffer(sz):
-    return secrets.token_bytes(sz)
+    """Return ``sz`` fresh bytes from the system CSPRNG.
+
+    Any failure of the random source, or a source that returns anything other than
+    exactly ``sz`` bytes, aborts encryption.  Silently falling back to zero bytes
+    would produce a file whose key material is public.
+    """
+    if sz <= 0:
+        raise exceptions.EncryptionError(f"Invalid random buffer size: {sz}")
+
+    try:
+        buf = secrets.token_bytes(sz)
+    except Exception as exc:
+        raise exceptions.EncryptionError(
+            "Random source failed while generating encryption material"
+        ) from exc
+
+    if not isinstance(buf, bytes) or len(buf) != sz:
+        got = len(buf) if isinstance(buf, (bytes, bytearray)) else type(buf).__name__
+        raise exceptions.EncryptionError(
+            f"Random source returned {got}, expected {sz} bytes"
+        )
+
+    if not any(buf):
+        raise exceptions.EncryptionError(
+            "Random source returned all-zero material; refusing to create a predictable encryption file"
+        )
+
+    return buf
 
 
 def _get_num_blocks(sz, block):
@@ -90,12 +117,16 @@ def _encrypt_aes_cbc_padded(data, key, iv, blockSize):
 
 def _get_salt(salt_value=None, salt_size=16):
     if salt_value is not None:
+        if not isinstance(salt_value, (bytes, bytearray)):
+            raise exceptions.EncryptionError(
+                "Invalid salt value type, should be bytes"
+            )
         if len(salt_value) != salt_size:
             raise exceptions.EncryptionError(
                 f"Invalid salt value size, should be {salt_size}"
             )
 
-        return salt_value
+        return bytes(salt_value)
 
     return _random_buffer(salt_size)
 
@@ -247,7 +278,11 @@ class ECMA376Agile:
         """
         Return an OLE compound file buffer (complete with headers) which contains ibuf encrypted into a single stream.
 
-        When salt_value is not specified (the default), we generate a random one.
+        When salt_value is not specified (the default), we generate a random one.  When it is
+        specified, it is used only for the password key encryptor (the verifier and encrypted
+        key-value salt).  The keyData salt, verifier input, secret key and integrity material
+        are always freshly generated, and any failure of the random source raises
+        :class:`msoffcrypto.exceptions.EncryptionError` instead of producing a file.
         """
 
         # Encryption ported from C++ (https://github.com/herumi/msoffice, BSD-3)
