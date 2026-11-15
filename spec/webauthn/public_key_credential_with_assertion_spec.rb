@@ -265,7 +265,7 @@ RSpec.describe "PublicKeyCredentialWithAssertion" do
           type: credential_type,
           id: credential_id,
           raw_id: credential_raw_id,
-          client_extension_outputs: { "appid" => true },
+          client_extension_outputs: client_extension_outputs,
           response: assertion_response
         )
       end
@@ -281,67 +281,153 @@ RSpec.describe "PublicKeyCredentialWithAssertion" do
       let(:origin) { seeds[:u2f_migration][:assertion][:origin] }
       let(:challenge) { seeds[:u2f_migration][:assertion][:challenge] }
 
-      context "and appid is set in configuration file" do
-        let(:legacy_u2f_appid) { seeds[:u2f_migration][:stored_credential][:app_id] }
+      let(:verify_assertion) do
+        lambda do
+          public_key_credential.verify(
+            challenge,
+            public_key: credential_public_key,
+            sign_count: credential_sign_count
+          )
+        end
+      end
 
+      # The seed assertion's rpIdHash is the hash of the legacy FIDO AppID, not the RP ID, so it can
+      # only verify through the legacy AppID compatibility path.
+      context "when the server requested the configured legacy AppID" do
         before do
-          WebAuthn.configuration.legacy_u2f_appid = legacy_u2f_appid
+          WebAuthn.configuration.legacy_u2f_appid = seeds[:u2f_migration][:stored_credential][:app_id]
         end
 
-        it "works" do
-          expect(
-            public_key_credential.verify(
-              challenge,
-              public_key: credential_public_key,
-              sign_count: credential_sign_count
-            )
-          ).to be_truthy
-        end
+        context "and the appid extension output is the boolean true" do
+          let(:client_extension_outputs) { { "appid" => true } }
 
-        context "if appid extension output is not present" do
-          let(:public_key_credential) do
-            WebAuthn::PublicKeyCredentialWithAssertion.new(
-              type: credential_type,
-              id: credential_id,
-              raw_id: credential_raw_id,
-              response: assertion_response
-            )
+          it "verifies the rpIdHash against the configured AppID and works" do
+            expect(verify_assertion.call).to be_truthy
           end
+        end
 
-          it "fails" do
-            expect do
-              public_key_credential.verify(
-                challenge,
-                public_key: credential_public_key,
-                sign_count: credential_sign_count
-              )
-            end.to raise_error(WebAuthn::RpIdVerificationError)
+        context "and the appid extension output is the boolean false" do
+          let(:client_extension_outputs) { { "appid" => false } }
+
+          it "does not use the AppID and fails the RP ID hash check" do
+            expect { verify_assertion.call }.to raise_error(WebAuthn::RpIdVerificationError)
+          end
+        end
+
+        context "and the appid extension output is not present" do
+          let(:client_extension_outputs) { {} }
+
+          it "does not use the AppID and fails the RP ID hash check" do
+            expect { verify_assertion.call }.to raise_error(WebAuthn::RpIdVerificationError)
+          end
+        end
+
+        context "and the appid extension output is the string \"false\"" do
+          let(:client_extension_outputs) { { "appid" => "false" } }
+
+          it "treats it as not the boolean true and fails the RP ID hash check" do
+            expect { verify_assertion.call }.to raise_error(WebAuthn::RpIdVerificationError)
+          end
+        end
+
+        context "and the appid extension output is a number" do
+          let(:client_extension_outputs) { { "appid" => 1 } }
+
+          it "treats it as not the boolean true and fails the RP ID hash check" do
+            expect { verify_assertion.call }.to raise_error(WebAuthn::RpIdVerificationError)
+          end
+        end
+
+        context "and the appid extension output is an untrusted AppID URL" do
+          let(:client_extension_outputs) { { "appid" => "https://attacker.example/appid" } }
+
+          it "never reads the AppID from the client and fails the RP ID hash check" do
+            expect { verify_assertion.call }.to raise_error(WebAuthn::RpIdVerificationError)
           end
         end
       end
 
-      context "and appid is not set in configuration file" do
-        it "raises an error" do
-          expect do
-            public_key_credential.verify(
-              challenge,
-              public_key: credential_public_key,
-              sign_count: credential_sign_count
-            )
-          end.to raise_error("Unspecified legacy U2F AppID")
+      context "when the server did not request a legacy AppID" do
+        context "and the appid extension output is the boolean true" do
+          let(:client_extension_outputs) { { "appid" => true } }
+
+          it "ignores the unsolicited extension and fails the RP ID hash check" do
+            expect { verify_assertion.call }.to raise_error(WebAuthn::RpIdVerificationError)
+          end
         end
 
-        context "if appid extension output is not present" do
-          let(:public_key_credential) do
-            WebAuthn::PublicKeyCredentialWithAssertion.new(
-              type: credential_type,
-              id: credential_id,
-              raw_id: credential_raw_id,
-              response: assertion_response
-            )
-          end
+        context "and the appid extension output is a truthy non-boolean value" do
+          let(:client_extension_outputs) { { "appid" => "false" } }
 
-          it "fails" do
+          it "ignores the unsolicited extension and fails the RP ID hash check" do
+            expect { verify_assertion.call }.to raise_error(WebAuthn::RpIdVerificationError)
+          end
+        end
+
+        context "and the appid extension output is not present" do
+          let(:client_extension_outputs) { {} }
+
+          it "fails the RP ID hash check" do
+            expect { verify_assertion.call }.to raise_error(WebAuthn::RpIdVerificationError)
+          end
+        end
+      end
+    end
+
+    context "when verifying a normal WebAuthn credential" do
+      let(:rp_id) { URI.parse(origin).host }
+      let(:client) { WebAuthn::FakeClient.new(origin, encoding: false) }
+
+      let!(:credential) { create_credential(client: client) }
+
+      let(:assertion_response) do
+        response = client.get(challenge: raw_challenge, rp_id: rp_id, sign_count: 1)["response"]
+
+        WebAuthn::AuthenticatorAssertionResponse.new(
+          authenticator_data: response["authenticatorData"],
+          client_data_json: response["clientDataJSON"],
+          signature: response["signature"]
+        )
+      end
+
+      let(:public_key_credential) do
+        WebAuthn::PublicKeyCredentialWithAssertion.new(
+          type: credential_type,
+          id: credential_id,
+          raw_id: credential_raw_id,
+          client_extension_outputs: client_extension_outputs,
+          response: assertion_response
+        )
+      end
+
+      before do
+        WebAuthn.configuration.allowed_origins = [origin]
+        WebAuthn.configuration.rp_id = rp_id
+      end
+
+      context "when the server requested the configured legacy AppID" do
+        before do
+          WebAuthn.configuration.legacy_u2f_appid = "https://legacy-u2f.example.com"
+        end
+
+        context "and no appid extension output is present" do
+          let(:client_extension_outputs) { {} }
+
+          it "verifies the rpIdHash against the regular RP ID and works" do
+            expect(
+              public_key_credential.verify(
+                challenge,
+                public_key: credential_public_key,
+                sign_count: credential_sign_count
+              )
+            ).to be_truthy
+          end
+        end
+
+        context "and an unauthorized appid=true extension output is present" do
+          let(:client_extension_outputs) { { "appid" => true } }
+
+          it "does not turn the RP-hash-mismatching response into a loginable credential" do
             expect do
               public_key_credential.verify(
                 challenge,
@@ -349,6 +435,50 @@ RSpec.describe "PublicKeyCredentialWithAssertion" do
                 sign_count: credential_sign_count
               )
             end.to raise_error(WebAuthn::RpIdVerificationError)
+          end
+        end
+
+        context "and an appid=false extension output is present" do
+          let(:client_extension_outputs) { { "appid" => false } }
+
+          it "keeps verifying against the regular RP ID and works" do
+            expect(
+              public_key_credential.verify(
+                challenge,
+                public_key: credential_public_key,
+                sign_count: credential_sign_count
+              )
+            ).to be_truthy
+          end
+        end
+
+        context "and the appid extension output is a non-boolean truthy value" do
+          let(:client_extension_outputs) { { "appid" => "false" } }
+
+          it "does not switch to the AppID and keeps verifying against the regular RP ID" do
+            expect(
+              public_key_credential.verify(
+                challenge,
+                public_key: credential_public_key,
+                sign_count: credential_sign_count
+              )
+            ).to be_truthy
+          end
+        end
+      end
+
+      context "when the server did not request a legacy AppID" do
+        context "and an appid=true extension output is present" do
+          let(:client_extension_outputs) { { "appid" => true } }
+
+          it "ignores the unsolicited extension and keeps verifying against the regular RP ID" do
+            expect(
+              public_key_credential.verify(
+                challenge,
+                public_key: credential_public_key,
+                sign_count: credential_sign_count
+              )
+            ).to be_truthy
           end
         end
       end

@@ -2,6 +2,10 @@
 
 ## [Unreleased](https://github.com/cedarcode/webauthn-ruby/compare/v3.5.1...master/)
 
+### Security
+
+- Tighten the legacy FIDO U2F `appid` extension compatibility path during authentication. The RP ID hash is now verified against the configured legacy U2F AppID only when the Relying Party actually configured `legacy_u2f_appid` (i.e. requested the extension) and the client extension output is the boolean `true`. Previously any truthy `appid` client extension output (e.g. the string `"false"` or a number) switched RP ID hash verification to the AppID, even when the extension was not requested. The AppID is always taken from the trusted Relying Party configuration, never from the client response.
+
 ## [v3.5.1](https://github.com/cedarcode/webauthn-ruby/compare/v3.5.0...v3.5.1/) - 2026-11-10
 
 ### Changed
