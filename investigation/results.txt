@@ -1,0 +1,124 @@
+
+=== A-multi-cert-entry.exe ======================================
+  file type: SignedPEFile
+  embedded signatures (incl. nested): 2
+  --- signature #0 ---
+    SignedData.digestAlgorithms : ['sha1']
+    signer_infos count          : 1
+    signer                      : CN=Investigation Root CA serial=305366375032193291531962308481205223851437179014
+    SignerInfo.digestAlgorithm  : sha1
+    IndirectData.digestAlgorithm: sha1
+    authenticated attributes    : ['content_type', 'message_digest']
+    unauthenticated attributes  : []
+    content digest == messageDigest attr: True
+    authentihash == IndirectData.digest : True
+  --- signature #1 ---
+    SignedData.digestAlgorithms : ['sha256']
+    signer_infos count          : 1
+    signer                      : CN=Investigation Root CA serial=305366375032193291531962308481205223851437179015
+    SignerInfo.digestAlgorithm  : sha256
+    IndirectData.digestAlgorithm: sha256
+    authenticated attributes    : ['content_type', 'message_digest']
+    unauthenticated attributes  : []
+    content digest == messageDigest attr: True
+    authentihash == IndirectData.digest : True
+    verify[  any] -> OK  digest=sha1  chain=CN=Investigation Root CA -> CN=DualSign leaf1
+    verify[first] -> OK  digest=sha1  chain=CN=Investigation Root CA -> CN=DualSign leaf1
+    verify[  all] -> OK  digest=sha1  chain=CN=Investigation Root CA -> CN=DualSign leaf1
+    verify[  all] -> OK  digest=sha256  chain=CN=Investigation Root CA -> CN=DualSign leaf2
+    verify[ best] -> OK  digest=sha256  chain=CN=Investigation Root CA -> CN=DualSign leaf2
+    explain_verify -> OK
+
+=== A-tampered.exe ==============================================
+  file type: SignedPEFile
+  embedded signatures (incl. nested): 2
+  --- signature #0 ---
+    SignedData.digestAlgorithms : ['sha1']
+    signer_infos count          : 1
+    signer                      : CN=Investigation Root CA serial=305366375032193291531962308481205223851437179014
+    SignerInfo.digestAlgorithm  : sha1
+    IndirectData.digestAlgorithm: sha1
+    authenticated attributes    : ['content_type', 'message_digest']
+    unauthenticated attributes  : []
+    content digest == messageDigest attr: True
+    authentihash == IndirectData.digest : False
+  --- signature #1 ---
+    SignedData.digestAlgorithms : ['sha256']
+    signer_infos count          : 1
+    signer                      : CN=Investigation Root CA serial=305366375032193291531962308481205223851437179015
+    SignerInfo.digestAlgorithm  : sha256
+    IndirectData.digestAlgorithm: sha256
+    authenticated attributes    : ['content_type', 'message_digest']
+    unauthenticated attributes  : []
+    content digest == messageDigest attr: True
+    authentihash == IndirectData.digest : False
+    verify[  any] -> AuthenticodeInvalidDigestError: The expected hash does not match the digest in the indirect data.
+    verify[first] -> AuthenticodeInvalidDigestError: The expected hash does not match the digest in the indirect data.
+    verify[  all] -> AuthenticodeInvalidDigestError: The expected hash does not match the digest in the indirect data.
+    verify[ best] -> AuthenticodeInvalidDigestError: The expected hash does not match the digest in the indirect data.
+    explain_verify -> INVALID_DIGEST (AuthenticodeInvalidDigestError: The expected hash does not match the digest in the indirect data.)
+
+=== B-nested-signature.exe ======================================
+  file type: SignedPEFile
+  embedded signatures (incl. nested): 2
+  --- signature #0 ---
+    SignedData.digestAlgorithms : ['sha1']
+    signer_infos count          : 1
+    signer                      : CN=Investigation Root CA serial=305366375032193291531962308481205223851437179014
+    SignerInfo.digestAlgorithm  : sha1
+    IndirectData.digestAlgorithm: sha1
+    authenticated attributes    : ['content_type', 'message_digest']
+    unauthenticated attributes  : ['microsoft_nested_signature']
+    content digest == messageDigest attr: True
+    authentihash == IndirectData.digest : True
+  --- signature #1 ---
+    SignedData.digestAlgorithms : ['sha256']
+    signer_infos count          : 1
+    signer                      : CN=Investigation Root CA serial=305366375032193291531962308481205223851437179015
+    SignerInfo.digestAlgorithm  : sha256
+    IndirectData.digestAlgorithm: sha256
+    authenticated attributes    : ['content_type', 'message_digest']
+    unauthenticated attributes  : []
+    content digest == messageDigest attr: True
+    authentihash == IndirectData.digest : True
+    verify[  any] -> OK  digest=sha1  chain=CN=Investigation Root CA -> CN=DualSign leaf1
+    verify[first] -> OK  digest=sha1  chain=CN=Investigation Root CA -> CN=DualSign leaf1
+    verify[  all] -> OK  digest=sha1  chain=CN=Investigation Root CA -> CN=DualSign leaf1
+    verify[  all] -> OK  digest=sha256  chain=CN=Investigation Root CA -> CN=DualSign leaf2
+    verify[ best] -> OK  digest=sha256  chain=CN=Investigation Root CA -> CN=DualSign leaf2
+    explain_verify -> OK
+
+=== C1-multi-signerinfo-same-digest.exe =========================
+  file type: SignedPEFile
+  iter_embedded_signatures -> AuthenticodeParseError: SignedData.signerInfos must contain exactly 1 signer, not 2
+    verify[  any] -> AuthenticodeParseError: SignedData.signerInfos must contain exactly 1 signer, not 2
+    verify[first] -> AuthenticodeParseError: SignedData.signerInfos must contain exactly 1 signer, not 2
+    verify[  all] -> AuthenticodeParseError: SignedData.signerInfos must contain exactly 1 signer, not 2
+    verify[ best] -> AuthenticodeParseError: SignedData.signerInfos must contain exactly 1 signer, not 2
+    explain_verify -> PARSE_ERROR (AuthenticodeParseError: SignedData.signerInfos must contain exactly 1 signer, not 2)
+
+=== C2-multi-signerinfo-two-digests.exe =========================
+  file type: SignedPEFile
+  iter_embedded_signatures -> ParseError: SignedData.digestAlgorithms must contain exactly 1 algorithm, not 2
+    verify[  any] -> ParseError: SignedData.digestAlgorithms must contain exactly 1 algorithm, not 2
+    verify[first] -> ParseError: SignedData.digestAlgorithms must contain exactly 1 algorithm, not 2
+    verify[  all] -> ParseError: SignedData.digestAlgorithms must contain exactly 1 algorithm, not 2
+    verify[ best] -> ParseError: SignedData.digestAlgorithms must contain exactly 1 algorithm, not 2
+    explain_verify -> PARSE_ERROR (ParseError: SignedData.digestAlgorithms must contain exactly 1 algorithm, not 2)
+
+=== D-poisoned-first-entry.exe ==================================
+  file type: SignedPEFile
+  iter_embedded_signatures -> AuthenticodeParseError: SignedData.signerInfos must contain exactly 1 signer, not 2
+    verify[  any] -> AuthenticodeParseError: SignedData.signerInfos must contain exactly 1 signer, not 2
+    verify[first] -> AuthenticodeParseError: SignedData.signerInfos must contain exactly 1 signer, not 2
+    verify[  all] -> AuthenticodeParseError: SignedData.signerInfos must contain exactly 1 signer, not 2
+    verify[ best] -> AuthenticodeParseError: SignedData.signerInfos must contain exactly 1 signer, not 2
+    explain_verify -> PARSE_ERROR (AuthenticodeParseError: SignedData.signerInfos must contain exactly 1 signer, not 2)
+
+=== direct envelope parsing (C layouts) =========================
+  C1-multi-signerinfo-same-digest.exe: AuthenticodeSignature.from_envelope -> AuthenticodeParseError: SignedData.signerInfos must contain exactly 1 signer, not 2
+  C2-multi-signerinfo-two-digests.exe: AuthenticodeSignature.from_envelope -> ParseError: SignedData.digestAlgorithms must contain exactly 1 algorithm, not 2
+
+=== generic pkcs7.SignedData layer (C layouts) ==================
+  C1-multi-signerinfo-same-digest.exe: parse -> ParseError: SignedData.contentInfo contains microsoft_spc_indirect_data_content, expected None
+  C2-multi-signerinfo-two-digests.exe: parse -> ParseError: SignedData.digestAlgorithms must contain exactly 1 algorithm, not 2
