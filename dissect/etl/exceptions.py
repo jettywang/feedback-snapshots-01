@@ -33,5 +33,9 @@ class InvalidHookIdException(Error):
     pass
 
 
+class InvalidTimestampError(Error, ValueError):
+    """Raised when an ETW timestamp cannot be converted without losing information."""
+
+
 class NoMoreEventsError(Error):
     pass

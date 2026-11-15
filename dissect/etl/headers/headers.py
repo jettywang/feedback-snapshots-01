@@ -97,12 +97,34 @@ class Header:
 
     @property
     def timestamp(self) -> datetime:
-        """The timestamp of the event."""
+        """The timestamp of the event.
+
+        Derived from :attr:`timestamp_filetime`; sub-microsecond ticks are truncated.
+
+        Raises:
+            InvalidTimestampError: If the event timestamp falls outside the datetime range.
+        """
         return self._etl.calculate_timestamp(self.time_delta)
 
     @property
+    def timestamp_filetime(self) -> int:
+        """The event timestamp as a FILETIME value (100ns since 1601-01-01 UTC).
+
+        This is the exact integer conversion of :attr:`time_delta`: no floating point
+        rounding is involved, so adjacent counters remain ordered.
+
+        Raises:
+            InvalidTimestampError: If the event timestamp falls outside the FILETIME range.
+        """
+        return self._etl.get_filetime_for_event(self.time_delta)
+
+    @property
     def time_delta(self) -> int:
-        """The change in time relative to the start of the logfile."""
+        """The raw clock counter relative to the start of the logfile.
+
+        The unit depends on the logfile header clock type, see
+        :attr:`dissect.etl.headers.logfile.LogfileHeader.clock_type`.
+        """
         return self.header.TimeDelta
 
     @property
@@ -150,11 +172,17 @@ class Header:
         """
 
     def standard_header_fields(self) -> dict[str, Any]:
-        """Some standard header information that can be retrieved for any header."""
+        """Some standard header information that can be retrieved for any header.
+
+        Both the raw clock counter and the exact converted FILETIME value are included, so
+        consumers can keep the original evidence alongside the 100ns timestamp.
+        """
         return {
             "version": self.version,
             "provider_id": self.provider_id,
             "timestamp": self.timestamp,
+            "timestamp_filetime": self.timestamp_filetime,
+            "time_delta": self.time_delta,
         }
 
     def __repr__(self) -> str:

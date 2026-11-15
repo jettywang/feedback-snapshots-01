@@ -3,12 +3,14 @@
 #  - https://www.geoffchappell.com/studies/windows/km/ntoskrnl/api/etw/tracelog/trace_logfile_header.htm
 from __future__ import annotations
 
+from dataclasses import replace
 from enum import IntEnum
 from typing import TYPE_CHECKING
 
 from dissect.cstruct import cstruct
 
-from dissect.etl.exceptions import InvalidHookIdException
+from dissect.etl.exceptions import InvalidHookIdException, InvalidTimestampError
+from dissect.etl.timestamp import ClockType, TimestampConverter
 
 if TYPE_CHECKING:
     from dissect.cstruct import Structure
@@ -102,6 +104,8 @@ class LogfileHeader:
         if calling_header.hook_id != 0x0000:
             raise InvalidHookIdException("Called with invalid hook ID")
         self._header = None
+        self._timestamp_converter = None
+        self._timestamp_converter_key = None
         self.system_header = calling_header
         self.data = calling_header.payload
 
@@ -118,8 +122,6 @@ class LogfileHeader:
         logfile_names = self.c_logfile.LogFileNames(self.payload)
         self.logger_name = logfile_names.LoggerName
         self.log_filename = logfile_names.LogFileName
-        self.timestamp_scale = self._calculate_timestamp_scale()
-        self.timestamp_base = self._calculate_timestamp_base()
 
     @property
     def header(self) -> Structure:
@@ -151,20 +153,94 @@ class LogfileHeader:
         return 0x118 if self.is_64bit else 0x110
 
     def _calculate_timestamp_scale(self) -> float:
-        """Calculate the timestamp_scale variable."""
-        clock_mode_dict = {
-            ReservedFlags.PERFORMANCE_FREQ: 10000000 / self.perf_freq,
-            ReservedFlags.FILETIME: 1.0,
-            ReservedFlags.CPU_FREQ: 10.0 / self.cpu_speed_in_MHz,
-        }
-        return clock_mode_dict.get(self.header.ReservedFlags, 0)
+        """Calculate the timestamp_scale variable.
+
+        This is the legacy floating point view of :attr:`timestamp_converter`; it is kept
+        for backwards compatibility. All internal calculations use the exact integer
+        converter instead.
+        """
+        return float(self.timestamp_converter.scale)
 
     def _calculate_timestamp_base(self) -> int:
         """Calculate the timestamp_base variable.
 
-        This is based on the start_time in the header and the delta of the system_header
+        This is based on the start_time in the header and the delta of the system_header.
+        The conversion is exact and rounds down, see :mod:`dissect.etl.timestamp`.
         """
-        return self.start_time - int(self.timestamp_scale * self.system_header.time_delta)
+        return self.timestamp_converter.timestamp_base
+
+    @property
+    def timestamp_scale(self) -> float:
+        """Legacy floating point scale factor of raw counters to 100ns ticks.
+
+        Prefer :attr:`timestamp_converter` for exact conversions.
+
+        Raises:
+            InvalidTimestampError: If the logfile header has an unusable clock configuration.
+        """
+        return self._calculate_timestamp_scale()
+
+    @property
+    def timestamp_base(self) -> int:
+        """FILETIME value that belongs to a raw counter of zero.
+
+        Raises:
+            InvalidTimestampError: If the logfile header has an unusable clock configuration.
+        """
+        return self._calculate_timestamp_base()
+
+    @property
+    def clock_type(self) -> ClockType:
+        """The clock that produced the ``TimeDelta`` values of this file."""
+        return self.timestamp_converter.clock_type
+
+    @property
+    def timestamp_converter(self) -> TimestampConverter:
+        """The exact converter for raw counters to FILETIME and datetimes.
+
+        The converter is derived from the parsed header. It is cached only for as long as
+        the relevant header fields stay identical, so it cannot go stale if a caller
+        modifies them while examining a file.
+
+        Raises:
+            InvalidTimestampError: If the logfile header selects an unsupported clock, or
+                has a frequency that is unusable for that clock.
+        """
+        key = (
+            self.header.ReservedFlags,
+            self.header.PerfFreq,
+            self.header.CpuSpeedInMHz,
+            self.header.StartTime,
+            self.system_header.time_delta,
+        )
+
+        if self._timestamp_converter is None or self._timestamp_converter_key != key:
+            self._timestamp_converter = self._create_timestamp_converter()
+            self._timestamp_converter_key = key
+
+        return self._timestamp_converter
+
+    def _create_timestamp_converter(self) -> TimestampConverter:
+        try:
+            clock_type = ClockType(self.header.ReservedFlags)
+        except (TypeError, ValueError) as e:
+            raise InvalidTimestampError(
+                f"unsupported clock type in ReservedFlags: {self.header.ReservedFlags!r}"
+            ) from e
+
+        unscaled = TimestampConverter.from_clock(
+            clock_type,
+            perf_freq=self.perf_freq,
+            cpu_speed_mhz=self.cpu_speed_in_MHz,
+        )
+
+        try:
+            scaled_delta = unscaled.scale_delta(self.system_header.time_delta)
+            timestamp_base = self.start_time - scaled_delta
+        except InvalidTimestampError as e:
+            raise InvalidTimestampError(f"invalid logfile start time: {e}") from e
+
+        return replace(unscaled, timestamp_base=timestamp_base)
 
     @property
     def cpu_speed_in_MHz(self) -> int:

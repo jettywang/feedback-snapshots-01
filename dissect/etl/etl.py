@@ -19,12 +19,12 @@
 from __future__ import annotations
 
 import io
+from fractions import Fraction
 from typing import TYPE_CHECKING, Any, BinaryIO
 
 from dissect.cstruct import Structure
 from dissect.util.compression.lzxpress import decompress as xpress_decompress
 from dissect.util.sid import read_sid
-from dissect.util.ts import wintimestamp
 
 from dissect.etl import manifest
 from dissect.etl.c_etl import BufferFlag, c_etl
@@ -36,6 +36,7 @@ from dissect.etl.exceptions import (
 )
 from dissect.etl.headers.logfile import LogfileHeader
 from dissect.etl.headers.utils import select_event_header
+from dissect.etl.timestamp import TimestampConverter
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -69,8 +70,8 @@ class ETL:
 
         self.start_time = self.logfile_header.start_time
         self.buffer_size = self.buffer_header.BufferSize
-        self.start = wintimestamp(self.logfile_header.start_time)
-        self.end = wintimestamp(self.logfile_header.end_time)
+        self.start = TimestampConverter.filetime_to_datetime(self.logfile_header.start_time)
+        self.end = TimestampConverter.filetime_to_datetime(self.logfile_header.end_time)
 
         self._buffer_cache = {0: first_buffer}
 
@@ -96,14 +97,38 @@ class ETL:
         for buffer in self.buffers():
             yield from buffer
 
+    @property
+    def timestamp_converter(self) -> TimestampConverter:
+        """The exact raw counter to FILETIME converter for this logfile."""
+        return self.logfile_header.timestamp_converter
+
     def calculate_timestamp(self, time_delta: int) -> datetime:
-        return wintimestamp(self.get_filetime_for_event(time_delta))
+        """Convert a raw event counter to an aware UTC datetime.
+
+        The conversion is performed with exact integers; see :mod:`dissect.etl.timestamp`.
+
+        Raises:
+            InvalidTimestampError: If the counter is negative or the result is outside the
+                datetime range.
+        """
+        return self.timestamp_converter.to_datetime(time_delta)
 
     def get_filetime_for_event(self, time_delta: int) -> int:
-        return self.logfile_header.timestamp_base + int(self._calculate_timescale_for_event(time_delta))
+        """Convert a raw event counter to a FILETIME value (100ns since 1601-01-01 UTC).
 
-    def _calculate_timescale_for_event(self, time_delta: int) -> float:
-        return self.logfile_header.timestamp_scale * time_delta
+        Raises:
+            InvalidTimestampError: If the counter is negative or the result is outside the
+                FILETIME/datetime range.
+        """
+        return self.timestamp_converter.to_filetime(time_delta)
+
+    def _calculate_timescale_for_event(self, time_delta: int) -> Fraction:
+        """Exact number of 100ns ticks between the logfile start and this event.
+
+        Kept as a compatibility shim: it used to return a float, which silently lost
+        precision for long traces. It now returns the exact value as a :class:`~fractions.Fraction`.
+        """
+        return Fraction(self.timestamp_converter.scale_delta(time_delta), 1)
 
 
 class Buffer:

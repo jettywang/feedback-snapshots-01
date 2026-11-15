@@ -9,12 +9,15 @@ from dissect.etl.exceptions import (
     InvalidHookIdException,
     InvalidMarkerError,
     InvalidRecordError,
+    InvalidTimestampError,
     ManifestNotFoundError,
 )
+from dissect.etl.timestamp import ClockType, TimestampConverter
 
 __all__ = [
     "ETL",
     "Buffer",
+    "ClockType",
     "Error",
     "ExtendedDataItemException",
     "InvalidBufferError",
@@ -22,5 +25,7 @@ __all__ = [
     "InvalidHookIdException",
     "InvalidMarkerError",
     "InvalidRecordError",
+    "InvalidTimestampError",
     "ManifestNotFoundError",
+    "TimestampConverter",
 ]

@@ -20,6 +20,24 @@ pip install dissect.etl
 
 This module is also automatically installed if you install the `dissect` package.
 
+## Timestamps
+
+ETW event headers store a raw clock counter (`TimeDelta`). The logfile header determines how
+that counter maps to wall-clock time, based on the clock type in `ReservedFlags`:
+
+- `PERF_FREQ` (1, QPC ticks): `10_000_000 / PerfFreq` 100ns ticks per counter.
+- `SYSTEM_TIME` (2): one 100ns tick per counter.
+- `CPU_CYCLE` (3): `10 / CpuSpeedInMHz` 100ns ticks per counter.
+
+`dissect.etl` performs this conversion with exact integers (via `TimestampConverter`) rather
+than floating point, so adjacent counters stay ordered even in long traces whose FILETIME
+values exceed the exact integer range of a float. Non-integral results are rounded **down**
+to whole 100ns ticks, and datetimes truncate the sub-microsecond remainder. Use
+`ETL.timestamp_converter` (or `LogfileHeader.timestamp_converter`) to convert counters
+directly, and `Header.time_delta` / `Header.timestamp_filetime` to keep both the raw counter
+and the converted 100ns value. Invalid frequencies, negative counters and values outside the
+`datetime` range raise `InvalidTimestampError` instead of producing a bogus timestamp.
+
 ## Build and test instructions
 
 This project uses `tox` to build source and wheel distributions. Run the following command from the root folder to build
