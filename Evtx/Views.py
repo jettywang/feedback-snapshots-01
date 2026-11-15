@@ -108,23 +108,36 @@ def render_root_node_with_subs(root_node, subs):
         if isinstance(node, e_nodes.EndOfStreamNode):
             pass  # intended
         elif isinstance(node, e_nodes.OpenStartElementNode):
-            acc.append("<")
-            acc.append(node.tag_name())
-            for child in node.children():
-                if isinstance(child, e_nodes.AttributeNode):
-                    acc.append(" ")
-                    acc.append(validate_name(child.attribute_name().string()))
-                    acc.append('="')
-                    # TODO: should use xml.sax.saxutils.quoteattr here
-                    # but to do so, we'd need to ensure we're not double-quoting this value.
-                    rec(child.attribute_value(), acc)
-                    acc.append('"')
-            acc.append(">")
-            for child in node.children():
-                rec(child, acc)
-            acc.append("</")
-            acc.append(validate_name(node.tag_name()))
-            acc.append(">\n")
+            # A NULL conditional substitution suppresses only the attribute or
+            # element that owns it; independent siblings must still render. The
+            # suppression signal is an exception caught at the nearest boundary.
+            start = len(acc)
+            try:
+                acc.append("<")
+                acc.append(node.tag_name())
+                for child in node.children():
+                    if isinstance(child, e_nodes.AttributeNode):
+                        attr_start = len(acc)
+                        try:
+                            acc.append(" ")
+                            acc.append(validate_name(child.attribute_name().string()))
+                            acc.append('="')
+                            # TODO: should use xml.sax.saxutils.quoteattr here
+                            # but to do so, we'd need to ensure we're not double-quoting this value.
+                            rec(child.attribute_value(), acc)
+                            acc.append('"')
+                        except e_nodes.SuppressConditionalSubstitution:
+                            # drop just this attribute, including any partial text
+                            del acc[attr_start:]
+                acc.append(">")
+                for child in node.children():
+                    rec(child, acc)
+                acc.append("</")
+                acc.append(validate_name(node.tag_name()))
+                acc.append(">\n")
+            except e_nodes.SuppressConditionalSubstitution:
+                # suppress the whole element while leaving its siblings intact
+                del acc[start:]
         elif isinstance(node, e_nodes.CloseStartElementNode):
             pass  # intended
         elif isinstance(node, e_nodes.CloseEmptyElementNode):
@@ -159,6 +172,15 @@ def render_root_node_with_subs(root_node, subs):
             acc.append(sub)
         elif isinstance(node, e_nodes.ConditionalSubstitutionNode):
             sub = subs[node.index()]
+
+            # A conditional substitution bound to a NULL value suppresses the
+            # owning attribute or element rather than emitting empty content.
+            # Any other value (including an explicit empty string or a numeric
+            # zero) is real evidence and must render normally.
+            if node.should_suppress(subs):
+                raise e_nodes.SuppressConditionalSubstitution(
+                    "conditional substitution index %d is NULL" % node.index()
+                )
 
             if isinstance(sub, e_nodes.BXmlTypeNode):
                 sub = render_root_node(sub.root())

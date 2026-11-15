@@ -469,10 +469,13 @@ def test_render_record(system):
     record = one(chunk.records())
 
     xml = record.xml()
+    # NULL conditional substitutions suppress only their owning attribute or
+    # element (e.g. the null Qualifiers, ActivityID/RelatedActivityID and
+    # UserID), while real values such as numeric zeros are still rendered.
     assert xml == textwrap.dedent(
         """\
                                      <Event xmlns="http://schemas.microsoft.com/win/2004/08/events/event"><System><Provider Name="Microsoft-Windows-Eventlog" Guid="{fc65ddd8-d6ef-4962-83d5-6e5cfe9ce148}"></Provider>
-                                     <EventID Qualifiers="">105</EventID>
+                                     <EventID>105</EventID>
                                      <Version>0</Version>
                                      <Level>4</Level>
                                      <Task>105</Task>
@@ -480,11 +483,11 @@ def test_render_record(system):
                                      <Keywords>0x8000000000000000</Keywords>
                                      <TimeCreated SystemTime="2012-03-14 04:17:43.354563+00:00"></TimeCreated>
                                      <EventRecordID>12049</EventRecordID>
-                                     <Correlation ActivityID="" RelatedActivityID=""></Correlation>
+                                     <Correlation></Correlation>
                                      <Execution ProcessID="820" ThreadID="2868"></Execution>
                                      <Channel>System</Channel>
                                      <Computer>WKS-WIN764BITB.shieldbase.local</Computer>
-                                     <Security UserID=""></Security>
+                                     <Security></Security>
                                      </System>
                                      <UserData><AutoBackup xmlns:auto-ns3="http://schemas.microsoft.com/win/2004/08/events" xmlns="http://manifests.microsoft.com/win/2004/08/windows/eventlog"><Channel>System</Channel>
                                      <BackupPath>C:\\Windows\\System32\\Winevt\\Logs\\Archive-System-2012-03-14-04-17-39-932.evtx</BackupPath>
