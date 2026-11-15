@@ -158,8 +158,37 @@ class LUKS:
         """Unlock the volume key using the given encryption key and keyslot."""
         keyslot_obj = self.metadata.keyslots[keyslot]
 
+        if keyslot_obj.area is None or keyslot_obj.area.offset is None or keyslot_obj.area.size is None:
+            raise ValueError(f"Invalid keyslot area for keyslot {keyslot}")
+
+        if keyslot_obj.af is None or not keyslot_obj.af.stripes:
+            raise ValueError(f"Invalid anti-forensic stripes for keyslot {keyslot}")
+
+        key_material_size = keyslot_obj.key_size * keyslot_obj.af.stripes
+        if key_material_size > keyslot_obj.area.size:
+            raise ValueError(
+                f"Invalid keyslot area size for keyslot {keyslot}: "
+                f"{key_material_size} bytes of key material in a {keyslot_obj.area.size} byte area"
+            )
+
+        area_end = keyslot_obj.area.offset + key_material_size
+        boundaries = [
+            slot.area.offset
+            for slot_id, slot in self.metadata.keyslots.items()
+            if slot_id != keyslot and slot.area is not None and slot.area.offset > keyslot_obj.area.offset
+        ]
+        boundaries += [
+            segment.offset
+            for segment in self.metadata.segments.values()
+            if isinstance(segment.offset, int) and segment.offset > keyslot_obj.area.offset
+        ]
+        if boundaries and area_end > min(boundaries):
+            raise ValueError(f"Keyslot area for keyslot {keyslot} overlaps the next keyslot or payload")
+
         self.fh.seek(keyslot_obj.area.offset)
-        area = self.fh.read(keyslot_obj.key_size * keyslot_obj.af.stripes)
+        area = self.fh.read(key_material_size)
+        if len(area) != key_material_size:
+            raise ValueError(f"Truncated keyslot area for keyslot {keyslot}")
 
         cipher = create_cipher(keyslot_obj.area.encryption, key, keyslot_obj.area.key_size * 8)
         return af.merge(

@@ -37,6 +37,10 @@ def diffuse(buf: bytes, hash: str) -> bytes:
 
 
 def merge(buf: bytes, block_size: int, block_num: int, hash: str) -> bytes:
+    if block_size <= 0:
+        raise ValueError(f"Invalid block size: {block_size}")
+    if block_num <= 0:
+        raise ValueError(f"Invalid number of blocks: {block_num}")
     if block_size * block_num > len(buf):
         raise ValueError(f"Unexpected input buffer size ({block_size} * {block_num} != {len(buf)})")
 
