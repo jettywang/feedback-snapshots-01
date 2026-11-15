@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, BinaryIO
 
 from dissect.evidence.adcrypt.adcrypt import ADCrypt, is_adcrypt
 from dissect.evidence.ewf import c_ewf
+from dissect.evidence.ewf.integrity import CheckStage, SetIntegrity, analyze_segments
 from dissect.evidence.ewf.stream import EWFStream
 
 if TYPE_CHECKING:
@@ -17,6 +18,20 @@ if TYPE_CHECKING:
     from typing_extensions import Self
 
 MAX_OPEN_SEGMENTS = 128
+
+
+class EWFIntegrityError(ValueError):
+    """Raised when the EWF segment collection contradicts a single coherent disk image.
+
+    Args:
+        stage: Whether the contradiction was found while opening the set or while reading chunks.
+        report: The open-time integrity report, when available.
+    """
+
+    def __init__(self, message: str, stage: CheckStage, report: SetIntegrity | None = None):
+        super().__init__(message)
+        self.stage = stage
+        self.report = report
 
 
 def find_files(path: str | Path) -> list[Path]:
@@ -63,6 +78,11 @@ class EWF:
             raise ValueError("No segment files provided for EWF container")
 
         self.adcrypt = None
+        self.integrity: SetIntegrity | None = None
+
+        # Order the supplied handles by the embedded segment numbers. File names and the order in
+        # which the handles are passed do not determine ownership; the recorded segment number does.
+        self._order_handles()
 
         first_segment = self.segment(0)
         if is_adcrypt(first_segment.fh):
@@ -71,6 +91,26 @@ class EWF:
             self._open_ewf()
 
         self.read_chunk = lru_cache(128)(self.read_chunk)
+
+    def _read_segment_number(self, fh: BinaryIO | Path) -> int:
+        """Read the embedded segment number from a handle or path."""
+        if isinstance(fh, Path):
+            with fh.open("rb") as opened:
+                return c_ewf.SegmentHeader(opened).segment_number
+
+        fh.seek(0)
+        return c_ewf.SegmentHeader(fh).segment_number
+
+    def _order_handles(self) -> None:
+        """Order the segment handles by their embedded segment number.
+
+        A coherent collection must have unique, 1-based segment numbers. Duplicate numbers are kept
+        adjacent here so the integrity analysis can report the collision explicitly instead of
+        silently dropping one of the segments.
+        """
+        ordered = sorted(enumerate(self.fh), key=lambda item: (self._read_segment_number(item[1]), item[0]))
+        self._input_order = [original for original, _ in ordered]
+        self.fh = [handle for _, handle in ordered]
 
     def __enter__(self) -> Self:
         return self
@@ -145,24 +185,72 @@ class EWF:
         # Open the EWF
         self._open_ewf()
 
+    def _open_analysis_segments(self) -> list[Segment]:
+        """Open every segment for integrity analysis.
+
+        Path-based segments are opened on dedicated, separately tracked handles so the analysis does
+        not interfere with the LRU cache. Caller-owned handles are accessed through the normal
+        :meth:`segment` path so their lifetime and any decryption wrapper stay managed in one place
+        and are never closed by the analysis.
+        """
+        segments = []
+        self._analysis_handles: list[BinaryIO] = []
+
+        for idx in range(len(self.fh)):
+            fh = self.fh[idx]
+            if isinstance(fh, Path):
+                raw_fh = fh.open("rb")
+                self._analysis_handles.append(raw_fh)
+
+                if self.is_adcrypt() and not self.is_locked():
+                    raw_fh = self.adcrypt.wrap(raw_fh, idx)
+
+                segments.append(Segment(raw_fh))
+            else:
+                segments.append(self.segment(idx))
+
+        return segments
+
+    def _close_analysis_segments(self) -> None:
+        """Close path-backed handles opened for integrity analysis."""
+        for fh in self._analysis_handles:
+            fh.close()
+        self._analysis_handles = []
+
     def _open_ewf(self) -> None:
         """Open the EWF container and initialize the volume and chunk information."""
         self.volume = None
+        self.integrity = None
+        self._analysis_handles = []
+
+        # Analyze every segment up front using dedicated Segment objects so the LRU cache is not
+        # forced to evict (and close) segments that still need to be read below.
+        analysis_segments = self._open_analysis_segments()
+        try:
+            report = analyze_segments(analysis_segments, input_order=self._input_order)
+        finally:
+            self._close_analysis_segments()
+        self.integrity = report
+
+        contradictions = report.contradictions
+        if contradictions:
+            messages = "; ".join(f"{check.name}: {check.detail}" for check in contradictions)
+            raise EWFIntegrityError(
+                f"Refusing to open incoherent EWF segment collection: {messages}", CheckStage.OPEN, report
+            )
 
         chunk = 0
         for i in range(len(self.fh)):
             segment = self.segment(i)
-            if segment.header.signature not in (b"EVF\x09\x0d\x0a\xff\x00", b"LVF\x09\x0d\x0a\xff\x00"):
-                raise ValueError(f"Invalid EWF signature in segment {i}, got {segment.header.signature!r}")
-
-            if segment.number != i + 1:
-                raise ValueError(f"Invalid EWF segment number in segment {i}, got {segment.number}, expected {i + 1}")
-
             if not self.volume and segment.volume:
                 self.volume = segment.volume
                 self.chunk_size = self.volume.sectors_per_chunk * self.volume.sector_size
             elif not self.volume and not segment.volume:
-                raise ValueError("Missing expected volume section in first segment")
+                raise EWFIntegrityError(
+                    "Missing expected volume section in first segment",
+                    CheckStage.OPEN,
+                    report,
+                )
 
             for j, table in enumerate(segment.tables):
                 chunk += table.number_of_entries
@@ -170,9 +258,13 @@ class EWF:
                 self._chunk_map.append((i, j))
 
         max_size = self.volume.number_of_chunks * self.chunk_size
-        last_chunk = self.read_chunk(self.volume.number_of_chunks - 1)
-
-        self.size = max_size - (self.chunk_size - len(last_chunk))
+        try:
+            last_chunk = self.read_chunk(self.volume.number_of_chunks - 1)
+            self.size = max_size - (self.chunk_size - len(last_chunk))
+        except EWFIntegrityError:
+            # The final chunk cannot be validated until a caller actually reads it. Keep opening the
+            # container so the contradiction is reported at read time rather than at open time.
+            self.size = max_size
 
     def read_chunk(self, chunk: int) -> bytes:
         """Read a chunk of data from the EWF container.
@@ -196,6 +288,16 @@ class EWF:
         offset_of_chunk = table.base_offset + (entry & 0x7FFFFFFF)
         compressed = entry >> 31 == 1
 
+        segment.fh.seek(0, 2)
+        segment_size = segment.fh.tell()
+        if not 0 <= offset_of_chunk < segment_size:
+            raise EWFIntegrityError(
+                f"Chunk {chunk} table entry in segment {segment_idx} references offset {offset_of_chunk:#x} "
+                f"outside the segment ({segment_size:#x} bytes); the segment does not belong to this chunk stream",
+                CheckStage.READ,
+                self.integrity,
+            )
+
         # We don't know the chunk size, so try to determine it using the offset of the next chunk
         # When it's the last chunk in the table though, this becomes trickier
         # We have to check if the chunk data is preceding the table, or if it's contained within the table section
@@ -209,7 +311,12 @@ class EWF:
                 end_of_chunk = table.descriptor.offset + table.descriptor.raw_size
 
             else:
-                raise ValueError("Unknown size of last chunk")
+                raise EWFIntegrityError(
+                    f"Cannot determine the size of chunk {chunk} in segment {segment_idx}; "
+                    "the segment does not belong to this chunk stream",
+                    CheckStage.READ,
+                    self.integrity,
+                )
         else:
             end_of_chunk = table.base_offset + (table.entries[relative_chunk + 1] & 0x7FFFFFFF)
 
@@ -219,10 +326,34 @@ class EWF:
         if not compressed:
             size_of_chunk -= 4
 
+        if offset_of_chunk < 0 or size_of_chunk < 0:
+            raise EWFIntegrityError(
+                f"Chunk {chunk} table entry in segment {segment_idx} references an invalid offset "
+                f"{offset_of_chunk:#x}; the segment does not belong to this chunk stream",
+                CheckStage.READ,
+                self.integrity,
+            )
+
         segment.fh.seek(offset_of_chunk)
         buf = segment.fh.read(size_of_chunk)
+        if len(buf) != size_of_chunk:
+            raise EWFIntegrityError(
+                f"Chunk {chunk} table entry in segment {segment_idx} references {size_of_chunk} bytes at "
+                f"{offset_of_chunk:#x}, but the segment only provides {len(buf)}; "
+                "the segment does not belong to this chunk stream",
+                CheckStage.READ,
+                self.integrity,
+            )
         if compressed:
-            buf = zlib.decompress(buf)
+            try:
+                buf = zlib.decompress(buf)
+            except zlib.error as e:
+                raise EWFIntegrityError(
+                    f"Chunk {chunk} in segment {segment_idx} could not be decompressed ({e}); "
+                    "the segment does not belong to this chunk stream",
+                    CheckStage.READ,
+                    self.integrity,
+                ) from e
 
         return buf
 
@@ -288,6 +419,23 @@ class Segment:
             if isinstance(section, VolumeSection):
                 return section
         return None
+
+    @cached_property
+    def identity_section(self) -> VolumeSection | DataSection | None:
+        """Return the section carrying the common set identifier and volume parameters.
+
+        The first segment stores these in a ``volume`` section; subsequent segments store an
+        equivalent copy in a ``data`` section.
+        """
+        for section in self.sections:
+            if isinstance(section, (VolumeSection, DataSection)):
+                return section
+        return None
+
+    @cached_property
+    def is_terminal(self) -> bool:
+        """Return whether the segment is the final one, as indicated by a ``done`` section."""
+        return any(section.descriptor.type == "done" for section in self.sections)
 
 
 class SectionDescriptor:
