@@ -103,3 +103,133 @@ describe JWE do
     expect { JWE.decrypt(payload, nil, alg: 'dir') }.to raise_error(ArgumentError)
   end
 end
+
+describe 'JWE with AES GCM Key Wrap algorithms' do
+  let(:plaintext) { 'The true sign of intelligence is not knowledge but imagination.' }
+
+  gcmkw_algs = {
+    'A128GCMKW' => 16,
+    'A192GCMKW' => 24,
+    'A256GCMKW' => 32
+  }
+
+  def decode_header(token)
+    JSON.parse(JWE::Serialization::Compact.decode(token).first)
+  end
+
+  def flip_first_byte(base64_value)
+    raw = JWE::Base64.jwe_decode(base64_value)
+    raw.setbyte(0, raw.getbyte(0) ^ 0x01)
+    JWE::Base64.jwe_encode(raw)
+  end
+
+  def tamper_header(token)
+    parts = token.split('.')
+    header = JSON.parse(JWE::Base64.jwe_decode(parts[0]))
+    yield header
+    parts[0] = JWE::Base64.jwe_encode(header.to_json)
+    parts.join('.')
+  end
+
+  gcmkw_algs.each do |alg, kek_size|
+    describe alg do
+      let(:kek) { SecureRandom.random_bytes(kek_size) }
+      let(:token) { JWE.encrypt(plaintext, kek, alg: alg) }
+
+      it 'roundtrips a compact serialization' do
+        expect(JWE.decrypt(token, kek)).to eq plaintext
+      end
+
+      it 'roundtrips with a CBC-HMAC content encryption method' do
+        token = JWE.encrypt(plaintext, kek, alg: alg, enc: 'A128CBC-HS256')
+
+        expect(JWE.decrypt(token, kek)).to eq plaintext
+      end
+
+      it 'carries the wrapping iv and tag in the protected header' do
+        header = decode_header(token)
+
+        expect(JWE::Base64.jwe_decode(header['iv']).bytesize).to eq 12
+        expect(JWE::Base64.jwe_decode(header['tag']).bytesize).to eq 16
+      end
+
+      it 'uses distinct iv and tag values for key wrapping and content encryption' do
+        parts = token.split('.')
+        header = decode_header(token)
+
+        expect(header['iv']).to_not eq parts[2]
+        expect(header['tag']).to_not eq parts[4]
+      end
+
+      it 'rejects a token with a tampered key wrap tag' do
+        tampered = tamper_header(token) { |h| h['tag'] = flip_first_byte(h['tag']) }
+
+        expect { JWE::Serialization::Compact.decode(tampered) }.to_not raise_error
+        expect { JWE.decrypt(tampered, kek) }
+          .to raise_error(JWE::InvalidData, /key wrap authentication tag/)
+      end
+
+      it 'rejects a token with a tampered key wrap iv' do
+        tampered = tamper_header(token) { |h| h['iv'] = flip_first_byte(h['iv']) }
+
+        expect { JWE::Serialization::Compact.decode(tampered) }.to_not raise_error
+        expect { JWE.decrypt(tampered, kek) }
+          .to raise_error(JWE::InvalidData, /key wrap authentication tag/)
+      end
+
+      it 'rejects a token missing the key wrap parameters' do
+        tampered = tamper_header(token) do |h|
+          h.delete('iv')
+          h.delete('tag')
+        end
+
+        expect { JWE.decrypt(tampered, kek) }.to raise_error(JWE::InvalidData)
+      end
+
+      it 'rejects a token with a tampered content encryption tag' do
+        parts = token.split('.')
+        parts[4] = flip_first_byte(parts[4])
+        tampered = parts.join('.')
+
+        # The key wrapping layer still authenticates and unwraps the CEK...
+        header, encrypted_cek, = JWE::Serialization::Compact.decode(tampered)
+        unwrapper = JWE::Alg.for(alg).new(kek)
+        unwrapper.apply_header(JSON.parse(header))
+        expect(unwrapper.decrypt(encrypted_cek)).to_not be_nil
+
+        # ...so the failure comes from the content encryption layer.
+        expect { JWE.decrypt(tampered, kek) }
+          .to raise_error(JWE::InvalidData, /ciphertext or authentication tag/)
+      end
+
+      it 'rejects a token with a tampered content encryption iv' do
+        parts = token.split('.')
+        parts[2] = flip_first_byte(parts[2])
+        tampered = parts.join('.')
+
+        expect { JWE.decrypt(tampered, kek) }
+          .to raise_error(JWE::InvalidData, /ciphertext or authentication tag/)
+      end
+
+      it 'rejects a token with a tampered content ciphertext' do
+        parts = token.split('.')
+        parts[3] = flip_first_byte(parts[3])
+        tampered = parts.join('.')
+
+        expect { JWE.decrypt(tampered, kek) }
+          .to raise_error(JWE::InvalidData, /ciphertext or authentication tag/)
+      end
+
+      it 'rejects decryption with a wrong key encryption key' do
+        other_kek = SecureRandom.random_bytes(kek_size)
+
+        expect { JWE.decrypt(token, other_kek) }.to raise_error(JWE::InvalidData)
+      end
+
+      it 'rejects a key encryption key with a wrong length' do
+        expect { JWE.encrypt(plaintext, SecureRandom.random_bytes(kek_size + 8), alg: alg) }
+          .to raise_error(ArgumentError)
+      end
+    end
+  end
+end

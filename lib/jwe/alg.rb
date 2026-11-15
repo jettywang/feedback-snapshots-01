@@ -1,7 +1,10 @@
 # frozen_string_literal: true
 
+require 'jwe/alg/a128_gcm_kw'
 require 'jwe/alg/a128_kw'
+require 'jwe/alg/a192_gcm_kw'
 require 'jwe/alg/a192_kw'
+require 'jwe/alg/a256_gcm_kw'
 require 'jwe/alg/a256_kw'
 require 'jwe/alg/dir'
 require 'jwe/alg/rsa_oaep'

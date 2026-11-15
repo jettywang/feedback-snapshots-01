@@ -32,10 +32,18 @@ module JWE
       cipher = Enc.for(enc)
       cipher.cek = key if alg == 'dir'
 
+      alg_instance = Alg.for(alg).new(key)
+      encrypted_cek = alg_instance.encrypt(cipher.cek)
+      # Key wrapping algorithms may contribute protected header parameters
+      # (e.g. "iv" and "tag" for AES GCM Key Wrap). They must be merged before
+      # the header is serialized, since the encoded header is the
+      # authenticated data of the content encryption layer.
+      header.merge!(alg_instance.header_params) if alg_instance.respond_to?(:header_params)
+
       json_hdr = header.to_json
       ciphertext = cipher.encrypt(payload, Base64.jwe_encode(json_hdr))
 
-      generate_serialization(json_hdr, Alg.encrypt_cek(alg, key, cipher.cek), ciphertext, cipher)
+      generate_serialization(json_hdr, encrypted_cek, ciphertext, cipher)
     end
 
     def decrypt(payload, key)
@@ -43,7 +51,9 @@ module JWE
       header = JSON.parse(header)
       check_params(header, key)
 
-      cek = Alg.decrypt_cek(header['alg'], key, enc_key)
+      alg_instance = Alg.for(header['alg']).new(key)
+      alg_instance.apply_header(header) if alg_instance.respond_to?(:apply_header)
+      cek = alg_instance.decrypt(enc_key)
       cipher = Enc.for(header['enc'], cek, iv, tag)
 
       plaintext = cipher.decrypt(ciphertext, payload.split('.').first)
