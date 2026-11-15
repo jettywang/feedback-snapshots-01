@@ -8,6 +8,7 @@ from dissect.clfs.exceptions import (
     InvalidContextError,
     InvalidRecordBlockError,
 )
+from dissect.clfs.lsn import interpret_lsn
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -218,6 +219,8 @@ class BaseRecord:
         if client_ctx_record.NodeId.Type != c_clfs.CLFS_NODE_TYPE.CLIENT_CONTEXT:
             raise InvalidContextError(f"Invalid NodeId type: {client_ctx_record.NodeId.Type}")
 
+        physical_base = interpret_lsn(int(client_ctx_record.LsnPhysicalBase.PhysicalOffset))
+
         return Stream(
             name=name,
             id=client_ctx_record.ClientId,
@@ -228,7 +231,7 @@ class BaseRecord:
             lsn_last=client_ctx_record.LsnLast,
             lsn_flush=client_ctx_record.LsnFlush,
             lsn_physical_base=client_ctx_record.LsnPhysicalBase,
-            offset=client_ctx_record.LsnPhysicalBase.Offset.RecordIndex - 1,
+            offset=physical_base.block_offset if physical_base.block_offset is not None else 0,
         )
 
     def _container_context(self, logblock_fh: BinaryIO, container_ctx_offset: int, name: str) -> None:

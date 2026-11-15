@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, BinaryIO
 
 from dissect.clfs.c_clfs import BlockHeader, c_clfs
 from dissect.clfs.exceptions import InvalidRecordBlockError
+from dissect.clfs.lsn import interpret_lsn
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -27,17 +28,40 @@ class Container:
         Returns:
             buf, cur_record_offset: Tuple containing a file-like object of the log block and the current offset.
         """
-        try:
-            log_block = BlockHeader(fh=self.fh, offset=offset)
-        except EOFError:
-            raise InvalidRecordBlockError("Invalid container block header, possibly corrupt/empty")
-
+        log_block = self._read_block(offset)
         cur_record_offset = log_block.header.RecordOffsets[0]
 
         buf = log_block.open()
         buf.seek(cur_record_offset)
 
         return buf, cur_record_offset
+
+    def _read_block(self, offset: int) -> BlockHeader:
+        """Read a log block and reject an unreadable header.
+
+        Args:
+            offset: Offset of the log block inside the container.
+        """
+        try:
+            return BlockHeader(fh=self.fh, offset=offset)
+        except (EOFError, ValueError):
+            raise InvalidRecordBlockError("Invalid container block header, possibly corrupt/empty")
+
+    def _verify_block(self, offset: int, expected_lsn: int) -> None:
+        """Verify that the block at ``offset`` declares the referenced LSN itself.
+
+        A previous-LSN reference identifies a segment and a block offset. Merely finding a
+        parseable block header at that offset is not enough: the block must declare the same
+        container and block offset before its records may be followed.
+
+        Args:
+            offset: Offset of the referenced log block inside the container.
+            expected_lsn: The raw LSN that referenced this block.
+        """
+        expected = interpret_lsn(expected_lsn)
+        declared = interpret_lsn(int(self._read_block(offset).header.CurrentLsn.PhysicalOffset))
+        if not declared.valid or declared.container_id != expected.container_id or declared.block_offset != offset:
+            raise InvalidRecordBlockError(f"Block at {offset:#x} does not declare the referenced LSN {expected_lsn:#x}")
 
     def records(self) -> Iterator[tuple[int, bytes, bytes]]:
         """Parse the records that are present within the log block."""
@@ -73,8 +97,18 @@ class Container:
                 if next_record_header.LsnPrevious == 0:
                     break
 
-                # Set the new block offset
-                log_block_offset = next_record_header.LsnPrevious - 1
+                # The previous LSN identifies the block; its record sequence is not a byte offset
+                previous = interpret_lsn(int(next_record_header.LsnPrevious))
+                if previous.is_invalid:
+                    break
+                if previous.is_null or not previous.valid or previous.block_offset is None:
+                    raise InvalidRecordBlockError(
+                        f"Record references an unusable previous LSN {int(next_record_header.LsnPrevious):#x}"
+                    )
+
+                # Verify the referenced block's own identity before following the chain
+                log_block_offset = previous.block_offset
+                self._verify_block(log_block_offset, int(next_record_header.LsnPrevious))
                 cur_record_header = next_record_header
                 continue
 
