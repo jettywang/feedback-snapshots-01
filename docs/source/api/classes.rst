@@ -126,6 +126,51 @@ Classes
     :members:
 
 
+Historical Authorization
+========================
+
+.. py:currentmodule:: pgpy
+
+These objects answer point-in-time questions about a key, such as whether
+it was authorized to sign at a specific moment in the past. They never
+reuse present-tense booleans like :py:attr:`PGPKey.is_expired`.
+
+
+:py:class:`KeyAuthorizationView`
+--------------------------------
+
+.. autoclass:: KeyAuthorizationView
+    :members:
+
+
+:py:class:`AuthorizationDecision`
+---------------------------------
+
+.. autoclass:: AuthorizationDecision
+    :members:
+
+
+:py:class:`SignatureEvidence`
+------------------------------
+
+.. autoclass:: SignatureEvidence
+    :members:
+
+
+:py:class:`AuthorizationState`
+------------------------------
+
+.. autoclass:: AuthorizationState
+    :members:
+
+
+:py:class:`EvidenceState`
+-------------------------
+
+.. autoclass:: EvidenceState
+    :members:
+
+
 Other Objects
 =============
 

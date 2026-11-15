@@ -6,7 +6,8 @@ import importlib
 import inspect
 
 
-modules = ['pgpy.constants',
+modules = ['pgpy.authorization',
+           'pgpy.constants',
            'pgpy.decorators',
            'pgpy.errors',
            'pgpy.pgp',

@@ -4,6 +4,21 @@
 Changelog
 *********
 
+Unreleased
+==========
+
+New Features
+------------
+* added :py:class:`~pgpy.KeyAuthorizationView` for point-in-time
+  (archive) authorization questions. It reconstructs whether a primary
+  key, User ID or subkey was authorized at an explicit evaluation time
+  from cryptographically verified self-signatures and binding
+  signatures, applies holder revocations with their proper scope,
+  reports third-party revocations as requiring external authorization,
+  and returns an explicit ``unknown`` verdict instead of guessing. The
+  existing low-level :py:meth:`~pgpy.PGPKey.verify` interface is
+  unchanged.
+
 v0.6.0
 ======
 
