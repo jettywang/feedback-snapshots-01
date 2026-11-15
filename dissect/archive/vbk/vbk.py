@@ -13,17 +13,23 @@ from dissect.util.hash.crc32c import crc32c
 from dissect.util.stream import AlignedStream
 from dissect.util.xmemoryview import xmemoryview
 
-from dissect.archive.exception import Error, FileNotFoundError, IsADirectoryError, NotADirectoryError
+from dissect.archive.exception import FileNotFoundError, IsADirectoryError, NotADirectoryError
 from dissect.archive.vbk.c_vbk import PAGE_SIZE, c_vbk
+from dissect.archive.vbk.content import (
+    inspect_external_fib,
+    inspect_increment,
+    inspect_int_fib,
+    inspect_patch,
+    inspect_unknown_item,
+)
+from dissect.archive.vbk.exception import VBKError
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
     from dissect.cstruct import Structure
 
-
-class VBKError(Error):
-    pass
+    from dissect.archive.vbk.content import ContentReport
 
 
 class VBK:
@@ -113,6 +119,15 @@ class VBK:
                 raise FileNotFoundError(f"File not found: {path}")
 
         return item
+
+    def inspect(self, path: str, *, verify: bool = True) -> ContentReport:
+        """Inspect whether a file can be completely recovered.
+
+        Args:
+            path: The path of the file or directory item to inspect.
+            verify: Whether to check digests and the LZ4 CRC while reading stored data.
+        """
+        return self.get(path).inspect(verify=verify)
 
 
 class SnapshotSlot:
@@ -332,6 +347,21 @@ class DirItem(MetaItem):
 
         return PropertiesDictionary(self.vbk, self.entry.PropsRootPage)
 
+    def inspect(self, *, verify: bool = True) -> ContentReport:
+        """Inspect whether this item can be completely recovered.
+
+        The result is derived from the FIB block descriptors and the storage
+        descriptors they resolve to. Sparse blocks are only sparse when the format
+        says so, and unsupported blocks are never treated as readable or empty content.
+
+        Args:
+            verify: Whether to check digests and the LZ4 CRC while reading stored data.
+        """
+        if self.is_dir():
+            raise IsADirectoryError(f"{self!r} is not a file")
+
+        return inspect_unknown_item(self)
+
     def is_dir(self) -> bool:
         """Return whether the directory item is a directory."""
         return False
@@ -421,6 +451,9 @@ class ExtFibItem(DirItem):
     def is_external_file(self) -> bool:
         return True
 
+    def inspect(self, *, verify: bool = True) -> ContentReport:
+        return inspect_external_fib(self)
+
 
 class IntFibItem(DirItem):
     """Directory item for an internal file.
@@ -442,6 +475,9 @@ class IntFibItem(DirItem):
 
     def is_internal_file(self) -> bool:
         return True
+
+    def inspect(self, *, verify: bool = True) -> ContentReport:
+        return inspect_int_fib(self, verify=verify)
 
     def open(self) -> FibStream:
         return FibStream(
@@ -467,6 +503,9 @@ class PatchItem(DirItem):
     def size(self) -> int:
         return self.entry.Patch.FibSize
 
+    def inspect(self, *, verify: bool = True) -> ContentReport:
+        return inspect_patch(self)
+
 
 class IncrementItem(DirItem):
     """Directory item for an increment.
@@ -482,6 +521,9 @@ class IncrementItem(DirItem):
     @cached_property
     def size(self) -> int:
         return self.entry.Increment.FibSize
+
+    def inspect(self, *, verify: bool = True) -> ContentReport:
+        return inspect_increment(self)
 
 
 class MetaTableDescriptor(MetaItem):
