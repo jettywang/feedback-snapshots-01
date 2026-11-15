@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import hashlib
+import struct
+import zlib
 from datetime import datetime, timezone
+from io import BytesIO
+from itertools import pairwise
 from typing import TYPE_CHECKING, BinaryIO
 
 import pytest
 
 from dissect.evidence.ad1 import ad1
-from dissect.evidence.ad1.ad1 import EntryType, find_files
+from dissect.evidence.ad1.ad1 import EntryOrigin, EntryType, MetaType, find_files
 from tests._utils import absolute_path
 
 if TYPE_CHECKING:
@@ -305,3 +309,233 @@ def test_ad1_segment_lru(ad1_segmented: list[Path], monkeypatch: pytest.MonkeyPa
 
     picture = fs.get("C:/Users/pcbje/Desktop/Data/Pictures/5-0-762-Koala.jpg")
     assert hashlib.sha1(picture.open().read()).hexdigest() == "9c3dcb1f9185a314ea25d51aed3b5881b32f420c"
+
+
+EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def ad1_file(name: str, data: bytes = b"", meta: list[tuple[int, MetaType, bytes]] | None = None) -> dict:
+    """Return a file entry specification for :func:`build_ad1`."""
+    meta = [(3, MetaType.FileSize, str(len(data)).encode()), *(meta or [])]
+    return {"name": name, "type": EntryType.File, "data": data, "meta": meta}
+
+
+def ad1_dir(
+    name: str, children: list[dict] | None = None, meta: list[tuple[int, MetaType, bytes]] | None = None
+) -> dict:
+    """Return a directory entry specification for :func:`build_ad1`."""
+    return {"name": name, "type": EntryType.Directory, "children": children or [], "meta": meta or []}
+
+
+def build_ad1(image_name: str, entries: list[dict]) -> BytesIO:
+    """Build a minimal in-memory AD1v4 image with the given top-level entries."""
+    name = image_name.encode()
+    stream = bytearray(b"\x00" * (92 + len(name)))  # Logical image header, filled in later
+
+    def emit_meta_chain(specs: list[tuple[int, MetaType, bytes]]) -> int:
+        offsets = []
+        for category, meta_type, data in specs:
+            offsets.append(len(stream))
+            stream.extend(struct.pack("<QIII", 0, category, int(meta_type), len(data)))
+            stream.extend(data)
+        for current, following in pairwise(offsets):
+            struct.pack_into("<Q", stream, current, following)
+        return offsets[0] if offsets else 0
+
+    def emit_entry(spec: dict) -> int:
+        child_offsets = [emit_entry(child) for child in spec.get("children", [])]
+        for current, following in pairwise(child_offsets):
+            struct.pack_into("<Q", stream, current, following)
+        child_offset = child_offsets[0] if child_offsets else 0
+
+        data = spec.get("data", b"")
+        zlib_meta = 0
+        if data:
+            chunk_offset = len(stream)
+            stream.extend(zlib.compress(data))
+            # The meta chain directly follows the compressed data and terminates the chunk list
+            meta_offset = emit_meta_chain(spec.get("meta", []))
+            zlib_meta = len(stream)
+            stream.extend(struct.pack("<QQ", 1, chunk_offset))
+        else:
+            meta_offset = emit_meta_chain(spec.get("meta", []))
+
+        entry_offset = len(stream)
+        entry_name = spec["name"].encode()
+        stream.extend(
+            struct.pack(
+                "<QQQQQII", 0, child_offset, meta_offset, zlib_meta, len(data), int(spec["type"]), len(entry_name)
+            )
+        )
+        stream.extend(entry_name)
+        stream.extend(struct.pack("<Q", 0))  # parent_index
+        return entry_offset
+
+    root_offsets = [emit_entry(spec) for spec in entries]
+    for current, following in pairwise(root_offsets):
+        struct.pack_into("<Q", stream, current, following)
+    first_file_offset = root_offsets[0] if root_offsets else 0
+
+    header = struct.pack(
+        "<16sIIIQQI",
+        b"ADLOGICALIMAGE\x00\x00",
+        4,  # version
+        1,  # unk1
+        65536,  # chunk_size
+        0,  # metadata_offset
+        first_file_offset,
+        len(name),
+    )
+    header += struct.pack("<4sQQQQQ", b"AD\x00\x00", 92, 0, 0, 0, 0)
+    header += name
+    stream[0 : len(header)] = header
+
+    segment = struct.pack(
+        "<16sIIIIQI",
+        b"ADSEGMENTEDFILE\x00",
+        1,  # unk1
+        2,  # unk2
+        1,  # segment_number
+        1,  # segment_count
+        512 + len(stream),  # segment_size
+        512,  # logical_image_offset
+    )
+    segment += b"\x00" * (512 - len(segment))
+    return BytesIO(segment + bytes(stream))
+
+
+def test_ad1_virtual_root_entries(ad1_basic: BinaryIO) -> None:
+    """Test that synthesized root entries are marked as such and carry their provenance."""
+    fs = ad1.AD1(ad1_basic)
+
+    assert fs.root.is_virtual()
+    assert fs.root.origin == EntryOrigin.SYNTHESIZED
+
+    drive = fs.get("E:")
+    assert drive.is_virtual()
+    assert drive.origin == EntryOrigin.SYNTHESIZED
+    assert drive.source == "E:\\AD1_test"
+    assert drive.reason is not None
+    assert drive.offset < 0
+
+    folder = fs.get("E:/AD1_test")
+    assert folder.is_virtual()
+    assert folder.source == "E:\\AD1_test"
+    assert folder.reason is not None
+
+    # Synthesized entries have stable, independent identities and no inherited metadata
+    assert folder.offset < 0
+    assert len({fs.root.offset, drive.offset, folder.offset}) == 3
+    assert folder.meta == {}
+    assert folder.md5 is None
+    assert folder.sha1 is None
+    assert folder.atime == folder.ctime == folder.mtime == folder.btime == EPOCH
+
+    file = fs.get("E:/AD1_test/doc1.txt")
+    assert not file.is_virtual()
+    assert file.origin == EntryOrigin.EVIDENCE
+    assert file.offset > 0
+    assert file.open().read() == b"Inhoud document 1"
+
+
+def test_ad1_multi_source_virtual_entries() -> None:
+    """Test provenance of synthesized roots in a multi-source image.
+
+    The sample image contains two kinds of root sources (a drive letter and a UNC root)
+    and a name conflict: the real "C:" root entry is also part of the source path of the
+    second source.
+    """
+    fs = ad1.AD1(
+        build_ad1(
+            "Custom Content Image([Multi])",
+            [
+                ad1_dir(
+                    "C:",
+                    meta=[(5, MetaType.DateCreated, b"20200102T030405")],
+                    children=[
+                        ad1_dir("Windows", children=[ad1_file("system.ini", b"[boot]\r\nshell=explorer.exe")]),
+                    ],
+                ),
+                ad1_dir(
+                    "Public:C:\\Users\\Public",
+                    meta=[
+                        (5, MetaType.DateCreated, b"20210607T080910"),
+                        (1, MetaType.MD5, b"0123456789abcdef0123456789abcdef"),
+                        (0, MetaType.PosixPermissions, b"0755"),
+                    ],
+                    children=[ad1_file("report.txt", b"multi source report")],
+                ),
+                ad1_dir(
+                    "exports:\\\\server\\share\\exports",
+                    children=[ad1_file("data.bin", b"\x00\x01\x02\x03")],
+                ),
+            ],
+        )
+    )
+
+    root = fs.get("/")
+    assert root.is_virtual()
+
+    # The real "C:" root is reused for the synthesized path, not duplicated
+    assert root.listdir() == ["C:", "\\\\server\\share"]
+
+    c = fs.get("C:")
+    assert not c.is_virtual()
+    assert c.origin == EntryOrigin.EVIDENCE
+    assert c.offset >= 0
+    assert c.btime == datetime(2020, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+    assert c.listdir() == ["Windows", "Users"]
+
+    # "Users" is synthesized to complete the second source path
+    users = fs.get("C:/Users")
+    assert users.is_virtual()
+    assert users.origin == EntryOrigin.SYNTHESIZED
+    assert users.source == "C:\\Users\\Public"
+    assert users.reason is not None
+    assert users.offset < 0
+    assert users.meta == {}
+    assert users.md5 is None
+    assert users.sha1 is None
+    assert users.atime == users.ctime == users.mtime == users.btime == EPOCH
+
+    # The real entry keeps its own identity and metadata under its leaf name
+    public = fs.get("C:/Users/Public")
+    assert not public.is_virtual()
+    assert public.origin == EntryOrigin.EVIDENCE
+    assert public.offset >= 0
+    assert public.source == "C:\\Users\\Public"
+    assert public.btime == datetime(2021, 6, 7, 8, 9, 10, tzinfo=timezone.utc)
+    assert public.md5 == "0123456789abcdef0123456789abcdef"
+    assert MetaType.PosixPermissions in public.meta
+
+    # The UNC root is synthesized as a single node
+    share = fs.get("\\\\server\\share")
+    assert share.is_virtual()
+    assert share.source == "\\\\server\\share\\exports"
+    assert share.offset < 0
+    assert share.offset != users.offset
+
+    exports = fs.get("\\\\server\\share/exports")
+    assert not exports.is_virtual()
+    assert exports.source == "\\\\server\\share\\exports"
+
+    # Regular file content reads are unaffected
+    assert fs.get("C:/Windows/system.ini").open().read() == b"[boot]\r\nshell=explorer.exe"
+    assert fs.get("C:/Users/Public/report.txt").open().read() == b"multi source report"
+    assert fs.get("\\\\server\\share/exports/data.bin").open().read() == b"\x00\x01\x02\x03"
+
+
+@pytest.mark.parametrize("image_name", ["Data", "C:", ""])
+def test_ad1_incomplete_root_path(image_name: str) -> None:
+    """Test that incomplete logical image root paths still yield a browsable tree."""
+    fs = ad1.AD1(build_ad1(image_name, [ad1_file("file.txt", b"data")]))
+
+    if image_name:
+        assert fs.root.listdir() == [image_name]
+        entry = fs.get(image_name)
+        assert entry.is_virtual()
+        assert entry.source == image_name
+        assert fs.get(f"{image_name}/file.txt").open().read() == b"data"
+    else:
+        assert fs.root.listdir() == ["file.txt"]
+        assert fs.get("file.txt").open().read() == b"data"

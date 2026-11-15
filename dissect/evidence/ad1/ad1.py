@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
+from enum import Enum
 from functools import cached_property
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import TYPE_CHECKING, BinaryIO
@@ -13,7 +14,6 @@ from dissect.evidence.exception import FileNotFoundError, NotADirectoryError, No
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-    from pathlib import PurePath
     from types import TracebackType
 
     from typing_extensions import Self
@@ -23,6 +23,13 @@ MetaType = c_ad1.MetaType
 FileClassType = c_ad1.FileClassType
 
 MAX_OPEN_SEGMENTS = 128
+
+
+class EntryOrigin(str, Enum):
+    """Origin of an entry in an AD1 logical image."""
+
+    EVIDENCE = "evidence"
+    SYNTHESIZED = "synthesized"
 
 
 def find_files(path: Path) -> list[Path]:
@@ -60,6 +67,8 @@ class AD1:
         fhs = find_files(fh) if isinstance(fh, Path) else [fh] if not isinstance(fh, list) else fh
 
         self.fh = fhs
+
+        self._virtual_offset = 0
         self.root = VirtualEntry(self, "/")
 
         self._segments: dict[int, SegmentFile] = {}
@@ -96,6 +105,16 @@ class AD1:
     def is_locked(self) -> bool:
         """Return whether the ADCRYPT container is locked."""
         return self.is_adcrypt() and self.adcrypt.is_locked()
+
+    def _next_virtual_offset(self) -> int:
+        """Return the next synthetic offset for a :class:`VirtualEntry`.
+
+        Synthetic offsets are negative, so they can never be confused with a physical
+        offset into the image. They are handed out sequentially, giving every synthesized
+        entry a stable and independent identity for a given image.
+        """
+        self._virtual_offset -= 1
+        return self._virtual_offset
 
     def segment(self, idx: int) -> SegmentFile:
         """Open a segment by index.
@@ -232,45 +251,120 @@ class AD1:
 
 
 def _hallicinate_root_entries(ad1: AD1) -> None:
-    # We need to create some fake entries for all parts leading up to `logical_image.name`
-    # This name commonly contains the full path each entry in the container is relative to
-    # Not always though, so do some poor mans heuristics
+    """Synthesize the directory hierarchy leading up to the acquired items.
+
+    The logical image name commonly contains the full path each entry in the container is
+    relative to, but the directories leading up to that path are not stored in the image.
+    To make the image browsable, the missing directories are synthesized as
+    :class:`VirtualEntry` nodes. These nodes are not part of the evidence: they carry a
+    synthetic offset, no timestamps, permissions or hashes of their own, and are marked
+    through :meth:`FileEntry.is_virtual` with the original path and reason of their
+    synthesis.
+    """
     root_name = ad1.logical_image.name
+    first_file_offset = ad1.logical_image.header.first_file_offset
+
     if root_name == "Custom Content Image([Multi])":
-        ad1.root.entry.child = ad1.logical_image.header.first_file_offset
-        if len(ad1.root.children) != 1:
-            raise ValueError("Unexpected number of root children for Custom Content Image([Multi])")
+        # Multi-source image: every top-level entry is named after the source it was
+        # acquired from, e.g. "Downloads:C:\Users\User\Downloads" or a UNC root
+        entries = []
+        offset = first_file_offset
+        while offset != 0:
+            entry = FileEntry(ad1, offset)
+            entries.append(entry)
+            offset = entry.entry.next
 
-        root_name = ad1.root.children[0].name.split(":", 1)[-1]
-        first_file_entry = ad1.root.children[0].entry
-        is_multi_image = True
-    else:
-        is_multi_image = False
+        # Attach shallow sources first, so deeper sources can reuse already attached roots
+        for entry in sorted(entries, key=lambda entry: len(_split_root_path(_source_path(entry.name)))):
+            _hallicinate_source_entry(ad1, entry)
+        return
 
-    root_path = PureWindowsPath(root_name) if "/" not in root_name and "\\" in root_name else PurePosixPath(root_name)
-    parts = list(root_path.parts)
-    parent = _create_root_entries(ad1, ad1.root, root_path, parts)
+    parent = ad1.root
+    for part in _split_root_path(root_name):
+        parent = _attach_child(
+            parent,
+            VirtualEntry(ad1, part, source=root_name, reason="synthesized from the logical image name"),
+        )
 
-    if is_multi_image:
-        parent.name = parent.name
-        parent.offset = ad1.logical_image.header.first_file_offset
-        parent.entry = first_file_entry
-    else:
-        # Add the first file offset as the first child offset of the last root part
-        parent.entry.child = ad1.logical_image.header.first_file_offset
+    # Attach the acquired items to the deepest root part
+    parent.entry.child = first_file_offset
 
 
-def _create_root_entries(ad1: AD1, parent: FileEntry, path: PurePath, parts: list[str]) -> FileEntry:
-    while parts:
-        part = parts.pop(0)
+def _hallicinate_source_entry(ad1: AD1, entry: FileEntry) -> None:
+    """Attach a real top-level entry of a multi-source image to the browsable tree.
+
+    The entry is named after the source it was acquired from. Missing parent directories
+    are synthesized as :class:`VirtualEntry` nodes, reusing roots that already exist in
+    the evidence. The entry itself keeps its physical offset and metadata; it is presented
+    under its leaf name with its original source path preserved.
+    """
+    source = _source_path(entry.name)
+    parts = _split_root_path(source)
+
+    parent = ad1.root
+    for part in parts[:-1]:
+        parent = _attach_child(
+            parent,
+            VirtualEntry(ad1, part, source=source, reason="synthesized from a multi-source entry path"),
+        )
+
+    if parts and entry.name != parts[-1]:
+        # Present the entry under its leaf name, preserving the original source path
+        entry.source = source
+        entry.name = parts[-1]
+
+    _attach_child(parent, entry)
+
+
+def _source_path(name: str) -> str:
+    """Return the source path recorded in a top-level entry name of a multi-source image.
+
+    FTK names these entries ``<leaf>:<source path>``, e.g. ``Downloads:C:\\Users\\User``.
+    Names that do not embed a rooted path, e.g. a bare drive (``C:``) or UNC root, are
+    returned as-is.
+    """
+    prefix, _, path = name.partition(":")
+    if len(prefix) > 1 and path and (path.startswith(("\\", "//")) or (len(path) > 1 and path[1] == ":")):
+        return path
+    return name
+
+
+def _split_root_path(root_name: str) -> list[str]:
+    """Split a recorded root path into browsable parts.
+
+    Drive roots (``C:``) and UNC roots (``\\\\server\\share``) are kept as single parts.
+    Root anchors without a drive (``/``, ``\\``) are already represented by the AD1 root
+    entry and are dropped. Relative or incomplete paths simply yield fewer parts.
+    """
+    if not root_name:
+        return []
+
+    path = PureWindowsPath(root_name) if "/" not in root_name and "\\" in root_name else PurePosixPath(root_name)
+
+    parts = []
+    for part in path.parts:
         if path.drive and part == f"{path.drive}\\":
+            # "C:\\" -> "C:", "\\\\server\\share\\" -> "\\\\server\\share"
             part = path.drive
+        if part in ("/", "\\", "//"):
+            continue
+        parts.append(part)
+    return parts
 
-        entry = VirtualEntry(ad1, part)
-        parent.children = [entry]
-        parent = entry
 
-    return parent
+def _attach_child(parent: FileEntry, entry: FileEntry) -> FileEntry:
+    """Attach ``entry`` as a child of ``parent`` and return the attached child.
+
+    If a child with the same name already exists, e.g. a real evidence entry that a
+    synthesized node would conflict with, the existing child is returned instead and
+    ``entry`` is discarded. Existing children are never removed or modified.
+    """
+    children = list(parent.children)
+    for child in children:
+        if child.name == entry.name:
+            return child
+    parent.children = [*children, entry]
+    return entry
 
 
 class SegmentFile:
@@ -306,7 +400,17 @@ class LogicalImage:
 
 
 class FileEntry:
-    """Represents a file entry in an AD1 logical image."""
+    """Represents a file entry in an AD1 logical image.
+
+    Attributes:
+        source: Original source path of this entry, if its position in the browsable tree
+            was derived from a path recorded in the image. ``None`` otherwise.
+        reason: Reason why this entry was synthesized by the library. ``None`` for entries
+            that are present in the evidence.
+    """
+
+    source: str | None = None
+    reason: str | None = None
 
     def __init__(self, ad1: AD1, offset: int):
         self.ad1 = ad1
@@ -405,6 +509,15 @@ class FileEntry:
             return int.from_bytes(meta.data, "little") == FileClassType.ReparsePoint
         return False
 
+    def is_virtual(self) -> bool:
+        """Return whether this entry is synthesized by the library and not present in the evidence."""
+        return False
+
+    @property
+    def origin(self) -> EntryOrigin:
+        """Return the origin of this entry."""
+        return EntryOrigin.SYNTHESIZED if self.is_virtual() else EntryOrigin.EVIDENCE
+
     def listdir(self) -> list[str]:
         if not self.is_dir():
             raise NotADirectoryError(self.name)
@@ -432,11 +545,25 @@ class FileEntry:
 
 
 class VirtualEntry(FileEntry):
-    """Represents the root entry in an AD1 logical image."""
+    """Represents a synthesized directory entry in an AD1 logical image.
 
-    def __init__(self, ad1: AD1, name: str):
-        super().__init__(ad1, -1)
+    Virtual entries are constructed by the library to complete the directory hierarchy
+    leading up to the acquired items. They are not part of the evidence: they carry a
+    synthetic (negative) offset instead of a physical one and have no timestamps,
+    permissions or hashes of their own.
+    """
+
+    def __init__(self, ad1: AD1, name: str, *, source: str | None = None, reason: str | None = None):
+        super().__init__(ad1, ad1._next_virtual_offset())
         self.entry = c_ad1.FileEntry(name=name.encode(), type=EntryType.Directory, size=0)
+        self.source = source
+        self.reason = reason
+
+    def __repr__(self) -> str:
+        return f"<{self.__class__.__name__} name={self.name!r} source={self.source!r}>"
+
+    def is_virtual(self) -> bool:
+        return True
 
 
 class FileMeta:
