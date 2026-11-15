@@ -45,22 +45,38 @@ class LnkExtraData:
     # This is kinda the same as LnkStringData only that the defined extra structures can wildly vary
     def __init__(self, fh: BinaryIO | None = None):
         self.extradata = {}
+        # Maps a block name to its (offset, declared size) within the stream.
+        self.offsets = {}
+        # Maps a block name to the raw bytes actually read when the declared
+        # block size exceeds the available data (i.e. a truncated block).
+        self.truncated_blocks = {}
 
         if fh:
             self._parse(fh)
 
     def _parse(self, fh: BinaryIO) -> None:
-        self.size = c_lnk.uint32(fh)
+        offset = fh.tell()
+        size_data = fh.read(4)
+        if len(size_data) != 4:
+            if size_data:
+                log.warning("Truncated EXTRA_DATA_BLOCK size encountered at offset %i", offset)
+            return
+        self.size = c_lnk.uint32(size_data)
 
         if self.size == 0x00000000:
             # terminal block encountered. end of lnk file
             self.extradata.update({"TERMINAL_BLOCK": c_lnk.EXTRA_DATA(extra_data_block=None, terminal_block=self.size)})
             return
 
+        if self.size < LINK_EXTRA_DATA_HEADER_SIZE:
+            log.warning("Invalid EXTRA_DATA_BLOCK size %i encountered at offset %i", self.size, offset)
+            return
+
         signature = c_lnk.uint32(fh)
         block_name = EXTRA_DATA_BLOCK_SIGNATURES.get_name(signature)
 
         if block_name:
+            self.offsets[block_name] = (offset, self.size)
             read_size = self.size - LINK_EXTRA_DATA_HEADER_SIZE
             block_data = memoryview(fh.read(read_size))
 
@@ -73,10 +89,17 @@ class LnkExtraData:
                     len(block_data),
                     block_name,
                 )
+                # Preserve the truncated block's raw bytes as evidence instead of silently dropping them.
+                self.truncated_blocks[block_name] = {
+                    "offset": offset,
+                    "declared_size": self.size,
+                    "raw": bytes(block_data),
+                }
                 return
 
             if block_name == "VISTA_AND_ABOVE_IDLIST_PROPS":
                 struct = LnkTargetIdList(BytesIO(block_data), read_size)
+                struct.raw_offset = offset + LINK_EXTRA_DATA_HEADER_SIZE
             else:
                 struct = c_lnk.typedefs[block_name](block_data)
 
@@ -111,6 +134,11 @@ class LnkExtraData:
 
         else:
             log.warning("Unknown extra data block encountered with signature %x", signature)
+            # Preserve the raw bytes of unsupported blocks instead of misaligning the parser.
+            block_name = f"UNKNOWN_{signature:#010x}"
+            block_data = fh.read(self.size - LINK_EXTRA_DATA_HEADER_SIZE)
+            self.extradata.update({block_name: block_data})
+            self.offsets[block_name] = (offset, self.size)
 
         # keep calling parse until the TERMINAL_BLOCK is hit.
         self._parse(fh)
@@ -145,6 +173,10 @@ class LnkStringData:
     def __init__(self, fh: BinaryIO | None = None, lnk_flags: c_lnk.LINK_FLAGS | None = None):
         self.flags = None
         self.string_data = None
+        # Maps a string data name to its (offset, size) within the stream.
+        self.offsets = {}
+        # Names of string data structures whose declared size exceeds the available data.
+        self.truncated = set()
         if fh:
             self.flags = lnk_flags
             self.string_data = {}
@@ -161,20 +193,37 @@ class LnkStringData:
 
         for flag, string_data_name in flag_names:
             if self.flags & c_lnk.LINK_FLAGS[flag]:
-                string_data = self._get_stringdata(fh)
+                offset = fh.tell()
+                string_data, truncated = self._get_stringdata(fh)
+                if string_data is None:
+                    self.truncated.add(string_data_name)
+                    break
+                self.offsets[string_data_name] = (offset, 2 + string_data.character_count)
                 self.string_data.update({string_data_name: string_data})
+                if truncated:
+                    # Offsets of any following string data can no longer be trusted.
+                    self.truncated.add(string_data_name)
+                    break
 
-    def _get_stringdata(self, fh: BinaryIO) -> c_lnk.STRING_DATA:
+    def _get_stringdata(self, fh: BinaryIO) -> tuple[c_lnk.STRING_DATA | None, bool]:
         # STRING_DATA structs have a size called character_count
         # this size (character_count) should be doubled when unicode is used
-        size = unpack("H", fh.read(2))[0]
+        size_data = fh.read(2)
+        if len(size_data) != 2:
+            return None, True
+        size = unpack("H", size_data)[0]
         if self.flags & c_lnk.LINK_FLAGS.is_unicode:
             size = size * 2
-            data = fh.read(size).decode("utf-16")
+            raw = fh.read(size)
+            try:
+                data = raw.decode("utf-16")
+            except UnicodeDecodeError:
+                data = raw.decode("utf-16", errors="backslashreplace")
         else:
-            data = fh.read(size)
+            raw = fh.read(size)
+            data = raw
 
-        return c_lnk.STRING_DATA(character_count=size, string=data)
+        return c_lnk.STRING_DATA(character_count=size, string=data), len(raw) != size
 
     def __getattr__(self, attr: str) -> Any:
         try:
@@ -205,9 +254,14 @@ class LnkInfo:
         self.linkinfo_header = None
         self.linkinfo_body = None
 
+        self.raw_offset = None
+        self.raw_size = None
+
         if fh:
+            self.raw_offset = fh.tell()
             self.linkinfo_header = c_lnk.LINK_INFO_HEADER(fh.read(LINK_INFO_HEADER_SIZE))
             self.flags = self.linkinfo_header.link_info_flags
+            self.raw_size = self.linkinfo_header.link_info_size
 
             # values higher than 0x24 indicate the presence of optional fields in the link info structure
             # if so the LocalBasePathOffsetUnicode and CommonPathSuffixOffsetUnicode fields are present
@@ -332,22 +386,46 @@ class LnkTargetIdList:
         self.idlist = None
         self.size = None
 
+        self.raw_offset = None
+        self.raw = b""
+        self.truncated = False
+
         if fh:
+            self.raw_offset = fh.tell()
             self.size = unpack("H", fh.read(2))[0] if size is None else size
-            self._parse(fh.read(self.size))
+            self.raw = fh.read(self.size)
+            if len(self.raw) != self.size:
+                self.truncated = True
+            self._parse(self.raw)
 
     def _parse(self, buff: BinaryIO) -> None:
         idlists = []
         buff = BytesIO(buff)
+        terminalid = b""
 
         # the size of the target_idlist struct includes itself. Thus we minus 2 here.
         while buff.tell() < self.size - 2:
-            size = unpack("H", buff.read(2))[0]
+            size_data = buff.read(2)
+            if len(size_data) != 2:
+                self.truncated = True
+                break
+            size = unpack("H", size_data)[0]
+            if size < 2:
+                # An ItemID size must at least cover its own size field.
+                self.truncated = True
+                break
             data = buff.read(size - 2)  # size of the struct includes the 16-bit size value. Thus we minus 2 here again.
+            if len(data) != size - 2:
+                self.truncated = True
+                break
             itemid = c_lnk.ITEMID(itemid_size=size, data=data)
             idlists.append(itemid)
+        else:
+            terminalid = buff.read()
+            if self.size > 0 and terminalid != b"\x00\x00":
+                self.truncated = True
 
-        self.idlist = c_lnk.IDLIST(itemid_list=idlists, terminalid=buff.read())
+        self.idlist = c_lnk.IDLIST(itemid_list=idlists, terminalid=terminalid)
         self.target_idlist = c_lnk.LINK_TARGET_IDLIST(idlist_size=self.size, idlist=self.idlist)
 
     def __repr__(self) -> str:

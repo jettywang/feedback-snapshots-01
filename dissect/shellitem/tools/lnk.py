@@ -6,7 +6,7 @@ from pathlib import Path
 
 from dissect.util import ts
 
-from dissect.shellitem.lnk import Lnk
+from dissect.shellitem.lnk import Lnk, collect_targets
 
 log = logging.getLogger(__name__)
 logging.lastResort = None
@@ -90,6 +90,9 @@ def parse(path: Path) -> None:
             f"Target file access time\t\t: {target_atime}\n"
             f"Target file changed time\t: {target_ctime}\n"
         )
+
+        report = collect_targets(lnk_file)
+        print(report.summary())
 
 
 def main() -> None:
