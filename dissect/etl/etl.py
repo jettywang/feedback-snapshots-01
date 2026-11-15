@@ -38,12 +38,13 @@ from dissect.etl.headers.logfile import LogfileHeader
 from dissect.etl.headers.utils import select_event_header
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
     from datetime import datetime
     from types import ModuleType
     from uuid import UUID
 
     from dissect.etl.headers.headers import Header
+    from dissect.etl.health import HealthSummary
 
 
 class ETL:
@@ -95,6 +96,17 @@ class ETL:
     def __iter__(self) -> Iterator[Event]:
         for buffer in self.buffers():
             yield from buffer
+
+    def health_summary(self) -> HealthSummary:
+        """Build a layered summary of the observation coverage of this ETL.
+
+        See :mod:`dissect.etl.health`. The summary keeps logger-claimed losses,
+        physically missing or truncated buffers and parse failures as separate
+        counters instead of collapsing them into one total.
+        """
+        from dissect.etl.health import build_health_summary
+
+        return build_health_summary(self)
 
     def calculate_timestamp(self, time_delta: int) -> datetime:
         return wintimestamp(self.get_filetime_for_event(time_delta))
@@ -155,15 +167,24 @@ class Buffer:
     def next_buffer(self) -> int:
         return self.offset + self.size
 
-    def __iter__(self) -> Iterator[EventRecord]:
+    def __iter__(self, on_error: Callable[[int, int, Exception], None] | None = None) -> Iterator[EventRecord]:
         offset = 0
-        try:
-            while offset < self.filled_bytes:
+        while offset < self.filled_bytes:
+            try:
                 event = self.read_record(offset)
-                offset += event.aligned_size
-                yield event
-        except (EOFError, NoMoreEventsError):
-            pass
+            except NoMoreEventsError:
+                # The 0xFFFFFFFF padding marker: the natural end of records.
+                return
+            except Exception as error:
+                # A truncated or malformed record makes the remainder of the
+                # buffer unscannable. Without a callback the historical
+                # behaviour of stopping silently is preserved.
+                if on_error is None:
+                    return
+                on_error(offset, self.filled_bytes, error)
+                return
+            offset += event.aligned_size
+            yield event
 
     def read_record(self, offset: int) -> EventRecord:
         """Parse a record from a given offset inside a buffer."""
@@ -186,11 +207,13 @@ class EventRecord:
     __slots__ = (
         "_event",
         "_header",
+        "_provider_skipped",
     )
 
     def __init__(self):
         self._event = None
         self._header = None
+        self._provider_skipped = False
 
     @property
     def header(self) -> Header:
@@ -203,10 +226,21 @@ class EventRecord:
         return self.header.size
 
     @property
+    def provider_skipped(self) -> bool:
+        """Whether the record's provider has no registered manifest.
+
+        Such records are still parsed and yielded, but their payload cannot be
+        interpreted. Accessing :attr:`event` performs the manifest lookup and
+        records the outcome here.
+        """
+        return self._provider_skipped
+
+    @property
     def event(self) -> Event:
         """Parse payload inside the event header."""
         if not self._event:
             self._event = parse_payload(self._header)
+            self._provider_skipped = self._event.manifest_missing
 
         return self._event
 
@@ -223,13 +257,15 @@ class Event:
         "_event",
         "_header",
         "_manifest",
+        "_manifest_missing",
         "_record",
         "_struct",
     ]
 
-    def __init__(self, header: Header, event_manifest: ModuleType):
+    def __init__(self, header: Header, event_manifest: ModuleType | None):
         self._header = header
         self._manifest = event_manifest
+        self._manifest_missing = event_manifest is None
         self._event = None
 
         # Not every header has an opcode and version, so check it like this.
@@ -245,6 +281,11 @@ class Event:
                 self._struct = None
         else:
             self._struct = None
+
+    @property
+    def manifest_missing(self) -> bool:
+        """Whether no manifest was registered for this event's provider."""
+        return self._manifest_missing
 
     def __getattr__(self, attribute: str) -> Any:
         try:

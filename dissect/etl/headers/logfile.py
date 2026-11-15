@@ -195,3 +195,24 @@ class LogfileHeader:
     def buffers_written(self) -> int:
         """The number of buffers written to the file."""
         return self.header.BuffersWritten
+
+    @property
+    def events_lost(self) -> int:
+        """The number of events the logger reports as lost.
+
+        This value is taken verbatim from the ``EventsLost`` field of the
+        :class:`TraceLogfileHeader`. It is a claim made by the logger itself and
+        is not verified against the physical contents of the file. A value of
+        zero does not prove that every event was captured.
+        """
+        return self.header.EventsLost
+
+    @property
+    def buffers_lost(self) -> int:
+        """The number of buffers the logger reports as lost.
+
+        This value is taken verbatim from the ``BufferLost`` field of the
+        :class:`TraceLogfileHeader` and is independent of any buffer loss
+        observed from the physical file layout.
+        """
+        return self.header.BufferLost
