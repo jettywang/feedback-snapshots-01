@@ -149,6 +149,20 @@ class Header:
         each header subclass defines what additional information it wants to return to a record.
         """
 
+    def metadata_fields(self) -> dict[str, Any]:
+        """Native-typed header metadata used as the correlation identity of an event.
+
+        Unlike :func:`additional_header_fields` (a display-oriented, legacy view that may
+        contain stringified values), this mapping must preserve the real identity of the
+        values (e.g. ``UUID`` objects instead of their string form) so that process or
+        activity correlation never depends on display formatting.
+        """
+        return self.additional_header_fields()
+
+    def extended_data_fields(self) -> list[dict[str, Any]]:
+        """Extended data items carried by this header, if the header type supports them."""
+        return []
+
     def standard_header_fields(self) -> dict[str, Any]:
         """Some standard header information that can be retrieved for any header."""
         return {
@@ -350,6 +364,13 @@ class EventInstanceGUIDHeader(Header):
             "ThreadId": self.thread_id,
             "ProcessId": self.process_id,
             "ParentGuid": f"{self.parent_guid}",
+        }
+
+    def metadata_fields(self) -> dict[str, Any]:
+        return {
+            "ThreadId": self.thread_id,
+            "ProcessId": self.process_id,
+            "ParentGuid": self.parent_guid,
         }
 
 

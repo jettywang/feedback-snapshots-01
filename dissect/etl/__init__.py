@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dissect.etl.etl import ETL, Buffer
+from dissect.etl.etl import ETL, Buffer, EventResult
 from dissect.etl.exceptions import (
     Error,
     ExtendedDataItemException,
@@ -15,6 +15,7 @@ from dissect.etl.exceptions import (
 __all__ = [
     "ETL",
     "Buffer",
+    "EventResult",
     "Error",
     "ExtendedDataItemException",
     "InvalidBufferError",

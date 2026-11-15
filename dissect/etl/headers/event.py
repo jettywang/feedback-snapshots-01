@@ -248,6 +248,17 @@ class EventHeader(Header):
             "ProcessId": self.process_id,
             "ActivityId": f"{self.activity_id}",
         }
+        basic_information.update({"Extensions": self.extended_data_fields()})
+        return basic_information
+
+    def metadata_fields(self) -> dict[str, Any]:
+        return {
+            "ThreadId": self.thread_id,
+            "ProcessId": self.process_id,
+            "ActivityId": self.activity_id,
+        }
+
+    def extended_data_fields(self) -> list[dict[str, Any]]:
         extensions = []
         for extension in self.header_extensions:
             extension_dict = {
@@ -255,5 +266,4 @@ class EventHeader(Header):
             }
             extension_dict.update(extension.data)
             extensions.append(extension_dict)
-        basic_information.update({"Extensions": extensions})
-        return basic_information
+        return extensions

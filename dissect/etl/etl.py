@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import io
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, BinaryIO
 
 from dissect.cstruct import Structure
@@ -38,12 +39,195 @@ from dissect.etl.headers.logfile import LogfileHeader
 from dissect.etl.headers.utils import select_event_header
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Mapping
     from datetime import datetime
     from types import ModuleType
     from uuid import UUID
 
     from dissect.etl.headers.headers import Header
+
+
+# Provenance labels for the facets of an EventResult.
+SOURCE_HEADER = "etw-header"
+SOURCE_EXTENSION = "etw-header-extension"
+SOURCE_MANIFEST = "manifest-template"
+
+
+def _snapshot_value(value: Any) -> Any:
+    """Materialize a parsed value into an immutable, self-contained snapshot.
+
+    Nested structures become read-only mappings (keeping their original field names),
+    arrays become tuples and mutable byte buffers become bytes. The snapshot no longer
+    references any live cstruct state, so continued parsing can never rewrite it.
+    """
+    if isinstance(value, Structure):
+        return MappingProxyType({key: _snapshot_value(val) for key, val in value.__values__.items()})
+    if isinstance(value, MappingProxyType):
+        return value
+    if isinstance(value, dict):
+        return MappingProxyType({key: _snapshot_value(val) for key, val in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_snapshot_value(item) for item in value)
+    if isinstance(value, (bytearray, memoryview)):
+        return bytes(value)
+    return value
+
+
+def _display_value(value: Any) -> Any:
+    """Convert a parsed value to its legacy display form for the flat event_values view.
+
+    SID structures are pretty-printed (a display-only conversion; the raw value stays
+    available in the payload facet). Every other value is snapshotted so the flat view
+    never holds references to live parser state.
+    """
+    if isinstance(value, Structure) and hasattr(value, "sid"):
+        return read_sid(value.sid.dumps())
+    return _snapshot_value(value)
+
+
+class EventResult:
+    """Immutable, faceted representation of a single parsed event.
+
+    The facets never merge and always keep their original field names, so a manifest
+    payload field can never overwrite ETW header metadata:
+
+    - ``header``: metadata from the ETW event header. This is the only facet that
+      business correlation (process or activity mapping) may use, exposed directly
+      through the ``process_id``, ``thread_id`` and ``activity_id`` properties.
+    - ``extensions``: extended data items carried by the header.
+    - ``payload``: values decoded with the provider manifest template, or ``None``
+      when the template is unknown (no manifest found or no matching event in it).
+
+    All values are materialized snapshots taken at parse time; continuing to parse
+    other events can never rewrite a previously returned result.
+    """
+
+    __slots__ = (
+        "_activity_id",
+        "_extensions",
+        "_header",
+        "_legacy_header",
+        "_legacy_payload",
+        "_payload",
+        "_process_id",
+        "_provider_name",
+        "_symbol",
+        "_thread_id",
+    )
+
+    def __init__(
+        self,
+        *,
+        header_fields: dict[str, Any],
+        legacy_header_fields: dict[str, Any],
+        extensions: list[dict[str, Any]],
+        payload: dict[str, Any] | None,
+        legacy_payload: dict[str, Any],
+        process_id: int | None,
+        thread_id: int | None,
+        activity_id: UUID | None,
+        provider_name: str | None,
+        symbol: str | None,
+    ):
+        self._header = MappingProxyType({key: _snapshot_value(value) for key, value in header_fields.items()})
+        self._legacy_header = dict(legacy_header_fields)
+        self._extensions = tuple(_snapshot_value(item) for item in extensions)
+        self._payload = (
+            None if payload is None else MappingProxyType({key: _snapshot_value(v) for key, v in payload.items()})
+        )
+        self._legacy_payload = dict(legacy_payload)
+        self._process_id = process_id
+        self._thread_id = thread_id
+        self._activity_id = activity_id
+        self._provider_name = provider_name
+        self._symbol = symbol
+
+    @property
+    def header(self) -> Mapping[str, Any]:
+        """Header metadata facet (source: ``etw-header``), with native value types."""
+        return self._header
+
+    @property
+    def extensions(self) -> tuple[Mapping[str, Any], ...]:
+        """Extended data items facet (source: ``etw-header-extension``)."""
+        return self._extensions
+
+    @property
+    def payload(self) -> Mapping[str, Any] | None:
+        """Manifest template values facet (source: ``manifest-template``).
+
+        ``None`` when the template is unknown, which is explicitly distinct from an
+        empty payload; see :func:`template_known`.
+        """
+        return self._payload
+
+    @property
+    def template_known(self) -> bool:
+        """Whether a manifest template was available to decode the payload."""
+        return self._payload is not None
+
+    @property
+    def provider_name(self) -> str | None:
+        return self._provider_name
+
+    @property
+    def symbol(self) -> str | None:
+        return self._symbol
+
+    @property
+    def process_id(self) -> int | None:
+        """Process id from the ETW header metadata facet. Never taken from the payload."""
+        return self._process_id
+
+    @property
+    def thread_id(self) -> int | None:
+        """Thread id from the ETW header metadata facet. Never taken from the payload."""
+        return self._thread_id
+
+    @property
+    def activity_id(self) -> UUID | None:
+        """Activity id from the ETW header metadata facet. Never taken from the payload."""
+        return self._activity_id
+
+    @property
+    def collisions(self) -> frozenset[str]:
+        """Field names present in both the header metadata and the manifest payload."""
+        if self._payload is None:
+            return frozenset()
+        return frozenset(self._header) & frozenset(self._payload)
+
+    def field_sources(self, name: str) -> tuple[str, ...]:
+        """Return the provenance labels of every facet that contains a field ``name``."""
+        sources = []
+        if name in self._header:
+            sources.append(SOURCE_HEADER)
+        if any(name in extension for extension in self._extensions):
+            sources.append(SOURCE_EXTENSION)
+        if self._payload is not None and name in self._payload:
+            sources.append(SOURCE_MANIFEST)
+        return tuple(sources)
+
+    def flatten(self) -> dict[str, Any]:
+        """Recreate the legacy flat ``event_values`` view.
+
+        Compatibility rule (historical behaviour, kept for existing consumers): header
+        fields are inserted first and manifest payload values are written afterwards, so
+        on a name collision the *payload* value wins. Nested structures are represented
+        by their immutable snapshot and SID structures by their pretty-printed string.
+
+        This is a display-oriented view only. Never derive process or activity
+        correlation from it; use the ``header`` facet or the ``process_id``,
+        ``thread_id`` and ``activity_id`` properties instead.
+        """
+        flat = dict(self._legacy_header)
+        flat.update(self._legacy_payload)
+        return flat
+
+    def __repr__(self) -> str:
+        return (
+            f"<EventResult symbol={self._symbol!r} header={dict(self._header)!r} "
+            f"extensions={len(self._extensions)} items payload={self._payload!r}>"
+        )
 
 
 class ETL:
@@ -224,6 +408,7 @@ class Event:
         "_header",
         "_manifest",
         "_record",
+        "_result",
         "_struct",
     ]
 
@@ -246,11 +431,72 @@ class Event:
         else:
             self._struct = None
 
+        self._result = self._build_result()
+
+    def _build_result(self) -> EventResult:
+        """Snapshot the parsed event into the faceted, immutable result representation."""
+        header = self._header
+
+        header_fields = header.standard_header_fields()
+        header_fields.update(header.metadata_fields())
+
+        payload = None
+        legacy_payload = {}
+        if self._struct is not None:
+            payload = dict(self._struct.__values__)
+            legacy_payload = {key: _display_value(value) for key, value in payload.items()}
+
+        process_id = getattr(header, "process_id", None)
+        if process_id is None:
+            process_id = header_fields.get("ProcessId")
+        thread_id = getattr(header, "thread_id", None)
+        if thread_id is None:
+            thread_id = header_fields.get("ThreadId")
+        activity_id = getattr(header, "activity_id", None)
+
+        return EventResult(
+            header_fields=header_fields,
+            legacy_header_fields=header.additional_header_fields(),
+            extensions=header.extended_data_fields(),
+            payload=payload,
+            legacy_payload=legacy_payload,
+            process_id=process_id,
+            thread_id=thread_id,
+            activity_id=activity_id,
+            provider_name=self.provider_name(),
+            symbol=self.symbol(),
+        )
+
     def __getattr__(self, attribute: str) -> Any:
         try:
             return getattr(self._struct, attribute)
         except AttributeError:
             return object.__getattribute__(self, attribute)
+
+    @property
+    def result(self) -> EventResult:
+        """The faceted, immutable result of this event.
+
+        Forensic reports and correlation logic must be built on this representation:
+        the header metadata facet always keeps its own values, even when the manifest
+        payload contains fields with the same name.
+        """
+        return self._result
+
+    @property
+    def process_id(self) -> int | None:
+        """Process id from the ETW header metadata facet."""
+        return self._result.process_id
+
+    @property
+    def thread_id(self) -> int | None:
+        """Thread id from the ETW header metadata facet."""
+        return self._result.thread_id
+
+    @property
+    def activity_id(self) -> UUID | None:
+        """Activity id from the ETW header metadata facet."""
+        return self._result.activity_id
 
     def provider_name(self) -> str | None:
         """Returns the manifest provider name."""
@@ -272,20 +518,14 @@ class Event:
 
         The header data is additional information provided from a specific header.
         The event data is from a specific manifest file if it exists.
+
+        .. warning::
+            This is the legacy flat view. On a name collision the manifest payload
+            value overwrites the header value (see :func:`EventResult.flatten`), so
+            never use this view for process or activity correlation. Use
+            :func:`Event.result` instead, which keeps both values with their source.
         """
-        event_values = self._header.additional_header_fields()
-        struct_events = self._struct._values if self._struct else {}
-
-        # Pretty print Instance values.
-        update_event = {}
-        instance_values = ((key, value) for key, value in struct_events.items() if isinstance(value, Structure))
-        for key, value in instance_values:
-            if hasattr(value, "sid"):
-                update_event[key] = read_sid(value.sid.dumps())
-
-        event_values.update(struct_events)
-        event_values.update(update_event)
-        return event_values
+        return self._result.flatten()
 
     def __repr__(self) -> str:
         symbol = self._event.symbol if self._event else None

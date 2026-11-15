@@ -41,6 +41,29 @@ tox
 For a more elaborate explanation on how to build and test the project, please see [the
 documentation](https://docs.dissect.tools/en/latest/contributing/tooling.html).
 
+## Event result model
+
+Each parsed `Event` exposes an immutable, faceted `EventResult` via `event.result`. The facets never merge and always
+keep their original field names, so a manifest payload field can never overwrite ETW header metadata:
+
+- `result.header`: metadata from the ETW event header, with native value types (e.g. `UUID`, not display strings).
+- `result.extensions`: extended data items carried by the header.
+- `result.payload`: values decoded with the provider manifest template, or `None` when the template is unknown
+  (explicitly distinct from an empty payload; see `result.template_known`).
+
+Field names that occur in multiple facets are reported by `result.collisions`, and `result.field_sources(name)`
+returns the provenance (`etw-header`, `etw-header-extension`, `manifest-template`) of every facet holding that name.
+All values are snapshots taken at parse time: continuing to parse other events never rewrites a previously returned
+result.
+
+Business correlation (process or activity mapping) must only use the explicitly chosen metadata facet, i.e.
+`result.process_id`, `result.thread_id` and `result.activity_id` (also available directly on the `Event`). These are
+always sourced from the ETW header, never from the payload and never from dictionary merge order.
+
+The legacy flat `event.event_values()` view is kept for compatibility: header fields are inserted first and manifest
+payload values afterwards, so on a name collision the payload value wins. It is a display-oriented view only — do not
+derive correlation identities from it.
+
 ## Contributing
 
 The Dissect project encourages any contribution to the codebase. To make your contribution fit into the project, please
