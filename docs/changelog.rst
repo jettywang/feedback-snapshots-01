@@ -2,6 +2,21 @@ Release notes
 =============
 This page contains the most significant changes in Signify between each release.
 
+Unreleased
+----------
+* Optimised file-level Authenticode verification of PE files. When a single
+  verification needs several fingerprints (e.g. a SHA-1 and a SHA-256 signature), the
+  input is now read in one shared pass and the resulting digests are cached on the
+  :class:`~signify.authenticode.signed_file.pe.SignedPEFile` instance for the lifetime
+  of that open input. Each digest algorithm keeps its own hasher, exclusion rules and
+  independent verification conclusion. The cache is never keyed on file name or length
+  and is not shared across separate opens.
+* Hardened :class:`~signify.fingerprinter.Fingerprinter` against unreadable or changing
+  input: short reads, failed seeks/reads and a change of the input length while hashing
+  now raise :class:`~signify.exceptions.FingerprinterError` instead of producing a
+  partial or unreliable fingerprint. A failed fingerprint calculation never leaves a
+  cached digest to stand in for the remaining verification.
+
 v0.9.3 (2026-10-11)
 -------------------
 * Fix crash on certificates with key algorithms unknown to asn1crypto (e.g. ML-DSA).

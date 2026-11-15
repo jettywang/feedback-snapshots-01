@@ -46,7 +46,11 @@ from typing_extensions import TypedDict
 from signify._typing import HashFunction
 from signify.authenticode.indirect_data import IndirectData, PeImageData
 from signify.authenticode.signed_data import AuthenticodeSignature
-from signify.exceptions import AuthenticodeInvalidPageHashError, SignedPEParseError
+from signify.exceptions import (
+    AuthenticodeInvalidPageHashError,
+    FingerprinterError,
+    SignedPEParseError,
+)
 from signify.fingerprinter import Fingerprinter, Range
 
 from .base import AuthenticodeFile
@@ -74,6 +78,14 @@ class SignedPEFile(AuthenticodeFile):
 
         self.file.seek(0, os.SEEK_END)
         self._filelength = self.file.tell()
+
+        # Fingerprints calculated during the lifetime of this object, i.e. for this
+        # particular open input. The cache is intentionally keyed on neither file name
+        # nor length alone: it lives on the instance that owns the open stream, so it
+        # can never be reused for a different (e.g. replaced or truncated) file. Each
+        # entry records the input length it was based on, and is only trusted while the
+        # stream still reports that same length.
+        self._fingerprint_cache: dict[tuple[str, int, int, int | None], bytes] = {}
 
     @classmethod
     def _try_open(
@@ -299,6 +311,35 @@ class SignedPEFile(AuthenticodeFile):
         """
         return SignedPEFingerprinter(self)
 
+    def _current_length(self) -> int:
+        """Returns the current length of the open input. A length that differs from the
+        one observed when this object was opened (or when a fingerprint was cached)
+        means the underlying content has changed and any cached fingerprint is stale.
+        """
+        self.file.seek(0, os.SEEK_END)
+        return self.file.tell()
+
+    def _invalidate_cache_on_change(self) -> None:
+        """Drops all cached fingerprints if the input length no longer matches the
+        length this object was opened with. Raises when the content has changed, so a
+        previously calculated digest can never be substituted for a fresh verification.
+        """
+        if self._current_length() != self._filelength:
+            self._fingerprint_cache.clear()
+            raise FingerprinterError(
+                "The length of the input changed since it was opened; cached "
+                "fingerprints have been invalidated."
+            )
+
+    def _cache_key(
+        self,
+        digest_algorithm: HashFunction,
+        start: int,
+        end: int,
+        block_size: int | None,
+    ) -> tuple[str, int, int, int | None]:
+        return (digest_algorithm().name, start, end, block_size)
+
     def get_fingerprint(
         self,
         digest_algorithm: HashFunction,
@@ -308,22 +349,85 @@ class SignedPEFile(AuthenticodeFile):
     ) -> bytes:
         """Gets the fingerprint for this file, with the provided start and end,
         and optionally aligned to the PE file's alignment.
+
+        Fingerprints calculated through this object are cached for the lifetime of this
+        open input, so that verifying several signatures that use the same digest
+        algorithm reads the relevant parts of the file only once. The cache is bound
+        to this object and to the input's current length; a changed length invalidates
+        it rather than returning a stale digest.
         """
+        self._invalidate_cache_on_change()
+
+        block_size = self.page_size if aligned else None
+        normalized_end = self._filelength if end < 0 else end
+        key = self._cache_key(digest_algorithm, start, normalized_end, block_size)
+
+        cached = self._fingerprint_cache.get(key)
+        if cached is not None:
+            return cached
+
         fingerprinter = self.get_fingerprinter()
-        fingerprinter.add_signed_pe_hashers(
+        if not fingerprinter.add_signed_pe_hashers(
             digest_algorithm,
             start=start,
             end=end,
-            block_size=self.page_size if aligned else None,
-        )
-        return fingerprinter.hash()[digest_algorithm().name]
+            block_size=block_size,
+        ):
+            raise SignedPEParseError(
+                "The PE header could not be parsed to determine the sections to omit, "
+                "so the Authenticode fingerprint could not be calculated."
+            )
+        digest = fingerprinter.hash()[digest_algorithm().name]
+
+        # The fingerprinter guarantees it read a stable snapshot; re-check the length to
+        # guard against a change in between separate fingerprint calculations as well.
+        self._invalidate_cache_on_change()
+        self._fingerprint_cache[key] = digest
+        return digest
 
     def get_fingerprints(self, *digest_algorithms: HashFunction) -> dict[str, bytes]:
+        """Calculates the fingerprints for multiple digest algorithms in a single pass
+        over the file.
+
+        All digest algorithms are fed the same (omission-adjusted) ranges by one
+        fingerprinter, so the file is read once instead of once per algorithm. Each
+        algorithm still keeps its own hasher and therefore its own independent digest
+        and verification conclusion. The resulting digests are cached on this object
+        for subsequent calls, as long as the input length does not change.
+        """
         if not digest_algorithms:
             return {}
-        fingerprinter = self.get_fingerprinter()
-        fingerprinter.add_signed_pe_hashers(*digest_algorithms)
-        return fingerprinter.hashes()["authentihash"]
+
+        self._invalidate_cache_on_change()
+
+        result: dict[str, bytes] = {}
+        missing: list[HashFunction] = []
+        for digest_algorithm in digest_algorithms:
+            key = self._cache_key(digest_algorithm, 0, self._filelength, None)
+            cached = self._fingerprint_cache.get(key)
+            if cached is not None:
+                result[digest_algorithm().name] = cached
+            else:
+                missing.append(digest_algorithm)
+
+        if missing:
+            fingerprinter = self.get_fingerprinter()
+            if not fingerprinter.add_signed_pe_hashers(*missing):
+                raise SignedPEParseError(
+                    "The PE header could not be parsed to determine the sections to "
+                    "omit, so the Authenticode fingerprints could not be calculated."
+                )
+            calculated = fingerprinter.hashes()["authentihash"]
+
+            self._invalidate_cache_on_change()
+            for digest_algorithm in missing:
+                name = digest_algorithm().name
+                self._fingerprint_cache[
+                    self._cache_key(digest_algorithm, 0, self._filelength, None)
+                ] = calculated[name]
+            result.update(calculated)
+
+        return result
 
     def iter_embedded_signatures(
         self, *, include_nested: bool = True, ignore_parse_errors: bool = True

@@ -29,6 +29,7 @@ import os
 from typing import BinaryIO
 
 from signify._typing import HashFunction
+from signify.exceptions import FingerprinterError
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +148,40 @@ class Fingerprinter:
         self._filelength = self.file.tell()
 
         self._fingers: list[Finger] = []
+
+    def _read_interval(self, start: int, length: int) -> bytes:
+        """Reads exactly ``length`` bytes from the input, starting at ``start``.
+
+        The input is required to be seekable. A seek that does not land on the
+        requested position, a read that returns fewer bytes than requested, or a read
+        that raises, all indicate that the input can not be read consistently. In any
+        of those cases a :class:`FingerprinterError` is raised; a partial block is
+        never hashed.
+
+        :param start: The offset at which the interval starts.
+        :param length: The exact number of bytes that must be returned.
+        :raises FingerprinterError: if the input cannot be read consistently.
+        """
+        try:
+            self.file.seek(start, os.SEEK_SET)
+            if self.file.tell() != start:
+                raise FingerprinterError(
+                    f"Unable to seek to offset {start} of the input."
+                )
+            block = self.file.read(length)
+        except FingerprinterError:
+            raise
+        except Exception as e:
+            raise FingerprinterError(
+                f"Failed to read {length} bytes at offset {start} of the input: {e!r}"
+            ) from e
+
+        if len(block) != length:
+            raise FingerprinterError(
+                f"Short read on file at offset {start}: expected {length} bytes, got "
+                f"{len(block)}."
+            )
+        return block
 
     def _adjust_ranges(
         self, ranges: list[Range], start: int = 0, end: int = -1
@@ -284,18 +319,32 @@ class Fingerprinter:
         :returns: A dict of dicts, the outer dict being a mapping of the description
             (as set in :meth:`add_hashers` and the inner dict being a mapping of hasher
             name to digest.
+        :raises FingerprinterError: when the input cannot be read consistently, for
+            example because of a short read, a read error or a change in length while
+            hashing.
         :raises RuntimeError: when internal inconsistencies occur.
         """
         while True:
             interval = self._next_interval
             if interval is None:
                 break
-            self.file.seek(interval.start, os.SEEK_SET)
-            block = self.file.read(interval.end - interval.start)
-            if len(block) != interval.end - interval.start:
-                raise RuntimeError("Short read on file.")
+            block = self._read_interval(
+                interval.start, interval.end - interval.start
+            )
             self._hash_block(block, interval.start, interval.end)
             self._consume(interval.start, interval.end)
+
+        # Re-check the length of the input. If it changed while we were hashing, the
+        # digests do not describe a single, stable snapshot and must not be reported as
+        # a successful fingerprint.
+        self.file.seek(0, os.SEEK_END)
+        current_length = self.file.tell()
+        if current_length != self._filelength:
+            raise FingerprinterError(
+                "The length of the input changed while calculating fingerprints "
+                f"(was {self._filelength}, is {current_length}); the resulting "
+                "hashes are unreliable."
+            )
 
         results = {}
         for finger in self._fingers:

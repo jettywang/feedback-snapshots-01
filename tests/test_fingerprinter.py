@@ -110,3 +110,51 @@ def test_hash_block():
     # Let's process the block
     fp._hash_block(dummy, 0, len(dummy))
     assert hasher.seen == dummy
+
+
+def test_short_read_raises_fingerprinter_error():
+    from signify.exceptions import FingerprinterError
+
+    class ShortRead(io.BytesIO):
+        def read(self, size=-1):
+            if size is None or size < 0:
+                return super().read(size)
+            return super().read(max(1, size // 2))
+
+    fingerprinter = Fingerprinter(ShortRead(b"x" * 100))
+    fingerprinter.add_hashers(hashlib.sha256)
+    with pytest.raises(FingerprinterError):
+        fingerprinter.hashes()
+
+
+def test_read_exception_raises_fingerprinter_error():
+    from signify.exceptions import FingerprinterError
+
+    class FailingRead(io.BytesIO):
+        def read(self, size=-1):
+            raise OSError("boom")
+
+    fingerprinter = Fingerprinter(FailingRead(b"x" * 100))
+    fingerprinter.add_hashers(hashlib.sha256)
+    with pytest.raises(FingerprinterError):
+        fingerprinter.hashes()
+
+
+def test_length_change_during_hashing_raises_fingerprinter_error():
+    from signify.exceptions import FingerprinterError
+
+    class Truncating(io.BytesIO):
+        def __init__(self, data):
+            super().__init__(data)
+            self._done = False
+
+        def read(self, size=-1):
+            if not self._done:
+                self._done = True
+                self.truncate(50)
+            return super().read(size)
+
+    fingerprinter = Fingerprinter(Truncating(b"x" * 100))
+    fingerprinter.add_hashers(hashlib.sha256)
+    with pytest.raises(FingerprinterError):
+        fingerprinter.hashes()

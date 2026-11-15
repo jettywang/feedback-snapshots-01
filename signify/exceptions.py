@@ -9,6 +9,12 @@ class ParseError(SignifyError):
     pass
 
 
+class FingerprinterError(SignifyError):
+    """Raised when the input of a :class:`~signify.fingerprinter.Fingerprinter` cannot
+    be read consistently. This covers short reads, read errors and a change in the
+    input's length while the fingerprint is being calculated."""
+
+
 class SignedMsiParseError(ParseError):
     pass
 
