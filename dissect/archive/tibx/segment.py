@@ -66,13 +66,46 @@ class Segment:
         )
 
 
-def _pkcs7_unpad(data: bytes) -> bytes:
-    """Strip PKCS#7 padding if present, else return the data unchanged."""
-    if data and len(data) % 16 == 0:
-        pad = data[-1]
-        if 1 <= pad <= 16 and data[-pad:] == bytes([pad]) * pad:
-            return data[:-pad]
-    return data
+def _pkcs7_unpad(data: bytes, page_index: int) -> bytes:
+    """Strip the PKCS#7 padding CBC leaves on a decrypted segment.
+
+    The padding is part of the ciphertext framing, so damage to the last block shows up
+    here. Before, invalid padding was passed through as data, which for a stored segment
+    could make one segment's tail pass for the next one's bytes.
+
+    Raises:
+        ~dissect.archive.tibx.exception.CorruptArchiveError: If ``data`` does not carry valid PKCS#7 padding.
+    """
+    if not data or len(data) % 16:
+        raise CorruptArchiveError(
+            f"encrypted segment at page {page_index} has {len(data)} bytes of CBC plaintext, not a block multiple"
+        )
+    pad = data[-1]
+    if not 1 <= pad <= 16 or data[-pad:] != bytes([pad]) * pad:
+        raise CorruptArchiveError(f"encrypted segment at page {page_index} has invalid CBC padding")
+    return data[:-pad]
+
+
+def _carries_segment_header(page: bytes) -> bool:
+    """Whether a continuation page holds another segment's header rather than payload.
+
+    Compressed and encrypted bytes can coincidentally start with ``SG``/``SE``, which is
+    why a bare magic is not enough. A complete header is: version 1, a known codec and
+    cache level, and non-zero lengths -- a combination that does not occur by accident in
+    a page of payload, but does identify the next segment when a continuation page is
+    missing or out of order.
+    """
+    magic = page[SEGMENT_HEADER_OFFSET : SEGMENT_HEADER_OFFSET + 2]
+    if magic not in (SEGMENT_MAGIC, SEGMENT_MAGIC_ENCRYPTED):
+        return False
+    header = c_tibx.segment_header(page[SEGMENT_HEADER_OFFSET:])
+    return (
+        header.version == 1
+        and header.compression <= c_tibx.ComprAlg.ZSTD
+        and header.cache_level <= 3
+        and header.length > 0
+        and header.zlength > 0
+    )
 
 
 def read_compressed(store: PageStore, segment: Segment, continuation: list[bytes] | None = None) -> bytes:
@@ -82,6 +115,15 @@ def read_compressed(store: PageStore, segment: Segment, continuation: list[bytes
     each page's 8-byte envelope. The physically-contiguous continuation pages are read in
     a single batched I/O (one ``read`` instead of one per page), which matters most over a
     network share -- or come from ``continuation``, pages already read with the header.
+
+    The segment's own lengths decide where it ends: the pages are never scanned to EOF, so
+    a segment can neither grow into its neighbour's first page nor be cut short by one.
+    Damage that would make it do so anyway -- a missing, duplicated or reordered
+    continuation page, or the next segment's header page spliced in -- raises instead of
+    returning bytes that are not this segment's.
+
+    Raises:
+        ~dissect.archive.tibx.exception.CorruptArchiveError: If the continuation pages are not this segment's.
     """
     remaining = segment.zlength
     first_take = min(SEGMENT_FIRST_PAGE_PAYLOAD, remaining)
@@ -105,6 +147,19 @@ def read_compressed(store: PageStore, segment: Segment, continuation: list[bytes
             # compressed and encrypted payload bytes can coincidentally match that magic.
             body = page[ENVELOPE_SIZE:]
             take = min(len(body), remaining)
+            if _carries_segment_header(page):
+                raise CorruptArchiveError(
+                    f"continuation page {start + offset} of segment at page {segment.page_index} "
+                    f"carries the header of another segment"
+                )
+            if take < len(body) and any(body[take:]):
+                # Acronis zero-fills the rest of a segment's last page. Anything else there
+                # belongs to whatever follows, so reading it would borrow another segment's
+                # bytes for this one: the page is missing, out of order, or misfiled.
+                raise CorruptArchiveError(
+                    f"continuation page {start + offset} of segment at page {segment.page_index} "
+                    f"has non-zero bytes after its {take} payload bytes"
+                )
             parts.append(body[:take])
             remaining -= take
 
@@ -166,18 +221,20 @@ def read_plaintext(store: PageStore, page_index: int, data_key: DataKey | None =
         from dissect.archive.tibx.crypto import decrypt_segment
 
         plaintext = decrypt_segment(read_compressed(store, segment, pages[1:]), data_key)
-        if segment.compression == c_tibx.ComprAlg.ZSTD:
-            # zstd frame parsing ignores any trailing CBC/PKCS#7 padding
-            out = decompress_zstd(plaintext, segment.length)
+        # CBC leaves PKCS#7 padding to strip, GCM plaintext is already exact -- and unpadding
+        # it there would eat real bytes whenever the payload happens to end in a valid padding
+        # pattern. The padding belongs to the CBC wrapping, so damage to it is wrapper damage:
+        # it must not pass for data, nor be zero-filled into a full-length read.
+        payload = plaintext if data_key.gcm else _pkcs7_unpad(plaintext, page_index)
+        if segment.compression == c_tibx.ComprAlg.NONE:
+            # Stored: the declared length is the whole framing, in both directions
+            if len(payload) != segment.length:
+                raise CorruptArchiveError(
+                    f"encrypted segment at page {page_index} decoded {len(payload)} bytes, expected {segment.length}"
+                )
+            out = payload
         else:
-            # Stored, LZ4 or zlib: CBC leaves PKCS#7 padding to strip, GCM is already exact --
-            # and unpadding it there would eat real bytes whenever the payload happens to end
-            # in a valid padding pattern.
-            payload = plaintext if data_key.gcm else _pkcs7_unpad(plaintext)
-            if segment.compression == c_tibx.ComprAlg.NONE:
-                out = payload[: segment.length]
-            else:
-                out = decompress(payload, segment)
+            out = decompress(payload, segment)
         # As for a plaintext segment: a short result is damage, not data to zero-fill
         if len(out) != segment.length:
             raise CorruptArchiveError(

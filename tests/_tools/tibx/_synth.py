@@ -19,6 +19,7 @@ store is only useful for as long as a real parser would accept it.
 from __future__ import annotations
 
 import io
+import random
 import struct
 import sys
 import zlib
@@ -131,53 +132,85 @@ def lz4_literals(data: bytes) -> bytes:
     return b"\xf0" + b"\xff" * (rest // 255) + bytes([rest % 255]) + data
 
 
-def segment_pages(
-    payload: bytes,
-    compression: c_tibx.ComprAlg = c_tibx.ComprAlg.ZSTD,
-    data_key: bytes | None = None,
-    alg: int = 3,
+def compressed(payload: bytes, compression: c_tibx.ComprAlg) -> bytes:
+    """The on-disk form of ``payload`` under ``compression`` (before any encryption)."""
+    if compression == c_tibx.ComprAlg.ZSTD:
+        return zstd.compress(payload)
+    if compression == c_tibx.ComprAlg.LZ4:
+        return lz4_literals(payload)
+    if compression == c_tibx.ComprAlg.ZLIB:
+        return zlib.compress(payload)
+    if compression == c_tibx.ComprAlg.NONE:
+        return payload
+    raise ValueError(f"unsupported synthetic compression {compression:#04x}")
+
+
+def exact_payload(compression: c_tibx.ComprAlg, target: int, *, lo: int = 400) -> bytes:
+    """Incompressible payload whose stored form is exactly ``target`` bytes.
+
+    Deterministic and quick: the payload is drawn from a seeded RNG over a narrow window
+    of lengths, so a boundary case such as "the compressed stream exactly fills the first
+    page" can be reproduced without a large sample.
+    """
+    for length in range(max(1, target - lo), target + lo + 1):
+        payload = random.Random(length).randbytes(length)
+        if len(compressed(payload, compression)) == target:
+            return payload
+    raise ValueError(f"no synthetic {compression.name} payload of {target} bytes")
+
+
+def exact_wrapped_payload(
+    compression: c_tibx.ComprAlg, target: int, *, prefix: int, block: int = 0, lo: int = 400
+) -> bytes:
+    """Incompressible payload whose encrypted framing is exactly ``target`` bytes.
+
+    ``prefix`` is the cipher prefix (CBC's IV, GCM's IV and tag); ``block`` is the AES block
+    size for CBC's PKCS#7 padding, 0 for a stream cipher that leaves the plaintext exact.
+    PKCS#7 always adds 1 to 16 bytes, even when the plaintext already ends on a block, so a
+    CBC-framed stream is `prefix + plaintext + pad` and can never fill a page exactly.
+    """
+    for length in range(max(1, target - lo), target + lo + 1):
+        payload = random.Random(length).randbytes(length)
+        size = len(compressed(payload, compression))
+        total = prefix + (size + block - size % block if block else size)
+        if total == target:
+            return payload
+    raise ValueError(f"no synthetic {compression.name} payload framed to {target} bytes")
+
+
+def cbc_blob(plaintext: bytes, data_key: bytes, iv: bytes = bytes(range(16))) -> bytes:
+    """A CBC-wrapped payload: the IV followed by the ciphertext.
+
+    ``plaintext`` must already be padded to a whole number of AES blocks -- the caller
+    chooses the padding so a test can make it wrong on purpose.
+    """
+    from Crypto.Cipher import AES
+
+    if len(plaintext) % 16:
+        raise ValueError("CBC plaintext must be a whole number of AES blocks")
+    return c_tibx.segment_cbc_header(iv=iv).dumps() + AES.new(data_key, AES.MODE_CBC, iv).encrypt(plaintext)
+
+
+def blob_pages(
+    blob: bytes,
+    length: int,
+    compression: c_tibx.ComprAlg,
+    *,
+    encrypted: bool = False,
     cache: int = 0,
 ) -> list[bytes]:
-    """Build the DATA page(s) of one segment: header page + continuation pages.
+    """DATA pages for an already-framed payload ``blob``.
 
-    With ``data_key`` set, an encrypted ``SE`` segment is produced and the key id is 1.
-    ``alg`` selects the framing, mirroring what Acronis writes: a CBC id (1-3) prepends a
-    random IV and PKCS#7-pads, a GCM id (5-7) prepends the IV and the tag and leaves the
-    ciphertext exactly as long as the plaintext.
+    ``length`` is the uncompressed length recorded in the header, which need not match
+    what ``blob`` decodes to: that is exactly the damage some tests need to express.
     """
-    if compression == c_tibx.ComprAlg.ZSTD:
-        blob = zstd.compress(payload)
-    elif compression == c_tibx.ComprAlg.LZ4:
-        blob = lz4_literals(payload)
-    elif compression == c_tibx.ComprAlg.ZLIB:
-        blob = zlib.compress(payload)
-    elif compression == c_tibx.ComprAlg.NONE:
-        blob = payload
-    else:
-        raise ValueError(f"unsupported synthetic compression {compression:#04x}")
-
-    if data_key is not None:
-        from Crypto.Cipher import AES
-
-        iv = bytes(range(16))
-        if alg in GCM_ALGS:
-            ciphertext, tag = AES.new(data_key, AES.MODE_GCM, nonce=iv).encrypt_and_digest(blob)
-            blob = c_tibx.segment_gcm_header(iv=iv, tag=tag).dumps() + ciphertext
-        else:
-            padded = blob + bytes([16 - len(blob) % 16]) * (16 - len(blob) % 16)
-            ciphertext = AES.new(data_key, AES.MODE_CBC, iv).encrypt(padded)
-            blob = c_tibx.segment_cbc_header(iv=iv).dumps() + ciphertext
-        magic, version, key_id = b"SE", 0, 1
-    else:
-        magic, version, key_id = b"SG", 1, 0
-
     first = blank_page(c_tibx.PageType.DATA)
     header = c_tibx.segment_header(
-        magic=magic,
-        version=version,
-        length=len(payload),
+        magic=b"SE" if encrypted else b"SG",
+        version=0 if encrypted else 1,
+        length=length,
         zlength=len(blob),
-        key_id=key_id,
+        key_id=1 if encrypted else 0,
         compression=compression,
         cache_level=cache,
     )
@@ -194,6 +227,42 @@ def segment_pages(
         pages.append(finalize(cont))
         position += len(chunk)
     return pages
+
+
+def segment_pages(
+    payload: bytes,
+    compression: c_tibx.ComprAlg = c_tibx.ComprAlg.ZSTD,
+    data_key: bytes | None = None,
+    alg: int = 3,
+    cache: int = 0,
+    blob: bytes | None = None,
+) -> list[bytes]:
+    """Build the DATA page(s) of one segment: header page + continuation pages.
+
+    With ``data_key`` set, an encrypted ``SE`` segment is produced and the key id is 1.
+    ``alg`` selects the framing, mirroring what Acronis writes: a CBC id (1-3) prepends a
+    random IV and PKCS#7-pads, a GCM id (5-7) prepends the IV and the tag and leaves the
+    ciphertext exactly as long as the plaintext.
+
+    ``blob`` overrides the compressed bytes (the length in the header still comes from
+    ``payload``), for damage that only the payload can express -- a wrong packing, say.
+    """
+    blob = compressed(payload, compression) if blob is None else blob
+
+    if data_key is not None:
+        from Crypto.Cipher import AES
+
+        iv = bytes(range(16))
+        if alg in GCM_ALGS:
+            ciphertext, tag = AES.new(data_key, AES.MODE_GCM, nonce=iv).encrypt_and_digest(blob)
+            blob = c_tibx.segment_gcm_header(iv=iv, tag=tag).dumps() + ciphertext
+        else:
+            padded = blob + bytes([16 - len(blob) % 16]) * (16 - len(blob) % 16)
+            ciphertext = AES.new(data_key, AES.MODE_CBC, iv).encrypt(padded)
+            blob = c_tibx.segment_cbc_header(iv=iv).dumps() + ciphertext
+        return blob_pages(blob, len(payload), compression, encrypted=True, cache=cache)
+
+    return blob_pages(blob, len(payload), compression, cache=cache)
 
 
 def wrap_data_key(data_key: bytes, password: bytes, iter_log2: int = 12, alg: int = 3) -> bytes:
@@ -646,6 +715,8 @@ def build_lsm_archive(
     page_base: int = 0,
     slices: list[int] | None = None,
     extra_slots: dict[int, bytes] | None = None,
+    segment_map: dict[int, tuple[int, int]] | None = None,
+    segment_blobs: dict[int, bytes] | None = None,
 ) -> bytes:
     """Build a complete synthetic archive: ARCH header + LSM maps + SG segments.
 
@@ -657,10 +728,19 @@ def build_lsm_archive(
     ``page_base`` makes all absolute page/byte offsets (segment_map, ctrees) global
     for a *version file* mapped at that logical page offset of a version set;
     ``extra_slots`` adds raw TLV payloads (e.g. slot 18, the volumes).
+
+    ``segment_map`` overrides the locator ``(page_count, page_offset)`` written for a
+    segment id, and ``segment_blobs`` overrides a segment's compressed payload, so a test
+    can express a locator or stream that is wrong independently of the pages themselves.
     """
     data_key = bytes(range(KEY_LENGTH[alg])) if password is not None else None
     pages, dm_cells, sm_cells, _ = _segments_and_maps(
-        extents, start_page=page_base + 1, compression=compression, data_key=data_key, alg=alg
+        extents,
+        start_page=page_base + 1,
+        compression=compression,
+        data_key=data_key,
+        alg=alg,
+        segment_blobs=segment_blobs,
     )
 
     if use_ctree:
@@ -675,6 +755,19 @@ def build_lsm_archive(
         sm_sb = lsb(8, 32, memtree_cells=sm_cells)
 
     slots = {1: dm_sb, 2: sm_sb}
+    if segment_map:
+        # The segment_map value carries page_count and page_offset; override a locator
+        # without touching the segment pages it points at
+        sm_cells = [
+            Cell(cell.key, segment_map_value(*segment_map[c_tibx.segment_map_key(cell.key).segment_id]))
+            if c_tibx.segment_map_key(cell.key).segment_id in segment_map
+            else cell
+            for cell in sm_cells
+        ]
+        if use_ctree:
+            pages[-1] = lsm_page(c_tibx.PageType.LEAF, b"LEAF", sm_cells, key_length=8, compact=True)
+        else:
+            slots[2] = lsb(8, 32, memtree_cells=sm_cells)
     if slices:
         # One record per backup, keyed by slice id, exactly as the extents reference them.
         # GUIDs and times are derived from the slice id so a test can predict them.
@@ -744,11 +837,13 @@ def _segments_and_maps(
     compression: c_tibx.ComprAlg,
     data_key: bytes | None,
     alg: int = 3,
+    segment_blobs: dict[int, bytes] | None = None,
 ) -> tuple[list[bytes], list[Cell], list[Cell], int]:
     """Build the SG segment pages plus the data_map/segment_map cells for ``extents``.
 
     Segment pages are placed starting at absolute page ``start_page``; returns
-    ``(pages, dm_cells, sm_cells, next_page)``.
+    ``(pages, dm_cells, sm_cells, next_page)``. ``segment_blobs`` replaces a segment's
+    compressed payload for the segment ids it names (``100`` and up).
     """
     pages: list[bytes] = []
     next_page = start_page
@@ -779,7 +874,8 @@ def _segments_and_maps(
             )
             payload += spec.data
 
-        seg_pages = segment_pages(bytes(payload), compression=compression, data_key=data_key, alg=alg)
+        blob = (segment_blobs or {}).get(segment_id)
+        seg_pages = segment_pages(bytes(payload), compression=compression, data_key=data_key, alg=alg, blob=blob)
         sm_cells.append(Cell(segment_map_key(segment_id), segment_map_value(len(seg_pages), next_page)))
         pages.extend(seg_pages)
         next_page += len(seg_pages)

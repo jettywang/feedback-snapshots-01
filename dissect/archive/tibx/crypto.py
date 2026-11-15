@@ -251,5 +251,8 @@ def decrypt_segment(payload: bytes, data_key: DataKey) -> bytes:
     if len(payload) < SEGMENT_CBC_HEADER_SIZE + 16:
         raise CorruptArchiveError(f"encrypted segment payload too short: {len(payload)} bytes")
     ciphertext = payload[SEGMENT_CBC_HEADER_SIZE:]
-    ciphertext = ciphertext[: len(ciphertext) // 16 * 16]
+    if len(ciphertext) % 16:
+        # Every CBC ciphertext is a whole number of blocks; a remainder means bytes were
+        # lost or added, and truncating them would hide exactly that kind of damage
+        raise CorruptArchiveError(f"encrypted segment CBC ciphertext is {len(ciphertext)} bytes, not a block multiple")
     return AES.new(data_key.key, AES.MODE_CBC, c_tibx.segment_cbc_header(payload).iv).decrypt(ciphertext)
