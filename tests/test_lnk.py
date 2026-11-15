@@ -62,9 +62,9 @@ def test_xp_remote_lnk_file(xp_remote_lnk_file: Path) -> None:
     assert flags & c_lnk.LINK_FLAGS.has_working_dir
     assert len(lnk_file.stringdata.string_data) == 1
     working_dir = lnk_file.stringdata.string_data["working_dir"]
-    assert working_dir.character_count == 0x62
+    assert working_dir.character_count == 0x31
     assert working_dir.string == "\\\\als-fichiers3\\Qualité\\Archives\\Méthodologie WAS"
-    assert len(working_dir.string) == working_dir.character_count / 2  # extra 0x00 bytes are decoded away.
+    assert len(working_dir.string) == working_dir.character_count
 
     tracker_props = lnk_file.extradata.extradata["TRACKER_PROPS"]
     assert tracker_props.length == 0x58
@@ -169,7 +169,7 @@ def test_win7_local_lnk_dir(win7_local_lnk_dir: Path) -> None:
     assert common_network_relative_link.net_name == b"\\\\NETBOOK\\Users"
 
     assert flags & c_lnk.LINK_FLAGS.has_relative_path
-    assert lnk_file.stringdata.relative_path.character_count == 0x26
+    assert lnk_file.stringdata.relative_path.character_count == 0x13
     assert lnk_file.stringdata.relative_path.string == "..\\..\\Administrator"
 
     tracker_props = lnk_file.extradata.extradata["TRACKER_PROPS"]

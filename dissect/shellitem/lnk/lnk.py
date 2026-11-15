@@ -166,15 +166,36 @@ class LnkStringData:
 
     def _get_stringdata(self, fh: BinaryIO) -> c_lnk.STRING_DATA:
         # STRING_DATA structs have a size called character_count
-        # this size (character_count) should be doubled when unicode is used
-        size = unpack("H", fh.read(2))[0]
-        if self.flags & c_lnk.LINK_FLAGS.is_unicode:
-            size = size * 2
-            data = fh.read(size).decode("utf-16")
-        else:
-            data = fh.read(size)
+        # this size (character_count) is a character count, not a byte count:
+        # it should be doubled to get the consumed byte count when unicode is used
+        count_data = fh.read(2)
+        if len(count_data) != 2:
+            raise EOFError(f"STRING_DATA truncated: expected 2 bytes for character_count, got {len(count_data)}")
+        character_count = unpack("H", count_data)[0]
 
-        return c_lnk.STRING_DATA(character_count=size, string=data)
+        if self.flags & c_lnk.LINK_FLAGS.is_unicode:
+            size = character_count * 2
+            raw = fh.read(size)
+            if len(raw) != size:
+                raise EOFError(
+                    f"STRING_DATA truncated: character_count {character_count} requires {size} bytes, "
+                    f"got {len(raw)}"
+                )
+            # Decode strictly as UTF-16LE. Corrupt data (e.g. lone surrogates) is rejected with a
+            # UnicodeDecodeError that retains the raw bytes as evidence, instead of being silently
+            # mangled into a display value that different command lines could collide into.
+            data = raw.decode("utf-16-le")
+        else:
+            size = character_count
+            raw = fh.read(size)
+            if len(raw) != size:
+                raise EOFError(
+                    f"STRING_DATA truncated: character_count {character_count} requires {size} bytes, "
+                    f"got {len(raw)}"
+                )
+            data = raw
+
+        return c_lnk.STRING_DATA(character_count=character_count, string=data)
 
     def __getattr__(self, attr: str) -> Any:
         try:
