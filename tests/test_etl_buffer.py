@@ -8,8 +8,8 @@ from dissect.cstruct import cstruct
 
 import dissect.etl.etl as etl
 from dissect.etl.c_etl import etl_def
-from dissect.etl.etl import Buffer
-from dissect.etl.exceptions import InvalidBufferError
+from dissect.etl.etl import Buffer, EventResult
+from dissect.etl.exceptions import InvalidBufferError, InvalidEventError, InvalidRecordError
 
 from .test_wmi_buffer_header import RAW_BUFFER_HEADER
 
@@ -60,15 +60,35 @@ def test_buffer_iteration_succeed(mocked_read_record: Buffer) -> None:
     assert next(buffer_iterator) == mocked_read_record.return_value
 
 
-@pytest.mark.parametrize(
-    ("header_offset", "data_offset"),
-    [(0, 10), (0, 0)],
-)
-@patch.object(Buffer, "read_record", side_effect=[EOFError])
-def test_buffer_iterations(mocked_read_record: Buffer, header_offset: int, data_offset: int) -> None:
-    buffer_iterator = setup_buffer_iterator(mocked_read_record, data_offset)
-    with pytest.raises(StopIteration):
-        next(buffer_iterator)
+def test_buffer_iteration_retains_truncated_record(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A record marker whose header cannot be decoded because the buffer ends inside it.
+    truncated = b"\xc0\x0a\x00\x00" + b"\x00" * 6
+    mocked_etl = setup_mocked_etlfile()
+    buffer = Buffer(mocked_etl, 0)
+    # Bypass the property machinery by preloading the cached attributes the iterator reads.
+    buffer._data = memoryview(truncated)
+    monkeypatch.setattr(Buffer, "data_offset", property(lambda self: 0))
+    monkeypatch.setattr(Buffer, "filled_bytes", property(lambda self: len(truncated)))
+
+    records = list(buffer)
+
+    assert len(records) == 1
+    record = records[0]
+    assert record.raw.result == EventResult.TRUNCATED
+    assert isinstance(record.raw.error, (EOFError, InvalidRecordError))
+    assert record.raw.payload == truncated
+    with pytest.raises(InvalidEventError):
+        _ = record.event
+
+
+def test_buffer_padding_marker_stops_iteration(monkeypatch: pytest.MonkeyPatch) -> None:
+    mocked_etl = setup_mocked_etlfile()
+    buffer = Buffer(mocked_etl, 0)
+    buffer._data = memoryview(b"\xff\xff\xff\xff")
+    monkeypatch.setattr(Buffer, "data_offset", property(lambda self: 0))
+    monkeypatch.setattr(Buffer, "filled_bytes", property(lambda self: 4))
+
+    assert list(buffer) == []
 
 
 def test_negative_read_offset() -> None:
