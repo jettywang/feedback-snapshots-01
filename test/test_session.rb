@@ -800,6 +800,36 @@ class SessionTest < Net::SFTP::TestCase
     assert_not_implemented 5, :unblock, "handle", 12345, 67890
   end
 
+  def test_fsync_should_send_fsync_extension_request
+    expect_sftp_session :server_version => 3, :extensions => { "fsync@openssh.com" => "1" } do |channel|
+      channel.sends_packet(FXP_EXTENDED, :long, 0, :string, "fsync@openssh.com", :string, "handle")
+      channel.gets_packet(FXP_STATUS, :long, 0, :long, 0)
+    end
+
+    response = assert_synchronous_command(:fsync!, "handle")
+    assert response.ok?
+  end
+
+  def test_posix_rename_should_send_posix_rename_extension_request
+    expect_sftp_session :server_version => 3, :extensions => { "posix-rename@openssh.com" => "1" } do |channel|
+      channel.sends_packet(FXP_EXTENDED, :long, 0, :string, "posix-rename@openssh.com",
+                           :string, "/path/to/old", :string, "/path/to/new")
+      channel.gets_packet(FXP_STATUS, :long, 0, :long, 0)
+    end
+
+    response = assert_synchronous_command(:posix_rename!, "/path/to/old", "/path/to/new")
+    assert response.ok?
+  end
+
+  def test_extension_predicate_should_reflect_advertised_extensions
+    expect_sftp_session :server_version => 3, :extensions => { "fsync@openssh.com" => "1" }
+    assert_scripted do
+      sftp.connect!
+      assert sftp.extension?("fsync@openssh.com")
+      refute sftp.extension?("posix-rename@openssh.com")
+    end
+  end
+
   def test_v6_unblock_should_send_block_packet
     expect_sftp_session :server_version => 6 do |channel|
       channel.sends_packet(FXP_UNBLOCK, :long, 0, :string, "handle", :int64, 12345, :int64, 67890)

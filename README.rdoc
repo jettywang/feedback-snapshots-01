@@ -32,6 +32,11 @@ In a nutshell:
     # upload a file or directory to the remote host
     sftp.upload!("/path/to/local", "/path/to/remote")
 
+    # or upload to a staging path, verify, fsync when the server supports it,
+    # and only then rename into place; the result records each confirmation
+    result = sftp.confirmed_upload!("/path/to/local", "/path/to/remote")
+    puts result.notification if result.published?
+
     # download a file or directory from the remote host
     sftp.download!("/path/to/remote", "/path/to/local")
 
@@ -60,7 +65,15 @@ In a nutshell:
     end
   end
 
-For the full documentation, start with Net::SFTP::Session. Also see Net::SFTP::Operations::Upload, Net::SFTP::Operations::Download, Net::SFTP::Operations::FileFactory, Net::SFTP::Operations::File, and Net::SFTP::Operations::Dir.
+For the full documentation, start with Net::SFTP::Session. Also see Net::SFTP::Operations::Upload, Net::SFTP::Operations::ConfirmedUpload, Net::SFTP::Operations::Download, Net::SFTP::Operations::FileFactory, Net::SFTP::Operations::File, and Net::SFTP::Operations::Dir.
+
+`upload!` returning successfully means every WRITE and the final CLOSE got a
+STATUS OK. That is not the same as "the file is durably on disk": SFTP has no
+directory fsync, and a server may acknowledge a write before it reaches stable
+storage. Use `confirmed_upload!` when the business needs a per-step record of
+what was actually confirmed. `examples/confirmed_upload_demo.rb` runs the
+write-failure, CLOSE-failure and all-confirmed paths against an in-memory
+server.
 
 == REQUIREMENTS:
 

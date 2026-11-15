@@ -38,6 +38,20 @@ module Net; module SFTP; module Protocol
       end
     end
 
+    # Asks an OpenSSH server to fsync(2) the open file identified by +handle+.
+    # The server must advertise the fsync@openssh.com extension.
+    def fsync(handle)
+      send_request(FXP_EXTENDED, :string, "fsync@openssh.com", :string, handle)
+    end
+
+    # Asks an OpenSSH server to rename +old_path+ to +new_path+ with POSIX
+    # rename(2) semantics, replacing +new_path+ if it exists. The server must
+    # advertise the posix-rename@openssh.com extension.
+    def posix_rename(old_path, new_path)
+      send_request(FXP_EXTENDED, :string, "posix-rename@openssh.com",
+        :string, old_path, :string, new_path)
+    end
+
     private
 
       # Send a new packet of the given type, and with the given data arguments.

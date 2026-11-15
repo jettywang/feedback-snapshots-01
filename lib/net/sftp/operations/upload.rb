@@ -61,6 +61,22 @@ module Net; module SFTP; module Operations
   #   access and modification times of the local ones, and their permissions
   #   are set even on files that already exist remotely.
   #
+  # == What a successful upload proves
+  #
+  # When #upload! returns without raising, every WRITE request received a
+  # STATUS OK, and the final CLOSE received a STATUS OK. That is the whole
+  # claim. It does not mean the server fsynced the data or the containing
+  # directory, and a write that the server accepted at the SFTP layer may
+  # still be lost in a server crash. The <tt>:close</tt> progress event is
+  # emitted before the CLOSE request is sent, and <tt>:finish</tt> only means
+  # the state machine has no work left. Neither event is a delivery
+  # confirmation; do not notify users from them.
+  #
+  # Use Session#confirmed_upload for a staged upload that records each
+  # confirmation separately, verifies the result, optionally fsyncs, and only
+  # then renames into the final path. See
+  # Net::SFTP::Operations::ConfirmedUpload.
+  #
   # Like OpenSSH's sftp client, new remote files and directories are created
   # with the permissions of the local ones, without setuid, setgid and sticky
   # bits and subject to the server's umask. Nothing is set when +local+ is an
@@ -87,11 +103,14 @@ module Net; module SFTP; module Operations
   #       puts "writing #{args[2].length} bytes to #{args[0].remote} starting at #{args[1]}"
   #     when :close then
   #       # args[0] : file metadata
-  #       puts "finished with #{args[0].remote}"
+  #       # Emitted before CLOSE is sent; not a delivery confirmation.
+  #       puts "closing #{args[0].remote}"
   #     when :mkdir then
   #       # args[0] : remote path name
   #       puts "creating directory #{args[0]}"
   #     when :finish then
+  #       # The state machine has no work left, not that the server confirmed
+  #       # delivery. The CLOSE reply is checked by #wait.
   #       puts "all done!"
   #   end
   #
@@ -110,7 +129,8 @@ module Net; module SFTP; module Operations
   #     end
   #
   #     def on_close(uploader, file)
-  #       puts "finished with #{file.remote}"
+  #       # Emitted before the handle is closed; the CLOSE reply is not in yet.
+  #       puts "closing #{file.remote}"
   #     end
   #
   #     def on_mkdir(uploader, path)

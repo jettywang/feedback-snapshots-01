@@ -5,6 +5,7 @@ require 'net/sftp/protocol'
 require 'net/sftp/request'
 require 'net/sftp/operations/dir'
 require 'net/sftp/operations/upload'
+require 'net/sftp/operations/confirmed_upload'
 require 'net/sftp/operations/download'
 require 'net/sftp/operations/file_factory'
 
@@ -108,6 +109,27 @@ module Net; module SFTP
       # Identical to #upload, but blocks until the upload is complete.
       def upload!(local, remote = File.basename(local), options={}, &block)
         upload(local, remote, options, &block).wait
+      end
+
+      # Uploads +local+ to a staging path and only moves it into place at
+      # +remote+ after every write and the close have been acknowledged by
+      # the server. Returns a Net::SFTP::Operations::ConfirmedUpload whose
+      # #result records exactly what was confirmed; it never reports more
+      # than WRITE status replies, CLOSE status, and (when available) fsync,
+      # size/attribute and rename replies prove.
+      #
+      # The final path is only replaced through posix-rename@openssh.com. If
+      # the server does not advertise it, the verified staging file is left
+      # in place and the result reports rename :unsupported instead of
+      # removing the old file and renaming in two non-atomic steps.
+      def confirmed_upload(local, remote = File.basename(local), options={}, &block)
+        Operations::ConfirmedUpload.new(self, local, remote, options, &block)
+      end
+
+      # Identical to #confirmed_upload, but blocks until the confirmation
+      # flow has finished and returns its Net::SFTP::Operations::ConfirmedUpload#result.
+      def confirmed_upload!(local, remote = File.basename(local), options={}, &block)
+        confirmed_upload(local, remote, options, &block).wait.result
       end
 
       # Initiates a download from +remote+ to +local+, asynchronously. This
@@ -291,6 +313,48 @@ module Net; module SFTP
       #   sftp.write!(handle, 0, "hello, world!\n")
       def write!(handle, offset, data, &callback)
         wait_for(write(handle, offset, data, &callback))
+      end
+
+      # :call-seq:
+      #   fsync(handle) -> request
+      #   fsync(handle) { |response| ... } -> request
+      #
+      # Asks the server to fsync(2) the file identified by +handle+. This is
+      # the fsync@openssh.com extension, so it is only available when the
+      # server advertises it (see #extensions). The reply is an ordinary
+      # FXP_STATUS packet.
+      def fsync(handle, &callback)
+        request :fsync, handle, &callback
+      end
+
+      # Identical to #fsync, but blocks until the server responds. It will
+      # raise a StatusException if the request was unsuccessful.
+      def fsync!(handle, &callback)
+        wait_for(fsync(handle, &callback))
+      end
+
+      # :call-seq:
+      #   posix_rename(old_path, new_path) -> request
+      #   posix_rename(old_path, new_path) { |response| ... } -> request
+      #
+      # Asks the server to rename +old_path+ to +new_path+ using POSIX
+      # rename(2) semantics, replacing +new_path+ if it exists. This is the
+      # posix-rename@openssh.com extension, so it is only available when the
+      # server advertises it (see #extensions).
+      def posix_rename(old_path, new_path, &callback)
+        request :posix_rename, old_path, new_path, &callback
+      end
+
+      # Identical to #posix_rename, but blocks until the server responds. It
+      # will raise a StatusException if the request was unsuccessful.
+      def posix_rename!(old_path, new_path, &callback)
+        wait_for(posix_rename(old_path, new_path, &callback))
+      end
+
+      # Returns true if the server advertised the named extension in its
+      # FXP_VERSION packet (for example, "fsync@openssh.com").
+      def extension?(name)
+        extensions.key?(name)
       end
 
       # :call-seq:
