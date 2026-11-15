@@ -99,6 +99,67 @@ class Protocol::V01::TestAttributes < Net::SFTP::TestCase
     assert_raises(Net::SFTP::Exception) { attributes_factory.from_buffer(buffer) }
   end
 
+  def test_from_buffer_should_accept_an_empty_attributes_structure
+    buffer = Net::SSH::Buffer.from(:long, 0)
+
+    attributes = attributes_factory.from_buffer(buffer)
+
+    assert_nil attributes.size
+    assert_nil attributes.permissions
+    assert_equal({}, attributes.attributes)
+  end
+
+  def test_from_buffer_should_reject_a_size_field_shorter_than_int64
+    buffer = Net::SSH::Buffer.from(:long, 0x1, :long, 1234)
+
+    error = assert_raises(Net::SFTP::TruncatedPacketError) { attributes_factory.from_buffer(buffer) }
+    assert_match(/size/, error.message)
+  end
+
+  def test_from_buffer_should_reject_a_field_shorter_than_its_type
+    buffer = Net::SSH::Buffer.from(:long, 0x4, :raw, "\x01\xed")
+
+    assert_raises(Net::SFTP::TruncatedPacketError) { attributes_factory.from_buffer(buffer) }
+  end
+
+  def test_from_buffer_should_reject_a_string_longer_than_the_packet
+    buffer = Net::SSH::Buffer.from(:long, 0x80000000, :long, 1, :string, "name", :long, 40)
+
+    assert_raises(Net::SFTP::TruncatedPacketError) { attributes_factory.from_buffer(buffer) }
+  end
+
+  def test_from_buffer_should_reject_flags_this_version_does_not_define
+    buffer = Net::SSH::Buffer.from(:long, 0x00000100)
+
+    error = assert_raises(Net::SFTP::UnsupportedAttributeFlagsError) { attributes_factory.from_buffer(buffer) }
+    assert_match(/0x00000100/, error.message)
+  end
+
+  def test_from_buffer_should_accept_the_uidgid_flag_with_both_ids
+    buffer = Net::SSH::Buffer.from(:long, 0x2, :long, 1, :long, 2)
+
+    attributes = attributes_factory.from_buffer(buffer)
+
+    assert_equal 1, attributes.uid
+    assert_equal 2, attributes.gid
+  end
+
+  def test_from_buffer_should_reject_trailing_bytes
+    buffer = Net::SSH::Buffer.from(:long, 0, :raw, "\x00")
+
+    assert_raises(Net::SFTP::MalformedPacketError) { attributes_factory.from_buffer(buffer) }
+  end
+
+  def test_from_buffer_within_should_reject_a_field_that_ends_past_the_limit
+    buffer = Net::SSH::Buffer.from(:long, 0x1, :int64, 1234, :long, 0xdeadbeef)
+
+    error = assert_raises(Net::SFTP::TruncatedPacketError) do
+      attributes_factory.from_buffer_within(buffer, 8)
+    end
+    assert_match(/size/, error.message)
+    assert_equal 12, buffer.available, "the bytes past the limit must not be consumed"
+  end
+
   private
 
     def full_buffer

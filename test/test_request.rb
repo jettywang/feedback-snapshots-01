@@ -52,18 +52,47 @@ class RequestTest < Net::SFTP::TestCase
     assert called
   end
 
+  def test_respond_to_should_raise_and_leave_no_response_when_the_packet_cannot_be_parsed
+    packet = stub("packet", :type => 1)
+    session = stub("session", :protocol => mock("protocol"))
+    session.protocol.expects(:parse).with(packet).raises(Net::SFTP::TruncatedPacketError, "short")
+
+    called = false
+    request = Net::SFTP::Request.new(session, :open, 1) { called = true }
+
+    error = assert_raises(Net::SFTP::TruncatedPacketError) { request.respond_to(packet) }
+    assert_equal "short", error.message
+    refute called
+    assert_nil request.response
+  end
+
+  def test_wait_should_raise_the_parse_error_after_a_failed_response
+    session = MockSession.new
+    session.pending_requests = { 1 => true }
+    request = Net::SFTP::Request.new(session, :open, 1)
+
+    error = assert_raises(Net::SFTP::MalformedPacketError) do
+      session.on_loop = proc { session.pending_requests.delete(1); request.fail!(Net::SFTP::MalformedPacketError.new("bad")) }
+      request.wait
+    end
+    assert_equal "bad", error.message
+  end
+
   private
 
     class MockSession
       attr_reader :loops
+      attr_accessor :pending_requests, :on_loop
 
       def initialize
         @loops = 0
+        @pending_requests = {}
       end
 
       def loop
         while true
           @loops += 1
+          @on_loop.call if @on_loop
           break unless yield
         end
       end

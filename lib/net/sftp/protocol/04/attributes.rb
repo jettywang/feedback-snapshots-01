@@ -66,13 +66,27 @@ module Net; module SFTP; module Protocol; module V04
       private
 
         # A helper method for parsing the ACL entry in an Attributes struct.
-        def parse_acl(buffer)
-          acl_buf = Net::SSH::Buffer.new(buffer.read_string)
+        # The ACL is carried as a string, so its count and entries are bounded
+        # by the string itself; an entry can never be completed from the bytes
+        # that follow the attribute structure.
+        def parse_acl(buffer, limit)
+          acl_buf = Net::SSH::Buffer.new(read_string_within!(buffer, limit, "ACL"))
+
           acl = []
           # Each entry is three longs and a string, at least 16 bytes.
-          read_bounded_count!(acl_buf, 16, "ACL").times do
-            acl << ACL.new(acl_buf.read_long, acl_buf.read_long, acl_buf.read_long, acl_buf.read_string)
+          count = read_bounded_count!(acl_buf, 16, "ACL")
+          count.times do
+            type  = read_within!(acl_buf, :long, acl_buf.length, "ACL type")
+            flag  = read_within!(acl_buf, :long, acl_buf.length, "ACL flag")
+            mask  = read_within!(acl_buf, :long, acl_buf.length, "ACL mask")
+            who   = read_string_within!(acl_buf, acl_buf.length, "ACL who")
+            acl << ACL.new(type, flag, mask, who)
           end
+
+          unless acl_buf.eof?
+            raise MalformedPacketError, "ACL left #{acl_buf.available} unparsed bytes"
+          end
+
           acl
         end
     end

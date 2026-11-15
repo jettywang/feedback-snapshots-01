@@ -11,6 +11,20 @@ module Net; module SFTP
     end
   end
 
+  # Raised when a response ends before a field that the packet's own flags or
+  # counts require, or when a nested count claims more items than its enclosing
+  # structure can hold.
+  class TruncatedPacketError < Net::SFTP::Exception; end
+
+  # Raised when an attribute flags value contains bits this protocol version
+  # does not define. The length and order of the fields that follow such bits
+  # are unknown, so the attributes cannot be parsed safely.
+  class UnsupportedAttributeFlagsError < Net::SFTP::Exception; end
+
+  # Raised when a response has bytes left over after the structure that its
+  # count or flags describe has been parsed.
+  class MalformedPacketError < Net::SFTP::Exception; end
+
   # A exception class for reporting a non-success result of an operation.
   class StatusException < Net::SFTP::Exception
 

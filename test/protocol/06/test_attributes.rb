@@ -98,6 +98,35 @@ class Protocol::V06::TestAttributes < Net::SFTP::TestCase
     assert_equal Net::SSH::Buffer.from(:long, 0x4, :byte, 1, :long, 0755).to_s, attributes.to_s
   end
 
+  def test_from_buffer_should_reject_flags_this_version_does_not_define
+    buffer = Net::SSH::Buffer.from(:long, 0x00010000, :byte, 1)
+
+    error = assert_raises(Net::SFTP::UnsupportedAttributeFlagsError) { attributes_factory.from_buffer(buffer) }
+    assert_match(/0x00010000/, error.message)
+  end
+
+  def test_from_buffer_should_reject_a_truncated_ctime_nseconds
+    buffer = Net::SSH::Buffer.from(:long, 0x8100, :byte, 1, :int64, 4567890123, :raw, "\x00\x00")
+
+    error = assert_raises(Net::SFTP::TruncatedPacketError) { attributes_factory.from_buffer(buffer) }
+    assert_match(/ctime_nseconds/, error.message)
+  end
+
+  def test_from_buffer_should_reject_a_mime_type_shorter_than_its_declared_length
+    buffer = Net::SSH::Buffer.from(:long, 0x1000, :byte, 1, :long, 20, :raw, "text/pl")
+
+    assert_raises(Net::SFTP::TruncatedPacketError) { attributes_factory.from_buffer(buffer) }
+  end
+
+  def test_from_buffer_should_accept_the_allocation_size_field_on_its_own
+    buffer = Net::SSH::Buffer.from(:long, 0x400, :byte, 1, :int64, 99)
+
+    attributes = attributes_factory.from_buffer(buffer)
+
+    assert_equal 99, attributes.allocation_size
+    assert_nil attributes.size
+  end
+
   private
 
     def full_buffer

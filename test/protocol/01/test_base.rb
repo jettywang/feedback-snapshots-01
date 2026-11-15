@@ -209,6 +209,34 @@ class Protocol::V01::TestBase < Net::SFTP::TestCase
     assert_raises(Net::SFTP::Exception) { @base.parse_name_packet(packet) }
   end
 
+  def test_parse_name_packet_should_keep_an_entry_s_extended_pairs_inside_that_entry
+    packet = Net::SSH::Buffer.from(:long, 2,
+      :string, "first", :string, "longfirst", :long, 0x80000000, :long, 1,
+      :string, "victim", :string, "long-victim", :long, 0x4, :long, 0644)
+
+    error = assert_raises(Net::SFTP::TruncatedPacketError) { @base.parse_name_packet(packet) }
+    assert_match(/extended attribute/, error.message)
+  end
+
+  def test_parse_name_packet_should_reject_a_trailing_byte_after_the_entries
+    packet = Net::SSH::Buffer.from(:long, 1,
+      :string, "name", :string, "longname", :long, 0, :raw, "\x00")
+
+    assert_raises(Net::SFTP::MalformedPacketError) { @base.parse_name_packet(packet) }
+  end
+
+  def test_parse_name_packet_should_reject_an_entry_whose_filename_overlaps_the_next
+    packet = Net::SSH::Buffer.from(:long, 2, :string, "name1", :long, 40, :raw, "abc")
+
+    assert_raises(Net::SFTP::TruncatedPacketError) { @base.parse_name_packet(packet) }
+  end
+
+  def test_parse_attrs_packet_should_reject_truncated_attributes
+    packet = Net::SSH::Buffer.from(:long, 0x4, :raw, "\x01\xed")
+
+    assert_raises(Net::SFTP::TruncatedPacketError) { @base.parse_attrs_packet(packet) }
+  end
+
   private
 
     def driver

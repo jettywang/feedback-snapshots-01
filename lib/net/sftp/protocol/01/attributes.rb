@@ -58,21 +58,35 @@ module Net; module SFTP; module Protocol; module V01
       end
 
       # Parses the given buffer and returns an Attributes object compsed from
-      # the data extracted from it.
+      # the data extracted from it. The buffer must contain exactly one
+      # attributes structure; a packet with unparsed bytes left over is
+      # rejected.
       def from_buffer(buffer)
-        flags = buffer.read_long
+        from_buffer_within(buffer, buffer.length, "attributes", :exact => true)
+      end
+
+      # Parses one attributes structure that is nested in a larger packet,
+      # such as the attributes of a FXP_NAME entry. Reads never pass +limit+,
+      # so a count that runs past the structure raises instead of borrowing
+      # bytes that belong to the next structure.
+      def from_buffer_within(buffer, limit, what="attributes", options={})
+        start = buffer.position
+        flags = read_within!(buffer, :long, limit, "#{what} flags")
+        assert_known_flags!(flags, what)
+
         data = {}
 
         elements.each do |name, type, condition|
-          if flags & condition == condition
-            if type == :special
-              data[name] = send("parse_#{name}", buffer)
-            else
-              data[name] = buffer.send("read_#{type}")
-            end
+          next unless flags & condition == condition
+
+          if type == :special
+            data[name] = send("parse_#{name}", buffer, limit)
+          else
+            data[name] = read_within!(buffer, type, limit, "#{what} #{name}")
           end
         end
 
+        assert_consumed!(buffer, start, limit, what) if options[:exact]
         new(data)
       end
 
@@ -106,12 +120,27 @@ module Net; module SFTP; module Protocol; module V01
 
       private
 
-        # Parse the hash of extended data from the buffer.
-        def parse_extended(buffer)
+        # Raises UnsupportedAttributeFlagsError if +flags+ sets a bit that this
+        # protocol version does not define. The width and order of the fields
+        # such a bit introduces are unknown, so nothing after it can be trusted.
+        def assert_known_flags!(flags, what="attributes")
+          known = elements.inject(0) { |mask, (_name, _type, condition)| mask | condition }
+          unknown = flags & ~known
+          unless unknown == 0
+            raise UnsupportedAttributeFlagsError,
+              "unsupported #{what} flags 0x%08x" % unknown
+          end
+        end
+
+        # Parse the hash of extended data from the buffer. Both strings of a
+        # pair must fit before +limit+; the bytes after the structure are not
+        # available to satisfy a dishonest count.
+        def parse_extended(buffer, limit)
           extended = Hash.new
           # Each pair is two strings, at least 8 bytes.
-          read_bounded_count!(buffer, 8, "extended attribute").times do
-            extended[buffer.read_string] = buffer.read_string
+          read_bounded_count_within!(buffer, 8, limit, "extended attribute").times do
+            name = read_string_within!(buffer, limit, "extended attribute name")
+            extended[name] = read_string_within!(buffer, limit, "extended attribute value")
           end
           extended
         end

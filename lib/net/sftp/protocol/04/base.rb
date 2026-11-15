@@ -29,11 +29,18 @@ module Net; module SFTP; module Protocol; module V04
       names = []
 
       # Each entry is a string, the attribute flags and the type, at least 9 bytes.
-      read_bounded_count!(packet, 9, "name").times do
-        filename = packet.read_string
-        attrs    = attribute_factory.from_buffer(packet)
+      count = read_bounded_count!(packet, 9, "name")
+      count.times do |index|
+        # Reserve the minimum bytes the entries after this one still need, so
+        # an attribute structure in this entry cannot satisfy a dishonest
+        # count with bytes that belong to a later entry.
+        filename = read_string_within!(packet, entry_limit(packet, index, count, 9), "name filename")
+        attrs    = attribute_factory.from_buffer_within(packet, entry_limit(packet, index, count, 9),
+                     "name attributes", :exact => index == count - 1)
         names   << name_factory.new(filename, attrs)
       end
+
+      raise MalformedPacketError, "trailing bytes after #{count} name entries" unless packet.eof?
 
       { :names => names }
     end

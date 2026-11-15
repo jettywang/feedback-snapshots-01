@@ -28,6 +28,27 @@ class Protocol::V04::TestBase < Protocol::V03::TestBase
     assert_equal 0550, names.last.attributes.permissions
   end
 
+  def test_parse_name_packet_should_keep_an_entry_s_extended_pairs_inside_that_entry
+    packet = Net::SSH::Buffer.from(:long, 2,
+      :string, "first", :long, 0x80000000, :long, 1,
+      :string, "victim", :long, 0x4, :byte, 1, :long, 0644)
+
+    error = assert_raises(Net::SFTP::TruncatedPacketError) { @base.parse_name_packet(packet) }
+    assert_match(/extended attribute/, error.message)
+  end
+
+  def test_parse_name_packet_should_reject_a_trailing_byte_after_the_entries
+    packet = Net::SSH::Buffer.from(:long, 1, :string, "name", :long, 0, :byte, 1, :raw, "\x00")
+
+    assert_raises(Net::SFTP::MalformedPacketError) { @base.parse_name_packet(packet) }
+  end
+
+  def test_parse_name_packet_should_reject_an_entry_whose_filename_overlaps_the_next
+    packet = Net::SSH::Buffer.from(:long, 2, :string, "name1", :long, 40, :raw, "abc")
+
+    assert_raises(Net::SFTP::TruncatedPacketError) { @base.parse_name_packet(packet) }
+  end
+
   def test_parse_name_packet_with_only_type_attribute_should_format_longname
     packet = Net::SSH::Buffer.from(:long, 1, :string, "name1", :long, 0, :byte, 1)
     names = @base.parse_name_packet(packet)[:names]
@@ -38,7 +59,6 @@ class Protocol::V04::TestBase < Protocol::V03::TestBase
   undef test_fstat_should_ignore_flags_parameter
   undef test_lstat_should_ignore_flags_parameter
   undef test_stat_should_ignore_flags_parameter
-
   def test_lstat_should_send_lstat_packet
     @session.expects(:send_packet).with(FXP_LSTAT, :long, 0, :string, "/path/to/file", :long, 0x800001fd)
     assert_equal 0, @base.lstat("/path/to/file")
@@ -72,6 +92,24 @@ class Protocol::V04::TestBase < Protocol::V03::TestBase
   def test_parse_name_packet_should_reject_count_larger_than_remaining_data
     packet = Net::SSH::Buffer.from(:long, 500_000, :string, "name1", :long, 0, :byte, 1)
     assert_raises(Net::SFTP::Exception) { @base.parse_name_packet(packet) }
+  end
+
+  def test_parse_name_packet_should_keep_an_entry_s_acl_inside_that_entry
+    # The first entry's ACL string is eight bytes and holds only one fixed
+    # field; the second entry's filename would complete it if the ACL count
+    # were checked against the rest of the packet instead of the string.
+    packet = Net::SSH::Buffer.from(:long, 2,
+      :string, "first", :long, 0x40, :byte, 1, :string, raw(:long, 2, :long, 1, :long, 2, :long, 3, :long, 0),
+      :string, "victim", :long, 0, :byte, 1)
+
+    error = assert_raises(Net::SFTP::TruncatedPacketError) { @base.parse_name_packet(packet) }
+    assert_match(/ACL/, error.message)
+  end
+
+  def test_parse_attrs_packet_should_reject_unknown_flags
+    packet = Net::SSH::Buffer.from(:long, 0x00010000, :byte, 1)
+
+    assert_raises(Net::SFTP::UnsupportedAttributeFlagsError) { @base.parse_attrs_packet(packet) }
   end
 
   private

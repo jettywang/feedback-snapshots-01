@@ -596,7 +596,7 @@ class SessionTest < Net::SFTP::TestCase
   def test_realpath_bang_should_block_and_return_names_item
     expect_sftp_session do |channel|
       channel.sends_packet(FXP_REALPATH, :long, 0, :string, "/path/to/dir")
-      channel.gets_packet(FXP_NAME, :long, 0, :long, 1, :string, "dir", :long, 0x0, :long, 2)
+      channel.gets_packet(FXP_NAME, :long, 0, :long, 1, :string, "dir", :long, 0x0, :byte, 2)
     end
 
     name = assert_synchronous_command(:realpath!, "/path/to/dir")

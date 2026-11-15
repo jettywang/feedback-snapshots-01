@@ -83,8 +83,21 @@ module Net; module SFTP
       # this method, which parses the packet and builds a Net::SFTP::Response
       # object to encapsulate it. If a #callback has been provided for this
       # request, the callback is invoked with the new response object.
+      #
+      # A response that cannot be parsed fails the request instead of
+      # producing a partial Response, and the parse error is raised so a
+      # caller waiting on the event loop cannot mistake the failure for a
+      # completed request. The callback is never invoked with attributes the
+      # server did not actually send.
       def respond_to(packet) #:nodoc:
-        data = session.protocol.parse(packet)
+        data =
+          begin
+            session.protocol.parse(packet)
+          rescue StandardError => error
+            fail!(error)
+            raise
+          end
+
         data[:type] = packet.type
         @response = Response.new(self, data)
 

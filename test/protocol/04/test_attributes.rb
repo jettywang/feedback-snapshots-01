@@ -65,6 +65,49 @@ class Protocol::V04::TestAttributes < Net::SFTP::TestCase
     assert_raises(Net::SFTP::Exception) { attributes_factory.from_buffer(buffer) }
   end
 
+  def test_from_buffer_should_reject_an_acl_count_larger_than_the_acl_string
+    # The ACL string holds one entry's fixed fields and a two-byte name, which
+    # the old packet-wide check would have accepted by borrowing later bytes.
+    acl = raw(:long, 2, :long, 1, :long, 2, :long, 3, :long, 0)
+    buffer = Net::SSH::Buffer.from(:long, 0x40, :byte, 1, :string, acl)
+
+    error = assert_raises(Net::SFTP::TruncatedPacketError) { attributes_factory.from_buffer(buffer) }
+    assert_match(/ACL/, error.message)
+  end
+
+  def test_from_buffer_should_reject_an_acl_whose_declared_length_exceeds_the_packet
+    buffer = Net::SSH::Buffer.from(:long, 0x40, :byte, 1, :long, 100, :raw, "abc")
+
+    assert_raises(Net::SFTP::TruncatedPacketError) { attributes_factory.from_buffer(buffer) }
+  end
+
+  def test_from_buffer_should_reject_acl_bytes_left_over_after_the_declared_entries
+    acl = raw(:long, 1, :long, 1, :long, 2, :long, 3, :string, "who", :long, 9)
+    buffer = Net::SSH::Buffer.from(:long, 0x40, :byte, 1, :string, acl)
+
+    assert_raises(Net::SFTP::MalformedPacketError) { attributes_factory.from_buffer(buffer) }
+  end
+
+  def test_from_buffer_should_accept_an_empty_acl
+    acl = raw(:long, 0)
+    buffer = Net::SSH::Buffer.from(:long, 0x40, :byte, 1, :string, acl)
+
+    assert_equal [], attributes_factory.from_buffer(buffer).acl
+  end
+
+  def test_from_buffer_should_reject_flags_this_version_does_not_define
+    buffer = Net::SSH::Buffer.from(:long, 0x400, :byte, 1, :int64, 99)
+
+    error = assert_raises(Net::SFTP::UnsupportedAttributeFlagsError) { attributes_factory.from_buffer(buffer) }
+    assert_match(/0x00000400/, error.message)
+  end
+
+  def test_from_buffer_should_reject_nseconds_without_the_matching_timestamp
+    buffer = Net::SSH::Buffer.from(:long, 0x100, :byte, 1, :long, 5)
+
+    assert_raises(Net::SFTP::MalformedPacketError) { attributes_factory.from_buffer(buffer) }
+  end
+
   def test_attributes_to_s_should_build_binary_representation
     attributes = attributes_factory.new(
       :type => 9,
