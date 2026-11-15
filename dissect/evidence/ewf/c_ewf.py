@@ -116,4 +116,27 @@ typedef struct {
 } HashSection;
 """
 
+# Error sections are the only EWF structures stored in big-endian byte order.
+# They record the sectors that could not be read while acquiring the source disk; the values are
+# therefore evidence of acquisition errors, not of the bytes stored in the image container.
+ewf_error_def = """
+typedef struct {
+    uint32              number_of_errors;
+    uint32              reserved;
+    uint64              sector_count;
+    uint32              unknown_1;
+    uint32              unknown_2;
+    uint32              checksum;
+} ErrorSection;
+
+typedef struct {
+    uint64              sector_count;
+    uint64              first_sector;
+    uint32              unknown_1;
+    uint32              unknown_2;
+    uint32              checksum;
+} ErrorSectionEntry;
+"""
+
 c_ewf = cstruct().load(ewf_def)
+c_ewf_error = cstruct(endian=">").load(ewf_error_def)

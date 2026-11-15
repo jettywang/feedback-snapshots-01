@@ -218,3 +218,46 @@ class _c_ewf(__cs__.cstruct):
 
 # Technically `c_ewf` is an instance of `_c_ewf`, but then we can't use it in type hints
 c_ewf: TypeAlias = _c_ewf
+
+
+class _c_ewf_error(__cs__.cstruct):
+    class ErrorSection(__cs__.Structure):
+        number_of_errors: _c_ewf_error.uint32
+        reserved: _c_ewf_error.uint32
+        sector_count: _c_ewf_error.uint64
+        unknown_1: _c_ewf_error.uint32
+        unknown_2: _c_ewf_error.uint32
+        checksum: _c_ewf_error.uint32
+        @overload
+        def __init__(
+            self,
+            number_of_errors: _c_ewf_error.uint32 | None = ...,
+            reserved: _c_ewf_error.uint32 | None = ...,
+            sector_count: _c_ewf_error.uint64 | None = ...,
+            unknown_1: _c_ewf_error.uint32 | None = ...,
+            unknown_2: _c_ewf_error.uint32 | None = ...,
+            checksum: _c_ewf_error.uint32 | None = ...,
+        ): ...
+        @overload
+        def __init__(self, fh: bytes | memoryview | bytearray | BinaryIO, /): ...
+
+    class ErrorSectionEntry(__cs__.Structure):
+        sector_count: _c_ewf_error.uint64
+        first_sector: _c_ewf_error.uint64
+        unknown_1: _c_ewf_error.uint32
+        unknown_2: _c_ewf_error.uint32
+        checksum: _c_ewf_error.uint32
+        @overload
+        def __init__(
+            self,
+            sector_count: _c_ewf_error.uint64 | None = ...,
+            first_sector: _c_ewf_error.uint64 | None = ...,
+            unknown_1: _c_ewf_error.uint32 | None = ...,
+            unknown_2: _c_ewf_error.uint32 | None = ...,
+            checksum: _c_ewf_error.uint32 | None = ...,
+        ): ...
+        @overload
+        def __init__(self, fh: bytes | memoryview | bytearray | BinaryIO, /): ...
+
+
+c_ewf_error: TypeAlias = _c_ewf_error
