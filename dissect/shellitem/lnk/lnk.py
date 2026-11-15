@@ -17,6 +17,7 @@ from dissect.shellitem.lnk.c_lnk import (
     LINK_INFO_HEADER_SIZE,
     c_lnk,
 )
+from dissect.shellitem.lnk.property_store import SerializedPropertyStore
 
 if typing.TYPE_CHECKING:
     from io import BufferedReader
@@ -59,6 +60,7 @@ class LnkExtraData:
 
         signature = c_lnk.uint32(fh)
         block_name = EXTRA_DATA_BLOCK_SIGNATURES.get_name(signature)
+        block_offset = fh.tell() - LINK_EXTRA_DATA_HEADER_SIZE
 
         if block_name:
             read_size = self.size - LINK_EXTRA_DATA_HEADER_SIZE
@@ -77,15 +79,16 @@ class LnkExtraData:
 
             if block_name == "VISTA_AND_ABOVE_IDLIST_PROPS":
                 struct = LnkTargetIdList(BytesIO(block_data), read_size)
+            elif block_name == "PROPERTY_STORE_PROPS":
+                struct = SerializedPropertyStore(
+                    block_data,
+                    offset=block_offset + LINK_EXTRA_DATA_HEADER_SIZE,
+                    block_offset=block_offset,
+                )
             else:
                 struct = c_lnk.typedefs[block_name](block_data)
 
-            if block_name == "PROPERTY_STORE_PROPS":
-                # TODO implement actual serialized property parsing
-                guid = self._parse_guid(struct.format_id)
-                struct.format_id = guid
-
-            elif block_name == "TRACKER_PROPS":
+            if block_name == "TRACKER_PROPS":
                 for name in struct.fields:
                     if "droid" in name:
                         guid = self._parse_guid(getattr(struct, name))
