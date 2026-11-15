@@ -110,7 +110,6 @@ typedef struct DEVICE_NAME {
     char device_name[];                         // A NULL–terminated string, as defined by the system default code page, which specifies a device; for example, the drive letter "D:".
 };
 
-// TODO create unicode version
 typedef struct COMMON_NETWORK_RELATIVE_LINK_HEADER {
     uint32 common_network_relative_link_size;    // A 32-bit, unsigned integer that specifies the size, in bytes, of the CommonNetworkRelativeLink structure. This value MUST be greater than or equal to 0x00000014. All offsets specified in this structure MUST be less than this value, and all strings contained in this structure MUST fit within the extent defined by this size.
     COMMON_NETWORK_RELATIVE_LINK_FLAGS common_network_relative_link_flags;   // Flags that specify the contents of the DeviceNameOffset and NetProviderType fields.
@@ -119,7 +118,19 @@ typedef struct COMMON_NETWORK_RELATIVE_LINK_HEADER {
     uint32 net_provider_type;                    // A 32-bit, unsigned integer that specifies the type of network provider. If the ValidNetType flag is set, this value MUST be one of the following; otherwise, this value MUST be ignored.
 };
 
-// TODO create unicode version
+// The two optional Unicode offset fields are present when the enclosing LinkInfo header
+// has a LinkInfoHeaderSize greater than or equal to 0x00000024. All offsets in this
+// structure, including the Unicode ones, are relative to the start of this structure.
+typedef struct COMMON_NETWORK_RELATIVE_LINK_UNICODE_HEADER {
+    uint32 common_network_relative_link_size;    // A 32-bit, unsigned integer that specifies the size, in bytes, of the CommonNetworkRelativeLink structure.
+    COMMON_NETWORK_RELATIVE_LINK_FLAGS common_network_relative_link_flags;   // Flags that specify the contents of the DeviceNameOffset and NetProviderType fields.
+    uint32 net_name_offset;                      // A 32-bit, unsigned integer that specifies the location of the ANSI NetName field, relative to the start of the CommonNetworkRelativeLink structure.
+    uint32 device_name_offset;                   // A 32-bit, unsigned integer that specifies the location of the ANSI DeviceName field, relative to the start of the CommonNetworkRelativeLink structure.
+    uint32 net_provider_type;                    // A 32-bit, unsigned integer that specifies the type of network provider.
+    uint32 net_name_offset_unicode;              // An optional, 32-bit, unsigned integer that specifies the location of the Unicode NetName field, relative to the start of the CommonNetworkRelativeLink structure.
+    uint32 device_name_offset_unicode;           // An optional, 32-bit, unsigned integer that specifies the location of the Unicode DeviceName field, relative to the start of the CommonNetworkRelativeLink structure.
+};
+
 typedef struct COMMON_NETWORK_RELATIVE_LINK {
     uint32 common_network_relative_link_size;    // A 32-bit, unsigned integer that specifies the size, in bytes, of the CommonNetworkRelativeLink structure. This value MUST be greater than or equal to 0x00000014. All offsets specified in this structure MUST be less than this value, and all strings contained in this structure MUST fit within the extent defined by this size.
     COMMON_NETWORK_RELATIVE_LINK_FLAGS common_network_relative_link_flags;   // Flags that specify the contents of the DeviceNameOffset and NetProviderType fields.
@@ -385,7 +396,11 @@ class EXTRA_DATA_BLOCK_SIGNATURES(IntEnum):
 LINK_HEADER_SIZE = 0x4C
 LINK_INFO_HEADER_SIZE = 0x0C
 LINK_INFO_BODY_SIZE = 0x10
+# A LinkInfo header with the two optional Unicode offset fields is 0x00000024 bytes.
+LINK_INFO_UNICODE_HEADER_SIZE = 0x24
 LINK_EXTRA_DATA_HEADER_SIZE = 0x08
+COMMON_NETWORK_RELATIVE_LINK_HEADER_SIZE = 0x14
+COMMON_NETWORK_RELATIVE_LINK_UNICODE_HEADER_SIZE = 0x1C
 
 
 JUMPLIST_HEADER_SIZE = 0x24

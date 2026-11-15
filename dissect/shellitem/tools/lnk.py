@@ -4,13 +4,23 @@ import argparse
 import logging
 from pathlib import Path
 
-from dissect.util import ts
-
 from dissect.shellitem.lnk import Lnk
+from dissect.util import ts
 
 log = logging.getLogger(__name__)
 logging.lastResort = None
 logging.raiseExceptions = False
+
+
+def _string_evidence(link_string) -> tuple[str | None, str | None, bool]:
+    """Return ``(ansi_text, unicode_text, conflict)`` for a LinkInfo string field."""
+    if link_string is None:
+        return None, None, False
+    ansi_text = link_string.ansi.decode() if link_string.ansi is not None and not link_string.ansi.absent else None
+    unicode_text = (
+        link_string.unicode.decode() if link_string.unicode is not None and not link_string.unicode.absent else None
+    )
+    return ansi_text, unicode_text, link_string.conflict
 
 
 def parse(path: Path) -> None:
@@ -29,16 +39,16 @@ def parse(path: Path) -> None:
         lnk_workdir = lnk_file.stringdata.working_dir.string if lnk_file.flag("has_working_dir") else None
         lnk_iconlocation = lnk_file.stringdata.icon_location.string if lnk_file.flag("has_icon_location") else None
         lnk_arguments = lnk_file.stringdata.command_line_arguments.string if lnk_file.flag("has_arguments") else None
-        local_base_path = (
-            lnk_file.linkinfo.local_base_path.decode(errors="backslashreplace")
-            if lnk_file.flag("has_link_info") and lnk_file.linkinfo.flag("volumeid_and_local_basepath")
-            else None
-        )
-        common_path_suffix = (
-            lnk_file.linkinfo.common_path_suffix.decode(errors="backslashreplace")
-            if lnk_file.flag("has_link_info")
-            else None
-        )
+
+        local_ansi = local_unicode = None
+        suffix_ansi = suffix_unicode = None
+        if lnk_file.flag("has_link_info"):
+            info = lnk_file.linkinfo
+            local_ansi, local_unicode, _ = _string_evidence(info.local_base_path_string)
+            suffix_ansi, suffix_unicode, _ = _string_evidence(info.common_path_suffix_string)
+
+        local_base_path = local_unicode if local_unicode is not None else local_ansi
+        common_path_suffix = suffix_unicode if suffix_unicode is not None else suffix_ansi
 
         if local_base_path and common_path_suffix:
             lnk_full_path = local_base_path + common_path_suffix
@@ -48,18 +58,12 @@ def parse(path: Path) -> None:
             lnk_full_path = None
 
         if lnk_file.flag("has_link_info") and lnk_file.linkinfo.flag("common_network_relative_link_and_pathsuffix"):
-            lnk_net_name = (
-                # TODO add codepage CLI flag to decode for supplied codepage
-                lnk_file.linkinfo.common_network_relative_link.net_name.decode(errors="backslashreplace")
-                if lnk_file.linkinfo.common_network_relative_link.net_name
-                else None
-            )
-            lnk_device_name = (
-                # TODO add codepage CLI flag to decode for supplied codepage
-                lnk_file.linkinfo.common_network_relative_link.device_name.decode(errors="backslashreplace")
-                if lnk_file.linkinfo.common_network_relative_link.device_name
-                else None
-            )
+            net_ansi, net_unicode, _ = _string_evidence(lnk_file.linkinfo.net_name_string)
+            device_ansi, device_unicode, _ = _string_evidence(lnk_file.linkinfo.device_name_string)
+            lnk_net_name = net_unicode if net_unicode is not None else net_ansi
+            lnk_device_name = device_unicode if device_unicode is not None else device_ansi
+
+        conflicts = lnk_file.linkinfo.conflicts if lnk_file.flag("has_link_info") else []
 
         try:
             machine_id = lnk_file.extradata.TRACKER_PROPS.machine_id.decode()
@@ -70,6 +74,7 @@ def parse(path: Path) -> None:
         target_atime = ts.wintimestamp(lnk_file.link_header.access_time)
         target_ctime = ts.wintimestamp(lnk_file.link_header.creation_time)
 
+        conflict_line = ", ".join(conflicts) if conflicts else "none"
         print(
             f"Link Path\t\t\t: {lnk_path}\n"
             f"Link Name / description\t\t: {lnk_name}\n"
@@ -80,9 +85,12 @@ def parse(path: Path) -> None:
             f"Link working directory\t\t: {lnk_workdir}\n"
             f"Link icon location\t\t: {lnk_iconlocation}\n"
             f"Link arguments\t\t\t: {lnk_arguments}\n"
-            f"Link local base path\t\t: {local_base_path}\n"
-            f"Link common path suffix\t\t: {common_path_suffix}\n"
+            f"Link local base path (ANSI)\t: {local_ansi}\n"
+            f"Link local base path (Unicode)\t: {local_unicode}\n"
+            f"Link common path suffix (ANSI)\t: {suffix_ansi}\n"
+            f"Link common path suffix (Unicode): {suffix_unicode}\n"
             f"Link full path\t\t\t: {lnk_full_path}\n"
+            f"Link encoding conflicts\t\t: {conflict_line}\n"
             f"Net name link\t\t\t: {lnk_net_name}\n"
             f"Device name link\t\t: {lnk_device_name}\n"
             f"Machine id link\t\t\t: {machine_id}\n"
