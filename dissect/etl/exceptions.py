@@ -25,6 +25,12 @@ class ManifestNotFoundError(Error):
     pass
 
 
+class InvalidManifestError(Error):
+    """Raised when an ETW manifest contains values that cannot be turned into safe parsing code."""
+
+    pass
+
+
 class ExtendedDataItemException(Error):
     pass
 
