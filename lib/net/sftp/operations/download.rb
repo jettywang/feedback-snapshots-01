@@ -54,10 +54,15 @@ module Net; module SFTP; module Operations
   #   directory tree recursively, it is the number of files and directories
   #   transferred at once and defaults to 16. Setting this higher might
   #   improve throughput, particularly on high-latency links. Reducing it
-  #   will reduce throughput.
+  #   will reduce throughput. A "limits@openssh.com" open-handles cap can
+  #   only lower this, never raise it.
   # * <tt>:read_size</tt> - the maximum number of bytes to read at a time
   #   from the source. Increasing this value might improve throughput. It
-  #   defaults to 32,000 bytes.
+  #   defaults to 32,000 bytes. When the server advertises
+  #   "limits@openssh.com", its packet and read-length limits further cap
+  #   this value after the actual SFTP packet overhead (for both the request
+  #   and the FXP_DATA reply) is deducted; a server limit can only make
+  #   reads smaller, never larger.
   # * <tt>:preserve</tt> - if true, the local files and directories get the
   #   access and modification times of the remote ones, and their permissions
   #   are set exactly, even on files that already exist and regardless of the
@@ -249,15 +254,34 @@ module Net; module SFTP; module Operations
         @read_size ||= positive_option(:read_size, DEFAULT_READ_SIZE)
       end
 
+      # The length to put on the next FXP_READ for +entry+, capped by the
+      # server's negotiated read-length and packet limits. Both the request
+      # packet and the FXP_DATA reply budget are honored, with the actual
+      # protocol overhead deducted, and the configured :read_size stays the
+      # upper bound so a generous server never enlarges local buffers.
+      def read_chunk_size(entry)
+        sftp.limits.read_chunk_size(read_size, entry.handle.to_s.bytesize)
+      end
+
+      # The most remote handles this download keeps open at once. Server
+      # limits can only reduce the local :requests budget, never enlarge it.
+      def open_handle_limit
+        sftp.limits.open_handle_limit(requests)
+      end
+
       # The number of simultaneous SFTP requests to use to effect the download.
       # Defaults to 16 for recursive downloads and 64 for single files.
       def requests
         @requests ||= positive_option(:requests, recursive? ? 16 : 64)
       end
 
-      # The most reads a single file may have outstanding at once.
+      # The most reads a single file may have outstanding at once. Bounded by
+      # the local :requests budget and the server's negotiated open-handles
+      # limit, so a server value can only shrink the window.
       def read_window_limit
-        recursive? ? 1 : requests
+        return 1 if recursive?
+
+        sftp.limits.open_handle_limit(requests)
       end
 
       def preserve?
@@ -274,7 +298,7 @@ module Net; module SFTP; module Operations
       # Enqueues as many files and directories from the stack as possible
       # (see #requests).
       def process_next_entry
-        while stack.any? && requests > @active
+        while stack.any? && open_handle_limit > @active
           entry = stack.shift
           @active += 1
 
@@ -479,8 +503,9 @@ module Net; module SFTP; module Operations
       # data reply, so small files don't cost a burst of reads past their end.
       def request_reads(entry)
         while !entry.eof && !@aborted && entry.pending < entry.window
-          read_range(entry, entry.next_read, read_size)
-          entry.next_read += read_size
+          length = read_chunk_size(entry)
+          read_range(entry, entry.next_read, length)
+          entry.next_read += length
         end
       end
 

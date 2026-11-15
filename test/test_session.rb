@@ -39,6 +39,55 @@ class SessionTest < Net::SFTP::TestCase
     assert_equal extensions, sftp.extensions
   end
 
+  def test_limits_default_to_no_restriction_without_the_extension
+    expect_sftp_session :server_version => 3
+    assert_scripted { sftp.connect! }
+
+    assert_equal Net::SFTP::Protocol::Limits.new, sftp.limits
+    assert_nil sftp.limits.write_payload_limit
+  end
+
+  def test_limits_extension_is_queried_before_the_session_opens
+    extensions = { Net::SFTP::Protocol::Limits::EXTENSION_NAME => "1" }
+    expect_sftp_session :server_version => 3, :extensions => extensions do |channel|
+      channel.sends_packet(FXP_EXTENDED, :long, 0, :string, Net::SFTP::Protocol::Limits::EXTENSION_NAME)
+      channel.gets_packet(FXP_EXTENDED_REPLY, :long, 0, :long, 262_144, :long, 65_536, :long, 65_536, :long, 16)
+    end
+
+    opened = false
+    assert_scripted do
+      sftp.connect! do
+        opened = true
+        assert_equal Net::SFTP::Protocol::Limits.new(262_144, 65_536, 65_536, 16), sftp.limits
+      end
+    end
+    assert opened
+  end
+
+  def test_limits_reply_with_zeroes_keeps_the_client_defaults
+    extensions = { Net::SFTP::Protocol::Limits::EXTENSION_NAME => "1" }
+    expect_sftp_session :server_version => 3, :extensions => extensions do |channel|
+      channel.sends_packet(FXP_EXTENDED, :long, 0, :string, Net::SFTP::Protocol::Limits::EXTENSION_NAME)
+      channel.gets_packet(FXP_EXTENDED_REPLY, :long, 0, :long, 0, :long, 0, :long, 0, :long, 0)
+    end
+
+    assert_scripted { sftp.connect! }
+    assert_equal Net::SFTP::Protocol::Limits.new, sftp.limits
+  end
+
+  def test_malformed_limits_reply_is_sanitized_rather_than_trusted
+    extensions = { Net::SFTP::Protocol::Limits::EXTENSION_NAME => "1" }
+    expect_sftp_session :server_version => 3, :extensions => extensions do |channel|
+      channel.sends_packet(FXP_EXTENDED, :long, 0, :string, Net::SFTP::Protocol::Limits::EXTENSION_NAME)
+      # Only two of the four values are present; the missing ones must read as
+      # "no limit" instead of leaving the session half-initialized.
+      channel.gets_packet(FXP_EXTENDED_REPLY, :long, 0, :long, 1 << 31, :long, 0)
+    end
+
+    assert_scripted { sftp.connect! }
+    assert_equal Net::SFTP::Protocol::Limits.new(1 << 31, 0, 0, 0), sftp.limits
+  end
+
   def test_channel_closed_by_server_should_fail_pending_sync_request
     expect_sftp_session :server_version => 3 do |channel|
       channel.sends_packet(FXP_OPEN, :long, 0, :string, "/path/to/file", :long, 0x01, :long, 0)

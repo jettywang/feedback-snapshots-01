@@ -1,0 +1,6 @@
+Honor the "limits@openssh.com" extension: uploads and downloads negotiate the
+server's packet, read/write length and open-handles limits and shrink their
+chunk sizes and concurrency to fit, after deducting the real SFTP packet
+overhead. Zero, missing or malformed values keep the client's own defaults, and
+a server value can only reduce local buffers and in-flight requests, never
+enlarge them.

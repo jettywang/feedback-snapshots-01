@@ -2,6 +2,7 @@ require 'net/ssh'
 require 'net/sftp/constants'
 require 'net/sftp/errors'
 require 'net/sftp/protocol'
+require 'net/sftp/protocol/limits'
 require 'net/sftp/request'
 require 'net/sftp/operations/dir'
 require 'net/sftp/operations/upload'
@@ -72,6 +73,11 @@ module Net; module SFTP
     # hash of name => data (e.g. "posix-rename@openssh.com" => "1").
     attr_reader :extensions
 
+    # The transport limits negotiated through the "limits@openssh.com"
+    # extension, or defaults if the server does not advertise it. A negotiated
+    # value can only reduce the client's own defaults, never increase them.
+    attr_reader :limits
+
     # Creates a new Net::SFTP instance atop the given Net::SSH connection.
     # This will return immediately, before the SFTP connection has been properly
     # initialized. Once the connection is ready, the given block will be called.
@@ -86,6 +92,7 @@ module Net; module SFTP
       self.logger = session.logger
       @state      = :closed
       @extensions = {}
+      @limits     = Protocol::Limits.new
       @pending_requests = {}
 
       connect(&block)
@@ -784,6 +791,7 @@ module Net; module SFTP
           @input = Net::SSH::Buffer.new
           @packet_length = nil
           @protocol = nil
+          @limits = Protocol::Limits.new
           @on_ready = Array(block)
         else # opening
           @on_ready << block if block
@@ -969,6 +977,38 @@ module Net; module SFTP
         @protocol = Protocol.load(self, negotiated_version)
         @pending_requests = {}
 
+        if extensions.key?(Protocol::Limits::EXTENSION_NAME)
+          negotiate_limits
+        else
+          finish_opening
+        end
+      end
+
+      # Queries the server's "limits@openssh.com" values. The session stays in
+      # the :init state until #on_limits runs, so user operations cannot race
+      # the negotiation. A failure never aborts the connection: the client's
+      # own defaults remain in force.
+      def negotiate_limits
+        request = Request.new(self, :extended, protocol.extended(Protocol::Limits::EXTENSION_NAME), &method(:on_limits))
+        pending_requests[request.id] = request
+        info { "requesting #{Protocol::Limits::EXTENSION_NAME} limits (#{request.id})" }
+      end
+
+      # Parses the limits reply. Zero, missing or malformed values mean "no
+      # limit" per the extension contract, and every value is validated so a
+      # malicious reply can only shrink the client's defaults.
+      def on_limits(response)
+        @limits = Protocol::Limits.from_extended_reply(response[:raw])
+        debug do
+          "negotiated limits: packet=#{limits.max_packet_length} read=#{limits.max_read_length} " \
+          "write=#{limits.max_write_length} handles=#{limits.max_open_handles}"
+        end
+        finish_opening
+      end
+
+      # Marks negotiation complete and hands the open session to every queued
+      # #connect callback.
+      def finish_opening
         @state = :open
         @on_ready.each { |callback| callback.call(self) }
         @on_ready = nil

@@ -34,8 +34,16 @@ module Net; module SFTP; module Protocol
       when FXP_DATA   then parse_data_packet(packet)
       when FXP_NAME   then parse_name_packet(packet)
       when FXP_ATTRS  then parse_attrs_packet(packet)
+      when FXP_EXTENDED_REPLY then { :raw => packet }
       else raise NotImplementedError, "unknown packet type: #{packet.type}"
       end
+    end
+
+    # Sends a FXP_EXTENDED request for the named extension. The reply arrives
+    # as a FXP_EXTENDED_REPLY packet whose contents depend on the extension;
+    # the caller parses it from the response's :raw packet.
+    def extended(name, *args)
+      send_request(FXP_EXTENDED, :string, name, *args)
     end
 
     private

@@ -49,12 +49,16 @@ module Net; module SFTP; module Operations
   #   any given time. When uploading an entire directory tree recursively,
   #   this will default to 16, otherwise it will default to 64, like OpenSSH's
   #   sftp client. Setting this higher might improve throughput. Reducing it
-  #   will reduce throughput.
+  #   will reduce throughput. A "limits@openssh.com" open-handles cap can only
+  #   lower this, never raise it.
   # * <tt>:read_size</tt> - the maximum number of bytes to read at a time
   #   from the source. Increasing this value might improve throughput. It
   #   defaults to 32,000 bytes. Each chunk is sent as one write request, so
   #   it must stay within the server's packet limit (OpenSSH drops the
-  #   connection on packets over 256 KiB).
+  #   connection on packets over 256 KiB). When the server advertises
+  #   "limits@openssh.com", its packet and write-length limits further cap
+  #   this value after the actual SFTP packet overhead is deducted; a server
+  #   limit can only make chunks smaller, never larger.
   # * <tt>:name</tt> - the filename to report to the progress monitor when
   #   an IO object is given as +local+. This defaults to "<memory>".
   # * <tt>:preserve</tt> - if true, the remote files and directories get the
@@ -164,6 +168,8 @@ module Net; module SFTP; module Operations
       @options = options
       @properties = options[:properties] || {}
       @active = 0
+      @open_handles = 0
+      @open_requests = 0
       @aborted = false
       @directories = []
 
@@ -184,9 +190,7 @@ module Net; module SFTP; module Operations
           sftp.mkdir(remote, directory_attributes(local, remote)) do |response|
             @active -= 1
             raise StatusException.new(response, "mkdir `#{remote}'") unless response.ok?
-            requests.times do
-              break unless process_next_entry
-            end
+            fill_open_slots
           end
         else
           @active -= 1
@@ -253,6 +257,41 @@ module Net; module SFTP; module Operations
         @read_size ||= positive_option(:read_size, DEFAULT_READ_SIZE)
       end
 
+      # The chunk size for the next write, capped by the server's negotiated
+      # packet and write-length limits after the actual protocol overhead for
+      # this handle is deducted. The configured :read_size stays the upper
+      # bound, so a generous server never grows the client's buffer.
+      def write_chunk_size(handle)
+        sftp.limits.write_chunk_size(read_size, handle.to_s.bytesize)
+      end
+
+      # The most requests this upload keeps outstanding, or handles open for a
+      # recursive tree. It is the local :requests budget narrowed by the
+      # server's negotiated max-open-handles limit, so a server value can only
+      # reduce concurrency, never enlarge the client's own resource cap.
+      def concurrent_requests
+        @concurrent_requests ||= sftp.limits.open_handle_limit(requests)
+      end
+
+      # The most remote handles this upload keeps open at once.
+      def open_handle_limit
+        concurrent_requests
+      end
+
+      # Opens queued entries until every negotiated handle slot is taken or the
+      # stack is drained. A false return from #process_next_entry while entries
+      # remain (it also drives in-progress uploads) must not stop the fill, so
+      # the loop keys only on the open-request count and remaining stack.
+      def fill_open_slots
+        while stack_has_entries? && @open_requests < open_handle_limit
+          process_next_entry
+        end
+      end
+
+      def stack_has_entries?
+        @stack.any? { |entries| entries.any? }
+      end
+
       def positive_option(name, default)
         value = (options[name] || default).to_i
         raise ArgumentError, ":#{name} must be positive" unless value > 0
@@ -310,6 +349,11 @@ module Net; module SFTP; module Operations
             update_progress(:mkdir, rpath)
             request = sftp.mkdir(rpath, directory_attributes(lpath, rpath), &method(:on_mkdir))
             request[:dir] = rpath
+          elsif @open_requests >= open_handle_limit
+            # Put the entry back; a closing handle re-enters the state
+            # machine and opens it, so the negotiated cap is never passed.
+            @stack.last.unshift(entry)
+            return false
           else
             open_file(lpath, rpath)
           end
@@ -341,6 +385,7 @@ module Net; module SFTP; module Operations
         metafile = LiveFile.new(name, remote, file, size, nil, attributes, 0)
         update_progress(:open, metafile)
 
+        @open_requests += 1
         request = sftp.open(remote, "w", attributes, &method(:on_open))
         request[:file] = metafile
       end
@@ -362,15 +407,19 @@ module Net; module SFTP; module Operations
       def on_open(response)
         @active -= 1
         file = response.request[:file]
-        raise StatusException.new(response, "open #{file.remote}") unless response.ok?
+        unless response.ok?
+          @open_requests -= 1
+          raise StatusException.new(response, "open #{file.remote}")
+        end
 
         file.handle = response[:handle]
+        @open_handles += 1
 
         @uploads << file
         write_next_chunk(file)
 
         if !recursive?
-          (requests - 1).times { write_next_chunk(file) }
+          (concurrent_requests - 1).times { write_next_chunk(file) }
         end
       end
 
@@ -400,9 +449,15 @@ module Net; module SFTP; module Operations
       # state machine.
       def on_close(response)
         @active -= 1
+        @open_handles -= 1
+        @open_requests -= 1
         file = response.request[:file]
         raise file.error if file.error
         raise StatusException.new(response, "close #{file.remote}") unless response.ok?
+        # Refill freed handle slots first; with an empty stack this falls
+        # through to process_next_entry, which drives the remaining uploads and
+        # eventually fires the finish event.
+        fill_open_slots
         process_next_entry
       end
 
@@ -456,7 +511,7 @@ module Net; module SFTP; module Operations
           process_next_entry
         else
           offset = file.io.pos
-          data = file.io.read(read_size) unless @aborted
+          data = file.io.read(write_chunk_size(file.handle)) unless @aborted
           if data.nil?
             stop_reading(file)
             if file.pending.zero?
