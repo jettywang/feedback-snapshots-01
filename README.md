@@ -310,6 +310,36 @@ of the IdP is required in order to execute the validation. You can pass the opti
 `:relax_signature_validation` to `SloLogoutrequest` and `Logoutresponse` if want to avoid signature
 validation if no certificate of the IdP is provided.
 
+### Preserving the Signed Bytes of the Query String
+
+On the `HTTP-Redirect` binding the IdP signs the raw bytes of
+`SAMLRequest/SAMLResponse&RelayState&SigAlg` exactly as they appear in the URL. Web frameworks
+decode the query string before the application sees it, and re-encoding the decoded values does
+not always reproduce the original bytes (`%20` vs `+`, `%2F` vs `%2f`, `%7E` vs `~`, Unicode
+percent-encoding). Validation then fails only for the RelayState values whose re-encoding differs.
+
+Instead of re-encoding framework-parsed parameters, parse the raw query string and decode the
+same parts, so the bytes that are verified are the bytes that were received:
+
+```ruby
+# Rails: request.query_string / Rack: env['QUERY_STRING'] (raw, still URI-encoded)
+raw_params = OneLogin::RubySaml::Utils.parse_raw_query_string(request.query_string)
+get_params = OneLogin::RubySaml::Utils.decode_raw_params(raw_params)
+
+logout_request = OneLogin::RubySaml::SloLogoutrequest.new(
+  get_params['SAMLRequest'],
+  :settings => settings,
+  :get_params => get_params,
+  :raw_get_params => raw_params
+)
+logout_request.is_valid?
+```
+
+`parse_raw_query_string` raises `ArgumentError` on duplicate `SAMLRequest`, `SAMLResponse`,
+`RelayState`, `SigAlg` or `Signature` parameters and on malformed percent-encoding, so ambiguous
+requests are rejected before any SAML content is processed. The same `raw_get_params` /
+`get_params` pair can be passed to `Logoutresponse`.
+
 In production also we highly recommend to register on the settings the IdP certificate instead
 of using the fingerprint method. The fingerprint, is a hash, so at the end is open to a collision
 attack that can end on a signature validation bypass. Other SAML toolkits deprecated that mechanism,

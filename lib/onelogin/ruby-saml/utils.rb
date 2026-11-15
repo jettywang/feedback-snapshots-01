@@ -200,6 +200,66 @@ module OneLogin
         url_string << "&SigAlg=#{raw_sig_alg}"
       end
 
+      # Parameters of the HTTP-Redirect binding whose raw (still URI-encoded) bytes
+      # are covered by the Signature. Duplicates of any of them make it ambiguous
+      # which occurrence was signed, so they are rejected when parsing.
+      REDIRECT_SECURITY_PARAMS = %w[SAMLRequest SAMLResponse RelayState SigAlg Signature].freeze
+
+      # Parse a raw GET query string into raw (still URI-encoded) parameters,
+      # preserving the exact bytes that the IdP signed on the HTTP-Redirect binding.
+      #
+      # Web frameworks decode the query string before the application sees it, and
+      # re-encoding the decoded values does not always reproduce the original bytes
+      # (e.g. %20 vs '+', %2F vs %2f, %7E vs ~), which breaks signature validation
+      # for some RelayState values. Parsing the raw query string avoids guessing:
+      # the bytes verified are the bytes received, never a re-encoded variant.
+      #
+      # @param query_string [String] The raw query string (e.g. Rack's QUERY_STRING,
+      #                              without the leading '?')
+      # @return [Hash] Raw parameters, URI-encoded exactly as received
+      # @raise [ArgumentError] If a SAML security parameter appears more than once,
+      #                        or carries malformed percent-encoding
+      #
+      def self.parse_raw_query_string(query_string)
+        raise ArgumentError.new("query_string must be a String") unless query_string.is_a?(String)
+
+        raw_params = {}
+        query_string.split('&').each do |pair|
+          next if pair.empty?
+
+          key, _, value = pair.partition('=')
+          if REDIRECT_SECURITY_PARAMS.include?(key)
+            if raw_params.has_key?(key)
+              raise ArgumentError.new("Duplicate parameter '#{key}' in query string")
+            end
+            unless value.match(/\A(?:[^%]|%[0-9A-Fa-f]{2})*\z/)
+              raise ArgumentError.new("Invalid percent-encoding in parameter '#{key}'")
+            end
+            raw_params[key] = value
+          elsif !raw_params.has_key?(key)
+            raw_params[key] = value
+          end
+        end
+
+        raw_params
+      end
+
+      # Decode raw (URI-encoded) parameters obtained with parse_raw_query_string.
+      # Decoding the same raw parts that feed the signature check guarantees the
+      # application works with the very request the IdP signed, instead of mixing
+      # framework-decoded values with independently recovered raw bytes.
+      #
+      # @param raw_params [Hash] Raw URI-encoded parameters
+      # @return [Hash] Decoded parameters
+      #
+      def self.decode_raw_params(raw_params)
+        decoded_params = {}
+        raw_params.each do |key, value|
+          decoded_params[key] = value.nil? ? nil : CGI.unescape(value)
+        end
+        decoded_params
+      end
+
       # Prepare raw GET parameters (build them from normal parameters
       # if not provided).
       #
