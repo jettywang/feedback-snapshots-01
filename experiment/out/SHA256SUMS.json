@@ -1,0 +1,21 @@
+{
+  "schema": "ewf-to-asdf-forensic-manifest/v1",
+  "generated_utc": "2026-11-15T07:37:38.094931+00:00",
+  "converter_sha256": "819bd0ccd5eb307df976e53ff7581a9beeb243598633a20c6e384501421f15e1",
+  "artifacts": {
+    "normal.asdf": "7c03ac7821eb1eddf54c1d8a93fe4d21b3c48fbd38677a5a04dccc1eb342ea81",
+    "variant.asdf": "185c548d216e1b7a5d6cef90693716d79993e3a479c27e347ed67f3580bdaf55",
+    "normal.manifest.json": "b5f932f418c655f1081c4fae25c446273b8a6b2d6ca448c47c661cca0f6e13b6",
+    "variant.manifest.json": "66a45aec03980f08c9a7e30c15baadb8f49937b5946827a0ff87e7d000fecfb8",
+    "incomplete-source.json": "44aa7a8030a38e7ead997143d464eb6774427fecf8533638e39a131c58ffc646",
+    "REPORT.md": "97b247229b83eaab5d604a08ff33b66fc328b7a7122d2324aff2bed664330073"
+  },
+  "source_segments": {
+    "image.E01": "dff882f955c5cccb79690e9f5be42125c8b5875052f1d3d1dda1d7de597fb6c8",
+    "image.E02": "9bd439cdbb5158c1bbc4c12ccac98dc874655573977214763895eb043004f32e",
+    "image.E03": "35bc51ba09665794b3852cfe57b9415c7aca901185e64abcd22e90c8b6ebb361",
+    "image.E04": "b4823add0c226c42255be4c2cc09ee80cce4f03f107c8c2c7b84e48a46449fce",
+    "image.E05": "78844b5d5b80695ba6d8c0901c28820389ebd6bacb0330a934ca01ec06bcd8d1"
+  },
+  "note": "Hashes here describe files at the end of this run. Recompute them yourself; do not trust a hash list that travels inside the same directory it describes."
+}

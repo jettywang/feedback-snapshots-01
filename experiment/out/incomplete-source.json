@@ -1,0 +1,101 @@
+{
+  "schema": "ewf-to-asdf-forensic-manifest/v1",
+  "status": "INCOMPLETE_SOURCE",
+  "generated_utc": "2026-11-15T07:37:37.688734+00:00",
+  "input": [
+    "/Users/apple/Documents/\u7528\u6237\u53cd\u9988\u9879\u76ee/run-control/first-five/jobs/FB-20261115-SEC15-056/workspace/experiment/out/incomplete-source/image.E01",
+    "/Users/apple/Documents/\u7528\u6237\u53cd\u9988\u9879\u76ee/run-control/first-five/jobs/FB-20261115-SEC15-056/workspace/experiment/out/incomplete-source/image.E02",
+    "/Users/apple/Documents/\u7528\u6237\u53cd\u9988\u9879\u76ee/run-control/first-five/jobs/FB-20261115-SEC15-056/workspace/experiment/out/incomplete-source/image.E03",
+    "/Users/apple/Documents/\u7528\u6237\u53cd\u9988\u9879\u76ee/run-control/first-five/jobs/FB-20261115-SEC15-056/workspace/experiment/out/incomplete-source/image.E04"
+  ],
+  "missing": "image.E05",
+  "error": "EWF reader refused: IndexError: Chunk 128 out of range; volume declares 129 chunks but tables only cover 124 (missing segment files)",
+  "preflight": {
+    "input": [
+      "/Users/apple/Documents/\u7528\u6237\u53cd\u9988\u9879\u76ee/run-control/first-five/jobs/FB-20261115-SEC15-056/workspace/experiment/out/incomplete-source/image.E01",
+      "/Users/apple/Documents/\u7528\u6237\u53cd\u9988\u9879\u76ee/run-control/first-five/jobs/FB-20261115-SEC15-056/workspace/experiment/out/incomplete-source/image.E02",
+      "/Users/apple/Documents/\u7528\u6237\u53cd\u9988\u9879\u76ee/run-control/first-five/jobs/FB-20261115-SEC15-056/workspace/experiment/out/incomplete-source/image.E03",
+      "/Users/apple/Documents/\u7528\u6237\u53cd\u9988\u9879\u76ee/run-control/first-five/jobs/FB-20261115-SEC15-056/workspace/experiment/out/incomplete-source/image.E04"
+    ],
+    "ok": false,
+    "checks": [],
+    "stems": [
+      "image"
+    ],
+    "suffixes": [
+      ".E01",
+      ".E02",
+      ".E03",
+      ".E04"
+    ],
+    "raw_stats": {
+      "declared_chunks": 129,
+      "table_entries": 124,
+      "per_segment": [
+        {
+          "index": 0,
+          "name": "image.E01",
+          "tables": [
+            {
+              "type": "table",
+              "entries": 31
+            },
+            {
+              "type": "table2",
+              "entries": 31
+            }
+          ]
+        },
+        {
+          "index": 1,
+          "name": "image.E02",
+          "tables": [
+            {
+              "type": "table",
+              "entries": 31
+            },
+            {
+              "type": "table2",
+              "entries": 31
+            }
+          ]
+        },
+        {
+          "index": 2,
+          "name": "image.E03",
+          "tables": [
+            {
+              "type": "table",
+              "entries": 31
+            },
+            {
+              "type": "table2",
+              "entries": 31
+            }
+          ]
+        },
+        {
+          "index": 3,
+          "name": "image.E04",
+          "tables": [
+            {
+              "type": "table",
+              "entries": 31
+            },
+            {
+              "type": "table2",
+              "entries": 31
+            }
+          ]
+        }
+      ]
+    },
+    "declared_chunks": 129,
+    "covered_chunks": 124,
+    "error": "EWF reader refused: IndexError: Chunk 128 out of range; volume declares 129 chunks but tables only cover 124 (missing segment files)",
+    "reader_refused": true
+  },
+  "conversion": "refused",
+  "derived_output": null,
+  "note": "Source segment set is incomplete. No ASDF was produced; do not treat any partial output as a complete image."
+}
