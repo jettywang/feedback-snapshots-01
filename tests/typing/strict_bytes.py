@@ -5,7 +5,7 @@ from typing_extensions import assert_type
 
 from h2.connection import H2Connection
 from h2.events import Event
-from h2.frame_buffer import FrameBuffer
+from h2.frame_buffer import FrameBuffer, FrameBufferStats
 
 
 def receive_data_accepts_buffer_types() -> None:
@@ -18,11 +18,14 @@ def receive_data_accepts_buffer_types() -> None:
     memoryview_events = connection.receive_data(memoryview_data)
     frame_buffer.add_data(bytearray_data)
     frame_buffer.add_data(memoryview_data)
+    frame_buffer.add_data(memoryview_data, borrow=True)
     buffered_frames = list(frame_buffer)
+    buffer_stats = frame_buffer.stats
 
     assert_type(bytearray_events, list[Event])
     assert_type(memoryview_events, list[Event])
     assert_type(buffered_frames, list[Frame])
+    assert_type(buffer_stats, FrameBufferStats)
     assert bytearray_events == []
     assert memoryview_events == []
     assert buffered_frames == []

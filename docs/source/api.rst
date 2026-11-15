@@ -27,6 +27,15 @@ Configuration
    :members:
 
 
+Internal Buffers
+----------------
+
+.. autoclass:: h2.frame_buffer.FrameBuffer
+   :members: add_data, stats
+
+.. autoclass:: h2.frame_buffer.FrameBufferStats
+   :members:
+
 .. _h2-events-api:
 
 Events

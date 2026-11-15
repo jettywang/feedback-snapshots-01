@@ -149,6 +149,20 @@ class H2Configuration:
         .. versionadded:: 2.6.0
 
     :type logger: ``logging.Logger``
+
+    :param receive_buffer_borrowing: Controls whether :meth:`H2Connection.receive_data
+        <h2.connection.H2Connection.receive_data>` may parse frames directly
+        out of caller-mutable input while it runs, instead of copying that
+        input first. This is safe for a normal synchronous receive loop: the
+        call drains the buffer and copies any incomplete frame before
+        returning, and emitted events always carry owned ``bytes`` data. Set it
+        to ``False`` to force eager copies of caller-mutable input, for example
+        when an audit requires that h2 never holds a view of the caller's
+        buffer even transiently.
+
+        .. versionadded:: 4.5.0
+
+    :type receive_buffer_borrowing: ``bool``
     """
 
     client_side = _BooleanConfigOption("client_side")
@@ -167,6 +181,9 @@ class H2Configuration:
     normalize_inbound_headers = _BooleanConfigOption(
         "normalize_inbound_headers",
     )
+    receive_buffer_borrowing = _BooleanConfigOption(
+        "receive_buffer_borrowing",
+    )
 
     def __init__(self,
                  client_side: bool = True,
@@ -176,7 +193,8 @@ class H2Configuration:
                  split_outbound_cookies: bool = False,
                  validate_inbound_headers: bool = True,
                  normalize_inbound_headers: bool = True,
-                 logger: DummyLogger | OutputLogger | None = None) -> None:
+                 logger: DummyLogger | OutputLogger | None = None,
+                 receive_buffer_borrowing: bool = True) -> None:
         self.client_side = client_side
         self.header_encoding = header_encoding
         self.validate_outbound_headers = validate_outbound_headers
@@ -184,6 +202,7 @@ class H2Configuration:
         self.split_outbound_cookies = split_outbound_cookies
         self.validate_inbound_headers = validate_inbound_headers
         self.normalize_inbound_headers = normalize_inbound_headers
+        self.receive_buffer_borrowing = receive_buffer_borrowing
         self.logger = logger or DummyLogger(__name__)
 
     @property

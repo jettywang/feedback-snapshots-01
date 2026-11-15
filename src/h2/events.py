@@ -289,7 +289,19 @@ class DataReceived(Event):
     """The Stream ID for the stream this data was received on."""
 
     data: bytes = _LAZY_INIT
-    """The data itself."""
+    """
+    The data itself.
+
+    This is always an owned ``bytes`` object, never a view over the buffer
+    passed to :meth:`H2Connection.receive_data
+    <h2.connection.H2Connection.receive_data>`. It is therefore safe to keep
+    the event and immediately reuse, overwrite, resize, or delete the receive
+    buffer: doing so cannot alter data that has already been delivered.
+
+    .. versionchanged:: 4.5.0
+       Documented that data is always an immutable snapshot, independent of
+       the caller's receive buffer.
+    """
 
     flow_controlled_length: int = _LAZY_INIT
     """

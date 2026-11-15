@@ -28,7 +28,9 @@ class TestFrameBuffer:
         frame = hyperframe.frame.SettingsFrame(0).serialize()
         buffer = h2.frame_buffer.FrameBuffer()
         buffer.max_frame_size = 65535
-        buffer.add_data(frame * 2)
+        # Mutable input is copied into owned bytearray storage. Immutable
+        # ``bytes`` would instead be borrowed as a read-only view.
+        buffer.add_data(bytearray(frame * 2))
         data = buffer._data
 
         next(buffer)
@@ -39,6 +41,67 @@ class TestFrameBuffer:
         # buffer being replaced by a sliced copy.
         assert buffer._data is data
         assert buffer._data == frame
+        assert isinstance(buffer._data, bytearray)
+
+
+class TestFrameBufferOwnership:
+    def test_bytes_input_is_borrowed_without_staging(self) -> None:
+        """
+        Immutable ``bytes`` is parsed by reference, not copied into a staging
+        bytearray.
+        """
+        frame = hyperframe.frame.SettingsFrame(0).serialize()
+        buffer = h2.frame_buffer.FrameBuffer()
+        buffer.max_frame_size = 65535
+        buffer.add_data(frame)
+
+        assert isinstance(buffer._data, memoryview)
+        assert buffer._data.readonly
+        assert buffer._data.obj is frame
+        assert buffer._data.tobytes() == frame
+
+        next(buffer)
+        assert buffer.stats.copied_input_bytes == 0
+        assert buffer.stats.borrowed_immutable_bytes == len(frame)
+        assert buffer.stats.retained_input_bytes == 0
+
+    def test_default_copy_survives_mutation(self) -> None:
+        """
+        A lazy ``FrameBuffer`` copies mutable input, so the caller can reuse
+        its buffer before iterating.
+        """
+        frame = hyperframe.frame.SettingsFrame(0).serialize()
+        buffer = h2.frame_buffer.FrameBuffer()
+        buffer.max_frame_size = 65535
+        mutable = bytearray(frame)
+        buffer.add_data(mutable)
+
+        mutable[:] = b"\x00" * len(mutable)
+
+        [parsed] = list(buffer)
+        assert parsed.serialize() == frame
+        assert buffer.stats.copied_input_bytes == len(frame)
+
+    def test_incomplete_prefix_is_owned_not_aliased(self) -> None:
+        """
+        An incomplete frame is copied before the caller can overwrite the
+        mutable input that supplied it.
+        """
+        frame = hyperframe.frame.SettingsFrame(0).serialize()
+        buffer = h2.frame_buffer.FrameBuffer()
+        buffer.max_frame_size = 65535
+        mutable = bytearray(frame[:5])
+        buffer.add_data(mutable)
+
+        mutable[:] = b"\xff" * len(mutable)
+
+        assert buffer.stats.retained_input_bytes == 5
+        assert buffer.stats.retained_backing_bytes == 5
+        assert buffer.stats.copied_input_bytes == 5
+
+        buffer.add_data(bytearray(frame[5:]))
+        [parsed] = list(buffer)
+        assert parsed.serialize() == frame
 
 
 class TestBasicClient:

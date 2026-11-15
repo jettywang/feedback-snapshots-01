@@ -1506,19 +1506,51 @@ class H2Connection:
         :type data: An object implementing the buffer protocol.
         :returns: A list of events that the remote peer triggered by sending
             this data.
+
+        The input is consumed entirely before this method returns. Mutable
+        input may be parsed in place while the call runs (unless
+        :data:`H2Configuration.receive_buffer_borrowing
+        <h2.config.H2Configuration.receive_buffer_borrowing>` is disabled), but
+        any incomplete frame suffix is copied into h2-owned storage before the
+        call returns, including on error paths. The caller may therefore reuse,
+        overwrite, resize, or delete its receive buffer immediately afterwards.
+
+        Returned events never alias the receive buffer: in particular,
+        :class:`DataReceived <h2.events.DataReceived>` carries owned ``bytes``
+        payloads. An authorisation check performed on the returned events and a
+        later body consumer therefore observe exactly the same bytes, even when
+        the network layer recycles the buffer between the two.
+
+        .. versionchanged:: 4.5.0
+           Added the borrow/copy distinction. Read-only views over immutable
+           ``bytes`` are borrowed; caller-mutable input is only borrowed for
+           the duration of this call.
         """
         self.config.logger.trace(
             "Process received data on connection. Received data: %r", data,
         )
 
         events: list[Event] = []
-        self.incoming_buffer.add_data(data)
-        self.incoming_buffer.max_frame_size = self.max_inbound_frame_size
+        buffer = self.incoming_buffer
+        buffer.max_frame_size = self.max_inbound_frame_size
 
+        # ``add_data`` may reject the connection preamble. That is not a frame
+        # processing error, so keep the previous behaviour of raising without
+        # terminating the connection, while still releasing any staged view.
         try:
-            for frame in self.incoming_buffer:
+            buffer.add_data(data, borrow=self.config.receive_buffer_borrowing)
+        except BaseException:  # noqa: BLE001
+            # Release a transient view even on interrupts; the caller must be
+            # able to reuse its buffer after any failed call.
+            buffer._finish_receive()
+            raise
+
+        terminal = False
+        try:
+            for frame in buffer:
                 events.extend(self._receive_frame(frame))
         except InvalidPaddingError as e:
+            terminal = True
             self._terminate_connection(ErrorCodes.PROTOCOL_ERROR)
             msg = "Received frame with invalid padding."
             raise ProtocolError(msg) from e
@@ -1527,8 +1559,15 @@ class H2Connection:
             # We should prepare to emit a GoAway frame before throwing the
             # exception up further. No need for an event: the exception will
             # do fine.
+            terminal = True
             self._terminate_connection(e.error_code)
             raise
+        finally:
+            # Always end the borrow window: a caller must be able to reuse its
+            # buffer as soon as this method returns. A fatal protocol error
+            # leaves the connection unusable, so discard the remainder instead
+            # of copying it.
+            buffer._finish_receive(discard=terminal)
 
         return events
 

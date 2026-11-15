@@ -191,6 +191,70 @@ taking any other active, unprompted action on the connection. In this instance,
 you'll want to make all the relevant ``send_*`` calls, and *then* call
 :meth:`data_to_send <h2.connection.H2Connection.data_to_send>`.
 
+.. _advanced-reusable-input-buffer:
+
+Receiving Into a Reusable Buffer
+--------------------------------
+
+.. versionadded:: 4.5.0
+
+:meth:`receive_data <h2.connection.H2Connection.receive_data>` consumes its
+argument before returning. Network stacks commonly reuse one ``bytearray`` for
+every read. h2 supports that without copying whole frames into its own storage,
+while keeping the bytes an authorisation check saw identical to the bytes a
+later body consumer sees.
+
+The ownership rules are:
+
+- **Immutable views are borrowed.** A ``bytes`` object, or a read-only
+  ``memoryview`` whose root object is ``bytes``, cannot change while the view
+  exists. h2 parses frames directly from it, with no input copy.
+- **Mutable buffers are borrowed only during the call.** A ``bytearray``, a
+  writable ``memoryview``, or a read-only view over a mutable object may be
+  parsed in place while ``receive_data`` runs. Before it returns, any
+  incomplete frame suffix is copied into h2-owned storage, including on error
+  paths. The caller may overwrite, resize, or delete its buffer immediately
+  afterwards; doing so cannot change bytes that were already buffered or
+  delivered.
+- **Lazy ``FrameBuffer`` iteration copies mutable input.** Without a receive
+  cycle that drains the buffer, h2 cannot know when the caller will reuse it,
+  so :meth:`FrameBuffer.add_data <h2.frame_buffer.FrameBuffer.add_data>` copies
+  caller-mutable input eagerly. ``borrow=True`` is reserved for a caller that
+  finishes the cycle with ``_finish_receive``.
+- **Event payloads are always owned.** ``DataReceived.data`` is a plain
+  ``bytes`` object created before the event is returned. Detaching payloads is
+  required for event stability and is separate from input staging.
+- **Only the exposed view is considered.** For a ``memoryview`` with an offset
+  into a larger object, h2 looks at the supplied bytes only. It never copies
+  or retains the rest of the backing object. A view whose items are not wire
+  bytes, or that is multi-dimensional or strided, is copied from its logical
+  byte representation so frame offsets stay unambiguous.
+- **A small leftover cannot pin a large buffer.** When a receive cycle ends
+  with an incomplete frame, h2 keeps only that frame. If the borrowed backing
+  object is much larger, the suffix is copied so the larger object can be
+  collected. Immutable views are retained while that is economical, avoiding
+  repeat copies.
+- **Fragmented frames interpret the original bytes.** A frame or HPACK header
+  block split across several calls is joined from bytes captured at receive
+  time. Reusing the same buffer for the next chunk cannot alter earlier
+  fragments.
+
+:attr:`FrameBuffer.stats <h2.frame_buffer.FrameBuffer.stats>` reports these
+decisions: ``received_bytes``, ``borrowed_immutable_bytes``,
+``borrowed_mutable_bytes``, ``copied_input_bytes``, ``copy_operations``,
+``payload_copy_bytes``, ``payload_copy_operations``, ``retained_input_bytes``
+and ``retained_backing_bytes``. A test can therefore assert that legitimate
+input is not copied more than fragmentation and payload detachment require,
+and that a recycled buffer does not pin memory.
+
+.. note::
+
+   ``H2Connection`` is not thread-safe. A buffer passed to ``receive_data``
+   must not be modified concurrently while the call is running. Once it
+   returns, it is safe to reuse. Callers that must rule out even a transient
+   borrow can set ``H2Configuration(receive_buffer_borrowing=False)`` to force
+   eager copies of mutable input.
+
 Headers
 -------
 

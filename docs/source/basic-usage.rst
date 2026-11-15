@@ -313,7 +313,9 @@ returned us a single event object:
 
 ``receive_data`` accepts the ``bytes`` returned by ``recv`` as well as other
 byte-like objects that implement the buffer protocol, such as ``bytearray`` and
-``memoryview``.
+``memoryview``. The input is consumed before the call returns, so a reusable
+receive buffer can be overwritten immediately afterwards; see
+:ref:`advanced-reusable-input-buffer` for the ownership rules.
 
 But what we didn't see was anything else. So it seems like all ``curl`` did
 was change its settings, but nothing else. If you look at the other ``curl``

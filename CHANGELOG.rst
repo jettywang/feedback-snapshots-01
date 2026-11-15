@@ -11,10 +11,29 @@ dev
 **API Changes (Backward Compatible)**
 
 - Support for Python 3.15 has been added.
+- ``H2Connection.receive_data`` now distinguishes borrowed from copied input.
+  Frames are parsed directly from read-only views over immutable ``bytes``
+  objects. Caller-mutable input may be parsed in place only for the duration
+  of the synchronous receive call: any incomplete frame remainder is copied
+  into h2-owned storage before the call returns, including on error paths, so
+  the caller can immediately reuse, overwrite, resize, or delete its buffer.
+  Event payloads remain owned ``bytes``, so a recycled ``bytearray`` or
+  ``memoryview`` cannot change bytes that were already delivered.
+- ``FrameBuffer.stats`` exposes ``FrameBufferStats``, which reports input copy
+  counts, payload-detach copies, and retained memory. This makes the
+  borrow/copy decisions and their memory cost auditable.
+- New ``H2Configuration.receive_buffer_borrowing`` option (default ``True``)
+  forces eager copying of caller-mutable receive input when disabled.
 
 **Bugfixes**
 
--
+- Fixed an ownership hazard where mutable input could remain referenced by
+  buffered or emitted frame bytes after the caller reused its receive buffer.
+  A small incomplete frame no longer pins a large receive buffer: the suffix
+  is copied when that releases significantly more memory than it costs.
+- Parsing errors no longer leave an exported ``memoryview`` of caller input in
+  an exception traceback, so a failed receive cannot prevent the caller from
+  resizing its ``bytearray``.
 
 4.4.1 (2026-08-03)
 ------------------
