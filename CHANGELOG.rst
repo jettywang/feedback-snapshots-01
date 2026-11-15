@@ -10,6 +10,16 @@ dev
 
 **API Changes (Backward Compatible)**
 
+- Added a read-only HPACK interpretation mode. ``HeaderBlockInterpreter``
+  decodes header blocks like ``Decoder`` while reconstructing the provenance
+  chain of every field: on-wire byte ranges, static/dynamic table references,
+  the original insertion block and position of dynamic entries together with
+  the size updates affecting them, and Huffman encoding ranges measured on the
+  compressed wire bytes. Duplicate entries with identical names and values keep
+  distinct origins. Interpretation is marked uncertain when a prior block is
+  missing or discarded, or after a compression error, and it never changes the
+  decoding result or the dynamic table state.
+
 **Bugfixes**
 
 

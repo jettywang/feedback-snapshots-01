@@ -4,13 +4,22 @@ Implements the HPACK header compression algorithm as detailed by RFC 7541.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from .exceptions import HPACKDecodingError, InvalidTableSizeError, OversizedHeaderListError
 from .huffman import HuffmanEncoder
 from .huffman_constants import REQUEST_CODES, REQUEST_CODES_LENGTH
 from .huffman_table import decode_huffman
-from .struct import HeaderTuple, HeaderWeaklyTyped, NeverIndexedHeaderTuple
+from .struct import (
+    ByteRange,
+    HeaderTuple,
+    HeaderWeaklyTyped,
+    IndexedEvent,
+    LiteralEvent,
+    NeverIndexedHeaderTuple,
+    TableSizeUpdateEvent,
+    WireString,
+)
 from .table import HeaderTable, table_entry_size
 
 if TYPE_CHECKING:
@@ -21,6 +30,32 @@ log = logging.getLogger(__name__)
 INDEX_NONE = b"\x00"
 INDEX_NEVER = b"\x10"
 INDEX_INCREMENTAL = b"\x40"
+
+# Label constants describing the four HPACK header field representations. They
+# are shared with the read-only interpretation mode.
+REPRESENTATION_INDEXED = "indexed"
+REPRESENTATION_LITERAL_INCREMENTAL = "literal_with_incremental_indexing"
+REPRESENTATION_LITERAL_WITHOUT_INDEXING = "literal_without_indexing"
+REPRESENTATION_LITERAL_NEVER_INDEXED = "literal_never_indexed"
+REPRESENTATION_TABLE_SIZE_UPDATE = "dynamic_table_size_update"
+
+
+class DecodeSink(Protocol):
+    """
+    Observer protocol for the parse events used by the read-only
+    interpretation mode.
+
+    Implementations receive one event per representation while a header block
+    is being decoded. All callbacks are pure observations: they must not mutate
+    the decoder or its table, and exceptions raised by a sink are treated like
+    any other decoding error.
+    """
+
+    def on_indexed(self, event: IndexedEvent) -> None: ...  # pragma: no cover
+
+    def on_literal(self, event: LiteralEvent) -> None: ...  # pragma: no cover
+
+    def on_table_size_update(self, event: TableSizeUpdateEvent) -> None: ...  # pragma: no cover
 
 VARINT_MAX_LENGTH = 5 # octets, enough for encoding prefix + uint32
 
@@ -157,6 +192,37 @@ def _to_bytes(value: bytes | str | Any) -> bytes:
     if t is not str:
         value = str(value)
     return value.encode("utf-8")  # type: ignore
+
+
+def _read_wire_string(
+    data: bytes,
+    base_offset: int,
+) -> tuple[bytes, WireString, tuple[int, int]]:
+    """
+    Reads one length-prefixed (possibly Huffman-encoded) string.
+
+    ``base_offset`` is the absolute position of the first byte of the length
+    prefix inside the header block. Returns the decoded string, its on-wire
+    description, and the ``(length_prefix_consumed, string_length)`` pair so
+    callers can advance their own cursors.
+    """
+    length, consumed = decode_integer(data, 7)
+    raw = data[consumed:consumed + length]
+    if len(raw) != length:
+        msg = "Truncated header block"
+        raise HPACKDecodingError(msg)
+
+    huffman_encoded = bool(data[0] & 0x80)
+    wire = WireString(
+        encoded=bytes(raw),
+        huffman_encoded=huffman_encoded,
+        encoded_range=ByteRange(
+            base_offset + consumed,
+            base_offset + consumed + length,
+        ),
+    )
+    decoded = decode_huffman(raw) if huffman_encoded else bytes(raw)
+    return decoded, wire, (consumed, length)
 
 
 class Encoder:
@@ -476,7 +542,12 @@ class Decoder:
     def header_table_size(self, value: int) -> None:
         self.header_table.maxsize = value
 
-    def decode(self, data: bytes, raw: bool = False) -> Iterable[HeaderTuple]:
+    def decode(
+        self,
+        data: bytes,
+        raw: bool = False,
+        sink: DecodeSink | None = None,
+    ) -> Iterable[HeaderTuple]:
         """
         Takes an HPACK-encoded header block and decodes it into a header set.
 
@@ -486,6 +557,11 @@ class Decoder:
                     byte strings or to decode them as UTF-8 before returning
                     them. The default value is False, which returns tuples of
                     Unicode strings
+        :param sink: (optional) An object implementing the
+                     :class:`DecodeSink` protocol. When provided, it is handed
+                     one parse event for every representation in the block.
+                     The sink is purely observational: decoding results and the
+                     dynamic table are identical whether or not it is supplied.
         :returns: A list of two-tuples of ``(name, value)`` representing the
                   HPACK-encoded headers, in the order they were decoded.
         :raises HPACKDecodingError: If an error is encountered while decoding
@@ -516,11 +592,15 @@ class Decoder:
             if indexed:
                 header, consumed = self._decode_indexed(
                     data_mem[current_index:],
+                    current_index,
+                    sink,
                 )
             elif literal_index:
                 # It's a literal header that does affect the header table.
                 header, consumed = self._decode_literal_index(
                     data_mem[current_index:],
+                    current_index,
+                    sink,
                 )
             elif encoding_update:
                 # It's an update to the encoding context. These are forbidden
@@ -530,12 +610,16 @@ class Decoder:
                     raise HPACKDecodingError(msg)
                 consumed = self._update_encoding_context(
                     data_mem[current_index:],
+                    current_index,
+                    sink,
                 )
                 header = None
             else:
                 # It's a literal header that does not affect the header table.
                 header, consumed = self._decode_literal_no_index(
                     data_mem[current_index:],
+                    current_index,
+                    sink,
                 )
 
             if header:
@@ -568,7 +652,12 @@ class Decoder:
             msg = "Encoder did not shrink table size to within the max"
             raise InvalidTableSizeError(msg)
 
-    def _update_encoding_context(self, data: bytes | memoryview) -> int:
+    def _update_encoding_context(
+        self,
+        data: bytes | memoryview,
+        base_offset: int = 0,
+        sink: DecodeSink | None = None,
+    ) -> int:
         """
         Handles a byte that updates the encoding context.
         """
@@ -578,24 +667,63 @@ class Decoder:
             msg = "Encoder exceeded max allowable table size"
             raise InvalidTableSizeError(msg)
         self.header_table_size = new_size
+        if sink is not None:
+            sink.on_table_size_update(
+                TableSizeUpdateEvent(
+                    base_offset=base_offset,
+                    field_range=ByteRange(base_offset, base_offset + consumed),
+                    new_size=new_size,
+                    index_range=ByteRange(base_offset, base_offset + consumed),
+                ),
+            )
         return consumed
 
-    def _decode_indexed(self, data: bytes | memoryview) -> tuple[HeaderTuple, int]:
+    def _decode_indexed(
+        self,
+        data: bytes | memoryview,
+        base_offset: int = 0,
+        sink: DecodeSink | None = None,
+    ) -> tuple[HeaderTuple, int]:
         """
         Decodes a header represented using the indexed representation.
         """
         index, consumed = decode_integer(data, 7)
         header = HeaderTuple(*self.header_table.get_by_index(index))
+        if sink is not None:
+            sink.on_indexed(
+                IndexedEvent(
+                    base_offset=base_offset,
+                    field_range=ByteRange(base_offset, base_offset + consumed),
+                    index=index,
+                    index_range=ByteRange(base_offset, base_offset + consumed),
+                ),
+            )
         log.debug("Decoded %s, consumed %d", header, consumed)
         return header, consumed
 
-    def _decode_literal_no_index(self, data: bytes | memoryview) -> tuple[HeaderTuple, int]:
-        return self._decode_literal(data, should_index=False)
+    def _decode_literal_no_index(
+        self,
+        data: bytes | memoryview,
+        base_offset: int = 0,
+        sink: DecodeSink | None = None,
+    ) -> tuple[HeaderTuple, int]:
+        return self._decode_literal(data, should_index=False, base_offset=base_offset, sink=sink)
 
-    def _decode_literal_index(self, data: bytes | memoryview) -> tuple[HeaderTuple, int]:
-        return self._decode_literal(data, should_index=True)
+    def _decode_literal_index(
+        self,
+        data: bytes | memoryview,
+        base_offset: int = 0,
+        sink: DecodeSink | None = None,
+    ) -> tuple[HeaderTuple, int]:
+        return self._decode_literal(data, should_index=True, base_offset=base_offset, sink=sink)
 
-    def _decode_literal(self, data: bytes | memoryview, should_index: bool) -> tuple[HeaderTuple, int]:
+    def _decode_literal(
+        self,
+        data: bytes | memoryview,
+        should_index: bool,
+        base_offset: int = 0,
+        sink: DecodeSink | None = None,
+    ) -> tuple[HeaderTuple, int]:
         """
         Decodes a header represented with a literal.
         """
@@ -612,16 +740,27 @@ class Decoder:
             indexed_name = data[0] & 0x3F
             name_len = 6
             not_indexable = False
+            representation = REPRESENTATION_LITERAL_INCREMENTAL
         else:
             high_byte = data[0]
             indexed_name = high_byte & 0x0F
             name_len = 4
             not_indexable = bool(high_byte & 0x10)
+            representation = (
+                REPRESENTATION_LITERAL_NEVER_INDEXED
+                if not_indexable
+                else REPRESENTATION_LITERAL_WITHOUT_INDEXING
+            )
 
+        name_index: int | None = None
+        name_index_range: ByteRange | None = None
+        name_wire: WireString | None = None
         if indexed_name:
             # Indexed header name.
             index, consumed = decode_integer(data, name_len)
             name = self.header_table.get_by_index(index)[0]
+            name_index = index
+            name_index_range = ByteRange(base_offset, base_offset + consumed)
 
             total_consumed = consumed
             length = 0
@@ -630,27 +769,18 @@ class Decoder:
             # move forward.
             data = data[1:]
 
-            length, consumed = decode_integer(data, 7)
-            name = data[consumed:consumed + length]
-            if len(name) != length:
-                msg = "Truncated header block"
-                raise HPACKDecodingError(msg)
-
-            if data[0] & 0x80:
-                name = decode_huffman(name)
+            name, name_wire, name_consumed = _read_wire_string(
+                data,
+                base_offset + total_consumed + 1,
+            )
+            consumed, length = name_consumed
             total_consumed = consumed + length + 1  # Since we moved forward 1.
 
         data = data[consumed + length:]
+        value_base = base_offset + total_consumed
 
-        # The header value is definitely length-based.
-        length, consumed = decode_integer(data, 7)
-        value = data[consumed:consumed + length]
-        if len(value) != length:
-            msg = "Truncated header block"
-            raise HPACKDecodingError(msg)
-
-        if data[0] & 0x80:
-            value = decode_huffman(value)
+        value, value_wire, value_consumed = _read_wire_string(data, value_base)
+        consumed, length = value_consumed
 
         # Updated the total consumed length.
         total_consumed += length + consumed
@@ -662,6 +792,20 @@ class Decoder:
             header = NeverIndexedHeaderTuple(name, value)
         else:
             header = HeaderTuple(name, value)
+
+        if sink is not None:
+            sink.on_literal(
+                LiteralEvent(
+                    base_offset=base_offset,
+                    field_range=ByteRange(base_offset, base_offset + total_consumed),
+                    representation=representation,
+                    should_index=should_index,
+                    name_index=name_index,
+                    name_index_range=name_index_range,
+                    name=name_wire,
+                    value=value_wire,
+                ),
+            )
 
         # If we've been asked to index this, add it to the header table.
         if should_index:
