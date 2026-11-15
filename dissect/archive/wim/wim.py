@@ -5,9 +5,6 @@ import struct
 from functools import cached_property, lru_cache
 from typing import TYPE_CHECKING, BinaryIO
 
-from dissect.util.stream import AlignedStream, BufferedStream, RelativeStream
-from dissect.util.ts import wintimestamp
-
 from dissect.archive.exception import (
     FileNotFoundError,
     InvalidHeaderError,
@@ -24,10 +21,14 @@ from dissect.archive.wim.c_wim import (
     WIM_IMAGE_TAG,
     c_wim,
 )
+from dissect.util.stream import AlignedStream, BufferedStream, RelativeStream
+from dissect.util.ts import wintimestamp
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
     from datetime import datetime
+
+    from dissect.archive.wim.relationships import RelationshipView
 
 DEFAULT_CHUNK_SIZE = 32 * 1024
 
@@ -51,38 +52,51 @@ class WIM:
         if self.header.Flags & HEADER_FLAG.SPANNED:
             raise NotImplementedError("Spanned WIM files are not yet supported")
 
-        self._resource_table, self._images = self._read_resource_table()
+        self._resource_entries, self._resource_table, self._images = self._read_resource_table()
 
-    def _read_resource_table(self) -> tuple[dict[bytes, Resource], list[Resource]]:
+    def _read_resource_table(self) -> tuple[list[Resource], dict[bytes, Resource], list[Resource]]:
         # Read the resource table in one go and separate images out
         # If this turns out to be slow for large WIM files, we can add some clever caching
+        entries = []
         table = {}
         images = []
         with Resource.from_short_header(self, self.header.OffsetTable).open() as fh:
-            for _ in range(fh.size // len(c_wim._RESHDR_DISK)):
+            for index in range(fh.size // len(c_wim._RESHDR_DISK)):
                 resource = Resource.from_header(self, c_wim._RESHDR_DISK(fh))
+                resource.index = index
+                entries.append(resource)
                 table[resource.hash] = resource
 
                 if resource.is_metadata:
                     images.append(resource)
 
-        return table, images
+        return entries, table, images
 
     @property
     def resources(self) -> dict[bytes, Resource]:
         """Return the table of resources in the WIM file."""
         return self._resource_table
 
+    @property
+    def resource_entries(self) -> list[Resource]:
+        """Return the resource table entries in table order.
+
+        Unlike :attr:`resources`, this keeps entries with duplicate hashes, which is
+        what a report needs to show that two streams point at separate table slots.
+        """
+        return self._resource_entries
+
     def images(self) -> Iterator[Image]:
         """Iterate over all images in the WIM file."""
         for resource in self._images:
-            yield Image(self, resource.open())
+            yield Image(self, resource.open(), resource=resource)
 
 
 class Resource:
     __slots__ = (
         "flags",
         "hash",
+        "index",
         "offset",
         "original_size",
         "part_number",
@@ -105,6 +119,7 @@ class Resource:
         self.wim = wim
         self.size = size
         self.flags = flags
+        self.index = -1
         self.offset = offset
         self.original_size = original_size
 
@@ -159,8 +174,9 @@ class Resource:
 
 
 class Image:
-    def __init__(self, wim: WIM, fh: BinaryIO):
+    def __init__(self, wim: WIM, fh: BinaryIO, resource: Resource | None = None):
         self.wim = wim
+        self.resource = resource
         self.security = SecurityBlock(fh)
 
         offset = fh.tell()
@@ -169,6 +185,13 @@ class Image:
 
     def __repr__(self) -> str:
         return "<Image>"
+
+    @cached_property
+    def relationships(self) -> RelationshipView:
+        """Return a relationship view over the directory entries of this image."""
+        from dissect.archive.wim.relationships import RelationshipView
+
+        return RelationshipView(self)
 
     def get(self, path: str, entry: DirectoryEntry | None = None) -> DirectoryEntry:
         # Programmatically we will often use the `/` separator, so replace it with the native path separator of NTFS
@@ -202,21 +225,63 @@ class Image:
         return entry
 
 
+class SecurityEntry:
+    """One entry of a WIM security block.
+
+    Entries are kept in place, including zero-length ones, because directory entries
+    address descriptors by array position. Hiding empty entries would shift every later
+    index and silently attach the wrong descriptor to a path.
+    """
+
+    __slots__ = ("data", "index", "offset", "size")
+
+    def __init__(self, index: int, offset: int, size: int, data: bytes):
+        self.index = index
+        self.offset = offset
+        self.size = size
+        self.data = data
+
+
 class SecurityBlock:
+    """The security block of a WIM image.
+
+    Directory entries address descriptors by their position in this block, so
+    :attr:`entries` and :attr:`descriptors` keep zero-length slots in place. Dropping an
+    empty slot would shift every later security id onto the descriptor of another file.
+    """
+
     def __init__(self, fh: BinaryIO):
         self.header = c_wim._SECURITYBLOCK_DISK(fh)
-        self.descriptors = []
-        for size in self.header.EntryLength:
-            if size == 0:
-                continue
 
-            self.descriptors.append(fh.read(size))
+        self.entries = []
+        for index, size in enumerate(self.header.EntryLength):
+            offset = fh.tell()
+            data = fh.read(size)
+            self.entries.append(SecurityEntry(index, offset, size, data))
+
+        self.descriptors = [entry.data for entry in self.entries]
+
+    def get(self, security_id: int) -> SecurityEntry | None:
+        """Return the security entry for ``security_id``.
+
+        Args:
+            security_id: Zero-based index into the security block.
+
+        Returns:
+            The security entry, or ``None`` if the id is outside the block. An entry with
+            ``data == b""`` is a stored empty slot, not a missing one.
+        """
+        if not 0 <= security_id < len(self.entries):
+            return None
+
+        return self.entries[security_id]
 
 
 class DirectoryEntry:
     def __init__(self, image: Image, fh: BinaryIO):
         self.image = image
         self.fh = fh
+        self.offset = fh.tell()
 
         start = fh.tell()
         self.entry = c_wim._DIRENTRY(fh)

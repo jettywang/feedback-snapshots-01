@@ -1,11 +1,45 @@
 from __future__ import annotations
 
-from dissect.archive.wim.wim import WIM, DirectoryEntry, Image, ReparsePoint, Resource
+from dissect.archive.wim.relationships import (
+    ContentGroup,
+    ContentMember,
+    ContentState,
+    DirectoryEntryState,
+    DirectoryRecord,
+    HardLinkGroup,
+    HardLinkMember,
+    HardLinkState,
+    RelationshipView,
+    ResourceRecord,
+    SecurityEntryRecord,
+    SecurityGroup,
+    SecurityReference,
+    SecurityState,
+    StreamRecord,
+)
+from dissect.archive.wim.wim import WIM, DirectoryEntry, Image, ReparsePoint, Resource, SecurityBlock, SecurityEntry
 
 __all__ = [
     "WIM",
+    "ContentGroup",
+    "ContentMember",
+    "ContentState",
     "DirectoryEntry",
+    "DirectoryEntryState",
+    "DirectoryRecord",
+    "HardLinkGroup",
+    "HardLinkMember",
+    "HardLinkState",
     "Image",
+    "RelationshipView",
     "ReparsePoint",
     "Resource",
+    "ResourceRecord",
+    "SecurityBlock",
+    "SecurityEntry",
+    "SecurityEntryRecord",
+    "SecurityGroup",
+    "SecurityReference",
+    "SecurityState",
+    "StreamRecord",
 ]
