@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from typing import TYPE_CHECKING, BinaryIO
+from typing import TYPE_CHECKING, BinaryIO, NamedTuple
 from uuid import UUID
 
 from dissect.fve.crypto import argon2, create_cipher
@@ -13,12 +13,21 @@ from dissect.fve.luks.c_luks import (
     SECONDARY_HEADER_OFFSETS,
     c_luks,
 )
-from dissect.fve.luks.metadata import Metadata
+from dissect.fve.luks.metadata import Digest, Metadata, Segment
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from dissect.fve.luks.metadata import Digest, Keyslot, Segment
+    from dissect.fve.luks.metadata import Keyslot
+
+
+class Chain(NamedTuple):
+    """A fully resolved keyslot -> digest -> segment relation."""
+
+    digest_id: int
+    digest: Digest
+    segment_id: int
+    segment: Segment
 
 
 class LUKS:
@@ -90,6 +99,7 @@ class LUKS:
 
         self._active_volume_key = None
         self._active_keyslot_id = None
+        self._active_chain = None
 
     @property
     def unlocked(self) -> bool:
@@ -101,10 +111,12 @@ class LUKS:
 
     def unlock(self, key: bytes, keyslot: int) -> None:
         """Unlock the volume with the volume encryption key."""
-        if not self._verify_volume_key(key, keyslot):
+        chain = self._verify_volume_key(key, keyslot)
+        if chain is None:
             raise ValueError(f"Invalid volume key for keyslot {keyslot}")
         self._active_volume_key = key
         self._active_keyslot_id = keyslot
+        self._active_chain = chain
 
     def unlock_with_key_file(self, path: Path, offset: int = 0, size: int = -1, keyslot: int | None = None) -> None:
         with path.open("rb") as fh:
@@ -146,7 +158,8 @@ class LUKS:
             try:
                 self.unlock(vk, idx)
                 break
-            except ValueError:
+            except ValueError as exc:
+                errors.append((idx, exc))
                 continue
         else:
             if errors:
@@ -169,16 +182,59 @@ class LUKS:
             keyslot_obj.af.hash,
         )
 
-    def _verify_volume_key(self, key: bytes, keyslot: int) -> None:
-        """Verify the given key for the given keyslot."""
-        digest = self.find_digest(keyslot)
+    def _verify_volume_key(self, key: bytes, keyslot: int) -> Chain | None:
+        """Verify the given volume key for the given keyslot.
+
+        Evaluates every digest that references the keyslot, independent of metadata order.
+        Returns the resolved chain if the key verifies and maps to exactly one segment,
+        or ``None`` if the key verifies against no applicable digest.
+
+        Raises:
+            ValueError: If the keyslot has no complete digest and segment chain, or if the
+                key verifies against digests that map to multiple different segments.
+        """
+        chains = self._resolve_chains(keyslot)
+        if not chains:
+            raise ValueError(f"Keyslot {keyslot} is not bound to any digest and segment")
+
+        verified = [chain for chain in chains if self._verify_digest(key, chain.digest)]
+        if not verified:
+            return None
+
+        segment_ids = {chain.segment_id for chain in verified}
+        if len(segment_ids) > 1:
+            raise ValueError(
+                f"Ambiguous volume key for keyslot {keyslot}: "
+                f"verifies against digests for multiple segments {sorted(segment_ids)}"
+            )
+
+        return verified[0]
+
+    @staticmethod
+    def _verify_digest(key: bytes, digest: Digest) -> bool:
+        """Verify the given key against a single digest."""
         if digest.type == "pbkdf2":
             result = hashlib.pbkdf2_hmac(digest.hash, key, digest.salt, digest.iterations, len(digest.digest))
-        else:
-            # Only the pbkdf2 type is supported in LUKS2
-            raise NotImplementedError(f"Unsupported digest algorithm: {digest.type}")
+            return result == digest.digest
 
-        return result == digest.digest
+        # Only the pbkdf2 type is supported in LUKS2
+        raise NotImplementedError(f"Unsupported digest algorithm: {digest.type}")
+
+    def _resolve_chains(self, keyslot: int) -> list[Chain]:
+        """Resolve all complete keyslot -> digest -> segment chains for the given keyslot.
+
+        Digests that reference the keyslot but dangle to a missing segment are skipped.
+        """
+        chains = []
+        for digest_id, digest in self.metadata.digests.items():
+            if keyslot not in digest.keyslots:
+                continue
+            for segment_id in digest.segments:
+                segment = self.metadata.segments.get(segment_id)
+                if segment is None:
+                    continue
+                chains.append(Chain(digest_id, digest, segment_id, segment))
+        return chains
 
     def find_digest(self, keyslot: int) -> Digest:
         """Find digest metadata corresponding to the given keyslot."""
@@ -186,19 +242,22 @@ class LUKS:
         if not digests:
             raise ValueError(f"No digest found for keyslot {keyslot}")
 
+        if len(digests) > 1:
+            raise ValueError(f"Ambiguous digest for keyslot {keyslot}: referenced by {len(digests)} digests")
+
         return digests[0]
 
     def find_segment(self, keyslot: int) -> Segment:
         """Find segment metadata corresponding to the given keyslot."""
-        digest = self.find_digest(keyslot)
-        segments = [segment for segment_id, segment in self.metadata.segments.items() if segment_id in digest.segments]
-        if not segments:
+        chains = self._resolve_chains(keyslot)
+        if not chains:
             raise ValueError(f"No segment found for keyslot {keyslot}")
 
-        if len(segments) > 1:
-            raise NotImplementedError(f"Keyslot {keyslot} has more than one segment")
+        segment_ids = {chain.segment_id for chain in chains}
+        if len(segment_ids) > 1:
+            raise ValueError(f"Ambiguous segment for keyslot {keyslot}: maps to segments {sorted(segment_ids)}")
 
-        return segments[0]
+        return chains[0].segment
 
     def open(self) -> CryptStream:
         """Open this volume and return a readable (decrypted) stream."""
@@ -207,7 +266,9 @@ class LUKS:
 
         # Technically LUKS supports multiple segments, but practically it only ever has one
         # Don't bother with supporting multiple segments for now
-        segment = self.find_segment(self._active_keyslot_id)
+        segment = self._active_chain.segment
+        if segment.type != "crypt":
+            raise NotImplementedError(f"Unsupported segment type: {segment.type}")
 
         return CryptStream(
             self.fh,
