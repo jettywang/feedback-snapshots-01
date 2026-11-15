@@ -86,6 +86,88 @@ encrypted = JWE.encrypt(payload, key, copyright: 'This is my stuff! All rights r
 puts encrypted
 ```
 
+## JSON Serialization (multiple recipients)
+
+Besides the compact serialization, the gem supports the [General and Flattened
+JWE JSON Serialization](https://tools.ietf.org/html/rfc7516#section-7.2). The
+payload is encrypted once with a single Content Encryption Key; that key is then
+wrapped independently for every recipient, so all recipients share the same
+content ciphertext, IV and authentication tag.
+
+### General JWE JSON Serialization
+
+Each entry in the recipients array carries its own key, key management algorithm
+and optional per-recipient headers. The same token can be opened by any of the
+legitimate recipients.
+
+```ruby
+require 'jwe'
+
+first_key  = OpenSSL::PKey::RSA.generate(2048)
+second_key = OpenSSL::PKey::RSA.generate(2048)
+payload = "The quick brown fox jumps over the lazy dog."
+
+encrypted = JWE.encrypt_general(
+  payload,
+  [
+    { key: first_key,  alg: 'RSA-OAEP', kid: 'first' },
+    { key: second_key, alg: 'RSA-OAEP', kid: 'second' }
+  ]
+)
+
+result = JWE.decrypt_general(encrypted, second_key)
+puts result.plaintext       # "The quick brown fox jumps over the lazy dog."
+puts result.recipient_index # 1 (the recipient that actually opened the token)
+puts result.header['kid']   # "second"
+```
+
+Recipients may use different key management algorithms (for example `RSA-OAEP`
+for one recipient and `A128KW` for another) as long as every wrapped key
+protects the same shared Content Encryption Key.
+
+### Flattened JWE JSON Serialization
+
+The flattened representation holds a single recipient with its members at the
+top level of the JSON object.
+
+```ruby
+encrypted = JWE.encrypt_flattened(payload, first_key, kid: 'solo')
+result = JWE.decrypt_flattened(encrypted, first_key)
+puts result.plaintext
+```
+
+### External Additional Authenticated Data (AAD)
+
+The authenticated data normally is the base64url encoded protected header. When
+the protected header is omitted, the shared header parameters move to the
+`unprotected` member and the external AAD is authenticated instead. The AAD is
+always taken from its original serialization, so any modification makes
+decryption fail with a `JWE::DecodeError`.
+
+```ruby
+encrypted = JWE.encrypt_general(
+  payload,
+  [{ key: first_key, alg: 'RSA-OAEP', kid: 'first' }],
+  protected: false,
+  aad: 'external additional authenticated data',
+  cty: 'text/plain'
+)
+
+JWE.decrypt_general(encrypted, first_key).plaintext
+```
+
+### JSON Serialization rules
+
+* A header parameter name must appear in only one of the protected, shared
+  unprotected and per-recipient header locations; duplicates raise
+  `JWE::DecodeError`.
+* `dir` and the direct key agreement variant `ECDH-ES` derive a per-recipient
+  Content Encryption Key and therefore cannot be combined with a JSON
+  Serialization that shares one CEK; they raise `JWE::DecodeError`.
+* When no recipient can unwrap a key, or content authentication fails, a
+  `JWE::DecodeError` is raised and no plaintext is returned. A failing recipient
+  is never able to reuse another recipient's headers.
+
 ## Available Algorithms
 
 The RFC 7518 JSON Web Algorithms (JWA) spec defines the algorithms for [encryption](https://tools.ietf.org/html/rfc7518#section-5.1)
