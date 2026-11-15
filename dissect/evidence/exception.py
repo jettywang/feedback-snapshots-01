@@ -31,3 +31,15 @@ class InvalidBlock(Error):
 
 class UnsupportedVersion(Error):
     """Related to ASDF (Acquire Snapshot Data Format)."""
+
+
+class SourceGapError(Error):
+    """Raised when a requested source range is not fully covered by collected blocks."""
+
+
+class SourceBlockCorrupt(Error):
+    """Raised when a source block fails its own stored block checksum."""
+
+
+class RecomposeIncomplete(Error):
+    """Raised when a derived snapshot cannot be finalized because a copy did not fully complete."""
