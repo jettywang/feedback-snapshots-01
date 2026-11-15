@@ -2,6 +2,22 @@
 Changelog
 =========
 
+- :feature:`-` Added optional policy enforcement for forwarded SSH agent
+  sessions. Handing an `.AgentForwardingPolicy` or `.RestrictedAgentPolicy` to
+  `AgentRequestHandler <paramiko.agent.AgentRequestHandler>`, or using
+  `RestrictedAgentRequestHandler
+  <paramiko.agent.RestrictedAgentRequestHandler>` directly, makes each
+  forwarded connection negotiate through a
+  `RestrictedAgentForwarder <paramiko.agent.RestrictedAgentForwarder>`:
+  identity enumeration is filtered to the allowed keys, sign requests must
+  match the complete public key blob *and* an exact agent ``flags`` word, and
+  unknown or state-changing requests are answered with ``SSH_AGENT_FAILURE``
+  locally, without ever reaching the real agent. Authorization is snapshotted
+  per live forwarding session and revoked when it closes; remote peers cannot
+  widen it by self-reporting a target name. Absent a locally-trusted target
+  binding, the guarantee is explicitly limited to the allowed keys and
+  signature algorithms.
+
 - :release:`5.1.0 <2026-10-17>`
 - :release:`5.0.1 <2026-10-17>`
 - :bug:`2462` (w/ earlier fix attempts :issue:`2475` and :issue:`2465`) An API

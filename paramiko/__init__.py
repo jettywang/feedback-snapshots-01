@@ -79,7 +79,17 @@ from paramiko.sftp_file import SFTPFile
 from paramiko.message import Message
 from paramiko.packet import Packetizer
 from paramiko.file import BufferedFile
-from paramiko.agent import Agent, AgentKey
+from paramiko.agent import (
+    Agent,
+    AgentForwardingPolicy,
+    AgentForwardingSession,
+    AgentKey,
+    RestrictedAgentClientProxy,
+    RestrictedAgentForwarder,
+    RestrictedAgentPolicy,
+    RestrictedAgentRequestHandler,
+    RestrictedKeyRule,
+)
 from paramiko.pkey import PKey, PublicBlob, UnknownKeyType
 from paramiko.hostkeys import HostKeys
 from paramiko.config import SSHConfig, SSHConfigDict
