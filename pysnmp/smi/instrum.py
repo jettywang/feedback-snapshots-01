@@ -10,6 +10,10 @@ import warnings
 
 from pysnmp import debug
 from pysnmp.smi import error
+from pysnmp.smi.budget import (
+    DEFAULT_TRAVERSAL_CANDIDATE_LIMIT,
+    TraversalBudget,
+)
 from pysnmp.smi.builder import MibBuilder
 
 __all__ = ["AbstractMibInstrumController", "MibInstrumController"]
@@ -35,6 +39,11 @@ class MibInstrumController(AbstractMibInstrumController):
     """MIB instrumentation controller."""
 
     __mib_builder: MibBuilder
+
+    #: Candidate examinations allowed for one ``read_next_variables`` call
+    #: that does not carry an explicit traversal budget.  ``None`` disables
+    #: the default limit.
+    default_traversal_candidate_limit = DEFAULT_TRAVERSAL_CANDIDATE_LIMIT
 
     fsm_read_variable = {
         # ( state, status ) -> newState
@@ -205,6 +214,9 @@ class MibInstrumController(AbstractMibInstrumController):
     def flip_flop_fsm(self, fsmTable, *varBinds, **context):
         """Flip-flop Finite State Machine."""
         self.__index_mib()
+        traversalBudget = context.get("traversal_budget")  # noqa: N806
+        if traversalBudget is not None:
+            traversalBudget.start_operation()
         debug.logger and debug.FLAG_INS and debug.logger(
             f"flipFlopFsm: input var-binds {varBinds!r}"
         )
@@ -236,12 +248,16 @@ class MibInstrumController(AbstractMibInstrumController):
                 if not mgmtFun:
                     raise error.SmiError(f"Unsupported state handler {state} at {self}")
 
-                context["idx"] = idx
+                # Keep per-varbind state (e.g. the traversal origin) isolated:
+                # the same context dictionary is reused for every varbind in
+                # this call, while the shared traversal budget must persist.
+                varbindContext = dict(context)  # noqa: N806
+                varbindContext["idx"] = idx
 
                 try:
                     # Convert to tuple to avoid ObjectName instantiation
                     # on subscription
-                    rval = mgmtFun((tuple(name), val), **context)
+                    rval = mgmtFun((tuple(name), val), **varbindContext)
 
                 except error.SmiError:
                     exc_t, exc_v, exc_tb = sys.exc_info()
@@ -280,7 +296,22 @@ class MibInstrumController(AbstractMibInstrumController):
         return self.flip_flop_fsm(self.fsm_read_variable, *varBinds, **context)
 
     def read_next_variables(self, *varBinds, **context):
-        """Read next MIB variables."""
+        """Read next MIB variables.
+
+        A ``traversal_budget`` context keyword carries an explicit
+        :py:class:`~pysnmp.smi.budget.TraversalBudget` shared by all varbinds
+        in one request.  When absent, a fresh budget bounded by
+        ``default_traversal_candidate_limit`` is used; pass
+        ``traversal_candidate_limit=None`` to disable that default.
+        """
+        if context.get("traversal_budget") is None:
+            limit = context.pop(
+                "traversal_candidate_limit", self.default_traversal_candidate_limit
+            )
+            context["traversal_budget"] = TraversalBudget(limit)
+        else:
+            context.pop("traversal_candidate_limit", None)
+
         return self.flip_flop_fsm(self.fsm_read_next_variable, *varBinds, **context)
 
     def write_variables(self, *varBinds, **context):

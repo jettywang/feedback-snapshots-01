@@ -558,10 +558,27 @@ class MibTree(ObjectType):
                     raise
 
                 direction = self.depthFirst
+
+                if tuple(node.name) <= tuple(nextName):
+                    raise error.NonIncreasingOidError(
+                        name=nextName,
+                        idx=context.get("idx"),
+                        candidate=tuple(node.name),
+                        previous=tuple(nextName),
+                        reason=(
+                            "MIB subtree backend did not advance to a "
+                            "lexicographically greater node"
+                        ),
+                    )
+
                 nextName = node.name
 
+            budget = context.get("traversal_budget")
+            if budget is not None:
+                budget.consume_for_context(nextName, context)
+
             try:
-                return getattr(node, methodName)((nextName, val), **context)
+                rval = getattr(node, methodName)((nextName, val), **context)
 
             except (
                 error.NoAccessError,
@@ -569,6 +586,55 @@ class MibTree(ObjectType):
                 error.NoSuchObjectError,
             ):
                 pass
+
+            else:
+                # The test phase reports success by returning None.
+                if rval is None:
+                    return
+
+                nextOid, nextVal = rval
+
+                if exval.is_mib_exception_value(nextVal):
+                    if nextVal.tagSet != exval.endOfMibView.tagSet:
+                        raise error.NonIncreasingOidError(
+                            name=nextName,
+                            idx=context.get("idx"),
+                            candidate=tuple(nextOid),
+                            previous=tuple(name),
+                            reason=(
+                                "traversal backend returned an SMIv2 "
+                                "exception value other than endOfMibView"
+                            ),
+                        )
+
+                    return rval
+
+                if tuple(nextOid) <= tuple(name):
+                    raise error.NonIncreasingOidError(
+                        name=nextName,
+                        idx=context.get("idx"),
+                        candidate=tuple(nextOid),
+                        previous=tuple(name),
+                        reason=(
+                            "traversal backend did not advance past the "
+                            "requested OID"
+                        ),
+                    )
+
+                # The value must be readable under its exact OID.  A
+                # coarse scalar/column check is not enough when the MIB
+                # view is finer-grained than the node the value came
+                # from; such candidates are skipped, never returned.
+                acFun = context.get("acFun")
+                if acFun:
+                    try:
+                        denied = acFun("read", (nextOid, nextVal), **context)
+                    except error.NoAccessError:
+                        denied = True
+                    if denied:
+                        continue
+
+                return rval
 
     def readTestNext(self, varBind, **context):
         return self._read_next(varBind, "readTestNext", None, **context)

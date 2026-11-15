@@ -1,5 +1,20 @@
 .. current-version: 7.1.32 (managed by bump2version)
 
+Unreleased
+----------
+
+- Added an explicit per-request candidate budget to GETNEXT/GETBULK so that
+  skipping MIB-view-hidden subtrees cannot consume unbounded work.  The
+  budget is shared by all varbinds and all GETBULK repetitions; exhaustion
+  is reported as ``resourceUnavailable`` rather than a false
+  ``endOfMibView``.
+- GETBULK repeaters now advance independently, repeating the last successor
+  with ``endOfMibView`` for columns that have ended.
+- Traversal now stops with an explicit error when instrumentation does not
+  advance, returns a non-``endOfMibView`` exception value, returns the wrong
+  number of varbinds, or returns a value the requester is not authorized to
+  read.
+
 Revision 7.1.32, released on Nov 07, 2026
 -----------------------------------------
 

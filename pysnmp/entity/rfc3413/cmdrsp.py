@@ -13,6 +13,15 @@ from pysnmp.proto import errind, error, rfc1902, rfc1905, rfc3411
 from pysnmp.proto.api import v2c  # backend is always SMIv2 compliant
 from pysnmp.proto.proxy import rfc2576
 from pysnmp.smi import error as smi_error
+from pysnmp.smi import exval
+from pysnmp.smi.budget import (
+    DEFAULT_TRAVERSAL_CANDIDATE_LIMIT,
+    TraversalBudget,
+)
+
+_NO_LIMIT = object()
+
+is_mib_exception_value = exval.is_mib_exception_value
 
 
 # 3.2
@@ -41,16 +50,144 @@ class CommandResponderBase:
         smi_error.AuthorizationError: "authorizationError",
         smi_error.NotWritableError: "notWritable",
         smi_error.InconsistentNameError: "inconsistentName",
+        smi_error.TraversalBudgetExceededError: "resourceUnavailable",
+        smi_error.NonIncreasingOidError: "genErr",
+        smi_error.TraversalAccessDeniedError: "authorizationError",
     }
 
-    def __init__(self, snmpEngine: SnmpEngine, snmpContext: SnmpContext, cbCtx=None):
-        """Create a responder object."""
+    #: Default per-request candidate budget shared by all varbinds and
+    #: GETBULK repetitions.  Override at class or instance level.
+    traversal_candidate_limit = DEFAULT_TRAVERSAL_CANDIDATE_LIMIT
+
+    def __init__(
+        self,
+        snmpEngine: SnmpEngine,
+        snmpContext: SnmpContext,
+        cbCtx=None,
+        traversal_candidate_limit=_NO_LIMIT,
+    ):
+        """Create a responder object.
+
+        Args:
+            snmpEngine (SnmpEngine): SNMP engine.
+            snmpContext (SnmpContext): SNMP context.
+            cbCtx: Opaque application context.
+            traversal_candidate_limit (int | None): Maximum number of MIB
+                candidates this responder may examine while producing one
+                response.  ``None`` disables the limit.  Defaults to the
+                class attribute.
+        """
         snmpEngine.message_dispatcher.register_context_engine_id(
             snmpContext.contextEngineId, self.SUPPORTED_PDU_TYPES, self.process_pdu
         )
         self.snmpContext = snmpContext
         self.cbCtx = cbCtx
+        if traversal_candidate_limit is _NO_LIMIT:
+            traversal_candidate_limit = self.traversal_candidate_limit
+        self.traversal_candidate_limit = traversal_candidate_limit
+        self.last_traversal_budget = None
         self.__pendingReqs = {}
+
+    def make_traversal_budget(self) -> TraversalBudget:
+        """Create the traversal budget for one incoming request."""
+        budget = TraversalBudget(self.traversal_candidate_limit)
+        # Retained for diagnostics and for applications that want to audit
+        # how much work a response required.
+        self.last_traversal_budget = budget
+        return budget
+
+    @staticmethod
+    def _check_response_progress(varBinds, requestVarBinds, idxMap=None):
+        """Ensure every returned value is a legal lexicographic successor.
+
+        Custom instrumentation may ignore the budget or return stale values.
+        The responder refuses to turn such a backend into a successful
+        response: a repeated or backwards OID is an explicit failure rather
+        than a silently truncated walk.
+        """
+        if idxMap is None:
+            idxMap = range(len(varBinds))  # noqa: N806
+
+        for idx, (name, val) in enumerate(varBinds):
+            requestName = requestVarBinds[idx][0]  # noqa: N806
+            requestIdx = idxMap[idx]
+
+            if is_mib_exception_value(val):
+                if val.tagSet == rfc1905.endOfMibView.tagSet:
+                    # RFC 3416 4.2.2/4.2.3: the name is either the last
+                    # successor or the requested name; it never moves back.
+                    if tuple(name) < tuple(requestName):
+                        raise smi_error.NonIncreasingOidError(
+                            idx=requestIdx,
+                            candidate=tuple(name),
+                            previous=tuple(requestName),
+                            reason=(
+                                "traversal backend returned an endOfMibView "
+                                "name that precedes the requested OID"
+                            ),
+                        )
+                    continue
+                raise smi_error.NonIncreasingOidError(
+                    idx=requestIdx,
+                    candidate=tuple(name),
+                    previous=tuple(requestName),
+                    reason=(
+                        "traversal backend returned an SMIv2 exception value "
+                        "other than endOfMibView"
+                    ),
+                )
+
+            if not tuple(name) > tuple(requestName):
+                raise smi_error.NonIncreasingOidError(
+                    idx=requestIdx,
+                    candidate=tuple(name),
+                    previous=tuple(requestName),
+                    reason=(
+                        "traversal backend returned an OID that does not "
+                        "lexicographically follow the requested OID"
+                    ),
+                )
+
+    def _verify_response_access(self, varBinds, context, idxMap=None):
+        """Ensure response values pass access control at their exact OIDs.
+
+        This complements the per-node checks performed by the MIB
+        instrumentation: instrumentation that bypasses or ignores ``acFun``
+        must not be able to smuggle a value for a denied candidate into the
+        response.
+        """
+        if idxMap is None:
+            idxMap = range(len(varBinds))  # noqa: N806
+
+        snmpEngine = context.get("snmpEngine")  # noqa: N806
+        if snmpEngine is None or not hasattr(snmpEngine, "observer"):
+            return
+        try:
+            snmpEngine.observer.get_execution_context("rfc3412.receiveMessage:request")
+        except KeyError:
+            # Direct responder invocation outside a real request; the
+            # instrumentation-level access checks still apply.
+            return
+
+        for idx, (name, val) in enumerate(varBinds):
+            if is_mib_exception_value(val):
+                continue
+
+            requestIdx = idxMap[idx]  # noqa: N806
+            denied = self.verify_access(
+                "read",
+                (name, val),
+                **dict(context, idx=requestIdx, traversal_idx_map=None),
+            )
+            if denied:
+                raise smi_error.TraversalAccessDeniedError(
+                    idx=requestIdx,
+                    candidate=tuple(name),
+                    reason=(
+                        "traversal backend produced a value for a candidate "
+                        "not visible to this requester"
+                    ),
+                )
 
     def handle_management_operation(
         self, snmpEngine, stateReference, contextName, PDU, acCtx
@@ -228,18 +365,25 @@ class CommandResponderBase:
             errorStatus = self.SMI_ERROR_MAP.get(errorIndication.__class__, "genErr")
 
             try:
-                errorIndex = errorIndication["idx"] + 1
+                idx = errorIndication["idx"]
+                errorIndex = 1 if idx is None else idx + 1
 
             except KeyError:
                 errorIndex = 1
 
-            if len(varBinds) > errorIndex:
-                errorIndex = 1
+            if errorIndex > len(varBinds):
+                errorIndex = len(varBinds)
 
             # rfc1905: 4.2.1.3
             if errorStatus == "tooBig":
                 errorIndex = 0
                 varBinds = []
+
+            # ``tooBig`` responses must have an empty varbind list
+            # (rfc1905: 4.2.1.3).  Other errors echo the request varbinds, so
+            # clamp a request-wide error index to the request varbind count.
+            if errorStatus != "tooBig" and errorIndex > len(varBinds):
+                errorIndex = len(varBinds)
 
             # Report error
             self.send_varbinds(
@@ -370,12 +514,29 @@ class NextCommandResponder(CommandResponderBase):
 
         varBinds = v2c.apiPDU.get_varbinds(PDU)
 
+        budget = self.make_traversal_budget()
+
         context = dict(
-            snmpEngine=snmpEngine, acFun=self.verify_access, cbCtx=self.cbCtx
+            snmpEngine=snmpEngine,
+            acFun=self.verify_access,
+            cbCtx=self.cbCtx,
+            traversal_budget=budget,
         )
 
         while True:
             rspVarBinds = mgmtFun(*varBinds, **context)
+
+            if len(rspVarBinds) != len(varBinds):
+                raise smi_error.GenError(
+                    idx=0,
+                    reason=(
+                        "traversal backend returned a wrong number of "
+                        "varbinds for the request"
+                    ),
+                )
+
+            self._check_response_progress(rspVarBinds, varBinds)
+            self._verify_response_access(rspVarBinds, context)
 
             try:
                 self.send_varbinds(snmpEngine, stateReference, 0, 0, rspVarBinds)
@@ -423,23 +584,104 @@ class BulkCommandResponder(CommandResponderBase):
 
         mgmtFun = self.snmpContext.get_mib_instrum(contextName).read_next_variables
 
+        budget = self.make_traversal_budget()
+
         context = dict(
-            snmpEngine=snmpEngine, acFun=self.verify_access, cbCtx=self.cbCtx
+            snmpEngine=snmpEngine,
+            acFun=self.verify_access,
+            cbCtx=self.cbCtx,
+            traversal_budget=budget,
         )
 
         if N:
             # TODO(etingof): manage all PDU var-binds in a single call
             rspVarBinds = mgmtFun(*reqVarBinds[:N], **context)
+            if len(rspVarBinds) != N:
+                raise smi_error.GenError(
+                    idx=0,
+                    reason=(
+                        "traversal backend returned a wrong number of "
+                        "varbinds for the non-repeaters"
+                    ),
+                )
+            self._check_response_progress(rspVarBinds, reqVarBinds[:N])
+            self._verify_response_access(rspVarBinds, context)
 
         else:
             rspVarBinds = []
 
-        varBinds = reqVarBinds[-R:]
+        # Every repeater advances independently.  Once a column reports
+        # endOfMibView it must not be walked further: its remaining slots are
+        # filled with endOfMibView while other columns keep advancing, and it
+        # does not make the whole response terminate early (rfc1905: 4.2.3).
+        columns = [list(varBind) for varBind in reqVarBinds[-R:]]
+        finalVarBinds = []
+        ended = [False] * R
+        lastVarBinds = [tuple(varBind) for varBind in reqVarBinds[-R:]]
 
         while M and R:
-            rspVarBinds.extend(mgmtFun(*varBinds, **context))
-            varBinds = rspVarBinds[-R:]
+            pending = []
+            for column in range(R):
+                if ended[column]:
+                    pending.append(None)
+                else:
+                    pending.append(columns[column])
+
+            if not any(pending):
+                break
+
+            active = [varBind for varBind in pending if varBind is not None]
+            activeIndexes = [N + column for column in range(R) if not ended[column]]
+            # Progress is measured against each column's current OID, which
+            # for repetitions after the first is the previous response OID.
+            stepContext = dict(context, traversal_idx_map=activeIndexes)  # noqa: N806
+            stepVarBinds = mgmtFun(*active, **stepContext)
+
+            if len(stepVarBinds) != len(active):
+                raise smi_error.GenError(
+                    idx=activeIndexes[0] if activeIndexes else None,
+                    reason=(
+                        "traversal backend returned a wrong number of "
+                        "varbinds for the repetition"
+                    ),
+                )
+
+            self._check_response_progress(stepVarBinds, active, idxMap=activeIndexes)
+            self._verify_response_access(stepVarBinds, context, idxMap=activeIndexes)
+
+            stepped = 0
+            for column in range(R):
+                if ended[column]:
+                    # rfc1905 4.2.3: once a column has no further
+                    # successors, later repetitions carry its last OID with
+                    # endOfMibView while other columns keep advancing.
+                    finalVarBinds.append((
+                        lastVarBinds[column][0],
+                        rfc1905.endOfMibView,
+                    ))
+                    continue
+
+                nextVarBind = stepVarBinds[stepped]
+                stepped += 1
+
+                if is_mib_exception_value(nextVarBind[1]) and (
+                    nextVarBind[1].tagSet == rfc1905.endOfMibView.tagSet
+                ):
+                    ended[column] = True
+                    finalVarBinds.append(nextVarBind)
+                    # rfc1905 4.2.3(2): subsequent repetition slots for this
+                    # column repeat the last (or original) name with
+                    # endOfMibView while other columns keep advancing.
+                    lastVarBinds[column] = (nextVarBind[0], rfc1905.endOfMibView)
+                    columns[column] = None
+                else:
+                    columns[column] = [nextVarBind[0], nextVarBind[1]]
+                    lastVarBinds[column] = (nextVarBind[0], nextVarBind[1])
+                    finalVarBinds.append(nextVarBind)
+
             M -= 1
+
+        rspVarBinds.extend(finalVarBinds)
 
         if len(rspVarBinds):
             self.send_varbinds(snmpEngine, stateReference, 0, 0, rspVarBinds)

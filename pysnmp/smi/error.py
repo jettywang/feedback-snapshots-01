@@ -190,6 +190,33 @@ class EndOfMibViewError(NoSuchNameError):
     pass
 
 
+# MIB traversal exceptions
+
+
+class TraversalError(MibOperationError):
+    """Base class for limited MIB traversal failures."""
+
+    pass
+
+
+class TraversalBudgetExceededError(TraversalError):
+    """The per-request candidate examination budget was exhausted."""
+
+    pass
+
+
+class NonIncreasingOidError(TraversalError):
+    """A traversal backend did not advance to a greater OID."""
+
+    pass
+
+
+class TraversalAccessDeniedError(TraversalError):
+    """A traversal backend produced a candidate forbidden by access control."""
+
+    pass
+
+
 # SNMP table management exceptions
 
 
