@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import struct
 import warnings
 from collections.abc import Iterable
 from typing import ClassVar, cast
@@ -13,6 +12,10 @@ from signify._typing import HashFunction
 from signify.asn1 import spc
 from signify.asn1.hashing import _get_digest_algorithm
 from signify.asn1.spc import SpcPeImageData, SpcSigInfo
+from signify.authenticode.page_hashes import (
+    ParsedPageHashTable,
+    parse_page_hash_table,
+)
 from signify.exceptions import (
     AuthenticodeParseError,
 )
@@ -154,19 +157,43 @@ class PeImageData:
         raise AttributeError("SpcPeImageData.contents contained multiple entries")
 
     @property
-    def page_hashes(self) -> Iterable[tuple[int, int, bytes, HashFunction]]:
-        """Iterates over all page hash ranges, and their hash digests, as defined
-        in the SpcSerializedObject. If not available, will simply return an empty list.
+    def page_hash_tables(self) -> Iterable[ParsedPageHashTable]:
+        """Iterates over the page hash tables in the serialized data.
+
+        The tables are validated while iterating. Duplicate or decreasing page
+        offsets, a missing or malformed terminator, a non-zero terminal digest and a
+        trailing partial entry all raise
+        :exc:`~signify.exceptions.AuthenticodePageHashParseError`; they are never
+        sorted or otherwise repaired.
+
+        If page hashes are not available, this returns an empty iterator.
         """
         if not self.serialized_data_asn1_available:
             return
         for content_type, contents in self.content_pairs:
             hash_algorithm = self.page_hash_algorithm(content_type)
             for content in contents:
-                for start, end, digest in self.parse_page_hash_content(
-                    hash_algorithm, content
-                ):
-                    yield start, end, digest, hash_algorithm
+                yield parse_page_hash_table(
+                    hash_algorithm, content, content_type=content_type
+                )
+
+    @property
+    def page_hashes(self) -> Iterable[tuple[int, int, bytes, HashFunction]]:
+        """Iterates over all page hash ranges, and their hash digests, as defined
+        in the SpcSerializedObject. If not available, will simply return an empty list.
+
+        The final offset is a terminator and is not yielded as a page. Structurally
+        invalid tables raise
+        :exc:`~signify.exceptions.AuthenticodePageHashParseError`.
+        """
+        for table in self.page_hash_tables:
+            for page_range in table.ranges:
+                yield (
+                    page_range.start,
+                    page_range.end,
+                    page_range.digest,
+                    table.algorithm,
+                )
 
     PAGE_HASH_ALGORITHMS: ClassVar[dict[str, HashFunction]] = {
         "microsoft_spc_pe_image_page_hashes_v1": hashlib.sha1,
@@ -199,21 +226,14 @@ class PeImageData:
         and a zero hash (``0000...``).
 
         This method yields tuples of start offset, end offset, and the hash digest.
+        The final offset is a terminator and is not yielded as a page.
+
+        :raises AuthenticodePageHashParseError: if offsets are not strictly
+            increasing, entries are incomplete, or the terminator digest is not zero.
         """
-
-        d = hash_algorithm()
-        d.update(b"")
-        hash_length = len(d.digest())
-
-        position, previous_offset, digest = 0, None, None
-        while position < len(content):
-            offset = struct.unpack("<I", content[position : position + 4])[0]
-            if previous_offset is not None and digest is not None:
-                yield previous_offset, offset, digest
-
-            digest = content[position + 4 : position + 4 + hash_length]
-            previous_offset = offset
-            position += 4 + hash_length
+        table = parse_page_hash_table(hash_algorithm, content)
+        for page_range in table.ranges:
+            yield page_range.start, page_range.end, page_range.digest
 
 
 class SigInfo:

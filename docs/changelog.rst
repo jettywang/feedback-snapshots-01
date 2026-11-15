@@ -2,6 +2,18 @@ Release notes
 =============
 This page contains the most significant changes in Signify between each release.
 
+Unreleased
+----------
+* Added ``SignedPEFile.get_page_hash_report`` (and its alias
+  ``verify_page_hashes``) returning per-page file ranges, expected and actual digests,
+  the number of padding bytes, and the reason a page could not be verified. The
+  existing exception-based page hash verification is preserved.
+* Page hash tables are now validated structurally: duplicate or decreasing offsets,
+  malformed terminators, and partial trailing entries raise
+  ``AuthenticodePageHashParseError`` instead of being silently sorted or skipped.
+* Page hash padding is now based on the actual page range between the signed offsets,
+  rather than on the number of bytes left after exclusions.
+
 v0.9.3 (2026-10-11)
 -------------------
 * Fix crash on certificates with key algorithms unknown to asn1crypto (e.g. ML-DSA).

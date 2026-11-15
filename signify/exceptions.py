@@ -25,6 +25,14 @@ class AuthenticodeParseError(ParseError):
     """Raised when any exception regarding parsing Authenticode structures occurs."""
 
 
+class AuthenticodePageHashParseError(AuthenticodeParseError):
+    """Raised when the page hash table in an Authenticode signature is malformed.
+
+    This is a structural problem with the signed data itself, not a mismatch between
+    a page's expected and calculated digest.
+    """
+
+
 class VerificationError(SignifyError):
     pass
 

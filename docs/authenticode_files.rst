@@ -134,9 +134,57 @@ In the example above, for the first hash, we would calculate the hash over the f
 PE header file, and then add 3072 NULL bytes to complete a full PE page. Note that the
 actual digest is calculated over less than 4096 bytes due to the omissions.
 
+The real page boundaries are the offsets in the table: each page runs from its own
+offset to the next offset, so the final entry is not a page but a terminator that ends
+the last page. The terminator digest must be all zeroes. A page is only padded with
+NULL bytes when the range between its offsets is shorter than the full page size; the
+padding is based on that range, not on the number of bytes left after omissions.
+
+Both the per-page files ranges and the PE fields excluded from the digest (the
+checksum, the certificate table directory entry, and the certificate table itself) are
+made available by :meth:`SignedPEFile.get_page_hash_report`. The page offsets must be
+strictly increasing and the number of digests must match the number of pages; duplicate
+offsets, decreasing offsets, a malformed terminator and trailing partial entries are
+reported as :class:`~signify.exceptions.AuthenticodePageHashParseError` and are never
+sorted or otherwise silently repaired.
+
+.. code-block:: python
+
+    with open("file.exe", "rb") as f:
+        pefile = AuthenticodeFile.from_stream(f)
+        signature = next(pefile.embedded_signatures)
+        report = pefile.get_page_hash_report(signature.indirect_data)
+
+    for page in report.pages:
+        print(
+            page.range, page.status, page.expected_hex, page.actual_hex,
+            page.padding_length, page.reason,
+        )
+
+A report only describes the page hashes. A page that matches is not evidence that the
+whole file is covered by that page, and a fully matching report does not establish that
+the complete Authenticode signature or the certificate chain is valid; use
+:meth:`SignedPEFile.verify` for that. The existing exception-based API is preserved:
+:meth:`SignedPEFile.verify_additional_hashes` still raises
+:class:`~signify.exceptions.AuthenticodeInvalidPageHashError` on a page mismatch or an
+unverifiable page, and raises
+:class:`~signify.exceptions.AuthenticodePageHashParseError` for a malformed table.
+
 .. autoclass:: SignedPEFile
-   :members:
+   :members: get_page_hash_report, verify_page_hashes, verify_additional_hashes
    :special-members: __init__
+
+.. autoclass:: signify.authenticode.page_hashes.PageHashReport
+   :members:
+
+.. autoclass:: signify.authenticode.page_hashes.PageHashEntry
+   :members:
+
+.. autoclass:: signify.authenticode.page_hashes.PageHashStatus
+   :members:
+
+.. autoclass:: signify.authenticode.page_hashes.PageHashTableError
+   :members:
 
 .. autoclass:: SignedPEFingerprinter
    :members:

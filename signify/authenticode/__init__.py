@@ -3,6 +3,12 @@ from .cert_store import (
     TRUSTED_CERTIFICATE_STORE,
     TRUSTED_CERTIFICATE_STORE_NO_CTL,
 )
+from .page_hashes import (
+    PageHashEntry,
+    PageHashReport,
+    PageHashStatus,
+    PageHashTableError,
+)
 from .signed_data import AuthenticodeSignature
 from .signed_file import AuthenticodeFile
 from .trust_list import AUTHROOTSTL_PATH, CertificateTrustList, CertificateTrustSubject
@@ -18,4 +24,8 @@ __all__ = [
     "AuthenticodeVerificationResult",
     "CertificateTrustList",
     "CertificateTrustSubject",
+    "PageHashEntry",
+    "PageHashReport",
+    "PageHashStatus",
+    "PageHashTableError",
 ]

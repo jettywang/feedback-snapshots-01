@@ -45,8 +45,20 @@ from typing_extensions import TypedDict
 
 from signify._typing import HashFunction
 from signify.authenticode.indirect_data import IndirectData, PeImageData
+from signify.authenticode.page_hashes import (
+    PageHashReport,
+    PageHashTableError,
+    ParsedPageHashTable,
+    build_page_hash_report,
+    parse_page_hash_table,
+    subtract_ranges,
+)
 from signify.authenticode.signed_data import AuthenticodeSignature
-from signify.exceptions import AuthenticodeInvalidPageHashError, SignedPEParseError
+from signify.exceptions import (
+    AuthenticodeInvalidPageHashError,
+    AuthenticodePageHashParseError,
+    SignedPEParseError,
+)
 from signify.fingerprinter import Fingerprinter, Range
 
 from .base import AuthenticodeFile
@@ -355,26 +367,157 @@ class SignedPEFile(AuthenticodeFile):
             if not ignore_parse_errors:
                 raise
 
-    def verify_additional_hashes(self, indirect_data: IndirectData) -> None:
-        """Verifies the page hashes (if available) in the SpcPeImageData field."""
+    def get_page_hash_report(
+        self, indirect_data: IndirectData
+    ) -> PageHashReport | None:
+        """Verifies the page hashes in the SpcPeImageData field and returns a
+        structured, per-page report.
 
-        # can only verify page hashes when the indirect data is
-        # microsoft_spc_pe_image_data
+        Every page entry contains its half-open file range, the expected digest from
+        the signature, the digest calculated over the file, and, if it could not be
+        verified, the reason. Pages are hashed with the same exclusions as the
+        Authenticode file hash (the PE checksum, the certificate table directory entry
+        and the certificate table), and short pages are zero-padded to the PE page
+        size.
+
+        A :class:`PageHashReport` only covers the page hashes present in the
+        signature. Individual pages passing does not mean the whole file is
+        Authenticode-valid, nor that all file bytes are covered by these pages; use
+        :meth:`verify` for the complete signature verification.
+
+        :param indirect_data: The indirect data to obtain the page hashes from.
+        :returns: The report, or :const:`None` if the indirect data does not contain
+            PE image data or does not contain page hashes. Structurally invalid
+            tables are not silently skipped or repaired; they are recorded in
+            :attr:`PageHashReport.structural_errors` and make
+            :attr:`PageHashReport.all_pages_match` :const:`False`.
+        """
         if indirect_data.content_type != "microsoft_spc_pe_image_data":
             return None
 
         image_data: PeImageData = cast(PeImageData, indirect_data.content)
+        if not image_data.serialized_data_asn1_available:
+            return None
 
-        for start, end, digest, hash_algorithm in image_data.page_hashes:
-            expected_hash = self.get_fingerprint(
-                hash_algorithm, start, end, aligned=True
+        tables: list[ParsedPageHashTable] = []
+        structural_errors: list[PageHashTableError] = []
+        for content_type, contents in image_data.content_pairs:
+            try:
+                hash_algorithm = image_data.page_hash_algorithm(content_type)
+            except AuthenticodePageHashParseError as exc:
+                structural_errors.append(
+                    PageHashTableError(
+                        str(exc), content_type=content_type, exception=exc
+                    )
+                )
+                continue
+            for content in contents:
+                try:
+                    parsed = parse_page_hash_table(
+                        hash_algorithm, content, content_type=content_type
+                    )
+                except AuthenticodePageHashParseError as exc:  # noqa: PERF203
+                    structural_errors.append(
+                        PageHashTableError(
+                            str(exc),
+                            content_type=content_type,
+                            exception=exc,
+                        )
+                    )
+                else:
+                    tables.append(parsed)
+
+        if not tables and not structural_errors:
+            return None
+
+        omit = self.get_authenticode_omit_sections() or {}
+        excluded_sections = [
+            (name, location.start, sum(location)) for name, location in omit.items()
+        ]
+
+        return build_page_hash_report(
+            tables=tables,
+            file_size=self._filelength,
+            page_size=self.page_size,
+            hash_page=self._hash_page_range,
+            structural_errors=structural_errors,
+            excluded_sections=excluded_sections,
+        )
+
+    def _hash_page_range(
+        self, digest_algorithm: HashFunction, start: int, end: int
+    ) -> bytes | None:
+        """Calculates a page hash over ``[start, end)``, appending zero padding to a
+        full page.
+
+        Returns :const:`None` if the range contains no bytes that participate in the
+        Authenticode hash at all, because hashing an empty range would produce the
+        digest of the padding only and would not verify the file's contents.
+
+        :raises SignedPEParseError: if the range lies outside the file.
+        """
+
+        if start < 0 or start > end or end > self._filelength:
+            raise SignedPEParseError(
+                f"The page range {start}-{end} exceeds the file boundaries"
+                f" (0-{self._filelength})"
             )
 
-            if expected_hash != digest:
-                raise AuthenticodeInvalidPageHashError(
-                    f"The page hash for page {start}-{end} is invalid."
-                )
+        # The page size is derived from the PE header. Refuse to pad when the range is
+        # not covered by a usable page size, instead of silently reporting a mismatch.
+        page_size = self.page_size
+        if page_size <= 0:
+            raise SignedPEParseError(f"Invalid PE page size {page_size}")
 
+        omit = self.get_authenticode_omit_sections() or {}
+        excluded = [
+            (start_length.start, sum(start_length)) for start_length in omit.values()
+        ]
+
+        covered = [
+            Range(range_start, range_end)
+            for range_start, range_end in subtract_ranges(start, end, excluded)
+        ]
+        if not covered:
+            return None
+
+        # A page is zero-padded to a whole PE page. The padding is based on the real
+        # page length, not on the length of the remaining ranges: bytes omitted from
+        # the hash (e.g. the checksum) still count towards the page length. Passing
+        # it explicitly avoids deriving it from the first and last hashed offsets,
+        # which differ whenever a page ends in an excluded region.
+        padding = (-(end - start)) % page_size
+
+        fingerprinter = self.get_fingerprinter()
+        fingerprinter.add_hashers(
+            digest_algorithm,
+            ranges=covered,
+            description="page_hash",
+            padding=padding,
+        )
+        return fingerprinter.hash()[digest_algorithm().name]
+
+    def verify_page_hashes(self, indirect_data: IndirectData) -> PageHashReport | None:
+        """Alias for :meth:`get_page_hash_report`.
+
+        Returns a per-page report instead of raising on page mismatches. Structural
+        table errors are included in the report.
+        """
+
+        return self.get_page_hash_report(indirect_data)
+
+    def verify_additional_hashes(self, indirect_data: IndirectData) -> None:
+        """Verifies the page hashes (if available) in the SpcPeImageData field.
+
+        This preserves the historical behaviour of raising
+        :exc:`~signify.exceptions.AuthenticodeInvalidPageHashError` on the first page
+        mismatch or unverifiable page. Use :meth:`get_page_hash_report` to obtain a
+        per-page report instead.
+        """
+
+        report = self.get_page_hash_report(indirect_data)
+        if report is not None:
+            report.raise_for_error()
         return None
 
 

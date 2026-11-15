@@ -52,6 +52,7 @@ class Finger:
         ranges: list[Range],
         description: str,
         block_size: int | None = None,
+        padding: int = 0,
     ):
         """
 
@@ -60,12 +61,16 @@ class Finger:
         :param description: The description of this Finger.
         :param block_size: Defines a virtual block size that should be used to
             complement the provided ranges with NULL bytes.
+        :param padding: An explicit number of NULL bytes to append after the ranges.
+            This takes precedence over ``block_size``, and is useful when the amount
+            of padding is known even though some hashed ranges are excluded.
         """
 
         self._ranges = ranges
         self.hashers = hashers
         self.description = description
         self.block_size = block_size
+        self.padding = padding
 
         self._virtual_range = self._ranges[-1].end - self._ranges[0].start
 
@@ -122,6 +127,10 @@ class Finger:
         ranges, and the last offset in the provided ranges, and not the actual amount
         of bytes read.
         """
+        if self.padding:
+            self.update(b"\0" * self.padding)
+            return
+
         if self.block_size is None or (self._virtual_range % self.block_size) == 0:
             return
 
@@ -188,6 +197,7 @@ class Fingerprinter:
         start: int = 0,
         end: int = -1,
         block_size: int | None = None,
+        padding: int = 0,
     ) -> None:
         """Add hash methods to the fingerprinter.
 
@@ -202,6 +212,8 @@ class Fingerprinter:
         :param end: End of range to be hashed. If -1, this is equal to the entire file.
         :param block_size: When set, adds NULL bytes to the end of the range to ensure
             a certain block size is read.
+        :param padding: When set, appends this exact number of NULL bytes, regardless
+            of ``block_size``.
         """
         concrete_hashers = [x() for x in hashers]
         if not ranges:
@@ -212,6 +224,7 @@ class Fingerprinter:
             self._adjust_ranges(ranges, start, end),
             description,
             block_size,
+            padding,
         )
         self._fingers.append(finger)
 
