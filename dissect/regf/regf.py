@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import struct
+from dataclasses import dataclass
 from functools import cached_property, lru_cache
 from io import BytesIO
 from typing import TYPE_CHECKING, BinaryIO, TypeAlias
@@ -16,6 +17,7 @@ from dissect.regf.c_regf import (
     REG_DWORD_BIG_ENDIAN,
     REG_EXPAND_SZ,
     REG_FULL_RESOURCE_DESCRIPTOR,
+    REG_LINK,
     REG_MULTI_SZ,
     REG_NONE,
     REG_QWORD,
@@ -26,12 +28,16 @@ from dissect.regf.c_regf import (
 )
 from dissect.regf.exceptions import (
     Error,
+    InvalidLinkError,
+    LinkLoopError,
+    LinkTargetNotFoundError,
+    MountNotFoundError,
     RegistryKeyNotFoundError,
     RegistryValueNotFoundError,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Mapping
     from datetime import datetime
 
 log = logging.getLogger(__name__)
@@ -42,6 +48,60 @@ CellType: TypeAlias = "IndexLeaf | FastLeaf | HashLeaf | IndexRoot | KeyNode | K
 
 STABLE = 0
 VOLATILE = 1
+
+# Every registry link target lives under this virtual root, e.g.
+# ``\REGISTRY\MACHINE\SOFTWARE\...``.
+REGISTRY_ROOT = "REGISTRY"
+
+# Safety bound for link chain resolution. Real chains are only a handful of
+# hops; this stops pathological data from looping forever if identity tracking
+# were ever bypassed.
+MAX_LINK_HOPS = 256
+
+
+@dataclass(frozen=True, slots=True)
+class RegistryLink:
+    """The on-disk evidence that a :class:`KeyNode` is a registry link.
+
+    A link is only recognised when the key carries the ``SYM_LINK`` flag, it
+    contains a single ``REG_LINK`` value and that value decodes as a
+    ``UTF-16-LE`` target string. A plain string value on an ordinary key never
+    produces a :class:`RegistryLink`.
+
+    The original value cell offset and raw data are retained so the evidence
+    survives even when the target itself cannot be resolved.
+    """
+
+    source: KeyNode
+    value: KeyValue
+    target: str
+    raw_target: bytes
+    value_offset: int
+
+
+@dataclass(frozen=True, slots=True)
+class LinkHop:
+    """One link traversal, recorded for an auditable resolution chain."""
+
+    link: RegistryLink
+    source_hive: RegistryHive
+    source_cell: int
+    target: str
+    target_hive: RegistryHive | None
+
+
+@dataclass(frozen=True, slots=True)
+class LinkResolution:
+    """The result of following zero or more links from a starting key."""
+
+    target: KeyNode
+    target_hive: RegistryHive
+    target_path: str
+    hops: tuple[LinkHop, ...]
+
+    @property
+    def followed_link(self) -> bool:
+        return bool(self.hops)
 
 
 class RegistryHive:
@@ -74,15 +134,16 @@ class RegistryHive:
             log.debug("Hive %r is not undergoing any transactions", self.filename)
 
         self._hbin_offset = len(c_regf._HBASE_BLOCK)
-        self._root = self.cell(self.header.RootCell)
-
         self.cell = lru_cache(4096)(self.cell)
+        self._root = self.cell(self.header.RootCell)
 
     def root(self) -> KeyNode:
         return self._root
 
     def cell(self, offset: int) -> CellType:
-        return self.parse_cell_data(self.cell_data(offset))
+        cell = self.parse_cell_data(self.cell_data(offset))
+        cell.offset = offset
+        return cell
 
     def _cell_data(self, offset: int) -> tuple[bool, bytes]:
         self.fh.seek(self._hbin_offset + offset)
@@ -136,9 +197,155 @@ class RegistryHive:
             while offset < next_hbin:
                 allocated, data = self._cell_data(offset - self._hbin_offset)
                 cell = _CELL_CLASSES.get(data[:2], lambda hive, buf: buf)(self, data)
+                if isinstance(cell, Cell):
+                    cell.offset = offset - self._hbin_offset
 
                 yield offset, allocated, cell
                 offset += 4 + len(data)
+
+    def inspect_link(self, path: str) -> RegistryLink | None:
+        """Open ``path`` and return its link evidence without following it."""
+        return self.open(path).inspect_link()
+
+    def resolve_link(self, path: str, mounts: RegistryMounts) -> LinkResolution:
+        """Open ``path`` and resolve it as a link using ``mounts``."""
+        return self.open(path).resolve_link(mounts)
+
+
+class RegistryMounts:
+    """Caller-provided mapping of virtual registry paths to offline hives.
+
+    A mount maps a virtual path such as ``\\REGISTRY\\MACHINE`` or
+    ``HKEY_LOCAL_MACHINE`` to a loaded :class:`RegistryHive`. Mount lookup is
+    case-insensitive and uses the longest matching prefix, allowing several
+    hives to be mounted beneath one another. Nothing here touches the host
+    registry.
+    """
+
+    def __init__(self, mounts: Mapping[str, RegistryHive] | None = None):
+        self._mounts: dict[tuple[str, ...], RegistryHive] = {}
+        if mounts:
+            for path, hive in mounts.items():
+                self.mount(path, hive)
+
+    @staticmethod
+    def normalize_path(path: str) -> tuple[str, ...]:
+        # Mount keys are matched case-insensitively, so they are upper-cased.
+        return tuple(part.upper() for part in path.strip("\\").replace("/", "\\").split("\\") if part)
+
+    @staticmethod
+    def _segments(path: str) -> tuple[str, ...]:
+        return tuple(part for part in path.strip("\\").replace("/", "\\").split("\\") if part)
+
+    def mount(self, path: str, hive: RegistryHive) -> None:
+        key = self.normalize_path(path)
+        if not key:
+            raise Error("A mount requires a non-empty registry path")
+        self._mounts[key] = hive
+
+    def lookup(self, target_path: str) -> tuple[RegistryHive, tuple[str, ...]]:
+        """Resolve ``target_path`` to the most specific mounted hive.
+
+        Returns the hive and the remaining path segments inside that hive,
+        preserving their original casing. Raises :class:`MountNotFoundError`
+        when no mount covers the target.
+        """
+        segments = self._segments(target_path)
+        if not segments or segments[0].upper() != REGISTRY_ROOT:
+            raise MountNotFoundError(f"Link target {target_path!r} is not a virtual registry path")
+
+        upper = tuple(part.upper() for part in segments)
+        best: tuple[str, ...] | None = None
+        for mount_path in self._mounts:
+            if upper[: len(mount_path)] == mount_path and (best is None or len(mount_path) > len(best)):
+                best = mount_path
+
+        if best is None:
+            raise MountNotFoundError(f"No hive mounted for link target {target_path!r}")
+
+        return self._mounts[best], segments[len(best) :]
+
+    def __len__(self) -> int:
+        return len(self._mounts)
+
+    def __contains__(self, path: object) -> bool:
+        return self.normalize_path(path) in self._mounts if isinstance(path, str) else False
+
+
+class LinkResolver:
+    """Resolves link keys strictly through offline :class:`RegistryMounts`."""
+
+    def __init__(self, mounts: RegistryMounts):
+        self.mounts = mounts
+
+    def resolve(self, start: KeyNode) -> LinkResolution:
+        current = start
+        current_hive = start.hive
+        hops: list[LinkHop] = []
+        # Identity of every cell already visited, across every mounted hive,
+        # so loops (including a link back to itself) are detected.
+        visited: set[tuple[int, int]] = {(id(current_hive), current.offset)}
+
+        while True:
+            link = current.link
+            if link is None:
+                target_path = self._virtual_path(current_hive, current, hops)
+                return LinkResolution(
+                    target=current,
+                    target_hive=current_hive,
+                    target_path=target_path,
+                    hops=tuple(hops),
+                )
+
+            if len(hops) >= MAX_LINK_HOPS:
+                raise LinkLoopError(f"Link chain exceeded {MAX_LINK_HOPS} hops", link).with_hops(hops)
+
+            try:
+                target_hive, remaining = self.mounts.lookup(link.target)
+            except MountNotFoundError as exc:
+                exc.link = link
+                raise exc.with_hops(hops + [self._hop(link, current_hive, None)]) from exc
+
+            # Record the jump before touching the target so the evidence of
+            # every attempted link survives a later failure.
+            hops.append(self._hop(link, current_hive, target_hive))
+
+            node = target_hive.root()
+            for part in remaining:
+                try:
+                    node = node.subkey(part)
+                except RegistryKeyNotFoundError as exc:
+                    error = LinkTargetNotFoundError(
+                        f"Link target {link.target!r} does not exist in the mounted hive",
+                        link,
+                    )
+                    raise error.with_hops(hops) from exc
+
+            identity = (id(target_hive), node.offset)
+            if identity in visited:
+                raise LinkLoopError(f"Link loop detected while resolving {link.target!r}", link).with_hops(hops)
+            visited.add(identity)
+
+            current = node
+            current_hive = target_hive
+
+    @staticmethod
+    def _hop(link: RegistryLink, source_hive: RegistryHive, target_hive: RegistryHive | None) -> LinkHop:
+        return LinkHop(
+            link=link,
+            source_hive=source_hive,
+            source_cell=link.source.offset,
+            target=link.target,
+            target_hive=target_hive,
+        )
+
+    @staticmethod
+    def _virtual_path(hive: RegistryHive, node: KeyNode, hops: tuple[LinkHop, ...]) -> str:
+        if hops:
+            # The final hop already names the full virtual path of the node it
+            # arrived at; node.path is only relative inside that target hive.
+            return hops[-1].target
+        return node.path
 
 
 class Cell:
@@ -147,6 +354,9 @@ class Cell:
 
     def __init__(self, hive: RegistryHive, data: bytes, strict: bool = True):
         self.hive = hive
+        # Hive-relative offset of this cell. Filled in by RegistryHive.cell
+        # and RegistryHive.walk; -1 when a cell was constructed directly.
+        self.offset = -1
 
         if data[:2] != self.__signature__:
             raise Error(f"Invalid {self.__class__.__name__} signature {data[:2]!r}, expected {self.__signature__!r}")
@@ -263,6 +473,66 @@ class KeyNode(Cell):
 
         raise RegistryValueNotFoundError(name)
 
+    @cached_property
+    def is_link(self) -> bool:
+        """Whether this key is a valid registry link.
+
+        A link requires the ``SYM_LINK`` key flag, a single ``REG_LINK`` value
+        and a ``UTF-16-LE`` encoded target. An ordinary key holding a string
+        value (even one named ``SymbolicLinkValue``) is not a link.
+        """
+        try:
+            return self.link is not None
+        except InvalidLinkError:
+            return False
+
+    @cached_property
+    def link(self) -> RegistryLink | None:
+        """Return the link evidence, ``None`` for ordinary keys.
+
+        Raises :class:`InvalidLinkError` when the key claims to be a link
+        (``SYM_LINK`` flag) but the value type or target encoding is wrong.
+        """
+        if KEY.SYM_LINK not in self.cell.Flags:
+            return None
+
+        values = list(self.values())
+        invalid = InvalidLinkError(f"Key {self.name!r} has the SYM_LINK flag but is not a valid link")
+        if len(values) != 1 or values[0].type != REG_LINK:
+            raise invalid
+
+        value = values[0]
+        raw_target = value.data
+        target = decode_link_target(raw_target)
+        if target is None:
+            raise invalid
+
+        return RegistryLink(
+            source=self,
+            value=value,
+            target=target,
+            raw_target=raw_target,
+            value_offset=value.offset,
+        )
+
+    def inspect_link(self) -> RegistryLink | None:
+        """Inspect this key without following or mounting anything.
+
+        Returns the :class:`RegistryLink` evidence for a link key, ``None`` for
+        an ordinary key and raises :class:`InvalidLinkError` for a malformed
+        link while still carrying the best available evidence.
+        """
+        return self.link
+
+    def resolve_link(self, mounts: RegistryMounts) -> LinkResolution:
+        """Follow this link through the caller-supplied hive mount mapping.
+
+        Only the provided offline hives are consulted; the host registry is
+        never touched. Every traversed link is recorded so each jump can be
+        traced back to its source cell.
+        """
+        return LinkResolver(mounts).resolve(self)
+
 
 class ValueList:
     def __init__(self, hive: RegistryHive, data: bytes, count: int):
@@ -279,7 +549,9 @@ class ValueList:
                 log.warning("Invalid cell signature %r at offset 0x%x", data[:2], entry)
                 continue
 
-            yield KeyValue(self.hive, data)
+            value = KeyValue(self.hive, data)
+            value.offset = entry
+            yield value
 
 
 class KeyValue(Cell):
@@ -504,6 +776,30 @@ def decode_name(blob: bytes, size: int, is_comp_name: bool) -> str:
             pass
 
     return repr(blob)
+
+
+def decode_link_target(data: bytes) -> str | None:
+    """Strictly decode a ``REG_LINK`` target as ``UTF-16-LE``.
+
+    Registry link targets are always UTF-16-LE strings. Unlike
+    :func:`try_decode_sz` (which tolerates legacy byte encodings), this
+    rejects anything that is not valid UTF-16-LE with an even byte count so a
+    plain or malformed string value can never be mistaken for a jump target.
+    Returns ``None`` when the data cannot be interpreted as a link target.
+    """
+    if not data or len(data) % 2:
+        return None
+
+    try:
+        target = data.decode("utf-16-le")
+    except UnicodeDecodeError:
+        return None
+
+    target = target.rstrip("\x00")
+    if not target or "\x00" in target:
+        return None
+
+    return target
 
 
 def try_decode_sz(data: bytes) -> str:
