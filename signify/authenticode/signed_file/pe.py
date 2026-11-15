@@ -39,7 +39,7 @@ import os
 import struct
 from collections.abc import Iterator
 from functools import cached_property
-from typing import BinaryIO, cast
+from typing import TYPE_CHECKING, Any, BinaryIO, Literal, cast
 
 from typing_extensions import TypedDict
 
@@ -48,6 +48,9 @@ from signify.authenticode.indirect_data import IndirectData, PeImageData
 from signify.authenticode.signed_data import AuthenticodeSignature
 from signify.exceptions import AuthenticodeInvalidPageHashError, SignedPEParseError
 from signify.fingerprinter import Fingerprinter, Range
+
+if TYPE_CHECKING:
+    from signify.authenticode.coverage import PECoverageReport
 
 from .base import AuthenticodeFile
 
@@ -107,6 +110,60 @@ class SignedPEFile(AuthenticodeFile):
             for k, v in locations.items()
             if k in ["checksum", "datadir_certtable", "certtable"]
         }
+
+    def get_authenticode_hash_ranges(self) -> list[Range] | None:
+        """Returns the exact file ranges that Signify feeds to the Authenticode
+        fingerprinter for this PE file.
+
+        This is the same range construction used by
+        :meth:`SignedPEFingerprinter.add_signed_pe_hashers`; it is exposed separately
+        so callers can inspect which bytes a valid signature actually covers.
+
+        The ranges are expressed in real file offsets, not section-relative or RVA
+        offsets.  Bytes outside these ranges are excluded from the Authenticode
+        digest.
+        """
+
+        omit = self.get_authenticode_omit_sections()
+        if omit is None:
+            return None
+
+        ranges = []
+        range_start = 0
+        for start_length in sorted(omit.values()):
+            ranges.append(Range(range_start, start_length.start))
+            range_start = sum(start_length)
+        ranges.append(Range(range_start, self._filelength))
+        return ranges
+
+    def get_coverage_report(
+        self,
+        *,
+        verify_chain: bool = False,
+        trusted_certificate_store: Any = None,
+        countersignature_mode: Literal["strict", "permit", "ignore"] = "permit",
+    ) -> PECoverageReport:
+        """Return a byte-level Authenticode coverage report for this PE file.
+
+        The report distinguishes the bytes that are covered by the Authenticode
+        digest from the checksum, certificate-directory entry and declared
+        certificate table, and records what happened to any data after the declared
+        certificate table.
+
+        :param verify_chain: Whether to also run certificate-chain verification.
+            Digest coverage and digest matching do not require this.
+        :param trusted_certificate_store: Store used when ``verify_chain`` is set.
+        :param countersignature_mode: How to treat countersignatures during chain
+            verification.
+        """
+        from signify.authenticode.coverage import PECoverageReport
+
+        return PECoverageReport(
+            self,
+            verify_chain=verify_chain,
+            trusted_certificate_store=trusted_certificate_store,
+            countersignature_mode=countersignature_mode,
+        )
 
     def _seek_start_of_pe(self) -> int:
         """Seeks in the file to the start of the PE header. After this method,
@@ -404,17 +461,10 @@ class SignedPEFingerprinter(Fingerprinter):
         to those that are needed to calculate the hash of signed PE Files.
         """
 
-        omit = self.signed_pe_file.get_authenticode_omit_sections()
+        ranges = self.signed_pe_file.get_authenticode_hash_ranges()
 
-        if omit is None:
+        if ranges is None:
             return False
-
-        ranges = []
-        range_start = 0
-        for start_length in sorted(omit.values()):
-            ranges.append(Range(range_start, start_length.start))
-            range_start = sum(start_length)
-        ranges.append(Range(range_start, self._filelength))
 
         self.add_hashers(
             *hashers,

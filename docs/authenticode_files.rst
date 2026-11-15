@@ -222,3 +222,92 @@ interpreted as flat image if you need to do this.
 .. autoclass:: AuthenticodeSignatureFile
    :members:
    :special-members: __init__
+
+Coverage of a PE signature
+##########################
+A valid Authenticode signature means that the signer signed the digest defined by the
+PE SIP; it does not mean the signer reviewed every byte of the file. To make that
+distinction inspectable, use :meth:`SignedPEFile.get_coverage_report`::
+
+    with open("sample.exe", "rb") as f:
+        signed_pe = SignedPEFile(f)
+        report = signed_pe.get_coverage_report(
+            verify_chain=True,
+            trusted_certificate_store=my_trust_store,
+        )
+    print(report.to_text())
+
+The report lists the real file offsets that Signify feeds to the Authenticode digest,
+and separates the excluded bytes into:
+
+* the 4-byte ``CheckSum`` field in the optional header;
+* the 8-byte certificate-table entry in the data directory (which selects the
+  exclusion boundary, but is itself excluded);
+* the declared certificate table ``[Address, Address+Size)``, including each
+  ``WIN_CERTIFICATE`` header, PKCS#7 payload and alignment padding;
+* any declared table slack that is not parsed as a certificate;
+* gaps between sections and section padding (these *are* hashed), and bytes after
+  the declared certificate table, which Signify also hashes.
+
+This matters because the declared certificate table can be extended to swallow bytes
+that would otherwise be hashed. The same appended payload therefore has two very
+different outcomes:
+
+* append bytes without changing the directory ``Size``: the bytes fall into the last
+  hashed range and the digest no longer matches;
+* append the same bytes and increase ``Size`` accordingly: the bytes are now inside
+  the excluded range and the signature still verifies.
+
+Neither outcome means the signer approved those bytes. The report therefore exposes
+three independent states:
+
+``signature_status``
+    ``VALID`` when the digest matches, the signer's signature verifies and the
+    certificate chain validates. ``VALID_DIGEST_ONLY`` when the first two hold but no
+    trust store was supplied. ``UNTRUSTED_CHAIN`` when the signer signature is valid
+    but the chain is not trusted.
+
+``coverage_status``
+    ``AUTHENTICODE_RANGES_VERIFIED`` when the digest over the computed ranges
+    matches the signed digest. This says nothing about excluded bytes.
+
+``extra_content_status``
+    ``REVIEW_REQUIRED`` when excluded bytes are not part of the expected
+    checksum/directory/PKCS#7 structure, for example table slack or a non-PKCS#7
+    ``WIN_CERTIFICATE`` entry.
+
+For an ingestion service, the practical rule is: a valid signature alone permits
+recording "these Authenticode ranges were verified"; it does not permit deduplicating
+or trusting the whole file by that digest. Store a full-file SHA-256 alongside it when
+``full_file_hash_policy`` is ``REQUIRED``, and in general whenever the exact bytes
+matter. The property is deliberately conservative: it is ``RECOMMENDED`` for a
+canonical layout, and ``REQUIRED`` whenever the layout contains unexamined excluded
+content, a malformed certificate table, or no usable signature.
+
+A mutation matrix can be generated for a file to show these boundaries empirically.
+From Python::
+
+    from signify.authenticode.coverage import run_mutation_matrix
+
+    report, results = run_mutation_matrix("sample.exe")
+    for result in results:
+        print(result.mutation.name, result.classification)
+
+Or from the command line (``--trust`` is optional and only needed for chain checks)::
+
+    python -m signify.authenticode.coverage sample.exe --mutate
+    python -m signify.authenticode.coverage sample.exe --mutate --json
+
+.. autoclass:: signify.authenticode.coverage.PECoverageReport
+   :members: to_text, to_dict, signature_status, coverage_status,
+      extra_content_status, full_file_hash_policy, full_file_hash_reasons,
+      regions, excluded_ranges, certificate_table, signatures
+
+.. autoclass:: signify.authenticode.coverage.Region
+.. autoclass:: signify.authenticode.coverage.ExcludedRange
+.. autoclass:: signify.authenticode.coverage.CertificateTableEntry
+.. autoclass:: signify.authenticode.coverage.SignatureCheck
+.. autoclass:: signify.authenticode.coverage.Mutation
+.. autoclass:: signify.authenticode.coverage.MutationResult
+.. autofunction:: signify.authenticode.coverage.run_mutation_matrix
+.. autofunction:: signify.authenticode.coverage.default_mutations
