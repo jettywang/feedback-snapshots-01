@@ -845,6 +845,244 @@ class RubySamlTest < Minitest::Test
         assert response_with_skip.send(:validate_subject_confirmation)
         assert_empty response_with_skip.errors
       end
+
+      describe "client address" do
+        let(:address_settings) do
+          OneLogin::RubySaml::Settings.new(
+            :idp_cert => ruby_saml_cert_text,
+            :assertion_consumer_service_url => "http://recipient"
+          )
+        end
+
+        # Returns [response, valid] where valid is the outcome of a full
+        # validation performed at the fixture's time.
+        def validate_address_response(confirmations, client_options = {}, overrides = [])
+          response = OneLogin::RubySaml::Response.new(
+            signed_response_document(confirmations, overrides),
+            { :settings => address_settings }.merge(client_options)
+          )
+          valid = false
+          Timecop.freeze(Time.parse("2015-03-18T04:50:24Z")) do
+            valid = response.is_valid?
+          end
+          [response, valid]
+        end
+
+        it "accepts a matching IPv4 Address when the caller confirms the client address" do
+          response, valid = validate_address_response([{ :address => "10.0.0.1" }], :client_address => "10.0.0.1")
+
+          assert valid
+          assert_empty response.errors
+          assert_equal 0, response.subject_confirmation_report[:accepted_index]
+          assert_equal true, response.subject_confirmation_report[:response_valid]
+          assert_equal :match, response.accepted_subject_confirmation[:address_result]
+          assert_equal "10.0.0.1", response.accepted_subject_confirmation[:address]
+        end
+
+        it "does not publish an accepted confirmation when the signature is invalid" do
+          # Tamper with a signed value after signing. The Address still matches
+          # the confirmed client, so only the signature check can reject this.
+          tampered = Base64.decode64(signed_response_document([{ :address => "10.0.0.1" }]))
+          tampered = tampered.sub("jane.doe@example.com", "attacker@example.com")
+
+          response = OneLogin::RubySaml::Response.new(
+            Base64.encode64(tampered),
+            :settings => OneLogin::RubySaml::Settings.new(
+              :idp_cert => ruby_saml_cert_text,
+              :assertion_consumer_service_url => "http://recipient"
+            ),
+            :client_address => "10.0.0.1"
+          )
+          valid = nil
+          Timecop.freeze(Time.parse("2015-03-18T04:50:24Z")) { valid = response.is_valid? }
+
+          refute valid
+          assert_includes response.errors, "Invalid Signature on SAML Response"
+          assert_equal :match, response.subject_confirmation_report[:candidates].first[:address_result]
+          assert_equal false, response.subject_confirmation_report[:response_valid]
+          assert_nil response.accepted_subject_confirmation
+        end
+
+        it "rejects a different IPv4 Address" do
+          response, valid = validate_address_response([{ :address => "10.0.0.1" }], :client_address => "10.0.0.2")
+
+          refute valid
+          assert_includes response.errors, "A valid SubjectConfirmation was not found on this Response"
+          assert_equal :mismatch, response.subject_confirmation_report[:candidates].first[:address_result]
+          assert_nil response.accepted_subject_confirmation
+        end
+
+        it "accepts IPv6 Address values regardless of textual form" do
+          response, valid = validate_address_response(
+            [{ :address => "2001:0DB8:0000:0000:0000:0000:0000:0001" }],
+            :client_address => "2001:db8::1"
+          )
+          assert valid
+
+          response, valid = validate_address_response([{ :address => "2001:db8::1" }], :client_address => "2001:db8::2")
+          refute valid
+          assert_equal :mismatch, response.subject_confirmation_report[:candidates].first[:address_result]
+        end
+
+        it "treats an IPv4-mapped IPv6 client address as the same IPv4 client" do
+          response, valid = validate_address_response([{ :address => "192.0.2.10" }], :client_address => "::ffff:192.0.2.10")
+
+          assert valid
+          assert_equal "192.0.2.10", response.subject_confirmation_report[:client_address]
+        end
+
+        it "matches an IPv4-mapped IPv6 Address against an IPv4 client address" do
+          response, valid = validate_address_response([{ :address => "::ffff:192.0.2.10" }], :client_address => "192.0.2.10")
+
+          assert valid
+          assert_equal :match, response.subject_confirmation_report[:candidates].first[:address_result]
+        end
+
+        it "rejects invalid or non-single-address Address values instead of treating them as a match" do
+          ["10.0.0.0/8", "fe80::1%eth0", "not-an-ip", ""].each do |address|
+            response, valid = validate_address_response([{ :address => address }], :client_address => "10.0.0.1")
+            refute valid, "expected #{address.inspect} to be rejected"
+            assert_equal :invalid, response.subject_confirmation_report[:candidates].first[:address_result]
+          end
+        end
+
+        it "never matches an Address when the caller could not confirm a client address" do
+          response, valid = validate_address_response([{ :address => "10.0.0.1" }], :client_address => nil)
+
+          refute valid
+          assert_equal :unknown_client, response.subject_confirmation_report[:candidates].first[:address_result]
+        end
+
+        it "allows a missing Address under the default exact policy" do
+          response, valid = validate_address_response([{}], :client_address => "10.0.0.1")
+
+          assert valid
+          assert_equal :absent, response.subject_confirmation_report[:candidates].first[:address_result]
+        end
+
+        it "requires an Address under the required policy" do
+          response, valid = validate_address_response([{}], :client_address => "10.0.0.1",
+                                                             :subject_confirmation_address_policy => :required)
+
+          refute valid
+          assert_includes response.subject_confirmation_report[:candidates].first[:failures], :address_missing
+
+          _response, valid = validate_address_response([{ :address => "10.0.0.1" }], :client_address => "10.0.0.1",
+                                                                               :subject_confirmation_address_policy => :required)
+          assert valid
+        end
+
+        it "does not enforce Address when the caller did not opt in" do
+          response, valid = validate_address_response([{ :address => "10.0.0.1" }])
+
+          assert valid
+          assert_equal false, response.subject_confirmation_report[:address_enforced]
+          assert_equal :not_enforced, response.subject_confirmation_report[:candidates].first[:address_result]
+        end
+
+        it "keeps the Address check on the same candidate as Recipient, InResponseTo and validity" do
+          response, valid = validate_address_response(
+            [{ :address => "10.0.0.2" }, { :address => "10.0.0.1", :recipient => "http://someone-else" }],
+            :client_address => "10.0.0.1"
+          )
+
+          refute valid
+          candidates = response.subject_confirmation_report[:candidates]
+          assert_equal [:address], candidates[0][:failures]
+          assert_includes candidates[1][:failures], :recipient
+        end
+
+        it "does not let another candidate's matching Address satisfy the current candidate" do
+          response, valid = validate_address_response(
+            [{ :address => "10.0.0.9", :recipient => "http://recipient" },
+             { :address => "10.0.0.1", :in_response_to => "someone-else" }],
+            :client_address => "10.0.0.1"
+          )
+
+          refute valid
+          candidates = response.subject_confirmation_report[:candidates]
+          assert_equal :mismatch, candidates[0][:address_result]
+          assert_includes candidates[1][:failures], :in_response_to
+          refute_equal candidates[1][:address], candidates[0][:address]
+        end
+
+        it "accepts the second candidate when the first fails and reports which one was used" do
+          response, valid = validate_address_response(
+            [{ :address => "10.0.0.2" }, { :address => "10.0.0.1" }],
+            :client_address => "10.0.0.1"
+          )
+
+          assert valid
+          assert_equal 1, response.subject_confirmation_report[:accepted_index]
+          assert_equal 1, response.accepted_subject_confirmation[:index]
+          assert_equal "10.0.0.1", response.accepted_subject_confirmation[:address]
+        end
+
+        it "rejects malformed or ambiguous caller address configuration at construction time" do
+          assert_raises(ArgumentError) do
+            OneLogin::RubySaml::Response.new(response_document_valid_signed, :client_address => "10.0.0.0/8")
+          end
+          assert_raises(ArgumentError) do
+            OneLogin::RubySaml::Response.new(response_document_valid_signed, :client_address => "not-an-ip")
+          end
+          assert_raises(ArgumentError) do
+            OneLogin::RubySaml::Response.new(response_document_valid_signed, :client_address => "10.0.0.1",
+                                                                                 :subject_confirmation_address_policy => :loose)
+          end
+          assert_raises(ArgumentError) do
+            OneLogin::RubySaml::Response.new(response_document_valid_signed, :client_address => nil,
+                                                                                 :subject_confirmation_address_policy => :required)
+          end
+          assert_raises(ArgumentError) do
+            OneLogin::RubySaml::Response.new(response_document_valid_signed, :client_address => "10.0.0.1",
+                                                                                 :skip_subject_confirmation => true)
+          end
+        end
+
+        it "does not accept an unsigned response even when the Address matches" do
+          unsigned = Base64.decode64(signed_response_document([{ :address => "10.0.0.1" }]))
+          unsigned.sub!(%r{<ds:Signature.*</ds:Signature>}m, "")
+          response = OneLogin::RubySaml::Response.new(Base64.encode64(unsigned),
+                                                      :settings => address_settings,
+                                                      :client_address => "10.0.0.1")
+          Timecop.freeze(Time.parse("2015-03-18T04:50:24Z")) do
+            refute response.is_valid?
+          end
+          assert_includes response.errors, "Found an unexpected number of Signature Element. SAML Response rejected"
+        end
+
+        it "treats an unparsable validity value on a candidate as a failed constraint" do
+          response = OneLogin::RubySaml::Response.new(
+            signed_response_document([{ :address => "10.0.0.1", :not_on_or_after => "not-a-time" }]),
+            :settings => address_settings,
+            :client_address => "10.0.0.1"
+          )
+          # The schema check would reject this document first, so exercise the
+          # candidate evaluation directly and prove it does not abort.
+          valid = Timecop.freeze(Time.parse("2015-03-18T04:50:24Z")) do
+            response.send(:validate_subject_confirmation)
+          end
+
+          refute valid
+          assert_includes response.subject_confirmation_report[:candidates].first[:failures], :not_on_or_after
+        end
+
+        it "only reports the caller confirmed address and never a header value" do
+          _, valid = validate_address_response([{ :address => "10.0.0.1" }],
+                                               :client_address => "10.0.0.1",
+                                               :client_address_source => :trusted_proxy)
+          assert valid
+
+          response, valid = validate_address_response([{ :address => "10.0.0.1" }],
+                                                      :client_address => "10.0.0.2",
+                                                      :client_address_source => :trusted_proxy)
+          refute valid
+          report = response.subject_confirmation_report
+          assert_equal "10.0.0.2", report[:client_address]
+          assert_equal :trusted_proxy, report[:client_address_source]
+          assert_equal "10.0.0.1", report[:candidates].first[:address]
+        end
+      end
     end
 
     describe "#validate_session_expiration" do

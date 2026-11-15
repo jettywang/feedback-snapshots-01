@@ -244,6 +244,10 @@ response = OneLogin::RubySaml::Response.new(params[:SAMLResponse], {skip_recipie
 response = OneLogin::RubySaml::Response.new(params[:SAMLResponse], {skip_audience: true}) # skips audience check
 ```
 
+The optional SubjectConfirmationData `Address` constraint is enforced only when the
+caller supplies a confirmed `client_address`; see
+[Enforce the SubjectConfirmationData `Address` constraint](#enforce-the-subjectconfirmationdata-address-constraint).
+
 All that's left is to wrap everything in a controller and reference it in the initialization and
 consumption URLs in OneLogin. A full controller example could look like this:
 
@@ -1100,6 +1104,47 @@ def consume
   end
 end
 ```
+
+### Enforce the SubjectConfirmationData `Address` constraint
+
+SAML makes `Address` optional on `SubjectConfirmationData`. When the IdP sets it,
+the SP may require that the response arrives from that client address. ruby-saml
+never inspects HTTP requests, sockets or forwarding headers; the caller must tell
+it which address was actually confirmed:
+
+```ruby
+response = OneLogin::RubySaml::Response.new(
+  params[:SAMLResponse],
+  settings: saml_settings,
+  matches_request_id: request_id,
+  client_address: confirmed_client_ip,          # only what your proxy layer trusts
+  client_address_source: :trusted_proxy_header, # optional, for the report
+  subject_confirmation_address_policy: :exact    # or :required
+)
+```
+
+Rules:
+
+* `client_address` must be a single IPv4 or IPv6 address (not a CIDR range or a
+  zone-scoped value). IPv4-mapped IPv6 values are normalized to IPv4.
+* No `client_address` means the Address constraint cannot be satisfied when the
+  IdP sent one; an unknown source is never a match.
+* `:exact` (default) requires a present `Address` to match the confirmed client
+  address and allows a missing `Address`. `:required` also rejects a missing one.
+* The check runs on the same SubjectConfirmation candidate as `Recipient`,
+  `InResponseTo`, `NotBefore`/`NotOnOrAfter` and the assertion signature. A match
+  on one candidate never satisfies another.
+* Bad configuration raises `ArgumentError` when the Response is constructed.
+
+After validation, `response.accepted_subject_confirmation` reports which candidate
+was accepted and `response.subject_confirmation_report` shows per-candidate
+constraint outcomes, including the confirmed address source.
+
+If your gateway sits behind a reverse proxy, read the forwarding header in your
+application code only after verifying that the socket peer is a trusted proxy, and
+pass the resulting address as `client_address`. Do not pass raw header values.
+A runnable example with direct, trusted-proxy and forged-header requests lives in
+`examples/subject_confirmation_address/demo.rb`.
 
 ## Contributing
 

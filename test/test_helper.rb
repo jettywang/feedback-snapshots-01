@@ -351,6 +351,63 @@ class Minitest::Test
     inflated
   end
 
+  # Builds a locally signed SAML Response from the unsigned test_sign.xml fixture.
+  #
+  # The fixture is rewritten on every call so a test can change one
+  # SubjectConfirmation and get a fresh, valid signature over that document.
+  #
+  # @param confirmations [Array<Hash>, nil] one entry per SubjectConfirmation; nil omits
+  #        the whole list. Supported keys: :method, :address, :recipient,
+  #        :in_response_to, :not_on_or_after, :not_before. A value of nil omits the attribute.
+  # @param overrides [Array<Array(String, String)>] extra literal substitutions
+  # @return [String] base64 encoded signed response
+  def signed_response_document(confirmations, overrides = [])
+    xml = fixture("test_sign.xml", false)
+
+    confirmations_xml = ""
+    unless confirmations.nil?
+      confirmations.each do |confirmation|
+        method = confirmation[:method] || "urn:oasis:names:tc:SAML:2.0:cm:bearer"
+        data_attributes = []
+        data_attributes << "Address='#{confirmation[:address]}'" if confirmation.has_key?(:address)
+
+        recipient = confirmation.has_key?(:recipient) ? confirmation[:recipient] : "http://recipient"
+        data_attributes << "Recipient='#{recipient}'" unless recipient.nil?
+
+        in_response_to = confirmation.has_key?(:in_response_to) ? confirmation[:in_response_to] : "_36387b60-af58-0132-6be9-6c4008ad82d2"
+        data_attributes << "InResponseTo='#{in_response_to}'" unless in_response_to.nil?
+
+        not_before = confirmation.fetch(:not_before, "2015-03-18T04:47:24Z")
+        data_attributes << "NotBefore='#{not_before}'" unless not_before.nil?
+
+        not_on_or_after = confirmation.fetch(:not_on_or_after, "2030-01-01T00:00:00Z")
+        data_attributes << "NotOnOrAfter='#{not_on_or_after}'" unless not_on_or_after.nil?
+
+        confirmations_xml << "      <saml:SubjectConfirmation Method='#{method}'>\n" \
+                              "        <saml:SubjectConfirmationData #{data_attributes.join(' ')}/>\n" \
+                              "      </saml:SubjectConfirmation>\n"
+      end
+    end
+
+    xml = xml.sub(FIXTURE_SUBJECT_CONFIRMATIONS, confirmations_xml)
+
+    overrides.each do |pattern, replacement|
+      xml = xml.sub(pattern, replacement)
+    end
+
+    document = XMLSecurity::Document.new(xml)
+    cert = OpenSSL::X509::Certificate.new(OneLogin::RubySaml::Utils.format_cert(ruby_saml_cert_text))
+    private_key = OpenSSL::PKey::RSA.new(OneLogin::RubySaml::Utils.format_private_key(ruby_saml_key_text))
+    document.sign_document(private_key, cert)
+
+    Base64.encode64(document.to_s)
+  end
+
+  FIXTURE_SUBJECT_CONFIRMATIONS = %q{      <saml:SubjectConfirmation Method='urn:oasis:names:tc:SAML:2.0:cm:bearer'>
+        <saml:SubjectConfirmationData InResponseTo='_36387b60-af58-0132-6be9-6c4008ad82d2' NotOnOrAfter='2015-03-19T17:57:12Z' Recipient='http://recipient'/>
+      </saml:SubjectConfirmation>
+}
+
   SCHEMA_DIR = File.expand_path(File.join(__FILE__, '../../lib/schemas'))
 
   #

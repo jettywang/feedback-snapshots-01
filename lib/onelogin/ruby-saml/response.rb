@@ -1,5 +1,6 @@
 require "xml_security"
 require "onelogin/ruby-saml/attributes"
+require "onelogin/ruby-saml/subject_confirmation_address"
 
 require "time"
 require "nokogiri"
@@ -21,6 +22,7 @@ module OneLogin
         "p" => PROTOCOL,
         "a" => ASSERTION
       }.freeze
+      BEARER_METHOD = 'urn:oasis:names:tc:SAML:2.0:cm:bearer'.freeze
 
       # TODO: Settings should probably be initialized too... WDYT?
 
@@ -38,8 +40,9 @@ module OneLogin
       # This is not a whitelist to allow people extending OneLogin::RubySaml:Response
       # and pass custom options
       AVAILABLE_OPTIONS = [
-        :allowed_clock_drift, :check_duplicated_attributes, :matches_request_id, :settings, :skip_audience, :skip_authnstatement, :skip_conditions,
-        :skip_destination, :skip_recipient_check, :skip_subject_confirmation
+        :allowed_clock_drift, :check_duplicated_attributes, :client_address, :client_address_source,
+        :matches_request_id, :settings, :skip_audience, :skip_authnstatement, :skip_conditions,
+        :skip_destination, :skip_recipient_check, :skip_subject_confirmation, :subject_confirmation_address_policy
       ]
       # TODO: Update the comment on initialize to describe every option
 
@@ -52,6 +55,8 @@ module OneLogin
       #                          or skip the subject confirmation validation with the :skip_subject_confirmation option
       #                          or skip the recipient validation of the subject confirmation element with :skip_recipient_check option
       #                          or skip the audience validation with :skip_audience option
+      #                          or enforce the SubjectConfirmationData Address constraint with :client_address and
+      #                          :subject_confirmation_address_policy (the library never reads HTTP headers itself)
       #
       def initialize(response, options = {})
         raise ArgumentError.new("Response cannot be nil") if response.nil?
@@ -67,12 +72,43 @@ module OneLogin
           end
         end
 
+        validate_subject_confirmation_address_options!
+
         @response = decode_raw_saml(response, settings)
         @document = XMLSecurity::SignedDocument.new(@response, @errors)
 
         if assertion_encrypted?
           @decrypted_document = generate_decrypted_document
         end
+      end
+
+      # The SubjectConfirmation that satisfied the whole response validation, as a Hash.
+      #
+      # Only set when Response#is_valid? accepted the response, so it is backed by
+      # the verified assertion signature. The address portion only shows values that
+      # were actually confirmed by the caller; the library never records HTTP headers.
+      #
+      # @return [Hash, nil]
+      def accepted_subject_confirmation
+        @accepted_subject_confirmation
+      end
+
+      # Detailed outcome of the SubjectConfirmation evaluation.
+      #
+      # Candidates from the signed assertion are listed in document order with the
+      # constraints each one failed; +:accepted_index+ points at the candidate that
+      # satisfied every subject-confirmation constraint, if any. Evaluation stops at
+      # that candidate, so the list ends there when one is found. This report is a
+      # diagnostic view available after validation has run, even when the response is
+      # rejected by a later check.
+      #
+      # +:response_valid+ says whether the whole Response validation passed (which
+      # includes the assertion signature). Only then is +:accepted+ authoritative;
+      # use {#accepted_subject_confirmation} for the final, signature-backed result.
+      #
+      # @return [Hash, nil]
+      def subject_confirmation_report
+        @subject_confirmation_report
       end
 
       # Validates the SAML Response with the default values (soft = true)
@@ -367,6 +403,24 @@ module OneLogin
         options[:allowed_clock_drift].to_f.abs + Float::EPSILON
       end
 
+      # @return [IPAddr, nil] the caller confirmed client address, normalized
+      #
+      def confirmed_client_address
+        @confirmed_client_address
+      end
+
+      # @return [Symbol, nil] the address matching policy, nil when address matching is off
+      #
+      def subject_confirmation_address_policy
+        @subject_confirmation_address_policy
+      end
+
+      # @return [Boolean] true when the caller opted into the Address constraint
+      #
+      def address_enforced?
+        !@subject_confirmation_address_policy.nil?
+      end
+
       # Checks if the SAML Response contains or not an EncryptedAssertion element
       # @return [Boolean] True if the SAML Response contains an EncryptedAssertion element
       #
@@ -398,6 +452,8 @@ module OneLogin
       #
       def validate(collect_errors = false)
         reset_errors!
+        @accepted_subject_confirmation = nil
+        @subject_confirmation_report = nil
         return false unless validate_response_state
 
         validations = [
@@ -421,12 +477,19 @@ module OneLogin
           :validate_signature
         ]
 
-        if collect_errors
+        valid = if collect_errors
           validations.each { |validation| send(validation) }
           @errors.empty?
         else
           validations.all? { |validation| send(validation) }
         end
+
+        if @subject_confirmation_report
+          @subject_confirmation_report[:response_valid] = valid
+          @accepted_subject_confirmation = @subject_confirmation_report[:accepted] if valid
+        end
+
+        valid
       end
 
 
@@ -783,40 +846,61 @@ module OneLogin
       # Validates if a valid SubjectConfirmation (If the response was initialized with the :allowed_clock_drift option,
       # timing validation are relaxed by the allowed_clock_drift value. If the response was initialized with the
       # :skip_subject_confirmation option, this validation is skipped)
-      # There is also an optional Recipient check
+      # There is also an optional Recipient check and an optional Address check.
+      #
+      # The Address check is opt-in: it is enabled when :client_address is given or when
+      # :subject_confirmation_address_policy is given. The client address must be confirmed by
+      # the caller; this library never reads a socket peer, X-Forwarded-For or any other HTTP
+      # header. Address matching is evaluated on the same candidate SubjectConfirmation as the
+      # Recipient, InResponseTo and validity window, and only the first candidate that passes
+      # every applicable constraint is accepted.
+      #
       # If fails, the error is added to the errors array
       # @return [Boolean] True if a valid SubjectConfirmation, otherwise False if soft=True
       # @raise [ValidationError] if soft == false and validation fails
       #
       def validate_subject_confirmation
-        return true if options[:skip_subject_confirmation]
+        if options[:skip_subject_confirmation]
+          @subject_confirmation_report = {
+            :skipped => true,
+            :response_valid => nil,
+            :address_enforced => false,
+            :accepted_index => nil,
+            :accepted => nil,
+            :candidates => []
+          }
+          return true
+        end
+
         valid_subject_confirmation = false
+        accepted_index = nil
+        candidates = []
 
         subject_confirmation_nodes = xpath_from_signed_assertion('/a:Subject/a:SubjectConfirmation')
 
         now = Time.now.utc
-        subject_confirmation_nodes.each do |subject_confirmation|
-          if subject_confirmation.attributes.include? "Method" and subject_confirmation.attributes['Method'] != 'urn:oasis:names:tc:SAML:2.0:cm:bearer'
-            next
-          end
+        subject_confirmation_nodes.each_with_index do |subject_confirmation, index|
+          candidate = subject_confirmation_candidate(subject_confirmation, index, now)
+          candidates << candidate
 
-          confirmation_data_node = REXML::XPath.first(
-            subject_confirmation,
-            'a:SubjectConfirmationData',
-            { "a" => ASSERTION }
-          )
-
-          next unless confirmation_data_node
-
-          attrs = confirmation_data_node.attributes
-          next if (attrs.include? "InResponseTo" and attrs['InResponseTo'] != in_response_to) ||
-                  (attrs.include? "NotBefore" and now < (parse_time(confirmation_data_node, "NotBefore") - allowed_clock_drift)) ||
-                  (attrs.include? "NotOnOrAfter" and now >= (parse_time(confirmation_data_node, "NotOnOrAfter") + allowed_clock_drift)) ||
-                  (attrs.include? "Recipient" and !options[:skip_recipient_check] and settings and attrs['Recipient'] != settings.assertion_consumer_service_url)
+          next unless candidate[:failures].empty?
 
           valid_subject_confirmation = true
+          accepted_index = index
           break
         end
+
+        @subject_confirmation_report = {
+          :skipped => false,
+          :response_valid => nil,
+          :address_enforced => address_enforced?,
+          :policy => subject_confirmation_address_policy,
+          :client_address => confirmed_client_address_text,
+          :client_address_source => options[:client_address_source],
+          :accepted_index => accepted_index,
+          :accepted => accepted_index.nil? ? nil : candidates[accepted_index],
+          :candidates => candidates
+        }
 
         if !valid_subject_confirmation
           error_msg = "A valid SubjectConfirmation was not found on this Response"
@@ -824,6 +908,96 @@ module OneLogin
         end
 
         true
+      end
+
+      # Evaluates one SubjectConfirmation against every constraint that applies to it.
+      # The Address is read from this candidate's own SubjectConfirmationData; another
+      # candidate's Address can never satisfy this one.
+      #
+      # @param subject_confirmation [REXML::Element]
+      # @param index [Integer]
+      # @param now [Time]
+      # @return [Hash]
+      def subject_confirmation_candidate(subject_confirmation, index, now)
+        method_attribute = subject_confirmation.attributes['Method']
+        failures = []
+
+        unless method_attribute.nil? || method_attribute == BEARER_METHOD
+          failures << :method
+        end
+
+        confirmation_data_node = REXML::XPath.first(
+          subject_confirmation,
+          'a:SubjectConfirmationData',
+          { "a" => ASSERTION }
+        )
+
+        unless confirmation_data_node
+          failures << :subject_confirmation_data_missing
+          return subject_confirmation_candidate_report(index, method_attribute, nil, nil, failures)
+        end
+
+        attrs = confirmation_data_node.attributes
+        failures << :in_response_to if attrs.include?("InResponseTo") && attrs['InResponseTo'] != in_response_to
+
+        if attrs.include?("NotBefore")
+          not_before_time = safe_parse_time(confirmation_data_node, "NotBefore")
+          failures << :not_before if not_before_time.nil? || now < (not_before_time - allowed_clock_drift)
+        end
+
+        if attrs.include?("NotOnOrAfter")
+          not_on_or_after_time = safe_parse_time(confirmation_data_node, "NotOnOrAfter")
+          failures << :not_on_or_after if not_on_or_after_time.nil? || now >= (not_on_or_after_time + allowed_clock_drift)
+        end
+
+        failures << :recipient if attrs.include?("Recipient") && !options[:skip_recipient_check] && settings && attrs['Recipient'] != settings.assertion_consumer_service_url
+
+        report = subject_confirmation_candidate_report(index, method_attribute, confirmation_data_node, attrs, failures)
+
+        if address_enforced?
+          address_result = SubjectConfirmationAddress.evaluate(attrs['Address'], confirmed_client_address)
+          report[:address_result] = address_result
+          case address_result
+          when :match
+            # accepted by the address constraint
+          when :absent
+            # :required makes a missing Address a failure; :exact allows it.
+            report[:failures] << :address_missing if subject_confirmation_address_policy == :required
+          else
+            report[:failures] << :address
+          end
+        else
+          report[:address_result] = :not_enforced
+        end
+
+        report
+      end
+
+      # Parses a timestamp from a candidate node, treating an unparsable value as
+      # a failed constraint instead of letting a diagnostic walk abort validation.
+      #
+      # @param node [REXML::Element]
+      # @param attribute [String]
+      # @return [Time, nil]
+      def safe_parse_time(node, attribute)
+        parse_time(node, attribute)
+      rescue ArgumentError
+        nil
+      end
+
+      # @return [Hash]
+      def subject_confirmation_candidate_report(index, method_attribute, confirmation_data_node, attrs, failures)
+        {
+          :index => index,
+          :method => method_attribute,
+          :in_response_to => attrs && attrs['InResponseTo'],
+          :recipient => attrs && attrs['Recipient'],
+          :not_before => attrs && attrs['NotBefore'],
+          :not_on_or_after => attrs && attrs['NotOnOrAfter'],
+          :address => attrs && attrs['Address'],
+          :address_result => :not_evaluated,
+          :failures => failures
+        }
       end
 
       # Validates the NameID element
@@ -1129,6 +1303,45 @@ module OneLogin
 
       def check_malformed_doc_enabled?
         check_malformed_doc?(settings)
+      end
+
+      # Parses and stores the caller supplied address options, if any.
+      #
+      # This is deliberately done at construction time: an unusable address
+      # configuration must fail before any SAML content is accepted.
+      #
+      # @raise [ArgumentError]
+      def validate_subject_confirmation_address_options!
+        policy = SubjectConfirmationAddress.normalize_policy(options[:subject_confirmation_address_policy])
+        supplied = options.has_key?(:client_address)
+
+        unless supplied || policy
+          @confirmed_client_address = nil
+          @subject_confirmation_address_policy = nil
+          return
+        end
+
+        if options[:skip_subject_confirmation]
+          raise ArgumentError.new("Cannot enforce the SubjectConfirmation Address constraint while skipping SubjectConfirmation validation")
+        end
+
+        @subject_confirmation_address_policy = policy || :exact
+        @confirmed_client_address = SubjectConfirmationAddress.client_address(options[:client_address])
+
+        if @subject_confirmation_address_policy == :required && @confirmed_client_address.nil?
+          raise ArgumentError.new("subject_confirmation_address_policy :required needs a confirmed client_address")
+        end
+
+        source = options[:client_address_source]
+        unless source.nil? || source.is_a?(String) || source.is_a?(Symbol)
+          raise ArgumentError.new("client_address_source must be a String or Symbol")
+        end
+      end
+
+      # The confirmed client address as text, for the report only.
+      # @return [String, nil]
+      def confirmed_client_address_text
+        @confirmed_client_address.nil? ? nil : @confirmed_client_address.to_s
       end
     end
   end
