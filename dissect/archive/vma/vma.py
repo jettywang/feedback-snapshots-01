@@ -60,25 +60,44 @@ class VMA:
                 self._blob_data[blob_offset] = self._blob[blob_offset + 2 : blob_offset + 2 + size].tobytes()
             blob_offset += size + 2
 
+        # A backup may carry references into the blob buffer that point outside of the
+        # data that was actually recovered. Resolve every declared name/data pointer
+        # defensively so a single bad pointer does not prevent the rest of the archive
+        # from being inspected; the evidence report records the broken references.
         self._config: dict[str, bytes] = {}
         for conf_name, conf_data in zip(self.header.config_names, self.header.config_data, strict=False):
             if (conf_name, conf_data) == (0, 0):
                 continue
 
-            self._config[self.blob_string(conf_name)] = self.blob_data(conf_data)
+            try:
+                config_name = self.blob_string(conf_name)
+                config_data = self.blob_data(conf_data)
+            except (KeyError, UnicodeDecodeError):
+                continue
+
+            self._config.setdefault(config_name, config_data)
 
         self._devices: dict[int, Device] = {}
         for dev_id, dev_info in enumerate(self.header.dev_info):
             if dev_id == 0 or dev_info.devname_ptr == 0:
                 continue
 
-            self._devices[dev_id] = Device(self, dev_id, self.blob_string(dev_info.devname_ptr), dev_info.size)
+            try:
+                dev_name = self.blob_string(dev_info.devname_ptr)
+            except (KeyError, UnicodeDecodeError):
+                continue
+
+            self._devices.setdefault(dev_id, Device(self, dev_id, dev_name, dev_info.size))
 
         self._extent = lru_cache(65536)(self._extent)
 
     @property
     def creation_time(self) -> datetime:
         return ts.from_unix(self.header.ctime)
+
+    def blob_buffer(self) -> bytes:
+        """Return the raw blob buffer embedded in the header, without any parsing."""
+        return self._blob.tobytes()
 
     def blob_data(self, offset: int) -> bytes:
         if offset not in self._blob_data:
@@ -104,16 +123,61 @@ class VMA:
         return Extent(self.fh, offset)
 
     def extents(self) -> Iterator[Extent]:
+        self.fh.seek(0, 2)
+        end = self.fh.tell()
         offset = self.header.header_size
-        while True:
+        while offset < end:
             try:
                 extent = self._extent(offset)
             except EOFError:
                 break
+            except InvalidHeaderError:
+                # The on-disk extent payload only stores allocated blocks, while
+                # ``Extent.size`` is the logical size (it counts sparse clusters).
+                # Scan forward for the next extent header instead of trusting the
+                # logical stride, so compactly written streams stay readable.
+                next_offset = self._find_extent(offset + c_vma.VMA_EXTENT_HEADER_SIZE, end)
+                if next_offset is None:
+                    break
+                extent = self._extent(next_offset)
 
             yield extent
 
-            offset += c_vma.VMA_EXTENT_HEADER_SIZE + extent.size
+            # Continue physically right after this extent's payload rather than
+            # using the logical size, which over-counts sparse clusters and would
+            # point into the middle of the next extent on compact streams.
+            offset = extent.data_offset + self._extent_payload_size(extent)
+
+    @staticmethod
+    def _extent_payload_size(extent: Extent) -> int:
+        size = 0
+        for entries in extent.blocks.values():
+            for _cluster_num, mask, _block_offset in entries:
+                if mask == 0:
+                    continue
+                size += mask.bit_count() * c_vma.VMA_BLOCK_SIZE
+        return size
+
+    def _find_extent(self, start: int, end: int) -> int | None:
+        if start >= end:
+            return None
+        self.fh.seek(start)
+        haystack = self.fh.read(end - start)
+
+        cursor = 0
+        while True:
+            relative = haystack.find(VMA_EXTENT_MAGIC, cursor)
+            if relative == -1:
+                return None
+            candidate = start + relative
+            # A matching byte sequence inside device payload is not a header:
+            # a real extent header must also pass its checksum verification.
+            try:
+                self._extent(candidate)
+            except (EOFError, InvalidHeaderError):
+                cursor = relative + len(VMA_EXTENT_MAGIC)
+                continue
+            return candidate
 
 
 class Device:

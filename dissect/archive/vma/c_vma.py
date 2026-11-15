@@ -60,3 +60,11 @@ c_vma = cstruct(endian=">").load(vma_def)
 
 VMA_MAGIC = b"VMA\x00"
 VMA_EXTENT_MAGIC = b"VMAE"
+
+# Sizes defined inside the cstruct definition, mirrored as Python constants so
+# they can be imported like ordinary module attributes.
+VMA_BLOCK_SIZE = c_vma.VMA_BLOCK_SIZE
+VMA_CLUSTER_SIZE = c_vma.VMA_CLUSTER_SIZE
+VMA_EXTENT_HEADER_SIZE = c_vma.VMA_EXTENT_HEADER_SIZE
+VMA_BLOCKS_PER_EXTENT = c_vma.VMA_BLOCKS_PER_EXTENT
+VMA_MAX_CONFIGS = c_vma.VMA_MAX_CONFIGS
