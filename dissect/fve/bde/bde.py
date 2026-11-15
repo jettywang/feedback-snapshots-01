@@ -28,14 +28,15 @@ from dissect.fve.bde.c_bde import (
     INFORMATION_OFFSET_GUID,
     c_bde,
 )
+from dissect.fve.bde.bek import BekCandidate, BekStatus, read_bek
 from dissect.fve.bde.eow import EowInformation
-from dissect.fve.bde.information import Dataset, Information, KeyDatum
+from dissect.fve.bde.information import ExternalInfoDatum, Information, KeyDatum
 from dissect.fve.bde.key import derive_recovery_key, derive_user_key, stretch
 from dissect.fve.crypto import create_cipher
 from dissect.fve.exception import InvalidHeaderError
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterable, Iterator
     from uuid import UUID
 
     from dissect.fve.bde.c_bde import FVE_KEY_PROTECTOR
@@ -197,21 +198,78 @@ class BDE:
         except ValueError as e:
             raise ValueError("Unable to unlock with given passphrase") from e
 
+    def bek_candidates(self, bek_fhs: Iterable[BinaryIO]) -> list[BekCandidate]:
+        """Match the startup keys of one or more BEK structures against this volume's external VMK protectors.
+
+        Matching is purely based on the structures on both sides: the identifier of the external info datum
+        in the BEK and the identifier of the VMK info datum on the volume. File names and display labels
+        are never used. Duplicate external info (same identifier and key) is only matched once.
+        """
+        volume_identifier = self.information.dataset.identifier
+        external_vmks = list(self.information.dataset.find_external_vmk())
+
+        candidates = []
+        seen = set()
+        for bek_fh in bek_fhs:
+            for datum, key in read_bek(bek_fh):
+                bek_identifier = datum.identifier if isinstance(datum, ExternalInfoDatum) else None
+
+                if bek_identifier is None or key is None:
+                    candidates.append(BekCandidate(bek_identifier, volume_identifier, status=BekStatus.UNSUPPORTED))
+                    continue
+
+                if (bek_identifier, key.data) in seen:
+                    candidates.append(
+                        BekCandidate(bek_identifier, volume_identifier, key=key, status=BekStatus.DUPLICATE)
+                    )
+                    continue
+                seen.add((bek_identifier, key.data))
+
+                vmk = next((vmk for vmk in external_vmks if vmk.identifier == bek_identifier), None)
+                if vmk is None:
+                    candidates.append(BekCandidate(bek_identifier, volume_identifier, key=key))
+                else:
+                    candidates.append(
+                        BekCandidate(bek_identifier, volume_identifier, vmk=vmk, key=key, status=BekStatus.MATCHED)
+                    )
+
+        return candidates
+
+    def unlock_bek_candidate(self, candidate: BekCandidate) -> BekCandidate:
+        """Attempt to unlock this volume with a matched BEK candidate.
+
+        Only tries the candidate key against the VMK protector it matched by identifier. The candidate is
+        only promoted to :attr:`BekStatus.UNLOCKED` when the existing VMK/FVEK authentication and type
+        validation in :meth:`unlock` succeed; otherwise it is marked as :attr:`BekStatus.KEY_MISMATCH`.
+        """
+        if candidate.status is not BekStatus.MATCHED:
+            raise ValueError(f"Unable to unlock with BEK candidate in status {candidate.status.name}")
+
+        try:
+            decrypted_key = candidate.vmk.decrypt(candidate.key)
+            self.unlock(decrypted_key)
+        except (ValueError, TypeError):
+            candidate.status = BekStatus.KEY_MISMATCH
+        else:
+            candidate.status = BekStatus.UNLOCKED
+
+        return candidate
+
     def unlock_with_bek(self, bek_fh: BinaryIO) -> BDE:
         """Unlock this volume with a BEK file."""
-        bek_ds = Dataset(bek_fh)
-        startup_key = bek_ds.find_startup_key()
-        if not startup_key:
+        candidates = self.bek_candidates([bek_fh])
+        if not candidates:
             raise ValueError("Unable to unlock with BEK, no startup key found")
 
-        for vmk in self.information.dataset.find_external_vmk():
-            if vmk.identifier == startup_key.identifier:
-                break
-        else:
-            raise ValueError("Unable to unlock with BEK, no matching VMK found")
+        for candidate in candidates:
+            if candidate.status is not BekStatus.MATCHED:
+                continue
 
-        decrypted_key = vmk.decrypt(startup_key.external_key())
-        return self.unlock(decrypted_key)
+            self.unlock_bek_candidate(candidate)
+            if candidate.status is BekStatus.UNLOCKED:
+                return self
+
+        raise ValueError("Unable to unlock with BEK, no matching VMK found")
 
     def unlock_with_external_key(self, key: bytes) -> BDE:
         """Unlock this volume with a raw external key."""
