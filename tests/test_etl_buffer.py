@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
@@ -17,52 +18,67 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 
+BUFFER_HEADER_SIZE = 0x48
+
+
+@pytest.fixture(autouse=True)
+def restore_c_etl() -> Iterator[None]:
+    original = etl.c_etl
+    yield
+    etl.c_etl = original
+
+
 def load_etl_definition() -> cstruct:
     return cstruct().load(etl_def)
 
 
-def setup_mocked_etlfile(start_offset: int = 0) -> MagicMock:
+def setup_mocked_etlfile(start_offset: int = 0, data: bytes | None = None) -> MagicMock:
+    stream = io.BytesIO(RAW_BUFFER_HEADER if data is None else data)
+
     mocked_etlfile = MagicMock()
-    mocked_etlfile.fh.read.return_value = RAW_BUFFER_HEADER
-    mocked_etlfile.fh.len.return_value = len(RAW_BUFFER_HEADER)
-    mocked_etlfile.fh.tell.return_value = start_offset + 0x48
+    mocked_etlfile.fh.read.side_effect = stream.read
+    mocked_etlfile.fh.seek.side_effect = stream.seek
+    mocked_etlfile.fh.tell.side_effect = stream.tell
     return mocked_etlfile
 
 
 def setup_buffer_with_offsets(data_offset: int, start_offset: int = 0) -> Buffer:
-    mocked_etl = setup_mocked_etlfile()
+    mocked_etl = setup_mocked_etlfile(data=b"\x00" * data_offset)
     etl.c_etl = MagicMock()
     etl.c_etl.BufferHeader.return_value.FilledBytes = data_offset
     etl.c_etl.BufferHeader.return_value.BufferSize = data_offset
-    etl.c_etl.BufferHeader.__len__.return_value = 0x48
+    etl.c_etl.BufferHeader.return_value.BufferFlag = 0
+    etl.c_etl.BufferHeader.__len__.return_value = BUFFER_HEADER_SIZE
     return Buffer(mocked_etl, start_offset)
 
 
 def setup_buffer_iterator(mocked_read_record: MagicMock, data_offset: int) -> Iterator[Buffer]:
-    mocked_read_record.next_offset = 10
+    mocked_read_record.return_value.aligned_size = 0x10
     buffer = setup_buffer_with_offsets(data_offset=data_offset)
     return iter(buffer)
 
 
 def test_buffer_data_len() -> None:
-    mocked_etl = setup_mocked_etlfile()
+    filled_bytes = 0x2A8
+    mocked_etl = setup_mocked_etlfile(data=RAW_BUFFER_HEADER + b"\x00" * (filled_bytes - BUFFER_HEADER_SIZE))
     mocked_etl.c_etl = load_etl_definition()
 
     buffer = Buffer(mocked_etl, 0)
     assert buffer.data
 
-    mocked_etl.fh.read.assert_called_with(buffer.filled_bytes - buffer.data_offset)
+    assert buffer.physical_size == filled_bytes - BUFFER_HEADER_SIZE
+    mocked_etl.fh.read.assert_called_with(buffer.physical_size)
 
 
 @patch.object(Buffer, "read_record")
 def test_buffer_iteration_succeed(mocked_read_record: Buffer) -> None:
-    buffer_iterator = setup_buffer_iterator(mocked_read_record, data_offset=15)
+    buffer_iterator = setup_buffer_iterator(mocked_read_record, data_offset=0x58)
     assert next(buffer_iterator) == mocked_read_record.return_value
 
 
 @pytest.mark.parametrize(
     ("header_offset", "data_offset"),
-    [(0, 10), (0, 0)],
+    [(0, 0x58), (0, 0x48)],
 )
 @patch.object(Buffer, "read_record", side_effect=[EOFError])
 def test_buffer_iterations(mocked_read_record: Buffer, header_offset: int, data_offset: int) -> None:

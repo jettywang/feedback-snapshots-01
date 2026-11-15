@@ -19,10 +19,10 @@
 from __future__ import annotations
 
 import io
+import struct
 from typing import TYPE_CHECKING, Any, BinaryIO
 
 from dissect.cstruct import Structure
-from dissect.util.compression.lzxpress import decompress as xpress_decompress
 from dissect.util.sid import read_sid
 from dissect.util.ts import wintimestamp
 
@@ -31,6 +31,8 @@ from dissect.etl.c_etl import BufferFlag, c_etl
 from dissect.etl.exceptions import (
     InvalidBufferError,
     InvalidHeaderError,
+    InvalidMarkerError,
+    InvalidRecordError,
     ManifestNotFoundError,
     NoMoreEventsError,
 )
@@ -46,11 +48,110 @@ if TYPE_CHECKING:
     from dissect.etl.headers.headers import Header
 
 
+MAX_DECOMPRESSED_SIZE = 1 << 26
+"""Upper bound for the output of a single decompressed buffer (64 MiB)."""
+
+BUFFER_HEADER_SIZE = len(c_etl.BufferHeader)
+
+
+def _decompression_limit(etl: ETL) -> int:
+    """Return the configured output limit, falling back for lightweight stubs."""
+    limit = getattr(etl, "max_decompressed_size", None)
+    return limit if isinstance(limit, int) and limit >= 0 else MAX_DECOMPRESSED_SIZE
+
+
+def _decompress_lzxpress(src: bytes, limit: int) -> bytes:
+    """Decompress an LZXPRESS stream without ever growing beyond ``limit`` bytes.
+
+    ``dissect.util``'s decompressor has no output limit, so a small malicious
+    buffer can expand into an arbitrarily large allocation.  This implementation
+    follows the same [MS-XCA] decoding rules, but checks the projected output
+    size before copying a match or appending a literal.
+    """
+    stream = io.BytesIO(src)
+    size = len(src)
+    dst = bytearray()
+
+    def read(count: int) -> bytes:
+        data = stream.read(count)
+        if len(data) != count:
+            raise InvalidBufferError("Truncated LZXPRESS stream")
+        return data
+
+    buffered_flags = 0
+    buffered_flags_count = 0
+    last_length_half_byte = 0
+
+    while stream.tell() < size:
+        if buffered_flags_count == 0:
+            buffered_flags = struct.unpack("<I", read(4))[0]
+            buffered_flags_count = 32
+
+        buffered_flags_count -= 1
+        if buffered_flags & (1 << buffered_flags_count) == 0:
+            if len(dst) + 1 > limit:
+                raise InvalidBufferError(f"Decompressed buffer exceeds the limit of {limit} bytes")
+            dst += read(1)
+            continue
+
+        if stream.tell() == size:
+            break
+
+        match = struct.unpack("<H", read(2))[0]
+        match_offset, match_length = divmod(match, 8)
+        match_offset += 1
+
+        if match_length == 7:
+            if last_length_half_byte == 0:
+                last_length_half_byte = stream.tell()
+                match_length = read(1)[0] % 16
+            else:
+                rewind = stream.tell()
+                stream.seek(last_length_half_byte)
+                match_length = read(1)[0] // 16
+                stream.seek(rewind)
+                last_length_half_byte = 0
+
+            if match_length == 15:
+                match_length = read(1)[0]
+                if match_length == 255:
+                    match_length = struct.unpack("<H", read(2))[0]
+                    if match_length == 0:
+                        match_length = struct.unpack("<I", read(4))[0]
+
+                    if match_length < 15 + 7:
+                        raise InvalidBufferError("Invalid LZXPRESS match length")
+
+                    match_length -= 15 + 7
+                match_length += 15
+            match_length += 7
+        match_length += 3
+
+        if match_offset > len(dst):
+            raise InvalidBufferError("Invalid LZXPRESS match offset")
+
+        # Check the whole match before copying it.  A single token can declare
+        # a multi-megabyte match, so growing first and checking later is too late.
+        if len(dst) + match_length > limit:
+            raise InvalidBufferError(f"Decompressed buffer exceeds the limit of {limit} bytes")
+
+        remaining = match_length
+        while remaining > 0:
+            match_size = min(remaining, match_offset)
+            dst += dst[-match_offset : (-match_offset + match_size) or None]
+            remaining -= match_size
+
+    return bytes(dst)
+
+
 class ETL:
     """The main interface when controlling an ETL file."""
 
-    def __init__(self, fh: BinaryIO):
+    def __init__(self, fh: BinaryIO, max_decompressed_size: int | None = None):
         self.fh = fh
+        # ``None`` means "use MAX_DECOMPRESSED_SIZE at read time", so the module
+        # setting can still be changed after construction.
+        self.max_decompressed_size = max_decompressed_size
 
         # Load the first buffer inside the file,
         # The first event of the buffer contains a logfile header
@@ -129,19 +230,56 @@ class Buffer:
 
     @property
     def data(self) -> memoryview:
-        if not self._data:
-            data_len = min(self.size, self.filled_bytes) - len(c_etl.BufferHeader)
-            if data_len < 0:
-                raise InvalidBufferError("Invalid data length")
+        if self._data is None:
+            data_len = self.physical_size
             self.fh.seek(self.data_offset)
 
             tmp_data = self.fh.read(data_len)
+            if len(tmp_data) != data_len:
+                raise InvalidBufferError(
+                    f"Truncated buffer at offset {self.offset:#x}: expected {data_len} bytes, got {len(tmp_data)}"
+                )
 
             if self.header.BufferFlag & BufferFlag.COMPRESSED:
-                tmp_data = xpress_decompress(tmp_data)
+                tmp_data = self._decompress(tmp_data)
 
             self._data = memoryview(tmp_data)
         return self._data
+
+    @property
+    def physical_size(self) -> int:
+        """Number of bytes on disk between this buffer's header and its end.
+
+        ``BufferSize`` is the stride between buffers, while ``FilledBytes`` is
+        the number of bytes that actually belong to this buffer.  Both are
+        physical byte counts; neither says anything about a decompressed
+        payload.  A declared size that exceeds the stride would make the read
+        spill into the next buffer, so it is rejected instead.
+        """
+        if self.size < BUFFER_HEADER_SIZE:
+            raise InvalidBufferError(f"Invalid data length: BufferSize ({self.size}) is smaller than the header")
+
+        if self.filled_bytes > self.size:
+            raise InvalidBufferError(
+                f"FilledBytes ({self.filled_bytes}) exceeds BufferSize ({self.size}) at offset {self.offset:#x}"
+            )
+
+        data_len = self.filled_bytes - BUFFER_HEADER_SIZE
+        if data_len < 0:
+            raise InvalidBufferError(
+                f"Invalid data length: FilledBytes ({self.filled_bytes}) does not contain the buffer header"
+            )
+
+        return data_len
+
+    def _decompress(self, data: bytes) -> bytes:
+        if not data:
+            return b""
+
+        # LZXPRESS has no declared output size, so bound the expansion before
+        # allocating the result.  The stream is validated against the same
+        # limit while decoding.
+        return _decompress_lzxpress(data, _decompression_limit(self.etl))
 
     @property
     def data_offset(self) -> int:
@@ -155,24 +293,40 @@ class Buffer:
     def next_buffer(self) -> int:
         return self.offset + self.size
 
+    @property
+    def record_data_size(self) -> int:
+        """Number of bytes that can contain records after decompression."""
+        return len(self.data)
+
     def __iter__(self) -> Iterator[EventRecord]:
         offset = 0
-        try:
-            while offset < self.filled_bytes:
+        data_size = self.record_data_size
+        while offset < data_size:
+            try:
                 event = self.read_record(offset)
-                offset += event.aligned_size
-                yield event
-        except (EOFError, NoMoreEventsError):
-            pass
+            except (EOFError, NoMoreEventsError, InvalidHeaderError, InvalidMarkerError, InvalidRecordError):
+                # A partial or non-record tail is padding or a truncated write,
+                # not an event.  Explicit read_record calls still raise.
+                break
+            offset += event.aligned_size
+            yield event
 
     def read_record(self, offset: int) -> EventRecord:
         """Parse a record from a given offset inside a buffer."""
-        event_record = EventRecord()
         data = self.data[offset:]
+        if not data:
+            raise EOFError("No record data left")
+
+        event_record = EventRecord()
         header = select_event_header(
             data=data,
             etl=self.etl,
         )
+
+        if header.size > len(data):
+            raise InvalidRecordError(
+                f"Record at offset {offset} declares {header.size} bytes, but only {len(data)} are available"
+            )
 
         event_record._header = header
 
