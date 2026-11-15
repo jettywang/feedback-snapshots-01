@@ -11,9 +11,11 @@ from dissect.evidence.ewf.ewf import (
     find_files,
 )
 from dissect.evidence.ewf.stream import EWFStream
+from dissect.evidence.exception import EWFError
 
 __all__ = [
     "EWF",
+    "EWFError",
     "EWFStream",
     "HeaderSection",
     "SectionDescriptor",

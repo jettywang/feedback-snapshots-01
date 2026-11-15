@@ -21,6 +21,10 @@ class NotASymlinkError(Error):
     pass
 
 
+class EWFError(Error, ValueError):
+    """Related to EWF (Expert Witness disk image Format)."""
+
+
 class InvalidSnapshot(Error):
     """Related to ASDF (Acquire Snapshot Data Format)."""
 
