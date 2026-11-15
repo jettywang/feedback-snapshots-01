@@ -156,6 +156,14 @@ HTTP/2 Error Codes
    :members:
 
 
+Per-Stream Origin Admission
+---------------------------
+
+.. automodule:: h2.origin_admission
+   :members:
+   :member-order: bysource
+
+
 Settings
 --------
 

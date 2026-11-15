@@ -33,6 +33,7 @@ Contents
    negotiating-http2
    examples
    advanced-usage
+   origin-admission
    low-level
    api
    testimonials
