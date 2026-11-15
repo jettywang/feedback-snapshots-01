@@ -46,7 +46,8 @@ class KeyCacheIdentityTest
       encodings += 1
       encode.call(*args)
     end
-    assert(@verifier.verify_rrset(records, [@b, @a]))
+    # Encoding reuse should not depend on verification crossing a TTL second.
+    Time.stub(:now, @now) { assert(@verifier.verify_rrset(records, [@b, @a])) }
     assert_equal(1, encodings)
     assert_equal(300, record.ttl)
   end
