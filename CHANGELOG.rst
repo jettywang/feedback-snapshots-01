@@ -11,6 +11,12 @@ dev
 **API Changes (Backward Compatible)**
 
 - Support for Python 3.15 has been added.
+- Added ``h2.alternative_services``, a restricted RFC 7838 alternative service
+  cache. Advertisements are stored as inert candidates for explicitly trusted
+  origins and only become usable after the application supplies a verified TLS
+  identity for the original origin.
+- Added ``stream_id`` to ``AlternativeServiceAvailable`` so consumers can
+  distinguish connection-level advertisements from stream-level ones.
 
 **Bugfixes**
 

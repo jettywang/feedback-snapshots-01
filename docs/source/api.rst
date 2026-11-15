@@ -84,6 +84,31 @@ Events
    :members:
 
 
+Alternative Services
+--------------------
+
+.. autoclass:: h2.alternative_services.AlternativeServiceCache
+   :members:
+
+.. autoclass:: h2.alternative_services.AlternativeServiceCandidate
+   :members:
+
+.. autoclass:: h2.alternative_services.AlternativeServiceUpdate
+   :members:
+
+.. autoclass:: h2.alternative_services.TlsIdentity
+   :members:
+
+.. autoclass:: h2.alternative_services.Origin
+   :members:
+
+.. autoclass:: h2.alternative_services.AdmissionStatus
+   :members:
+
+.. autoclass:: h2.alternative_services.AdvertisementSource
+   :members:
+
+
 Exceptions
 ----------
 

@@ -102,6 +102,62 @@ is emitted by h2. The following objects have "related events":
              the "related events" event pattern, you will want to be careful to
              avoid double-processing related events.
 
+Alternative Services
+~~~~~~~~~~~~~~~~~~~~~
+
+.. versionadded:: 4.5.0
+
+RFC 7838 lets a server advertise an alternative location for an origin with
+an ALTSVC frame or an ``alt-svc`` response header. h2 reports received
+ALTSVC frames as
+:class:`AlternativeServiceAvailable <h2.events.AlternativeServiceAvailable>`
+events. The event is only an advertisement: its ``origin`` is supplied by the
+peer (or inferred from a stream's ``:authority``), and the connection carrying
+it does not establish that the advertised address is authoritative for that
+origin. Credentials must not be sent to an advertised address on the strength
+of the advertisement alone.
+
+:class:`AlternativeServiceCache <h2.alternative_services.AlternativeServiceCache>`
+implements the restricted bookkeeping h2 can safely provide. It accepts only
+origins from an explicit trusted set, requires a verified
+:class:`TlsIdentity <h2.alternative_services.TlsIdentity>` for each
+advertisement, parses the full Alt-Svc field value, honours ``ma`` and
+``persist``, and rejects malformed advertisements without disturbing an older
+valid candidate. It never opens a connection or sends a request.
+
+The application remains responsible for transport. Once it has connected to a
+candidate and verified the TLS handshake against the original origin, it can
+call :meth:`authorize <h2.alternative_services.AlternativeServiceCache.authorize>`
+immediately before sending the request::
+
+    cache = h2.alternative_services.AlternativeServiceCache(
+        trusted_origins=["https://example.com"],
+    )
+
+    for event in stream_events:
+        if isinstance(event, h2.events.AlternativeServiceAvailable):
+            identity = h2.alternative_services.TlsIdentity(
+                "https://example.com",
+                verified=True,
+                peer_names=verified_peer_names,
+            )
+            cache.offer(event, tls_identity=identity)
+
+    # Later, after connecting to the candidate and verifying its TLS
+    # handshake against the original origin:
+    candidate = cache.select("https://example.com", tls_identity=new_identity)
+    if candidate is not None and cache.authorize(
+        "https://example.com", candidate, tls_identity=new_identity,
+    ):
+        send_request(candidate)
+
+An ``alt-svc`` response header can be passed to
+:meth:`apply_header <h2.alternative_services.AlternativeServiceCache.apply_header>`,
+which is also the only path that accepts the ``clear`` token. The cache does
+not parse header blocks itself: the caller supplies the origin because a
+:class:`ResponseReceived <h2.events.ResponseReceived>` event does not carry the
+request authority.
+
 .. _h2-connection-advanced:
 
 Connections: Advanced

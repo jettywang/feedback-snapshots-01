@@ -1961,6 +1961,7 @@ class H2Connection:
                 return frames, events
 
             event = AlternativeServiceAvailable()
+            event.stream_id = 0
             event.origin = frame.origin
             event.field_value = frame.field
             events.append(event)

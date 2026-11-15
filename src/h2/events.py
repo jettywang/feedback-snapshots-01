@@ -612,9 +612,26 @@ class AlternativeServiceAvailable(Event):
     This event can only be fired on the client end of a connection.
 
     .. versionadded:: 2.3.0
+
+    .. versionchanged:: 4.5.0
+       Added ``stream_id`` so that consumers can distinguish an explicit
+       connection-level advertisement from one whose origin was inferred from
+       a stream.
     """
 
     def __init__(self) -> None:
+        #: The stream on which the ALTSVC frame was received, or ``0`` for a
+        #: connection-level advertisement.
+        #:
+        #: A stream-level advertisement (``stream_id > 0``) derives its origin
+        #: from the request authority of that stream.  A connection-level
+        #: advertisement (``stream_id == 0``) carries its origin in the frame.
+        #: Consumers must not treat either origin as proof that the advertised
+        #: alternative service is authorized for the origin.
+        #:
+        #: .. versionadded:: 4.5.0
+        self.stream_id: int = 0
+
         #: The origin to which the alternative service field value applies.
         #: This field is either supplied by the server directly, or inferred by
         #: h2 from the ``:authority`` pseudo-header field that was sent
