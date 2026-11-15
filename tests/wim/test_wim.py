@@ -6,7 +6,7 @@ import hashlib
 import pytest
 from dissect.util.compression.lzxpress_huffman import decompress
 
-from dissect.archive.wim.wim import WIM, CompressedStream
+from dissect.archive.wim.wim import WIM, CompressedStream, ContentReferenceStatus
 from tests._util import absolute_path
 
 
@@ -77,3 +77,40 @@ def test_wim(path: str, chunk_size: int) -> None:
         assert len(entry.streams) == 1
         assert entry.size() == 60
         assert hashlib.sha1(entry.open().read()).hexdigest() == "1fc83a896287fe48f6d42d8d04f88f6dc90c0c45"
+
+
+def test_wim_relationships_on_real_image() -> None:
+    with gzip.open(absolute_path("_data/wim/basic4k.wim.gz")) as fh:
+        wim = WIM(fh)
+        image = next(wim.images())
+        view = image.relationships()
+
+        # The fixture has no HardLink identifiers, so identical-content paths must not become a group.
+        assert view.hardlink_groups == {}
+        assert image.get("file.txt").entry.HardLink == 0
+
+        # Each path stays its own entry, including both security references of the same descriptor.
+        records = {record.path: record for record in view.entries}
+        assert set(records) == {"", "ads.txt", "dir", "dir\\another.txt", "file.txt", "link.txt"}
+        assert records["file.txt"].security_id == records["dir\\another.txt"].security_id
+        assert records["file.txt"].entry is not records["dir\\another.txt"].entry
+
+        # The security table is addressed by index; descriptor bytes come from the real security block.
+        assert records["file.txt"].security.index == records["file.txt"].security_id
+        assert records["file.txt"].security.descriptor == image.security.descriptors[records["file.txt"].security_id]
+        assert records["ads.txt"].security.descriptor != records["file.txt"].security.descriptor
+
+        # Content references resolve back to concrete rows in the resource table.
+        entry = image.get("ads.txt")
+        references = records["ads.txt"].content
+        assert {reference.stream_name for reference in references} == {"", "spookystream"}
+        for reference in references:
+            assert reference.status is ContentReferenceStatus.RESOLVED
+            resource = wim.resource_entries[reference.resource_index]
+            assert resource.hash == reference.hash
+        assert entry.size("spookystream") == 38
+
+        # The metadata resource itself is identifiable, and its content is not any file stream.
+        assert view.metadata_resource_index is not None
+        assert wim.resource_entries[view.metadata_resource_index].is_metadata
+        assert view.metadata_hash not in {reference.hash for reference in records["file.txt"].content}

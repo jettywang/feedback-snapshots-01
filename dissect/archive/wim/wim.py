@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import struct
+from dataclasses import dataclass, field
+from enum import Enum
 from functools import cached_property, lru_cache
 from typing import TYPE_CHECKING, BinaryIO
 
@@ -19,6 +22,7 @@ from dissect.archive.wim.c_wim import (
     FILE_ATTRIBUTE,
     HEADER_FLAG,
     IO_REPARSE_TAG,
+    NO_SECURITY_DESC,
     RESHDR_FLAG,
     SYMLINK_FLAG,
     WIM_IMAGE_TAG,
@@ -30,6 +34,8 @@ if TYPE_CHECKING:
     from datetime import datetime
 
 DEFAULT_CHUNK_SIZE = 32 * 1024
+EMPTY_HASH = hashlib.sha1(b"").digest()
+"""SHA-1 digest WIM uses for empty content, which has no resource table row."""
 
 
 class WIM:
@@ -51,38 +57,56 @@ class WIM:
         if self.header.Flags & HEADER_FLAG.SPANNED:
             raise NotImplementedError("Spanned WIM files are not yet supported")
 
-        self._resource_table, self._images = self._read_resource_table()
+        self._resource_table, self._images, self._resource_entries = self._read_resource_table()
 
-    def _read_resource_table(self) -> tuple[dict[bytes, Resource], list[Resource]]:
+    def _read_resource_table(self) -> tuple[dict[bytes, Resource], list[Resource], list[Resource]]:
         # Read the resource table in one go and separate images out
         # If this turns out to be slow for large WIM files, we can add some clever caching
         table = {}
         images = []
+        entries = []
         with Resource.from_short_header(self, self.header.OffsetTable).open() as fh:
             for _ in range(fh.size // len(c_wim._RESHDR_DISK)):
                 resource = Resource.from_header(self, c_wim._RESHDR_DISK(fh))
+                resource.index = len(entries)
+                entries.append(resource)
                 table[resource.hash] = resource
 
                 if resource.is_metadata:
                     images.append(resource)
 
-        return table, images
+        return table, images, entries
 
     @property
     def resources(self) -> dict[bytes, Resource]:
         """Return the table of resources in the WIM file."""
         return self._resource_table
 
+    @property
+    def resource_entries(self) -> list[Resource]:
+        """Return all resource table entries in their original order.
+
+        The :attr:`resources` table is keyed by hash, so duplicate descriptors for the same hash collapse into one
+        entry. This property keeps every descriptor so relationship evidence can still point at the original table row.
+        """
+        return self._resource_entries
+
     def images(self) -> Iterator[Image]:
         """Iterate over all images in the WIM file."""
         for resource in self._images:
-            yield Image(self, resource.open())
+            yield Image(self, resource.open(), resource)
+
+    def relationships(self) -> Iterator[ImageRelationships]:
+        """Iterate over the relationship views of all images in the WIM file."""
+        for image in self.images():
+            yield image.relationships()
 
 
 class Resource:
     __slots__ = (
         "flags",
         "hash",
+        "index",
         "offset",
         "original_size",
         "part_number",
@@ -101,6 +125,7 @@ class Resource:
         part_number: int | None = None,
         reference_count: int | None = None,
         hash: bytes | None = None,
+        index: int | None = None,
     ):
         self.wim = wim
         self.size = size
@@ -111,6 +136,7 @@ class Resource:
         self.part_number = part_number
         self.reference_count = reference_count
         self.hash = hash
+        self.index = index
 
     @classmethod
     def from_short_header(cls, wim: WIM, reshdr: c_wim.RESHDR_DISK_SHORT) -> Resource:
@@ -127,7 +153,7 @@ class Resource:
         obj = cls.from_short_header(wim, reshdr.Base)
         obj.part_number = reshdr.PartNumber
         obj.reference_count = reshdr.RefCount
-        obj.hash = reshdr.Hash
+        obj.hash = bytes(reshdr.Hash)
         return obj
 
     @property
@@ -159,8 +185,9 @@ class Resource:
 
 
 class Image:
-    def __init__(self, wim: WIM, fh: BinaryIO):
+    def __init__(self, wim: WIM, fh: BinaryIO, resource: Resource | None = None):
         self.wim = wim
+        self.resource = resource
         self.security = SecurityBlock(fh)
 
         offset = fh.tell()
@@ -169,6 +196,10 @@ class Image:
 
     def __repr__(self) -> str:
         return "<Image>"
+
+    def relationships(self) -> ImageRelationships:
+        """Build a view of the directory entry, hardlink, content and security relations in this image."""
+        return ImageRelationships(self)
 
     def get(self, path: str, entry: DirectoryEntry | None = None) -> DirectoryEntry:
         # Programmatically we will often use the `/` separator, so replace it with the native path separator of NTFS
@@ -204,13 +235,28 @@ class Image:
 
 class SecurityBlock:
     def __init__(self, fh: BinaryIO):
+        self.offset = fh.tell()
         self.header = c_wim._SECURITYBLOCK_DISK(fh)
-        self.descriptors = []
-        for size in self.header.EntryLength:
-            if size == 0:
-                continue
 
-            self.descriptors.append(fh.read(size))
+        # Keep one slot per table entry. Zero length entries are placeholders and must not shift the
+        # SecurityId -> descriptor mapping of the entries that follow them.
+        self.descriptors: list[bytes | None] = []
+        self.offsets: list[int] = []
+        for size in self.header.EntryLength:
+            self.offsets.append(fh.tell())
+            self.descriptors.append(fh.read(size) if size else None)
+
+    def descriptor(self, index: int) -> bytes | None:
+        """Return the descriptor at a zero-based security table index."""
+        if 0 <= index < len(self.descriptors):
+            return self.descriptors[index]
+        return None
+
+    def status(self, index: int) -> SecurityReferenceStatus:
+        """Return how a zero-based security table index resolves."""
+        if not 0 <= index < len(self.descriptors):
+            return SecurityReferenceStatus.OUT_OF_RANGE
+        return SecurityReferenceStatus.EMPTY if self.descriptors[index] is None else SecurityReferenceStatus.RESOLVED
 
 
 class DirectoryEntry:
@@ -219,6 +265,7 @@ class DirectoryEntry:
         self.fh = fh
 
         start = fh.tell()
+        self.offset = start
         self.entry = c_wim._DIRENTRY(fh)
         self.name = None
         self.short_name = None
@@ -273,6 +320,17 @@ class DirectoryEntry:
     def is_file(self) -> bool:
         """Return whether this entry is a regular file."""
         return not self.is_dir()
+
+    @property
+    def hardlink_id(self) -> int:
+        """Return the hardlink group identifier declared by this directory entry.
+
+        The ``HardLink`` member shares storage with the reparse point tag, so it is only meaningful for
+        entries that are not reparse points. A value of zero means the entry does not declare a hardlink group.
+        """
+        if self.is_reparse_point():
+            return 0
+        return int(self.entry.HardLink)
 
     def is_reparse_point(self) -> bool:
         """Return whether this entry is a reparse point."""
@@ -367,7 +425,8 @@ class DirectoryEntry:
         if stream_hash is None:
             raise FileNotFoundError(f"Stream not found in directory entry {self}: {name!r}")
 
-        if stream_hash.strip(b"\x00") == b"":
+        stream_hash = bytes(stream_hash)
+        if not stream_hash.strip(b"\x00") or stream_hash == EMPTY_HASH:
             return BufferedStream(io.BytesIO(b""), size=0)
 
         if resource := self.image.wim.resources.get(stream_hash):
@@ -503,3 +562,395 @@ def _ts_to_ns(ts: int) -> int:
 
 def _read_name(fh: BinaryIO, length: int) -> str:
     return fh.read(length).decode("utf-16-le")
+
+
+class SecurityReferenceStatus(str, Enum):
+    """How a directory entry's ``SecurityId`` relates to the image security table."""
+
+    NONE = "none"
+    """The entry does not reference a security descriptor (``SecurityId`` is ``0xFFFFFFFF``)."""
+
+    RESOLVED = "resolved"
+    """The index points at a non-empty descriptor in this image's security table."""
+
+    EMPTY = "empty"
+    """The index points at an empty table slot (unknown descriptor), not a previous entry's data."""
+
+    OUT_OF_RANGE = "out_of_range"
+    """The index is outside this image's security table."""
+
+
+@dataclass(frozen=True)
+class SecurityDescriptorReference:
+    """A single directory entry's reference into an image's security descriptor table."""
+
+    path: str
+    entry_offset: int
+    security_id: int
+    index: int | None
+    status: SecurityReferenceStatus
+    descriptor: bytes | None
+    offset: int | None
+    """Offset of the descriptor within the decompressed image metadata stream, if a table slot exists."""
+    security_block_offset: int | None
+    """Offset of the security block within the decompressed image metadata stream."""
+
+
+class ContentReferenceStatus(str, Enum):
+    """How a directory entry stream relates to the WIM resource table."""
+
+    RESOLVED = "resolved"
+    """The stream hash has a matching row in the resource table."""
+
+    EMPTY = "empty"
+    """The stream hash is all zeroes or the SHA-1 of empty data, and does not need a resource."""
+
+    MISSING = "missing"
+    """The stream hash is not present in the resource table."""
+
+
+@dataclass(frozen=True)
+class ContentReference:
+    """A stream reference from a directory entry to a content resource."""
+
+    path: str
+    entry_offset: int
+    stream_name: str
+    hash: bytes
+    status: ContentReferenceStatus
+    resource: Resource | None
+    resource_index: int | None
+    """Row index in :attr:`WIM.resource_entries` for the resolved descriptor."""
+
+
+@dataclass
+class EntryRecord:
+    """One directory entry, with its own path, metadata, security and content references.
+
+    Entries are never merged by content hash. Two paths with identical content remain two records; a hardlink
+    group is only formed from the ``HardLink`` identity field of the directory entries.
+    """
+
+    path: str
+    entry: DirectoryEntry
+    security: SecurityDescriptorReference
+    content: list[ContentReference]
+    hardlink_group: HardlinkGroup | None = field(default=None, repr=False, compare=False)
+
+    @property
+    def hardlink_id(self) -> int:
+        """Return the hardlink group identifier declared by this directory entry."""
+        return self.entry.hardlink_id
+
+    @property
+    def security_id(self) -> int:
+        """Return the raw ``SecurityId`` from the directory entry."""
+        return self.security.security_id
+
+    @property
+    def offset(self) -> int:
+        """Return the directory entry offset in the image metadata stream."""
+        return self.entry.offset
+
+
+class HardlinkAnomaly(str, Enum):
+    """Inconsistencies found inside a hardlink group."""
+
+    SINGLE_MEMBER = "single_member"
+    """The group identifier is claimed by only one path."""
+
+    SECURITY_ID_CONFLICT = "security_id_conflict"
+    """Members of the same hardlink group reference different security descriptors."""
+
+    CONTENT_CONFLICT = "content_conflict"
+    """Members of the same hardlink group reference different streams or content hashes."""
+
+    ATTRIBUTE_CONFLICT = "attribute_conflict"
+    """Members of the same hardlink group have different file attributes."""
+
+    TYPE_CONFLICT = "type_conflict"
+    """Members of the same hardlink group are not all files or all directories."""
+
+    DIRECTORY_MEMBER = "directory_member"
+    """At least one member is a directory, which cannot be hardlinked."""
+
+    SECURITY_UNRESOLVED = "security_unresolved"
+    """At least one member references an empty or out-of-range security table slot."""
+
+
+@dataclass
+class HardlinkGroup:
+    """Paths that share one ``HardLink`` identifier within a single image."""
+
+    id: int
+    members: list[EntryRecord]
+    anomalies: list[HardlinkAnomaly]
+
+    @property
+    def security_ids(self) -> set[int]:
+        """Return all distinct security IDs declared by the group members."""
+        return {member.security_id for member in self.members}
+
+    @property
+    def content_hashes(self) -> set[bytes]:
+        """Return all distinct content hashes referenced by the group members."""
+        return {reference.hash for member in self.members for reference in member.content}
+
+    @property
+    def is_consistent(self) -> bool:
+        """Return whether the group has no detected anomalies."""
+        return not self.anomalies
+
+
+@dataclass
+class ContentResource:
+    """A content hash and every directory entry stream that references it.
+
+    This is intentionally independent from :class:`HardlinkGroup`: shared content is not proof of a hardlink, and
+    hardlinked paths may still reference the same content resource without being deduplicated here.
+    """
+
+    hash: bytes
+    resources: list[Resource]
+    """Resource descriptors whose hash matches this content, in resource table order."""
+    resource_indices: list[int]
+    """Row numbers in :attr:`WIM.resource_entries` for :attr:`resources`."""
+    references: list[ContentReference]
+
+    @property
+    def is_metadata(self) -> bool:
+        """Return whether any descriptor for this hash is a metadata resource."""
+        return any(resource.is_metadata for resource in self.resources)
+
+    @property
+    def is_shared(self) -> bool:
+        """Return whether more than one directory entry references this content."""
+        return len({(reference.path, reference.entry_offset) for reference in self.references}) > 1
+
+    @property
+    def paths(self) -> list[str]:
+        """Return every distinct referencing path, in first-seen order."""
+        return list(dict.fromkeys(reference.path for reference in self.references))
+
+
+class ImageRelationships:
+    """Relationship view of one image.
+
+    The view separates four kinds of evidence:
+
+    - :attr:`entries`: every directory entry, with its own path and metadata.
+    - :attr:`hardlink_groups`: groups formed only from the directory entry ``HardLink`` field.
+    - :attr:`content_resources`: content hashes and the streams that reference them.
+    - :attr:`security_references`: each entry's index-based reference into the image security table.
+
+    Hardlink groups are scoped to this image. The same group identifier in another image is a different group.
+    """
+
+    def __init__(self, image: Image):
+        self.image = image
+        self.metadata_hash = image.resource.hash if image.resource else None
+        """SHA-1 of the decompressed image metadata stream, if known."""
+        self.metadata_resource_index: int | None = None
+        """Row in :attr:`WIM.resource_entries` for this image's metadata resource, if known."""
+
+        rows_by_hash: dict[bytes, list[int]] = {}
+        for index, resource in enumerate(image.wim.resource_entries):
+            if resource.hash is not None:
+                rows_by_hash.setdefault(resource.hash, []).append(index)
+
+        if self.metadata_hash is not None:
+            rows = rows_by_hash.get(self.metadata_hash, [])
+            if rows:
+                self.metadata_resource_index = rows[0]
+
+        entries: list[EntryRecord] = []
+        for path, entry in _iter_entries(image):
+            security = _security_reference(image, path, entry)
+            content: list[ContentReference] = []
+            for stream_name, stream_hash in entry.streams.items():
+                digest = bytes(stream_hash)
+                if not digest.strip(b"\x00") or digest == EMPTY_HASH:
+                    content.append(
+                        ContentReference(
+                            path,
+                            entry.offset,
+                            stream_name,
+                            digest,
+                            ContentReferenceStatus.EMPTY,
+                            None,
+                            None,
+                        )
+                    )
+                    continue
+
+                resource = image.wim.resources.get(digest)
+                content.append(
+                    ContentReference(
+                        path,
+                        entry.offset,
+                        stream_name,
+                        digest,
+                        ContentReferenceStatus.RESOLVED if resource else ContentReferenceStatus.MISSING,
+                        resource,
+                        resource.index if resource else None,
+                    )
+                )
+
+            entries.append(EntryRecord(path, entry, security, content))
+
+        self.entries = entries
+
+        content_resources: dict[bytes, ContentResource] = {}
+        for record in entries:
+            for reference in record.content:
+                if reference.status is ContentReferenceStatus.EMPTY:
+                    continue
+
+                resource = content_resources.get(reference.hash)
+                if resource is None:
+                    resource = ContentResource(
+                        reference.hash,
+                        [],
+                        rows_by_hash.get(reference.hash, []),
+                        [],
+                    )
+                    content_resources[reference.hash] = resource
+
+                resource.references.append(reference)
+                if reference.resource is not None and reference.resource not in resource.resources:
+                    resource.resources.append(reference.resource)
+
+        self.content_resources = content_resources
+
+        hardlink_groups: dict[int, HardlinkGroup] = {}
+        for record in entries:
+            if not record.hardlink_id:
+                continue
+
+            group = hardlink_groups.get(record.hardlink_id)
+            if group is None:
+                group = HardlinkGroup(record.hardlink_id, [], [])
+                hardlink_groups[record.hardlink_id] = group
+
+            group.members.append(record)
+            record.hardlink_group = group
+
+        for group in hardlink_groups.values():
+            group.anomalies[:] = _hardlink_anomalies(group)
+
+        self.hardlink_groups = hardlink_groups
+
+    @property
+    def security_references(self) -> list[SecurityDescriptorReference]:
+        """Return the security table reference of every directory entry."""
+        return [record.security for record in self.entries]
+
+    def get(self, path: str) -> EntryRecord:
+        """Return the entry record for exactly one path.
+
+        Raises :class:`KeyError` if the path does not exist and :class:`ValueError` if malformed metadata contains
+        multiple directory entries with the same path.
+        """
+        normalized = path.replace("/", "\\").strip("\\")
+        matches = [record for record in self.entries if record.path == normalized]
+        if not matches:
+            raise KeyError(f"Path not found in image relationships: {path}")
+        if len(matches) > 1:
+            raise ValueError(f"Path has multiple directory entries: {path}")
+        return matches[0]
+
+
+def _iter_entries(
+    image: Image,
+    path: str = "",
+    entry: DirectoryEntry | None = None,
+    ancestors: set[int] | None = None,
+) -> Iterator[tuple[str, DirectoryEntry]]:
+    entry = entry or image.root
+    ancestors = ancestors or set()
+
+    yield path, entry
+
+    if not entry.is_dir() or entry.offset in ancestors:
+        return
+
+    ancestors = ancestors | {entry.offset}
+    for child in entry.iterdir():
+        child_path = f"{path}\\{child.name}" if path else (child.name or "")
+        yield from _iter_entries(image, child_path, child, ancestors)
+
+
+def _security_reference(image: Image, path: str, entry: DirectoryEntry) -> SecurityDescriptorReference:
+    security_id = int(entry.entry.SecurityId)
+    if security_id == NO_SECURITY_DESC:
+        return SecurityDescriptorReference(
+            path,
+            entry.offset,
+            security_id,
+            None,
+            SecurityReferenceStatus.NONE,
+            None,
+            None,
+            image.security.offset,
+        )
+
+    # Security IDs are zero-based indices into the security table. Do not compact the table: an empty slot is
+    # unknown evidence for that exact index, not a reason to look at the next or previous descriptor.
+    index = security_id
+    block = image.security
+    if index >= len(block.descriptors):
+        return SecurityDescriptorReference(
+            path,
+            entry.offset,
+            security_id,
+            index,
+            SecurityReferenceStatus.OUT_OF_RANGE,
+            None,
+            None,
+            image.security.offset,
+        )
+
+    descriptor = block.descriptors[index]
+    return SecurityDescriptorReference(
+        path,
+        entry.offset,
+        security_id,
+        index,
+        block.status(index),
+        descriptor,
+        block.offsets[index],
+        image.security.offset,
+    )
+
+
+def _hardlink_anomalies(group: HardlinkGroup) -> list[HardlinkAnomaly]:
+    anomalies = []
+    if len(group.members) < 2:
+        anomalies.append(HardlinkAnomaly.SINGLE_MEMBER)
+
+    if len(group.security_ids) > 1:
+        anomalies.append(HardlinkAnomaly.SECURITY_ID_CONFLICT)
+
+    content_signatures = {
+        tuple(sorted((reference.stream_name, reference.hash) for reference in member.content))
+        for member in group.members
+    }
+    if len(content_signatures) > 1:
+        anomalies.append(HardlinkAnomaly.CONTENT_CONFLICT)
+
+    if len({int(member.entry.entry.Attributes) for member in group.members}) > 1:
+        anomalies.append(HardlinkAnomaly.ATTRIBUTE_CONFLICT)
+
+    if len({member.entry.is_dir() for member in group.members}) > 1:
+        anomalies.append(HardlinkAnomaly.TYPE_CONFLICT)
+
+    if any(member.entry.is_dir() for member in group.members):
+        anomalies.append(HardlinkAnomaly.DIRECTORY_MEMBER)
+
+    if any(
+        member.security.status in (SecurityReferenceStatus.EMPTY, SecurityReferenceStatus.OUT_OF_RANGE)
+        for member in group.members
+    ):
+        anomalies.append(HardlinkAnomaly.SECURITY_UNRESOLVED)
+
+    return anomalies

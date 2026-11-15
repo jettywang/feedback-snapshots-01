@@ -320,6 +320,7 @@ class _c_wim(__cs__.cstruct):
 c_wim: TypeAlias = _c_wim
 
 WIM_IMAGE_TAG: Literal[b"MSWIM\x00\x00\x00"] = ...
+NO_SECURITY_DESC: Literal[0xFFFFFFFF] = ...
 HEADER_FLAG = c_wim.HEADER_FLAG
 RESHDR_FLAG = c_wim.RESHDR_FLAG
 

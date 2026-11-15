@@ -237,6 +237,7 @@ typedef struct _WIMHASH {
 c_wim = cstruct().load(wim_def)
 
 WIM_IMAGE_TAG = b"MSWIM\x00\x00\x00"
+NO_SECURITY_DESC = 0xFFFFFFFF
 HEADER_FLAG = c_wim.HEADER_FLAG
 RESHDR_FLAG = c_wim.RESHDR_FLAG
 
