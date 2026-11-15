@@ -2,6 +2,14 @@ Release notes
 =============
 This page contains the most significant changes in Signify between each release.
 
+Unreleased
+----------
+* Do not mutate the caller's ``VerificationContext`` while verifying a
+  countersignature. The timestamp from a countersignature was left on the caller's
+  context, so a later signature verified with the same context could inherit the
+  timestamp of an unrelated signature (including in ``permit`` mode when the
+  countersignature itself had failed to validate).
+
 v0.9.3 (2026-10-11)
 -------------------
 * Fix crash on certificates with key algorithms unknown to asn1crypto (e.g. ML-DSA).

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import datetime
 from collections.abc import Iterable
 from typing import cast
@@ -319,6 +320,10 @@ class SignerInfo:
         self._verify_issuer_signature(issuer, context)
 
         if signing_time is not None:
+            # Never mutate the caller's context: the timestamp is specific to this
+            # SignerInfo and may otherwise leak into the verification of unrelated
+            # signatures that share the same VerificationContext.
+            context = copy.copy(context)
             context.timestamp = signing_time
         return context.verify(issuer)
 
@@ -332,25 +337,29 @@ class SignerInfo:
         Returns the verified signing time of the binary, if correct, or returns None.
         """
 
-        if self.countersigner is None or countersignature_mode == "ignore":
+        countersigner = self.countersigner
+        if countersigner is None or countersignature_mode == "ignore":
             return None
 
         try:
             # 3. Check the countersigner hash.
             # Make sure to use the same digest_algorithm that the countersigner used
-            if not self.countersigner.check_message_digest(self.encrypted_digest):
+            if not countersigner.check_message_digest(self.encrypted_digest):
                 raise CounterSignerError(
                     "The expected hash of the encryptedDigest does not match"
                     " countersigner's SignerInfo"
                 )
 
-            context.timestamp = self.countersigner.signing_time
+            # Verify the countersigner at its own signing time, without mutating the
+            # context that the caller provided.
+            cs_context = copy.copy(context)
+            cs_context.timestamp = countersigner.signing_time
 
             # We could be calling SignerInfo.verify or RFC3161SignedData.verify
             # here, but those have identical signatures. Note that
             # RFC3161SignedData accepts a trusted_certificate_store argument, but
             # we pass in an explicit context anyway
-            self.countersigner.verify(context)
+            countersigner.verify(cs_context)
         except Exception as e:
             if countersignature_mode != "strict":
                 pass
@@ -361,7 +370,7 @@ class SignerInfo:
         else:
             # If no errors occur, we should be fine setting the timestamp to the
             # countersignature's timestamp
-            return self.countersigner.signing_time
+            return countersigner.signing_time
 
         return None
 
