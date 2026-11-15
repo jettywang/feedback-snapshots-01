@@ -49,6 +49,13 @@ module Net; module SFTP
     # The highest protocol version supported by the Net::SFTP library.
     HIGHEST_PROTOCOL_VERSION_SUPPORTED = 6
 
+    # The largest SFTP packet body (the type byte plus its arguments, not
+    # counting the four-byte length header) that will be accepted from the
+    # server. OpenSSH's sftp-server uses the same 256 KiB limit. The length is
+    # checked as soon as the header arrives, before the body is buffered, so a
+    # server cannot make the client wait for or allocate an enormous packet.
+    MAX_PACKET_LENGTH = 256 * 1024
+
     # A reference to the Net::SSH session object that powers this SFTP session.
     attr_reader :session
 
@@ -87,6 +94,7 @@ module Net; module SFTP
       @state      = :closed
       @extensions = {}
       @pending_requests = {}
+      @framing_error = nil
 
       connect(&block)
     end
@@ -783,6 +791,7 @@ module Net; module SFTP
           @channel = session.open_channel(&method(:when_channel_confirmed))
           @input = Net::SSH::Buffer.new
           @packet_length = nil
+          @framing_error = nil
           @protocol = nil
           @on_ready = Array(block)
         else # opening
@@ -821,6 +830,7 @@ module Net; module SFTP
       # You should probably use the operation methods, rather than building and
       # sending the packet directly. (See #open, #close, etc.)
       def send_packet(type, *args)
+        raise @framing_error if @framing_error
         data = Net::SSH::Buffer.from(*args)
         msg = Net::SSH::Buffer.from(:long, data.length+1, :byte, type, :raw, data)
         raise SessionClosedError unless channel
@@ -840,6 +850,7 @@ module Net; module SFTP
       # given arguments. Returns a new Request instance that encapsulates the
       # request.
       def request(type, *args, &callback)
+        raise @framing_error if @framing_error
         request = Request.new(self, type, protocol.send(type, *args), &callback)
         info { "sending #{type} packet (#{request.id})" }
         pending_requests[request.id] = request
@@ -902,7 +913,13 @@ module Net; module SFTP
         @channel = nil
         begin
           # Data that arrived in the same read as the close has not been polled yet.
+          # A framing error here means the tail was garbage; the channel is
+          # already gone, so SessionClosedError below remains the outcome for
+          # anything still pending.
           when_channel_polled(channel)
+        rescue Net::SFTP::Exception => e
+          raise unless e.equal?(@framing_error)
+          debug { "discarding buffered input after framing error while closing: #{e.message}" }
         ensure
           @state = :closed
           failed, @pending_requests = @pending_requests, {}
@@ -916,15 +933,42 @@ module Net; module SFTP
       # This basically checks the input buffer to see if enough input has been
       # accumulated to handle. If there has, the packet is parsed and
       # dispatched, according to its type (see #do_version and #dispatch_request).
+      #
+      # The input is treated purely as a byte stream, so it does not matter how
+      # the SSH channel split it into callbacks: a packet split across many
+      # callbacks is dispatched once its last byte arrives, and several packets
+      # arriving together are dispatched in order. Whichever sequence of
+      # callbacks delivers the same bytes produces the same result.
+      #
+      # A declared length outside 1..MAX_PACKET_LENGTH is a framing error. It
+      # is rejected from the four-byte header alone, before the body is
+      # buffered or a Packet is allocated, because a valid SFTP packet always
+      # has a type byte and the session cannot resynchronise after a bogus
+      # length. Packets completed before the bad header are still dispatched;
+      # every request still waiting for a reply is failed with the framing
+      # error, the buffered tail (which cannot be trusted to start on a packet
+      # boundary) is discarded, and the error is raised out of the event loop.
       def when_channel_polled(channel)
-        while input.length > 0
+        if @framing_error
+          input.clear!
+          raise @framing_error
+        end
+
+        while true
           if @packet_length.nil?
             # make sure we've read enough data to tell how long the packet is
-            return unless input.length >= 4
-            @packet_length = input.read_long
+            return if input.length < 4
+            length = input.read_long
+            return fail_framing!("invalid SFTP packet length #{length}") if length < 1
+            if length > MAX_PACKET_LENGTH
+              return fail_framing!("SFTP packet length #{length} exceeds the maximum of #{MAX_PACKET_LENGTH}")
+            end
+            @packet_length = length
           end
 
-          return unless input.length >= @packet_length + 4
+          # Wait for the rest of the body, then for the length header of the
+          # next packet, without treating a partial packet as an error.
+          return if input.length < @packet_length + 4
           packet = Net::SFTP::Packet.new(input.read(@packet_length))
           input.consume!
           @packet_length = nil
@@ -937,6 +981,22 @@ module Net; module SFTP
             dispatch_request(packet)
           end
         end
+      end
+
+      # Abandons the input stream after a framing error. Completed packets
+      # have already been dispatched; requests that are still pending cannot
+      # be completed because their replies cannot be located in the stream, so
+      # they are failed with +message+. The buffered bytes are discarded and
+      # subsequent sends are refused by #request.
+      def fail_framing!(message)
+        @framing_error = Net::SFTP::Exception.new(message)
+        @packet_length = nil
+        input.clear!
+
+        failed, @pending_requests = @pending_requests, {}
+        failed.each_value { |request| request.fail!(@framing_error) }
+
+        raise @framing_error
       end
 
       # Called to handle FXP_VERSION packets. This performs the SFTP protocol
