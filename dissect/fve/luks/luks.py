@@ -20,6 +20,15 @@ if TYPE_CHECKING:
 
     from dissect.fve.luks.metadata import Digest, Keyslot, Segment
 
+#: Segment flags that indicate an ongoing or interrupted LUKS2 online reencryption.
+REENCRYPT_SEGMENT_FLAGS = frozenset({"in-reencryption", "final-reencrypt"})
+
+#: Valid values for the ``mode`` field of a LUKS2 reencrypt keyslot.
+REENCRYPT_KEY_SLOT_MODES = frozenset({"reencrypt", "encrypt", "decrypt"})
+
+#: Valid values for the ``direction`` field of a LUKS2 reencrypt keyslot.
+REENCRYPT_KEY_SLOT_DIRECTIONS = frozenset({"forward", "backward"})
+
 
 class LUKS:
     """LUKS disk encryption.
@@ -200,10 +209,50 @@ class LUKS:
 
         return segments[0]
 
+    def reencryption_status(self) -> str | None:
+        """Return a description of an ongoing or interrupted LUKS2 online reencryption.
+
+        Returns ``None`` if the volume layout is stable and safe to interpret. Otherwise returns
+        a human-readable description of the reencryption related state that prevents us from
+        safely mapping every sector to a single segment.
+
+        A volume in this state can still be unlocked (passphrase and volume key verification
+        are unaffected), but :meth:`open` refuses to return a decrypted stream for it.
+        """
+        if self.header.version != 2:
+            return None
+
+        reasons = []
+
+        for segment_id, segment in self.metadata.segments.items():
+            flags = set(segment.flags or [])
+            if reencrypt_flags := flags & REENCRYPT_SEGMENT_FLAGS:
+                reasons.append(f"segment {segment_id} has reencryption flags: {', '.join(sorted(reencrypt_flags))}")
+            if segment.type != "crypt":
+                reasons.append(f"segment {segment_id} has unexpected type: {segment.type}")
+
+        for keyslot_id, keyslot in self.metadata.keyslots.items():
+            if keyslot.type != "reencrypt":
+                continue
+            if keyslot.mode is None or keyslot.direction is None:
+                reasons.append(f"reencrypt keyslot {keyslot_id} has incomplete recovery information")
+            elif keyslot.mode not in REENCRYPT_KEY_SLOT_MODES or keyslot.direction not in REENCRYPT_KEY_SLOT_DIRECTIONS:
+                reasons.append(
+                    f"reencrypt keyslot {keyslot_id} has unknown mode or direction: "
+                    f"{keyslot.mode}/{keyslot.direction}"
+                )
+            else:
+                reasons.append(f"reencrypt keyslot {keyslot_id} present ({keyslot.mode}, {keyslot.direction})")
+
+        return "; ".join(reasons) if reasons else None
+
     def open(self) -> CryptStream:
         """Open this volume and return a readable (decrypted) stream."""
         if not self.unlocked:
             raise ValueError("Volume is locked")
+
+        if (status := self.reencryption_status()) is not None:
+            raise ValueError(f"Refusing to open volume with unfinished reencryption: {status}")
 
         # Technically LUKS supports multiple segments, but practically it only ever has one
         # Don't bother with supporting multiple segments for now
