@@ -13,6 +13,8 @@ import logging
 import os
 import struct
 from bisect import bisect_right
+from dataclasses import dataclass, field
+from enum import Enum
 from operator import itemgetter
 from typing import TYPE_CHECKING, BinaryIO
 
@@ -42,6 +44,7 @@ if TYPE_CHECKING:
     from dissect.fve.bde.information import VmkInfoDatum
 
 Run = tuple[int, int, int]
+MappedRun = tuple[int, int, int, int]
 
 log = logging.getLogger(__name__)
 log.setLevel(os.getenv("DISSECT_LOG_BDE", "CRITICAL"))
@@ -362,6 +365,61 @@ class BootSector:
             raise ValueError("Not a BDE volume")
 
 
+class SourceType(str, Enum):
+    """Where the bytes of a logical (decrypted) range physically originate from."""
+
+    #: Plaintext stored at the same location on disk.
+    ORIGINAL = "original"
+    #: Ciphertext stored at the same location on disk, decrypted in place.
+    DECRYPTED = "decrypted"
+    #: Ciphertext relocated to the virtualized block elsewhere on the volume.
+    RELOCATED = "relocated"
+    #: Vista volume header with library-applied compatibility patches.
+    VISTA_COMPAT = "vista-compat"
+    #: Reserved region, synthesized as null bytes (nothing is read from disk).
+    RESERVED = "reserved"
+    #: Relocation metadata is corrupt, no trustworthy source can be reported.
+    CORRUPT = "corrupt"
+
+
+@dataclass
+class Patch:
+    """A library-applied compatibility correction to on-disk data.
+
+    Records exactly which bytes of the logical view are a compatibility interpretation
+    rather than the original on-disk content.
+    """
+
+    #: Absolute offset in the logical (decrypted) view.
+    offset: int
+    #: Human-readable name of the corrected field.
+    field: str
+    #: Bytes as originally stored on disk.
+    original: bytes
+    #: Bytes substituted by the library.
+    patched: bytes
+
+
+@dataclass
+class Segment:
+    """Provenance of a contiguous range of the logical (decrypted) view."""
+
+    #: Absolute offset in the logical (decrypted) view.
+    offset: int
+    #: Size of this segment in bytes.
+    size: int
+    #: Where these bytes originate from.
+    source: SourceType
+    #: Absolute offset on the underlying volume, ``None`` for synthesized data.
+    physical_offset: int | None = None
+    #: Logical plaintext of this segment, as returned by a regular read.
+    data: bytes | None = None
+    #: Original on-disk bytes at ``physical_offset``, ``None`` for synthesized data.
+    raw: bytes | None = None
+    #: Library-applied compatibility patches within this segment.
+    patches: list[Patch] = field(default_factory=list)
+
+
 class BitlockerStream(AlignedStream):
     """Transparently decrypting Bitlocker stream.
 
@@ -470,6 +528,15 @@ class BitlockerStream(AlignedStream):
                 count -= count
 
     def _iter_runs(self, offset: int, length: int) -> Iterator[Run]:
+        for run_type, _, physical_sector, count in self._iter_mapped_runs(offset, length):
+            yield (run_type, physical_sector, count)
+
+    def _iter_mapped_runs(self, offset: int, length: int) -> Iterator[MappedRun]:
+        """Yield runs as ``(run_type, logical_sector, physical_sector, count)``.
+
+        Identical to :meth:`_iter_runs`, but additionally tracks the logical sector of each run,
+        so relocated (virtualized) regions can be told apart from their physical location.
+        """
         sector = offset // self.sector_size
         count = -(-length // self.sector_size)
 
@@ -477,7 +544,7 @@ class BitlockerStream(AlignedStream):
             # Vista volume header behaviour
             if self.bde.version == 1 and sector < 0x2000 // self.sector_size:
                 if sector == 0:
-                    yield (BitlockerStream.RUN_VISTA_HEADER, sector, 1)
+                    yield (BitlockerStream.RUN_VISTA_HEADER, 0, 0, 1)
 
                     sector += 1
                     count -= 1
@@ -486,7 +553,7 @@ class BitlockerStream(AlignedStream):
                 if count:
                     remaining_sectors = min((0x2000 // self.sector_size) - sector, count)
 
-                    yield (BitlockerStream.RUN_PLAIN, sector, remaining_sectors)
+                    yield (BitlockerStream.RUN_PLAIN, sector, sector, remaining_sectors)
 
                     sector += remaining_sectors
                     count -= remaining_sectors
@@ -495,7 +562,13 @@ class BitlockerStream(AlignedStream):
             if sector < self._virtualized_sector_count:
                 remaining_sectors = min(self._virtualized_sector_count - sector, count)
 
-                yield from self._iter_run_state(sector + self._virtualized_block_sector, remaining_sectors)
+                physical_sector = sector + self._virtualized_block_sector
+                logical_sector = sector
+                for run_type, _, run_count in self._iter_run_state(physical_sector, remaining_sectors):
+                    yield (run_type, logical_sector, physical_sector, run_count)
+
+                    logical_sector += run_count
+                    physical_sector += run_count
 
                 sector += remaining_sectors
                 count -= remaining_sectors
@@ -510,24 +583,26 @@ class BitlockerStream(AlignedStream):
                 if sector < region_start < sector + count:
                     remaining_sectors = min(region_start - sector, count)
 
-                    yield from self._iter_run_state(sector, remaining_sectors)
+                    for run_type, _, run_count in self._iter_run_state(sector, remaining_sectors):
+                        yield (run_type, sector, sector, run_count)
 
-                    sector += remaining_sectors
-                    count -= remaining_sectors
+                        sector += run_count
+                        count -= run_count
 
                 # Starts in a region
                 if region_start <= sector < region_end:
                     remaining_sectors = min(region_end - sector, count)
 
-                    yield (BitlockerStream.RUN_SPARSE, sector, remaining_sectors)
+                    yield (BitlockerStream.RUN_SPARSE, sector, sector, remaining_sectors)
 
                     sector += remaining_sectors
                     count -= remaining_sectors
             else:
-                yield from self._iter_run_state(sector, count)
+                for run_type, _, run_count in self._iter_run_state(sector, count):
+                    yield (run_type, sector, sector, run_count)
 
-                sector += count
-                count -= count
+                    sector += run_count
+                    count -= run_count
 
     def _read(self, offset: int, length: int) -> bytes:
         result = []
@@ -539,8 +614,7 @@ class BitlockerStream(AlignedStream):
             elif run_type == BitlockerStream.RUN_VISTA_HEADER:
                 self._fh.seek(read_sector * self.sector_size)
                 buf = bytearray(self._fh.read(sector_count * self.sector_size))
-                buf[0x03:0x0B] = b"NTFS    "
-                buf[0x38:0x40] = struct.pack("<Q", self.bde.information.header.Mft2StartLcn)
+                self._apply_vista_compat(buf)
                 result.append(bytes(buf))
             elif run_type == BitlockerStream.RUN_SPARSE:
                 result.append(b"\x00" * self.sector_size * sector_count)
@@ -550,6 +624,152 @@ class BitlockerStream(AlignedStream):
                 result.append(self.cipher.decrypt(buf, read_sector))
 
         return b"".join(result)
+
+    def _apply_vista_compat(self, buf: bytearray) -> None:
+        """Apply the Vista compatibility patches to a boot sector buffer in place."""
+        buf[0x03:0x0B] = b"NTFS    "
+        buf[0x38:0x40] = struct.pack("<Q", self.bde.information.header.Mft2StartLcn)
+
+    def _vista_compat_patches(self, raw: bytes, base: int = 0) -> list[Patch]:
+        """Return the Vista compatibility patches for a raw on-disk boot sector.
+
+        The ``original`` bytes are the actual on-disk content, the ``patched`` bytes are the
+        compatibility interpretation applied by this library. Neither is presented as the other.
+        """
+        patched = bytearray(raw)
+        self._apply_vista_compat(patched)
+        return [
+            Patch(offset=base + 0x03, field="OEM ID", original=raw[0x03:0x0B], patched=bytes(patched[0x03:0x0B])),
+            Patch(
+                offset=base + 0x38,
+                field="MFT2 start LCN",
+                original=raw[0x38:0x40],
+                patched=bytes(patched[0x38:0x40]),
+            ),
+        ]
+
+    def relocation_problems(self) -> list[str]:
+        """Validate the virtualized (relocated) block parameters and return a list of problems.
+
+        Only the Information header values are consulted. Adjacent metadata, such as the
+        virtualization info datum, is deliberately not used to "repair" corrupt values.
+        """
+        problems = []
+
+        if self.bde.version < 2 or not self._virtualized_sector_count:
+            return problems
+
+        offset = self._virtualized_block_offset
+        size = self._virtualized_sector_count * self.sector_size
+
+        if offset == 0:
+            problems.append("virtualized block offset is zero")
+        if offset % self.sector_size:
+            problems.append("virtualized block offset is not sector aligned")
+        if 0 < offset < size:
+            problems.append("virtualized block overlaps its own logical range")
+        if self.size is not None and offset + size > self.size:
+            problems.append("virtualized block extends beyond the end of the volume")
+
+        return problems
+
+    @property
+    def relocation_valid(self) -> bool:
+        """Return whether the virtualized (relocated) block parameters are trustworthy."""
+        return not self.relocation_problems()
+
+    def _classify_run(self, run_type: int, logical_sector: int, relocation_valid: bool) -> SourceType:
+        if run_type == BitlockerStream.RUN_VISTA_HEADER:
+            return SourceType.VISTA_COMPAT
+        if run_type == BitlockerStream.RUN_SPARSE:
+            return SourceType.RESERVED
+        if self.bde.version >= 2 and logical_sector < self._virtualized_sector_count:
+            return SourceType.RELOCATED if relocation_valid else SourceType.CORRUPT
+        if run_type == BitlockerStream.RUN_ENCRYPTED:
+            return SourceType.DECRYPTED
+        return SourceType.ORIGINAL
+
+    def provenance(self, offset: int, length: int) -> list[Segment]:
+        """Describe the physical source of each segment of a logical (decrypted) range.
+
+        The returned segments carry no plaintext or raw data, only the source classification,
+        the physical offset to read the source bytes back from, and any compatibility patches.
+        """
+        return self._segments(offset, length, read_data=False)
+
+    def read_with_provenance(self, offset: int, length: int) -> tuple[bytes, list[Segment]]:
+        """Read a logical (decrypted) range and return the data together with its provenance.
+
+        The returned plaintext is identical to what a regular read at the same offset returns.
+        Each segment separately retains the logical plaintext (``data``), the original on-disk
+        bytes (``raw``) and any derived compatibility patches (``patches``).
+        """
+        segments = self._segments(offset, length, read_data=True)
+        return b"".join(segment.data for segment in segments), segments
+
+    def _segments(self, offset: int, length: int, read_data: bool) -> list[Segment]:
+        end = offset + length
+        relocation_valid = self.relocation_valid
+        segments = []
+
+        mapped_runs = _consolidate_mapped_runs(self._iter_mapped_runs(offset, length))
+        for run_type, logical_sector, physical_sector, count in mapped_runs:
+            source = self._classify_run(run_type, logical_sector, relocation_valid)
+
+            run_offset = logical_sector * self.sector_size
+            segment_offset = max(run_offset, offset)
+            segment_end = min(run_offset + count * self.sector_size, end)
+            lead = segment_offset - run_offset
+            size = segment_end - segment_offset
+            if size <= 0:
+                continue
+
+            physical_offset = None
+            raw = data = None
+            patches = []
+
+            if source is SourceType.RESERVED:
+                data = b"\x00" * size if read_data else None
+            else:
+                physical_offset = physical_sector * self.sector_size + lead
+
+                run_raw = run_data = None
+                if read_data or source is SourceType.VISTA_COMPAT:
+                    self._fh.seek(physical_sector * self.sector_size)
+                    run_raw = self._fh.read(count * self.sector_size)
+
+                if source is SourceType.VISTA_COMPAT:
+                    run_data = bytearray(run_raw)
+                    self._apply_vista_compat(run_data)
+                    run_data = bytes(run_data)
+
+                    patches = [
+                        patch
+                        for patch in self._vista_compat_patches(run_raw, base=run_offset)
+                        if patch.offset < segment_end and patch.offset + len(patch.patched) > segment_offset
+                    ]
+                elif run_type == BitlockerStream.RUN_ENCRYPTED and run_raw is not None:
+                    run_data = self.cipher.decrypt(run_raw, physical_sector)
+                else:
+                    run_data = run_raw
+
+                if read_data:
+                    raw = run_raw[lead : lead + size]
+                    data = run_data[lead : lead + size]
+
+            segments.append(
+                Segment(
+                    offset=segment_offset,
+                    size=size,
+                    source=source,
+                    physical_offset=physical_offset,
+                    data=data,
+                    raw=raw,
+                    patches=patches,
+                )
+            )
+
+        return segments
 
 
 def _consolidate_runs(it: Iterator[Run]) -> Iterator[Run]:
@@ -575,6 +795,38 @@ def _consolidate_runs(it: Iterator[Run]) -> Iterator[Run]:
 
     if current_type is not None:
         yield (current_type, current_sector, current_count)
+
+
+def _consolidate_mapped_runs(it: Iterator[MappedRun]) -> Iterator[MappedRun]:
+    current_type = None
+    current_logical = None
+    current_physical = None
+    current_count = 0
+
+    for run_type, logical_sector, physical_sector, count in it:
+        if current_type is None:
+            current_type = run_type
+            current_logical = logical_sector
+            current_physical = physical_sector
+            current_count = count
+            continue
+
+        if (
+            current_type != run_type
+            or current_logical + current_count != logical_sector
+            or current_physical + current_count != physical_sector
+        ):
+            yield (current_type, current_logical, current_physical, current_count)
+
+            current_type = run_type
+            current_logical = logical_sector
+            current_physical = physical_sector
+            current_count = count
+        else:
+            current_count += count
+
+    if current_type is not None:
+        yield (current_type, current_logical, current_physical, current_count)
 
 
 def is_bde_volume(fh: BinaryIO) -> bool:
