@@ -175,6 +175,10 @@ class FileHeader(Block):
         @return A boolean that indicates that the FileHeader
           successfully passes a set of heuristic checks that
           all EVTX FileHeaders should pass.
+
+          The checksum comparison is an unkeyed CRC32 error-detection
+          check over the first 0x78 bytes. It is not a signature check
+          and does not authenticate the file or its origin.
         """
         return (
             self.check_magic()
@@ -345,9 +349,15 @@ class ChunkHeader(Block):
 
     def verify(self):
         """
-        @return A boolean that indicates that the FileHeader
+        @return A boolean that indicates that the ChunkHeader
           successfully passes a set of heuristic checks that
           all EVTX ChunkHeaders should pass.
+
+          The checksum comparisons are unkeyed CRC32 error-detection
+          checks over the chunk header and record data. A passing
+          result does not validate record boundaries or template
+          references, and is not a signature check or an
+          authentication of the log or its origin.
         """
         return (
             self.check_magic()
