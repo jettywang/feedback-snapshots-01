@@ -94,7 +94,7 @@ The RFC 7518 JSON Web Algorithms (JWA) spec defines the algorithms for [encrypti
 Only a subset of these algorithms is implemented in this gem. Striked elements are not available:
 
 Key management:
-* RSA1_5
+* RSA1_5 (legacy; see the security note below)
 * RSA-OAEP (default)
 * RSA-OAEP-256 (if OpenSSL::VERSION >= '3.0')
 * A128KW
@@ -119,6 +119,16 @@ Encryption:
 * A128GCM (default)
 * A192GCM
 * A256GCM
+
+## Security Notes
+
+RSA1_5 is supported only for legacy interoperability and is not recommended for new integrations; prefer RSA-OAEP
+(the default) or another modern key management algorithm. When unwrapping the CEK fails during decryption (padding
+error or a CEK that does not meet the `enc` requirements), `JWE.decrypt` applies implicit rejection (RFC 3218): it
+continues with random key material so that unwrap failures fail content authentication and raise the same
+`JWE::InvalidData` as any other invalid token, instead of exposing a padding/length oracle. A sanitized diagnostic
+reason may be attached to the raised error as its `cause`; it never contains key material or private key operation
+errors, and it must not be surfaced to clients.
 
 ## License
 

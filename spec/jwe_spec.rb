@@ -102,4 +102,102 @@ describe JWE do
     payload = "#{JWE::Base64.jwe_encode(hdr.to_json)}.QY.QY.QY.QY"
     expect { JWE.decrypt(payload, nil, alg: 'dir') }.to raise_error(ArgumentError)
   end
+
+  describe 'when decrypting RSA1_5 tokens' do
+    let(:token) { JWE.encrypt(plaintext, rsa_key, alg: 'RSA1_5', enc: 'A128GCM') }
+    let(:token_parts) { token.split('.') }
+
+    let(:padding_invalid_token) do
+      parts = token_parts.dup
+      parts[1] = JWE::Base64.jwe_encode(SecureRandom.random_bytes(256))
+      parts.join('.')
+    end
+
+    let(:wrong_length_cek_token) do
+      parts = token_parts.dup
+      parts[1] = JWE::Base64.jwe_encode(rsa_key.public_encrypt('short'))
+      parts.join('.')
+    end
+
+    let(:auth_invalid_token) do
+      parts = token_parts.dup
+      parts[4] = JWE::Base64.jwe_encode(SecureRandom.random_bytes(16))
+      parts.join('.')
+    end
+
+    def error_for(payload)
+      JWE.decrypt(payload, rsa_key)
+      nil
+    rescue StandardError => e
+      e
+    end
+
+    it 'roundtrips' do
+      expect(JWE.decrypt(token, rsa_key)).to eq plaintext
+    end
+
+    it 'rejects padding-invalid, wrong-length and auth-invalid tokens with the same failure contract' do
+      errors = [padding_invalid_token, wrong_length_cek_token, auth_invalid_token].map { |t| error_for(t) }
+
+      expect(errors).to all(be_a(JWE::InvalidData))
+      expect(errors.map(&:message).uniq.length).to eq 1
+    end
+
+    it 'does not return plaintext for implicitly rejected tokens' do
+      expect(error_for(padding_invalid_token)).to be_a(JWE::InvalidData)
+      expect(error_for(wrong_length_cek_token)).to be_a(JWE::InvalidData)
+    end
+
+    it 'does not expose private key operation errors or key material' do
+      cek = rsa_key.private_decrypt(JWE::Base64.jwe_decode(token_parts[1]))
+      errors = [padding_invalid_token, wrong_length_cek_token].map { |t| error_for(t) }
+
+      expect(errors).to all(be_a(JWE::InvalidData))
+      errors.each do |error|
+        expect(error).to_not be_a(OpenSSL::PKey::PKeyError)
+        expect(error.message).to_not include(cek)
+        expect(error.cause).to be_a(JWE::BadCEK)
+        expect(error.cause.message).to_not include(cek)
+      end
+    end
+
+    it 'runs the content authentication path for implicitly rejected CEKs' do
+      cbc_token = JWE.encrypt(plaintext, rsa_key, alg: 'RSA1_5', enc: 'A256CBC-HS512')
+      parts = cbc_token.split('.')
+      parts[1] = JWE::Base64.jwe_encode(SecureRandom.random_bytes(256))
+
+      # This message is only raised after the HMAC over the ciphertext has
+      # been computed and compared, proving authentication still runs.
+      expect { JWE.decrypt(parts.join('.'), rsa_key) }
+        .to raise_error(JWE::InvalidData, 'Authentication tag verification failed')
+    end
+  end
+
+  describe '.unwrap_cek' do
+    let(:cek) { SecureRandom.random_bytes(16) }
+
+    it 'returns a valid CEK untouched' do
+      unwrapped, reason = JWE.unwrap_cek('RSA1_5', rsa_key, rsa_key.public_encrypt(cek), 16)
+
+      expect(unwrapped).to eq cek
+      expect(reason).to be_nil
+    end
+
+    it 'substitutes secure random material matching the requested length on padding failure' do
+      first, = JWE.unwrap_cek('RSA1_5', rsa_key, SecureRandom.random_bytes(256), 32)
+      second, = JWE.unwrap_cek('RSA1_5', rsa_key, SecureRandom.random_bytes(256), 32)
+
+      expect(first.bytesize).to eq 32
+      expect(first).to_not eq "\0" * 32
+      expect(first).to_not eq second
+    end
+
+    it 'substitutes secure random material when the unwrapped CEK length is wrong' do
+      unwrapped, reason = JWE.unwrap_cek('RSA1_5', rsa_key, rsa_key.public_encrypt('short'), 64)
+
+      expect(unwrapped.bytesize).to eq 64
+      expect(unwrapped).to_not eq "\0" * 64
+      expect(reason).to_not be_nil
+    end
+  end
 end

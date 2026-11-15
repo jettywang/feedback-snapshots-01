@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+**Fixes and enhancements:**
+
+- Apply implicit rejection (RFC 3218) when unwrapping the CEK in `JWE.decrypt`: padding errors and CEK length mismatches now continue with random key material and fail content authentication, raising the same `JWE::InvalidData` as any other invalid token instead of leaking distinguishable unwrap failures (notably for RSA1_5)
+
 ## [v1.1.1](https://github.com/jwt/ruby-jwe/tree/v1.1.1) (2025-08-07)
 
 [Full Changelog](https://github.com/jwt/ruby-jwe/compare/v1.1.0...v1.1.1)

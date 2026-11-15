@@ -43,12 +43,36 @@ module JWE
       header = JSON.parse(header)
       check_params(header, key)
 
-      cek = Alg.decrypt_cek(header['alg'], key, enc_key)
+      cek, rejection_reason = unwrap_cek(header['alg'], key, enc_key, Enc.for(header['enc']).key_length)
       cipher = Enc.for(header['enc'], cek, iv, tag)
 
-      plaintext = cipher.decrypt(ciphertext, payload.split('.').first)
+      begin
+        plaintext = cipher.decrypt(ciphertext, payload.split('.').first)
+      rescue JWE::InvalidData => error
+        raise error, cause: JWE::BadCEK.new(rejection_reason) if rejection_reason
+
+        raise
+      end
 
       apply_zip(header, plaintext, :decompress)
+    rescue JWE::BadCEK
+      raise JWE::InvalidData, 'Invalid ciphertext or authentication tag'
+    end
+
+    # Unwraps the CEK with implicit rejection (RFC 3218): when unwrapping
+    # fails or yields a CEK that does not meet the enc requirements, random
+    # key material of the required length is returned instead, so that unwrap
+    # failures run the same content authentication path and raise the same
+    # error as any other invalid token. The returned reason is kept for
+    # internal diagnostics only and never includes key material or private
+    # key operation errors.
+    def unwrap_cek(alg, key, encrypted_cek, cek_length)
+      cek = Alg.decrypt_cek(alg, key, encrypted_cek)
+      return [cek, nil] if cek.bytesize == cek_length
+
+      [SecureRandom.random_bytes(cek_length), 'unwrapped CEK does not meet enc requirements']
+    rescue OpenSSL::PKey::PKeyError
+      [SecureRandom.random_bytes(cek_length), 'CEK unwrap failed']
     end
 
     def check_params(header, key)
