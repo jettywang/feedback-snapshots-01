@@ -11,6 +11,20 @@ module Net; module SFTP
     end
   end
 
+  # Raised when the version handshake with the server cannot be completed
+  # because its FXP_VERSION packet is invalid: a second FXP_VERSION after the
+  # handshake finished, a protocol version neither side supports, or an
+  # extension advertised twice with conflicting values. The negotiated
+  # protocol and extensions are left untouched when this is raised.
+  class NegotiationError < Net::SFTP::Exception; end
+
+  # Raised when an extension operation is requested that the server did not
+  # advertise for the current handshake, or when an extension operation is
+  # attempted before the FXP_VERSION handshake has completed. The client never
+  # falls back to a weaker plain request on its own: an unsupported extension
+  # is an explicit failure.
+  class ExtensionNotSupportedError < Net::SFTP::Exception; end
+
   # A exception class for reporting a non-success result of an operation.
   class StatusException < Net::SFTP::Exception
 

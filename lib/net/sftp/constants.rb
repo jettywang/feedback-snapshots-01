@@ -6,8 +6,8 @@ module Net module SFTP
   module Constants
 
     # The various packet types supported by SFTP protocol versions 1 through 6.
-    # The FXP_EXTENDED and FXP_EXTENDED_REPLY packet types are not currently
-    # understood by Net::SFTP.
+    # FXP_EXTENDED requests are sent through Net::SFTP::Session#extended,
+    # gated on the extensions the server advertised in its FXP_VERSION packet.
     module PacketTypes
       FXP_INIT           = 1
       FXP_VERSION        = 2

@@ -34,8 +34,23 @@ module Net; module SFTP; module Protocol
       when FXP_DATA   then parse_data_packet(packet)
       when FXP_NAME   then parse_name_packet(packet)
       when FXP_ATTRS  then parse_attrs_packet(packet)
+      when FXP_EXTENDED_REPLY then parse_extended_reply_packet(packet)
       else raise NotImplementedError, "unknown packet type: #{packet.type}"
       end
+    end
+
+    # Sends a FXP_EXTENDED request for the server extension named +name+, with
+    # the given type-taged +args+ appended after the extension name. The
+    # session is responsible for checking that the server advertised the
+    # extension for the current handshake. Returns the new packet id.
+    def extended(name, *args)
+      send_request(FXP_EXTENDED, :string, name, *args)
+    end
+
+    # Parses the given FXP_EXTENDED_REPLY packet and returns a hash with one
+    # key, :data, holding the reply's uninterpreted payload as a string.
+    def parse_extended_reply_packet(packet)
+      { :data => packet.read_string }
     end
 
     private

@@ -36,6 +36,24 @@ class Protocol::TestBase < Net::SFTP::TestCase
     assert_equal :result, @base.parse(packet)
   end
 
+  def test_parse_with_extended_reply_packet_should_delegate_to_parser
+    packet = stub('packet', :type => FXP_EXTENDED_REPLY)
+    @base.expects(:parse_extended_reply_packet).with(packet).returns(:result)
+    assert_equal :result, @base.parse(packet)
+  end
+
+  def test_extended_should_send_extended_packet_with_name_and_args
+    @session.expects(:send_packet).
+      with(FXP_EXTENDED, :long, 0, :string, "hardlink@openssh.com", :string, "/a", :string, "/b")
+    assert_equal 0, @base.extended("hardlink@openssh.com", :string, "/a", :string, "/b")
+  end
+
+  def test_parse_extended_reply_packet_should_return_reply_data
+    packet = stub('packet')
+    packet.expects(:read_string).returns("reply-bytes")
+    assert_equal({ :data => "reply-bytes" }, @base.parse_extended_reply_packet(packet))
+  end
+
   def test_parse_with_unknown_packet_should_raise_exception
     packet = stub('packet', :type => FXP_WRITE)
     assert_raises(NotImplementedError) { @base.parse(packet) }

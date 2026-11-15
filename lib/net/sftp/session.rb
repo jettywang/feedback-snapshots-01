@@ -729,6 +729,48 @@ module Net; module SFTP
         wait_for(unblock(handle, offset, length, &callback))
       end
 
+      # :call-seq:
+      #   extended(name, *args) -> request
+      #   extended(name, *args) { |response| ... } -> request
+      #
+      # Sends an FXP_EXTENDED request for the server extension +name+ (such as
+      # "posix-rename@openssh.com"), passing +args+ as the type-tagged
+      # arguments of the request, e.g.:
+      #
+      #   sftp.extended("posix-rename@openssh.com", :string, from, :string, to)
+      #
+      # The extension must be present in #extensions, the capabilities the
+      # server advertised in the FXP_VERSION packet of this handshake. If the
+      # handshake has not completed, or the server did not advertise +name+, an
+      # ExtensionNotSupportedError is raised before any packet is sent. The
+      # client never silently rewrites an unsupported extension into a weaker
+      # plain request.
+      #
+      # Advertising an extension only means the server claims to support it;
+      # the returned request still has to succeed on its own and a failure
+      # arrives as an ordinary non-OK response (or StatusException for
+      # #extended!).
+      def extended(name, *args, &callback)
+        unless open?
+          raise ExtensionNotSupportedError,
+            "cannot invoke extension #{name.inspect} before the SFTP handshake completes (session is #{state})"
+        end
+
+        unless extensions.key?(name)
+          raise ExtensionNotSupportedError,
+            "server did not advertise extension #{name.inspect} in this handshake"
+        end
+
+        request :extended, name, *args, &callback
+      end
+
+      # Identical to #extended, but blocks until the server responds. It will
+      # raise a StatusException if the extension request was unsuccessful.
+      # Otherwise, it returns the Response object for the request.
+      def extended!(name, *args, &callback)
+        wait_for(extended(name, *args, &callback))
+      end
+
     public # miscellaneous methods
 
       # Closes the SFTP connection, but not the SSH connection. Blocks until the
@@ -784,6 +826,11 @@ module Net; module SFTP
           @input = Net::SSH::Buffer.new
           @packet_length = nil
           @protocol = nil
+          # Every handshake advertises its own protocol version and extensions.
+          # Start from a clean slate so capabilities from a previous connection
+          # can never be presented as the new server's before its FXP_VERSION
+          # arrives (or if that handshake never completes).
+          @extensions = {}
           @on_ready = Array(block)
         else # opening
           @on_ready << block if block
@@ -941,12 +988,16 @@ module Net; module SFTP
 
       # Called to handle FXP_VERSION packets. This performs the SFTP protocol
       # version negotiation, instantiating the appropriate Protocol instance
-      # and invoking the callback given to #connect, if any.
+      # and invoking the callback given to #connect, if any. The negotiated
+      # version and extensions are scoped to this single handshake: they are
+      # only published once the whole packet has been validated, so a malformed
+      # handshake cannot leave stale or partial capabilities in effect.
       def do_version(packet)
         # Negotiation happens once. A later FXP_VERSION would swap the protocol
-        # driver and drop every pending request.
+        # driver and drop every pending request, and must not run the open
+        # callbacks a second time.
         unless state == :init
-          raise Net::SFTP::Exception, "unexpected FXP_VERSION packet while session is #{state}"
+          raise NegotiationError, "unexpected FXP_VERSION packet while session is #{state}"
         end
 
         debug { "negotiating sftp protocol version, mine is #{HIGHEST_PROTOCOL_VERSION_SUPPORTED}" }
@@ -954,24 +1005,54 @@ module Net; module SFTP
         server_version = packet.read_long
         debug { "server reports sftp version #{server_version}" }
 
+        # A version outside the range this library speaks is a negotiation
+        # failure. Reject it explicitly instead of silently clamping through
+        # the min below, which would advertise a weaker protocol than the
+        # server chose without either side acknowledging the mismatch.
+        unless (1..HIGHEST_PROTOCOL_VERSION_SUPPORTED).include?(server_version)
+          raise NegotiationError, "unsupported SFTP protocol version #{server_version}"
+        end
+
         # Servers reply with their own version whatever we offered (OpenSSH
         # always says 3), so cap at the version we offered as well.
         negotiated_version = [server_version, @version, HIGHEST_PROTOCOL_VERSION_SUPPORTED].compact.min
+
+        unless (1..HIGHEST_PROTOCOL_VERSION_SUPPORTED).include?(negotiated_version)
+          raise NegotiationError, "unsupported SFTP protocol version #{server_version}"
+        end
         info { "negotiated version is #{negotiated_version}" }
 
-        @extensions = {}
-        until packet.eof?
-          name = packet.read_string
-          data = packet.read_string
-          @extensions[name] = data
-        end
+        advertised = parse_extensions(packet)
 
-        @protocol = Protocol.load(self, negotiated_version)
+        # Build the new driver before publishing anything; Protocol.load would
+        # otherwise leave a half-negotiated session visible to other code.
+        protocol = Protocol.load(self, negotiated_version)
+
+        @extensions = advertised
+        @protocol = protocol
         @pending_requests = {}
 
         @state = :open
         @on_ready.each { |callback| callback.call(self) }
         @on_ready = nil
+      end
+
+      # Reads the extension name/value pairs of an FXP_VERSION packet into a
+      # new hash. The same extension may be repeated only if every occurrence
+      # carries the same value; a name advertised with conflicting values is a
+      # negotiation failure rather than a silent last-write-wins overwrite.
+      def parse_extensions(packet)
+        extensions = {}
+        until packet.eof?
+          name = packet.read_string
+          data = packet.read_string
+          if extensions.key?(name) && extensions[name] != data
+            raise NegotiationError,
+              "extension #{name.inspect} advertised with conflicting values (#{extensions[name].inspect} and #{data.inspect})"
+          end
+          extensions[name] = data
+        end
+        extensions
       end
 
       # Parses the packet, finds the associated Request instance, and tells

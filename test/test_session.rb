@@ -148,6 +148,192 @@ class SessionTest < Net::SFTP::TestCase
     assert_equal 3, sftp.protocol.version
   end
 
+  def test_duplicate_version_packet_should_not_invoke_open_callbacks_twice
+    expect_sftp_session :server_version => 3 do |channel|
+      channel.gets_packet(FXP_VERSION, :long, 1)
+    end
+
+    opens = 0
+    Net::SSH::Test::Extensions::IO.with_test_extension do
+      session = Net::SFTP::Session.new(connection)
+      error = assert_raises(Net::SFTP::NegotiationError) do
+        session.connect! { opens += 1 }
+      end
+      assert_match(/unexpected FXP_VERSION/, error.message)
+      assert_equal 3, session.protocol.version
+    end
+    assert_equal 1, opens
+  end
+
+  def test_unsupported_server_version_should_raise_negotiation_error
+    story do |script|
+      channel = script.opens_channel
+      channel.sends_subsystem("sftp")
+      channel.sends_packet(FXP_INIT, :long, Net::SFTP::Session::HIGHEST_PROTOCOL_VERSION_SUPPORTED)
+      channel.gets_packet(FXP_VERSION, :long, 99)
+    end
+
+    Net::SSH::Test::Extensions::IO.with_test_extension do
+      session = Net::SFTP::Session.new(connection)
+      error = assert_raises(Net::SFTP::NegotiationError) { session.connect! }
+      assert_match(/unsupported SFTP protocol version 99/, error.message)
+      refute session.open?
+      assert_nil session.protocol
+      assert_equal({}, session.extensions)
+    end
+  end
+
+  def test_extension_advertised_twice_with_same_value_should_be_accepted
+    extensions = [[:string, "statvfs@openssh.com", :string, "2"],
+                  [:string, "statvfs@openssh.com", :string, "2"]].flatten
+    story do |script|
+      channel = script.opens_channel
+      channel.sends_subsystem("sftp")
+      channel.sends_packet(FXP_INIT, :long, Net::SFTP::Session::HIGHEST_PROTOCOL_VERSION_SUPPORTED)
+      channel.gets_packet(FXP_VERSION, :long, 3, *extensions)
+    end
+
+    assert_scripted do
+      sftp.connect!
+      assert_equal({ "statvfs@openssh.com" => "2" }, sftp.extensions)
+    end
+  end
+
+  def test_extension_advertised_with_conflicting_values_should_raise
+    extensions = [[:string, "statvfs@openssh.com", :string, "2"],
+                  [:string, "statvfs@openssh.com", :string, "1"]].flatten
+    story do |script|
+      channel = script.opens_channel
+      channel.sends_subsystem("sftp")
+      channel.sends_packet(FXP_INIT, :long, Net::SFTP::Session::HIGHEST_PROTOCOL_VERSION_SUPPORTED)
+      channel.gets_packet(FXP_VERSION, :long, 3, *extensions)
+    end
+
+    Net::SSH::Test::Extensions::IO.with_test_extension do
+      session = Net::SFTP::Session.new(connection)
+      error = assert_raises(Net::SFTP::NegotiationError) { session.connect! }
+      assert_match(/statvfs@openssh\.com/, error.message)
+      assert_match(/conflicting values/, error.message)
+      refute session.open?
+      assert_nil session.protocol
+      assert_equal({}, session.extensions)
+    end
+  end
+
+  def test_extended_operation_should_send_extended_packet_and_parse_reply
+    expect_sftp_session :server_version => 3,
+        :extensions => { "statvfs@openssh.com" => "2" } do |channel|
+      channel.sends_packet(FXP_EXTENDED, :long, 0, :string, "statvfs@openssh.com", :string, "/path")
+      channel.gets_packet(FXP_EXTENDED_REPLY, :long, 0, :string, "reply-bytes")
+    end
+
+    assert_scripted do
+      sftp.connect!
+      request = sftp.extended("statvfs@openssh.com", :string, "/path")
+      sftp.loop
+      assert request.response.ok?
+      assert_equal "reply-bytes", request.response[:data]
+    end
+  end
+
+  def test_extended_operation_failure_is_reported_not_rewritten_as_plain_request
+    expect_sftp_session :server_version => 3,
+        :extensions => { "hardlink@openssh.com" => "1" } do |channel|
+      channel.sends_packet(FXP_EXTENDED, :long, 0, :string, "hardlink@openssh.com",
+        :string, "/a", :string, "/b")
+      channel.gets_packet(FXP_STATUS, :long, 0, :long, 8, :string, "unsupported", :string, "en")
+    end
+
+    assert_scripted do
+      sftp.connect!
+      request = sftp.extended("hardlink@openssh.com", :string, "/a", :string, "/b")
+      sftp.loop
+      refute request.response.ok?
+      assert_equal 8, request.response.code
+    end
+  end
+
+  def test_extended_operation_unknown_to_handshake_should_raise_without_sending
+    expect_sftp_session :server_version => 3,
+        :extensions => { "hardlink@openssh.com" => "1" }
+
+    assert_scripted do
+      sftp.connect!
+      error = assert_raises(Net::SFTP::ExtensionNotSupportedError) do
+        sftp.extended("posix-rename@openssh.com", :string, "/a", :string, "/b")
+      end
+      assert_match(/posix-rename@openssh\.com/, error.message)
+    end
+  end
+
+  def test_extended_operation_before_handshake_completes_should_raise
+    story do |script|
+      channel = script.opens_channel
+      channel.sends_subsystem("sftp")
+      channel.sends_packet(FXP_INIT, :long, Net::SFTP::Session::HIGHEST_PROTOCOL_VERSION_SUPPORTED)
+      channel.gets_close
+      channel.sends_close
+    end
+
+    Net::SSH::Test::Extensions::IO.with_test_extension do
+      session = Net::SFTP::Session.new(connection)
+      session.connect
+      assert session.opening?
+      assert_raises(Net::SFTP::ExtensionNotSupportedError) do
+        session.extended("hardlink@openssh.com", :string, "/a")
+      end
+    end
+  end
+
+  def test_reconnect_negotiates_extensions_independently_and_scopes_extended_operations
+    first_extension  = "hardlink@openssh.com"
+    second_extension = "posix-rename@openssh.com"
+
+    story do |script|
+      first_channel = script.opens_channel
+      first_channel.sends_subsystem("sftp")
+      first_channel.sends_packet(FXP_INIT, :long, Net::SFTP::Session::HIGHEST_PROTOCOL_VERSION_SUPPORTED)
+      first_channel.gets_packet(FXP_VERSION, :long, 3, :string, first_extension, :string, "1")
+      first_channel.sends_packet(FXP_EXTENDED, :long, 0, :string, first_extension, :string, "/a", :string, "/b")
+      first_channel.gets_packet(FXP_STATUS, :long, 0, :long, 0)
+      first_channel.sends_close
+      first_channel.gets_close
+
+      second_channel = script.opens_channel
+      second_channel.sends_subsystem("sftp")
+      second_channel.sends_packet(FXP_INIT, :long, Net::SFTP::Session::HIGHEST_PROTOCOL_VERSION_SUPPORTED)
+      second_channel.gets_packet(FXP_VERSION, :long, 3, :string, second_extension, :string, "1")
+      second_channel.sends_packet(FXP_EXTENDED, :long, 0, :string, second_extension, :string, "/c", :string, "/d")
+      second_channel.gets_packet(FXP_STATUS, :long, 0, :long, 0)
+      second_channel.sends_close
+      second_channel.gets_close
+    end
+
+    assert_scripted do
+      session = Net::SFTP::Session.new(connection)
+      session.connect!
+
+      assert_equal [first_extension], session.extensions.keys
+      assert session.extensions.key?(first_extension)
+      refute session.extensions.key?(second_extension)
+      session.extended!(first_extension, :string, "/a", :string, "/b")
+
+      session.close_channel
+      assert session.closed?
+
+      session.connect!
+      assert_equal [second_extension], session.extensions.keys
+      refute session.extensions.key?(first_extension), "first connection's extension must not survive reconnect"
+
+      assert_raises(Net::SFTP::ExtensionNotSupportedError) do
+        session.extended(first_extension, :string, "/a", :string, "/b")
+      end
+      session.extended!(second_extension, :string, "/c", :string, "/d")
+
+      session.close_channel
+    end
+  end
+
   def test_v1_open_read_only_that_succeeds_should_invoke_callback
     expect_open("/path/to/file", "r", nil, :server_version => 1)
     assert_successful_open("/path/to/file")
