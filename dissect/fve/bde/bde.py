@@ -399,11 +399,18 @@ class BitlockerStream(AlignedStream):
         self.sector_size = bde.sector_size
         if self.bde.encrypted:
             self.encrypted = True
-            self.cipher = create_cipher(
-                CIPHER_MAP[bde._fvek_type],
-                bde._fvek,
-                sector_size=self.sector_size,
-                iv_sector_size=self.sector_size,
+            # Only build the cipher when an FVEK is actually available. A locked volume can still
+            # construct this stream to classify how sectors are stored (plaintext/encrypted/sparse)
+            # without being able to decrypt the encrypted runs.
+            self.cipher = (
+                create_cipher(
+                    CIPHER_MAP[bde._fvek_type],
+                    bde._fvek,
+                    sector_size=self.sector_size,
+                    iv_sector_size=self.sector_size,
+                )
+                if bde._fvek_type is not None and bde._fvek is not None
+                else None
             )
         else:
             self.encrypted = False
