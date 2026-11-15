@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.resources
+import re
 import types
 from collections import defaultdict
 from pathlib import Path
@@ -12,11 +13,16 @@ from defusedxml import ElementTree
 from dissect import cstruct
 
 from dissect.etl.exceptions import ManifestNotFoundError
+from dissect.etl.mapping import BIT_MAP, VALUE_MAP
 
 if TYPE_CHECKING:
     from uuid import UUID
 
 MODPATH = "dissect.etl.manifests"
+
+EVENTS_NS = "{http://schemas.microsoft.com/win/2004/08/events}"
+STRING_REF_RE = re.compile(r"^\$\(string\.([^)]+)\)$")
+INT_TYPE_RE = re.compile(r"^(?:UInt|Int|SInt|HexInt)(\d+)$")
 
 STRUCT_FMT = """
 struct {name} {{
@@ -30,6 +36,9 @@ from collections import namedtuple
 
 from dissect import cstruct
 from dissect.cstruct import BaseType, MetaType, Structure
+
+from dissect.etl.mapping import BIT_MAP, VALUE_MAP, MapDefinition, MapEntry
+
 
 Structure._calc_offsets = lambda _: None
 Keyword = namedtuple('Keyword', ['name', 'message', 'mask'])
@@ -138,14 +147,37 @@ KEYWORDS = {{
 EVENTS = {{
 {events}
 }}
+
+MAPS = {{
+{maps}
+}}
+
+TEMPLATE_MAPS = {{
+{template_maps}
+}}
 """
 
 FIELD_MAP = {
+    "AnsiString": "char {name}[]",
     "Boolean": "uint8 {name}",
+    "FILETIME": "uint64 {name}",
+    "HexInt8": "uint8 {name}",
+    "HexInt16": "uint16 {name}",
+    "HexInt32": "uint32 {name}",
+    "HexInt64": "uint64 {name}",
     "GUID": "char {name}[16]",
     "IPAddrV4": "uint32 {name}",
     "IPAddrV6": "char {name}[16]",
+    "Int8": "int8 {name}",
+    "Int16": "int16 {name}",
+    "Int32": "int32 {name}",
+    "Int64": "int64 {name}",
     "Pointer": "EtwPointer {name}",
+    "UInt8": "uint8 {name}",
+    "UInt16": "uint16 {name}",
+    "UInt32": "uint32 {name}",
+    "UInt64": "uint64 {name}",
+    "WChar": "wchar {name}",
     "SInt8": "int8 {name}",
     "SInt16": "int16 {name}",
     "SInt32": "int32 {name}",
@@ -212,25 +244,45 @@ def generate_from_xml(s: str) -> str:
     e = ElementTree.fromstring(s)
     formatter = Formatter()
 
-    strings = [
-        "    '{id}': '{value}',".format(**string.attrib)
-        for string in e.iter("{http://schemas.microsoft.com/win/2004/08/events}string")
-    ]
+    strings = ["    '{id}': '{value}',".format(**string.attrib) for string in e.iter(f"{EVENTS_NS}string")]
+    string_table = {string.attrib["id"]: string.attrib["value"] for string in e.iter(f"{EVENTS_NS}string")}
 
     keywords = []
-    for keyword in e.iter("{http://schemas.microsoft.com/win/2004/08/events}keyword"):
+    for keyword in e.iter(f"{EVENTS_NS}keyword"):
         attr = keyword.attrib
         attr["message"] = attr["message"].split(".")[1][:-1]
         keywords.append("    '{name}': Keyword('{name}', STRINGS['{message}'], {mask}),".format(**attr))
 
+    maps = []
+    for map_element in e.iter():
+        if map_element.tag not in (f"{EVENTS_NS}valueMap", f"{EVENTS_NS}bitMap"):
+            continue
+
+        kind = VALUE_MAP if map_element.tag == f"{EVENTS_NS}valueMap" else BIT_MAP
+        name = map_element.attrib["name"]
+        entries = [
+            "MapEntry({value}, {name!r}, {identifier!r})".format(
+                value=int(entry.attrib["value"], 0),
+                name=_resolve_map_message(entry.attrib.get("message", ""), string_table),
+                identifier=_map_message_identifier(entry.attrib.get("message", "")),
+            )
+            for entry in map_element.iter(f"{EVENTS_NS}map")
+        ]
+
+        maps.append(f"    {name!r}: MapDefinition({name!r}, {kind!r}, (")
+        maps.extend(f"        {entry}," for entry in entries)
+        maps.append("    ), PROVIDER_GUID, PROVIDER_NAME),")
+
     templates = []
-    for template in e.iter("{http://schemas.microsoft.com/win/2004/08/events}template"):
+    template_maps = []
+    for template in e.iter(f"{EVENTS_NS}template"):
         sname = template.attrib["tid"]
 
         if sname.startswith("0x"):
             sname = sname.replace("0x", "NULLx")
 
         fields = []
+        mapped_fields = []
         for field in template:
             fattr = field.attrib
             fname = fattr["name"]
@@ -247,6 +299,10 @@ def generate_from_xml(s: str) -> str:
 
             fields.append(line.format(name=fname))
 
+            if map_name := fattr.get("map"):
+                width, signed = _field_width(ftype)
+                mapped_fields.append(f"    {fname!r}: ({map_name!r}, {width!r}, {signed!r}),")
+
         templates.append(
             STRUCT_FMT.format(
                 name=sname,
@@ -254,8 +310,13 @@ def generate_from_xml(s: str) -> str:
             )
         )
 
+        if mapped_fields:
+            template_maps.append(f"    c_parser.{sname}: {{")
+            template_maps.extend(mapped_fields)
+            template_maps.append("    },")
+
     events = []
-    for event in e.iter("{http://schemas.microsoft.com/win/2004/08/events}event"):
+    for event in e.iter(f"{EVENTS_NS}event"):
         attr = defaultdict(lambda: None)
         attr.update(event.attrib)
 
@@ -274,7 +335,7 @@ def generate_from_xml(s: str) -> str:
             )
         )
 
-    provider = next(e.iter("{http://schemas.microsoft.com/win/2004/08/events}provider"))
+    provider = next(e.iter(f"{EVENTS_NS}provider"))
 
     return CLASS_FMT.format(
         provider_name=provider.attrib["name"],
@@ -284,7 +345,42 @@ def generate_from_xml(s: str) -> str:
         strings="\n".join(strings),
         keywords="\n".join(keywords),
         events="\n".join(events),
+        maps="\n".join(maps),
+        template_maps="\n".join(template_maps),
     )
+
+
+def _map_message_identifier(message: str) -> str | None:
+    """Return the resource identifier of a ``$(string.<id>)`` message, if any."""
+    match = STRING_REF_RE.match(message)
+    return match.group(1) if match else None
+
+
+def _resolve_map_message(message: str, strings: dict[str, str]) -> str | None:
+    """Resolve a map message against this provider's own string table.
+
+    Missing resources are intentionally left unresolved instead of falling back to the message
+    text, another provider's table, or the numeric value.
+    """
+    identifier = _map_message_identifier(message)
+    if identifier is not None:
+        return strings.get(identifier)
+    return message or None
+
+
+def _field_width(in_type: str) -> tuple[int | None, bool | None]:
+    """Determine the integer width and signedness of a manifest ``inType``.
+
+    ``win:HexInt32`` and ``win:UInt32`` both describe 32-bit unsigned values; explicitly signed
+    types keep their sign so the original parsed value stays untouched in the result.
+    """
+    match = INT_TYPE_RE.match(in_type)
+    if not match:
+        return None, None
+
+    width = int(match.group(1))
+    signed = in_type.startswith(("Int", "SInt"))
+    return width, signed
 
 
 def get_resource_string(path: str) -> str:

@@ -36,6 +36,7 @@ from dissect.etl.exceptions import (
 )
 from dissect.etl.headers.logfile import LogfileHeader
 from dissect.etl.headers.utils import select_event_header
+from dissect.etl.mapping import MapDefinition
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -44,6 +45,7 @@ if TYPE_CHECKING:
     from uuid import UUID
 
     from dissect.etl.headers.headers import Header
+    from dissect.etl.mapping import MappedValue
 
 
 class ETL:
@@ -223,6 +225,7 @@ class Event:
         "_event",
         "_header",
         "_manifest",
+        "_mappings",
         "_record",
         "_struct",
     ]
@@ -231,6 +234,7 @@ class Event:
         self._header = header
         self._manifest = event_manifest
         self._event = None
+        self._mappings = None
 
         # Not every header has an opcode and version, so check it like this.
         opcode = getattr(header, "opcode", None)
@@ -267,6 +271,60 @@ class Event:
     def symbol(self) -> str | None:
         return self._event.symbol if self._event else None
 
+    @property
+    def mappings(self) -> dict[str, MappedValue]:
+        """Interpreted manifest value/bit maps, keyed by original payload field name.
+
+        The values in this view are derived from the same parsed structure as
+        :meth:`event_values`; :attr:`MappedValue.raw_value` always preserves the original numeric
+        value so display text never replaces the value used for rule evaluation.
+        """
+        if self._mappings is None:
+            self._mappings = self._resolve_mappings()
+        return self._mappings
+
+    def mapped_values(self) -> dict[str, MappedValue]:
+        """Alias for :attr:`mappings`."""
+        return self.mappings
+
+    def mapping_results(self) -> dict[str, dict[str, Any]]:
+        """Return the mapped fields as JSON-friendly dictionaries for backend display."""
+        return {field: mapped.as_dict() for field, mapped in self.mappings.items()}
+
+    def _resolve_mappings(self) -> dict[str, MappedValue]:
+        if self._manifest is None or self._struct is None or self._event is None:
+            return {}
+
+        # Map definitions and template associations are provider-local: a same-named map in
+        # another provider must never be consulted here.
+        template_maps = getattr(self._manifest, "TEMPLATE_MAPS", {})
+        field_maps = template_maps.get(self._event.template)
+        if not field_maps:
+            return {}
+
+        definitions = getattr(self._manifest, "MAPS", {})
+        provider_guid = getattr(self._manifest, "PROVIDER_GUID", None)
+        provider_name = getattr(self._manifest, "PROVIDER_NAME", None)
+        struct_values = _struct_values(self._struct)
+
+        resolved = {}
+        for field_name, (map_name, width, signed) in field_maps.items():
+            if field_name not in struct_values:
+                continue
+
+            raw_value = struct_values[field_name]
+            if not isinstance(raw_value, int):
+                continue
+
+            definition = definitions.get(map_name)
+            if definition is None:
+                # Preserve the intended provider-local map identity instead of dropping the
+                # field; no numeric interpretation is attempted without a definition.
+                definition = MapDefinition.missing(map_name, provider_guid, provider_name)
+
+            resolved[field_name] = definition.resolve(raw_value, width or 0, field_name, signed)
+        return resolved
+
     def event_values(self) -> dict[str, Any]:
         """Create an items view that holds event and header data.
 
@@ -274,7 +332,7 @@ class Event:
         The event data is from a specific manifest file if it exists.
         """
         event_values = self._header.additional_header_fields()
-        struct_events = self._struct._values if self._struct else {}
+        struct_events = _struct_values(self._struct)
 
         # Pretty print Instance values.
         update_event = {}
@@ -290,6 +348,13 @@ class Event:
     def __repr__(self) -> str:
         symbol = self._event.symbol if self._event else None
         return f"{self._header} <{symbol} {self._struct!r}>"
+
+
+def _struct_values(struct: Structure | None) -> dict[str, Any]:
+    """Return the parsed field values of a cstruct structure across supported versions."""
+    if struct is None:
+        return {}
+    return getattr(struct, "__values__", getattr(struct, "_values", {}))
 
 
 def parse_payload(header: Header) -> Event:
