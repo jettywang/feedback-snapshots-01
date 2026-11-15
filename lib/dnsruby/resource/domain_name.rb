@@ -44,7 +44,7 @@ module Dnsruby
 
       def encode_rdata(msg, canonical=false) #:nodoc: all
         if !([Classes::NONE, Classes::ANY].include? klass) || @rdata.length > 0
-          msg.put_name(@domainname, canonical)
+          msg.put_name(@domainname, canonical || type == Types::DNAME, canonical)
         end
       end
 

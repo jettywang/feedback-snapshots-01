@@ -32,7 +32,7 @@ class RR
   end
 
   #  A regular expression which catches any valid resource record.
-  @@RR_REGEX = Regexp.new("^\\s*(\\S+)\\s*(\\d+)?\\s*(#{Classes.regexp +
+  @@RR_REGEX = Regexp.new("^\\s*((?:\\\\.|\\S)+)\\s*(\\d+)?\\s*(#{Classes.regexp +
       "|CLASS\\d+"})?\\s*(#{Types.regexp + '|TYPE\\d+'})?\\s*([\\s\\S]*)\$") #:nodoc: all
 
   @@implemented_rr_map = nil
@@ -232,6 +232,10 @@ class RR
       rrtype = 'ANY'
     end
 
+    if ttl == 0 && rdata.empty? && empty_update_type?(rrtype, rrclass)
+      return empty_update_record(name, rrtype, rrclass)
+    end
+
     if /\A\s*\\#/.match?(rdata)
       # RFC 3597 section 5 permits zero octets with no hexadecimal field.
       # Validate before packing: pack('H*') alone also accepts non-hex input.
@@ -257,9 +261,8 @@ class RR
     rdata = data ? data[offset, rdlength] : []
     decoder = MessageDecoder.new(rdata)
     record_class = get_class(rrtype, rrclass)
-    record = if rdlength == 0 && [Classes::ANY, Classes::NONE].include?(Classes.new(rrclass)) &&
-        record_class <= RR::DomainName
-      record_class.new(Name.new([]))
+    record = if rdlength == 0 && ttl == 0 && empty_update_type?(rrtype, rrclass)
+      empty_update_record(name, rrtype, rrclass)
     else
       record_class.decode_rdata(decoder)
     end
@@ -274,6 +277,46 @@ class RR
   # Some formats depend on the actual RR class, which is assigned after the
   # format-specific decoder runs (notably ANY/NONE UPDATE markers).
   def validate_decoded_rdata #:nodoc: all
+  end
+
+  # RFC 2136 prerequisites and whole-RRset deletes carry no RDATA, including
+  # for types whose ordinary records require fields. Keep the familiar typed
+  # record while representing this operation separately from an empty value.
+  module EmptyUpdateData #:nodoc: all
+    def rdata_to_string
+      ''
+    end
+
+    def data
+      ''
+    end
+
+    def rdlength
+      0
+    end
+
+    def encode_rdata(_encoder, _canonical = false)
+      unless ttl == 0 && RR.empty_update_type?(type, klass)
+        raise EncodeError, 'Empty UPDATE records require TTL zero and class ANY or NONE'
+      end
+    end
+
+    def validate_decoded_rdata
+    end
+  end
+
+  def self.empty_update_type?(type, klass) #:nodoc: all
+    code = Types.new(type).code
+    [Classes::ANY, Classes::NONE].include?(Classes.new(klass)) &&
+      code > 0 && code != Types::OPT && !(128..254).cover?(code)
+  end
+
+  def self.empty_update_record(name, type, klass) #:nodoc: all
+    raise ArgumentError, 'Invalid empty UPDATE record type or class' unless empty_update_type?(type, klass)
+    record_class = get_class(type, klass)
+    record = record_class <= RR::DomainName ? record_class.new(Name.new([])) : record_class.new
+    record.name, record.type, record.klass, record.ttl, record.rdata = name, type, klass, 0, ''
+    record.extend(EmptyUpdateData)
   end
 
   # Return an array of all the currently implemented RR types

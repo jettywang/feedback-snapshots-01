@@ -277,7 +277,6 @@ module Dnsruby
 
     def parseRR(rec) #:nodoc: all
       type = rec.type
-      delta = Delta.new
 
       case @state
       when :InitialSoa
@@ -452,7 +451,12 @@ module Dnsruby
       buf = tcp_read(socket, answersize, deadline)
       msg = Message.decode(buf)
       if (@tsig)
-        if !@tsig.verify_envelope(msg, buf)
+        signature = msg.tsig
+        verified = @tsig.verify_envelope(msg, buf)
+        @last_tsigstate = msg.tsigstate
+        if !verified
+          authenticated_error = RR::TSIG.authenticated_error(msg, signature)
+          raise authenticated_error if authenticated_error
           Dnsruby.log.error("Bad signature on zone transfer - closing connection")
           raise ResolvError.new("Bad signature on zone transfer")
         end

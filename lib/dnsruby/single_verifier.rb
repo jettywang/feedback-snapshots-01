@@ -16,6 +16,7 @@
 
 require 'weakref'
 require 'securerandom'
+require 'dnsruby/serial_time'
 
 
 # This class does verification/validation from a single point - signed root,
@@ -362,7 +363,7 @@ module Dnsruby
 
       #  Now check that we are in the validity period for the RRSIG
       now = Time.now.to_i
-      if ((sigrec.expiration < now) || (sigrec.inception > now))
+      unless SerialTime.valid?(sigrec.inception, sigrec.expiration, now)
         raise VerifyError.new("Signature record not in validity period")
       end
     end
@@ -580,7 +581,8 @@ module Dnsruby
       # again. Cache lifetime and permission to finish this request are distinct.
       previous = learned_provenance(rrset)
       expiration = [expiration, previous.expiration].min if previous
-      signature_expiration = signature.expiration
+      signature_expiration = SerialTime.absolute(signature.expiration, Time.now.to_i)
+      raise VerifyError, 'Signature expiration is ambiguous' unless signature_expiration
       if parent
         expiration = [expiration, parent.expiration].min
         signature_expiration = [signature_expiration, parent.signature_expiration].min
@@ -1406,7 +1408,9 @@ module Dnsruby
           if parent_provenance && !usable_provenance?(parent_provenance)
             raise VerifyError, 'Learned trust expired during verification'
           end
-          expiration = ([ttl_expiration, sigrec.expiration] + previous_expirations).min
+          signature_expiration = SerialTime.absolute(sigrec.expiration, Time.now.to_i)
+          raise VerifyError, 'Signature expiration is ambiguous' unless signature_expiration
+          expiration = ([ttl_expiration, signature_expiration] + previous_expirations).min
           provenance = authenticated_provenance(rrset, sigrec, expiration, parent_provenance)
           verified_at = Time.now.to_i
           rrset.ttl = [rrset.ttl, [provenance.expiration - verified_at, 0].max].min
@@ -1499,7 +1503,9 @@ module Dnsruby
       end
       ValidationBudget.current&.check!
       # Commit lifetime bounds only after the wildcard proof also succeeds.
-      raise VerifyError, 'Signature expired during verification' if sigrec.expiration.to_i < Time.now.to_i
+      unless SerialTime.valid?(sigrec.inception, sigrec.expiration)
+        raise VerifyError, 'Signature expired during verification'
+      end
       #             print "VERIFIED OK\n"
       return true
     end

@@ -232,7 +232,7 @@ module Dnsruby
       #  (alpn="h2,h3"), so remember which to put the text back as it came.
       #  A parenthesis separates too, and the strip below may remove it first.
       stored_line_was_separate = true
-      quote_index = line.index('"')
+      quote_index = Presentation.unescaped_quote(line)
       if line.include?("'") && (rdata_start = Presentation.single_quoted_start(line,
           owner_omitted: line.start_with?(' ', "\t")))
         quote_index = [quote_index, line.index(/(?<=[\s(])'/, rdata_start)].compact.min
@@ -253,8 +253,8 @@ module Dnsruby
 
 
       #  o We need to identify the domain name in the record, and then
-      split = line.split(' ') # split on whitespace
-      name = split[0].strip
+      split = Presentation.tokens(line)
+      name = split[0]
       new_name = absolute_name(name).to_s(true)
       line.sub!(name) { new_name }
       name = new_name

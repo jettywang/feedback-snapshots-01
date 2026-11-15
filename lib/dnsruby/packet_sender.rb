@@ -1104,18 +1104,8 @@ module Dnsruby
       if (query.tsig)
         if (response_signature = response.tsig)
           if !query.tsig.verify(query, response, response_bytes)
-            if response.verified? && response.header.get_header_rcode == RCode.NOTAUTH
-              description = {18 => 'BADTIME', 22 => 'BADTRUNC'}[response.tsigerror]
-              if description
-                diagnostic = "Authenticated TSIG #{description} (#{response.tsigerror})"
-                if response.tsigerror == RCode.BADTIME
-                  high, low = response_signature.other_data.unpack('nN')
-                  diagnostic += "; server time #{(high << 32) | low} seconds since Unix epoch"
-                end
-                Dnsruby.log.error { diagnostic }
-                return TsigError.new(diagnostic)
-              end
-            end
+            authenticated_error = RR::TSIG.authenticated_error(response, response_signature)
+            return authenticated_error if authenticated_error
             #  Discard packet and wait for correctly signed response
             Dnsruby.log.error { "TSIG authentication failed!" }
             return TsigError.new

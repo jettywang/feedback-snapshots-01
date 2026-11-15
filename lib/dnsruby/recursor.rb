@@ -20,7 +20,7 @@ module Dnsruby
   # 
   #   require 'Dnsruby'
   #   rec = Dnsruby::Recursor.new()
-  #   answer = rec.recurse("rob.com.au")
+  #   answer = rec.query("rob.com.au")
   # 
   # This module uses a Dnsruby::Resolver to perform recursive queries.
   # 
@@ -212,6 +212,7 @@ module Dnsruby
       #  Like an array, but stores the expiration of each record.
       def initialize(*args)
         @hash = Hash.new # stores addresses against their expiration
+        @fresh = {} # Zero-TTL addresses belong only to the current lookup.
         @mutex = Mutex.new # This class is thread-safe
       end
       def push(item)
@@ -219,26 +220,35 @@ module Dnsruby
         expiration = Time.now + ttl
         @mutex.synchronize {
           @hash.delete(address)
-          @hash[address] = expiration
+          @fresh.delete(address)
+          if ttl <= 0
+            @fresh[address] = true
+          else
+            @hash[address] = expiration
+          end
           @hash.shift while @hash.length > ADDRESS_CACHE_LIMIT
+          @fresh.shift while @fresh.length > ADDRESS_CACHE_LIMIT
         }
       end
       def values
-        ret =[]
-        keys_to_delete = []
-        @mutex.synchronize {
-          @hash.keys.each {|address|
-            if (@hash[address] > Time.now)
-              ret.push(address)
-            else
-              keys_to_delete.push(address)
-            end
-          }
-          keys_to_delete.each {|key|
-            @hash.delete(key)
-          }
-        }
-        return ret
+        @mutex.synchronize { expire; @hash.keys }
+      end
+      def current_values
+        @mutex.synchronize { expire; @hash.keys | @fresh.keys }
+      end
+      # Shared caches contain only reusable addresses. Copies also keep later
+      # updates to one lookup's working map out of another lookup's view.
+      def snapshot
+        copy = self.class.new
+        @mutex.synchronize do
+          expire
+          copy.instance_variable_set(:@hash, @hash.dup)
+        end
+        copy
+      end
+      private def expire
+        now = Time.now
+        @hash.delete_if { |_address, expiration| expiration <= now }
       end
       def length
         values.length
@@ -445,6 +455,7 @@ module Dnsruby
       # Publish a complete bootstrap, replacing delegations learned through the
       # old hints. An unsuccessful bootstrap leaves the previous state intact.
       @@mutex.synchronize do
+        hints = hints.transform_values(&:snapshot)
         @@hints = hints
         @@stale_hints = nil
         @@hints_generation += 1
@@ -524,7 +535,7 @@ module Dnsruby
       generation = Thread.current[:dnsruby_recursor_generation]
       return if generation && generation != @@hints_generation
       @@authority_cache.delete(name)
-      @@authority_cache[name] = addresses
+      @@authority_cache[name] = addresses.is_a?(AddressCache) ? addresses.snapshot : addresses.dup
       @@authority_cache.shift while @@authority_cache.length > CACHE_LIMIT
     end
 
@@ -538,8 +549,9 @@ module Dnsruby
       @@zones_cache.delete(name)
       @@zone_expirations.delete(name)
       return if ttl.nil? || ttl <= 0
-      @@zones_cache[name] = authorities
-      @@zone_expirations[name] = [authorities, Time.now + ttl]
+      snapshot = authorities.transform_values { |addresses| addresses.is_a?(AddressCache) ? addresses.snapshot : addresses.dup }
+      @@zones_cache[name] = snapshot
+      @@zone_expirations[name] = [snapshot, Time.now + ttl]
       while @@zones_cache.length > CACHE_LIMIT
         oldest = @@zones_cache.each_key.find { |zone| zone != "." }
         break unless oldest
@@ -562,7 +574,13 @@ module Dnsruby
     # DNSSEC validation is performed unless true is passed as the fourth parameter.
     def query(name, type=Types.A, klass=Classes.IN, no_validation = false)
       Recursor.send(:with_limits, @resolver, recursion_limits) do
-        query_internal(name, type, klass, no_validation)
+        if no_validation
+          query_internal(name, type, klass, no_validation)
+        else
+          transmissions = SelectThread::TransmissionBudget.current
+          budget = transmissions.context(:validation) { ValidationBudget.current || ValidationBudget.new }
+          ValidationBudget.with(budget) { query_internal(name, type, klass, no_validation) }
+        end
       end
     end
 
@@ -606,7 +624,7 @@ module Dnsruby
       #  Seed name servers with the closest known authority
       #       ret =  _dorecursion( name, type, klass, ".", @hints, 0)
       begin
-        ret = _dorecursion(name, type, klass, known_zone, known_authorities, 0, no_validation)
+        ret = follow_aliases(name, type, klass, known_zone, known_authorities, 0, no_validation)
         Dnssec.validate(ret) if ret && !no_validation
         if scope && scope == recursion_cache_scope(no_validation)
           @response_cache.add(query_message, scope, ret, nil,
@@ -625,6 +643,107 @@ module Dnsruby
     end
 
     private :query_internal
+
+    # An authoritative server may finish its answer at an alias whose target
+    # belongs to another zone. Continue within this lookup's budgets, retaining
+    # the caller's question and every answer in the alias chain.
+    def follow_aliases(name, type, klass, known_zone, authorities, depth, no_validation)
+      original_name = Name.create(name)
+      original_name.absolute = true
+      qtype, qclass = Types.new(type), Classes.new(klass)
+      current_name = original_name
+      responses = []
+      seen = {}
+      loop do
+        QueryControl.current&.check!
+        begin
+          packet = _dorecursion(current_name.to_s(true), type, klass, known_zone, authorities, depth, no_validation)
+        rescue ResolvError => error
+          if error.response && !responses.empty?
+            error.response = combine_alias_responses(responses + [error.response], original_name, qtype, qclass)
+          end
+          raise
+        end
+        return nil unless packet
+        responses << packet
+        # Explicit alias queries and ANY request the records themselves.
+        if [Types::CNAME, Types::DNAME, Types::ANY].include?(qtype) ||
+            packet.rcode != RCode::NOERROR || Cache.negative_soa(packet)
+          return combine_alias_responses(responses, original_name, qtype, qclass)
+        end
+        target, complete = alias_target(packet, current_name, qtype, qclass, seen)
+        if complete || target == current_name
+          return combine_alias_responses(responses, original_name, qtype, qclass)
+        end
+        current_name = target
+        depth += 1
+        authority_name = qtype == Types::DS && !current_name.labels.empty? ? current_name.strip_label : current_name
+        known_zone, authorities = get_closest_known_zone_authorities_for(authority_name)
+      end
+    end
+    private :follow_aliases
+
+    def alias_target(packet, name, type, klass, seen)
+      loop do
+        QueryControl.current&.check!
+        records = packet.answer.select { |rr| rr.klass == klass && rr.name == name }
+        return [name, true] if records.any? { |rr| rr.type == type }
+        aliases = records.select { |rr| rr.type == Types::CNAME }
+        if aliases.empty?
+          dnames = packet.answer.select do |rr|
+            rr.type == Types::DNAME && rr.klass == klass && name.subdomain_of?(rr.name)
+          end
+          dname = dnames.max_by { |rr| rr.name.labels.length }
+          return [name, false] unless dname
+          if dnames.any? { |rr| rr.name == dname.name && rr.domainname != dname.domainname }
+            raise ResolvError, 'Conflicting DNAME targets in recursive answer'
+          end
+          begin
+            target = Name.new(name.labels.first(name.labels.length - dname.name.labels.length) +
+              dname.domainname.labels, true)
+          rescue ResolvError => error
+            raise YXDomain, "DNAME target is too long: #{error.message}"
+          end
+          cname = RR.create(name: name, type: Types::CNAME, klass: klass, ttl: dname.ttl, domainname: target)
+          packet.add_answer(cname)
+        else
+          targets = aliases.map(&:domainname).uniq
+          raise ResolvError, 'Conflicting CNAME targets in recursive answer' unless targets.length == 1
+          target = targets.first
+        end
+        Recursor.send(:current_budget)&.step!
+        raise RecursionLimitError, 'Recursive alias chain is too long' if seen.length >= 255
+        raise RecursionLimitError, 'Recursive alias loop' if seen[name.canonical]
+        seen[name.canonical] = true
+        name = target
+      end
+    end
+    private :alias_target
+
+    def combine_alias_responses(responses, name, type, klass)
+      return responses.first if responses.length == 1
+      result = responses.last.clone
+      result.question.replace([Question.new(name, type, klass)])
+      result.answer.replace(responses.flat_map(&:answer))
+      # Earlier wildcard answers can require their own denial proofs when the
+      # completed chain is verified. Keep those proofs with their signatures.
+      proofs = responses[0...-1].flat_map(&:authority).select do |rr|
+        [Types::NSEC, Types::NSEC3].include?(rr.type) ||
+          (rr.type == Types::RRSIG && [Types::NSEC, Types::NSEC3].include?(rr.type_covered))
+      end
+      result.authority.concat(proofs)
+      result.header.id = responses.first.header.id
+      # The assembled response is no longer one authority's signed message.
+      # DNSSEC is checked over the complete answer before it is returned.
+      result.header.aa = result.header.ad = false
+      expirations = responses.filter_map { |packet| packet.instance_variable_get(:@dnsruby_authenticated_expiration) }
+      result.instance_variable_set(:@dnsruby_authenticated_expiration, expirations.min) unless expirations.empty?
+      result.answerfrom = responses.last.answerfrom
+      result.answerip = responses.last.answerip
+      result.update_counts
+      result
+    end
+    private :combine_alias_responses
 
     HOP_SETTINGS = %i[port use_tcp no_tcp tcp_pipelining tcp_pipelining_max_queries
       tcp_idle_timeout packet_timeout query_timeout retry_times retry_delay
@@ -706,6 +825,7 @@ module Dnsruby
         @@mutex.synchronize {
           observed_authorities = @@zones_cache[known_zone]
           known_authorities = observed_authorities&.dup # isolate each recursion's working map
+          known_authorities&.transform_values! { |addresses| addresses.is_a?(AddressCache) ? addresses.snapshot : addresses.dup }
         }
         #         print "Known authorities : #{known_authorities}\n"
 
@@ -744,7 +864,7 @@ module Dnsruby
         known_authorities.keys.each do |ns_rec|
           addresses = known_authorities[ns_rec]
           cached = @@authority_cache[ns_rec]
-          values = addresses.respond_to?(:values) ? addresses.values : Array(addresses)
+          values = addresses.is_a?(AddressCache) ? addresses.current_values : Array(addresses)
           cached_values = if values.empty?
             cached.respond_to?(:values) ? cached.values : Array(cached)
           end
@@ -752,7 +872,7 @@ module Dnsruby
             Recursor.cache_authority(ns_rec, known_authorities[ns_rec])
             ns.push(values)
           elsif !cached_values.empty?
-            known_authorities[ns_rec] = @@authority_cache[ns_rec]
+            known_authorities[ns_rec] = cached.is_a?(AddressCache) ? cached.snapshot : cached.dup
             ns.push(cached_values)
           else
             @@authority_cache.delete(ns_rec)
@@ -804,7 +924,8 @@ module Dnsruby
                 begin
                   answer = SelectThread::TransmissionBudget.with(transmission_budget) do
                     QueryControl.with(control) do
-                      recurse = -> { _dorecursion(ns_rec, address_type, klass, '.', hints.dup,
+                      local_hints = hints.transform_values { |addresses| addresses.is_a?(AddressCache) ? addresses.snapshot : addresses.dup }
+                      recurse = -> { follow_aliases(ns_rec, address_type, klass, '.', local_hints,
                         depth + 1, no_validation) }
                       budget ? budget.with_dependency(ns_rec, address_type, klass, &recurse) : recurse.call
                     end
@@ -893,8 +1014,8 @@ module Dnsruby
                         unless addresses.is_a?(AddressCache)
                           addresses = known_authorities[server] = AddressCache.new
                         end
-                        Recursor.cache_authority(server, addresses)
                         addresses.push([ip, rr.ttl])
+                        Recursor.cache_authority(server, addresses)
                         found_auth+=1
                         next
                       end

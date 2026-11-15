@@ -4,6 +4,20 @@ module Dnsruby
   # Shared lexical handling for RR strings and zone-file continuation lines.
   # Character-string escapes remain intact for the record-specific parser.
   module Presentation #:nodoc: all
+    # Header tokens preserve escaped whitespace and punctuation in owners.
+    def self.tokens(text)
+      text.scan(/(?:\\.|[^\s])+/m)
+    end
+
+    def self.unescaped_quote(text)
+      position = 0
+      while (token = /\\.|"/m.match(text, position))
+        return token.begin(0) if token[0] == '"'
+        position = token.end(0)
+      end
+      nil
+    end
+
     # TXT (and its SPF subclass) historically also accept single quotes. Do
     # not extend that convention to domain names or other RDATA formats, where
     # an apostrophe is an ordinary character. Return the end of the type token

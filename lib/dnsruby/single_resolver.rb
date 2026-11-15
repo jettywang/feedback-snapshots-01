@@ -148,6 +148,9 @@ module Dnsruby
           :recurse=>@recurse, :udp_size=>@udp_size})
 
       single_res_mutex.synchronize {
+        # Hostname resolution and sender construction can run alongside
+        # setters. Publish the current configuration, not the earlier snapshot.
+        update_internal_res(isr)
         @config.nameserver = [server]
         @server = server
         @configured = true

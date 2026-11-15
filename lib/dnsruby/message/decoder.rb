@@ -17,6 +17,9 @@ class MessageDecoder #:nodoc: all
     @data = data
     @index = 0
     @limit = data.length
+    # Compression addresses have 14 bits. Cache only validated suffixes at
+    # addressable offsets, so repeated names do not repeat pointer traversal.
+    @name_suffixes = {}
     yield self if block_given?
   end
 
@@ -124,21 +127,36 @@ class MessageDecoder #:nodoc: all
     labels = []
     return_index = nil
     expanded_length = 1 # The terminating root label.
+    path = []
+    suffix_end = 0
 
     loop do
       raise DecodeError, 'Truncated DNS name' unless has_remaining?
+      if return_index && (suffix = @name_suffixes[@index])
+        # Previously decoded suffixes must also fit the current RDATA bound.
+        # The pointer's own two octets were checked before this lookup.
+        assert_buffer_position_valid(suffix[2])
+        expanded_length += suffix[1] - 1
+        raise DecodeError, "DNS name exceeds #{Name::MaxNameLength} octets" if expanded_length > Name::MaxNameLength
+        labels.concat(suffix[0])
+        suffix_end = suffix[2]
+        break
+      end
+      offset = @index
+      label_index = labels.length
       temp = get_byte_at(@index)
       case temp
         when 0
           @index += 1
-          @index = return_index if return_index
-          return labels
+          path << [offset, label_index, @index]
+          break
         when 192..255
           idx = get_unpack('n')[0] & 0x3fff
           if limit <= idx
             raise DecodeError.new('non-backward name pointer')
           end
           return_index ||= @index
+          path << [offset, label_index, @index]
           @index = idx
           # Each target is below the preceding target (or original name).
           # The 14-bit pointer address therefore bounds traversal without
@@ -149,11 +167,26 @@ class MessageDecoder #:nodoc: all
           if expanded_length > Name::MaxNameLength
             raise DecodeError, "DNS name exceeds #{Name::MaxNameLength} octets"
           end
-          labels << self.get_label
+          labels << get_label.string.dup.freeze
+          path << [offset, label_index, @index]
         else
           raise DecodeError, 'Reserved or invalid DNS label type'
       end
     end
+    # Pointer-only aliases share one immutable array. Label suffix arrays are
+    # bounded by the 255-octet expanded name limit, not by packet record count.
+    previous_index = previous_suffix = nil
+    path.reverse_each do |offset, label_index, wire_end|
+      suffix_end = [suffix_end, wire_end].max
+      next if offset >= 0x4000
+      value = label_index == previous_index ? previous_suffix : labels[label_index..-1].freeze
+      @name_suffixes[offset] ||= [value, 1 + value.sum { |label| label.bytesize + 1 }, suffix_end].freeze
+      previous_index, previous_suffix = label_index, value
+    end
+    @index = return_index if return_index
+    # Name and Label expose mutable strings; cached data must never be shared
+    # with callers or between separately decoded names.
+    labels.map { |label| Name::Label.new(label.dup) }
   end
 
   # Gets a single label.
@@ -185,14 +218,11 @@ class MessageDecoder #:nodoc: all
     #  @TODO@ Trap decode errors here, and somehow mark the record as bad.
     #  Need some way to represent raw data only
     record = get_length16 do |length|
-      # A missing name is not the root. Empty name-only UPDATE markers have
-      # no name field at all; retain their typed representation explicitly.
-      marker_class = [Classes::ANY, Classes::NONE].include?(klass)
-      marker_context = update_section.nil? || (ttl == 0 &&
+      marker_context = ttl == 0 && (update_section.nil? ||
         (update_section == :prerequisite ||
           (update_section == :update && klass == Classes::ANY)))
-      if length == 0 && marker_class && marker_context && typeclass <= RR::DomainName
-        typeclass.new(Name.new([]))
+      if length == 0 && marker_context && RR.empty_update_type?(type, klass)
+        RR.empty_update_record(name, type, klass)
       else
         typeclass.decode_rdata(self)
       end

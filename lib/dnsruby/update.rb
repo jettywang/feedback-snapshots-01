@@ -149,7 +149,11 @@ module Dnsruby
           klass = Classes.new(zone()[0].zclass)
           rdata=args[2]
         end
-        rec = RR.create("#{name} #{ttl} #{klass} #{type} #{rdata}")
+        rec = if args.length > 2
+          RR.create("#{name} #{ttl} #{klass} #{type} #{rdata}")
+        else
+          RR.empty_update_record(name, type, klass)
+        end
         add_pre(rec)
         return rec
       else
@@ -172,8 +176,6 @@ module Dnsruby
     #           (in the zone and class denoted by the Zone Section) can exist.
     #
     def absent(*args)
-      ttl = 0
-      rdata = ""
       klass = Classes.NONE
       if (args.length>=1) # domain (RFC2136, Section 2.4.5)
         name = args[0]
@@ -181,7 +183,7 @@ module Dnsruby
         if (args.length==2) # RRSET (RFC2136, Section 2.4.3)
           type = args[1]
         end
-        rec = RR.create("#{name} #{ttl} #{klass} #{type} #{rdata}")
+        rec = RR.empty_update_record(name, type, klass)
         add_pre(rec)
         return rec
       else
@@ -262,10 +264,10 @@ module Dnsruby
       resource = nil
       case args.length
       when 1 # name
-        resource = RR.create("#{args[0]} #{ttl} #{klass} #{Types.ANY} #{rdata}")
+        resource = RR.empty_update_record(args[0], Types.ANY, klass)
         add_update(resource)
       when 2 # name, type
-        resource = RR.create("#{args[0]} #{ttl} #{klass} #{args[1]} #{rdata}")
+        resource = RR.empty_update_record(args[0], args[1], klass)
         add_update(resource)
       when 3 # name, type, rdata
         name = args[0]

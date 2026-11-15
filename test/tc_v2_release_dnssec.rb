@@ -414,16 +414,28 @@ require_relative 'tc_dnssec_denial_proofs'
 class DnssecDenialProofsTest
   include V2PublicDnssecHelper
 
-  def test_public_validation_fast_path_retains_opt_out_proof_lifetime
+  def test_public_validation_full_policy_retains_cached_opt_out_proof_lifetime
     message = response('missing.collision.invalid.', 'AAAA', nxdomain: true)
     add_chain(message, flags: 1)
     with_public_verifier(@verifier) do
-      @verifier.stub(:validate, ->(*) { flunk('cached-key verification should complete this response') }) do
-        assert(Dnsruby::Dnssec.validate(message))
+      assert_equal(:insecure, @verifier.verify_for_validation(message))
+      cached_expiry = message.instance_variable_get(:@dnsruby_authenticated_expiration)
+      full_validation = @verifier.method(:validate)
+      policy_calls = 0
+      validate = lambda do |*args|
+        policy_calls += 1
+        full_validation.call(*args)
       end
+      @verifier.stub(:follow_chain, Dnsruby::RRSet.new([@key])) do
+        @verifier.stub(:validate, validate) do
+          assert(Dnsruby::Dnssec.validate(message))
+        end
+      end
+      assert_equal(1, policy_calls)
       assert_equal(Dnsruby::Message::SecurityLevel.INSECURE, message.security_level)
       expiry = message.instance_variable_get(:@dnsruby_authenticated_expiration)
       assert(expiry)
+      assert_equal(cached_expiry, expiry)
       assert_operator(expiry, :<=, Time.now.to_i + 300)
     end
   end

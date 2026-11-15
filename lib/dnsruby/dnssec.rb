@@ -224,17 +224,18 @@ module Dnsruby
       if (found_sigs)
         begin
           result = verify_result(msg, nil, operational: true)
-          if result == :secure || result == :insecure
-            msg.security_level = result == :secure ? Message::SecurityLevel.SECURE : Message::SecurityLevel.INSECURE
+          if result == :secure
+            msg.security_level = Message::SecurityLevel.SECURE
             msg.security_error = ''
-            msg.header.ad = false if result == :insecure
             return true
           end
         rescue ValidationLimitError
           raise
-        rescue VerifyError => e
-          msg.security_error = e
-          msg.security_level = Message::SecurityLevel.BOGUS
+        rescue VerifyError
+          # Missing cached keys and a failed trusted path both arrive here.
+          # Full validation discovers the applicable anchors and distinguishes
+          # those cases. A cached INSECURE result must go through that policy
+          # too: another applicable anchor may establish SECURE or BOGUS.
         end
       end
 

@@ -59,6 +59,10 @@ TESTS = %w(
     review_transport_native
     review_packet_contracts
     final_review_fixes
+    final_transport_contracts
+    protocol_review_fixes
+    rrset_review_fixes
+    dnssec_recursor_review_fixes
     cancelled_send_capacity
     review_code_mapper
     review_presentation

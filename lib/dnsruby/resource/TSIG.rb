@@ -66,6 +66,22 @@ module Dnsruby
       SIGNED_ERRORS = {18 => 'BADTIME', 22 => 'BADTRUNC'}.freeze
       private_constant :SIGNED_ERRORS
 
+      # Verification removes the TSIG RR from the Message. Keep its saved
+      # record long enough to report authenticated errors consistently for
+      # ordinary queries and zone transfers (RFC 8945 sections 5.4.3/5.4.4).
+      def self.authenticated_error(response, signature) #:nodoc:
+        return unless signature && response.verified? && response.header.get_header_rcode == RCode.NOTAUTH
+        description = SIGNED_ERRORS[response.tsigerror]
+        return unless description
+        diagnostic = "Authenticated TSIG #{description} (#{response.tsigerror})"
+        if response.tsigerror == RCode.BADTIME
+          high, low = signature.other_data.unpack('nN')
+          diagnostic += "; server time #{(high << 32) | low} seconds since Unix epoch"
+        end
+        Dnsruby.log.error { diagnostic }
+        TsigError.new(diagnostic)
+      end
+
       # Generates a TSIG record and adds it to the message.
       # Takes an optional original_request argument for the case where this is
       # a response to a query (RFC 8945 section 4.3.1).

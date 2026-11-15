@@ -162,7 +162,12 @@ class DnssecWildcardProofsTest < Minitest::Test
     refute(Dnsruby::Dnssec.verify(message))
     message.security_level = Dnsruby::Message::SecurityLevel.SECURE
     message.header.ad = true
-    assert(Dnsruby::Dnssec.validate(message))
+    # This fixture has a local trust anchor; it has no chain from the real root.
+    # An INSECURE cached result must still pass the selected validation policy.
+    Dnsruby::Dnssec.validation_policy = Dnsruby::Dnssec::ValidationPolicy::ALWAYS_LOCAL_ANCHORS_ONLY
+    @verifier.stub(:follow_chain, Dnsruby::RRSet.new([@key])) do
+      assert(Dnsruby::Dnssec.validate(message))
+    end
     assert_equal(Dnsruby::Message::SecurityLevel.INSECURE, message.security_level)
     refute(message.header.ad)
 

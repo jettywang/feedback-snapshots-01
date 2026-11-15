@@ -96,7 +96,7 @@ module Dnsruby
           msg.put_pack("n", @priority)
           msg.put_pack("n", @weight)
           msg.put_pack("n", @port)
-          msg.put_name(@target,canonical)
+          msg.put_name(@target, true, canonical)
         end
 
         def self.decode_rdata(msg) #:nodoc: all

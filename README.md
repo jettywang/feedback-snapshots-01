@@ -262,6 +262,8 @@ not increase this limit.
 
 Recursor caches also have size limits. Cached delegations expire when their NS
 records expire, even if the associated nameserver addresses have longer TTLs.
+Fresh nameserver addresses with a zero TTL remain usable for the current
+lookup, but are not retained in shared caches.
 When you supply a Resolver to `Recursor.new`, its transport and source-address
 settings apply to the recursive queries. Its `query_timeout` limits the whole
 lookup, including nameserver discovery and validation. TSIG keys remain tied
@@ -277,6 +279,13 @@ Each `Recursor` lookup has a 30-second deadline, including root bootstrap,
 nameserver address discovery and DNSSEC lookups. A shorter Resolver
 `query_timeout` or inherited deadline takes precedence. The recursive deadline
 also applies when the Resolver's `query_timeout` is zero.
+
+For ordinary questions, `Recursor` follows CNAME and DNAME aliases and returns
+the alias chain together with the target answer under the original question.
+Alias lookups share the same deadline and work limits. Questions explicitly
+requesting CNAME, DNAME or ANY return the received records directly. When
+validation is enabled, the DNSSEC limits above are shared across the entire
+recursive lookup, including parallel address discovery and the final answer.
 
 The lookup shares limits of 128 transmission attempts and 256 discovery work
 units across its supporting queries. Work units count recursive steps and

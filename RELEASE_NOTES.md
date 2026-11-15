@@ -258,6 +258,27 @@ inside labels distinct from the dots that separate labels.
   RRset grouping uses an index and avoids cloning unrelated records. It
   preserves section order and TTL normalization, and charges validation work
   while grouping records and checking duplicates.
+* Recursive answers now complete CNAME and DNAME chains within the original
+  lookup's deadline and work limits. Zero-TTL nameserver addresses are usable
+  during the lookup that obtained them without entering shared caches. DNSSEC
+  work and time limits are shared across the lookup's network hops, parallel
+  address discovery and final answer validation.
+* DNSSEC validation evaluates applicable trust anchors before accepting a
+  provisional insecure result. RRSIG validity and learned-key expiration use
+  the serial-number arithmetic required for timestamps that cross the
+  32-bit boundary.
+* SRV targets, DNAME targets, RRSIG signer names and NSEC successor names are
+  encoded without name compression. Valid empty UPDATE prerequisites and
+  deletions work for all applicable record types. Zone-file owner names retain
+  escaped spaces and quotes. Decoding reuses validated compression suffixes
+  within each packet while keeping returned names independently mutable.
+* `RRSet#add` accepts another RRSet, and deleting signatures keeps the signature
+  count correct. Bulk duplicate checks avoid repeatedly encoding every record
+  already in a set while preserving mutable record behavior.
+* Replacing a SingleResolver's server preserves concurrent configuration
+  changes. TCP replies report their byte size. Zone transfers retain verified
+  BADTIME and BADTRUNC diagnostics and no longer allocate unused IXFR state
+  for each received record.
 
 
 ## v1.74.0

@@ -43,21 +43,25 @@ class ReleaseRecursorCacheTest < Minitest::Test
 
   def test_empty_working_map_cannot_evict_a_newer_delegation
     replacement = {'ns.example.' => @klass::AddressCache.new}
-    empty = {}
+    replacement.fetch('ns.example.').push(['192.0.2.54', 60])
     working = {}
     klass = @klass
     working.define_singleton_method(:values) do
       klass.cache_zone('example.', replacement, 60)
       []
     end
-    empty.define_singleton_method(:dup) { working }
-    @klass.cache_zone('example.', empty, 30)
+    @klass.cache_zone('example.', {}, 30)
+    published = @klass.class_variable_get(:@@zones_cache).fetch('example.')
+    published.define_singleton_method(:dup) { working }
 
     zone, authorities = @recursor.get_closest_known_zone_authorities_for('www.example.')
     assert_equal('example.', zone)
-    assert_equal(replacement, authorities)
-    assert_same(replacement, @klass.class_variable_get(:@@zones_cache)['example.'])
-    assert_same(replacement, @klass.class_variable_get(:@@zone_expirations)['example.'].first)
+    assert_equal(replacement.keys, authorities.keys)
+    assert_equal(['192.0.2.54'], authorities.fetch('ns.example.').values)
+    latest = @klass.class_variable_get(:@@zones_cache).fetch('example.')
+    refute_same(replacement, latest)
+    refute_same(latest, authorities)
+    assert_same(latest, @klass.class_variable_get(:@@zone_expirations)['example.'].first)
   end
 
   def test_zero_ttl_delegation_is_not_retained

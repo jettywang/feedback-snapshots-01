@@ -168,40 +168,49 @@ class ReleaseAuxiliaryFixesTest < Minitest::Test
   end
 
   def test_ds_queries_use_cached_parent_authorities_and_preserve_the_question
-    with_cached_recursor_authorities do |recursor, zones|
+    with_cached_recursor_authorities do |recursor, zones, calls|
       ['child.example', 'child.example.', Dnsruby::Name.create('child.example'),
         Dnsruby::Name.create('child.example.')].each do |name|
         ['DS', 43, Dnsruby::Types.new('DS')].each do |type|
-          args = recursor.query(name, type, Dnsruby::Classes::IN, true)
-          assert_same(name, args[0])
+          was_absolute = name.absolute? if name.is_a?(Dnsruby::Name)
+          response = recursor.query(name, type, Dnsruby::Classes::IN, true)
+          args = calls.last
+          expected_name = Dnsruby::Name.create(name)
+          expected_name.absolute = true
+          assert_equal(expected_name, response.question.first.qname)
+          assert_equal(was_absolute, name.absolute?) if name.is_a?(Dnsruby::Name)
+          assert_equal(expected_name.to_s(true), args[0])
           assert_same(type, args[1])
           assert_equal('example.', args[3])
-          assert_equal(zones.fetch('example.'), args[4])
-          refute_same(zones.fetch('example.'), args[4])
+          assert_authority_snapshot(zones.fetch('example.'), args[4])
         end
       end
     end
   end
 
   def test_ds_queries_for_top_level_names_and_root_use_root_authorities
-    with_cached_recursor_authorities do |recursor, zones|
+    with_cached_recursor_authorities do |recursor, zones, calls|
       ['example', 'example.', '.', Dnsruby::Name.create('.')].each do |name|
-        args = recursor.query(name, 'DS', Dnsruby::Classes::IN, true)
-        assert_same(name, args[0])
+        response = recursor.query(name, 'DS', Dnsruby::Classes::IN, true)
+        args = calls.last
+        expected_name = Dnsruby::Name.create(name)
+        expected_name.absolute = true
+        assert_equal(expected_name, response.question.first.qname)
+        assert_equal(expected_name.to_s(true), args[0])
         assert_equal('.', args[3])
-        assert_equal(zones.fetch('.'), args[4])
-        refute_same(zones.fetch('.'), args[4])
+        assert_authority_snapshot(zones.fetch('.'), args[4])
       end
     end
   end
 
   def test_other_record_types_still_use_cached_child_authorities
-    with_cached_recursor_authorities do |recursor, zones|
+    with_cached_recursor_authorities do |recursor, zones, calls|
       ['DNSKEY', 'A', Dnsruby::Types.new('NS')].each do |type|
-        args = recursor.query('child.example.', type, Dnsruby::Classes::IN, true)
+        response = recursor.query('child.example.', type, Dnsruby::Classes::IN, true)
+        args = calls.last
+        assert_equal(Dnsruby::Types.new(type), response.question.first.qtype)
         assert_equal('child.example.', args[3])
-        assert_equal(zones.fetch('child.example.'), args[4])
-        refute_same(zones.fetch('child.example.'), args[4])
+        assert_authority_snapshot(zones.fetch('child.example.'), args[4])
       end
     end
   end
@@ -242,6 +251,15 @@ class ReleaseAuxiliaryFixesTest < Minitest::Test
 
   private
 
+  def assert_authority_snapshot(original, copy)
+    assert_equal(original.keys, copy.keys)
+    refute_same(original, copy)
+    original.each do |name, addresses|
+      assert_equal(addresses.values, copy.fetch(name).values)
+      refute_same(addresses, copy.fetch(name))
+    end
+  end
+
   def with_cached_recursor_authorities
     recursor_class = Dnsruby::Recursor
     original_hints = recursor_class.class_variable_get(:@@hints)
@@ -254,8 +272,15 @@ class ReleaseAuxiliaryFixesTest < Minitest::Test
     recursor_class.class_variable_set(:@@zones_cache, zones)
     recursor = recursor_class.allocate
     recursor.instance_variable_set(:@resolver, Struct.new(:recurse).new)
-    recursor.define_singleton_method(:_dorecursion) { |*args| args }
-    yield recursor, zones
+    calls = []
+    recursor.define_singleton_method(:_dorecursion) do |*args|
+      calls << args
+      Dnsruby::Message.new(*args.first(3)).tap do |response|
+        response.header.qr = response.header.aa = true
+        response.add_authority(Dnsruby::RR.create("#{args[3]} 60 IN SOA ns.example. hostmaster.example. 1 60 60 60 30"))
+      end
+    end
+    yield recursor, zones, calls
   ensure
     recursor_class.class_variable_set(:@@hints, original_hints) if recursor_class
     recursor_class.class_variable_set(:@@zones_cache, original_zones) if recursor_class

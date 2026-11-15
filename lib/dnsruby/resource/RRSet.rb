@@ -16,7 +16,12 @@ class RRSet
     end
     @rrs = []
     @num_sigs = 0
+    # During construction all entries are private wire copies. Discard this
+    # temporary index before exposing the set: public RR objects are mutable.
+    @membership_index = {}
     rrs.each {|rr| add(rr)}
+  ensure
+    @membership_index = nil
   end
   def self.new_from_string(string)
     rr_strings = string.split("\n")
@@ -33,7 +38,13 @@ class RRSet
   end
   def privateAdd(r) #:nodoc:
     budget = ValidationBudget.current if defined?(ValidationBudget)
-    if @rrs.any? { |existing| budget&.check!(1); existing == r }
+    duplicate = if @membership_index
+      budget&.check!(1)
+      @membership_index.key?(r)
+    else
+      @rrs.any? { |existing| budget&.check!(1); existing == r }
+    end
+    if duplicate
       return true
     end
     new_pos = @rrs.length - @num_sigs
@@ -48,6 +59,7 @@ class RRSet
       @num_sigs += 1
     end
     @rrs.insert(new_pos, r)
+    @membership_index[r] = true if @membership_index
     return true
   end
 
@@ -57,9 +69,10 @@ class RRSet
   def add(rin, do_clone = true)
     if (rin.instance_of?RRSet)
       ret = false
-      [rin.rrs, rin.sigs].each {|rr| ret = add(rr)}
+      (rin.rrs + rin.sigs).each {|rr| ret = add(rr, do_clone)}
       return ret
     end
+    @membership_index = nil unless do_clone
     # Reject unrelated records before copying their wire data.
     first = @rrs.first
     return false if first && !rin.sameRRset(first)
@@ -127,7 +140,9 @@ class RRSet
   end
   # Delete the RR from this RRSet
   def delete(rr)
-    @rrs.delete(rr)
+    removed = @rrs.delete(rr)
+    @num_sigs = @rrs.count { |record| record.type == Types::RRSIG } if removed
+    removed
   end
   def each
     @rrs.each do |rr|

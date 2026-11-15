@@ -85,7 +85,8 @@ module Dnsruby
         @transmission_budget = @st.validation_transmission_budget(@client_queue, @client_id)
       end
       @transmission_budget ||= SelectThread::TransmissionBudget.current || SelectThread::TransmissionBudget.new
-      @budget = ValidationBudget.new(deadline: deadline)
+      lookup_budget = @transmission_budget.context(:validation) { nil }
+      @budget = lookup_budget ? lookup_budget.child(deadline: deadline) : ValidationBudget.new(deadline: deadline)
     end
     private :prepare_budget
 

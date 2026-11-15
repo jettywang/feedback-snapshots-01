@@ -58,15 +58,27 @@ module Dnsruby
       Thread.current[:dnsruby_validation_budget] = previous
     end
 
-    def initialize(deadline: nil, limits: Dnssec.validation_limits)
+    def initialize(deadline: nil, limits: Dnssec.validation_limits, parent: nil)
       # A plain token can be retained with learned records without retaining
       # the budget, resolver control, or the rest of a validation operation.
-      @transaction = Object.new.freeze
-      @limits = limits
-      deadline = [deadline, TransportClock.now + limits[:timeout]].compact.min
-      @control = QueryControl.new(deadline: deadline, parent: QueryControl.current)
-      @signature_verifications = 0
-      @work = 0
+      if parent
+        @transaction = parent.transaction
+        @limits = parent.limits
+        @state = parent.state
+        @control = QueryControl.new(deadline: deadline, parent: parent.control)
+      else
+        @transaction = Object.new.freeze
+        @limits = limits
+        deadline = [deadline, TransportClock.now + limits[:timeout]].compact.min
+        @control = QueryControl.new(deadline: deadline, parent: QueryControl.current)
+        @state = { mutex: Mutex.new, signature_verifications: 0, work: 0 }
+      end
+    end
+
+    # A selector cancels its completed hop. Keep that signal local while all
+    # hops and parallel address workers count against the lookup's one budget.
+    def child(deadline: nil)
+      self.class.new(deadline: deadline, parent: self)
     end
 
     def deadline
@@ -79,11 +91,10 @@ module Dnsruby
 
     def check!(work = 0)
       @control.check!
-      if @signature_verifications > @limits[:max_signature_verifications]
-        fail_with(ValidationLimitError, 'DNSSEC signature verification limit exceeded')
+      @state[:mutex].synchronize do
+        @state[:work] += work
+        check_counts!
       end
-      @work += work
-      fail_with(ValidationLimitError, 'DNSSEC validation work limit exceeded') if @work > @limits[:max_work]
       true
     rescue QueryControl::Stopped => error
       raise if self.class.current
@@ -106,11 +117,27 @@ module Dnsruby
     end
     private :fail_with
 
+    def check_counts!
+      if @state[:signature_verifications] > @limits[:max_signature_verifications]
+        fail_with(ValidationLimitError, 'DNSSEC signature verification limit exceeded')
+      end
+      if @state[:work] > @limits[:max_work]
+        fail_with(ValidationLimitError, 'DNSSEC validation work limit exceeded')
+      end
+    end
+    private :check_counts!
+
     def signature!
       check!
-      @signature_verifications += 1
-      check!
+      @state[:mutex].synchronize do
+        @state[:signature_verifications] += 1
+        check_counts!
+      end
+      true
     end
 
+    protected
+
+    attr_reader :limits, :state
   end
 end

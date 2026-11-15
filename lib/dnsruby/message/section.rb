@@ -18,11 +18,7 @@ class Section < Array
       end
       type_ok && (rr.klass == klass) && (rr.name.to_s(true).downcase == name.to_s().downcase)
     }
-    rrset = RRSet.new()
-    rrs.each do |rr|
-      rrset.add(rr)
-    end
-    rrset
+    RRSet.new(rrs)
   end
 
   #  Return an array of all the rrsets in the section
@@ -41,10 +37,9 @@ class Section < Array
       # Hash insertion order preserves the section's first occurrence of each
       # set. A signature joins the set it covers even when it appears first.
       key = [rr.name.canonical, rr.klass.code, covered_type.code]
-      set = groups[key] ||= RRSet.new
-      set.add(rr)
+      (groups[key] ||= []) << rr
     end
-    groups.values
+    groups.values.map { |records| RRSet.new(records) }
   end
 
   def ==(other)

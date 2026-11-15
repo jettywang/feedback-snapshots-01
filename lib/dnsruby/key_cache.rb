@@ -14,6 +14,8 @@
 # limitations under the License.
 # ++
 
+require 'dnsruby/serial_time'
+
 module Dnsruby
   class KeyCache #:nodoc: all
     #  Cache includes expiration time for keys
@@ -60,9 +62,9 @@ module Dnsruby
       # that actually verified. Never extend it using other supplied RRSIGs.
       # Explicit callers without that deadline get a conservative TTL bound.
       unless expiration
-        signatures = k.sigs.select { |sig| sig.inception <= now && sig.expiration >= now }
+        signatures = k.sigs.select { |sig| SerialTime.valid?(sig.inception, sig.expiration, now) }
         return if signatures.empty?
-        expiration = ([now + k.ttl] + signatures.map(&:expiration)).min
+        expiration = ([now + k.ttl] + signatures.map { |sig| SerialTime.absolute(sig.expiration, now) }).min
       end
       return if expiration <= now
       k.rrs.each { |rr| priv_add_key(rr, expiration) }

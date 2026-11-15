@@ -1034,7 +1034,6 @@ module Dnsruby
             answerport=ret[1][1]
             answerfrom=ret[1][2]
             answerip=ret[1][3]
-            answersize=(buf.length)
           else
             #  recvfrom failed - why?
             Dnsruby.log.error{"Error - recvfrom failed from #{socket}"}
@@ -1050,6 +1049,7 @@ module Dnsruby
         handle_recvfrom_failure(socket, e)
         return
       end
+      answersize = buf.bytesize
       Dnsruby.log.debug{";; answer from #{answerfrom} : #{answersize} bytes\n"}
 
       begin
