@@ -215,10 +215,10 @@ class CommandGenerator:
 
         if snmpEngine.transport_dispatcher is None:
             raise error.PySnmpError("No transport dispatcher available")
-        # Convert timeout in seconds into timeout in timer ticks
+        # Convert timeout in hundredths of a second into timer ticks
         timeoutInTicks = (
             float(timeout)
-            / 100
+            * 0.01
             / snmpEngine.transport_dispatcher.get_timer_resolution()
         )
 

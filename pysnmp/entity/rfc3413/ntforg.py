@@ -19,6 +19,13 @@ from pysnmp.smi.rfc1902 import ObjectType
 getNextHandle = nextid.Integer(0x7FFFFFFF)  # noqa: N816
 
 
+# Terminal states reported once per management target (RFC 3413 section 3.3).
+TARGET_STATE_FILTERED = "filtered"
+TARGET_STATE_SENT = "sent"
+TARGET_STATE_ACKNOWLEDGED = "acknowledged"
+TARGET_STATE_FAILED = "failed"
+
+
 class NotificationOriginator:
     """Notification originator."""
 
@@ -98,10 +105,10 @@ class NotificationOriginator:
                 cbFun(snmpEngine, sendRequestHandle, errorIndication, None, cbCtx)
                 return
 
-            # Convert timeout in seconds into timeout in timer ticks
+            # Convert timeout in hundredths of a second into timer ticks
             timeoutInTicks = (
                 float(origTimeout)
-                / 100
+                * 0.01
                 / snmpEngine.transport_dispatcher.get_timer_resolution()
             )
 
@@ -222,10 +229,10 @@ class NotificationOriginator:
 
         # 3.3.5
         if reqPDU.tagSet in rfc3411.CONFIRMED_CLASS_PDUS:
-            # Convert timeout in seconds into timeout in timer ticks
+            # Convert timeout in hundredths of a second into timer ticks
             timeoutInTicks = (
                 float(timeout)
-                / 100
+                * 0.01
                 / snmpEngine.transport_dispatcher.get_timer_resolution()
             )
 
@@ -297,35 +304,186 @@ class NotificationOriginator:
         self, snmpEngine: SnmpEngine, sendRequestHandle, errorIndication, pdu, cbCtx
     ):
         """Process SNMP PDU response."""
-        notificationHandle, cbFun, cbCtx = cbCtx
+        (
+            notificationHandle,
+            targetAddrName,
+            targetCbFun,
+            targetCbCtx,
+            cbFun,
+            cbCtx,
+        ) = cbCtx
 
-        self.__pendingNotifications[notificationHandle].remove(sendRequestHandle)
+        pendingTargets = self.__pendingNotifications[notificationHandle]
+
+        pendingTargets.pop(sendRequestHandle)
 
         debug.logger & debug.FLAG_APP and debug.logger(
-            "processResponseVarBinds: notificationHandle {}, sendRequestHandle {}, errorIndication {}, pending requests {}".format(
+            "processResponseVarBinds: notificationHandle {}, target {}, sendRequestHandle {}, errorIndication {}, pending requests {}".format(
                 notificationHandle,
+                targetAddrName,
                 sendRequestHandle,
                 errorIndication,
-                self.__pendingNotifications[notificationHandle],
+                pendingTargets,
             )
         )
 
-        if not self.__pendingNotifications[notificationHandle]:
+        if errorIndication:
+            targetState = TARGET_STATE_FAILED
+        else:
+            targetState = TARGET_STATE_ACKNOWLEDGED
+
+        self._report_target_result(
+            snmpEngine,
+            notificationHandle,
+            targetAddrName,
+            targetState,
+            errorIndication,
+            pdu,
+            targetCbFun,
+            targetCbCtx,
+        )
+
+        if not pendingTargets:
             debug.logger & debug.FLAG_APP and debug.logger(
                 "processResponseVarBinds: notificationHandle {}, sendRequestHandle {} -- completed".format(
                     notificationHandle, sendRequestHandle
                 )
             )
             del self.__pendingNotifications[notificationHandle]
-            cbFun(
-                snmpEngine,
-                sendRequestHandle,
-                errorIndication,
-                pdu and v2c.apiPDU.get_error_status(pdu) or 0,
-                pdu and v2c.apiPDU.get_error_index(pdu, muteErrors=True) or 0,
-                pdu and v2c.apiPDU.get_varbinds(pdu) or (),
-                cbCtx,
-            )
+            if cbFun is not None:
+                cbFun(
+                    snmpEngine,
+                    sendRequestHandle,
+                    errorIndication,
+                    pdu and v2c.apiPDU.get_error_status(pdu) or 0,
+                    pdu and v2c.apiPDU.get_error_index(pdu, muteErrors=True) or 0,
+                    pdu and v2c.apiPDU.get_varbinds(pdu) or (),
+                    cbCtx,
+                )
+
+    @staticmethod
+    def _filter_entry_matches(oid, subtree, mask):
+        """Return True if OID matches a snmpNotifyFilter entry (RFC 3413 s.6)."""
+        if len(oid) < len(subtree):
+            return False
+
+        for index, subIdentifier in enumerate(subtree):
+            # A zero bit wildcards the corresponding sub-identifier.
+            if index // 8 < len(mask) and not (
+                mask[index // 8] & (0x80 >> (index % 8))
+            ):
+                continue
+            if oid[index] != subIdentifier:
+                return False
+
+        return True
+
+    def _is_allowed_by_filter_profile(self, filterEntries, varBinds, snmpTrapOID):
+        """Apply RFC 3413 section 6 snmpNotifyFilterTable rules.
+
+        The NOTIFICATION-TYPE OID (the value of the snmpTrapOID.0 varbind)
+        must be specifically included, and none of the object instances may
+        be specifically excluded. Matching entries are resolved by the most
+        specific subtree, ties broken lexicographically.
+        """
+        included = 1
+        excluded = 2
+
+        def decide(oid):
+            matching = [
+                entry
+                for entry in filterEntries
+                if self._filter_entry_matches(oid, entry[0], entry[1])
+            ]
+            if not matching:
+                return None
+            # Longest subtree wins; on equal length, the lexicographically
+            # largest instance wins (RFC 3413 section 6).
+            matching.sort(key=lambda entry: (len(entry[0]), entry[0]))
+            return matching[-1][2]
+
+        notificationName = None
+        for varName, varVal in varBinds:
+            if varName == snmpTrapOID:
+                notificationName = tuple(varVal)
+                break
+
+        # The notification name must be specifically included.
+        if decide(notificationName) != included:
+            return False
+
+        for varName, varVal in varBinds:
+            if varName == snmpTrapOID:
+                continue
+            # Object instances are included by default; only an explicit
+            # exclusion drops the whole notification for this target.
+            if decide(tuple(varName)) == excluded:
+                return False
+
+        return True
+
+    def _is_allowed_by_vacm(
+        self,
+        snmpEngine: SnmpEngine,
+        securityModel,
+        securityName,
+        securityLevel,
+        contextName,
+        varBinds,
+        snmpTrapOID,
+    ):
+        """Apply the RFC 3413 section 3.3 steps (2) and (3) VACM checks."""
+        for varName, varVal in varBinds:
+            # Step (3): the NOTIFICATION-TYPE OID is checked separately.
+            if varName == snmpTrapOID:
+                checkedName = tuple(varVal)
+            else:
+                checkedName = varName
+            try:
+                snmpEngine.access_control_model[self.ACM_ID].is_access_allowed(
+                    snmpEngine,
+                    securityModel,
+                    securityName,
+                    securityLevel,
+                    "notify",
+                    contextName,
+                    checkedName,
+                )
+            except error.StatusInformation:
+                debug.logger & debug.FLAG_APP and debug.logger(
+                    "sendVarBinds: VACM denied access for OID {} securityName {}".format(
+                        checkedName, securityName
+                    )
+                )
+                return False
+
+        return True
+
+    def _report_target_result(
+        self,
+        snmpEngine: SnmpEngine,
+        notificationHandle,
+        targetAddrName,
+        targetState,
+        errorIndication,
+        pdu,
+        targetCbFun,
+        targetCbCtx,
+    ):
+        """Invoke the per-target callback exactly once with a terminal state."""
+        if targetCbFun is None:
+            return
+
+        targetCbFun(
+            snmpEngine,
+            notificationHandle,
+            targetAddrName,
+            targetState,
+            errorIndication,
+            pdu and v2c.apiPDU.get_varbinds(pdu) or (),
+            targetCbCtx,
+        )
+
 
     #
     # Higher-level API to Notification Originator. Supports multiple
@@ -340,6 +498,8 @@ class NotificationOriginator:
         varBinds: "tuple[ObjectType, ...]" = (),
         cbFun=None,
         cbCtx=None,
+        targetCbFun=None,
+        targetCbCtx=None,
     ):
         """Send SNMP notification to a target.
 
@@ -349,8 +509,14 @@ class NotificationOriginator:
             contextEngineId (str): SNMP engine ID of the context to send notification in.
             contextName (str): SNMP context name to send notification in.
             varBinds (tuple): SNMP variable bindings to send.
-            cbFun (callable): Callback function to call when response is received.
-            cbCtx (object): General-purpose data passed to the callback function.
+            cbFun (callable): Completion callback invoked once after every
+                Confirmed-Class (Inform) target has reached a terminal state.
+            cbCtx (object): General-purpose data passed to ``cbFun``.
+            targetCbFun (callable): Per-target callback invoked exactly once
+                with the target's unique terminal state. Its arguments are
+                ``(snmpEngine, notificationHandle, targetAddrName, state,
+                errorIndication, varBinds, targetCbCtx)``.
+            targetCbCtx (object): General-purpose data passed to ``targetCbFun``.
 
         Returns:
             int: Notification handle that can be used to cancel the notification.
@@ -369,11 +535,14 @@ class NotificationOriginator:
 
         mibBuilder = snmpEngine.get_mib_builder()
 
-        if contextName:
-            (__SnmpAdminString,) = mibBuilder.import_symbols(
-                "SNMP-FRAMEWORK-MIB", "SnmpAdminString"
-            )
-            contextName = __SnmpAdminString(contextName)
+        (__SnmpAdminString,) = mibBuilder.import_symbols(
+            "SNMP-FRAMEWORK-MIB", "SnmpAdminString"
+        )
+        # An empty (default) context name is a valid value and must be
+        # normalized to SnmpAdminString too, otherwise VACM context lookup
+        # fails to match the configured default context.
+        if not isinstance(contextName, __SnmpAdminString):
+            contextName = __SnmpAdminString(contextName or "")
 
         # 3.3
         notifyTag, notifyType = config.get_notification_info(
@@ -430,12 +599,16 @@ class NotificationOriginator:
                 "SNMPv2-MIB::snmpTrapOID.0 to be present"
             )
 
-        sendRequestHandle = -1
-
         debug.logger & debug.FLAG_APP and debug.logger(
             f"sendVarBinds: final varBinds {varBinds}"
         )
 
+        confirmedCount = 0
+        firstErrorIndication = None
+
+        # Filtering and authorization are evaluated independently for every
+        # target. A rejection for one target never aborts the remaining
+        # targets, and a rejected target is never handed to the transport.
         for targetAddrName in config.get_target_names(snmpEngine, notifyTag):
             (
                 transportDomain,
@@ -451,13 +624,6 @@ class NotificationOriginator:
                 securityLevel,
             ) = config.get_target_parameters(snmpEngine, params)
 
-            # 3.3.1 XXX
-            # XXX filtering's yet to be implemented
-            #             filterProfileName = config.getNotifyFilterProfile(params)
-
-            #             (filterSubtree, filterMask,
-            #              filterType) = config.getNotifyFilter(filterProfileName)
-
             debug.logger & debug.FLAG_APP and debug.logger(
                 "sendVarBinds: notificationHandle {}, notifyTag {} yields: transportDomain {}, transportAddress {!r}, securityModel {}, securityName {}, securityLevel {}".format(
                     notificationHandle,
@@ -470,33 +636,64 @@ class NotificationOriginator:
                 )
             )
 
-            for varName, varVal in inputVarBinds:
-                if varName in (sysUpTime, snmpTrapOID):
-                    continue
-                try:
-                    snmpEngine.access_control_model[self.ACM_ID].is_access_allowed(
-                        snmpEngine,
-                        securityModel,
-                        securityName,
-                        securityLevel,
-                        "notify",
-                        contextName,
-                        varName,
-                    )
-
+            # 3.3 (1) + RFC 3413 section 6: snmpNotifyFilterTable profile
+            # bound to this target's snmpTargetParams entry.
+            profileName = config.get_notify_filter_profile_name(
+                snmpEngine, params
+            )
+            if profileName is not None:
+                filterEntries = config.get_notify_filters(
+                    snmpEngine, profileName
+                )
+                if filterEntries and not self._is_allowed_by_filter_profile(
+                    filterEntries, inputVarBinds, snmpTrapOID
+                ):
                     debug.logger & debug.FLAG_APP and debug.logger(
-                        f"sendVarBinds: ACL succeeded for OID {varName} securityName {securityName}"
-                    )
-
-                except error.StatusInformation:
-                    debug.logger & debug.FLAG_APP and debug.logger(
-                        "sendVarBinds: ACL denied access for OID {} securityName {}, droppping notification".format(
-                            varName, securityName
+                        "sendVarBinds: notify filter dropped notification for target {} securityName {}".format(
+                            targetAddrName, securityName
                         )
                     )
-                    return
+                    self._report_target_result(
+                        snmpEngine,
+                        notificationHandle,
+                        targetAddrName,
+                        TARGET_STATE_FILTERED,
+                        errind.notificationFiltered,
+                        None,
+                        targetCbFun,
+                        targetCbCtx,
+                    )
+                    if firstErrorIndication is None:
+                        firstErrorIndication = errind.notificationFiltered
+                    continue
 
-            # 3.3.4
+            # 3.3 (2) and (3): VACM notify view, covering every varbind and
+            # the NOTIFICATION-TYPE OID from snmpTrapOID.0.
+            if not self._is_allowed_by_vacm(
+                snmpEngine,
+                securityModel,
+                securityName,
+                securityLevel,
+                contextName,
+                inputVarBinds,
+                snmpTrapOID,
+            ):
+                self._report_target_result(
+                    snmpEngine,
+                    notificationHandle,
+                    targetAddrName,
+                    TARGET_STATE_FILTERED,
+                    errind.notificationFiltered,
+                    None,
+                    targetCbFun,
+                    targetCbCtx,
+                )
+                if firstErrorIndication is None:
+                    firstErrorIndication = errind.notificationFiltered
+                continue
+
+            # 3.3 (4): the full, unmodified variable-binding list is used.
+            # Sensitive varbinds are never stripped to force a pass.
             if notifyType == 1:
                 pdu = v2c.SNMPv2TrapPDU()
             elif notifyType == 2:
@@ -507,7 +704,7 @@ class NotificationOriginator:
             v2c.apiPDU.set_defaults(pdu)
             v2c.apiPDU.set_varbinds(pdu, inputVarBinds)
 
-            # 3.3.5
+            # 3.3 (5)/(6)
             try:
                 sendRequestHandle = self.send_pdu(
                     snmpEngine,
@@ -516,47 +713,84 @@ class NotificationOriginator:
                     contextName,
                     pdu,
                     self.process_response_varbinds,
-                    (notificationHandle, cbFun, cbCtx),
+                    (
+                        notificationHandle,
+                        targetAddrName,
+                        targetCbFun,
+                        targetCbCtx,
+                        cbFun,
+                        cbCtx,
+                    ),
                 )
 
             except error.StatusInformation:
                 statusInformation = sys.exc_info()[1]
                 debug.logger & debug.FLAG_APP and debug.logger(
-                    "sendVarBinds: sendRequestHandle {}: sendPdu() failed with {!r}".format(
-                        sendRequestHandle, statusInformation
+                    "sendVarBinds: target {}: sendPdu() failed with {!r}".format(
+                        targetAddrName, statusInformation
                     )
                 )
-                if (
-                    notificationHandle not in self.__pendingNotifications
-                    or not self.__pendingNotifications[notificationHandle]
-                ):
-                    if notificationHandle in self.__pendingNotifications:
-                        del self.__pendingNotifications[notificationHandle]
-                    if cbFun:
-                        cbFun(
-                            snmpEngine,
-                            notificationHandle,
-                            statusInformation["errorIndication"],
-                            0,
-                            0,
-                            (),
-                            cbCtx,
-                        )
-                return notificationHandle
+                errorIndication = statusInformation["errorIndication"]
+                self._report_target_result(
+                    snmpEngine,
+                    notificationHandle,
+                    targetAddrName,
+                    TARGET_STATE_FAILED,
+                    errorIndication,
+                    None,
+                    targetCbFun,
+                    targetCbCtx,
+                )
+                if firstErrorIndication is None:
+                    firstErrorIndication = errorIndication
+                continue
 
             debug.logger & debug.FLAG_APP and debug.logger(
-                "sendVarBinds: notificationHandle %s, sendRequestHandle %s, timeout %d"
-                % (notificationHandle, sendRequestHandle, timeout)
+                "sendVarBinds: notificationHandle %s, target %s, sendRequestHandle %s, timeout %d"
+                % (notificationHandle, targetAddrName, sendRequestHandle, timeout)
             )
 
             if notifyType == 2:
-                if notificationHandle not in self.__pendingNotifications:
-                    self.__pendingNotifications[notificationHandle] = set()
-                self.__pendingNotifications[notificationHandle].add(sendRequestHandle)
+                confirmedCount += 1
+                self.__pendingNotifications.setdefault(
+                    notificationHandle, {}
+                )[sendRequestHandle] = targetAddrName
+            else:
+                # Unconfirmed-Class PDU: handoff to the transport is the
+                # terminal state, distinct from an Inform acknowledgement.
+                self._report_target_result(
+                    snmpEngine,
+                    notificationHandle,
+                    targetAddrName,
+                    TARGET_STATE_SENT,
+                    None,
+                    None,
+                    targetCbFun,
+                    targetCbCtx,
+                )
+
+        # All targets were filtered or failed before any Inform could be
+        # tracked; resolve the completion callback instead of leaving callers
+        # waiting. Trap completions remain driven by the caller, as before.
+        if (
+            notifyType == 2
+            and confirmedCount == 0
+            and notificationHandle not in self.__pendingNotifications
+            and cbFun is not None
+        ):
+            cbFun(
+                snmpEngine,
+                notificationHandle,
+                firstErrorIndication or errind.notificationFiltered,
+                0,
+                0,
+                (),
+                cbCtx,
+            )
 
         debug.logger & debug.FLAG_APP and debug.logger(
-            "sendVarBinds: notificationHandle {}, sendRequestHandle {}, notification(s) sent".format(
-                notificationHandle, sendRequestHandle
+            "sendVarBinds: notificationHandle {}, confirmed targets {}, notification(s) processed".format(
+                notificationHandle, confirmedCount
             )
         )
 

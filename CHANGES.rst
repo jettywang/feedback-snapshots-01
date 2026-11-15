@@ -3,6 +3,17 @@
 Revision 7.1.32, released on Nov 07, 2026
 -----------------------------------------
 
+- Implemented per-target RFC 3413 notification filtering in the
+  Notification Originator: each management target is now authorized against
+  its own snmpNotifyFilter profile and VACM notify view, including the
+  NOTIFICATION-TYPE OID from snmpTrapOID.0. A rejected target is dropped
+  independently without affecting the others, is never handed to the
+  transport, and is reported through a new per-target terminal-state
+  callback (filtered, sent, acknowledged, failed).
+- Fixed notification target timeout conversion so SNMPv2-TC TimeInterval
+  hundredths of a second are translated to timer ticks correctly.
+- Fixed an empty (default) context name not being normalized, which broke
+  VACM context lookup for notifications.
 - Fixed a TypeError when closing a v1arch dispatcher with pending requests.
 - Fixed transport creation without a current event loop on Python 3.15.
 - Added Python 3.15 support.

@@ -247,6 +247,99 @@ def get_notification_info(snmpEngine: SnmpEngine, notificationTarget):
     return targetToNotifyMap[notificationTarget]
 
 
+def get_notify_filter_profile_name(snmpEngine: SnmpEngine, paramsName):
+    """Return the notification filter profile bound to target parameters.
+
+    Implements the lookup of RFC 3413 snmpNotifyFilterProfileTable. A
+    ``None`` result means no filter profile is associated with the target
+    parameters, in which case RFC 3413 section 6 mandates that no
+    notification filtering is performed for this management target.
+    """
+    mibBuilder = snmpEngine.get_mib_builder()
+
+    (
+        snmpNotifyFilterProfileEntry,
+        snmpNotifyFilterProfileName,
+    ) = mibBuilder.import_symbols(  # type: ignore
+        "SNMP-NOTIFICATION-MIB",
+        "snmpNotifyFilterProfileEntry",
+        "snmpNotifyFilterProfileName",
+    )
+
+    tblIdx = snmpNotifyFilterProfileEntry.getInstIdFromIndices(paramsName)
+
+    try:
+        profileName = snmpNotifyFilterProfileName.getNode(
+            snmpNotifyFilterProfileName.name + tblIdx
+        ).syntax
+    except NoSuchInstanceError:
+        return None
+
+    return profileName
+
+
+def get_notify_filters(snmpEngine: SnmpEngine, profileName):
+    """Return the filter entries of a notification filter profile.
+
+    Each entry is a ``(subtree, mask, filter_type)`` tuple as stored in the
+    RFC 3413 snmpNotifyFilterTable:
+
+    * ``subtree`` -- tuple of sub-identifiers (OBJECT IDENTIFIER)
+    * ``mask`` -- ``bytes`` bit mask; a zero bit wildcards a sub-identifier
+    * ``filter_type`` -- ``1`` for included, ``2`` for excluded
+
+    An empty tuple means the profile has no matching entries, in which
+    case RFC 3413 section 6 mandates that no filtering is performed.
+    """
+    mibBuilder = snmpEngine.get_mib_builder()
+
+    (
+        snmpNotifyFilterEntry,
+        snmpNotifyFilterSubtree,
+        snmpNotifyFilterMask,
+        snmpNotifyFilterType,
+    ) = mibBuilder.import_symbols(  # type: ignore
+        "SNMP-NOTIFICATION-MIB",
+        "snmpNotifyFilterEntry",
+        "snmpNotifyFilterSubtree",
+        "snmpNotifyFilterMask",
+        "snmpNotifyFilterType",
+    )
+
+    filters = []
+
+    mibNode = snmpNotifyFilterSubtree
+    while True:
+        try:
+            mibNode = snmpNotifyFilterSubtree.getNextNode(mibNode.name)
+        except NoSuchInstanceError:
+            break
+
+        instId = mibNode.name[len(snmpNotifyFilterSubtree.name) :]
+
+        entryProfileName, subtree = snmpNotifyFilterEntry.getIndicesFromInstId(
+            instId
+        )
+
+        if entryProfileName != profileName:
+            # Rows are ordered lexicographically by profile name; rows for
+            # another profile are skipped, not treated as end-of-table.
+            continue
+
+        mask = snmpNotifyFilterMask.getNode(
+            snmpNotifyFilterMask.name + instId
+        ).syntax.asOctets()
+        filter_type = int(
+            snmpNotifyFilterType.getNode(
+                snmpNotifyFilterType.name + instId
+            ).syntax
+        )
+
+        filters.append((tuple(subtree), mask, filter_type))
+
+    return tuple(filters)
+
+
 def get_target_names(snmpEngine: SnmpEngine, tag):
     """Return a list of target names associated with a given tag."""
     mibBuilder = snmpEngine.get_mib_builder()

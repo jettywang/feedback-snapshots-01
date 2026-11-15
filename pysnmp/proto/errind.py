@@ -480,6 +480,17 @@ otherError = OtherError("Unspecified SNMP engine error occurred")  # noqa: N816
 # SNMP Apps errors
 
 
+class NotificationFiltered(ErrorIndication):  # noqa: N818
+    """Notification filtered out for a management target."""
+
+    pass
+
+
+notificationFiltered = NotificationFiltered(  # noqa: N816
+    "Notification denied for this target by RFC 3413 filtering or VACM notify view"
+)
+
+
 class OidNotIncreasing(ErrorIndication):  # noqa: N818
     """OID not increasing."""
 
