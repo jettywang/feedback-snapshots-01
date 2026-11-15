@@ -2,6 +2,20 @@ Release notes
 =============
 This page contains the most significant changes in Signify between each release.
 
+Unreleased
+----------
+* Added post-verification publisher constraints. A ``PublisherPolicy`` of trusted leaf
+  certificate SubjectPublicKeyInfo (SPKI) SHA-256 fingerprints with explicit validity
+  intervals can now be enforced via ``AuthenticodeFile.verify_publishers`` or by passing
+  ``publisher_policy`` to ``AuthenticodeFile.verify``. Matching is on the fully verified
+  signer leaf's SPKI only, never on the subject display name, so certificate renewal
+  (same key) and genuine key rotation (different key) are handled distinctly. Each
+  signature in a multi-publisher file is reported on its own basis, and a signature that
+  fails digest, code-signature or chain verification can never obtain publisher identity.
+  Rejection is reported as ``AuthenticodeVerificationResult.PUBLISHER_ERROR``.
+* Added ``Certificate.subject_public_key_info`` and
+  ``Certificate.spki_sha256_fingerprint``.
+
 v0.9.3 (2026-10-11)
 -------------------
 * Fix crash on certificates with key algorithms unknown to asn1crypto (e.g. ML-DSA).

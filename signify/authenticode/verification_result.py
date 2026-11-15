@@ -11,6 +11,7 @@ from signify.exceptions import (
     AuthenticodeInvalidAdditionalHashError,
     AuthenticodeInvalidDigestError,
     AuthenticodeNotSignedError,
+    AuthenticodePublisherVerificationError,
     CertificateVerificationError,
     ParseError,
     VerificationError,
@@ -56,6 +57,11 @@ class AuthenticodeVerificationResult(enum.Enum):
     """The additional file hash, such as the page hash for PE files, or the
     extended digest for MSI files, does not match the calculated hash.
     """
+    PUBLISHER_ERROR = enum.auto()
+    """The signature itself (digest, code signature and certificate chain) verified,
+    but the leaf certificate that actually produced the signature is not an allowed
+    publisher under the configured publisher policy.
+    """
 
     @classmethod
     def call(
@@ -71,6 +77,8 @@ class AuthenticodeVerificationResult(enum.Enum):
             return cls.INVALID_DIGEST, exc
         except AuthenticodeInvalidAdditionalHashError as exc:
             return cls.INVALID_ADDITIONAL_HASH, exc
+        except AuthenticodePublisherVerificationError as exc:
+            return cls.PUBLISHER_ERROR, exc
         except AuthenticodeCounterSignerError as exc:
             return cls.COUNTERSIGNER_ERROR, exc
         except CertificateVerificationError as exc:

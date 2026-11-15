@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import hashlib
 import logging
 import os
@@ -12,6 +13,11 @@ from typing_extensions import Self
 from signify._typing import HashFunction
 from signify.asn1.hashing import ACCEPTED_DIGEST_ALGORITHMS
 from signify.authenticode.indirect_data import IndirectData
+from signify.authenticode.publisher import (
+    PublisherPolicy,
+    PublisherVerification,
+    evaluate_publisher,
+)
 from signify.authenticode.signed_data import (
     AuthenticodeSignature,
 )
@@ -24,6 +30,7 @@ from signify.exceptions import (
     AuthenticodeFingerprintNotProvidedError,
     AuthenticodeInvalidDigestError,
     AuthenticodeNotSignedError,
+    AuthenticodeVerificationError,
     ParseError,
 )
 from signify.pkcs7 import SignedData
@@ -253,6 +260,8 @@ class AuthenticodeFile:
         ] = "all",
         expected_hashes: dict[str, bytes] | None = None,
         ignore_parse_errors: bool = True,
+        publisher_policy: PublisherPolicy | None = None,
+        publisher_at: datetime.datetime | None = None,
         **kwargs: Any,
     ) -> list[tuple[SignedData, IndirectData | None, Iterable[list[Certificate]]]]:
         """Verifies the SignedData structures. This is a little bit more efficient than
@@ -340,8 +349,26 @@ class AuthenticodeFile:
             else:
                 if multi_verify_mode not in ("all", "first"):
                     # only return the last one, as we are in mode any/best
+                    if publisher_policy is not None:
+                        moment = publisher_at
+                        if moment is None:
+                            moment = datetime.datetime.now(datetime.timezone.utc)
+                        signed_data, _indirect_data, verified_chains = chains[-1]
+                        leaf = self._signer_leaf(signed_data, verified_chains)
+                        evaluate_publisher(
+                            signed_data, leaf, publisher_policy, moment
+                        ).raise_if_rejected()
                     return chains[-1:]
         if last_error is None:
+            if publisher_policy is not None:
+                moment = publisher_at
+                if moment is None:
+                    moment = datetime.datetime.now(datetime.timezone.utc)
+                for signed_data, _indirect_data, verified_chains in chains:
+                    leaf = self._signer_leaf(signed_data, verified_chains)
+                    evaluate_publisher(
+                        signed_data, leaf, publisher_policy, moment
+                    ).raise_if_rejected()
             return chains
         raise last_error
 
@@ -396,6 +423,99 @@ class AuthenticodeFile:
             )
             return signed_data, subject.indirect_data, signed_data.verify(**kwargs)
         raise AuthenticodeNotSignedError("Unknown SignedData object passed.")
+
+    @staticmethod
+    def _signer_leaf(
+        signed_data: AuthenticodeSignature | CertificateTrustList,
+        chains: Iterable[list[Certificate]],
+    ) -> Certificate:
+        """Resolves the end-entity (signer) certificate that actually completed
+        verification for one SignedData.
+
+        The chains returned by verification run from the trusted anchor to the
+        end-entity certificate, so the signer leaf is the *last* certificate. We
+        additionally confirm that this is the exact certificate referenced by the
+        SignerInfo (issuer + serial number), rather than some other certificate in the
+        chain, so a same-named CA in the chain can never be mistaken for the publisher.
+        """
+        chain = next(iter(chains))
+        leaf = chain[-1]
+
+        if isinstance(signed_data, AuthenticodeSignature):
+            signer_info = signed_data.signer_info
+            if (
+                leaf.issuer != signer_info.issuer
+                or leaf.serial_number != signer_info.serial_number
+            ):
+                # Locate the referenced certificate explicitly within the verified
+                # chain instead of trusting the chain's last position.
+                for certificate in reversed(chain):
+                    if (
+                        certificate.issuer == signer_info.issuer
+                        and certificate.serial_number == signer_info.serial_number
+                    ):
+                        return certificate
+                raise AuthenticodeVerificationError(
+                    "The verified chain does not contain the certificate referenced"
+                    " by the SignerInfo."
+                )
+
+        return leaf
+
+    def verify_publishers(
+        self,
+        publisher_policy: PublisherPolicy,
+        *,
+        at: datetime.datetime | None = None,
+        expected_hashes: dict[str, bytes] | None = None,
+        signature_types: Literal[
+            "all", "all+", "catalog", "catalog+", "embedded"
+        ] = "all",
+        multi_verify_mode: Literal["any", "first", "all", "best"] = "all",
+        ignore_parse_errors: bool = True,
+        **kwargs: Any,
+    ) -> list[PublisherVerification]:
+        """Verifies every signature fully (file digest, code signature and trust
+        chain) and then constrains each one against the publisher policy.
+
+        Unlike :meth:`verify`, this never short-circuits: each signature is evaluated
+        independently and one :class:`PublisherVerification` is returned per
+        successfully verified signature, reporting the exact policy entry (or entries)
+        on which its signer leaf is accepted. A signature that fails cryptographic or
+        chain verification raises before any publisher identity is granted, so a
+        rejected signature can never obtain publisher status from another, valid
+        signature present in the same file.
+
+        :param publisher_policy: The explicit set of trusted leaf SPKIs and their
+            validity intervals.
+        :param at: Timestamp used for the publisher validity interval. When
+            :const:`None`, the current time is used.
+        :return: One publisher decision per fully verified signature.
+        :raises AuthenticodePublisherVerificationError: if any verified signer leaf is
+            not an allowed publisher.
+        :raises AuthenticodeVerificationError: if any signature fails verification.
+        """
+        # ``all`` makes verify() return every successfully verified structure instead
+        # of only the first one, so each publisher can be reported on its own basis.
+        results = self.verify(
+            multi_verify_mode=multi_verify_mode,
+            signature_types=signature_types,
+            expected_hashes=expected_hashes,
+            ignore_parse_errors=ignore_parse_errors,
+            **kwargs,
+        )
+
+        moment = at
+        if moment is None:
+            moment = datetime.datetime.now(datetime.timezone.utc)
+
+        decisions: list[PublisherVerification] = []
+        for signed_data, _indirect_data, chains in results:
+            leaf = self._signer_leaf(signed_data, chains)
+            decision = evaluate_publisher(signed_data, leaf, publisher_policy, moment)
+            decision.raise_if_rejected()
+            decisions.append(decision)
+        return decisions
 
     def explain_verify(
         self, *args: Any, **kwargs: Any

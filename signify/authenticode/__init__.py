@@ -3,6 +3,11 @@ from .cert_store import (
     TRUSTED_CERTIFICATE_STORE,
     TRUSTED_CERTIFICATE_STORE_NO_CTL,
 )
+from .publisher import (
+    PublisherPolicy,
+    PublisherVerification,
+    TrustedPublisher,
+)
 from .signed_data import AuthenticodeSignature
 from .signed_file import AuthenticodeFile
 from .trust_list import AUTHROOTSTL_PATH, CertificateTrustList, CertificateTrustSubject
@@ -18,4 +23,7 @@ __all__ = [
     "AuthenticodeVerificationResult",
     "CertificateTrustList",
     "CertificateTrustSubject",
+    "PublisherPolicy",
+    "PublisherVerification",
+    "TrustedPublisher",
 ]

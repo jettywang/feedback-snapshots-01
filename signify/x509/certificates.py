@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import collections
 import datetime
+import hashlib
 import logging
 import re
 from collections.abc import Iterable, Iterator
@@ -110,6 +111,32 @@ class Certificate:
                 "public_key"
             ].dump(),
         )
+
+    @property
+    def subject_public_key_info(self) -> bytes:
+        """The DER-encoded SubjectPublicKeyInfo (SPKI) of this certificate. This is
+        the full ``SubjectPublicKeyInfo`` structure (algorithm identifier and the
+        public key bit string), not just the public key bit string.
+
+        This is the stable identifier of the key itself. Two certificates that share
+        the same public key (e.g. an original and its renewal) have the same SPKI,
+        regardless of their serial numbers, validity dates or subject display names.
+        """
+        return cast(
+            bytes,
+            self.asn1["tbs_certificate"]["subject_public_key_info"].dump(),
+        )
+
+    @cached_property
+    def spki_sha256_fingerprint(self) -> str:
+        """The SHA-256 fingerprint of the DER-encoded :attr:`subject_public_key_info`,
+        as a lowercase hex string without separators.
+
+        This identifies the *key* held by the certificate, which makes it suitable for
+        pinning a trusted publisher independently of certificate renewal or the
+        certificate's subject name.
+        """
+        return hashlib.sha256(self.subject_public_key_info).hexdigest()
 
     @property
     def extensions(self) -> dict[str, Any]:

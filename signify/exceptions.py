@@ -85,6 +85,11 @@ class AuthenticodeInvalidExtendedDigestError(AuthenticodeInvalidAdditionalHashEr
     pass
 
 
+class AuthenticodePublisherVerificationError(AuthenticodeVerificationError):
+    """Raised when a fully verified signature's leaf certificate is not an allowed
+    publisher according to the configured publisher policy."""
+
+
 class CertificateTrustListParseError(SignifyError):
     pass
 

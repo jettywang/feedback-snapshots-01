@@ -50,6 +50,7 @@ This module is compatible with Python 3.9+.
    authroot
    authenticode_structures
    authenticode_asn1
+   publisher
 
 
 Indices and tables
