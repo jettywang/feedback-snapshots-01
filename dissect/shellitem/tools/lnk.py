@@ -7,10 +7,27 @@ from pathlib import Path
 from dissect.util import ts
 
 from dissect.shellitem.lnk import Lnk
+from dissect.shellitem.lnk.itemid import FileEntryShellItem, ShellItem
 
 log = logging.getLogger(__name__)
 logging.lastResort = None
 logging.raiseExceptions = False
+
+
+def format_shell_item(index: int, item: ShellItem) -> str:
+    """Format a single shell item of a target IDList for display."""
+    status = item.name if item.name is not None else "<unresolved>"
+    line = f"[{index}] {item.type_name} (0x{item.type:02x}): {status}"
+
+    if isinstance(item, FileEntryShellItem):
+        line += f" (short name: {item.primary_name}, long name: {item.long_name})"
+    elif item.name is None:
+        # Unknown entries are shown as raw data, no name is guessed from it.
+        line += f" raw: {item.data.hex()}"
+
+    if item.error:
+        line += f" [error: {item.error}]"
+    return line
 
 
 def parse(path: Path) -> None:
@@ -66,6 +83,17 @@ def parse(path: Path) -> None:
         except AttributeError:
             machine_id = None
 
+        lnk_target_idlist_path = None
+        lnk_target_idlist_components = "None"
+        if lnk_file.flag("has_link_target_idlist"):
+            target_idlist = lnk_file.target_idlist
+            lnk_target_idlist_path = target_idlist.get_path()
+            components = [format_shell_item(index, item) for index, item in enumerate(target_idlist.items)]
+            if target_idlist.truncated:
+                components.append("<truncated target idlist>")
+            if components:
+                lnk_target_idlist_components = "\n\t\t\t\t  ".join(components)
+
         target_mtime = ts.wintimestamp(lnk_file.link_header.write_time)
         target_atime = ts.wintimestamp(lnk_file.link_header.access_time)
         target_ctime = ts.wintimestamp(lnk_file.link_header.creation_time)
@@ -86,6 +114,8 @@ def parse(path: Path) -> None:
             f"Net name link\t\t\t: {lnk_net_name}\n"
             f"Device name link\t\t: {lnk_device_name}\n"
             f"Machine id link\t\t\t: {machine_id}\n"
+            f"Target IDList path\t\t: {lnk_target_idlist_path}\n"
+            f"Target IDList components\t: {lnk_target_idlist_components}\n"
             f"Target file modification time\t: {target_mtime}\n"
             f"Target file access time\t\t: {target_atime}\n"
             f"Target file changed time\t: {target_ctime}\n"

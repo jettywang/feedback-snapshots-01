@@ -17,6 +17,7 @@ from dissect.shellitem.lnk.c_lnk import (
     LINK_INFO_HEADER_SIZE,
     c_lnk,
 )
+from dissect.shellitem.lnk.itemid import RootFolderShellItem, ShellItem, parse_shell_item
 
 if typing.TYPE_CHECKING:
     from io import BufferedReader
@@ -331,6 +332,8 @@ class LnkTargetIdList:
         self.target_idlist = None
         self.idlist = None
         self.size = None
+        self.items: list[ShellItem] = []
+        self.truncated = False
 
         if fh:
             self.size = unpack("H", fh.read(2))[0] if size is None else size
@@ -338,17 +341,62 @@ class LnkTargetIdList:
 
     def _parse(self, buff: BinaryIO) -> None:
         idlists = []
+        self.items = []
         buff = BytesIO(buff)
+        total = len(buff.getvalue())
+        terminalid = b""
 
-        # the size of the target_idlist struct includes itself. Thus we minus 2 here.
-        while buff.tell() < self.size - 2:
-            size = unpack("H", buff.read(2))[0]
-            data = buff.read(size - 2)  # size of the struct includes the 16-bit size value. Thus we minus 2 here again.
-            itemid = c_lnk.ITEMID(itemid_size=size, data=data)
-            idlists.append(itemid)
+        while buff.tell() < total:
+            header = buff.read(2)
+            if len(header) < 2:
+                # Truncated entry header, not even a size field fits. Keep the stray byte(s).
+                terminalid = header
+                self.truncated = True
+                break
 
-        self.idlist = c_lnk.IDLIST(itemid_list=idlists, terminalid=buff.read())
+            size = unpack("H", header)[0]
+            if size == 0:
+                # TerminalID encountered, end of the IDList.
+                terminalid = header
+                break
+
+            remaining = total - buff.tell()
+            if size < 2 or size - 2 > remaining:
+                # The entry cannot make progress (size smaller than its own size field) or claims
+                # more data than is available. Keep the remaining bytes as a truncated entry and stop.
+                data = buff.read(remaining)
+                idlists.append(c_lnk.ITEMID(itemid_size=size, data=data))
+                item = parse_shell_item(size, data)
+                item.error = "truncated shell item"
+                self.items.append(item)
+                self.truncated = True
+                break
+
+            # size of the struct includes the 16-bit size value. Thus we minus 2 here.
+            data = buff.read(size - 2)
+            idlists.append(c_lnk.ITEMID(itemid_size=size, data=data))
+            self.items.append(parse_shell_item(size, data))
+
+        self.idlist = c_lnk.IDLIST(itemid_list=idlists, terminalid=terminalid)
         self.target_idlist = c_lnk.LINK_TARGET_IDLIST(idlist_size=self.size, idlist=self.idlist)
+
+    @property
+    def path_components(self) -> list[str | None]:
+        """Return the resolved path component per shell item, None for items that do not resolve to one."""
+        return [item.get_path_component() for item in self.items]
+
+    def get_path(self) -> str:
+        """Best-effort reconstruction of the target path. Unresolved items are marked as such."""
+        components = []
+        for item in self.items:
+            component = item.get_path_component()
+            if component is None:
+                if isinstance(item, RootFolderShellItem):
+                    # Namespace containers are not file system path components.
+                    continue
+                component = f"<unresolved type 0x{item.type:02x}>"
+            components.append(component.rstrip("\\"))
+        return "\\".join(components)
 
     def __repr__(self) -> str:
         return repr(self.target_idlist)
