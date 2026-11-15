@@ -280,33 +280,240 @@ module OneLogin
       # given multiple private keys to try.
       # @param encrypted_node [REXML::Element] The Encrypted element
       # @param private_keys [Array<OpenSSL::PKey::RSA>] The Service provider private key
+      # @param recipient [String|nil] The expected recipient of the EncryptedKey element
       # @return [String] The decrypted data
-      def self.decrypt_multi(encrypted_node, private_keys)
+      def self.decrypt_multi(encrypted_node, private_keys, recipient = nil)
         raise ArgumentError.new('private_keys must be specified') if !private_keys || private_keys.empty?
 
+        encrypt_data = retrieve_encrypted_data(encrypted_node)
+        encrypted_key = retrieve_encrypted_key(encrypted_node, encrypt_data, recipient)
+
         error = nil
-        private_keys.each do |key|
+        private_keys.each do |private_key|
           begin
-            return decrypt_data(encrypted_node, key)
+            return decrypt_data_with_key(encrypt_data, encrypted_key, private_key)
           rescue OpenSSL::PKey::PKeyError => e
+            error ||= e
+          rescue OpenSSL::Cipher::CipherError => e
             error ||= e
           end
         end
 
         raise(error) if error
+        raise encryption_error(encrypted_node, 'no EncryptedKey could be decrypted')
       end
 
-      # Obtains the decrypted string from an Encrypted node element in XML
+      # Obtains the single EncryptedData element that is the target of decryption.
       # @param encrypted_node [REXML::Element] The Encrypted element
-      # @param private_key [OpenSSL::PKey::RSA] The Service provider private key
-      # @return [String] The decrypted data
-      def self.decrypt_data(encrypted_node, private_key)
-        encrypt_data = REXML::XPath.first(
+      # @return [REXML::Element] The EncryptedData element
+      def self.retrieve_encrypted_data(encrypted_node)
+        encrypted_data_nodes =
+          if encrypted_node.name == 'EncryptedData'
+            [encrypted_node]
+          else
+            REXML::XPath.match(
+              encrypted_node,
+              "./xenc:EncryptedData",
+              { 'xenc' => XENC }
+            )
+          end
+
+        if encrypted_data_nodes.size != 1
+          raise encryption_error(encrypted_node, 'the encrypted element must contain exactly one EncryptedData')
+        end
+
+        encrypt_data = encrypted_data_nodes.first
+        assert_unique_encrypted_data_id(encrypted_node, encrypt_data)
+        encrypt_data
+      end
+
+      # Obtains the single EncryptedKey that is bound to the EncryptedData.
+      # @param encrypted_node [REXML::Element] The Encrypted element
+      # @param encrypt_data [REXML::Element] The EncryptedData element
+      # @param recipient [String|nil] The expected recipient of the EncryptedKey element
+      # @return [REXML::Element] The EncryptedKey element
+      def self.retrieve_encrypted_key(encrypted_node, encrypt_data, recipient = nil)
+        encrypted_keys, rejections = retrieve_encrypted_keys(encrypted_node, encrypt_data, recipient)
+
+        unless rejections.empty?
+          raise encryption_error(encrypted_node, "conflicting EncryptedKey binding (#{rejections.join('; ')})")
+        end
+
+        if encrypted_keys.empty?
+          raise encryption_error(encrypted_node, 'no EncryptedKey element found for the EncryptedData')
+        end
+
+        assert_unique_encrypted_key_ids(encrypted_node, encrypted_keys)
+
+        if encrypted_keys.size != 1
+          raise encryption_error(encrypted_node, 'multiple EncryptedKey elements are bound to the EncryptedData')
+        end
+
+        encrypted_keys.first
+      end
+
+      # Obtains the EncryptedKey elements that are bound to the EncryptedData.
+      # @param encrypted_node [REXML::Element] The Encrypted element
+      # @param encrypt_data [REXML::Element] The EncryptedData element
+      # @param recipient [String|nil] The expected recipient of the EncryptedKey element
+      # @return [Array(Array<REXML::Element>, Array<String>)] Eligible keys and rejection reasons
+      def self.retrieve_encrypted_keys(encrypted_node, encrypt_data, recipient = nil)
+        candidate_keys = []
+
+        REXML::XPath.match(
+          encrypt_data,
+          "./ds:KeyInfo//xenc:EncryptedKey | ./KeyInfo//xenc:EncryptedKey",
+          { 'ds' => DSIG, 'xenc' => XENC }
+        ).each { |key| candidate_keys << key }
+
+        REXML::XPath.match(
           encrypted_node,
-          "./xenc:EncryptedData",
+          "./xenc:EncryptedKey",
+          { 'xenc' => XENC }
+        ).each { |key| candidate_keys << key }
+
+        REXML::XPath.match(
+          encrypt_data,
+          "./ds:KeyInfo/ds:RetrievalMethod | ./ds:KeyInfo/RetrievalMethod | ./KeyInfo/ds:RetrievalMethod | ./KeyInfo/RetrievalMethod",
+          { 'ds' => DSIG, 'xenc' => XENC }
+        ).each do |retrieval_method|
+          uri = retrieval_method.attributes['URI']
+          unless uri && uri.start_with?('#') && !uri[1..-1].empty?
+            raise encryption_error(encrypted_node, 'malformed EncryptedKey RetrievalMethod')
+          end
+
+          referenced_keys = REXML::XPath.match(
+            encrypted_node.root,
+            "//xenc:EncryptedKey[@Id=$id]",
+            { 'xenc' => XENC },
+            { 'id' => uri[1..-1] }
+          )
+
+          if referenced_keys.empty?
+            raise encryption_error(encrypted_node, 'EncryptedKey RetrievalMethod does not resolve')
+          end
+
+          referenced_keys.each { |key| candidate_keys << key }
+        end
+
+        candidate_keys = candidate_keys.each_with_object([]) do |key, unique_keys|
+          unique_keys << key unless unique_keys.any? { |unique_key| unique_key.object_id == key.object_id }
+        end
+
+        eligible_keys = []
+        rejections = []
+
+        candidate_keys.each do |key|
+          if !encrypted_key_recipient_matches?(key, recipient)
+            rejections << "EncryptedKey #{encrypted_key_label(key)} is for another Recipient"
+            next
+          end
+
+          if !encrypted_key_references_data?(key, encrypt_data)
+            rejections << "EncryptedKey #{encrypted_key_label(key)} references another EncryptedData"
+            next
+          end
+
+          eligible_keys << key
+        end
+
+        [eligible_keys, rejections]
+      end
+
+      # Checks whether the EncryptedKey Recipient matches the expected recipient.
+      # @param encrypted_key [REXML::Element] The EncryptedKey element
+      # @param recipient [String|nil] The expected recipient
+      # @return [Boolean] True when the key can be used by the recipient
+      def self.encrypted_key_recipient_matches?(encrypted_key, recipient)
+        return true if recipient.nil? || recipient.empty?
+
+        key_recipient = encrypted_key.attributes['Recipient']
+        return true if key_recipient.nil? || key_recipient.empty?
+
+        key_recipient == recipient
+      end
+
+      # Checks whether the EncryptedKey references the target EncryptedData.
+      # @param encrypted_key [REXML::Element] The EncryptedKey element
+      # @param encrypt_data [REXML::Element] The EncryptedData element
+      # @return [Boolean] True when the key is bound to the target
+      def self.encrypted_key_references_data?(encrypted_key, encrypt_data)
+        data_references = REXML::XPath.match(
+          encrypted_key,
+          "./xenc:ReferenceList/xenc:DataReference",
           { 'xenc' => XENC }
         )
-        symmetric_key = retrieve_symmetric_key(encrypt_data, private_key)
+
+        return true if data_references.empty?
+
+        target_id = encrypt_data.attributes['Id']
+        return false if target_id.nil? || target_id.empty?
+
+        data_references.any? do |data_reference|
+          uri = data_reference.attributes['URI']
+          uri && uri.start_with?('#') && uri[1..-1] == target_id
+        end
+      end
+
+      # Checks that the candidate EncryptedKeys do not share an Id.
+      # @param encrypted_node [REXML::Element] The Encrypted element
+      # @param encrypted_keys [Array<REXML::Element>] The candidate keys
+      def self.assert_unique_encrypted_key_ids(encrypted_node, encrypted_keys)
+        ids = encrypted_keys.map { |key| key.attributes['Id'] }.compact.reject { |id| id.empty? }
+
+        if ids.size != ids.uniq.size
+          raise encryption_error(encrypted_node, 'duplicated EncryptedKey Id')
+        end
+
+        ids.each do |id|
+          matching_keys = REXML::XPath.match(
+            encrypted_node.root,
+            "//xenc:EncryptedKey[@Id=$id]",
+            { 'xenc' => XENC },
+            { 'id' => id }
+          )
+
+          if matching_keys.size != 1
+            raise encryption_error(encrypted_node, 'duplicated EncryptedKey Id')
+          end
+        end
+      end
+
+      # Checks that the target EncryptedData does not share an Id with another node.
+      # @param encrypted_node [REXML::Element] The Encrypted element
+      # @param encrypt_data [REXML::Element] The EncryptedData element
+      def self.assert_unique_encrypted_data_id(encrypted_node, encrypt_data)
+        id = encrypt_data.attributes['Id']
+        return if id.nil? || id.empty?
+
+        matching_data = REXML::XPath.match(
+          encrypted_node.root,
+          "//xenc:EncryptedData[@Id=$id]",
+          { 'xenc' => XENC },
+          { 'id' => id }
+        )
+
+        if matching_data.size != 1
+          raise encryption_error(encrypted_node, 'duplicated EncryptedData Id')
+        end
+      end
+
+      def self.encrypted_key_label(encrypted_key)
+        id = encrypted_key.attributes['Id']
+        id.nil? || id.empty? ? 'without Id' : "##{id}"
+      end
+
+      def self.encryption_error(encrypted_node, message)
+        ValidationError.new("Invalid #{encrypted_node.name}: #{message}")
+      end
+
+      # Decrypts an EncryptedData element with an already selected EncryptedKey.
+      # @param encrypt_data [REXML::Element] The EncryptedData element
+      # @param encrypted_key [REXML::Element] The EncryptedKey element
+      # @param private_key [OpenSSL::PKey::RSA] The Service provider private key
+      # @return [String] The decrypted data
+      def self.decrypt_data_with_key(encrypt_data, encrypted_key, private_key)
+        symmetric_key = decrypt_encrypted_key(encrypted_key, private_key)
         cipher_value = REXML::XPath.first(
           encrypt_data,
           "./xenc:CipherData/xenc:CipherValue",
@@ -322,18 +529,29 @@ module OneLogin
         retrieve_plaintext(node, symmetric_key, algorithm)
       end
 
-      # Obtains the symmetric key from the EncryptedData element
-      # @param encrypt_data [REXML::Element]     The EncryptedData element
+      # Obtains the decrypted string from an Encrypted node element in XML
+      # @param encrypted_node [REXML::Element] The Encrypted element
+      # @param private_key [OpenSSL::PKey::RSA] The Service provider private key
+      # @return [String] The decrypted data
+      def self.decrypt_data(encrypted_node, private_key)
+        decrypt_multi(encrypted_node, [private_key])
+      end
+
+      # Obtains the symmetric key from the EncryptedKey bound to an EncryptedData element
+      # @param encrypted_node [REXML::Element] The Encrypted element
       # @param private_key [OpenSSL::PKey::RSA] The Service provider private key
       # @return [String] The symmetric key
-      def self.retrieve_symmetric_key(encrypt_data, private_key)
-        encrypted_key = REXML::XPath.first(
-          encrypt_data,
-          "./ds:KeyInfo/xenc:EncryptedKey | ./KeyInfo/xenc:EncryptedKey | //xenc:EncryptedKey[@Id=$id]",
-          { "ds" => DSIG, "xenc" => XENC },
-          { "id" => self.retrieve_symetric_key_reference(encrypt_data) }
-        )
+      def self.retrieve_symmetric_key(encrypted_node, private_key)
+        encrypt_data = retrieve_encrypted_data(encrypted_node)
+        encrypted_key = retrieve_encrypted_key(encrypted_node, encrypt_data)
+        decrypt_encrypted_key(encrypted_key, private_key)
+      end
 
+      # Decrypts an EncryptedKey element with a private key
+      # @param encrypted_key [REXML::Element] The EncryptedKey element
+      # @param private_key [OpenSSL::PKey::RSA] The Service provider private key
+      # @return [String] The symmetric key
+      def self.decrypt_encrypted_key(encrypted_key, private_key)
         encrypted_symmetric_key_element = REXML::XPath.first(
           encrypted_key,
           "./xenc:CipherData/xenc:CipherValue",

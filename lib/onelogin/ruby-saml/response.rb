@@ -1103,7 +1103,7 @@ module OneLogin
           node_header = '<node xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">'
         end
 
-        elem_plaintext = OneLogin::RubySaml::Utils.decrypt_multi(encrypt_node, settings.get_sp_decryption_keys)
+        elem_plaintext = OneLogin::RubySaml::Utils.decrypt_multi(encrypt_node, settings.get_sp_decryption_keys, decryption_recipient(encrypt_node))
 
         # If we get some problematic noise in the plaintext after decrypting.
         # This quick regexp parse will grab only the Element and discard the noise.
@@ -1114,6 +1114,17 @@ module OneLogin
         elem_plaintext = node_header + elem_plaintext + '</node>'
         doc = REXML::Document.new(elem_plaintext)
         doc.root[0]
+      end
+
+      # Returns the recipient that an EncryptedKey must be addressed to, when
+      # that binding can be established for the encrypted element.
+      # @param encrypt_node [REXML::Element] The encrypted element
+      # @return [String|nil] The expected recipient
+      def decryption_recipient(encrypt_node)
+        return nil if encrypt_node.name != 'EncryptedAssertion'
+        return nil if settings.nil? || settings.assertion_consumer_service_url.nil?
+
+        settings.assertion_consumer_service_url
       end
 
       # Parse the attribute of a given node in Time format
