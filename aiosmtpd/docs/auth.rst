@@ -195,6 +195,57 @@ AuthResult API
       where legacy handlers might be looking for ``session.login_data`` for some reasons.
 
 
+.. _sender-authorization:
+
+Envelope-sender authorization
+=============================
+
+Authentication answers *who* the client is.  It does not, by itself, decide
+*which envelope sender* that client may use.  A submission server must make
+that second decision in ``handle_MAIL``, before writing
+``envelope.mail_from``.
+
+The ``examples/authenticated_relayer/sender_policy.py`` module demonstrates a
+reusable shape for this:
+
+``parse_envelope_address(address, *, smtp_utf8, smtp_utf8_enabled)``
+   Converts the addr-spec delivered to ``handle_MAIL`` into one canonical
+   identity.  It does not re-run a lenient RFC 5322 parser over the wire
+   command.  The local-part keeps its exact case and Unicode code points; only
+   the RFC 5321 equivalence between quoted and unquoted forms is applied.
+   ``<>`` is returned as the distinct null reverse-path, while
+   ``""@example.com`` is rejected as an empty local-part.
+
+   The domain is canonicalized with one explicit IDNA policy.  The example
+   uses strict IDNA2008 with STD3 rules and lowercases ASCII letters.  UTS #46
+   compatibility folding is intentionally *not* used, so a full-width or other
+   homoglyph is rejected instead of being mapped onto the legitimate alias.
+
+   If either the local-part or the domain contains non-ASCII text, the
+   ``smtp_utf8`` argument must be the MAIL command's SMTPUTF8 assertion.
+   Merely enabling ``enable_SMTPUTF8`` on the server is not enough: a client
+   that did not negotiate SMTPUTF8 must not reach the Unicode identity path,
+   even though ``aiosmtpd`` has already decoded the command bytes.
+
+``SenderPolicy``
+   Maps an authenticated username to an exact set of envelope-sender
+   identities.  Aliases may be written as U-labels or A-labels; matching is
+   on the canonical key.  There are no domain-wide, prefix, plus-address, or
+   case-folded local-part matches.
+
+``SenderAuthorizedHandler``
+   A ``handle_MAIL`` hook that applies the policy.  It writes
+   ``envelope.mail_from`` only after authorization succeeds and explicitly
+   clears it on every rejection.  Consequently a later ``RCPT`` or ``DATA``
+   cannot inherit a sender from a rejected ``MAIL``.  The message body's
+   ``From`` header is never consulted.
+
+The hook logs the original input in a bounded, control-character-escaped form
+and records the canonical identity and the exact match basis separately, so
+operators can investigate a rejection without allowing a crafted address to
+forge log lines.
+
+
 Security Considerations
 =======================
 
@@ -210,3 +261,5 @@ Example
 =======
 
 An example is provided in ``examples/authenticated_relayer``.
+Its ``sender_policy.py`` also demonstrates
+:ref:`authenticated envelope-sender authorization <sender-authorization>`.

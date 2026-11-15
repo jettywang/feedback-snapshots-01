@@ -5,6 +5,8 @@ coverage==7.8.0
 # 2.8.0 requires Python >= 3.10, so 3.9 pins one back.
 dnspython==2.7.0; python_version < "3.10"
 dnspython==2.8.0; python_version >= "3.10"
+# examples/authenticated_relayer/sender_policy.py uses strict IDNA2008 mapping.
+idna==3.20
 pytest==8.4.2
 pytest-cov==6.1.1
 pytest-mock==3.14.0

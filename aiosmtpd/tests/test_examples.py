@@ -93,6 +93,9 @@ def test_correct_password_accepted(
     user, password = known_user
     result = authenticate(mechanism, LoginPassword(user.encode("utf-8"), password))
     assert result.success is True
+    # The authenticated identity is an opaque submission username, not a
+    # mailbox and not anything read from the message body.
+    assert result.auth_data.username == user
 
 
 def test_all_created_users_can_authenticate(

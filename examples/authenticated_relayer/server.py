@@ -13,9 +13,13 @@ from pathlib import Path
 from smtplib import SMTP as SMTPCLient
 from typing import Dict
 
-import dns.resolver
 from aiosmtpd.controller import Controller
-from aiosmtpd.smtp import AuthResult, LoginPassword
+from aiosmtpd.smtp import AuthResult, Envelope, LoginPassword, Session, SMTP
+
+try:
+    from .sender_policy import AuthIdentity, SenderAuthorizedHandler, SenderPolicy
+except ImportError:  # Running this file directly, as the example's __main__ does.
+    from sender_policy import AuthIdentity, SenderAuthorizedHandler, SenderPolicy
 
 
 DEST_PORT = 25
@@ -36,7 +40,14 @@ class Authenticator:
     def __init__(self, auth_database):
         self.auth_db = Path(auth_database)
 
-    def __call__(self, server, session, envelope, mechanism, auth_data):
+    def __call__(
+        self,
+        server: SMTP,
+        session: Session,
+        envelope: Envelope,
+        mechanism: str,
+        auth_data: object,
+    ) -> AuthResult:
         fail_nothandled = AuthResult(success=False, handled=False)
         if mechanism not in ("LOGIN", "PLAIN"):
             return fail_nothandled
@@ -85,11 +96,17 @@ class Authenticator:
         # same as a wrong password.
         if row is None or not hmac.compare_digest(digest, expected):
             return fail_nothandled
-        return AuthResult(success=True)
+        # The authorized envelope senders are keyed by this opaque username.
+        # It is not a mailbox and is never derived from the message header.
+        return AuthResult(success=True, auth_data=AuthIdentity(username=username))
 
 
 @lru_cache(maxsize=256)
 def get_mx(domain):
+    # Imported lazily so the submission policy (and tests) can be exercised
+    # without a resolver or network access.
+    import dns.resolver
+
     records = dns.resolver.resolve(domain, "MX")
     if not records:
         return None
@@ -97,8 +114,28 @@ def get_mx(domain):
     return str(result.exchange)
 
 
-class RelayHandler:
-    def handle_data(self, server, session, envelope, data):
+#: Envelope senders each authenticated user may use, expressed separately
+#: from the user's login name.  A user may have zero, one, or many aliases;
+#: matching is exact on the canonical identity (see sender_policy.py).
+ALLOWED_SENDERS: Dict[str, list[str]] = {
+    "user1": ["user1@example.com", "user1@例え.example"],
+    "user2": ["user2@example.com"],
+    "user3": ["user3@example.com"],
+    "user4": ["user4@example.com"],
+    "user5": ["user5@example.com"],
+    "user6": ["user6@example.com"],
+}
+
+
+class RelayHandler(SenderAuthorizedHandler):
+    """Authorize the envelope sender, then relay the accepted envelope."""
+
+    async def handle_DATA(
+        self, server: SMTP, session: Session, envelope: Envelope
+    ) -> str:
+        # The envelope sender was set by handle_MAIL after authorization.
+        # The message body's From header is deliberately never consulted:
+        # a client cannot gain envelope authority by writing a header.
         mx_rcpt: Dict[str, list[str]] = {}
         for rcpt in envelope.rcpt_tos:
             _, _, domain = rcpt.partition("@")
@@ -112,18 +149,28 @@ class RelayHandler:
                 client.sendmail(
                     from_addr=envelope.mail_from,
                     to_addrs=rcpts,
-                    msg=envelope.original_content
+                    msg=envelope.original_content,
                 )
+        return "250 OK"
 
 
 # noinspection PyShadowingNames
 async def amain():
-    handler = RelayHandler()
+    policy = SenderPolicy(ALLOWED_SENDERS)
+    handler = RelayHandler(policy)
     cont = Controller(
         handler,
         hostname='',
         port=8025,
-        authenticator=Authenticator(DB_AUTH)
+        authenticator=Authenticator(DB_AUTH),
+        # Submission requires authentication; never advertise SMTPUTF8 unless
+        # the deployment's downstream path can actually carry EAI.
+        auth_required=True,
+        # The example has no certificate, so it cannot offer STARTTLS.  A real
+        # submission deployment MUST leave auth_require_tls at its default
+        # (True) and supply a tls_context; this is local-demo-only.
+        auth_require_tls=False,
+        enable_SMTPUTF8=True,
     )
     try:
         cont.start()

@@ -10,6 +10,10 @@
 Fixed/Improved
 --------------
 
+* The ``authenticated_relayer`` example now authorizes the envelope sender of
+  authenticated clients, supports SMTPUTF8 with an explicit IDNA policy, and
+  no longer treats the message header as sender authority.  The reusable
+  policy lives in ``examples/authenticated_relayer/sender_policy.py``.
 * Dropped Python 3.8, PyPy 3.8
 * Added PyPy 3.11, dropped PyPy 3.9
 * The ``authenticated_relayer`` example now stores a per-user salt and uses it
