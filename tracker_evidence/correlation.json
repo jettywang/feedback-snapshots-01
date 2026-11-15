@@ -1,0 +1,149 @@
+{
+  "groups": [
+    {
+      "rule": "R1",
+      "identity_used": {
+        "current_pair": [
+          "11111111-2222-3333-4444-555555555555",
+          "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        ],
+        "birth_pair": [
+          "11111111-2222-3333-4444-555555555555",
+          "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        ]
+      },
+      "files": [
+        "alpha_created.lnk",
+        "alpha_duplicate.lnk"
+      ],
+      "conclusion": "same tracked object (identical current and birth identity pairs)"
+    }
+  ],
+  "migration_candidates": [
+    {
+      "rule": "R2",
+      "identity_used": {
+        "birth_pair": [
+          "11111111-2222-3333-4444-555555555555",
+          "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        ]
+      },
+      "files": [
+        {
+          "file": "alpha_created.lnk",
+          "current_pair": [
+            "11111111-2222-3333-4444-555555555555",
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+          ]
+        },
+        {
+          "file": "alpha_duplicate.lnk",
+          "current_pair": [
+            "11111111-2222-3333-4444-555555555555",
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+          ]
+        },
+        {
+          "file": "beta_moved.lnk",
+          "current_pair": [
+            "66666666-7777-8888-9999-000000000000",
+            "ffff0000-1111-2222-3333-444444444444"
+          ]
+        }
+      ],
+      "conclusion": "shared birth identity, diverging current identity: candidate move/migration chain; records kept distinct, not merged"
+    }
+  ],
+  "partial_matches": [
+    {
+      "rule": "R5",
+      "files": [
+        "alpha_created.lnk",
+        "zeta_truncated.lnk"
+      ],
+      "identity_used": {
+        "current_pair": [
+          "11111111-2222-3333-4444-555555555555",
+          "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        ]
+      },
+      "conclusion": "one complete identity pair matches but the other pair is missing/zero on at least one record: cannot confirm same object"
+    },
+    {
+      "rule": "R5",
+      "files": [
+        "alpha_duplicate.lnk",
+        "zeta_truncated.lnk"
+      ],
+      "identity_used": {
+        "current_pair": [
+          "11111111-2222-3333-4444-555555555555",
+          "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        ]
+      },
+      "conclusion": "one complete identity pair matches but the other pair is missing/zero on at least one record: cannot confirm same object"
+    }
+  ],
+  "insufficient": [
+    {
+      "rule": "R3",
+      "files": [
+        "alpha_created.lnk",
+        "delta_shared_volume.lnk"
+      ],
+      "overlap": "single shared GUID(s): volume_droid",
+      "conclusion": "insufficient to correlate: no complete identity pair matches"
+    },
+    {
+      "rule": "R3",
+      "files": [
+        "alpha_created.lnk",
+        "gamma_same_machine_name.lnk"
+      ],
+      "overlap": "same machine_id 'DESKTOP-ALPHA01' only",
+      "conclusion": "insufficient to correlate: no complete identity pair matches"
+    },
+    {
+      "rule": "R3",
+      "files": [
+        "alpha_duplicate.lnk",
+        "delta_shared_volume.lnk"
+      ],
+      "overlap": "single shared GUID(s): volume_droid",
+      "conclusion": "insufficient to correlate: no complete identity pair matches"
+    },
+    {
+      "rule": "R3",
+      "files": [
+        "alpha_duplicate.lnk",
+        "gamma_same_machine_name.lnk"
+      ],
+      "overlap": "same machine_id 'DESKTOP-ALPHA01' only",
+      "conclusion": "insufficient to correlate: no complete identity pair matches"
+    },
+    {
+      "rule": "R3",
+      "files": [
+        "beta_moved.lnk",
+        "gamma_same_machine_name.lnk"
+      ],
+      "overlap": "same machine_id 'DESKTOP-ALPHA01' only",
+      "conclusion": "insufficient to correlate: no complete identity pair matches"
+    },
+    {
+      "rule": "R3",
+      "files": [
+        "delta_shared_volume.lnk",
+        "zeta_truncated.lnk"
+      ],
+      "overlap": "single shared GUID(s): volume_droid",
+      "conclusion": "insufficient to correlate: no complete identity pair matches"
+    }
+  ],
+  "uncorrelatable": [
+    {
+      "file": "epsilon_zeroed.lnk",
+      "reason": "no non-zero, fully-present identity pair"
+    }
+  ]
+}

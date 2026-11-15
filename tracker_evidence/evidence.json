@@ -1,0 +1,522 @@
+[
+  {
+    "file": "samples/alpha_created.lnk",
+    "file_size": 176,
+    "sha256_note": "hash the exhibit separately; this view covers content only",
+    "tracker_block": {
+      "present": true,
+      "anomalies": [],
+      "link_flags": "0x00000000",
+      "extradata_offset": 76,
+      "block_offset": 76,
+      "block_size_declared": 96,
+      "block_bytes_available": 96,
+      "fields": {
+        "length": {
+          "offset": "0x54",
+          "size": 4,
+          "raw_hex": "58000000",
+          "value": 88
+        },
+        "version": {
+          "offset": "0x58",
+          "size": 4,
+          "raw_hex": "00000000",
+          "value": 0
+        },
+        "machine_id": {
+          "offset": "0x5c",
+          "size": 16,
+          "raw_hex": "4445534b544f502d414c504841303100",
+          "value": "DESKTOP-ALPHA01",
+          "null_terminated": true
+        },
+        "volume_droid": {
+          "offset": "0x6c",
+          "size": 16,
+          "raw_hex": "11111111222233334444555555555555",
+          "guid": "11111111-2222-3333-4444-555555555555",
+          "recompute": "11111111-2222-3333-4444-555555555555",
+          "all_zero": false
+        },
+        "file_droid": {
+          "offset": "0x7c",
+          "size": 16,
+          "raw_hex": "aaaaaaaabbbbccccddddeeeeeeeeeeee",
+          "guid": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          "recompute": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          "all_zero": false
+        },
+        "volume_droid_birth": {
+          "offset": "0x8c",
+          "size": 16,
+          "raw_hex": "11111111222233334444555555555555",
+          "guid": "11111111-2222-3333-4444-555555555555",
+          "recompute": "11111111-2222-3333-4444-555555555555",
+          "all_zero": false
+        },
+        "file_droid_birth": {
+          "offset": "0x9c",
+          "size": 16,
+          "raw_hex": "aaaaaaaabbbbccccddddeeeeeeeeeeee",
+          "guid": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          "recompute": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          "all_zero": false
+        }
+      }
+    },
+    "dissect_shellitem": {
+      "tracker_props_parsed": true,
+      "machine_id": "DESKTOP-ALPHA01",
+      "volume_droid": "11111111-2222-3333-4444-555555555555",
+      "file_droid": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      "volume_droid_birth": "11111111-2222-3333-4444-555555555555",
+      "file_droid_birth": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    }
+  },
+  {
+    "file": "samples/alpha_duplicate.lnk",
+    "file_size": 176,
+    "sha256_note": "hash the exhibit separately; this view covers content only",
+    "tracker_block": {
+      "present": true,
+      "anomalies": [],
+      "link_flags": "0x00000000",
+      "extradata_offset": 76,
+      "block_offset": 76,
+      "block_size_declared": 96,
+      "block_bytes_available": 96,
+      "fields": {
+        "length": {
+          "offset": "0x54",
+          "size": 4,
+          "raw_hex": "58000000",
+          "value": 88
+        },
+        "version": {
+          "offset": "0x58",
+          "size": 4,
+          "raw_hex": "00000000",
+          "value": 0
+        },
+        "machine_id": {
+          "offset": "0x5c",
+          "size": 16,
+          "raw_hex": "4445534b544f502d414c504841303100",
+          "value": "DESKTOP-ALPHA01",
+          "null_terminated": true
+        },
+        "volume_droid": {
+          "offset": "0x6c",
+          "size": 16,
+          "raw_hex": "11111111222233334444555555555555",
+          "guid": "11111111-2222-3333-4444-555555555555",
+          "recompute": "11111111-2222-3333-4444-555555555555",
+          "all_zero": false
+        },
+        "file_droid": {
+          "offset": "0x7c",
+          "size": 16,
+          "raw_hex": "aaaaaaaabbbbccccddddeeeeeeeeeeee",
+          "guid": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          "recompute": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          "all_zero": false
+        },
+        "volume_droid_birth": {
+          "offset": "0x8c",
+          "size": 16,
+          "raw_hex": "11111111222233334444555555555555",
+          "guid": "11111111-2222-3333-4444-555555555555",
+          "recompute": "11111111-2222-3333-4444-555555555555",
+          "all_zero": false
+        },
+        "file_droid_birth": {
+          "offset": "0x9c",
+          "size": 16,
+          "raw_hex": "aaaaaaaabbbbccccddddeeeeeeeeeeee",
+          "guid": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          "recompute": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          "all_zero": false
+        }
+      }
+    },
+    "dissect_shellitem": {
+      "tracker_props_parsed": true,
+      "machine_id": "DESKTOP-ALPHA01",
+      "volume_droid": "11111111-2222-3333-4444-555555555555",
+      "file_droid": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+      "volume_droid_birth": "11111111-2222-3333-4444-555555555555",
+      "file_droid_birth": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    }
+  },
+  {
+    "file": "samples/beta_moved.lnk",
+    "file_size": 176,
+    "sha256_note": "hash the exhibit separately; this view covers content only",
+    "tracker_block": {
+      "present": true,
+      "anomalies": [],
+      "link_flags": "0x00000000",
+      "extradata_offset": 76,
+      "block_offset": 76,
+      "block_size_declared": 96,
+      "block_bytes_available": 96,
+      "fields": {
+        "length": {
+          "offset": "0x54",
+          "size": 4,
+          "raw_hex": "58000000",
+          "value": 88
+        },
+        "version": {
+          "offset": "0x58",
+          "size": 4,
+          "raw_hex": "00000000",
+          "value": 0
+        },
+        "machine_id": {
+          "offset": "0x5c",
+          "size": 16,
+          "raw_hex": "4445534b544f502d414c504841303100",
+          "value": "DESKTOP-ALPHA01",
+          "null_terminated": true
+        },
+        "volume_droid": {
+          "offset": "0x6c",
+          "size": 16,
+          "raw_hex": "66666666777788889999000000000000",
+          "guid": "66666666-7777-8888-9999-000000000000",
+          "recompute": "66666666-7777-8888-9999-000000000000",
+          "all_zero": false
+        },
+        "file_droid": {
+          "offset": "0x7c",
+          "size": 16,
+          "raw_hex": "0000ffff111122223333444444444444",
+          "guid": "ffff0000-1111-2222-3333-444444444444",
+          "recompute": "ffff0000-1111-2222-3333-444444444444",
+          "all_zero": false
+        },
+        "volume_droid_birth": {
+          "offset": "0x8c",
+          "size": 16,
+          "raw_hex": "11111111222233334444555555555555",
+          "guid": "11111111-2222-3333-4444-555555555555",
+          "recompute": "11111111-2222-3333-4444-555555555555",
+          "all_zero": false
+        },
+        "file_droid_birth": {
+          "offset": "0x9c",
+          "size": 16,
+          "raw_hex": "aaaaaaaabbbbccccddddeeeeeeeeeeee",
+          "guid": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          "recompute": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          "all_zero": false
+        }
+      }
+    },
+    "dissect_shellitem": {
+      "tracker_props_parsed": true,
+      "machine_id": "DESKTOP-ALPHA01",
+      "volume_droid": "66666666-7777-8888-9999-000000000000",
+      "file_droid": "ffff0000-1111-2222-3333-444444444444",
+      "volume_droid_birth": "11111111-2222-3333-4444-555555555555",
+      "file_droid_birth": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    }
+  },
+  {
+    "file": "samples/delta_shared_volume.lnk",
+    "file_size": 176,
+    "sha256_note": "hash the exhibit separately; this view covers content only",
+    "tracker_block": {
+      "present": true,
+      "anomalies": [],
+      "link_flags": "0x00000000",
+      "extradata_offset": 76,
+      "block_offset": 76,
+      "block_size_declared": 96,
+      "block_bytes_available": 96,
+      "fields": {
+        "length": {
+          "offset": "0x54",
+          "size": 4,
+          "raw_hex": "58000000",
+          "value": 88
+        },
+        "version": {
+          "offset": "0x58",
+          "size": 4,
+          "raw_hex": "00000000",
+          "value": 0
+        },
+        "machine_id": {
+          "offset": "0x5c",
+          "size": 16,
+          "raw_hex": "4445534b544f502d4245544130320000",
+          "value": "DESKTOP-BETA02",
+          "null_terminated": true
+        },
+        "volume_droid": {
+          "offset": "0x6c",
+          "size": 16,
+          "raw_hex": "11111111222233334444555555555555",
+          "guid": "11111111-2222-3333-4444-555555555555",
+          "recompute": "11111111-2222-3333-4444-555555555555",
+          "all_zero": false
+        },
+        "file_droid": {
+          "offset": "0x7c",
+          "size": 16,
+          "raw_hex": "0df0ad0baddeefbecafe0123456789ab",
+          "guid": "0badf00d-dead-beef-cafe-0123456789ab",
+          "recompute": "0badf00d-dead-beef-cafe-0123456789ab",
+          "all_zero": false
+        },
+        "volume_droid_birth": {
+          "offset": "0x8c",
+          "size": 16,
+          "raw_hex": "d0d0d0d0e1e142428383040404040404",
+          "guid": "d0d0d0d0-e1e1-4242-8383-040404040404",
+          "recompute": "d0d0d0d0-e1e1-4242-8383-040404040404",
+          "all_zero": false
+        },
+        "file_droid_birth": {
+          "offset": "0x9c",
+          "size": 16,
+          "raw_hex": "ed5eed5eed6eed4eaeedbeedbeedbeed",
+          "guid": "5eed5eed-6eed-4eed-aeed-beedbeedbeed",
+          "recompute": "5eed5eed-6eed-4eed-aeed-beedbeedbeed",
+          "all_zero": false
+        }
+      }
+    },
+    "dissect_shellitem": {
+      "tracker_props_parsed": true,
+      "machine_id": "DESKTOP-BETA02",
+      "volume_droid": "11111111-2222-3333-4444-555555555555",
+      "file_droid": "0badf00d-dead-beef-cafe-0123456789ab",
+      "volume_droid_birth": "d0d0d0d0-e1e1-4242-8383-040404040404",
+      "file_droid_birth": "5eed5eed-6eed-4eed-aeed-beedbeedbeed"
+    }
+  },
+  {
+    "file": "samples/epsilon_zeroed.lnk",
+    "file_size": 176,
+    "sha256_note": "hash the exhibit separately; this view covers content only",
+    "tracker_block": {
+      "present": true,
+      "anomalies": [],
+      "link_flags": "0x00000000",
+      "extradata_offset": 76,
+      "block_offset": 76,
+      "block_size_declared": 96,
+      "block_bytes_available": 96,
+      "fields": {
+        "length": {
+          "offset": "0x54",
+          "size": 4,
+          "raw_hex": "58000000",
+          "value": 88
+        },
+        "version": {
+          "offset": "0x58",
+          "size": 4,
+          "raw_hex": "00000000",
+          "value": 0
+        },
+        "machine_id": {
+          "offset": "0x5c",
+          "size": 16,
+          "raw_hex": "4445534b544f502d47414d4d41303300",
+          "value": "DESKTOP-GAMMA03",
+          "null_terminated": true
+        },
+        "volume_droid": {
+          "offset": "0x6c",
+          "size": 16,
+          "raw_hex": "00000000000000000000000000000000",
+          "guid": "00000000-0000-0000-0000-000000000000",
+          "recompute": "00000000-0000-0000-0000-000000000000",
+          "all_zero": true
+        },
+        "file_droid": {
+          "offset": "0x7c",
+          "size": 16,
+          "raw_hex": "00000000000000000000000000000000",
+          "guid": "00000000-0000-0000-0000-000000000000",
+          "recompute": "00000000-0000-0000-0000-000000000000",
+          "all_zero": true
+        },
+        "volume_droid_birth": {
+          "offset": "0x8c",
+          "size": 16,
+          "raw_hex": "00000000000000000000000000000000",
+          "guid": "00000000-0000-0000-0000-000000000000",
+          "recompute": "00000000-0000-0000-0000-000000000000",
+          "all_zero": true
+        },
+        "file_droid_birth": {
+          "offset": "0x9c",
+          "size": 16,
+          "raw_hex": "00000000000000000000000000000000",
+          "guid": "00000000-0000-0000-0000-000000000000",
+          "recompute": "00000000-0000-0000-0000-000000000000",
+          "all_zero": true
+        }
+      }
+    },
+    "dissect_shellitem": {
+      "tracker_props_parsed": true,
+      "machine_id": "DESKTOP-GAMMA03",
+      "volume_droid": "00000000-0000-0000-0000-000000000000",
+      "file_droid": "00000000-0000-0000-0000-000000000000",
+      "volume_droid_birth": "00000000-0000-0000-0000-000000000000",
+      "file_droid_birth": "00000000-0000-0000-0000-000000000000"
+    }
+  },
+  {
+    "file": "samples/gamma_same_machine_name.lnk",
+    "file_size": 176,
+    "sha256_note": "hash the exhibit separately; this view covers content only",
+    "tracker_block": {
+      "present": true,
+      "anomalies": [],
+      "link_flags": "0x00000000",
+      "extradata_offset": 76,
+      "block_offset": 76,
+      "block_size_declared": 96,
+      "block_bytes_available": 96,
+      "fields": {
+        "length": {
+          "offset": "0x54",
+          "size": 4,
+          "raw_hex": "58000000",
+          "value": 88
+        },
+        "version": {
+          "offset": "0x58",
+          "size": 4,
+          "raw_hex": "00000000",
+          "value": 0
+        },
+        "machine_id": {
+          "offset": "0x5c",
+          "size": 16,
+          "raw_hex": "4445534b544f502d414c504841303100",
+          "value": "DESKTOP-ALPHA01",
+          "null_terminated": true
+        },
+        "volume_droid": {
+          "offset": "0x6c",
+          "size": 16,
+          "raw_hex": "67452301ab89efcd0123456789abcdef",
+          "guid": "01234567-89ab-cdef-0123-456789abcdef",
+          "recompute": "01234567-89ab-cdef-0123-456789abcdef",
+          "all_zero": false
+        },
+        "file_droid": {
+          "offset": "0x7c",
+          "size": 16,
+          "raw_hex": "98badcfe54761032fedcba9876543210",
+          "guid": "fedcba98-7654-3210-fedc-ba9876543210",
+          "recompute": "fedcba98-7654-3210-fedc-ba9876543210",
+          "all_zero": false
+        },
+        "volume_droid_birth": {
+          "offset": "0x8c",
+          "size": 16,
+          "raw_hex": "67452301ab89efcd0123456789abcdef",
+          "guid": "01234567-89ab-cdef-0123-456789abcdef",
+          "recompute": "01234567-89ab-cdef-0123-456789abcdef",
+          "all_zero": false
+        },
+        "file_droid_birth": {
+          "offset": "0x9c",
+          "size": 16,
+          "raw_hex": "98badcfe54761032fedcba9876543210",
+          "guid": "fedcba98-7654-3210-fedc-ba9876543210",
+          "recompute": "fedcba98-7654-3210-fedc-ba9876543210",
+          "all_zero": false
+        }
+      }
+    },
+    "dissect_shellitem": {
+      "tracker_props_parsed": true,
+      "machine_id": "DESKTOP-ALPHA01",
+      "volume_droid": "01234567-89ab-cdef-0123-456789abcdef",
+      "file_droid": "fedcba98-7654-3210-fedc-ba9876543210",
+      "volume_droid_birth": "01234567-89ab-cdef-0123-456789abcdef",
+      "file_droid_birth": "fedcba98-7654-3210-fedc-ba9876543210"
+    }
+  },
+  {
+    "file": "samples/zeta_truncated.lnk",
+    "file_size": 140,
+    "sha256_note": "hash the exhibit separately; this view covers content only",
+    "tracker_block": {
+      "present": true,
+      "anomalies": [
+        "truncated: declared 0x60 bytes, only 0x40 available",
+        "field volume_droid_birth beyond available bytes",
+        "field file_droid_birth beyond available bytes"
+      ],
+      "link_flags": "0x00000000",
+      "extradata_offset": 76,
+      "block_offset": 76,
+      "block_size_declared": 96,
+      "block_bytes_available": 64,
+      "fields": {
+        "length": {
+          "offset": "0x54",
+          "size": 4,
+          "raw_hex": "58000000",
+          "value": 88
+        },
+        "version": {
+          "offset": "0x58",
+          "size": 4,
+          "raw_hex": "00000000",
+          "value": 0
+        },
+        "machine_id": {
+          "offset": "0x5c",
+          "size": 16,
+          "raw_hex": "4445534b544f502d44454c5441303400",
+          "value": "DESKTOP-DELTA04",
+          "null_terminated": true
+        },
+        "volume_droid": {
+          "offset": "0x6c",
+          "size": 16,
+          "raw_hex": "11111111222233334444555555555555",
+          "guid": "11111111-2222-3333-4444-555555555555",
+          "recompute": "11111111-2222-3333-4444-555555555555",
+          "all_zero": false
+        },
+        "file_droid": {
+          "offset": "0x7c",
+          "size": 16,
+          "raw_hex": "aaaaaaaabbbbccccddddeeeeeeeeeeee",
+          "guid": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          "recompute": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+          "all_zero": false
+        },
+        "volume_droid_birth": {
+          "offset": "0x8c",
+          "size": 16,
+          "raw_hex": null,
+          "missing": true
+        },
+        "file_droid_birth": {
+          "offset": "0x9c",
+          "size": 16,
+          "raw_hex": null,
+          "missing": true
+        }
+      }
+    },
+    "dissect_shellitem": {
+      "tracker_props_parsed": false
+    }
+  }
+]
