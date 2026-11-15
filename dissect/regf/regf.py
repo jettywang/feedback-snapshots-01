@@ -34,6 +34,8 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
     from datetime import datetime
 
+    from dissect.regf.mounted import MountedDevicesAnalysis
+
 log = logging.getLogger(__name__)
 log.setLevel(os.getenv("DISSECT_LOG_REGF", "CRITICAL"))
 
@@ -80,6 +82,19 @@ class RegistryHive:
 
     def root(self) -> KeyNode:
         return self._root
+
+    def mounted_devices(self, *, snapshot: str | None = None) -> MountedDevicesAnalysis:
+        """Analyze the ``MountedDevices`` key without modifying the hive.
+
+        Args:
+            snapshot: Optional label used to keep evidence from different hives apart.
+
+        Returns:
+            A read-only analysis of drive-letter and volume-name aliases.
+        """
+        from dissect.regf.mounted import analyze_mounted_devices
+
+        return analyze_mounted_devices(self, snapshot=snapshot)
 
     def cell(self, offset: int) -> CellType:
         return self.parse_cell_data(self.cell_data(offset))

@@ -54,3 +54,35 @@ Dissect is released as open source by Fox-IT (<https://www.fox-it.com>) part of 
 Developed by the Dissect Team (<dissect@fox-it.com>) and made available at <https://github.com/fox-it/dissect>.
 
 License terms: AGPL3 (<https://www.gnu.org/licenses/agpl-3.0.html>). For more information, see the LICENSE file.
+
+## MountedDevices correlation
+
+`dissect.regf.mounted` provides a read-only view of the drive letters and
+volume names stored in `SYSTEM\MountedDevices`. It recognizes the 12-byte MBR
+form (disk signature and partition offset) and the 24-byte `DMIO:ID:` GPT form
+(partition GUID), retains every original value and cell offset, and keeps
+unknown layouts as evidence.
+
+```python
+from dissect.regf import analyze_mounted_devices, correlate_mounted_devices
+
+first = analyze_mounted_devices(hive_a, snapshot="capture-a")
+second = analyze_mounted_devices(hive_b, snapshot="capture-b")
+correlation = correlate_mounted_devices(first, second)
+
+for record in correlation.records:
+    print(record.identity.canonical, record.alias_names, record.snapshots)
+```
+
+Each value record includes `name`, `value_cell_offset`, `data_cell_offset`,
+`raw_hex`, `kind`, `status`, `identity`, and `parse_basis`, so every alias can
+be checked against the bytes it came from. Unknown layouts have
+`kind == "unknown"` and no identity.
+
+Text references to another registry value are followed only by exact name, with
+cycle, missing-target, duplicate-name, and conflicting-reuse cases reported
+instead of guessed. A drive letter reused by different identities in two
+snapshots appears in `conflicts`; its aliases are not merged.
+
+`examples/mounted_devices.py SYSTEM=path/to/SYSTEM` prints the same records as
+JSON.
