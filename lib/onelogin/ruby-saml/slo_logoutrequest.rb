@@ -78,6 +78,28 @@ module OneLogin
 
       alias_method :nameid_format, :name_id_format
 
+      # @return [String|nil] Gets the NameID NameQualifier provided by the IdP.
+      #
+      def name_id_namequalifier
+        @name_id_namequalifier ||=
+          if name_id_node && name_id_node.attribute("NameQualifier")
+            name_id_node.attribute("NameQualifier").value
+          end
+      end
+
+      alias_method :nameid_namequalifier, :name_id_namequalifier
+
+      # @return [String|nil] Gets the NameID SPNameQualifier provided by the IdP.
+      #
+      def name_id_spnamequalifier
+        @name_id_spnamequalifier ||=
+          if name_id_node && name_id_node.attribute("SPNameQualifier")
+            name_id_node.attribute("SPNameQualifier").value
+          end
+      end
+
+      alias_method :nameid_spnamequalifier, :name_id_spnamequalifier
+
       def name_id_node
         @name_id_node ||=
           begin
@@ -180,6 +202,7 @@ module OneLogin
           :validate_id,
           :validate_version,
           :validate_structure,
+          :validate_name_id,
           :validate_not_on_or_after,
           :validate_issuer,
           :validate_signature
@@ -191,6 +214,38 @@ module OneLogin
         else
           validations.all? { |validation| send(validation) }
         end
+      end
+
+      # Validates the NameID and its qualifiers of the Logout Request
+      # If fails, the error is added to the errors array
+      # @return [Boolean] True if the NameID is valid, otherwise False if soft=True
+      # @raise [ValidationError] if soft == false and validation fails
+      #
+      def validate_name_id
+        # Encrypted NameID resolution has its own (pre-existing) error path
+        # when no decryption key is configured; do not change that behavior.
+        encrypted_node = REXML::XPath.first(document, "/p:LogoutRequest/a:EncryptedID", { "p" => PROTOCOL, "a" => ASSERTION })
+        return true if encrypted_node
+
+        return true if name_id_node.nil?
+
+        if name_id.nil? || name_id.empty?
+          return append_error("An empty NameID value found")
+        end
+
+        unless settings.nil? || settings.sp_entity_id.nil? || settings.sp_entity_id.empty? || name_id_spnamequalifier.nil? || name_id_spnamequalifier.empty?
+          if name_id_spnamequalifier != settings.sp_entity_id
+            return append_error("SPNameQualifier value does not match the SP entityID value.")
+          end
+        end
+
+        unless settings.nil? || settings.idp_name_qualifier.nil? || settings.idp_name_qualifier.empty? || name_id_namequalifier.nil? || name_id_namequalifier.empty?
+          if name_id_namequalifier != settings.idp_name_qualifier
+            return append_error("NameQualifier value does not match the IdP name qualifier value.")
+          end
+        end
+
+        true
       end
 
       # Validates that the Logout Request contains an ID
