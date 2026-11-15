@@ -1578,6 +1578,15 @@ for typeDecoder in TAG_MAP.values():
 EOO_SENTINEL = bytes((0, 0))
 
 
+class _ScopeTokens(object):
+    """Mutable counter of debug-scope tokens pushed by one invocation."""
+
+    __slots__ = ('count',)
+
+    def __init__(self):
+        self.count = 0
+
+
 class SingleItemDecoder(object):
     defaultErrorState = stErrorCondition
     #defaultErrorState = stDumpRawValue
@@ -1600,6 +1609,32 @@ class SingleItemDecoder(object):
                  tagSet=None, length=None, state=stDecodeTag,
                  decodeFun=None, substrateFun=None,
                  **options):
+
+        # `debug.scope` is a process-global stack: this invocation may push
+        # one token per state-machine dispatch. Its success-path pops are
+        # never reached when a suspended parse is closed or abandoned, so
+        # count what was pushed and pop it on every exit. The count keeps
+        # total pushes and pops balanced even when decoders interleave;
+        # only the token text, not the stack height, is shared state.
+        scopeTokens = _ScopeTokens()
+
+        try:
+            for value in self._decoding(
+                    substrate, asn1Spec, tagSet, length, state,
+                    decodeFun, substrateFun, scopeTokens, **options):
+                yield value
+
+        finally:
+            while scopeTokens.count:
+                scopeTokens.count -= 1
+                if len(debug.scope):
+                    debug.scope.pop()
+
+    def _decoding(self, substrate, asn1Spec=None,
+                  tagSet=None, length=None, state=stDecodeTag,
+                  decodeFun=None, substrateFun=None,
+                  scopeTokens=None,
+                  **options):
 
         _nestingLevel = options.get('_nestingLevel', 0)
 
@@ -1819,6 +1854,7 @@ class SingleItemDecoder(object):
                 if LOG:
                     LOG('codec %s chosen by a built-in type, decoding %s' % (concreteDecoder and concreteDecoder.__class__.__name__ or "<none>", state is stDecodeValue and 'value' or 'as explicit tag'))
                     debug.scope.push(concreteDecoder is None and '?' or concreteDecoder.protoComponent.__class__.__name__)
+                    scopeTokens.count += 1
 
             if state is stGetValueDecoderByAsn1Spec:
 
@@ -1884,6 +1920,7 @@ class SingleItemDecoder(object):
                 if LOG:
                     LOG('codec %s chosen by ASN.1 spec, decoding %s' % (state is stDecodeValue and concreteDecoder.__class__.__name__ or "<none>", state is stDecodeValue and 'value' or 'as explicit tag'))
                     debug.scope.push(chosenSpec is None and '?' or chosenSpec.__class__.__name__)
+                    scopeTokens.count += 1
 
             if state is stDecodeValue:
                 if not options.get('recursiveFlag', True) and not substrateFun:  # deprecate this
@@ -1961,9 +1998,48 @@ class SingleItemDecoder(object):
 
         if LOG:
             debug.scope.pop()
+            scopeTokens.count -= 1
             LOG('decoder left scope %s, call completed' % debug.scope)
 
         yield value
+
+
+def _iterateDecoding(substrate, asn1Spec, singleItemDecoder, options):
+    """Yield objects decoded from `substrate` until it is exhausted.
+
+    Deliberately a module-level generator that does not close over the
+    `StreamingDecoder` instance: the decoder owns this generator, and the
+    generator owns the only references to the input stream, schema and
+    options. Dropping or closing the decoder therefore releases the input
+    deterministically instead of leaving it referenced by a cycle.
+
+    The child decoder generator is closed explicitly when this pass is
+    terminated early, so that a suspended parse does not keep the
+    partially built object or the substrate alive on interpreters that
+    defer generator finalization.
+    """
+    iterator = None
+
+    try:
+        while True:
+            iterator = singleItemDecoder(
+                substrate, asn1Spec, **options)
+
+            for asn1Object in iterator:
+                yield asn1Object
+
+            iterator = None
+
+            for chunk in isEndOfStream(substrate):
+                if isinstance(chunk, SubstrateUnderrunError):
+                    yield chunk
+
+            if chunk:
+                break
+
+    finally:
+        if iterator is not None:
+            iterator.close()
 
 
 class StreamingDecoder(object):
@@ -1972,6 +2048,18 @@ class StreamingDecoder(object):
     On each iteration, consume whatever BER/CER/DER serialization is
     available in the `substrate` stream-like object and turns it into
     one or more, possibly nested, ASN.1 objects.
+
+    A `StreamingDecoder` instance is a single decoding pass. It stays
+    resumable while it yields
+    :py:class:`~pyasn1.error.SubstrateUnderrunError` sentinels; the caller
+    feeds more data and iterates again. The pass ends when the last object
+    has been yielded, when an exception escapes, or when :meth:`close` is
+    called. At that point the decoder drops its references to the input
+    stream, the schema and the options, and further iteration raises
+    :py:class:`~pyasn1.error.DecoderTerminatedError`. Construct a new
+    decoder, reusing the same `asn1Spec` if needed, to decode another
+    request. Reusing the input stream itself is only meaningful if it still
+    holds the bytes that were not consumed by the terminated decoder.
 
     Parameters
     ----------
@@ -2001,7 +2089,9 @@ class StreamingDecoder(object):
 
         The `context` property of :py:class:`~pyasn1.error.SubstrateUnderrunError`
         object might hold a reference to the partially populated ASN.1 object
-        being reconstructed.
+        being reconstructed. That object belongs to the decoder that yielded
+        it; it is never returned as a decoded value, and it is abandoned when
+        the decoder is closed or fails.
 
     Raises
     ------
@@ -2048,21 +2138,74 @@ class StreamingDecoder(object):
         self._substrate = asSeekableStream(substrate)
         self._asn1Spec = asn1Spec
         self._options = options
+        self._generator = None
+        self._terminated = False
+        self._exhausted = False
 
     def __iter__(self):
-        while True:
-            for asn1Object in self._singleItemDecoder(
-                    self._substrate, self._asn1Spec, **self._options):
-                yield asn1Object
+        return self
 
-            for chunk in isEndOfStream(self._substrate):
-                if isinstance(chunk, SubstrateUnderrunError):
-                    yield
+    @property
+    def closed(self):
+        """Return :obj:`True` if this decoding pass has ended.
 
-                break
+        A closed decoder can not be iterated; construct a new decoder for
+        another decoding pass.
+        """
+        return self._terminated
 
-            if chunk:
-                break
+    def close(self):
+        """Terminate this decoding pass and release its input references.
+
+        Suspended generator state, the normalized substrate stream, the
+        schema and the options are dropped immediately. Calling `close()`
+        more than once is harmless.
+        """
+        if self._terminated:
+            return
+
+        self._terminated = True
+
+        generator = self._generator
+        self._generator = None
+
+        try:
+            if generator is not None:
+                generator.close()
+
+        finally:
+            self._singleItemDecoder = None
+            self._substrate = None
+            self._asn1Spec = None
+            self._options = None
+
+    def __next__(self):
+        if self._terminated:
+            if self._exhausted:
+                raise StopIteration
+
+            raise error.DecoderTerminatedError(
+                'Streaming decoder has been terminated; '
+                'create a new decoder to decode another request'
+            )
+
+        if self._generator is None:
+            self._generator = _iterateDecoding(
+                self._substrate, self._asn1Spec,
+                self._singleItemDecoder, self._options
+            )
+
+        try:
+            return next(self._generator)
+
+        except StopIteration:
+            self._exhausted = True
+            self.close()
+            raise
+
+        except BaseException:
+            self.close()
+            raise
 
 
 class Decoder(object):
@@ -2181,17 +2324,24 @@ class Decoder(object):
         streamingDecoder = cls.STREAMING_DECODER(
             substrate, asn1Spec, **options)
 
-        for asn1Object in streamingDecoder:
-            if isinstance(asn1Object, SubstrateUnderrunError):
-                raise error.SubstrateUnderrunError('Short substrate on input')
+        try:
+            for asn1Object in streamingDecoder:
+                if isinstance(asn1Object, SubstrateUnderrunError):
+                    raise error.SubstrateUnderrunError('Short substrate on input')
 
-            try:
-                tail = next(readFromStream(substrate))
+                try:
+                    for tail in readFromStream(substrate):
+                        if isinstance(tail, SubstrateUnderrunError):
+                            raise error.SubstrateUnderrunError(
+                                'Short substrate on input')
 
-            except error.EndOfStreamError:
-                tail = b''
+                except error.EndOfStreamError:
+                    tail = b''
 
-            return asn1Object, tail
+                return asn1Object, tail
+
+        finally:
+            streamingDecoder.close()
 
     @staticmethod
     def _callSubstrateFunV4asV5(substrateFunV4, asn1Object, substrate, length):

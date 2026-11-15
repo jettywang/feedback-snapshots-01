@@ -1217,7 +1217,7 @@ flowchart TD
     B4 --> L1
 
     L1["Layer 1 Decoder.__call__<br/>classmethod, no constructor args<br/>returns first item plus tail"]
-    L2["Layer 2 StreamingDecoder.__iter__<br/>one top level item per pass"]
+    L2["Layer 2 StreamingDecoder.__next__<br/>one top level item per pass<br/>close() terminates and releases state"]
     L3["Layer 3 SingleItemDecoder.__call__<br/>generator, is also decodeFun"]
     L1 --> L2 --> L3
 
@@ -1332,7 +1332,10 @@ inventoried in the
 `SingleItemDecoder` (`decoder.py`) decodes one TLV and is the state machine.
 Its `__call__` is a generator, and it is also the `decodeFun` handed to every
 payload decoder, which is how recursion happens. `StreamingDecoder` owns the
-normalized stream and yields one top-level object per pass. `Decoder` is the
+normalized stream and yields one top-level object per iteration; it is its
+own iterator, and a single instance is a single decoding pass that `close()`
+ends and makes reusable only by replacement ([Terminating a decoding
+pass](#terminating-a-decoding-pass)). `Decoder` is the
 one-shot facade: its `__call__` is a classmethod, it returns after the first
 top-level object, and trailing data comes back as `tail`, not as an error.
 Giving `Decoder` an `__init__` while `__call__` stays a classmethod would not
@@ -1464,11 +1467,12 @@ partial input the first yield is a sentinel, so `bytes(chunk)` raises; the
 sentinel never reached the caller, so the caller was never given the chance
 to supply more data. A comprehension that filters sentinels is equally
 wrong: it drains the generator internally, turning a resumable decoder into
-a busy loop. The one legitimate `next()` is `Decoder.__call__`'s
-trailing-data read (`tail = next(readFromStream(substrate))`), safe only
-because `size=-1` can never trigger the short-read branch; even there, a
-non-blocking `read(-1)` returning `None` would hand a sentinel back as
-`tail`.
+a busy loop. `Decoder.__call__`'s trailing-data read used to be the one
+`next()`, safe only because `size=-1` cannot trigger the short-read branch;
+a non-blocking `read(-1)` returning `None` there would still have handed a
+sentinel back as `tail`. It now iterates the generator and turns any
+sentinel into `SubstrateUnderrunError`, so a short substrate cannot return
+a sentinel disguised as trailing bytes.
 
 The second half of the contract: `SingleItemDecoder.__call__` and every
 `valueDecoder`/`indefLenValueDecoder` are generators. In Python, `return`
@@ -1487,15 +1491,84 @@ result has been yielded (the pattern in `RawPayloadDecoder.valueDecoder`,
 (`tests/codec/ber/test_decoder.py`) is the executable specification: a
 `BytesIO` subclass returning `None` on alternate reads must produce exactly
 eight sentinel yields before the finished object, with the partial object
-reachable via `error.context['asn1Object']`. Resumption has a real
-limitation: it works only for substrates left unwrapped, because
-`CachingStreamWrapper.read`
-feeds `None` straight into its cache and dies with a `TypeError`, so
-non-blocking input is supported for seekable substrates only. Any refactor
-of the idiom into `next()`, a comprehension, or a helper that returns
-instead of yielding breaks the restartable-decoder test and, for users
-driving pyasn1 off a socket, converts partial-input handling into a
-`TypeError` or an infinite loop while the full-buffer suite stays green.
+reachable via `error.context['asn1Object']`. Any refactor of the idiom into
+`next()`, a comprehension, or a helper that returns instead of yielding
+breaks the restartable-decoder test and, for users driving pyasn1 off a
+socket, converts partial-input handling into a `TypeError` or an infinite
+loop while the full-buffer suite stays green.
+
+`isEndOfStream` and `peekIntoStream` follow the same protocol: a
+non-blocking `read`/`peek` returning `None` yields a
+`SubstrateUnderrunError`, not a bare `yield` (which would surface as `None`
+in the caller and be mistaken for data). `CachingStreamWrapper.read`
+propagates the `None` from its raw stream instead of concatenating it into
+the cache, so non-blocking input also works through the wrapper rather than
+failing with a `TypeError`.
+
+### Terminating a decoding pass
+
+`StreamingDecoder` is a single decoding pass, and that pass has an explicit
+lifecycle. While it yields `SubstrateUnderrunError` sentinels the pass is
+resumable: state lives in suspended generator frames, and the caller feeds
+more bytes and iterates again. The pass ends when the last top-level object
+has been yielded, when any exception escapes, or when the caller calls
+`close()`. At that instant the decoder closes its generator chain, drops its
+normalized stream, `asn1Spec` and options, and sets `closed` to true.
+Iterating a terminated decoder raises `DecoderTerminatedError`
+(`pyasn1/error.py`); an exhausted one raises `StopIteration` instead. A new
+request needs a new `StreamingDecoder`, though the same `asn1Spec` may be
+reused because the decoder only ever fills clones.
+
+That termination is what keeps a cancelled request out of the next one.
+Before it existed, `__iter__` was itself the generator: closing the iterator
+left the `StreamingDecoder` holding the stream, schema and a live suspended
+frame, and the next `iter(decoder)` silently resumed the abandoned parse at
+whatever mid-value position it had reached, decoding the next request's
+bytes as the tail of the previous value. The failure was invisible whenever
+both requests happened to use the same schema.
+
+Two structural details carry the contract. First, `_iterateDecoding` is a
+module-level generator that takes the stream, schema, decoder and options as
+arguments; the `StreamingDecoder` stores only the generator, not a second
+binding of the same objects, so `close()` and garbage collection release
+the input promptly instead of through a reference cycle. Second,
+`_iterateDecoding` closes a suspended child generator before replacing it
+with the next top-level pass, so a closed multi-item decoder does not leave
+the previous item's generator reachable. The one-shot `Decoder.__call__` closes its
+`StreamingDecoder` in a `finally` block, including on the
+`SubstrateUnderrunError` path, so there is no lingering reference after a
+failed call.
+
+A third piece of global state needs the same discipline.
+`debug.scope` (`debug.py`) is a process-global stack used only to render
+log prefixes; recursive `decodeFun` invocations push a token and pop it on
+their success path. A parse terminated mid-value never reaches those pops,
+so `SingleItemDecoder.__call__` counts the tokens its own dispatch pushed
+and pops the remainder in a `finally` block. `_ScopeTokens` exists because
+the counter must be shared with `_decoding` without leaking another public
+parameter: it rides as a positional argument and never appears in `options`,
+which is splatted into every nested call and would otherwise collide.
+Counting also keeps push/pop balanced when two decoders interleave on the
+one shared stack; only the token text, not the height, is shared.
+
+`tests/codec/test_decoder_lifecycle.py` is the executable specification. It
+pauses a nested indefinite-length substrate at every one-byte boundary and
+asserts the consumption position never moves backwards, that partial
+objects arrive only through the sentinel `context` and never as a value,
+and that the shared schema is not mutated. It then closes one of two
+interleaved decoders, checks the cancelled one's position and read count do
+not move, and asserts the surviving decoder still produces its own value.
+The same module checks reference release with `weakref`, reuse of a
+terminated decoder, the exception path across BER, CER and DER, and that a
+closed pass restores the global debug-scope depth.
+
+One leak remains outside the decoder's control: when an exception escapes,
+the traceback it carries references the generator frames that raised it,
+and those frames hold the substrate and schema until the exception object is
+dropped. `_iterateDecoding` therefore closes the child generator in a
+`finally` block rather than relying on garbage collection; releasing the
+exception (or clearing its frames with `traceback.clear_frames`) releases
+the frames it retains.
 
 ### Length accounting
 

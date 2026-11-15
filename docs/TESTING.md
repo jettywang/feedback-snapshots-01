@@ -256,8 +256,22 @@ every case through `itertools.product`. Its `_snapshot` helper captures
 component state using `getComponentByName(name, instantiate=False)`. The
 `instantiate=False` is essential, because the default would itself materialize
 the absent component the test is trying to prove untouched.
+`tests/codec/test_decoder_lifecycle.py` applies the same pattern to the
+streaming decoders, declaring a three-codec tuple and asserting the
+close/exception/reuse contract in each subtest.
 
-**`self.subTest`** appears only in that newest module. It is fine to use in
+**Incremental input.** A test that needs to pause a decoding pass does not
+have to subclass `io.BytesIO`. `IncrementalStream` in
+`tests/codec/test_decoder_lifecycle.py` wraps a `BytesIO` and exposes only
+the bytes the test has `feed()`ed, returning `None` -- the non-blocking
+contract `readFromStream` understands -- past that point. Assert on
+`stream.tell()` and `stream.reads` as well as the decoded value: a decoder
+that silently re-reads or seeks backwards can still return the right object
+for some inputs. Reference release is asserted with `weakref` after
+`gc.collect()`, and the objects must be deleted in the test's own frame
+before collecting, or the frame itself keeps them alive.
+
+**`self.subTest`** appears only in the newest modules. It is fine to use in
 new cross-product tests and unnecessary elsewhere.
 
 ## Layout
@@ -273,6 +287,7 @@ tests/
 │                                  test_namedtype, test_namedval, test_opentype, test_useful
 └── codec/
     ├── test_streaming.py          stream wrappers
+    ├── test_decoder_lifecycle.py  streaming decoder close/reuse contract
     ├── test_encoder_no_mutation.py  cross-codec regression
     ├── ber/  cer/  der/  native/  test_encoder.py + test_decoder.py each
 ```

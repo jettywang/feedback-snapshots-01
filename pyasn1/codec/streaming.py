@@ -27,6 +27,8 @@ class CachingStreamWrapper(io.IOBase):
 
     def peek(self, n):
         result = self.read(n)
+        if result is None:
+            return None
         self._cache.seek(-len(result), os.SEEK_CUR)
         return result
 
@@ -45,6 +47,12 @@ class CachingStreamWrapper(io.IOBase):
                 return read_from_cache
 
         read_from_raw = self._raw.read(n)
+
+        if read_from_raw is None:
+            # Non-blocking stream with nothing available right now. Report
+            # the underrun instead of failing on ``bytes + None``; already
+            # cached bytes are still served and may be sought back over.
+            return read_from_cache or None
 
         self._cache.write(read_from_raw)
 
@@ -129,7 +137,10 @@ def isEndOfStream(substrate):
 
     Returns
     -------
-    : :py:class:`bool`
+    : :py:class:`bool` or :py:class:`~pyasn1.error.SubstrateUnderrunError`
+        Whether the stream is at its end, or a `SubstrateUnderrunError`
+        object if the stream is non-blocking and nothing is available yet.
+        The caller feeds more data and iterates again.
     """
     if isinstance(substrate, io.BytesIO):
         cp = substrate.tell()
@@ -139,9 +150,14 @@ def isEndOfStream(substrate):
         yield result
 
     else:
-        received = substrate.read(1)
-        if received is None:
-            yield
+        while True:
+            received = substrate.read(1)
+            if received is not None:
+                break
+
+            # Non-blocking stream: ask again, same sentinel-then-payload
+            # protocol as readFromStream.
+            yield error.SubstrateUnderrunError()
 
         if received:
             substrate.seek(-1, os.SEEK_CUR)
@@ -162,16 +178,22 @@ def peekIntoStream(substrate, size=-1):
 
     Returns
     -------
-    : :py:class:`bytes` or :py:class:`str`
-        The return type depends on Python major version
+    : :py:class:`bytes` or :py:class:`str` or :py:class:`~pyasn1.error.SubstrateUnderrunError`
+        The return type of the data depends on Python major version. A
+        `SubstrateUnderrunError` object is yielded first for as long as a
+        non-blocking stream has fewer than `size` bytes available.
     """
     if hasattr(substrate, "peek"):
-        received = substrate.peek(size)
-        if received is None:
-            yield
+        while True:
+            received = substrate.peek(size)
+            if received is None:
+                yield error.SubstrateUnderrunError()
+                continue
 
-        while len(received) < size:
-            yield
+            if size < 0 or len(received) >= size:
+                break
+
+            yield error.SubstrateUnderrunError()
 
         yield received
 

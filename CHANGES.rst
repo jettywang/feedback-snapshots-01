@@ -1,6 +1,25 @@
 Revision 0.7.0, released XX-XX-2026
 ---------------------------------------
 
+- Fixed `StreamingDecoder` state leaking across requests when an
+  incremental decoding pass was abandoned. Closing the iterator used to
+  leave the decoder holding the input stream, schema and a suspended
+  mid-value parse; iterating it again silently resumed that parse against
+  the next request's bytes. A `StreamingDecoder` is now a single decoding
+  pass with an explicit lifecycle: `close()` terminates it, drops the
+  stream, schema and options references, and iteration afterwards raises
+  the new `DecoderTerminatedError` instead of resuming. An exception
+  terminates the pass as well, and an exhausted one raises
+  `StopIteration`. Reuse the schema for a new request by constructing a
+  new decoder. Partially built objects remain reachable only through the
+  `context` of the `SubstrateUnderrunError` sentinel that reported them,
+  and are released when the pass ends
+- Fixed `isEndOfStream`/`peekIntoStream` yielding `None` when a
+  non-blocking stream returned no data, which callers could mistake for
+  end-of-stream. They now yield `SubstrateUnderrunError`, matching
+  `readFromStream`, and `CachingStreamWrapper` propagates the same
+  condition instead of failing with `TypeError` on non-seekable
+  non-blocking input
 - Fixed OverflowError from BER/CER/DER length values that fit in the
   supported 8-octet length field but exceed the platform maximum readable
   size. Such oversized definite lengths are now rejected with PyAsn1Error.

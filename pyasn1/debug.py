@@ -142,5 +142,8 @@ class Scope(object):
     def pop(self):
         return self._list.pop()
 
+    def __len__(self):
+        return len(self._list)
+
 
 scope = Scope()

@@ -71,6 +71,23 @@ class EndOfStreamError(SubstrateUnderrunError):
     """
 
 
+class DecoderTerminatedError(PyAsn1Error):
+    """ASN.1 incremental decoder has been terminated
+
+    A streaming decoder holds suspended generator state for exactly one
+    decoding pass. Once that pass ends -- by exhaustion, by an exception,
+    by the caller closing it, or by the iterator being abandoned -- the
+    decoder drops its input stream, schema and options references and
+    refuses further iteration. Construct a new decoder, with the same
+    schema if required, to decode another request.
+
+    This error indicates an attempt to reuse a terminated decoder. It is
+    raised instead of silently resuming the suspended parse at an
+    arbitrary mid-value position, which would mix the remains of the
+    aborted request into the next one.
+    """
+
+
 class UnsupportedSubstrateError(PyAsn1Error):
     """Unsupported substrate type to parse as ASN.1 data."""
 
