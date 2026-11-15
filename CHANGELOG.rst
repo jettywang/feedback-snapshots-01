@@ -11,6 +11,14 @@ dev
 **API Changes (Backward Compatible)**
 
 - Support for Python 3.15 has been added.
+- Added ``h2.deadline.DeadlineAdapter``, an explicit-clock wrapper around
+  ``H2Connection`` that enforces a connection-level deadline for incomplete
+  header blocks (terminating the connection with GOAWAY) and a per-stream
+  idle deadline (resetting only the offending stream with RST_STREAM),
+  without starting any background threads or timers.
+- Added ``FrameBuffer.incomplete_header_block_stream_id`` and
+  ``FrameBuffer.clear`` to support inspecting and releasing partially
+  received header blocks.
 
 **Bugfixes**
 

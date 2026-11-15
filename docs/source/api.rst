@@ -27,6 +27,23 @@ Configuration
    :members:
 
 
+Deadlines
+---------
+
+.. autoclass:: h2.deadline.DeadlineAdapter
+   :members:
+
+.. autoclass:: h2.deadline.StreamIdleDeadlineExceeded
+   :members:
+
+.. autoclass:: h2.deadline.HeaderBlockDeadlineExceeded
+   :members:
+
+.. autoclass:: h2.deadline.DeadlineExceededError
+   :show-inheritance:
+   :members:
+
+
 .. _h2-events-api:
 
 Events

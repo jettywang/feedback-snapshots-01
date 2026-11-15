@@ -63,6 +63,32 @@ class FrameBuffer:
 
         self._data += data_view
 
+    @property
+    def incomplete_header_block_stream_id(self) -> int | None:
+        """
+        The stream ID of the header block currently being received, if any.
+
+        While a HEADERS or PUSH_PROMISE frame is waiting for its associated
+        CONTINUATION frames, this returns the stream ID of that partial
+        header block. At all other times it returns ``None``.
+
+        .. versionadded:: 4.5.0
+        """
+        if self._headers_buffer:
+            return self._headers_buffer[0].stream_id
+        return None
+
+    def clear(self) -> None:
+        """
+        Drop all buffered inbound data, including any partially received
+        header block. This releases memory held on behalf of a peer and is
+        primarily useful when tearing a connection down.
+
+        .. versionadded:: 4.5.0
+        """
+        self._data = bytearray()
+        self._headers_buffer = []
+
     def _validate_frame_length(self, length: int) -> None:
         """
         Confirm that the frame is an appropriate length.
