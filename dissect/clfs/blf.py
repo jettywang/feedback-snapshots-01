@@ -7,7 +7,9 @@ from dissect.clfs.exceptions import (
     InvalidBLFError,
     InvalidContextError,
     InvalidRecordBlockError,
+    InvalidTruncateRecordError,
 )
+from dissect.clfs.truncate import TruncateEvidence, parse_truncate_record
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -276,7 +278,15 @@ class BaseRecord:
 
 
 class TruncateRecord:
-    """Parser for the truncate records within a BLF if they exist.
+    """Read-only parser for the truncate records within a BLF if they exist.
+
+    Only the de-fixuped in-memory copy of a scratch (or scratch shadow) block is inspected; the underlying
+    log file is never replayed or written. The resulting :class:`~dissect.clfs.truncate.TruncateEvidence`
+    reports which client is affected, the relevant LSNs, the old/new lengths and the sector changes, each
+    tied back to the original byte range it was decoded from.
+
+    A record being present only proves truncation-related material exists; it does not prove the change was
+    committed. Current and shadow blocks are parsed independently and their contents are never merged.
 
     Args:
         fh: A file-like object to a BLF file.
@@ -284,6 +294,7 @@ class TruncateRecord:
     """
 
     def __init__(self, fh: BinaryIO, offset: int):
+        self.offset = offset
         try:
             self.logblock = BlockHeader(fh=fh, offset=offset)
         except EOFError:
@@ -293,13 +304,23 @@ class TruncateRecord:
         logblock_fh = self.logblock.open()
         logblock_fh.seek(record_offset)
 
-        self.record = c_clfs.CLFS_TRUNCATE_RECORD_HEADER(logblock_fh)
+        # A zero-sector (typically shadow) block carries no record bytes at all. Keep the block reference
+        # but do not invent a header or evidence; the iterator skips such blocks.
+        self.record = None
+        try:
+            self.record = c_clfs.CLFS_TRUNCATE_RECORD_HEADER(logblock_fh)
+        except (EOFError, AttributeError):
+            self.evidence = None
+            return
 
-        if self.record.ClientChangeOffset == 0:
-            # CLFS_TRUNCATE_RECORD_HEADER = 16 bytes
-            record_offset += 0x10
-        else:
-            record_offset += self.record.ClientChangeOffset
+        # Bounds-checked evidence extraction. A zero ClientChangeOffset/OwnerPageOffset is the null
+        # marker meaning that region is absent; a non-zero value is relative to the record start.
+        try:
+            self.evidence: TruncateEvidence | None = parse_truncate_record(logblock=self.logblock, block_offset=offset)
+        except InvalidTruncateRecordError:
+            # A structurally unparseable record (for example a region pointing outside the record range)
+            # still leaves the raw header readable above, but there is no bounded evidence to extract.
+            self.evidence = None
 
 
 class BLF:
@@ -341,13 +362,21 @@ class BLF:
                 yield BaseRecord(fh=self.fh, offset=metablock.Offset, block_type=metablock.Type)
 
     def truncate_records(self) -> Iterator[TruncateRecord]:
-        """Yield the truncate records.
+        """Yield the scratch and scratch-shadow truncate records, each parsed independently.
 
-        This has not been encountered yet.
+        Shadow blocks are yielded separately from current blocks so callers never have to combine the two
+        to reconstruct a single state. Records without a parseable bounded region are still yielded with
+        their raw header and ``evidence`` set to ``None``.
         """
         for metablock in self.metablocks:
             if metablock.Type in (
                 c_clfs.CLFS_METADATA_BLOCK_TYPE.ClfsMetaBlockScratch,
                 c_clfs.CLFS_METADATA_BLOCK_TYPE.ClfsMetaBlockScratchShadow,
             ):
-                yield TruncateRecord(fh=self.fh, offset=metablock.Offset)
+                try:
+                    truncate_record = TruncateRecord(fh=self.fh, offset=metablock.Offset)
+                except InvalidRecordBlockError:
+                    continue
+                if truncate_record.record is None:
+                    continue
+                yield truncate_record

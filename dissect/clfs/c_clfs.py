@@ -304,6 +304,24 @@ c_clfs = cstruct().load(clfs_def)
 SECTOR_SIZE = 512
 CLFS_CONTROL_RECORD_MAGIC_VALUE = 0xC1F5C1F500005F1C
 
+# Fixed byte layout of the truncate structures that cstruct cannot size on its own because they
+# contain variable-length arrays. Values are offsets/sizes relative to the start of the owning record,
+# which is what makes the on-disk evidence traceable back to original bytes.
+TRUNCATE_RECORD_HEADER_SIZE = 16
+CLIENT_CHANGE_FIXED_SIZE = 33
+SECTOR_CHANGE_SIZE = 520
+
+# Offsets inside CLFS_TRUNCATE_RECORD_HEADER (relative to the start of the truncate record).
+TRUNCATE_CLIENT_CHANGE_OFFSET_FIELD = 8
+TRUNCATE_OWNER_PAGE_OFFSET_FIELD = 12
+
+# Offset of OldLength inside the fixed prefix of CLFS_TRUNCATE_CLIENT_CHANGE; Length sits two bytes before it.
+CLIENT_CHANGE_OLD_LENGTH = 27
+
+# Offsets inside CLFS_SECTOR_CHANGE.
+SECTOR_CHANGE_INITIALIZED_SECTOR = 0
+SECTOR_CHANGE_PAYLOAD = 8
+
 
 class BlockHeader:
     """Main class to parse the block headers.
