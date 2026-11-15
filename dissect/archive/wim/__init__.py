@@ -1,6 +1,15 @@
 from __future__ import annotations
 
-from dissect.archive.wim.wim import WIM, DirectoryEntry, Image, ReparsePoint, Resource
+from dissect.archive.wim.wim import (
+    WIM,
+    DirectoryEntry,
+    Image,
+    ReparsePoint,
+    Resource,
+    StreamEvidence,
+    StreamScanReport,
+    StreamStatus,
+)
 
 __all__ = [
     "WIM",
@@ -8,4 +17,7 @@ __all__ = [
     "Image",
     "ReparsePoint",
     "Resource",
+    "StreamEvidence",
+    "StreamScanReport",
+    "StreamStatus",
 ]

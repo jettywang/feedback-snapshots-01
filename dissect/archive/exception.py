@@ -23,3 +23,7 @@ class NotADirectoryError(Error, NotADirectoryError):
 
 class NotAReparsePointError(Error):
     pass
+
+
+class CorruptArchiveError(Error):
+    pass

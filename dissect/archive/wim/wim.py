@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import struct
+from dataclasses import dataclass, field, replace
+from enum import Enum
 from functools import cached_property, lru_cache
 from typing import TYPE_CHECKING, BinaryIO
 
-from dissect.util.stream import AlignedStream, BufferedStream, RelativeStream
+from dissect.util.stream import AlignedStream, RelativeStream
 from dissect.util.ts import wintimestamp
 
 from dissect.archive.exception import (
+    CorruptArchiveError,
     FileNotFoundError,
     InvalidHeaderError,
     NotADirectoryError,
@@ -30,6 +34,212 @@ if TYPE_CHECKING:
     from datetime import datetime
 
 DEFAULT_CHUNK_SIZE = 32 * 1024
+ZERO_HASH = b"\x00" * 20
+
+
+class StreamStatus(str, Enum):
+    """Readability of a data stream's backing resource."""
+
+    READABLE = "readable"
+    """The resource is present and its stream could be opened."""
+
+    MISSING = "missing"
+    """The stream names a non-zero resource that is absent from the resource table."""
+
+    NO_RESOURCE = "no-resource"
+    """The stream is bound to the all-zero hash, which never identifies a resource."""
+
+    CORRUPT = "corrupt"
+    """The resource exists but its data could not be opened or read completely."""
+
+    MALFORMED = "malformed"
+    """The stream table itself is truncated or violates the directory entry's declared bounds."""
+
+    UNSUPPORTED = "unsupported"
+    """The resource uses a feature this implementation cannot read, such as spanned storage."""
+
+
+@dataclass
+class StreamEvidence:
+    """A single data stream, as declared by a directory entry.
+
+    A stream is identified by its owner, its name and its position in the stream table. Two
+    streams can share a resource hash while remaining separate evidence, and two entries
+    can even share a stream name without either disappearing. An empty :attr:`name` is the
+    unnamed (default) stream; a directory entry with no stream at all has no evidence.
+    """
+
+    entry: DirectoryEntry
+    name: str | None
+    resource_hash: bytes | None
+    logical_size: int | None
+    status: StreamStatus
+    index: int = 0
+    error: str | None = None
+    resource: Resource | None = None
+    scanned: bool = True
+    verified: bool = False
+
+    @property
+    def stream_name(self) -> str | None:
+        """Alias for :attr:`name`."""
+        return self.name
+
+    @property
+    def directory_entry(self) -> DirectoryEntry:
+        """Alias for :attr:`entry`."""
+        return self.entry
+
+    @property
+    def owner(self) -> DirectoryEntry:
+        """Alias for :attr:`entry`."""
+        return self.entry
+
+    @property
+    def resource_id(self) -> bytes | None:
+        """The resource hash that identifies this stream's backing resource."""
+        return self.resource_hash
+
+    @property
+    def resource_id_hex(self) -> str | None:
+        """The resource hash as hexadecimal, or ``None`` if the stream has no resource."""
+        return self.resource_hash.hex() if self.resource_hash is not None else None
+
+    @property
+    def size(self) -> int | None:
+        """Alias for :attr:`logical_size`."""
+        return self.logical_size
+
+    @property
+    def entry_path(self) -> str:
+        """The path of the directory entry that owns this stream."""
+        return self.entry.full_path
+
+    @property
+    def readable(self) -> bool:
+        """Whether this stream's resource is known to be readable."""
+        return self.status == StreamStatus.READABLE
+
+    @property
+    def is_default(self) -> bool:
+        """Whether this is the unnamed default stream."""
+        return self.name == ""
+
+    @property
+    def path(self) -> str:
+        """The entry path, suffixed with the stream name for a named stream."""
+        path = self.entry.full_path
+        if self.name:
+            return f"{path}:{self.name}" if path else f":{self.name}"
+        return path
+
+    def open(self) -> BinaryIO:
+        """Open this stream's own resource.
+
+        Raises:
+            FileNotFoundError: If the stream has no resource or the resource is missing.
+            CorruptArchiveError: If the stream table or the resource is malformed.
+            NotImplementedError: If the resource uses an unsupported feature.
+        """
+        if self.status == StreamStatus.MALFORMED:
+            raise CorruptArchiveError(f"Malformed stream {self!r}: {self.error}")
+        if self.status == StreamStatus.NO_RESOURCE:
+            raise FileNotFoundError(f"Stream {self!r} is not bound to a resource (zero hash)")
+        if self.status == StreamStatus.MISSING:
+            raise FileNotFoundError(f"Resource {self.resource_id_hex} for stream {self!r} is not in the resource table")
+        if self.status == StreamStatus.CORRUPT:
+            raise CorruptArchiveError(f"Resource {self.resource_id_hex} for stream {self!r} is corrupt: {self.error}")
+        if self.status == StreamStatus.UNSUPPORTED:
+            raise NotImplementedError(f"Stream {self!r} uses an unsupported resource: {self.error}")
+
+        if self.resource is None:
+            raise FileNotFoundError(f"Stream {self!r} has no resource")
+        return self.resource.open()
+
+    def __repr__(self) -> str:
+        return f"<StreamEvidence path={self.path!r} status={self.status.value!r}>"
+
+
+@dataclass(frozen=True)
+class StreamScanReport:
+    """The result of :meth:`WIM.scan_streams`.
+
+    Every stream that the metadata declares appears exactly once, including duplicates and
+    streams whose resource is missing or corrupt. Use :attr:`readable` for streams that can
+    be opened, :attr:`errors` for those that cannot, and :attr:`by_status` for a breakdown.
+    """
+
+    streams: list[StreamEvidence]
+    verified: bool = False
+    image_errors: list[str] = field(default_factory=list)
+    scanned_images: int = 0
+    total_images: int = 0
+
+    def __iter__(self) -> Iterator[StreamEvidence]:
+        return iter(self.streams)
+
+    def __len__(self) -> int:
+        return len(self.streams)
+
+    def __getitem__(self, index: int) -> StreamEvidence:
+        return self.streams[index]
+
+    @property
+    def scanned(self) -> list[StreamEvidence]:
+        """Streams whose metadata was enumerated, including missing or corrupt resources."""
+        return [stream for stream in self.streams if stream.scanned]
+
+    @property
+    def malformed(self) -> list[StreamEvidence]:
+        """Stream slots whose table entry could not be parsed at all."""
+        return [stream for stream in self.streams if not stream.scanned]
+
+    @property
+    def readable(self) -> list[StreamEvidence]:
+        """Streams whose resource could be opened (and read completely when verified)."""
+        return [stream for stream in self.streams if stream.readable]
+
+    @property
+    def unreadable(self) -> list[StreamEvidence]:
+        """Streams that cannot be opened, or that failed verification."""
+        return [stream for stream in self.streams if not stream.readable]
+
+    @property
+    def errors(self) -> list[StreamEvidence]:
+        """Alias for :attr:`unreadable`."""
+        return self.unreadable
+
+    @property
+    def by_status(self) -> dict[StreamStatus, list[StreamEvidence]]:
+        """Group the evidence by its readability status."""
+        result: dict[StreamStatus, list[StreamEvidence]] = {}
+        for stream in self.streams:
+            result.setdefault(stream.status, []).append(stream)
+        return result
+
+    @property
+    def ok(self) -> bool:
+        """Whether every declared stream is readable and every image was scanned."""
+        return not self.image_errors and all(stream.readable for stream in self.streams)
+
+    def summary(self) -> dict[str, int]:
+        """Return a count per status, plus totals for streams and images."""
+        result = {status.value: 0 for status in StreamStatus}
+        for stream in self.streams:
+            result[stream.status.value] += 1
+        result["total"] = len(self.streams)
+        result["images"] = self.total_images
+        result["images_scanned"] = self.scanned_images
+        result["image_errors"] = len(self.image_errors)
+        return result
+
+
+@dataclass
+class _RawStream:
+    name: str | None
+    resource_hash: bytes | None
+    index: int
+    error: str | None = None
 
 
 class WIM:
@@ -75,8 +285,60 @@ class WIM:
 
     def images(self) -> Iterator[Image]:
         """Iterate over all images in the WIM file."""
-        for resource in self._images:
-            yield Image(self, resource.open())
+        for index, resource in enumerate(self._images):
+            yield Image(self, resource.open(), index=index)
+
+    def iter_streams(self) -> Iterator[StreamEvidence]:
+        """Iterate over every data stream of every image, without losing duplicate names.
+
+        Each item names the stream, the directory entry that owns it and the resource it
+        binds to. A default stream has an empty name; a directory entry without any stream
+        yields nothing, so "no stream" is not represented as an empty default stream.
+        """
+        for image in self.images():
+            yield from image.iter_streams()
+
+    def stream_evidence(self) -> list[StreamEvidence]:
+        """Return every data stream of every image as a list of :class:`StreamEvidence`."""
+        return list(self.iter_streams())
+
+    def scan_streams(self, *, verify: bool = False) -> StreamScanReport:
+        """Scan every image for data streams and return a per-stream report.
+
+        Missing resources, streams bound to a zero hash and malformed stream tables are
+        reported per stream. An image whose metadata itself cannot be read is reported in
+        :attr:`StreamScanReport.image_errors` instead of silently producing no streams.
+
+        With ``verify=True`` every readable stream is opened, read to EOF and checked
+        against its declared logical size and SHA-1 resource identifier, so decompression,
+        truncation and content failures are reported instead of looking like a clean empty
+        file. Verification reads the complete resource; leave it off for a metadata-only
+        inventory of large WIM files.
+        """
+        streams: list[StreamEvidence] = []
+        image_errors: list[str] = []
+        scanned_images = 0
+
+        for index, resource in enumerate(self._images):
+            try:
+                image = Image(self, resource.open(), index=index)
+                image_streams = list(image.iter_streams())
+            except Exception as e:
+                image_errors.append(f"image {index}: {type(e).__name__}: {e}")
+                continue
+
+            if verify:
+                image_streams = [_verify_evidence(evidence) for evidence in image_streams]
+            streams.extend(image_streams)
+            scanned_images += 1
+
+        return StreamScanReport(
+            streams,
+            verified=verify,
+            image_errors=image_errors,
+            scanned_images=scanned_images,
+            total_images=len(self._images),
+        )
 
 
 class Resource:
@@ -111,6 +373,9 @@ class Resource:
         self.part_number = part_number
         self.reference_count = reference_count
         self.hash = hash
+
+    def __repr__(self) -> str:
+        return f"<Resource hash={self.hash.hex() if self.hash else None} offset={self.offset:#x} size={self.size}>"
 
     @classmethod
     def from_short_header(cls, wim: WIM, reshdr: c_wim.RESHDR_DISK_SHORT) -> Resource:
@@ -159,8 +424,11 @@ class Resource:
 
 
 class Image:
-    def __init__(self, wim: WIM, fh: BinaryIO):
+    def __init__(self, wim: WIM, fh: BinaryIO, index: int = 0):
         self.wim = wim
+        self.fh = fh
+        self.index = index
+        self.size = _stream_size(fh)
         self.security = SecurityBlock(fh)
 
         offset = fh.tell()
@@ -168,7 +436,26 @@ class Image:
         self.root = DirectoryEntry(self, fh)
 
     def __repr__(self) -> str:
-        return "<Image>"
+        return f"<Image index={self.index}>"
+
+    def iter_entries(self) -> Iterator[DirectoryEntry]:
+        """Iterate over every directory entry in this image, depth first."""
+        stack = [self.root]
+        while stack:
+            entry = stack.pop()
+            yield entry
+            if entry.is_dir() and not entry.is_reparse_point():
+                try:
+                    children = list(entry.iterdir())
+                except (EOFError, struct.error):
+                    # A damaged child table ends this branch; already yielded evidence stands.
+                    continue
+                stack.extend(reversed(children))
+
+    def iter_streams(self) -> Iterator[StreamEvidence]:
+        """Iterate over every data stream in this image."""
+        for entry in self.iter_entries():
+            yield from entry.stream_evidence()
 
     def get(self, path: str, entry: DirectoryEntry | None = None) -> DirectoryEntry:
         # Programmatically we will often use the `/` separator, so replace it with the native path separator of NTFS
@@ -214,12 +501,14 @@ class SecurityBlock:
 
 
 class DirectoryEntry:
-    def __init__(self, image: Image, fh: BinaryIO):
+    def __init__(self, image: Image, fh: BinaryIO, parent: DirectoryEntry | None = None):
         self.image = image
         self.fh = fh
+        self.parent = parent
 
         start = fh.tell()
         self.entry = c_wim._DIRENTRY(fh)
+        self.offset = start
         self.name = None
         self.short_name = None
         self.extra = None
@@ -232,33 +521,197 @@ class DirectoryEntry:
             self.short_name = _read_name(fh, length)
             fh.read(2)
 
-        # If there's any trailing data after the aligned end, read it and store it
-        end = fh.tell()
-        if (length := self.entry.Length - (((end + 7) & (-8)) - start)) > 0 or (
-            length := self.entry.Length - (end - start)
-        ) > 0:
+        # The directory entry's declared length ends at the aligned end of its header and
+        # names. Anything after that is a stream table, not part of this entry's own body.
+        self.body_end = fh.tell()
+        self.declared_end = start + self.entry.Length
+        self.streams_start = (self.declared_end + 7) & (-8)
+        self.end = self.declared_end
+
+        # If there's any trailing data before the declared end, read it and store it
+        if (length := self.declared_end - fh.tell()) > 0:
             self.extra = fh.read(length)
 
-        self.streams = {}
-        if self.entry.Streams:
-            for _ in range(self.entry.Streams):
-                # Stream entries are 8 byte aligned
-                fh.seek((fh.tell() + 7) & (-8))
+        self._raw_streams: list[_RawStream] = []
+        self._streams: dict[str, bytes] | None = None
+        self._stream_evidence_cache: list[StreamEvidence] | None = None
+        self._parse_streams(fh)
 
-                name = ""
+    def _parse_streams(self, fh: BinaryIO) -> None:
+        if not self.entry.Streams:
+            # No stream table: a regular file's unnamed content is its default stream, even
+            # when the hash is zero (which means "no resource", not "empty file").
+            # Directories and reparse points have no data stream at all, so they produce no
+            # evidence rather than a default stream bound to a missing resource.
+            if not self.is_dir():
+                self._raw_streams.append(_RawStream("", self.entry.Hash, 0))
+            return
+
+        start = self.streams_start
+        limit = self._stream_table_limit()
+        pos = start
+        for index in range(self.entry.Streams):
+            pos = (pos + 7) & (-8)
+            if pos + len(c_wim._STREAMENTRY) > limit:
+                self._malformed_streams(index, f"stream {index} header at {pos:#x} exceeds bounds ({limit:#x})")
+                self.end = (pos + 7) & (-8)
+                break
+
+            if _looks_like_directory_entry(self.image, pos):
+                # A directory entry begins where the next stream was declared. Its hash and
+                # names belong to that file, not to this one, so stop the table here.
+                self._malformed_streams(index, f"stream {index} at {pos:#x} is the next directory entry")
+                self.end = pos
+                return
+
+            fh.seek(pos)
+            try:
                 stream = c_wim._STREAMENTRY(fh)
-                if name_length := stream.StreamNameLength:
-                    name = _read_name(fh, name_length)
-                    name_length += 2
-                    fh.read(2)
+            except (EOFError, struct.error) as e:
+                self._malformed_streams(index, f"truncated stream {index} header at {pos:#x}: {e}")
+                self.end = _next_entry_after_stream(self.image, pos)
+                return
 
-                self.streams[name] = stream.Hash
+            name_length = stream.StreamNameLength
+            minimum_length = len(c_wim._STREAMENTRY) + name_length + (2 if name_length else 0)
+            expected_length = (minimum_length + 7) & (-8)
+            if stream.Length != expected_length or pos + stream.Length > limit:
+                # A stream entry's own declared length is the only bound on where the next
+                # stream starts. It must exactly cover its header, name and alignment
+                # padding; it may also not run past the metadata. If it does not, report the
+                # slot and resume at the next real directory entry rather than reading it as
+                # a stream.
+                error = (
+                    f"stream {index} at {pos:#x} declares {stream.Length} bytes, "
+                    f"expected {expected_length} for its header and name"
+                )
+                if pos + stream.Length > limit:
+                    error = f"stream {index} at {pos:#x} ends beyond bounds ({limit:#x})"
+                self._malformed_streams(index, error, resource_hash=bytes(stream.Hash))
+                self.end = _next_entry_after_stream(self.image, pos)
+                return
 
-                if remaining := stream.Length - len(c_wim._STREAMENTRY) - name_length:
-                    fh.read(remaining)
-        else:
-            # Add the entry hash as the default stream
-            self.streams[""] = self.entry.Hash
+            name = ""
+            if name_length:
+                name = _read_name(fh, name_length)
+                fh.read(2)
+                if _invalid_stream_name(name) or _overlapping_directory_entry(
+                    self.image, pos + len(c_wim._STREAMENTRY), pos + stream.Length
+                ):
+                    # Stream names are user-visible text. Embedded NULs or control bytes,
+                    # or a directory entry header inside the name span, mean the length was
+                    # inflated to borrow the next file's bytes.
+                    self._malformed_streams(index, f"stream {index} at {pos:#x} has a forged name span")
+                    self.end = _next_entry_after_stream(self.image, pos)
+                    return
+
+            self._raw_streams.append(_RawStream(name, bytes(stream.Hash), index))
+            pos += stream.Length
+
+        self.end = pos
+
+    def _malformed_streams(self, index: int, error: str, resource_hash: bytes | None = None) -> None:
+        """Record every declared-but-unreadable stream slot from ``index`` onwards."""
+        for remaining in range(index, self.entry.Streams):
+            self._raw_streams.append(_RawStream(None, resource_hash if remaining == index else None, remaining, error))
+
+    def _stream_table_limit(self) -> int:
+        """The exclusive end of the stream table, derived from the declared directory entry bounds.
+
+        The stream table must stay inside the metadata image. It may not run into the header
+        of the directory entry that follows this one, which starts at an 8-byte boundary and
+        is detected by :func:`_looks_like_directory_entry`.
+        """
+        return self.image.size if self.image.size is not None else self.declared_end
+
+    @property
+    def full_path(self) -> str:
+        """The path of this entry relative to the image root, using ``\\`` separators."""
+        names = []
+        entry: DirectoryEntry | None = self
+        while entry is not None and entry.parent is not None:
+            names.append(entry.name or "")
+            entry = entry.parent
+        return "\\".join(reversed(names))
+
+    @property
+    def streams(self) -> dict[str, bytes]:
+        """Map of stream name to resource hash.
+
+        This compatibility view cannot represent duplicate stream names; use
+        :meth:`stream_evidence` to enumerate every stream without loss. A duplicate name
+        is retained here as the first declaration, while evidence keeps all of them.
+        """
+        if self._streams is None:
+            self._streams = {}
+            for stream in self._raw_streams:
+                if stream.name is not None and stream.name not in self._streams:
+                    self._streams[stream.name] = stream.resource_hash
+        return self._streams
+
+    def stream_evidence(self) -> list[StreamEvidence]:
+        """Return one evidence record per declared stream, preserving duplicates and order."""
+        if self._stream_evidence_cache is None:
+            self._stream_evidence_cache = [self._make_evidence(stream) for stream in self._raw_streams]
+        return self._stream_evidence_cache
+
+    def _make_evidence(self, stream: _RawStream) -> StreamEvidence:
+        if stream.error is not None:
+            return StreamEvidence(
+                entry=self,
+                name=stream.name,
+                resource_hash=stream.resource_hash,
+                logical_size=None,
+                status=StreamStatus.MALFORMED,
+                index=stream.index,
+                error=stream.error,
+                scanned=False,
+            )
+
+        resource_hash = stream.resource_hash
+        if resource_hash is None or resource_hash == ZERO_HASH:
+            return StreamEvidence(
+                entry=self,
+                name=stream.name,
+                resource_hash=resource_hash,
+                logical_size=0 if resource_hash == ZERO_HASH else None,
+                status=StreamStatus.NO_RESOURCE,
+                index=stream.index,
+            )
+
+        resource = self.image.wim.resources.get(resource_hash)
+        if resource is None:
+            return StreamEvidence(
+                entry=self,
+                name=stream.name,
+                resource_hash=resource_hash,
+                logical_size=None,
+                status=StreamStatus.MISSING,
+                index=stream.index,
+                error=f"resource {resource_hash.hex()} is not in the resource table",
+            )
+
+        status = StreamStatus.READABLE
+        error = None
+        if resource.is_spanned:
+            status = StreamStatus.UNSUPPORTED
+            error = "spanned resources are not supported"
+        elif not _resource_in_bounds(self.image.wim, resource):
+            status = StreamStatus.CORRUPT
+            error = (
+                f"resource data at {resource.offset:#x}+{resource.size:#x} is outside the WIM file or resource table"
+            )
+
+        return StreamEvidence(
+            entry=self,
+            name=stream.name,
+            resource_hash=resource_hash,
+            logical_size=resource.original_size,
+            status=status,
+            index=stream.index,
+            error=error,
+            resource=resource,
+        )
 
     def __repr__(self) -> str:
         return f"<DirectoryEntry name={self.name!r}>"
@@ -344,36 +797,54 @@ class DirectoryEntry:
         fh = self.fh
         fh.seek(self.entry.SubdirOffset)
         while True:
-            length = int.from_bytes(fh.read(8), "little")
+            start = fh.tell()
+            if self.image.size is not None and start + len(c_wim._DIRENTRY) > self.image.size:
+                break
+
+            raw_length = fh.read(8)
+            if len(raw_length) != 8:
+                break
+
+            length = int.from_bytes(raw_length, "little")
             if length <= 8:
                 break
 
-            fh.seek(-8, io.SEEK_CUR)
-            entry = DirectoryEntry(self.image, fh)
-            offset = fh.tell()
+            fh.seek(start)
+            entry = DirectoryEntry(self.image, fh, parent=self)
 
             yield entry
 
-            # Align to the next 8 byte boundary
-            fh.seek((offset + 7) & (-8))
+            # The next directory entry starts at the aligned end of this entry's stream
+            # table, never at the aligned end of an individual stream.
+            fh.seek((entry.end + 7) & (-8))
 
-    def open(self, name: str = "") -> BinaryIO:
+    def open(self, name: str = "", index: int | None = None) -> BinaryIO:
         """Return a file-like object for the contents of this directory entry.
 
         Args:
             name: Optional alternate stream name to open.
+            index: Optional stream table index, to select one of several streams that share
+                ``name``. Without it, a duplicated name is ambiguous and raises.
+
+        Raises:
+            FileNotFoundError: If the named stream does not exist or its resource is missing.
+            CorruptArchiveError: If the entry, a duplicate name or the resource is malformed.
         """
-        stream_hash = self.streams.get(name)
-        if stream_hash is None:
-            raise FileNotFoundError(f"Stream not found in directory entry {self}: {name!r}")
+        evidence = self._evidence_for(name, index)
+        return evidence.open()
 
-        if stream_hash.strip(b"\x00") == b"":
-            return BufferedStream(io.BytesIO(b""), size=0)
-
-        if resource := self.image.wim.resources.get(stream_hash):
-            return resource.open()
-
-        raise FileNotFoundError(f"Unable to find resource for directory entry {self}")
+    def _evidence_for(self, name: str, index: int | None = None) -> StreamEvidence:
+        matches = [stream for stream in self.stream_evidence() if stream.name == name]
+        if index is not None:
+            matches = [stream for stream in matches if stream.index == index]
+        if not matches:
+            raise FileNotFoundError(f"Stream not found in directory entry {self}: {name!r} (index {index!r})")
+        if len(matches) > 1:
+            raise CorruptArchiveError(
+                f"Directory entry {self} declares {len(matches)} streams named {name!r}; "
+                "pass an index or use stream_evidence() to open each one"
+            )
+        return matches[0]
 
 
 class ReparsePoint:
@@ -503,3 +974,153 @@ def _ts_to_ns(ts: int) -> int:
 
 def _read_name(fh: BinaryIO, length: int) -> str:
     return fh.read(length).decode("utf-16-le")
+
+
+def _stream_size(fh: BinaryIO) -> int | None:
+    """Return the size of a seekable image stream without changing its position."""
+    size = getattr(fh, "size", None)
+    if isinstance(size, int):
+        return size
+    try:
+        pos = fh.tell()
+        size = fh.seek(0, io.SEEK_END)
+        fh.seek(pos)
+    except (AttributeError, OSError, ValueError):
+        return None
+    return size if isinstance(size, int) else None
+
+
+def _looks_like_directory_entry(image: Image, offset: int) -> bool:
+    """Whether ``offset`` plausibly starts a new directory entry rather than a stream entry.
+
+    A stream may be truncated or an entry may over-declare ``Streams``; in either case the
+    bytes that follow can be the next directory entry. Reading that header as a stream would
+    silently swallow a file, so check the declared length, alignment, names and subdirectory
+    reference against the image bounds before trusting the stream table.
+    """
+    if offset % 8:
+        return False
+    if image.size is not None and offset + len(c_wim._DIRENTRY) > image.size:
+        return False
+
+    try:
+        image.fh.seek(offset)
+        header = c_wim._DIRENTRY(image.fh)
+        name = image.fh.read(header.FileNameLength)
+    except (EOFError, struct.error):
+        return False
+
+    length = header.Length
+    if length < len(c_wim._DIRENTRY) or length % 8:
+        return False
+    if image.size is not None and offset + length > image.size:
+        return False
+    if not header.FileNameLength or header.FileNameLength % 2:
+        return False
+    if header.FileNameLength > length - len(c_wim._DIRENTRY):
+        return False
+    if header.ShortNameLength % 2:
+        return False
+    if header.ShortNameLength > length - len(c_wim._DIRENTRY) - header.FileNameLength:
+        return False
+
+    try:
+        decoded = name.decode("utf-16-le")
+    except UnicodeDecodeError:
+        return False
+    if not decoded or any(ord(char) < 0x20 for char in decoded):
+        return False
+
+    subdir = header.SubdirOffset
+    if subdir:
+        if subdir % 8:
+            return False
+        if image.size is not None and subdir >= image.size:
+            return False
+
+    return True
+
+
+def _overlapping_directory_entry(image: Image, start: int, end: int) -> int | None:
+    """Return the first directory entry offset inside ``(start, end)``, if any."""
+    candidate = (start + 7) & (-8)
+    while candidate < end:
+        if _looks_like_directory_entry(image, candidate):
+            return candidate
+        candidate += 8
+
+    return None
+
+
+def _invalid_stream_name(name: str) -> bool:
+    """Whether a decoded stream name contains bytes no NTFS stream name can hold."""
+    return not name or any(ord(char) < 0x20 or char == ":" for char in name)
+
+
+def _next_entry_after_stream(image: Image, offset: int) -> int:
+    """Find where a following directory entry begins after a malformed stream entry.
+
+    A stream that declares an implausible length cannot be followed by simply adding that
+    length. Scan the 8-byte slots after the stream header for the first one that parses as a
+    directory entry, so the next file is not lost; otherwise continue after the stream header.
+    """
+    candidate = offset + 8
+    limit = image.size if image.size is not None else candidate
+
+    while candidate + len(c_wim._DIRENTRY) <= limit:
+        if _looks_like_directory_entry(image, candidate):
+            return candidate
+        candidate += 8
+
+    return candidate
+
+
+def _resource_in_bounds(wim: WIM, resource: Resource) -> bool:
+    """Whether a resource's declared data range fits inside the WIM file."""
+    fh = wim.fh
+    try:
+        pos = fh.tell()
+        end = fh.seek(0, io.SEEK_END)
+        fh.seek(pos)
+    except (OSError, ValueError):
+        return True
+
+    if not isinstance(end, int):
+        return True
+    if resource.offset < 0 or resource.size < 0:
+        return False
+    return resource.offset + resource.size <= end
+
+
+def _verify_evidence(evidence: StreamEvidence) -> StreamEvidence:
+    """Open and read a stream to EOF, checking its size and resource digest."""
+    if evidence.status != StreamStatus.READABLE:
+        return replace(evidence, verified=False)
+
+    try:
+        with evidence.open() as fh:
+            digest = hashlib.sha1()
+            read = 0
+            while chunk := fh.read(DEFAULT_CHUNK_SIZE):
+                digest.update(chunk)
+                read += len(chunk)
+    except (EOFError, OSError, struct.error, NotImplementedError) as e:
+        return replace(evidence, status=StreamStatus.CORRUPT, error=f"{type(e).__name__}: {e}", verified=False)
+
+    if evidence.logical_size is not None and read != evidence.logical_size:
+        return replace(
+            evidence,
+            status=StreamStatus.CORRUPT,
+            error=f"read {read} bytes, expected {evidence.logical_size}",
+            verified=False,
+        )
+
+    if evidence.resource_hash is not None and digest.digest() != evidence.resource_hash:
+        return replace(
+            evidence,
+            status=StreamStatus.CORRUPT,
+            error=f"resource digest {digest.hexdigest()} does not match {evidence.resource_id_hex}",
+            verified=False,
+        )
+
+    return replace(evidence, verified=True)
