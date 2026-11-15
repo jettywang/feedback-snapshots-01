@@ -113,6 +113,57 @@ after the name (see `Dictionaries`_ for their definitions):
 Accessing a tag which is not present raises a ``KeyError``, like a
 missing attribute.
 
+Tunnel candidates and VLAN policy
+---------------------------------
+
+Reading ``reply["Tunnel-Private-Group-ID"]`` returns the values of all
+tags. That is useful for display, but it is not an authorization: RFC 2868
+section 3 defines each tag as one tunnel alternative, so values of
+different tags must not be combined into one assignment. Use
+:mod:`pyrad.tunnel` to read the VLAN assignment of an Access-Accept:
+
+.. code-block:: python
+
+    from pyrad import tunnel
+
+    result = tunnel.validate_tunnel_candidates(
+        reply, tunnel.TunnelPolicy(allowed_vlans=range(100, 201)))
+
+    if result.assignment is not None:
+        assignment = result.assignment
+        print(assignment.vlan_id)     # e.g. 100
+        print(assignment.sources)
+        # {'Tunnel-Type': 'Tunnel-Type:1',
+        #  'Tunnel-Medium-Type': 'Tunnel-Medium-Type:1',
+        #  'Tunnel-Private-Group-ID': 'Tunnel-Private-Group-ID:1'}
+
+The three attributes are read as raw values by their codes, not through
+the tag-merging packet accessors. Tag 0 and a string value without a tag
+are the same untagged candidate; tags 1 through 31 are separate
+candidates. A candidate is considered only if all three attributes are
+present. Missing fields, duplicate attributes, conflicting values,
+malformed integers and unsupported tunnel or medium types are returned as
+diagnostics on that candidate, and no field is ever taken from another
+candidate.
+
+The local policy is applied after assembly. ``allowed_vlans`` is an
+iterable of VLAN IDs and defaults to empty, which denies every VLAN.
+Passing a valid Message-Authenticator authenticates the packet, not the
+VLANs in it, so always configure the range that the access network may
+use. If several complete candidates are approved, the packet is ambiguous
+and no assignment is returned unless ``selected_tag`` picks one.
+
+:class:`~pyrad.tunnel.TunnelApplicationAdapter` is the interface for the
+code that applies the configuration. It accepts only one complete
+candidate approved by the policy and raises
+:class:`~pyrad.tunnel.TunnelAuthorizationError` otherwise:
+
+.. code-block:: python
+
+    adapter = tunnel.TunnelApplicationAdapter(
+        tunnel.TunnelPolicy(allowed_vlans=range(100, 201)))
+    assignment = adapter.apply(reply)   # or raise TunnelAuthorizationError
+
 Encrypted attributes
 --------------------
 

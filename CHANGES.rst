@@ -4,6 +4,17 @@ Changelog
 Unreleased
 ----------
 
+* Add :mod:`pyrad.tunnel` to read a tunnel assignment from an Access-Accept
+  without merging values of different tags. ``assemble_tunnel_candidates``
+  groups ``Tunnel-Type``, ``Tunnel-Medium-Type`` and
+  ``Tunnel-Private-Group-ID`` by RFC 2868 tag, treating tag 0 and untagged
+  values as the same candidate and keeping missing, duplicate, conflicting
+  and malformed values as diagnostics. ``validate_tunnel_candidates``
+  applies a local :class:`~pyrad.tunnel.TunnelPolicy` afterwards; the
+  allowed VLAN range defaults to empty and is checked even for
+  authenticated packets. ``TunnelApplicationAdapter`` accepts only one
+  complete approved candidate and reports the source attribute of every
+  field.
 * pyrad no longer depends on netaddr; it was only used by the tests and
   is now in the ``test`` dependency group. ipv6prefix values given as
   ``netaddr.IPNetwork`` are still accepted. Code that imports netaddr

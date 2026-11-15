@@ -40,6 +40,8 @@ This package contains the following modules:
   - dictionary: RADIUS attribute dictionary
   - dictfile: dictionary file parser with $INCLUDE support
   - packet: a RADIUS packet as sent to/from servers
+  - tunnel: assembly and local policy validation of tunnel
+    attributes (RFC 2868)
   - tools: utility functions
 """
 
@@ -50,4 +52,5 @@ __url__ = 'http://pyrad.readthedocs.io/en/latest/?badge=latest'
 __copyright__ = 'Copyright 2002-2026 Wichert Akkerman, Christian Giese. All rights reserved.'
 __version__ = '2.6.0'
 
-__all__ = ['client', 'dictionary', 'packet', 'server', 'tools', 'dictfile']
+__all__ = ['client', 'dictionary', 'packet', 'server', 'tools',
+           'dictfile', 'tunnel']

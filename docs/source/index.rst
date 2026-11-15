@@ -107,6 +107,7 @@ Per-module API documentation.
   api/proxy
   api/server
   api/server_async
+  api/tunnel
 
 
 Author, Copyright, Availability
