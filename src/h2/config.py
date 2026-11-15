@@ -149,6 +149,17 @@ class H2Configuration:
         .. versionadded:: 2.6.0
 
     :type logger: ``logging.Logger``
+
+    :param enable_diagnostics: Controls whether the connection records
+        structured diagnostics about inbound frame processing. When enabled,
+        :attr:`h2.connection.H2Connection.diagnostics` captures the absolute
+        on-wire byte ranges, pre-failure protocol state and delivered-event
+        boundaries needed to locate an HTTP/2 connection error. Diagnostics
+        only retain structural metadata and payload summaries (frame type,
+        stream id, lengths, flags); they never store header values,
+        authentication headers, bodies or raw payloads. Defaults to ``False``,
+        in which case the feature is fully inert and behaviour is unchanged.
+    :type enable_diagnostics: ``bool``
     """
 
     client_side = _BooleanConfigOption("client_side")
@@ -167,6 +178,7 @@ class H2Configuration:
     normalize_inbound_headers = _BooleanConfigOption(
         "normalize_inbound_headers",
     )
+    enable_diagnostics = _BooleanConfigOption("enable_diagnostics")
 
     def __init__(self,
                  client_side: bool = True,
@@ -176,7 +188,8 @@ class H2Configuration:
                  split_outbound_cookies: bool = False,
                  validate_inbound_headers: bool = True,
                  normalize_inbound_headers: bool = True,
-                 logger: DummyLogger | OutputLogger | None = None) -> None:
+                 logger: DummyLogger | OutputLogger | None = None,
+                 enable_diagnostics: bool = False) -> None:
         self.client_side = client_side
         self.header_encoding = header_encoding
         self.validate_outbound_headers = validate_outbound_headers
@@ -185,6 +198,7 @@ class H2Configuration:
         self.validate_inbound_headers = validate_inbound_headers
         self.normalize_inbound_headers = normalize_inbound_headers
         self.logger = logger or DummyLogger(__name__)
+        self.enable_diagnostics = enable_diagnostics
 
     @property
     def header_encoding(self) -> bool | str | None:

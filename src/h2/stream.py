@@ -145,7 +145,11 @@ class H2StreamStateMachine:
             old_state = self.state
             self.state = StreamState.CLOSED
             msg = f"Invalid input {input_} in state {old_state}"
-            raise ProtocolError(msg) from err
+            error = ProtocolError(msg)
+            # Preserve the state observed immediately before the failed
+            # transition so optional diagnostics report the pre-failure state.
+            error.stream_state_before = old_state.name
+            raise error from err
         else:
             previous_state = self.state
             self.state = target_state

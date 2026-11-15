@@ -23,6 +23,16 @@ class ProtocolError(H2Error):
     #: The error code corresponds to this kind of Protocol Error.
     error_code = ErrorCodes.PROTOCOL_ERROR
 
+    def __init__(self, *args: object) -> None:
+        super().__init__(*args)
+        #: Connection/stream state name captured immediately before a failed
+        #: state-machine transition. Populated by the state machines when they
+        #: raise a plain ProtocolError and consumed by optional diagnostics;
+        #: absent on subclasses that bypass this initializer, where readers
+        #: fall back to a ``None`` default.
+        self.connection_state_before: str | None = None
+        self.stream_state_before: str | None = None
+
 
 class FrameTooLargeError(ProtocolError):
     """

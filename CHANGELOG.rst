@@ -11,6 +11,13 @@ dev
 **API Changes (Backward Compatible)**
 
 - Support for Python 3.15 has been added.
+- Add opt-in structured connection diagnostics. Configure a connection with
+  ``H2Configuration(enable_diagnostics=True)`` and read
+  ``H2Connection.diagnostics`` to obtain payload-free frame summaries, the
+  absolute on-wire byte range that triggered an inbound error (including the
+  full HEADERS/CONTINUATION block and the specific failing frame), the
+  pre-failure protocol state and the boundary of delivered events. Diagnostics
+  are inert by default and do not change normal events or protocol responses.
 
 **Bugfixes**
 

@@ -27,6 +27,40 @@ Configuration
    :members:
 
 
+Diagnostics
+-----------
+
+Optional, opt-in structured diagnostics for locating the input that triggers
+an inbound HTTP/2 connection error. Enable them with
+``H2Configuration(enable_diagnostics=True)`` and read the record from
+:attr:`h2.connection.H2Connection.diagnostics`.
+
+Diagnostics capture absolute on-wire byte ranges, the protocol state observed
+before the failure, and the boundary of events that had actually been
+delivered. Only structural metadata and payload summaries (frame type, stream
+id, lengths and flags) are retained: header values, authentication headers,
+bodies and raw frame payloads are never stored. Enabling diagnostics does not
+change normal events or protocol responses.
+
+.. autoclass:: h2.diagnostics.ConnectionDiagnostics
+   :members:
+
+.. autoclass:: h2.diagnostics.DiagnosticEntry
+   :members:
+
+.. autoclass:: h2.diagnostics.FrameSummary
+   :members:
+
+.. autoclass:: h2.diagnostics.WireRange
+   :members:
+
+.. autoclass:: h2.diagnostics.StateSnapshot
+   :members:
+
+.. autoclass:: h2.diagnostics.EventBoundary
+   :members:
+
+
 .. _h2-events-api:
 
 Events

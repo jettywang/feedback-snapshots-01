@@ -29,7 +29,17 @@ from hyperframe.frame import (
     WindowUpdateFrame,
 )
 
+from . import diagnostics as _diag
 from .config import H2Configuration
+from .diagnostics import (
+    CATEGORY_STATE_ERROR,
+    CATEGORY_UNKNOWN_FRAME,
+    ConnectionDiagnostics,
+    DiagnosticEntry,
+    FrameSummary,
+    WireRange,
+    _DiagnosticsRecorder,
+)
 from .errors import ErrorCodes, _error_code_from_int
 from .events import (
     AlternativeServiceAvailable,
@@ -264,7 +274,11 @@ class H2ConnectionStateMachine:
             old_state = self.state
             self.state = ConnectionState.CLOSED
             msg = f"Invalid input {input_} in state {old_state}"
-            raise ProtocolError(msg) from e
+            error = ProtocolError(msg)
+            # Preserve the state observed immediately before the failed
+            # transition so optional diagnostics report the pre-failure state.
+            error.connection_state_before = old_state.name
+            raise error from e
         else:
             self.state = target_state
             if func is not None:  # pragma: no cover
@@ -377,7 +391,15 @@ class H2Connection:
         self.max_inbound_frame_size = self.local_settings.max_frame_size
 
         # Buffer for incoming data.
-        self.incoming_buffer = FrameBuffer(server=not self.config.client_side)
+        # When diagnostics are enabled a shared recorder owns the absolute
+        # wire-offset bookkeeping; otherwise the frame buffer runs unchanged.
+        self._diag_recorder: _DiagnosticsRecorder | None = (
+            _DiagnosticsRecorder() if self.config.enable_diagnostics else None
+        )
+        self.incoming_buffer = FrameBuffer(
+            server=not self.config.client_side,
+            recorder=self._diag_recorder,
+        )
 
         # A private variable to store a sequence of received header frames
         # until completion.
@@ -416,6 +438,21 @@ class H2Connection:
             AltSvcFrame: self._receive_alt_svc_frame,
             ExtensionFrame: self._receive_unknown_frame,
         }
+
+    @property
+    def diagnostics(self) -> ConnectionDiagnostics | None:
+        """
+        The structured diagnostic record for this connection.
+
+        Only present when the connection was created with
+        ``H2Configuration(enable_diagnostics=True)``; otherwise this is
+        ``None`` and no diagnostic work is performed. The record contains
+        payload-free frame summaries, absolute on-wire byte ranges, the
+        pre-failure protocol state and the boundary of delivered events.
+        """
+        if self._diag_recorder is None:
+            return None
+        return self._diag_recorder.diagnostics
 
     def _prepare_for_sending(self, frames: list[Frame]) -> None:
         if not frames:
@@ -1512,25 +1549,171 @@ class H2Connection:
         )
 
         events: list[Event] = []
-        self.incoming_buffer.add_data(data)
         self.incoming_buffer.max_frame_size = self.max_inbound_frame_size
 
+        current_frame: Frame | None = None
+        # Connection state before any frame in this batch is processed. Used so
+        # diagnostics report the pre-failure state even when the failure
+        # originates in a stream state machine rather than the connection one.
+        state_before_batch = self.state_machine.state
         try:
-            for frame in self.incoming_buffer:
-                events.extend(self._receive_frame(frame))
+            # add_data may raise a ProtocolError itself (for a bad preamble),
+            # so it stays inside the diagnostic/error-handling boundary.
+            self.incoming_buffer.add_data(data)
+            frame_iterator = iter(self.incoming_buffer)
+            while True:
+                # Bind the frame before dispatching it so that a failure while
+                # parsing or handling it can still be attributed to its wire
+                # range. A plain ``for`` loop would leave this unset when the
+                # iterator itself raises.
+                try:
+                    current_frame = next(frame_iterator)
+                except StopIteration:
+                    break
+                frame = current_frame
+                frame_events = self._receive_frame(frame)
+                events.extend(frame_events)
+                self._mark_delivery(frame, len(events))
         except InvalidPaddingError as e:
             self._terminate_connection(ErrorCodes.PROTOCOL_ERROR)
             msg = "Received frame with invalid padding."
-            raise ProtocolError(msg) from e
+            protocol_error = ProtocolError(msg)
+            # A padding error is raised while the buffer is still parsing the
+            # frame body, so the iterator never yields it: fall back to the
+            # frame the buffer had in progress.
+            failing_frame = current_frame or self.incoming_buffer._frame_in_progress
+            self._record_diagnostic_error(
+                protocol_error, e, failing_frame, state_before_batch,
+            )
+            raise protocol_error from e
         except ProtocolError as e:
             # For whatever reason, receiving the frame caused a protocol error.
             # We should prepare to emit a GoAway frame before throwing the
             # exception up further. No need for an event: the exception will
             # do fine.
             self._terminate_connection(e.error_code)
+            self._record_diagnostic_error(
+                e, frame=current_frame, state_before=state_before_batch,
+            )
             raise
 
         return events
+
+    def _mark_delivery(self, frame: Frame, delivered_event_count: int) -> None:
+        """
+        Advance the delivered-event boundary once a frame has produced events
+        without raising. Only frames fully processed up to this point count, so
+        an event that is never delivered can never appear as an executed
+        action.
+        """
+        recorder = self._diag_recorder
+        if recorder is None:
+            return
+        wire_end = recorder.frame_end(frame)
+        if wire_end is None:
+            return
+        recorder.record_delivery(delivered_event_count, wire_end)
+
+    def _record_diagnostic_error(
+        self,
+        error: ProtocolError,
+        original: Exception | None = None,
+        frame: Frame | None = None,
+        state_before: ConnectionState | None = None,
+    ) -> None:
+        """
+        Build and store the fatal diagnostic entry for a raised protocol
+        error, enriching any framing-level context with the pre-failure
+        connection state and delivered-event boundary.
+        """
+        recorder = self._diag_recorder
+        if recorder is None or recorder.diagnostics.last_error is not None:
+            return
+
+        context = _diag.frame_error(error) or (
+            _diag.frame_error(original) if original is not None else None
+        )
+        boundary = recorder.diagnostics.boundary
+        snapshot = recorder.snapshot(
+            connection_state=self.state_machine.state,
+            highest_inbound_stream_id=self.highest_inbound_stream_id,
+            open_stream_count=self.open_inbound_streams + self.open_outbound_streams,
+        )
+        # Report the state observed before the failure. A state machine may
+        # already have transitioned to CLOSED, so prefer the captured prior
+        # state, then the batch's starting state, then the live snapshot.
+        prior_connection_state = getattr(error, "connection_state_before", None)
+        if prior_connection_state is None and original is not None:
+            prior_connection_state = getattr(original, "connection_state_before", None)
+        if prior_connection_state is not None:
+            snapshot.connection_state = prior_connection_state
+        elif state_before is not None:
+            snapshot.connection_state = state_before.name
+
+        frame_summary: FrameSummary | None = None
+        frame_range: WireRange | None = None
+        header_block_range = snapshot.active_header_block
+        category = CATEGORY_STATE_ERROR
+        message = str(error)
+
+        if context is not None:
+            category = context.category
+            message = context.message
+            frame_summary = context.summary
+            frame_range = context.frame_range
+            if context.header_block_range is not None:
+                header_block_range = context.header_block_range
+        elif frame is not None:
+            frame_range = _diag.wire_range_of(frame)
+            if frame_range is not None:
+                frame_summary = _diag.summarize_frame(
+                    frame,
+                    declared_length=frame.body_len,
+                )
+
+        # A header-bearing frame that fails after being fully framed constitutes
+        # its own (single-frame) header block, even when no CONTINUATION frames
+        # were involved.
+        if header_block_range is None and isinstance(frame, (HeadersFrame, PushPromiseFrame)):
+            header_block_range = frame_range
+
+        entry = DiagnosticEntry(
+            category=category,
+            fatal=True,
+            message=message,
+            frame=frame_summary,
+            frame_range=frame_range,
+            header_block_range=header_block_range,
+            connection_state=snapshot.connection_state,
+            stream_state=self._prior_stream_state_name(
+                error,
+                original,
+                frame_summary.stream_id if frame_summary is not None else None,
+            ),
+            delivered_event_count=boundary.delivered_event_count,
+            delivered_wire_end=boundary.delivered_wire_end,
+        )
+
+        recorder.record_fatal(entry)
+
+    def _prior_stream_state_name(
+        self,
+        error: ProtocolError,
+        original: Exception | None,
+        stream_id: int | None,
+    ) -> str | None:
+        """
+        Return the stream state observed immediately before a failed
+        transition, falling back to the stream's current state name.
+        """
+        prior = getattr(error, "stream_state_before", None)
+        if prior is None and original is not None:
+            prior = getattr(original, "stream_state_before", None)
+        if prior is not None:
+            return str(prior)
+        if stream_id is None or stream_id not in self.streams:
+            return None
+        return self.streams[stream_id].state_machine.state.name
 
     def _receive_frame(self, frame: Frame) -> list[Event]:
         """
@@ -1980,8 +2163,29 @@ class H2Connection:
         self.config.logger.debug(
             "Received unknown extension frame (ID %d)", frame.stream_id,
         )
+        self._record_unknown_frame(frame)
         event = UnknownFrameReceived(frame=frame)
         return [], [event]
+
+    def _record_unknown_frame(self, frame: ExtensionFrame) -> None:
+        """Record an unknown extension frame as a payload-free observation."""
+        recorder = self._diag_recorder
+        if recorder is None:
+            return
+        boundary = recorder.diagnostics.boundary
+        wire_range = _diag.wire_range_of(frame)
+        recorder.record_observation(
+            DiagnosticEntry(
+                category=CATEGORY_UNKNOWN_FRAME,
+                fatal=False,
+                message=f"Ignored unknown frame type {frame.type}",
+                frame=_diag.summarize_frame(frame, declared_length=frame.body_len),
+                frame_range=wire_range,
+                connection_state=self.state_machine.state.name,
+                delivered_event_count=boundary.delivered_event_count,
+                delivered_wire_end=boundary.delivered_wire_end,
+            ),
+        )
 
     def _local_settings_acked(self) -> dict[SettingCodes | int, ChangedSetting]:
         """
