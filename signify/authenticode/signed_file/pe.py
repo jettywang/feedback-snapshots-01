@@ -47,6 +47,7 @@ from signify._typing import HashFunction
 from signify.authenticode.indirect_data import IndirectData, PeImageData
 from signify.authenticode.signed_data import AuthenticodeSignature
 from signify.exceptions import AuthenticodeInvalidPageHashError, SignedPEParseError
+from signify.file_types import FileFormat
 from signify.fingerprinter import Fingerprinter, Range
 
 from .base import AuthenticodeFile
@@ -63,6 +64,10 @@ class ParsedCertTable(TypedDict):
 
 
 class SignedPEFile(AuthenticodeFile):
+    file_format = FileFormat.PE
+    detection_magic = (b"MZ",)
+    _parse_error_class = SignedPEParseError
+
     def __init__(self, file_obj: BinaryIO):
         """A PE file that is to be parsed to find the relevant sections for
         Authenticode parsing.
@@ -79,9 +84,50 @@ class SignedPEFile(AuthenticodeFile):
     def _try_open(
         cls, file_obj: BinaryIO, file_name: str | None, header: bytes
     ) -> SignedPEFile | None:
-        if header.startswith(bytes.fromhex("4D 5A")):
-            return cls(file_obj)
-        return None
+        if not header.startswith(b"MZ"):
+            return None
+        pefile = cls(file_obj)
+        # Detection must not let a damaged PE fall through to another parser
+        # (or to FlatFile).  Validate only the container headers here; the
+        # presence of a signature is decided later, during verification.
+        pefile._validate_pe_container()
+        return pefile
+
+    def _validate_pe_container(self) -> None:
+        """Reject streams that claim to be PE files but cannot be one.
+
+        This checks the MZ/PE headers and, when the optional header declares a
+        certificate table, that the declared range lies within the file.  It
+        does not require a certificate table: an unsigned PE is valid input.
+        """
+        try:
+            optional_header_offset, optional_header_size = self._seek_optional_header()
+            # Inspect the declared certificate table entry without relying on
+            # the lenient get_authenticode_omit_sections(), which intentionally
+            # treats out-of-range tables as absent for hashing purposes.
+            self.file.seek(optional_header_offset, os.SEEK_SET)
+            signature = struct.unpack("<H", self.file.read(2))[0]
+            if signature == 0x10B:
+                cert_base = optional_header_offset + 128
+            elif signature == 0x20B:
+                cert_base = optional_header_offset + 144
+            else:
+                raise SignedPEParseError("Unknown PE optional header signature.")
+            if optional_header_offset + optional_header_size < cert_base + 8:
+                return
+            self.file.seek(cert_base, os.SEEK_SET)
+            address, size = struct.unpack("<II", self.file.read(8))
+            if size and (
+                address < optional_header_offset + optional_header_size
+                or address + size > self._filelength
+            ):
+                raise SignedPEParseError(
+                    "The PE certificate table is outside the file boundaries."
+                )
+        except (SignedPEParseError, struct.error) as e:
+            raise SignedPEParseError(
+                "The stream starts with an MZ header but is not a valid PE file."
+            ) from e
 
     def get_authenticode_omit_sections(self) -> dict[str, RelRange] | None:
         """Returns all ranges of the raw file that are relevant for exclusion for the
@@ -247,9 +293,8 @@ class SignedPEFile(AuthenticodeFile):
 
         locations = self.get_authenticode_omit_sections()
         if not locations or "certtable" not in locations:
-            raise SignedPEParseError(
-                "The PE file does not contain a certificate table."
-            )
+            # The container is valid; it just has no signature table.
+            return
 
         position = locations["certtable"].start
         certtable_end = sum(locations["certtable"])
@@ -328,32 +373,52 @@ class SignedPEFile(AuthenticodeFile):
     def iter_embedded_signatures(
         self, *, include_nested: bool = True, ignore_parse_errors: bool = True
     ) -> Iterator[AuthenticodeSignature]:
+        """Iterate over embedded signatures, distinguishing unsigned from damaged.
+
+        A structurally valid PE without a Certificate Table, or with a
+        Certificate Table that contains no PKCS#7 entry, is unsigned and yields
+        nothing.  A PE whose headers or certificate table cannot be parsed
+        raises :class:`~signify.exceptions.SignedPEParseError` (classified as
+        :data:`~signify.file_types.FailureStage.MALFORMED_SIGNATURE`).  When
+        ``ignore_parse_errors`` is :const:`True`, the failure is recorded on
+        :attr:`signature_parse_error` so :meth:`verify` can refuse to treat the
+        file as merely unsigned.
+        """
+        self.signature_parse_error = None
         try:
-            found = False
-            for certificate in self._parse_cert_table():
-                if certificate["revision"] != 0x200:
-                    raise SignedPEParseError(
-                        f"Unknown certificate revision {certificate['revision']!r}"
-                    )
-
-                if certificate["type"] == 2:
-                    signed_data = AuthenticodeSignature.from_envelope(
-                        certificate["certificate"], signed_file=self
-                    )
-                    if include_nested:
-                        yield from signed_data.iter_recursive_nested()
-                    else:
-                        yield signed_data
-                    found = True
-
-            if not found:
-                raise SignedPEParseError(
-                    "A SignedData structure was not found in the PE file's Certificate"
-                    " Table"
-                )
-        except SignedPEParseError:
+            yield from self._iter_embedded_signatures(include_nested=include_nested)
+        except Exception as e:
+            error = self._signature_parse_error(e)
+            self.signature_parse_error = error
             if not ignore_parse_errors:
-                raise
+                raise error from e
+
+    def _iter_embedded_signatures(
+        self, *, include_nested: bool
+    ) -> Iterator[AuthenticodeSignature]:
+        """Yield signatures, or raise when the container is structurally invalid."""
+        self._validate_pe_container()
+        locations = self.get_authenticode_omit_sections()
+        if locations is None or "certtable" not in locations:
+            # A valid PE without a certificate table is simply unsigned.
+            return
+
+        for certificate in self._parse_cert_table():
+            if certificate["revision"] != 0x200:
+                raise SignedPEParseError(
+                    f"Unknown certificate revision {certificate['revision']!r}"
+                )
+
+            if certificate["type"] == 2:
+                signed_data = AuthenticodeSignature.from_envelope(
+                    certificate["certificate"], signed_file=self
+                )
+                if include_nested:
+                    yield from signed_data.iter_recursive_nested()
+                else:
+                    yield signed_data
+        # A certificate table with no PKCS#7 entry yields nothing: it is an
+        # unsigned file, not a parse failure.
 
     def verify_additional_hashes(self, indirect_data: IndirectData) -> None:
         """Verifies the page hashes (if available) in the SpcPeImageData field."""

@@ -8,6 +8,11 @@ from typing_extensions import Self
 from signify.authenticode.indirect_data import IndirectData
 from signify.authenticode.signed_data import AuthenticodeSignature
 from signify.authenticode.trust_list import CertificateTrustList
+from signify.exceptions import (
+    AuthenticodeNotSignedError,
+    CertificateTrustListParseError,
+)
+from signify.file_types import FailureStage, FileFormat
 from signify.pkcs7 import SignedData
 from signify.x509 import Certificate
 
@@ -21,6 +26,10 @@ class CtlFile(AuthenticodeFile):
     Note that this subclass is not fully type-safe, as it will not return
     :class:`AuthenticodeSignature` objects.
     """
+
+    file_format = FileFormat.CTL
+    detection_magic = (b"\x30",)
+    _parse_error_class = CertificateTrustListParseError
 
     def __init__(self, ctl: CertificateTrustList) -> None:
         """
@@ -39,7 +48,24 @@ class CtlFile(AuthenticodeFile):
     @classmethod
     def from_envelope(cls, data: bytes) -> Self:
         """Creates a :class:`CtlFile` from a data envelope."""
-        return cls(CertificateTrustList.from_envelope(data))
+        try:
+            ctl = CertificateTrustList.from_envelope(data)
+        except CertificateTrustListParseError as e:
+            if e.file_format is None:
+                e.file_format = FileFormat.CTL
+            if e.stage is None:
+                e.stage = FailureStage.MALFORMED_SIGNATURE
+            raise
+        except Exception as e:
+            # Do not propagate the decoder message: it may quote ASN.1 content
+            # and is not a stable service-facing contract.
+            error = CertificateTrustListParseError(
+                "The recognized CTL container is structurally invalid.",
+                file_format=FileFormat.CTL,
+            )
+            error.__cause__ = e
+            raise error from e
+        return cls(ctl)
 
     def _calculate_expected_hashes(
         self,
@@ -70,7 +96,16 @@ class CtlFile(AuthenticodeFile):
     ) -> Iterator[CertificateTrustList]:
         """Returns an iterator over the :class:`CertificateTrustList` object.
 
+        A CTL without any ``SignerInfo`` is structurally valid but unsigned;
+        this raises :class:`~signify.exceptions.AuthenticodeNotSignedError`
+        rather than a cryptographic verification error.
+
         :param include_nested: Ignored.
         :param ignore_parse_errors: Ignored.
         """
+        if not self.ctl.signer_infos:
+            raise AuthenticodeNotSignedError(
+                "The CTL file does not contain a signature.",
+                file_format=FileFormat.CTL,
+            )
         yield self.ctl

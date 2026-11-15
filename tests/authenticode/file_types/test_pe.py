@@ -101,9 +101,12 @@ def test_modified_pciide_fails():
 
 
 def test_simple():
+    # This MZ-prefixed sample is not a PE at all: the PE header is missing.
+    # The container is recognized as PE, so it must report structural damage
+    # rather than be treated as unsigned.
     with open_test_data("simple") as f:
         pefile = SignedPEFile(f)
-        with pytest.raises(AuthenticodeNotSignedError):
+        with pytest.raises(SignedPEParseError):
             pefile.verify()
         with pytest.raises(SignedPEParseError):
             list(pefile.iter_embedded_signatures(ignore_parse_errors=False))

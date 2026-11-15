@@ -64,12 +64,73 @@ In Signify, we implement a subset of available file types by subclassing
 required methods for extracting the signature from the file and verifying it, much like
 SIPs in Windows.
 
+Detection and failure stages
+============================
 The easiest method of using this is by simply calling
-:meth:`signify.authenticode.AuthenticodeFile.from_stream`, which should automatically
-determine the appropriate subclass based on the provided file.
+:meth:`signify.authenticode.AuthenticodeFile.from_stream`, which automatically
+determines the appropriate subclass from the file's magic bytes.
+
+Detection is deliberately *not* a sequence of trial parses.  For each supported
+container there is exactly one leading magic:
+
+========================  ==============
+Format                    Leading bytes
+========================  ==============
+PE                        ``MZ``
+MSI (Structured Storage)  ``D0 CF 11 E0 A1 B1 1A E1``
+CTL / Catalog (.cat)      ``30`` (ASN.1 ``SEQUENCE``)
+P7X                       ``PKCX``
+========================  ==============
+
+If one of these matches, only that parser is used.  A failure in that parser is
+reported as structural damage; the input is never retried as another format and is
+never silently downgraded to an unsigned :class:`FlatFile`.  ``allow_flat=True``
+only applies to input that matches none of these magics.
+
+Parsers that fail while reading an embedded signature (for example a truncated PE
+certificate table or an MSI with an unparseable ``DigitalSignature`` stream) record
+that failure instead of reporting the file as unsigned.  A structurally valid file
+with no signature remains an *unsigned* result: no exception is raised while
+detecting it, and verification raises
+:class:`signify.exceptions.AuthenticodeNotSignedError`.
+
+:meth:`signify.authenticode.AuthenticodeFile.detect` exposes the selected format
+and failure stage programmatically:
+
+.. code-block:: python
+
+    from signify.authenticode import AuthenticodeFile
+
+    result = AuthenticodeFile.detect(file_obj)
+    # result.file_format  -> FileFormat.PE / MSI / CTL / P7X / FLAT / UNKNOWN
+    # result.stage        -> None, UNSUPPORTED_FORMAT, MALFORMED_SIGNATURE, ...
+    # result.signed_file  -> parser, or None when detection failed
+    # result.error        -> SignifyError with .file_format and .stage
+
+The four service-facing stages are:
+
+``UNSUPPORTED_FORMAT``
+    No supported magic matched.  Reject, or use a separate policy for generic
+    files (``allow_flat=True``).
+``UNSIGNED``
+    A supported container was parsed and contains no signature.
+``MALFORMED_SIGNATURE``
+    A supported container, or a signature structure inside it, is damaged.
+    This is not equivalent to "unsigned": route it to manual inspection.
+``VERIFICATION_FAILED``
+    A signature was parsed but does not validate (digest, chain, or time).
+
+Every exception from this package carries ``stage`` and, once known,
+``file_format``.  Messages never include private key material or the full contents
+of the inspected file.  A stream passed to detection is not closed; it is left at
+offset 0 and must stay open for as long as the returned parser is inspected.
+
+A short service-side triage example lives in ``docs/authenticode_detection.py``.
 
 In some cases, you may need to instantiate a subclass yourself, or access various
-methods provided by a subclass.
+methods provided by a subclass.  Direct construction (``SignedPEFile(stream)``,
+``CtlFile.from_envelope(data)``, ...) continues to work and does not go through
+detection.
 
 PE (.exe)
 ---------

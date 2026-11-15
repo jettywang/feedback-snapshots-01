@@ -20,8 +20,8 @@ from signify.exceptions import (
     AuthenticodeInvalidExtendedDigestError,
     AuthenticodeNotSignedError,
     SignedMsiParseError,
-    SignifyError,
 )
+from signify.file_types import FileFormat
 
 from .base import AuthenticodeFile
 
@@ -31,6 +31,10 @@ DIGITAL_SIGNATURE_ENTRY_NAME = "\x05DigitalSignature"
 
 class SignedMsiFile(AuthenticodeFile):
     """Implementation of MSI file Authenticode validation"""
+
+    file_format = FileFormat.MSI
+    detection_magic = (bytes.fromhex("D0 CF 11 E0 A1 B1 1A E1"),)
+    _parse_error_class = SignedMsiParseError
 
     def __init__(self, file_obj: BinaryIO | OleFileIO):
         """
@@ -43,8 +47,10 @@ class SignedMsiFile(AuthenticodeFile):
         else:
             try:
                 self._ole_file = OleFileIO(file_obj)
-            except NotOleFileError:
-                raise SignedMsiParseError("Not a valid OleFile")
+            except (NotOleFileError, OSError, ValueError) as e:
+                raise SignedMsiParseError(
+                    "Not a valid OleFile", file_format=FileFormat.MSI
+                ) from e
 
     @classmethod
     def _try_open(
@@ -99,30 +105,38 @@ class SignedMsiFile(AuthenticodeFile):
     def iter_embedded_signatures(
         self, *, include_nested: bool = True, ignore_parse_errors: bool = True
     ) -> Iterator[AuthenticodeSignature]:
+        """Iterate over embedded signatures, distinguishing unsigned from damaged.
+
+        A valid MSI without a ``DigitalSignature`` stream is unsigned and
+        yields nothing.  A present but unparseable signature stream raises
+        :class:`~signify.exceptions.SignedMsiParseError`, classified as a
+        malformed signature rather than an unsigned file.
+        """
+        self.signature_parse_error = None
+        if not self._ole_file.exists(DIGITAL_SIGNATURE_ENTRY_NAME):
+            # No signature stream is a valid, unsigned MSI.  Raise the
+            # unsigned-specific error so callers do not confuse it with a
+            # damaged signature structure.
+            raise AuthenticodeNotSignedError(
+                "The MSI file is missing a DigitalSignature stream.",
+                file_format=FileFormat.MSI,
+            )
+
         try:
-            if not self._ole_file.exists(DIGITAL_SIGNATURE_ENTRY_NAME):
-                raise AuthenticodeNotSignedError(
-                    "The MSI file is missing a DigitalSignature stream."
-                )
-            # get properties from the stream:
             with self._ole_file.openstream(DIGITAL_SIGNATURE_ENTRY_NAME) as fh:
                 b_data = fh.read()
-
             signed_data = AuthenticodeSignature.from_envelope(b_data, signed_file=self)
-            if include_nested:
-                yield from signed_data.iter_recursive_nested()
-            else:
-                yield signed_data
-        except SignedMsiParseError:
-            if not ignore_parse_errors:
-                raise
-        except SignifyError:
-            raise
         except Exception as e:
-            raise
-            # Rewrap any parse errors encountered
+            error = self._signature_parse_error(e)
+            self.signature_parse_error = error
             if not ignore_parse_errors:
-                raise SignedMsiParseError(str(e))
+                raise error from e
+            return
+
+        if include_nested:
+            yield from signed_data.iter_recursive_nested()
+        else:
+            yield signed_data
 
     def verify_additional_hashes(self, indirect_data: IndirectData) -> None:
         """Verifies the extended digest of MSI files."""

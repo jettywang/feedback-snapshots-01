@@ -5,6 +5,7 @@ from typing import BinaryIO
 
 from signify._typing import HashFunction
 from signify.authenticode.signed_data import AuthenticodeSignature
+from signify.file_types import FileFormat
 from signify.fingerprinter import Fingerprinter
 
 from .base import AuthenticodeFile
@@ -12,6 +13,8 @@ from .base import AuthenticodeFile
 
 class FlatFile(AuthenticodeFile):
     """Simple flat file implementation that fully hashes the file's contents."""
+
+    file_format = FileFormat.FLAT
 
     def __init__(self, file_obj: BinaryIO) -> None:
         self.file = file_obj

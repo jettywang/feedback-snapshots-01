@@ -2,6 +2,20 @@ Release notes
 =============
 This page contains the most significant changes in Signify between each release.
 
+Unreleased
+----------
+* Added ``AuthenticodeFile.detect`` and ``DetectionResult``, recording the selected
+  file format and the failure stage (unsupported format, unsigned, malformed
+  signature, or verification failure).
+* File type detection is now based on explicit magic-byte tables only.  A recognized
+  but damaged PE, MSI, CTL or P7X is reported as ``MALFORMED_SIGNATURE`` instead of
+  falling through to another parser or to ``FlatFile``.
+* Errors now expose ``stage``, ``file_format`` and ``requires_manual_inspection``,
+  and no longer chain decoder messages that may contain file content.
+* ``CtlFile`` now reports unsigned catalogs as ``NOT_SIGNED`` rather than a digest
+  verification failure.  ``SignedPEFile`` no longer treats a PE without a certificate
+  table as a parse error.
+
 v0.9.3 (2026-10-11)
 -------------------
 * Fix crash on certificates with key algorithms unknown to asn1crypto (e.g. ML-DSA).

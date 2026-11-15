@@ -311,8 +311,13 @@ def main() -> None:
                     print(f"    Status: {result.name}")
 
         except Exception as e:
+            stage = getattr(e, "stage", None)
             if args.verbose:
                 print("    Error while parsing: " + str(e))
+                if stage is not None:
+                    print(f"    Stage: {stage}")
+            elif stage is not None:
+                print(f"    Status: ERROR ({stage})")
             else:
                 print("    Status: ERROR")
 

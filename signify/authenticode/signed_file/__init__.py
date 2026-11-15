@@ -1,4 +1,4 @@
-from .base import AuthenticodeFile
+from .base import AuthenticodeFile, DetectionResult, FileDetection
 from .ctl import CtlFile
 from .flat import FlatFile
 from .pe import SignedPEFile, SignedPEFingerprinter
@@ -8,6 +8,8 @@ __all__ = [
     "AuthenticodeFile",
     "AuthenticodeSignatureFile",
     "CtlFile",
+    "DetectionResult",
+    "FileDetection",
     "FlatFile",
     "SignedPEFile",
     "SignedPEFingerprinter",

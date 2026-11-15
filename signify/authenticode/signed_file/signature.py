@@ -7,6 +7,8 @@ from typing import BinaryIO
 from typing_extensions import Self
 
 from signify.authenticode.signed_data import AuthenticodeSignature
+from signify.exceptions import AuthenticodeParseError
+from signify.file_types import FileFormat
 
 from .base import AuthenticodeFile
 
@@ -25,6 +27,10 @@ class AuthenticodeSignatureFile(AuthenticodeFile):
     provided by :class:`AuthenticodeFile`, simply use the
     :class:`AuthenticodeSignature` directly.
     """
+
+    file_format = FileFormat.P7X
+    detection_magic = (b"PKCX",)
+    _parse_error_class = AuthenticodeParseError
 
     def __init__(self, signed_data: AuthenticodeSignature | None) -> None:
         """
@@ -49,9 +55,22 @@ class AuthenticodeSignatureFile(AuthenticodeFile):
         fill it in.
         """
         signed_file = cls(None)
-        signed_file.signed_data = AuthenticodeSignature.from_envelope(
-            data, signed_file=signed_file
-        )
+        try:
+            signed_data = AuthenticodeSignature.from_envelope(
+                data, signed_file=signed_file
+            )
+        except AuthenticodeParseError:
+            raise
+        except Exception as e:
+            # The format is not known here: this helper is also used for
+            # certificate-table entries inside PE files.  Detection or the
+            # calling container attaches the appropriate file_format.
+            error = AuthenticodeParseError(
+                "The SignedData envelope is structurally invalid."
+            )
+            error.__cause__ = e
+            raise error from e
+        signed_file.signed_data = signed_data
         return signed_file
 
     def iter_embedded_signatures(

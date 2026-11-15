@@ -5,7 +5,8 @@ import logging
 import os
 import pathlib
 from collections.abc import Iterable, Iterator
-from typing import Any, BinaryIO, Literal
+from dataclasses import dataclass
+from typing import Any, BinaryIO, ClassVar, Literal
 
 from typing_extensions import Self
 
@@ -25,11 +26,96 @@ from signify.exceptions import (
     AuthenticodeInvalidDigestError,
     AuthenticodeNotSignedError,
     ParseError,
+    SignifyError,
+    UnsupportedFileFormatError,
 )
+from signify.file_types import FailureStage, FileFormat
 from signify.pkcs7 import SignedData
 from signify.x509 import Certificate
 
 logger = logging.getLogger(__name__)
+
+#: Number of leading bytes read by the format sniffer.  File type detection is
+#: intentionally based on these bytes only; it never attempts to parse (or
+#: verify) a candidate format to see whether another parser might accept it.
+DETECTION_HEADER_SIZE = 8
+
+
+def _rewind_stream(file_obj: BinaryIO) -> None:
+    """Move a seekable stream to offset 0, explaining the requirement if not."""
+    try:
+        file_obj.seek(0, os.SEEK_SET)
+    except (AttributeError, OSError, ValueError) as e:
+        raise UnsupportedFileFormatError(
+            "File detection requires a seekable binary stream.",
+            file_format=FileFormat.UNKNOWN,
+        ) from e
+
+
+def _header_matches_class(header: bytes, cls: type[AuthenticodeFile]) -> bool:
+    magics = cls.detection_magic
+    if magics is None:
+        return True
+    return any(header.startswith(magic) for magic in magics)
+
+
+@dataclass(frozen=True)
+class DetectionResult:
+    """The outcome of :meth:`AuthenticodeFile.detect`.
+
+    ``file_format`` records which container was selected by the magic-byte
+    sniffer.  ``stage`` is set when detection or container parsing failed, and
+    can be used by services to decide between rejection, accepting an unsigned
+    file, and manual inspection.  ``signed_file`` is present when the container
+    could be constructed, even if a subsequent validation step reported
+    ``error``.
+    """
+
+    file_format: FileFormat
+    signed_file: AuthenticodeFile | None = None
+    error: SignifyError | None = None
+    stage: FailureStage | None = None
+
+    @property
+    def format(self) -> FileFormat:
+        """Alias for :attr:`file_format`."""
+        return self.file_format
+
+    @property
+    def failure_stage(self) -> FailureStage | None:
+        """Alias for :attr:`stage`."""
+        return self.stage
+
+    @property
+    def is_supported(self) -> bool:
+        """Whether the magic bytes selected a supported Authenticode container."""
+        return self.file_format != FileFormat.UNKNOWN
+
+    @property
+    def is_usable(self) -> bool:
+        """Whether a parser was constructed without a structural parse error."""
+        return self.error is None
+
+    @property
+    def is_unsigned(self) -> bool:
+        return self.stage == FailureStage.UNSIGNED
+
+    @property
+    def is_malformed(self) -> bool:
+        return self.stage == FailureStage.MALFORMED_SIGNATURE
+
+    @property
+    def requires_manual_inspection(self) -> bool:
+        return self.stage == FailureStage.MALFORMED_SIGNATURE
+
+    def __iter__(self) -> Iterator[Any]:
+        # Convenience for tuple-style use: ``format, signed_file = detect(...)``.
+        yield self.file_format
+        yield self.signed_file
+
+
+#: Short alias for callers that prefer a compact name.
+FileDetection = DetectionResult
 
 
 class AuthenticodeFile:
@@ -38,6 +124,209 @@ class AuthenticodeFile:
     """
 
     catalogs: Iterable[CertificateTrustList] = ()
+
+    #: Format selected by automatic detection.  Concrete parsers set this so
+    #: errors raised during later verification can be attributed to the format
+    #: that was actually recognized.
+    file_format: ClassVar[FileFormat] = FileFormat.UNKNOWN
+
+    #: Exact leading bytes accepted by the magic-based format sniffer.  A value
+    #: of ``None`` means the class is not selected by automatic detection.
+    detection_magic: ClassVar[tuple[bytes, ...] | None] = None
+
+    #: Parse error class used when a recognized container cannot be opened.
+    _parse_error_class: ClassVar[type[ParseError]] = ParseError
+
+    #: Set by :meth:`iter_embedded_signatures` when a recognized container
+    #: contains a damaged signature structure.  :meth:`verify` raises it rather
+    #: than reporting the file as unsigned.
+    signature_parse_error: ParseError | None = None
+
+    @classmethod
+    def detect(
+        cls,
+        file_obj: BinaryIO,
+        file_name: str | None = None,
+        *,
+        allow_flat: bool = False,
+    ) -> DetectionResult:
+        """Identify the container format without guessing by trial verification.
+
+        Detection is based on the leading magic bytes only.  A recognized
+        container is opened with its own parser; if that parser rejects the
+        structure, the failure is returned as
+        :data:`~signify.file_types.FailureStage.MALFORMED_SIGNATURE` and is
+        never retried as another file type (in particular, it is never silently
+        downgraded to an unsigned flat image).
+
+        Detection always starts at offset 0, never closes the stream, and
+        leaves it at offset 0 on return.  The caller owns the stream and must
+        close it.  The parser returned in ``signed_file`` keeps using the same
+        stream, so it must remain open as long as signatures are inspected.
+
+        :param file_obj: The seekable binary stream to inspect.
+        :param file_name: Optional file name; read from ``file_obj.name`` when
+            omitted.
+        :param allow_flat: When :const:`True`, files whose magic bytes do not
+            match a supported container are reported as ``FLAT`` and are
+            opened as a :class:`FlatFile`.  The stream is not consumed beyond
+            the detection header, and no fingerprint has been calculated yet.
+        :return: A :class:`DetectionResult` describing the selected format,
+            the constructed parser (when possible) and any failure stage.
+        """
+        if file_name is None and hasattr(file_obj, "name"):
+            file_name = pathlib.Path(file_obj.name).name
+
+        # Detection is defined relative to the beginning of the stream.  The
+        # stream is explicitly rewound before and after the sniff so parsers
+        # that use absolute offsets (PE/MSI) see the same layout they always
+        # have.  Detection never closes the stream and never reads past the
+        # header beyond the leading DETECTION_HEADER_SIZE bytes.
+        _rewind_stream(file_obj)
+        header = file_obj.read(DETECTION_HEADER_SIZE)
+        _rewind_stream(file_obj)
+
+        # Subclass entry points keep the historical behavior of being an
+        # auto-detecting constructor: a known magic selects that parser even
+        # when called on a different concrete class.  The class's own parser is
+        # used only when no other magic matched.
+        parser = cls._parser_for_header(header)
+        if parser is None and cls is not AuthenticodeFile:
+            if cls.detection_magic is None or _header_matches_class(header, cls):
+                parser = cls
+        if parser is None:
+            if allow_flat:
+                from .flat import FlatFile
+
+                return DetectionResult(FileFormat.FLAT, signed_file=FlatFile(file_obj))
+            error = UnsupportedFileFormatError(
+                "Unable to determine file type with available parsers.",
+                file_format=FileFormat.UNKNOWN,
+            )
+            return DetectionResult(FileFormat.UNKNOWN, error=error, stage=error.stage)
+
+        result = cls._open_detected(parser, file_obj, file_name, header)
+        # Constructors may seek while validating.  Leave the stream at a known
+        # position whether construction succeeded or failed.
+        _rewind_stream(file_obj)
+        return result
+
+    @classmethod
+    def _open_detected(
+        cls,
+        parser: type[AuthenticodeFile],
+        file_obj: BinaryIO,
+        file_name: str | None,
+        header: bytes,
+    ) -> DetectionResult:
+        """Open a recognized container, classifying any parse failure."""
+        file_format = parser.file_format
+        try:
+            attempt = parser._try_open(file_obj, file_name, header)
+        except Exception as e:
+            # Log locally for debugging; the public error deliberately does not
+            # chain the decoder exception, whose message may quote file content.
+            logger.debug(
+                f"Error while opening detected {parser.__name__}",
+                exc_info=True,
+            )
+            error = parser._wrap_open_error(e, file_format=file_format)
+            return DetectionResult(file_format, error=error, stage=error.stage)
+        if attempt is None:
+            # A magic match must produce a parser; anything else means the
+            # container is recognized but structurally unusable.
+            error = parser._parse_error_for_format(
+                f"{parser.__name__} recognized the file but did not return a parser.",
+                file_format=file_format,
+            )
+            return DetectionResult(file_format, error=error, stage=error.stage)
+        # Instance-level format overrides the class default so even a parser
+        # instantiated directly reports the format that was recognized.
+        attempt.__dict__["file_format"] = file_format
+        return DetectionResult(file_format, signed_file=attempt)
+
+    @classmethod
+    def _parser_for_header(cls, header: bytes) -> type[AuthenticodeFile] | None:
+        """Return the parser selected by the magic bytes, without trying one.
+
+        Ordering matters only for overlapping prefixes; pick the most specific
+        first (e.g. ``PKCX`` before a generic ASN.1 ``0x30``).  MSI support is
+        optional, so a missing ``olefile`` does not prevent detecting the other
+        formats.
+        """
+        from . import ctl, pe, signature
+
+        candidates: list[type[AuthenticodeFile]] = [
+            signature.AuthenticodeSignatureFile,
+            ctl.CtlFile,
+            pe.SignedPEFile,
+        ]
+
+        try:
+            from . import msi
+        except ImportError:  # olefile is an optional dependency
+            pass
+        else:
+            candidates.append(msi.SignedMsiFile)
+
+        for parser in candidates:
+            magics = parser.detection_magic
+            if magics is None:
+                continue
+            if any(header.startswith(magic) for magic in magics):
+                return parser
+        return None
+
+    @classmethod
+    def _parse_error_for_format(
+        cls, message: str, *, file_format: FileFormat
+    ) -> ParseError:
+        return cls._parse_error_class(message, file_format=file_format)
+
+    @classmethod
+    def _wrap_open_error(
+        cls, error: Exception, *, file_format: FileFormat
+    ) -> SignifyError:
+        """Convert arbitrary parser failures into the public error contract.
+
+        Messages are intentionally generic: exceptions raised by ASN.1 or
+        certificate parsing must never include private key material or the full
+        contents of the file being inspected.
+        """
+        if isinstance(error, SignifyError):
+            if error.file_format is None:
+                error.file_format = file_format
+            if error.stage is None:
+                error.stage = FailureStage.MALFORMED_SIGNATURE
+            return error
+        logger.debug(f"Third-party parser raised {type(error).__name__}", exc_info=True)
+        return cls._parse_error_for_format(
+            f"Unable to parse the recognized {file_format.value.upper()} container.",
+            file_format=file_format,
+        )
+
+    def _signature_parse_error(self, error: Exception) -> ParseError:
+        """Classify a failure while reading an embedded signature structure.
+
+        Signify's own parse errors are preserved, because they describe the
+        structural rule that failed and never contain key material or the full
+        file body.  Errors from third-party decoders are replaced with a
+        generic message; the original is retained as ``__cause__`` for local
+        debugging only.
+        """
+        if isinstance(error, ParseError):
+            if error.file_format is None:
+                error.file_format = self.file_format
+            if error.stage is None:
+                error.stage = FailureStage.MALFORMED_SIGNATURE
+            return error
+        logger.debug(
+            f"Third-party decoder raised {type(error).__name__}", exc_info=True
+        )
+        return self._parse_error_for_format(
+            "The recognized file contains a damaged signature structure.",
+            file_format=self.file_format,
+        )
 
     @classmethod
     def from_stream(
@@ -50,56 +339,37 @@ class AuthenticodeFile:
         """This initializer will return a concrete subclass that is compatible with the
         provided file object, and otherwise throw an error.
 
+        Detection uses the file's magic bytes only; a recognized but damaged
+        container raises a :class:`signify.exceptions.ParseError` subclass
+        carrying ``file_format`` and ``stage`` rather than falling back to
+        another parser.  Use :meth:`detect` when the selected format and
+        failure stage are needed programmatically.
+
         :param file_obj: The file-like object to read from
         :param file_name: The optional argument can be used to specify the file name.
-        :param allow_flat: Indicates whether FlatFile is allowed as a subclass. As
-            this matches anything, this will always be available.
+        :param allow_flat: Indicates whether FlatFile is allowed as a fallback
+            for input whose magic bytes do not match a supported container.
         """
-        if file_name is None and hasattr(file_obj, "name"):
-            file_name = pathlib.Path(file_obj.name).name
-
-        # Peek for the first 8 bytes
-        file_obj.seek(0, os.SEEK_SET)
-        header = file_obj.read(8)
-        file_obj.seek(0, os.SEEK_SET)
-
-        for subclass in cls.__subclasses__():
-            try:
-                attempt = subclass._try_open(file_obj, file_name, header)
-            except Exception as e:  # noqa: PERF203
-                logger.debug(f"Error while trying {subclass.__name__}: {e!r}")
-            else:
-                if attempt is not None:
-                    return attempt
-
-        # If we are not AuthenticodeFile ourselves, we are already a subclass
-        # of AuthenticodeFile. Perhaps we know how to open this file.
-        if cls is not AuthenticodeFile:
-            try:
-                attempt = cls._try_open(file_obj, file_name, header)
-            except Exception as e:
-                logger.debug(f"Error while trying {cls.__name__}: {e!r}")
-            else:
-                if attempt is not None:
-                    return attempt
-
-        if allow_flat:
-            from .flat import FlatFile
-
-            return FlatFile(file_obj)
-
-        raise ParseError("Unable to determine file type with available parsers.")
+        result = cls.detect(file_obj, file_name, allow_flat=allow_flat)
+        if result.error is not None:
+            raise result.error
+        if result.signed_file is None:
+            raise UnsupportedFileFormatError(
+                "Unable to determine file type with available parsers."
+            )
+        return result.signed_file
 
     @classmethod
     def _try_open(
         cls, file_obj: BinaryIO, file_name: str | None, header: bytes
     ) -> Self | None:
         """Returns a specific :class:`AuthenticodeFile` object for the specified file,
-        if compatible, or :const:`None` otherwise. Errors are silently ignored by
-        :meth:`from_stream`.
+        if compatible, or :const:`None` otherwise.
 
-        Since most files will use the header for detection, a header of at least 8
-        bytes is provided for convenience.
+        This remains available for direct construction of a known parser.  The
+        automatic detection path does not use it as a fallback: it calls only
+        the parser selected by :attr:`detection_magic`, and propagates any
+        failure from that parser instead of trying another one.
         """
         return None
 
@@ -285,6 +555,10 @@ class AuthenticodeFile:
         :raises ParseError: for parse errors in the signed file
         """
 
+        # Reset any failure recorded by a previous call; iteration below records
+        # a fresh classification for this verification attempt.
+        self.signature_parse_error = None
+
         # we need to iterate it twice, so we need to prefetch all signed_datas
         signed_datas = list(
             self.iter_signatures(
@@ -294,10 +568,40 @@ class AuthenticodeFile:
             )
         )
 
+        # A failure recorded while collecting signatures must take precedence
+        # over the empty-set path below.
+        if self.signature_parse_error is not None:
+            raise self.signature_parse_error
+
         # if there are no signed_datas, the binary is not signed
         if not signed_datas:
-            raise AuthenticodeNotSignedError("No signature was found.")
+            raise AuthenticodeNotSignedError(
+                "No signature was found.", file_format=self.file_format
+            )
 
+        try:
+            return self._verify_signatures(
+                signed_datas,
+                multi_verify_mode=multi_verify_mode,
+                expected_hashes=expected_hashes,
+                **kwargs,
+            )
+        except SignifyError as e:
+            # Attach the recognized format to verification failures so callers
+            # can attribute them without re-detecting the file.
+            if e.file_format is None:
+                e.file_format = self.file_format
+            raise
+
+    def _verify_signatures(
+        self,
+        signed_datas: list[AuthenticodeSignature | CertificateTrustList],
+        *,
+        multi_verify_mode: Literal["any", "first", "all", "best"],
+        expected_hashes: dict[str, bytes] | None,
+        **kwargs: Any,
+    ) -> list[tuple[SignedData, IndirectData | None, Iterable[list[Certificate]]]]:
+        """Verify the prefetched signatures using the requested selection mode."""
         # only consider the first signed_data; by selecting it here we prevent
         # calculating more hashes than needed
         if multi_verify_mode == "first":

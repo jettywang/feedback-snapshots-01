@@ -151,7 +151,9 @@ implementation, such as :class:`signify.authenticode.signed_file.SignedPeFile` o
 the same interface.
 
 This generic interface allows access to zero or more :class:`AuthenticodeSignature`
-objects, and allows validation of the signature.
+objects, and allows validation of the signature.  Detection is based on the leading
+magic bytes only and records the selected format and failure stage; see
+:doc:`authenticode_files` for the detection contract and :class:`DetectionResult`.
 
 .. autoclass:: AuthenticodeFile
    :members:
