@@ -3,6 +3,14 @@ Detailed CHANGELOG
 
 olefile.py
 ----------
+* 2026-11-15 v0.48:
+    - added OleFileIO.audit_directory() to audit the raw OLE directory structure
+      independently of listdir: preserves original SIDs and parent/left/right/child
+      relationships, detects cycles, multi-parent (shared child) references, illegal
+      object types and colors, invalid names and pointers, orphan entries, and the
+      MS-CFB 2.6.4 sort order and red-black tree properties. All traversals are
+      iterative so deep trees and malformed cyclic chains cannot trigger uncontrolled
+      recursion. New classes AuditIssue, DirectoryAuditRecord and DirectoryAuditReport.
 * 2023-11-30 v0.47.dev6:
     - fixed issue #142: isOleFile has a new data parameter to handle files in memory properly
     - fixed issue #156: write_sect now correctly detects when data is larger than the sector size

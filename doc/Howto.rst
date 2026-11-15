@@ -233,6 +233,37 @@ with or without streams (new in v0.26):
 
     ole.listdir (streams=False, storages=True)
 
+Audit the directory structure
+-----------------------------
+
+:py:meth:`olefile.OleFileIO.listdir` only walks the storage tree reachable
+from the root entry, so it cannot show orphan entries hidden in a damaged
+directory. :py:meth:`olefile.OleFileIO.audit_directory` (new in v0.48) reads
+every 128-byte directory entry directly and returns an
+:py:class:`olefile.DirectoryAuditReport`:
+
+- each :py:class:`olefile.DirectoryAuditRecord` keeps the original SID and the
+  raw parent, left/right sibling and child SIDs;
+- root-reachable entries and orphan entries are reported separately, orphan
+  streams are never re-attached to a guessed path;
+- cycles, multi-parent (shared child) references, illegal object types and
+  color flags, bad names, invalid pointers and the MS-CFB 2.6.4 sort order and
+  red-black properties are checked, each as an :py:class:`olefile.AuditIssue`
+  pointing back to the offending record SID;
+- all traversals are iterative, so deep trees and malformed cyclic chains
+  cannot cause uncontrolled recursion.
+
+::
+
+    report = ole.audit_directory()
+    print(report.summary())
+    for issue in report.issues:
+        print(issue)              # e.g. "SID 5: [cycle] cycle in ..."
+    print(report.orphan_sids)     # SIDs not reachable from the root
+
+The check of sort order and red/black colors can be skipped while keeping all
+structural checks with ``ole.audit_directory(check_red_black=False)``.
+
 Test if known streams/storages exist:
 -------------------------------------
 

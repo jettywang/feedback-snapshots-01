@@ -52,6 +52,20 @@ Detailed History
 
 See the `full changelog <https://github.com/decalage2/olefile/blob/master/CHANGELOG.md>`__ for more details.
 
+- **2026-11-15 v0.48**:
+    - added :py:meth:`olefile.OleFileIO.audit_directory` to audit the raw OLE
+      directory structure independently of
+      :py:meth:`olefile.OleFileIO.listdir`. It preserves original SIDs and the
+      parent/left/right/child relationships on
+      :py:class:`olefile.DirectoryAuditRecord`, detects cycles, multi-parent
+      (shared child) references, illegal object types and colors, invalid names
+      and pointers, orphan entries, and the MS-CFB 2.6.4 sort order and
+      red-black tree properties, returning an
+      :py:class:`olefile.DirectoryAuditReport` of
+      :py:class:`olefile.AuditIssue` objects. Orphan streams are reported
+      separately and never re-attached to a guessed path; all traversals are
+      iterative so deep or malformed chains cannot cause uncontrolled
+      recursion.
 - **2023-11-30 v0.47 (in development)**:
     - fixed issue #142: isOleFile has a new data parameter to handle files in memory properly
     - fixed issue #156: write_sect now correctly detects when data is larger than the sector size

@@ -86,8 +86,8 @@ from __future__ import print_function   # This version of olefile requires Pytho
 # OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
 # PERFORMANCE OF THIS SOFTWARE.
 
-__date__    = "2023-12-01"
-__version__ = '0.47'
+__date__    = "2026-11-15"
+__version__ = '0.48'
 __author__  = "Philippe Lagadec"
 
 __all__ = ['isOleFile', 'OleFileIO', 'OleMetadata', 'enable_logging',
@@ -98,7 +98,16 @@ __all__ = ['isOleFile', 'OleFileIO', 'OleMetadata', 'enable_logging',
            'DEFECT_FATAL', 'DEFAULT_PATH_ENCODING',
            'MAXREGSECT', 'DIFSECT', 'FATSECT', 'ENDOFCHAIN', 'FREESECT',
            'MAXREGSID', 'NOSTREAM', 'UNKNOWN_SIZE', 'WORD_CLSID',
-           'OleFileIONotClosed'
+           'OleFileIONotClosed',
+           'AuditIssue', 'DirectoryAuditRecord', 'DirectoryAuditReport',
+           'AUDIT_INVALID_OBJECT_TYPE', 'AUDIT_DUPLICATE_ROOT',
+           'AUDIT_INVALID_ROOT', 'AUDIT_INVALID_COLOR',
+           'AUDIT_INVALID_NAMELENGTH', 'AUDIT_ILLEGAL_NAME_CHAR',
+           'AUDIT_EMPTY_NOT_BLANK', 'AUDIT_STREAM_WITH_CHILD',
+           'AUDIT_SID_OUT_OF_RANGE', 'AUDIT_RESERVED_SID', 'AUDIT_CYCLE',
+           'AUDIT_MULTIPLE_PARENTS', 'AUDIT_ORPHAN', 'AUDIT_DUPLICATE_NAME',
+           'AUDIT_SORT_ORDER', 'AUDIT_RED_BLACK_ROOT_RED',
+           'AUDIT_RED_BLACK_DOUBLE_RED'
 ]
 
 import io
@@ -1014,6 +1023,287 @@ class OleDirectoryEntry:
         return filetime2datetime(self.createTime)
 
 
+#=== DIRECTORY AUDIT ==========================================================
+
+# Issue codes reported by OleFileIO.audit_directory().
+# Each code identifies a specific kind of directory structure problem so that
+# callers can filter issues programmatically instead of parsing messages.
+AUDIT_INVALID_OBJECT_TYPE      = 'invalid_object_type'
+AUDIT_DUPLICATE_ROOT           = 'duplicate_root'
+AUDIT_INVALID_ROOT             = 'invalid_root'
+AUDIT_INVALID_COLOR            = 'invalid_color'
+AUDIT_INVALID_NAMELENGTH       = 'invalid_name_length'
+AUDIT_ILLEGAL_NAME_CHAR        = 'illegal_name_character'
+AUDIT_EMPTY_NOT_BLANK          = 'empty_entry_not_blank'
+AUDIT_STREAM_WITH_CHILD        = 'stream_with_child'
+AUDIT_SID_OUT_OF_RANGE         = 'sid_out_of_range'
+AUDIT_RESERVED_SID             = 'reserved_sid'
+AUDIT_CYCLE                    = 'cycle'
+AUDIT_MULTIPLE_PARENTS         = 'multiple_parents'
+AUDIT_ORPHAN                   = 'orphan_entry'
+AUDIT_DUPLICATE_NAME           = 'duplicate_name'
+AUDIT_SORT_ORDER               = 'sort_order'
+AUDIT_RED_BLACK_ROOT_RED       = 'red_black_root_red'
+AUDIT_RED_BLACK_DOUBLE_RED     = 'red_black_double_red'
+
+# Severity levels for audit issues, reusing the DEFECT_* scale semantics.
+AUDIT_SEVERITY = {
+    AUDIT_INVALID_OBJECT_TYPE:      DEFECT_INCORRECT,
+    AUDIT_DUPLICATE_ROOT:           DEFECT_INCORRECT,
+    AUDIT_INVALID_ROOT:             DEFECT_INCORRECT,
+    AUDIT_INVALID_COLOR:            DEFECT_INCORRECT,
+    AUDIT_INVALID_NAMELENGTH:       DEFECT_INCORRECT,
+    AUDIT_ILLEGAL_NAME_CHAR:        DEFECT_INCORRECT,
+    AUDIT_EMPTY_NOT_BLANK:          DEFECT_POTENTIAL,
+    AUDIT_STREAM_WITH_CHILD:        DEFECT_INCORRECT,
+    AUDIT_SID_OUT_OF_RANGE:         DEFECT_INCORRECT,
+    AUDIT_RESERVED_SID:             DEFECT_INCORRECT,
+    AUDIT_CYCLE:                    DEFECT_FATAL,
+    AUDIT_MULTIPLE_PARENTS:         DEFECT_INCORRECT,
+    AUDIT_ORPHAN:                   DEFECT_POTENTIAL,
+    AUDIT_DUPLICATE_NAME:           DEFECT_INCORRECT,
+    AUDIT_SORT_ORDER:               DEFECT_INCORRECT,
+    AUDIT_RED_BLACK_ROOT_RED:       DEFECT_INCORRECT,
+    AUDIT_RED_BLACK_DOUBLE_RED:     DEFECT_INCORRECT,
+}
+
+# Human-readable descriptions of issue codes:
+AUDIT_ISSUE_TEXT = {
+    AUDIT_INVALID_OBJECT_TYPE:      'object type is not one of 0x00, 0x01, 0x02, 0x05 (MS-CFB 2.6.1)',
+    AUDIT_DUPLICATE_ROOT:           'a root storage object (type 0x05) appears at a SID other than 0',
+    AUDIT_INVALID_ROOT:             'directory entry #0 is not a root storage object (type 0x05)',
+    AUDIT_INVALID_COLOR:            'color flag is neither 0x00 (red) nor 0x01 (black)',
+    AUDIT_INVALID_NAMELENGTH:       'directory entry name length is invalid',
+    AUDIT_ILLEGAL_NAME_CHAR:        "name contains one of the illegal characters '/', '\\', ':', '!'",
+    AUDIT_EMPTY_NOT_BLANK:          'unallocated entry (type 0x00) is not blank as required by MS-CFB 2.6.3',
+    AUDIT_STREAM_WITH_CHILD:        'stream object has a non-NOSTREAM child ID (MS-CFB 2.6.1)',
+    AUDIT_SID_OUT_OF_RANGE:         'reference points outside the directory entry array',
+    AUDIT_RESERVED_SID:             'reference uses a reserved SID instead of a regular SID or NOSTREAM',
+    AUDIT_CYCLE:                    'cyclical reference in the directory sibling/child graph',
+    AUDIT_MULTIPLE_PARENTS:         'directory entry is referenced by more than one parent/sibling pointer',
+    AUDIT_ORPHAN:                   'allocated entry is not reachable from the root storage',
+    AUDIT_DUPLICATE_NAME:           'two sibling entries have the same name per MS-CFB sorting relationship',
+    AUDIT_SORT_ORDER:               'red-black tree is not sorted according to MS-CFB 2.6.4',
+    AUDIT_RED_BLACK_ROOT_RED:       'the top node of a red-black tree must be black',
+    AUDIT_RED_BLACK_DOUBLE_RED:     'two consecutive red nodes in the red-black tree',
+}
+
+
+class AuditIssue(object):
+    """
+    Single directory structure anomaly found by :meth:`OleFileIO.audit_directory`.
+
+    Every issue keeps the SID of the directory record it is attached to so that
+    it can always be traced back to the original 128-byte directory entry, even
+    when the same SID is involved in several anomalies.
+
+    Attributes:
+        code: one of the ``AUDIT_*`` constants, identifying the anomaly kind.
+        severity: defect level, using the same scale as the DEFECT_* constants.
+        sid: SID of the directory record the anomaly is reported on.
+        message: human-readable description of the anomaly.
+        related_sids: tuple of other SIDs involved, e.g. the two parents of a
+            multi-parent entry or the SID closing a cycle.
+    """
+
+    def __init__(self, code, sid, message, related_sids=()):
+        self.code = code
+        self.severity = AUDIT_SEVERITY.get(code, DEFECT_INCORRECT)
+        self.sid = sid
+        self.message = message
+        self.related_sids = tuple(related_sids)
+
+    def __repr__(self):
+        return 'AuditIssue(code=%r, sid=%r, related_sids=%r, message=%r)' % (
+            self.code, self.sid, self.related_sids, self.message)
+
+    def __str__(self):
+        return 'SID %d: [%s] %s' % (self.sid, self.code, self.message)
+
+    def __eq__(self, other):
+        if not isinstance(other, AuditIssue):
+            return NotImplemented
+        return (self.code, self.sid, self.related_sids) == \
+               (other.code, other.sid, other.related_sids)
+
+    def __ne__(self, other):
+        result = self.__eq__(other)
+        if result is NotImplemented:
+            return result
+        return not result
+
+    def __hash__(self):
+        return hash((self.code, self.sid, self.related_sids))
+
+
+class DirectoryAuditRecord(object):
+    """
+    Raw view of one 128-byte OLE directory entry, preserving original SIDs.
+
+    Unlike :class:`OleDirectoryEntry`, this class never modifies the parsed
+    values (no truncation of the name length, no defect exceptions) and keeps
+    the raw parent/left/right/child SIDs exactly as stored in the directory
+    stream, including out-of-range and reserved values.
+
+    Attributes:
+        sid: index of the directory entry in the directory array.
+        name: entry name decoded from UTF-16LE without the terminating null.
+        name_utf16: raw UTF-16LE bytes of the name without the terminating null.
+        namelength: raw 16-bit name length field (bytes, including the null).
+        entry_type: raw object type byte (one of the STGTY_* constants when valid).
+        color: raw color flag byte (0=red, 1=black per MS-CFB 2.6.1).
+        sid_left: raw left sibling ID, NOSTREAM when absent.
+        sid_right: raw right sibling ID, NOSTREAM when absent.
+        sid_child: raw child ID, NOSTREAM when absent.
+        is_allocated: True for storage, stream and root objects (types 1, 2, 5),
+            False for unallocated entries (type 0) and invalid types.
+        is_empty: True when the object type is STGTY_EMPTY.
+        parents: tuple of SIDs that reference this record through a child ID
+            or a left/right sibling pointer, in discovery order.
+        tree_parents: tuple of SIDs whose child ID points to this record.
+        reachable: True when the record is reachable from the root storage.
+        raw_entry: the original 128 bytes of the directory entry.
+    """
+
+    def __init__(self, sid, raw_entry, ole_file):
+        self.sid = sid
+        self.raw_entry = raw_entry
+        (
+            self.name_raw,
+            self.namelength,
+            self.entry_type,
+            self.color,
+            self.sid_left,
+            self.sid_right,
+            self.sid_child,
+            self.clsid_raw,
+            self.dwUserFlags,
+            self.createTime,
+            self.modifyTime,
+            self.isectStart,
+            self.sizeLow,
+            self.sizeHigh
+        ) = struct.unpack(OleDirectoryEntry.STRUCT_DIRENTRY, raw_entry)
+        # Decode the name defensively: a malformed name length must not prevent
+        # the rest of the audit from running.
+        name_byte_count = self.namelength - 2
+        if name_byte_count < 0 or name_byte_count > 64 or name_byte_count % 2:
+            name_byte_count = min(max(self.namelength, 0), 64)
+        self.name_utf16 = self.name_raw[:name_byte_count]
+        self.name = ole_file._decode_utf16_str(self.name_utf16)
+        # Reverse references, filled by the audit while walking the graph:
+        self.parents = []
+        self.tree_parents = []
+        self.reachable = False
+
+    @property
+    def is_empty(self):
+        return self.entry_type == STGTY_EMPTY
+
+    @property
+    def is_allocated(self):
+        return self.entry_type in (STGTY_STORAGE, STGTY_STREAM, STGTY_ROOT)
+
+    @property
+    def name_sort_key(self):
+        """
+        Sorting key of the entry name per MS-CFB 2.6.4: name length in UTF-16
+        code points first, then code points uppercased with the Unicode simple
+        default case conversion.
+        """
+        return (len(self.name),
+                tuple(ord(char.upper()) for char in self.name))
+
+    def __repr__(self):
+        return 'DirectoryAuditRecord(sid=%d, name=%r, type=%d, left=%d, right=%d, child=%d)' % (
+            self.sid, self.name, self.entry_type,
+            self.sid_left, self.sid_right, self.sid_child)
+
+
+class DirectoryAuditReport(object):
+    """
+    Result of :meth:`OleFileIO.audit_directory`.
+
+    The report keeps a read-only picture of the whole directory array: every
+    parsed record (including unallocated and unreachable ones), the set of
+    records reachable from the root storage, the orphan records and all
+    detected anomalies. Orphan streams/storages are reported as such but never
+    re-attached to a guessed path.
+
+    Attributes:
+        records: tuple of :class:`DirectoryAuditRecord` ordered by original SID.
+        issues: tuple of :class:`AuditIssue`, ordered by SID then issue code.
+        reachable_sids: frozenset of SIDs reachable from the root storage.
+        orphan_sids: frozenset of allocated SIDs not reachable from the root.
+    """
+
+    def __init__(self, records, issues, reachable_sids):
+        self.records = tuple(records)
+        self.issues = tuple(sorted(issues, key=lambda item: (item.sid, item.code)))
+        self.reachable_sids = frozenset(reachable_sids)
+        allocated = set(record.sid for record in records if record.is_allocated)
+        self.orphan_sids = frozenset(allocated - self.reachable_sids)
+
+    @property
+    def healthy(self):
+        """True when no anomaly of any severity was detected."""
+        return not self.issues
+
+    def records_by_sid(self, sid):
+        """Return the DirectoryAuditRecord for a SID, or None if absent."""
+        if 0 <= sid < len(self.records):
+            return self.records[sid]
+        return None
+
+    def issues_for_sid(self, sid):
+        """Return all issues attached to a given directory record SID."""
+        return tuple(issue for issue in self.issues if issue.sid == sid)
+
+    def issues_with_code(self, code):
+        """Return all issues of a given AUDIT_* code."""
+        return tuple(issue for issue in self.issues if issue.code == code)
+
+    @property
+    def orphan_records(self):
+        """Allocated records not reachable from the root storage, ordered by SID."""
+        return tuple(self.records[sid] for sid in sorted(self.orphan_sids))
+
+    @property
+    def reachable_records(self):
+        """Records reachable from the root storage, ordered by SID."""
+        return tuple(self.records[sid] for sid in sorted(self.reachable_sids))
+
+    def summary(self):
+        """Return a compact dict summarizing the audit result."""
+        counts = {}
+        for issue in self.issues:
+            counts[issue.code] = counts.get(issue.code, 0) + 1
+        return {
+            'total_entries': len(self.records),
+            'reachable_entries': len(self.reachable_sids),
+            'orphan_entries': len(self.orphan_sids),
+            'issue_count': len(self.issues),
+            'issues_by_code': counts,
+            'healthy': self.healthy,
+        }
+
+    def dump(self):
+        """Print the report in a human-readable form (for debugging)."""
+        print('Directory audit: %d entries, %d reachable, %d orphan, %d issue(s)'
+              % (len(self.records), len(self.reachable_sids),
+                 len(self.orphan_sids), len(self.issues)))
+        for record in self.records:
+            status = 'reachable' if record.reachable else (
+                'orphan' if record.is_allocated else
+                'empty' if record.is_empty else 'invalid')
+            print('  SID %3d %-9s type=%d color=%d L=%d R=%d C=%d %r'
+                  % (record.sid, status, record.entry_type, record.color,
+                     record.sid_left, record.sid_right, record.sid_child,
+                     record.name))
+        for issue in self.issues:
+            print('  -', str(issue))
+
+
 #--- OleFileIO ----------------------------------------------------------------
 
 class OleFileIO:
@@ -1838,6 +2128,387 @@ class OleFileIO:
         Dump directory (for debugging only)
         """
         self.root.dump()
+
+    # --- directory structure audit ----------------------------------------
+
+    @staticmethod
+    def _audit_is_valid_sid(sid, nb_entries):
+        """True if sid is NOSTREAM or a regular SID inside the directory."""
+        if sid == NOSTREAM:
+            return True
+        return 0 <= sid < nb_entries
+
+    @staticmethod
+    def _audit_is_reserved_sid(sid):
+        """True if sid is one of the reserved directory SIDs (except NOSTREAM)."""
+        return MAXREGSID <= sid < NOSTREAM
+
+    def _audit_validate_pointer(self, sid, nb_entries, owner_sid, field, issues):
+        """
+        Validate one raw child/left/right SID pointer.
+
+        Returns True when the pointer can be followed to an existing directory
+        record, False otherwise (NOSTREAM or an invalid/reserved reference).
+        Every anomaly is recorded against the record owning the pointer.
+        """
+        if sid == NOSTREAM:
+            return False
+        if self._audit_is_reserved_sid(sid):
+            issues.append(AuditIssue(
+                AUDIT_RESERVED_SID, owner_sid,
+                '%s SID %d (0x%08X) uses a reserved SID value'
+                % (field, sid, sid & 0xFFFFFFFF)))
+            return False
+        if sid < 0 or sid >= nb_entries:
+            issues.append(AuditIssue(
+                AUDIT_SID_OUT_OF_RANGE, owner_sid,
+                '%s SID %d (0x%08X) points outside the directory array (%d entries)'
+                % (field, sid, sid & 0xFFFFFFFF, nb_entries)))
+            return False
+        return True
+
+    def _audit_read_records(self, issues):
+        """
+        Parse every slot of the directory stream into DirectoryAuditRecord
+        objects, preserving raw SIDs and never raising on malformed entries.
+        """
+        max_entries = self.directory_fp.size // OleDirectoryEntry.DIRENTRY_SIZE
+        records = []
+        for sid in iterrange(max_entries):
+            self.directory_fp.seek(sid * OleDirectoryEntry.DIRENTRY_SIZE)
+            raw_entry = self.directory_fp.read(OleDirectoryEntry.DIRENTRY_SIZE)
+            if len(raw_entry) < OleDirectoryEntry.DIRENTRY_SIZE:
+                break
+            try:
+                record = DirectoryAuditRecord(sid, raw_entry, self)
+            except struct.error:
+                # An entry that cannot even be unpacked is reported as an
+                # invalid object type and replaced by a blank-looking record so
+                # that the rest of the directory can still be audited.
+                raw_entry = b'\x00' * OleDirectoryEntry.DIRENTRY_SIZE
+                record = DirectoryAuditRecord(sid, raw_entry, self)
+                record.entry_type = 255
+                issues.append(AuditIssue(
+                    AUDIT_INVALID_OBJECT_TYPE, sid,
+                    'directory entry cannot be parsed as a 128-byte DirEntry'))
+            records.append(record)
+        return records
+
+    def _audit_entry_fields(self, records, issues):
+        """Per-record checks that do not need the relationship graph."""
+        nb_entries = len(records)
+        for record in records:
+            sid = record.sid
+            # --- object type -------------------------------------------------
+            if record.entry_type not in (STGTY_EMPTY, STGTY_STORAGE,
+                                         STGTY_STREAM, STGTY_ROOT):
+                issues.append(AuditIssue(
+                    AUDIT_INVALID_OBJECT_TYPE, sid,
+                    'object type %d (0x%02X): %s'
+                    % (record.entry_type, record.entry_type,
+                       AUDIT_ISSUE_TEXT[AUDIT_INVALID_OBJECT_TYPE])))
+            if record.entry_type == STGTY_ROOT and sid != 0:
+                issues.append(AuditIssue(
+                    AUDIT_DUPLICATE_ROOT, sid,
+                    AUDIT_ISSUE_TEXT[AUDIT_DUPLICATE_ROOT]))
+            if sid == 0 and record.entry_type != STGTY_ROOT:
+                issues.append(AuditIssue(
+                    AUDIT_INVALID_ROOT, sid,
+                    AUDIT_ISSUE_TEXT[AUDIT_INVALID_ROOT]))
+            # --- color flag --------------------------------------------------
+            if record.entry_type != STGTY_EMPTY and record.color not in (0, 1):
+                issues.append(AuditIssue(
+                    AUDIT_INVALID_COLOR, sid,
+                    'color flag %d (0x%02X) is neither red (0) nor black (1)'
+                    % (record.color, record.color)))
+            # --- name --------------------------------------------------------
+            if record.entry_type != STGTY_EMPTY:
+                if record.namelength < 2 or record.namelength > 64 \
+                        or record.namelength % 2:
+                    issues.append(AuditIssue(
+                        AUDIT_INVALID_NAMELENGTH, sid,
+                        'name length %d is not an even value between 2 and 64'
+                        % record.namelength))
+                if any(char in '/\\:!' for char in record.name):
+                    issues.append(AuditIssue(
+                        AUDIT_ILLEGAL_NAME_CHAR, sid,
+                        AUDIT_ISSUE_TEXT[AUDIT_ILLEGAL_NAME_CHAR]))
+            # --- empty entries must be blank (MS-CFB 2.6.3) ------------------
+            if record.entry_type == STGTY_EMPTY:
+                blank = b'\x00' * OleDirectoryEntry.DIRENTRY_SIZE
+                # the three sibling/child pointers are initialized to NOSTREAM:
+                expected = bytearray(blank)
+                for offset in (68, 72, 76):
+                    expected[offset:offset + 4] = b'\xFF\xFF\xFF\xFF'
+                if record.raw_entry != bytes(expected):
+                    issues.append(AuditIssue(
+                        AUDIT_EMPTY_NOT_BLANK, sid,
+                        AUDIT_ISSUE_TEXT[AUDIT_EMPTY_NOT_BLANK]))
+            # --- stream objects must have no child ID ------------------------
+            if record.entry_type == STGTY_STREAM \
+                    and record.sid_child != NOSTREAM:
+                issues.append(AuditIssue(
+                    AUDIT_STREAM_WITH_CHILD, sid,
+                    AUDIT_ISSUE_TEXT[AUDIT_STREAM_WITH_CHILD],
+                    (record.sid_child,)))
+            # --- raw pointer validity ----------------------------------------
+            self._audit_validate_pointer(record.sid_left, nb_entries, sid,
+                                         'left sibling', issues)
+            self._audit_validate_pointer(record.sid_right, nb_entries, sid,
+                                         'right sibling', issues)
+            self._audit_validate_pointer(record.sid_child, nb_entries, sid,
+                                         'child', issues)
+
+    def _audit_build_graph(self, records, issues):
+        """
+        Build reverse references, detect cycles and multi-parent entries.
+
+        The graph is made of child IDs (storage -> tree root) and left/right
+        sibling IDs (red-black tree edges). All walks are iterative and bounded
+        by the number of records so that cycles or malformed chains can never
+        cause uncontrolled recursion.
+        """
+        nb_entries = len(records)
+        # edge list: (parent_sid, child_sid, edge_kind)
+        edges = []
+        for record in records:
+            sid = record.sid
+            for target, kind in ((record.sid_child, 'child'),
+                                 (record.sid_left, 'left'),
+                                 (record.sid_right, 'right')):
+                if target != NOSTREAM and 0 <= target < nb_entries \
+                        and not self._audit_is_reserved_sid(target):
+                    edges.append((sid, target, kind))
+        # fill reverse references and detect entries with several parents:
+        for parent_sid, target_sid, kind in edges:
+            target = records[target_sid]
+            if parent_sid not in target.parents:
+                target.parents.append(parent_sid)
+            if kind == 'child' and parent_sid not in target.tree_parents:
+                target.tree_parents.append(parent_sid)
+        for record in records:
+            if len(record.parents) > 1:
+                issues.append(AuditIssue(
+                    AUDIT_MULTIPLE_PARENTS, record.sid,
+                    'entry is referenced by %d entries: %s'
+                    % (len(record.parents),
+                       ', '.join('SID %d' % p for p in record.parents)),
+                    tuple(record.parents)))
+        # cycle detection with iterative DFS over the directed edge graph:
+        adjacency = {}
+        for parent_sid, target_sid, kind in edges:
+            adjacency.setdefault(parent_sid, []).append(target_sid)
+        state = {}  # 0 = unseen, 1 = on current DFS stack, 2 = done
+        for start in iterrange(nb_entries):
+            if state.get(start, 0) != 0:
+                continue
+            stack = [(start, iter(adjacency.get(start, ())))]
+            state[start] = 1
+            while stack:
+                node_sid, iterator = stack[-1]
+                advanced = False
+                for next_sid in iterator:
+                    if state.get(next_sid, 0) == 1:
+                        # edge back to a node on the current stack: a cycle
+                        cycle = [item[0] for item in stack] + [next_sid]
+                        issues.append(AuditIssue(
+                            AUDIT_CYCLE, node_sid,
+                            'cycle in directory references: %s'
+                            % ' -> '.join('SID %d' % item for item in cycle),
+                            (next_sid,)))
+                    elif state.get(next_sid, 0) == 0:
+                        state[next_sid] = 1
+                        stack.append((next_sid, iter(adjacency.get(next_sid, ()))))
+                        advanced = True
+                        break
+                if not advanced:
+                    state[node_sid] = 2
+                    stack.pop()
+
+    def _audit_reachability(self, records):
+        """
+        Iteratively mark every record reachable from SID #0 through child and
+        left/right sibling pointers. The walk is bounded by the record count;
+        a visited set makes cycles harmless.
+        """
+        nb_entries = len(records)
+        if not records:
+            return set()
+        visited = set()
+        # start from SID #0 even if its object type is wrong (reported
+        # separately by _audit_entry_fields)
+        stack = [0]
+        while stack:
+            sid = stack.pop()
+            if sid in visited or sid < 0 or sid >= nb_entries:
+                continue
+            visited.add(sid)
+            record = records[sid]
+            for target in (record.sid_child, record.sid_left, record.sid_right):
+                if target != NOSTREAM and 0 <= target < nb_entries \
+                        and not self._audit_is_reserved_sid(target) \
+                        and target not in visited:
+                    stack.append(target)
+        for sid in visited:
+            records[sid].reachable = True
+        return visited
+
+    def _audit_walk_tree(self, records, root_sid):
+        """
+        Iterative in-order walk of one red-black tree.
+
+        Returns a tuple (nodes, edges) where nodes is the ordered list of
+        visited SIDs and edges maps each visited SID to (left, right). A
+        visited set stops the walk on cycles or on entries shared between
+        trees, so this can never recurse out of control.
+        """
+        nodes = []
+        edges = {}
+        visited = set()
+        stack = []
+        current = root_sid
+        nb_entries = len(records)
+        while stack or (current != NOSTREAM and current not in visited):
+            while current != NOSTREAM and current not in visited \
+                    and 0 <= current < nb_entries:
+                visited.add(current)
+                record = records[current]
+                edges[current] = (record.sid_left, record.sid_right)
+                stack.append(current)
+                current = record.sid_left
+            if current != NOSTREAM and (current in visited
+                                        or not (0 <= current < nb_entries)):
+                # malformed chain: stop descending this branch
+                current = NOSTREAM
+            if stack:
+                current = stack.pop()
+                nodes.append(current)
+                current = records[current].sid_right
+        return nodes, edges
+
+    def _audit_trees(self, records, issues):
+        """
+        Validate every red-black tree hanging off a storage child ID:
+        BST/spec sorting, unique sibling names, black tree root and no two
+        consecutive red nodes (MS-CFB 2.6.4).
+        """
+        for storage in records:
+            if storage.entry_type not in (STGTY_STORAGE, STGTY_ROOT):
+                continue
+            if storage.sid_child == NOSTREAM:
+                continue
+            child_sid = storage.sid_child
+            if not (0 <= child_sid < len(records)) \
+                    or self._audit_is_reserved_sid(child_sid):
+                # already reported as out-of-range/reserved pointer
+                continue
+            tree_root = records[child_sid]
+            nodes, edges = self._audit_walk_tree(records, child_sid)
+            # tree root must be black
+            if tree_root.color == 0:
+                issues.append(AuditIssue(
+                    AUDIT_RED_BLACK_ROOT_RED, child_sid,
+                    AUDIT_ISSUE_TEXT[AUDIT_RED_BLACK_ROOT_RED],
+                    (storage.sid,)))
+            # in-order sorting and duplicate names
+            previous_sid = None
+            seen_keys = {}
+            for node_sid in nodes:
+                node = records[node_sid]
+                key = node.name_sort_key
+                if key in seen_keys:
+                    issues.append(AuditIssue(
+                        AUDIT_DUPLICATE_NAME, node_sid,
+                        'duplicate name %r (same MS-CFB sort key as SID %d) '
+                        'under SID %d'
+                        % (node.name, seen_keys[key], storage.sid),
+                        (seen_keys[key], storage.sid)))
+                else:
+                    seen_keys[key] = node_sid
+                if previous_sid is not None:
+                    prev_record = records[previous_sid]
+                    if not (prev_record.name_sort_key < key):
+                        issues.append(AuditIssue(
+                            AUDIT_SORT_ORDER, node_sid,
+                            'in-order tree walk is not sorted: SID %d %r comes '
+                            'after SID %d %r'
+                            % (previous_sid, prev_record.name,
+                               node_sid, node.name),
+                            (previous_sid, storage.sid)))
+                previous_sid = node_sid
+            # red-black property: no two consecutive red nodes. Walk the tree
+            # iteratively; each node carries its parent color.
+            pending = [(child_sid, 1)]  # (sid, parent color); root parent black
+            seen = set()
+            while pending:
+                node_sid, parent_color = pending.pop()
+                if node_sid in seen or node_sid not in edges:
+                    continue
+                seen.add(node_sid)
+                node = records[node_sid]
+                if node.color == 0 and parent_color == 0:
+                    issues.append(AuditIssue(
+                        AUDIT_RED_BLACK_DOUBLE_RED, node_sid,
+                        AUDIT_ISSUE_TEXT[AUDIT_RED_BLACK_DOUBLE_RED]))
+                left, right = edges[node_sid]
+                for target in (left, right):
+                    if target != NOSTREAM and 0 <= target < len(records) \
+                            and target in edges:
+                        pending.append((target, node.color))
+
+    def audit_directory(self, check_red_black=True):
+        """
+        Audit the raw OLE directory structure without changing it.
+
+        The audit reads every 128-byte directory entry directly from the
+        directory stream, independently of :meth:`listdir` and of the storage
+        tree built while opening the file. Original SIDs and raw parent, left
+        sibling, right sibling and child relationships are preserved on
+        :class:`DirectoryAuditRecord` objects.
+
+        The audit detects:
+
+        - illegal object types and color flags, invalid names and name lengths,
+          streams with a child ID and non-blank unallocated entries;
+        - out-of-range and reserved SID pointers, cycles and entries referenced
+          by several parents (shared children / multi-parent references);
+        - orphan entries, i.e. allocated storages/streams not reachable from the
+          root storage. They are reported separately and never re-attached to a
+          guessed path;
+        - MS-CFB 2.6.4 red-black tree properties: sort order, unique sibling
+          names, black tree roots and no two consecutive red nodes.
+
+        All traversals are iterative and bounded by the number of directory
+        entries, so deep trees or malformed cyclic chains cannot trigger
+        uncontrolled recursion.
+
+        :param bool check_red_black: if False, skip the sort order and
+            red/black property checks (pointer, cycle, multi-parent and orphan
+            checks always run).
+        :returns: a :class:`DirectoryAuditReport` describing records, reachable
+            and orphan entries and every anomaly.
+        :rtype: DirectoryAuditReport
+
+        New in olefile 0.48.
+        """
+        if self.directory_fp is None:
+            raise OleFileError('the directory stream is not loaded')
+        issues = []
+        records = self._audit_read_records(issues)
+        self._audit_entry_fields(records, issues)
+        self._audit_build_graph(records, issues)
+        reachable = self._audit_reachability(records)
+        if check_red_black:
+            self._audit_trees(records, issues)
+        for record in records:
+            if record.is_allocated and record.sid not in reachable:
+                issues.append(AuditIssue(
+                    AUDIT_ORPHAN, record.sid,
+                    'allocated %s %r is not reachable from the root storage'
+                    % ('storage' if record.entry_type == STGTY_STORAGE
+                       else 'stream' if record.entry_type == STGTY_STREAM
+                       else 'root', record.name)))
+        return DirectoryAuditReport(records, issues, reachable)
 
     def _open(self, start, size = UNKNOWN_SIZE, force_FAT=False):
         """
