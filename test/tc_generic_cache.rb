@@ -357,6 +357,42 @@ class TestGenericCache < Minitest::Test
     assert_same(replacement, Dnsruby::RR.get_class(61_044, 1))
   end
 
+  def test_name_and_index_snapshots_do_not_retain_obsolete_classes_or_lose_replacements
+    [false, true].each_with_index do |hold_name, offset|
+      type = 62_223 + offset
+      weak_class, retained = Thread.new do
+        generated = Dnsruby::RR.get_class(type, 1)
+        entry = generated.instance_variable_get(:@generic_cache_entry)
+        # A caller can retain a name, and registry cleanup temporarily retains
+        # index cells. Neither must keep an obsolete class alive.
+        snapshot = hold_name ? entry.name : entry.index
+        Dnsruby::ClassHash.delete([type, 1])
+        [WeakRef.new(generated), snapshot]
+      end.value
+      5.times { GC.start(full_mark: true, immediate_sweep: true) }
+      refute(weak_class.weakref_alive?)
+      assert_instance_of(hold_name ? String : Cache::NameIndex, retained)
+      Dnsruby::ClassHash.rehash
+      Dnsruby::ClassHash.transform_values! { |value| value }
+      replacement = Dnsruby::RR.get_class(type, 1)
+      evict
+      5.times { GC.start(full_mark: true, immediate_sweep: true) }
+      assert_same(replacement, Generic.const_get("Type#{type}_Class1"))
+      assert_same(replacement, Dnsruby::RR.get_class(type, 1))
+    end
+  end
+
+  def test_retired_name_index_and_key_remain_collectible
+    references = Thread.new do
+      generated = Dnsruby::RR.get_class(62_225, 1)
+      entry = generated.instance_variable_get(:@generic_cache_entry)
+      Dnsruby::ClassHash.delete([62_225, 1])
+      [generated, entry.index, entry.name].map { |object| WeakRef.new(object) }
+    end.value
+    5.times { GC.start(full_mark: true, immediate_sweep: true) }
+    references.each { |reference| refute(reference.weakref_alive?) }
+  end
+
   def test_older_frozen_class_does_not_retain_its_replacement
     held, replacement = Thread.new do
       previous = Dnsruby::RR.get_class(62_220, 1).freeze

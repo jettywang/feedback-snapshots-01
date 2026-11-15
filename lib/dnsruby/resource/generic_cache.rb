@@ -27,6 +27,12 @@ module Dnsruby
       # Entry versions prevent older mutation cleanup discarding a publication.
       @lock = Mutex.new
       @names = ObjectSpace::WeakMap.new
+      # Ruby 3.2 WeakMap enumeration can remove a dead forward entry without
+      # clearing its inverse reference. A later finalizer can then remove an
+      # unrelated entry whose key reused that address. Enumerate self-mapped
+      # index cells instead: each inverse reference has the same lifetime as
+      # its key, and @names is used only for lookup and publication.
+      @indices = ObjectSpace::WeakMap.new
       @fifo = {}.compare_by_identity
       @version = 0
 
@@ -102,7 +108,10 @@ module Dnsruby
             index = @names[name]
             entry.index = index || NameIndex.new
             entry.index.current = WeakRef.new(entry)
-            @names[name] = entry.index unless index
+            unless index
+              @names[name] = entry.index
+              @indices[entry.index] = entry.index
+            end
             retain(entry)
           end
         end
@@ -202,7 +211,7 @@ module Dnsruby
         end
 
         def automatic_entries
-          @names.values.filter_map { |index| dereference(index) }.select(&:automatic)
+          @indices.keys.filter_map { |index| dereference(index) }.select(&:automatic)
         end
 
         def indexed_entry(name)
