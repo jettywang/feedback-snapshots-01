@@ -454,13 +454,17 @@ module Net; module SFTP
       # Identical to #readdir, but blocks until the server responds. It will raise
       # a StatusException if the request was unsuccessful. Otherwise, it will
       # return nil if there were no more names to read, or an array of name
-      # entries.
+      # entries. (As of protocol version 6, the server signals the end of a
+      # directory listing with an empty FXP_NAME packet instead of an FXP_STATUS
+      # EOF response; both are reported as nil here.)
       #
       #   while (entries = sftp.readdir!(handle)) do
       #     entries.each { |entry| puts(entry.name) }
       #   end
       def readdir!(handle, &callback)
-        wait_for(readdir(handle, &callback), :names)
+        names = wait_for(readdir(handle, &callback), :names)
+        names = nil if names && names.empty? && protocol.version >= 6
+        names
       end
 
       # :call-seq:

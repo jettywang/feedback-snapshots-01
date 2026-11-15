@@ -16,6 +16,17 @@ module Net; module SFTP; module Operations
   #     puts entry.name
   #   end
   class Dir
+    # The number of consecutive empty readdir batches tolerated from a
+    # pre-v6 server before the enumeration is aborted. Protocol v6 uses an
+    # empty batch to signal the end of the listing (see Session#readdir!),
+    # but older versions must signal it with a STATUS EOF response, so for
+    # them an empty batch means the request made no progress. Without a
+    # bound, a server that keeps answering with empty batches would make
+    # the client send READDIR requests forever. The counter is local to
+    # each #foreach call, so one misbehaving directory can neither starve
+    # nor prematurely end the enumeration of another.
+    MAX_EMPTY_BATCHES = 2
+
     # The SFTP session object that drives this directory factory.
     attr_reader :sftp
 
@@ -29,7 +40,16 @@ module Net; module SFTP; module Operations
     # the name of the entry.
     def foreach(path)
       handle = sftp.opendir!(path)
+      empty_batches = 0
       while entries = sftp.readdir!(handle)
+        if entries.empty?
+          empty_batches += 1
+          if empty_batches > MAX_EMPTY_BATCHES
+            raise Net::SFTP::Exception, "readdir #{path}: server sent #{empty_batches} consecutive empty batches without signalling end-of-listing"
+          end
+          next
+        end
+        empty_batches = 0
         entries.each { |entry| yield entry }
       end
       return nil
