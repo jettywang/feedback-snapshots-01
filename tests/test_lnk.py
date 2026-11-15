@@ -1,13 +1,41 @@
 from __future__ import annotations
 
+import logging
+from io import BytesIO
+from struct import pack
 from typing import TYPE_CHECKING
 
 from dissect.util.ts import uuid1timestamp
 
 from dissect.shellitem.lnk import Lnk, c_lnk
+from dissect.shellitem.lnk.lnk import LnkExtraData
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+SPECIAL_FOLDER_PROPS_SIGNATURE = 0xA0000005
+TRACKER_PROPS_SIGNATURE = 0xA0000003
+UNKNOWN_BLOCK_SIGNATURE = 0x0BADF00D
+TERMINAL_BLOCK = pack("<I", 0)
+
+
+def extra_data_block(signature: int, payload: bytes) -> bytes:
+    return pack("<II", len(payload) + 8, signature) + payload
+
+
+def special_folder_props_block(special_folder_id: int = 0x26, offset: int = 0x1C) -> bytes:
+    return extra_data_block(SPECIAL_FOLDER_PROPS_SIGNATURE, pack("<II", special_folder_id, offset))
+
+
+def tracker_props_payload(machine_id: bytes) -> bytes:
+    return (
+        pack("<II", 0x58, 0)
+        + machine_id.ljust(16, b"\x00")
+        + b"\x01" * 16
+        + b"\x02" * 16
+        + b"\x03" * 16
+        + b"\x04" * 16
+    )
 
 
 def test_xp_custom_destination_remote_lnk_file(xp_modified_remote_lnk_file: Path) -> None:
@@ -207,3 +235,116 @@ def test_vista_and_above_idlist_lnk_props(vista_idlist_lnk_file: Path) -> None:
     assert vista_props.size == 0x62  # 98
     assert vista_props.idlist.itemid_list[0].itemid_size == 0x60  # 96
     assert len(vista_props.idlist.itemid_list[0].data) == 0x5E  # 94
+
+
+def test_extra_data_known_unknown_known_terminal() -> None:
+    # A known block, an unknown block, another known block and a terminal block.
+    # The known block after the unknown one must be parsed at the right position with the right content.
+    unknown_payload = bytes(range(0x20))
+    buffer = (
+        special_folder_props_block(special_folder_id=0x26, offset=0x1C)
+        + extra_data_block(UNKNOWN_BLOCK_SIGNATURE, unknown_payload)
+        + extra_data_block(TRACKER_PROPS_SIGNATURE, tracker_props_payload(b"real-machine"))
+        + TERMINAL_BLOCK
+    )
+
+    extradata = LnkExtraData(BytesIO(buffer)).extradata
+
+    special_folder_props = extradata["SPECIAL_FOLDER_PROPS"]
+    assert special_folder_props.special_folder_id == 0x26
+    assert special_folder_props.offset == 0x1C
+
+    assert extradata[f"UNKNOWN_BLOCK_0x{UNKNOWN_BLOCK_SIGNATURE:08X}"] == unknown_payload
+
+    tracker_props = extradata["TRACKER_PROPS"]
+    assert tracker_props.length == 0x58
+    assert tracker_props.machine_id == b"real-machine\x00\x00\x00\x00"
+
+    assert "TERMINAL_BLOCK" in extradata
+
+
+def test_extra_data_unknown_block_with_fake_signature() -> None:
+    # The payload of the unknown block contains a fully formed fake TRACKER_PROPS block.
+    # The parser must skip the unknown block by its validated length and not resynchronise on the fake signature.
+    fake_tracker_block = extra_data_block(TRACKER_PROPS_SIGNATURE, tracker_props_payload(b"fake-machine"))
+    buffer = (
+        special_folder_props_block()
+        + extra_data_block(UNKNOWN_BLOCK_SIGNATURE, fake_tracker_block)
+        + extra_data_block(TRACKER_PROPS_SIGNATURE, tracker_props_payload(b"real-machine"))
+        + TERMINAL_BLOCK
+    )
+
+    extradata = LnkExtraData(BytesIO(buffer)).extradata
+
+    assert extradata[f"UNKNOWN_BLOCK_0x{UNKNOWN_BLOCK_SIGNATURE:08X}"] == fake_tracker_block
+    assert extradata["TRACKER_PROPS"].machine_id == b"real-machine\x00\x00\x00\x00"
+    assert "TERMINAL_BLOCK" in extradata
+
+
+def test_extra_data_block_size_smaller_than_header(caplog) -> None:
+    # A non-terminal block with a size smaller than the 8 byte header is malformed.
+    first_block = special_folder_props_block()
+    buffer = first_block + pack("<I", 0x4) + b"junk-junk-junk"
+
+    with caplog.at_level(logging.ERROR):
+        extradata = LnkExtraData(BytesIO(buffer)).extradata
+
+    assert "SPECIAL_FOLDER_PROPS" in extradata
+    assert "TERMINAL_BLOCK" not in extradata
+    assert "size 0x4 at offset 0x10" in caplog.text
+
+
+def test_extra_data_block_crossing_end_of_file(caplog) -> None:
+    # The declared block size runs past the end of the file.
+    buffer = pack("<II", 0x100, SPECIAL_FOLDER_PROPS_SIGNATURE) + b"\x00" * 4
+
+    with caplog.at_level(logging.ERROR):
+        extradata = LnkExtraData(BytesIO(buffer)).extradata
+
+    assert extradata == {}
+    assert "offset 0x0 with size 0x100 crosses the end of the file" in caplog.text
+
+
+def test_extra_data_missing_terminal_block(caplog) -> None:
+    # The file ends right after a valid block, without a terminal block.
+    buffer = special_folder_props_block()
+
+    with caplog.at_level(logging.WARNING):
+        extradata = LnkExtraData(BytesIO(buffer)).extradata
+
+    assert "SPECIAL_FOLDER_PROPS" in extradata
+    assert "TERMINAL_BLOCK" not in extradata
+    assert "Missing TERMINAL_BLOCK" in caplog.text
+    assert "offset 0x10" in caplog.text
+
+
+def test_extra_data_zero_length_payload_known_block(caplog) -> None:
+    # A known block with a zero-length payload is malformed and must not be parsed.
+    buffer = pack("<II", 0x8, SPECIAL_FOLDER_PROPS_SIGNATURE) + TERMINAL_BLOCK
+
+    with caplog.at_level(logging.ERROR):
+        extradata = LnkExtraData(BytesIO(buffer)).extradata
+
+    assert extradata == {}
+    assert "zero-length payload" in caplog.text
+
+
+def test_extra_data_zero_length_payload_unknown_block() -> None:
+    # An unknown block with a zero-length payload is legal and skipped.
+    buffer = extra_data_block(UNKNOWN_BLOCK_SIGNATURE, b"") + TERMINAL_BLOCK
+
+    extradata = LnkExtraData(BytesIO(buffer)).extradata
+
+    assert extradata[f"UNKNOWN_BLOCK_0x{UNKNOWN_BLOCK_SIGNATURE:08X}"] == b""
+    assert "TERMINAL_BLOCK" in extradata
+
+
+def test_extra_data_many_unknown_blocks() -> None:
+    # Parsing must not recurse per block, so many blocks must not hit the recursion limit.
+    block_count = 5000
+    buffer = extra_data_block(UNKNOWN_BLOCK_SIGNATURE, b"\xff" * 4) * block_count + TERMINAL_BLOCK
+
+    extradata = LnkExtraData(BytesIO(buffer)).extradata
+
+    assert extradata[f"UNKNOWN_BLOCK_0x{UNKNOWN_BLOCK_SIGNATURE:08X}"] == b"\xff" * 4
+    assert "TERMINAL_BLOCK" in extradata

@@ -50,70 +50,105 @@ class LnkExtraData:
             self._parse(fh)
 
     def _parse(self, fh: BinaryIO) -> None:
-        self.size = c_lnk.uint32(fh)
+        # Iterate instead of recursing so that the parse depth does not grow with the amount of blocks.
+        while True:
+            offset = fh.tell()
 
-        if self.size == 0x00000000:
-            # terminal block encountered. end of lnk file
-            self.extradata.update({"TERMINAL_BLOCK": c_lnk.EXTRA_DATA(extra_data_block=None, terminal_block=self.size)})
-            return
+            size_bytes = fh.read(4)
+            if len(size_bytes) != 4:
+                log.warning("Missing TERMINAL_BLOCK: unexpected end of EXTRA_DATA at offset 0x%x", offset)
+                return
 
-        signature = c_lnk.uint32(fh)
-        block_name = EXTRA_DATA_BLOCK_SIGNATURES.get_name(signature)
+            (size,) = unpack("<I", size_bytes)
 
-        if block_name:
-            read_size = self.size - LINK_EXTRA_DATA_HEADER_SIZE
-            block_data = memoryview(fh.read(read_size))
+            if size == 0x00000000:
+                # terminal block encountered. end of lnk file
+                self.extradata.update({"TERMINAL_BLOCK": c_lnk.EXTRA_DATA(extra_data_block=None, terminal_block=size)})
+                return
 
-            if len(block_data) != read_size:
-                # Some malicious lnk files have a mismatch in the size indicated in the data block and actual bytes red.
-                # This causes cstruct to have an EOFError when trying to parse the actual size. Which is not reflected.
-                log.warning(
-                    "Mismatch in read size (%i) and actual EXTRA_DATA_BLOCK length (%i) for data block (%s)",
-                    read_size,
-                    len(block_data),
-                    block_name,
+            if size < LINK_EXTRA_DATA_HEADER_SIZE:
+                log.error(
+                    "Invalid EXTRA_DATA_BLOCK size 0x%x at offset 0x%x: smaller than the header size 0x%x. Stopping.",
+                    size,
+                    offset,
+                    LINK_EXTRA_DATA_HEADER_SIZE,
                 )
                 return
 
-            if block_name == "VISTA_AND_ABOVE_IDLIST_PROPS":
-                struct = LnkTargetIdList(BytesIO(block_data), read_size)
-            else:
-                struct = c_lnk.typedefs[block_name](block_data)
+            signature_bytes = fh.read(4)
+            read_size = size - LINK_EXTRA_DATA_HEADER_SIZE
+            block_data = fh.read(read_size)
 
-            if block_name == "PROPERTY_STORE_PROPS":
-                # TODO implement actual serialized property parsing
-                guid = self._parse_guid(struct.format_id)
-                struct.format_id = guid
+            if len(signature_bytes) != 4 or len(block_data) != read_size:
+                # Some malicious lnk files have a mismatch in the size indicated in the data block and actual bytes
+                # read. The block crosses the end of the file, so no valid successor block can follow.
+                log.error(
+                    "EXTRA_DATA_BLOCK at offset 0x%x with size 0x%x crosses the end of the file. Stopping.",
+                    offset,
+                    size,
+                )
+                return
 
-            elif block_name == "TRACKER_PROPS":
-                for name in struct.fields:
-                    if "droid" in name:
-                        guid = self._parse_guid(getattr(struct, name))
-                        setattr(struct, name, guid)
+            (signature,) = unpack("<I", signature_bytes)
+            block_name = EXTRA_DATA_BLOCK_SIGNATURES.get_name(signature)
 
-            elif block_name == "KNOWN_FOLDER_PROPS":
-                guid = self._parse_guid(struct.known_folder_id)
-                struct.known_folder_id = guid
+            if block_name is None:
+                # Unknown blocks are legal forward-compatible extensions. Keep the raw payload according to the
+                # validated block size and continue with the next block. Never resynchronise on signatures that
+                # appear inside the payload of an unknown block.
+                log.info(
+                    "Unknown EXTRA_DATA_BLOCK with signature 0x%08x at offset 0x%x. Storing %i raw bytes.",
+                    signature,
+                    offset,
+                    read_size,
+                )
+                self.extradata.update({f"UNKNOWN_BLOCK_0x{signature:08X}": bytes(block_data)})
+                continue
 
-            elif (
-                block_name == "ENVIRONMENT_PROPS"
-                or block_name == "ICON_ENVIRONMENT_PROPS"
-                or block_name == "DARWIN_PROPS"
-            ):
-                if block_name == "DARWIN_PROPS":
-                    struct.darwin_data_ansi = struct.darwin_data_ansi
-                    struct.darwin_data_unicode = struct.darwin_data_unicode.decode().rstrip("\x00")
-                else:
-                    struct.target_ansi = struct.target_ansi
-                    struct.target_unicode = struct.target_unicode.decode("utf-16").rstrip("\x00")
+            if read_size == 0:
+                log.error(
+                    "EXTRA_DATA_BLOCK %s at offset 0x%x has a zero-length payload. Stopping.",
+                    block_name,
+                    offset,
+                )
+                return
 
-            self.extradata.update({block_name: struct})
+            self._parse_block(block_name, memoryview(block_data), read_size)
 
+    def _parse_block(self, block_name: str, block_data: memoryview, read_size: int) -> None:
+        if block_name == "VISTA_AND_ABOVE_IDLIST_PROPS":
+            struct = LnkTargetIdList(BytesIO(block_data), read_size)
         else:
-            log.warning("Unknown extra data block encountered with signature %x", signature)
+            struct = c_lnk.typedefs[block_name](block_data)
 
-        # keep calling parse until the TERMINAL_BLOCK is hit.
-        self._parse(fh)
+        if block_name == "PROPERTY_STORE_PROPS":
+            # TODO implement actual serialized property parsing
+            guid = self._parse_guid(struct.format_id)
+            struct.format_id = guid
+
+        elif block_name == "TRACKER_PROPS":
+            for name in struct.fields:
+                if "droid" in name:
+                    guid = self._parse_guid(getattr(struct, name))
+                    setattr(struct, name, guid)
+
+        elif block_name == "KNOWN_FOLDER_PROPS":
+            guid = self._parse_guid(struct.known_folder_id)
+            struct.known_folder_id = guid
+
+        elif (
+            block_name == "ENVIRONMENT_PROPS"
+            or block_name == "ICON_ENVIRONMENT_PROPS"
+            or block_name == "DARWIN_PROPS"
+        ):
+            if block_name == "DARWIN_PROPS":
+                struct.darwin_data_ansi = struct.darwin_data_ansi
+                struct.darwin_data_unicode = struct.darwin_data_unicode.decode().rstrip("\x00")
+            else:
+                struct.target_ansi = struct.target_ansi
+                struct.target_unicode = struct.target_unicode.decode("utf-16").rstrip("\x00")
+
+        self.extradata.update({block_name: struct})
 
     def _parse_guid(self, guid: bytes, endianness: str = "<") -> UUID:
         if endianness == "<":
