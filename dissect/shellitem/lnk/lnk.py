@@ -17,6 +17,11 @@ from dissect.shellitem.lnk.c_lnk import (
     LINK_INFO_HEADER_SIZE,
     c_lnk,
 )
+from dissect.shellitem.lnk.shellitems import (
+    ShellItem,
+    TerminalShellItem,
+    parse_idlist,
+)
 
 if typing.TYPE_CHECKING:
     from io import BufferedReader
@@ -322,6 +327,10 @@ class LnkTargetIdList:
     """This class represents a LNK file's TARGET_IDLIST structure. The TARGET_IDLIST structure specifies the target of
     the link. This information is stored in individual ITEM_ID structures.
 
+    Besides the raw :class:`~dissect.shellitem.lnk.c_lnk.IDLIST` structure, every SHITEMID is also parsed into a
+    :class:`~dissect.shellitem.lnk.shellitems.ShellItem` so that the individual path components (root folder, volume
+    and file entries, including long name extension blocks) can be inspected instead of opaque bytes.
+
     Args:
         fh: A file-like object to a TARGET_IDLIST structure.
         size: Size of the TARGET_IDLIST structure
@@ -331,24 +340,61 @@ class LnkTargetIdList:
         self.target_idlist = None
         self.idlist = None
         self.size = None
+        self.shell_items: list[ShellItem] = []
+        self.terminal_item: TerminalShellItem | None = None
+        self.parse_warnings: list[dict] = []
 
         if fh:
             self.size = unpack("H", fh.read(2))[0] if size is None else size
             self._parse(fh.read(self.size))
 
     def _parse(self, buff: BinaryIO) -> None:
+        data = buff if isinstance(buff, bytes) else buff.read()
         idlists = []
-        buff = BytesIO(buff)
+        stream = BytesIO(data)
 
         # the size of the target_idlist struct includes itself. Thus we minus 2 here.
-        while buff.tell() < self.size - 2:
-            size = unpack("H", buff.read(2))[0]
-            data = buff.read(size - 2)  # size of the struct includes the 16-bit size value. Thus we minus 2 here again.
-            itemid = c_lnk.ITEMID(itemid_size=size, data=data)
+        while stream.tell() < self.size - 2:
+            size = unpack("H", stream.read(2))[0]
+            if size == 0:
+                # The zero sized terminal ID terminates the IDList. Rewind so it ends up in the terminalid field.
+                stream.seek(stream.tell() - 2)
+                break
+            if size < 2:
+                # A size smaller than the size field itself cannot describe a valid item. Stop and
+                # preserve the remaining bytes instead of reading a negative number of bytes.
+                stream.seek(stream.tell() - 2)
+                break
+
+            item_data = stream.read(size - 2)
+            itemid = c_lnk.ITEMID(itemid_size=size, data=item_data)
             idlists.append(itemid)
 
-        self.idlist = c_lnk.IDLIST(itemid_list=idlists, terminalid=buff.read())
+        self.idlist = c_lnk.IDLIST(itemid_list=idlists, terminalid=stream.read())
         self.target_idlist = c_lnk.LINK_TARGET_IDLIST(idlist_size=self.size, idlist=self.idlist)
+
+        self.shell_items, self.terminal_item, self.parse_warnings = parse_idlist(data)
+        for warning in self.parse_warnings:
+            log.warning("Target IDList parsing warning at offset %s: %s", warning.get("offset"), warning.get("reason"))
+
+    @property
+    def path_components(self) -> list[str | None]:
+        """Return the path component name of every parsed shell item.
+
+        Unknown items contribute ``None`` so callers can tell resolved components apart from entries
+        whose type was not understood.
+        """
+        return [item.path_component for item in self.shell_items]
+
+    @property
+    def resolved_components(self) -> list[str]:
+        """Return the names of all path components that were parsed into a name."""
+        return [component for component in self.path_components if component is not None]
+
+    @property
+    def unknown_components(self) -> list[ShellItem]:
+        """Return the items that could not be parsed into a known shell item type."""
+        return [item for item in self.shell_items if not item.parsed]
 
     def __repr__(self) -> str:
         return repr(self.target_idlist)
