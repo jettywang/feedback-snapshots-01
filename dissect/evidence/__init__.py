@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dissect.evidence.ad1.ad1 import AD1
-from dissect.evidence.asdf.asdf import AsdfSnapshot, AsdfStream
+from dissect.evidence.asdf.asdf import AsdfSnapshot, AsdfStream, RangeSource, RangeStatus, ReadRange
 from dissect.evidence.ewf.ewf import EWF
 
 __all__ = [
@@ -9,4 +9,7 @@ __all__ = [
     "EWF",
     "AsdfSnapshot",
     "AsdfStream",
+    "RangeSource",
+    "RangeStatus",
+    "ReadRange",
 ]

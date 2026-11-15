@@ -7,8 +7,11 @@ import io
 import shutil
 import tarfile
 import uuid
+import zlib
 from bisect import bisect_right
 from collections import defaultdict
+from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING, BinaryIO
 
 from dissect.util import ts
@@ -40,6 +43,91 @@ FILE_MAGIC = b"ASDF"
 BLOCK_MAGIC = b"BL\xa5\xdf"
 FOOTER_MAGIC = b"FT\xa5\xdf"
 SPARSE_BYTES = b"\xa5\xdf"
+
+
+class RangeStatus(Enum):
+    """Status of a range returned by :meth:`AsdfStream.read_ranges`.
+
+    The status is derived from the block table and the outcome of reading the
+    underlying block, never from the contents of the returned bytes. This means
+    that acquired all-zero data, or acquired data that happens to have the same
+    value as :data:`SPARSE_BYTES`, is still :attr:`CAPTURED`.
+
+    Attributes:
+        CAPTURED: The range was acquired and its block was read and verified successfully.
+        UNCAPTURED: No block in the snapshot covers this range. There is no content or provenance available.
+        CORRUPTED: A block covers this range, but reading or verifying it failed. No content or provenance is returned.
+    """
+
+    CAPTURED = "captured"
+    UNCAPTURED = "uncaptured"
+    CORRUPTED = "corrupted"
+
+
+@dataclass(frozen=True)
+class RangeSource:
+    """Provenance of a captured :class:`ReadRange`.
+
+    Attributes:
+        table_index: Index of the block in :attr:`AsdfStream.table`.
+        idx: Stream index of the block.
+        offset: Logical offset of the block in the stream.
+        size: Logical size of the block.
+        file_offset: Absolute file offset of the block header in the ASDF file.
+        data_offset: Absolute file offset of the block data in the ASDF file.
+    """
+
+    table_index: int
+    idx: int
+    offset: int
+    size: int
+    file_offset: int
+    data_offset: int
+
+
+@dataclass(frozen=True)
+class ReadRange:
+    """A contiguous range of stream content and where it came from.
+
+    Only ranges with :attr:`RangeStatus.CAPTURED` have ``data``, ``source`` and
+    ``file_offset`` set. For :attr:`RangeStatus.UNCAPTURED` and
+    :attr:`RangeStatus.CORRUPTED` these are ``None``, and a corrupted range
+    additionally has a description in ``error``.
+
+    Attributes:
+        offset: Logical offset of this range in the stream.
+        length: Length of this range in bytes.
+        status: Status of this range.
+        data: The confirmed bytes for a captured range, otherwise ``None``.
+        source: The block that produced the data, otherwise ``None``.
+        file_offset: Absolute file offset of the first byte of ``data`` in the ASDF file, otherwise ``None``.
+        error: Description of why a range is not captured, otherwise ``None``.
+    """
+
+    offset: int
+    length: int
+    status: RangeStatus
+    data: bytes | None = None
+    source: RangeSource | None = None
+    file_offset: int | None = None
+    error: str | None = None
+
+    @property
+    def end(self) -> int:
+        """Return the logical end offset of this range."""
+        return self.offset + self.length
+
+
+@dataclass(frozen=True)
+class _BlockMeta:
+    """Block metadata from the block table, used to verify block reads.
+
+    The block header itself holds the authoritative block offset and size, which
+    may be larger than the (possibly trimmed) range in the block table entry.
+    """
+
+    flags: int
+    file_size: int | None
 
 
 class AsdfWriter(io.RawIOBase):
@@ -329,6 +417,13 @@ class AsdfSnapshot:
 
         self.table: dict[list[SnapshotTableEntry]] = defaultdict(list)
         self._table_lookup: dict[list[int]] = defaultdict(list)
+        # Block table metadata, keyed by (stream idx, entry offset, block file offset).
+        # It is kept separately so the public table keeps its historical tuple shape.
+        self._block_meta: dict[tuple[int, int, int], _BlockMeta] = {}
+
+        self.file_size = self.fh.seek(0, io.SEEK_END)
+        if self.file_size < len(c_asdf.footer):
+            raise InvalidSnapshot("file too small for footer")
 
         footer_offset = self.fh.seek(-len(c_asdf.footer), io.SEEK_END)
 
@@ -353,14 +448,25 @@ class AsdfSnapshot:
 
         for _ in range(count):
             entry = c_asdf.table_entry(table_data)
-            self._table_insert(entry.idx, entry.offset, entry.size, entry.file_offset)
+            self._table_insert(entry.idx, entry.offset, entry.size, entry.file_offset, entry.flags, entry.file_size)
 
     def _recover_block_table(self) -> None:
         self.fh.seek(len(c_asdf.header))
         for block, file_offset in scrape_blocks(self.fh):
-            self._table_insert(block.idx, block.offset, block.size, file_offset)
+            # A recovered block header does not carry the on-disk block size, so the
+            # exact extent of a block's payload is unknown. Only the header geometry
+            # and flags are known for sure.
+            self._table_insert(block.idx, block.offset, block.size, file_offset, block.flags, None)
 
-    def _table_insert(self, idx: int, offset: int, size: int, file_offset: int) -> None:
+    def _table_insert(
+        self,
+        idx: int,
+        offset: int,
+        size: int,
+        file_offset: int,
+        flags: int,
+        file_size: int | None = None,
+    ) -> None:
         stream_idx = idx
         entry_data_offset = file_offset + len(c_asdf.block)
 
@@ -386,6 +492,9 @@ class AsdfSnapshot:
                 entry_data_offset,
             ),
         )
+        self._block_meta[(stream_idx, entry_offset, file_offset)] = _BlockMeta(
+            flags=int(flags), file_size=int(file_size) if file_size is not None else None
+        )
 
     def contains(self, idx: int) -> bool:
         """Check whether this file contains the given stream index.
@@ -404,6 +513,25 @@ class AsdfSnapshot:
         if idx not in self.table:
             raise IndexError(f"invalid stream idx: {idx}")
         return AsdfStream(self, idx)
+
+    def read_ranges(self, idx: int, offset: int = 0, length: int | None = None) -> list[ReadRange]:
+        """Read a range from a stream and return the content and status of each part of it.
+
+        This is a convenience wrapper around :meth:`AsdfStream.read_ranges` for
+        callers that only have a stream index, such as a scanner backend. The
+        returned status is derived from the block table and the actual block read,
+        never from the returned byte values, so only confirmed captured ranges
+        carry content and provenance.
+
+        Args:
+            idx: The stream index to read from.
+            offset: The logical offset in the stream to read from.
+            length: The number of bytes to read. If ``None`` or ``-1``, read to the end of the stream.
+
+        Returns:
+            A list of :class:`ReadRange` objects describing every part of the requested range.
+        """
+        return self.open(idx).read_ranges(offset, length)
 
     def streams(self) -> Iterator[AsdfStream]:
         """Iterate over all streams in the file."""
@@ -450,6 +578,17 @@ class Metadata:
 class AsdfStream(AlignedStream):
     """ASDF stream from a snapshot.
 
+    The regular :meth:`read` interface is a convenience interface that is kept
+    compatible with previous versions: uncaptured ranges are filled with
+    :data:`SPARSE_BYTES` and a corrupt block raises :class:`InvalidBlock`. That
+    makes it impossible to tell uncaptured bytes, captured bytes that happen to
+    have the same value, and read failures apart.
+
+    Use :meth:`read_ranges` when the distinction between captured, uncaptured
+    and corrupted ranges must be known. It derives the status of every range
+    from the block table and the actual block read, and only returns content and
+    provenance for ranges that were confirmed to be captured.
+
     Args:
         asdf: :class:`AsdfSnapshot` parent object.
         idx: Stream index in the :class:`AsdfSnapshot`.
@@ -466,6 +605,255 @@ class AsdfStream(AlignedStream):
         # Doesn't really matter though, just take the last run offset + size
         size = self.table[-1][0] + self.table[-1][1]
         super().__init__(size)
+
+    def read(self, n: int = -1) -> bytes:
+        """Read up to ``n`` bytes from the current position, or to the end of the stream if ``n`` is ``-1``.
+
+        This is the historical convenience interface and its behavior is unchanged:
+
+        - Uncaptured ranges are filled with :data:`SPARSE_BYTES`.
+        - A block with an invalid header raises :class:`InvalidBlock`.
+        - Block CRCs are not verified on this path.
+
+        It is therefore impossible to tell uncaptured bytes, captured bytes that happen to equal
+        :data:`SPARSE_BYTES`, and some kinds of read damage apart. Use :meth:`read_ranges` when that
+        distinction matters.
+        """
+        return super().read(n)
+
+    def read_ranges(self, offset: int = 0, length: int | None = None) -> list[ReadRange]:
+        """Read a range and return the content and status of each part of it.
+
+        The returned ranges are contiguous, in stream order, and cover exactly the
+        requested ``[offset, offset + length)`` range (clamped to the stream size).
+        A single call can cross block boundaries and return multiple ranges.
+
+        Status is determined from the block table and the result of reading and
+        verifying each block, never from the byte values themselves. Captured
+        all-zero data, or captured data that equals :data:`SPARSE_BYTES`, is
+        still :attr:`RangeStatus.CAPTURED`.
+
+        Only :attr:`RangeStatus.CAPTURED` ranges carry ``data``, ``source`` and
+        ``file_offset``. Uncaptured ranges have no content or provenance, and
+        corrupted ranges additionally carry an ``error`` description.
+
+        Args:
+            offset: The logical offset in the stream to read from.
+            length: The number of bytes to read. If ``None`` or ``-1``, read to the end of the stream.
+
+        Returns:
+            A list of :class:`ReadRange` objects describing every part of the requested range.
+
+        Raises:
+            ValueError: If ``offset`` is negative or ``length`` is smaller than ``-1``.
+
+        This method does not change the current stream position or the read buffer.
+        """
+        if offset < 0:
+            raise ValueError(f"negative offset {offset}")
+        if length is None or length == -1:
+            length = max(0, self.size - offset)
+        elif length < -1:
+            raise ValueError(f"negative length {length}")
+
+        end = min(self.size, offset + length)
+        if end <= offset:
+            return []
+
+        result = []
+        pos = offset
+        run_idx = bisect_right(self._table_lookup, pos) - 1
+        if run_idx < 0:
+            run_idx = 0
+        elif pos >= self.table[run_idx][0] + self.table[run_idx][1]:
+            run_idx += 1
+
+        with self._lock:
+            while pos < end:
+                if run_idx >= len(self.table):
+                    result.append(ReadRange(pos, end - pos, RangeStatus.UNCAPTURED))
+                    break
+
+                run_start, run_size, _, _ = self.table[run_idx]
+                run_end = run_start + run_size
+
+                if run_end <= pos:
+                    run_idx += 1
+                    continue
+
+                if pos < run_start:
+                    gap_end = min(run_start, end)
+                    result.append(ReadRange(pos, gap_end - pos, RangeStatus.UNCAPTURED))
+                    pos = gap_end
+                    continue
+
+                segment_end = min(run_end, end)
+                segment_len = segment_end - pos
+
+                try:
+                    data, source, file_offset = self._read_block_slice(run_idx, pos - run_start, segment_len)
+                except (InvalidBlock, OSError, ValueError) as e:
+                    result.append(ReadRange(pos, segment_len, RangeStatus.CORRUPTED, error=f"{type(e).__name__}: {e}"))
+                else:
+                    result.append(
+                        ReadRange(
+                            pos,
+                            segment_len,
+                            RangeStatus.CAPTURED,
+                            data=data,
+                            source=source,
+                            file_offset=file_offset,
+                        )
+                    )
+
+                pos = segment_end
+                run_idx += 1
+
+        return result
+
+    def _read_block_slice(self, run_idx: int, block_offset: int, length: int) -> tuple[bytes, RangeSource, int | None]:
+        """Read and verify a slice of a single block.
+
+        Args:
+            run_idx: Index of the block in :attr:`table`.
+            block_offset: Byte offset within the block to start reading from.
+            length: Number of bytes to read.
+
+        Returns:
+            A tuple of the block data, its provenance and the absolute file offset of the data.
+
+        Raises:
+            InvalidBlock: If the block header, block data or checksum cannot be verified.
+        """
+        run_start, run_size, file_offset, run_data_offset = self.table[run_idx]
+        meta = self.asdf._block_meta.get((self.idx, run_start, file_offset))
+        if meta is None:
+            raise InvalidBlock("missing block table metadata")
+
+        header_size = len(c_asdf.block)
+        if file_offset < 0 or file_offset + header_size > self.asdf.file_size:
+            raise InvalidBlock("block header outside file")
+
+        self.fh.seek(file_offset)
+        header_buf = self.fh.read(header_size)
+        if len(header_buf) != header_size or header_buf[:4] != BLOCK_MAGIC:
+            raise InvalidBlock("invalid block magic")
+
+        block = c_asdf.block(header_buf)
+        if block.idx != self.idx:
+            raise InvalidBlock(f"block idx mismatch: {block.idx} != {self.idx}")
+        if int(block.flags) != meta.flags:
+            raise InvalidBlock(f"block flags mismatch: 0x{int(block.flags):x} != 0x{meta.flags:x}")
+
+        # The block table entry can be a trimmed portion of the block in the header
+        if run_start < block.offset or run_start + run_size > block.offset + block.size:
+            raise InvalidBlock("block table range outside block header")
+
+        # Data offset of the block table entry, possibly adjusted for overlap trimming
+        data_offset = file_offset + header_size
+        entry_data_offset = run_data_offset
+        if entry_data_offset < data_offset:
+            raise InvalidBlock("block data offset before block header")
+
+        compressed = meta.flags & c_asdf.BLOCK_FLAG.COMPRESS
+        has_crc = meta.flags & c_asdf.BLOCK_FLAG.CRC32
+        body_size = meta.file_size
+
+        if body_size is not None and data_offset + body_size > self.asdf.file_size:
+            raise InvalidBlock("block data outside file")
+
+        if compressed:
+            packed, body = self._read_compressed_block(data_offset, body_size, block.size, has_crc)
+            block_offset_in_body = (run_start - block.offset) + block_offset
+            data = body[block_offset_in_body : block_offset_in_body + length]
+            return data, self._range_source(run_idx, file_offset, data_offset, run_start, run_size), None
+
+        if body_size is not None and has_crc:
+            if body_size < 4:
+                raise InvalidBlock("block too small for crc32")
+            packed = self._read_file(data_offset, body_size, "block data")
+            target_crc = int.from_bytes(packed[-4:], "little")
+            actual_crc = zlib.crc32(packed[:-4]) & 0xFFFFFFFF
+            if actual_crc != target_crc:
+                raise InvalidBlock(f"block crc32 mismatch: expected 0x{target_crc:08x}, got 0x{actual_crc:08x}")
+
+        read_offset = entry_data_offset + block_offset
+        data = self._read_file(read_offset, length, "block data")
+
+        return data, self._range_source(run_idx, file_offset, data_offset, run_start, run_size), read_offset
+
+    def _read_compressed_block(
+        self, data_offset: int, body_size: int | None, block_size: int, has_crc: bool
+    ) -> tuple[bytes, bytes]:
+        """Read, verify and decompress the payload of a compressed block.
+
+        If the on-disk size and checksum are known from the block table, they are verified
+        strictly. For recovered blocks that only have a block header, the payload is read
+        until the stream ends and is accepted only if it decompresses to exactly ``block_size``.
+
+        Args:
+            data_offset: Absolute file offset of the compressed payload.
+            body_size: On-disk size of the payload (including the CRC32 trailer), if known.
+            block_size: Decompressed size recorded in the block header.
+            has_crc: Whether a CRC32 trailer is expected.
+
+        Returns:
+            A tuple of the raw compressed payload and the decompressed block data.
+
+        Raises:
+            InvalidBlock: If the payload cannot be verified or decompressed.
+        """
+        if body_size is not None:
+            packed = self._read_file(data_offset, body_size, "compressed block data")
+            if has_crc:
+                if len(packed) < 4:
+                    raise InvalidBlock("compressed block too small for crc32")
+                packed, target_crc = packed[:-4], int.from_bytes(packed[-4:], "little")
+                actual_crc = zlib.crc32(packed) & 0xFFFFFFFF
+                if actual_crc != target_crc:
+                    raise InvalidBlock(f"block crc32 mismatch: expected 0x{target_crc:08x}, got 0x{actual_crc:08x}")
+        else:
+            # A recovered block header does not record the on-disk payload size or
+            # its CRC32 trailer, so the payload can only be bounded by the file end.
+            if data_offset > self.asdf.file_size:
+                raise InvalidBlock("compressed block data outside file")
+            self.fh.seek(data_offset)
+            packed = self.fh.read()
+
+        try:
+            decompressor = zlib.decompressobj()
+            body = decompressor.decompress(packed)
+            body += decompressor.flush()
+        except zlib.error as e:
+            raise InvalidBlock(f"invalid compressed block: {e}") from e
+
+        if not decompressor.eof or len(body) != block_size:
+            raise InvalidBlock(f"compressed block size mismatch: expected {block_size}, got {len(body)}")
+
+        return packed, body
+
+    def _range_source(
+        self, run_idx: int, file_offset: int, data_offset: int, run_start: int, run_size: int
+    ) -> RangeSource:
+        """Build the provenance object for a block."""
+        return RangeSource(
+            table_index=run_idx,
+            idx=self.idx,
+            offset=run_start,
+            size=run_size,
+            file_offset=file_offset,
+            data_offset=data_offset,
+        )
+
+    def _read_file(self, offset: int, length: int, what: str) -> bytes:
+        """Read an exact number of bytes from the snapshot file."""
+        if offset < 0 or offset + length > self.asdf.file_size:
+            raise InvalidBlock(f"{what} outside file")
+        self.fh.seek(offset)
+        data = self.fh.read(length)
+        if len(data) != length:
+            raise InvalidBlock(f"short read of {what}")
+        return data
 
     def _read(self, offset: int, length: int) -> bytes:
         result = []
