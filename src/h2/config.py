@@ -7,7 +7,10 @@ Objects for controlling the configuration of the HTTP/2 stack.
 from __future__ import annotations
 
 import sys
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:  # pragma: no cover
+    from collections.abc import Callable
 
 
 class _BooleanConfigOption:
@@ -149,6 +152,31 @@ class H2Configuration:
         .. versionadded:: 2.6.0
 
     :type logger: ``logging.Logger``
+
+    :param push_promise_admission_callback: An optional callable that decides
+        whether a PUSH_PROMISE frame received from the remote peer should be
+        admitted. This is only meaningful for client connections: servers
+        never receive PUSH_PROMISE frames.
+
+        The callable is invoked with three positional arguments: the headers
+        of the parent request the push is associated with (or ``None`` if
+        they are not known), the promised request headers, and a boolean
+        indicating whether push is currently enabled in the local settings.
+        It must return ``True`` to admit the pushed stream or ``False`` to
+        refuse it. Refused pushes emit no events: the promised stream is
+        immediately reset with ``REFUSED_STREAM`` and cannot be reactivated
+        by subsequent frames.
+
+        A ready-made implementation that enforces trusted origins and a
+        resource policy is available as
+        :class:`PushPromiseAdmissionPolicy <h2.push.PushPromiseAdmissionPolicy>`.
+
+        If ``None`` (the default), all pushed streams are admitted, matching
+        the historical behaviour of this library.
+
+        .. versionadded:: 4.5.0
+
+    :type push_promise_admission_callback: callable or ``None``
     """
 
     client_side = _BooleanConfigOption("client_side")
@@ -176,7 +204,8 @@ class H2Configuration:
                  split_outbound_cookies: bool = False,
                  validate_inbound_headers: bool = True,
                  normalize_inbound_headers: bool = True,
-                 logger: DummyLogger | OutputLogger | None = None) -> None:
+                 logger: DummyLogger | OutputLogger | None = None,
+                 push_promise_admission_callback: Callable[..., bool] | None = None) -> None:
         self.client_side = client_side
         self.header_encoding = header_encoding
         self.validate_outbound_headers = validate_outbound_headers
@@ -185,6 +214,25 @@ class H2Configuration:
         self.validate_inbound_headers = validate_inbound_headers
         self.normalize_inbound_headers = normalize_inbound_headers
         self.logger = logger or DummyLogger(__name__)
+        self.push_promise_admission_callback = push_promise_admission_callback
+
+    @property
+    def push_promise_admission_callback(self) -> Callable[..., bool] | None:
+        """
+        The callback used to decide whether an inbound PUSH_PROMISE frame is
+        admitted, or ``None`` if all pushed streams are admitted.
+        """
+        return self._push_promise_admission_callback
+
+    @push_promise_admission_callback.setter
+    def push_promise_admission_callback(self, value: Callable[..., bool] | None) -> None:
+        """
+        Enforces constraints on the value of the admission callback.
+        """
+        if value is not None and not callable(value):
+            msg = "push_promise_admission_callback must be callable or None"
+            raise ValueError(msg)
+        self._push_promise_admission_callback = value
 
     @property
     def header_encoding(self) -> bool | str | None:

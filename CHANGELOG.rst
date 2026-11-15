@@ -11,6 +11,12 @@ dev
 **API Changes (Backward Compatible)**
 
 - Support for Python 3.15 has been added.
+- Added an optional PUSH_PROMISE admission callback
+  (``H2Configuration.push_promise_admission_callback``) that lets clients
+  refuse pushed streams before they become visible to the application, and a
+  ready-made ``h2.push.PushPromiseAdmissionPolicy`` enforcing trusted origins
+  and a caller-supplied resource policy. Refused pushes are immediately reset
+  with REFUSED_STREAM and cannot be reactivated by subsequent frames.
 
 **Bugfixes**
 

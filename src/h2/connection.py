@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import base64
 from enum import Enum, IntEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from hpack.exceptions import HPACKError, OversizedHeaderListError
 from hpack.hpack import Decoder, Encoder
@@ -39,6 +39,7 @@ from .events import (
     PingAckReceived,
     PingReceived,
     PriorityUpdated,
+    PushedStreamReceived,
     RemoteSettingsChanged,
     RequestReceived,
     ResponseReceived,
@@ -1691,6 +1692,35 @@ class H2Connection:
             f.error_code = ErrorCodes.REFUSED_STREAM
             return [f], events
 
+        # If the user has registered an admission callback, give it the
+        # opportunity to refuse this push before the pushed stream becomes
+        # visible to the application. The callback receives the parent
+        # request headers, the promised request headers, and whether push is
+        # currently enabled in our local settings.
+        admission_callback = self.config.push_promise_admission_callback
+        if admission_callback is not None:
+            push_event = cast(PushedStreamReceived, stream_events[0])
+            request_headers = stream.request_headers
+            parent_headers: list[Header] | list[tuple[str, str]] | None
+            header_encoding = self.config.header_encoding
+            if request_headers is not None and isinstance(header_encoding, str):
+                parent_headers = [
+                    (name.decode(header_encoding), value.decode(header_encoding))
+                    for name, value in request_headers
+                ]
+            else:
+                parent_headers = request_headers
+            admitted = admission_callback(
+                parent_headers,
+                push_event.headers,
+                bool(self.local_settings.enable_push),
+            )
+            if not admitted:
+                frames += self._refuse_pushed_stream(
+                    frame.promised_stream_id, pushed_headers,
+                )
+                return frames, events
+
         new_stream = self._begin_new_stream(
             frame.promised_stream_id, AllowedStreamIDs.EVEN,
         )
@@ -1698,6 +1728,29 @@ class H2Connection:
         new_stream.remotely_pushed(pushed_headers)
 
         return frames, events + stream_events
+
+    def _refuse_pushed_stream(self,
+                              promised_stream_id: int,
+                              pushed_headers: Iterable[Header]) -> list[Frame]:
+        """
+        Refuse a pushed stream that the admission callback rejected.
+
+        The promised stream is reserved and then immediately reset with
+        REFUSED_STREAM. This promptly releases the reserved stream resources
+        and ensures the promised stream ID is consumed: subsequent HEADERS or
+        DATA frames sent by the peer on this stream cannot reactivate it, and
+        are instead handled by the usual closed-stream logic.
+        """
+        self.config.logger.debug(
+            "Refusing pushed stream ID %d per admission callback",
+            promised_stream_id,
+        )
+        new_stream = self._begin_new_stream(
+            promised_stream_id, AllowedStreamIDs.EVEN,
+        )
+        self.streams[promised_stream_id] = new_stream
+        new_stream.remotely_pushed(pushed_headers)
+        return new_stream.reset_stream(ErrorCodes.REFUSED_STREAM)
 
     def _handle_data_on_closed_stream(self,
                                       events: list[Event],

@@ -27,6 +27,13 @@ Configuration
    :members:
 
 
+Server Push
+-----------
+
+.. autoclass:: h2.push.PushPromiseAdmissionPolicy
+   :members:
+
+
 .. _h2-events-api:
 
 Events

@@ -780,6 +780,11 @@ class H2Stream:
         self.max_outbound_frame_size: int | None = None
         self.request_method: bytes | None = None
 
+        # The request headers sent on this stream, if this is a client stream
+        # initiated by us. Used to provide the parent request context to the
+        # push promise admission callback.
+        self.request_headers: list[Header] | None = None
+
         # The current value of the outbound stream flow control window
         self.outbound_flow_control_window = outbound_window_size
 
@@ -904,6 +909,9 @@ class H2Stream:
 
         if self.state_machine.client and self._authority is None:
             self._authority = authority_from_headers(bytes_headers)
+
+        if self.state_machine.client and self.request_headers is None:
+            self.request_headers = bytes_headers
 
         # store request method for _initialize_content_length
         self.request_method = extract_method_header(bytes_headers)
