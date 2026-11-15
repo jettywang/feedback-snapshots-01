@@ -17,6 +17,15 @@ Revision 0.7.0, released XX-XX-2026
   preserves component absence when inspected with ``instantiate=False``.
   Applications relying on ``encode()`` to populate defaulted components
   should explicitly instantiate or set those components before encoding.
+- Fixed the same mutation on the schema-driven path, where a caller reuses
+  one schema object across requests (e.g. several signature payloads). BER,
+  CER and DER no longer instantiate components in the supplied ``asn1Spec``
+  or in sibling value objects: component schema lookups read with
+  ``instantiate=False``, DER SET ordering resolves an untagged CHOICE's
+  alternative without indexing the schema object, and a sparse
+  SEQUENCE OF reports an unset component instead of materializing it.
+  Value objects passed with a separate ``asn1Spec`` are now encoded through
+  the same non-instantiating accessors.
 - Expanded SECURITY.md with the project's vulnerability scope: what
   qualifies for a private advisory and a CVE versus what is handled
   as an ordinary public bug report

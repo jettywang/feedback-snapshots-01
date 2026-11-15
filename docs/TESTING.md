@@ -257,6 +257,18 @@ component state using `getComponentByName(name, instantiate=False)`. The
 `instantiate=False` is essential, because the default would itself materialize
 the absent component the test is trying to prove untouched.
 
+The same module's `ReusedSchemaSigningTestCase` covers object reuse across
+requests rather than a single call: two interleaved signing payloads, one
+shared `asn1Spec`, and a recursive `_state` snapshot that records component
+slots, `Choice._currentIdx`, and which declared components are instantiated.
+Reading `_componentValues` directly is deliberate there — `getComponentByName`
+with `instantiate=False` cannot distinguish a genuinely absent component from
+a present-but-schema-only one, which is exactly the difference the reuse tests
+must observe. Note that `getComponentByPosition(idx, instantiate=False)` on a
+`SequenceOf` reads the slot without filling holes, whereas `SequenceOf.__iter__`
+does fill them; a test that iterates a sparse SEQUENCE OF is itself the
+mutation it is trying to detect.
+
 **`self.subTest`** appears only in that newest module. It is fine to use in
 new cross-product tests and unnecessary elsewhere.
 

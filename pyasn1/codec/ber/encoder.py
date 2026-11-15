@@ -12,6 +12,7 @@ from pyasn1 import error
 from pyasn1.codec.ber import eoo
 from pyasn1.compat import _MISSING
 from pyasn1.compat.integer import to_bytes
+from pyasn1.type import base
 from pyasn1.type import char
 from pyasn1.type import tag
 from pyasn1.type import univ
@@ -20,6 +21,40 @@ from pyasn1.type import useful
 __all__ = ['Encoder', 'encode']
 
 LOG = debug.registerLoggee(__name__, flags=debug.DEBUG_ENCODER)
+
+
+def _getComponentSpec(asn1Spec, idx, namedType):
+    """Resolve a component schema without instantiating the schema object.
+
+    A component slot that is present but still schema-only reads as
+    ``noValue`` (the same conflation ``instantiate=False`` makes), in which
+    case the named type's prototype is borrowed. Nothing is written back.
+    """
+    try:
+        componentSpec = asn1Spec.getComponentByPosition(idx, instantiate=False)
+
+    except (AttributeError, error.PyAsn1Error):
+        componentSpec = univ.noValue
+
+    if componentSpec is univ.noValue:
+        return namedType.asn1Object
+
+    return componentSpec
+
+
+def _getComponentSpecByName(asn1Spec, namedType):
+    """Resolve a named component schema without instantiating it."""
+    try:
+        componentSpec = asn1Spec.getComponentByName(
+            namedType.name, instantiate=False)
+
+    except (AttributeError, error.PyAsn1Error):
+        componentSpec = univ.noValue
+
+    if componentSpec is univ.noValue:
+        return namedType.asn1Object
+
+    return componentSpec
 
 
 class AbstractItemEncoder(object):
@@ -632,17 +667,33 @@ class SequenceEncoder(AbstractItemEncoder):
             # bare Python value + ASN.1 schema
             for idx, namedType in enumerate(asn1Spec.componentType.namedTypes):
 
-                try:
-                    component = value[namedType.name]
+                if isinstance(value, base.Asn1Item):
+                    # value object under a separately supplied schema
+                    component = value.getComponentByName(
+                        namedType.name, instantiate=False)
 
-                except KeyError:
-                    raise error.PyAsn1Error('Component name "%s" not found in %r' % (
-                        namedType.name, value))
+                    if component is univ.noValue:
+                        if namedType.isOptional or namedType.isDefaulted:
+                            if LOG:
+                                LOG('not encoding absent component %r' % (namedType,))
+                            continue
 
-                if namedType.isOptional and namedType.name not in value:
-                    if LOG:
-                        LOG('not encoding OPTIONAL component %r' % (namedType,))
-                    continue
+                        raise error.PyAsn1Error(
+                            'Component name "%s" not found in %r' % (
+                                namedType.name, value))
+
+                else:
+                    try:
+                        component = value[namedType.name]
+
+                    except KeyError:
+                        raise error.PyAsn1Error('Component name "%s" not found in %r' % (
+                            namedType.name, value))
+
+                    if namedType.isOptional and namedType.name not in value:
+                        if LOG:
+                            LOG('not encoding OPTIONAL component %r' % (namedType,))
+                        continue
 
                 if namedType.isDefaulted and component == namedType.asn1Object:
                     if LOG:
@@ -698,7 +749,17 @@ class SequenceOfEncoder(AbstractItemEncoder):
 
         wrapType = options.pop('wrapType', None)
 
-        for idx, component in enumerate(value):
+        for idx in range(len(value)):
+            if isinstance(value, base.Asn1Item):
+                component = value.getComponentByPosition(idx, instantiate=False)
+
+                if component is univ.noValue:
+                    raise error.PyAsn1Error(
+                        'Component %d of %r is not set' % (idx, value))
+
+            else:
+                component = value[idx]
+
             chunk = encodeFun(component, asn1Spec, **options)
 
             if (wrapType is not None and
@@ -731,9 +792,19 @@ class ChoiceEncoder(AbstractItemEncoder):
                 raise error.PyAsn1Error('%s components for Choice at %r' % (len(names) and 'Multiple ' or 'None ', value))
 
             name = names[0]
+            namedType = asn1Spec.componentType[name]
 
-            component = value[name]
-            asn1Spec = asn1Spec[name]
+            if isinstance(value, base.Asn1Item):
+                component = value.getComponentByName(name, instantiate=False)
+
+                if component is univ.noValue:
+                    raise error.PyAsn1Error(
+                        'Component name "%s" not found in %r' % (name, value))
+
+            else:
+                component = value[name]
+
+            asn1Spec = _getComponentSpecByName(asn1Spec, namedType)
 
         return encodeFun(component, asn1Spec, **options), True, True
 

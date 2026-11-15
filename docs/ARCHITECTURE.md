@@ -1147,6 +1147,40 @@ governs how the encoders read the value; how they read the schema is a
 separate contract with its own reason not to change, described in [Recursive
 schemas](#recursive-schemas).
 
+The same purity rule extends to the schema side of a schema-driven call. A
+caller may keep one schema object for many requests and pass it as
+`asn1Spec` alongside a value object, as signing code does; `encode()` must not
+leave state behind on it or on any sibling value object built from it. Three
+accessor spellings used to leak on that path, all of them instantiating:
+
+- `asn1Spec[idx]` in CER's `SetEncoder.encodeValue` (inherited by DER) and
+  `value[namedType.name]` in the bare-value branch materialize a component
+  slot in the schema/value. Replaced by `_getComponentSpec` /
+  `_getComponentSpecByName` in `ber/encoder.py`, which read with
+  `instantiate=False` and fall back to `namedType.asn1Object` for a component
+  that is absent or still schema-only.
+- `asn1Spec[name]` in `ChoiceEncoder.encodeValue` and in DER's
+  `SetEncoder._componentSortKey` instantiate the chosen alternative. Both now
+  go through the non-instantiating helpers, the sort key reading
+  `componentType[...].asn1Object.tagSet` as its final fallback.
+- `SequenceOfEncoder._encodeComponents` iterated the value, and
+  `SequenceOf.__iter__` calls instantiating `getComponentByPosition`. A sparse
+  SEQUENCE OF therefore materialized slot 0 while encoding, even on a failed
+  encode. The loop now reads `getComponentByPosition(idx, instantiate=False)`
+  by index and raises `PyAsn1Error` for a hole instead of filling it.
+
+Behaviour on the legal paths is unchanged. A value object that omits an
+OPTIONAL or DEFAULT variant still reads as absent, an explicit assignment
+equal to the DEFAULT still encodes to the omitted form (BER family) and is
+still distinct in component state, and the native encoder still renders
+defaults. `ReusedSchemaSigningTestCase` in
+`tests/codec/test_encoder_no_mutation.py` drives two interleaved request
+payloads through all five entry points on one shared schema, comparing bytes
+against a fresh schema per request and snapshotting both the schema and the
+sibling value objects around index access, `clone()`, `subtype()`, and
+successful and failed encodes; a separate case pins the shared-subcomponent
+aliasing that starts the corruption.
+
 ### The native codec
 
 `codec/native/` converts between pyasn1 objects and Python built-ins. It
@@ -1744,6 +1778,7 @@ each guard.
 | CER/DER time length window | `TimeEncoderMixIn.encodeValue` (`cer/encoder.py`), with `MIN_LENGTH`/`MAX_LENGTH` overridden per type on `GeneralizedTimeEncoder` and `UTCTimeEncoder` | Enforces canonical time length ([What each dialect changes](#what-each-dialect-changes)) and also caps what the forced `maxChunkSize=1000` could chunk | `7c5db32`, 2017; `dd6640a`, 2019 |
 | Inconsistency guard | `SequenceEncoder.encodeValue` (`ber/encoder.py`), `SetEncoder.encodeValue` (`cer/encoder.py`), `SetEncoder.encode` (`native/encoder.py`) | Rejects constrained containers violating their `subtypeSpec`; a narrow check, see the caveats below | `66afc89`, 2019 (raise reworked into `PyAsn1Error` by `7a599a1`, 2024) |
 | Encoder purity | the `getComponentByPosition(idx, instantiate=False)` component loops in the same three methods | `encode()` materializing absent DEFAULT/OPTIONAL components in the caller's object ([Encoding as a pure function](#encoding-as-a-pure-function)) | `ca9ec2e` / PR #112, 0.7.0-dev |
+| Schema purity | `_getComponentSpec` / `_getComponentSpecByName` (`ber/encoder.py`), the schema-driven branches of `SequenceEncoder.encodeValue`, `SetEncoder.encodeValue` (`cer/encoder.py`), `ChoiceEncoder.encodeValue` and `SequenceOfEncoder._encodeComponents` (`ber/encoder.py`), and `SetEncoder._componentSortKey` (`der/encoder.py`) | Reusing one schema across requests no longer materializes components in the schema or sibling value objects ([Encoding as a pure function](#encoding-as-a-pure-function)) | 0.7.0-dev |
 | Purity regression test | `tests/codec/test_encoder_no_mutation.py` | Pins the purity guard across all five encoder entry points | 0.7.0-dev |
 
 The `isInconsistent` guard returns `False` immediately when the object has no

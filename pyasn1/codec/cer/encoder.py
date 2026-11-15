@@ -8,6 +8,7 @@ import warnings
 
 from pyasn1 import error
 from pyasn1.codec.ber import encoder
+from pyasn1.type import base
 from pyasn1.type import univ
 from pyasn1.type import useful
 
@@ -203,23 +204,39 @@ class SetEncoder(encoder.SequenceEncoder):
                 comps.append((component, asn1Spec))
 
         else:
-            # bare Python value + ASN.1 schema
+            # bare Python value or ASN.1 value object + ASN.1 schema
             for idx, namedType in enumerate(asn1Spec.componentType.namedTypes):
 
-                try:
-                    component = value[namedType.name]
+                if isinstance(value, base.Asn1Item):
+                    component = value.getComponentByName(
+                        namedType.name, instantiate=False)
 
-                except KeyError:
-                    raise error.PyAsn1Error('Component name "%s" not found in %r' % (namedType.name, value))
+                    if component is univ.noValue:
+                        if namedType.isOptional or namedType.isDefaulted:
+                            continue
 
-                if namedType.isOptional and namedType.name not in value:
-                    continue
+                        raise error.PyAsn1Error(
+                            'Component name "%s" not found in %r' % (
+                                namedType.name, value))
+
+                else:
+                    try:
+                        component = value[namedType.name]
+
+                    except KeyError:
+                        raise error.PyAsn1Error('Component name "%s" not found in %r' % (namedType.name, value))
+
+                    if namedType.isOptional and namedType.name not in value:
+                        continue
 
                 if namedType.isDefaulted and component == namedType.asn1Object:
                     continue
 
                 compsMap[id(component)] = namedType
-                comps.append((component, asn1Spec[idx]))
+                comps.append((
+                    component,
+                    encoder._getComponentSpec(asn1Spec, idx, namedType)
+                ))
 
         for comp, compType in sorted(comps, key=self._componentSortKey):
             namedType = compsMap[id(comp)]

@@ -39,7 +39,15 @@ class SetEncoder(encoder.SetEncoder):
                         '%s components for Choice at %r' % (len(names) and 'Multiple ' or 'None ', component))
 
                 # TODO: support nested CHOICE ordering
-                return asn1Spec[names[0]].tagSet
+                # Read the chosen alternative without instantiating the schema
+                # object; fall back to its declared type when absent.
+                componentSpec = asn1Spec.getComponentByName(
+                    names[0], instantiate=False)
+
+                if componentSpec is univ.noValue:
+                    componentSpec = asn1Spec.componentType[names[0]].asn1Object
+
+                return componentSpec.tagSet
 
         else:
             return compType.tagSet
