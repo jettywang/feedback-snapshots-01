@@ -115,6 +115,12 @@ file.load_key(password="Passw0rd", verify_password=True)
 # Use private key
 file.load_key(private_key=open("priv.pem", "rb"))
 
+# Explicitly select the Agile keyEncryptor credential class ("password" or "certificate")
+# and, for files wrapping the key for several certificates, the certificate
+# identity (its certId attribute); the selected entry alone supplies the salt,
+# verifier and keyBits used for the operation
+file.load_key(private_key=open("priv.pem", "rb"), key_encryptor="certificate", certificate_id="AWBcS...=")
+
 # Use intermediate key (secretKey)
 file.load_key(secret_key=binascii.unhexlify("AE8C36E68B4BB9EA46E5544A5FDB6693875B2FDE1507CBC65C8BCF99E25C2562"))
 
