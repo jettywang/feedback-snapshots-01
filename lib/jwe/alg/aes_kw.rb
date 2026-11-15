@@ -14,6 +14,8 @@ module JWE
       end
 
       def encrypt(cek)
+        check_key_data_length(cek.b.length, 8)
+
         a = iv
         r = cek.b.scan(/.{8}/m)
 
@@ -37,6 +39,8 @@ module JWE
       end
 
       def decrypt(encrypted_cek)
+        check_key_data_length(encrypted_cek.b.length, 16)
+
         c = encrypted_cek.b.scan(/.{8}/m)
         a, *r = c
 
@@ -81,6 +85,12 @@ module JWE
         cipher.key = key
         cipher.padding = 0
         cipher.update(data) + cipher.final
+      end
+
+      def check_key_data_length(length, minimum)
+        return if length >= minimum && (length % 8).zero?
+
+        raise StandardError.new("Invalid key data length: must be a multiple of 8 bytes and at least #{minimum} bytes long.")
       end
 
       def xor(data, t)
