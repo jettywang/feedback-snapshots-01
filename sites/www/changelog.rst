@@ -2,6 +2,17 @@
 Changelog
 =========
 
+- :feature:`-` Added `paramiko.sftp_policy.SFTPPermissionPolicy` and
+  `paramiko.sftp_policy.RestrictedSFTPServerInterface`, a rooted SFTP server
+  interface whose file creation merges the server permission policy and the
+  client's requested attributes into the actual ``os.open`` call.  Files are
+  never created with a wide mode and then ``chmod``'d: the final mode is
+  supplied at creation, exclusive creates never touch an existing file, the
+  process umask is never modified, and later ``SETSTAT``/``FSETSTAT`` requests
+  cannot widen permissions, change ownership, or inject extended attributes
+  unless the policy explicitly allows it.  Each interface instance owns its
+  own policy, so concurrent sessions with different policies do not affect
+  each other.
 - :release:`5.1.0 <2026-10-17>`
 - :release:`5.0.1 <2026-10-17>`
 - :bug:`2462` (w/ earlier fix attempts :issue:`2475` and :issue:`2465`) An API

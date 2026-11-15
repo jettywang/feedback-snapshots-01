@@ -75,6 +75,12 @@ from paramiko.sftp_server import SFTPServer
 from paramiko.sftp_attr import SFTPAttributes
 from paramiko.sftp_handle import SFTPHandle
 from paramiko.sftp_si import SFTPServerInterface
+from paramiko.sftp_policy import (
+    RestrictedSFTPHandle,
+    RestrictedSFTPServerInterface,
+    SFTPPermissionPolicy,
+    open_restricted_file,
+)
 from paramiko.sftp_file import SFTPFile
 from paramiko.message import Message
 from paramiko.packet import Packetizer

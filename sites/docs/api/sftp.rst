@@ -11,3 +11,4 @@ SFTP
     :show-inheritance:
 .. automodule:: paramiko.sftp_handle
 .. automodule:: paramiko.sftp_si
+.. automodule:: paramiko.sftp_policy
