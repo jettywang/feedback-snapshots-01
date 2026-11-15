@@ -17,6 +17,7 @@ msoffcrypto-tool
 
    cli
    msoffcrypto
+   encryption-evidence
 
 .. * :ref:`genindex`
 .. * :ref:`modindex`

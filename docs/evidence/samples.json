@@ -1,0 +1,4397 @@
+[
+  {
+    "schema_version": "1.0",
+    "case": "plain_ooxml_control",
+    "note": "plaintext OOXML control",
+    "requested_check_mode": {
+      "verify_password": false,
+      "verify_integrity": false
+    },
+    "file": {
+      "name": "example.docx",
+      "size": 11995,
+      "sha256": "8c8212db6e624bfc69286e94d09b7e68c753ee86b6826e51427a33c841f133d1",
+      "ephemeral": false,
+      "container": "zip",
+      "derived_from": null
+    },
+    "format": {
+      "family": "ooxml",
+      "dispatch": "zip + [Content_Types].xml",
+      "declared_method": "plain",
+      "declaration_source": "EncryptionInfo stream",
+      "declaration_present": false,
+      "parameters": {},
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": false,
+      "key": {
+        "attempted": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "verifier_bits": null,
+        "collision_resistant": null,
+        "error": null
+      },
+      "decryption": {
+        "attempted": false,
+        "result": "not_attempted",
+        "exception": null,
+        "output_bytes": 0,
+        "wrote_output_before_error": false,
+        "output_validation": {
+          "kind": "none",
+          "depth": "none",
+          "result": "not_run",
+          "detail": "",
+          "complete": null
+        }
+      },
+      "integrity": {
+        "requested": false,
+        "applicable": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "scope": "not available",
+        "authenticates_producer": false
+      }
+    },
+    "evidence": {
+      "level": "container_only",
+      "level_meaning": "container/format dispatch only",
+      "facts": [
+        "verify_password=False; verify_integrity=False",
+        "is_encrypted()=False via zip + [Content_Types].xml",
+        "no declaration; load_key/decrypt not attempted"
+      ],
+      "not_proven": [
+        "plaintext: no marker is not positive validation that the document is unencrypted",
+        "unsupported declarations: is_encrypted() also returns False for some unknown FilePass types"
+      ]
+    },
+    "policy": {
+      "class": "unknown",
+      "description": "declaration could not be classified",
+      "declared_cipher": null,
+      "declared_key_bits": null,
+      "declared_kdf": null,
+      "declared_integrity": "unknown",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "NO_ENCRYPTION_DECLARED",
+      "state_meaning": "no supported encryption declaration was found",
+      "reject_reason": null,
+      "reject_reason_meaning": null,
+      "severity": "info"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "unsupported_container",
+    "note": "",
+    "requested_check_mode": {
+      "verify_password": false,
+      "verify_integrity": false
+    },
+    "file": {
+      "name": "unsupported_container.bin",
+      "size": 190,
+      "sha256": null,
+      "ephemeral": true,
+      "container": "other",
+      "derived_from": null
+    },
+    "format": {
+      "family": "unknown",
+      "dispatch": "none",
+      "declared_method": "none",
+      "declaration_source": "none",
+      "declaration_present": false,
+      "parameters": {},
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": null,
+      "key": {
+        "attempted": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "verifier_bits": null,
+        "collision_resistant": null,
+        "error": "OfficeFile: FileFormatError: Unsupported file format"
+      },
+      "decryption": {
+        "attempted": false,
+        "result": "not_attempted",
+        "exception": null,
+        "output_bytes": 0,
+        "wrote_output_before_error": false,
+        "output_validation": {
+          "kind": "none",
+          "depth": "none",
+          "result": "not_run",
+          "detail": "",
+          "complete": null
+        }
+      },
+      "integrity": {
+        "requested": false,
+        "applicable": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "scope": "not available",
+        "authenticates_producer": false
+      }
+    },
+    "evidence": {
+      "level": "none",
+      "level_meaning": "nothing was established",
+      "facts": [
+        "verify_password=False; verify_integrity=False",
+        "OfficeFile dispatch failed: FileFormatError: Unsupported file format"
+      ],
+      "not_proven": [
+        "content",
+        "encryption strength",
+        "integrity",
+        "key correctness"
+      ]
+    },
+    "policy": {
+      "class": "unknown",
+      "description": "declaration could not be classified",
+      "declared_cipher": null,
+      "declared_key_bits": null,
+      "declared_kdf": null,
+      "declared_integrity": "unknown",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "UNSUPPORTED_CONTAINER",
+      "state_meaning": "container/format is not recognized by msoffcrypto",
+      "reject_reason": "UNSUPPORTED_CONTAINER",
+      "reject_reason_meaning": "not an OLE/ZIP container this library can dispatch",
+      "severity": "reject"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "agile_default",
+    "note": "no verify_password",
+    "requested_check_mode": {
+      "verify_password": false,
+      "verify_integrity": false
+    },
+    "file": {
+      "name": "example_password.docx",
+      "size": 18432,
+      "sha256": "0605624697328060fdc75ca9929ea20b9d63ebed9387ff1a97aaf9979757234a",
+      "ephemeral": false,
+      "container": "ole",
+      "derived_from": null
+    },
+    "format": {
+      "family": "ooxml",
+      "dispatch": "zip + [Content_Types].xml",
+      "declared_method": "agile",
+      "declaration_source": "EncryptionInfo stream",
+      "declaration_present": true,
+      "parameters": {
+        "version": "4.4",
+        "payload_cipher": "AES",
+        "payload_key_bits": 256,
+        "payload_hash": "SHA512",
+        "block_size": 16,
+        "spin_count": 100000,
+        "password_cipher": "AES",
+        "password_key_bits": 256,
+        "password_hash": "SHA512",
+        "has_data_integrity": true
+      },
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": true,
+      "key": {
+        "attempted": true,
+        "mechanism": "agile_verifier",
+        "result": "not_checked",
+        "verifier_bits": 512,
+        "collision_resistant": true,
+        "error": null
+      },
+      "decryption": {
+        "attempted": true,
+        "result": "ok",
+        "exception": null,
+        "output_bytes": 11995,
+        "wrote_output_before_error": false,
+        "output_validation": {
+          "kind": "ooxml_package",
+          "depth": "members",
+          "result": "pass",
+          "detail": "11 members, CRC ok",
+          "zipfile_is_zipfile": true,
+          "complete": true
+        }
+      },
+      "integrity": {
+        "requested": false,
+        "applicable": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "scope": "not available",
+        "authenticates_producer": false
+      }
+    },
+    "evidence": {
+      "level": "decrypted",
+      "level_meaning": "decrypt() returned bytes with a structural check",
+      "facts": [
+        "verify_password=False; verify_integrity=False",
+        "is_encrypted()=True via zip + [Content_Types].xml",
+        "declared method='agile' from EncryptionInfo stream; parameters={'version': '4.4', 'payload_cipher': 'AES', 'payload_key_bits': 256, 'payload_hash': 'SHA512', 'block_size': 16, 'spin_count': 100000, 'password_cipher': 'AES', 'password_key_bits': 256, 'password_hash': 'SHA512', 'has_data_integrity': True}",
+        "OOXML load_key default does not run the verifier",
+        "decrypt() returned 11995 bytes; structure={'kind': 'ooxml_package', 'depth': 'members', 'result': 'pass', 'detail': '11 members, CRC ok', 'zipfile_is_zipfile': True, 'complete': True}"
+      ],
+      "not_proven": [
+        "document authenticity, safety, or semantic validity",
+        "encryption strength: the API reports declared parameters, not a strength verdict",
+        "password correctness: decrypt() success and ZIP/OLE structure are not a verifier",
+        "payload integrity: an HMAC exists but verify_integrity was not requested"
+      ]
+    },
+    "policy": {
+      "class": "aes_agile_hmac",
+      "description": "ECMA-376 Agile AES with optional HMAC integrity",
+      "declared_cipher": "AES",
+      "declared_key_bits": 256,
+      "declared_kdf": {
+        "hash": "SHA512",
+        "spin_count": 100000
+      },
+      "declared_integrity": "hmac",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "CONTENT_DECRYPTED_KEY_UNVERIFIED",
+      "state_meaning": "content decrypted and has structure, but no verifier was checked",
+      "reject_reason": null,
+      "reject_reason_meaning": null,
+      "severity": "info"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "agile_verified_integrity",
+    "note": "",
+    "requested_check_mode": {
+      "verify_password": true,
+      "verify_integrity": true
+    },
+    "file": {
+      "name": "example_password.docx",
+      "size": 18432,
+      "sha256": "0605624697328060fdc75ca9929ea20b9d63ebed9387ff1a97aaf9979757234a",
+      "ephemeral": false,
+      "container": "ole",
+      "derived_from": null
+    },
+    "format": {
+      "family": "ooxml",
+      "dispatch": "zip + [Content_Types].xml",
+      "declared_method": "agile",
+      "declaration_source": "EncryptionInfo stream",
+      "declaration_present": true,
+      "parameters": {
+        "version": "4.4",
+        "payload_cipher": "AES",
+        "payload_key_bits": 256,
+        "payload_hash": "SHA512",
+        "block_size": 16,
+        "spin_count": 100000,
+        "password_cipher": "AES",
+        "password_key_bits": 256,
+        "password_hash": "SHA512",
+        "has_data_integrity": true
+      },
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": true,
+      "key": {
+        "attempted": true,
+        "mechanism": "agile_verifier",
+        "result": "match",
+        "verifier_bits": 512,
+        "collision_resistant": true,
+        "error": null
+      },
+      "decryption": {
+        "attempted": true,
+        "result": "ok",
+        "exception": null,
+        "output_bytes": 11995,
+        "wrote_output_before_error": false,
+        "output_validation": {
+          "kind": "ooxml_package",
+          "depth": "members",
+          "result": "pass",
+          "detail": "11 members, CRC ok",
+          "zipfile_is_zipfile": true,
+          "complete": true
+        }
+      },
+      "integrity": {
+        "requested": true,
+        "applicable": true,
+        "mechanism": "hmac_sha512",
+        "result": "pass",
+        "scope": "EncryptedPackage ciphertext",
+        "authenticates_producer": false
+      }
+    },
+    "evidence": {
+      "level": "integrity_verified",
+      "level_meaning": "Agile HMAC over EncryptedPackage passed and structure is valid",
+      "facts": [
+        "verify_password=True; verify_integrity=True",
+        "is_encrypted()=True via zip + [Content_Types].xml",
+        "declared method='agile' from EncryptionInfo stream; parameters={'version': '4.4', 'payload_cipher': 'AES', 'payload_key_bits': 256, 'payload_hash': 'SHA512', 'block_size': 16, 'spin_count': 100000, 'password_cipher': 'AES', 'password_key_bits': 256, 'password_hash': 'SHA512', 'has_data_integrity': True}",
+        "verifier match (agile_verifier, 512 bits)",
+        "decrypt() returned 11995 bytes; structure={'kind': 'ooxml_package', 'depth': 'members', 'result': 'pass', 'detail': '11 members, CRC ok', 'zipfile_is_zipfile': True, 'complete': True}"
+      ],
+      "not_proven": [
+        "document authenticity, safety, or semantic validity",
+        "encryption strength: the API reports declared parameters, not a strength verdict",
+        "producer identity: HMAC proves possession of the key, not who produced the file"
+      ]
+    },
+    "policy": {
+      "class": "aes_agile_hmac",
+      "description": "ECMA-376 Agile AES with optional HMAC integrity",
+      "declared_cipher": "AES",
+      "declared_key_bits": 256,
+      "declared_kdf": {
+        "hash": "SHA512",
+        "spin_count": 100000
+      },
+      "declared_integrity": "hmac",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "INTEGRITY_VERIFIED",
+      "state_meaning": "content decrypted, structure is valid, and the Agile payload HMAC passed",
+      "reject_reason": null,
+      "reject_reason_meaning": null,
+      "severity": "info"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "agile_wrong_default",
+    "note": "no verifier; ZIP check is the only gate",
+    "requested_check_mode": {
+      "verify_password": false,
+      "verify_integrity": false
+    },
+    "file": {
+      "name": "example_password.docx",
+      "size": 18432,
+      "sha256": "0605624697328060fdc75ca9929ea20b9d63ebed9387ff1a97aaf9979757234a",
+      "ephemeral": false,
+      "container": "ole",
+      "derived_from": null
+    },
+    "format": {
+      "family": "ooxml",
+      "dispatch": "zip + [Content_Types].xml",
+      "declared_method": "agile",
+      "declaration_source": "EncryptionInfo stream",
+      "declaration_present": true,
+      "parameters": {
+        "version": "4.4",
+        "payload_cipher": "AES",
+        "payload_key_bits": 256,
+        "payload_hash": "SHA512",
+        "block_size": 16,
+        "spin_count": 100000,
+        "password_cipher": "AES",
+        "password_key_bits": 256,
+        "password_hash": "SHA512",
+        "has_data_integrity": true
+      },
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": true,
+      "key": {
+        "attempted": true,
+        "mechanism": "agile_verifier",
+        "result": "not_checked",
+        "verifier_bits": 512,
+        "collision_resistant": true,
+        "error": null
+      },
+      "decryption": {
+        "attempted": true,
+        "result": "error",
+        "exception": "InvalidKeyError: The file could not be decrypted with this password",
+        "output_bytes": 11995,
+        "wrote_output_before_error": true,
+        "output_validation": {
+          "kind": "zip_eocd",
+          "depth": "magic",
+          "result": "fail",
+          "detail": "no end-of-central-directory record",
+          "zipfile_is_zipfile": false,
+          "complete": true
+        }
+      },
+      "integrity": {
+        "requested": false,
+        "applicable": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "scope": "not available",
+        "authenticates_producer": false
+      }
+    },
+    "evidence": {
+      "level": "declaration",
+      "level_meaning": "a producer-controlled declaration was read",
+      "facts": [
+        "verify_password=False; verify_integrity=False",
+        "is_encrypted()=True via zip + [Content_Types].xml",
+        "declared method='agile' from EncryptionInfo stream; parameters={'version': '4.4', 'payload_cipher': 'AES', 'payload_key_bits': 256, 'payload_hash': 'SHA512', 'block_size': 16, 'spin_count': 100000, 'password_cipher': 'AES', 'password_key_bits': 256, 'password_hash': 'SHA512', 'has_data_integrity': True}",
+        "OOXML load_key default does not run the verifier",
+        "decrypt() raised InvalidKeyError: The file could not be decrypted with this password; caller buffer already had 11995 bytes"
+      ],
+      "not_proven": [
+        "password correctness: no supported verifier was checked",
+        "whether failure is due to wrong password, truncation, tampering, or a non-Office payload"
+      ]
+    },
+    "policy": {
+      "class": "aes_agile_hmac",
+      "description": "ECMA-376 Agile AES with optional HMAC integrity",
+      "declared_cipher": "AES",
+      "declared_key_bits": 256,
+      "declared_kdf": {
+        "hash": "SHA512",
+        "spin_count": 100000
+      },
+      "declared_integrity": "hmac",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "DECRYPTION_INCONCLUSIVE",
+      "state_meaning": "no verifier was checked and decryption failed",
+      "reject_reason": "KEY_UNVERIFIED_AND_DECRYPTION_FAILED",
+      "reject_reason_meaning": "no verifier was checked, so failure cannot be attributed to the password",
+      "severity": "reject"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "agile_wrong_verified",
+    "note": "",
+    "requested_check_mode": {
+      "verify_password": true,
+      "verify_integrity": false
+    },
+    "file": {
+      "name": "example_password.docx",
+      "size": 18432,
+      "sha256": "0605624697328060fdc75ca9929ea20b9d63ebed9387ff1a97aaf9979757234a",
+      "ephemeral": false,
+      "container": "ole",
+      "derived_from": null
+    },
+    "format": {
+      "family": "ooxml",
+      "dispatch": "zip + [Content_Types].xml",
+      "declared_method": "agile",
+      "declaration_source": "EncryptionInfo stream",
+      "declaration_present": true,
+      "parameters": {
+        "version": "4.4",
+        "payload_cipher": "AES",
+        "payload_key_bits": 256,
+        "payload_hash": "SHA512",
+        "block_size": 16,
+        "spin_count": 100000,
+        "password_cipher": "AES",
+        "password_key_bits": 256,
+        "password_hash": "SHA512",
+        "has_data_integrity": true
+      },
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": true,
+      "key": {
+        "attempted": true,
+        "mechanism": "agile_verifier",
+        "result": "mismatch",
+        "verifier_bits": 512,
+        "collision_resistant": true,
+        "error": "InvalidKeyError: Key verification failed"
+      },
+      "decryption": {
+        "attempted": false,
+        "result": "not_attempted",
+        "exception": null,
+        "output_bytes": 0,
+        "wrote_output_before_error": false,
+        "output_validation": {
+          "kind": "none",
+          "depth": "none",
+          "result": "not_run",
+          "detail": "",
+          "complete": null
+        }
+      },
+      "integrity": {
+        "requested": false,
+        "applicable": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "scope": "not available",
+        "authenticates_producer": false
+      }
+    },
+    "evidence": {
+      "level": "key_checked_negative",
+      "level_meaning": "a supported verifier rejected the key",
+      "facts": [
+        "verify_password=True; verify_integrity=False",
+        "is_encrypted()=True via zip + [Content_Types].xml",
+        "declared method='agile' from EncryptionInfo stream; parameters={'version': '4.4', 'payload_cipher': 'AES', 'payload_key_bits': 256, 'payload_hash': 'SHA512', 'block_size': 16, 'spin_count': 100000, 'password_cipher': 'AES', 'password_key_bits': 256, 'password_hash': 'SHA512', 'has_data_integrity': True}",
+        "load_key failed: InvalidKeyError: Key verification failed"
+      ],
+      "not_proven": [
+        "password uniqueness: a match is not required for rejection, and weak verifiers can collide",
+        "payload state: a verifier mismatch says nothing about whether the payload is intact"
+      ]
+    },
+    "policy": {
+      "class": "aes_agile_hmac",
+      "description": "ECMA-376 Agile AES with optional HMAC integrity",
+      "declared_cipher": "AES",
+      "declared_key_bits": 256,
+      "declared_kdf": {
+        "hash": "SHA512",
+        "spin_count": 100000
+      },
+      "declared_integrity": "hmac",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "KEY_REJECTED",
+      "state_meaning": "a supported verifier was checked and the password did not match it",
+      "reject_reason": "KEY_VERIFIER_MISMATCH",
+      "reject_reason_meaning": "a supported verifier rejected the password",
+      "severity": "reject"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "agile_header_only_default",
+    "note": "",
+    "requested_check_mode": {
+      "verify_password": false,
+      "verify_integrity": false
+    },
+    "file": {
+      "name": "agile_header_only.docx",
+      "size": 18432,
+      "sha256": null,
+      "ephemeral": true,
+      "container": "ole",
+      "derived_from": {
+        "fixture": "example_password.docx",
+        "sha256": "0605624697328060fdc75ca9929ea20b9d63ebed9387ff1a97aaf9979757234a"
+      }
+    },
+    "format": {
+      "family": "ooxml",
+      "dispatch": "zip + [Content_Types].xml",
+      "declared_method": "agile",
+      "declaration_source": "EncryptionInfo stream",
+      "declaration_present": true,
+      "parameters": {
+        "version": "4.4",
+        "payload_cipher": "AES",
+        "payload_key_bits": 256,
+        "payload_hash": "SHA512",
+        "block_size": 16,
+        "spin_count": 100000,
+        "password_cipher": "AES",
+        "password_key_bits": 256,
+        "password_hash": "SHA512",
+        "has_data_integrity": true
+      },
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": true,
+      "key": {
+        "attempted": true,
+        "mechanism": "agile_verifier",
+        "result": "not_checked",
+        "verifier_bits": 512,
+        "collision_resistant": true,
+        "error": null
+      },
+      "decryption": {
+        "attempted": true,
+        "result": "error",
+        "exception": "InvalidKeyError: The file could not be decrypted with this password",
+        "output_bytes": 11995,
+        "wrote_output_before_error": true,
+        "output_validation": {
+          "kind": "zip_eocd",
+          "depth": "magic",
+          "result": "fail",
+          "detail": "no end-of-central-directory record",
+          "zipfile_is_zipfile": false,
+          "complete": true
+        }
+      },
+      "integrity": {
+        "requested": false,
+        "applicable": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "scope": "not available",
+        "authenticates_producer": false
+      }
+    },
+    "evidence": {
+      "level": "declaration",
+      "level_meaning": "a producer-controlled declaration was read",
+      "facts": [
+        "verify_password=False; verify_integrity=False",
+        "is_encrypted()=True via zip + [Content_Types].xml",
+        "declared method='agile' from EncryptionInfo stream; parameters={'version': '4.4', 'payload_cipher': 'AES', 'payload_key_bits': 256, 'payload_hash': 'SHA512', 'block_size': 16, 'spin_count': 100000, 'password_cipher': 'AES', 'password_key_bits': 256, 'password_hash': 'SHA512', 'has_data_integrity': True}",
+        "OOXML load_key default does not run the verifier",
+        "decrypt() raised InvalidKeyError: The file could not be decrypted with this password; caller buffer already had 11995 bytes"
+      ],
+      "not_proven": [
+        "password correctness: no supported verifier was checked",
+        "whether failure is due to wrong password, truncation, tampering, or a non-Office payload"
+      ]
+    },
+    "policy": {
+      "class": "aes_agile_hmac",
+      "description": "ECMA-376 Agile AES with optional HMAC integrity",
+      "declared_cipher": "AES",
+      "declared_key_bits": 256,
+      "declared_kdf": {
+        "hash": "SHA512",
+        "spin_count": 100000
+      },
+      "declared_integrity": "hmac",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "DECRYPTION_INCONCLUSIVE",
+      "state_meaning": "no verifier was checked and decryption failed",
+      "reject_reason": "KEY_UNVERIFIED_AND_DECRYPTION_FAILED",
+      "reject_reason_meaning": "no verifier was checked, so failure cannot be attributed to the password",
+      "severity": "reject"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "agile_header_only_verified",
+    "note": "",
+    "requested_check_mode": {
+      "verify_password": true,
+      "verify_integrity": false
+    },
+    "file": {
+      "name": "agile_header_only.docx",
+      "size": 18432,
+      "sha256": null,
+      "ephemeral": true,
+      "container": "ole",
+      "derived_from": {
+        "fixture": "example_password.docx",
+        "sha256": "0605624697328060fdc75ca9929ea20b9d63ebed9387ff1a97aaf9979757234a"
+      }
+    },
+    "format": {
+      "family": "ooxml",
+      "dispatch": "zip + [Content_Types].xml",
+      "declared_method": "agile",
+      "declaration_source": "EncryptionInfo stream",
+      "declaration_present": true,
+      "parameters": {
+        "version": "4.4",
+        "payload_cipher": "AES",
+        "payload_key_bits": 256,
+        "payload_hash": "SHA512",
+        "block_size": 16,
+        "spin_count": 100000,
+        "password_cipher": "AES",
+        "password_key_bits": 256,
+        "password_hash": "SHA512",
+        "has_data_integrity": true
+      },
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": true,
+      "key": {
+        "attempted": true,
+        "mechanism": "agile_verifier",
+        "result": "match",
+        "verifier_bits": 512,
+        "collision_resistant": true,
+        "error": null
+      },
+      "decryption": {
+        "attempted": true,
+        "result": "error",
+        "exception": "InvalidKeyError: The file could not be decrypted with this password",
+        "output_bytes": 11995,
+        "wrote_output_before_error": true,
+        "output_validation": {
+          "kind": "zip_eocd",
+          "depth": "magic",
+          "result": "fail",
+          "detail": "no end-of-central-directory record",
+          "zipfile_is_zipfile": false,
+          "complete": true
+        }
+      },
+      "integrity": {
+        "requested": false,
+        "applicable": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "scope": "not available",
+        "authenticates_producer": false
+      }
+    },
+    "evidence": {
+      "level": "key_checked",
+      "level_meaning": "a supported verifier accepted the key, but content is not usable",
+      "facts": [
+        "verify_password=True; verify_integrity=False",
+        "is_encrypted()=True via zip + [Content_Types].xml",
+        "declared method='agile' from EncryptionInfo stream; parameters={'version': '4.4', 'payload_cipher': 'AES', 'payload_key_bits': 256, 'payload_hash': 'SHA512', 'block_size': 16, 'spin_count': 100000, 'password_cipher': 'AES', 'password_key_bits': 256, 'password_hash': 'SHA512', 'has_data_integrity': True}",
+        "verifier match (agile_verifier, 512 bits)",
+        "decrypt() raised InvalidKeyError: The file could not be decrypted with this password; caller buffer already had 11995 bytes"
+      ],
+      "not_proven": [
+        "content and authenticity of any missing bytes",
+        "whether the cause is truncation, tampering, or a producer error"
+      ]
+    },
+    "policy": {
+      "class": "aes_agile_hmac",
+      "description": "ECMA-376 Agile AES with optional HMAC integrity",
+      "declared_cipher": "AES",
+      "declared_key_bits": 256,
+      "declared_kdf": {
+        "hash": "SHA512",
+        "spin_count": 100000
+      },
+      "declared_integrity": "hmac",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "PAYLOAD_TRUNCATED_OR_CORRUPTED",
+      "state_meaning": "the key/verifier matched but decryption could not produce a package",
+      "reject_reason": "PAYLOAD_TRUNCATED_OR_CORRUPTED",
+      "reject_reason_meaning": "key matched but payload is absent, truncated, or corrupt",
+      "severity": "reject"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "agile_header_only_integrity",
+    "note": "",
+    "requested_check_mode": {
+      "verify_password": true,
+      "verify_integrity": true
+    },
+    "file": {
+      "name": "agile_header_only.docx",
+      "size": 18432,
+      "sha256": null,
+      "ephemeral": true,
+      "container": "ole",
+      "derived_from": {
+        "fixture": "example_password.docx",
+        "sha256": "0605624697328060fdc75ca9929ea20b9d63ebed9387ff1a97aaf9979757234a"
+      }
+    },
+    "format": {
+      "family": "ooxml",
+      "dispatch": "zip + [Content_Types].xml",
+      "declared_method": "agile",
+      "declaration_source": "EncryptionInfo stream",
+      "declaration_present": true,
+      "parameters": {
+        "version": "4.4",
+        "payload_cipher": "AES",
+        "payload_key_bits": 256,
+        "payload_hash": "SHA512",
+        "block_size": 16,
+        "spin_count": 100000,
+        "password_cipher": "AES",
+        "password_key_bits": 256,
+        "password_hash": "SHA512",
+        "has_data_integrity": true
+      },
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": true,
+      "key": {
+        "attempted": true,
+        "mechanism": "agile_verifier",
+        "result": "match",
+        "verifier_bits": 512,
+        "collision_resistant": true,
+        "error": null
+      },
+      "decryption": {
+        "attempted": true,
+        "result": "error",
+        "exception": "InvalidKeyError: Payload integrity verification failed",
+        "output_bytes": 0,
+        "wrote_output_before_error": false,
+        "output_validation": {
+          "kind": "none",
+          "depth": "none",
+          "result": "not_run",
+          "detail": "",
+          "complete": null
+        }
+      },
+      "integrity": {
+        "requested": true,
+        "applicable": true,
+        "mechanism": "hmac_sha512",
+        "result": "fail",
+        "scope": "EncryptedPackage ciphertext",
+        "authenticates_producer": false
+      }
+    },
+    "evidence": {
+      "level": "key_checked",
+      "level_meaning": "a supported verifier accepted the key, but content is not usable",
+      "facts": [
+        "verify_password=True; verify_integrity=True",
+        "is_encrypted()=True via zip + [Content_Types].xml",
+        "declared method='agile' from EncryptionInfo stream; parameters={'version': '4.4', 'payload_cipher': 'AES', 'payload_key_bits': 256, 'payload_hash': 'SHA512', 'block_size': 16, 'spin_count': 100000, 'password_cipher': 'AES', 'password_key_bits': 256, 'password_hash': 'SHA512', 'has_data_integrity': True}",
+        "verifier match (agile_verifier, 512 bits)",
+        "decrypt() raised InvalidKeyError: Payload integrity verification failed; caller buffer already had 0 bytes"
+      ],
+      "not_proven": [
+        "content authenticity: HMAC failure does not identify the actor",
+        "whether the document is otherwise recoverable without the HMAC gate",
+        "which bytes changed or why"
+      ]
+    },
+    "policy": {
+      "class": "aes_agile_hmac",
+      "description": "ECMA-376 Agile AES with optional HMAC integrity",
+      "declared_cipher": "AES",
+      "declared_key_bits": 256,
+      "declared_kdf": {
+        "hash": "SHA512",
+        "spin_count": 100000
+      },
+      "declared_integrity": "hmac",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "PAYLOAD_INTEGRITY_FAILED",
+      "state_meaning": "the key matched but the Agile HMAC did not",
+      "reject_reason": "PAYLOAD_INTEGRITY_FAILED",
+      "reject_reason_meaning": "Agile HMAC mismatch",
+      "severity": "reject"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "agile_info_only_default",
+    "note": "",
+    "requested_check_mode": {
+      "verify_password": true,
+      "verify_integrity": false
+    },
+    "file": {
+      "name": "agile_info_only.docx",
+      "size": 5312,
+      "sha256": null,
+      "ephemeral": true,
+      "container": "ole",
+      "derived_from": {
+        "fixture": "example_password.docx",
+        "sha256": "0605624697328060fdc75ca9929ea20b9d63ebed9387ff1a97aaf9979757234a"
+      }
+    },
+    "format": {
+      "family": "ooxml",
+      "dispatch": "zip + [Content_Types].xml",
+      "declared_method": "agile",
+      "declaration_source": "EncryptionInfo stream",
+      "declaration_present": true,
+      "parameters": {
+        "version": "4.4",
+        "payload_cipher": "AES",
+        "payload_key_bits": 256,
+        "payload_hash": "SHA512",
+        "block_size": 16,
+        "spin_count": 100000,
+        "password_cipher": "AES",
+        "password_key_bits": 256,
+        "password_hash": "SHA512",
+        "has_data_integrity": true
+      },
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": true,
+      "key": {
+        "attempted": true,
+        "mechanism": "agile_verifier",
+        "result": "match",
+        "verifier_bits": 512,
+        "collision_resistant": true,
+        "error": null
+      },
+      "decryption": {
+        "attempted": true,
+        "result": "error",
+        "exception": "error: unpack requires a buffer of 8 bytes",
+        "output_bytes": 0,
+        "wrote_output_before_error": false,
+        "output_validation": {
+          "kind": "none",
+          "depth": "none",
+          "result": "not_run",
+          "detail": "",
+          "complete": null
+        }
+      },
+      "integrity": {
+        "requested": false,
+        "applicable": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "scope": "not available",
+        "authenticates_producer": false
+      }
+    },
+    "evidence": {
+      "level": "key_checked",
+      "level_meaning": "a supported verifier accepted the key, but content is not usable",
+      "facts": [
+        "verify_password=True; verify_integrity=False",
+        "is_encrypted()=True via zip + [Content_Types].xml",
+        "declared method='agile' from EncryptionInfo stream; parameters={'version': '4.4', 'payload_cipher': 'AES', 'payload_key_bits': 256, 'payload_hash': 'SHA512', 'block_size': 16, 'spin_count': 100000, 'password_cipher': 'AES', 'password_key_bits': 256, 'password_hash': 'SHA512', 'has_data_integrity': True}",
+        "verifier match (agile_verifier, 512 bits)",
+        "decrypt() raised error: unpack requires a buffer of 8 bytes; caller buffer already had 0 bytes",
+        "load_key(verify_password=True) succeeds because EncryptionInfo alone carries the verifier; EncryptedPackage is absent, so verifier success is independent of payload presence"
+      ],
+      "not_proven": [
+        "content and authenticity of any missing bytes",
+        "whether the cause is truncation, tampering, or a producer error"
+      ]
+    },
+    "policy": {
+      "class": "aes_agile_hmac",
+      "description": "ECMA-376 Agile AES with optional HMAC integrity",
+      "declared_cipher": "AES",
+      "declared_key_bits": 256,
+      "declared_kdf": {
+        "hash": "SHA512",
+        "spin_count": 100000
+      },
+      "declared_integrity": "hmac",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "PAYLOAD_TRUNCATED_OR_CORRUPTED",
+      "state_meaning": "the key/verifier matched but decryption could not produce a package",
+      "reject_reason": "PAYLOAD_TRUNCATED_OR_CORRUPTED",
+      "reject_reason_meaning": "key matched but payload is absent, truncated, or corrupt",
+      "severity": "reject"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "agile_info_only_integrity",
+    "note": "",
+    "requested_check_mode": {
+      "verify_password": true,
+      "verify_integrity": true
+    },
+    "file": {
+      "name": "agile_info_only.docx",
+      "size": 5312,
+      "sha256": null,
+      "ephemeral": true,
+      "container": "ole",
+      "derived_from": {
+        "fixture": "example_password.docx",
+        "sha256": "0605624697328060fdc75ca9929ea20b9d63ebed9387ff1a97aaf9979757234a"
+      }
+    },
+    "format": {
+      "family": "ooxml",
+      "dispatch": "zip + [Content_Types].xml",
+      "declared_method": "agile",
+      "declaration_source": "EncryptionInfo stream",
+      "declaration_present": true,
+      "parameters": {
+        "version": "4.4",
+        "payload_cipher": "AES",
+        "payload_key_bits": 256,
+        "payload_hash": "SHA512",
+        "block_size": 16,
+        "spin_count": 100000,
+        "password_cipher": "AES",
+        "password_key_bits": 256,
+        "password_hash": "SHA512",
+        "has_data_integrity": true
+      },
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": true,
+      "key": {
+        "attempted": true,
+        "mechanism": "agile_verifier",
+        "result": "match",
+        "verifier_bits": 512,
+        "collision_resistant": true,
+        "error": null
+      },
+      "decryption": {
+        "attempted": true,
+        "result": "error",
+        "exception": "InvalidKeyError: Payload integrity verification failed",
+        "output_bytes": 0,
+        "wrote_output_before_error": false,
+        "output_validation": {
+          "kind": "none",
+          "depth": "none",
+          "result": "not_run",
+          "detail": "",
+          "complete": null
+        }
+      },
+      "integrity": {
+        "requested": true,
+        "applicable": true,
+        "mechanism": "hmac_sha512",
+        "result": "fail",
+        "scope": "EncryptedPackage ciphertext",
+        "authenticates_producer": false
+      }
+    },
+    "evidence": {
+      "level": "key_checked",
+      "level_meaning": "a supported verifier accepted the key, but content is not usable",
+      "facts": [
+        "verify_password=True; verify_integrity=True",
+        "is_encrypted()=True via zip + [Content_Types].xml",
+        "declared method='agile' from EncryptionInfo stream; parameters={'version': '4.4', 'payload_cipher': 'AES', 'payload_key_bits': 256, 'payload_hash': 'SHA512', 'block_size': 16, 'spin_count': 100000, 'password_cipher': 'AES', 'password_key_bits': 256, 'password_hash': 'SHA512', 'has_data_integrity': True}",
+        "verifier match (agile_verifier, 512 bits)",
+        "decrypt() raised InvalidKeyError: Payload integrity verification failed; caller buffer already had 0 bytes"
+      ],
+      "not_proven": [
+        "content authenticity: HMAC failure does not identify the actor",
+        "whether the document is otherwise recoverable without the HMAC gate",
+        "which bytes changed or why"
+      ]
+    },
+    "policy": {
+      "class": "aes_agile_hmac",
+      "description": "ECMA-376 Agile AES with optional HMAC integrity",
+      "declared_cipher": "AES",
+      "declared_key_bits": 256,
+      "declared_kdf": {
+        "hash": "SHA512",
+        "spin_count": 100000
+      },
+      "declared_integrity": "hmac",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "PAYLOAD_INTEGRITY_FAILED",
+      "state_meaning": "the key matched but the Agile HMAC did not",
+      "reject_reason": "PAYLOAD_INTEGRITY_FAILED",
+      "reject_reason_meaning": "Agile HMAC mismatch",
+      "severity": "reject"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "agile_tampered_default",
+    "note": "",
+    "requested_check_mode": {
+      "verify_password": true,
+      "verify_integrity": false
+    },
+    "file": {
+      "name": "agile_tampered_member.docx",
+      "size": 18432,
+      "sha256": null,
+      "ephemeral": true,
+      "container": "ole",
+      "derived_from": {
+        "fixture": "example_password.docx",
+        "sha256": "0605624697328060fdc75ca9929ea20b9d63ebed9387ff1a97aaf9979757234a"
+      }
+    },
+    "format": {
+      "family": "ooxml",
+      "dispatch": "zip + [Content_Types].xml",
+      "declared_method": "agile",
+      "declaration_source": "EncryptionInfo stream",
+      "declaration_present": true,
+      "parameters": {
+        "version": "4.4",
+        "payload_cipher": "AES",
+        "payload_key_bits": 256,
+        "payload_hash": "SHA512",
+        "block_size": 16,
+        "spin_count": 100000,
+        "password_cipher": "AES",
+        "password_key_bits": 256,
+        "password_hash": "SHA512",
+        "has_data_integrity": true
+      },
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": true,
+      "key": {
+        "attempted": true,
+        "mechanism": "agile_verifier",
+        "result": "match",
+        "verifier_bits": 512,
+        "collision_resistant": true,
+        "error": null
+      },
+      "decryption": {
+        "attempted": true,
+        "result": "ok",
+        "exception": null,
+        "output_bytes": 11995,
+        "wrote_output_before_error": false,
+        "output_validation": {
+          "kind": "ooxml_package",
+          "depth": "members",
+          "result": "fail",
+          "detail": "member inflate failed: error: Error -3 while decompressing data: invalid code lengths set",
+          "zipfile_is_zipfile": true,
+          "complete": true
+        }
+      },
+      "integrity": {
+        "requested": false,
+        "applicable": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "scope": "not available",
+        "authenticates_producer": false
+      }
+    },
+    "evidence": {
+      "level": "key_checked",
+      "level_meaning": "a supported verifier accepted the key, but content is not usable",
+      "facts": [
+        "verify_password=True; verify_integrity=False",
+        "is_encrypted()=True via zip + [Content_Types].xml",
+        "declared method='agile' from EncryptionInfo stream; parameters={'version': '4.4', 'payload_cipher': 'AES', 'payload_key_bits': 256, 'payload_hash': 'SHA512', 'block_size': 16, 'spin_count': 100000, 'password_cipher': 'AES', 'password_key_bits': 256, 'password_hash': 'SHA512', 'has_data_integrity': True}",
+        "verifier match (agile_verifier, 512 bits)",
+        "decrypt() returned 11995 bytes; structure={'kind': 'ooxml_package', 'depth': 'members', 'result': 'fail', 'detail': 'member inflate failed: error: Error -3 while decompressing data: invalid code lengths set', 'zipfile_is_zipfile': True, 'complete': True}"
+      ],
+      "not_proven": [
+        "content and authenticity of the recovered bytes",
+        "whether the key was wrong, the payload was tampered with, or the payload was never an Office document"
+      ]
+    },
+    "policy": {
+      "class": "aes_agile_hmac",
+      "description": "ECMA-376 Agile AES with optional HMAC integrity",
+      "declared_cipher": "AES",
+      "declared_key_bits": 256,
+      "declared_kdf": {
+        "hash": "SHA512",
+        "spin_count": 100000
+      },
+      "declared_integrity": "hmac",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "OUTPUT_STRUCTURE_INVALID",
+      "state_meaning": "bytes were returned but they fail the container structure check",
+      "reject_reason": "OUTPUT_STRUCTURE_INVALID",
+      "reject_reason_meaning": "decrypted bytes are not a valid package of the declared family",
+      "severity": "reject"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "agile_tampered_integrity",
+    "note": "",
+    "requested_check_mode": {
+      "verify_password": true,
+      "verify_integrity": true
+    },
+    "file": {
+      "name": "agile_tampered_member.docx",
+      "size": 18432,
+      "sha256": null,
+      "ephemeral": true,
+      "container": "ole",
+      "derived_from": {
+        "fixture": "example_password.docx",
+        "sha256": "0605624697328060fdc75ca9929ea20b9d63ebed9387ff1a97aaf9979757234a"
+      }
+    },
+    "format": {
+      "family": "ooxml",
+      "dispatch": "zip + [Content_Types].xml",
+      "declared_method": "agile",
+      "declaration_source": "EncryptionInfo stream",
+      "declaration_present": true,
+      "parameters": {
+        "version": "4.4",
+        "payload_cipher": "AES",
+        "payload_key_bits": 256,
+        "payload_hash": "SHA512",
+        "block_size": 16,
+        "spin_count": 100000,
+        "password_cipher": "AES",
+        "password_key_bits": 256,
+        "password_hash": "SHA512",
+        "has_data_integrity": true
+      },
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": true,
+      "key": {
+        "attempted": true,
+        "mechanism": "agile_verifier",
+        "result": "match",
+        "verifier_bits": 512,
+        "collision_resistant": true,
+        "error": null
+      },
+      "decryption": {
+        "attempted": true,
+        "result": "error",
+        "exception": "InvalidKeyError: Payload integrity verification failed",
+        "output_bytes": 0,
+        "wrote_output_before_error": false,
+        "output_validation": {
+          "kind": "none",
+          "depth": "none",
+          "result": "not_run",
+          "detail": "",
+          "complete": null
+        }
+      },
+      "integrity": {
+        "requested": true,
+        "applicable": true,
+        "mechanism": "hmac_sha512",
+        "result": "fail",
+        "scope": "EncryptedPackage ciphertext",
+        "authenticates_producer": false
+      }
+    },
+    "evidence": {
+      "level": "key_checked",
+      "level_meaning": "a supported verifier accepted the key, but content is not usable",
+      "facts": [
+        "verify_password=True; verify_integrity=True",
+        "is_encrypted()=True via zip + [Content_Types].xml",
+        "declared method='agile' from EncryptionInfo stream; parameters={'version': '4.4', 'payload_cipher': 'AES', 'payload_key_bits': 256, 'payload_hash': 'SHA512', 'block_size': 16, 'spin_count': 100000, 'password_cipher': 'AES', 'password_key_bits': 256, 'password_hash': 'SHA512', 'has_data_integrity': True}",
+        "verifier match (agile_verifier, 512 bits)",
+        "decrypt() raised InvalidKeyError: Payload integrity verification failed; caller buffer already had 0 bytes"
+      ],
+      "not_proven": [
+        "content authenticity: HMAC failure does not identify the actor",
+        "whether the document is otherwise recoverable without the HMAC gate",
+        "which bytes changed or why"
+      ]
+    },
+    "policy": {
+      "class": "aes_agile_hmac",
+      "description": "ECMA-376 Agile AES with optional HMAC integrity",
+      "declared_cipher": "AES",
+      "declared_key_bits": 256,
+      "declared_kdf": {
+        "hash": "SHA512",
+        "spin_count": 100000
+      },
+      "declared_integrity": "hmac",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "PAYLOAD_INTEGRITY_FAILED",
+      "state_meaning": "the key matched but the Agile HMAC did not",
+      "reject_reason": "PAYLOAD_INTEGRITY_FAILED",
+      "reject_reason_meaning": "Agile HMAC mismatch",
+      "severity": "reject"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "agile_minimal_zip_payload",
+    "note": "",
+    "requested_check_mode": {
+      "verify_password": true,
+      "verify_integrity": true
+    },
+    "file": {
+      "name": "agile_minimal_zip_payload.docx",
+      "size": 9728,
+      "sha256": null,
+      "ephemeral": true,
+      "container": "ole",
+      "derived_from": {
+        "fixture": "example_password.docx",
+        "sha256": "0605624697328060fdc75ca9929ea20b9d63ebed9387ff1a97aaf9979757234a"
+      }
+    },
+    "format": {
+      "family": "ooxml",
+      "dispatch": "zip + [Content_Types].xml",
+      "declared_method": "agile",
+      "declaration_source": "EncryptionInfo stream",
+      "declaration_present": true,
+      "parameters": {
+        "version": "4.4",
+        "payload_cipher": "AES",
+        "payload_key_bits": 256,
+        "payload_hash": "SHA512",
+        "block_size": 16,
+        "spin_count": 100000,
+        "password_cipher": "AES",
+        "password_key_bits": 256,
+        "password_hash": "SHA512",
+        "has_data_integrity": true
+      },
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": true,
+      "key": {
+        "attempted": true,
+        "mechanism": "agile_verifier",
+        "result": "match",
+        "verifier_bits": 512,
+        "collision_resistant": true,
+        "error": null
+      },
+      "decryption": {
+        "attempted": true,
+        "result": "ok",
+        "exception": null,
+        "output_bytes": 4096,
+        "wrote_output_before_error": false,
+        "output_validation": {
+          "kind": "ooxml_package",
+          "depth": "package",
+          "result": "fail",
+          "detail": "missing [Content_Types].xml, _rels/.rels",
+          "zipfile_is_zipfile": true,
+          "complete": true
+        }
+      },
+      "integrity": {
+        "requested": true,
+        "applicable": true,
+        "mechanism": "hmac_sha512",
+        "result": "pass",
+        "scope": "EncryptedPackage ciphertext",
+        "authenticates_producer": false
+      }
+    },
+    "evidence": {
+      "level": "key_checked",
+      "level_meaning": "a supported verifier accepted the key, but content is not usable",
+      "facts": [
+        "verify_password=True; verify_integrity=True",
+        "is_encrypted()=True via zip + [Content_Types].xml",
+        "declared method='agile' from EncryptionInfo stream; parameters={'version': '4.4', 'payload_cipher': 'AES', 'payload_key_bits': 256, 'payload_hash': 'SHA512', 'block_size': 16, 'spin_count': 100000, 'password_cipher': 'AES', 'password_key_bits': 256, 'password_hash': 'SHA512', 'has_data_integrity': True}",
+        "verifier match (agile_verifier, 512 bits)",
+        "decrypt() returned 4096 bytes; structure={'kind': 'ooxml_package', 'depth': 'package', 'result': 'fail', 'detail': 'missing [Content_Types].xml, _rels/.rels', 'zipfile_is_zipfile': True, 'complete': True}",
+        "payload is 4096 bytes whose only ZIP structure is a 22-byte end-of-central-directory record; zipfile.is_zipfile() returns True and the Agile HMAC passes, yet the package has no [Content_Types].xml"
+      ],
+      "not_proven": [
+        "content and authenticity of the recovered bytes",
+        "whether the key was wrong, the payload was tampered with, or the payload was never an Office document",
+        "that a ZIP magic/end record implies an OOXML document"
+      ]
+    },
+    "policy": {
+      "class": "aes_agile_hmac",
+      "description": "ECMA-376 Agile AES with optional HMAC integrity",
+      "declared_cipher": "AES",
+      "declared_key_bits": 256,
+      "declared_kdf": {
+        "hash": "SHA512",
+        "spin_count": 100000
+      },
+      "declared_integrity": "hmac",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "OUTPUT_STRUCTURE_INVALID",
+      "state_meaning": "bytes were returned but they fail the container structure check",
+      "reject_reason": "OUTPUT_STRUCTURE_INVALID",
+      "reject_reason_meaning": "decrypted bytes are not a valid package of the declared family",
+      "severity": "reject"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "agile_no_data_integrity",
+    "note": "",
+    "requested_check_mode": {
+      "verify_password": true,
+      "verify_integrity": true
+    },
+    "file": {
+      "name": "agile_no_data_integrity.docx",
+      "size": 5120,
+      "sha256": null,
+      "ephemeral": true,
+      "container": "ole",
+      "derived_from": {
+        "fixture": "example_password.docx",
+        "sha256": "0605624697328060fdc75ca9929ea20b9d63ebed9387ff1a97aaf9979757234a"
+      }
+    },
+    "format": {
+      "family": "ooxml",
+      "dispatch": "zip + [Content_Types].xml",
+      "declared_method": "unparsed",
+      "declaration_source": "EncryptionInfo stream",
+      "declaration_present": true,
+      "parameters": {
+        "version": "4.4"
+      },
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": null,
+      "key": {
+        "attempted": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "verifier_bits": null,
+        "collision_resistant": null,
+        "error": null
+      },
+      "decryption": {
+        "attempted": false,
+        "result": "not_attempted",
+        "exception": null,
+        "output_bytes": 0,
+        "wrote_output_before_error": false,
+        "output_validation": {
+          "kind": "none",
+          "depth": "none",
+          "result": "not_run",
+          "detail": "",
+          "complete": null
+        }
+      },
+      "integrity": {
+        "requested": false,
+        "applicable": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "scope": "not available",
+        "authenticates_producer": false
+      }
+    },
+    "evidence": {
+      "level": "declaration",
+      "level_meaning": "a producer-controlled declaration was read",
+      "facts": [
+        "verify_password=True; verify_integrity=True",
+        "OfficeFile dispatch failed: IndexError: list index out of range",
+        "raw EncryptionInfo version 4.4"
+      ],
+      "not_proven": [
+        "content",
+        "encryption strength",
+        "integrity",
+        "key correctness"
+      ]
+    },
+    "policy": {
+      "class": "unsupported",
+      "description": "library has no key/content path for this declaration",
+      "declared_cipher": null,
+      "declared_key_bits": null,
+      "declared_kdf": {
+        "hash": null,
+        "spin_count": null
+      },
+      "declared_integrity": "none",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "ENCRYPTION_DECLARED_UNPARSED",
+      "state_meaning": "a declaration exists but its metadata cannot be parsed",
+      "reject_reason": "ENCRYPTIONINFO_UNPARSEABLE",
+      "reject_reason_meaning": "EncryptionInfo/FIB/FilePass/UserEditAtom metadata is damaged",
+      "severity": "reject"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "agile_sha1_verified",
+    "note": "",
+    "requested_check_mode": {
+      "verify_password": true,
+      "verify_integrity": true
+    },
+    "file": {
+      "name": "ecma376agile_sha1_password.xlsx",
+      "size": 13824,
+      "sha256": "4d6437ede946382c471b681c7721e2874de569f829238c5a6b25321b172f104b",
+      "ephemeral": false,
+      "container": "ole",
+      "derived_from": null
+    },
+    "format": {
+      "family": "ooxml",
+      "dispatch": "zip + [Content_Types].xml",
+      "declared_method": "agile",
+      "declaration_source": "EncryptionInfo stream",
+      "declaration_present": true,
+      "parameters": {
+        "version": "4.4",
+        "payload_cipher": "AES",
+        "payload_key_bits": 128,
+        "payload_hash": "SHA1",
+        "block_size": 16,
+        "spin_count": 100000,
+        "password_cipher": "AES",
+        "password_key_bits": 128,
+        "password_hash": "SHA1",
+        "has_data_integrity": true
+      },
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": true,
+      "key": {
+        "attempted": true,
+        "mechanism": "agile_verifier",
+        "result": "match",
+        "verifier_bits": 160,
+        "collision_resistant": true,
+        "error": null
+      },
+      "decryption": {
+        "attempted": true,
+        "result": "ok",
+        "exception": null,
+        "output_bytes": 8369,
+        "wrote_output_before_error": false,
+        "output_validation": {
+          "kind": "ooxml_package",
+          "depth": "members",
+          "result": "pass",
+          "detail": "10 members, CRC ok",
+          "zipfile_is_zipfile": true,
+          "complete": true
+        }
+      },
+      "integrity": {
+        "requested": true,
+        "applicable": true,
+        "mechanism": "hmac_sha1",
+        "result": "pass",
+        "scope": "EncryptedPackage ciphertext",
+        "authenticates_producer": false
+      }
+    },
+    "evidence": {
+      "level": "integrity_verified",
+      "level_meaning": "Agile HMAC over EncryptedPackage passed and structure is valid",
+      "facts": [
+        "verify_password=True; verify_integrity=True",
+        "is_encrypted()=True via zip + [Content_Types].xml",
+        "declared method='agile' from EncryptionInfo stream; parameters={'version': '4.4', 'payload_cipher': 'AES', 'payload_key_bits': 128, 'payload_hash': 'SHA1', 'block_size': 16, 'spin_count': 100000, 'password_cipher': 'AES', 'password_key_bits': 128, 'password_hash': 'SHA1', 'has_data_integrity': True}",
+        "verifier match (agile_verifier, 160 bits)",
+        "decrypt() returned 8369 bytes; structure={'kind': 'ooxml_package', 'depth': 'members', 'result': 'pass', 'detail': '10 members, CRC ok', 'zipfile_is_zipfile': True, 'complete': True}"
+      ],
+      "not_proven": [
+        "document authenticity, safety, or semantic validity",
+        "encryption strength: the API reports declared parameters, not a strength verdict",
+        "producer identity: HMAC proves possession of the key, not who produced the file"
+      ]
+    },
+    "policy": {
+      "class": "aes_agile_hmac",
+      "description": "ECMA-376 Agile AES with optional HMAC integrity",
+      "declared_cipher": "AES",
+      "declared_key_bits": 128,
+      "declared_kdf": {
+        "hash": "SHA1",
+        "spin_count": 100000
+      },
+      "declared_integrity": "hmac",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "INTEGRITY_VERIFIED",
+      "state_meaning": "content decrypted, structure is valid, and the Agile payload HMAC passed",
+      "reject_reason": null,
+      "reject_reason_meaning": null,
+      "severity": "info"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "standard_default",
+    "note": "no verify_password",
+    "requested_check_mode": {
+      "verify_password": false,
+      "verify_integrity": false
+    },
+    "file": {
+      "name": "ecma376standard_password.docx",
+      "size": 7168,
+      "sha256": "d265dcf02f7d552486229b8c67a627ef3752fe6802b02fd2d2d485fcfbbac5de",
+      "ephemeral": false,
+      "container": "ole",
+      "derived_from": null
+    },
+    "format": {
+      "family": "ooxml",
+      "dispatch": "zip + [Content_Types].xml",
+      "declared_method": "standard",
+      "declaration_source": "EncryptionInfo stream",
+      "declaration_present": true,
+      "parameters": {
+        "version": "3.2",
+        "payload_cipher": "AES-128",
+        "payload_key_bits": 128,
+        "payload_hash": "SHA1",
+        "provider_type": 24,
+        "has_data_integrity": false,
+        "verifier_hash_size": 20
+      },
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": true,
+      "key": {
+        "attempted": true,
+        "mechanism": "standard_verifier",
+        "result": "not_checked",
+        "verifier_bits": 160,
+        "collision_resistant": true,
+        "error": null
+      },
+      "decryption": {
+        "attempted": true,
+        "result": "ok",
+        "exception": null,
+        "output_bytes": 3939,
+        "wrote_output_before_error": false,
+        "output_validation": {
+          "kind": "ooxml_package",
+          "depth": "members",
+          "result": "pass",
+          "detail": "9 members, CRC ok",
+          "zipfile_is_zipfile": true,
+          "complete": true
+        }
+      },
+      "integrity": {
+        "requested": false,
+        "applicable": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "scope": "not available",
+        "authenticates_producer": false
+      }
+    },
+    "evidence": {
+      "level": "decrypted",
+      "level_meaning": "decrypt() returned bytes with a structural check",
+      "facts": [
+        "verify_password=False; verify_integrity=False",
+        "is_encrypted()=True via zip + [Content_Types].xml",
+        "declared method='standard' from EncryptionInfo stream; parameters={'version': '3.2', 'payload_cipher': 'AES-128', 'payload_key_bits': 128, 'payload_hash': 'SHA1', 'provider_type': 24, 'has_data_integrity': False, 'verifier_hash_size': 20}",
+        "OOXML load_key default does not run the verifier",
+        "decrypt() returned 3939 bytes; structure={'kind': 'ooxml_package', 'depth': 'members', 'result': 'pass', 'detail': '9 members, CRC ok', 'zipfile_is_zipfile': True, 'complete': True}"
+      ],
+      "not_proven": [
+        "document authenticity, safety, or semantic validity",
+        "encryption strength: the API reports declared parameters, not a strength verdict",
+        "password correctness: decrypt() success and ZIP/OLE structure are not a verifier",
+        "payload integrity: this method exposes no HMAC"
+      ]
+    },
+    "policy": {
+      "class": "aes_standard_no_integrity",
+      "description": "ECMA-376 Standard AES, SHA-1 KDF, no payload integrity",
+      "declared_cipher": "AES-128",
+      "declared_key_bits": 128,
+      "declared_kdf": {
+        "hash": "SHA1",
+        "spin_count": null
+      },
+      "declared_integrity": "none",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "CONTENT_DECRYPTED_KEY_UNVERIFIED",
+      "state_meaning": "content decrypted and has structure, but no verifier was checked",
+      "reject_reason": null,
+      "reject_reason_meaning": null,
+      "severity": "info"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "standard_verified",
+    "note": "",
+    "requested_check_mode": {
+      "verify_password": true,
+      "verify_integrity": false
+    },
+    "file": {
+      "name": "ecma376standard_password.docx",
+      "size": 7168,
+      "sha256": "d265dcf02f7d552486229b8c67a627ef3752fe6802b02fd2d2d485fcfbbac5de",
+      "ephemeral": false,
+      "container": "ole",
+      "derived_from": null
+    },
+    "format": {
+      "family": "ooxml",
+      "dispatch": "zip + [Content_Types].xml",
+      "declared_method": "standard",
+      "declaration_source": "EncryptionInfo stream",
+      "declaration_present": true,
+      "parameters": {
+        "version": "3.2",
+        "payload_cipher": "AES-128",
+        "payload_key_bits": 128,
+        "payload_hash": "SHA1",
+        "provider_type": 24,
+        "has_data_integrity": false,
+        "verifier_hash_size": 20
+      },
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": true,
+      "key": {
+        "attempted": true,
+        "mechanism": "standard_verifier",
+        "result": "match",
+        "verifier_bits": 160,
+        "collision_resistant": true,
+        "error": null
+      },
+      "decryption": {
+        "attempted": true,
+        "result": "ok",
+        "exception": null,
+        "output_bytes": 3939,
+        "wrote_output_before_error": false,
+        "output_validation": {
+          "kind": "ooxml_package",
+          "depth": "members",
+          "result": "pass",
+          "detail": "9 members, CRC ok",
+          "zipfile_is_zipfile": true,
+          "complete": true
+        }
+      },
+      "integrity": {
+        "requested": false,
+        "applicable": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "scope": "not available",
+        "authenticates_producer": false
+      }
+    },
+    "evidence": {
+      "level": "decrypted_key_checked",
+      "level_meaning": "as decrypted, and a supported verifier accepted the key",
+      "facts": [
+        "verify_password=True; verify_integrity=False",
+        "is_encrypted()=True via zip + [Content_Types].xml",
+        "declared method='standard' from EncryptionInfo stream; parameters={'version': '3.2', 'payload_cipher': 'AES-128', 'payload_key_bits': 128, 'payload_hash': 'SHA1', 'provider_type': 24, 'has_data_integrity': False, 'verifier_hash_size': 20}",
+        "verifier match (standard_verifier, 160 bits)",
+        "decrypt() returned 3939 bytes; structure={'kind': 'ooxml_package', 'depth': 'members', 'result': 'pass', 'detail': '9 members, CRC ok', 'zipfile_is_zipfile': True, 'complete': True}"
+      ],
+      "not_proven": [
+        "document authenticity, safety, or semantic validity",
+        "encryption strength: the API reports declared parameters, not a strength verdict",
+        "payload integrity: this method exposes no HMAC"
+      ]
+    },
+    "policy": {
+      "class": "aes_standard_no_integrity",
+      "description": "ECMA-376 Standard AES, SHA-1 KDF, no payload integrity",
+      "declared_cipher": "AES-128",
+      "declared_key_bits": 128,
+      "declared_kdf": {
+        "hash": "SHA1",
+        "spin_count": null
+      },
+      "declared_integrity": "none",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "CONTENT_DECRYPTED_KEY_VERIFIED",
+      "state_meaning": "content decrypted and a supported verifier matched",
+      "reject_reason": null,
+      "reject_reason_meaning": null,
+      "severity": "info"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "standard_wrong_verified",
+    "note": "",
+    "requested_check_mode": {
+      "verify_password": true,
+      "verify_integrity": false
+    },
+    "file": {
+      "name": "ecma376standard_password.docx",
+      "size": 7168,
+      "sha256": "d265dcf02f7d552486229b8c67a627ef3752fe6802b02fd2d2d485fcfbbac5de",
+      "ephemeral": false,
+      "container": "ole",
+      "derived_from": null
+    },
+    "format": {
+      "family": "ooxml",
+      "dispatch": "zip + [Content_Types].xml",
+      "declared_method": "standard",
+      "declaration_source": "EncryptionInfo stream",
+      "declaration_present": true,
+      "parameters": {
+        "version": "3.2",
+        "payload_cipher": "AES-128",
+        "payload_key_bits": 128,
+        "payload_hash": "SHA1",
+        "provider_type": 24,
+        "has_data_integrity": false,
+        "verifier_hash_size": 20
+      },
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": true,
+      "key": {
+        "attempted": true,
+        "mechanism": "standard_verifier",
+        "result": "mismatch",
+        "verifier_bits": 160,
+        "collision_resistant": true,
+        "error": "InvalidKeyError: Key verification failed"
+      },
+      "decryption": {
+        "attempted": false,
+        "result": "not_attempted",
+        "exception": null,
+        "output_bytes": 0,
+        "wrote_output_before_error": false,
+        "output_validation": {
+          "kind": "none",
+          "depth": "none",
+          "result": "not_run",
+          "detail": "",
+          "complete": null
+        }
+      },
+      "integrity": {
+        "requested": false,
+        "applicable": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "scope": "not available",
+        "authenticates_producer": false
+      }
+    },
+    "evidence": {
+      "level": "key_checked_negative",
+      "level_meaning": "a supported verifier rejected the key",
+      "facts": [
+        "verify_password=True; verify_integrity=False",
+        "is_encrypted()=True via zip + [Content_Types].xml",
+        "declared method='standard' from EncryptionInfo stream; parameters={'version': '3.2', 'payload_cipher': 'AES-128', 'payload_key_bits': 128, 'payload_hash': 'SHA1', 'provider_type': 24, 'has_data_integrity': False, 'verifier_hash_size': 20}",
+        "load_key failed: InvalidKeyError: Key verification failed"
+      ],
+      "not_proven": [
+        "password uniqueness: a match is not required for rejection, and weak verifiers can collide",
+        "payload state: a verifier mismatch says nothing about whether the payload is intact"
+      ]
+    },
+    "policy": {
+      "class": "aes_standard_no_integrity",
+      "description": "ECMA-376 Standard AES, SHA-1 KDF, no payload integrity",
+      "declared_cipher": "AES-128",
+      "declared_key_bits": 128,
+      "declared_kdf": {
+        "hash": "SHA1",
+        "spin_count": null
+      },
+      "declared_integrity": "none",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "KEY_REJECTED",
+      "state_meaning": "a supported verifier was checked and the password did not match it",
+      "reject_reason": "KEY_VERIFIER_MISMATCH",
+      "reject_reason_meaning": "a supported verifier rejected the password",
+      "severity": "reject"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "standard_header_only",
+    "note": "",
+    "requested_check_mode": {
+      "verify_password": true,
+      "verify_integrity": false
+    },
+    "file": {
+      "name": "standard_header_only.docx",
+      "size": 7168,
+      "sha256": null,
+      "ephemeral": true,
+      "container": "ole",
+      "derived_from": {
+        "fixture": "ecma376standard_password.docx",
+        "sha256": "d265dcf02f7d552486229b8c67a627ef3752fe6802b02fd2d2d485fcfbbac5de"
+      }
+    },
+    "format": {
+      "family": "ooxml",
+      "dispatch": "zip + [Content_Types].xml",
+      "declared_method": "standard",
+      "declaration_source": "EncryptionInfo stream",
+      "declaration_present": true,
+      "parameters": {
+        "version": "3.2",
+        "payload_cipher": "AES-128",
+        "payload_key_bits": 128,
+        "payload_hash": "SHA1",
+        "provider_type": 24,
+        "has_data_integrity": false,
+        "verifier_hash_size": 20
+      },
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": true,
+      "key": {
+        "attempted": true,
+        "mechanism": "standard_verifier",
+        "result": "match",
+        "verifier_bits": 160,
+        "collision_resistant": true,
+        "error": null
+      },
+      "decryption": {
+        "attempted": true,
+        "result": "error",
+        "exception": "InvalidKeyError: The file could not be decrypted with this password",
+        "output_bytes": 3939,
+        "wrote_output_before_error": true,
+        "output_validation": {
+          "kind": "zip_eocd",
+          "depth": "magic",
+          "result": "fail",
+          "detail": "no end-of-central-directory record",
+          "zipfile_is_zipfile": false,
+          "complete": true
+        }
+      },
+      "integrity": {
+        "requested": false,
+        "applicable": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "scope": "not available",
+        "authenticates_producer": false
+      }
+    },
+    "evidence": {
+      "level": "key_checked",
+      "level_meaning": "a supported verifier accepted the key, but content is not usable",
+      "facts": [
+        "verify_password=True; verify_integrity=False",
+        "is_encrypted()=True via zip + [Content_Types].xml",
+        "declared method='standard' from EncryptionInfo stream; parameters={'version': '3.2', 'payload_cipher': 'AES-128', 'payload_key_bits': 128, 'payload_hash': 'SHA1', 'provider_type': 24, 'has_data_integrity': False, 'verifier_hash_size': 20}",
+        "verifier match (standard_verifier, 160 bits)",
+        "decrypt() raised InvalidKeyError: The file could not be decrypted with this password; caller buffer already had 3939 bytes"
+      ],
+      "not_proven": [
+        "content and authenticity of any missing bytes",
+        "payload integrity: this method exposes no HMAC",
+        "whether the cause is truncation, tampering, or a producer error"
+      ]
+    },
+    "policy": {
+      "class": "aes_standard_no_integrity",
+      "description": "ECMA-376 Standard AES, SHA-1 KDF, no payload integrity",
+      "declared_cipher": "AES-128",
+      "declared_key_bits": 128,
+      "declared_kdf": {
+        "hash": "SHA1",
+        "spin_count": null
+      },
+      "declared_integrity": "none",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "PAYLOAD_TRUNCATED_OR_CORRUPTED",
+      "state_meaning": "the key/verifier matched but decryption could not produce a package",
+      "reject_reason": "PAYLOAD_TRUNCATED_OR_CORRUPTED",
+      "reject_reason_meaning": "key matched but payload is absent, truncated, or corrupt",
+      "severity": "reject"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "standard_tampered",
+    "note": "verify_integrity is ignored",
+    "requested_check_mode": {
+      "verify_password": true,
+      "verify_integrity": true
+    },
+    "file": {
+      "name": "standard_tampered_member.docx",
+      "size": 7168,
+      "sha256": null,
+      "ephemeral": true,
+      "container": "ole",
+      "derived_from": {
+        "fixture": "ecma376standard_password.docx",
+        "sha256": "d265dcf02f7d552486229b8c67a627ef3752fe6802b02fd2d2d485fcfbbac5de"
+      }
+    },
+    "format": {
+      "family": "ooxml",
+      "dispatch": "zip + [Content_Types].xml",
+      "declared_method": "standard",
+      "declaration_source": "EncryptionInfo stream",
+      "declaration_present": true,
+      "parameters": {
+        "version": "3.2",
+        "payload_cipher": "AES-128",
+        "payload_key_bits": 128,
+        "payload_hash": "SHA1",
+        "provider_type": 24,
+        "has_data_integrity": false,
+        "verifier_hash_size": 20
+      },
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": true,
+      "key": {
+        "attempted": true,
+        "mechanism": "standard_verifier",
+        "result": "match",
+        "verifier_bits": 160,
+        "collision_resistant": true,
+        "error": null
+      },
+      "decryption": {
+        "attempted": true,
+        "result": "ok",
+        "exception": null,
+        "output_bytes": 3939,
+        "wrote_output_before_error": false,
+        "output_validation": {
+          "kind": "ooxml_package",
+          "depth": "members",
+          "result": "fail",
+          "detail": "member inflate failed: UnicodeDecodeError: 'utf-8' codec can't decode byte 0xbf in position 16: invalid start byte",
+          "zipfile_is_zipfile": true,
+          "complete": true
+        }
+      },
+      "integrity": {
+        "requested": true,
+        "applicable": false,
+        "mechanism": "none",
+        "result": "not_applicable",
+        "scope": "not available",
+        "authenticates_producer": false
+      }
+    },
+    "evidence": {
+      "level": "key_checked",
+      "level_meaning": "a supported verifier accepted the key, but content is not usable",
+      "facts": [
+        "verify_password=True; verify_integrity=True",
+        "is_encrypted()=True via zip + [Content_Types].xml",
+        "declared method='standard' from EncryptionInfo stream; parameters={'version': '3.2', 'payload_cipher': 'AES-128', 'payload_key_bits': 128, 'payload_hash': 'SHA1', 'provider_type': 24, 'has_data_integrity': False, 'verifier_hash_size': 20}",
+        "verifier match (standard_verifier, 160 bits)",
+        "verify_integrity requested but this method exposes no payload HMAC",
+        "decrypt() returned 3939 bytes; structure={'kind': 'ooxml_package', 'depth': 'members', 'result': 'fail', 'detail': \"member inflate failed: UnicodeDecodeError: 'utf-8' codec can't decode byte 0xbf in position 16: invalid start byte\", 'zipfile_is_zipfile': True, 'complete': True}"
+      ],
+      "not_proven": [
+        "content and authenticity of the recovered bytes",
+        "whether the key was wrong, the payload was tampered with, or the payload was never an Office document"
+      ]
+    },
+    "policy": {
+      "class": "aes_standard_no_integrity",
+      "description": "ECMA-376 Standard AES, SHA-1 KDF, no payload integrity",
+      "declared_cipher": "AES-128",
+      "declared_key_bits": 128,
+      "declared_kdf": {
+        "hash": "SHA1",
+        "spin_count": null
+      },
+      "declared_integrity": "none",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "OUTPUT_STRUCTURE_INVALID",
+      "state_meaning": "bytes were returned but they fail the container structure check",
+      "reject_reason": "OUTPUT_STRUCTURE_INVALID",
+      "reject_reason_meaning": "decrypted bytes are not a valid package of the declared family",
+      "severity": "reject"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "xor_ok",
+    "note": "",
+    "requested_check_mode": {
+      "verify_password": false,
+      "verify_integrity": false
+    },
+    "file": {
+      "name": "xor_password_123456789012345.xls",
+      "size": 91136,
+      "sha256": "c75375186933e2413325c4e64ce76903452d51413816d0df1d5fd677ea4dd76d",
+      "ephemeral": false,
+      "container": "ole",
+      "derived_from": null
+    },
+    "format": {
+      "family": "xls97",
+      "dispatch": "Workbook stream",
+      "declared_method": "xor",
+      "declaration_source": "FilePass wEncryptionType",
+      "declaration_present": true,
+      "parameters": {
+        "encryption_type": 0,
+        "payload_cipher": "XOR",
+        "payload_hash": "none",
+        "payload_key_bits": null
+      },
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": true,
+      "key": {
+        "attempted": true,
+        "mechanism": "xor_16bit_verifier",
+        "result": "match",
+        "verifier_bits": 16,
+        "collision_resistant": false,
+        "error": null
+      },
+      "decryption": {
+        "attempted": true,
+        "result": "ok",
+        "exception": null,
+        "output_bytes": 91136,
+        "wrote_output_before_error": false,
+        "output_validation": {
+          "kind": "biff",
+          "depth": "framing",
+          "result": "pass",
+          "detail": "OLE ok, BOF/EOF walk ok",
+          "complete": false
+        }
+      },
+      "integrity": {
+        "requested": false,
+        "applicable": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "scope": "not available",
+        "authenticates_producer": false
+      }
+    },
+    "evidence": {
+      "level": "decrypted_weak_key_check",
+      "level_meaning": "as decrypted, but the verifier is only 16 bits (XOR)",
+      "facts": [
+        "verify_password=False; verify_integrity=False",
+        "is_encrypted()=True via Workbook stream",
+        "declared method='xor' from FilePass wEncryptionType; parameters={'encryption_type': 0, 'payload_cipher': 'XOR', 'payload_hash': 'none', 'payload_key_bits': None}",
+        "verifier match (xor_16bit_verifier, 16 bits)",
+        "decrypt() returned 91136 bytes; structure={'kind': 'biff', 'depth': 'framing', 'result': 'pass', 'detail': 'OLE ok, BOF/EOF walk ok', 'complete': False}"
+      ],
+      "not_proven": [
+        "cell/document contents: only BOF/EOF framing was structurally validated",
+        "document authenticity, safety, or semantic validity",
+        "encryption strength: the API reports declared parameters, not a strength verdict",
+        "password uniqueness: the XOR verifier is 16 bits; a different password can produce structurally plausible but wrong bytes",
+        "payload integrity: this method exposes no HMAC",
+        "structure beyond framing: the family validator is shallow; returned bytes may still be wrong (see legacy header-only samples)"
+      ]
+    },
+    "policy": {
+      "class": "obfuscation",
+      "description": "XOR obfuscation, not encryption; 16-bit verifier",
+      "declared_cipher": "XOR",
+      "declared_key_bits": null,
+      "declared_kdf": {
+        "hash": "none",
+        "spin_count": null
+      },
+      "declared_integrity": "none",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "CONTENT_DECRYPTED_WEAK_KEY_MATCH",
+      "state_meaning": "content decrypted and a weak verifier matched (XOR, 16-bit)",
+      "reject_reason": null,
+      "reject_reason_meaning": null,
+      "severity": "info"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "xor_wrong",
+    "note": "",
+    "requested_check_mode": {
+      "verify_password": false,
+      "verify_integrity": false
+    },
+    "file": {
+      "name": "xor_password_123456789012345.xls",
+      "size": 91136,
+      "sha256": "c75375186933e2413325c4e64ce76903452d51413816d0df1d5fd677ea4dd76d",
+      "ephemeral": false,
+      "container": "ole",
+      "derived_from": null
+    },
+    "format": {
+      "family": "xls97",
+      "dispatch": "Workbook stream",
+      "declared_method": "xor",
+      "declaration_source": "FilePass wEncryptionType",
+      "declaration_present": true,
+      "parameters": {
+        "encryption_type": 0,
+        "payload_cipher": "XOR",
+        "payload_hash": "none",
+        "payload_key_bits": null
+      },
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": true,
+      "key": {
+        "attempted": true,
+        "mechanism": "xor_16bit_verifier",
+        "result": "mismatch",
+        "verifier_bits": 16,
+        "collision_resistant": false,
+        "error": "InvalidKeyError: Failed to verify password"
+      },
+      "decryption": {
+        "attempted": false,
+        "result": "not_attempted",
+        "exception": null,
+        "output_bytes": 0,
+        "wrote_output_before_error": false,
+        "output_validation": {
+          "kind": "none",
+          "depth": "none",
+          "result": "not_run",
+          "detail": "",
+          "complete": null
+        }
+      },
+      "integrity": {
+        "requested": false,
+        "applicable": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "scope": "not available",
+        "authenticates_producer": false
+      }
+    },
+    "evidence": {
+      "level": "key_checked_negative",
+      "level_meaning": "a supported verifier rejected the key",
+      "facts": [
+        "verify_password=False; verify_integrity=False",
+        "is_encrypted()=True via Workbook stream",
+        "declared method='xor' from FilePass wEncryptionType; parameters={'encryption_type': 0, 'payload_cipher': 'XOR', 'payload_hash': 'none', 'payload_key_bits': None}",
+        "load_key failed: InvalidKeyError: Failed to verify password"
+      ],
+      "not_proven": [
+        "password uniqueness: a match is not required for rejection, and weak verifiers can collide",
+        "payload state: a verifier mismatch says nothing about whether the payload is intact"
+      ]
+    },
+    "policy": {
+      "class": "obfuscation",
+      "description": "XOR obfuscation, not encryption; 16-bit verifier",
+      "declared_cipher": "XOR",
+      "declared_key_bits": null,
+      "declared_kdf": {
+        "hash": "none",
+        "spin_count": null
+      },
+      "declared_integrity": "none",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "KEY_REJECTED",
+      "state_meaning": "a supported verifier was checked and the password did not match it",
+      "reject_reason": "KEY_VERIFIER_MISMATCH",
+      "reject_reason_meaning": "a supported verifier rejected the password",
+      "severity": "reject"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "xor_collision",
+    "note": "",
+    "requested_check_mode": {
+      "verify_password": false,
+      "verify_integrity": false
+    },
+    "file": {
+      "name": "xor_password_123456789012345.xls",
+      "size": 91136,
+      "sha256": "c75375186933e2413325c4e64ce76903452d51413816d0df1d5fd677ea4dd76d",
+      "ephemeral": false,
+      "container": "ole",
+      "derived_from": null
+    },
+    "format": {
+      "family": "xls97",
+      "dispatch": "Workbook stream",
+      "declared_method": "xor",
+      "declaration_source": "FilePass wEncryptionType",
+      "declaration_present": true,
+      "parameters": {
+        "encryption_type": 0,
+        "payload_cipher": "XOR",
+        "payload_hash": "none",
+        "payload_key_bits": null
+      },
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": true,
+      "key": {
+        "attempted": true,
+        "mechanism": "xor_16bit_verifier",
+        "result": "match",
+        "verifier_bits": 16,
+        "collision_resistant": false,
+        "error": null
+      },
+      "decryption": {
+        "attempted": true,
+        "result": "ok",
+        "exception": null,
+        "output_bytes": 91136,
+        "wrote_output_before_error": false,
+        "output_validation": {
+          "kind": "biff",
+          "depth": "framing",
+          "result": "pass",
+          "detail": "OLE ok, BOF/EOF walk ok",
+          "complete": false
+        }
+      },
+      "integrity": {
+        "requested": false,
+        "applicable": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "scope": "not available",
+        "authenticates_producer": false
+      },
+      "cross_check": {
+        "kind": "xor_verifier_collision",
+        "description": "two different passwords both pass the 16-bit verifier and BOF/EOF framing",
+        "workbook_bytes": 80843,
+        "differing_bytes": 72177,
+        "both_structure_valid": true
+      }
+    },
+    "evidence": {
+      "level": "decrypted_weak_key_check",
+      "level_meaning": "as decrypted, but the verifier is only 16 bits (XOR)",
+      "facts": [
+        "verify_password=False; verify_integrity=False",
+        "is_encrypted()=True via Workbook stream",
+        "declared method='xor' from FilePass wEncryptionType; parameters={'encryption_type': 0, 'payload_cipher': 'XOR', 'payload_hash': 'none', 'payload_key_bits': None}",
+        "verifier match (xor_16bit_verifier, 16 bits)",
+        "decrypt() returned 91136 bytes; structure={'kind': 'biff', 'depth': 'framing', 'result': 'pass', 'detail': 'OLE ok, BOF/EOF walk ok', 'complete': False}",
+        "collision: a different password ('A5XSZmz6VjoEywz') reproduces the 16-bit verifier; 72177/80843 decrypted Workbook bytes differ from the correct-password recovery, yet BOF/EOF framing still passes"
+      ],
+      "not_proven": [
+        "cell/document contents: only BOF/EOF framing was structurally validated",
+        "document authenticity, safety, or semantic validity",
+        "encryption strength: the API reports declared parameters, not a strength verdict",
+        "password uniqueness: the XOR verifier is 16 bits; a different password can produce structurally plausible but wrong bytes",
+        "payload integrity: this method exposes no HMAC",
+        "structure beyond framing: the family validator is shallow; returned bytes may still be wrong (see legacy header-only samples)",
+        "that a verifier match identifies the original password"
+      ]
+    },
+    "policy": {
+      "class": "obfuscation",
+      "description": "XOR obfuscation, not encryption; 16-bit verifier",
+      "declared_cipher": "XOR",
+      "declared_key_bits": null,
+      "declared_kdf": {
+        "hash": "none",
+        "spin_count": null
+      },
+      "declared_integrity": "none",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "CONTENT_DECRYPTED_WEAK_KEY_MATCH",
+      "state_meaning": "content decrypted and a weak verifier matched (XOR, 16-bit)",
+      "reject_reason": null,
+      "reject_reason_meaning": null,
+      "severity": "info"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "xor_header_only",
+    "note": "",
+    "requested_check_mode": {
+      "verify_password": false,
+      "verify_integrity": false
+    },
+    "file": {
+      "name": "xor_header_only.xls",
+      "size": 91136,
+      "sha256": null,
+      "ephemeral": true,
+      "container": "ole",
+      "derived_from": {
+        "fixture": "xor_password_123456789012345.xls",
+        "sha256": "c75375186933e2413325c4e64ce76903452d51413816d0df1d5fd677ea4dd76d"
+      }
+    },
+    "format": {
+      "family": "xls97",
+      "dispatch": "Workbook stream",
+      "declared_method": "xor",
+      "declaration_source": "FilePass wEncryptionType",
+      "declaration_present": true,
+      "parameters": {
+        "encryption_type": 0,
+        "payload_cipher": "XOR",
+        "payload_hash": "none",
+        "payload_key_bits": null
+      },
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": true,
+      "key": {
+        "attempted": true,
+        "mechanism": "xor_16bit_verifier",
+        "result": "match",
+        "verifier_bits": 16,
+        "collision_resistant": false,
+        "error": null
+      },
+      "decryption": {
+        "attempted": true,
+        "result": "error",
+        "exception": "error: unpack requires a buffer of 4 bytes",
+        "output_bytes": 0,
+        "wrote_output_before_error": false,
+        "output_validation": {
+          "kind": "none",
+          "depth": "none",
+          "result": "not_run",
+          "detail": "",
+          "complete": null
+        }
+      },
+      "integrity": {
+        "requested": false,
+        "applicable": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "scope": "not available",
+        "authenticates_producer": false
+      }
+    },
+    "evidence": {
+      "level": "key_checked",
+      "level_meaning": "a supported verifier accepted the key, but content is not usable",
+      "facts": [
+        "verify_password=False; verify_integrity=False",
+        "is_encrypted()=True via Workbook stream",
+        "declared method='xor' from FilePass wEncryptionType; parameters={'encryption_type': 0, 'payload_cipher': 'XOR', 'payload_hash': 'none', 'payload_key_bits': None}",
+        "verifier match (xor_16bit_verifier, 16 bits)",
+        "decrypt() raised error: unpack requires a buffer of 4 bytes; caller buffer already had 0 bytes"
+      ],
+      "not_proven": [
+        "content and authenticity of any missing bytes",
+        "payload integrity: this method exposes no HMAC",
+        "whether the cause is truncation, tampering, or a producer error"
+      ]
+    },
+    "policy": {
+      "class": "obfuscation",
+      "description": "XOR obfuscation, not encryption; 16-bit verifier",
+      "declared_cipher": "XOR",
+      "declared_key_bits": null,
+      "declared_kdf": {
+        "hash": "none",
+        "spin_count": null
+      },
+      "declared_integrity": "none",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "PAYLOAD_TRUNCATED_OR_CORRUPTED",
+      "state_meaning": "the key/verifier matched but decryption could not produce a package",
+      "reject_reason": "PAYLOAD_TRUNCATED_OR_CORRUPTED",
+      "reject_reason_meaning": "key matched but payload is absent, truncated, or corrupt",
+      "severity": "reject"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "xls_rc4_ok",
+    "note": "",
+    "requested_check_mode": {
+      "verify_password": false,
+      "verify_integrity": false
+    },
+    "file": {
+      "name": "rc4cryptoapi_password.xls",
+      "size": 25600,
+      "sha256": "b804cba40c27ea88f2ea994b6b7d75145661532f9356e7246d2499f63d58abfe",
+      "ephemeral": false,
+      "container": "ole",
+      "derived_from": null
+    },
+    "format": {
+      "family": "xls97",
+      "dispatch": "Workbook stream",
+      "declared_method": "rc4_cryptoapi",
+      "declaration_source": "FilePass wEncryptionType",
+      "declaration_present": true,
+      "parameters": {
+        "encryption_type": 1,
+        "version": "4.2",
+        "payload_cipher": "RC4",
+        "payload_hash": "SHA1",
+        "payload_key_bits": 128,
+        "provider_type": 1,
+        "header_flags": 12
+      },
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": true,
+      "key": {
+        "attempted": true,
+        "mechanism": "rc4_cryptoapi_sha1_verifier",
+        "result": "match",
+        "verifier_bits": 160,
+        "collision_resistant": true,
+        "error": null
+      },
+      "decryption": {
+        "attempted": true,
+        "result": "ok",
+        "exception": null,
+        "output_bytes": 25600,
+        "wrote_output_before_error": false,
+        "output_validation": {
+          "kind": "biff",
+          "depth": "framing",
+          "result": "pass",
+          "detail": "OLE ok, BOF/EOF walk ok",
+          "complete": false
+        }
+      },
+      "integrity": {
+        "requested": false,
+        "applicable": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "scope": "not available",
+        "authenticates_producer": false
+      }
+    },
+    "evidence": {
+      "level": "decrypted_key_checked",
+      "level_meaning": "as decrypted, and a supported verifier accepted the key",
+      "facts": [
+        "verify_password=False; verify_integrity=False",
+        "is_encrypted()=True via Workbook stream",
+        "declared method='rc4_cryptoapi' from FilePass wEncryptionType; parameters={'encryption_type': 1, 'version': '4.2', 'payload_cipher': 'RC4', 'payload_hash': 'SHA1', 'payload_key_bits': 128, 'provider_type': 1, 'header_flags': 12}",
+        "verifier match (rc4_cryptoapi_sha1_verifier, 160 bits)",
+        "decrypt() returned 25600 bytes; structure={'kind': 'biff', 'depth': 'framing', 'result': 'pass', 'detail': 'OLE ok, BOF/EOF walk ok', 'complete': False}"
+      ],
+      "not_proven": [
+        "cell/document contents: only BOF/EOF framing was structurally validated",
+        "document authenticity, safety, or semantic validity",
+        "encryption strength: the API reports declared parameters, not a strength verdict",
+        "payload integrity: this method exposes no HMAC",
+        "structure beyond framing: the family validator is shallow; returned bytes may still be wrong (see legacy header-only samples)"
+      ]
+    },
+    "policy": {
+      "class": "rc4_legacy",
+      "description": "RC4 (40/128-bit) with a legacy verifier and no payload integrity",
+      "declared_cipher": "RC4",
+      "declared_key_bits": 128,
+      "declared_kdf": {
+        "hash": "SHA1",
+        "spin_count": null
+      },
+      "declared_integrity": "none",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "CONTENT_DECRYPTED_KEY_VERIFIED",
+      "state_meaning": "content decrypted and a supported verifier matched",
+      "reject_reason": null,
+      "reject_reason_meaning": null,
+      "severity": "info"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "xls_rc4_wrong",
+    "note": "",
+    "requested_check_mode": {
+      "verify_password": false,
+      "verify_integrity": false
+    },
+    "file": {
+      "name": "rc4cryptoapi_password.xls",
+      "size": 25600,
+      "sha256": "b804cba40c27ea88f2ea994b6b7d75145661532f9356e7246d2499f63d58abfe",
+      "ephemeral": false,
+      "container": "ole",
+      "derived_from": null
+    },
+    "format": {
+      "family": "xls97",
+      "dispatch": "Workbook stream",
+      "declared_method": "rc4_cryptoapi",
+      "declaration_source": "FilePass wEncryptionType",
+      "declaration_present": true,
+      "parameters": {
+        "encryption_type": 1,
+        "version": "4.2",
+        "payload_cipher": "RC4",
+        "payload_hash": "SHA1",
+        "payload_key_bits": 128,
+        "provider_type": 1,
+        "header_flags": 12
+      },
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": true,
+      "key": {
+        "attempted": true,
+        "mechanism": "rc4_cryptoapi_sha1_verifier",
+        "result": "mismatch",
+        "verifier_bits": 160,
+        "collision_resistant": true,
+        "error": "InvalidKeyError: Failed to verify password"
+      },
+      "decryption": {
+        "attempted": false,
+        "result": "not_attempted",
+        "exception": null,
+        "output_bytes": 0,
+        "wrote_output_before_error": false,
+        "output_validation": {
+          "kind": "none",
+          "depth": "none",
+          "result": "not_run",
+          "detail": "",
+          "complete": null
+        }
+      },
+      "integrity": {
+        "requested": false,
+        "applicable": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "scope": "not available",
+        "authenticates_producer": false
+      }
+    },
+    "evidence": {
+      "level": "key_checked_negative",
+      "level_meaning": "a supported verifier rejected the key",
+      "facts": [
+        "verify_password=False; verify_integrity=False",
+        "is_encrypted()=True via Workbook stream",
+        "declared method='rc4_cryptoapi' from FilePass wEncryptionType; parameters={'encryption_type': 1, 'version': '4.2', 'payload_cipher': 'RC4', 'payload_hash': 'SHA1', 'payload_key_bits': 128, 'provider_type': 1, 'header_flags': 12}",
+        "load_key failed: InvalidKeyError: Failed to verify password"
+      ],
+      "not_proven": [
+        "password uniqueness: a match is not required for rejection, and weak verifiers can collide",
+        "payload state: a verifier mismatch says nothing about whether the payload is intact"
+      ]
+    },
+    "policy": {
+      "class": "rc4_legacy",
+      "description": "RC4 (40/128-bit) with a legacy verifier and no payload integrity",
+      "declared_cipher": "RC4",
+      "declared_key_bits": 128,
+      "declared_kdf": {
+        "hash": "SHA1",
+        "spin_count": null
+      },
+      "declared_integrity": "none",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "KEY_REJECTED",
+      "state_meaning": "a supported verifier was checked and the password did not match it",
+      "reject_reason": "KEY_VERIFIER_MISMATCH",
+      "reject_reason_meaning": "a supported verifier rejected the password",
+      "severity": "reject"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "xls_rc4_header_only",
+    "note": "",
+    "requested_check_mode": {
+      "verify_password": false,
+      "verify_integrity": false
+    },
+    "file": {
+      "name": "rc4_header_only.xls",
+      "size": 25600,
+      "sha256": null,
+      "ephemeral": true,
+      "container": "ole",
+      "derived_from": {
+        "fixture": "rc4cryptoapi_password.xls",
+        "sha256": "b804cba40c27ea88f2ea994b6b7d75145661532f9356e7246d2499f63d58abfe"
+      }
+    },
+    "format": {
+      "family": "xls97",
+      "dispatch": "Workbook stream",
+      "declared_method": "rc4_cryptoapi",
+      "declaration_source": "FilePass wEncryptionType",
+      "declaration_present": true,
+      "parameters": {
+        "encryption_type": 1,
+        "version": "4.2",
+        "payload_cipher": "RC4",
+        "payload_hash": "SHA1",
+        "payload_key_bits": 128,
+        "provider_type": 1,
+        "header_flags": 12
+      },
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": true,
+      "key": {
+        "attempted": true,
+        "mechanism": "rc4_cryptoapi_sha1_verifier",
+        "result": "match",
+        "verifier_bits": 160,
+        "collision_resistant": true,
+        "error": null
+      },
+      "decryption": {
+        "attempted": true,
+        "result": "error",
+        "exception": "error: unpack requires a buffer of 4 bytes",
+        "output_bytes": 0,
+        "wrote_output_before_error": false,
+        "output_validation": {
+          "kind": "none",
+          "depth": "none",
+          "result": "not_run",
+          "detail": "",
+          "complete": null
+        }
+      },
+      "integrity": {
+        "requested": false,
+        "applicable": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "scope": "not available",
+        "authenticates_producer": false
+      }
+    },
+    "evidence": {
+      "level": "key_checked",
+      "level_meaning": "a supported verifier accepted the key, but content is not usable",
+      "facts": [
+        "verify_password=False; verify_integrity=False",
+        "is_encrypted()=True via Workbook stream",
+        "declared method='rc4_cryptoapi' from FilePass wEncryptionType; parameters={'encryption_type': 1, 'version': '4.2', 'payload_cipher': 'RC4', 'payload_hash': 'SHA1', 'payload_key_bits': 128, 'provider_type': 1, 'header_flags': 12}",
+        "verifier match (rc4_cryptoapi_sha1_verifier, 160 bits)",
+        "decrypt() raised error: unpack requires a buffer of 4 bytes; caller buffer already had 0 bytes"
+      ],
+      "not_proven": [
+        "content and authenticity of any missing bytes",
+        "payload integrity: this method exposes no HMAC",
+        "whether the cause is truncation, tampering, or a producer error"
+      ]
+    },
+    "policy": {
+      "class": "rc4_legacy",
+      "description": "RC4 (40/128-bit) with a legacy verifier and no payload integrity",
+      "declared_cipher": "RC4",
+      "declared_key_bits": 128,
+      "declared_kdf": {
+        "hash": "SHA1",
+        "spin_count": null
+      },
+      "declared_integrity": "none",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "PAYLOAD_TRUNCATED_OR_CORRUPTED",
+      "state_meaning": "the key/verifier matched but decryption could not produce a package",
+      "reject_reason": "PAYLOAD_TRUNCATED_OR_CORRUPTED",
+      "reject_reason_meaning": "key matched but payload is absent, truncated, or corrupt",
+      "severity": "reject"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "doc_rc4_ok",
+    "note": "",
+    "requested_check_mode": {
+      "verify_password": false,
+      "verify_integrity": false
+    },
+    "file": {
+      "name": "rc4cryptoapi_password.doc",
+      "size": 23040,
+      "sha256": "9c5217bea80fb1a7811ad7709dd9bb35f6c639bac7154580dd4c99d54e1fc0e0",
+      "ephemeral": false,
+      "container": "ole",
+      "derived_from": null
+    },
+    "format": {
+      "family": "doc97",
+      "dispatch": "wordDocument stream",
+      "declared_method": "rc4_cryptoapi",
+      "declaration_source": "FIB fEncrypted/fObfuscation",
+      "declaration_present": true,
+      "parameters": {
+        "fib_encrypted": 1,
+        "fib_obfuscation": 0,
+        "fib_key_or_header_size": 198,
+        "version": "4.2",
+        "payload_cipher": "RC4",
+        "payload_hash": "SHA1",
+        "payload_key_bits": 128,
+        "provider_type": 1,
+        "header_flags": 12
+      },
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": true,
+      "key": {
+        "attempted": true,
+        "mechanism": "rc4_cryptoapi_sha1_verifier",
+        "result": "match",
+        "verifier_bits": 160,
+        "collision_resistant": true,
+        "error": null
+      },
+      "decryption": {
+        "attempted": true,
+        "result": "ok",
+        "exception": null,
+        "output_bytes": 23040,
+        "wrote_output_before_error": false,
+        "output_validation": {
+          "kind": "ole_fib",
+          "depth": "header",
+          "result": "pass",
+          "detail": "OLE ok, FIB magic ok; stream contents not validated",
+          "complete": false
+        }
+      },
+      "integrity": {
+        "requested": false,
+        "applicable": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "scope": "not available",
+        "authenticates_producer": false
+      }
+    },
+    "evidence": {
+      "level": "decrypted_key_checked",
+      "level_meaning": "as decrypted, and a supported verifier accepted the key",
+      "facts": [
+        "verify_password=False; verify_integrity=False",
+        "is_encrypted()=True via wordDocument stream",
+        "declared method='rc4_cryptoapi' from FIB fEncrypted/fObfuscation; parameters={'fib_encrypted': 1, 'fib_obfuscation': 0, 'fib_key_or_header_size': 198, 'version': '4.2', 'payload_cipher': 'RC4', 'payload_hash': 'SHA1', 'payload_key_bits': 128, 'provider_type': 1, 'header_flags': 12}",
+        "verifier match (rc4_cryptoapi_sha1_verifier, 160 bits)",
+        "decrypt() returned 23040 bytes; structure={'kind': 'ole_fib', 'depth': 'header', 'result': 'pass', 'detail': 'OLE ok, FIB magic ok; stream contents not validated', 'complete': False}"
+      ],
+      "not_proven": [
+        "all stream contents: only the FIB was structurally validated",
+        "document authenticity, safety, or semantic validity",
+        "encryption strength: the API reports declared parameters, not a strength verdict",
+        "payload integrity: this method exposes no HMAC",
+        "structure beyond header: the family validator is shallow; returned bytes may still be wrong (see legacy header-only samples)"
+      ]
+    },
+    "policy": {
+      "class": "rc4_legacy",
+      "description": "RC4 (40/128-bit) with a legacy verifier and no payload integrity",
+      "declared_cipher": "RC4",
+      "declared_key_bits": 128,
+      "declared_kdf": {
+        "hash": "SHA1",
+        "spin_count": null
+      },
+      "declared_integrity": "none",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "CONTENT_DECRYPTED_KEY_VERIFIED",
+      "state_meaning": "content decrypted and a supported verifier matched",
+      "reject_reason": null,
+      "reject_reason_meaning": null,
+      "severity": "info"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "doc_rc4_wrong",
+    "note": "",
+    "requested_check_mode": {
+      "verify_password": false,
+      "verify_integrity": false
+    },
+    "file": {
+      "name": "rc4cryptoapi_password.doc",
+      "size": 23040,
+      "sha256": "9c5217bea80fb1a7811ad7709dd9bb35f6c639bac7154580dd4c99d54e1fc0e0",
+      "ephemeral": false,
+      "container": "ole",
+      "derived_from": null
+    },
+    "format": {
+      "family": "doc97",
+      "dispatch": "wordDocument stream",
+      "declared_method": "rc4_cryptoapi",
+      "declaration_source": "FIB fEncrypted/fObfuscation",
+      "declaration_present": true,
+      "parameters": {
+        "fib_encrypted": 1,
+        "fib_obfuscation": 0,
+        "fib_key_or_header_size": 198,
+        "version": "4.2",
+        "payload_cipher": "RC4",
+        "payload_hash": "SHA1",
+        "payload_key_bits": 128,
+        "provider_type": 1,
+        "header_flags": 12
+      },
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": true,
+      "key": {
+        "attempted": true,
+        "mechanism": "rc4_cryptoapi_sha1_verifier",
+        "result": "mismatch",
+        "verifier_bits": 160,
+        "collision_resistant": true,
+        "error": "InvalidKeyError: Failed to verify password"
+      },
+      "decryption": {
+        "attempted": false,
+        "result": "not_attempted",
+        "exception": null,
+        "output_bytes": 0,
+        "wrote_output_before_error": false,
+        "output_validation": {
+          "kind": "none",
+          "depth": "none",
+          "result": "not_run",
+          "detail": "",
+          "complete": null
+        }
+      },
+      "integrity": {
+        "requested": false,
+        "applicable": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "scope": "not available",
+        "authenticates_producer": false
+      }
+    },
+    "evidence": {
+      "level": "key_checked_negative",
+      "level_meaning": "a supported verifier rejected the key",
+      "facts": [
+        "verify_password=False; verify_integrity=False",
+        "is_encrypted()=True via wordDocument stream",
+        "declared method='rc4_cryptoapi' from FIB fEncrypted/fObfuscation; parameters={'fib_encrypted': 1, 'fib_obfuscation': 0, 'fib_key_or_header_size': 198, 'version': '4.2', 'payload_cipher': 'RC4', 'payload_hash': 'SHA1', 'payload_key_bits': 128, 'provider_type': 1, 'header_flags': 12}",
+        "load_key failed: InvalidKeyError: Failed to verify password"
+      ],
+      "not_proven": [
+        "password uniqueness: a match is not required for rejection, and weak verifiers can collide",
+        "payload state: a verifier mismatch says nothing about whether the payload is intact"
+      ]
+    },
+    "policy": {
+      "class": "rc4_legacy",
+      "description": "RC4 (40/128-bit) with a legacy verifier and no payload integrity",
+      "declared_cipher": "RC4",
+      "declared_key_bits": 128,
+      "declared_kdf": {
+        "hash": "SHA1",
+        "spin_count": null
+      },
+      "declared_integrity": "none",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "KEY_REJECTED",
+      "state_meaning": "a supported verifier was checked and the password did not match it",
+      "reject_reason": "KEY_VERIFIER_MISMATCH",
+      "reject_reason_meaning": "a supported verifier rejected the password",
+      "severity": "reject"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "doc_rc4_header_only",
+    "note": "",
+    "requested_check_mode": {
+      "verify_password": false,
+      "verify_integrity": false
+    },
+    "file": {
+      "name": "doc_header_only.doc",
+      "size": 23040,
+      "sha256": null,
+      "ephemeral": true,
+      "container": "ole",
+      "derived_from": {
+        "fixture": "rc4cryptoapi_password.doc",
+        "sha256": "9c5217bea80fb1a7811ad7709dd9bb35f6c639bac7154580dd4c99d54e1fc0e0"
+      }
+    },
+    "format": {
+      "family": "doc97",
+      "dispatch": "wordDocument stream",
+      "declared_method": "rc4_cryptoapi",
+      "declaration_source": "FIB fEncrypted/fObfuscation",
+      "declaration_present": true,
+      "parameters": {
+        "fib_encrypted": 1,
+        "fib_obfuscation": 0,
+        "fib_key_or_header_size": 198,
+        "version": "4.2",
+        "payload_cipher": "RC4",
+        "payload_hash": "SHA1",
+        "payload_key_bits": 128,
+        "provider_type": 1,
+        "header_flags": 12
+      },
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": true,
+      "key": {
+        "attempted": true,
+        "mechanism": "rc4_cryptoapi_sha1_verifier",
+        "result": "match",
+        "verifier_bits": 160,
+        "collision_resistant": true,
+        "error": null
+      },
+      "decryption": {
+        "attempted": true,
+        "result": "ok",
+        "exception": null,
+        "output_bytes": 23040,
+        "wrote_output_before_error": false,
+        "output_validation": {
+          "kind": "ole_fib",
+          "depth": "header",
+          "result": "pass",
+          "detail": "OLE ok, FIB magic ok; stream contents not validated",
+          "complete": false
+        }
+      },
+      "integrity": {
+        "requested": false,
+        "applicable": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "scope": "not available",
+        "authenticates_producer": false
+      },
+      "cross_check": {
+        "kind": "legacy_partial_validation",
+        "description": "the API's structural check validates only the FIB, not decrypted stream bodies",
+        "stream": "WordDocument",
+        "stream_bytes": 4096,
+        "differing_bytes": 3555,
+        "structure_result": "pass",
+        "structure_depth": "header"
+      }
+    },
+    "evidence": {
+      "level": "decrypted_key_checked",
+      "level_meaning": "as decrypted, and a supported verifier accepted the key",
+      "facts": [
+        "verify_password=False; verify_integrity=False",
+        "is_encrypted()=True via wordDocument stream",
+        "declared method='rc4_cryptoapi' from FIB fEncrypted/fObfuscation; parameters={'fib_encrypted': 1, 'fib_obfuscation': 0, 'fib_key_or_header_size': 198, 'version': '4.2', 'payload_cipher': 'RC4', 'payload_hash': 'SHA1', 'payload_key_bits': 128, 'provider_type': 1, 'header_flags': 12}",
+        "verifier match (rc4_cryptoapi_sha1_verifier, 160 bits)",
+        "decrypt() returned 23040 bytes; structure={'kind': 'ole_fib', 'depth': 'header', 'result': 'pass', 'detail': 'OLE ok, FIB magic ok; stream contents not validated', 'complete': False}",
+        "structure check passes on a header-only file while 3555/4096 WordDocument bytes differ from the correct-password recovery"
+      ],
+      "not_proven": [
+        "all stream contents: only the FIB was structurally validated",
+        "document authenticity, safety, or semantic validity",
+        "encryption strength: the API reports declared parameters, not a strength verdict",
+        "payload integrity: this method exposes no HMAC",
+        "structure beyond header: the family validator is shallow; returned bytes may still be wrong (see legacy header-only samples)",
+        "that returned WordDocument bytes are the producer's original bytes"
+      ]
+    },
+    "policy": {
+      "class": "rc4_legacy",
+      "description": "RC4 (40/128-bit) with a legacy verifier and no payload integrity",
+      "declared_cipher": "RC4",
+      "declared_key_bits": 128,
+      "declared_kdf": {
+        "hash": "SHA1",
+        "spin_count": null
+      },
+      "declared_integrity": "none",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "CONTENT_DECRYPTED_KEY_VERIFIED",
+      "state_meaning": "content decrypted and a supported verifier matched",
+      "reject_reason": null,
+      "reject_reason_meaning": null,
+      "severity": "info"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "doc_xor_declared",
+    "note": "",
+    "requested_check_mode": {
+      "verify_password": false,
+      "verify_integrity": false
+    },
+    "file": {
+      "name": "doc_xor_declared.doc",
+      "size": 22528,
+      "sha256": null,
+      "ephemeral": true,
+      "container": "ole",
+      "derived_from": {
+        "fixture": "plain.doc",
+        "sha256": "290f71ddd3f6d940dc3569fc410cf5f167df4cb91b9274f4408d3f1bdaa83736"
+      }
+    },
+    "format": {
+      "family": "doc97",
+      "dispatch": "wordDocument stream",
+      "declared_method": "xor",
+      "declaration_source": "FIB fEncrypted/fObfuscation",
+      "declaration_present": true,
+      "parameters": {
+        "fib_encrypted": 1,
+        "fib_obfuscation": 1,
+        "fib_key_or_header_size": 0
+      },
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": true,
+      "key": {
+        "attempted": true,
+        "mechanism": "xor_16bit_verifier",
+        "result": "not_implemented",
+        "verifier_bits": 16,
+        "collision_resistant": false,
+        "error": null
+      },
+      "decryption": {
+        "attempted": true,
+        "result": "error",
+        "exception": "AttributeError: 'Doc97File' object has no attribute 'type'",
+        "output_bytes": 0,
+        "wrote_output_before_error": false,
+        "output_validation": {
+          "kind": "none",
+          "depth": "none",
+          "result": "not_run",
+          "detail": "",
+          "complete": null
+        }
+      },
+      "integrity": {
+        "requested": false,
+        "applicable": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "scope": "not available",
+        "authenticates_producer": false
+      }
+    },
+    "evidence": {
+      "level": "declaration",
+      "level_meaning": "a producer-controlled declaration was read",
+      "facts": [
+        "verify_password=False; verify_integrity=False",
+        "is_encrypted()=True via wordDocument stream",
+        "declared method='xor' from FIB fEncrypted/fObfuscation; parameters={'fib_encrypted': 1, 'fib_obfuscation': 1, 'fib_key_or_header_size': 0}",
+        "DOC XOR load_key returned without verifying IKey and without setting a type",
+        "decrypt() raised AttributeError: 'Doc97File' object has no attribute 'type'; caller buffer already had 0 bytes"
+      ],
+      "not_proven": [
+        "content",
+        "encryption strength",
+        "integrity",
+        "key correctness"
+      ]
+    },
+    "policy": {
+      "class": "obfuscation",
+      "description": "XOR obfuscation, not encryption; 16-bit verifier",
+      "declared_cipher": null,
+      "declared_key_bits": null,
+      "declared_kdf": {
+        "hash": null,
+        "spin_count": null
+      },
+      "declared_integrity": "none",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "UNSUPPORTED_ENCRYPTION_METHOD",
+      "state_meaning": "the declaration names a method/version this library cannot process",
+      "reject_reason": "UNSUPPORTED_ENCRYPTION_TYPE",
+      "reject_reason_meaning": "declared method is XOR in DOC, an unknown FilePass type, or otherwise unimplemented",
+      "severity": "reject"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "doc_forged_marker",
+    "note": "",
+    "requested_check_mode": {
+      "verify_password": false,
+      "verify_integrity": false
+    },
+    "file": {
+      "name": "doc_forged_marker.doc",
+      "size": 22528,
+      "sha256": null,
+      "ephemeral": true,
+      "container": "ole",
+      "derived_from": {
+        "fixture": "plain.doc",
+        "sha256": "290f71ddd3f6d940dc3569fc410cf5f167df4cb91b9274f4408d3f1bdaa83736"
+      }
+    },
+    "format": {
+      "family": "doc97",
+      "dispatch": "wordDocument stream",
+      "declared_method": "unknown",
+      "declaration_source": "FIB fEncrypted/fObfuscation",
+      "declaration_present": true,
+      "parameters": {
+        "fib_encrypted": 1,
+        "fib_obfuscation": 0,
+        "fib_key_or_header_size": 0,
+        "version": "1562.15"
+      },
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": true,
+      "key": {
+        "attempted": true,
+        "mechanism": "none",
+        "result": "error",
+        "verifier_bits": null,
+        "collision_resistant": null,
+        "error": "DecryptionError: Unsupported encryption method"
+      },
+      "decryption": {
+        "attempted": false,
+        "result": "not_attempted",
+        "exception": null,
+        "output_bytes": 0,
+        "wrote_output_before_error": false,
+        "output_validation": {
+          "kind": "none",
+          "depth": "none",
+          "result": "not_run",
+          "detail": "",
+          "complete": null
+        }
+      },
+      "integrity": {
+        "requested": false,
+        "applicable": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "scope": "not available",
+        "authenticates_producer": false
+      }
+    },
+    "evidence": {
+      "level": "declaration",
+      "level_meaning": "a producer-controlled declaration was read",
+      "facts": [
+        "verify_password=False; verify_integrity=False",
+        "is_encrypted()=True via wordDocument stream",
+        "declared method='unknown' from FIB fEncrypted/fObfuscation; parameters={'fib_encrypted': 1, 'fib_obfuscation': 0, 'fib_key_or_header_size': 0, 'version': '1562.15'}",
+        "load_key failed: DecryptionError: Unsupported encryption method"
+      ],
+      "not_proven": [
+        "content",
+        "encryption strength",
+        "integrity",
+        "key correctness"
+      ]
+    },
+    "policy": {
+      "class": "unsupported",
+      "description": "library has no key/content path for this declaration",
+      "declared_cipher": null,
+      "declared_key_bits": null,
+      "declared_kdf": {
+        "hash": null,
+        "spin_count": null
+      },
+      "declared_integrity": "none",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "UNSUPPORTED_ENCRYPTION_METHOD",
+      "state_meaning": "the declaration names a method/version this library cannot process",
+      "reject_reason": "UNSUPPORTED_ENCRYPTION_TYPE",
+      "reject_reason_meaning": "declared method is XOR in DOC, an unknown FilePass type, or otherwise unimplemented",
+      "severity": "reject"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "ppt_rc4_ok",
+    "note": "",
+    "requested_check_mode": {
+      "verify_password": false,
+      "verify_integrity": false
+    },
+    "file": {
+      "name": "rc4cryptoapi_password.ppt",
+      "size": 43008,
+      "sha256": "17a57bcbe7cb517c088410fed763ccc58b9b10d23258571c1ab67830d2591a49",
+      "ephemeral": false,
+      "container": "ole",
+      "derived_from": null
+    },
+    "format": {
+      "family": "ppt97",
+      "dispatch": "PowerPoint Document stream",
+      "declared_method": "rc4_cryptoapi",
+      "declaration_source": "UserEditAtom recLen",
+      "declaration_present": true,
+      "parameters": {
+        "header_token": "0xf3d1c4df",
+        "user_edit_record_len": 32,
+        "version": "4.2",
+        "payload_cipher": "RC4",
+        "payload_hash": "SHA1",
+        "payload_key_bits": 128,
+        "provider_type": 1,
+        "header_flags": 12
+      },
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": true,
+      "key": {
+        "attempted": true,
+        "mechanism": "rc4_cryptoapi_sha1_verifier",
+        "result": "match",
+        "verifier_bits": 160,
+        "collision_resistant": true,
+        "error": null
+      },
+      "decryption": {
+        "attempted": true,
+        "result": "ok",
+        "exception": null,
+        "output_bytes": 43008,
+        "wrote_output_before_error": false,
+        "output_validation": {
+          "kind": "ppt_record",
+          "depth": "header",
+          "result": "pass",
+          "detail": "OLE ok, Document record header ok; atom chain not validated",
+          "complete": false
+        }
+      },
+      "integrity": {
+        "requested": false,
+        "applicable": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "scope": "not available",
+        "authenticates_producer": false
+      }
+    },
+    "evidence": {
+      "level": "decrypted_key_checked",
+      "level_meaning": "as decrypted, and a supported verifier accepted the key",
+      "facts": [
+        "verify_password=False; verify_integrity=False",
+        "is_encrypted()=True via PowerPoint Document stream",
+        "declared method='rc4_cryptoapi' from UserEditAtom recLen; parameters={'header_token': '0xf3d1c4df', 'user_edit_record_len': 32, 'version': '4.2', 'payload_cipher': 'RC4', 'payload_hash': 'SHA1', 'payload_key_bits': 128, 'provider_type': 1, 'header_flags': 12}",
+        "verifier match (rc4_cryptoapi_sha1_verifier, 160 bits)",
+        "decrypt() returned 43008 bytes; structure={'kind': 'ppt_record', 'depth': 'header', 'result': 'pass', 'detail': 'OLE ok, Document record header ok; atom chain not validated', 'complete': False}"
+      ],
+      "not_proven": [
+        "all persist atoms: only the first record header was structurally validated",
+        "document authenticity, safety, or semantic validity",
+        "encryption strength: the API reports declared parameters, not a strength verdict",
+        "payload integrity: this method exposes no HMAC",
+        "structure beyond header: the family validator is shallow; returned bytes may still be wrong (see legacy header-only samples)"
+      ]
+    },
+    "policy": {
+      "class": "rc4_legacy",
+      "description": "RC4 (40/128-bit) with a legacy verifier and no payload integrity",
+      "declared_cipher": "RC4",
+      "declared_key_bits": 128,
+      "declared_kdf": {
+        "hash": "SHA1",
+        "spin_count": null
+      },
+      "declared_integrity": "none",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "CONTENT_DECRYPTED_KEY_VERIFIED",
+      "state_meaning": "content decrypted and a supported verifier matched",
+      "reject_reason": null,
+      "reject_reason_meaning": null,
+      "severity": "info"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "ppt_rc4_wrong",
+    "note": "",
+    "requested_check_mode": {
+      "verify_password": false,
+      "verify_integrity": false
+    },
+    "file": {
+      "name": "rc4cryptoapi_password.ppt",
+      "size": 43008,
+      "sha256": "17a57bcbe7cb517c088410fed763ccc58b9b10d23258571c1ab67830d2591a49",
+      "ephemeral": false,
+      "container": "ole",
+      "derived_from": null
+    },
+    "format": {
+      "family": "ppt97",
+      "dispatch": "PowerPoint Document stream",
+      "declared_method": "rc4_cryptoapi",
+      "declaration_source": "UserEditAtom recLen",
+      "declaration_present": true,
+      "parameters": {
+        "header_token": "0xf3d1c4df",
+        "user_edit_record_len": 32,
+        "version": "4.2",
+        "payload_cipher": "RC4",
+        "payload_hash": "SHA1",
+        "payload_key_bits": 128,
+        "provider_type": 1,
+        "header_flags": 12
+      },
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": true,
+      "key": {
+        "attempted": true,
+        "mechanism": "rc4_cryptoapi_sha1_verifier",
+        "result": "mismatch",
+        "verifier_bits": 160,
+        "collision_resistant": true,
+        "error": "InvalidKeyError: Failed to verify password"
+      },
+      "decryption": {
+        "attempted": false,
+        "result": "not_attempted",
+        "exception": null,
+        "output_bytes": 0,
+        "wrote_output_before_error": false,
+        "output_validation": {
+          "kind": "none",
+          "depth": "none",
+          "result": "not_run",
+          "detail": "",
+          "complete": null
+        }
+      },
+      "integrity": {
+        "requested": false,
+        "applicable": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "scope": "not available",
+        "authenticates_producer": false
+      }
+    },
+    "evidence": {
+      "level": "key_checked_negative",
+      "level_meaning": "a supported verifier rejected the key",
+      "facts": [
+        "verify_password=False; verify_integrity=False",
+        "is_encrypted()=True via PowerPoint Document stream",
+        "declared method='rc4_cryptoapi' from UserEditAtom recLen; parameters={'header_token': '0xf3d1c4df', 'user_edit_record_len': 32, 'version': '4.2', 'payload_cipher': 'RC4', 'payload_hash': 'SHA1', 'payload_key_bits': 128, 'provider_type': 1, 'header_flags': 12}",
+        "load_key failed: InvalidKeyError: Failed to verify password"
+      ],
+      "not_proven": [
+        "password uniqueness: a match is not required for rejection, and weak verifiers can collide",
+        "payload state: a verifier mismatch says nothing about whether the payload is intact"
+      ]
+    },
+    "policy": {
+      "class": "rc4_legacy",
+      "description": "RC4 (40/128-bit) with a legacy verifier and no payload integrity",
+      "declared_cipher": "RC4",
+      "declared_key_bits": 128,
+      "declared_kdf": {
+        "hash": "SHA1",
+        "spin_count": null
+      },
+      "declared_integrity": "none",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "KEY_REJECTED",
+      "state_meaning": "a supported verifier was checked and the password did not match it",
+      "reject_reason": "KEY_VERIFIER_MISMATCH",
+      "reject_reason_meaning": "a supported verifier rejected the password",
+      "severity": "reject"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "ppt_rc4_header_only",
+    "note": "",
+    "requested_check_mode": {
+      "verify_password": false,
+      "verify_integrity": false
+    },
+    "file": {
+      "name": "ppt_header_only.ppt",
+      "size": 43008,
+      "sha256": null,
+      "ephemeral": true,
+      "container": "ole",
+      "derived_from": {
+        "fixture": "rc4cryptoapi_password.ppt",
+        "sha256": "17a57bcbe7cb517c088410fed763ccc58b9b10d23258571c1ab67830d2591a49"
+      }
+    },
+    "format": {
+      "family": "ppt97",
+      "dispatch": "PowerPoint Document stream",
+      "declared_method": "rc4_cryptoapi",
+      "declaration_source": "UserEditAtom recLen",
+      "declaration_present": true,
+      "parameters": {
+        "header_token": "0xf3d1c4df",
+        "user_edit_record_len": 32,
+        "version": "4.2",
+        "payload_cipher": "RC4",
+        "payload_hash": "SHA1",
+        "payload_key_bits": 128,
+        "provider_type": 1,
+        "header_flags": 12
+      },
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": true,
+      "key": {
+        "attempted": true,
+        "mechanism": "rc4_cryptoapi_sha1_verifier",
+        "result": "match",
+        "verifier_bits": 160,
+        "collision_resistant": true,
+        "error": null
+      },
+      "decryption": {
+        "attempted": true,
+        "result": "ok",
+        "exception": null,
+        "output_bytes": 43008,
+        "wrote_output_before_error": false,
+        "output_validation": {
+          "kind": "ppt_record",
+          "depth": "header",
+          "result": "fail",
+          "detail": "first record type 0x1978, expected Document 0x03e8",
+          "complete": false
+        }
+      },
+      "integrity": {
+        "requested": false,
+        "applicable": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "scope": "not available",
+        "authenticates_producer": false
+      },
+      "cross_check": {
+        "kind": "legacy_partial_validation",
+        "description": "the API returns success even though most persist objects were zeroed",
+        "stream": "PowerPoint Document",
+        "stream_bytes": 38706,
+        "differing_bytes": 38278,
+        "structure_result": "fail",
+        "structure_depth": "header"
+      }
+    },
+    "evidence": {
+      "level": "key_checked",
+      "level_meaning": "a supported verifier accepted the key, but content is not usable",
+      "facts": [
+        "verify_password=False; verify_integrity=False",
+        "is_encrypted()=True via PowerPoint Document stream",
+        "declared method='rc4_cryptoapi' from UserEditAtom recLen; parameters={'header_token': '0xf3d1c4df', 'user_edit_record_len': 32, 'version': '4.2', 'payload_cipher': 'RC4', 'payload_hash': 'SHA1', 'payload_key_bits': 128, 'provider_type': 1, 'header_flags': 12}",
+        "verifier match (rc4_cryptoapi_sha1_verifier, 160 bits)",
+        "decrypt() returned 43008 bytes; structure={'kind': 'ppt_record', 'depth': 'header', 'result': 'fail', 'detail': 'first record type 0x1978, expected Document 0x03e8', 'complete': False}",
+        "decrypt() succeeded and returned 38706 bytes although 38278/38706 PowerPoint Document bytes differ from the correct-password recovery"
+      ],
+      "not_proven": [
+        "content and authenticity of the recovered bytes",
+        "whether the key was wrong, the payload was tampered with, or the payload was never an Office document",
+        "that returned PowerPoint Document bytes are the producer's originals"
+      ]
+    },
+    "policy": {
+      "class": "rc4_legacy",
+      "description": "RC4 (40/128-bit) with a legacy verifier and no payload integrity",
+      "declared_cipher": "RC4",
+      "declared_key_bits": 128,
+      "declared_kdf": {
+        "hash": "SHA1",
+        "spin_count": null
+      },
+      "declared_integrity": "none",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "OUTPUT_STRUCTURE_INVALID",
+      "state_meaning": "bytes were returned but they fail the container structure check",
+      "reject_reason": "OUTPUT_STRUCTURE_INVALID",
+      "reject_reason_meaning": "decrypted bytes are not a valid package of the declared family",
+      "severity": "reject"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "ppt_forged_marker",
+    "note": "",
+    "requested_check_mode": {
+      "verify_password": false,
+      "verify_integrity": false
+    },
+    "file": {
+      "name": "ppt_forged_marker.ppt",
+      "size": 43008,
+      "sha256": null,
+      "ephemeral": true,
+      "container": "ole",
+      "derived_from": {
+        "fixture": "plain.ppt",
+        "sha256": "18555251635eaab62a1fce9886026156d375615bd96f5639df7dc005e2488347"
+      }
+    },
+    "format": {
+      "family": "ppt97",
+      "dispatch": "PowerPoint Document stream",
+      "declared_method": "unparsed",
+      "declaration_source": "none",
+      "declaration_present": true,
+      "parameters": {},
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": true,
+      "key": {
+        "attempted": true,
+        "mechanism": "none",
+        "result": "error",
+        "verifier_bits": null,
+        "collision_resistant": null,
+        "error": "KeyError: 0"
+      },
+      "decryption": {
+        "attempted": false,
+        "result": "not_attempted",
+        "exception": null,
+        "output_bytes": 0,
+        "wrote_output_before_error": false,
+        "output_validation": {
+          "kind": "none",
+          "depth": "none",
+          "result": "not_run",
+          "detail": "",
+          "complete": null
+        }
+      },
+      "integrity": {
+        "requested": false,
+        "applicable": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "scope": "not available",
+        "authenticates_producer": false
+      }
+    },
+    "evidence": {
+      "level": "declaration",
+      "level_meaning": "a producer-controlled declaration was read",
+      "facts": [
+        "verify_password=False; verify_integrity=False",
+        "is_encrypted()=True via PowerPoint Document stream",
+        "declaration marker points at a missing/invalid crypt session: 0",
+        "the check continues so the library's own failure mode is recorded",
+        "declared method='unparsed' from none; parameters={}",
+        "load_key failed: KeyError: 0"
+      ],
+      "not_proven": [
+        "content",
+        "encryption strength",
+        "integrity",
+        "key correctness"
+      ]
+    },
+    "policy": {
+      "class": "unsupported",
+      "description": "library has no key/content path for this declaration",
+      "declared_cipher": null,
+      "declared_key_bits": null,
+      "declared_kdf": null,
+      "declared_integrity": "unknown",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "ENCRYPTION_DECLARATION_INCONSISTENT",
+      "state_meaning": "a marker exists but the structures it points to are absent",
+      "reject_reason": "DECLARATION_INCONSISTENT",
+      "reject_reason_meaning": "an encryption marker exists but its crypt session or header is missing",
+      "severity": "reject"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "xls_forged_filepass_type1",
+    "note": "",
+    "requested_check_mode": {
+      "verify_password": false,
+      "verify_integrity": false
+    },
+    "file": {
+      "name": "xls_forged_filepass_type1.xls",
+      "size": 25600,
+      "sha256": null,
+      "ephemeral": true,
+      "container": "ole",
+      "derived_from": {
+        "fixture": "plain.xls",
+        "sha256": "0d57ed3cb8f9e09b0986a7d8d76407de6cb2dce84a2f30048eab9103225437f5"
+      }
+    },
+    "format": {
+      "family": "xls97",
+      "dispatch": "Workbook stream",
+      "declared_method": "unknown",
+      "declaration_source": "FilePass wEncryptionType",
+      "declaration_present": true,
+      "parameters": {
+        "encryption_type": 1,
+        "version": "0.2"
+      },
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": true,
+      "key": {
+        "attempted": true,
+        "mechanism": "none",
+        "result": "error",
+        "verifier_bits": null,
+        "collision_resistant": null,
+        "error": "DecryptionError: Unsupported encryption method"
+      },
+      "decryption": {
+        "attempted": false,
+        "result": "not_attempted",
+        "exception": null,
+        "output_bytes": 0,
+        "wrote_output_before_error": false,
+        "output_validation": {
+          "kind": "none",
+          "depth": "none",
+          "result": "not_run",
+          "detail": "",
+          "complete": null
+        }
+      },
+      "integrity": {
+        "requested": false,
+        "applicable": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "scope": "not available",
+        "authenticates_producer": false
+      }
+    },
+    "evidence": {
+      "level": "declaration",
+      "level_meaning": "a producer-controlled declaration was read",
+      "facts": [
+        "verify_password=False; verify_integrity=False",
+        "is_encrypted()=True via Workbook stream",
+        "declared method='unknown' from FilePass wEncryptionType; parameters={'encryption_type': 1, 'version': '0.2'}",
+        "load_key failed: DecryptionError: Unsupported encryption method"
+      ],
+      "not_proven": [
+        "content",
+        "encryption strength",
+        "integrity",
+        "key correctness"
+      ]
+    },
+    "policy": {
+      "class": "unsupported",
+      "description": "library has no key/content path for this declaration",
+      "declared_cipher": null,
+      "declared_key_bits": null,
+      "declared_kdf": {
+        "hash": null,
+        "spin_count": null
+      },
+      "declared_integrity": "none",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "UNSUPPORTED_ENCRYPTION_METHOD",
+      "state_meaning": "the declaration names a method/version this library cannot process",
+      "reject_reason": "UNSUPPORTED_ENCRYPTION_TYPE",
+      "reject_reason_meaning": "declared method is XOR in DOC, an unknown FilePass type, or otherwise unimplemented",
+      "severity": "reject"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "xls_unknown_filepass_type",
+    "note": "",
+    "requested_check_mode": {
+      "verify_password": false,
+      "verify_integrity": false
+    },
+    "file": {
+      "name": "xls_unknown_filepass_type.xls",
+      "size": 25600,
+      "sha256": null,
+      "ephemeral": true,
+      "container": "ole",
+      "derived_from": {
+        "fixture": "plain.xls",
+        "sha256": "0d57ed3cb8f9e09b0986a7d8d76407de6cb2dce84a2f30048eab9103225437f5"
+      }
+    },
+    "format": {
+      "family": "xls97",
+      "dispatch": "Workbook stream",
+      "declared_method": "unknown",
+      "declaration_source": "FilePass wEncryptionType",
+      "declaration_present": true,
+      "parameters": {
+        "encryption_type": 2
+      },
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": false,
+      "key": {
+        "attempted": true,
+        "mechanism": "none",
+        "result": "no_method",
+        "verifier_bits": null,
+        "collision_resistant": null,
+        "error": null
+      },
+      "decryption": {
+        "attempted": true,
+        "result": "error",
+        "exception": "AttributeError: 'Xls97File' object has no attribute 'type'",
+        "output_bytes": 0,
+        "wrote_output_before_error": false,
+        "output_validation": {
+          "kind": "none",
+          "depth": "none",
+          "result": "not_run",
+          "detail": "",
+          "complete": null
+        }
+      },
+      "integrity": {
+        "requested": false,
+        "applicable": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "scope": "not available",
+        "authenticates_producer": false
+      }
+    },
+    "evidence": {
+      "level": "declaration",
+      "level_meaning": "a producer-controlled declaration was read",
+      "facts": [
+        "verify_password=False; verify_integrity=False",
+        "is_encrypted()=False via Workbook stream",
+        "is_encrypted() returned False although a FilePass record exists",
+        "declared method='unknown' from FilePass wEncryptionType; parameters={'encryption_type': 2}",
+        "load_key returned success but selected no supported method",
+        "decrypt() raised AttributeError: 'Xls97File' object has no attribute 'type'; caller buffer already had 0 bytes"
+      ],
+      "not_proven": [
+        "content",
+        "encryption strength",
+        "integrity",
+        "key correctness"
+      ]
+    },
+    "policy": {
+      "class": "unsupported",
+      "description": "library has no key/content path for this declaration",
+      "declared_cipher": null,
+      "declared_key_bits": null,
+      "declared_kdf": {
+        "hash": null,
+        "spin_count": null
+      },
+      "declared_integrity": "none",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "UNSUPPORTED_ENCRYPTION_METHOD",
+      "state_meaning": "the declaration names a method/version this library cannot process",
+      "reject_reason": "UNSUPPORTED_ENCRYPTION_TYPE",
+      "reject_reason_meaning": "declared method is XOR in DOC, an unknown FilePass type, or otherwise unimplemented",
+      "severity": "reject"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "ooxml_garbage_info",
+    "note": "",
+    "requested_check_mode": {
+      "verify_password": true,
+      "verify_integrity": false
+    },
+    "file": {
+      "name": "ooxml_garbage_info.docx",
+      "size": 18432,
+      "sha256": null,
+      "ephemeral": true,
+      "container": "ole",
+      "derived_from": {
+        "fixture": "example_password.docx",
+        "sha256": "0605624697328060fdc75ca9929ea20b9d63ebed9387ff1a97aaf9979757234a"
+      }
+    },
+    "format": {
+      "family": "ooxml",
+      "dispatch": "zip + [Content_Types].xml",
+      "declared_method": "unparsed",
+      "declaration_source": "EncryptionInfo stream",
+      "declaration_present": true,
+      "parameters": {
+        "version": "4.4"
+      },
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": null,
+      "key": {
+        "attempted": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "verifier_bits": null,
+        "collision_resistant": null,
+        "error": null
+      },
+      "decryption": {
+        "attempted": false,
+        "result": "not_attempted",
+        "exception": null,
+        "output_bytes": 0,
+        "wrote_output_before_error": false,
+        "output_validation": {
+          "kind": "none",
+          "depth": "none",
+          "result": "not_run",
+          "detail": "",
+          "complete": null
+        }
+      },
+      "integrity": {
+        "requested": false,
+        "applicable": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "scope": "not available",
+        "authenticates_producer": false
+      }
+    },
+    "evidence": {
+      "level": "declaration",
+      "level_meaning": "a producer-controlled declaration was read",
+      "facts": [
+        "verify_password=True; verify_integrity=False",
+        "OfficeFile dispatch failed: ExpatError: not well-formed (invalid token): line 1, column 0",
+        "raw EncryptionInfo version 4.4"
+      ],
+      "not_proven": [
+        "content",
+        "encryption strength",
+        "integrity",
+        "key correctness"
+      ]
+    },
+    "policy": {
+      "class": "unsupported",
+      "description": "library has no key/content path for this declaration",
+      "declared_cipher": null,
+      "declared_key_bits": null,
+      "declared_kdf": {
+        "hash": null,
+        "spin_count": null
+      },
+      "declared_integrity": "none",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "ENCRYPTION_DECLARED_UNPARSED",
+      "state_meaning": "a declaration exists but its metadata cannot be parsed",
+      "reject_reason": "ENCRYPTIONINFO_UNPARSEABLE",
+      "reject_reason_meaning": "EncryptionInfo/FIB/FilePass/UserEditAtom metadata is damaged",
+      "severity": "reject"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "ooxml_extensible",
+    "note": "",
+    "requested_check_mode": {
+      "verify_password": true,
+      "verify_integrity": false
+    },
+    "file": {
+      "name": "ooxml_extensible.docx",
+      "size": 18432,
+      "sha256": null,
+      "ephemeral": true,
+      "container": "ole",
+      "derived_from": {
+        "fixture": "example_password.docx",
+        "sha256": "0605624697328060fdc75ca9929ea20b9d63ebed9387ff1a97aaf9979757234a"
+      }
+    },
+    "format": {
+      "family": "ooxml",
+      "dispatch": "zip + [Content_Types].xml",
+      "declared_method": "extensible",
+      "declaration_source": "EncryptionInfo stream",
+      "declaration_present": true,
+      "parameters": {
+        "version": "3.3"
+      },
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": null,
+      "key": {
+        "attempted": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "verifier_bits": null,
+        "collision_resistant": null,
+        "error": null
+      },
+      "decryption": {
+        "attempted": false,
+        "result": "not_attempted",
+        "exception": null,
+        "output_bytes": 0,
+        "wrote_output_before_error": false,
+        "output_validation": {
+          "kind": "none",
+          "depth": "none",
+          "result": "not_run",
+          "detail": "",
+          "complete": null
+        }
+      },
+      "integrity": {
+        "requested": false,
+        "applicable": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "scope": "not available",
+        "authenticates_producer": false
+      }
+    },
+    "evidence": {
+      "level": "declaration",
+      "level_meaning": "a producer-controlled declaration was read",
+      "facts": [
+        "verify_password=True; verify_integrity=False",
+        "OfficeFile dispatch failed: DecryptionError: Unsupported EncryptionInfo version (Extensible Encryption)",
+        "raw EncryptionInfo version 3.3"
+      ],
+      "not_proven": [
+        "content",
+        "encryption strength",
+        "integrity",
+        "key correctness"
+      ]
+    },
+    "policy": {
+      "class": "unsupported",
+      "description": "library has no key/content path for this declaration",
+      "declared_cipher": null,
+      "declared_key_bits": null,
+      "declared_kdf": {
+        "hash": null,
+        "spin_count": null
+      },
+      "declared_integrity": "none",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "UNSUPPORTED_ENCRYPTION_METHOD",
+      "state_meaning": "the declaration names a method/version this library cannot process",
+      "reject_reason": "UNSUPPORTED_ENCRYPTION_VERSION",
+      "reject_reason_meaning": "declared version is Extensible or unknown",
+      "severity": "reject"
+    }
+  },
+  {
+    "schema_version": "1.0",
+    "case": "ooxml_unknown_version",
+    "note": "",
+    "requested_check_mode": {
+      "verify_password": true,
+      "verify_integrity": false
+    },
+    "file": {
+      "name": "ooxml_unknown_version.docx",
+      "size": 18432,
+      "sha256": null,
+      "ephemeral": true,
+      "container": "ole",
+      "derived_from": {
+        "fixture": "example_password.docx",
+        "sha256": "0605624697328060fdc75ca9929ea20b9d63ebed9387ff1a97aaf9979757234a"
+      }
+    },
+    "format": {
+      "family": "ooxml",
+      "dispatch": "zip + [Content_Types].xml",
+      "declared_method": "unknown",
+      "declaration_source": "EncryptionInfo stream",
+      "declaration_present": true,
+      "parameters": {
+        "version": "9.9"
+      },
+      "declaration_is_forgeable": true
+    },
+    "checks": {
+      "encryption_marker": null,
+      "key": {
+        "attempted": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "verifier_bits": null,
+        "collision_resistant": null,
+        "error": null
+      },
+      "decryption": {
+        "attempted": false,
+        "result": "not_attempted",
+        "exception": null,
+        "output_bytes": 0,
+        "wrote_output_before_error": false,
+        "output_validation": {
+          "kind": "none",
+          "depth": "none",
+          "result": "not_run",
+          "detail": "",
+          "complete": null
+        }
+      },
+      "integrity": {
+        "requested": false,
+        "applicable": false,
+        "mechanism": "none",
+        "result": "not_checked",
+        "scope": "not available",
+        "authenticates_producer": false
+      }
+    },
+    "evidence": {
+      "level": "declaration",
+      "level_meaning": "a producer-controlled declaration was read",
+      "facts": [
+        "verify_password=True; verify_integrity=False",
+        "OfficeFile dispatch failed: DecryptionError: Unsupported EncryptionInfo version (9:9)",
+        "raw EncryptionInfo version 9.9"
+      ],
+      "not_proven": [
+        "content",
+        "encryption strength",
+        "integrity",
+        "key correctness"
+      ]
+    },
+    "policy": {
+      "class": "unsupported",
+      "description": "library has no key/content path for this declaration",
+      "declared_cipher": null,
+      "declared_key_bits": null,
+      "declared_kdf": {
+        "hash": null,
+        "spin_count": null
+      },
+      "declared_integrity": "none",
+      "assessment": "backend policy derived from declared parameters; not an API verdict",
+      "supported_by_api": false
+    },
+    "verdict": {
+      "state": "UNSUPPORTED_ENCRYPTION_METHOD",
+      "state_meaning": "the declaration names a method/version this library cannot process",
+      "reject_reason": "UNSUPPORTED_ENCRYPTION_VERSION",
+      "reject_reason_meaning": "declared version is Extensible or unknown",
+      "severity": "reject"
+    }
+  }
+]
