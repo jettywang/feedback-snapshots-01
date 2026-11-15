@@ -347,7 +347,8 @@ module Dnsruby
                     found = true
                   end
                 }
-              rescue Exception
+              rescue Exception => error
+                raise if ValidationBudget.abort?(error)
               end
               if (!found)
                 #  That didn't work - try recursing from the root
@@ -368,6 +369,7 @@ module Dnsruby
               end
             end
           rescue Exception => e
+            raise if ValidationBudget.abort?(e)
             Dnsruby.log.error{"Can't make sense of nameserver : #{server}, exception : #{e}"}
             raise ArgumentError.new("Can't make sense of nameserver : #{server}, exception : #{e}")
             return nil

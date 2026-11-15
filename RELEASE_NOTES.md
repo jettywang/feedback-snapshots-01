@@ -2,7 +2,7 @@
 
 ## v2.0.0
 
-Dnsruby 2.0 adds SVCB and HTTPS records and support for Ed25519 DNSSEC
+Dnsruby 2.0 adds SVCB and HTTPS records and support for Ed25519 and Ed448 DNSSEC
 signatures. It makes queries, TCP connections, zone transfers and DNSSEC
 validation more reliable. It also bounds caches and validation work, updates
 the root trust anchors, and improves performance when many queries are in
@@ -48,7 +48,7 @@ any DNSSEC or timeout settings your application uses.
   defaults to SHA-256 and rejects new DS records using SHA-1 digests or signing
   algorithms 5 or 7. RSA keys with noncanonical encodings or sizes outside the
   protocol limits are rejected. See [DNSSEC algorithm policy](README.md#dnssec-algorithm-policy).
-  Ed25519 validation requires version 3.0 or later of the `openssl` gem and
+  Ed25519 and Ed448 validation require version 3.0 or later of the `openssl` gem and
   an OpenSSL provider that supports it. Otherwise it follows the same rules
   as other unsupported algorithms.
 * **DNSSEC validation has work and time limits.** The defaults are 64 signature
@@ -58,6 +58,13 @@ any DNSSEC or timeout settings your application uses.
   insecure answer. Up to four workers validate responses at once, with another
   64 responses waiting. Applications with unusual validation workloads can
   [adjust these limits](README.md#dnssec-validation-limits).
+* **Recursive lookups have shared discovery limits.** A complete lookup now
+  defaults to 30 seconds, 128 transmission attempts, 256 discovery work units
+  and eight address-discovery worker threads. Supporting lookups share these
+  limits, and repeated dependencies on the same path are skipped. A shorter
+  Resolver timeout still takes precedence. Applications can configure
+  `Recursor#recursion_limits`; work or transmission exhaustion raises
+  `RecursionLimitError`. See [recursive lookup limits](README.md#recursive-lookup-limits).
 * **Retries, failures and transfers have bounded lifetimes.** For each question,
   RFC 9520 limits attempts to three per server address and transport, including
   protocol retries; `retry_times` values above three are capped. Completed
@@ -148,6 +155,9 @@ inside labels distinct from the dots that separate labels.
   [#179](https://github.com/alexdalitz/dnsruby/issues/179),
   [#184](https://github.com/alexdalitz/dnsruby/issues/184),
   [PR #221](https://github.com/alexdalitz/dnsruby/pull/221).
+* A SingleResolver keeps only its selected server after initialization and
+  later `server=` changes. A Resolver with `retry_times = 0` completes with
+  a timeout immediately instead of leaving an empty retry plan waiting.
 * Zone transfers complete partial writes, check response envelopes and require
   matching opening and closing SOAs. TSIG transfers authenticate the whole
   sequence, permit up to 99 unsigned messages between signatures and reject
@@ -193,6 +203,16 @@ inside labels distinct from the dots that separate labels.
   chain within the same validation budget. An unsigned delegation requires
   authenticated proof: lookup failures cannot become insecure results.
   Signer zones, DNSKEY Zone Key flags and DS owner/class bindings are checked.
+  A key authenticating a DNSKEY RRset must also be present in that set.
+  Missing NSEC or RRSIG bitmap bits do not prove those types absent.
+  NSEC3 records with unsupported flags are ignored as denial proofs while
+  supported records remain usable.
+* Signed Additional records are verified when their keys are available.
+  Unverifiable signed extras are removed without rejecting an independently
+  authenticated answer. Unsigned glue remains available without acquiring
+  authentication metadata from records in another section; unverified extras
+  do not enter the trusted-key cache. Validation and cancellation limits still
+  apply to optional data.
 * Validated answers and cached copies expire according to their original
   receipt time, signatures and chain of trust. Revalidation does not renew
   those lifetimes, and failed or BOGUS validation is never cached as successful.
@@ -211,6 +231,13 @@ inside labels distinct from the dots that separate labels.
 
 * SVCB and HTTPS work in DNS messages and zone files, including relative targets,
   numeric `keyNNNNN` parameters and escaped text. IPv6 hints use RFC 5952 text.
+* CAA accepts extensible alphanumeric tags and empty or binary values, including
+  an empty `issue` value. Wire decoding preserves the value independently of
+  presentation parsing. Private RRSIG algorithm numbers round-trip unchanged.
+  Received ordinary TTLs with their high bit set become zero under RFC 2181;
+  OPT fields and TSIG's zero-TTL rule retain their special handling. Mandatory
+  names require their wire encoding, while valid empty UPDATE markers still
+  round-trip. DS, CDS and DLV equality and hashing agree for digest case variants.
 * Zone-file TTLs and SOA intervals accept combined time suffixes such as
   `1h30m`. Both class-before-TTL and TTL-before-class formats work. Quoted,
   escaped and multiline values preserve their punctuation, Unicode and binary
@@ -228,6 +255,9 @@ inside labels distinct from the dots that separate labels.
   accumulate memory or slow garbage collection on Ruby 3.0–3.2.
   Name compression shares immutable label copies between suffixes, reducing
   allocations while preserving case and escaped label boundaries.
+  RRset grouping uses an index and avoids cloning unrelated records. It
+  preserves section order and TTL normalization, and charges validation work
+  while grouping records and checking duplicates.
 
 
 ## v1.74.0

@@ -16,26 +16,28 @@
 module Dnsruby
   class RR
     # Class for CAA resource records.
-    # RFC 6844
+    # RFC 8659
     class CAA < RR
       ClassValue = nil #:nodoc: all
       TypeValue= Types::CAA #:nodoc: all
 
-      # The property tag for the record (issue|issuewild|issuemail|issuevmc|iodef|contactemail|contactphone)
+      # The property tag. Tags are extensible ASCII letters and digits.
       attr_accessor :property_tag
       # The value for the property_tag
       attr_accessor :property_value
       # The value for the flag
-      attr_writer :flag
+      def flag=(value)
+        @flag = value.to_i
+      end
 
       def from_hash(hash) #:nodoc: all
-        @property_tag = hash[:property_tag]
-        @property_value = hash[:property_value]
-        @flag = hash[:flag]
+        from_data([hash[:flag], hash[:property_tag], hash[:property_value]])
       end
 
       def from_data(data) #:nodoc: all
-        @flag, @property_tag, @property_value = data
+        flag, @property_tag, @property_value = data
+        self.flag = flag
+        validate_fields
       end
 
       def flag
@@ -43,20 +45,31 @@ module Dnsruby
       end
 
       def from_string(input) #:nodoc: all
-        matches = (/(\d+) (issuewild|issuemail|issuevmc|issue|iodef|contactemail|contactphone) "(.+)"$/i).match(input)
-        if matches.nil?
-          raise DecodeError.new("Cannot parse record: #{input[0...1000]}")
-        end
-        @flag = matches[1]
-        @property_tag = matches[2]
-        @property_value = matches[3]
+        # A CAA value is one character-string, with no 255-octet limit.
+        matches = /\A\s*(\d+)\s+([A-Za-z0-9]+)\s+("(?:\\.|[^"\\])*"|(?:\\.|[^\s"\\])+)\s*\z/m.match(input.b)
+        raise DecodeError, "Cannot parse CAA record: #{input[0...1000]}" unless matches
+
+        value = matches[3]
+        value = value[1...-1] if value.start_with?('"')
+        from_data([matches[1], matches[2], decode_value(value)])
       end
 
       def rdata_to_string #:nodoc: all
-        "#{flag} #{@property_tag} \"#{@property_value}\""
+        value = +''.b
+        @property_value.each_byte do |octet|
+          if octet == 34 || octet == 92
+            value << 92 << octet
+          elsif octet < 32 || octet > 126
+            value << format('\\%03d', octet)
+          else
+            value << octet
+          end
+        end
+        "#{flag} #{@property_tag} \"#{value}\""
       end
 
       def encode_rdata(msg, canonical=false) #:nodoc: all
+        validate_fields
         msg.put_pack('C', flag)
         msg.put_string(@property_tag)
         # We don't put a length byte on the final string.
@@ -68,8 +81,42 @@ module Dnsruby
         property_tag = msg.get_string
         # The final string has no length byte - its length is implicit as the remainder of the packet length
         property_value = msg.get_bytes
-        return self.new("#{flag} #{property_tag} \"#{property_value}\"")
+        self.new([flag, property_tag, property_value])
       end
+
+      def validate_fields
+        unless (0..255).cover?(flag) && @property_tag.is_a?(String) &&
+            @property_tag.bytesize.between?(1, 255) && /\A[A-Za-z0-9]+\z/n.match?(@property_tag.b) &&
+            @property_value.is_a?(String)
+          raise DecodeError, 'CAA requires an octet flag, an alphanumeric tag and a string value'
+        end
+      end
+      private :validate_fields
+
+      def decode_value(value)
+        decoded = +''.b
+        index = 0
+        while index < value.bytesize
+          octet = value.getbyte(index)
+          if octet == 92
+            index += 1
+            octet = value.getbyte(index)
+            raise DecodeError, 'Incomplete CAA value escape' unless octet
+            if (48..57).cover?(octet)
+              digits = value.byteslice(index, 3)
+              unless /\A[0-9]{3}\z/.match?(digits) && digits.to_i <= 255
+                raise DecodeError, 'CAA decimal escapes must specify one octet with three digits'
+              end
+              octet = digits.to_i
+              index += 2
+            end
+          end
+          decoded << octet
+          index += 1
+        end
+        decoded
+      end
+      private :decode_value
     end
   end
 end

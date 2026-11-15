@@ -256,7 +256,13 @@ class RR
     name, rrtype, rrclass, ttl, rdlength, data, offset = args
     rdata = data ? data[offset, rdlength] : []
     decoder = MessageDecoder.new(rdata)
-    record = get_class(rrtype, rrclass).decode_rdata(decoder)
+    record_class = get_class(rrtype, rrclass)
+    record = if rdlength == 0 && [Classes::ANY, Classes::NONE].include?(Classes.new(rrclass)) &&
+        record_class <= RR::DomainName
+      record_class.new(Name.new([]))
+    else
+      record_class.decode_rdata(decoder)
+    end
     record.name = Name.create(name)
     record.ttl = ttl
     record.type = rrtype
@@ -319,33 +325,21 @@ class RR
     raise DecodeError.new("#{self.class} is RR.")
   end
 
+  # Metadata and alternate presentations are not part of record identity.
+  def equality_fields #:nodoc:
+    fields = instance_variables - [:@ttl, :@rdata, :@dnsruby_learned_trust,
+      :@dnsruby_authenticated_expiration, :@dnsruby_received_at]
+    fields.delete(:@digest) if is_a?(RR::DS)
+    fields.sort
+  end
+  protected :equality_fields
+
   def ==(other)
     return false unless self.class == other.class
-
-    ivars_to_compare = ->(object) do
-      ivars = object.instance_variables.map { |var| var.to_s }
-      ivars.delete '@ttl' # RFC 2136 section 1.1
-      ivars.delete '@rdata'
-      ivars.delete '@dnsruby_learned_trust' # Validation provenance is not wire data.
-      ivars.delete '@dnsruby_authenticated_expiration'
-      ivars.delete '@dnsruby_received_at'
-      if self.type == Types.DS
-        ivars.delete '@digest'
-      end
-      ivars.sort
+    fields = equality_fields
+    fields == other.equality_fields && fields.all? do |field|
+      instance_variable_get(field) == other.instance_variable_get(field)
     end
-
-    get_instance_var_values = ->(object, ivar_names) do
-      ivar_names.map { |ivar_name| object.instance_variable_get(ivar_name) }
-    end
-
-    self_ivars  = ivars_to_compare.(self)
-    other_ivars = ivars_to_compare.(other)
-    return false unless self_ivars == other_ivars
-
-    self_values  = get_instance_var_values.(self, self_ivars)
-    other_values = get_instance_var_values.(other, other_ivars)
-    self_values == other_values
   end
 
   def eql?(other) #:nodoc:
@@ -353,10 +347,8 @@ class RR
   end
 
   def hash # :nodoc:
-    vars = (self.instance_variables - [:@ttl, :@rdata, :@dnsruby_learned_trust,
-      :@dnsruby_authenticated_expiration, :@dnsruby_received_at]).sort
-    vars.inject(0) do |hash_value, var_name|
-      hash_value ^ self.instance_variable_get(var_name).hash
+    equality_fields.inject(0) do |hash_value, field|
+      hash_value ^ instance_variable_get(field).hash
     end
   end
 

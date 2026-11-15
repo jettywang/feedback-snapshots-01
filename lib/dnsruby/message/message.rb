@@ -579,12 +579,13 @@ module Dnsruby
       begin
         MessageDecoder.new(m) {|msg|
           o.header = Header.new(msg)
+          update = o.header.opcode == OpCode.Update
           o.header.qdcount.times {
             question = msg.get_question
             o.question << question
           }
           o.header.ancount.times {
-            rr = msg.get_rr
+            rr = msg.get_rr(update_section: update ? :prerequisite : false)
             rr.instance_variable_set(:@dnsruby_received_at, received_at)
             if rr.type == Types::TSIG
               raise DecodeError.new('TSIG must be the last record in the additional section')
@@ -592,7 +593,7 @@ module Dnsruby
             o.answer << rr
           }
           o.header.nscount.times {
-            rr = msg.get_rr
+            rr = msg.get_rr(update_section: update ? :update : false)
             rr.instance_variable_set(:@dnsruby_received_at, received_at)
             if rr.type == Types::TSIG
               raise DecodeError.new('TSIG must be the last record in the additional section')
@@ -601,7 +602,7 @@ module Dnsruby
           }
           o.header.arcount.times { |count|
             start = msg.index
-            rr = msg.get_rr
+            rr = msg.get_rr(update_section: false)
             rr.instance_variable_set(:@dnsruby_received_at, received_at)
             if rr.type == Types::TSIG
               if count != o.header.arcount-1

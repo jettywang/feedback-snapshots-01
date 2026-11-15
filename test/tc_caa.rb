@@ -27,6 +27,7 @@ class TestCAA < Minitest::Test
      'foo.com. IN CAA 0 issuewild "ca.example.net"' => [0, 'issuewild', 'ca.example.net'],
      'foo.com. IN CAA 0 issuemail "ca.example.net"' => [0, 'issuemail', 'ca.example.net'],
      'foo.com. IN CAA 0 issuevmc "ca.example.net"' => [0, 'issuevmc', 'ca.example.net'],
+     'foo.com. IN CAA 0 Issue "ca.example.net"' => [0, 'Issue', 'ca.example.net'],
      'foo.com. IN CAA 0 iodef "mailto:security@example.com"' => [0, 'iodef', 'mailto:security@example.com'],
      'foo.com. IN CAA 0 issue "ca.example.net; account=230123"' => [0, 'issue', 'ca.example.net; account=230123']
     }.each do |text, data|
@@ -48,8 +49,7 @@ class TestCAA < Minitest::Test
 
   def test_caa_error
     {
-      'foo.com. IN CAA 0 ca.example.net "issue"' => [0, 'ca.example.net', 'issue'],
-      'foo.com. IN CAA 0 Issue "ca.example.net"' => [0, 'Issue', 'ca.example.net']
+      'foo.com. IN CAA 0 ca.example.net "issue"' => [0, 'ca.example.net', 'issue']
     }.each do |text, data|
       assert_raises DecodeError do
         RR.create(text)

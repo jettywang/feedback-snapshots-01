@@ -93,8 +93,12 @@ module Dnsruby
       # A hash interval proves absence, while equality proves existence. Keep
       # these operations separate: an interval's bitmap describes its owner,
       # never a name merely covered by the interval (RFC 5155 sections 8.3-8.7).
+      def supported_parameters? # :nodoc:
+        @hash_alg == Nsec3HashAlgorithms.SHA_1 && [0, 1].include?(@flags)
+      end
+
       def usable_hash? # :nodoc:
-        @hash_alg == Nsec3HashAlgorithms.SHA_1 && [0, 1].include?(@flags) &&
+        supported_parameters? &&
           @iterations.is_a?(Integer) && @iterations.between?(0, 65_535) &&
           @next_hashed.is_a?(String) && @next_hashed.bytesize == 20 &&
           /\A[0-9a-v]{32}\z/.match?(owner_hash)
@@ -214,11 +218,12 @@ module Dnsruby
 
       OPT_OUT = 1
       def flags=(f)
-        if f == 0 || f == OPT_OUT
-          @flags = f
-        else
-          raise DecodeError.new("Unknown NSEC3 flags field - #{f}")
+        unless f.is_a?(Integer) && f.between?(0, 255)
+          raise DecodeError, "NSEC3 flags must be an octet: #{f}"
         end
+        # Preserve future flags on decode. Validators ignore unsupported
+        # records under RFC 5155 section 8.2 instead of rejecting the message.
+        @flags = f
       end
 
       # If the Opt-Out flag is set, the NSEC3 record covers zero or more

@@ -180,6 +180,46 @@ class DnssecDenialProofsTest < Minitest::Test
     assert(records.any? { |record| record.check_name_in_range('missing.collision.invalid.') })
   end
 
+  def test_nsec_and_its_signature_exist_independently_of_their_bitmap_bits
+    [[], %w[NSEC], %w[RRSIG], %w[NSEC RRSIG]].each do |bits|
+      record = Dnsruby::RR.create("target.collision.invalid. 300 IN NSEC z.collision.invalid. TXT #{bits.join(' ')}")
+      [Dnsruby::Types.NSEC, Dnsruby::Types.RRSIG].each do |type|
+        refute(@verifier.send(:denial_bitmap?, record, type))
+      end
+      assert(@verifier.send(:denial_bitmap?, record, Dnsruby::Types.AAAA))
+    end
+  end
+
+  def test_nsec3_future_flags_do_not_hide_the_supported_denial_chain
+    message = response('target.collision.invalid.', 'AAAA')
+    supported = add_chain(message)
+    add_chain(message, flags: 2, salt: 'abcd')
+    decoded = Dnsruby::Message.decode(message.encode)
+    assert(@verifier.verify(decoded))
+    remaining = decoded.authority.select { |record| record.type == Dnsruby::Types.NSEC3 }
+    assert_equal(supported.length, remaining.length)
+    assert(remaining.all? { |record| record.flags == 0 })
+    assert_equal(decoded.authority.length, decoded.header.nscount)
+  end
+
+  def test_nsec3_mixed_future_flags_keep_the_complete_signed_rrset
+    message = response('target.collision.invalid.', 'AAAA')
+    records = add_chain(message)
+    record = records.find { |rr| rr.owner_hash == hash_name('target.collision.invalid.') }
+    remove_set(message.authority, record.name.to_s, Dnsruby::Types.NSEC3)
+    future = record.clone
+    future.flags = 2
+    mixed = Dnsruby::RRSet.new([record, future])
+    signature = signed(record).sigs.first
+    bytes = @verifier.send(:canonical_rrset_data, mixed, signature, {})
+    der = @private_key.dsa_sign_asn1(OpenSSL::Digest::SHA256.digest(signature.sig_data + bytes))
+    signature.signature = OpenSSL::ASN1.decode(der).value.map { |n| n.value.to_s(2).rjust(32, "\0") }.join
+    mixed.add(signature)
+    mixed.each { |rr| message.add_authority(rr) }
+    assert(@verifier.verify(message))
+    assert_equal([0, 2], message.authority.select { |rr| rr.type == Dnsruby::Types.NSEC3 && rr.name == record.name }.map(&:flags))
+  end
+
   def test_dnskey_message_authenticates_each_rrset_once
     message = Dnsruby::Message.new(@zone, 'DNSKEY')
     signed(@key).each { |record| message.add_answer(record) }

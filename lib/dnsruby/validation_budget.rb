@@ -34,6 +34,13 @@ module Dnsruby
       Thread.current[:dnsruby_validation_budget]
     end
 
+    # Supporting lookup configuration has legacy catch-all fallbacks. None
+    # may convert an enclosing operation's exhaustion into an ordinary failure.
+    def self.abort?(error)
+      error.is_a?(Abort) || error.is_a?(ValidationLimitError) ||
+        error.is_a?(QueryControl::Stopped) || error.is_a?(RecursionLimitError)
+    end
+
     def self.with(budget = nil)
       previous = current
       budget = previous || budget || new

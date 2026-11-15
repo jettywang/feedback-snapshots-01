@@ -79,6 +79,50 @@ class RecursorAddressFallbackTest < Minitest::Test
     end
   end
 
+  def test_one_worker_runs_the_other_family_inline_without_deadlock
+    with_address_lookup(['ns.example.']) do |run, _calls, _recursor|
+      parent_thread = Thread.current
+      family_threads = Queue.new
+      release_worker = Queue.new
+      limits = Dnsruby::Recursor::DEFAULT_RECURSION_LIMITS.merge(max_workers: 1)
+      Dnsruby::Recursor.send(:with_limits, nil, limits) do |budget|
+        result = run.call do |name, type|
+          family_threads << [type, Thread.current]
+          type == 'AAAA' ? release_worker.pop : release_worker.push(true)
+          address_answer(name, type)
+        end
+        assert_equal(['192.0.2.53', '2001:db8::53'], result)
+        threads = drain(family_threads).to_h
+        assert_same(parent_thread, threads['A'])
+        refute_same(parent_thread, threads['AAAA'])
+        assert(budget.reserve_worker, 'Completed discovery must release its worker slot')
+        budget.release_worker
+      end
+    end
+  end
+
+  def test_worker_creation_failure_releases_its_slot
+    with_address_lookup(['ns.example.']) do |run, _calls, _recursor|
+      limits = Dnsruby::Recursor::DEFAULT_RECURSION_LIMITS.merge(max_workers: 1)
+      Dnsruby::Recursor.send(:with_limits, nil, limits) do |budget|
+        Thread.stub(:new, ->(*) { raise ThreadError, 'Worker unavailable' }) do
+          assert_raises(ThreadError) { run.call { |name, type| address_answer(name, type) } }
+        end
+        assert(budget.reserve_worker)
+        budget.release_worker
+      end
+    end
+  end
+
+  def test_recursion_limit_does_not_try_another_nameserver
+    with_address_lookup(%w[first.example. second.example.]) do |run, calls, _recursor|
+      error = Dnsruby::RecursionLimitError.new('Lookup work limit reached')
+      actual = assert_raises(Dnsruby::RecursionLimitError) { run.call { |*| raise error } }
+      assert_same(error, actual)
+      assert_equal(['first.example.'], drain(calls).map(&:first).uniq)
+    end
+  end
+
   private
 
   def address_answer(name, type)

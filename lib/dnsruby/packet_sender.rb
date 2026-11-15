@@ -249,7 +249,7 @@ module Dnsruby
               end
             end
           rescue Exception => e
-            raise if attr.to_s == 'tsig'
+            raise if attr.to_s == 'tsig' || ValidationBudget.abort?(e)
             Dnsruby.log.error { "PacketSender : Argument #{attr}, #{arg[attr]} not valid : #{e}\n" }
           end
         end

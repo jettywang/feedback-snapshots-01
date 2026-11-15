@@ -34,7 +34,7 @@ module Dnsruby
     LearnedTrust = Struct.new(:expiration, :signature_expiration, :transaction, :sources, :operational)
     VALIDATION_ALGORITHMS = [Algorithms.RSASHA1, Algorithms.RSASHA1_NSEC3_SHA1,
       Algorithms.RSASHA256, Algorithms.RSASHA512,
-      Algorithms.ECDSAP256SHA256, Algorithms.ECDSAP384SHA384, Algorithms.ED25519].freeze
+      Algorithms.ECDSAP256SHA256, Algorithms.ECDSAP384SHA384, Algorithms.ED25519, Algorithms.ED448].freeze
     # RFC 9905 retains implementation support for RSA/SHA-1 but requires
     # validating resolvers to treat it as unsupported operationally. Explicit
     # verify() calls keep their existing cryptographic verification behaviour.
@@ -198,6 +198,8 @@ module Dnsruby
         if (!ret)
           raise ResolvError.new("Couldn't get response from Recursor")
         end
+      rescue RecursionLimitError
+        raise
       rescue ResolvError => e
         #         print "ERROR - Couldn't find the DLV key\n"
         TheLog.error("Couldn't find the DLV key\n")
@@ -664,12 +666,13 @@ module Dnsruby
       #  new total set of keys to check the rest of the rrsets.
       #  Return true if we can verify the whole message.
 
+      discard_unsupported_nsec3_proofs(msg)
       sections = msg.section_rrsets
       context = { message: msg, proofs: {}, sections: sections,
-        verified: {}.compare_by_identity }
+        verified: {}.compare_by_identity, discarded_optional: {}.compare_by_identity }
       insecure = trust_operation&.fetch(:insecure_rrsets, {}) || {}
       insecure_set = ->(set) { insecure[[set.name.canonical, set.klass.code, set.type.code]] }
-      sections.each_value do |rrsets|
+      sections.each do |section, rrsets|
         #         print "Checking section : #{section}\n"
         ds_rrsets = rrsets.select { |rrset| rrset.type == Types.DS }
         if ((!ds_rrsets || ds_rrsets.length == 0) && (@verifier_type == VerifierType::DLV))
@@ -677,18 +680,24 @@ module Dnsruby
         end
         ds_rrsets.each {|ds_rrset|
           next if insecure_set.call(ds_rrset)
-          if ((ds_rrset && ds_rrset.rrs.length > 0) && !verify_ds_rrset(ds_rrset, keys, msg, context))
-            raise VerifyError.new("Failed to verify DS RRSet")
-            #             return false
+          if section == 'additional'
+            verify_optional_rrset(ds_rrset, context) do |optional_context|
+              verify_ds_rrset(ds_rrset, keys, msg, optional_context)
+            end
+          elsif ds_rrset.rrs.any? && !verify_ds_rrset(ds_rrset, keys, msg, context)
+            raise VerifyError, 'Failed to verify DS RRSet'
           end
         }
 
         key_rrsets = rrsets.select { |rrset| rrset.type == Types.DNSKEY }
         key_rrsets.each {|key_rrset|
           next if insecure_set.call(key_rrset)
-          if ((key_rrset && key_rrset.rrs.length > 0) && !verify_key_rrset(key_rrset, keys, context))
-            raise VerifyError.new("Failed to verify DNSKEY RRSet")
-            #             return false
+          if section == 'additional'
+            verify_optional_rrset(key_rrset, context) do |optional_context|
+              verify_key_rrset(key_rrset, keys, optional_context)
+            end
+          elsif key_rrset.rrs.any? && !verify_key_rrset(key_rrset, keys, context)
+            raise VerifyError, 'Failed to verify DNSKEY RRSet'
           end
         }
       end
@@ -696,6 +705,7 @@ module Dnsruby
       #  Then, look through all the remaining RRSets, and verify them all (unless not necessary).
       sections.each do |section, rrsets|
         rrsets.each do |rrset|
+          next if context[:discarded_optional].key?(rrset)
           if section != 'additional' && insecure_set.call(rrset)
             context[:insecure] = true
             next
@@ -754,31 +764,15 @@ module Dnsruby
             end
           end
 
-          if (section == "additional")
-            #  check for glue
-            #  if the ownername (in the addtional section) of the glue address is the same or longer as the ownername of the NS record, it is glue
-            if (msg.additional.size > 0)
-              arec = msg.additional.rrsets('A')[0]
-              if (!arec || arec.rrs.length == 0)
-                arec = msg.additional.rrsets('AAAA')[0]
+          if section == 'additional'
+            # Unsigned glue is needed for iterative discovery. Signed optional
+            # data is useful only when it verifies without another lookup; a
+            # failure must not reject an independently authenticated answer.
+            if rrset.sigs.any?
+              verify_optional_rrset(rrset, context) do |optional_context|
+                verify_rrset(rrset, keys, optional_context)
               end
-              ns_rrsets = msg.additional.rrsets('NS')
-              ns_rrsets.each {|ns_rrset|
-                if (ns_rrset.length > 0)
-                  nsname = ns_rrset.rrs()[0].name
-                  if (arec && arec.rrs().length > 0)
-                    aname = arec.rrs()[0].name
-                    if (nsname.subdomain_of?aname)
-                      next
-                    end
-                  end
-                end
-              }
             end
-          end
-          #  If records are in additional, and no RRSIG, that's Ok - just don't use them!
-          if ((section == "additional") && (rrset.sigs.length == 0))
-            #  @TODO@ Make sure that we don't cache these records!
             next
           end
           #  else verify RRSet
@@ -791,9 +785,68 @@ module Dnsruby
         end
       end
       verify_nsecs(msg, context)
+      discard_optional_rrsets(msg, context)
       apply_verified_lifetimes(msg, context)
       return context[:insecure] ? :insecure : true
     end
+
+    # Unsupported NSEC3 parameters do not invalidate another usable proof.
+    # Keep a mixed RRset intact for signature verification; usable_hash? filters
+    # its unsupported records when the proof is evaluated. Explicit NSEC3
+    # answers remain available to callers inspecting these records.
+    def discard_unsupported_nsec3_proofs(message)
+      supported = {}
+      message.authority.each do |record|
+        ValidationBudget.current&.check!(1)
+        next unless record.type == Types.NSEC3
+        identity = [record.name.canonical, record.klass.code]
+        supported[identity] = !!supported[identity] || record.supported_parameters?
+      end
+      return unless supported.value?(false)
+      message.authority.delete_if do |record|
+        ValidationBudget.current&.check!(1)
+        type = record.type == Types.RRSIG ? record.type_covered : record.type
+        type == Types.NSEC3 && supported[[record.name.canonical, record.klass.code]] == false
+      end
+      message.update_counts
+    end
+    private :discard_unsupported_nsec3_proofs
+
+    # Optional verification may contribute authenticated data, but never the
+    # security classification of the required answer. Drop failed signed sets
+    # from the returned message so response caching cannot retain them as part
+    # of a successfully validated response. Resource limits still abort all work.
+    def verify_optional_rrset(rrset, context)
+      optional_context = context.merge(insecure: false)
+      return true if yield(optional_context) && !optional_context[:insecure]
+      discard_optional_rrset(rrset, context)
+      false
+    rescue VerifyError => error
+      raise if error.is_a?(ValidationLimitError)
+      discard_optional_rrset(rrset, context)
+      false
+    end
+
+    def discard_optional_rrset(rrset, context)
+      context[:discarded_optional][rrset] = true
+      context[:verified].delete(rrset)
+    end
+
+    def discard_optional_rrsets(message, context)
+      return if context[:discarded_optional].empty?
+      discarded = context[:discarded_optional].each_key.each_with_object({}) do |rrset, index|
+        ValidationBudget.current&.check!(1)
+        type = rrset.type == Types.RRSIG ? rrset.sigs.first.type_covered : rrset.type
+        index[[rrset.name.canonical, rrset.klass.code, type.code]] = true
+      end
+      message.additional.delete_if do |record|
+        ValidationBudget.current&.check!(1)
+        type = record.type == Types.RRSIG ? record.type_covered : record.type
+        discarded[[record.name.canonical, record.klass.code, type.code]]
+      end
+      message.update_counts
+    end
+    private :verify_optional_rrset, :discard_optional_rrset, :discard_optional_rrsets
 
     # RFC 6672 5.3.1: a synthesized CNAME inherits authentication from the
     # DNAME, provided that the complete label substitution is identical. Only
@@ -945,6 +998,9 @@ module Dnsruby
       # ANY has no data-type bit. NSEC3 can represent an empty nonterminal;
       # an exact NSEC owner necessarily has at least its own NSEC RRset.
       return record.type == Types.NSEC3 && types.empty? if qtype == Types.ANY
+      # A validated NSEC and its covering RRSIG exist regardless of these
+      # bitmap bits (RFC 4035 section 5.4).
+      return false if record.type == Types.NSEC && [Types.NSEC, Types.RRSIG].include?(qtype)
       return false if types.include?(qtype) || types.include?(Types.CNAME)
       return types.include?(Types.NS) && !types.include?(Types.SOA) if referral
       # A parent delegation cannot deny ordinary data in the child zone.
@@ -1075,23 +1131,29 @@ module Dnsruby
     # bounds only after the entire message has passed validation, including its
     # denial proof, so the response cache receives the same lifetimes.
     def apply_verified_lifetimes(msg, context)
-      limits = {}
       now = Time.now.to_i
-      context[:verified].each do |rrset, result|
-        identity = [rrset.name.canonical, rrset.klass.code, rrset.type.code]
-        previous = limits[identity]
-        limits[identity] = [([rrset.ttl] + Array(previous&.first)).min,
-          ([result[:expiration]] + Array(previous&.last)).min]
-      end
-      msg.each_resource do |rr|
-        type = rr.type == Types.RRSIG ? rr.type_covered : rr.type
-        limit = limits[[rr.name.canonical, rr.klass.code, type.code]]
-        next unless limit
-        previous = rr.instance_variable_get(:@dnsruby_authenticated_expiration)
-        deadline = [previous, limit.last].compact.min
-        rr.ttl = [rr.ttl, limit.first, [deadline - now, 0].max].min
-        rr.instance_variable_set(:@dnsruby_authenticated_expiration, deadline)
-        rr.instance_variable_set(:@dnsruby_received_at, now)
+      context[:sections].each do |section, rrsets|
+        limits = {}
+        rrsets.each do |rrset|
+          ValidationBudget.current&.check!(1)
+          result = context[:verified][rrset]
+          next unless result
+          limits[[rrset.name.canonical, rrset.klass.code, rrset.type.code]] =
+            [rrset.ttl, result[:expiration]]
+        end
+        # An unsigned Additional set must not inherit authentication from a
+        # set with the same owner/class/type in another section.
+        msg.public_send(section).each do |rr|
+          ValidationBudget.current&.check!(1)
+          type = rr.type == Types.RRSIG ? rr.type_covered : rr.type
+          limit = limits[[rr.name.canonical, rr.klass.code, type.code]]
+          next unless limit
+          previous = rr.instance_variable_get(:@dnsruby_authenticated_expiration)
+          deadline = [previous, limit.last].compact.min
+          rr.ttl = [rr.ttl, limit.first, [deadline - now, 0].max].min
+          rr.instance_variable_set(:@dnsruby_authenticated_expiration, deadline)
+          rr.instance_variable_set(:@dnsruby_received_at, now)
+        end
       end
     end
     private :terminal_answer, :within_zone?, :denial_bitmap?, :nsec3_denial,
@@ -1309,11 +1371,20 @@ module Dnsruby
         keys = get_keys_to_check(sigrecs) + ds_keys.values.map(&:first)
       end
 
+      key_members = if rrset.type == Types.DNSKEY
+        rrset.rrs.each_with_object({}) do |key, members|
+          ValidationBudget.current&.check!(1)
+          members[KeyCache.key_identity(key)] = true
+        end
+      end
       error = VerifyError.new("Signing key not found")
       canonical_data = {}
       each_matching_key(keys, sigrecs) do |keyrec, sigrec|
         begin
           identity = KeyCache.key_identity(keyrec)
+          if key_members && !key_members.key?(identity)
+            raise VerifyError, 'Signing DNSKEY is absent from the apex DNSKEY RRSet'
+          end
           parent_provenance = if explicit_ds
             ds_keys.key?(identity) ? ds_keys[identity].last : key_provenance(keyrec)
           elsif explicit_keys
@@ -1362,7 +1433,8 @@ module Dnsruby
     def algorithm_supported?(algorithm, operational: false)
       allowed = operational ? OPERATIONAL_ALGORITHMS : VALIDATION_ALGORITHMS
       allowed.include?(algorithm) &&
-        (algorithm != Algorithms.ED25519 || RR::DNSKEY.ed25519_supported?)
+        (algorithm != Algorithms.ED25519 || RR::DNSKEY.ed25519_supported?) &&
+        (algorithm != Algorithms.ED448 || RR::DNSKEY.ed448_supported?)
     end
     private :algorithm_supported?
 
@@ -1396,9 +1468,10 @@ module Dnsruby
         verified = keyrec.public_key.verify(OpenSSL::Digest::SHA256.new, sigrec.signature, sig_data)
       elsif (sigrec.algorithm == Algorithms.RSASHA512)
         verified = keyrec.public_key.verify(OpenSSL::Digest::SHA512.new, sigrec.signature, sig_data)
-      elsif sigrec.algorithm == Algorithms.ED25519
-        unless sigrec.signature.bytesize == 64
-          raise VerifyError, 'Ed25519 signature must contain 64 octets'
+      elsif [Algorithms.ED25519, Algorithms.ED448].include?(sigrec.algorithm)
+        size = sigrec.algorithm == Algorithms.ED25519 ? 64 : 114
+        unless sigrec.signature.bytesize == size
+          raise VerifyError, "#{sigrec.algorithm} signature must contain #{size} octets"
         end
         verified = keyrec.public_key.verify(nil, sigrec.signature, sig_data)
       elsif [Algorithms.ECDSAP256SHA256, Algorithms.ECDSAP384SHA384].include?(sigrec.algorithm)
@@ -1511,7 +1584,7 @@ module Dnsruby
               expiration: proof_context.fetch(:expiration)
             }
           end
-          if proof.type == Types.NSEC3 && proof.rrs.any? { |rr| rr.flags == 1 }
+          if proof.type == Types.NSEC3 && proof.rrs.any? { |rr| rr.usable_hash? && rr.flags == 1 }
             insecure_proof = true
             next
           end
@@ -1621,6 +1694,8 @@ module Dnsruby
         if (!ret)
           raise ResolvError.new("Couldn't get DNSKEY from Recursor")
         end
+      rescue RecursionLimitError
+        raise
       rescue ResolvError => e
         #         print "Error getting zone key from DLV RR for #{name} : #{e}\n"
         TheLog.error("Error getting zone key from DLV RR for #{name} : #{e}")
@@ -1659,6 +1734,8 @@ module Dnsruby
           if (!ret)
             raise ResolvError.new("Couldn't get DLV record from Recursor")
           end
+        rescue RecursionLimitError
+          raise
         rescue ResolvError => e
           #           print "Error getting DLV record for #{name} : #{e}\n"
           TheLog.info("Error getting DLV record for #{name} : #{e}")
@@ -1842,6 +1919,8 @@ module Dnsruby
               # NXDOMAIN is usable only with its authenticated denial response.
               ds_ret = e.response
               raise VerifyError, "Missing DS denial response for #{child}" unless ds_ret
+            rescue RecursionLimitError
+              raise
             rescue ResolvError => e
               raise VerifyError, "Error getting DS record for #{child}: #{e}"
             end
@@ -1910,6 +1989,8 @@ module Dnsruby
           if (!key_ret)
             raise ResolvError.new("Couldn't get info from Recursor")
           end
+        rescue RecursionLimitError
+          raise
         rescue ResolvError => e
           #           print "Error getting DNSKEY for #{child} : #{e}\n"
           TheLog.error("Error getting DNSKEY for #{child} : #{e}")
@@ -2186,6 +2267,7 @@ module Dnsruby
     private :bound_insecure_lifetime
 
     private def validate_internal(msg, query)
+      discard_unsupported_nsec3_proofs(msg)
       if (msg.rrsets('RRSIG').length == 0)
         return validate_no_rrsigs(msg)
       end

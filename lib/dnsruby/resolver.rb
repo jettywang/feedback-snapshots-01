@@ -500,7 +500,7 @@ module Dnsruby
                 send(key.to_s + '=', args[0][key])
               end
             rescue Exception => e
-              raise if key.to_s == 'tsig'
+              raise if key.to_s == 'tsig' || ValidationBudget.abort?(e)
               Dnsruby.log.error{"Argument #{key} not valid : #{e}\n"}
             end
           end
@@ -535,11 +535,11 @@ module Dnsruby
     # can resolve a hostname through this same selector, whose callbacks need
     # @single_res_mutex. Only publishing the finished list takes that mutex.
     def configure_nameservers(replace = false, nameservers = @config.nameserver)
+      new_resolvers = []
+      published = false
       begin
-        threads = []
-        nameservers.each do |ns|
-          threads << Thread.new do
-            PacketSender.new({
+        build_sender = lambda do |ns|
+          PacketSender.new({
                 server:             ns,
                 port:               @port,
                 dnssec:             @dnssec,
@@ -557,10 +557,20 @@ module Dnsruby
                 recurse:            @recurse,
                 udp_size:           @udp_size,
                 ignore_config_resolv_errors: true})
-          end
         end
-
-        new_resolvers = threads.map(&:value).compact
+        if QueryControl.current || SelectThread::TransmissionBudget.current
+          # DNSSEC may discover NS names without glue. Resolve those names in
+          # this thread so inherited deadlines, work and transmission limits
+          # remain shared, without creating another discovery worker pool.
+          nameservers.each do |ns|
+            QueryControl.current&.check!
+            ValidationBudget.current&.check!(1)
+            new_resolvers << build_sender.call(ns)
+          end
+        else
+          threads = nameservers.map { |ns| Thread.new { build_sender.call(ns) } }
+          new_resolvers = threads.map(&:value).compact
+        end
         new_resolvers = new_resolvers.select do |resolver|
           !resolver.nil? && !resolver.server.nil?
         end
@@ -573,13 +583,22 @@ module Dnsruby
           @config.nameserver = nameservers if replace
           (@single_resolvers - complete).compact.each(&:close)
           @single_resolvers = complete
+          published = true
           @configuration_error = nil
           @configured = true
         end
       rescue Exception => error
+        new_resolvers.compact.each(&:close) unless published
         @single_res_mutex.synchronize do
-          @configuration_error = error if @single_resolvers.empty?
-          @configured = true
+          if ValidationBudget.abort?(error)
+            # Exhaustion belongs to the enclosing lookup, not the server
+            # configuration. A later lookup must be able to configure again.
+            @configuration_error = nil
+            @configured = !@single_resolvers.empty?
+          else
+            @configuration_error = error if @single_resolvers.empty?
+            @configured = true
+          end
         end
         raise
       end
@@ -1081,6 +1100,10 @@ module Dnsruby
         no_nameservers = @parent.single_resolvers.empty?
         if no_nameservers && @parent.query_timeout == 0
           query_timeout = TransportClock.now + 1
+        elsif retries.empty? && !no_nameservers
+          # A caller may disable all attempts with retry_times=0. Complete
+          # through the normal timeout path instead of leaving an orphan.
+          query_timeout = TransportClock.now
         end
         query_timeout = [query_timeout, control&.deadline].compact.min
         @timeouts[client_query_id] = [query_timeout, retries, no_nameservers]
@@ -1409,8 +1432,8 @@ module Dnsruby
         increment_resolver_priority(resolver) unless response.cached
         begin_validation(client_query_id, query_id, select_queue)
         #  @TODO@ Does the client want notified at this point?
-      elsif error.kind_of?(EncodeError)
-        Dnsruby.log.debug{'Encode error - sending to client'}
+      elsif error.kind_of?(EncodeError) || error.kind_of?(RecursionLimitError)
+        Dnsruby.log.debug{'Query cannot continue - sending error to client'}
         send_result_and_stop_querying(client_queue, client_query_id, select_queue, response, error)
       else
         #    - if it was any other error, then remove that server from the list for that query

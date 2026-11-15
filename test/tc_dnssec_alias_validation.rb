@@ -109,6 +109,68 @@ class DnssecAliasValidationTest < Minitest::Test
     assert_empty(requested)
   end
 
+  def test_optional_foreign_signed_data_is_removed_without_rejecting_the_answer
+    @verifier.add_trust_anchor(@keys.fetch('left.').first)
+    answer = signed('left. 300 IN MX 10 mail.right.', 'left.')
+    extra = signed('mail.right. 300 IN A 192.0.2.2', 'right.')
+    message = message_with('left.', 'MX', [answer], extra.rrs + extra.sigs)
+    assert(@verifier.verify(message))
+    assert_empty(message.additional)
+    assert_equal(0, message.header.arcount)
+    assert(message.answer.all? { |rr| rr.instance_variable_get(:@dnsruby_authenticated_expiration) })
+    refute(@verifier.get_keys_to_check.any? { |key| key.name == @keys.fetch('right.').first.name })
+  end
+
+  def test_optional_foreign_dnskey_and_ds_learning_is_opportunistic
+    @verifier.add_trust_anchor(@keys.fetch('left.').first)
+    answer = signed('left. 300 IN MX 10 mail.right.', 'left.')
+    key = @keys.fetch('right.').first
+    [signed(key, 'right.'), signed(Dnsruby::RR::DS.from_key(key, 2), 'right.')].each do |extra|
+      message = message_with('left.', 'MX', [answer], extra.rrs + extra.sigs)
+      assert(@verifier.verify(message))
+      assert_empty(message.additional)
+      refute(@verifier.get_keys_to_check.any? { |known| known.name == key.name })
+    end
+  end
+
+  def test_verified_optional_data_is_retained_and_unsigned_glue_stays_unauthenticated
+    %w[left. right.].each { |zone| @verifier.add_trust_anchor(@keys.fetch(zone).first) }
+    extra = signed('mail.right. 300 IN A 192.0.2.2', 'right.')
+    glue = Dnsruby::RR.create('ns.right. 300 IN A 192.0.2.3')
+    message = message_with('left.', 'MX', [signed('left. 300 IN MX 10 mail.right.', 'left.')],
+      extra.rrs + extra.sigs + [glue])
+    assert(@verifier.verify(message))
+    assert_equal(3, message.additional.length)
+    message.additional.each do |record|
+      if record.name == glue.name
+        assert_nil(record.instance_variable_get(:@dnsruby_authenticated_expiration))
+      else
+        refute_nil(record.instance_variable_get(:@dnsruby_authenticated_expiration))
+      end
+    end
+  end
+
+  def test_unsigned_additional_copy_does_not_inherit_answer_authentication
+    @verifier.add_trust_anchor(@keys.fetch('left.').first)
+    answer = signed('mail.left. 300 IN A 192.0.2.2', 'left.')
+    extra = answer.rrs.first.clone
+    message = message_with('mail.left.', 'A', [answer], [extra])
+    assert(@verifier.verify(message))
+    refute_nil(message.answer.first.instance_variable_get(:@dnsruby_authenticated_expiration))
+    assert_nil(message.additional.first.instance_variable_get(:@dnsruby_authenticated_expiration))
+  end
+
+  def test_optional_verification_preserves_the_shared_signature_limit
+    %w[left. right.].each { |zone| @verifier.add_trust_anchor(@keys.fetch(zone).first) }
+    extra = signed('mail.right. 300 IN A 192.0.2.2', 'right.')
+    message = message_with('left.', 'MX', [signed('left. 300 IN MX 10 mail.right.', 'left.')], extra.rrs + extra.sigs)
+    limits = Dnsruby::Dnssec.validation_limits.merge(max_signature_verifications: 1)
+    Dnsruby::Dnssec.stub(:validation_limits, limits) do
+      assert_raises(Dnsruby::ValidationLimitError) { @verifier.verify(message) }
+    end
+    assert_nil(Dnsruby::ValidationBudget.current)
+  end
+
   def test_dname_authenticates_synthesized_cname_in_either_record_order
     @verifier.add_trust_anchor(@keys.fetch('left.').first)
     [false, true].each do |cname_first|

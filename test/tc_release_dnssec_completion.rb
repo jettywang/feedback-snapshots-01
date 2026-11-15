@@ -29,7 +29,7 @@ class ReleaseDnssecCompletionTest < Minitest::Test
   def test_ed25519_verification_and_public_operational_validation
     key, private_key = ed25519_key
     record = Dnsruby::RR.create('www.example.invalid. 300 IN A 192.0.2.1')
-    records = ed25519_signed(record, key, private_key)
+    records = eddsa_signed(record, key, private_key)
     assert_equal('ED25519', key.algorithm.to_s)
     assert_equal(256, key.key_length)
     assert_equal(32, key.key.bytesize)
@@ -73,12 +73,12 @@ class ReleaseDnssecCompletionTest < Minitest::Test
   def test_ed25519_obeys_signature_time_identity_and_budget_checks
     key, private_key = ed25519_key
     record = Dnsruby::RR.create('www.example.invalid. 300 IN A 192.0.2.1')
-    expired = ed25519_signed(record, key, private_key, expiration: @now - 1)
+    expired = eddsa_signed(record, key, private_key, expiration: @now - 1)
     assert_raises(Dnsruby::VerifyError) { @verifier.verify_rrset(expired, key) }
     other_owner = key.clone
     other_owner.name = 'other.invalid.'
-    assert_raises(Dnsruby::VerifyError) { @verifier.verify_rrset(ed25519_signed(record, key, private_key), other_owner) }
-    records = ed25519_signed(record, key, private_key)
+    assert_raises(Dnsruby::VerifyError) { @verifier.verify_rrset(eddsa_signed(record, key, private_key), other_owner) }
+    records = eddsa_signed(record, key, private_key)
     limits = Dnsruby::Dnssec.validation_limits.merge(max_signature_verifications: 0)
     budget = Dnsruby::ValidationBudget.new(limits: limits)
     assert_raises(Dnsruby::ValidationLimitError) do
@@ -92,10 +92,10 @@ class ReleaseDnssecCompletionTest < Minitest::Test
       Dnsruby::RR.create("example.invalid. 300 IN DNSKEY 257 3 15 #{Base64.strict_encode64(key.key.byteslice(0, 31))}")
     end
     record = Dnsruby::RR.create('www.example.invalid. 300 IN A 192.0.2.1')
-    records = ed25519_signed(record, key, private_key)
+    records = eddsa_signed(record, key, private_key)
     records.sigs.first.signature = records.sigs.first.signature.byteslice(0, 63)
     assert_raises(Dnsruby::VerifyError) { @verifier.verify_rrset(records, key) }
-    records = ed25519_signed(record, key, private_key)
+    records = eddsa_signed(record, key, private_key)
     records.sigs.first.signature = private_key.sign(nil, 'different ordinary message')
     assert_raises(Dnsruby::VerifyError) { @verifier.verify_rrset(records, key) }
   end
@@ -103,7 +103,7 @@ class ReleaseDnssecCompletionTest < Minitest::Test
   def test_ed25519_unavailable_provider_uses_unsupported_algorithm_policy
     key, private_key = ed25519_key
     ds = Dnsruby::RR::DS.from_key(key, 2)
-    records = ed25519_signed(Dnsruby::RR.create('www.example.invalid. 300 IN A 192.0.2.1'), key, private_key)
+    records = eddsa_signed(Dnsruby::RR.create('www.example.invalid. 300 IN A 192.0.2.1'), key, private_key)
     assert(@verifier.send(:supported_ds?, ds))
     Dnsruby::RR::DNSKEY.stub(:ed25519_supported?, false) do
       refute(@verifier.send(:supported_ds?, ds))
@@ -124,6 +124,83 @@ class ReleaseDnssecCompletionTest < Minitest::Test
       klass.instance_variable_set(:@ed25519_supported, saved)
     elsif klass.instance_variable_defined?(:@ed25519_supported)
       klass.remove_instance_variable(:@ed25519_supported)
+    end
+  end
+
+  def test_ed448_verification_and_public_operational_validation
+    key, private_key = ed448_key
+    record = Dnsruby::RR.create('www.example.invalid. 300 IN A 192.0.2.1')
+    records = eddsa_signed(record, key, private_key)
+    assert_equal('ED448', key.algorithm.to_s)
+    assert_equal(448, key.key_length)
+    assert_equal(57, key.key.bytesize)
+    assert_equal(114, records.sigs.first.signature.bytesize)
+    assert(@verifier.verify_rrset(records, key))
+    @verifier.add_trust_anchor(key)
+    message = Dnsruby::Message.new(record.name, 'A')
+    records.each { |rr| message.add_answer(rr) }
+    with_verifiers(anchor: @verifier) do
+      Dnsruby::Dnssec.validation_policy = Dnsruby::Dnssec::ValidationPolicy::ALWAYS_LOCAL_ANCHORS_ONLY
+      assert(Dnsruby::Dnssec.validate(message))
+      assert_equal(Dnsruby::Message::SecurityLevel.SECURE, message.security_level)
+    end
+  end
+
+  def test_ed448_matches_published_dnssec_examples
+    skip 'OpenSSL provider does not support Ed448' unless Dnsruby::RR::DNSKEY.ed448_supported?
+    # RFC 8080 section 6.2, corrected by verified erratum 4935:
+    # https://www.rfc-editor.org/rfc/inline-errata/rfc8080.html
+    vectors = [
+      ['3kgROaDjrh0H2iuixWBrc8g2EpBBLCdGzHmn+G2MpTPhpj/OiBVHHSfPodx1FYYUcJKm1MDpJtIA', 9713,
+        '6ccf18d5bc5d7fc2fceb1d59d17321402f2aa8d368048db93dd811f5cb2b19c7',
+        '3cPAHkmlnxcDHMyg7vFC34l0blBhuG1qpwLmjInI8w1CMB29FkEAIJUA0amxWndkmnBZ6SKiwZSAxGILn/NBtOXft0+Gj7FSvOKxE/07+4RQvE581N3Aj/JtIyaiYVdnYtyMWbSNyGEY2213WKsJlwEA'],
+      ['kkreGWoccSDmUBGAe7+zsbG6ZAFQp+syPmYUurBRQc3tDjeMCJcVMRDmgcNLp5HlHAMy12VoISsA', 38353,
+        '645ff078b3568f5852b70cb60e8e696cc77b75bfaaffc118cf79cbda1ba28af4',
+        'E1/oLjSGIbmLny/4fcgM1z4oL6aqo+izT3urCyHyvEp4Sp8Syg1eI+lJ57CSnZqjJP41O/9l4m0AsQ4f7qI1gVnML8vWWiyW2KXhT9kuAICUSxv5OWbf81Rq7Yu60npabODB0QFPb/rkW3kUZmQ0YQUA']
+    ]
+    Time.stub(:now, Time.at(1_439_000_000)) do
+      record = Dnsruby::RR.create('example.com. 3600 IN MX 10 mail.example.com.')
+      vectors.each do |public_key, tag, digest, signature|
+        key = Dnsruby::RR.create("example.com. 3600 IN DNSKEY 257 3 16 #{public_key}")
+        ds = Dnsruby::RR.create("example.com. 3600 IN DS #{tag} 16 2 #{digest}")
+        sig = Dnsruby::RR.create("example.com. 3600 IN RRSIG MX 16 2 3600 1440021600 1438207200 #{tag} example.com. #{signature}")
+        assert_equal(tag, key.key_tag)
+        assert(ds.check_key(key))
+        assert(@verifier.verify_rrset(Dnsruby::RRSet.new([record, sig]), key))
+      end
+    end
+  end
+
+  def test_ed448_wire_sizes_and_unavailable_provider_policy
+    key, private_key = ed448_key
+    assert_raises(ArgumentError) do
+      Dnsruby::RR.create("example.invalid. 300 IN DNSKEY 257 3 16 #{Base64.strict_encode64(key.key.byteslice(0, 56))}")
+    end
+    record = Dnsruby::RR.create('www.example.invalid. 300 IN A 192.0.2.1')
+    records = eddsa_signed(record, key, private_key)
+    records.sigs.first.signature = records.sigs.first.signature.byteslice(0, 113)
+    assert_raises(Dnsruby::VerifyError) { @verifier.verify_rrset(records, key) }
+    ds = Dnsruby::RR::DS.from_key(key, 2)
+    assert(@verifier.send(:supported_ds?, ds))
+    Dnsruby::RR::DNSKEY.stub(:ed448_supported?, false) do
+      refute(@verifier.send(:supported_ds?, ds))
+      assert_raises(Dnsruby::VerifyError) { @verifier.verify_rrset(eddsa_signed(record, key, private_key), key) }
+    end
+  end
+
+  def test_ed448_old_openssl_binding_is_reported_as_unsupported
+    klass = Dnsruby::RR::DNSKEY
+    saved = klass.instance_variable_get(:@ed448_supported)
+    existed = klass.instance_variable_defined?(:@ed448_supported)
+    klass.remove_instance_variable(:@ed448_supported) if existed
+    old_key = Object.new
+    old_key.define_singleton_method(:verify) { |*| raise TypeError, 'no implicit conversion of nil into String' }
+    OpenSSL::PKey.stub(:read, old_key) { refute(klass.ed448_supported?) }
+  ensure
+    if existed
+      klass.instance_variable_set(:@ed448_supported, saved)
+    elsif klass.instance_variable_defined?(:@ed448_supported)
+      klass.remove_instance_variable(:@ed448_supported)
     end
   end
 
@@ -231,6 +308,23 @@ class ReleaseDnssecCompletionTest < Minitest::Test
     [Dnsruby::RR.create("example.invalid. 300 IN DNSKEY 257 3 ED25519 #{Base64.strict_encode64(public_bytes)}"), private_key]
   end
 
+  def ed448_key
+    skip 'OpenSSL provider does not support Ed448' unless Dnsruby::RR::DNSKEY.ed448_supported?
+    # RFC 8032 section 7.4, empty-message vector, imported as RFC 8410 PKCS#8.
+    seed = ['6c82a562cb808d10d632be89c8513ebf' \
+      '6c929f34ddfa8c9f63c9960ef6e348a3' \
+      '528c8a3fcc2f044e39a3fc5b94492f8f' \
+      '032e7549a20098f95b'].pack('H*')
+    der = OpenSSL::ASN1::Sequence.new([
+      OpenSSL::ASN1::Integer.new(0),
+      OpenSSL::ASN1::Sequence.new([OpenSSL::ASN1::ObjectId.new('1.3.101.113')]),
+      OpenSSL::ASN1::OctetString.new(OpenSSL::ASN1::OctetString.new(seed).to_der)
+    ]).to_der
+    private_key = OpenSSL::PKey.read(der)
+    public_bytes = OpenSSL::ASN1.decode(private_key.public_to_der).value.last.value
+    [Dnsruby::RR.create("example.invalid. 300 IN DNSKEY 257 3 ED448 #{Base64.strict_encode64(public_bytes)}"), private_key]
+  end
+
   def signature_for(record, key, expiration: @now + 300)
     Dnsruby::RR.create(name: record.name, type: 'RRSIG', ttl: record.ttl,
       type_covered: record.type, algorithm: key.algorithm, labels: record.name.labels.length,
@@ -242,7 +336,7 @@ class ReleaseDnssecCompletionTest < Minitest::Test
     signature.sig_data + Dnsruby::MessageEncoder.new { |encoder| encoder.put_rr(record, true) }.to_s
   end
 
-  def ed25519_signed(record, key, private_key, **options)
+  def eddsa_signed(record, key, private_key, **options)
     signature = signature_for(record, key, **options)
     signature.signature = private_key.sign(nil, canonical_data(record, signature))
     Dnsruby::RRSet.new([record, signature])

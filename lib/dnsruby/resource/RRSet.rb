@@ -32,7 +32,8 @@ class RRSet
     return @rrs[0, @rrs.length-@num_sigs]
   end
   def privateAdd(r) #:nodoc:
-    if @rrs.include?r
+    budget = ValidationBudget.current if defined?(ValidationBudget)
+    if @rrs.any? { |existing| budget&.check!(1); existing == r }
       return true
     end
     new_pos = @rrs.length - @num_sigs
@@ -59,22 +60,11 @@ class RRSet
       [rin.rrs, rin.sigs].each {|rr| ret = add(rr)}
       return ret
     end
-    #       r = RR.create(r.to_s) # clone the record
-    r = nil
-    if do_clone
-      r = rin.clone
-    else
-      r = rin
-    end
-    if (@rrs.size() == 0) #  && !(r.type == Types.RRSIG))
-      return privateAdd(r)
-    end
-    #  Check the type, klass and ttl are correct
-    first = @rrs[0]
-    if (!r.sameRRset(first))
-      return false
-      #         raise ArgumentError.new("record does not match rrset")
-    end
+    # Reject unrelated records before copying their wire data.
+    first = @rrs.first
+    return false if first && !rin.sameRRset(first)
+    r = do_clone ? rin.clone : rin
+    return privateAdd(r) unless first
 
     if (!(r.type == Types::RRSIG) && (!(first.type == Types::RRSIG)))
       if (r.ttl != first.ttl) # RFC2181, section 5.2

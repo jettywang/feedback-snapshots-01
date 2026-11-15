@@ -22,6 +22,7 @@ Dnsruby.log.level = Logger::FATAL
 TESTS = %w(
     dnskey
     cache_keys
+    caa
     review_cache
     escapedchars
     edns_retry_regressions
@@ -48,6 +49,8 @@ TESTS = %w(
     release_configuration_fixes
     release_auxiliary_fixes
     recursor_address_fallback
+    recursor_limits
+    resolver_configuration_contracts
     release_review_transport
     release_review_transport_native
     review_transport_fixes
@@ -60,6 +63,7 @@ TESTS = %w(
     review_code_mapper
     review_presentation
     record_regressions
+    record_codec_contracts
     selector_wakeup
     message
     misc
@@ -86,6 +90,7 @@ TESTS = %w(
     rr-txt
     rr-unknown
     rrset
+    rrset_grouping
     rrsig
     svcb
     svcb_transport
@@ -128,6 +133,8 @@ if have_open_ssl?
   require_relative 'tc_dnssec_trust_races.rb'
   require_relative 'tc_key_cache_identity.rb'
   require_relative 'tc_dnssec_budget.rb'
+  require_relative 'tc_dnssec_recursion_limits.rb'
+  require_relative 'tc_supporting_lookup_limits.rb'
   require_relative 'tc_dnssec_cache_lifetime.rb'
   require_relative 'tc_dnssec_cache_bounds.rb'
   require_relative 'tc_dnssec_wildcard_proofs.rb'

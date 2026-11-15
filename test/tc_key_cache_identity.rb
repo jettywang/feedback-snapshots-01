@@ -114,6 +114,25 @@ class KeyCacheIdentityTest < Minitest::Test
     assert_raises(Dnsruby::VerifyError) { @verifier.verify_rrset(signed(@record, @a, 0), @b) }
   end
 
+  def test_dnskey_signer_membership_uses_full_identity_and_keeps_candidate_fallback
+    # A valid self-signed keyset and a different ordinary key sharing its tag.
+    records = signed(@a, @a, 0)
+    refute_equal(Dnsruby::KeyCache.key_identity(@a), Dnsruby::KeyCache.key_identity(@b))
+    assert_equal(@a.key_tag, @b.key_tag)
+    attempted = []
+    original = @verifier.method(:verify_rrset_with_key)
+    @verifier.stub(:verify_rrset_with_key, lambda { |set, key, *args|
+      attempted << Dnsruby::KeyCache.key_identity(key)
+      original.call(set, key, *args)
+    }) do
+      assert(@verifier.verify(records, [@b, @a]))
+      assert_equal([Dnsruby::KeyCache.key_identity(@a)], attempted)
+      attempted.clear
+      assert_raises(Dnsruby::VerifyError) { @verifier.verify_rrset(records, @b) }
+      assert_empty(attempted)
+    end
+  end
+
   def test_same_public_key_at_another_owner_cannot_verify
     foreign_key = Dnsruby::RR.create(@a.to_s)
     foreign_key.name = 'unrelated.invalid.'
@@ -216,10 +235,10 @@ class KeyCacheIdentityTest < Minitest::Test
   end
 
   def test_unsupported_signature_candidate_does_not_hide_supported_signature
-    unsupported = Dnsruby::RR.create("collision.invalid. 300 IN DNSKEY 257 3 16 #{Base64.strict_encode64(@a.key)}")
+    unsupported = Dnsruby::RR.create("collision.invalid. 300 IN DNSKEY 257 3 17 #{Base64.strict_encode64(@a.key)}")
     valid = signed(@record, @a, 0).sigs.first
     invalid = valid.clone
-    invalid.algorithm = 16
+    invalid.algorithm = 17
     invalid.key_tag = unsupported.key_tag
     records = Dnsruby::RRSet.new([@record, invalid, valid])
     assert(@verifier.verify_rrset(records, [unsupported, @a]))

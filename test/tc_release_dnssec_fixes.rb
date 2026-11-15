@@ -149,7 +149,7 @@ class ReleaseDnssecFixesTest < Minitest::Test
   end
 
   def test_only_authenticated_all_unsupported_ds_sets_are_insecure
-    [[3, 6], [16]].each do |algorithms|
+    [[3, 6], [17]].each do |algorithms|
       message = Dnsruby::Message.new(@child, 'DS')
       algorithms.each do |algorithm|
         message.add_answer(Dnsruby::RR.create("child.example. 60 IN DS 1 #{algorithm} 2 " + '00' * 32))

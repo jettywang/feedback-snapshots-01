@@ -69,6 +69,22 @@ class Nsec3Test < Minitest::Test
     assert_equal(nsec.to_s, nsec3.to_s)
   end
 
+  def test_future_flags_round_trip_but_are_unusable_for_denial
+    record = Dnsruby::RR.create(INPUT)
+    record.flags = 2
+    message = Dnsruby::Message.new
+    message.add_authority(record)
+    decoded = Dnsruby::Message.decode(message.encode).authority.first
+    assert_equal(2, decoded.flags)
+    assert_equal(record.to_s, decoded.to_s)
+    refute(decoded.supported_parameters?)
+    refute(decoded.usable_hash?)
+    [0, 1].each do |flags|
+      decoded.flags = flags
+      assert(decoded.usable_hash?)
+    end
+  end
+
   def test_calculate_hash
     input = [
 [   "example"       , "0p9mhaveqvm6t7vbl5lop2u3t2rp3tom"],
@@ -113,7 +129,7 @@ class Nsec3Test < Minitest::Test
 #    rescue DecodeError
 #    end
     begin
-      nsec.flags = 2
+      nsec.flags = 256
       fail
     rescue DecodeError
     end

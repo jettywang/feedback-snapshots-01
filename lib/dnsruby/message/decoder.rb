@@ -124,8 +124,6 @@ class MessageDecoder #:nodoc: all
     labels = []
     return_index = nil
     expanded_length = 1 # The terminating root label.
-    # Empty name RDATA is used by the existing ANY/NONE UPDATE codecs.
-    return labels unless has_remaining?
 
     loop do
       raise DecodeError, 'Truncated DNS name' unless has_remaining?
@@ -176,7 +174,7 @@ class MessageDecoder #:nodoc: all
   end
 
   # Gets a resource record.
-  def get_rr
+  def get_rr(update_section: nil)
     name = get_name
     type, klass, ttl = get_unpack('nnN')
     if type == Types::TSIG && (klass != Classes::ANY || ttl != 0)
@@ -186,9 +184,22 @@ class MessageDecoder #:nodoc: all
     typeclass = RR.get_class(type, klass)
     #  @TODO@ Trap decode errors here, and somehow mark the record as bad.
     #  Need some way to represent raw data only
-    record = get_length16 { typeclass.decode_rdata(self) }
+    record = get_length16 do |length|
+      # A missing name is not the root. Empty name-only UPDATE markers have
+      # no name field at all; retain their typed representation explicitly.
+      marker_class = [Classes::ANY, Classes::NONE].include?(klass)
+      marker_context = update_section.nil? || (ttl == 0 &&
+        (update_section == :prerequisite ||
+          (update_section == :update && klass == Classes::ANY)))
+      if length == 0 && marker_class && marker_context && typeclass <= RR::DomainName
+        typeclass.new(Name.new([]))
+      else
+        typeclass.decode_rdata(self)
+      end
+    end
     record.name = name
-    record.ttl = ttl
+    # OPT overloads this field with EDNS flags and the extended RCODE.
+    record.ttl = type != Types::OPT && ttl >= 0x80000000 ? 0 : ttl
     record.type = type
     record.klass = klass
     record.validate_decoded_rdata

@@ -115,6 +115,98 @@ module Dnsruby
   class Recursor
     CACHE_LIMIT = 16_384
     ADDRESS_CACHE_LIMIT = 256
+    DEFAULT_RECURSION_LIMITS = {
+      timeout: 30.0, max_queries: 128, max_steps: 256, max_workers: 8
+    }.freeze
+
+    # TransmissionBudget carries this across address and validation workers.
+    class Budget # :nodoc:
+      attr_reader :limits, :deadline
+
+      def initialize(limits)
+        @limits = limits
+        @deadline = TransportClock.now + limits[:timeout]
+        @steps = @workers = 0
+        @mutex = Mutex.new
+      end
+
+      def step!
+        QueryControl.current&.check!
+        @mutex.synchronize do
+          raise RecursionLimitError, 'Recursive lookup work limit exceeded' if @steps >= @limits[:max_steps]
+          @steps += 1
+        end
+      end
+
+      def reserve_worker
+        @mutex.synchronize do
+          return false if @workers >= @limits[:max_workers]
+          @workers += 1
+          true
+        end
+      end
+
+      def release_worker
+        @mutex.synchronize { @workers -= 1 }
+      end
+
+      def with_dependency(name, type, klass)
+        previous = Thread.current[:dnsruby_recursion_dependencies] || []
+        identity = [Name.create(name).canonical, Types.new(type).code, Classes.new(klass).code]
+        return nil if previous.include?(identity)
+        Thread.current[:dnsruby_recursion_dependencies] = previous + [identity]
+        yield
+      ensure
+        Thread.current[:dnsruby_recursion_dependencies] = previous
+      end
+    end
+    private_constant :Budget
+
+    def recursion_limits
+      @recursion_limits || DEFAULT_RECURSION_LIMITS
+    end
+
+    def recursion_limits=(settings)
+      unless settings.is_a?(Hash) && (settings.keys - DEFAULT_RECURSION_LIMITS.keys).empty?
+        raise ArgumentError, 'Unknown recursive lookup limit'
+      end
+      limits = DEFAULT_RECURSION_LIMITS.merge(settings)
+      limits.each do |key, value|
+        valid = if key == :timeout
+          value.is_a?(Numeric) && value.finite? && value > 0
+        else
+          value.is_a?(Integer) && value > 0
+        end
+        raise ArgumentError, "Invalid recursive lookup limit #{key}" unless valid
+      end
+      @recursion_limits = limits.freeze
+    end
+
+    def self.current_budget
+      SelectThread::TransmissionBudget.current&.context(:recursion) { nil }
+    end
+    private_class_method :current_budget
+
+    def self.with_limits(resolver, limits = DEFAULT_RECURSION_LIMITS)
+      parent = QueryControl.current
+      parent&.check!
+      transmissions = SelectThread::TransmissionBudget.current || SelectThread::TransmissionBudget.new
+      budget = transmissions.context(:recursion) { Budget.new(limits) }
+      transmissions.limit_total!(budget.limits[:max_queries], RecursionLimitError)
+      timeout = resolver.query_timeout if resolver.respond_to?(:query_timeout)
+      deadline = budget.deadline
+      deadline = [deadline, TransportClock.now + timeout].min if timeout && timeout > 0
+      control = QueryControl.new(deadline: deadline, parent: parent)
+      SelectThread::TransmissionBudget.with(transmissions) do
+        QueryControl.with(control) { yield budget }
+      end
+    rescue QueryControl::DeadlineExceeded
+      parent&.check!
+      raise ResolvTimeout, 'Recursive query timed out'
+    ensure
+      control&.cancel
+    end
+    private_class_method :with_limits
 
     class AddressCache # :nodoc: all
       #  Like an array, but stores the expiration of each record.
@@ -214,7 +306,7 @@ module Dnsruby
     #   ftp://ftp.internic.net/domain/named.root
     # 
     def hints=(hints)
-      Recursor.set_hints(hints, @resolver)
+      Recursor.send(:with_limits, @resolver, recursion_limits) { Recursor.set_hints(hints, @resolver) }
     end
     def self.with_hints_configuration
       # Bootstrap can wait on DNS. Keep it outside the cache mutex, and allow
@@ -271,7 +363,9 @@ module Dnsruby
     private_class_method :hints_ready?
 
     def self.set_hints(hints, resolver)
-      with_hints_configuration { configure_hints(hints, resolver) }
+      with_limits(resolver) do
+        with_hints_configuration { configure_hints(hints, resolver) }
+      end
     end
 
     def self.configure_hints(hints, resolver)
@@ -282,6 +376,8 @@ module Dnsruby
       end
       resolver.nameservers = hints if hints && !hints.empty?
       resolver.recurse = true
+      budget = current_budget
+      budget&.step!
       packet=resolver.query_no_validation_or_recursion(".", "NS", "IN")
       hints = Hash.new
       if (packet)
@@ -298,41 +394,34 @@ module Dnsruby
           end
           if ((packet.additional.length == 0) ||
                  ((packet.additional.length == 1) && (packet.additional()[0].type == Types.OPT)))
-            #  Some resolvers (e.g. 8.8.8.8) do not send an additional section -
-            #  need to make explicit queries for these :(
-            #  Probably best to limit the number of outstanding queries - extremely bursty behaviour otherwise
-            #  What happens if we select only name
+            # Resolve missing root addresses in bounded batches. All of the
+            # queries keep the bootstrap's deadline and transmission budget.
             control = QueryControl.current
             q = control ? QueryControl::Queue.new : Queue.new
-            query_ids = []
-            begin
-              hints.keys.each {|server|
-                #  Query for the server address and add it to hints.
-                ['A', 'AAAA'].each {|type|
+            batch_size = budget ? budget.limits[:max_workers] : DEFAULT_RECURSION_LIMITS[:max_workers]
+            hints.keys.product(['A', 'AAAA']).each_slice(batch_size) do |batch|
+              query_ids = []
+              begin
+                batch.each do |server, type|
+                  budget&.step!
                   msg = Message.new
                   msg.do_caching = @do_caching
                   msg.header.rd = false
                   msg.do_validation = false
                   msg.add_question(server, type, 'IN')
-                  if (@dnssec)
-                    msg.header.cd = true # We do our own validation by default
-                  end
+                  msg.header.cd = true if @dnssec
                   control&.check!
                   query_ids << resolver.send_async(msg, q)
-                }
-              }
-              (hints.length * 2).times {
-                _id, result, _error = control ? control.pop(q) : q.pop
-                if (result)
-                  result.answer.each {|rr|
-                    TheLog.debug(";; NS address: " + rr.inspect+"\n")
-                    add_to_hints(hints, rr)
-                  }
                 end
-              }
-            ensure
-              if control && (engine = resolver.instance_variable_get(:@resolver_ruby))
-                query_ids.each { |id| engine.cancel_query(id, q) }
+                query_ids.length.times do
+                  _id, result, error = control ? control.pop(q) : q.pop
+                  raise error if error.is_a?(RecursionLimitError)
+                  result&.answer&.each { |rr| add_to_hints(hints, rr) }
+                end
+              ensure
+                if control && (engine = resolver.instance_variable_get(:@resolver_ruby))
+                  query_ids.each { |id| engine.cancel_query(id, q) }
+                end
               end
             end
           else
@@ -472,20 +561,8 @@ module Dnsruby
     # The Recursor maintains a cache of known nameservers.
     # DNSSEC validation is performed unless true is passed as the fourth parameter.
     def query(name, type=Types.A, klass=Classes.IN, no_validation = false)
-      parent = QueryControl.current
-      timeout = @resolver.query_timeout if @resolver.respond_to?(:query_timeout)
-      return query_internal(name, type, klass, no_validation) unless timeout && timeout > 0
-
-      control = QueryControl.new(deadline: TransportClock.now + timeout, parent: parent)
-      begin
-        QueryControl.with(control) { query_internal(name, type, klass, no_validation) }
-      rescue QueryControl::DeadlineExceeded
-        # Inherited cancellation/deadlines retain their original meaning for
-        # DNSSEC discovery. Only this Recursor's own timeout becomes public.
-        parent&.check!
-        raise ResolvTimeout, 'Recursive query timed out'
-      ensure
-        control.cancel
+      Recursor.send(:with_limits, @resolver, recursion_limits) do
+        query_internal(name, type, klass, no_validation)
       end
     end
 
@@ -569,7 +646,7 @@ module Dnsruby
       hints = @@mutex.synchronize do
         @@hints.map { |name, addresses| [name, addresses.values.map(&:to_s).sort] }.sort_by(&:first)
       end
-      [no_validation, @dnssec, @ipv6_ok, hints, @resolver.object_id, hop_settings,
+      [no_validation, @dnssec, @ipv6_ok, hints, @resolver.object_id, hop_settings, recursion_limits,
         @resolver.single_resolvers.map { |sender| [sender.server.to_s.dup, sender.port] }.sort,
         Cache.validation_scope]
     end
@@ -650,6 +727,7 @@ module Dnsruby
 
     def _dorecursion(name, type, klass, known_zone, known_authorities, depth, no_validation) # :nodoc:
       QueryControl.current&.check!
+      Recursor.send(:current_budget)&.step!
 
       if ( depth > 255 )
         TheLog.debug(";; _dorecursion() Recursion too deep, aborting...\n")
@@ -713,33 +791,58 @@ module Dnsruby
           hints_generation = Thread.current[:dnsruby_recursor_generation]
           hints = @@mutex.synchronize { @@hints.dup }
           workers = []
+          budget = Recursor.send(:current_budget)
+          dependencies = Thread.current[:dnsruby_recursion_dependencies]
           results = QueryControl::Queue.new
           ans = []
           begin
-            (@ipv6_ok ? ['AAAA', 'A'] : ['A']).each do |address_type|
-              workers << Thread.new do
-                Thread.current.report_on_exception = false
-                Thread.current[:dnsruby_recursor_generation] = hints_generation
+            address_types = @ipv6_ok ? ['AAAA', 'A'] : ['A']
+            address_types.each do |address_type|
+              lookup = lambda do
+                previous_dependencies = Thread.current[:dnsruby_recursion_dependencies]
+                Thread.current[:dnsruby_recursion_dependencies] = dependencies
                 begin
                   answer = SelectThread::TransmissionBudget.with(transmission_budget) do
                     QueryControl.with(control) do
-                      _dorecursion(ns_rec, address_type, klass, '.', hints.dup,
-                        depth + 1, no_validation)
+                      recurse = -> { _dorecursion(ns_rec, address_type, klass, '.', hints.dup,
+                        depth + 1, no_validation) }
+                      budget ? budget.with_dependency(ns_rec, address_type, klass, &recurse) : recurse.call
                     end
                   end
                   results << [answer, nil]
                 rescue StandardError => error
                   results << [nil, error]
+                ensure
+                  Thread.current[:dnsruby_recursion_dependencies] = previous_dependencies
                 end
               end
+              reserved = !budget || budget.reserve_worker
+              if reserved
+                begin
+                  workers << Thread.new(lookup) do |operation|
+                    Thread.current.report_on_exception = false
+                    Thread.current[:dnsruby_recursor_generation] = hints_generation
+                    begin
+                      operation.call
+                    ensure
+                      budget&.release_worker
+                    end
+                  end
+                rescue Exception
+                  budget&.release_worker
+                  raise
+                end
+              else
+                lookup.call
+              end
             end
-            workers.length.times do
+            address_types.length.times do
               answer, error = control.pop(results)
               if error
                 # A failed family or nameserver must not hide a usable
                 # alternative. Budget failures and cancellation still stop
                 # the entire operation, as do unexpected programming errors.
-                raise error if error.is_a?(VerifyError)
+                raise error if error.is_a?(VerifyError) || error.is_a?(RecursionLimitError)
                 case error
                 when ResolvError, ResolvTimeout, IOError, SystemCallError
                   TheLog.debug(";; _dorecursion() Address lookup failed: #{error}")
@@ -823,6 +926,7 @@ module Dnsruby
       nameservers = []
       ns.each do |nss|
         nss.each {|n|
+          Recursor.send(:current_budget)&.step!
           nameservers.push(n.to_s)
         }
       end

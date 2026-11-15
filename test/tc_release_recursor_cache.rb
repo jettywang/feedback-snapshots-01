@@ -91,6 +91,25 @@ class ReleaseRecursorCacheTest < Minitest::Test
     resolver&.close
   end
 
+  def test_increasing_recursion_limits_does_not_reuse_a_smaller_limits_failure
+    resolver = Dnsruby::Resolver.new(nameserver: ['192.0.2.53'])
+    recursor = @klass.new(resolver)
+    count = 0
+    recursor.define_singleton_method(:_dorecursion) do |*_args|
+      count += 1
+      2.times { Dnsruby::Recursor.send(:current_budget).step! }
+      nil
+    end
+    recursor.recursion_limits = {max_steps: 1}
+    2.times { assert_raises(Dnsruby::RecursionLimitError) { recursor.query('example.', 'A', 'IN', true) } }
+    assert_equal(2, count, 'Shared recursion budget exhaustion must not cache a question failure')
+    recursor.recursion_limits = {max_steps: 2}
+    assert_nil(recursor.query('example.', 'A', 'IN', true))
+    assert_equal(3, count)
+  ensure
+    resolver&.close
+  end
+
   def test_cached_completion_honors_cancellation_and_deadlines
     resolver = Dnsruby::Resolver.new(nameserver: ['192.0.2.53'])
     recursor = @klass.new(resolver)

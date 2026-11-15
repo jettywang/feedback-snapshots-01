@@ -180,11 +180,11 @@ configuring TSIG to see it. The default log level is FATAL.
 ### DNSSEC algorithm policy
 
 Dnsruby validates signatures made with RSA/SHA-256 (8), RSA/SHA-512 (10),
-ECDSA P-256 (13), ECDSA P-384 (14), and Ed25519 (15). Ed25519 requires version
+ECDSA P-256 (13), ECDSA P-384 (14), Ed25519 (15), and Ed448 (16). Ed25519 and Ed448 require version
 3.0 or later of the `openssl` gem and an OpenSSL provider that supports it
 (normally OpenSSL 1.1.1 or later). On older Ruby releases, including Ruby 3.0,
-you may need to install a newer compatible `openssl` gem. If Ed25519 is
-unavailable, Dnsruby treats it as an unsupported algorithm.
+you may need to install a newer compatible `openssl` gem. An unavailable
+algorithm is treated as unsupported.
 
 Resolver validation treats RSA/SHA-1 signing algorithms 5 and 7 as unsupported,
 as required by [RFC 9905](https://www.rfc-editor.org/rfc/rfc9905.html#section-2).
@@ -270,6 +270,38 @@ to the configured peer; they are not passed to arbitrary authoritative servers.
 Learned DNSKEY and DS records also have size limits. Configured trust anchors
 are kept until you remove them or their requested expiration time arrives;
 this applies to both DNSKEY and DS anchors.
+
+### Recursive lookup limits
+
+Each `Recursor` lookup has a 30-second deadline, including root bootstrap,
+nameserver address discovery and DNSSEC lookups. A shorter Resolver
+`query_timeout` or inherited deadline takes precedence. The recursive deadline
+also applies when the Resolver's `query_timeout` is zero.
+
+The lookup shares limits of 128 transmission attempts and 256 discovery work
+units across its supporting queries. Work units count recursive steps and
+nameserver candidates. At most eight extra threads discover nameserver
+addresses; further discovery runs within an existing thread. Root address
+queries run in batches of at most eight. Repeated address dependencies on the
+same discovery path are skipped.
+
+Set these limits before starting queries when your workload needs more time
+or discovery work:
+
+```ruby
+recursor.recursion_limits = {
+  timeout: 60.0,
+  max_queries: 256,
+  max_steps: 512,
+  max_workers: 8
+}
+```
+
+Omitted settings use their defaults. The timeout must be positive and finite;
+other limits must be positive integers. Exhausted work or transmission limits
+raise `Dnsruby::RecursionLimitError`, a subclass of `Dnsruby::ResolvError`, and
+are not cached as failures of the individual question. An expired recursive
+deadline raises `Dnsruby::ResolvTimeout`.
 
 ### Zone transfer deadlines
 

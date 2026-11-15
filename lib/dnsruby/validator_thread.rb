@@ -130,7 +130,9 @@ module Dnsruby
     rescue StandardError => error
       # Resolver observers ignore late completions; direct PacketSender callers
       # still need a terminal error after cancellation or their sender closing.
-      error = VerifyError.new("DNSSEC validation failed: #{error.message}") unless error.is_a?(VerifyError)
+      unless error.is_a?(VerifyError) || error.is_a?(RecursionLimitError)
+        error = VerifyError.new("DNSSEC validation failed: #{error.message}")
+      end
       finish_error(error)
     ensure
       unregister

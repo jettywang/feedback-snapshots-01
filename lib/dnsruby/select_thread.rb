@@ -227,7 +227,21 @@ module Dnsruby
 
       def initialize
         @counts = {}
+        @contexts = {}
+        @total = 0
         @mutex = Mutex.new
+      end
+
+      # Supporting queries and validator workers already share this object.
+      def context(key)
+        @mutex.synchronize { @contexts[key] ||= yield }
+      end
+
+      def limit_total!(maximum, error_class)
+        @mutex.synchronize do
+          @maximum = [@maximum, maximum].compact.min
+          @limit_error_class = error_class
+        end
       end
 
       def admit(server, port, tcp, question = nil)
@@ -236,6 +250,10 @@ module Dnsruby
         @mutex.synchronize do
           count = @counts[key] || 0
           return false if count >= 3
+          if @maximum && @total >= @maximum
+            raise @limit_error_class, 'Recursive query transmission limit exceeded'
+          end
+          @total += 1
           @counts[key] = count + 1
           true
         end

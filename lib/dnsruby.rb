@@ -158,6 +158,10 @@ module Dnsruby
     attr_accessor :response
   end
 
+  # A recursive lookup exceeded its aggregate work or query limit.
+  class RecursionLimitError < ResolvError
+  end
+
   # A timeout error raised while querying for a resource
   class ResolvTimeout < Timeout::Error
   end

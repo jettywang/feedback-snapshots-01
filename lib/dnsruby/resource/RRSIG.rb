@@ -240,7 +240,7 @@ module Dnsruby
 
       def encode_rdata(msg, canonical=false) #:nodoc: all
         #  2 octets, then 2 sets of 1 octet
-        msg.put_pack('ncc', @type_covered.to_i, @algorithm.to_i, @labels)
+        msg.put_pack('nCC', @type_covered.to_i, @algorithm.to_i, @labels)
         msg.put_pack("NNN", @original_ttl, @expiration, @inception)
         msg.put_pack("n", @key_tag)
         msg.put_name(@signers_name, canonical, false)
@@ -248,7 +248,7 @@ module Dnsruby
       end
 
       def self.decode_rdata(msg) #:nodoc: all
-        type_covered, algorithm, labels = msg.get_unpack('ncc')
+        type_covered, algorithm, labels = msg.get_unpack('nCC')
         original_ttl, expiration, inception = msg.get_unpack('NNN')
         key_tag, = msg.get_unpack('n')
         signers_name = msg.get_name
@@ -263,7 +263,7 @@ module Dnsruby
         # with the Signer's Name field in canonical form and
         # the Signature field excluded;
         data = MessageEncoder.new { |msg|
-          msg.put_pack('ncc', @type_covered.to_i, @algorithm.to_i, @labels)
+          msg.put_pack('nCC', @type_covered.to_i, @algorithm.to_i, @labels)
           msg.put_pack("NNN", @original_ttl, @expiration, @inception)
           msg.put_pack("n", @key_tag)
           msg.put_name(@signers_name, true)

@@ -110,8 +110,8 @@ module Dnsruby
           else
             begin
               send(attr.to_s+"=", arg[attr])
-            rescue Exception
-              raise if attr.to_s == 'tsig'
+            rescue Exception => error
+              raise if attr.to_s == 'tsig' || ValidationBudget.abort?(error)
               Dnsruby.log.error{"Argument #{attr} not valid\n"}
             end
           end
@@ -127,6 +127,9 @@ module Dnsruby
           :recurse=>@recurse, :udp_size=>@udp_size})
 
       @single_resolvers = [isr]
+      @server = isr.server
+      @config.nameserver = [@server]
+      @configured = true
 
       #       ResolverRegister::register_single_resolver(self)
     end
@@ -135,8 +138,8 @@ module Dnsruby
       if (!@configured)
         @config.get_ready
       end
-      @server = Config.resolve_server(s).to_s
-      isr = PacketSender.new({:server=>@server, :port=>@port, :dnssec=>@dnssec,
+      server = Config.resolve_server(s).to_s
+      isr = PacketSender.new({:server=>server, :port=>@port, :dnssec=>@dnssec,
           :use_tcp=>@use_tcp, :no_tcp=>@no_tcp, :packet_timeout=>@packet_timeout,
           :tcp_pipelining=>@tcp_pipelining, :tcp_pipelining_max_queries=>@tcp_pipelining_max_queries,
           :tcp_idle_timeout=>@tcp_idle_timeout,
@@ -144,7 +147,10 @@ module Dnsruby
           :src_address=>@src_address, :src_address6=>@src_address6, :src_port=>@src_port,
           :recurse=>@recurse, :udp_size=>@udp_size})
 
-      @single_res_mutex.synchronize {
+      single_res_mutex.synchronize {
+        @config.nameserver = [server]
+        @server = server
+        @configured = true
         @single_resolvers.compact.each(&:close)
         @single_resolvers = [isr]
       }

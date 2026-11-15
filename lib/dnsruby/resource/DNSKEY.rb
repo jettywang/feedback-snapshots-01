@@ -317,6 +317,8 @@ module Dnsruby
             @public_key = ec_key(Algorithms.ECDSAP256SHA256 == @algorithm ? 'prime256v1' : 'secp384r1')
           elsif @algorithm == Algorithms.ED25519 && DNSKEY.ed25519_supported?
             @public_key = ed25519_key
+          elsif @algorithm == Algorithms.ED448 && DNSKEY.ed448_supported?
+            @public_key = ed448_key
           end
         end
         #  @TODO@ Support other key encodings!
@@ -353,6 +355,45 @@ module Dnsruby
         end
         @key_length = 256
         OpenSSL::PKey.read(DNSKEY.send(:ed25519_subject_public_key, @key))
+      end
+
+      def self.ed448_supported? #:nodoc:
+        return @ed448_supported if defined?(@ed448_supported)
+        return false unless defined?(OpenSSL::PKey)
+        # RFC 8032 section 7.4, the empty-message test vector.
+        public_bytes = ['5fd7449b59b461fd2ce787ec616ad46a' \
+          '1da1342485a70e1f8a0ea75d80e96778' \
+          'edf124769b46c7061bd6783df1e50f6c' \
+          'd1fa1abeafe8256180'].pack('H*')
+        signature = ['533a37f6bbe457251f023c0d88f976ae' \
+          '2dfb504a843e34d2074fd823d41a591f' \
+          '2b233f034f628281f2fd7a22ddd47d78' \
+          '28c59bd0a21bfd3980ff0d2028d4b18a' \
+          '9df63e006c5d1c2d345b925d8dc00b41' \
+          '04852db99ac5c7cdda8530a113a0f4db' \
+          'b61149f05a7363268c71d95808ff2e65' \
+          '2600'].pack('H*')
+        key = OpenSSL::PKey.read(ed448_subject_public_key(public_bytes))
+        @ed448_supported = key.verify(nil, signature, ''.b)
+      rescue OpenSSL::OpenSSLError, NotImplementedError, TypeError, ArgumentError
+        @ed448_supported = false
+      end
+
+      def self.ed448_subject_public_key(bytes) #:nodoc:
+        # RFC 8410: Ed448, like Ed25519, has no algorithm parameters.
+        OpenSSL::ASN1::Sequence.new([
+          OpenSSL::ASN1::Sequence.new([OpenSSL::ASN1::ObjectId.new('1.3.101.113')]),
+          OpenSSL::ASN1::BitString.new(bytes)
+        ]).to_der
+      end
+      private_class_method :ed448_subject_public_key
+
+      def ed448_key
+        unless @key.bytesize == 57
+          raise OpenSSL::PKey::PKeyError, 'Ed448 DNSKEY must contain 57 octets'
+        end
+        @key_length = 448
+        OpenSSL::PKey.read(DNSKEY.send(:ed448_subject_public_key, @key))
       end
 
       def rsa_key

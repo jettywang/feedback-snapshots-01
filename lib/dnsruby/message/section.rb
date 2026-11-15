@@ -30,38 +30,21 @@ class Section < Array
     if type && !(Types === type)
       type = Types.new(type)
     end
-    ret = []
+    groups = {}
+    budget = ValidationBudget.current if defined?(ValidationBudget)
     each do |rr|
-      next if (!include_opt && (rr.type == Types::OPT))
-      #           if (type)
-      #             next if ((rr.type == Types.RRSIG) && (type != Types.RRSIG) && (rr.type_covered != type))
-      #             next if (rr.type != type)
-      #           end
-      if (type)
-        #  if this is an rrsig type, then :
-        #     only include it if the type_covered is the type requested,
-        #     OR if the type requested is an RRSIG
-        if rr.type == Types::RRSIG
-          if (rr.type_covered == type) || (type == Types::RRSIG)
-          else
-            next
-          end
-          #               next if ((rr.type_covered != type) || (type != Types.RRSIG))
-        elsif rr.type != type
-          next
-        end
-      end
+      budget&.check!(1)
+      next if !include_opt && rr.type == Types::OPT
+      covered_type = rr.type == Types::RRSIG ? rr.type_covered : rr.type
+      next if type && rr.type != type && covered_type != type
 
-      found_rrset = false
-      ret.each do |rrset|
-        found_rrset = rrset.add(rr)
-        break if found_rrset
-      end
-      unless found_rrset
-        ret.push(RRSet.new(rr))
-      end
+      # Hash insertion order preserves the section's first occurrence of each
+      # set. A signature joins the set it covers even when it appears first.
+      key = [rr.name.canonical, rr.klass.code, covered_type.code]
+      set = groups[key] ||= RRSet.new
+      set.add(rr)
     end
-    ret
+    groups.values
   end
 
   def ==(other)
