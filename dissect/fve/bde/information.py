@@ -18,6 +18,7 @@ from dissect.fve.bde.c_bde import (
     FVE_KEY_PROTECTOR,
     FVE_KEY_TYPE,
     FVE_STATE,
+    VMK_KEY_SIZE,
     c_bde,
 )
 from dissect.fve.bde.c_tpm import c_tpm
@@ -71,9 +72,27 @@ class Information:
         return self._valid_checksum
 
     def check_integrity(self, key: KeyDatum | bytes) -> bool:
-        """Check the integrity of this Information block."""
-        if self.validation.integrity_check:
-            datum = self.validation.integrity_check.unbox(key)
+        """Check the integrity of this Information block.
+
+        If the Information block has an encrypted integrity check, it must unseal to a 32 byte ``HASH_256`` key
+        datum with the ``PROPERTY`` role and ``KEY`` type that contains the SHA256 of the Information buffer.
+        Otherwise, fall back to the CRC32 validation.
+        """
+        integrity_check = self.validation.integrity_check
+        if isinstance(integrity_check, AesCcmEncryptedDatum):
+            try:
+                datum = integrity_check.unbox(key)
+            except ValueError:
+                return False
+
+            if not isinstance(datum, KeyDatum):
+                return False
+
+            try:
+                datum.validate(FVE_KEY_TYPE.HASH_256, VMK_KEY_SIZE)
+            except ValueError:
+                return False
+
             return hashlib.sha256(self._buf).digest() == datum.data
         return self.is_valid()
 
@@ -83,6 +102,15 @@ class Information:
         if self.version >= 2:
             stored_size <<= 4
         return stored_size
+
+    @property
+    def has_integrity_check(self) -> bool:
+        """Return whether this Information block has an encrypted integrity check.
+
+        The encrypted integrity check authenticates the Information block with the VMK, unlike the plain CRC32
+        validation. Older versions (such as Vista) do not have one.
+        """
+        return isinstance(self.validation.integrity_check, AesCcmEncryptedDatum)
 
     @property
     def version(self) -> int:
@@ -309,6 +337,15 @@ class Datum:
     def data_size(self) -> int:
         return self.size - self.MINIMAL_SIZE
 
+    @property
+    def is_complete(self) -> bool:
+        """Return whether this datum's declared size matches its available data.
+
+        A datum is read from a dataset by its declared size, so a truncated datum at the end of a dataset silently
+        reads short. Any datum that declares more bytes than it contains is rejected when it is used as key material.
+        """
+        return len(self._data) == self.data_size
+
     @cached_property
     def properties(self) -> list[Datum]:
         """Return a list of property datum if this datum is complex."""
@@ -397,6 +434,39 @@ class KeyDatum(Datum):
     def data(self) -> bytes:
         return self._data[len(KeyDatum.__struct__) :]
 
+    def validate(self, key_type: FVE_KEY_TYPE | None = None, key_size: int | None = None) -> None:
+        """Validate the role, type, key type and key material size of this key datum.
+
+        A key datum that unseals successfully and has a plausible length is not necessarily usable at the
+        position it was found in. Unsealed keys always have the ``PROPERTY`` role and ``KEY`` type, and the
+        key type and material size must match the algorithm of the key that is being imported.
+
+        Args:
+            key_type: The expected key type.
+            key_size: The expected key material size in bytes.
+
+        Raises:
+            ValueError: If this datum is not a valid key of the expected type and size.
+        """
+        if not self.is_complete:
+            raise ValueError(
+                f"Invalid key datum: declared size {self.size} does not match available data {len(self._data) + self.MINIMAL_SIZE}"
+            )
+
+        if self.role != FVE_DATUM_ROLE.PROPERTY:
+            raise ValueError(f"Invalid key datum role: {self.role.name}, expected PROPERTY")
+
+        if self.type != FVE_DATUM_TYPE.KEY:
+            raise ValueError(f"Invalid key datum type: {self.type.name}, expected KEY")
+
+        if key_type is not None and self.key_type != key_type:
+            raise ValueError(f"Invalid key type: {self.key_type.name}, expected {key_type.name}")
+
+        if key_size is not None and len(self.data) != key_size:
+            raise ValueError(
+                f"Invalid key material size for {self.key_type.name}: {len(self.data)} bytes, expected {key_size}"
+            )
+
 
 class UnicodeDatum(Datum):
     def __repr__(self) -> str:
@@ -479,7 +549,14 @@ class AesCcmEncryptedDatum(Datum):
         key = key.data if isinstance(key, KeyDatum) else key
         cipher = AES.new(key, AES.MODE_CCM, nonce=self.nonce)
         decrypted_data = cipher.decrypt_and_verify(self.data, self.mac)
-        return Datum.from_bytes(decrypted_data)
+
+        datum = Datum.from_bytes(decrypted_data)
+        if datum.size != len(decrypted_data):
+            raise ValueError(
+                f"Invalid unsealed datum: declared size {datum.size} does not match unsealed size {len(decrypted_data)}"
+            )
+
+        return datum
 
 
 class TpmEncryptedBlobDatum(Datum):
@@ -591,8 +668,24 @@ class VmkInfoDatum(Datum):
         return FVE_KEY_PROTECTOR(self._datum.Priority)
 
     def decrypt(self, key: KeyDatum | bytes) -> KeyDatum:
+        """Unseal this VMK with the given protector key.
+
+        The unsealed datum must be a 32 byte VMK with the ``PROPERTY`` role and ``KEY`` type. Any other datum is
+        rejected so it can not be used in place of a VMK at a higher layer.
+
+        Raises:
+            ValueError: If this VMK does not contain an AES-CCM encrypted key or if the unsealed datum is not a VMK.
+        """
         encrypted_key = self.aes_ccm_encrypted_key()
-        return encrypted_key.unbox(key)
+        if not encrypted_key:
+            raise ValueError("VMK does not contain an AES-CCM encrypted key")
+
+        datum = encrypted_key.unbox(key)
+        if not isinstance(datum, KeyDatum):
+            raise ValueError(f"Invalid VMK, unsealed datum is not a key: {type(datum).__name__}")
+
+        datum.validate(FVE_KEY_TYPE.VMK, VMK_KEY_SIZE)
+        return datum
 
     def label(self) -> str | None:
         for datum in self.find_property(FVE_DATUM_TYPE.UNICODE):

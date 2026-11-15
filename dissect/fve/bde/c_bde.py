@@ -506,3 +506,20 @@ CIPHER_MAP = {
     FVE_KEY_TYPE.AES_XTS_128: "aes-xts-128-plain64",
     FVE_KEY_TYPE.AES_XTS_256: "aes-xts-256-plain64",
 }
+
+# Exact size, in bytes, of the key material for every FVE_KEY_TYPE that can be used as a FVEK.
+# AES-CBC uses one AES key (16 or 32 bytes), AES-XTS uses a data key and a tweak key (2x 16 or 2x 32 bytes) and
+# the Elephant diffuser variants use a 64 byte layout of AES key, diffuser key and sector tweak key. AES itself
+# happily accepts keys of multiple sizes, so the material size must be checked against the configured algorithm
+# instead of relying on the cipher implementation to reject an incorrect key.
+FVE_KEY_MATERIAL_SIZE = {
+    FVE_KEY_TYPE.AES_128_DIFFUSER: 64,
+    FVE_KEY_TYPE.AES_256_DIFFUSER: 64,
+    FVE_KEY_TYPE.AES_128: 16,
+    FVE_KEY_TYPE.AES_256: 32,
+    FVE_KEY_TYPE.AES_XTS_128: 32,
+    FVE_KEY_TYPE.AES_XTS_256: 64,
+}
+
+# Size, in bytes, of an unboxed Volume Master Key.
+VMK_KEY_SIZE = 32
