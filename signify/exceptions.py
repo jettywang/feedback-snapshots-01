@@ -91,3 +91,30 @@ class CertificateTrustListParseError(SignifyError):
 
 class CTLCertificateVerificationError(CertificateVerificationError):
     pass
+
+
+class CatalogVerificationError(AuthenticodeVerificationError):
+    """Base class for errors while proving that a specific file is covered by a
+    catalog (:class:`~signify.authenticode.CertificateTrustList` with the
+    ``microsoft_catalog_list`` subject usage).
+    """
+
+
+class CatalogNotACatalogError(CatalogVerificationError):
+    """Raised when a regular Certificate Trust List (e.g. an ``authroot.stl`` root
+    list) is used as if it were a file catalog. The structures look similar, but only
+    catalogs list file members.
+    """
+
+
+class CatalogMemberNotFoundError(CatalogVerificationError):
+    """Raised when no catalog member carries the (indirect) digest of the target
+    file.
+    """
+
+
+class CatalogAmbiguousMemberError(CatalogVerificationError):
+    """Raised when multiple catalog members carry the same indirect digest, so that
+    the matching member cannot be determined unambiguously. This prevents a dictionary
+    overwrite from silently deciding which member is used.
+    """

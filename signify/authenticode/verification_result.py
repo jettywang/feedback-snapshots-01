@@ -11,6 +11,10 @@ from signify.exceptions import (
     AuthenticodeInvalidAdditionalHashError,
     AuthenticodeInvalidDigestError,
     AuthenticodeNotSignedError,
+    CatalogAmbiguousMemberError,
+    CatalogMemberNotFoundError,
+    CatalogNotACatalogError,
+    CatalogVerificationError,
     CertificateVerificationError,
     ParseError,
     VerificationError,
@@ -56,6 +60,18 @@ class AuthenticodeVerificationResult(enum.Enum):
     """The additional file hash, such as the page hash for PE files, or the
     extended digest for MSI files, does not match the calculated hash.
     """
+    NOT_A_CATALOG = enum.auto()
+    """A regular Certificate Trust List (not a file catalog) was used to try to prove
+    a file. The structures look similar, but only catalogs list file members.
+    """
+    CATALOG_MEMBER_NOT_FOUND = enum.auto()
+    """The catalog contains no member whose indirect digest matches the target file.
+    A member with merely the same display name does not count.
+    """
+    CATALOG_AMBIGUOUS_MEMBER = enum.auto()
+    """Multiple catalog members carry the same indirect digest for the target file, so
+    the matching member cannot be determined unambiguously.
+    """
 
     @classmethod
     def call(
@@ -73,6 +89,14 @@ class AuthenticodeVerificationResult(enum.Enum):
             return cls.INVALID_ADDITIONAL_HASH, exc
         except AuthenticodeCounterSignerError as exc:
             return cls.COUNTERSIGNER_ERROR, exc
+        except CatalogNotACatalogError as exc:
+            return cls.NOT_A_CATALOG, exc
+        except CatalogAmbiguousMemberError as exc:
+            return cls.CATALOG_AMBIGUOUS_MEMBER, exc
+        except CatalogMemberNotFoundError as exc:
+            return cls.CATALOG_MEMBER_NOT_FOUND, exc
+        except CatalogVerificationError as exc:
+            return cls.VERIFY_ERROR, exc
         except CertificateVerificationError as exc:
             return cls.CERTIFICATE_ERROR, exc
         except ParseError as exc:

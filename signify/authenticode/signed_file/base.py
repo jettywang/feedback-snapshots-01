@@ -16,6 +16,7 @@ from signify.authenticode.signed_data import (
     AuthenticodeSignature,
 )
 from signify.authenticode.trust_list import (
+    CatalogVerificationResult,
     CertificateTrustList,
     CertificateTrustSubject,
 )
@@ -409,6 +410,33 @@ class AuthenticodeFile:
         """
 
         return AuthenticodeVerificationResult.call(self.verify, *args, **kwargs)
+
+    def verify_with_catalog(
+        self,
+        catalog: CertificateTrustList,
+        *,
+        verify_catalog_signature: bool = True,
+        verify_additional_hashes: bool = True,
+        expected_hash: bytes | None = None,
+        **kwargs: Any,
+    ) -> CatalogVerificationResult:
+        """Explicitly proves that *this* file is covered by the provided catalog.
+
+        This is a thin relay to
+        :meth:`CertificateTrustList.verify_file`. Unlike :meth:`add_catalog` combined
+        with :meth:`verify`, this returns a
+        :class:`~signify.authenticode.trust_list.CatalogVerificationResult` that names
+        the catalog member actually used and the file fingerprint that matched, and it
+        raises explainable errors when the catalog is not a file catalog, no member
+        matches, multiple members match, or the member digest does not match the file.
+        """
+        return catalog.verify_file(
+            self,
+            verify_catalog_signature=verify_catalog_signature,
+            verify_additional_hashes=verify_additional_hashes,
+            expected_hash=expected_hash,
+            **kwargs,
+        )
 
     def get_fingerprint(self, digest_algorithm: HashFunction) -> bytes:
         """Gets the fingerprint for this file"""

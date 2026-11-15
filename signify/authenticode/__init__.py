@@ -5,7 +5,12 @@ from .cert_store import (
 )
 from .signed_data import AuthenticodeSignature
 from .signed_file import AuthenticodeFile
-from .trust_list import AUTHROOTSTL_PATH, CertificateTrustList, CertificateTrustSubject
+from .trust_list import (
+    AUTHROOTSTL_PATH,
+    CatalogVerificationResult,
+    CertificateTrustList,
+    CertificateTrustSubject,
+)
 from .verification_result import AuthenticodeVerificationResult
 
 __all__ = [
@@ -16,6 +21,7 @@ __all__ = [
     "AuthenticodeFile",
     "AuthenticodeSignature",
     "AuthenticodeVerificationResult",
+    "CatalogVerificationResult",
     "CertificateTrustList",
     "CertificateTrustSubject",
 ]

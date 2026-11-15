@@ -90,11 +90,53 @@ Catalog Files (.cat) are used for externally signing files, mostly used in the c
 driver files. They can be used to sign virtually any type of file. They are usually
 found in a subdirectory of ``C:\Windows\System32\CatRoot``.
 
+Proving a file with a catalog
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Some driver-package files only exist inside a signed catalog and carry no embedded
+signature of their own. To prove such a file, use the explicit
+:meth:`CertificateTrustList.verify_file` interface (or the convenience wrapper
+:meth:`signify.authenticode.AuthenticodeFile.verify_with_catalog`)::
+
+    from signify.authenticode import AuthenticodeFile, CertificateTrustList
+
+    catalog = CertificateTrustList.from_envelope(open("driver.cat", "rb").read())
+    target = AuthenticodeFile.from_stream(open("driver.inf", "rb"), allow_flat=True)
+
+    result = target.verify_with_catalog(catalog)
+    print(result.member.identifier_str, result.fingerprint_hex)
+
+This does not treat the mere presence of a member with the same display name as
+success. Instead it verifies, in order, that:
+
+1. The object is actually a file catalog (a regular certificate trust list with a
+   similar structure is rejected).
+2. The catalog's own PKCS#7 signature is valid.
+3. Exactly one catalog member matches the file's contents. Membership is established
+   by the member's indirect digest, never by its display name. When several members
+   carry the same digest, an ambiguity is reported instead of letting a dictionary
+   overwrite pick the winner.
+4. The digest algorithm and the Authenticode file type in the member's
+   :class:`~signify.authenticode.indirect_data.IndirectData` are interpreted together:
+   the file is hashed with that exact algorithm and the fingerprint must equal the
+   member's digest.
+
+Catalog v1 uses the ``microsoft_catalog_list_member`` (SHA-1) member algorithm, while
+catalog v2 uses ``microsoft_catalog_list_member_v2`` (SHA-256). Both are handled
+transparently. On success, the returned
+:class:`~signify.authenticode.trust_list.CatalogVerificationResult` names the member
+that was actually used and the file fingerprint that matched. Use
+:meth:`CertificateTrustList.explain_verify_file` for a non-raising variant that returns
+an :class:`~signify.authenticode.AuthenticodeVerificationResult` and the underlying
+exception.
+
 CertificateTrustList objects
 ----------------------------
 .. autoclass:: signify.authenticode.CertificateTrustList
    :members:
    :special-members: __init__
 .. autoclass:: signify.authenticode.CertificateTrustSubject
+   :members:
+   :special-members: __init__
+.. autoclass:: signify.authenticode.trust_list.CatalogVerificationResult
    :members:
    :special-members: __init__

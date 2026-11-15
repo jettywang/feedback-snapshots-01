@@ -2,6 +2,21 @@ Release notes
 =============
 This page contains the most significant changes in Signify between each release.
 
+Unreleased
+----------
+* Added the explicit "prove this file with this catalog" interface:
+  ``CertificateTrustList.verify_file`` (with the non-raising
+  ``explain_verify_file``) and the convenience wrapper
+  ``AuthenticodeFile.verify_with_catalog``. It verifies the catalog's own signature,
+  the member attribution (by indirect digest, never by display name) and the target
+  file's content, and returns a ``CatalogVerificationResult`` naming the member and
+  file fingerprint actually used.
+* Catalog member lookups no longer collapse duplicate indirect digests through a
+  dictionary overwrite. Multiple members matching one content digest now raise an
+  explicit ambiguity error instead of silently picking one.
+* A regular certificate trust list (e.g. ``authroot.stl``) can no longer be used as a
+  file catalog; a structurally similar but non-catalog list is rejected explicitly.
+
 v0.9.3 (2026-10-11)
 -------------------
 * Fix crash on certificates with key algorithms unknown to asn1crypto (e.g. ML-DSA).

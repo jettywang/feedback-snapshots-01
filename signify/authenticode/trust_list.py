@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import datetime
 import hashlib
 import pathlib
@@ -14,10 +15,16 @@ from signify import asn1
 from signify._typing import HashFunction
 from signify.asn1.hashing import _get_digest_algorithm
 from signify.authenticode.signer_info import AuthenticodeSignerInfo
-from signify.authenticode.verification_result import AuthenticodeExplainVerifyMixin
+from signify.authenticode.verification_result import (
+    AuthenticodeExplainVerifyMixin,
+    AuthenticodeVerificationResult,
+)
 from signify.exceptions import (
     AuthenticodeCounterSignerError,
     AuthenticodeInvalidDigestError,
+    CatalogAmbiguousMemberError,
+    CatalogMemberNotFoundError,
+    CatalogNotACatalogError,
     CertificateTrustListParseError,
     CounterSignerError,
     CTLCertificateVerificationError,
@@ -31,6 +38,49 @@ if TYPE_CHECKING:
     from signify.authenticode.indirect_data import IndirectData
 
 AUTHROOTSTL_PATH = pathlib.Path(mscerts.where(stl=True))
+
+
+@dataclasses.dataclass(frozen=True)
+class CatalogVerificationResult:
+    """The successful result of proving that a specific file is covered by a
+    catalog.
+
+    Unlike a bare boolean, this reports *how* the conclusion was reached: which
+    catalog member was actually used (not merely a member that happened to share a
+    display name), and which fingerprint of the target file matched its indirect
+    digest.
+    """
+
+    catalog: CertificateTrustList
+    """The catalog that contains the matching member."""
+    member: CertificateTrustSubject
+    """The single, unambiguously matched catalog member."""
+    fingerprint: bytes
+    """The digest calculated over the target file that matched the member."""
+    digest_algorithm: HashFunction
+    """The hash function used to calculate :attr:`fingerprint`. This is taken from the
+    member's :class:`~signify.authenticode.IndirectData`, so that the digest algorithm
+    and the member's file type are always interpreted together."""
+    content_type: str
+    """The Authenticode content type of the member's indirect data (e.g.
+    ``microsoft_spc_cab_data`` or ``microsoft_spc_pe_image_data``)."""
+
+    @property
+    def fingerprint_hex(self) -> str:
+        """The :attr:`fingerprint` as a lowercase hexadecimal string."""
+        return self.fingerprint.hex().lower()
+
+    @property
+    def member_name(self) -> str | None:
+        """The display name recorded in the member's ``catalog_namevalue``, if any.
+
+        This is purely informational: it is never used to decide whether a file matches
+        a member.
+        """
+        namevalue = self.member.catalog_namevalue
+        if namevalue and "value" in namevalue:
+            return cast(str, namevalue["value"])
+        return None
 
 
 class CertificateTrustListSignerInfo(AuthenticodeSignerInfo):
@@ -130,16 +180,26 @@ class CertificateTrustList(AuthenticodeExplainVerifyMixin, SignedData):
         )
 
     @property
-    def _subjects(self) -> dict[str, CertificateTrustSubject]:
-        return {subj.identifier_str: subj for subj in self.subjects}
+    def _is_catalog_member_algorithm(self) -> bool:
+        return self._subject_algorithm in (
+            "microsoft_catalog_list_member",
+            "microsoft_catalog_list_member_v2",
+        )
 
-    @property
-    def _subjects_by_indirect_data_hash(self) -> dict[str, CertificateTrustSubject]:
-        return {
-            subj.indirect_data.digest.hex().lower(): subj
-            for subj in self.subjects
-            if subj.indirect_data is not None
-        }
+    def _iter_subjects_by_key(self, key: str) -> list[CertificateTrustSubject]:
+        """Returns all subjects matching the provided lookup key, preserving catalog
+        order. Used instead of a dictionary comprehension so that duplicate keys (e.g.
+        two members with the same indirect digest) are not silently collapsed by a
+        dictionary overwrite.
+        """
+        if self._is_catalog_member_algorithm:
+            return [
+                subject
+                for subject in self.subjects
+                if subject.indirect_data is not None
+                and subject.indirect_data.digest.hex().lower() == key
+            ]
+        return [subject for subject in self.subjects if subject.identifier_str == key]
 
     # TODO: extensions??
 
@@ -182,36 +242,187 @@ class CertificateTrustList(AuthenticodeExplainVerifyMixin, SignedData):
             )
         return subject.verify_trust(chain, *args, **kwargs)
 
+    def _lookup_key(
+        self, subject: Certificate | signed_file.AuthenticodeFile | bytes
+    ) -> str:
+        """Calculates the lookup key (a lowercase hexadecimal string) for the provided
+        certificate, file or raw digest, following the catalog's
+        :attr:`subject_algorithm`.
+        """
+        if isinstance(subject, Certificate):
+            if self.subject_algorithm == hashlib.sha1:
+                return subject.sha1_fingerprint
+            elif self.subject_algorithm == hashlib.sha256:
+                return subject.sha256_fingerprint
+            raise CertificateTrustListParseError(
+                "The specified subject algorithm is not yet supported."
+            )
+        elif isinstance(subject, bytes):
+            return subject.hex().lower()
+        fingerprint = subject.get_fingerprint(self.subject_algorithm)
+        return fingerprint.hex().lower()
+
     def find_subject(
         self, subject: Certificate | signed_file.AuthenticodeFile | bytes
     ) -> CertificateTrustSubject | None:
         """Finds the :class:`CertificateTrustSubject` belonging to the provided
         :class:`signify.x509.Certificate` or :class:`signed_file.AuthenticodeFile`.
 
+        For catalogs, members are located by the digest in their
+        :class:`~signify.authenticode.IndirectData`, never by the member's display
+        name.
+
+        This returns a single subject for backwards compatibility and returns
+        :const:`None` when nothing matches. When multiple members match (an ambiguous
+        catalog), the first is returned here; use :meth:`find_catalog_members` or
+        :meth:`verify_file` to have such cases explicitly reported instead of silently
+        resolved.
+
         :param subject: The certificate or file to look for.
         """
+        matches = self._iter_subjects_by_key(self._lookup_key(subject))
+        if not matches:
+            return None
+        return matches[0]
 
-        if isinstance(subject, Certificate):
-            if self.subject_algorithm == hashlib.sha1:
-                identifier = subject.sha1_fingerprint
-            elif self.subject_algorithm == hashlib.sha256:
-                identifier = subject.sha256_fingerprint
-            else:
-                raise CertificateTrustListParseError(
-                    "The specified subject algorithm is not yet supported."
-                )
-        elif isinstance(subject, bytes):
-            identifier = subject.hex().lower()
-        else:
-            fingerprint = subject.get_fingerprint(self.subject_algorithm)
-            identifier = fingerprint.hex().lower()
+    def find_catalog_members(
+        self, file: signed_file.AuthenticodeFile | bytes
+    ) -> list[CertificateTrustSubject]:
+        """Returns all catalog members whose indirect digest equals the fingerprint of
+        the provided file (or a raw digest provided as :class:`bytes`).
 
-        if self._subject_algorithm in (
-            "microsoft_catalog_list_member",
-            "microsoft_catalog_list_member_v2",
-        ):
-            return self._subjects_by_indirect_data_hash.get(identifier)
-        return self._subjects.get(identifier)
+        The file is hashed with the catalog's :attr:`subject_algorithm` (SHA-1 for
+        catalog v1, SHA-256 for catalog v2), which is the algorithm that produces the
+        member identifier. Members are only considered when they actually carry
+        :class:`~signify.authenticode.IndirectData`; entries without indirect data can
+        never prove a file's contents.
+
+        A list (rather than a dictionary) is returned so that duplicate members are
+        preserved. :meth:`verify_file` uses this to report ambiguity explicitly instead
+        of letting a dictionary overwrite pick the winner.
+
+        :raises CatalogNotACatalogError: if this list is not a file catalog.
+        """
+        if not self.is_catalog:
+            raise CatalogNotACatalogError(
+                "This Certificate Trust List is not a file catalog (its subject usage"
+                f" is {self.subject_usage!r}, not containing 'microsoft_catalog_list')."
+                " A regular certificate trust list cannot be used to prove a file."
+            )
+        return self._iter_subjects_by_key(self._lookup_key(file))
+
+    def verify_file(
+        self,
+        file: signed_file.AuthenticodeFile,
+        *,
+        verify_catalog_signature: bool = True,
+        verify_additional_hashes: bool = True,
+        expected_hash: bytes | None = None,
+        **kwargs: Any,
+    ) -> CatalogVerificationResult:
+        """Proves that the provided file is covered by this catalog.
+
+        This is the explicit "use this catalog to prove this file" interface. It does
+        *not* treat the mere presence of a same-named member as success. All of the
+        following must hold:
+
+        1. This object must actually be a file catalog (``microsoft_catalog_list``
+           subject usage). A regular certificate trust list that merely shares the
+           structure is rejected.
+        2. The catalog's own signature must verify (unless
+           ``verify_catalog_signature=False``).
+        3. Exactly one member must match the file's contents. Membership is established
+           by the indirect digest, never by the member's display name. If several
+           members carry the same digest, an ambiguity is reported.
+        4. The digest algorithm and the Authenticode file type recorded in the member's
+           :class:`~signify.authenticode.IndirectData` must be interpreted together:
+           the file is hashed with that exact algorithm and the resulting fingerprint
+           must equal the member's digest.
+
+        :param file: The file to prove.
+        :param verify_catalog_signature: If :const:`True` (the default), verifies the
+            catalog's own PKCS#7 signature before trusting its members.
+        :param verify_additional_hashes: Forwarded to the file's indirect-data
+            verification (e.g. PE page hashes), when applicable.
+        :param expected_hash: A pre-calculated fingerprint of the file using the
+            catalog's :attr:`subject_algorithm`. When omitted, the fingerprint is
+            calculated from the file.
+        :param kwargs: Additional keyword arguments forwarded to
+            :meth:`CertificateTrustList.verify` when verifying the catalog signature.
+        :return: A :class:`CatalogVerificationResult` identifying the member that was
+            actually used and the matching file fingerprint.
+        :raises CatalogNotACatalogError: if this is not a file catalog.
+        :raises CatalogMemberNotFoundError: if no member matches the file.
+        :raises CatalogAmbiguousMemberError: if multiple members match the file.
+        :raises AuthenticodeInvalidDigestError: if the matched member's digest does not
+            match the file's contents under the member's digest algorithm.
+        """
+        if not self.is_catalog:
+            raise CatalogNotACatalogError(
+                "This Certificate Trust List is not a file catalog (its subject usage"
+                f" is {self.subject_usage!r}, not containing 'microsoft_catalog_list')."
+                " A regular certificate trust list cannot be used to prove a file."
+            )
+
+        # 1. Verify the catalog's own signature before trusting any of its members.
+        if verify_catalog_signature:
+            self.verify(**kwargs)
+
+        # 2. Locate members by the file fingerprint using the catalog's member
+        # algorithm. This hashes the file with the catalog v1/v2 subject algorithm.
+        if expected_hash is None:
+            expected_hash = file.get_fingerprint(self.subject_algorithm)
+        members = self.find_catalog_members(expected_hash)
+
+        if not members:
+            raise CatalogMemberNotFoundError(
+                "The catalog does not contain a member whose indirect digest matches"
+                f" the {self.subject_algorithm.__name__} fingerprint"
+                f" {expected_hash.hex().lower()} of the provided file. A member with a"
+                " matching display name is not sufficient."
+            )
+        if len(members) > 1:
+            raise CatalogAmbiguousMemberError(
+                f"The catalog contains {len(members)} members whose indirect digest"
+                f" matches the file fingerprint {expected_hash.hex().lower()}. The"
+                " matching member is ambiguous; refusing to pick one by dictionary"
+                " ordering."
+            )
+
+        member = members[0]
+        indirect_data = member.indirect_data
+        # find_catalog_members only returns members with indirect data, but be explicit.
+        if indirect_data is None:  # pragma: no cover - guarded by find_catalog_members
+            raise CatalogMemberNotFoundError(
+                "The matching catalog member does not contain indirect data and cannot"
+                " prove the file's contents."
+            )
+
+        # 3. Interpret the digest algorithm and the file type together: hash the file
+        # with the member's own digest algorithm and require an exact digest match.
+        member_algorithm = indirect_data.digest_algorithm
+        member_fingerprint = file.get_fingerprint(member_algorithm)
+        file.verify_indirect_data(
+            indirect_data,
+            expected_hash=member_fingerprint,
+            verify_additional_hashes=verify_additional_hashes,
+        )
+
+        return CatalogVerificationResult(
+            catalog=self,
+            member=member,
+            fingerprint=member_fingerprint,
+            digest_algorithm=member_algorithm,
+            content_type=indirect_data.content_type,
+        )
+
+    def explain_verify_file(
+        self, file: signed_file.AuthenticodeFile, **kwargs: Any
+    ) -> tuple[AuthenticodeVerificationResult, Exception | None]:
+        """Non-raising variant of :meth:`verify_file`. Returns the verification result
+        and the exception (if any) instead of raising.
+        """
+        return AuthenticodeVerificationResult.call(self.verify_file, file, **kwargs)
 
     @classmethod
     def from_stl_file(cls, path: pathlib.Path = AUTHROOTSTL_PATH) -> Self:
