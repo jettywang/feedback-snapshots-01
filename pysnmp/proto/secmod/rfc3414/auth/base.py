@@ -25,6 +25,11 @@ class AbstractAuthenticationService:
         """Return length of the digest produced by this service."""
         raise error.ProtocolError(errind.noAuthentication)
 
+    @property
+    def hash_algorithm(self):
+        """Return hashlib hash constructor used by this service."""
+        raise error.ProtocolError(errind.noAuthentication)
+
     # 7.2.4.1
     def authenticate_outgoing_message(self, authKey, wholeMsg):
         """Authenticate outgoing message."""

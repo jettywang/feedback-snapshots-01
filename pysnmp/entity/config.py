@@ -203,6 +203,9 @@ def delete_v1_system(snmpEngine: SnmpEngine, communityIndex):
 def __cook_v3_user_info(snmpEngine: SnmpEngine, securityName, securityEngineId):
     mibBuilder = snmpEngine.get_mib_builder()
 
+    # Load USM MIB instrumentation (e.g. the usmUserOwn*KeyChange columns)
+    mibBuilder.import_symbols("__SNMP-USER-BASED-SM-MIB", "usmUserSpinLock")  # type: ignore
+
     (snmpEngineID,) = mibBuilder.import_symbols("__SNMP-FRAMEWORK-MIB", "snmpEngineID")  # type: ignore
 
     if securityEngineId is None:

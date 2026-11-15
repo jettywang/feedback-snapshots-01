@@ -65,6 +65,15 @@ async def start_agent(
         "privkey1",
     )
 
+    config.add_v3_user(
+        snmpEngine,
+        "usr-sha256-aes",
+        config.USM_AUTH_HMAC192_SHA256,
+        "authkey1",
+        config.USM_PRIV_CFB128_AES,
+        "privkey1",
+    )
+
     # Allow read MIB access for this user / securityModels at VACM
     config.add_vacm_user(snmpEngine, 1, "public", "noAuthNoPriv", (1, 3, 6), (1, 3, 6))
     config.add_vacm_user(snmpEngine, 2, "public", "noAuthNoPriv", (1, 3, 6), (1, 3, 6))
@@ -72,6 +81,9 @@ async def start_agent(
     config.add_vacm_user(snmpEngine, 3, "usr-sha-none", "authNoPriv", (1, 3, 6))
     config.add_vacm_user(snmpEngine, 3, "usr-sha-aes", "authPriv", (1, 3, 6))
     config.add_vacm_user(snmpEngine, 3, "usr-sha-aes256", "authPriv", (1, 3, 6))
+    config.add_vacm_user(
+        snmpEngine, 3, "usr-sha256-aes", "authPriv", (1, 3, 6), (1, 3, 6)
+    )
 
     # Configure SNMP context
     snmpContext = context.SnmpContext(snmpEngine)

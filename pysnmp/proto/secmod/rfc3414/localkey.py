@@ -4,6 +4,7 @@
 # Copyright (c) 2005-2020, Ilya Etingof <etingof@gmail.com>
 # License: https://www.pysnmp.com/pysnmp/license.html
 #
+import secrets
 from hashlib import md5, sha1
 
 from pyasn1.type import univ
@@ -45,6 +46,62 @@ def localize_key(passKey, snmpEngineId, hashFunc) -> univ.OctetString:
     # noinspection PyDeprecation,PyCallingNonCallable
     digest = hashFunc(passKey + snmpEngineId.asOctets() + passKey).digest()
     return univ.OctetString(digest)
+
+
+# RFC 3414 A.5.1 & KeyChange TEXTUAL-CONVENTION (SNMP-USER-BASED-SM-MIB)
+#
+# A KeyChange value is the concatenation of a "random" component (as long
+# as the key being changed) and a "delta" component. The delta component
+# is produced by repeatedly hashing the old key (chained through the
+# intermediate digests) with the random component and XOR-ing the digest
+# with the new key. This way the new key never travels over the wire.
+
+
+def produce_key_change(oldKey, newKey, hashFunc, rand=None) -> univ.OctetString:
+    """Create a KeyChange value transforming oldKey into newKey.
+
+    This is the manager-side operation: given the existing localized key
+    *oldKey* and the desired localized key *newKey*, produce the opaque
+    KeyChange value to send to the authoritative SNMP engine. The *rand*
+    component is generated randomly unless explicitly given.
+    """
+    oldKey = univ.OctetString(oldKey).asOctets()
+    newKey = univ.OctetString(newKey).asOctets()
+    if rand is None:
+        rand = secrets.token_bytes(len(oldKey))
+    else:
+        rand = univ.OctetString(rand).asOctets()
+    temp = oldKey
+    delta = b""
+    offset = 0
+    while offset < len(newKey):
+        temp = hashFunc(temp + rand).digest()
+        chunk = newKey[offset : offset + len(temp)]
+        delta += bytes(x ^ y for x, y in zip(temp, chunk))
+        offset += len(temp)
+    return univ.OctetString(rand + delta)
+
+
+def resolve_key_change(oldKey, keyChange, hashFunc) -> univ.OctetString:
+    """Recover the new key from a KeyChange value.
+
+    This is the receiver-side operation: given the existing localized key
+    *oldKey* and a KeyChange value (random || delta), compute the new
+    localized key via the same one-way transform the manager used.
+    """
+    oldKey = univ.OctetString(oldKey).asOctets()
+    keyChange = univ.OctetString(keyChange).asOctets()
+    rand = keyChange[: len(oldKey)]
+    delta = keyChange[len(oldKey) :]
+    temp = oldKey
+    newKey = b""
+    offset = 0
+    while offset < len(delta):
+        temp = hashFunc(temp + rand).digest()
+        chunk = delta[offset : offset + len(temp)]
+        newKey += bytes(x ^ y for x, y in zip(temp, chunk))
+        offset += len(temp)
+    return univ.OctetString(newKey)
 
 
 # RFC3414: A.2.1

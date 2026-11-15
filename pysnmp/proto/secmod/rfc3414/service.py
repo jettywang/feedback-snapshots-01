@@ -209,6 +209,11 @@ class SnmpUSMSecurityModel(AbstractSecurityModel):
     def __get_user_info(
         mibInstrumController: MibInstrumController, securityEngineID, userName
     ):
+        # Make sure USM MIB instrumentation (e.g. the usmUserOwn*KeyChange
+        # columns) is loaded before any request reaches the MIB write path
+        mibInstrumController.get_mib_builder().import_symbols(  # type: ignore
+            "__SNMP-USER-BASED-SM-MIB", "usmUserSpinLock"
+        )
         (usmUserEntry,) = mibInstrumController.get_mib_builder().import_symbols(  # type: ignore
             "SNMP-USER-BASED-SM-MIB", "usmUserEntry"
         )

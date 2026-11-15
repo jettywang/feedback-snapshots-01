@@ -72,6 +72,11 @@ class HmacSha2(base.AbstractAuthenticationService):
         """Return digest length."""
         return self.__digestLength
 
+    @property
+    def hash_algorithm(self):
+        """Return hashlib hash constructor used by this service."""
+        return self.__hashAlgo
+
     # 7.3.1
     def authenticate_outgoing_message(self, authKey, wholeMsg):
         """Authenticate outgoing message."""
