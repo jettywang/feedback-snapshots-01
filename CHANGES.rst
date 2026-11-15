@@ -21,6 +21,18 @@ Revision 0.7.0, released XX-XX-2026
   qualifies for a private advisory and a CVE versus what is handled
   as an ordinary public bug report
   [issue #96](https://github.com/pyasn1/pyasn1/issues/96)
+- Added a read-only ASN.1 schema ambiguity prechecker in
+  ``pyasn1.type.schema`` (``SchemaPrecheck``). Before any network input is
+  decoded it reports, with full field paths and the tag-production basis,
+  where a single wire tag can be routed to more than one field across
+  SEQUENCE optional/default windows, SET, nested untagged CHOICE, and
+  explicit/implicit tagging. Recursive references terminate the walk while
+  legal shared types are not misreported as cycles. Open types (ANY / ANY
+  DEFINED BY) are flagged as needing runtime context rather than judged safe.
+  ``precheck_evidence.build_evidence`` emits a minimal BER substrate that
+  demonstrates each deterministic conflict plus a relabelled control
+  encoding, operating on cloned schemas without instantiating values or
+  modifying the original schema.
 
 Revision 0.6.5, released 26-10-2026
 ---------------------------------------

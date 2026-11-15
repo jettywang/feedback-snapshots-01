@@ -160,6 +160,7 @@ its :ref:`fields <type.namedtype>` specification.
    /pyasn1/type/namedtype/contents
    /pyasn1/type/opentype/contents
    /pyasn1/type/namedval/contents
+   /pyasn1/type/schema/contents
 
 .. _pyasn1-codecs:
 

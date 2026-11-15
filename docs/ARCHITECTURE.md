@@ -65,7 +65,7 @@ here.
 
 ### Module map
 
-The package is thirty-two modules; four carry most of the weight:
+The package is thirty-five modules; four carry most of the weight:
 `type/univ.py` (~3,300 lines), `codec/ber/decoder.py` (~2,200),
 `codec/ber/encoder.py` (~960), `type/constraint.py` (~750).
 
@@ -81,6 +81,8 @@ The package is thirty-two modules; four carry most of the weight:
 | `type/namedval.py` | `NamedValues`, the enumeration/named-bit mapping |
 | `type/constraint.py` | Constraint objects and their composition |
 | `type/opentype.py` | `OpenType`, the ANY-defined-by mapping |
+| `type/schema/precheck.py` | Read-only `SchemaPrecheck`: static tag-ambiguity findings over a schema graph, never decoding or instantiating values |
+| `type/schema/precheck_evidence.py` | `build_evidence`: minimal BER substrate and a relabelled control encoding for each `TagConflict`, built on cloned schemas only |
 | `type/error.py` | A *second* `ValueConstraintError`, the one actually raised |
 | `codec/streaming.py` | `asSeekableStream`, `CachingStreamWrapper`, `readFromStream`: the resumable-stream engine |
 | `codec/ber/decoder.py` | The base decoder: payload decoders, the state machine, every security limit |
@@ -582,6 +584,68 @@ Removing the `getattr(..., True)` defaults corrupts objects restored from
 pickles written by 0.6.4 or earlier: the flag ships first in 0.7.0 (the
 recursive-schema entry under `Revision 0.7.0` in `CHANGES.rst`), so "predating
 the flag" covers every published release to date.
+
+### Read-only schema precheck
+
+`type/schema/precheck.py` answers a security question the decoder only
+discovers on hostile input: where can one wire tag be routed to more than one
+field? `SchemaPrecheck.run()` walks an already-constructed schema graph and
+returns `Finding` objects, a `TagConflict` for a deterministic collision and
+an `OpenTypeFinding` for an `ANY` / `ANY DEFINED BY` field whose concrete type
+is selected at runtime. Open types are reported as needing context and are
+never classified safe: `isStaticallyUnambiguous` ignores them, so a caller must
+read `openTypes` separately rather than treating the absence of a conflict as
+proof the field is decided.
+
+The analysis recomputes wire identity from each field's `TagSet` instead of
+reading the eagerly built `NamedTypes` tag maps. Those maps can be
+`PostponedError` placeholders in a schema whose class body is still executing
+(see [Component schemas and deferred errors](#component-schemas-and-deferred-errors)),
+so depending on them would make the precheck blind exactly where recursive
+construction is happening. The wire signature is the ordered tuple of
+`(tag class, tag id)` pairs across `TagSet.superTags`: implicit tagging
+overwrites the trailing pair, explicit tagging appends a constructed one, so
+an implicit `[0] INTEGER` and an explicit `[0] INTEGER` have different
+signatures and do not collide even though their outermost pair matches. An
+untagged `Choice` has an empty `TagSet` and is transparent, so
+`SchemaPrecheck._fieldAlternatives` flattens it recursively to the
+alternatives the decoder would actually see; a *tagged* choice presents one
+fixed signature like any other field.
+
+The three constructed shapes use different collision rules. A `Set` or
+`Choice` selects by tag with no positional fallback, so any signature shared
+by two fields collides unconditionally. A `Sequence` is ordered: a mandatory
+field is an anchor consumed at its own position, and only an OPTIONAL/DEFAULT
+field opens a window over the following fields up to and including the next
+mandatory one (`SchemaPrecheck._sequenceWindow` mirrors
+`NamedTypes.__computeAmbiguousTypes`). Two fields collide only if they share a
+signature inside such a window.
+
+Recursion is bounded by object identity, not value equality. A set of node ids
+on the current depth-first path is the cycle guard: an edge back to an
+ancestor stops the descent without fabricating a finding, while a separate
+memo of fully analysed types lets a *shared* type — the same object reused by
+several parents — emit its findings once per parent path. Legitimate sharing
+therefore never looks like a cycle, and a genuinely recursive schema
+terminates.
+
+The walk is side-effect free by construction: it only reads `componentType`,
+`tagSet` and the `NamedType` flags, never calls a `setComponent*` method or
+constructs a value, and never writes to a schema object. Byte production lives
+in a separate module, `type/schema/precheck_evidence.py`. For a `TagConflict`,
+`build_evidence` synthesises the smallest BER substrate carrying the shared
+tag (which the original schema rejects or routes non-uniquely) and a control
+value. The control is built on a *cloned* schema: one colliding field keeps
+its original tag as the reference and every other field presenting that wire
+signature -- including fields in a neighbouring ambiguity window -- is
+retagged with an unused context id, preserving each field's implicit/explicit
+mode and its OPTIONAL/DEFAULT wrapper, so the same payload decodes
+deterministically. A mandatory open `ANY` has no statically known value, so in
+that case the control is reported as not synthesised rather than emitting a
+substrate that would fail on an unrelated required component. The original
+schema passed to the prechecker is untouched;
+`tests/type/test_schema_precheck.py` asserts both the read-only walk and that
+evidence building leaves the original tags and value state unchanged.
 
 ### The constraint algebra
 
