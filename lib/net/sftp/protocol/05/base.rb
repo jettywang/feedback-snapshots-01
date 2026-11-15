@@ -34,6 +34,7 @@ module Net; module SFTP; module Protocol; module V05
     # to pass as part of the FXP_OPEN request.
     def open(path, flags, options)
       flags = normalize_open_flags(flags)
+      assert_representable_open_flags!(flags)
 
       sftp_flags = if flags & (IO::CREAT | IO::EXCL) == (IO::CREAT | IO::EXCL)
             FV5::CREATE_NEW

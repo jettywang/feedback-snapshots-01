@@ -73,6 +73,7 @@ module Net; module SFTP; module Protocol; module V01
     # to pass as part of the FXP_OPEN request.
     def open(path, flags, options)
       flags = normalize_open_flags(flags)
+      assert_representable_open_flags!(flags)
 
       if flags & (IO::WRONLY | IO::RDWR) != 0
         sftp_flags = FV1::WRITE
@@ -250,6 +251,32 @@ module Net; module SFTP; module Protocol; module V01
           end
         else
           flags.to_i
+        end
+      end
+
+      # Rejects open requests whose safety semantics cannot be represented on
+      # the wire *before* any packet is built or sent. Widening these silently
+      # would either grant destructive power that was never requested (a
+      # truncate with no write access) or quietly drop a guarantee the caller
+      # asked for (an exclusive create without O_CREAT). The same normalized
+      # IO flags are validated for every protocol version, so the rejection is
+      # identical whether the driver emits pflags (v1-v4) or an access mask and
+      # disposition (v5-v6).
+      def assert_representable_open_flags!(flags)
+        write_access = (flags & (IO::WRONLY | IO::RDWR)) != 0
+
+        if (flags & IO::EXCL) != 0 && (flags & IO::CREAT) == 0
+          raise ArgumentError,
+            "IO::EXCL without IO::CREAT cannot be expressed in SFTP: the " \
+            "exclusive-create guarantee would be silently dropped, refusing " \
+            "rather than opening an existing file"
+        end
+
+        if (flags & IO::TRUNC) != 0 && !write_access
+          raise ArgumentError,
+            "IO::TRUNC without IO::WRONLY or IO::RDWR cannot be expressed " \
+            "safely in SFTP: it would send a destructive truncate on a handle " \
+            "opened without write access"
         end
       end
 
