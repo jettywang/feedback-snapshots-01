@@ -19,6 +19,32 @@ pip install dissect.fve
 
 This module is also automatically installed if you install the `dissect` package.
 
+## BitLocker volume status
+
+`BDE.status()` returns a display-oriented report that separates what the volume metadata
+declares from what was actually observed by reading sectors:
+
+```python
+from dissect.fve.bde import BDE
+
+bde = BDE(fh)
+status = bde.status()  # verify=False to skip sector sampling
+
+status.state  # "suspended", "paused", "decrypted", "encrypted", ...
+status.ciphertext.declared  # from the EOW bitmap / StateOffset layout
+status.ciphertext.observed  # from comparing raw and decrypted sector samples; None if untested
+status.access.without_external_credentials  # clear key / TPM / plaintext
+status.access.requires_credential  # a user passphrase, recovery password or BEK is needed
+status.access.readable  # None means "not tested", never "unreadable"
+status.sector_map.ranges  # per-range nominal state plus sampled evidence
+status.to_dict()["display"]  # badge and headline fields for a backend UI
+```
+
+A suspended volume can therefore report both `ciphertext.conclusion == "present"` and
+`access.without_external_credentials == True`: the sectors still contain ciphertext, while
+the clear (obfuscated) key protector allows the volume to be opened without a user secret.
+`status.to_dict()` is JSON-serialisable.
+
 ## Build and test instructions
 
 This project uses `tox` to build source and wheel distributions. Run the following command from the root folder to build

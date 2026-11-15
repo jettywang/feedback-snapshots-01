@@ -40,6 +40,7 @@ if TYPE_CHECKING:
 
     from dissect.fve.bde.c_bde import FVE_KEY_PROTECTOR
     from dissect.fve.bde.information import VmkInfoDatum
+    from dissect.fve.bde.status import BDEStatus
 
 Run = tuple[int, int, int]
 
@@ -269,11 +270,52 @@ class BDE:
 
         return self.unlock(decrypted_key)
 
-    def open(self) -> BitlockerStream:
-        """Open this volume and return a readable (decrypted) stream."""
+    def open(self, size: int | None = None) -> BitlockerStream:
+        """Open this volume and return a readable (decrypted) stream.
+
+        Args:
+            size: Optional known volume size in bytes. Supplying it avoids probing the
+                underlying file handle for its end.
+        """
         if not self.unlocked:
             raise ValueError("Volume is locked")
-        return BitlockerStream(self)
+        return BitlockerStream(self, size=size)
+
+    def open_layout(self, size: int | None = None) -> BitlockerStream:
+        """Open this volume as a layout-only stream.
+
+        The stream exposes the same run map as :meth:`open`, but never decrypts. Reads of
+        encrypted runs return the raw ciphertext. This is useful to determine which sectors
+        are encrypted without requiring a key.
+        """
+        return BitlockerStream(self, decrypt=False, size=size)
+
+    def iter_runs(self, offset: int = 0, length: int | None = None) -> Iterator[Run]:
+        """Iterate over the run map of this volume without requiring a key.
+
+        Yields ``(run_type, sector, sector_count)`` tuples where ``run_type`` is one of the
+        ``BitlockerStream.RUN_*`` constants. The run map is metadata, not proof: a
+        ``RUN_ENCRYPTED`` run means the volume expects ciphertext there, not that the bytes
+        were verified to be ciphertext.
+        """
+        if length is None:
+            size = getattr(self.fh, "size", None)
+            if size is None:
+                position = self.fh.tell()
+                try:
+                    self.fh.seek(0, io.SEEK_END)
+                    size = self.fh.tell()
+                finally:
+                    self.fh.seek(position)
+            length = max(0, size - offset)
+
+        return BitlockerStream(self, decrypt=False, size=offset + length)._iter_runs(offset, length)
+
+    def status(self, verify: bool = True) -> BDEStatus:
+        """Return a structured status report for this volume."""
+        from dissect.fve.bde.status import BDEStatus
+
+        return BDEStatus.from_bde(self, verify=verify)
 
     def reserved_regions(self) -> list[tuple[int, int]]:
         """Return a list of reserved regions for this volume.
@@ -384,21 +426,22 @@ class BitlockerStream(AlignedStream):
     RUN_SPARSE = 2
     RUN_ENCRYPTED = 3
 
-    def __init__(self, bde: BDE):
+    def __init__(self, bde: BDE, *, decrypt: bool = True, size: int | None = None):
         self.bde = bde
         self._fh = bde.fh
 
-        size = getattr(bde.fh, "size", None)
-        try:
-            if size is None:
-                bde.fh.seek(0, io.SEEK_END)
-                size = bde.fh.tell()
-        except Exception:
-            pass
+        if size is None:
+            size = getattr(bde.fh, "size", None)
+            try:
+                if size is None:
+                    bde.fh.seek(0, io.SEEK_END)
+                    size = bde.fh.tell()
+            except Exception:
+                pass
 
         self.sector_size = bde.sector_size
-        if self.bde.encrypted:
-            self.encrypted = True
+        self.encrypted = bde.encrypted
+        if bde.encrypted and decrypt:
             self.cipher = create_cipher(
                 CIPHER_MAP[bde._fvek_type],
                 bde._fvek,
@@ -406,7 +449,6 @@ class BitlockerStream(AlignedStream):
                 iv_sector_size=self.sector_size,
             )
         else:
-            self.encrypted = False
             self.cipher = None
 
         self._reserved_regions = bde.reserved_regions()
@@ -547,7 +589,10 @@ class BitlockerStream(AlignedStream):
             elif run_type == BitlockerStream.RUN_ENCRYPTED:
                 self._fh.seek(read_sector * self.sector_size)
                 buf = self._fh.read(sector_count * self.sector_size)
-                result.append(self.cipher.decrypt(buf, read_sector))
+                if self.cipher is not None:
+                    result.append(self.cipher.decrypt(buf, read_sector))
+                else:
+                    result.append(buf)
 
         return b"".join(result)
 
