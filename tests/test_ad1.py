@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import hashlib
+import struct
+import zlib
 from datetime import datetime, timezone
+from io import BytesIO
 from typing import TYPE_CHECKING, BinaryIO
 
 import pytest
 
 from dissect.evidence.ad1 import ad1
 from dissect.evidence.ad1.ad1 import EntryType, find_files
+from dissect.evidence.ad1.c_ad1 import c_ad1
 from tests._utils import absolute_path
 
 if TYPE_CHECKING:
@@ -305,3 +309,370 @@ def test_ad1_segment_lru(ad1_segmented: list[Path], monkeypatch: pytest.MonkeyPa
 
     picture = fs.get("C:/Users/pcbje/Desktop/Data/Pictures/5-0-762-Koala.jpg")
     assert hashlib.sha1(picture.open().read()).hexdigest() == "9c3dcb1f9185a314ea25d51aed3b5881b32f420c"
+
+
+# Synthetic AD1 builder for identity and duplicate path tests.
+
+_EVIDENCE_ROOT = b"C:\\evidence"
+
+
+def _file_entry_bytes(
+    *,
+    name: bytes,
+    type: EntryType,
+    next: int = 0,
+    child: int = 0,
+    meta: int = 0,
+    zlib_meta: int = 0,
+    parent_index: int = 0,
+) -> bytes:
+    entry = c_ad1.FileEntry(
+        next=next,
+        child=child,
+        meta=meta,
+        zlib_meta=zlib_meta,
+        size=0,
+        type=type,
+        name_len=len(name),
+        name=name,
+        parent_index=parent_index,
+    )
+    return bytes(entry)
+
+
+class _SyntheticNode:
+    def __init__(
+        self,
+        name: bytes,
+        type: EntryType,
+        content: bytes = b"",
+        parent_index: int = 0,
+    ) -> None:
+        self.name = name
+        self.type = type
+        self.content = content
+        self.parent_index = parent_index
+        self.children: list[_SyntheticNode] = []
+        self.offset = 0
+
+    @property
+    def size(self) -> int:
+        return 56 + len(self.name)
+
+
+def build_duplicate_path_ad1() -> bytes:
+    """Build a minimal AD1 image with duplicate and anomalous entries."""
+    header_size = 92 + len(_EVIDENCE_ROOT)
+
+    same_parent_a = _SyntheticNode(b"dup.txt", EntryType.File, b"alpha-content")
+    same_parent_b = _SyntheticNode(b"dup.txt", EntryType.File, b"beta-content")
+    case_variant = _SyntheticNode(b"Dup.txt", EntryType.File, b"gamma-content")
+    other_dir = _SyntheticNode(b"other", EntryType.Directory)
+    other_parent = _SyntheticNode(b"dup.txt", EntryType.File, b"delta-content")
+    orphan = _SyntheticNode(b"orphan.bin", EntryType.File, b"orphan-content", parent_index=0xDEAD)
+    other_dir.children = [other_parent]
+
+    roots = [same_parent_a, same_parent_b, case_variant, other_dir, orphan]
+    physical = [*roots, other_parent]
+
+    offset = header_size
+    for node in physical:
+        node.offset = offset
+        offset += node.size
+
+    chunks: dict[int, tuple[int, int, bytes]] = {}
+    metadata: dict[int, int] = {}
+    for node in physical:
+        if node.type != EntryType.File:
+            continue
+
+        chunk_table_offset = offset
+        data_offset = chunk_table_offset + 16
+        compressed = zlib.compress(node.content)
+        meta_offset = data_offset + len(compressed)
+        chunks[node.offset] = (chunk_table_offset, data_offset, compressed)
+        metadata[node.offset] = meta_offset
+        offset = meta_offset + 20 + len(str(len(node.content))) + 20 + 32 + 20 + 40
+
+    def serialize_chain(nodes: list[_SyntheticNode]) -> dict[int, bytes]:
+        result = {}
+        for idx, node in enumerate(nodes):
+            following = nodes[idx + 1].offset if idx + 1 < len(nodes) else 0
+            child = node.children[0].offset if node.children else 0
+            zlib_meta, meta = 0, 0
+            if node.type == EntryType.File:
+                zlib_meta = chunks[node.offset][0]
+                meta = metadata[node.offset]
+            result[node.offset] = _file_entry_bytes(
+                name=node.name,
+                type=node.type,
+                next=following,
+                child=child,
+                meta=meta,
+                zlib_meta=zlib_meta,
+                parent_index=node.parent_index,
+            )
+        return result
+
+    entries: dict[int, bytes] = {}
+    entries.update(serialize_chain(roots))
+    entries.update(serialize_chain(other_dir.children))
+
+    buf = bytearray(offset)
+
+    logical = bytes(
+        c_ad1.LogicalImageHeader(
+            magic=b"ADLOGICALIMAGE\x00\x00",
+            version=4,
+            unk1=1,
+            chunk_size=65536,
+            metadata_offset=0,
+            first_file_offset=roots[0].offset,
+            name_len=len(_EVIDENCE_ROOT),
+            unk_magic=b"AD\x00\x00",
+            name_offset=92,
+            attr_guid_offset=0,
+            unk2=0,
+            locs_guid_offset=0,
+            unk3=0,
+            name=_EVIDENCE_ROOT,
+        )
+    )
+    assert len(logical) == header_size
+    buf[:header_size] = logical
+
+    for entry_offset, data in entries.items():
+        buf[entry_offset : entry_offset + len(data)] = data
+
+    for node in physical:
+        if node.type != EntryType.File:
+            continue
+
+        chunk_table_offset, data_offset, compressed = chunks[node.offset]
+        chunk_table = bytes(c_ad1.FileEntryChunks(num_chunks=1, chunks=[data_offset]))
+        assert len(chunk_table) == 16
+        buf[chunk_table_offset : chunk_table_offset + 16] = chunk_table
+        buf[data_offset : data_offset + len(compressed)] = compressed
+
+        meta_offset = metadata[node.offset]
+        items = [
+            (c_ad1.MetaType.FileSize, str(len(node.content)).encode()),
+            (c_ad1.MetaType.MD5, hashlib.md5(node.content).hexdigest().encode()),
+            (c_ad1.MetaType.SHA1, hashlib.sha1(node.content).hexdigest().encode()),
+        ]
+        sizes = [20 + len(data) for _, data in items]
+        for idx, (meta_type, data) in enumerate(items):
+            following = meta_offset + sizes[idx] if idx + 1 < len(items) else 0
+            item = bytes(c_ad1.FileMeta(next=following, category=0, type=meta_type, len=len(data), data=data))
+            buf[meta_offset : meta_offset + len(item)] = item
+            meta_offset += len(item)
+
+    segment_header = bytes(
+        c_ad1.SegmentedFileHeader(
+            magic=b"ADSEGMENTEDFILE\x00",
+            unk1=1,
+            unk2=2,
+            segment_number=1,
+            segment_count=1,
+            segment_size=512 + offset,
+            logical_image_offset=512,
+            padding=b"\x00" * 468,
+        )
+    )
+    return segment_header + bytes(buf)
+
+
+@pytest.fixture
+def ad1_duplicate_paths(tmp_path: Path) -> ad1.AD1:
+    path = tmp_path / "duplicates.ad1"
+    path.write_bytes(build_duplicate_path_ad1())
+    return ad1.AD1(path)
+
+
+def test_ad1_duplicate_display_path_is_ambiguous(ad1_duplicate_paths: ad1.AD1) -> None:
+    """Duplicate names under one parent stay distinct and path lookup reports both."""
+    fs = ad1_duplicate_paths
+
+    candidates = fs.entries_for_path("C:/evidence/dup.txt")
+    assert len(candidates) == 2
+    assert [entry.name for entry in candidates] == ["dup.txt", "dup.txt"]
+    assert candidates[0].offset != candidates[1].offset
+    assert all(entry.parent is fs.get("C:/evidence") for entry in candidates)
+
+    with pytest.raises(ad1.AmbiguousEntryError) as exc_info:
+        fs.get("C:/evidence/dup.txt")
+
+    error = exc_info.value
+    assert error.path == "C:/evidence/dup.txt"
+    assert [entry.offset for entry in error.candidates] == [entry.offset for entry in candidates]
+
+
+def test_ad1_duplicate_entries_open_independently(ad1_duplicate_paths: ad1.AD1) -> None:
+    """Each duplicate entry has its own content and hash metadata."""
+    fs = ad1_duplicate_paths
+    first, second = fs.entries_for_path("C:/evidence/dup.txt")
+
+    first_content = first.open().read()
+    second_content = second.open().read()
+
+    assert first_content == b"alpha-content"
+    assert second_content == b"beta-content"
+    assert first_content != second_content
+    assert first.md5 == hashlib.md5(first_content).hexdigest()
+    assert second.md5 == hashlib.md5(second_content).hexdigest()
+    assert first.sha1 == hashlib.sha1(first_content).hexdigest()
+    assert second.sha1 == hashlib.sha1(second_content).hexdigest()
+
+    # Opening through the identity returns the same entry regardless of path.
+    assert fs.entry_by_offset(first.offset) is first
+    assert fs.open_by_offset(first.offset).read() == first_content
+    assert fs.open_by_offset(second.offset).read() == second_content
+
+
+def test_ad1_case_and_parent_distinguish_entries(ad1_duplicate_paths: ad1.AD1) -> None:
+    """Case variants and same names under different parents are separate cases."""
+    fs = ad1_duplicate_paths
+
+    assert fs.get("C:/evidence/Dup.txt").open().read() == b"gamma-content"
+    assert fs.get("C:/evidence/other/dup.txt").open().read() == b"delta-content"
+
+    # The differently cased entry is not part of the same-parent ambiguity.
+    assert len(fs.entries_for_path("C:/evidence/Dup.txt")) == 1
+    assert len(fs.entries_for_path("C:/evidence/other/dup.txt")) == 1
+
+    identities = {entry.offset for entry in fs.iter_entries(include_virtual=False)}
+    assert {leaf.offset for leaf in fs.entries_for_path("C:/evidence/dup.txt")} <= identities
+    assert fs.entry_by_offset(fs.get("C:/evidence/Dup.txt").offset).name == "Dup.txt"
+
+
+def test_ad1_anomalous_parent_keeps_own_identity(ad1_duplicate_paths: ad1.AD1) -> None:
+    """A damaged parent relation does not borrow a same-named entry elsewhere."""
+    fs = ad1_duplicate_paths
+    orphan = fs.get("C:/evidence/orphan.bin")
+
+    assert orphan.declared_parent_offset == 0xDEAD
+    assert orphan.parent is fs.get("C:/evidence")
+    assert fs.entry_by_offset(orphan.offset) is orphan
+    assert orphan.open().read() == b"orphan-content"
+    assert orphan.md5 == hashlib.md5(b"orphan-content").hexdigest()
+
+    anomalies = [anomaly for anomaly in fs.anomalies if anomaly.offset == orphan.offset]
+    assert [anomaly.kind for anomaly in anomalies] == [ad1.ANOMALY_DECLARED_PARENT_MISSING]
+    assert anomalies[0].declared_parent == 0xDEAD
+
+    # No other entry may claim the orphan's identity or its declared parent.
+    assert all(entry.offset != orphan.offset for entry in fs.entries_for_path("C:/evidence/dup.txt"))
+    assert all(entry.offset != 0xDEAD for entry in fs.iter_entries())
+
+
+def test_ad1_entry_identity_enumeration(ad1_duplicate_paths: ad1.AD1) -> None:
+    """Enumeration is identity based and exposes parent/child and hash metadata."""
+    fs = ad1_duplicate_paths
+
+    physical = list(fs.iter_entries(include_virtual=False))
+    assert [entry.offset for entry in physical] == [103, 166, 229, 292, 419, 353]
+    assert [entry.offset for entry in fs.entries] == [entry.offset for entry in fs.iter_entries()]
+
+    # Identity keyed enumeration must not collapse entries that share a path.
+    assert len({entry.offset for entry in physical}) == len(physical)
+    paths = [entry.path for entry in physical]
+    assert paths.count("C:/evidence/dup.txt") == 2
+
+    for entry in physical:
+        assert entry.entry_id == entry.offset
+        if entry.is_file():
+            assert entry.size == len(entry.open().read())
+        assert fs.get_by_offset(entry.offset) is entry
+
+    with pytest.raises(ad1.FileNotFoundError):
+        fs.entry_by_offset(0xFFFF)
+
+
+def test_ad1_duplicate_path_open_shortcut_rejects_ambiguity(ad1_duplicate_paths: ad1.AD1) -> None:
+    """The convenience open path surfaces ambiguity instead of returning bytes."""
+    fs = ad1_duplicate_paths
+
+    with pytest.raises(ad1.AmbiguousEntryError) as exc_info:
+        fs.open("C:/evidence/dup.txt")
+
+    assert {entry.offset for entry in exc_info.value.candidates} == {
+        entry.offset for entry in fs.entries_for_path("C:/evidence/dup.txt")
+    }
+
+    # Explicit identity opening remains available for each candidate.
+    for entry in exc_info.value.candidates:
+        assert fs.open_by_offset(entry.offset).read() == entry.open().read()
+        assert fs.open(entry.offset).read() == entry.open().read()
+        assert fs.get(entry.offset) is entry
+
+
+def test_ad1_shared_child_is_reported(ad1_duplicate_paths: ad1.AD1) -> None:
+    """A child linked from two parents is reported, not silently re-parented."""
+    data = bytearray(build_duplicate_path_ad1())
+
+    # Make the 'other' directory point at the first same-parent duplicate,
+    # which is already owned by the synthetic evidence root.
+    shared_offset = 166
+    struct.pack_into("<Q", data, 512 + 292 + 8, shared_offset)
+
+    fs_shared = ad1.AD1(BytesIO(bytes(data)))
+    anomalies = [entry for entry in fs_shared.anomalies if entry.kind == ad1.ANOMALY_SHARED_CHILD]
+    # Both the linked entry and its following sibling are already owned by
+    # another parent; each is reported by identity, and neither is re-parented.
+    assert [anomaly.offset for anomaly in anomalies] == [shared_offset, 229]
+    assert all(anomaly.parent == 292 for anomaly in anomalies)
+
+    # The first observed containment wins; the entry keeps one parent and is
+    # not indexed twice under different identities.
+    shared = fs_shared.entry_by_offset(shared_offset)
+    assert shared.parent is fs_shared.get("C:/evidence")
+    assert sum(1 for entry in fs_shared.entries if entry.offset == shared_offset) == 1
+    assert shared.open().read() == b"beta-content"
+
+
+def test_ad1_cycle_does_not_hang_or_overwrite(ad1_duplicate_paths: ad1.AD1) -> None:
+    """A cyclic sibling chain is bounded and does not overwrite another entry."""
+    data = bytearray(build_duplicate_path_ad1())
+    struct.pack_into("<Q", data, 512 + 103, 103)
+
+    fs_cycle = ad1.AD1(BytesIO(bytes(data)))
+    assert [entry for entry in fs_cycle.anomalies if entry.kind == ad1.ANOMALY_CYCLE]
+    assert len(fs_cycle.entries) < len(ad1_duplicate_paths.entries)
+
+
+def test_ad1_multi_image_alias_keeps_single_identity(ad1_encrypted_passphrase: list[Path]) -> None:
+    """A multi-image logical root is one browse entry with two lookup identities."""
+    fs = ad1.AD1(ad1_encrypted_passphrase)
+    fs.unlock(passphrase="password")
+
+    downloads = fs.get("C:/Users/User/Downloads")
+    physical_offset = fs.logical_image.header.first_file_offset
+
+    assert fs.anomalies == []
+    assert fs.get_by_offset(physical_offset) is downloads
+    assert fs.entry_by_offset(downloads.offset) is downloads
+    assert fs.get_by_offset(physical_offset).parent is fs.get("C:/Users/User")
+
+    # The children's declared parent points at the physical directory offset
+    # and must resolve to the same browse entry, not create a new one.
+    child = fs.get("C:/Users/User/Downloads/desktop.ini")
+    assert child.declared_parent_offset == physical_offset
+    assert child.declared_parent is downloads
+    assert all(fs._entry_index[entry.offset] is entry for entry in downloads.children)
+
+
+def test_ad1_identity_api_requires_unlocked_container(ad1_encrypted_passphrase: list[Path]) -> None:
+    """Identity enumeration and lookup keep the ADCRYPT lock contract."""
+    fs = ad1.AD1(ad1_encrypted_passphrase)
+
+    with pytest.raises(ValueError, match="AD1 container is locked by ADCRYPT"):
+        fs.entry_by_offset(0)
+
+    with pytest.raises(ValueError, match="AD1 container is locked by ADCRYPT"):
+        fs.entries_for_path("/")
+
+    assert fs.entries == []
+    assert fs.anomalies == []
+
+    fs.unlock(passphrase="password")
+    assert len(fs.entries) > 0
