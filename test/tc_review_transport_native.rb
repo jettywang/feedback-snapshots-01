@@ -1,4 +1,5 @@
 require_relative 'spec_helper'
+require_relative 'socket_helpers'
 require 'socket'
 require 'timeout'
 
@@ -131,13 +132,11 @@ class ReviewTransportNativeTest < Minitest::Test
 
   def test_default_udp_advertisement_retries_truncated_responses_over_tcp
     [false, true].each do |dnssec|
-      port, udp_requests = udp_server do |request|
+      port, udp_requests, tcp = udp_server(tcp: true) do |request|
         reply = response(request, 'truncated')
         reply.header.tc = true
         reply
       end
-      tcp = TCPServer.new('127.0.0.1', port)
-      @sockets << tcp
       tcp_requests = Queue.new
       worker do
         client = tcp.accept
@@ -176,7 +175,7 @@ class ReviewTransportNativeTest < Minitest::Test
       key = tsig_key
       received = 0
       observed = Queue.new
-      port, = udp_server do |request, bytes|
+      port, _, tcp = udp_server(tcp: true) do |request, bytes|
         signature = request.tsig
         raise 'invalid UDP request MAC' unless signature &&
           key.generate(request, nil, '', bytes, signature).mac == signature.mac
@@ -188,8 +187,6 @@ class ReviewTransportNativeTest < Minitest::Test
         key.apply(reply, request)
         reply
       end
-      tcp = TCPServer.new('127.0.0.1', port)
-      @sockets << tcp
       worker do
         client = tcp.accept
         begin
@@ -343,9 +340,14 @@ class ReviewTransportNativeTest < Minitest::Test
     thread
   end
 
-  def udp_server(&handler)
-    socket = UDPSocket.new
-    socket.bind('127.0.0.1', 0)
+  def udp_server(tcp: false, &handler)
+    if tcp
+      socket, listener = TestSockets.udp_tcp_pair
+      @sockets << listener
+    else
+      socket = UDPSocket.new
+      socket.bind('127.0.0.1', 0)
+    end
     @sockets << socket
     requests = Queue.new
     worker do
@@ -361,7 +363,7 @@ class ReviewTransportNativeTest < Minitest::Test
         end
       end
     end
-    [socket.addr[1], requests]
+    [socket.addr[1], requests, listener]
   end
 
   def resolver_for(port, options = {})

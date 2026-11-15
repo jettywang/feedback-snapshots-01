@@ -1,4 +1,5 @@
 require_relative 'spec_helper'
+require_relative 'socket_helpers'
 require 'socket'
 require 'timeout'
 
@@ -76,9 +77,7 @@ class TestSVCBTransport < Minitest::Test
   end
 
   def with_server(udp_reply, tcp_reply)
-    udp = UDPSocket.new
-    udp.bind('127.0.0.1', 0)
-    tcp = TCPServer.new('127.0.0.1', udp.addr[1])
+    udp, tcp = TestSockets.udp_tcp_pair
     events, errors = Queue.new, Queue.new
     running = true
     workers = [[udp, :udp, udp_reply], [tcp, :tcp, tcp_reply]].map do |listener, transport, reply|

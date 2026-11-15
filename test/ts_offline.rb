@@ -89,6 +89,7 @@ TESTS = %w(
     rrsig
     svcb
     svcb_transport
+    socket_helpers
     tcp_pipelining
     transport_fork
     tkey

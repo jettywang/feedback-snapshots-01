@@ -4,6 +4,7 @@ require 'socket'
 require 'resolv'
 require 'thread'
 require 'timeout'
+require_relative 'socket_helpers'
 
 # Local, independent DNS peer. No public DNS traffic, fixed port, privileged
 # service, RubyDNS API or subprocess is required.
@@ -18,10 +19,8 @@ class SoakServer
   attr_reader :port
 
   def initialize
-    @listener = TCPServer.new(IP, 0)
+    @udp, @listener = TestSockets.udp_tcp_pair(IP)
     @port = @listener.addr[1]
-    @udp = UDPSocket.new
-    @udp.bind(IP, @port)
     @wake_read, @wake_write = IO.pipe
     @clients = {}
     ready = Queue.new

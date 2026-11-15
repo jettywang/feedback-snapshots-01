@@ -1,12 +1,11 @@
 require_relative 'spec_helper'
+require_relative 'socket_helpers'
 require 'socket'
 require 'timeout'
 
 class EdnsRetryRegressionsTest < Minitest::Test
   def test_formerr_then_truncated_udp_completes_over_tcp_without_mutating_caller
-    udp = UDPSocket.new
-    udp.bind('127.0.0.1', 0)
-    tcp = TCPServer.new('127.0.0.1', udp.addr[1])
+    udp, tcp = TestSockets.udp_tcp_pair
     requests = Queue.new
     udp_worker = Thread.new do
       2.times do |index|
