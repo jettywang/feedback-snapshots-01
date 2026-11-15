@@ -27,6 +27,12 @@ Codecs generator interface
 For indefinite length or chunked encoding mode, make codecs
 iterable producing/consuming substrate/objects.
 
+BER encoding can now stream values of unknown length: see
+``encodeStream`` and ``StreamingEncoder`` in
+``pyasn1.codec.ber.streaming_encoder``. Still missing are an equivalent
+streaming path for CER, and streaming decode into an application-supplied
+object tree rather than a whole reconstructed value.
+
 ASN.1 schema compiler
 ---------------------
 

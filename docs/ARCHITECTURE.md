@@ -85,6 +85,7 @@ The package is thirty-two modules; four carry most of the weight:
 | `codec/streaming.py` | `asSeekableStream`, `CachingStreamWrapper`, `readFromStream`: the resumable-stream engine |
 | `codec/ber/decoder.py` | The base decoder: payload decoders, the state machine, every security limit |
 | `codec/ber/encoder.py` | The base encoder |
+| `codec/ber/streaming_encoder.py` | `encodeStream`/`encodeStreamTo`/`StreamingEncoder`: indefinite-length BER emitted while components are produced, plus the termination contract |
 | `codec/ber/eoo.py` | The end-of-octets singleton |
 | `codec/cer/*`, `codec/der/*` | Derived codecs, sharing BER's objects by identity |
 | `codec/native/*` | Conversion to and from Python dicts, lists and scalars |
@@ -1042,6 +1043,50 @@ Tightening `**ignored` into strict validation is a breaking change:
 `**options`, including per-call keys like `substrateFun`, into the
 `SingleItemDecoder` constructor, and that pass-through works only because the
 constructor discards what it does not recognize.
+
+### Streaming indefinite-length encoding
+
+`codec/ber/streaming_encoder.py` is a separate entry point, not a mode of
+`Encoder`: `encode()` stays a bytes-in/bytes-out pure function. Its
+`encodeStream(value, asn1Spec=None, **options)` returns a `StreamingEncoder`,
+an iterator of octet chunks; `encodeStreamTo(sink, value, ...)` drains that
+iterator into an object with `write(bytes) -> int`.
+
+The framing is indefinite length for constructed values and definite length
+for primitives, which is what X.690 allows. A constructed value is emitted as
+`tag 0x80`, then each component's complete TLV, then `00 00`; explicit tags
+nest the same way around the base TLV. `SequenceOf`/`SetOf` accept any
+iterable and consume it one component at a time (`_sequenceOfComponents`), so
+a generator is never turned into a list. A string given as an iterable of
+`bytes`/`str` fragments (`_encodeStringFragments`) becomes a constructed
+string whose fragments carry the string type's own universal tag -- e.g.
+UTF8String fragments inside a constructed UTF8String -- because the decoder
+resolves each fragment against `protoComponent`. `maxChunkSize` splits each
+fragment further, lazily and on character boundaries for `str`.
+
+The termination contract is the reason this lives apart. `StreamingEncoder`
+tracks `complete`; `_run()` sets it only after the top-level payload
+generator is exhausted, which is the only path that yields the final EOC.
+Any exception -- a producer iterator raising, a `subtypeSpec` violation, a
+sink short write -- leaves `complete` false and `aborted` true, and the
+exception travels out wrapped in `StreamingEncodeError` (or unchanged if no
+octets were emitted yet). Nothing in this module emits EOC from a `finally`,
+so `close()` on the iterator and `abort()` both leave an unterminated prefix.
+That is deliberate: BER has no self-delimiting abort marker, so the caller
+must terminate the transport rather than append octets. For the same reason
+`pyasn1.codec.der.encoder.encodeStream()` raises instead of forwarding to BER;
+DER's constructed values must carry a definite length, and a silent fallback
+would produce non-DER octets that look successfully encoded.
+
+String and container size constraints are checked incrementally
+(`_sizeBounds` reads bare `ValueSizeConstraint` bounds out of a
+`ConstraintsIntersection`), so an over-limit producer fails before the
+terminator is reached. This check is conservative: it only interprets
+`ValueSizeConstraint` and lets every other constraint be enforced by the
+per-component clone. Buffering is bounded by one encoded component per
+nesting level plus one string fragment; `tests/codec/ber/test_streaming_encoder.py`
+(`StreamingBufferingTestCase`) pins that peak traced allocation does not grow
+with payload size.
 
 ### The options channel
 

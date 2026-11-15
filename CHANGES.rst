@@ -1,6 +1,19 @@
 Revision 0.7.0, released XX-XX-2026
 ---------------------------------------
 
+- Added a standalone streaming BER encoder for values whose total length is
+  unknown: ``pyasn1.codec.ber.streaming_encoder.encodeStream()`` yields
+  indefinite-length BER octets as components are produced, and
+  ``encodeStreamTo()`` writes them to a sink. ``SequenceOf``/``SetOf``
+  components are consumed lazily from any iterable (generators are not
+  materialised), and a string value given as an iterable of fragments is
+  emitted as a constructed indefinite-length string. The regular
+  ``encode()`` API is unchanged. A failed producer, a violated container
+  constraint, a short sink write or an explicit abort leaves the output as
+  an unterminated prefix: no end-of-contents octets are ever emitted to make
+  incomplete content look complete, and the caller is responsible for
+  terminating the transport. ``pyasn1.codec.der.encoder.encodeStream()``
+  raises rather than falling back to BER indefinite-length framing.
 - Fixed OverflowError from BER/CER/DER length values that fit in the
   supported 8-octet length field but exceed the platform maximum readable
   size. Such oversized definite lengths are now rejected with PyAsn1Error.

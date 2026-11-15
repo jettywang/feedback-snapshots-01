@@ -119,6 +119,31 @@ class Encoder(encoder.Encoder):
 #:
 encode = Encoder()
 
+
+def encodeStream(value, asn1Spec=None, **options):
+    """Reject streaming encoding: DER has no indefinite-length form.
+
+    DER requires every constructed value to carry a definite length, so a
+    value whose total length is only known after generation cannot be
+    encoded as DER.  Falling back to BER indefinite framing here would
+    produce octets that are not DER while looking like a successful DER
+    encode, which is especially dangerous for signature verification.
+
+    Use :func:`pyasn1.codec.ber.streaming_encoder.encodeStream` if BER
+    indefinite-length framing is acceptable, or buffer the value and call
+    :func:`encode` for DER.
+
+    Raises
+    ------
+    ~pyasn1.error.PyAsn1Error
+        Always.
+    """
+    raise error.PyAsn1Error(
+        'DER does not support streaming encoding: constructed values '
+        'require a definite length. Use BER streaming encoding or buffer '
+        'the value and encode it as DER.')
+
+
 def __getattr__(attr: str):
     if newAttr := {"tagMap": "TAG_MAP", "typeMap": "TYPE_MAP"}.get(attr):
         warnings.warn(f"{attr} is deprecated. Please use {newAttr} instead.", DeprecationWarning, stacklevel=2)
