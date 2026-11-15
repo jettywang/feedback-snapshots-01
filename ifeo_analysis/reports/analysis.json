@@ -1,0 +1,2932 @@
+{
+  "assumptions": {
+    "SystemRoot": "C:\\Windows",
+    "ProgramFiles": "C:\\Program Files"
+  },
+  "reports": [
+    {
+      "hive": "ifeo_analysis/samples/case_a_monitor_only.hive",
+      "sha256": "299f6785b1cb45df50fc217330f1b36a140215d3e577c6793b232d3bae6225bf",
+      "size": 5024,
+      "parser": {
+        "library": "dissect.regf"
+      },
+      "hive_header": {
+        "version": 5,
+        "filename": "SOFTWARE",
+        "checksum_comparison_true": true,
+        "in_transaction": false
+      },
+      "views": [
+        {
+          "view": "native",
+          "base_path": "Microsoft\\Windows NT\\CurrentVersion",
+          "view_root_present": true,
+          "ifeo_key_present": false,
+          "spe_key_present": true,
+          "images": [
+            {
+              "image": "monitor-only.exe",
+              "view": "native",
+              "ifeo_path": null,
+              "spe_path": "Microsoft\\Windows NT\\CurrentVersion\\SilentProcessExit\\monitor-only.exe",
+              "ifeo_present": false,
+              "spe_present": true,
+              "values": {
+                "ifeo": [],
+                "spe": [
+                  {
+                    "name": "MonitorProcess",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\SilentProcessExit\\monitor-only.exe",
+                    "raw_type": 1,
+                    "type_name": "REG_SZ",
+                    "size": 52,
+                    "data_hex": "43003a005c0054006f006f006c0073005c006d006f006e00690074006f0072002d006f006e006c0079002e006500780065000000",
+                    "decoded": "C:\\Tools\\monitor-only.exe",
+                    "issues": []
+                  },
+                  {
+                    "name": "ReportingMode",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\SilentProcessExit\\monitor-only.exe",
+                    "raw_type": 4,
+                    "type_name": "REG_DWORD",
+                    "size": 4,
+                    "data_hex": "01000000",
+                    "decoded": 1,
+                    "issues": []
+                  }
+                ]
+              },
+              "debugger": {
+                "raw": null,
+                "valid": false,
+                "occurrences": [],
+                "path_flags": {
+                  "raw": null,
+                  "basename": null,
+                  "quoted": false,
+                  "absolute": false
+                },
+                "environment": {
+                  "has_environment_variables": false,
+                  "variables": [],
+                  "unresolved": [],
+                  "expanded_candidate": null,
+                  "candidate_only": true
+                }
+              },
+              "global_flag": {
+                "value": null,
+                "valid": false,
+                "bit_0x200": false,
+                "ambiguous": false,
+                "occurrences": []
+              },
+              "use_filter": {
+                "value": null,
+                "valid": false,
+                "enabled": false,
+                "disabled": false,
+                "ambiguous": false,
+                "occurrences": []
+              },
+              "filters": [],
+              "filter_values": [],
+              "valid_filter_count": 0,
+              "monitor": {
+                "raw": "C:\\Tools\\monitor-only.exe",
+                "valid": true,
+                "occurrences": [
+                  {
+                    "raw": "C:\\Tools\\monitor-only.exe",
+                    "type": 1,
+                    "valid": true
+                  }
+                ],
+                "path_flags": {
+                  "raw": "C:\\Tools\\monitor-only.exe",
+                  "basename": "monitor-only.exe",
+                  "quoted": false,
+                  "absolute": true
+                },
+                "environment": {
+                  "has_environment_variables": false,
+                  "variables": [],
+                  "unresolved": [],
+                  "expanded_candidate": "C:\\Tools\\monitor-only.exe",
+                  "candidate_only": true,
+                  "note": "路径未做存在性、签名或可执行性验证"
+                }
+              },
+              "reporting_mode": {
+                "value": 1,
+                "valid": true,
+                "occurrences": [
+                  {
+                    "value": 1,
+                    "type": 4,
+                    "size": 4,
+                    "valid": true
+                  }
+                ]
+              },
+              "monitor_association_complete": false,
+              "mechanisms": [
+                "MONITOR_WITHOUT_FLAG_ORPHAN"
+              ],
+              "missing_associations": [
+                "IFEO 映像键"
+              ],
+              "informational_missing": [],
+              "issues": [],
+              "notes": [
+                "MonitorProcess 存在但缺少可用的 GlobalFlag 0x200，不能仅凭监控路径认定生效。"
+              ],
+              "pairing_ambiguous": false
+            }
+          ],
+          "issues": [],
+          "spe_path": "Microsoft\\Windows NT\\CurrentVersion\\SilentProcessExit"
+        },
+        {
+          "view": "wow6432",
+          "base_path": "Wow6432Node\\Microsoft\\Windows NT\\CurrentVersion",
+          "view_root_present": false,
+          "ifeo_key_present": false,
+          "spe_key_present": false,
+          "images": [],
+          "issues": [
+            {
+              "code": "VIEW_ROOT_MISSING",
+              "severity": "warning",
+              "message": "该 hive 中不存在视图根键 'Wow6432Node\\\\Microsoft\\\\Windows NT\\\\CurrentVersion'",
+              "path": "Wow6432Node\\Microsoft\\Windows NT\\CurrentVersion",
+              "value": null
+            }
+          ]
+        }
+      ],
+      "issues": [
+        {
+          "code": "VIEW_ROOT_MISSING",
+          "severity": "warning",
+          "message": "该 hive 中不存在视图根键 'Wow6432Node\\\\Microsoft\\\\Windows NT\\\\CurrentVersion'",
+          "path": "Wow6432Node\\Microsoft\\Windows NT\\CurrentVersion",
+          "value": null
+        }
+      ]
+    },
+    {
+      "hive": "ifeo_analysis/samples/case_b_full_chain.hive",
+      "sha256": "52e8097e45d5457199090a9dee213b8829ef66314b25f5c161bcdacfe7ff8aab",
+      "size": 5440,
+      "parser": {
+        "library": "dissect.regf"
+      },
+      "hive_header": {
+        "version": 5,
+        "filename": "SOFTWARE",
+        "checksum_comparison_true": true,
+        "in_transaction": false
+      },
+      "views": [
+        {
+          "view": "native",
+          "base_path": "Microsoft\\Windows NT\\CurrentVersion",
+          "view_root_present": true,
+          "ifeo_key_present": true,
+          "spe_key_present": true,
+          "images": [
+            {
+              "image": "full-chain.exe",
+              "view": "native",
+              "ifeo_path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\full-chain.exe",
+              "spe_path": "Microsoft\\Windows NT\\CurrentVersion\\SilentProcessExit\\full-chain.exe",
+              "ifeo_present": true,
+              "spe_present": true,
+              "values": {
+                "ifeo": [
+                  {
+                    "name": "Debugger",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\full-chain.exe",
+                    "raw_type": 1,
+                    "type_name": "REG_SZ",
+                    "size": 38,
+                    "data_hex": "43003a005c0054006f006f006c0073005c00640062006700360034002e006500780065000000",
+                    "decoded": "C:\\Tools\\dbg64.exe",
+                    "issues": []
+                  },
+                  {
+                    "name": "GlobalFlag",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\full-chain.exe",
+                    "raw_type": 4,
+                    "type_name": "REG_DWORD",
+                    "size": 4,
+                    "data_hex": "00020000",
+                    "decoded": 512,
+                    "issues": []
+                  }
+                ],
+                "spe": [
+                  {
+                    "name": "MonitorProcess",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\SilentProcessExit\\full-chain.exe",
+                    "raw_type": 2,
+                    "type_name": "REG_EXPAND_SZ",
+                    "size": 66,
+                    "data_hex": "2500530079007300740065006d0052006f006f00740025005c0054006f006f006c0073005c006d006f006e00690074006f007200360034002e006500780065000000",
+                    "decoded": "%SystemRoot%\\Tools\\monitor64.exe",
+                    "issues": []
+                  },
+                  {
+                    "name": "ReportingMode",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\SilentProcessExit\\full-chain.exe",
+                    "raw_type": 4,
+                    "type_name": "REG_DWORD",
+                    "size": 4,
+                    "data_hex": "01000000",
+                    "decoded": 1,
+                    "issues": []
+                  }
+                ]
+              },
+              "debugger": {
+                "raw": "C:\\Tools\\dbg64.exe",
+                "valid": true,
+                "occurrences": [
+                  {
+                    "raw": "C:\\Tools\\dbg64.exe",
+                    "type": 1,
+                    "valid": true
+                  }
+                ],
+                "path_flags": {
+                  "raw": "C:\\Tools\\dbg64.exe",
+                  "basename": "dbg64.exe",
+                  "quoted": false,
+                  "absolute": true
+                },
+                "environment": {
+                  "has_environment_variables": false,
+                  "variables": [],
+                  "unresolved": [],
+                  "expanded_candidate": "C:\\Tools\\dbg64.exe",
+                  "candidate_only": true,
+                  "note": "路径未做存在性、签名或可执行性验证"
+                }
+              },
+              "global_flag": {
+                "value": 512,
+                "valid": true,
+                "bit_0x200": true,
+                "ambiguous": false,
+                "occurrences": [
+                  {
+                    "value": 512,
+                    "type": 4,
+                    "size": 4,
+                    "valid": true,
+                    "silent_process_exit_bit": true,
+                    "other_bits": 0
+                  }
+                ]
+              },
+              "use_filter": {
+                "value": null,
+                "valid": false,
+                "enabled": false,
+                "disabled": false,
+                "ambiguous": false,
+                "occurrences": []
+              },
+              "filters": [],
+              "filter_values": [],
+              "valid_filter_count": 0,
+              "monitor": {
+                "raw": "%SystemRoot%\\Tools\\monitor64.exe",
+                "valid": true,
+                "occurrences": [
+                  {
+                    "raw": "%SystemRoot%\\Tools\\monitor64.exe",
+                    "type": 2,
+                    "valid": true
+                  }
+                ],
+                "path_flags": {
+                  "raw": "%SystemRoot%\\Tools\\monitor64.exe",
+                  "basename": "monitor64.exe",
+                  "quoted": false,
+                  "absolute": false
+                },
+                "environment": {
+                  "has_environment_variables": true,
+                  "variables": [
+                    "SystemRoot"
+                  ],
+                  "unresolved": [],
+                  "expanded_candidate": "C:\\Windows\\Tools\\monitor64.exe",
+                  "candidate_only": true,
+                  "assumptions_used": {
+                    "SystemRoot": "C:\\Windows"
+                  },
+                  "note": "展开结果只是候选解释；hive 不携带目标机环境，未验证路径或程序"
+                }
+              },
+              "reporting_mode": {
+                "value": 1,
+                "valid": true,
+                "occurrences": [
+                  {
+                    "value": 1,
+                    "type": 4,
+                    "size": 4,
+                    "valid": true
+                  }
+                ]
+              },
+              "monitor_association_complete": true,
+              "mechanisms": [
+                "IFEO_DEBUGGER_REDIRECT_CANDIDATE",
+                "SILENT_PROCESS_EXIT_MONITOR_CANDIDATE"
+              ],
+              "missing_associations": [],
+              "informational_missing": [],
+              "issues": [],
+              "notes": [
+                "Debugger 存在只说明 IFEO 重定向候选，不是执行证据。",
+                "GlobalFlag 的 0x200 位与 MonitorProcess 同时合法成立，支持 SilentProcessExit 监控候选。"
+              ],
+              "pairing_ambiguous": false
+            }
+          ],
+          "issues": [],
+          "ifeo_path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options",
+          "spe_path": "Microsoft\\Windows NT\\CurrentVersion\\SilentProcessExit"
+        },
+        {
+          "view": "wow6432",
+          "base_path": "Wow6432Node\\Microsoft\\Windows NT\\CurrentVersion",
+          "view_root_present": false,
+          "ifeo_key_present": false,
+          "spe_key_present": false,
+          "images": [],
+          "issues": [
+            {
+              "code": "VIEW_ROOT_MISSING",
+              "severity": "warning",
+              "message": "该 hive 中不存在视图根键 'Wow6432Node\\\\Microsoft\\\\Windows NT\\\\CurrentVersion'",
+              "path": "Wow6432Node\\Microsoft\\Windows NT\\CurrentVersion",
+              "value": null
+            }
+          ]
+        }
+      ],
+      "issues": [
+        {
+          "code": "VIEW_ROOT_MISSING",
+          "severity": "warning",
+          "message": "该 hive 中不存在视图根键 'Wow6432Node\\\\Microsoft\\\\Windows NT\\\\CurrentVersion'",
+          "path": "Wow6432Node\\Microsoft\\Windows NT\\CurrentVersion",
+          "value": null
+        }
+      ]
+    },
+    {
+      "hive": "ifeo_analysis/samples/case_c_two_views.hive",
+      "sha256": "7fff659b0fcd7bfed8c448dc49a7a1bdf41282d823786e912adb722d535f4e49",
+      "size": 7552,
+      "parser": {
+        "library": "dissect.regf"
+      },
+      "hive_header": {
+        "version": 5,
+        "filename": "SOFTWARE",
+        "checksum_comparison_true": true,
+        "in_transaction": false
+      },
+      "views": [
+        {
+          "view": "native",
+          "base_path": "Microsoft\\Windows NT\\CurrentVersion",
+          "view_root_present": true,
+          "ifeo_key_present": true,
+          "spe_key_present": true,
+          "images": [
+            {
+              "image": "dual-view.exe",
+              "view": "native",
+              "ifeo_path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\dual-view.exe",
+              "spe_path": "Microsoft\\Windows NT\\CurrentVersion\\SilentProcessExit\\dual-view.exe",
+              "ifeo_present": true,
+              "spe_present": true,
+              "values": {
+                "ifeo": [
+                  {
+                    "name": "Debugger",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\dual-view.exe",
+                    "raw_type": 1,
+                    "type_name": "REG_SZ",
+                    "size": 38,
+                    "data_hex": "43003a005c0054006f006f006c0073005c00640062006700360034002e006500780065000000",
+                    "decoded": "C:\\Tools\\dbg64.exe",
+                    "issues": []
+                  },
+                  {
+                    "name": "GlobalFlag",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\dual-view.exe",
+                    "raw_type": 4,
+                    "type_name": "REG_DWORD",
+                    "size": 4,
+                    "data_hex": "00020000",
+                    "decoded": 512,
+                    "issues": []
+                  },
+                  {
+                    "name": "UseFilter",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\dual-view.exe",
+                    "raw_type": 4,
+                    "type_name": "REG_DWORD",
+                    "size": 4,
+                    "data_hex": "01000000",
+                    "decoded": 1,
+                    "issues": []
+                  }
+                ],
+                "spe": [
+                  {
+                    "name": "MonitorProcess",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\SilentProcessExit\\dual-view.exe",
+                    "raw_type": 2,
+                    "type_name": "REG_EXPAND_SZ",
+                    "size": 66,
+                    "data_hex": "2500530079007300740065006d0052006f006f00740025005c0054006f006f006c0073005c006d006f006e00690074006f007200360034002e006500780065000000",
+                    "decoded": "%SystemRoot%\\Tools\\monitor64.exe",
+                    "issues": []
+                  },
+                  {
+                    "name": "ReportingMode",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\SilentProcessExit\\dual-view.exe",
+                    "raw_type": 4,
+                    "type_name": "REG_DWORD",
+                    "size": 4,
+                    "data_hex": "01000000",
+                    "decoded": 1,
+                    "issues": []
+                  }
+                ]
+              },
+              "debugger": {
+                "raw": "C:\\Tools\\dbg64.exe",
+                "valid": true,
+                "occurrences": [
+                  {
+                    "raw": "C:\\Tools\\dbg64.exe",
+                    "type": 1,
+                    "valid": true
+                  }
+                ],
+                "path_flags": {
+                  "raw": "C:\\Tools\\dbg64.exe",
+                  "basename": "dbg64.exe",
+                  "quoted": false,
+                  "absolute": true
+                },
+                "environment": {
+                  "has_environment_variables": false,
+                  "variables": [],
+                  "unresolved": [],
+                  "expanded_candidate": "C:\\Tools\\dbg64.exe",
+                  "candidate_only": true,
+                  "note": "路径未做存在性、签名或可执行性验证"
+                }
+              },
+              "global_flag": {
+                "value": 512,
+                "valid": true,
+                "bit_0x200": true,
+                "ambiguous": false,
+                "occurrences": [
+                  {
+                    "value": 512,
+                    "type": 4,
+                    "size": 4,
+                    "valid": true,
+                    "silent_process_exit_bit": true,
+                    "other_bits": 0
+                  }
+                ]
+              },
+              "use_filter": {
+                "value": 1,
+                "valid": true,
+                "enabled": true,
+                "disabled": false,
+                "ambiguous": false,
+                "occurrences": [
+                  {
+                    "value": 1,
+                    "type": 4,
+                    "size": 4,
+                    "valid": true
+                  }
+                ]
+              },
+              "filters": [
+                {
+                  "source": "filter-subkey",
+                  "subkey": "filter-x64-a",
+                  "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\dual-view.exe\\filter-x64-a",
+                  "raw": "C:\\Apps64\\dual-view.exe",
+                  "raw_type": 1,
+                  "type_name": "REG_SZ",
+                  "size": 48,
+                  "data_hex": "43003a005c004100700070007300360034005c006400750061006c002d0076006900650077002e006500780065000000",
+                  "issues": [],
+                  "path_flags": {
+                    "raw": "C:\\Apps64\\dual-view.exe",
+                    "basename": "dual-view.exe",
+                    "quoted": false,
+                    "absolute": true
+                  },
+                  "environment": {
+                    "has_environment_variables": false,
+                    "variables": [],
+                    "unresolved": [],
+                    "expanded_candidate": "C:\\Apps64\\dual-view.exe",
+                    "candidate_only": true,
+                    "note": "路径未做存在性、签名或可执行性验证"
+                  }
+                },
+                {
+                  "source": "filter-subkey",
+                  "subkey": "filter-x64-b",
+                  "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\dual-view.exe\\filter-x64-b",
+                  "raw": "%ProgramFiles%\\Dual View\\dual-view.exe",
+                  "raw_type": 2,
+                  "type_name": "REG_EXPAND_SZ",
+                  "size": 78,
+                  "data_hex": "2500500072006f006700720061006d00460069006c006500730025005c004400750061006c00200056006900650077005c006400750061006c002d0076006900650077002e006500780065000000",
+                  "issues": [],
+                  "path_flags": {
+                    "raw": "%ProgramFiles%\\Dual View\\dual-view.exe",
+                    "basename": "dual-view.exe",
+                    "quoted": false,
+                    "absolute": false
+                  },
+                  "environment": {
+                    "has_environment_variables": true,
+                    "variables": [
+                      "ProgramFiles"
+                    ],
+                    "unresolved": [],
+                    "expanded_candidate": "C:\\Program Files\\Dual View\\dual-view.exe",
+                    "candidate_only": true,
+                    "assumptions_used": {
+                      "ProgramFiles": "C:\\Program Files"
+                    },
+                    "note": "展开结果只是候选解释；hive 不携带目标机环境，未验证路径或程序"
+                  }
+                }
+              ],
+              "filter_values": [
+                {
+                  "source": "filter-subkey",
+                  "subkey": "filter-x64-a",
+                  "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\dual-view.exe\\filter-x64-a",
+                  "name": "FilterFullPath",
+                  "raw_type": 1,
+                  "type_name": "REG_SZ",
+                  "size": 48,
+                  "data_hex": "43003a005c004100700070007300360034005c006400750061006c002d0076006900650077002e006500780065000000",
+                  "decoded": "C:\\Apps64\\dual-view.exe"
+                },
+                {
+                  "source": "filter-subkey",
+                  "subkey": "filter-x64-b",
+                  "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\dual-view.exe\\filter-x64-b",
+                  "name": "FilterFullPath",
+                  "raw_type": 2,
+                  "type_name": "REG_EXPAND_SZ",
+                  "size": 78,
+                  "data_hex": "2500500072006f006700720061006d00460069006c006500730025005c004400750061006c00200056006900650077005c006400750061006c002d0076006900650077002e006500780065000000",
+                  "decoded": "%ProgramFiles%\\Dual View\\dual-view.exe"
+                }
+              ],
+              "valid_filter_count": 2,
+              "monitor": {
+                "raw": "%SystemRoot%\\Tools\\monitor64.exe",
+                "valid": true,
+                "occurrences": [
+                  {
+                    "raw": "%SystemRoot%\\Tools\\monitor64.exe",
+                    "type": 2,
+                    "valid": true
+                  }
+                ],
+                "path_flags": {
+                  "raw": "%SystemRoot%\\Tools\\monitor64.exe",
+                  "basename": "monitor64.exe",
+                  "quoted": false,
+                  "absolute": false
+                },
+                "environment": {
+                  "has_environment_variables": true,
+                  "variables": [
+                    "SystemRoot"
+                  ],
+                  "unresolved": [],
+                  "expanded_candidate": "C:\\Windows\\Tools\\monitor64.exe",
+                  "candidate_only": true,
+                  "assumptions_used": {
+                    "SystemRoot": "C:\\Windows"
+                  },
+                  "note": "展开结果只是候选解释；hive 不携带目标机环境，未验证路径或程序"
+                }
+              },
+              "reporting_mode": {
+                "value": 1,
+                "valid": true,
+                "occurrences": [
+                  {
+                    "value": 1,
+                    "type": 4,
+                    "size": 4,
+                    "valid": true
+                  }
+                ]
+              },
+              "monitor_association_complete": true,
+              "mechanisms": [
+                "IFEO_DEBUGGER_REDIRECT_CANDIDATE",
+                "IFEO_FILTER_CONDITION_CANDIDATE",
+                "SILENT_PROCESS_EXIT_MONITOR_CANDIDATE"
+              ],
+              "missing_associations": [],
+              "informational_missing": [],
+              "issues": [],
+              "notes": [
+                "Debugger 存在只说明 IFEO 重定向候选，不是执行证据。",
+                "GlobalFlag 的 0x200 位与 MonitorProcess 同时合法成立，支持 SilentProcessExit 监控候选。"
+              ],
+              "pairing_ambiguous": false
+            }
+          ],
+          "issues": [],
+          "ifeo_path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options",
+          "spe_path": "Microsoft\\Windows NT\\CurrentVersion\\SilentProcessExit"
+        },
+        {
+          "view": "wow6432",
+          "base_path": "Wow6432Node\\Microsoft\\Windows NT\\CurrentVersion",
+          "view_root_present": true,
+          "ifeo_key_present": true,
+          "spe_key_present": true,
+          "images": [
+            {
+              "image": "dual-view.exe",
+              "view": "wow6432",
+              "ifeo_path": "Wow6432Node\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\dual-view.exe",
+              "spe_path": "Wow6432Node\\Microsoft\\Windows NT\\CurrentVersion\\SilentProcessExit\\dual-view.exe",
+              "ifeo_present": true,
+              "spe_present": true,
+              "values": {
+                "ifeo": [
+                  {
+                    "name": "Debugger",
+                    "path": "Wow6432Node\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\dual-view.exe",
+                    "raw_type": 1,
+                    "type_name": "REG_SZ",
+                    "size": 38,
+                    "data_hex": "43003a005c0054006f006f006c0073005c00640062006700330032002e006500780065000000",
+                    "decoded": "C:\\Tools\\dbg32.exe",
+                    "issues": []
+                  },
+                  {
+                    "name": "GlobalFlag",
+                    "path": "Wow6432Node\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\dual-view.exe",
+                    "raw_type": 4,
+                    "type_name": "REG_DWORD",
+                    "size": 4,
+                    "data_hex": "00020000",
+                    "decoded": 512,
+                    "issues": []
+                  },
+                  {
+                    "name": "UseFilter",
+                    "path": "Wow6432Node\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\dual-view.exe",
+                    "raw_type": 4,
+                    "type_name": "REG_DWORD",
+                    "size": 4,
+                    "data_hex": "01000000",
+                    "decoded": 1,
+                    "issues": []
+                  }
+                ],
+                "spe": [
+                  {
+                    "name": "MonitorProcess",
+                    "path": "Wow6432Node\\Microsoft\\Windows NT\\CurrentVersion\\SilentProcessExit\\dual-view.exe",
+                    "raw_type": 1,
+                    "type_name": "REG_SZ",
+                    "size": 46,
+                    "data_hex": "43003a005c0054006f006f006c0073005c006d006f006e00690074006f007200330032002e006500780065000000",
+                    "decoded": "C:\\Tools\\monitor32.exe",
+                    "issues": []
+                  },
+                  {
+                    "name": "ReportingMode",
+                    "path": "Wow6432Node\\Microsoft\\Windows NT\\CurrentVersion\\SilentProcessExit\\dual-view.exe",
+                    "raw_type": 4,
+                    "type_name": "REG_DWORD",
+                    "size": 4,
+                    "data_hex": "02000000",
+                    "decoded": 2,
+                    "issues": []
+                  }
+                ]
+              },
+              "debugger": {
+                "raw": "C:\\Tools\\dbg32.exe",
+                "valid": true,
+                "occurrences": [
+                  {
+                    "raw": "C:\\Tools\\dbg32.exe",
+                    "type": 1,
+                    "valid": true
+                  }
+                ],
+                "path_flags": {
+                  "raw": "C:\\Tools\\dbg32.exe",
+                  "basename": "dbg32.exe",
+                  "quoted": false,
+                  "absolute": true
+                },
+                "environment": {
+                  "has_environment_variables": false,
+                  "variables": [],
+                  "unresolved": [],
+                  "expanded_candidate": "C:\\Tools\\dbg32.exe",
+                  "candidate_only": true,
+                  "note": "路径未做存在性、签名或可执行性验证"
+                }
+              },
+              "global_flag": {
+                "value": 512,
+                "valid": true,
+                "bit_0x200": true,
+                "ambiguous": false,
+                "occurrences": [
+                  {
+                    "value": 512,
+                    "type": 4,
+                    "size": 4,
+                    "valid": true,
+                    "silent_process_exit_bit": true,
+                    "other_bits": 0
+                  }
+                ]
+              },
+              "use_filter": {
+                "value": 1,
+                "valid": true,
+                "enabled": true,
+                "disabled": false,
+                "ambiguous": false,
+                "occurrences": [
+                  {
+                    "value": 1,
+                    "type": 4,
+                    "size": 4,
+                    "valid": true
+                  }
+                ]
+              },
+              "filters": [
+                {
+                  "source": "filter-subkey",
+                  "subkey": "filter-x86",
+                  "path": "Wow6432Node\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\dual-view.exe\\filter-x86",
+                  "raw": "C:\\Apps32\\dual-view.exe",
+                  "raw_type": 1,
+                  "type_name": "REG_SZ",
+                  "size": 48,
+                  "data_hex": "43003a005c004100700070007300330032005c006400750061006c002d0076006900650077002e006500780065000000",
+                  "issues": [],
+                  "path_flags": {
+                    "raw": "C:\\Apps32\\dual-view.exe",
+                    "basename": "dual-view.exe",
+                    "quoted": false,
+                    "absolute": true
+                  },
+                  "environment": {
+                    "has_environment_variables": false,
+                    "variables": [],
+                    "unresolved": [],
+                    "expanded_candidate": "C:\\Apps32\\dual-view.exe",
+                    "candidate_only": true,
+                    "note": "路径未做存在性、签名或可执行性验证"
+                  }
+                }
+              ],
+              "filter_values": [
+                {
+                  "source": "filter-subkey",
+                  "subkey": "filter-x86",
+                  "path": "Wow6432Node\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\dual-view.exe\\filter-x86",
+                  "name": "FilterFullPath",
+                  "raw_type": 1,
+                  "type_name": "REG_SZ",
+                  "size": 48,
+                  "data_hex": "43003a005c004100700070007300330032005c006400750061006c002d0076006900650077002e006500780065000000",
+                  "decoded": "C:\\Apps32\\dual-view.exe"
+                }
+              ],
+              "valid_filter_count": 1,
+              "monitor": {
+                "raw": "C:\\Tools\\monitor32.exe",
+                "valid": true,
+                "occurrences": [
+                  {
+                    "raw": "C:\\Tools\\monitor32.exe",
+                    "type": 1,
+                    "valid": true
+                  }
+                ],
+                "path_flags": {
+                  "raw": "C:\\Tools\\monitor32.exe",
+                  "basename": "monitor32.exe",
+                  "quoted": false,
+                  "absolute": true
+                },
+                "environment": {
+                  "has_environment_variables": false,
+                  "variables": [],
+                  "unresolved": [],
+                  "expanded_candidate": "C:\\Tools\\monitor32.exe",
+                  "candidate_only": true,
+                  "note": "路径未做存在性、签名或可执行性验证"
+                }
+              },
+              "reporting_mode": {
+                "value": 2,
+                "valid": true,
+                "occurrences": [
+                  {
+                    "value": 2,
+                    "type": 4,
+                    "size": 4,
+                    "valid": true
+                  }
+                ]
+              },
+              "monitor_association_complete": true,
+              "mechanisms": [
+                "IFEO_DEBUGGER_REDIRECT_CANDIDATE",
+                "IFEO_FILTER_CONDITION_CANDIDATE",
+                "SILENT_PROCESS_EXIT_MONITOR_CANDIDATE"
+              ],
+              "missing_associations": [],
+              "informational_missing": [],
+              "issues": [],
+              "notes": [
+                "Debugger 存在只说明 IFEO 重定向候选，不是执行证据。",
+                "GlobalFlag 的 0x200 位与 MonitorProcess 同时合法成立，支持 SilentProcessExit 监控候选。"
+              ],
+              "pairing_ambiguous": false
+            }
+          ],
+          "issues": [],
+          "ifeo_path": "Wow6432Node\\Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options",
+          "spe_path": "Wow6432Node\\Microsoft\\Windows NT\\CurrentVersion\\SilentProcessExit"
+        }
+      ],
+      "issues": []
+    },
+    {
+      "hive": "ifeo_analysis/samples/case_d_ambiguous.hive",
+      "sha256": "9f083caef1b4e39dadd1f55a81f8a3486539c93be909d7831ef62ed961935dc8",
+      "size": 10240,
+      "parser": {
+        "library": "dissect.regf"
+      },
+      "hive_header": {
+        "version": 5,
+        "filename": "SOFTWARE",
+        "checksum_comparison_true": true,
+        "in_transaction": false
+      },
+      "views": [
+        {
+          "view": "native",
+          "base_path": "Microsoft\\Windows NT\\CurrentVersion",
+          "view_root_present": true,
+          "ifeo_key_present": true,
+          "spe_key_present": true,
+          "images": [
+            {
+              "image": "bad-filter-type.exe",
+              "view": "native",
+              "ifeo_path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\bad-filter-type.exe",
+              "spe_path": "Microsoft\\Windows NT\\CurrentVersion\\SilentProcessExit\\bad-filter-type.exe",
+              "ifeo_present": true,
+              "spe_present": true,
+              "values": {
+                "ifeo": [
+                  {
+                    "name": "GlobalFlag",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\bad-filter-type.exe",
+                    "raw_type": 4,
+                    "type_name": "REG_DWORD",
+                    "size": 4,
+                    "data_hex": "00020000",
+                    "decoded": 512,
+                    "issues": []
+                  },
+                  {
+                    "name": "UseFilter",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\bad-filter-type.exe",
+                    "raw_type": 1,
+                    "type_name": "REG_SZ",
+                    "size": 4,
+                    "data_hex": "31000000",
+                    "decoded": "1",
+                    "issues": []
+                  }
+                ],
+                "spe": [
+                  {
+                    "name": "MonitorProcess",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\SilentProcessExit\\bad-filter-type.exe",
+                    "raw_type": 1,
+                    "type_name": "REG_SZ",
+                    "size": 32,
+                    "data_hex": "43003a005c0054006f006f006c0073005c006d0032002e006500780065000000",
+                    "decoded": "C:\\Tools\\m2.exe",
+                    "issues": []
+                  }
+                ]
+              },
+              "debugger": {
+                "raw": null,
+                "valid": false,
+                "occurrences": [],
+                "path_flags": {
+                  "raw": null,
+                  "basename": null,
+                  "quoted": false,
+                  "absolute": false
+                },
+                "environment": {
+                  "has_environment_variables": false,
+                  "variables": [],
+                  "unresolved": [],
+                  "expanded_candidate": null,
+                  "candidate_only": true
+                }
+              },
+              "global_flag": {
+                "value": 512,
+                "valid": true,
+                "bit_0x200": true,
+                "ambiguous": false,
+                "occurrences": [
+                  {
+                    "value": 512,
+                    "type": 4,
+                    "size": 4,
+                    "valid": true,
+                    "silent_process_exit_bit": true,
+                    "other_bits": 0
+                  }
+                ]
+              },
+              "use_filter": {
+                "value": null,
+                "valid": false,
+                "enabled": false,
+                "disabled": false,
+                "ambiguous": false,
+                "occurrences": [
+                  {
+                    "value": null,
+                    "type": 1,
+                    "size": 4,
+                    "valid": false
+                  }
+                ]
+              },
+              "filters": [],
+              "filter_values": [],
+              "valid_filter_count": 0,
+              "monitor": {
+                "raw": "C:\\Tools\\m2.exe",
+                "valid": true,
+                "occurrences": [
+                  {
+                    "raw": "C:\\Tools\\m2.exe",
+                    "type": 1,
+                    "valid": true
+                  }
+                ],
+                "path_flags": {
+                  "raw": "C:\\Tools\\m2.exe",
+                  "basename": "m2.exe",
+                  "quoted": false,
+                  "absolute": true
+                },
+                "environment": {
+                  "has_environment_variables": false,
+                  "variables": [],
+                  "unresolved": [],
+                  "expanded_candidate": "C:\\Tools\\m2.exe",
+                  "candidate_only": true,
+                  "note": "路径未做存在性、签名或可执行性验证"
+                }
+              },
+              "reporting_mode": {
+                "value": null,
+                "valid": false,
+                "occurrences": []
+              },
+              "monitor_association_complete": true,
+              "mechanisms": [
+                "SILENT_PROCESS_EXIT_MONITOR_CANDIDATE"
+              ],
+              "missing_associations": [],
+              "informational_missing": [
+                "Debugger（独立重定向线索，非监控必需）",
+                "ReportingMode（参考信息，非候选必要条件）"
+              ],
+              "issues": [
+                {
+                  "code": "WRONG_TYPE",
+                  "severity": "error",
+                  "message": "UseFilter 必须是 REG_DWORD，实际为 REG_SZ",
+                  "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\bad-filter-type.exe",
+                  "value": "UseFilter"
+                }
+              ],
+              "notes": [
+                "GlobalFlag 的 0x200 位与 MonitorProcess 同时合法成立，支持 SilentProcessExit 监控候选。"
+              ],
+              "pairing_ambiguous": false
+            },
+            {
+              "image": "bad-flag-type.exe",
+              "view": "native",
+              "ifeo_path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\bad-flag-type.exe",
+              "spe_path": "Microsoft\\Windows NT\\CurrentVersion\\SilentProcessExit\\bad-flag-type.exe",
+              "ifeo_present": true,
+              "spe_present": true,
+              "values": {
+                "ifeo": [
+                  {
+                    "name": "GlobalFlag",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\bad-flag-type.exe",
+                    "raw_type": 1,
+                    "type_name": "REG_SZ",
+                    "size": 8,
+                    "data_hex": "3500310032000000",
+                    "decoded": "512",
+                    "issues": []
+                  },
+                  {
+                    "name": "UseFilter",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\bad-flag-type.exe",
+                    "raw_type": 4,
+                    "type_name": "REG_DWORD",
+                    "size": 4,
+                    "data_hex": "01000000",
+                    "decoded": 1,
+                    "issues": []
+                  }
+                ],
+                "spe": [
+                  {
+                    "name": "MonitorProcess",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\SilentProcessExit\\bad-flag-type.exe",
+                    "raw_type": 1,
+                    "type_name": "REG_SZ",
+                    "size": 32,
+                    "data_hex": "43003a005c0054006f006f006c0073005c006d0031002e006500780065000000",
+                    "decoded": "C:\\Tools\\m1.exe",
+                    "issues": []
+                  }
+                ]
+              },
+              "debugger": {
+                "raw": null,
+                "valid": false,
+                "occurrences": [],
+                "path_flags": {
+                  "raw": null,
+                  "basename": null,
+                  "quoted": false,
+                  "absolute": false
+                },
+                "environment": {
+                  "has_environment_variables": false,
+                  "variables": [],
+                  "unresolved": [],
+                  "expanded_candidate": null,
+                  "candidate_only": true
+                }
+              },
+              "global_flag": {
+                "value": null,
+                "valid": false,
+                "bit_0x200": false,
+                "ambiguous": false,
+                "occurrences": [
+                  {
+                    "value": null,
+                    "type": 1,
+                    "size": 8,
+                    "valid": false
+                  }
+                ]
+              },
+              "use_filter": {
+                "value": 1,
+                "valid": true,
+                "enabled": true,
+                "disabled": false,
+                "ambiguous": false,
+                "occurrences": [
+                  {
+                    "value": 1,
+                    "type": 4,
+                    "size": 4,
+                    "valid": true
+                  }
+                ]
+              },
+              "filters": [],
+              "filter_values": [],
+              "valid_filter_count": 0,
+              "monitor": {
+                "raw": "C:\\Tools\\m1.exe",
+                "valid": true,
+                "occurrences": [
+                  {
+                    "raw": "C:\\Tools\\m1.exe",
+                    "type": 1,
+                    "valid": true
+                  }
+                ],
+                "path_flags": {
+                  "raw": "C:\\Tools\\m1.exe",
+                  "basename": "m1.exe",
+                  "quoted": false,
+                  "absolute": true
+                },
+                "environment": {
+                  "has_environment_variables": false,
+                  "variables": [],
+                  "unresolved": [],
+                  "expanded_candidate": "C:\\Tools\\m1.exe",
+                  "candidate_only": true,
+                  "note": "路径未做存在性、签名或可执行性验证"
+                }
+              },
+              "reporting_mode": {
+                "value": null,
+                "valid": false,
+                "occurrences": []
+              },
+              "monitor_association_complete": false,
+              "mechanisms": [
+                "MONITOR_WITHOUT_FLAG_ORPHAN",
+                "USEFILTER_WITHOUT_FILTER_CONDITION"
+              ],
+              "missing_associations": [
+                "含 0x200 的 4 字节 REG_DWORD GlobalFlag"
+              ],
+              "informational_missing": [
+                "Debugger（独立重定向线索，非监控必需）",
+                "ReportingMode（参考信息，非候选必要条件）"
+              ],
+              "issues": [
+                {
+                  "code": "WRONG_TYPE",
+                  "severity": "error",
+                  "message": "GlobalFlag 必须是 REG_DWORD，实际为 REG_SZ",
+                  "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\bad-flag-type.exe",
+                  "value": "GlobalFlag"
+                }
+              ],
+              "notes": [
+                "MonitorProcess 存在但缺少可用的 GlobalFlag 0x200，不能仅凭监控路径认定生效。"
+              ],
+              "pairing_ambiguous": false
+            },
+            {
+              "image": "bad-flag-width.exe",
+              "view": "native",
+              "ifeo_path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\bad-flag-width.exe",
+              "spe_path": null,
+              "ifeo_present": true,
+              "spe_present": false,
+              "values": {
+                "ifeo": [
+                  {
+                    "name": "GlobalFlag",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\bad-flag-width.exe",
+                    "raw_type": 4,
+                    "type_name": "REG_DWORD",
+                    "size": 8,
+                    "data_hex": "0002000000000000",
+                    "decoded": 512,
+                    "issues": []
+                  },
+                  {
+                    "name": "UseFilter",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\bad-flag-width.exe",
+                    "raw_type": 4,
+                    "type_name": "REG_DWORD",
+                    "size": 4,
+                    "data_hex": "01000000",
+                    "decoded": 1,
+                    "issues": []
+                  }
+                ],
+                "spe": []
+              },
+              "debugger": {
+                "raw": null,
+                "valid": false,
+                "occurrences": [],
+                "path_flags": {
+                  "raw": null,
+                  "basename": null,
+                  "quoted": false,
+                  "absolute": false
+                },
+                "environment": {
+                  "has_environment_variables": false,
+                  "variables": [],
+                  "unresolved": [],
+                  "expanded_candidate": null,
+                  "candidate_only": true
+                }
+              },
+              "global_flag": {
+                "value": null,
+                "valid": false,
+                "bit_0x200": false,
+                "ambiguous": false,
+                "occurrences": [
+                  {
+                    "value": null,
+                    "type": 4,
+                    "size": 8,
+                    "valid": false
+                  }
+                ]
+              },
+              "use_filter": {
+                "value": 1,
+                "valid": true,
+                "enabled": true,
+                "disabled": false,
+                "ambiguous": false,
+                "occurrences": [
+                  {
+                    "value": 1,
+                    "type": 4,
+                    "size": 4,
+                    "valid": true
+                  }
+                ]
+              },
+              "filters": [],
+              "filter_values": [],
+              "valid_filter_count": 0,
+              "monitor": {
+                "raw": null,
+                "valid": false,
+                "occurrences": [],
+                "path_flags": {
+                  "raw": null,
+                  "basename": null,
+                  "quoted": false,
+                  "absolute": false
+                },
+                "environment": {
+                  "has_environment_variables": false,
+                  "variables": [],
+                  "unresolved": [],
+                  "expanded_candidate": null,
+                  "candidate_only": true
+                }
+              },
+              "reporting_mode": {
+                "value": null,
+                "valid": false,
+                "occurrences": []
+              },
+              "monitor_association_complete": false,
+              "mechanisms": [
+                "USEFILTER_WITHOUT_FILTER_CONDITION"
+              ],
+              "missing_associations": [
+                "含 0x200 的 4 字节 REG_DWORD GlobalFlag",
+                "SilentProcessExit 映像键"
+              ],
+              "informational_missing": [
+                "Debugger（独立重定向线索，非监控必需）"
+              ],
+              "issues": [
+                {
+                  "code": "WRONG_SIZE",
+                  "severity": "error",
+                  "message": "GlobalFlag 必须是 4 字节 DWORD，实际为 8 字节",
+                  "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\bad-flag-width.exe",
+                  "value": "GlobalFlag"
+                }
+              ],
+              "notes": [],
+              "pairing_ambiguous": false
+            },
+            {
+              "image": "bad-monitor-type.exe",
+              "view": "native",
+              "ifeo_path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\bad-monitor-type.exe",
+              "spe_path": "Microsoft\\Windows NT\\CurrentVersion\\SilentProcessExit\\bad-monitor-type.exe",
+              "ifeo_present": true,
+              "spe_present": true,
+              "values": {
+                "ifeo": [
+                  {
+                    "name": "GlobalFlag",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\bad-monitor-type.exe",
+                    "raw_type": 4,
+                    "type_name": "REG_DWORD",
+                    "size": 4,
+                    "data_hex": "00020000",
+                    "decoded": 512,
+                    "issues": []
+                  },
+                  {
+                    "name": "UseFilter",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\bad-monitor-type.exe",
+                    "raw_type": 4,
+                    "type_name": "REG_DWORD",
+                    "size": 4,
+                    "data_hex": "01000000",
+                    "decoded": 1,
+                    "issues": []
+                  }
+                ],
+                "spe": [
+                  {
+                    "name": "MonitorProcess",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\SilentProcessExit\\bad-monitor-type.exe",
+                    "raw_type": 4,
+                    "type_name": "REG_DWORD",
+                    "size": 4,
+                    "data_hex": "01000000",
+                    "decoded": 1,
+                    "issues": []
+                  }
+                ]
+              },
+              "debugger": {
+                "raw": null,
+                "valid": false,
+                "occurrences": [],
+                "path_flags": {
+                  "raw": null,
+                  "basename": null,
+                  "quoted": false,
+                  "absolute": false
+                },
+                "environment": {
+                  "has_environment_variables": false,
+                  "variables": [],
+                  "unresolved": [],
+                  "expanded_candidate": null,
+                  "candidate_only": true
+                }
+              },
+              "global_flag": {
+                "value": 512,
+                "valid": true,
+                "bit_0x200": true,
+                "ambiguous": false,
+                "occurrences": [
+                  {
+                    "value": 512,
+                    "type": 4,
+                    "size": 4,
+                    "valid": true,
+                    "silent_process_exit_bit": true,
+                    "other_bits": 0
+                  }
+                ]
+              },
+              "use_filter": {
+                "value": 1,
+                "valid": true,
+                "enabled": true,
+                "disabled": false,
+                "ambiguous": false,
+                "occurrences": [
+                  {
+                    "value": 1,
+                    "type": 4,
+                    "size": 4,
+                    "valid": true
+                  }
+                ]
+              },
+              "filters": [],
+              "filter_values": [],
+              "valid_filter_count": 0,
+              "monitor": {
+                "raw": null,
+                "valid": false,
+                "occurrences": [
+                  {
+                    "raw": null,
+                    "type": 4,
+                    "valid": false
+                  }
+                ],
+                "path_flags": {
+                  "raw": null,
+                  "basename": null,
+                  "quoted": false,
+                  "absolute": false
+                },
+                "environment": {
+                  "has_environment_variables": false,
+                  "variables": [],
+                  "unresolved": [],
+                  "expanded_candidate": null,
+                  "candidate_only": true
+                }
+              },
+              "reporting_mode": {
+                "value": null,
+                "valid": false,
+                "occurrences": []
+              },
+              "monitor_association_complete": false,
+              "mechanisms": [
+                "FLAG_WITHOUT_MONITOR",
+                "USEFILTER_WITHOUT_FILTER_CONDITION"
+              ],
+              "missing_associations": [
+                "合法 MonitorProcess"
+              ],
+              "informational_missing": [
+                "Debugger（独立重定向线索，非监控必需）",
+                "ReportingMode（参考信息，非候选必要条件）"
+              ],
+              "issues": [
+                {
+                  "code": "WRONG_TYPE",
+                  "severity": "error",
+                  "message": "MonitorProcess 必须是 REG_SZ 或 REG_EXPAND_SZ，实际为 REG_DWORD",
+                  "path": "Microsoft\\Windows NT\\CurrentVersion\\SilentProcessExit\\bad-monitor-type.exe",
+                  "value": "MonitorProcess"
+                }
+              ],
+              "notes": [
+                "GlobalFlag 的 0x200 位存在但 MonitorProcess 不可用，关联不完整。"
+              ],
+              "pairing_ambiguous": false
+            },
+            {
+              "image": "debugger-only.exe",
+              "view": "native",
+              "ifeo_path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\debugger-only.exe",
+              "spe_path": null,
+              "ifeo_present": true,
+              "spe_present": false,
+              "values": {
+                "ifeo": [
+                  {
+                    "name": "Debugger",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\debugger-only.exe",
+                    "raw_type": 1,
+                    "type_name": "REG_SZ",
+                    "size": 48,
+                    "data_hex": "43003a005c0054006f006f006c0073005c00640065006200750067002d006f006e006c0079002e006500780065000000",
+                    "decoded": "C:\\Tools\\debug-only.exe",
+                    "issues": []
+                  }
+                ],
+                "spe": []
+              },
+              "debugger": {
+                "raw": "C:\\Tools\\debug-only.exe",
+                "valid": true,
+                "occurrences": [
+                  {
+                    "raw": "C:\\Tools\\debug-only.exe",
+                    "type": 1,
+                    "valid": true
+                  }
+                ],
+                "path_flags": {
+                  "raw": "C:\\Tools\\debug-only.exe",
+                  "basename": "debug-only.exe",
+                  "quoted": false,
+                  "absolute": true
+                },
+                "environment": {
+                  "has_environment_variables": false,
+                  "variables": [],
+                  "unresolved": [],
+                  "expanded_candidate": "C:\\Tools\\debug-only.exe",
+                  "candidate_only": true,
+                  "note": "路径未做存在性、签名或可执行性验证"
+                }
+              },
+              "global_flag": {
+                "value": null,
+                "valid": false,
+                "bit_0x200": false,
+                "ambiguous": false,
+                "occurrences": []
+              },
+              "use_filter": {
+                "value": null,
+                "valid": false,
+                "enabled": false,
+                "disabled": false,
+                "ambiguous": false,
+                "occurrences": []
+              },
+              "filters": [],
+              "filter_values": [],
+              "valid_filter_count": 0,
+              "monitor": {
+                "raw": null,
+                "valid": false,
+                "occurrences": [],
+                "path_flags": {
+                  "raw": null,
+                  "basename": null,
+                  "quoted": false,
+                  "absolute": false
+                },
+                "environment": {
+                  "has_environment_variables": false,
+                  "variables": [],
+                  "unresolved": [],
+                  "expanded_candidate": null,
+                  "candidate_only": true
+                }
+              },
+              "reporting_mode": {
+                "value": null,
+                "valid": false,
+                "occurrences": []
+              },
+              "monitor_association_complete": false,
+              "mechanisms": [
+                "IFEO_DEBUGGER_REDIRECT_CANDIDATE"
+              ],
+              "missing_associations": [
+                "含 0x200 的 4 字节 REG_DWORD GlobalFlag",
+                "SilentProcessExit 映像键"
+              ],
+              "informational_missing": [],
+              "issues": [],
+              "notes": [
+                "Debugger 存在只说明 IFEO 重定向候选，不是执行证据。"
+              ],
+              "pairing_ambiguous": false
+            },
+            {
+              "image": "duplicate.exe",
+              "view": "native",
+              "ifeo_path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\duplicate.exe",
+              "spe_path": "Microsoft\\Windows NT\\CurrentVersion\\SilentProcessExit\\duplicate.exe",
+              "ifeo_present": true,
+              "spe_present": true,
+              "values": {
+                "ifeo": [
+                  {
+                    "name": "GlobalFlag",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\duplicate.exe",
+                    "raw_type": 4,
+                    "type_name": "REG_DWORD",
+                    "size": 4,
+                    "data_hex": "00020000",
+                    "decoded": 512,
+                    "issues": []
+                  },
+                  {
+                    "name": "UseFilter",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\duplicate.exe",
+                    "raw_type": 4,
+                    "type_name": "REG_DWORD",
+                    "size": 4,
+                    "data_hex": "01000000",
+                    "decoded": 1,
+                    "issues": []
+                  },
+                  {
+                    "name": "UseFilter",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\duplicate.exe",
+                    "raw_type": 1,
+                    "type_name": "REG_SZ",
+                    "size": 4,
+                    "data_hex": "31000000",
+                    "decoded": "1",
+                    "issues": []
+                  }
+                ],
+                "spe": [
+                  {
+                    "name": "MonitorProcess",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\SilentProcessExit\\duplicate.exe",
+                    "raw_type": 1,
+                    "type_name": "REG_SZ",
+                    "size": 32,
+                    "data_hex": "43003a005c0054006f006f006c0073005c006d0033002e006500780065000000",
+                    "decoded": "C:\\Tools\\m3.exe",
+                    "issues": []
+                  }
+                ]
+              },
+              "debugger": {
+                "raw": null,
+                "valid": false,
+                "occurrences": [],
+                "path_flags": {
+                  "raw": null,
+                  "basename": null,
+                  "quoted": false,
+                  "absolute": false
+                },
+                "environment": {
+                  "has_environment_variables": false,
+                  "variables": [],
+                  "unresolved": [],
+                  "expanded_candidate": null,
+                  "candidate_only": true
+                }
+              },
+              "global_flag": {
+                "value": 512,
+                "valid": true,
+                "bit_0x200": true,
+                "ambiguous": false,
+                "occurrences": [
+                  {
+                    "value": 512,
+                    "type": 4,
+                    "size": 4,
+                    "valid": true,
+                    "silent_process_exit_bit": true,
+                    "other_bits": 0
+                  }
+                ]
+              },
+              "use_filter": {
+                "value": 1,
+                "valid": true,
+                "enabled": false,
+                "disabled": false,
+                "ambiguous": true,
+                "occurrences": [
+                  {
+                    "value": 1,
+                    "type": 4,
+                    "size": 4,
+                    "valid": true
+                  },
+                  {
+                    "value": null,
+                    "type": 1,
+                    "size": 4,
+                    "valid": false
+                  }
+                ]
+              },
+              "filters": [],
+              "filter_values": [],
+              "valid_filter_count": 0,
+              "monitor": {
+                "raw": "C:\\Tools\\m3.exe",
+                "valid": true,
+                "occurrences": [
+                  {
+                    "raw": "C:\\Tools\\m3.exe",
+                    "type": 1,
+                    "valid": true
+                  }
+                ],
+                "path_flags": {
+                  "raw": "C:\\Tools\\m3.exe",
+                  "basename": "m3.exe",
+                  "quoted": false,
+                  "absolute": true
+                },
+                "environment": {
+                  "has_environment_variables": false,
+                  "variables": [],
+                  "unresolved": [],
+                  "expanded_candidate": "C:\\Tools\\m3.exe",
+                  "candidate_only": true,
+                  "note": "路径未做存在性、签名或可执行性验证"
+                }
+              },
+              "reporting_mode": {
+                "value": null,
+                "valid": false,
+                "occurrences": []
+              },
+              "monitor_association_complete": true,
+              "mechanisms": [
+                "SILENT_PROCESS_EXIT_MONITOR_CANDIDATE"
+              ],
+              "missing_associations": [],
+              "informational_missing": [
+                "Debugger（独立重定向线索，非监控必需）",
+                "ReportingMode（参考信息，非候选必要条件）"
+              ],
+              "issues": [
+                {
+                  "code": "DUPLICATE_VALUE_NAME",
+                  "severity": "error",
+                  "message": "同一键内 'usefilter' 出现 2 次；全部记录保留，但 hive 本身不说明哪个值生效",
+                  "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\duplicate.exe",
+                  "value": "usefilter"
+                },
+                {
+                  "code": "WRONG_TYPE",
+                  "severity": "error",
+                  "message": "UseFilter 必须是 REG_DWORD，实际为 REG_SZ",
+                  "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\duplicate.exe",
+                  "value": "UseFilter"
+                }
+              ],
+              "notes": [
+                "UseFilter 存在重复或冲突记录，过滤启用状态不确定；这不改变 GlobalFlag+MonitorProcess 的监控关联判定。",
+                "GlobalFlag 的 0x200 位与 MonitorProcess 同时合法成立，支持 SilentProcessExit 监控候选。"
+              ],
+              "pairing_ambiguous": false
+            },
+            {
+              "image": "env-missing.exe",
+              "view": "native",
+              "ifeo_path": null,
+              "spe_path": "Microsoft\\Windows NT\\CurrentVersion\\SilentProcessExit\\env-missing.exe",
+              "ifeo_present": false,
+              "spe_present": true,
+              "values": {
+                "ifeo": [],
+                "spe": [
+                  {
+                    "name": "MonitorProcess",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\SilentProcessExit\\env-missing.exe",
+                    "raw_type": 2,
+                    "type_name": "REG_EXPAND_SZ",
+                    "size": 42,
+                    "data_hex": "25004d0049005300530049004e0047005f0056004100520025005c006d0036002e006500780065000000",
+                    "decoded": "%MISSING_VAR%\\m6.exe",
+                    "issues": []
+                  },
+                  {
+                    "name": "ReportingMode",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\SilentProcessExit\\env-missing.exe",
+                    "raw_type": 4,
+                    "type_name": "REG_DWORD",
+                    "size": 4,
+                    "data_hex": "01000000",
+                    "decoded": 1,
+                    "issues": []
+                  }
+                ]
+              },
+              "debugger": {
+                "raw": null,
+                "valid": false,
+                "occurrences": [],
+                "path_flags": {
+                  "raw": null,
+                  "basename": null,
+                  "quoted": false,
+                  "absolute": false
+                },
+                "environment": {
+                  "has_environment_variables": false,
+                  "variables": [],
+                  "unresolved": [],
+                  "expanded_candidate": null,
+                  "candidate_only": true
+                }
+              },
+              "global_flag": {
+                "value": null,
+                "valid": false,
+                "bit_0x200": false,
+                "ambiguous": false,
+                "occurrences": []
+              },
+              "use_filter": {
+                "value": null,
+                "valid": false,
+                "enabled": false,
+                "disabled": false,
+                "ambiguous": false,
+                "occurrences": []
+              },
+              "filters": [],
+              "filter_values": [],
+              "valid_filter_count": 0,
+              "monitor": {
+                "raw": "%MISSING_VAR%\\m6.exe",
+                "valid": true,
+                "occurrences": [
+                  {
+                    "raw": "%MISSING_VAR%\\m6.exe",
+                    "type": 2,
+                    "valid": true
+                  }
+                ],
+                "path_flags": {
+                  "raw": "%MISSING_VAR%\\m6.exe",
+                  "basename": "m6.exe",
+                  "quoted": false,
+                  "absolute": false
+                },
+                "environment": {
+                  "has_environment_variables": true,
+                  "variables": [
+                    "MISSING_VAR"
+                  ],
+                  "unresolved": [
+                    "MISSING_VAR"
+                  ],
+                  "expanded_candidate": null,
+                  "candidate_only": true,
+                  "assumptions_used": {},
+                  "note": "展开结果只是候选解释；hive 不携带目标机环境，未验证路径或程序"
+                }
+              },
+              "reporting_mode": {
+                "value": 1,
+                "valid": true,
+                "occurrences": [
+                  {
+                    "value": 1,
+                    "type": 4,
+                    "size": 4,
+                    "valid": true
+                  }
+                ]
+              },
+              "monitor_association_complete": false,
+              "mechanisms": [
+                "MONITOR_WITHOUT_FLAG_ORPHAN"
+              ],
+              "missing_associations": [
+                "IFEO 映像键"
+              ],
+              "informational_missing": [],
+              "issues": [],
+              "notes": [
+                "MonitorProcess 存在但缺少可用的 GlobalFlag 0x200，不能仅凭监控路径认定生效。"
+              ],
+              "pairing_ambiguous": false
+            },
+            {
+              "image": "filter-without-usefilter.exe",
+              "view": "native",
+              "ifeo_path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\filter-without-usefilter.exe",
+              "spe_path": null,
+              "ifeo_present": true,
+              "spe_present": false,
+              "values": {
+                "ifeo": [
+                  {
+                    "name": "GlobalFlag",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\filter-without-usefilter.exe",
+                    "raw_type": 4,
+                    "type_name": "REG_DWORD",
+                    "size": 4,
+                    "data_hex": "00020000",
+                    "decoded": 512,
+                    "issues": []
+                  },
+                  {
+                    "name": "UseFilter",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\filter-without-usefilter.exe",
+                    "raw_type": 4,
+                    "type_name": "REG_DWORD",
+                    "size": 4,
+                    "data_hex": "00000000",
+                    "decoded": 0,
+                    "issues": []
+                  }
+                ],
+                "spe": []
+              },
+              "debugger": {
+                "raw": null,
+                "valid": false,
+                "occurrences": [],
+                "path_flags": {
+                  "raw": null,
+                  "basename": null,
+                  "quoted": false,
+                  "absolute": false
+                },
+                "environment": {
+                  "has_environment_variables": false,
+                  "variables": [],
+                  "unresolved": [],
+                  "expanded_candidate": null,
+                  "candidate_only": true
+                }
+              },
+              "global_flag": {
+                "value": 512,
+                "valid": true,
+                "bit_0x200": true,
+                "ambiguous": false,
+                "occurrences": [
+                  {
+                    "value": 512,
+                    "type": 4,
+                    "size": 4,
+                    "valid": true,
+                    "silent_process_exit_bit": true,
+                    "other_bits": 0
+                  }
+                ]
+              },
+              "use_filter": {
+                "value": 0,
+                "valid": true,
+                "enabled": false,
+                "disabled": true,
+                "ambiguous": false,
+                "occurrences": [
+                  {
+                    "value": 0,
+                    "type": 4,
+                    "size": 4,
+                    "valid": true
+                  }
+                ]
+              },
+              "filters": [
+                {
+                  "source": "filter-subkey",
+                  "subkey": "inert-filter",
+                  "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\filter-without-usefilter.exe\\inert-filter",
+                  "raw": "C:\\Apps\\Inert\\filter-without-usefilter.exe",
+                  "raw_type": 1,
+                  "type_name": "REG_SZ",
+                  "size": 86,
+                  "data_hex": "43003a005c0041007000700073005c0049006e006500720074005c00660069006c007400650072002d0077006900740068006f00750074002d00750073006500660069006c007400650072002e006500780065000000",
+                  "issues": [],
+                  "path_flags": {
+                    "raw": "C:\\Apps\\Inert\\filter-without-usefilter.exe",
+                    "basename": "filter-without-usefilter.exe",
+                    "quoted": false,
+                    "absolute": true
+                  },
+                  "environment": {
+                    "has_environment_variables": false,
+                    "variables": [],
+                    "unresolved": [],
+                    "expanded_candidate": "C:\\Apps\\Inert\\filter-without-usefilter.exe",
+                    "candidate_only": true,
+                    "note": "路径未做存在性、签名或可执行性验证"
+                  }
+                }
+              ],
+              "filter_values": [
+                {
+                  "source": "filter-subkey",
+                  "subkey": "inert-filter",
+                  "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\filter-without-usefilter.exe\\inert-filter",
+                  "name": "FilterFullPath",
+                  "raw_type": 1,
+                  "type_name": "REG_SZ",
+                  "size": 86,
+                  "data_hex": "43003a005c0041007000700073005c0049006e006500720074005c00660069006c007400650072002d0077006900740068006f00750074002d00750073006500660069006c007400650072002e006500780065000000",
+                  "decoded": "C:\\Apps\\Inert\\filter-without-usefilter.exe"
+                }
+              ],
+              "valid_filter_count": 1,
+              "monitor": {
+                "raw": null,
+                "valid": false,
+                "occurrences": [],
+                "path_flags": {
+                  "raw": null,
+                  "basename": null,
+                  "quoted": false,
+                  "absolute": false
+                },
+                "environment": {
+                  "has_environment_variables": false,
+                  "variables": [],
+                  "unresolved": [],
+                  "expanded_candidate": null,
+                  "candidate_only": true
+                }
+              },
+              "reporting_mode": {
+                "value": null,
+                "valid": false,
+                "occurrences": []
+              },
+              "monitor_association_complete": false,
+              "mechanisms": [
+                "FLAG_WITHOUT_MONITOR",
+                "FILTER_CONDITION_NOT_ENABLED"
+              ],
+              "missing_associations": [
+                "SilentProcessExit 映像键"
+              ],
+              "informational_missing": [
+                "Debugger（独立重定向线索，非监控必需）"
+              ],
+              "issues": [],
+              "notes": [
+                "GlobalFlag 的 0x200 位存在但 MonitorProcess 不可用，关联不完整。"
+              ],
+              "pairing_ambiguous": false
+            },
+            {
+              "image": "missing-monitor.exe",
+              "view": "native",
+              "ifeo_path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\missing-monitor.exe",
+              "spe_path": "Microsoft\\Windows NT\\CurrentVersion\\SilentProcessExit\\missing-monitor.exe",
+              "ifeo_present": true,
+              "spe_present": true,
+              "values": {
+                "ifeo": [
+                  {
+                    "name": "GlobalFlag",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\missing-monitor.exe",
+                    "raw_type": 4,
+                    "type_name": "REG_DWORD",
+                    "size": 4,
+                    "data_hex": "00020000",
+                    "decoded": 512,
+                    "issues": []
+                  },
+                  {
+                    "name": "UseFilter",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\missing-monitor.exe",
+                    "raw_type": 4,
+                    "type_name": "REG_DWORD",
+                    "size": 4,
+                    "data_hex": "01000000",
+                    "decoded": 1,
+                    "issues": []
+                  }
+                ],
+                "spe": [
+                  {
+                    "name": "ReportingMode",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\SilentProcessExit\\missing-monitor.exe",
+                    "raw_type": 4,
+                    "type_name": "REG_DWORD",
+                    "size": 4,
+                    "data_hex": "01000000",
+                    "decoded": 1,
+                    "issues": []
+                  }
+                ]
+              },
+              "debugger": {
+                "raw": null,
+                "valid": false,
+                "occurrences": [],
+                "path_flags": {
+                  "raw": null,
+                  "basename": null,
+                  "quoted": false,
+                  "absolute": false
+                },
+                "environment": {
+                  "has_environment_variables": false,
+                  "variables": [],
+                  "unresolved": [],
+                  "expanded_candidate": null,
+                  "candidate_only": true
+                }
+              },
+              "global_flag": {
+                "value": 512,
+                "valid": true,
+                "bit_0x200": true,
+                "ambiguous": false,
+                "occurrences": [
+                  {
+                    "value": 512,
+                    "type": 4,
+                    "size": 4,
+                    "valid": true,
+                    "silent_process_exit_bit": true,
+                    "other_bits": 0
+                  }
+                ]
+              },
+              "use_filter": {
+                "value": 1,
+                "valid": true,
+                "enabled": true,
+                "disabled": false,
+                "ambiguous": false,
+                "occurrences": [
+                  {
+                    "value": 1,
+                    "type": 4,
+                    "size": 4,
+                    "valid": true
+                  }
+                ]
+              },
+              "filters": [],
+              "filter_values": [],
+              "valid_filter_count": 0,
+              "monitor": {
+                "raw": null,
+                "valid": false,
+                "occurrences": [],
+                "path_flags": {
+                  "raw": null,
+                  "basename": null,
+                  "quoted": false,
+                  "absolute": false
+                },
+                "environment": {
+                  "has_environment_variables": false,
+                  "variables": [],
+                  "unresolved": [],
+                  "expanded_candidate": null,
+                  "candidate_only": true
+                }
+              },
+              "reporting_mode": {
+                "value": 1,
+                "valid": true,
+                "occurrences": [
+                  {
+                    "value": 1,
+                    "type": 4,
+                    "size": 4,
+                    "valid": true
+                  }
+                ]
+              },
+              "monitor_association_complete": false,
+              "mechanisms": [
+                "FLAG_WITHOUT_MONITOR",
+                "USEFILTER_WITHOUT_FILTER_CONDITION"
+              ],
+              "missing_associations": [
+                "合法 MonitorProcess"
+              ],
+              "informational_missing": [
+                "Debugger（独立重定向线索，非监控必需）"
+              ],
+              "issues": [],
+              "notes": [
+                "GlobalFlag 的 0x200 位存在但 MonitorProcess 不可用，关联不完整。"
+              ],
+              "pairing_ambiguous": false
+            },
+            {
+              "image": "monitor-only-orphan.exe",
+              "view": "native",
+              "ifeo_path": null,
+              "spe_path": "Microsoft\\Windows NT\\CurrentVersion\\SilentProcessExit\\monitor-only-orphan.exe",
+              "ifeo_present": false,
+              "spe_present": true,
+              "values": {
+                "ifeo": [],
+                "spe": [
+                  {
+                    "name": "MonitorProcess",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\SilentProcessExit\\monitor-only-orphan.exe",
+                    "raw_type": 1,
+                    "type_name": "REG_SZ",
+                    "size": 32,
+                    "data_hex": "43003a005c0054006f006f006c0073005c006d0035002e006500780065000000",
+                    "decoded": "C:\\Tools\\m5.exe",
+                    "issues": []
+                  }
+                ]
+              },
+              "debugger": {
+                "raw": null,
+                "valid": false,
+                "occurrences": [],
+                "path_flags": {
+                  "raw": null,
+                  "basename": null,
+                  "quoted": false,
+                  "absolute": false
+                },
+                "environment": {
+                  "has_environment_variables": false,
+                  "variables": [],
+                  "unresolved": [],
+                  "expanded_candidate": null,
+                  "candidate_only": true
+                }
+              },
+              "global_flag": {
+                "value": null,
+                "valid": false,
+                "bit_0x200": false,
+                "ambiguous": false,
+                "occurrences": []
+              },
+              "use_filter": {
+                "value": null,
+                "valid": false,
+                "enabled": false,
+                "disabled": false,
+                "ambiguous": false,
+                "occurrences": []
+              },
+              "filters": [],
+              "filter_values": [],
+              "valid_filter_count": 0,
+              "monitor": {
+                "raw": "C:\\Tools\\m5.exe",
+                "valid": true,
+                "occurrences": [
+                  {
+                    "raw": "C:\\Tools\\m5.exe",
+                    "type": 1,
+                    "valid": true
+                  }
+                ],
+                "path_flags": {
+                  "raw": "C:\\Tools\\m5.exe",
+                  "basename": "m5.exe",
+                  "quoted": false,
+                  "absolute": true
+                },
+                "environment": {
+                  "has_environment_variables": false,
+                  "variables": [],
+                  "unresolved": [],
+                  "expanded_candidate": "C:\\Tools\\m5.exe",
+                  "candidate_only": true,
+                  "note": "路径未做存在性、签名或可执行性验证"
+                }
+              },
+              "reporting_mode": {
+                "value": null,
+                "valid": false,
+                "occurrences": []
+              },
+              "monitor_association_complete": false,
+              "mechanisms": [
+                "MONITOR_WITHOUT_FLAG_ORPHAN"
+              ],
+              "missing_associations": [
+                "IFEO 映像键"
+              ],
+              "informational_missing": [
+                "ReportingMode（参考信息，非候选必要条件）"
+              ],
+              "issues": [],
+              "notes": [
+                "MonitorProcess 存在但缺少可用的 GlobalFlag 0x200，不能仅凭监控路径认定生效。"
+              ],
+              "pairing_ambiguous": false
+            },
+            {
+              "image": "multi-filter.exe",
+              "view": "native",
+              "ifeo_path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\multi-filter.exe",
+              "spe_path": null,
+              "ifeo_present": true,
+              "spe_present": false,
+              "values": {
+                "ifeo": [
+                  {
+                    "name": "GlobalFlag",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\multi-filter.exe",
+                    "raw_type": 4,
+                    "type_name": "REG_DWORD",
+                    "size": 4,
+                    "data_hex": "00020000",
+                    "decoded": 512,
+                    "issues": []
+                  },
+                  {
+                    "name": "UseFilter",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\multi-filter.exe",
+                    "raw_type": 4,
+                    "type_name": "REG_DWORD",
+                    "size": 4,
+                    "data_hex": "01000000",
+                    "decoded": 1,
+                    "issues": []
+                  }
+                ],
+                "spe": []
+              },
+              "debugger": {
+                "raw": null,
+                "valid": false,
+                "occurrences": [],
+                "path_flags": {
+                  "raw": null,
+                  "basename": null,
+                  "quoted": false,
+                  "absolute": false
+                },
+                "environment": {
+                  "has_environment_variables": false,
+                  "variables": [],
+                  "unresolved": [],
+                  "expanded_candidate": null,
+                  "candidate_only": true
+                }
+              },
+              "global_flag": {
+                "value": 512,
+                "valid": true,
+                "bit_0x200": true,
+                "ambiguous": false,
+                "occurrences": [
+                  {
+                    "value": 512,
+                    "type": 4,
+                    "size": 4,
+                    "valid": true,
+                    "silent_process_exit_bit": true,
+                    "other_bits": 0
+                  }
+                ]
+              },
+              "use_filter": {
+                "value": 1,
+                "valid": true,
+                "enabled": true,
+                "disabled": false,
+                "ambiguous": false,
+                "occurrences": [
+                  {
+                    "value": 1,
+                    "type": 4,
+                    "size": 4,
+                    "valid": true
+                  }
+                ]
+              },
+              "filters": [
+                {
+                  "source": "filter-subkey",
+                  "subkey": "filter-1",
+                  "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\multi-filter.exe\\filter-1",
+                  "raw": "C:\\Apps\\Multi\\multi-filter.exe",
+                  "raw_type": 1,
+                  "type_name": "REG_SZ",
+                  "size": 62,
+                  "data_hex": "43003a005c0041007000700073005c004d0075006c00740069005c006d0075006c00740069002d00660069006c007400650072002e006500780065000000",
+                  "issues": [],
+                  "path_flags": {
+                    "raw": "C:\\Apps\\Multi\\multi-filter.exe",
+                    "basename": "multi-filter.exe",
+                    "quoted": false,
+                    "absolute": true
+                  },
+                  "environment": {
+                    "has_environment_variables": false,
+                    "variables": [],
+                    "unresolved": [],
+                    "expanded_candidate": "C:\\Apps\\Multi\\multi-filter.exe",
+                    "candidate_only": true,
+                    "note": "路径未做存在性、签名或可执行性验证"
+                  }
+                },
+                {
+                  "source": "filter-subkey",
+                  "subkey": "filter-2",
+                  "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\multi-filter.exe\\filter-2",
+                  "raw": "%ProgramFiles%\\Multi\\multi-filter.exe",
+                  "raw_type": 2,
+                  "type_name": "REG_EXPAND_SZ",
+                  "size": 76,
+                  "data_hex": "2500500072006f006700720061006d00460069006c006500730025005c004d0075006c00740069005c006d0075006c00740069002d00660069006c007400650072002e006500780065000000",
+                  "issues": [],
+                  "path_flags": {
+                    "raw": "%ProgramFiles%\\Multi\\multi-filter.exe",
+                    "basename": "multi-filter.exe",
+                    "quoted": false,
+                    "absolute": false
+                  },
+                  "environment": {
+                    "has_environment_variables": true,
+                    "variables": [
+                      "ProgramFiles"
+                    ],
+                    "unresolved": [],
+                    "expanded_candidate": "C:\\Program Files\\Multi\\multi-filter.exe",
+                    "candidate_only": true,
+                    "assumptions_used": {
+                      "ProgramFiles": "C:\\Program Files"
+                    },
+                    "note": "展开结果只是候选解释；hive 不携带目标机环境，未验证路径或程序"
+                  }
+                }
+              ],
+              "filter_values": [
+                {
+                  "source": "filter-subkey",
+                  "subkey": "filter-1",
+                  "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\multi-filter.exe\\filter-1",
+                  "name": "FilterFullPath",
+                  "raw_type": 1,
+                  "type_name": "REG_SZ",
+                  "size": 62,
+                  "data_hex": "43003a005c0041007000700073005c004d0075006c00740069005c006d0075006c00740069002d00660069006c007400650072002e006500780065000000",
+                  "decoded": "C:\\Apps\\Multi\\multi-filter.exe"
+                },
+                {
+                  "source": "filter-subkey",
+                  "subkey": "filter-2",
+                  "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\multi-filter.exe\\filter-2",
+                  "name": "FilterFullPath",
+                  "raw_type": 2,
+                  "type_name": "REG_EXPAND_SZ",
+                  "size": 76,
+                  "data_hex": "2500500072006f006700720061006d00460069006c006500730025005c004d0075006c00740069005c006d0075006c00740069002d00660069006c007400650072002e006500780065000000",
+                  "decoded": "%ProgramFiles%\\Multi\\multi-filter.exe"
+                }
+              ],
+              "valid_filter_count": 2,
+              "monitor": {
+                "raw": null,
+                "valid": false,
+                "occurrences": [],
+                "path_flags": {
+                  "raw": null,
+                  "basename": null,
+                  "quoted": false,
+                  "absolute": false
+                },
+                "environment": {
+                  "has_environment_variables": false,
+                  "variables": [],
+                  "unresolved": [],
+                  "expanded_candidate": null,
+                  "candidate_only": true
+                }
+              },
+              "reporting_mode": {
+                "value": null,
+                "valid": false,
+                "occurrences": []
+              },
+              "monitor_association_complete": false,
+              "mechanisms": [
+                "IFEO_FILTER_CONDITION_CANDIDATE",
+                "FLAG_WITHOUT_MONITOR"
+              ],
+              "missing_associations": [
+                "SilentProcessExit 映像键"
+              ],
+              "informational_missing": [
+                "Debugger（独立重定向线索，非监控必需）"
+              ],
+              "issues": [],
+              "notes": [
+                "GlobalFlag 的 0x200 位存在但 MonitorProcess 不可用，关联不完整。"
+              ],
+              "pairing_ambiguous": false
+            },
+            {
+              "image": "no-flag.exe",
+              "view": "native",
+              "ifeo_path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\no-flag.exe",
+              "spe_path": "Microsoft\\Windows NT\\CurrentVersion\\SilentProcessExit\\no-flag.exe",
+              "ifeo_present": true,
+              "spe_present": true,
+              "values": {
+                "ifeo": [
+                  {
+                    "name": "Debugger",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\no-flag.exe",
+                    "raw_type": 1,
+                    "type_name": "REG_SZ",
+                    "size": 50,
+                    "data_hex": "43003a005c0054006f006f006c0073005c006400620067002d006e006f002d0066006c00610067002e006500780065000000",
+                    "decoded": "C:\\Tools\\dbg-no-flag.exe",
+                    "issues": []
+                  }
+                ],
+                "spe": [
+                  {
+                    "name": "MonitorProcess",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\SilentProcessExit\\no-flag.exe",
+                    "raw_type": 1,
+                    "type_name": "REG_SZ",
+                    "size": 32,
+                    "data_hex": "43003a005c0054006f006f006c0073005c006d0034002e006500780065000000",
+                    "decoded": "C:\\Tools\\m4.exe",
+                    "issues": []
+                  }
+                ]
+              },
+              "debugger": {
+                "raw": "C:\\Tools\\dbg-no-flag.exe",
+                "valid": true,
+                "occurrences": [
+                  {
+                    "raw": "C:\\Tools\\dbg-no-flag.exe",
+                    "type": 1,
+                    "valid": true
+                  }
+                ],
+                "path_flags": {
+                  "raw": "C:\\Tools\\dbg-no-flag.exe",
+                  "basename": "dbg-no-flag.exe",
+                  "quoted": false,
+                  "absolute": true
+                },
+                "environment": {
+                  "has_environment_variables": false,
+                  "variables": [],
+                  "unresolved": [],
+                  "expanded_candidate": "C:\\Tools\\dbg-no-flag.exe",
+                  "candidate_only": true,
+                  "note": "路径未做存在性、签名或可执行性验证"
+                }
+              },
+              "global_flag": {
+                "value": null,
+                "valid": false,
+                "bit_0x200": false,
+                "ambiguous": false,
+                "occurrences": []
+              },
+              "use_filter": {
+                "value": null,
+                "valid": false,
+                "enabled": false,
+                "disabled": false,
+                "ambiguous": false,
+                "occurrences": []
+              },
+              "filters": [],
+              "filter_values": [],
+              "valid_filter_count": 0,
+              "monitor": {
+                "raw": "C:\\Tools\\m4.exe",
+                "valid": true,
+                "occurrences": [
+                  {
+                    "raw": "C:\\Tools\\m4.exe",
+                    "type": 1,
+                    "valid": true
+                  }
+                ],
+                "path_flags": {
+                  "raw": "C:\\Tools\\m4.exe",
+                  "basename": "m4.exe",
+                  "quoted": false,
+                  "absolute": true
+                },
+                "environment": {
+                  "has_environment_variables": false,
+                  "variables": [],
+                  "unresolved": [],
+                  "expanded_candidate": "C:\\Tools\\m4.exe",
+                  "candidate_only": true,
+                  "note": "路径未做存在性、签名或可执行性验证"
+                }
+              },
+              "reporting_mode": {
+                "value": null,
+                "valid": false,
+                "occurrences": []
+              },
+              "monitor_association_complete": false,
+              "mechanisms": [
+                "IFEO_DEBUGGER_REDIRECT_CANDIDATE",
+                "MONITOR_WITHOUT_FLAG_ORPHAN"
+              ],
+              "missing_associations": [
+                "含 0x200 的 4 字节 REG_DWORD GlobalFlag"
+              ],
+              "informational_missing": [
+                "ReportingMode（参考信息，非候选必要条件）"
+              ],
+              "issues": [],
+              "notes": [
+                "Debugger 存在只说明 IFEO 重定向候选，不是执行证据。",
+                "MonitorProcess 存在但缺少可用的 GlobalFlag 0x200，不能仅凭监控路径认定生效。"
+              ],
+              "pairing_ambiguous": false
+            },
+            {
+              "image": "subkey-conflict.exe",
+              "view": "native",
+              "ifeo_path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\subkey-conflict.exe",
+              "spe_path": null,
+              "ifeo_present": true,
+              "spe_present": false,
+              "values": {
+                "ifeo": [
+                  {
+                    "name": "GlobalFlag",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\subkey-conflict.exe",
+                    "raw_type": 4,
+                    "type_name": "REG_DWORD",
+                    "size": 4,
+                    "data_hex": "00020000",
+                    "decoded": 512,
+                    "issues": []
+                  },
+                  {
+                    "name": "UseFilter",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\subkey-conflict.exe",
+                    "raw_type": 4,
+                    "type_name": "REG_DWORD",
+                    "size": 4,
+                    "data_hex": "01000000",
+                    "decoded": 1,
+                    "issues": []
+                  }
+                ],
+                "spe": []
+              },
+              "debugger": {
+                "raw": null,
+                "valid": false,
+                "occurrences": [],
+                "path_flags": {
+                  "raw": null,
+                  "basename": null,
+                  "quoted": false,
+                  "absolute": false
+                },
+                "environment": {
+                  "has_environment_variables": false,
+                  "variables": [],
+                  "unresolved": [],
+                  "expanded_candidate": null,
+                  "candidate_only": true
+                }
+              },
+              "global_flag": {
+                "value": 512,
+                "valid": true,
+                "bit_0x200": true,
+                "ambiguous": false,
+                "occurrences": [
+                  {
+                    "value": 512,
+                    "type": 4,
+                    "size": 4,
+                    "valid": true,
+                    "silent_process_exit_bit": true,
+                    "other_bits": 0
+                  }
+                ]
+              },
+              "use_filter": {
+                "value": 1,
+                "valid": true,
+                "enabled": true,
+                "disabled": false,
+                "ambiguous": false,
+                "occurrences": [
+                  {
+                    "value": 1,
+                    "type": 4,
+                    "size": 4,
+                    "valid": true
+                  }
+                ]
+              },
+              "filters": [],
+              "filter_values": [],
+              "valid_filter_count": 0,
+              "monitor": {
+                "raw": null,
+                "valid": false,
+                "occurrences": [],
+                "path_flags": {
+                  "raw": null,
+                  "basename": null,
+                  "quoted": false,
+                  "absolute": false
+                },
+                "environment": {
+                  "has_environment_variables": false,
+                  "variables": [],
+                  "unresolved": [],
+                  "expanded_candidate": null,
+                  "candidate_only": true
+                }
+              },
+              "reporting_mode": {
+                "value": null,
+                "valid": false,
+                "occurrences": []
+              },
+              "monitor_association_complete": false,
+              "mechanisms": [
+                "FLAG_WITHOUT_MONITOR",
+                "USEFILTER_WITHOUT_FILTER_CONDITION"
+              ],
+              "missing_associations": [
+                "SilentProcessExit 映像键"
+              ],
+              "informational_missing": [
+                "Debugger（独立重定向线索，非监控必需）"
+              ],
+              "issues": [
+                {
+                  "code": "FILTER_SUBKEY_WITHOUT_FILTERFULLPATH",
+                  "severity": "warning",
+                  "message": "子键 'subkey-conflict.exe' 存在但没有 FilterFullPath；保留为结构线索",
+                  "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\subkey-conflict.exe\\subkey-conflict.exe",
+                  "value": null
+                },
+                {
+                  "code": "MISPLACED_ASSOCIATION_VALUE",
+                  "severity": "warning",
+                  "message": "MonitorProcess 出现在 IFEO 映像键的子键 'subkey-conflict.exe' 中；不作为关联依据，也未当作过滤条件",
+                  "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\subkey-conflict.exe\\subkey-conflict.exe",
+                  "value": "MonitorProcess"
+                }
+              ],
+              "notes": [
+                "GlobalFlag 的 0x200 位存在但 MonitorProcess 不可用，关联不完整。"
+              ],
+              "pairing_ambiguous": false
+            },
+            {
+              "image": "usefilter-without-filter.exe",
+              "view": "native",
+              "ifeo_path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\usefilter-without-filter.exe",
+              "spe_path": null,
+              "ifeo_present": true,
+              "spe_present": false,
+              "values": {
+                "ifeo": [
+                  {
+                    "name": "GlobalFlag",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\usefilter-without-filter.exe",
+                    "raw_type": 4,
+                    "type_name": "REG_DWORD",
+                    "size": 4,
+                    "data_hex": "00020000",
+                    "decoded": 512,
+                    "issues": []
+                  },
+                  {
+                    "name": "UseFilter",
+                    "path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options\\usefilter-without-filter.exe",
+                    "raw_type": 4,
+                    "type_name": "REG_DWORD",
+                    "size": 4,
+                    "data_hex": "01000000",
+                    "decoded": 1,
+                    "issues": []
+                  }
+                ],
+                "spe": []
+              },
+              "debugger": {
+                "raw": null,
+                "valid": false,
+                "occurrences": [],
+                "path_flags": {
+                  "raw": null,
+                  "basename": null,
+                  "quoted": false,
+                  "absolute": false
+                },
+                "environment": {
+                  "has_environment_variables": false,
+                  "variables": [],
+                  "unresolved": [],
+                  "expanded_candidate": null,
+                  "candidate_only": true
+                }
+              },
+              "global_flag": {
+                "value": 512,
+                "valid": true,
+                "bit_0x200": true,
+                "ambiguous": false,
+                "occurrences": [
+                  {
+                    "value": 512,
+                    "type": 4,
+                    "size": 4,
+                    "valid": true,
+                    "silent_process_exit_bit": true,
+                    "other_bits": 0
+                  }
+                ]
+              },
+              "use_filter": {
+                "value": 1,
+                "valid": true,
+                "enabled": true,
+                "disabled": false,
+                "ambiguous": false,
+                "occurrences": [
+                  {
+                    "value": 1,
+                    "type": 4,
+                    "size": 4,
+                    "valid": true
+                  }
+                ]
+              },
+              "filters": [],
+              "filter_values": [],
+              "valid_filter_count": 0,
+              "monitor": {
+                "raw": null,
+                "valid": false,
+                "occurrences": [],
+                "path_flags": {
+                  "raw": null,
+                  "basename": null,
+                  "quoted": false,
+                  "absolute": false
+                },
+                "environment": {
+                  "has_environment_variables": false,
+                  "variables": [],
+                  "unresolved": [],
+                  "expanded_candidate": null,
+                  "candidate_only": true
+                }
+              },
+              "reporting_mode": {
+                "value": null,
+                "valid": false,
+                "occurrences": []
+              },
+              "monitor_association_complete": false,
+              "mechanisms": [
+                "FLAG_WITHOUT_MONITOR",
+                "USEFILTER_WITHOUT_FILTER_CONDITION"
+              ],
+              "missing_associations": [
+                "SilentProcessExit 映像键"
+              ],
+              "informational_missing": [
+                "Debugger（独立重定向线索，非监控必需）"
+              ],
+              "issues": [],
+              "notes": [
+                "GlobalFlag 的 0x200 位存在但 MonitorProcess 不可用，关联不完整。"
+              ],
+              "pairing_ambiguous": false
+            }
+          ],
+          "issues": [],
+          "ifeo_path": "Microsoft\\Windows NT\\CurrentVersion\\Image File Execution Options",
+          "spe_path": "Microsoft\\Windows NT\\CurrentVersion\\SilentProcessExit"
+        },
+        {
+          "view": "wow6432",
+          "base_path": "Wow6432Node\\Microsoft\\Windows NT\\CurrentVersion",
+          "view_root_present": false,
+          "ifeo_key_present": false,
+          "spe_key_present": false,
+          "images": [],
+          "issues": [
+            {
+              "code": "VIEW_ROOT_MISSING",
+              "severity": "warning",
+              "message": "该 hive 中不存在视图根键 'Wow6432Node\\\\Microsoft\\\\Windows NT\\\\CurrentVersion'",
+              "path": "Wow6432Node\\Microsoft\\Windows NT\\CurrentVersion",
+              "value": null
+            }
+          ]
+        }
+      ],
+      "issues": [
+        {
+          "code": "VIEW_ROOT_MISSING",
+          "severity": "warning",
+          "message": "该 hive 中不存在视图根键 'Wow6432Node\\\\Microsoft\\\\Windows NT\\\\CurrentVersion'",
+          "path": "Wow6432Node\\Microsoft\\Windows NT\\CurrentVersion",
+          "value": null
+        }
+      ]
+    }
+  ]
+}
