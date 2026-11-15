@@ -80,6 +80,20 @@ Then, you should send back a ``101`` response that contains ``h2c`` in the ``Upg
 
 At this point, you may now respond to the original HTTP/1.1 request in HTTP/2 by calling the appropriate methods on the :class:`H2Connection <h2.connection.H2Connection>` object. No further HTTP/1.1 may be sent on this connection: from this point onward, all data sent by you and the client will be HTTP/2 data.
 
+The original HTTP/1.1 request is represented by stream 1, which is
+half-closed for the client. It must be authorized and its body consumed
+exactly once by the HTTP/1.1 side of the connection before the upgrade is
+accepted. h2 does not deliver that request again as an event, and it rejects
+further DATA or HEADERS frames on stream 1. Later requests use their own
+stream IDs and must be authorized independently.
+
+If :meth:`H2Connection.initiate_upgrade_connection
+<h2.connection.H2Connection.initiate_upgrade_connection>` raises
+:class:`ProtocolError <h2.exceptions.ProtocolError>`, the upgrade value is
+malformed and no HTTP/2 data has been prepared. Do not send a ``101``
+response in that case: finish the request over HTTP/1.1 instead. The same
+applies when the ``HTTP2-Settings`` header is absent.
+
 Server Example
 ^^^^^^^^^^^^^^
 

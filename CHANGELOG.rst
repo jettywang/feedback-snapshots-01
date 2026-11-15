@@ -14,7 +14,15 @@ dev
 
 **Bugfixes**
 
--
+- ``H2Connection.initiate_upgrade_connection`` now validates the
+  ``HTTP2-Settings`` header field strictly and before emitting any HTTP/2
+  data. A malformed base64url value, an unparseable SETTINGS payload, or an
+  invalid setting value now raises ``ProtocolError`` without queuing a
+  connection preface or SETTINGS frame and without creating stream 1, so a
+  rejected h2c upgrade leaves the connection untouched.
+- ``H2Connection.initiate_upgrade_connection`` now raises ``ProtocolError``
+  when called on a connection that has already been initialised, instead of
+  emitting a second preface and re-creating stream 1.
 
 4.4.1 (2026-08-03)
 ------------------

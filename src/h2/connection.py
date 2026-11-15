@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any
 
 from hpack.exceptions import HPACKError, OversizedHeaderListError
 from hpack.hpack import Decoder, Encoder
-from hyperframe.exceptions import InvalidPaddingError
+from hyperframe.exceptions import InvalidFrameError, InvalidPaddingError
 from hyperframe.frame import (
     AltSvcFrame,
     ContinuationFrame,
@@ -386,6 +386,12 @@ class H2Connection:
         # Data that needs to be sent.
         self._data_to_send = bytearray()
 
+        # Whether the connection (or upgrade) has been initialised. The send
+        # buffer alone cannot answer that question: it may already have been
+        # drained, and re-initialising would then duplicate the preface and
+        # re-create stream 1.
+        self._initialized = False
+
         # Keeps track of how streams are closed.
         # Used to ensure that we don't blow up in the face of frames that were
         # in flight when a RST_STREAM was sent.
@@ -521,6 +527,7 @@ class H2Connection:
         Must be called for both clients and servers.
         """
         self.config.logger.debug("Initializing connection")
+        self._initialized = True
         self.state_machine.process_input(ConnectionInputs.SEND_SETTINGS)
         if self.config.client_side:
             preamble = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
@@ -573,26 +580,44 @@ class H2Connection:
             "Upgrade connection. Current settings: %s", self.local_settings,
         )
 
+        if self._initialized or self.state_machine.state is not ConnectionState.IDLE:
+            msg = "Connection has already been initiated."
+            raise ProtocolError(msg)
+
         frame_data = None
-        # Begin by getting the preamble in place.
-        self.initiate_connection()
+        settings_frame = None
 
         if self.config.client_side:
             f = SettingsFrame(0)
             for setting, value in self.local_settings.items():
                 f.settings[setting] = value
 
-            frame_data = f.serialize_body()
-            frame_data = base64.urlsafe_b64encode(frame_data)
+            frame_data = base64.urlsafe_b64encode(f.serialize_body())
         elif settings_header:
+            # The HTTP2-Settings header field was supplied by the client. It
+            # must be well-formed before we emit any HTTP/2 data: a rejected
+            # upgrade must not leave a connection preface or SETTINGS frame
+            # queued for sending, nor may it create stream 1.
+            settings_payload = _decode_upgrade_settings_header(settings_header)
+            settings_frame = SettingsFrame(0)
+            try:
+                settings_frame.parse_body(memoryview(settings_payload))
+            except InvalidFrameError as e:
+                msg = "Invalid HTTP2-Settings header field value."
+                raise ProtocolError(msg) from e
+
+            for setting, value in settings_frame.settings.items():
+                self.remote_settings.validate_received_setting(setting, value)
+
+        # Begin by getting the preamble in place.
+        self.initiate_connection()
+
+        if settings_frame is not None:
             # We have a settings header from the client. This needs to be
             # applied, but we want to throw away the ACK. We do this by
-            # inserting the data into a Settings frame and then passing it to
-            # the state machine, but ignoring the return value.
-            settings_header = base64.urlsafe_b64decode(settings_header)
-            f = SettingsFrame(0)
-            f.parse_body(memoryview(settings_header))
-            self._receive_settings_frame(f)
+            # passing the already-validated frame to the state machine, but
+            # ignoring the return value.
+            self._receive_settings_frame(settings_frame)
 
         # Set up appropriate state. Stream 1 in a half-closed state:
         # half-closed(local) for clients, half-closed(remote) for servers.
@@ -2052,6 +2077,34 @@ class H2Connection:
         return self._stream_closed_by(stream_id) in (
             StreamClosedBy.RECV_END_STREAM, StreamClosedBy.SEND_END_STREAM,
         )
+
+
+def _decode_upgrade_settings_header(settings_header: bytes) -> bytes:
+    """
+    Decode the base64url-encoded payload of an ``HTTP2-Settings`` header field.
+
+    RFC 7540 section 3.2.1 requires this field to contain a base64url encoding
+    of a SETTINGS frame payload. ``base64.urlsafe_b64decode`` silently drops
+    characters outside the alphabet, which would turn a malformed field into
+    an empty (and therefore plausible-looking) SETTINGS frame. The field is
+    part of the request that is about to be treated as stream 1, so a
+    malformed value must reject the upgrade instead of being accepted.
+    """
+    try:
+        payload = base64.b64decode(
+            settings_header + b"=" * ((-len(settings_header)) % 4),
+            altchars=b"-_",
+            validate=True,
+        )
+    except ValueError as e:
+        msg = "Invalid HTTP2-Settings header field value."
+        raise ProtocolError(msg) from e
+
+    if base64.urlsafe_b64encode(payload).rstrip(b"=") != settings_header.rstrip(b"="):
+        msg = "Invalid HTTP2-Settings header field value."
+        raise ProtocolError(msg)
+
+    return payload
 
 
 def _add_frame_priority(frame: PriorityFrame | HeadersFrame,
