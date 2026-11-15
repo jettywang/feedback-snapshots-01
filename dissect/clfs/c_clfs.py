@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import io
-from typing import BinaryIO
+from typing import BinaryIO, NamedTuple
 
 # External dependencies
 from dissect.cstruct import cstruct
+
+from dissect.clfs.exceptions import InvalidRecordBlockError
 
 clfs_def = """
 /* ======== Generic Windows ======== */
@@ -302,15 +304,56 @@ typedef struct RECORD_HEADER {
 c_clfs = cstruct().load(clfs_def)
 
 SECTOR_SIZE = 512
+SECTOR_SIGNATURE_SIZE = 2
 CLFS_CONTROL_RECORD_MAGIC_VALUE = 0xC1F5C1F500005F1C
+
+# Position flag bits in the low byte of a sector signature.
+SECTOR_SIGNATURE_FIRST = 0x40
+SECTOR_SIGNATURE_LAST = 0x20
+SECTOR_SIGNATURE_POSITION = SECTOR_SIGNATURE_FIRST | SECTOR_SIGNATURE_LAST
+# The remaining low-byte bits form a per-block signature base (0x10 for BLF metadata
+# blocks, 0x04 for container log blocks) that must be constant within a block.
+SECTOR_SIGNATURE_BASE = ~SECTOR_SIGNATURE_POSITION & 0xFF
+
+HEADER_SIZE = 0x6C  # len(c_clfs.CLFS_LOG_BLOCK_HEADER)
+
+
+class SectorFixup(NamedTuple):
+    """Describes one verified sector fixup.
+
+    Attributes:
+        sector: Index of the sector within the block.
+        offset: Offset within the block of the restored 2 bytes (the sector tail).
+        signature: The 2 signature bytes as found on disk (verified before use).
+        original: The 2 original bytes restored from the fixup array.
+    """
+
+    sector: int
+    offset: int
+    signature: bytes
+    original: bytes
 
 
 class BlockHeader:
-    """Main class to parse the block headers.
+    """Parse and validate a CLFS log block header.
+
+    The physical bytes read from disk are kept untouched in ``raw``. The validated,
+    fixup-restored view is exposed separately as ``data`` (immutable) and through
+    ``open()``. Untrusted fixup data is never applied before the sector counts, the
+    fixup array bounds and every sector tail signature have been verified.
+
+    The ENCODED/DECODED flags are interpreted according to the actual on-disk format:
+    an ENCODED block carries sector signatures that must verify before the fixup array
+    is applied, a DECODED block already holds plain data and is passed through as-is.
+    Truncated blocks, zero-sector declarations, out-of-bounds fixup arrays and
+    signature mismatches are rejected instead of being silently repaired.
 
     Args:
         fh: A file-like object.
         offset: Offset to start reading the block header from.
+
+    Raises:
+        InvalidRecordBlockError: If the block fails validation.
     """
 
     def __init__(self, fh: BinaryIO, offset: int):
@@ -319,20 +362,118 @@ class BlockHeader:
         fh.seek(self.offset)
         self.header = c_clfs.CLFS_LOG_BLOCK_HEADER(fh)
 
+        total_sectors = self.header.TotalSectors
+        valid_sectors = self.header.ValidSectors
+
+        if total_sectors == 0:
+            raise InvalidRecordBlockError("Block declares zero total sectors")
+        if valid_sectors == 0 or valid_sectors > total_sectors:
+            raise InvalidRecordBlockError(
+                f"Invalid valid sector count: {valid_sectors} (total sectors: {total_sectors})"
+            )
+
+        self.size = total_sectors * SECTOR_SIZE
+
         fh.seek(self.offset)
-        data = bytearray(fh.read(self.header.TotalSectors * SECTOR_SIZE))
-        view = memoryview(data)
+        raw = fh.read(self.size)
+        if len(raw) != self.size:
+            raise InvalidRecordBlockError(
+                f"Truncated block: expected {total_sectors} sectors ({self.size} bytes), got {len(raw)} bytes"
+            )
+        self.raw = raw
 
-        fixup = view[self.header.FixupOffset :]
-        ptr = view[SECTOR_SIZE - 2 :]
+        encoded = bool(self.header.Flags & c_clfs.CLFS_LOG_BLOCK_FLAGS.ENCODED)
+        decoded = bool(self.header.Flags & c_clfs.CLFS_LOG_BLOCK_FLAGS.DECODED)
+        if encoded == decoded:
+            raise InvalidRecordBlockError(
+                f"Invalid log block flags {int(self.header.Flags):#x}: exactly one of ENCODED/DECODED must be set"
+            )
 
-        for _ in range(self.header.TotalSectors):
-            ptr[:2] = fixup[:2]
-            fixup = fixup[2:]
-            ptr = ptr[SECTOR_SIZE:]
+        if decoded:
+            # Already in decoded form: sector tails hold real data, no fixup to apply.
+            self.fixups: tuple[SectorFixup, ...] = ()
+            self.data = raw
+        else:
+            self.fixups = self._verify(raw)
+            self.data = self._apply(raw)
 
-        self.data = bytes(data)
+    def _fixup_array_bounds(self) -> tuple[int, int]:
+        """Validate the fixup array location and return its ``(start, end)`` offsets within the block."""
+        start = self.header.FixupOffset
+        end = start + self.header.TotalSectors * SECTOR_SIGNATURE_SIZE
+
+        if start < HEADER_SIZE:
+            raise InvalidRecordBlockError(f"Fixup array overlaps the block header: {start:#x}")
+        if end > self.size:
+            raise InvalidRecordBlockError(
+                f"Fixup array extends past the end of the block: {start:#x}..{end:#x} (block size {self.size:#x})"
+            )
+        for sector in range(self.header.TotalSectors):
+            tail = sector * SECTOR_SIZE + SECTOR_SIZE - SECTOR_SIGNATURE_SIZE
+            if start < tail + SECTOR_SIGNATURE_SIZE and end > tail:
+                raise InvalidRecordBlockError(
+                    f"Fixup array {start:#x}..{end:#x} covers the signature of sector {sector} at {tail:#x}"
+                )
+        return start, end
+
+    def _expected_position(self, sector: int) -> int:
+        """Return the expected position flag bits of the sector signature low byte."""
+        position = 0
+        if sector == 0:
+            position |= SECTOR_SIGNATURE_FIRST
+        if sector == self.header.TotalSectors - 1:
+            position |= SECTOR_SIGNATURE_LAST
+        return position
+
+    def _verify(self, raw: bytes) -> tuple[SectorFixup, ...]:
+        """Verify the fixup array bounds and every sector tail signature.
+
+        Returns:
+            A tuple of :class:`SectorFixup` describing each verified fixup position.
+
+        Raises:
+            InvalidRecordBlockError: If any verification fails.
+        """
+        fixup_start, _ = self._fixup_array_bounds()
+
+        signature_base = None
+        fixups = []
+        for sector in range(self.header.TotalSectors):
+            tail = sector * SECTOR_SIZE + SECTOR_SIZE - SECTOR_SIGNATURE_SIZE
+            signature = raw[tail : tail + SECTOR_SIGNATURE_SIZE]
+            low, high = signature[0], signature[1]
+
+            if high != self.header.Fixup:
+                raise InvalidRecordBlockError(
+                    f"Sector {sector} signature sequence mismatch: got {signature.hex()}, "
+                    f"expected high byte {self.header.Fixup:#x}"
+                )
+            if low & SECTOR_SIGNATURE_POSITION != self._expected_position(sector):
+                raise InvalidRecordBlockError(
+                    f"Sector {sector} signature position mismatch: got {signature.hex()}, "
+                    f"expected position bits {self._expected_position(sector):#x}"
+                )
+            if signature_base is None:
+                signature_base = low & SECTOR_SIGNATURE_BASE
+            elif low & SECTOR_SIGNATURE_BASE != signature_base:
+                raise InvalidRecordBlockError(
+                    f"Sector {sector} signature base mismatch: got {signature.hex()}, "
+                    f"expected base {signature_base:#x}"
+                )
+
+            entry = sector * SECTOR_SIGNATURE_SIZE
+            original = raw[fixup_start + entry : fixup_start + entry + SECTOR_SIGNATURE_SIZE]
+            fixups.append(SectorFixup(sector=sector, offset=tail, signature=signature, original=original))
+
+        return tuple(fixups)
+
+    def _apply(self, raw: bytes) -> bytes:
+        """Apply the verified fixups to a copy of the raw bytes and return the restored block."""
+        data = bytearray(raw)
+        for fixup in self.fixups:
+            data[fixup.offset : fixup.offset + SECTOR_SIGNATURE_SIZE] = fixup.original
+        return bytes(data)
 
     def open(self) -> io.BytesIO:
-        """Return a file-like object of the block header."""
+        """Return a file-like object of the validated, fixup-restored block view."""
         return io.BytesIO(self.data)
