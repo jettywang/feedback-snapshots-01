@@ -42,9 +42,11 @@ class Container:
     def records(self) -> Iterator[tuple[int, bytes, bytes]]:
         """Parse the records that are present within the log block."""
         log_block_offset = self.offset
+        cur_block_offset = log_block_offset
 
         buf, cur_record_offset = self._open_block(log_block_offset)
         cur_record_header = c_clfs.RECORD_HEADER(buf)
+        cur_block_data = None
 
         while True:
             # Data block
@@ -60,6 +62,11 @@ class Container:
                 can subtract the offset (size of header) from the data size itself and be left with the record data.
                 """
 
+                # A start record has to be preceded by a data record within the same block, block data of a
+                # previously visited block may never be reused as the payload of the current record
+                if cur_block_data is None:
+                    raise InvalidRecordBlockError("Start record without preceding data record in the same block")
+
                 # Advance to the next RECORD_HEADER
                 next_record_header = c_clfs.RECORD_HEADER(buf)
 
@@ -73,6 +80,11 @@ class Container:
                 if next_record_header.LsnPrevious == 0:
                     break
 
+                # A start record has to be followed by the last record of the block, a second start record
+                # within the same block is not a valid continuation of the record sequence
+                if next_record_header.Type & c_clfs.RecordType.ClfsStartRecord:
+                    raise InvalidRecordBlockError("Duplicate start record within the same block")
+
                 # Set the new block offset
                 log_block_offset = next_record_header.LsnPrevious - 1
                 cur_record_header = next_record_header
@@ -80,5 +92,17 @@ class Container:
 
             # End of block, pointer to new block
             if cur_record_header.Type & c_clfs.RecordType.ClfsLastRecord:
+                # The last record has to point to a different block, otherwise no progress can be made
+                if log_block_offset == cur_block_offset:
+                    raise InvalidRecordBlockError("Last record does not point to a new block")
+
+                cur_block_offset = log_block_offset
                 buf, cur_record_offset = self._open_block(log_block_offset)
                 cur_record_header = c_clfs.RECORD_HEADER(buf)
+
+                # Block data is only valid within the block it was read from
+                cur_block_data = None
+                continue
+
+            # No state transition applies to this record, so no progress can be made
+            raise InvalidRecordBlockError(f"Invalid record type: {cur_record_header.Type!r}")
