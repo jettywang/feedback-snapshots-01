@@ -91,6 +91,44 @@ def test_vbk_version_13() -> None:
             assert digest == "e9ed281cf9c2fe1745e4eb9c926c1a64bd47569c48be511c5fdf6fd5793e5a77"
 
 
+def test_traced_properties_on_real_vbk() -> None:
+    """Traceable properties must parse a real VBK and read every byte back."""
+    with gzip.open(absolute_path("_data/vbk/test13.vbk.gz")) as fh:
+        vbk = VBK(fh)
+
+        entry = vbk.get(
+            "6745a759-2205-4cd2-b172-8ec8f7e60ef8 (3c834d56-37ac-8bd3-b946-30113c55c4b5)/8b14f74c-360d-4d7a-98f7-7f4c5e737eb7"  # noqa: E501
+        )
+
+        traced = entry.traced_properties
+        assert traced is not None
+        assert traced.complete
+        assert traced.breakpoint is None
+        assert set(traced.keys()) == set(entry.properties.keys())
+
+        prop = traced["DefinedBlocksMask"]
+        assert prop.value == entry.properties["DefinedBlocksMask"]
+        assert prop.value_range.read_back(traced.blob, vbk.fh) == prop.value
+
+        # Every backing fragment must resolve to a valid bank and file offset.
+        for source, file_offset, length in prop.value_range.fragments(traced.blob):
+            assert 0 <= source.address.bank < len(vbk.active_slot.banks)
+            assert file_offset >= 0
+            assert length > 0
+            vbk.fh.seek(file_offset)
+            assert len(vbk.fh.read(length)) == length
+
+
+def test_page_address_decoding() -> None:
+    """The high and low 32 bits of a page number map to bank and in-bank page."""
+    from dissect.archive.vbk.trace import PageAddress
+
+    address = PageAddress.decode((1 << 32) | 5)
+    assert address.bank == 1
+    assert address.page == 5
+    assert address.encode() == (1 << 32) | 5
+
+
 def test_metavector2_lookup() -> None:
     """Test that the lookup logic in MetaVector2 works as expected."""
     raw_blob = []

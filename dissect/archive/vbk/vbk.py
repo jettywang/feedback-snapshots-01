@@ -8,13 +8,23 @@ from io import BytesIO
 from typing import TYPE_CHECKING, BinaryIO, Generic, TypeVar
 from zlib import crc32
 
+from dissect.archive.exception import (
+    Error,
+    FileNotFoundError,
+    IsADirectoryError,
+    NotADirectoryError,
+)
+from dissect.archive.vbk.c_vbk import PAGE_SIZE, c_vbk
+from dissect.archive.vbk.trace import (
+    PageAddress,
+    PageOwnership,
+    TracedMetaBlob,
+    TracedPropertiesDictionary,
+)
 from dissect.util.compression import lz4
 from dissect.util.hash.crc32c import crc32c
 from dissect.util.stream import AlignedStream
 from dissect.util.xmemoryview import xmemoryview
-
-from dissect.archive.exception import Error, FileNotFoundError, IsADirectoryError, NotADirectoryError
-from dissect.archive.vbk.c_vbk import PAGE_SIZE, c_vbk
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -66,6 +76,10 @@ class VBK:
 
         self.active_slot: SnapshotSlot = active_slot
 
+        # Shared registry ensuring a physical page can only back one meta blob,
+        # so evidence from one directory can never be borrowed by another.
+        self.page_ownership = PageOwnership()
+
         self.root = RootDirectory(
             self,
             self.active_slot.descriptor.DirectoryRoot.RootPage,
@@ -96,6 +110,19 @@ class VBK:
             page: The starting page number of the meta blob to read.
         """
         return self.active_slot._get_meta_blob(page)
+
+    def get_traced_meta_blob(self, page: int, label: str | None = None) -> TracedMetaBlob:
+        """Read a validated, traceable meta blob.
+
+        Args:
+            page: The starting page number of the meta blob to read.
+            label: An optional label used when claiming page ownership.
+        """
+        return self.active_slot.get_traced_meta_blob(page, label)
+
+    def decode_page_address(self, page: int) -> PageAddress:
+        """Split a composite page number into its bank and in-bank page parts."""
+        return PageAddress.decode(page)
 
     def get(self, path: str, item: DirItem | None = None) -> DirItem:
         """Get a directory item from the VBK file."""
@@ -216,6 +243,24 @@ class SnapshotSlot:
         """
         return MetaBlob(self, page)
 
+    def get_traced_meta_blob(self, page: int, label: str | None = None) -> TracedMetaBlob:
+        """Get a validated, traceable meta blob from the snapshot slot.
+
+        Every next-page reference is checked for bank/page range, ownership and
+        forward progress. Failures are recorded as breakpoints instead of being
+        silently followed.
+
+        Args:
+            page: The page of the first page in the meta blob.
+            label: An optional ownership label for the blob.
+        """
+        return TracedMetaBlob(self, page, self.vbk.page_ownership, label)
+
+    @staticmethod
+    def decode_page_address(page: int) -> PageAddress:
+        """Split a composite page number into its bank and in-bank page parts."""
+        return PageAddress.decode(page)
+
 
 class Bank:
     """A bank in the snapshot slot. A bank is a collection of pages.
@@ -239,6 +284,11 @@ class Bank:
         self.header = c_vbk.BankHeader(vbk.fh)
 
         self.page = lru_cache(128)(self.page)
+
+    @property
+    def page_count(self) -> int:
+        """The number of populated data pages described by the bank header."""
+        return self.header.PageCount
 
     def __repr__(self) -> str:
         return f"<Bank offset={self.offset:#x} size={self.size:#x}>"
@@ -331,6 +381,24 @@ class DirItem(MetaItem):
             return None
 
         return PropertiesDictionary(self.vbk, self.entry.PropsRootPage)
+
+    @cached_property
+    def traced_properties(self) -> TracedPropertiesDictionary | None:
+        """The traceable properties of the directory item, if it has them.
+
+        Each property records the exact bank, page and file offset its bytes came
+        from. When the property blob cannot be fully validated, the returned
+        dictionary is incomplete and exposes a ``breakpoint`` instead of values.
+        """
+        if self.entry.PropsRootPage == -1:
+            return None
+
+        return TracedPropertiesDictionary(
+            self.vbk.active_slot,
+            self.entry.PropsRootPage,
+            self.vbk.page_ownership,
+            label=f"props:{self.entry.PropsRootPage}",
+        )
 
     def is_dir(self) -> bool:
         """Return whether the directory item is a directory."""
