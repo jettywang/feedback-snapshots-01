@@ -2,6 +2,20 @@
 
 ## 0.13.0 - TBD
 
+* Fix NTLM acceptor MIC verification to bind the MIC to the exact received `NEGOTIATE`, `CHALLENGE`, and `AUTHENTICATE`
+  bytes rather than the messages unpacked and packed again
+  * A legal message layout with different field ordering, offsets, or padding no longer verifies a MIC calculated over a
+    re-encoded message
+* Fix NTLM `Authenticate.mic` detection for legal message layouts where the payload starts after the MIC
+  * The MIC offset is now derived from the `NTLMSSP_NEGOTIATE_VERSION` flag and the payload start instead of assuming
+    the first payload field immediately follows the MIC
+* Fix NTLM acceptor MIC requirement to be decided by the acceptor policy and the `CHALLENGE` it sent, not by the
+  `MsvAvFlags` the initiator placed in its own response
+  * An initiator can no longer omit both `MIC_PROVIDED` and the MIC to skip MIC verification when the challenge
+    contained `MsvAvTimestamp`
+* Add the `NegotiateOptions.require_ntlm_mic` option for an NTLM acceptor to require a MIC even without a timestamp in
+  the `CHALLENGE`
+
 ## 0.12.4 - 2026-10-06
 
 * Fix SSPI acceptor with explicit `Password` or `KerberosKeytab` credentials failing with `SEC_E_LOGON_DENIED` when the username is in the UPN form `user@REALM`

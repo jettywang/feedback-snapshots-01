@@ -679,18 +679,31 @@ class Authenticate(NTLMMessage):
         """Gets the offset of the MIC structure if present."""
         payload_offset = self._payload_offset
 
-        # If the payload offset is 88 or more then we must have the Version (8 bytes) and the MIC (16 bytes) plus
-        # any random data after that.
-        if payload_offset >= 88:
+        # The MIC is at a fixed position directly after the 64 byte header. The optional 8 byte Version structure that
+        # follows the header when NTLMSSP_NEGOTIATE_VERSION is set comes before it. The initiator is free to place the
+        # payload fields at any offset and can add padding after the MIC so the payload offset alone is not enough to
+        # determine if a MIC is present.
+        #
+        # Some initiators set NTLMSSP_NEGOTIATE_VERSION but still omit the Version field, the historical heuristic
+        # treats a payload that starts between 80 and 87 with the flag set as having a MIC but no Version field.
+        if self.flags & NegotiateFlags.version:
+            if payload_offset == 72:
+                # Version present but no MIC, payload directly after the Version field.
+                return 0
+
+            elif payload_offset < 80:
+                # Not enough room for either a Version + MIC, or a MIC without the Version field.
+                return 0
+
+            elif payload_offset < 88:
+                # MIC but no Version field even though the flag is set.
+                return 64
+
+            # Version (8 bytes) and MIC (16 bytes) before the payload, any extra bytes are padding.
             return 72
 
-        # If the payload offset is between 80 and 88, then we should have just the MIC and no Version.
-        elif payload_offset >= 80:
-            return 64
-
-        # Not enough room for a MIC between the minimum size and the payload offset.
-        else:
-            return 0
+        # No Version field, the MIC if present starts directly after the 64 byte header.
+        return 64 if payload_offset >= 80 else 0
 
     @staticmethod
     def unpack(b_data: bytes, encoding: typing.Optional[str] = None) -> "Authenticate":

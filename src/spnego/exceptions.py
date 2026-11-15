@@ -78,6 +78,12 @@ class NegotiateOptions(enum.IntFlag):
         To created a wrapped WinRM message the IOV extensions are required when using Kerberos auth. Setting this flag
         will skip Kerberos when `protocol='negotiate'` if the IOV headers aren't present and just fallback to NTLM.
 
+    require_ntlm_mic:
+        Makes the NTLM acceptor require and verify the MIC in the AUTHENTICATE message regardless of the
+        `MsvAvFlags` value the initiator sent in its NTLMv2 response. Without this the acceptor only verifies a MIC
+        when the initiator advertises `MIC_PROVIDED`, meaning an initiator can omit both the AV flag and the MIC to
+        skip verification. This option has no effect on NTLMv1 or when a MIC was not negotiated.
+
     .. _gss-ntlmssp:
         https://github.com/gssapi/gss-ntlmssp
     """
@@ -94,6 +100,7 @@ class NegotiateOptions(enum.IntFlag):
     session_key = 0x00000020
     wrapping_iov = 0x00000040
     wrapping_winrm = 0x00000080
+    require_ntlm_mic = 0x00000100
 
 
 class FeatureMissingError(Exception):

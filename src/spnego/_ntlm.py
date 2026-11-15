@@ -2,6 +2,7 @@
 # MIT License (see LICENSE or https://opensource.org/licenses/MIT)
 
 import base64
+import hmac
 import logging
 import os
 import socket
@@ -312,7 +313,9 @@ class NTLMProxy(ContextProxy):
                 )
 
         self._temp_negotiate: typing.Optional[Negotiate] = None
+        self._temp_negotiate_raw: typing.Optional[bytes] = None
         self._temp_challenge: typing.Optional[Challenge] = None
+        self._temp_challenge_raw: typing.Optional[bytes] = None
         self._mic_required = False
 
         # Crypto state for signing and sealing.
@@ -392,7 +395,9 @@ class NTLMProxy(ContextProxy):
         if self._complete:
             # Clear out any temp data we still have stored.
             self._temp_negotiate = None
+            self._temp_negotiate_raw = None
             self._temp_challenge = None
+            self._temp_challenge_raw = None
 
             in_usage = "accept" if self.usage == "initiate" else "initiate"
             session_key = self._session_key or b""
@@ -541,9 +546,23 @@ class NTLMProxy(ContextProxy):
         )
 
         self._temp_negotiate = negotiate
+        self._temp_negotiate_raw = token
         self._temp_challenge = challenge
+        self._temp_challenge_raw = challenge.pack()
 
         return challenge.pack()
+
+    def _is_mic_required(self, challenge: Challenge) -> bool:
+        """Whether the acceptor requires the initiator to include a MIC.
+
+        The requirement is based on what the acceptor sent and its own policy. MS-NLMP states an initiator MUST provide
+        a MIC when the CHALLENGE contains MsvAvTimestamp. The explicit option lets a caller require one even when the
+        challenge does not have a timestamp. The initiator supplied MsvAvFlags are not consulted, an initiator cannot
+        opt out of MIC verification by clearing a flag in its own response.
+        """
+        target_info = challenge.target_info or TargetInfo()
+
+        return bool(self.options & NegotiateOptions.require_ntlm_mic) or AvId.timestamp in target_info
 
     def _step_accept_authenticate(self, token: bytes, channel_bindings: typing.Optional[GssChannelBindings]) -> None:
         """Process the Authenticate message from the initiator."""
@@ -551,6 +570,7 @@ class NTLMProxy(ContextProxy):
         challenge = typing.cast(Challenge, self._temp_challenge)
         server_challenge = challenge.server_challenge
         auth = Authenticate.unpack(token)
+        mic_required = False
 
         # TODO: Add anonymous user support.
         if not auth.user_name or (
@@ -587,8 +607,16 @@ class NTLMProxy(ContextProxy):
                 if expected_bindings not in [actual_bindings, b"\x00" * 16]:
                     raise BadBindingsError(context_msg="Acceptor bindings do not match initiator bindings")
 
-            if target_info.get(AvId.flags, 0) & AvFlags.mic:
-                expected_mic = auth.mic
+            supplied_mic = auth.mic
+            mic_provided = bool(supplied_mic) and supplied_mic != b"\x00" * 16
+            if target_info.get(AvId.flags, 0) & AvFlags.mic or mic_provided or self._is_mic_required(challenge):
+                expected_mic = supplied_mic
+                mic_required = True
+
+            if mic_required and not mic_provided:
+                # This can only happen when the policy requires a MIC but the initiator omitted it entirely, or the
+                # message layout gives no room for the MIC field at all. Fail before the session key is derived.
+                raise InvalidTokenError(context_msg="Invalid MIC in NTLM authentication message")
 
         else:
             if not self._nt_v1:
@@ -629,11 +657,23 @@ class NTLMProxy(ContextProxy):
         else:
             self._session_key = key_exchange_key
 
-        if expected_mic:
-            auth.mic = b"\x00" * 16
-            actual_mic = self._calculate_mic(self.session_key, negotiate.pack(), challenge.pack(), auth.pack())
+        if mic_required:
+            # Bind the MIC to the exact bytes that were sent and received, not to a message that is unpacked and packed
+            # again. The field values may be identical but the security buffers can be laid out differently, the
+            # re-encoded message would then hide a changed, added, or reordered layout from the MIC check.
+            mic_offset = auth._get_mic_offset()
+            authenticate_raw = bytearray(token)
 
-            if actual_mic != expected_mic:
+            if not expected_mic or not mic_offset or len(authenticate_raw) < mic_offset + 16:
+                raise InvalidTokenError(context_msg="Invalid MIC in NTLM authentication message")
+
+            # The MIC is calculated with the MIC field set to 0, the rest of the message is left untouched.
+            authenticate_raw[mic_offset : mic_offset + 16] = b"\x00" * 16
+            negotiate_raw = self._temp_negotiate_raw or negotiate.pack()
+            challenge_raw = self._temp_challenge_raw or challenge.pack()
+            actual_mic = self._calculate_mic(self.session_key, negotiate_raw, challenge_raw, bytes(authenticate_raw))
+
+            if not hmac.compare_digest(actual_mic, expected_mic):
                 raise InvalidTokenError(context_msg="Invalid MIC in NTLM authentication message")
 
         self._context_attr = auth.flags
