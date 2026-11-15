@@ -14,7 +14,12 @@ dev
 
 **Bugfixes**
 
--
+- Correlate SETTINGS acknowledgements with the individual SETTINGS frame they
+  confirm. When several SETTINGS frames are in flight, one ACK now applies only
+  the head group instead of advancing every pending setting, so limits (initial
+  window size, max frame size, max concurrent streams) cannot take effect before
+  their own frame is acknowledged. A duplicate or unsolicited ACK received after
+  the handshake is ignored and no longer advances still-pending configuration.
 
 4.4.1 (2026-08-03)
 ------------------

@@ -383,6 +383,12 @@ class H2Connection:
         # until completion.
         self._header_frames: list[Frame] = []
 
+        # Whether the ACK for the connection's initial SETTINGS frame has been
+        # received yet. The handshake ACK is a one-time, positional event that
+        # does not correspond to any entry in ``local_settings``; subsequent
+        # ACKs match the FIFO queue of post-handshake SETTINGS frames.
+        self._initial_settings_acked = False
+
         # Data that needs to be sent.
         self._data_to_send = bytearray()
 
@@ -1122,7 +1128,7 @@ class H2Connection:
             "Update connection settings to %s", new_settings,
         )
         self.state_machine.process_input(ConnectionInputs.SEND_SETTINGS)
-        self.local_settings.update(new_settings)
+        self.local_settings.append_group(new_settings)
         s = SettingsFrame(0)
         s.settings = new_settings
         self._prepare_for_sending([s])
@@ -1770,16 +1776,31 @@ class H2Connection:
 
         # This is an ack of the local settings.
         if "ACK" in frame.flags:
+            if self._initial_settings_acked and not self.local_settings.outstanding:
+                # After the handshake, a duplicate or unsolicited ACK matches no
+                # queued SETTINGS frame. It must be ignored rather than advance
+                # any still-pending configuration.
+                self.config.logger.debug(
+                    "Received a SETTINGS ACK with no outstanding SETTINGS frame",
+                )
+                return [], events
+
+            # The first ACK closes the one-time handshake exchange; later ACKs
+            # pop the head group of the post-handshake outstanding queue.
+            self._initial_settings_acked = True
             changed_settings = self._local_settings_acked()
             ack_event = SettingsAcknowledged()
             ack_event.changed_settings = changed_settings
             events.append(ack_event)
             return [], events
 
-        # Add the new settings.
+        # Add the new settings as their own outstanding group. The generated
+        # acknowledgement immediately below pops exactly this group, so the
+        # frame boundary is preserved even if several SETTINGS frames arrive
+        # back to back.
         for setting, value in frame.settings.items():
             self.remote_settings.validate_received_setting(setting, value)
-        self.remote_settings.update(frame.settings)
+        self.remote_settings.append_group(frame.settings)
         events.append(
             RemoteSettingsChanged.from_settings(
                 self.remote_settings, frame.settings,

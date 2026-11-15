@@ -129,17 +129,14 @@ class Settings(MutableMapping[SettingCodes | int, int]):
         self._client = client
 
         # Backing object for the settings. This is a dictionary of
-        # (setting: [list of values]), where the first value in the list is the
-        # current value of the setting. Strictly this doesn't use lists but
-        # instead uses collections.deque to avoid repeated memory allocations.
-        #
-        # This contains the default values for HTTP/2.
-        self._settings: dict[SettingCodes | int, collections.deque[int]] = {
-            SettingCodes.HEADER_TABLE_SIZE: collections.deque([4096]),
-            SettingCodes.ENABLE_PUSH: collections.deque([int(client)]),
-            SettingCodes.INITIAL_WINDOW_SIZE: collections.deque([65535]),
-            SettingCodes.MAX_FRAME_SIZE: collections.deque([16384]),
-            SettingCodes.ENABLE_CONNECT_PROTOCOL: collections.deque([0]),
+        # (setting: value), holding the *currently effective* value of each
+        # setting. This contains the default values for HTTP/2.
+        self._settings: dict[SettingCodes | int, int] = {
+            SettingCodes.HEADER_TABLE_SIZE: 4096,
+            SettingCodes.ENABLE_PUSH: int(client),
+            SettingCodes.INITIAL_WINDOW_SIZE: 65535,
+            SettingCodes.MAX_FRAME_SIZE: 16384,
+            SettingCodes.ENABLE_CONNECT_PROTOCOL: 0,
         }
         if initial_values is not None:
             for key, value in initial_values.items():
@@ -150,26 +147,74 @@ class Settings(MutableMapping[SettingCodes | int, int]):
                         msg,
                         error_code=invalid,
                     )
-                self._settings[key] = collections.deque([value])
+                self._settings[key] = value
+
+        # The queue of SETTINGS frames that have been sent/received but not yet
+        # acknowledged. Each entry is an ordered mapping of the settings carried
+        # by a single SETTINGS frame. Acknowledgements pop the *head* group only,
+        # so one ACK can never advance a value proposed by a different, still
+        # outstanding SETTINGS frame. Multiple SETTINGS frames may be in flight
+        # at once, each touching a different subset of settings.
+        self._outstanding_settings: collections.deque[
+            dict[SettingCodes | int, int]
+        ] = collections.deque()
+
+    @property
+    def outstanding(self) -> int:
+        """
+        The number of SETTINGS frames whose acknowledgements are still pending.
+        A value of zero means a received ACK is unsolicited or a duplicate and
+        must be ignored rather than applied.
+        """
+        return len(self._outstanding_settings)
+
+    def append_group(self, values: dict[SettingCodes | int, int]) -> None:
+        """
+        Record the settings carried by one newly emitted/received SETTINGS
+        frame as a single outstanding group. Opening a fresh group here is what
+        keeps two successive SETTINGS frames distinguishable: an ACK for the
+        first frame cannot pop values proposed by the second.
+        """
+        group: dict[SettingCodes | int, int] = {}
+        for key, value in values.items():
+            invalid = _validate_setting(key, value)
+            if invalid:
+                msg = f"Setting {key} has invalid value {value}"
+                raise InvalidSettingsValueError(
+                    msg,
+                    error_code=invalid,
+                )
+            group[key] = value
+            self._settings.setdefault(key, None)
+        self._outstanding_settings.append(group)
 
     def acknowledge(self) -> dict[SettingCodes | int, ChangedSetting]:
         """
         The settings have been acknowledged, either by the user (remote
         settings) or by the remote peer (local settings).
 
+        This applies exactly the single, oldest outstanding group of settings
+        (the one carried by the SETTINGS frame this ACK corresponds to). An
+        acknowledgement for a group that does not exist, or a repeated
+        acknowledgement, has no effect and returns no changes rather than
+        advancing any unrelated, still outstanding configuration.
+
         :returns: A dict of {setting: ChangedSetting} that were applied.
         """
         changed_settings: dict[SettingCodes | int, ChangedSetting] = {}
 
-        # If there is more than one setting in the list, we have a setting
-        # value outstanding. Update them.
-        for k, v in self._settings.items():
-            if len(v) > 1:
-                old_setting = v.popleft()
-                new_setting = v[0]
-                changed_settings[k] = ChangedSetting(
-                    k, old_setting, new_setting,
-                )
+        if not self._outstanding_settings:
+            # Extra or duplicate ACK with no matching SETTINGS frame: nothing
+            # may be advanced.
+            return changed_settings
+
+        acknowledged_group = self._outstanding_settings.popleft()
+        for setting, new_value in acknowledged_group.items():
+            old_setting = self._settings.get(setting)
+            self._settings[setting] = new_value
+            changed_settings[setting] = ChangedSetting(
+                setting, old_setting, new_value,
+            )
 
         return changed_settings
 
@@ -263,7 +308,7 @@ class Settings(MutableMapping[SettingCodes | int, int]):
 
     # Implement the MutableMapping API.
     def __getitem__(self, key: SettingCodes | int) -> int:
-        val = self._settings[key][0]
+        val = self._settings[key]
 
         # Things that were created when a setting was received should stay
         # KeyError'd.
@@ -281,13 +326,16 @@ class Settings(MutableMapping[SettingCodes | int, int]):
                 error_code=invalid,
             )
 
-        try:
-            items = self._settings[key]
-        except KeyError:
-            items = collections.deque([None])  # type: ignore
-            self._settings[key] = items
+        # Record this proposal against the SETTINGS frame currently being
+        # built. The effective value in ``_settings`` is untouched until the
+        # frame is acknowledged.
+        if not self._outstanding_settings:
+            self._outstanding_settings.append({})
+        self._outstanding_settings[-1][key] = value
 
-        items.append(value)
+        # Ensure the key is known so that ``__getitem__`` semantics (including
+        # the KeyError for not-yet-received settings) are preserved.
+        self._settings.setdefault(key, None)
 
     def validate_received_setting(self, setting: SettingCodes | int, value: int) -> None:
         """
@@ -308,6 +356,8 @@ class Settings(MutableMapping[SettingCodes | int, int]):
 
     def __delitem__(self, key: SettingCodes | int) -> None:
         del self._settings[key]
+        for group in self._outstanding_settings:
+            group.pop(key, None)
 
     def __iter__(self) -> Iterator[SettingCodes | int]:
         return self._settings.__iter__()
@@ -317,7 +367,11 @@ class Settings(MutableMapping[SettingCodes | int, int]):
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, Settings):
-            return self._settings == other._settings
+            return (
+                self._settings == other._settings
+                and self._outstanding_settings
+                == other._outstanding_settings
+            )
         return NotImplemented
 
     def __ne__(self, other: object) -> bool:
