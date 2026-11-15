@@ -31,3 +31,15 @@ struct VolumeHeader {
 c_veracrypt = cstruct(endian=">").load(veracrypt_def)
 
 TC_BOOT_VOLUME_HEADER_SECTOR_OFFSET = (63 - 1) * 512  # 31744
+
+# Ranges within the 512-byte decrypted header (which directly follows the 64-byte salt).
+HEADER_CRC32_RANGE = slice(0, 188)  # absolute bytes 64-251: the header fields
+KEY_AREA_CRC32_RANGE = slice(192, 448)  # absolute bytes 256-511: the master key area
+
+# Supported VolumeHeader.version range (VeraCrypt 1.x writes version 5).
+VOLUME_HEADER_VERSION_MIN = 1
+VOLUME_HEADER_VERSION_MAX = 5
+
+# Sector size must be a power of two within this range.
+SECTOR_SIZE_MIN = 512
+SECTOR_SIZE_MAX = 8192

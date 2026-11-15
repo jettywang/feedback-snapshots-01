@@ -2,11 +2,19 @@ from __future__ import annotations
 
 import io
 import math
+import zlib
 from io import BytesIO
 from typing import TYPE_CHECKING, BinaryIO
 
+from dissect.fve.exception import InvalidHeaderError
 from dissect.fve.veracrypt.c_veracrypt import (
+    HEADER_CRC32_RANGE,
+    KEY_AREA_CRC32_RANGE,
+    SECTOR_SIZE_MAX,
+    SECTOR_SIZE_MIN,
     TC_BOOT_VOLUME_HEADER_SECTOR_OFFSET,
+    VOLUME_HEADER_VERSION_MAX,
+    VOLUME_HEADER_VERSION_MIN,
     c_veracrypt,
 )
 from dissect.fve.veracrypt.crypto import CIPHERS
@@ -94,24 +102,59 @@ class VeraCrypt:
         raise NotImplementedError
 
     def _decrypt_header(self, keys: bytes) -> bool:
-        """Decrypt the VeraCrypt header using any of the available :class:`Cipher` implementations."""
+        """Decrypt and validate the VeraCrypt header using any of the available :class:`Cipher` implementations.
+
+        A candidate header only counts as decrypted if the magic, the key area CRC32 and the
+        header CRC32 all check out, and the header fields are consistent. The volume data
+        area is only admitted later, when the volume is opened.
+        """
         for Cipher in CIPHERS:
             cipher = Cipher(BytesIO(self.header_ciphertext), keys, 0, 512)
             plaintext = cipher.open().read()
             header = c_veracrypt.VolumeHeader(plaintext)
 
-            if header.magic == b"VERA":
-                self.header_keys = keys
-                self.header = header
-                self.cipher = cipher.__type__
-                self.key = self.header.master_keys[0:64]  # NOTE: Could contain more keys if other cipher(s) are used.
-                self.size = header.volume_size
-                self.version = header.version
-                self.client_version = header.client_version
-                self.unlocked = True
-                break
+            if header.magic != b"VERA":
+                continue
+
+            # The decrypted header itself and the key area must both be intact.
+            if zlib.crc32(plaintext[KEY_AREA_CRC32_RANGE]) != int.from_bytes(header.crc32, "big"):
+                raise InvalidHeaderError("VeraCrypt key area CRC32 mismatch")
+            if zlib.crc32(plaintext[HEADER_CRC32_RANGE]) != int.from_bytes(header.crc32_decrypted, "big"):
+                raise InvalidHeaderError("VeraCrypt header CRC32 mismatch")
+
+            self._validate_header(header)
+
+            self.header_keys = keys
+            self.header = header
+            self.cipher = cipher.__type__
+            self.key = self.header.master_keys[0:64]  # NOTE: Could contain more keys if other cipher(s) are used.
+            self.size = header.volume_size
+            self.version = header.version
+            self.client_version = header.client_version
+            self.unlocked = True
+            break
 
         return self.unlocked
+
+    @staticmethod
+    def _validate_header(header: c_veracrypt.VolumeHeader) -> None:
+        """Validate consistency of a decrypted and CRC-verified VeraCrypt header."""
+        if not VOLUME_HEADER_VERSION_MIN <= header.version <= VOLUME_HEADER_VERSION_MAX:
+            raise InvalidHeaderError(f"Unsupported VeraCrypt header version: {header.version}")
+
+        sector_size = header.sector_size
+        if not SECTOR_SIZE_MIN <= sector_size <= SECTOR_SIZE_MAX or sector_size & (sector_size - 1):
+            raise InvalidHeaderError(f"Invalid VeraCrypt sector size: {sector_size}")
+
+        if (
+            not header.mk_scope_size
+            or header.mk_scope_offset % sector_size
+            or header.mk_scope_size % sector_size
+        ):
+            raise InvalidHeaderError("VeraCrypt master key scope is not sector aligned")
+
+        if not header.volume_size or header.volume_size > header.mk_scope_size:
+            raise InvalidHeaderError("VeraCrypt volume size exceeds the master key scope")
 
     def open(self) -> CryptStream:
         """Open this volume and return a readable (decrypted) stream."""
@@ -123,6 +166,16 @@ class VeraCrypt:
 
         offset = self.header.mk_scope_offset
         size = self.header.mk_scope_size
+
+        # The declared data area must fit within the underlying stream before it is admitted.
+        position = self.fh.tell()
+        stream_size = self.fh.seek(0, io.SEEK_END)
+        self.fh.seek(position)
+        if offset + size > stream_size:
+            raise InvalidHeaderError(
+                f"VeraCrypt data area (offset {offset:#x}, size {size:#x}) exceeds the stream size ({stream_size:#x})"
+            )
+
         cipher = Cipher(self.fh, self.key, offset, size)
         return cipher.open()
 
