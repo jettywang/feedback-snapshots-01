@@ -2,6 +2,19 @@
 Changelog
 =========
 
+- :feature:`-` Added `paramiko.bounded`, a small example of collecting the
+  output of a fixed, trusted remote command while treating the returned data
+  as untrusted.  It drains stdout and stderr concurrently (so a large amount
+  of output cannot fill the channel window and permanently wedge the reading
+  thread), applies a single caller-supplied byte budget across both streams,
+  honors an overall deadline and cooperative cancellation, and always closes
+  the channel and joins its reader threads.
+
+  Results explicitly distinguish `~paramiko.bounded.ResultStatus.COMPLETE`
+  from `~paramiko.bounded.ResultStatus.FAILED` (non-zero exit or exceeded
+  byte budget) and `~paramiko.bounded.ResultStatus.UNKNOWN` (disconnect,
+  missing ``exit-status``, deadline, or cancellation).  Truncated output is
+  never reported as a complete success.
 - :release:`5.1.0 <2026-10-17>`
 - :release:`5.0.1 <2026-10-17>`
 - :bug:`2462` (w/ earlier fix attempts :issue:`2475` and :issue:`2465`) An API

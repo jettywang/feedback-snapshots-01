@@ -52,6 +52,12 @@ from paramiko.channel import (
     ChannelStderrFile,
     ChannelStdinFile,
 )
+from paramiko.bounded import (
+    BoundedResult,
+    ResultReason,
+    ResultStatus,
+    collect_bounded,
+)
 from paramiko.ssh_exception import (
     AuthenticationException,
     BadAuthenticationType,

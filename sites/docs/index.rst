@@ -67,6 +67,7 @@ Miscellany
 ----------
 
 .. toctree::
+    api/bounded
     api/buffered_pipe
     api/file
     api/pipe
