@@ -121,17 +121,22 @@ class EventHeaderExtendedDataItem:
     ]
 
     def __init__(self, payload: bytes):
-        header = c_etl.EventHeaderExtendedDataItemHeader(payload)
-        self.size = header.Size
-        self.ext_type = self._extension_type(header.ExtType)
-        self.reserved1 = header.Reserved1
-        self.data_size = header.DataSize
-        self.data = self._read_extension_type(self.ext_type, header.Data)
-        self.raw_data = header.Data
-        self.linkage = 0
-        self.reserved2 = 0
+        size, ext_type, reserved1, data_size = c_etl.uint16[4](payload)
+        self.size = size
+        self.ext_type = self._extension_type(ext_type)
+        self.reserved1 = reserved1
+        self.data_size = data_size
+        self.linkage = reserved1 & 0x1
+        self.reserved2 = reserved1 >> 1
 
         self.validate_header()
+
+        if self.size > len(payload):
+            raise ExtendedDataItemException("DataItem size larger than available payload.")
+
+        header = c_etl.EventHeaderExtendedDataItemHeader(payload)
+        self.data = self._read_extension_type(self.ext_type, header.Data)
+        self.raw_data = header.Data
 
     def validate_header(self) -> None:
         if self.size < 8:
@@ -189,16 +194,17 @@ class EventHeader(Header):
         return c_etl.EventHeader
 
     def _read_extensions(self) -> list[EventHeaderExtendedDataItem]:
-        """Read header extensions from the payload."""
-        count = 0
+        """Read header extensions from the payload.
+
+        Each item has a continuation bit (``Linkage``) in its third ``uint16``.  The
+        extension chain ends at the first item that does not set this bit; everything
+        after it is the actual event payload and must not be interpreted as a header.
+        """
         items = []
         payload_pos = 0
         payload_size = len(self.payload)
 
-        while True:
-            if count >= 13:
-                break
-
+        while len(items) < 13:
             if payload_pos + 8 > payload_size:
                 break
 
@@ -208,9 +214,10 @@ class EventHeader(Header):
                 break
 
             items.append(header_extension)
-
-            count += 1
             payload_pos += header_extension.size
+
+            if not header_extension.linkage:
+                break
 
         return items
 
