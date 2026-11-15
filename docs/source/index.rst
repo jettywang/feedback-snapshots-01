@@ -105,6 +105,7 @@ Per-module API documentation.
   api/host
   api/packet
   api/proxy
+  api/radsec
   api/server
   api/server_async
 

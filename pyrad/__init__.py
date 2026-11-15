@@ -32,6 +32,7 @@ This package contains the following modules:
 
   - client: RADIUS client code
   - client_async: asyncio based RADIUS client code
+  - radsec: RADIUS over TLS (RadSec, RFC 6614) client and server code
   - server: RADIUS server code
   - server_async: asyncio based RADIUS server code
   - proxy: RADIUS proxy server code

@@ -4,6 +4,18 @@ Changelog
 Unreleased
 ----------
 
+* New ``pyrad.radsec`` module: an independent asyncio transport for RadSec
+  (RADIUS over TLS, RFC 6614). It reuses the pyrad ``Packet`` classes and the
+  packet handlers but does not touch the UDP transports. The server requires
+  a client certificate and maps the verified certificate to a trusted
+  ``RadSecPeer`` through a ``peer_factory``; the connection address and packet
+  attributes never decide the identity. Frames are reassembled from the
+  RADIUS Length field (coalescing and fragmentation), bounded by a maximum
+  frame length and a frame wait timeout, and certificate failures, half
+  frames, oversized frames and unknown peers never reach a packet handler.
+  Per RFC 6614 section 2.5 one RadSec shared secret is used for the RADIUS
+  authenticators instead of a per-source-address UDP secret. The new tests
+  need the ``cryptography`` package, now in the ``test`` dependency group.
 * pyrad no longer depends on netaddr; it was only used by the tests and
   is now in the ``test`` dependency group. ipv6prefix values given as
   ``netaddr.IPNetwork`` are still accepted. Code that imports netaddr
