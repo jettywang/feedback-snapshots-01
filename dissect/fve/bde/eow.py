@@ -14,7 +14,7 @@ from dissect.fve.bde.c_bde import (
     EOW_SIGNATURE,
     c_bde,
 )
-from dissect.fve.exception import InvalidHeaderError
+from dissect.fve.exception import InvalidHeaderError, UnknownStateError
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -195,34 +195,39 @@ class EowBitmapRecord:
 
 
 def _iter_bitmap(bitmap: bytes, size: int, start: int, count: int) -> Iterator[tuple[int, int]]:
-    byte_idx, bit_idx = divmod(start, 8)
-    remaining_bits = size - start
-    current_bit = (bitmap[byte_idx] & (1 << bit_idx)) >> bit_idx
+    """Iterate over ``count`` bits of a bitmap, starting at bit ``start``.
+
+    ``size`` is the number of valid bits in the bitmap. Runs are yielded as ``(bit_value, bit_count)`` tuples.
+
+    A bitmap can be shorter than the region it describes. Requesting a bit that is not present in the bitmap is
+    treated as an unknown state and raises an :class:`UnknownStateError`, instead of silently treating it as zero.
+    """
+    if start < 0:
+        raise ValueError("Negative bitmap start")
+
+    if count <= 0 or start >= size:
+        return
+
+    end = min(size, start + count)
+    current_bit = None
     current_count = 0
 
-    for byte in bitmap[byte_idx:]:
-        if count == 0 or remaining_bits == 0:
-            break
+    for bit_offset in range(start, end):
+        byte_idx, bit_idx = divmod(bit_offset, 8)
+        if byte_idx >= len(bitmap):
+            raise UnknownStateError(
+                f"EOW bitmap is truncated: bit {bit_offset} requested, but only {len(bitmap)} bytes are available"
+            )
 
-        if (current_bit, byte) == (0, 0) or (current_bit, byte) == (1, 0xFF):
-            max_count = min(count, remaining_bits, 8 - bit_idx)
-            current_count += max_count
-            remaining_bits -= max_count
-            count -= max_count
-            bit_idx = 0
+        bit_value = (bitmap[byte_idx] >> bit_idx) & 1
+        if bit_value == current_bit:
+            current_count += 1
         else:
-            for cur_bit_idx in range(bit_idx, min(count, remaining_bits, 8)):
-                bit_set = (byte & (1 << cur_bit_idx)) >> cur_bit_idx
+            if current_count:
+                yield (current_bit, current_count)
 
-                if bit_set == current_bit:
-                    current_count += 1
-                else:
-                    yield (current_bit, current_count)
-                    current_bit = bit_set
-                    current_count = 1
-
-                remaining_bits -= 1
-                count -= 1
+            current_bit = bit_value
+            current_count = 1
 
     if current_count:
         yield (current_bit, current_count)

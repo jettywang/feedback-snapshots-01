@@ -32,7 +32,7 @@ from dissect.fve.bde.eow import EowInformation
 from dissect.fve.bde.information import Dataset, Information, KeyDatum
 from dissect.fve.bde.key import derive_recovery_key, derive_user_key, stretch
 from dissect.fve.crypto import create_cipher
-from dissect.fve.exception import InvalidHeaderError
+from dissect.fve.exception import InvalidHeaderError, UnknownStateError
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -422,52 +422,95 @@ class BitlockerStream(AlignedStream):
         self._eow_sectors_per_chunk = None
 
         if self.is_eow:
-            self._eow_bitmaps = bde.eow_information.bitmaps
+            self._eow_bitmaps = sorted(bde.eow_information.bitmaps, key=lambda bm: bm.region_offset)
             self._eow_bitmap_lookup = [bm.region_offset // self.sector_size for bm in self._eow_bitmaps]
             self._eow_sectors_per_chunk = self.bde.eow_information.chunk_size // self.sector_size
 
         super().__init__(size=size)
 
-    def _iter_run_state(self, sector: int, count: int) -> Iterator[Run]:
+    def _iter_eow_runs(self, sector: int, count: int) -> Iterator[Run]:
+        sector_size = self.sector_size
+        chunk_size_bytes = self.bde.eow_information.chunk_size
+
+        current_type = None
+        current_sector = sector
+        current_count = 0
+
         while count > 0:
-            if self.is_eow:
-                bitmap_idx = bisect_right(self._eow_bitmap_lookup, sector)
-                bitmap = self._eow_bitmaps[bitmap_idx - 1]
+            bitmap_idx = bisect_right(self._eow_bitmap_lookup, sector)
+            if bitmap_idx == 0:
+                raise UnknownStateError(f"No EOW bitmap covers sector {sector}")
 
-                relative_sector = sector - (bitmap.region_offset // self.sector_size)
-                chunk = (relative_sector * self.sector_size) // self.bde.eow_information.chunk_size
-                chunk_count = -(-count // self._eow_sectors_per_chunk)
+            bitmap = self._eow_bitmaps[bitmap_idx - 1]
+            region_start = bitmap.region_offset // sector_size
+            region_size_sectors = bitmap.region_size // sector_size
+            region_end = region_start + region_size_sectors
 
-                for bit_set, bit_count in bitmap.runs(chunk, chunk_count):
-                    run_type = BitlockerStream.RUN_ENCRYPTED if bit_set else BitlockerStream.RUN_PLAIN
-                    run_count = min(count, bit_count * self._eow_sectors_per_chunk)
+            if not region_start <= sector < region_end:
+                raise UnknownStateError(f"No EOW bitmap covers sector {sector}")
 
-                    yield (run_type, sector, run_count)
+            relative_sector = sector - region_start
+            chunk = (relative_sector * sector_size) // chunk_size_bytes
+            chunk_end_sector = min(
+                region_start + ((chunk + 1) * chunk_size_bytes) // sector_size,
+                region_end,
+            )
 
-                    sector += run_count
-                    count -= run_count
+            # Never run past the end of the current chunk, the next chunk may have a different state
+            run_count = min(count, chunk_end_sector - sector)
+
+            # Exactly one bit must describe this chunk. A missing bit is an unknown state, not plain text.
+            runs = list(bitmap.runs(chunk, 1))
+            if len(runs) != 1 or runs[0][1] != 1:
+                raise UnknownStateError(f"EOW bitmap {bitmap.index} has no state for chunk {chunk}")
+
+            bit_set = runs[0][0]
+            run_type = BitlockerStream.RUN_ENCRYPTED if bit_set else BitlockerStream.RUN_PLAIN
+
+            if current_type is not None and (current_type != run_type or current_sector + current_count != sector):
+                yield (current_type, current_sector, current_count)
+                current_type = None
+
+            if current_type is None:
+                current_type = run_type
+                current_sector = sector
+                current_count = 0
+
+            current_count += run_count
+
+            sector += run_count
+            count -= run_count
+
+        if current_count:
+            yield (current_type, current_sector, current_count)
+
+    def _iter_run_state(self, sector: int, count: int) -> Iterator[Run]:
+        if self.is_eow:
+            yield from self._iter_eow_runs(sector, count)
+            return
+
+        while count > 0:
+            # The StateOffset determines how much of the volume is encrypted.
+            # In pre-EOW Bitlocker, it's actually used to determine how much of the volume is encrypted
+            # for partially encrypted volumes, but since EOW, it seems to just contain the volume size.
+            # Pre-EOW volumes are encrypted back to front, so reading beyond the StateOffset means reading
+            # plaintext data.
+            if self._state_offset_sector and sector < self._state_offset_sector:
+                remaining_sectors = min(self._state_offset_sector - sector, count)
+                yield (BitlockerStream.RUN_ENCRYPTED, sector, remaining_sectors)
+
+                sector += remaining_sectors
+                count -= remaining_sectors
+
+            if self._state_offset_sector and sector >= self._state_offset_sector:
+                yield (BitlockerStream.RUN_PLAIN, sector, count)
+            elif self.encrypted:
+                yield (BitlockerStream.RUN_ENCRYPTED, sector, count)
             else:
-                # The StateOffset determines how much of the volume is encrypted.
-                # In pre-EOW Bitlocker, it's actually used to determine how much of the volume is encrypted
-                # for partially encrypted volumes, but since EOW, it seems to just contain the volume size.
-                # Pre-EOW volumes are encrypted back to front, so reading beyond the StateOffset means reading
-                # plaintext data.
-                if self._state_offset_sector and sector < self._state_offset_sector:
-                    remaining_sectors = min(self._state_offset_sector - sector, count)
-                    yield (BitlockerStream.RUN_ENCRYPTED, sector, remaining_sectors)
+                yield (BitlockerStream.RUN_PLAIN, sector, count)
 
-                    sector += remaining_sectors
-                    count -= remaining_sectors
-
-                if self._state_offset_sector and sector >= self._state_offset_sector:
-                    yield (BitlockerStream.RUN_PLAIN, sector, count)
-                elif self.encrypted:
-                    yield (BitlockerStream.RUN_ENCRYPTED, sector, count)
-                else:
-                    yield (BitlockerStream.RUN_PLAIN, sector, count)
-
-                sector += count
-                count -= count
+            sector += count
+            count -= count
 
     def _iter_runs(self, offset: int, length: int) -> Iterator[Run]:
         sector = offset // self.sector_size
