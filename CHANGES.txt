@@ -1,3 +1,13 @@
+Unreleased
+----------
+
+- Added ``rfc7191_receipts``, a delivery-assurance correlator for RFC 7191
+  key package receipts and errors.  It ties already-authenticated evidence
+  to send records using both ``KeyPkgIdentifier`` representations, the
+  sender's ``receiptsFrom``/``receiptsTo`` request, the claimed
+  ``receivedBy``/``errorBy`` and the authenticated CMS subject.  Evidence is
+  retained as raw DER and entity identity is compared byte-for-byte.
+
 Revision 0.4.2, released 27-03-2025
 ---------------------------------------
 
