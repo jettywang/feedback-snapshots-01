@@ -2142,6 +2142,29 @@ class OleFileIO:
             raise TypeError('object is not an OLE stream')
         return entry.size
 
+    def list_ole10native_streams(self):
+        """
+        Return the paths of all ``\\x01Ole10Native`` streams in this file.
+
+        This is a read-only helper for OLE Package objects.  See
+        :mod:`olefile.ole_native` for the parsed view.
+
+        :returns: list of stream paths (each a list of names)
+        """
+        return [path for path in self.listdir()
+                if path and path[-1].lower() == '\x01ole10native']
+
+    def open_ole10native(self, filename):
+        """
+        Read and parse one ``\\x01Ole10Native`` stream. (read-only)
+
+        :param filename: path of the stream (see openstream for syntax)
+        :returns: an :class:`olefile.ole_native.Ole10Native` object
+        :exception IOError: if the stream does not exist or cannot be read
+        """
+        from .ole_native import open_ole10native
+        return open_ole10native(self, filename)
+
     def get_rootentry_name(self):
         """
         Return root entry name. Should usually be 'Root Entry' or 'R' in most

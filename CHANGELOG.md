@@ -3,6 +3,11 @@ Detailed CHANGELOG
 
 olefile.py
 ----------
+* 2026-11-15 (unreleased):
+    - added olefile.ole_native: read-only OLENativeStream (\x01Ole10Native)
+      parsing for OLE Package objects, with linked/embedded separation,
+      declared and available native-data ranges, retained trailer bytes,
+      self-reported name evidence, and SHA-256 helpers over native bytes
 * 2023-11-30 v0.47.dev6:
     - fixed issue #142: isOleFile has a new data parameter to handle files in memory properly
     - fixed issue #156: write_sect now correctly detects when data is larger than the sector size

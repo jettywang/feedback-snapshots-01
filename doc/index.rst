@@ -34,6 +34,7 @@ Microscopy file formats, McAfee antivirus quarantine files, etc.
     Contribute
     Howto
     OLE_Overview
+    Ole10Native
     olefile
     FAQ
 

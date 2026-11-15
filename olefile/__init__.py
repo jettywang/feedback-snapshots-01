@@ -23,6 +23,43 @@ See source code and LICENSE.txt for information on usage and redistribution.
 
 from .olefile import *
 # import metadata not covered by *:
-from .olefile import __version__, __author__, __date__, __all__
+from .olefile import __version__, __author__, __date__, __all__ as _olefile_all
+
+# Read-only OLENativeStream (Ole10Native) support, see olefile/ole_native.py
+from .ole_native import (
+    OLE10NATIVE_STREAM_NAME,
+    OLE10NATIVE_FORMAT_LINKED,
+    OLE10NATIVE_FORMAT_EMBEDDED,
+    OLE10NATIVE_PACKAGE_CLSID,
+    Ole10Native,
+    Ole10NativeStream,
+    OleNativeStream,
+    Ole10NativeIssue,
+    OleNative,
+    parse_ole10native,
+    parse_ole10native_dict,
+    parse_ole10native_stream,
+    open_ole10native,
+    find_ole10native_streams,
+    iter_ole10native,
+)
+
+__all__ = list(_olefile_all) + [
+    'OLE10NATIVE_STREAM_NAME',
+    'OLE10NATIVE_FORMAT_LINKED',
+    'OLE10NATIVE_FORMAT_EMBEDDED',
+    'OLE10NATIVE_PACKAGE_CLSID',
+    'Ole10Native',
+    'Ole10NativeStream',
+    'OleNativeStream',
+    'Ole10NativeIssue',
+    'OleNative',
+    'parse_ole10native',
+    'parse_ole10native_dict',
+    'parse_ole10native_stream',
+    'open_ole10native',
+    'find_ole10native_streams',
+    'iter_ole10native',
+]
 
 
