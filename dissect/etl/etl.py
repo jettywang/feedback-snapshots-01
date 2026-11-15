@@ -293,15 +293,13 @@ class Event:
 
 
 def parse_payload(header: Header) -> Event:
-    """Parse the event payload using the appropriate manifest, if available."""
+    """Parse the event payload using the appropriate manifest, if available.
+
+    The manifest is selected for the pointer width of this specific record,
+    so interleaved 32-bit and 64-bit records never share mutable parser state.
+    """
     try:
-        mf = manifest.lookup(header.provider_id)
-        if header.is_64bit:
-            mf.c_parser.EtwPointer.as_64bit()
-            mf.c_parser.UserSID_blob.as_64bit()
-        else:
-            mf.c_parser.EtwPointer.as_32bit()
-            mf.c_parser.UserSID_blob.as_32bit()
+        mf = manifest.lookup(header.provider_id, header.is_64bit)
     except (ManifestNotFoundError, AttributeError):
         mf = None
 

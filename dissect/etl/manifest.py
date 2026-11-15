@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.resources
+import inspect
 import types
 from collections import defaultdict
 from pathlib import Path
@@ -70,6 +71,7 @@ class EtwPointer(VariableType):
         cls.size = 8
         cls.type = cls.cs.uint64
 
+    @classmethod
     def as_32bit(cls):
         if cls.size == 4:
             return
@@ -159,36 +161,62 @@ FIELD_MAP = {
     "UnicodeString": "wchar {name}[]",
 }
 
-CACHE: dict[UUID, types.ModuleType] = {}
+CACHE: dict[tuple[UUID, bool], types.ModuleType] = {}
 
 c_parser = cstruct.cstruct()
 
 
-def lookup(guid: UUID) -> types.ModuleType:
-    global CACHE
+def lookup(guid: UUID, is_64bit: bool) -> types.ModuleType:
+    """Return the manifest for a provider, compiled for a specific pointer width.
 
+    Manifests contain variable-width types (``EtwPointer`` and ``UserSID_blob``)
+    that depend on the architecture of the event record. Each architecture gets
+    its own compiled module with those types pinned to the requested width, so
+    interleaving 32-bit and 64-bit records in one process never reinterprets
+    events that were already parsed.
+    """
+    key = (guid, is_64bit)
     try:
-        return CACHE[guid]
+        return CACHE[key]
     except KeyError:
         pass
 
+    mod = None
+
     try:
-        mod = importlib.import_module(f"{MODPATH}.{{{guid}}}")
+        precompiled = importlib.import_module(f"{MODPATH}.{{{guid}}}")
     except ImportError:
         pass
     else:
-        CACHE[guid] = mod
-        return mod
+        # An imported module is a process-wide singleton, so recompile it from
+        # its source to get an isolated copy for this architecture.
+        try:
+            mod = _compile_module(guid, inspect.getsource(precompiled), inspect.getsourcefile(precompiled))
+        except (OSError, TypeError):
+            mod = precompiled
 
-    try:
-        mod = compile_xml(guid, get_resource_string(f"manifests/xml/{{{guid}}}.xml"))
-    except IOError:
-        pass
-    else:
-        CACHE[guid] = mod
-        return mod
+    if mod is None:
+        try:
+            mod = compile_xml(guid, get_resource_string(f"manifests/xml/{{{guid}}}.xml"))
+        except IOError:
+            pass
 
-    raise ManifestNotFoundError(guid)
+    if mod is None:
+        raise ManifestNotFoundError(guid)
+
+    _set_pointer_size(mod, is_64bit)
+    CACHE[key] = mod
+    return mod
+
+
+def _set_pointer_size(mod: types.ModuleType, is_64bit: bool) -> None:
+    """Pin the variable-width types of a compiled manifest to one architecture."""
+    for type_name in ("EtwPointer", "UserSID_blob"):
+        variable_type = getattr(mod.c_parser, type_name)
+        if is_64bit:
+            variable_type.as_64bit()
+        else:
+            variable_type.as_32bit()
 
 
 def compile_file(guid: UUID, path: str) -> types.ModuleType:
@@ -198,7 +226,11 @@ def compile_file(guid: UUID, path: str) -> types.ModuleType:
 def compile_xml(guid: UUID, s: str) -> types.ModuleType:
     generated = generate_from_xml(s)
     # print generated
-    code = compile(generated, f"<manifest {guid}>", "exec")
+    return _compile_module(guid, generated, f"<manifest {guid}>")
+
+
+def _compile_module(guid: UUID, source: str, filename: str) -> types.ModuleType:
+    code = compile(source, filename or f"<manifest {guid}>", "exec")
     module = types.ModuleType(str(guid))
     exec(code, module.__dict__)
     return module
