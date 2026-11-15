@@ -26,10 +26,74 @@ logging.lastResort = None
 logging.raiseExceptions = False
 
 
+class LnkExtraDataBlock:
+    """A single EXTRA_DATA_BLOCK (or TERMINAL_BLOCK) encountered while parsing EXTRA_DATA.
+
+    Every block that appears in the underlying stream gets its own immutable record, even when several blocks share the
+    same type. Duplicate blocks are therefore preserved as separate pieces of evidence instead of overwriting each
+    other. Blocks with an unrecognized signature, and the terminal block, are kept as well, but never pretend to be a
+    known block type.
+
+    Args:
+        index: Zero-based position of this block in EXTRA_DATA, including the terminal block.
+        offset: Byte offset at which the block starts, measured from the start of the EXTRA_DATA structure.
+        block_size: Value of the block size field as stored in the stream (``0`` for the terminal block).
+        signature: Raw block signature as stored in the stream (``None`` for the terminal block).
+        name: Name of a known block type from ``EXTRA_DATA_BLOCK_SIGNATURES``, else ``None``.
+        data: Parsed structure for a known block, else the raw block body bytes.
+    """
+
+    __slots__ = ("index", "offset", "block_size", "signature", "name", "data")
+
+    def __init__(
+        self,
+        index: int,
+        offset: int,
+        block_size: int,
+        signature: int | None,
+        name: str | None,
+        data: Any,
+    ):
+        self.index = index
+        self.offset = offset
+        self.block_size = block_size
+        self.signature = signature
+        self.name = name
+        self.data = data
+
+    @property
+    def is_known(self) -> bool:
+        """Whether this block has a signature that maps to a known EXTRA_DATA block type."""
+        return self.name is not None
+
+    @property
+    def is_unknown(self) -> bool:
+        """Whether this block has a signature that does not map to any known block type."""
+        return self.name is None and self.signature is not None
+
+    @property
+    def is_terminal(self) -> bool:
+        """Whether this block is the TERMINAL_BLOCK that ends EXTRA_DATA."""
+        return self.signature is None
+
+    def __repr__(self) -> str:
+        if self.is_terminal:
+            label = "TERMINAL_BLOCK"
+        elif self.is_unknown:
+            label = f"UNKNOWN_BLOCK(0x{self.signature:08x})"
+        else:
+            label = self.name
+        return f"<LnkExtraDataBlock index={self.index} offset={self.offset} {label}>"
+
+
 class LnkExtraData:
     """Class that represents the a LNK file's EXTRA_DATA structure.
 
     This optional structure hold additional optional structures that convey additional information about a link target
+
+    Every parsed block is stored in file order in :attr:`blocks`, including duplicate, unknown and terminal blocks, so
+    no evidence is silently overwritten. The legacy :attr:`extradata` mapping and attribute access are retained for
+    backwards compatibility and expose the first occurrence of every known block type only.
 
     Args:
         fh: A file-like object to an EXTRA_DATA structure
@@ -45,24 +109,39 @@ class LnkExtraData:
     # This is kinda the same as LnkStringData only that the defined extra structures can wildly vary
     def __init__(self, fh: BinaryIO | None = None):
         self.extradata = {}
+        self.blocks = []
 
         if fh:
             self._parse(fh)
 
     def _parse(self, fh: BinaryIO) -> None:
-        self.size = c_lnk.uint32(fh)
+        offset = fh.tell()
+        block_index = 0
 
-        if self.size == 0x00000000:
-            # terminal block encountered. end of lnk file
-            self.extradata.update({"TERMINAL_BLOCK": c_lnk.EXTRA_DATA(extra_data_block=None, terminal_block=self.size)})
-            return
+        while True:
+            block_offset = fh.tell() - offset
+            size = c_lnk.uint32(fh)
 
-        signature = c_lnk.uint32(fh)
-        block_name = EXTRA_DATA_BLOCK_SIGNATURES.get_name(signature)
+            if size == 0x00000000:
+                # terminal block encountered. end of lnk file
+                terminal = c_lnk.EXTRA_DATA(extra_data_block=None, terminal_block=size)
+                self.blocks.append(
+                    LnkExtraDataBlock(
+                        index=block_index,
+                        offset=block_offset,
+                        block_size=size,
+                        signature=None,
+                        name=None,
+                        data=terminal,
+                    )
+                )
+                self.extradata.update({"TERMINAL_BLOCK": terminal})
+                return
 
-        if block_name:
-            read_size = self.size - LINK_EXTRA_DATA_HEADER_SIZE
-            block_data = memoryview(fh.read(read_size))
+            signature = c_lnk.uint32(fh)
+            block_name = EXTRA_DATA_BLOCK_SIGNATURES.get_name(signature)
+            read_size = size - LINK_EXTRA_DATA_HEADER_SIZE
+            block_data = fh.read(read_size)
 
             if len(block_data) != read_size:
                 # Some malicious lnk files have a mismatch in the size indicated in the data block and actual bytes red.
@@ -71,49 +150,84 @@ class LnkExtraData:
                     "Mismatch in read size (%i) and actual EXTRA_DATA_BLOCK length (%i) for data block (%s)",
                     read_size,
                     len(block_data),
-                    block_name,
+                    block_name or f"0x{signature:08x}",
                 )
                 return
 
-            if block_name == "VISTA_AND_ABOVE_IDLIST_PROPS":
-                struct = LnkTargetIdList(BytesIO(block_data), read_size)
-            else:
-                struct = c_lnk.typedefs[block_name](block_data)
-
-            if block_name == "PROPERTY_STORE_PROPS":
-                # TODO implement actual serialized property parsing
-                guid = self._parse_guid(struct.format_id)
-                struct.format_id = guid
-
-            elif block_name == "TRACKER_PROPS":
-                for name in struct.fields:
-                    if "droid" in name:
-                        guid = self._parse_guid(getattr(struct, name))
-                        setattr(struct, name, guid)
-
-            elif block_name == "KNOWN_FOLDER_PROPS":
-                guid = self._parse_guid(struct.known_folder_id)
-                struct.known_folder_id = guid
-
-            elif (
-                block_name == "ENVIRONMENT_PROPS"
-                or block_name == "ICON_ENVIRONMENT_PROPS"
-                or block_name == "DARWIN_PROPS"
-            ):
-                if block_name == "DARWIN_PROPS":
-                    struct.darwin_data_ansi = struct.darwin_data_ansi
-                    struct.darwin_data_unicode = struct.darwin_data_unicode.decode().rstrip("\x00")
+            if block_name:
+                struct = self._parse_block(block_name, block_data)
+                if block_name in self.extradata:
+                    log.warning(
+                        "Duplicate extra data block encountered (%s) at offset %i. "
+                        "Keeping every occurrence in blocks(); legacy access keeps the first occurrence.",
+                        block_name,
+                        block_offset,
+                    )
                 else:
-                    struct.target_ansi = struct.target_ansi
-                    struct.target_unicode = struct.target_unicode.decode("utf-16").rstrip("\x00")
+                    self.extradata.update({block_name: struct})
+            else:
+                # Keep the raw, unparsed body and its location without pretending it is a known block type.
+                log.warning(
+                    "Unknown extra data block encountered with signature %x at offset %i", signature, block_offset
+                )
+                struct = bytes(block_data)
 
-            self.extradata.update({block_name: struct})
+            self.blocks.append(
+                LnkExtraDataBlock(
+                    index=block_index,
+                    offset=block_offset,
+                    block_size=size,
+                    signature=signature,
+                    name=block_name,
+                    data=struct,
+                )
+            )
+            block_index += 1
 
-        else:
-            log.warning("Unknown extra data block encountered with signature %x", signature)
+    def _parse_block(self, block_name: str, block_data: bytes) -> Any:
+        if block_name == "VISTA_AND_ABOVE_IDLIST_PROPS":
+            return LnkTargetIdList(BytesIO(block_data), len(block_data))
 
-        # keep calling parse until the TERMINAL_BLOCK is hit.
-        self._parse(fh)
+        struct = c_lnk.typedefs[block_name](memoryview(block_data))
+
+        if block_name == "PROPERTY_STORE_PROPS":
+            # TODO implement actual serialized property parsing
+            guid = self._parse_guid(struct.format_id)
+            struct.format_id = guid
+
+        elif block_name == "TRACKER_PROPS":
+            for name in struct.fields:
+                if "droid" in name:
+                    guid = self._parse_guid(getattr(struct, name))
+                    setattr(struct, name, guid)
+
+        elif block_name == "KNOWN_FOLDER_PROPS":
+            guid = self._parse_guid(struct.known_folder_id)
+            struct.known_folder_id = guid
+
+        elif block_name in ("ENVIRONMENT_PROPS", "ICON_ENVIRONMENT_PROPS", "DARWIN_PROPS"):
+            if block_name == "DARWIN_PROPS":
+                struct.darwin_data_ansi = struct.darwin_data_ansi
+                struct.darwin_data_unicode = struct.darwin_data_unicode.decode().rstrip("\x00")
+            else:
+                struct.target_ansi = struct.target_ansi
+                struct.target_unicode = struct.target_unicode.decode("utf-16").rstrip("\x00")
+
+        return struct
+
+    def extra_data_blocks(self, block_name: str) -> list[LnkExtraDataBlock]:
+        """Return every block record of the given type, in the order in which they appear in the file.
+
+        Duplicate blocks are returned as separate records. Unknown and terminal blocks are never returned here; use
+        :attr:`blocks` to inspect them.
+
+        Args:
+            block_name: Name of a known EXTRA_DATA block type, as defined in ``EXTRA_DATA_BLOCK_SIGNATURES``.
+
+        Returns:
+            A list of matching :class:`LnkExtraDataBlock` records, possibly empty.
+        """
+        return [block for block in self.blocks if block.name == block_name]
 
     def _parse_guid(self, guid: bytes, endianness: str = "<") -> UUID:
         if endianness == "<":
@@ -122,13 +236,15 @@ class LnkExtraData:
         return UUID(bytes=guid)
 
     def __getattr__(self, attr: str) -> Any:
+        # Only called when normal attribute lookup fails. extradata and blocks are set in __init__ before parsing, so
+        # accessing them here does not recurse. Legacy access deterministically exposes the first occurrence of a type.
         try:
             return self.extradata[attr]
         except KeyError:
-            return object.__getattribute__(self, attr)
+            raise AttributeError(attr)
 
     def __repr__(self) -> str:
-        return " ".join(f"{value}" for value in self.extradata.values())
+        return " ".join(f"{block}" for block in self.blocks)
 
 
 class LnkStringData:
