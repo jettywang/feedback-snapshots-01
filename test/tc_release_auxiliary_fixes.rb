@@ -249,6 +249,7 @@ class ReleaseAuxiliaryFixesTest < Minitest::Test
     zones = ['.', 'example.', 'child.example.'].to_h do |zone|
       [zone, { "ns.#{zone}" => recursor_class::AddressCache.new }]
     end
+    zones.fetch('.').values.first.push(['192.0.2.53', 300])
     recursor_class.class_variable_set(:@@hints, zones.fetch('.'))
     recursor_class.class_variable_set(:@@zones_cache, zones)
     recursor = recursor_class.allocate

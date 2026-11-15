@@ -2,10 +2,11 @@
 
 ## v2.0.0
 
-Dnsruby 2.0 adds SVCB and HTTPS records and makes queries, TCP connections, zone
-transfers and DNSSEC validation more reliable. It also bounds caches and
-validation work, updates the root trust anchors, and improves performance when
-many queries are in progress.
+Dnsruby 2.0 adds SVCB and HTTPS records and support for Ed25519 DNSSEC
+signatures. It makes queries, TCP connections, zone transfers and DNSSEC
+validation more reliable. It also bounds caches and validation work, updates
+the root trust anchors, and improves performance when many queries are in
+progress.
 
 Most existing query code can stay as it is. Before upgrading, check the Ruby
 requirement, TSIG settings and record persistence described below, followed by
@@ -47,6 +48,9 @@ any DNSSEC or timeout settings your application uses.
   defaults to SHA-256 and rejects new DS records using SHA-1 digests or signing
   algorithms 5 or 7. RSA keys with noncanonical encodings or sizes outside the
   protocol limits are rejected. See [DNSSEC algorithm policy](README.md#dnssec-algorithm-policy).
+  Ed25519 validation requires version 3.0 or later of the `openssl` gem and
+  an OpenSSL provider that supports it. Otherwise it follows the same rules
+  as other unsupported algorithms.
 * **DNSSEC validation has work and time limits.** The defaults are 64 signature
   attempts, 100,000 work units and five seconds per answer, including queries
   needed to follow the chain of trust. A limit raises `ValidationLimitError`,
@@ -113,6 +117,9 @@ inside labels distinct from the dots that separate labels.
   UDP reads cannot block after a readiness notification, and changes to TCP
   pipelining take effect consistently on subsequent attempts. Updating a source
   port pool no longer briefly exposes an empty pool to concurrent sends.
+  Invalid replacements leave the previous configuration intact, and an occupied
+  port no longer prevents a send from trying the other configured ports.
+  A zero retry delay keeps every scheduled nameserver attempt.
   [#155](https://github.com/alexdalitz/dnsruby/issues/155).
 * Cancellation and timeouts wake waiting queries promptly, including while
   validation or nameserver discovery is running. Late replies or callbacks
@@ -133,7 +140,11 @@ inside labels distinct from the dots that separate labels.
   configuration changes are preserved. IPv6 link-local nameservers accept
   interface zones such as `fe80::1%eth0`, including in `resolv.conf`. Recursive
   discovery tries other nameservers and address families after ordinary lookup
-  failures, within the same cancellation and validation limits.
+  failures, within the same cancellation and validation limits. A Recursor
+  honors the transport and source settings of its supplied Resolver and applies
+  its query timeout to the complete lookup. Changes to DNSSEC root hints take
+  effect on subsequent lookups. Root hints are also refreshed when all their
+  cached addresses expire, including during a lookup.
   [#179](https://github.com/alexdalitz/dnsruby/issues/179),
   [#184](https://github.com/alexdalitz/dnsruby/issues/184),
   [PR #221](https://github.com/alexdalitz/dnsruby/pull/221).
@@ -167,6 +178,8 @@ inside labels distinct from the dots that separate labels.
   retaining configured DNSKEY anchors. Removing or expiring a configured anchor
   also removes keys learned from it. Keys sharing a tag can coexist, and an
   unusable matching key does not prevent another from validating the answer.
+  DS matching accepts the same owner name with or without a trailing dot,
+  including when the DS is a configured trust anchor.
   Learned DNSKEY and DS records have size limits, and validation looks up only
   matching candidates. DS anchors now honor their requested expiration times,
   just as DNSKEY anchors do. Direct RRset verification can try another trusted
@@ -183,6 +196,8 @@ inside labels distinct from the dots that separate labels.
 * Validated answers and cached copies expire according to their original
   receipt time, signatures and chain of trust. Revalidation does not renew
   those lifetimes, and failed or BOGUS validation is never cached as successful.
+  Trying another verifier preserves a successful insecure result's authenticated
+  lifetime, so negative answers can still be cached under the default policy.
   Bounded negative caches use the SOA lifetime required by RFC 2308; failure
   caches follow RFC 9520. Entries respect the question class, configuration and
   trust changes. Cancellation, raw messages, UPDATE and TSIG bypass these new
@@ -199,7 +214,11 @@ inside labels distinct from the dots that separate labels.
 * Zone-file TTLs and SOA intervals accept combined time suffixes such as
   `1h30m`. Both class-before-TTL and TTL-before-class formats work. Quoted,
   escaped and multiline values preserve their punctuation, Unicode and binary
-  character strings.
+  character strings, including single-quoted TXT and SPF values. An explicit
+  record TTL leaves the `$TTL` default in place for later records. Relative
+  names in KX, NSEC, NXT, RRSIG, IPSECKEY and HIP data now use the zone origin.
+  Zone files also accept RFC 3597 hexadecimal data for known record types
+  without changing its bytes.
 * Query scheduling, retries and cancellation avoid repeatedly scanning every
   pending query. TCP reply matching is faster when many queries share a
   connection. DNSSEC reuses canonical data and verifies reusable DS, DNSKEY
@@ -207,6 +226,8 @@ inside labels distinct from the dots that separate labels.
   the cache lock, and record parsing and numeric lookups allocate fewer
   temporary objects. Unknown-record class handling and replacement no longer
   accumulate memory or slow garbage collection on Ruby 3.0–3.2.
+  Name compression shares immutable label copies between suffixes, reducing
+  allocations while preserving case and escaped label boundaries.
 
 
 ## v1.74.0

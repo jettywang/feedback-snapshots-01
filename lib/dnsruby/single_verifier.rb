@@ -34,7 +34,7 @@ module Dnsruby
     LearnedTrust = Struct.new(:expiration, :signature_expiration, :transaction, :sources, :operational)
     VALIDATION_ALGORITHMS = [Algorithms.RSASHA1, Algorithms.RSASHA1_NSEC3_SHA1,
       Algorithms.RSASHA256, Algorithms.RSASHA512,
-      Algorithms.ECDSAP256SHA256, Algorithms.ECDSAP384SHA384].freeze
+      Algorithms.ECDSAP256SHA256, Algorithms.ECDSAP384SHA384, Algorithms.ED25519].freeze
     # RFC 9905 retains implementation support for RSA/SHA-1 but requires
     # validating resolvers to treat it as unsupported operationally. Explicit
     # verify() calls keep their existing cryptographic verification behaviour.
@@ -102,21 +102,63 @@ module Dnsruby
       @configured_ds_index = DSCache.new(max_records: nil)
     end
 
+    @recursor_mutex = Mutex.new
+    @recursor_pid = Process.pid
+
+    def self.with_recursor_lock
+      if @recursor_pid != Process.pid
+        @recursor_mutex = Mutex.new
+        @recursor_pid = Process.pid
+        @recursor = nil
+      end
+      locked = false
+      until (locked = @recursor_mutex.try_lock)
+        QueryControl.current&.check!
+        sleep 0.01
+      end
+      QueryControl.current&.check!
+      yield
+    ensure
+      @recursor_mutex.unlock if locked
+    end
+    private_class_method :with_recursor_lock
+
+    def self.set_recursor_hints(hints)
+      with_recursor_lock do
+        @recursor_hints = if hints.is_a?(Array)
+          hints.map { |hint| hint.dup.freeze }.freeze
+        else
+          hints&.dup&.freeze
+        end
+        @recursor = nil
+        Recursor.reset_hints
+      end
+    end
+
     def set_hints(hints)
-      @@hints = hints
+      SingleVerifier.set_recursor_hints(hints)
+    end
+
+    def self.shared_recursor
+      with_recursor_lock do
+        unless @recursor
+          if @recursor_hints
+            bootstrap = Resolver.new
+            begin
+              Recursor.set_hints(@recursor_hints, bootstrap)
+            ensure
+              bootstrap.close
+            end
+          end
+          @recursor = Recursor.new
+          @recursor.dnssec = true
+        end
+        @recursor
+      end
     end
 
     def get_recursor
-      if (!defined?@@recursor)
-        if (defined?@@hints)
-          Recursor.set_hints(@@hints, Resolver.new)
-          @@recursor = Recursor.new()
-        else
-          @@recursor = Recursor.new
-        end
-      end
-      @@recursor.dnssec = true
-      return @@recursor
+      SingleVerifier.shared_recursor
     end
 
     def get_dlv_resolver # :nodoc:
@@ -349,7 +391,17 @@ module Dnsruby
       provenance = learned_provenance(k)
       return false if provenance && !usable_provenance?(provenance)
       expiration ||= provenance&.expiration
-      previous = @trust_mutex.synchronize { @trusted_key_provenance.dup }
+      # Only an existing version of an incoming key can prevent its replacement.
+      # Readers check other provenance before use; checking the whole cache here
+      # makes each independent key discovery proportional to every cached zone.
+      incoming = k.is_a?(RRSet) ? k.rrs : (k.is_a?(KeyCache) ? k.keys : [])
+      identities = incoming.map { |key| KeyCache.key_identity(key) }
+      previous = @trust_mutex.synchronize do
+        identities.filter_map do |identity|
+          trust = @trusted_key_provenance[identity]
+          [identity, trust] if trust
+        end.to_h
+      end
       invalid = previous.reject { |_identity, trust| usable_provenance?(trust) }
       publish_trust do
         invalid.each do |identity, trust|
@@ -533,7 +585,7 @@ module Dnsruby
       end
       sources = (parent ? parent.sources : []) + [[@trust_source_id, trust_operation.fetch(:generation)].freeze]
       LearnedTrust.new(expiration, signature_expiration, ValidationBudget.current.transaction,
-        sources.uniq.freeze, OPERATIONAL_ALGORITHMS.include?(signature.algorithm) &&
+        sources.uniq.freeze, algorithm_supported?(signature.algorithm, operational: true) &&
           (!parent || parent.operational)).freeze
     end
 
@@ -1196,7 +1248,7 @@ module Dnsruby
       end
       enumerator.each {|key|
         ValidationBudget.current&.check!(1)
-        next if trust_operation&.fetch(:operational, false) && !OPERATIONAL_ALGORITHMS.include?(key.algorithm)
+        next if trust_operation&.fetch(:operational, false) && !algorithm_supported?(key.algorithm, operational: true)
         if ((key.revoked?)) # || (key.bad_flags?))
           next
         end
@@ -1307,6 +1359,13 @@ module Dnsruby
       raise error
     end
 
+    def algorithm_supported?(algorithm, operational: false)
+      allowed = operational ? OPERATIONAL_ALGORITHMS : VALIDATION_ALGORITHMS
+      allowed.include?(algorithm) &&
+        (algorithm != Algorithms.ED25519 || RR::DNSKEY.ed25519_supported?)
+    end
+    private :algorithm_supported?
+
     def verify_rrset_with_key(rrset, keyrec, sigrec, canonical_data = {})
       #  RFC 4034
       # 3.1.8.1.  Signature Calculation
@@ -1314,7 +1373,7 @@ module Dnsruby
       unless keyrec.zone_key?
         raise VerifyError, 'DNSKEY Zone Key flag is not set'
       end
-      unless VALIDATION_ALGORITHMS.include?(sigrec.algorithm)
+      unless algorithm_supported?(sigrec.algorithm)
         if [Algorithms.DSA, Algorithms.DSA_NSEC3_SHA1].include?(sigrec.algorithm)
           raise VerifyError, "Algorithm #{sigrec.algorithm.code} is prohibited for DNSSEC validation"
         end
@@ -1337,6 +1396,11 @@ module Dnsruby
         verified = keyrec.public_key.verify(OpenSSL::Digest::SHA256.new, sigrec.signature, sig_data)
       elsif (sigrec.algorithm == Algorithms.RSASHA512)
         verified = keyrec.public_key.verify(OpenSSL::Digest::SHA512.new, sigrec.signature, sig_data)
+      elsif sigrec.algorithm == Algorithms.ED25519
+        unless sigrec.signature.bytesize == 64
+          raise VerifyError, 'Ed25519 signature must contain 64 octets'
+        end
+        verified = keyrec.public_key.verify(nil, sigrec.signature, sig_data)
       elsif [Algorithms.ECDSAP256SHA256, Algorithms.ECDSAP384SHA384].include?(sigrec.algorithm)
         byte_size = (keyrec.public_key.group.degree + 7) / 8
         if sigrec.signature.bytesize != 2 * byte_size
@@ -1619,38 +1683,40 @@ module Dnsruby
     end
 
     def find_closest_anchor_for(name) # :nodoc:
-      #  Check if we have an anchor for name.
-      #  If not, strip off first label and try again
-      #  If we get to root, then return false
-      name = "." if name == ""
-      n = Name.create(name)
-      root = Name.create(".")
-      configured, keys, discovered = @trust_mutex.synchronize do
+      n = Name.create(name == "" ? "." : name)
+      names = [n]
+      names << names.last.strip_label until names.last.labels.empty?
+      # Lookup by owner before consulting provenance. A cache of unrelated
+      # zones should not add work to every step down a delegation chain.
+      candidates = @trust_mutex.synchronize do
         expire_trust_anchors
-        configured_ds = @configured_ds_store.group_by do |ds|
-          [ds.name.canonical, ds.klass.code, ds.type.code]
-        end.values.map { |records| RRSet.new(records) }
-        [@trust_anchors.keys + configured_ds, cached_trust_keys, @discovered_ds_store.rrsets]
+        names.map do |owner|
+          [@trust_anchors.keys_for_name(owner) + @configured_ds_index.rrsets_for_name(owner),
+            @trusted_keys.keys_for_name(owner), @discovered_ds_store.rrsets_for_name(owner)]
+        end
       end
-      anchors = configured + keys.select { |key| usable_cached_key?(key) } +
-        discovered.select { |rrset| usable_provenance?(learned_provenance(rrset)) }
-      if trust_operation
-        anchors.concat(trust_operation[:keys].values.filter_map { |key, trust| key if usable_provenance?(trust) })
-        anchors.concat(trust_operation[:ds].filter_map { |rrset, trust| rrset if usable_provenance?(trust) })
+      operation = trust_operation
+      names.zip(candidates).each do |owner, (configured, keys, discovered)|
+        canonical = owner.canonical
+        anchors = configured + keys.select { |key| usable_cached_key?(key) } +
+          discovered.select { |rrset| usable_provenance?(learned_provenance(rrset)) }
+        if operation
+          operation[:keys].each_value do |key, trust|
+            anchors << key if key.name.canonical == canonical && usable_provenance?(trust)
+          end
+          operation[:ds].each do |rrset, trust|
+            anchors << rrset if rrset.name.canonical == canonical && usable_provenance?(trust)
+          end
+        end
+        if operation&.fetch(:operational, false)
+          anchors.reject! { |key| key.type == Types.DNSKEY && !algorithm_supported?(key.algorithm, operational: true) }
+        end
+        # Records remain mutable; an index entry must not grant trust under
+        # the old owner after the caller changes the record's name.
+        anchor = anchors.find { |key| key.name.canonical == canonical }
+        return anchor if anchor
       end
-      if trust_operation&.fetch(:operational, false)
-        anchors.reject! { |key| key.type == Types.DNSKEY && !OPERATIONAL_ALGORITHMS.include?(key.algorithm) }
-      end
-      while (true) # n != root)
-        #  Try the trusted keys first, then the DS set
-        anchors.each {|key|
-          return key if key.name.canonical == n.canonical
-        }
-        break if (n.to_s == root.to_s)
-        #  strip the name
-        n = n.strip_label
-      end
-      return false
+      false
     end
 
     #  @TODO@ Handle REVOKED keys! (RFC 5011)
@@ -1878,7 +1944,7 @@ module Dnsruby
     end
 
     def supported_ds?(record)
-      OPERATIONAL_ALGORITHMS.include?(record.algorithm) && [1, 2, 4].include?(record.digest_type.code)
+      algorithm_supported?(record.algorithm, operational: true) && [1, 2, 4].include?(record.digest_type.code)
     end
     private :supported_ds?
 
@@ -2200,7 +2266,7 @@ module Dnsruby
         rrsets.each do |rrset|
           next if rrset.rrs.empty?
           if rrset.sigs.empty? || (trust_operation&.fetch(:operational, false) &&
-              rrset.sigs.none? { |sig| OPERATIONAL_ALGORITHMS.include?(sig.algorithm) })
+              rrset.sigs.none? { |sig| algorithm_supported?(sig.algorithm, operational: true) })
             # Unsigned alias targets have no signer to discover. Establish
             # their security through the parent delegation, never from the
             # absence of a signature in this response.

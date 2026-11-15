@@ -8,6 +8,7 @@ class ReleaseRecursorCacheTest < Minitest::Test
       [name, @klass.class_variable_get(name)]
     end
     @root = {'ns.root.' => @klass::AddressCache.new}
+    @root.fetch('ns.root.').push(['192.0.2.53', 300])
     @klass.class_variable_set(:@@zones_cache, {'.' => @root})
     @klass.class_variable_set(:@@hints, @root)
     @klass.class_variable_set(:@@zone_expirations, {})

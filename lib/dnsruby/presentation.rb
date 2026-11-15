@@ -18,11 +18,18 @@ module Dnsruby
         position = field.end(0)
       end
       fields.shift unless owner_omitted
-      fields.shift if fields.first&.first&.match?(/\A\d/)
       # Numeric classes learned from received records must not make parsing
       # unrelated records rebuild an ever-growing regular expression.
-      class_token = fields.first&.first
-      if class_token && (Classes.to_code(class_token) || /\ACLASS\d+\z/i.match?(class_token))
+      ttl_seen = class_seen = false
+      2.times do
+        token = fields.first&.first
+        if token && !ttl_seen && /\A\d/.match?(token)
+          ttl_seen = true
+        elsif token && !class_seen && (Classes.to_code(token) || /\ACLASS\d+\z/i.match?(token))
+          class_seen = true
+        else
+          break
+        end
         fields.shift
       end
       type_token = fields.first&.first

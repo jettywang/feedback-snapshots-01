@@ -126,7 +126,7 @@ module Dnsruby
 
       # A DS binds both the DNSKEY's identity and its public-key digest.
       def check_key(key)
-        key.type == Types.DNSKEY && key.klass == klass && key.name == name &&
+        key.type == Types.DNSKEY && key.klass == klass && key.name.canonical == name.canonical &&
           matching_key_digest?(key)
       end
 

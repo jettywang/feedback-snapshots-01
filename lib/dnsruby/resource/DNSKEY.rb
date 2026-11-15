@@ -315,10 +315,44 @@ module Dnsruby
             @public_key = dsa_key
           elsif [Algorithms.ECDSAP256SHA256, Algorithms.ECDSAP384SHA384].include?(@algorithm)
             @public_key = ec_key(Algorithms.ECDSAP256SHA256 == @algorithm ? 'prime256v1' : 'secp384r1')
+          elsif @algorithm == Algorithms.ED25519 && DNSKEY.ed25519_supported?
+            @public_key = ed25519_key
           end
         end
         #  @TODO@ Support other key encodings!
         return @public_key
+      end
+
+      # Check the actual provider as well as Ruby's OpenSSL API. Parsing a
+      # public key alone does not guarantee that signature verification works.
+      def self.ed25519_supported? #:nodoc:
+        return @ed25519_supported if defined?(@ed25519_supported)
+        return false unless defined?(OpenSSL::PKey)
+        public_bytes = ['d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a'].pack('H*')
+        signature = ['e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e06522490155' \
+          '5fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b'].pack('H*')
+        # RFC 8032 section 7.1, test 1 (the empty message).
+        key = OpenSSL::PKey.read(ed25519_subject_public_key(public_bytes))
+        @ed25519_supported = key.verify(nil, signature, ''.b)
+      rescue OpenSSL::OpenSSLError, NotImplementedError, TypeError, ArgumentError
+        @ed25519_supported = false
+      end
+
+      def self.ed25519_subject_public_key(bytes) #:nodoc:
+        # RFC 8410 SubjectPublicKeyInfo: Ed25519's algorithm has no parameters.
+        OpenSSL::ASN1::Sequence.new([
+          OpenSSL::ASN1::Sequence.new([OpenSSL::ASN1::ObjectId.new('1.3.101.112')]),
+          OpenSSL::ASN1::BitString.new(bytes)
+        ]).to_der
+      end
+      private_class_method :ed25519_subject_public_key
+
+      def ed25519_key
+        unless @key.bytesize == 32
+          raise OpenSSL::PKey::PKeyError, 'Ed25519 DNSKEY must contain 32 octets'
+        end
+        @key_length = 256
+        OpenSSL::PKey.read(DNSKEY.send(:ed25519_subject_public_key, @key))
       end
 
       def rsa_key

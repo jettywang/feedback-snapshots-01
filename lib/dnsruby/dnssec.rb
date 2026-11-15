@@ -144,6 +144,7 @@ module Dnsruby
     end
 
     def self.reset
+      SingleVerifier.set_recursor_hints(nil)
       @@validation_policy = ValidationPolicy::LOCAL_ANCHORS_THEN_ROOT
       @@root_verifier = SingleVerifier.new(SingleVerifier::VerifierType::ROOT)
       ROOT_TRUST_ANCHORS.each {|ds| @@root_verifier.add_root_ds(RR.create(ds))}
@@ -157,8 +158,7 @@ module Dnsruby
     end
 
     def self.set_hints(hints)
-      @@root_verifier.set_hints(hints)
-      @@anchor_verifier.set_hints(hints)
+      SingleVerifier.set_recursor_hints(hints)
     end
 
     def self.no_keys?
@@ -300,11 +300,21 @@ module Dnsruby
     end
 
     private_class_method def self.try_validation_internal(last_level, last_error, last_error_level, proc, msg, query)
+      # Keep the lifetime with the successful result. A later unanchored
+      # verifier can return INSECURE without establishing a cacheable proof.
+      previous_expiration = if last_level == Message::SecurityLevel.INSECURE
+        msg.instance_variable_get(:@dnsruby_authenticated_expiration)
+      end
       begin
         result = proc.call(msg, query)
         if !result || msg.security_level == Message::SecurityLevel.BOGUS
           detail = msg.security_error.to_s
           raise VerifyError, detail.empty? ? 'DNSSEC validation failed' : detail
+        end
+        if previous_expiration && msg.security_level <= Message::SecurityLevel.INSECURE
+          current_expiration = msg.instance_variable_get(:@dnsruby_authenticated_expiration)
+          msg.instance_variable_set(:@dnsruby_authenticated_expiration,
+            [previous_expiration, current_expiration].compact.min)
         end
         last_level = Message::SecurityLevel.new([msg.security_level.code, last_level.code].max)
       rescue VerifyError => e
@@ -342,6 +352,7 @@ module Dnsruby
 
     private_class_method def self.verify_internal(msg, keys, operational: false)
       insecure = false
+      insecure_expiration = nil
       last_error = nil
       verifiers = if operational
         case @@validation_policy
@@ -357,14 +368,21 @@ module Dnsruby
         begin
           result = operational ? verifier.verify_for_validation(msg) : verifier.verify_result(msg, keys)
           return :secure if result == :secure
-          insecure ||= result == :insecure
+          if result == :insecure
+            insecure = true
+            expiration = msg.instance_variable_get(:@dnsruby_authenticated_expiration)
+            insecure_expiration = [insecure_expiration, expiration].compact.min
+          end
         rescue ValidationLimitError
           raise
         rescue VerifyError => error
           last_error = error
         end
       end
-      return :insecure if insecure
+      if insecure
+        msg.instance_variable_set(:@dnsruby_authenticated_expiration, insecure_expiration) if insecure_expiration
+        return :insecure
+      end
       raise last_error if last_error
       false
     end

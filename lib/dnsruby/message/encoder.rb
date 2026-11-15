@@ -65,10 +65,11 @@ class MessageEncoder #:nodoc: all
       @data << "\0"
       return
     end
+    # Snapshot each label once. Suffix keys share these immutable strings,
+    # while retaining label boundaries and case for lossless compression.
+    labels = d.map { |label| label.string.b.freeze }
     d.each_index do |i|
-      # A dot can itself be a label octet. Keep label boundaries in the key,
-      # and preserve case because compression must not rewrite presentation.
-      domain = d[i..-1].map { |label| label.string.b.freeze }.freeze
+      domain = labels[i..-1].freeze
       if (idx = @names[domain]) && idx < 0x4000
         self.put_pack('n', 0xc000 | idx)
         return

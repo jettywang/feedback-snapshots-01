@@ -28,6 +28,7 @@ module Dnsruby
       origin_name = parse_zone_name(origin)
       @origin = Name.new(origin_name.labels, true).to_s(true)
       @soa_ttl = soa_ttl
+      @default_ttl = nil
       if (soa_minimum && !@last_explicit_ttl)
         @last_explicit_ttl = soa_minimum
       else
@@ -110,7 +111,7 @@ module Dnsruby
         return nil
       end
       if (line.index("$TTL") == 0)
-        @last_explicit_ttl = get_ttl(line.split()[1].strip) #  $TTL <ttl>
+        @default_ttl = get_ttl(line.split()[1].strip) #  $TTL <ttl>
         #                 print "Setting $TTL to #{ttl}\n"
         return nil
       end
@@ -284,7 +285,8 @@ module Dnsruby
         split = line.split
       elsif (((split[1]).to_i == 0) && (split[1] != "0"))
         #  Add the TTL
-        if (!@last_explicit_ttl)
+        inherited_ttl = @default_ttl || @last_explicit_ttl
+        if (!inherited_ttl)
           #  If this is the SOA record, and no @last_explicit_ttl is defined,
           #  then we need to try the SOA TTL element from the config. Otherwise,
           #  find the SOA Minimum field, and use that.
@@ -295,7 +297,7 @@ module Dnsruby
           #  the actual type. If the type is not SOA then, then we can raise an error
           line = name + " %MISSING_TTL% "
         else
-          line = name + " #{@last_explicit_ttl} "
+          line = name + " #{inherited_ttl} "
         end
         (split.length - 1).times {|i| line += "#{split[i+1]} "}
         line += "\n"
@@ -332,9 +334,16 @@ module Dnsruby
       type = Types.new(type_text)
       is_soa = (type == Types::SOA)
       type_was = type
+      # RFC 3597 RDATA is already encoded wire data, even for known types.
+      # Its tokens must not be treated as textual names or SOA intervals.
+      generic_rdata = split[4]&.start_with?('\\#')
       if (type == Types.RRSIG)
         #  If this is an RRSIG record, then add the TYPE COVERED rather than the type - this allows us to load a complete RRSet at a time
-        type = Types.new(split[4].strip)
+        if generic_rdata
+          type = Dnsruby::RR.send(:new_from_normalised_string, line).type_covered if do_prefix_hack
+        else
+          type = Types.new(split[4].strip)
+        end
       end
 
       type_string=prefix_for_rrset_order(type, type_was)
@@ -350,7 +359,7 @@ module Dnsruby
             line.sub!(" %MISSING_TTL% ", " #{@last_explicit_ttl} ")
           end
         end
-        line = replace_soa_ttl_fields(line)
+        line = replace_soa_ttl_fields(line) unless generic_rdata
         if (!@last_explicit_ttl)
           soa_rr = Dnsruby::RR.send(:new_from_normalised_string, line)
           @last_explicit_ttl = soa_rr.minimum
@@ -364,8 +373,13 @@ module Dnsruby
         line += stored_line.strip
       end
 
+      if generic_rdata
+        return line + "\n", type_string, @last_name if do_prefix_hack
+        return line + "\n"
+      end
+
       # Qualify parsed labels so an escaped final dot stays inside its label.
-      if [Types::MX, Types::NS, Types::AFSDB, Types::NAPTR, Types::RT,
+      if [Types::MX, Types::KX, Types::NS, Types::AFSDB, Types::NAPTR, Types::RT,
           Types::SRV, Types::CNAME, Types::MB, Types::MG, Types::MR,
           Types::PTR, Types::DNAME].include?(type_was)
         line = line.sub(/\S+\z/) { |target| absolute_name(target).to_s(true) }
@@ -382,6 +396,21 @@ module Dnsruby
           parsed_rr.public_send("#{field}=", absolute_name(parsed_rr.public_send(field)))
         end
         line = parsed_rr.to_s
+      end
+      # These name fields precede other RDATA. Qualify their presentation
+      # tokens directly, preserving the remaining signature/key text and
+      # avoiding record serializers which omit a name's trailing dot.
+      case type_was
+      when Types::NSEC, Types::NXT, Types::RRSIG, Types::IPSECKEY, Types::HIP
+        fields = line.split
+        domain_fields = case type_was
+        when Types::NSEC, Types::NXT then [4]
+        when Types::RRSIG then [11]
+        when Types::IPSECKEY then fields[5].to_i == 3 ? [7] : []
+        when Types::HIP then (7...fields.length).to_a
+        end
+        domain_fields.each { |index| fields[index] = absolute_name(fields.fetch(index)).to_s(true) }
+        line = fields.join(' ')
       end
       #  SVCB and HTTPS carry their TargetName in the middle of the RDATA
       #  (before the SvcParams), so the trailing-name logic above cannot reach

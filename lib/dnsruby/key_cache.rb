@@ -23,6 +23,7 @@ module Dnsruby
       @keys = {}
       @candidate_index = {}
       @key_candidates = {}
+      @name_index = {}
       raise ArgumentError, 'max_keys must be a positive integer' if max_keys && (!max_keys.is_a?(Integer) || max_keys <= 0)
       @max_keys = max_keys
       add(keys)
@@ -84,6 +85,7 @@ module Dnsruby
       candidate = self.class.candidate_identity(k.name, k.klass, k.algorithm, k.key_tag)
       (@candidate_index[candidate] ||= {})[identity] = true
       @key_candidates[identity] = candidate
+      (@name_index[identity.first] ||= {})[identity] = true
     end
 
     def matching_keys(signatures)
@@ -93,6 +95,19 @@ module Dnsruby
       end.uniq
       now = Time.now.to_i
       identities.filter_map do |identity|
+        expiration, key = @keys.fetch(identity)
+        if expiration <= now
+          delete_identity(identity)
+          nil
+        else
+          key
+        end
+      end
+    end
+
+    def keys_for_name(name)
+      now = Time.now.to_i
+      (@name_index[name.canonical] || {}).keys.filter_map do |identity|
         expiration, key = @keys.fetch(identity)
         if expiration <= now
           delete_identity(identity)
@@ -119,6 +134,9 @@ module Dnsruby
       cached = @keys.delete(identity)
       return unless cached
       key = cached[1]
+      names = @name_index.fetch(identity.first)
+      names.delete(identity)
+      @name_index.delete(identity.first) if names.empty?
       candidate = @key_candidates.delete(identity)
       bucket = @candidate_index[candidate]
       if bucket
@@ -160,6 +178,7 @@ module Dnsruby
       @record_count = 0
       @sets = {}
       @candidate_index = {}
+      @name_index = {}
     end
 
     def self.set_identity(rrset)
@@ -182,6 +201,7 @@ module Dnsruby
       candidates = rrset.rrs.map { |record| self.class.candidate_identity(record) }.uniq
       @sets[identity] = [expiration, rrset, count, candidates]
       @record_count += count
+      (@name_index[identity.first] ||= {})[identity] = true
       candidates.each { |candidate| (@candidate_index[candidate] ||= {})[identity] = true }
     end
 
@@ -193,6 +213,19 @@ module Dnsruby
       end.uniq
       now = Time.now.to_i
       identities.filter_map do |identity|
+        expiration, rrset = @sets.fetch(identity)
+        if expiration <= now
+          delete(identity)
+          nil
+        else
+          rrset
+        end
+      end
+    end
+
+    def rrsets_for_name(name)
+      now = Time.now.to_i
+      (@name_index[name.canonical] || {}).keys.filter_map do |identity|
         expiration, rrset = @sets.fetch(identity)
         if expiration <= now
           delete(identity)
@@ -219,6 +252,9 @@ module Dnsruby
       entry = @sets.delete(identity)
       return unless entry
       @record_count -= entry[2]
+      names = @name_index.fetch(identity.first)
+      names.delete(identity)
+      @name_index.delete(identity.first) if names.empty?
       entry[3].each do |candidate|
         bucket = @candidate_index.fetch(candidate)
         bucket.delete(identity)

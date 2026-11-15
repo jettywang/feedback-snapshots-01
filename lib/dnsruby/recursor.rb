@@ -164,6 +164,9 @@ module Dnsruby
 
     #  For guarding access to shared caches.
     @@mutex = Mutex.new # :nodoc: all
+    @@hints_mutex = Mutex.new
+    @@hints_generation = 0
+    @@stale_hints = nil
     @@hints = nil
     @@authority_cache = Hash.new
     @@zones_cache = nil
@@ -181,8 +184,15 @@ module Dnsruby
       if (res)
         @resolver = res
       else
-        if (defined?@@nameservers && @@nameservers.length > 0)
-          @resolver = Resolver.new({:nameserver => @@nameservers})
+        nameservers = @@mutex.synchronize do
+          # Hints already contain addresses. Re-resolving their owner names
+          # would start separate bootstrap queries outside this lookup.
+          if @@hints && !@@hints.equal?(@@stale_hints)
+            @@hints.values.flat_map(&:values).uniq
+          end
+        end
+        if nameservers && !nameservers.empty?
+          @resolver = Resolver.new({:nameserver => nameservers})
         else
           @resolver = Resolver.new
         end
@@ -206,36 +216,71 @@ module Dnsruby
     def hints=(hints)
       Recursor.set_hints(hints, @resolver)
     end
-    def Recursor.set_hints(hints, resolver)
-      TheLog.debug(";; hints(#{hints.inspect})\n")
-      @resolver = resolver
-      if (resolver.single_resolvers.length == 0)
-        resolver = Resolver.new()
-        resolver.dnssec = @dnssec
+    def self.with_hints_configuration
+      # Bootstrap can wait on DNS. Keep it outside the cache mutex, and allow
+      # a query waiting for another bootstrap to honour its own deadline.
+      until @@hints_mutex.try_lock
+        QueryControl.current&.check!
+        sleep 0.01
       end
-      if (hints && hints.length > 0)
-        resolver.nameservers=hints
-        if (String === hints)
-          hints = [hints]
-        end
-        hints.each {|hint|
-          @@hints = Hash.new
-          @@hints[hint]=hint
-        }
+      begin
+        QueryControl.current&.check!
+        yield
+      ensure
+        @@hints_mutex.unlock
       end
-      if (!hints && @@nameservers)
-        @@hints=(@@nameservers)
-      else
-        @@nameservers=(hints)
-        @@hints = hints
-      end
-      TheLog.debug(";; verifying (root) zone...\n")
-      #  bind always asks one of the hint servers
-      #  for who it thinks is authoritative for
-      #  the (root) zone as a sanity check.
-      #  Nice idea.
+    end
+    private_class_method :with_hints_configuration
 
-      #       if (!@@hints || @@hints.length == 0)
+    def self.reset_hints
+      with_hints_configuration do
+        @@mutex.synchronize do
+          # Existing queries may still hold the previous root bootstrap.
+          # Keep it readable until a replacement is ready, but require the
+          # next query to refresh it and prevent old work from seeding caches.
+          @@stale_hints = @@hints
+          @@zones_cache = @@hints && {'.' => @@hints}
+          @@nameservers = nil
+          @@zone_expirations = {}
+          @@authority_cache = {}
+          @@hints_generation += 1
+          Cache.invalidate_resolutions
+        end
+      end
+    end
+
+    def self.ensure_hints(resolver)
+      generation = @@mutex.synchronize do
+        @@hints_generation if hints_ready?
+      end
+      return generation if generation
+      with_hints_configuration do
+        configured = @@mutex.synchronize { hints_ready? }
+        configure_hints({}, resolver) unless configured
+        @@mutex.synchronize { @@hints_generation }
+      end
+    end
+    private_class_method :ensure_hints
+
+    # Called with the cache mutex held. A retained bootstrap is usable only
+    # while at least one root address is live and no reset has superseded it.
+    def self.hints_ready?
+      @@hints && @@zones_cache && !@@hints.equal?(@@stale_hints) &&
+        @@hints.any? { |_name, addresses| !addresses.values.empty? }
+    end
+    private_class_method :hints_ready?
+
+    def self.set_hints(hints, resolver)
+      with_hints_configuration { configure_hints(hints, resolver) }
+    end
+
+    def self.configure_hints(hints, resolver)
+      TheLog.debug(";; hints(#{hints.inspect})\n")
+      temporary_resolver = nil
+      if resolver.single_resolvers.empty?
+        resolver = temporary_resolver = Resolver.new
+      end
+      resolver.nameservers = hints if hints && !hints.empty?
       resolver.recurse = true
       packet=resolver.query_no_validation_or_recursion(".", "NS", "IN")
       hints = Hash.new
@@ -305,51 +350,28 @@ module Dnsruby
             hints.delete(server)
           end
         end
+      end
+      raise ResolvError, 'Nameserver did not supply usable root hints' if hints.empty?
+
+      # Publish a complete bootstrap, replacing delegations learned through the
+      # old hints. An unsuccessful bootstrap leaves the previous state intact.
+      @@mutex.synchronize do
         @@hints = hints
-      else
-        @@hints = {}
+        @@stale_hints = nil
+        @@hints_generation += 1
+        @@nameservers = hints.keys
+        @@zones_cache = {'.' => hints}
+        @@zone_expirations = {}
+        @@authority_cache = {}
+        Cache.invalidate_resolutions
       end
-      if (@@hints.size > 0)
-        TheLog.info(";; USING THE FOLLOWING HINT IPS:\n")
-        @@hints.values.each do |ips|
-          ips.each do |server|
-            TheLog.info(";;  #{server}\n")
-          end
-        end
-      else
-        raise ResolvError.new( "Server ["+(@@nameservers)[0].to_s+".] did not give answers")
-      end
-
-      #  Disable recursion flag.
-      resolver.recurse = false
-      #       end
-
-      #   return $self->nameservers( map { @{ $_ } } values %{ $self->{'hints'} } );
-      if (Array === @@hints)
-        temp = []
-        @@hints.each {|hint|
-          temp.push(hint)
-        }
-        @@hints = Hash.new
-        count = 0
-        temp.each {|hint|
-          print "Adding hint : #{temp[count]}\n"
-          @@hints[count] = temp[count]
-          count += 1
-        }
-      end
-      if (String === @@hints)
-        temp = @@hints
-        @@hints = Hash.new
-        @@hints[0] = temp
-      end
-      # @@nameservers = @@hints.values
-      @@nameservers=[]
-      @@hints.each {|key, value|
-        @@nameservers.push(key)
-      }
-      return @@nameservers
+      @@nameservers
+    ensure
+      resolver.recurse = false if resolver
+      temporary_resolver&.close
     end
+    private_class_method :configure_hints
+
 
     def Recursor.add_to_hints(hints, rr)
       server = rr.name.to_s.downcase
@@ -396,16 +418,12 @@ module Dnsruby
       return @callback
     end
 
-    def Recursor.clear_caches(resolver = Resolver.new)
-      Cache.invalidate_resolutions
-      resolver.dnssec = @dnssec
-      Recursor.set_hints(Hash.new, resolver)
-      reset = proc do
-        @@zones_cache = {"." => @@hints}
-        @@zone_expirations = {}
-        @@authority_cache = {}
-      end
-      @@mutex.owned? ? reset.call : @@mutex.synchronize(&reset)
+    def Recursor.clear_caches(resolver = nil)
+      temporary_resolver = resolver.nil?
+      resolver ||= Resolver.new
+      Recursor.set_hints({}, resolver)
+    ensure
+      resolver&.close if temporary_resolver
     end
 
     # These helpers are called with the shared cache mutex held. Root hints
@@ -414,6 +432,8 @@ module Dnsruby
       unless @@mutex.owned?
         return @@mutex.synchronize { cache_authority(name, addresses) }
       end
+      generation = Thread.current[:dnsruby_recursor_generation]
+      return if generation && generation != @@hints_generation
       @@authority_cache.delete(name)
       @@authority_cache[name] = addresses
       @@authority_cache.shift while @@authority_cache.length > CACHE_LIMIT
@@ -423,6 +443,8 @@ module Dnsruby
       unless @@mutex.owned?
         return @@mutex.synchronize { cache_zone(name, authorities, ttl) }
       end
+      generation = Thread.current[:dnsruby_recursor_generation]
+      return if generation && generation != @@hints_generation
       return if name == "."
       @@zones_cache.delete(name)
       @@zone_expirations.delete(name)
@@ -450,28 +472,35 @@ module Dnsruby
     # The Recursor maintains a cache of known nameservers.
     # DNSSEC validation is performed unless true is passed as the fourth parameter.
     def query(name, type=Types.A, klass=Classes.IN, no_validation = false)
+      parent = QueryControl.current
+      timeout = @resolver.query_timeout if @resolver.respond_to?(:query_timeout)
+      return query_internal(name, type, klass, no_validation) unless timeout && timeout > 0
+
+      control = QueryControl.new(deadline: TransportClock.now + timeout, parent: parent)
+      begin
+        QueryControl.with(control) { query_internal(name, type, klass, no_validation) }
+      rescue QueryControl::DeadlineExceeded
+        # Inherited cancellation/deadlines retain their original meaning for
+        # DNSSEC discovery. Only this Recursor's own timeout becomes public.
+        parent&.check!
+        raise ResolvTimeout, 'Recursive query timed out'
+      ensure
+        control.cancel
+      end
+    end
+
+    def query_internal(name, type, klass, no_validation)
+      previous_generation = Thread.current[:dnsruby_recursor_generation]
       QueryControl.current&.check!
       unless SelectThread::TransmissionBudget.current
         return SelectThread::TransmissionBudget.with(SelectThread::TransmissionBudget.new) do
-          query(name, type, klass, no_validation)
+          query_internal(name, type, klass, no_validation)
         end
       end
       #  @TODO@ PROVIDE AN ASYNCHRONOUS SEND WHICH RETURNS MESSAGE WITH ERROR!!!
 
-      #  Make sure the hint servers are initialized.
-      @@mutex.synchronize {
-        self.hints=(Hash.new) unless @@hints
-      }
+      Thread.current[:dnsruby_recursor_generation] = Recursor.send(:ensure_hints, @resolver)
       @resolver.recurse = false
-      #  Make sure the authority cache is clean.
-      #  It is only used to store A and AAAA records of
-      #  the suposedly authoritative name servers.
-      #  TTLs are respected
-      @@mutex.synchronize {
-        if (!@@zones_cache)
-          Recursor.clear_caches(@resolver)
-        end
-      }
 
       query_message = Message.new(name, type, klass)
       query_message.do_validation = !no_validation
@@ -514,7 +543,25 @@ module Dnsruby
         end
         raise
       end
+    ensure
+      Thread.current[:dnsruby_recursor_generation] = previous_generation
     end
+
+    private :query_internal
+
+    HOP_SETTINGS = %i[port use_tcp no_tcp tcp_pipelining tcp_pipelining_max_queries
+      tcp_idle_timeout packet_timeout query_timeout retry_times retry_delay
+      ignore_truncation udp_size src_address src_address6 src_port].freeze
+    private_constant :HOP_SETTINGS
+
+    def hop_settings
+      HOP_SETTINGS.each_with_object({}) do |field, settings|
+        next unless @resolver && @resolver.respond_to?(field)
+        value = @resolver.public_send(field)
+        settings[field] = value.is_a?(Array) || value.is_a?(String) ? value.dup : value
+      end
+    end
+    private :hop_settings
 
     def recursion_cache_scope(no_validation)
       return unless @resolver.respond_to?(:do_caching) && @resolver.do_caching
@@ -522,7 +569,7 @@ module Dnsruby
       hints = @@mutex.synchronize do
         @@hints.map { |name, addresses| [name, addresses.values.map(&:to_s).sort] }.sort_by(&:first)
       end
-      [no_validation, @dnssec, @ipv6_ok, hints, @resolver.object_id,
+      [no_validation, @dnssec, @ipv6_ok, hints, @resolver.object_id, hop_settings,
         @resolver.single_resolvers.map { |sender| [sender.server.to_s.dup, sender.port] }.sort,
         Cache.validation_scope]
     end
@@ -612,25 +659,45 @@ module Dnsruby
 
       known_zone = known_zone.sub(/\.*$/, ".")
 
-      ns = [] # Array of AddressCaches (was array of array of addresses)
+      ns = [] # Snapshot each address list once for this hop.
       missing_authorities = []
       @@mutex.synchronize{
         #  Get IPs from authorities
         known_authorities.keys.each do |ns_rec|
           addresses = known_authorities[ns_rec]
           cached = @@authority_cache[ns_rec]
-          if addresses && !(addresses.respond_to?(:values) ? addresses.values : addresses).empty?
+          values = addresses.respond_to?(:values) ? addresses.values : Array(addresses)
+          cached_values = if values.empty?
+            cached.respond_to?(:values) ? cached.values : Array(cached)
+          end
+          if !values.empty?
             Recursor.cache_authority(ns_rec, known_authorities[ns_rec])
-            ns.push(@@authority_cache[ns_rec])
-          elsif cached && !(cached.respond_to?(:values) ? cached.values : cached).empty?
+            ns.push(values)
+          elsif !cached_values.empty?
             known_authorities[ns_rec] = @@authority_cache[ns_rec]
-            ns.push(@@authority_cache[ns_rec])
+            ns.push(cached_values)
           else
             @@authority_cache.delete(ns_rec)
             missing_authorities << ns_rec
           end
         end
       }
+
+      if known_zone == '.'
+        if ns.empty?
+          # Root addresses can expire after query admission, including while
+          # finding an address for a delegated server. Refresh the bootstrap
+          # instead of recursively looking up root servers against empty hints.
+          Recursor.send(:ensure_hints, @resolver)
+          ns = @@mutex.synchronize { @@hints.values.map(&:values).reject(&:empty?) }
+          raise ResolvError, 'Root hints expired before use' if ns.empty?
+          # Retain this query's original generation: a refresh or reset must
+          # not let earlier traversal work populate the replacement caches.
+        end
+        # Missing root addresses need bootstrap refresh, not hostname lookup
+        # through the same root servers after their other addresses fail.
+        missing_authorities.clear
+      end
 
       if (ns.length == 0)
         found_auth = 0
@@ -643,6 +710,7 @@ module Dnsruby
           # Propagate cancellation and validation policy into both workers.
           control = QueryControl.new(parent: QueryControl.current)
           transmission_budget = SelectThread::TransmissionBudget.current
+          hints_generation = Thread.current[:dnsruby_recursor_generation]
           hints = @@mutex.synchronize { @@hints.dup }
           workers = []
           results = QueryControl::Queue.new
@@ -651,6 +719,7 @@ module Dnsruby
             (@ipv6_ok ? ['AAAA', 'A'] : ['A']).each do |address_type|
               workers << Thread.new do
                 Thread.current.report_on_exception = false
+                Thread.current[:dnsruby_recursor_generation] = hints_generation
                 begin
                   answer = SelectThread::TransmissionBudget.with(transmission_budget) do
                     QueryControl.with(control) do
@@ -670,7 +739,7 @@ module Dnsruby
                 # A failed family or nameserver must not hide a usable
                 # alternative. Budget failures and cancellation still stop
                 # the entire operation, as do unexpected programming errors.
-                raise error if error.is_a?(ValidationLimitError)
+                raise error if error.is_a?(VerifyError)
                 case error
                 when ResolvError, ResolvTimeout, IOError, SystemCallError
                   TheLog.debug(";; _dorecursion() Address lookup failed: #{error}")
@@ -757,16 +826,13 @@ module Dnsruby
           nameservers.push(n.to_s)
         }
       end
-      resolver = Resolver.new({:nameserver=>nameservers})
+      # TSIG belongs to the configured upstream, not to arbitrary authorities.
+      resolver = Resolver.new(hop_settings.merge(nameserver: nameservers))
       # Validation needs signatures even when requesting DNSSEC records was not
       # explicitly enabled. Non-validating lookups retain the caller's setting.
       resolver.dnssec = @dnssec || !no_validation
       resolver.recurse = false
-      servers = []
-      resolver.single_resolvers.each {|s|
-        servers.push(s.server)
-      }
-      resolver.retry_delay = nameservers.length
+      authority_error = nil
       begin
         #  Should construct packet ourselves and clear RD bit
         query = Message.new(name, type, klass)
@@ -781,7 +847,29 @@ module Dnsruby
       rescue ResolvTimeout, IOError
         #             TheLog.debug(";; nameserver #{levelns.to_s} didn't respond")
         #             next
+        QueryControl.current&.check!
         TheLog.debug("No response!")
+        packet = nil
+      rescue ServFail, Refused, NotImp, FormErr, SocketEofResolvError => error
+        raise if missing_authorities.empty?
+        QueryControl.current&.check!
+        authority_error = error
+        packet = nil
+      ensure
+        resolver.close
+      end
+      if packet.nil? && !missing_authorities.empty?
+        # A referral may contain both glue and names that need address
+        # discovery. Try the latter if all immediately usable servers fail.
+        unresolved = known_authorities.select { |server, _| missing_authorities.include?(server) }
+        begin
+          alternative = _dorecursion(name, type, klass, known_zone, unresolved, depth + 1, no_validation)
+          return alternative if alternative
+        rescue ResolvTimeout, IOError, ServFail, Refused, NotImp, FormErr, SocketEofResolvError => error
+          QueryControl.current&.check!
+          raise(authority_error || error)
+        end
+        raise authority_error if authority_error
         return nil
       end
       if (packet) # @TODO@ Check that the packet *is* actually authoritative!!
@@ -843,11 +931,10 @@ module Dnsruby
             address.name == rr.nsdname &&
             (address.name == parent || address.name.subdomain_of?(parent))
         end
-        if glue.empty?
-          addresses.push([rr.nsdname, rr.ttl])
-        else
-          glue.each { |address| addresses.push([address.address.to_s, address.ttl]) }
-        end
+        # Leave missing addresses empty so _dorecursion resolves them with the
+        # same transport settings, deadline and transmission budget. Passing a
+        # hostname to Resolver.new would start a separate bootstrap lookup.
+        glue.each { |address| addresses.push([address.address.to_s, address.ttl]) }
       end
       [delegation.to_s(true).downcase, authorities, records.map(&:ttl).min]
     end

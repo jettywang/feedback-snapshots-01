@@ -361,16 +361,17 @@ class TestReleaseTransport < Minitest::Test
 
   def test_retirement_between_socket_selection_and_registration_retries_admission
     isolated(<<~'RUBY')
-      [true, false].each do |keep_peer|
-        sockets = []
+      [true, false].product([0, 60_001, [60_001, 60_002]]).each do |keep_peer, ports|
+        sockets, connection_ports = [], []
         Dnsruby::PacketSender.define_method(:connect_tcp) do |*args, **kwargs|
+          connection_ports << args[3]
           FrameSocket.new.tap do |socket|
             socket.define_singleton_method(:connect) { |_| raise Errno::EISCONN }
             sockets << socket
           end
         end
         writer = Dnsruby::PacketSender.new(server: '127.0.0.1', use_tcp: true,
-          tcp_pipelining: true, dnssec: false, packet_timeout: 5)
+          tcp_pipelining: true, dnssec: false, packet_timeout: 5, src_port: ports)
         requests = 3.times.map { |i| query("admission#{i}.example.").tap { |q| q.header.id = i } }
         queues = 3.times.map { Queue.new }
         writer.send_async(requests[0], queues[0], 0)
@@ -378,11 +379,16 @@ class TestReleaseTransport < Minitest::Test
         old = sockets.first
         selected, release = Queue.new, Queue.new
         choose = writer.method(:tcp_pipeline_socket)
+        extra_retirements = 2
         writer.define_singleton_method(:tcp_pipeline_socket) do |port|
           result = choose.call(port)
           if result.first.equal?(old)
             selected << true
             release.pop
+          elsif extra_retirements > 0
+            # Repeated admission races must not consume the source-port pool.
+            extra_retirements -= 1
+            SELECTOR.retire_socket(result.first)
           end
           result
         end
@@ -399,8 +405,11 @@ class TestReleaseTransport < Minitest::Test
         release << true
         sending.value
         current = SELECTOR.query_settings_for_id(2)
-        raise 'registration used retired or closed stream' unless sockets.size == 2 &&
+        raise 'registration used retired or closed stream' unless sockets.size == 4 &&
           current.socket.equal?(sockets.last) && old.written.bytesize == old_size
+        allowed_ports = ports == 0 ? (50_000..65_535) : Array(ports)
+        raise 'admission retry escaped the configured source ports' unless
+          connection_ports.all? { |port| allowed_ports.include?(port) }
         raise 'admission retry replaced ownership or deadline' unless
           current.send_token.equal?(pending.send_token) && current.endtime == original_deadline
         raise 'admission retry delivered a premature error' unless queues[2].empty?

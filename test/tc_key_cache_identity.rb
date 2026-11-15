@@ -216,10 +216,10 @@ class KeyCacheIdentityTest < Minitest::Test
   end
 
   def test_unsupported_signature_candidate_does_not_hide_supported_signature
-    unsupported = Dnsruby::RR.create("collision.invalid. 300 IN DNSKEY 257 3 15 #{Base64.strict_encode64(@a.key)}")
+    unsupported = Dnsruby::RR.create("collision.invalid. 300 IN DNSKEY 257 3 16 #{Base64.strict_encode64(@a.key)}")
     valid = signed(@record, @a, 0).sigs.first
     invalid = valid.clone
-    invalid.algorithm = 15
+    invalid.algorithm = 16
     invalid.key_tag = unsupported.key_tag
     records = Dnsruby::RRSet.new([@record, invalid, valid])
     assert(@verifier.verify_rrset(records, [unsupported, @a]))

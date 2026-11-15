@@ -494,8 +494,9 @@ module Dnsruby
       Dnsruby.log.debug("Using tcp_pipeline_socket")
       # A live connection retains its endpoint and source binding. Compare the
       # configured source-port pool, not each randomly selected candidate port.
+      source_ports = @pipeline_connect_context&.[](2) || @src_port
       configuration = [@server.dup, @port, (@ipv6 ? @src_address6 : @src_address).dup,
-        @src_port.dup, @ipv6]
+        source_ports.dup, @ipv6]
       sockaddr = Socket.sockaddr_in(configuration[1], configuration[0])
 
       reuse_pipeline_socket = -> do
@@ -750,6 +751,9 @@ module Dnsruby
       socket = nil
       runnextportloop = true
       numtries = 0
+      source_port_configuration = @src_port.dup.freeze
+      source_ports = source_port_configuration.uniq
+      random_source_port = source_ports.first == 0
       src_address = @src_address
       if (@ipv6)
         src_address = @src_address6
@@ -766,7 +770,12 @@ module Dnsruby
             return
           end
           numtries += 1
-          src_port = get_next_src_port
+          src_port = if random_source_port
+            # Keep this attempt's mode even if a caller replaces the pool.
+            50_000 + SecureRandom.random_number(15_536)
+          else
+            source_ports[SecureRandom.random_number(source_ports.length)]
+          end
           if (use_tcp)
             begin
               if pipeline
@@ -779,7 +788,7 @@ module Dnsruby
                     @use_counts.delete(@pipeline_socket)
                     @pipeline_socket = nil
                   end
-                  @pipeline_connect_context = [endtime, previous_settings.send_token]
+                  @pipeline_connect_context = [endtime, previous_settings.send_token, source_port_configuration]
                   socket, new_socket = tcp_pipeline_socket(src_port)
                 ensure
                   remove_instance_variable(:@pipeline_connect_context)
@@ -821,10 +830,13 @@ module Dnsruby
             rescue Exception
             end
           end
-          #  Try again if the error was EADDRINUSE and a random source port is used
-          #  Maybe try a max number of times?
-          if ((e.class != Errno::EADDRINUSE) || (numtries > 50) ||
-              ((e.class == Errno::EADDRINUSE) && (src_port == @src_port[0])))
+          # Only an occupied bind removes a candidate. A pipeline admission
+          # retry has not found the port unusable and must retain the pool.
+          source_ports.delete(src_port) if e.is_a?(Errno::EADDRINUSE) && !random_source_port
+          # Random ports keep the bounded retry policy; configured pools do
+          # not revisit an occupied member during this attempt.
+          if !e.is_a?(Errno::EADDRINUSE) || (random_source_port && numtries >= 50) ||
+              (!random_source_port && source_ports.empty?)
             err_msg = "dnsruby can't connect to #{@server}:#{@port} from #{src_address}:#{src_port}, use_tcp=#{use_tcp}, exception = #{e.class}, #{e} #{e.backtrace}"
             err=IOError.new(err_msg)
             Dnsruby.log.error( "#{err}")

@@ -179,6 +179,13 @@ configuring TSIG to see it. The default log level is FATAL.
 
 ### DNSSEC algorithm policy
 
+Dnsruby validates signatures made with RSA/SHA-256 (8), RSA/SHA-512 (10),
+ECDSA P-256 (13), ECDSA P-384 (14), and Ed25519 (15). Ed25519 requires version
+3.0 or later of the `openssl` gem and an OpenSSL provider that supports it
+(normally OpenSSL 1.1.1 or later). On older Ruby releases, including Ruby 3.0,
+you may need to install a newer compatible `openssl` gem. If Ed25519 is
+unavailable, Dnsruby treats it as an unsupported algorithm.
+
 Resolver validation treats RSA/SHA-1 signing algorithms 5 and 7 as unsupported,
 as required by [RFC 9905](https://www.rfc-editor.org/rfc/rfc9905.html#section-2).
 An answer whose authenticated chain relies only on these algorithms is
@@ -255,6 +262,10 @@ not increase this limit.
 
 Recursor caches also have size limits. Cached delegations expire when their NS
 records expire, even if the associated nameserver addresses have longer TTLs.
+When you supply a Resolver to `Recursor.new`, its transport and source-address
+settings apply to the recursive queries. Its `query_timeout` limits the whole
+lookup, including nameserver discovery and validation. TSIG keys remain tied
+to the configured peer; they are not passed to arbitrary authoritative servers.
 
 Learned DNSKEY and DS records also have size limits. Configured trust anchors
 are kept until you remove them or their requested expiration time arrives;

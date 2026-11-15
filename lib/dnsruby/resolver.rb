@@ -705,8 +705,10 @@ module Dnsruby
     #         res.src_port=60015..60115
     #
     def src_port=(p)
-      if Resolver.check_port(p)
-        @src_port = Resolver.get_ports_from(p)
+      ports = Resolver.get_ports_from(p)
+      raise ArgumentError, 'Source port pool must not be empty' if ports.empty?
+      if Resolver.check_port(ports)
+        @src_port = ports
         update
       end
     end
@@ -917,33 +919,28 @@ module Dnsruby
     end
 
     def generate_timeouts(base=0) # :nodoc: all
-      #  These should be be pegged to the single_resolver they are targetting :
-      #   e.g. timeouts[timeout1]=nameserver
       timeouts = {}
       retry_delay = @retry_delay
-      #       @single_res_mutex.synchronize {
+      @single_resolvers.delete(nil)
       [@retry_times, 3].min.times do |retry_count|
-        if retry_count > 0
-          retry_delay *= 2
-        end
-
-        @single_resolvers.delete(nil) # Just in case...
-        @single_resolvers.each_index do |i|
-          res = @single_resolvers[i]
-          offset = (i * @retry_delay.to_f / @single_resolvers.length)
-          if retry_count == 0
-            timeouts[base + offset]=[res, retry_count]
+        retry_delay *= 2 if retry_count > 0
+        @single_resolvers.each_with_index do |res, i|
+          offset = i * @retry_delay.to_f / @single_resolvers.length
+          deadline = base + offset + (retry_count == 0 ? 0 : retry_delay)
+          attempt = [res, retry_count]
+          if (existing = timeouts[deadline])
+            # Keep the established single-attempt shape for distinct deadlines.
+            # Zero delays (or rounded floating-point deadlines) need a bucket.
+            existing = timeouts[deadline] = [existing] unless existing.first.is_a?(Array)
+            existing << attempt
           else
-            if timeouts.has_key?(base + retry_delay + offset)
-              Dnsruby.log_and_raise('Duplicate timeout key!')
-            end
-            timeouts[base + retry_delay + offset]=[res, retry_count]
+            timeouts[deadline] = attempt
           end
         end
       end
-      #       }
       timeouts
     end
+
   end
 
 
@@ -1258,24 +1255,19 @@ module Dnsruby
           # The finite retry plan is ordered once when admitted. Hash deletion
           # retains that order, so no unrelated retry plan needs to be sorted.
           while (timeout = timeouts.each_key.first) && timeout <= time_now
-            #  Send the next query
-            res, retry_count = timeouts[timeout]
-            id = [res, msg, client_query_id, retry_count]
-            Dnsruby.log.debug("Sending msg to #{res.server}")
-            #  We should keep a list of the queries which are outstanding
-            outstanding.push(id)
-            timeouts.delete(timeout)
-
-            #  Pick a new QID here @TODO@ !!!
-            #               msg.header.id = rand(65535);
-            #               print "New query : #{new_msg}\n"
-            # A query keeps its original retry plan after reconfiguration.
-            # Removed senders may retry, but must not create idle reusable
-            # sockets that this Resolver can no longer reach through close.
-            retired = !@parent.single_resolvers.include?(res)
-            operation = res.prepare_send_async(msg, select_queue, id, retired, control,
-              (@transmission_budgets[client_query_id] ||= SelectThread::TransmissionBudget.new))
-            sends << operation if operation
+            attempts = timeouts.delete(timeout)
+            attempts = [attempts] unless attempts.first.is_a?(Array)
+            attempts.each do |res, retry_count|
+              id = [res, msg, client_query_id, retry_count]
+              Dnsruby.log.debug("Sending msg to #{res.server}")
+              outstanding.push(id)
+              # A query keeps its original retry plan after reconfiguration.
+              # Retired senders must not create unreachable reusable sockets.
+              retired = !@parent.single_resolvers.include?(res)
+              operation = res.prepare_send_async(msg, select_queue, id, retired, control,
+                (@transmission_budgets[client_query_id] ||= SelectThread::TransmissionBudget.new))
+              sends << operation if operation
+            end
           end
           update_tick_deadline(client_query_id)
         end
@@ -1428,8 +1420,10 @@ module Dnsruby
           Dnsruby.log.debug{"Removing #{resolver.server} from resolver list for this query"}
           if timeouts
             timeouts[1].each do |key, value|
-              res = value[0]
-              if res == resolver
+              if value.first.is_a?(Array)
+                value.reject! { |res, _retry| res == resolver }
+                timeouts[1].delete(key) if value.empty?
+              elsif value.first == resolver
                 timeouts[1].delete(key)
               end
             end
