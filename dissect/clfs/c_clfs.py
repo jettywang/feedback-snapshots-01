@@ -308,6 +308,11 @@ CLFS_CONTROL_RECORD_MAGIC_VALUE = 0xC1F5C1F500005F1C
 class BlockHeader:
     """Main class to parse the block headers.
 
+    The returned ``data`` is the block view after applying the sector fixups. Only declared sectors are read, and
+    the view never grows beyond the bytes that are actually present: a truncated block is kept at its real length
+    instead of being zero-filled. A fixup table that does not fit inside the available bytes is rejected, because
+    the sector tails it should restore cannot be trusted.
+
     Args:
         fh: A file-like object.
         offset: Offset to start reading the block header from.
@@ -319,17 +324,37 @@ class BlockHeader:
         fh.seek(self.offset)
         self.header = c_clfs.CLFS_LOG_BLOCK_HEADER(fh)
 
+        total_sectors = self.header.TotalSectors
+        if total_sectors == 0:
+            self.data = b""
+            return
+
+        block_size = total_sectors * SECTOR_SIZE
+
         fh.seek(self.offset)
-        data = bytearray(fh.read(self.header.TotalSectors * SECTOR_SIZE))
-        view = memoryview(data)
+        raw = fh.read(block_size)
+        # ``available`` may be smaller than the declared block size for a truncated container. It is never larger.
+        available = len(raw)
 
-        fixup = view[self.header.FixupOffset :]
-        ptr = view[SECTOR_SIZE - 2 :]
+        data = bytearray(raw)
 
-        for _ in range(self.header.TotalSectors):
-            ptr[:2] = fixup[:2]
-            fixup = fixup[2:]
-            ptr = ptr[SECTOR_SIZE:]
+        fixup_offset = self.header.FixupOffset
+        if self.header.Fixup or fixup_offset:
+            # A block without a fixup number and without a fixup table has no sector tails to restore.
+            fixup_end = fixup_offset + total_sectors * 2
+            if fixup_offset < c_clfs.CLFS_LOG_BLOCK_HEADER.size or fixup_end > available:
+                raise EOFError(
+                    f"Log block at offset {offset:#x} has a truncated fixup table "
+                    f"({fixup_offset:#x}..{fixup_end:#x}, {available} bytes available)"
+                )
+
+            view = memoryview(data)
+            for sector in range(total_sectors):
+                tail = (sector + 1) * SECTOR_SIZE - 2
+                if tail + 2 > available:
+                    break
+                fixup = fixup_offset + sector * 2
+                view[tail : tail + 2] = view[fixup : fixup + 2]
 
         self.data = bytes(data)
 
