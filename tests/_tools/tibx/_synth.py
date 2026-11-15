@@ -646,6 +646,7 @@ def build_lsm_archive(
     page_base: int = 0,
     slices: list[int] | None = None,
     extra_slots: dict[int, bytes] | None = None,
+    extra_data_map_cells: list[Cell] | None = None,
 ) -> bytes:
     """Build a complete synthetic archive: ARCH header + LSM maps + SG segments.
 
@@ -656,12 +657,17 @@ def build_lsm_archive(
 
     ``page_base`` makes all absolute page/byte offsets (segment_map, ctrees) global
     for a *version file* mapped at that logical page offset of a version set;
-    ``extra_slots`` adds raw TLV payloads (e.g. slot 18, the volumes).
+    ``extra_slots`` adds raw TLV payloads (e.g. slot 18, the volumes);
+    ``extra_data_map_cells`` adds raw data_map records with no extent behind them
+    (e.g. an extent whose segment the segment_map does not know).
     """
     data_key = bytes(range(KEY_LENGTH[alg])) if password is not None else None
     pages, dm_cells, sm_cells, _ = _segments_and_maps(
         extents, start_page=page_base + 1, compression=compression, data_key=data_key, alg=alg
     )
+    if extra_data_map_cells:
+        dm_cells += extra_data_map_cells
+        dm_cells.sort(key=lambda cell: cell.key)
 
     if use_ctree:
         next_page = page_base + 1 + len(pages)

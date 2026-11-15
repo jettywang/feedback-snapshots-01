@@ -103,6 +103,11 @@ class RecoveryPoint:
     Slice ids are not contiguous: a differential chain here numbered its two backups 2 and
     4. Address a point by its list index, and let :attr:`slice_id` stay whatever the
     archive says it is.
+
+    Chain order is slice-id order, never wall-clock order: the record's times are
+    writer-supplied, and a machine whose clock was rolled back records earlier times for
+    a later backup. See :mod:`dissect.archive.tibx.selection` for selecting a point with
+    that in mind.
     """
 
     def __init__(self, index: int, slice_id: int, record: c_tibx.slice_record):
@@ -127,13 +132,31 @@ class RecoveryPoint:
         return slice_type.name or f"unknown ({int(slice_type):#x})"
 
     @property
+    def deleted(self) -> bool:
+        """Whether this backup is marked deleted (the bit above :data:`SLICE_TYPE_MASK` of the record's flags)."""
+        return bool(self._record.flags & 0x80)
+
+    @property
+    def ctime_ms(self) -> int:
+        """When this backup started, as the raw milliseconds of the record; 0 if the writer left it unset."""
+        return self._record.ctime_ms
+
+    @property
+    def ftime_ms(self) -> int:
+        """When this backup finished, as the raw milliseconds of the record; 0 if the writer left it unset.
+
+        A 0 here is how an interrupted backup shows up: it never recorded a finish time.
+        """
+        return self._record.ftime_ms
+
+    @property
     def created(self) -> datetime.datetime:
-        """When this backup started."""
+        """When this backup started. The epoch itself if the record carries no start time."""
         return datetime.datetime.fromtimestamp(self._record.ctime_ms / 1000, datetime.timezone.utc)
 
     @property
     def finished(self) -> datetime.datetime:
-        """When this backup finished."""
+        """When this backup finished. The epoch itself if the record carries no finish time."""
         return datetime.datetime.fromtimestamp(self._record.ftime_ms / 1000, datetime.timezone.utc)
 
 
@@ -151,9 +174,13 @@ class ItemStream(NamedTuple):
 class TIBX:
     """An Acronis TIBX ("archive3") backup archive.
 
-    Opens at the latest recovery point. Use :meth:`recovery_points` to enumerate the
-    backups the archive records and :meth:`use_recovery_point` to select an earlier one
-    in a chain.
+    Opens at the live commit root -- ``"latest"`` -- which is a convenience default, not a
+    declared backup: it is whatever the newest commit left in the data_map, including the
+    extents of a backup that was interrupted before it could record a slice. Use
+    :meth:`recovery_points` to enumerate the backups the archive records and
+    :meth:`use_recovery_point` to select an earlier one in a chain;
+    :mod:`dissect.archive.tibx.selection` spells out what "latest" can mean and selects
+    with an explicit fallback.
 
     Args:
         fh: A file-like object of the archive, or the ordered file-like objects of a
@@ -405,8 +432,9 @@ class TIBX:
         """Select which recovery point volumes and reads reflect.
 
         Args:
-            recovery_point: ``"latest"`` (the live root, default), ``"oldest"``, or an
-                integer index into :meth:`recovery_points`.
+            recovery_point: ``"latest"`` (the live root, default -- the newest state of the
+                data_map, not necessarily a finished backup), ``"oldest"``, or an integer
+                index into :meth:`recovery_points`.
 
         Raises:
             ~dissect.archive.tibx.exception.InvalidArchiveError: If an integer index is out of range.
