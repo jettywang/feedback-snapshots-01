@@ -353,11 +353,30 @@ module OneLogin
       end
 
       # @return [Array] The Audience elements from the Contitions of the SAML Response.
+      # Every Audience is flattened into a single array, no matter which AudienceRestriction
+      # group it belongs to. Use audience_restrictions to preserve the group structure.
       #
       def audiences
-        @audiences ||= begin
-          nodes = xpath_from_signed_assertion('/a:Conditions/a:AudienceRestriction/a:Audience')
-          nodes.map { |node| Utils.element_text(node) }.reject(&:empty?)
+        @audiences ||= audience_restrictions.flatten
+      end
+
+      # @return [Array<Array<String>>] The Audience elements grouped by AudienceRestriction,
+      # extracted from the Conditions of the signed Assertion that is actually validated.
+      # Each nested array represents one AudienceRestriction group (disjunction of its
+      # audiences) and the outer array preserves the conjunction between groups, as
+      # required by the SAML 2.0 core specification.
+      #
+      def audience_restrictions
+        @audience_restrictions ||= begin
+          restriction_nodes = xpath_from_signed_assertion('/a:Conditions/a:AudienceRestriction')
+          restriction_nodes.map do |restriction_node|
+            audience_nodes = REXML::XPath.match(
+              restriction_node,
+              './a:Audience',
+              SAML_NAMESPACES
+            )
+            audience_nodes.map { |node| Utils.element_text(node) }.reject(&:empty?)
+          end
         end
       end
 
@@ -635,7 +654,15 @@ module OneLogin
       # Validates the Audience, (If the Audience match the Service Provider EntityID)
       # If the response was initialized with the :skip_audience option, this validation is skipped,
       # If fails, the error is added to the errors array
-      # @return [Boolean] True if there is an Audience Element that match the Service Provider EntityID, otherwise False if soft=True
+      #
+      # Multiple <AudienceRestriction> elements are evaluated following the SAML 2.0 core
+      # specification: within one restriction the SP entity id only has to match a single
+      # Audience (disjunction), while every restriction has to be satisfied (conjunction).
+      # Flattening all restrictions into a single union would wrongly accept an assertion
+      # whose audiences are split across mutually exclusive groups.
+      #
+      # @return [Boolean] True if the Service Provider EntityID is accepted by every
+      # AudienceRestriction group, otherwise False if soft=True
       # @raise [ValidationError] if soft == false and validation fails
       #
       def validate_audience
@@ -647,7 +674,7 @@ module OneLogin
           return append_error("Invalid Audiences. The <AudienceRestriction> element contained only empty <Audience> elements. Expected audience #{settings.sp_entity_id}.")
         end
 
-        unless audiences.include? settings.sp_entity_id
+        unless audience_restrictions.all? { |group| group.include?(settings.sp_entity_id) }
           s = audiences.count > 1 ? 's' : '';
           error_msg = "Invalid Audience#{s}. The audience#{s} #{audiences.join(',')}, did not match the expected audience #{settings.sp_entity_id}"
           return append_error(error_msg)

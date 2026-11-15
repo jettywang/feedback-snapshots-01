@@ -778,6 +778,25 @@ element containing an <Audience> element that uniquely identifies the service pr
 the `skip_audience` option, Ruby SAML will validate that each SAML response includes an <Audience> element
 whose contents matches `settings.sp_entity_id`.
 
+An assertion can carry several <AudienceRestriction> elements inside its <Conditions>. Following the
+SAML 2.0 core specification, they are combined with a disjunction *within* each group and a conjunction
+*between* groups: the SP entity id only has to match one <Audience> of each <AudienceRestriction>, but it
+has to be accepted by every <AudienceRestriction>. All groups are flattened together when exposing
+`response.audiences`; use `response.audience_restrictions` to keep the group structure.
+
+```xml
+<Conditions>
+  <!-- accepted: the SP entity id matches one audience of each restriction -->
+  <AudienceRestriction>
+    <Audience>https://sp.example.com/metadata</Audience>
+    <Audience>https://sp-backup.example.com/metadata</Audience>
+  </AudienceRestriction>
+  <AudienceRestriction>
+    <Audience>https://sp.example.com/metadata</Audience>
+  </AudienceRestriction>
+</Conditions>
+```
+
 By default, Ruby SAML considers an <AudienceRestriction> element containing only empty <Audience> elements
 to be valid. That means an otherwise valid SAML response with a condition like this would be valid:
 
@@ -793,6 +812,12 @@ is invalid using the `settings.security[:strict_audience_validation]` parameter.
 ```ruby
 settings.security[:strict_audience_validation] = true
 ```
+
+Other condition types inside <Conditions> (for example <OneTimeUse> or extension conditions the toolkit
+does not understand) do not cause the response to be rejected: Ruby SAML only evaluates the conditions it
+implements, namely the NotBefore/NotOnOrAfter time window and the <AudienceRestriction> groups. The
+audience checks always run against the signed assertion that is actually validated, never against data
+taken from an additional unsigned assertion.
 
 ## Single Log Out
 

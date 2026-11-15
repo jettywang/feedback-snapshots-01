@@ -1,5 +1,8 @@
 # Ruby SAML Changelog
 
+### Unreleased
+* Evaluate multiple `AudienceRestriction` groups with disjunction inside each group and conjunction between groups instead of flattening every `Audience` into a single union. Add `Response#audience_restrictions` to expose the group structure.
+
 ### 1.18.1  (Jul 29, 2025)
 * Fix vulnerability CVE-2025-54572 Prevent DOS due large SAML Message
 * Adapt tests to be able to execute signature validation sooner
