@@ -232,6 +232,20 @@ class Minitest::Test
     @idp_metadata_different_sign_and_encrypt_cert ||= File.read(File.join(File.dirname(__FILE__), 'metadata', 'idp_metadata_different_sign_and_encrypt_cert.xml'))
   end
 
+  def trusted_metadata_fixture(name)
+    @trusted_metadata_fixtures ||= {}
+    @trusted_metadata_fixtures[name] ||= File.read(File.join(File.dirname(__FILE__), "metadata", "trusted", name))
+  end
+
+  def trusted_metadata_certificate(name)
+    @trusted_metadata_certificates ||= {}
+    @trusted_metadata_certificates[name] ||= OpenSSL::X509::Certificate.new(trusted_metadata_fixture(name))
+  end
+
+  def trusted_metadata_time
+    Time.parse("2026-06-01T00:00:00Z").utc
+  end
+
   def idp_different_slo_response_location
     @idp_different_slo_response_location ||= File.read(File.join(File.dirname(__FILE__), 'metadata', 'idp_different_slo_response_location.xml'))
   end

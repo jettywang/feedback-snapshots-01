@@ -415,7 +415,65 @@ Those return an Hash instead of a `Settings` object, which may be useful for con
 
 ### Validating Signature of Metadata and retrieve settings
 
-Right now there is no method at ruby_saml to validate the signature of the metadata that is going to be parsed, but it can be done as follows:
+`IdpMetadataParser#parse` does not validate metadata signatures and will accept
+any `IDPSSODescriptor` it is pointed at. For a metadata collection that contains
+several IdPs, use `TrustedMetadataImporter` instead. It requires the caller to
+supply the trust anchors, the one target entityID, and the verification time:
+
+```ruby
+require "onelogin/ruby-saml/trusted_metadata_importer"
+
+trust_anchor = OpenSSL::X509::Certificate.new(File.read("metadata-signer.pem"))
+
+result = OneLogin::RubySaml::TrustedMetadataImporter.import(
+  metadata_xml,                                  # String, IO, or Nokogiri document
+  [trust_anchor],                                # the only trusted signers/CA anchors
+  "https://idp.example.com/metadata",            # exactly one target entityID
+  Time.now.utc                                   # explicit verification time
+)
+
+settings = result.settings
+settings.idp_sso_service_url # only the target's endpoint, if it was adopted
+settings.idp_cert            # only the target's signing certificate
+
+result.signature_paths       # paths of the signatures that covered the target
+result.rejected.each do |entry|
+  entry.entity_id            # every other entity stays as evidence
+  entry.reason
+  entry.sso_locations
+  entry.signing_certificate_fingerprints
+end
+```
+
+`TrustedMetadataImporter` enforces the following rules:
+
+* **Coverage.** A signature covers the element its `Reference` resolves to and
+  that element's descendants. The covered element must be the target entity or
+  one of its ancestors. A signature on one `EntityDescriptor` therefore never
+  authenticates a sibling, and a signature on an inner `EntitiesDescriptor`
+  authenticates only the entities nested inside it.
+* **All covering signatures count.** If more than one signature covers the
+  target, every one of them must verify. A bad extra signature rejects the
+  target; it is not skipped in favour of a good one.
+* **Anchors only.** The certificate in the signature's `KeyInfo` must chain to
+  one of the caller's trust anchors. The anchor may be a CA or the signer's own
+  certificate (a pinned leaf); the signer is still checked for validity at the
+  verification time. Certificates advertised inside entity `KeyDescriptor`s are
+  never used as metadata trust and are never merged into a new trust pool.
+* **Hierarchical validity.** The effective `validUntil` is the earliest value on
+  the target and all of its ancestors, including the document root. A
+  `cacheDuration` is only used when the element has no `validUntil`, and is
+  measured from the element's `IssueInstant` (or the nearest enclosing one).
+  The target is rejected when the verification time is at or after that limit.
+* **Uniqueness.** Duplicate `entityID` values, a missing target, and an entity
+  without an `IDPSSODescriptor`, SSO endpoint, or signing certificate are
+  rejected explicitly rather than resolved by picking one.
+* **Evidence.** On success `Result#rejected` lists every entity that was not
+  adopted, with its endpoints and certificate fingerprints. On failure
+  `TrustedMetadataError#evidence` exposes the same information plus the reason
+  each entity was rejected or left unselected.
+
+The older manual approach below remains valid for single-entity metadata:
 
 * Download the XML.
 * Validate the Signature, providing the cert.

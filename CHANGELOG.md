@@ -1,5 +1,8 @@
 # Ruby SAML Changelog
 
+### Unreleased
+* Add `TrustedMetadataImporter` for restricted import from a signed metadata collection: caller-supplied trust anchors, a single target entityID, and an explicit verification time. Signature coverage is bound to the covered element so a signed entity never authenticates its siblings; validity is inherited from all ancestors; duplicate IDs, expired ancestors, and unanchored certificates are rejected with evidence.
+
 ### 1.18.1  (Jul 29, 2025)
 * Fix vulnerability CVE-2025-54572 Prevent DOS due large SAML Message
 * Adapt tests to be able to execute signature validation sooner
