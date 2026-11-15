@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 from typing import TYPE_CHECKING, BinaryIO
 from uuid import UUID
 
@@ -13,6 +14,7 @@ from dissect.fve.luks.c_luks import (
     SECONDARY_HEADER_OFFSETS,
     c_luks,
 )
+from dissect.fve.luks.layout import Region, validate_luks2_layout
 from dissect.fve.luks.metadata import Metadata
 
 if TYPE_CHECKING:
@@ -66,6 +68,7 @@ class LUKS:
         self.label = None
         self.checksum_algorithm = None
         self.metadata, self.metadata1, self.metadata2 = None, None, None
+        self.layout: list[Region] | None = None
 
         self.uuid = UUID(self.header.uuid.strip(b"\x00").decode())
 
@@ -87,6 +90,15 @@ class LUKS:
             self.metadata2 = Metadata.from_json(json_area2)
 
             self.metadata = self.metadata1 or self.metadata2
+
+            # Validate the physical layout (metadata areas, keyslot areas and data segments)
+            # before any keyslot bytes are read or any decryption is attempted
+            metadata_regions = [
+                (header.hdr_offset, header.hdr_size)
+                for header in (self.header1, self.header2)
+                if header is not None and header.magic in (LUKS2_MAGIC_1ST, LUKS2_MAGIC_2ND)
+            ]
+            self.layout = validate_luks2_layout(self.metadata, metadata_regions, _device_size(fh))
 
         self._active_volume_key = None
         self._active_keyslot_id = None
@@ -237,6 +249,15 @@ def derive_passphrase_key(passphrase: bytes, keyslot: Keyslot) -> bytes:
         return argon2.hash_secret_raw(passphrase, kdf.salt, kdf.time, kdf.memory, kdf.cpus, keyslot.key_size, kdf.type)
 
     raise NotImplementedError(f"Unsupported kdf algorithm: {kdf.type}")
+
+
+def _device_size(fh: BinaryIO) -> int:
+    """Return the size of the underlying device without reading its contents."""
+    position = fh.tell()
+    try:
+        return fh.seek(0, io.SEEK_END)
+    finally:
+        fh.seek(position)
 
 
 def find_luks_headers(fh: BinaryIO) -> tuple[int | None, int | None, int | None]:
