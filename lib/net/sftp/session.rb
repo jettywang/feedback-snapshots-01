@@ -49,6 +49,13 @@ module Net; module SFTP
     # The highest protocol version supported by the Net::SFTP library.
     HIGHEST_PROTOCOL_VERSION_SUPPORTED = 6
 
+    # The largest SFTP packet length (the 32-bit field before the packet type
+    # byte, not counting that 4-byte field) that the client will accept from
+    # the server. OpenSSH's sftp-server uses the same 256 KiB limit. A larger
+    # declared length is rejected as soon as its header arrives, before any of
+    # the claimed payload is buffered.
+    MAX_PACKET_LENGTH = 256 * 1024
+
     # A reference to the Net::SSH session object that powers this SFTP session.
     attr_reader :session
 
@@ -884,7 +891,7 @@ module Net; module SFTP
         debug { "sftp subsystem successfully started" }
         @state = :init
 
-        channel.on_data { |c,data| input.append(data) }
+        channel.on_data(&method(:when_channel_data))
         channel.on_extended_data { |c,t,data| debug { data } }
 
         channel.on_process(&method(:when_channel_polled))
@@ -901,8 +908,11 @@ module Net; module SFTP
         was_opening = opening?
         @channel = nil
         begin
-          # Data that arrived in the same read as the close has not been polled yet.
-          when_channel_polled(channel)
+          # Data that arrived in the same read as the close has not been polled
+          # yet. No more data can arrive, so anything still incomplete or
+          # unparseable is discarded instead of being reported as a framing
+          # error on top of the close.
+          when_channel_polled(channel, :closing)
         ensure
           @state = :closed
           failed, @pending_requests = @pending_requests, {}
@@ -912,17 +922,50 @@ module Net; module SFTP
         raise error if was_opening || failed.any?
       end
 
+      # Called for each chunk of data the SSH channel delivers. The chunk is
+      # just an arbitrary slice of the byte stream: packet boundaries are
+      # discovered by #when_channel_polled, so one SFTP packet may span many
+      # callbacks and one callback may carry several packets. Nothing is
+      # buffered once framing has failed or the channel has closed.
+      #
+      # The length field is read and checked here as soon as it is complete,
+      # and before any of the body bytes from the same callback are appended:
+      # an oversized declaration therefore fails without ever buffering the
+      # payload it claims. Complete packets are still parsed on the next poll.
+      def when_channel_data(channel, data)
+        return unless state == :init || state == :open
+
+        if @packet_length.nil? && input.length < 4
+          take = [4 - input.length, data.bytesize].min
+          input.append(data.byteslice(0, take))
+          data = data.byteslice(take..-1)
+          read_packet_length(channel)
+        end
+
+        input.append(data) if data && !data.empty?
+      end
+
       # Called whenever Net::SSH polls the SFTP channel for pending activity.
       # This basically checks the input buffer to see if enough input has been
       # accumulated to handle. If there has, the packet is parsed and
       # dispatched, according to its type (see #do_version and #dispatch_request).
-      def when_channel_polled(channel)
+      #
+      # Packet boundaries depend only on the 32-bit length field, so that field
+      # is validated before the payload is buffered: a packet length below one
+      # (there must be a type byte) or above MAX_PACKET_LENGTH is a framing
+      # error and terminates the session (see #fail_framing!). A short read is
+      # not an error: incomplete headers and packets stay buffered until more
+      # data arrives, and complete packets are dispatched whether they arrive
+      # one at a time or several in the same callback.
+      #
+      # With +mode+ :closing the channel has already closed, so no further bytes
+      # can complete anything still buffered. Complete packets are dispatched,
+      # and an incomplete or unusable one is dropped silently instead of
+      # raising a framing error over the close.
+      def when_channel_polled(channel, mode = nil)
         while input.length > 0
-          if @packet_length.nil?
-            # make sure we've read enough data to tell how long the packet is
-            return unless input.length >= 4
-            @packet_length = input.read_long
-          end
+          length_state = read_packet_length(channel, mode)
+          return if length_state == :incomplete || length_state == :dropped
 
           return unless input.length >= @packet_length + 4
           packet = Net::SFTP::Packet.new(input.read(@packet_length))
@@ -937,6 +980,51 @@ module Net; module SFTP
             dispatch_request(packet)
           end
         end
+      end
+
+      # Reads and validates the 4-byte length field if it has fully arrived.
+      # Returns :incomplete when the header is not complete yet, :ok when a
+      # usable length is buffered, and :dropped when :closing mode discarded
+      # an unusable fragment.
+      def read_packet_length(channel, mode = nil)
+        return :ok if @packet_length
+        return :incomplete unless input.length >= 4
+
+        @packet_length = input.read_long
+        if @packet_length.between?(1, MAX_PACKET_LENGTH)
+          :ok
+        elsif mode == :closing
+          discard_input
+          :dropped
+        else
+          fail_framing!(channel, @packet_length)
+        end
+      end
+
+      # Called when a length field cannot describe an SFTP packet. The stream
+      # cannot be resynchronized without trusting that field, so the session is
+      # terminal: every request still awaiting a response is failed with the
+      # same FramingError, responses that were already dispatched stay
+      # delivered, and all buffered bytes (the bad header and anything after
+      # it) are discarded rather than being parsed as a later packet. The error
+      # is then raised out of the event loop.
+      def fail_framing!(channel, length)
+        error = FramingError.new(length)
+        debug { error.message }
+        discard_input
+        channel.close
+        @channel = nil
+        @state = :closed
+        failed, @pending_requests = @pending_requests, {}
+        failed.each_value { |request| request.fail!(error) }
+        raise error
+      end
+
+      # Drops the partial length field and any buffered bytes, so no stale
+      # fragment can be mistaken for the start of a later packet.
+      def discard_input
+        @packet_length = nil
+        @input = Net::SSH::Buffer.new
       end
 
       # Called to handle FXP_VERSION packets. This performs the SFTP protocol

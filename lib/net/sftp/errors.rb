@@ -11,6 +11,21 @@ module Net; module SFTP
     end
   end
 
+  # Raised when the declared length of an SFTP packet falls outside the
+  # framing bounds. Unlike a malformed payload inside a complete frame, an
+  # unusable length means the packet boundaries cannot be trusted, so all of
+  # the requests still pending at that point fail with this error and the
+  # session discards its buffered input.
+  class FramingError < Net::SFTP::Exception
+    # The length field of the offending packet.
+    attr_reader :length
+
+    def initialize(length, message = "invalid SFTP packet length #{length}")
+      @length = length
+      super(message)
+    end
+  end
+
   # A exception class for reporting a non-success result of an operation.
   class StatusException < Net::SFTP::Exception
 
