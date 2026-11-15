@@ -3,6 +3,14 @@ Detailed CHANGELOG
 
 olefile.py
 ----------
+* 2026-11-15:
+    - added olefile.encaudit: read-only structural audit of encrypted Office
+      (OOXML) containers. Parses Standard and Agile EncryptionInfo per
+      [MS-OFFCRYPTO], cross-checks version/algorithm/key-size/hash and the
+      EncryptedPackage declared length, rejects external/unknown schemes,
+      DTDs and duplicate declarations, and digests ciphertext by streaming
+      only. Password verification and content integrity are never executed
+      and are reported as NOT_PERFORMED. CLI: python -m olefile.encaudit
 * 2023-11-30 v0.47.dev6:
     - fixed issue #142: isOleFile has a new data parameter to handle files in memory properly
     - fixed issue #156: write_sect now correctly detects when data is larger than the sector size
