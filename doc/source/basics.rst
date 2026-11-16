@@ -77,6 +77,40 @@ method is called, the translation is done automatically and the correct data gat
 
 The list of layers supported by Volatility can be determined by running the `frameworkinfo` plugin.
 
+QEMU suspend files
+^^^^^^^^^^^^^^^^^^
+
+A QEMU suspend-to-disk file stores RAM as a sequence of page records.  The same
+page may appear multiple times, and the RAM block name can change between
+records, so the QEMU layer records every page along with the block it belongs
+to, the file offset of its payload and the encoding used.  Only pages whose
+block is ``pc.ram`` form the readable address space; pages from other RAM
+blocks are kept as evidence but never mapped into it.
+
+Reading a page follows these rules:
+
+* A record without ``SEGMENT_FLAG_CONTINUE`` names its RAM block; a record with
+  the flag reuses the name from the previous page record.
+* A normal page stores one page of bytes.  ``SEGMENT_FLAG_COMPRESS`` stores a
+  single byte repeated over the whole page (it is not a zlib stream).
+* The last record for a block and address wins.  Earlier records remain in
+  :attr:`~volatility3.framework.layers.qemu.QemuSuspendLayer.ram_page_records`
+  and their ``superseded_by`` field points at the record that replaced them.
+* XBZRLE delta pages are not decoded.  The newest record still wins and the
+  page remains unresolved, with ``unsupported_reason`` explaining why; the
+  layer does not silently fall back to an older record.
+
+The layer exposes :meth:`~volatility3.framework.layers.qemu.QemuSuspendLayer.ram_page_source`
+to find the record supplying a page, :meth:`~volatility3.framework.layers.qemu.QemuSuspendLayer.ram_page_history`
+for every record of a block/address pair and
+:meth:`~volatility3.framework.layers.qemu.QemuSuspendLayer.ram_page_report` for
+a per-record readable/superseded/other-block status.
+
+Page addresses in the file have the PCI address hole compressed out.  Each
+record keeps the value as stored (``encoded_address``) together with the hole
+that applied, so the final address can be recomputed with
+:meth:`~volatility3.framework.layers.qemu.QemuSuspendLayer.relocate_ram_address`.
+
 Templates and Objects
 ---------------------
 

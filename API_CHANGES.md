@@ -4,6 +4,16 @@ API Changes
 When an addition to the existing API is made, the minor version is bumped.
 When an API feature or function is removed or changed, the major version is bumped.
 
+2.29.0
+======
+QEMU suspend layer now exposes per-record evidence:
+`QemuRamPageRecord`, `QemuSuspendLayer.ram_page_records`,
+`ram_page_history`, `ram_page_winner`, `ram_page_source`, `ram_page_report`,
+`ram_mem_sizes` and `relocate_ram_address`.
+Repeated RAM pages now follow last-record-wins semantics per RAM block;
+records for blocks other than `pc.ram` no longer enter the readable address
+space, and compressed records are expanded from their own winning record.
+
 2.25.0
 ======
 Pointer class now supports `get_raw_value()`.
