@@ -10,6 +10,7 @@ from ._status_codes import *
 from ._transports import *
 from ._types import *
 from ._urls import *
+from ._mtls import *
 
 try:
     from ._main import main
@@ -34,12 +35,20 @@ __all__ = [
     "AsyncBaseTransport",
     "AsyncByteStream",
     "AsyncClient",
+    "AsyncClientIdentityTransport",
     "AsyncHTTPTransport",
     "Auth",
     "BaseTransport",
     "BasicAuth",
     "ByteStream",
     "Client",
+    "client_identity",
+    "ClientIdentity",
+    "ClientIdentityError",
+    "ClientIdentityNotRegistered",
+    "ClientIdentityNotRequested",
+    "ClientIdentityOriginDenied",
+    "ClientIdentityTransport",
     "CloseError",
     "codes",
     "ConnectError",
@@ -62,6 +71,7 @@ __all__ = [
     "LocalProtocolError",
     "main",
     "MockTransport",
+    "MTLS_CLIENT_IDENTITY_EXTENSION",
     "NetRCAuth",
     "NetworkError",
     "options",
@@ -103,4 +113,6 @@ __all__ = [
 __locals = locals()
 for __name in __all__:
     if not __name.startswith("__"):
-        setattr(__locals[__name], "__module__", "httpx")  # noqa
+        __obj = __locals[__name]
+        if hasattr(__obj, "__module__"):
+            __obj.__module__ = "httpx"  # noqa

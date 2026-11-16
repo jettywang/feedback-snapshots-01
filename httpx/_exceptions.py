@@ -19,6 +19,10 @@ Our exception hierarchy:
         · RemoteProtocolError
       - ProxyError
       - UnsupportedProtocol
+    + ClientIdentityError
+      · ClientIdentityNotRequested
+      · ClientIdentityNotRegistered
+      · ClientIdentityOriginDenied
     + DecodingError
     + TooManyRedirects
   x HTTPStatusError
@@ -40,6 +44,10 @@ if typing.TYPE_CHECKING:
     from ._models import Request, Response  # pragma: no cover
 
 __all__ = [
+    "ClientIdentityError",
+    "ClientIdentityNotRegistered",
+    "ClientIdentityNotRequested",
+    "ClientIdentityOriginDenied",
     "CloseError",
     "ConnectError",
     "ConnectTimeout",
@@ -234,6 +242,42 @@ class RemoteProtocolError(ProtocolError):
     The protocol was violated by the server.
 
     For example, returning malformed HTTP.
+    """
+
+
+# Restricted client certificate (mTLS) identity exceptions...
+
+
+class ClientIdentityError(RequestError):
+    """
+    Base class for failures raised while selecting an authorized client
+    certificate (mTLS) identity for a request.
+
+    These failures are always raised *before* any connection is established,
+    so an unauthorized request never reaches the network.
+    """
+
+
+class ClientIdentityNotRequested(ClientIdentityError):
+    """
+    A request reached an identity-restricted transport without naming the
+    pre-registered client identity it is authorized to use.
+    """
+
+
+class ClientIdentityNotRegistered(ClientIdentityError):
+    """
+    A request named a client identity that the application did not register
+    with the transport. Identities are not arbitrary file paths, so the
+    caller cannot point the transport at an unregistered certificate.
+    """
+
+
+class ClientIdentityOriginDenied(ClientIdentityError):
+    """
+    The selected client identity is not authorized for the request target
+    origin. This is re-checked on every request, including each redirect and
+    authentication follow-up, before a connection is acquired.
     """
 
 
