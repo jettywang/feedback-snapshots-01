@@ -53,6 +53,9 @@ ShadowCopyInformation = namedtuple('ShadowCopyInformation', [ 'stack_position', 
 LocationDescriptionItems = namedtuple('LocationDescriptionItems', [ 'volume_offset', 'store_offset', 'size' ])
 OnDiskTableEntry = namedtuple('OnDiskTableEntry', [ 'original_volume_offset', 'data_block_offset_in_store', 'data_block_volume_offset', 'flags', 'allocation_bitmap' ])
 
+# A sentinel used to distinguish a cached empty translation result from a missing cache entry.
+_NO_TRANSLATION_CACHED = object()
+
 class ShadowCopyException(Exception):
 	"""This is a top-level exception for this module."""
 
@@ -675,6 +678,15 @@ class ShadowParser(object):
 	current_offset = None
 	"""A current offset in an image file."""
 
+	translation_cache = None
+	"""A cache of translated offsets: a dictionary keyed by (offset, ignore_overlay_entries, do_forward_lookup)."""
+
+	regular_entry_offsets = None
+	"""A set of original volume offsets having at least one non-overlay entry (used to decide a store switch in O(1))."""
+
+	stats = None
+	"""A dictionary of machine-independent counters (mapping work and coalesced reads)."""
+
 	use_second_volume = None
 	"""A different volume is used to store shadow copies."""
 
@@ -685,6 +697,12 @@ class ShadowParser(object):
 		"""
 
 		self.shadow_selected = False
+
+		self.translation_cache = dict()
+		self.regular_entry_offsets = set()
+		self.stats = dict(translate_requests = 0, translate_cache_hits = 0,
+		                  store_chain_steps = 0, diff_entry_inspections = 0,
+		                  coalesced_read_runs = 0, physical_read_calls = 0)
 
 		self.volume_object = volume_object
 		self.volume_offset = volume_offset
@@ -774,14 +792,11 @@ class ShadowParser(object):
 		self.current_application_information = self.read_application_information()
 		self.current_diff_area = self.read_diff_area()
 
-		self.current_diff_area_index = dict()
+		self._build_diff_area_index()
 
-		item_pos = 0
-		for item in self.current_diff_area:
-			if item.original_volume_offset not in self.current_diff_area_index.keys():
-				self.current_diff_area_index[item.original_volume_offset] = item_pos
-
-			item_pos += 1
+		# A new snapshot (or a re-selection) invalidates every cached translation and read state.
+		self.translation_cache = dict()
+		self._reset_stats()
 
 		stack_position = self.current_cbi2.get_stack_position()
 		self.current_next_parser = ShadowParser(self.volume_object, self.volume_offset, self.volume_size)
@@ -946,6 +961,44 @@ class ShadowParser(object):
 
 		return items
 
+	def _build_diff_area_index(self):
+		"""Build the diff area index and a set of offsets having non-overlay entries.
+
+		The index maps an original volume offset to the position of its first entry in the sorted diff area.
+		The set ('regular_entry_offsets') lets a store-switch decision be made in O(1) without walking
+		the whole store chain for every data block read.
+		"""
+
+		self.current_diff_area_index = dict()
+		self.regular_entry_offsets = set()
+
+		item_pos = 0
+		for item in self.current_diff_area:
+			if item.original_volume_offset not in self.current_diff_area_index:
+				self.current_diff_area_index[item.original_volume_offset] = item_pos
+
+			if item.flags & DIFF_AREA_TABLE_ENTRY_UNKNOWN_NAME_2 == 0:
+				self.regular_entry_offsets.add(item.original_volume_offset)
+
+			item_pos += 1
+
+	def _reset_stats(self):
+		"""Reset the machine-independent counters (mapping work and coalesced reads)."""
+
+		self.stats = dict(translate_requests = 0, translate_cache_hits = 0,
+		                  store_chain_steps = 0, diff_entry_inspections = 0,
+		                  coalesced_read_runs = 0, physical_read_calls = 0)
+
+	def _invalidate_translation_cache_chain(self):
+		"""Invalidate translation caches of this parser and of every next store in the stack."""
+
+		parser = self
+		while parser is not None:
+			if parser.translation_cache is not None:
+				parser.translation_cache.clear()
+
+			parser = parser.current_next_parser
+
 	def check_bitmap(self, offset, check_previous_bitmap = True):
 		"""Check if a given offset is set in the bitmap (in the current one and in the previous one, if requested), return True if it is."""
 
@@ -976,7 +1029,26 @@ class ShadowParser(object):
 		The list is empty if a given volume offset is not found. Each offset in the list points to a 512-byte block. The offset can be None for a 512-byte block filled with null bytes.
 		If the 'ignore_overlay_entries' argument is True, ignore data from overlays (used internally when switching to the next store from the current one).
 		If the 'do_forward_lookup' argument is True, do the forward lookup (used internally).
+
+		Results are memoized per selected shadow copy; the cache is invalidated by a snapshot switch
+		or by a backward seek (see 'seek' and '_invalidate_translation_cache_chain').
 		"""
+
+		cache_key = (offset, bool(ignore_overlay_entries), bool(do_forward_lookup))
+		cached = self.translation_cache.get(cache_key, _NO_TRANSLATION_CACHED)
+
+		self.stats['translate_requests'] += 1
+		if cached is not _NO_TRANSLATION_CACHED:
+			self.stats['translate_cache_hits'] += 1
+			return cached
+
+		result = self._translate_exact_offset_uncached(offset, ignore_overlay_entries, do_forward_lookup)
+		self.translation_cache[cache_key] = result
+
+		return result
+
+	def _translate_exact_offset_uncached(self, offset, ignore_overlay_entries = False, do_forward_lookup = False):
+		"""Translate an offset without using the translation cache (the caching wrapper calls this method)."""
 
 		def lookup_in_next_store(offset, do_forward_lookup):
 			if self.current_next_parser is None:
@@ -1002,25 +1074,14 @@ class ShadowParser(object):
 			if next_parser is None:
 				return 2 # Switch to the original volume (there is no next store).
 
-			while next_parser is not None:
-				if offset in next_parser.current_diff_area_index.keys():
-					pos = next_parser.current_diff_area_index[offset]
+			parser = next_parser
+			while parser is not None:
+				self.stats['store_chain_steps'] += 1
 
-					while True:
-						try:
-							table_entry = next_parser.current_diff_area[pos]
-						except IndexError:
-							break
+				if offset in parser.regular_entry_offsets: # An O(1) lookup replaces a per-store entry scan.
+					return 1 # Switch to the next store.
 
-						if table_entry.original_volume_offset != offset:
-							break
-
-						if table_entry.flags & DIFF_AREA_TABLE_ENTRY_UNKNOWN_NAME_2 == 0:
-							return 1 # Switch to the next store.
-
-						pos += 1
-
-				next_parser = next_parser.current_next_parser
+				parser = parser.current_next_parser
 
 			return 0 # No switch to the next store.
 
@@ -1061,6 +1122,7 @@ class ShadowParser(object):
 					break
 
 				pos += 1
+				self.stats['diff_entry_inspections'] += 1
 
 				new_offset = table_entry.data_block_volume_offset
 
@@ -1131,6 +1193,9 @@ class ShadowParser(object):
 	def read_at_exact_offset(self, offset, debug_fill = False):
 		"""Read a block at a given aligned volume offset.
 		If the 'debug_fill' argument is True, use a custom byte pattern to fill empty blocks and blocks pointing to original offsets.
+
+		Adjacent 512-byte sub-blocks backed by consecutive offsets are merged into a single seek plus a
+		single read, so a fully backed 16 KiB block costs one physical read instead of up to 32.
 		"""
 
 		new_offsets = self.translate_exact_offset(offset)
@@ -1140,37 +1205,128 @@ class ShadowParser(object):
 		data = b''
 
 		if not debug_fill:
+			run_start = None
+			run_count = 0
+			truncated = False
+
+			def flush_run():
+				nonlocal run_start, run_count, data, truncated
+				if run_count == 0:
+					return
+
+				self.stats['coalesced_read_runs'] += 1
+				self.volume_object.seek(self.volume_offset + run_start)
+				self.stats['physical_read_calls'] += 1
+				run_data = self.volume_object.read(512 * run_count)
+				data += run_data
+
+				if len(run_data) != 512 * run_count: # A short read: retry the rest one 512-byte block at a time.
+					consumed_blocks = len(run_data) // 512
+					consumed_bytes = consumed_blocks * 512
+
+					# Keep only the aligned prefix; the trailing partial 512-byte block is re-read below.
+					if consumed_bytes != len(run_data):
+						data = data[ : len(data) - (len(run_data) - consumed_bytes)]
+
+					sub_index = consumed_blocks
+					while sub_index < run_count:
+						self.volume_object.seek(self.volume_offset + run_start + sub_index * 512)
+						self.stats['physical_read_calls'] += 1
+						sub_data = self.volume_object.read(512)
+						data += sub_data
+
+						if len(sub_data) != 512: # Match the previous behavior: stop at the first truncated block.
+							truncated = True
+							break
+
+						sub_index += 1
+
+				run_start = None
+				run_count = 0
+
 			for new_offset in new_offsets:
+				if truncated: # Match the previous behavior: stop at the first truncated read.
+					break
+
 				if new_offset is None: # An empty block.
+					flush_run()
 					data += b'\x00' * 512
 
-				else: # A block with data.
-					self.volume_object.seek(self.volume_offset + new_offset)
-					new_data = self.volume_object.read(512)
+				elif run_count > 0 and new_offset == run_start + run_count * 512: # Extend the current run.
+					run_count += 1
 
-					data += new_data
+				else: # Start a new run.
+					flush_run()
+					run_start = new_offset
+					run_count = 1
 
-					if len(new_data) != 512: # Truncated data.
-						break
+			if not truncated:
+				flush_run()
 		else:
 			i = 0
+			run_start = None
+			run_count = 0
+			truncated = False
+
+			def flush_debug_run():
+				nonlocal run_start, run_count, data, truncated
+				if run_count == 0:
+					return
+
+				self.stats['coalesced_read_runs'] += 1
+				self.volume_object.seek(self.volume_offset + run_start)
+				self.stats['physical_read_calls'] += 1
+				run_data = self.volume_object.read(512 * run_count)
+				data += run_data
+
+				if len(run_data) != 512 * run_count: # A short read: retry the rest one 512-byte block at a time.
+					consumed_blocks = len(run_data) // 512
+					consumed_bytes = consumed_blocks * 512
+
+					# Keep only the aligned prefix; the trailing partial 512-byte block is re-read below.
+					if consumed_bytes != len(run_data):
+						data = data[ : len(data) - (len(run_data) - consumed_bytes)]
+
+					sub_index = consumed_blocks
+					while sub_index < run_count:
+						self.volume_object.seek(self.volume_offset + run_start + sub_index * 512)
+						self.stats['physical_read_calls'] += 1
+						sub_data = self.volume_object.read(512)
+						data += sub_data
+
+						if len(sub_data) != 512: # Match the previous behavior: stop at the first truncated block.
+							truncated = True
+							break
+
+						sub_index += 1
+
+				run_start = None
+				run_count = 0
+
 			for new_offset in new_offsets:
+				if truncated: # Match the previous behavior: stop at the first truncated read.
+					break
+
 				if new_offset is None: # An empty block, use the empty pattern.
+					flush_debug_run()
 					data += b'EMPTY           ' * 32
 
 				elif new_offset == offset + 512 * i: # A block with original data, use the original pattern.
+					flush_debug_run()
 					data += b'ORIGINAL        ' * 32
 
-				else: # A block with different data, return it.
-					self.volume_object.seek(self.volume_offset + new_offset)
-					new_data = self.volume_object.read(512)
+				elif run_count > 0 and new_offset == run_start + run_count * 512: # Extend the current run.
+					run_count += 1
 
-					data += new_data
-
-					if len(new_data) != 512: # Truncated data.
-						break
+				else: # Start a new run for a block with different data.
+					flush_debug_run()
+					run_start = new_offset
+					run_count = 1
 
 				i += 1
+
+			if not truncated:
+				flush_debug_run()
 
 		return data
 
@@ -1199,6 +1355,8 @@ class ShadowParser(object):
 			self.current_offset = old_offset # Restore the old offset.
 			raise ValueError('Negative seek value')
 
+		if self.current_offset < old_offset: # A backward seek invalidates cached translations of the whole store chain.
+			self._invalidate_translation_cache_chain()
 		return self.current_offset
 
 	def tell(self):
@@ -1287,6 +1445,12 @@ class ShadowParserTwoVolumes(ShadowParser):
 		"""
 
 		self.shadow_selected = False
+
+		self.translation_cache = dict()
+		self.regular_entry_offsets = set()
+		self.stats = dict(translate_requests = 0, translate_cache_hits = 0,
+		                  store_chain_steps = 0, diff_entry_inspections = 0,
+		                  coalesced_read_runs = 0, physical_read_calls = 0)
 
 		self.volume_object = volume_object
 		self.volume_offset = volume_offset
@@ -1387,14 +1551,11 @@ class ShadowParserTwoVolumes(ShadowParser):
 		self.current_application_information = self.read_application_information()
 		self.current_diff_area = self.read_diff_area()
 
-		self.current_diff_area_index = dict()
+		self._build_diff_area_index()
 
-		item_pos = 0
-		for item in self.current_diff_area:
-			if item.original_volume_offset not in self.current_diff_area_index.keys():
-				self.current_diff_area_index[item.original_volume_offset] = item_pos
-
-			item_pos += 1
+		# A new snapshot (or a re-selection) invalidates every cached translation and read state.
+		self.translation_cache = dict()
+		self._reset_stats()
 
 		stack_position = self.current_cbi2.get_stack_position()
 		self.current_next_parser = ShadowParserTwoVolumes(self.volume_object, self.volume_storage_object, self.volume_offset, self.volume_size, self.volume_storage_offset)
@@ -1559,8 +1720,10 @@ class ShadowParserTwoVolumes(ShadowParser):
 
 		return items
 
-	def translate_exact_offset(self, offset, ignore_overlay_entries = False, do_forward_lookup = False):
-		"""Translate a given aligned volume offset of a data block to a list of (use_storage_volume, offset) tuples describing the same data block in a shadow copy, this list is then returned.
+	def _translate_exact_offset_uncached(self, offset, ignore_overlay_entries = False, do_forward_lookup = False):
+		"""Translate an offset without using the translation cache (the caching wrapper inherited from ShadowParser calls this method).
+
+		The result is a list of (use_storage_volume, offset) tuples describing the same data block.
 		The list is empty if a given volume offset is not found. Each offset in the list points to a 512-byte block. The offset can be None for a 512-byte block filled with null bytes.
 		If the 'use_storage_volume' item is True, read data from a storage volume (instead of the original one).
 		If the 'ignore_overlay_entries' argument is True, ignore data from overlays (used internally when switching to the next store from the current one).
@@ -1591,25 +1754,14 @@ class ShadowParserTwoVolumes(ShadowParser):
 			if next_parser is None:
 				return 2 # Switch to the original volume (there is no next store).
 
-			while next_parser is not None:
-				if offset in next_parser.current_diff_area_index.keys():
-					pos = next_parser.current_diff_area_index[offset]
+			parser = next_parser
+			while parser is not None:
+				self.stats['store_chain_steps'] += 1
 
-					while True:
-						try:
-							table_entry = next_parser.current_diff_area[pos]
-						except IndexError:
-							break
+				if offset in parser.regular_entry_offsets: # An O(1) lookup replaces a per-store entry scan.
+					return 1 # Switch to the next store.
 
-						if table_entry.original_volume_offset != offset:
-							break
-
-						if table_entry.flags & DIFF_AREA_TABLE_ENTRY_UNKNOWN_NAME_2 == 0:
-							return 1 # Switch to the next store.
-
-						pos += 1
-
-				next_parser = next_parser.current_next_parser
+				parser = parser.current_next_parser
 
 			return 0 # No switch to the next store.
 
@@ -1650,6 +1802,7 @@ class ShadowParserTwoVolumes(ShadowParser):
 					break
 
 				pos += 1
+				self.stats['diff_entry_inspections'] += 1
 
 				new_offset = table_entry.data_block_volume_offset
 
@@ -1720,6 +1873,10 @@ class ShadowParserTwoVolumes(ShadowParser):
 	def read_at_exact_offset(self, offset):
 		"""Read a block at a given aligned volume offset.
 		The 'debug_fill' argument is not supported by this parser.
+
+		Adjacent 512-byte sub-blocks are merged into one seek plus one read only while they stay on the
+		same source (the original volume or the storage volume) and at consecutive offsets; a source
+		switch, a null block or an offset gap breaks the run, so source boundaries are preserved.
 		"""
 
 		new_offsets = self.translate_exact_offset(offset)
@@ -1728,25 +1885,73 @@ class ShadowParserTwoVolumes(ShadowParser):
 
 		data = b''
 
-		for use_storage_volume, new_offset in new_offsets:
-			if not use_storage_volume:
+		run_use_storage = None
+		run_start = None
+		run_count = 0
+		truncated = False
+
+		def flush_run():
+			nonlocal run_use_storage, run_start, run_count, data, truncated
+			if run_count == 0:
+				return
+
+			if not run_use_storage:
 				file_object = self.volume_object
 				file_object_offset = self.volume_offset
 			else:
 				file_object = self.volume_storage_object
 				file_object_offset = self.volume_storage_offset
 
+			self.stats['coalesced_read_runs'] += 1
+			self.stats['physical_read_calls'] += 1
+			file_object.seek(file_object_offset + run_start)
+			run_data = file_object.read(512 * run_count)
+			data += run_data
+
+			if len(run_data) != 512 * run_count: # A short read: retry the rest one 512-byte block at a time.
+				consumed_blocks = len(run_data) // 512
+				consumed_bytes = consumed_blocks * 512
+
+				# Keep only the aligned prefix; the trailing partial 512-byte block is re-read below.
+				if consumed_bytes != len(run_data):
+					data = data[ : len(data) - (len(run_data) - consumed_bytes)]
+
+				sub_index = consumed_blocks
+				while sub_index < run_count:
+					file_object.seek(file_object_offset + run_start + sub_index * 512)
+					self.stats['physical_read_calls'] += 1
+					sub_data = file_object.read(512)
+					data += sub_data
+
+					if len(sub_data) != 512: # Match the previous behavior: stop at the first truncated block.
+						truncated = True
+						break
+
+					sub_index += 1
+
+			run_use_storage = None
+			run_start = None
+			run_count = 0
+
+		for use_storage_volume, new_offset in new_offsets:
+			if truncated: # Match the previous behavior: stop at the first truncated read.
+				break
+
 			if new_offset is None: # An empty block.
+				flush_run()
 				data += b'\x00' * 512
 
-			else: # A block with data.
-				file_object.seek(file_object_offset + new_offset)
-				new_data = file_object.read(512)
+			elif run_count > 0 and use_storage_volume == run_use_storage and new_offset == run_start + run_count * 512:
+				run_count += 1 # Extend the current run on the same source.
 
-				data += new_data
+			else: # Start a new run (a different source, a gap, or the first data block).
+				flush_run()
+				run_use_storage = use_storage_volume
+				run_start = new_offset
+				run_count = 1
 
-				if len(new_data) != 512: # Truncated data.
-					break
+		if not truncated:
+			flush_run()
 
 		return data
 

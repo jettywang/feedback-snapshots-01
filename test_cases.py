@@ -2997,6 +2997,249 @@ def test_shadow_invalid_offsets():
 
 	f.close()
 
+class CountingFile(object):
+	"""A counting wrapper: how many physical read() and seek() calls a shadow parser issues."""
+
+	def __init__(self, file_object):
+		self._file_object = file_object
+		self.read_calls = 0
+		self.seek_calls = 0
+		self.bytes_read = 0
+
+	def seek(self, offset, whence = 0):
+		self.seek_calls += 1
+		return self._file_object.seek(offset, whence)
+
+	def read(self, size = -1):
+		self.read_calls += 1
+		if size is None or size < 0:
+			data = self._file_object.read()
+		else:
+			data = self._file_object.read(size)
+
+		self.bytes_read += len(data)
+		return data
+
+	def tell(self):
+		return self._file_object.tell()
+
+	def close(self):
+		return self._file_object.close()
+
+def _chain_stats(vss):
+	stats = dict(translate_requests = 0, translate_cache_hits = 0, store_chain_steps = 0,
+	             diff_entry_inspections = 0, coalesced_read_runs = 0, physical_read_calls = 0)
+
+	parser = vss
+	while parser is not None:
+		for key in stats:
+			stats[key] += parser.stats.get(key, 0)
+
+		parser = parser.current_next_parser
+
+	return stats
+
+def _reference_read(parser, size):
+	"""An independent model: resolve and read every 512-byte sub-block on its own."""
+
+	start_offset = parser.tell()
+	data = bytearray()
+	provenance = []
+
+	remaining = size
+	offset = start_offset
+
+	while remaining > 0:
+		block_offset = offset // 0x4000 * 0x4000
+		offset_in_block = offset % 0x4000
+
+		translations = parser.translate_exact_offset(block_offset)
+		if len(translations) == 0:
+			break
+
+		block = bytearray()
+		for item in translations:
+			if isinstance(item, tuple):
+				use_storage, sub_offset = item
+				if sub_offset is None:
+					block += b'\x00' * 512
+					continue
+
+				if use_storage:
+					file_object = parser.volume_storage_object
+					base = parser.volume_storage_offset
+				else:
+					file_object = parser.volume_object
+					base = parser.volume_offset
+
+				file_object.seek(base + sub_offset)
+				block += file_object.read(512)
+
+			elif item is None:
+				block += b'\x00' * 512
+
+			else:
+				parser.volume_object.seek(parser.volume_offset + item)
+				block += parser.volume_object.read(512)
+
+		take = min(len(block) - offset_in_block, remaining)
+		data += block[offset_in_block : offset_in_block + take]
+		provenance.append((block_offset, tuple(translations)))
+
+		offset += take
+		remaining -= take
+
+	parser.seek(start_offset + len(data))
+	return bytes(data), provenance
+
+def _optimized_provenance(parser, length):
+	provenance = []
+	block = (parser.tell() - length) // 0x4000 * 0x4000
+	blocks = (length + 0x3FFF) // 0x4000
+
+	for i in range(blocks):
+		provenance.append((block + i * 0x4000, tuple(parser.translate_exact_offset(block + i * 0x4000))))
+
+	return provenance
+
+def test_shadow_sequential_read_coalescing():
+	f = CountingFile(tarfile.open(VOLUME_VSS_10, 'r').extractfile('vss_10.raw'))
+	vss = ShadowCopy.ShadowParser(f, 2048 * 512)
+	vss.select_shadow(1)
+
+	region_blocks = 32
+	length = region_blocks * 0x4000
+
+	vss.seek(0)
+	optimized = vss.read(length)
+	optimized_provenance = _optimized_provenance(vss, len(optimized))
+	optimized_io = (f.read_calls, f.seek_calls)
+	stats = _chain_stats(vss)
+	f.close()
+
+	f = tarfile.open(VOLUME_VSS_10, 'r').extractfile('vss_10.raw')
+	reference = ShadowCopy.ShadowParser(f, 2048 * 512)
+	reference.select_shadow(1)
+	reference.seek(0)
+	reference_data, reference_provenance = _reference_read(reference, length)
+	f.close()
+
+	assert optimized == reference_data
+	assert optimized_provenance == reference_provenance
+
+	# The independent model always issues one physical read per non-null 512-byte sub-block.
+	reference_read_calls = sum(1 for block_offset, translations in reference_provenance for item in translations if not (isinstance(item, tuple) and item[1] is None) and item is not None)
+
+	assert optimized_io[0] < reference_read_calls
+	assert optimized_io[1] < reference_read_calls
+	# Each run covers at least one 16 KiB block worth of coalesced work, so runs stay well below
+	# the number of individual 512-byte reads the independent model needs.
+	assert stats['coalesced_read_runs'] < reference_read_calls
+
+def test_shadow_debug_fill_coalescing():
+	f = tarfile.open(VOLUME_VSS_10, 'r').extractfile('vss_10.raw')
+	reference = ShadowCopy.ShadowParser(f, 2048 * 512)
+	reference.select_shadow(1)
+
+	f2 = tarfile.open(VOLUME_VSS_10, 'r').extractfile('vss_10.raw')
+	optimized = ShadowCopy.ShadowParser(f2, 2048 * 512)
+	optimized.select_shadow(1)
+
+	for block in range(0, 16 * 0x4000, 0x4000):
+		reference.seek(block)
+		optimized.seek(block)
+
+		assert optimized.read(0x4000, debug_fill = True) == reference.read(0x4000, debug_fill = True)
+
+	f.close()
+	f2.close()
+
+def test_shadow_translation_cache_invalidation():
+	f = CountingFile(tarfile.open(VOLUME_VSS_10, 'r').extractfile('vss_10.raw'))
+	vss = ShadowCopy.ShadowParser(f, 2048 * 512)
+	vss.select_shadow(1)
+
+	region_blocks = 16
+	vss.seek(0)
+	vss.read(region_blocks * 0x4000)
+	end_offset = vss.tell()
+	first_stats = _chain_stats(vss)
+
+	# Re-open already seen offsets while the stream position only moves forward: pure cache hits.
+	for block_index in range(region_blocks):
+		vss.seek(end_offset)
+		assert len(vss.translate_exact_offset(block_index * 0x4000)) == 32
+
+	second_stats = _chain_stats(vss)
+	assert second_stats['translate_requests'] - first_stats['translate_requests'] == region_blocks
+	assert second_stats['translate_cache_hits'] - first_stats['translate_cache_hits'] == region_blocks
+	assert second_stats['store_chain_steps'] - first_stats['store_chain_steps'] == 0
+	assert second_stats['diff_entry_inspections'] - first_stats['diff_entry_inspections'] == 0
+
+	# A backward seek invalidates the translation cache of every store in the chain.
+	vss.seek(0)
+	parser = vss
+	while parser is not None:
+		assert len(parser.translation_cache) == 0
+		parser = parser.current_next_parser
+
+	# A forward or an equal seek keeps the cache.
+	vss.seek(end_offset)
+	vss.translate_exact_offset(0)
+	cache_size = len(vss.translation_cache)
+	assert cache_size > 0
+	vss.seek(end_offset)
+	assert len(vss.translation_cache) == cache_size
+
+	# Selecting another snapshot rebuilds and invalidates the whole chain.
+	vss.select_shadow(2)
+	parser = vss
+	while parser is not None:
+		assert len(parser.translation_cache) == 0
+		parser = parser.current_next_parser
+
+	f.close()
+
+def test_shadow_two_volumes_source_boundaries():
+	f1 = tarfile.open(VOLUME_VSS_TWO_1, 'r').extractfile('vss_1_vol.raw')
+	f2 = CountingFile(tarfile.open(VOLUME_VSS_TWO_2, 'r').extractfile('vss_2_stor.raw'))
+
+	parser = ShadowCopy.ShadowParserTwoVolumes(f1, f2, 67584 * 512, None, 67584 * 512)
+	parser.select_shadow(1)
+
+	region_blocks = 32
+	length = region_blocks * 0x4000
+
+	parser.seek(0)
+	optimized = parser.read(length)
+	optimized_provenance = _optimized_provenance(parser, len(optimized))
+	optimized_storage_io = (f2.read_calls, f2.seek_calls)
+	stats = _chain_stats(parser)
+
+	f1_ref = tarfile.open(VOLUME_VSS_TWO_1, 'r').extractfile('vss_1_vol.raw')
+	f2_ref = tarfile.open(VOLUME_VSS_TWO_2, 'r').extractfile('vss_2_stor.raw')
+	reference = ShadowCopy.ShadowParserTwoVolumes(f1_ref, f2_ref, 67584 * 512, None, 67584 * 512)
+	reference.select_shadow(1)
+	reference.seek(0)
+	reference_data, reference_provenance = _reference_read(reference, length)
+
+	assert optimized == reference_data
+	assert optimized_provenance == reference_provenance
+
+	# Each provenance item keeps its source: original volume (False) or storage volume (True)/null.
+	for block_offset, translations in optimized_provenance:
+		for use_storage, sub_offset in translations:
+			assert use_storage in (True, False, None)
+
+	# Coalescing never crosses a source boundary: no run spans the two file objects.
+	assert optimized_storage_io[0] < 32 * region_blocks
+	assert stats['coalesced_read_runs'] >= 1
+
+	f1.close()
+	f2.close()
+	f1_ref.close()
+	f2_ref.close()
+
 def test_gpt():
 	f = gzip.open(PT_GPT_0_GZ, 'rb')
 

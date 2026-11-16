@@ -1,3 +1,12 @@
+Version: 1.1.21
+
+Improve sequential reads of shadow copies: coalesce adjacent 512-byte reads into larger reads,
+cache offset translations (invalidated by a snapshot switch or a backward seek) and avoid
+re-scanning the store chain for every data block. Source boundaries between stores, overlays
+and forwarders are preserved; returned bytes, null blocks and provenance are unchanged.
+
+---
+
 Version: 1.1.20
 
 Improve handling of unusual FAT volumes.
