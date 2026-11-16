@@ -5,6 +5,10 @@ class Error(Exception):
     pass
 
 
+class InvalidSecurityDescriptor(Error, ValueError):
+    """Raised when a self-relative security descriptor is malformed."""
+
+
 class BrokenIndexError(Error):
     pass
 
