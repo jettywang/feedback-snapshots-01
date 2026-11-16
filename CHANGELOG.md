@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `ArtifactKitCandidateKind` and `ArtifactKitPayload.kind` classify every
+  ArtifactKit scan candidate as `complete`, `truncated` or `self_pointer`, with
+  `is_complete` / `is_truncated` / `is_self_pointer_only` helpers.
+- `ArtifactKitPayload.declared_size` records the size claimed by the header,
+  which can exceed the bytes that were actually read and decoded (`size`).
+- `iter_artifactkit_payloads` gained a `chunk_size` argument for bounded
+  chunked scanning and logs each candidate at DEBUG level.
+
+### Changed
+
+- ArtifactKit scanning now reads the file in bounded, overlapping chunks and
+  caps every candidate payload read at the bytes physically available, instead
+  of trusting the declared length byte-for-byte. Scan range (`maxrange`) and
+  payload range are handled as separate, explicit boundaries.
+- Self-pointer hits with a missing/partial header or a zero-length declaration
+  are retained as explainable self-pointer-only candidates rather than dropped;
+  overlapping candidates are never merged, and headers straddling a chunk
+  boundary are re-read via seek so no candidate is missed.
+- Decoded bytes and loader hints are kept for inspection only; hints alone no
+  longer imply a Beacon, and nothing is executed during scanning.
+- `beacon-artifact` reports the candidate kind and truncation detail and only
+  dumps candidates that actually carry payload bytes.
+
+### Security
+
+- A forged, oversized ArtifactKit `size` field can no longer trigger a huge
+  read or be reported as a fully extracted payload; such candidates are marked
+  `truncated` and limited to the available data.
+
 ## [1.3.0] - 2026-10-01
 
 ### Added

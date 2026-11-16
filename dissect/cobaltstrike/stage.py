@@ -125,10 +125,15 @@ def get_beacon_stages(fh: BinaryIO) -> list[BeaconStage]:
         for artifact in iter_artifactkit_payloads(fh):
             saw_artifact = True
             logger.info("FOUND possible ArtifactKit offset: %s", artifact.offset)
-            logger.info("  - size: %s", artifact.size)
+            logger.info("  - kind: %s", artifact.kind.value)
+            logger.info("  - size: %s (declared: %s)", artifact.size, artifact.declared_size)
             logger.info("  - 4-byte xorkey: %r", artifact.xorkey)
             logger.info("  - hints: %r", artifact.hints)
             logger.info("  - payload (preview): %r", artifact.payload[:20])
+            if artifact.is_self_pointer_only:
+                # Bare self-pointer hit: no declared payload, so it cannot resolve into a beacon.
+                logger.info("  - self-pointer hit only, skipping stage resolution")
+                continue
             if result := get_beacon_stages(artifact):
                 return [artifact, *result]
         if saw_artifact:
