@@ -92,6 +92,7 @@ class VmwareLayer(segmented.SegmentedLayer):
         tags = {}
         index_len = self._context.symbol_space.get_type("vmware!unsigned int").size
         while not tags_read:
+            tag_offset = offset
             flags = ord(meta_layer.read(offset, 1))
             name_len = ord(meta_layer.read(offset + 1, 1))
             tags_read = (flags == 0) and (name_len == 0)
@@ -127,25 +128,29 @@ class VmwareLayer(segmented.SegmentedLayer):
                     )
                     # Skip two bytes of padding (as it seems?)
                     # Read the actual data
+                    data_offset = (
+                        offset
+                        + 2
+                        + name_len
+                        + (indices_len * index_len)
+                        + 2 * data_len
+                        + 2
+                    )
+                    if (
+                        data_size < 0
+                        or data_offset + data_size > meta_layer.maximum_address + 1
+                    ):
+                        raise VmwareFormatException(
+                            self.name,
+                            f"VMware tag {name} at offset {hex(tag_offset)} declares {data_size} data bytes, which runs past the end of the metadata",
+                        )
                     data = self._context.object(
                         "vmware!bytes",
                         layer_name=self._meta_layer,
-                        offset=offset
-                        + 2
-                        + name_len
-                        + (indices_len * index_len)
-                        + 2 * data_len
-                        + 2,
+                        offset=data_offset,
                         length=data_size,
                     )
-                    offset += (
-                        2
-                        + name_len
-                        + (indices_len * index_len)
-                        + 2 * data_len
-                        + 2
-                        + data_size
-                    )
+                    offset = data_offset + data_size
                 else:  # Handle regular cases
                     data = self._context.object(
                         self._choose_type(data_len),
@@ -154,13 +159,34 @@ class VmwareLayer(segmented.SegmentedLayer):
                     )
                     offset += 2 + name_len + (indices_len * index_len) + data_len
 
-                tags[(name, tuple(indices))] = (flags, data)
+                key = (name, tuple(indices))
+                if key in tags and tags[key] != (flags, data):
+                    raise VmwareFormatException(
+                        self.name,
+                        f"Conflicting duplicate VMware tag {name} at offset {hex(tag_offset)}",
+                    )
+                tags[key] = (flags, data)
 
-        if tags[("regionsCount", ())][1] == 0:
+        regions_count_tag = tags.get(("regionsCount", ()))
+        if regions_count_tag is None:
+            raise VmwareFormatException(
+                self.name, "VMware metadata is missing the regionsCount tag"
+            )
+        if regions_count_tag[1] == 0:
             raise VmwareFormatException(
                 self.name, "VMware VMEM is not split into regions"
             )
-        for region in range(tags[("regionsCount", ())][1]):
+        for region in range(regions_count_tag[1]):
+            missing = [
+                tag_name
+                for tag_name in ("regionPPN", "regionPageNum", "regionSize")
+                if (tag_name, (region,)) not in tags
+            ]
+            if missing:
+                raise VmwareFormatException(
+                    self.name,
+                    f"VMware metadata is missing region {region} tag(s): {', '.join(missing)}",
+                )
             offset = tags[("regionPPN", (region,))][1] * self._page_size
             mapped_offset = tags[("regionPageNum", (region,))][1] * self._page_size
             length = tags[("regionSize", (region,))][1] * self._page_size
