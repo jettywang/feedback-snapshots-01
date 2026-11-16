@@ -267,6 +267,15 @@ class SymbolSpaceInterface(collections.abc.Mapping):
         name is specified, the caches of all symbol tables are cleared."""
 
     @abstractmethod
+    def invalidate_table_caches(self, table_name: str) -> None:
+        """Drops the resolved templates and symbols cached for one table.
+
+        Used when a table's template construction changes (for example
+        through a class override) so that subsequent resolutions reflect it,
+        without disturbing the cached templates of other tables.
+        """
+
+    @abstractmethod
     def get_symbols_by_type(self, type_name: str) -> Iterable[str]:
         """Returns all symbols based on the type of the symbol."""
 
@@ -360,6 +369,17 @@ class SymbolTableInterface(
 
 class NativeTableInterface(BaseSymbolTableInterface):
     """Class to distinguish NativeSymbolLists from other symbol lists."""
+
+    def copy(self, name: str) -> "NativeTableInterface":
+        """Returns an independent native table with the given name.
+
+        Symbol tables own their native table so that its name (used to prefix
+        native type names) and any class overrides remain scoped to that
+        table rather than mutating shared state used by other tables.
+        """
+        raise NotImplementedError(
+            "Abstract method copy not implemented by subclass."
+        )
 
     def get_symbol(self, name: str) -> SymbolInterface:
         raise exceptions.SymbolError(name, self.name, "NativeTables never hold symbols")

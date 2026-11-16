@@ -24,6 +24,18 @@ class NativeTable(interfaces.symbols.NativeTableInterface):
             {"enum", "array", "bitfield", "void", "string", "bytes", "function"}
         )
 
+    def copy(self, name: str) -> "NativeTable":
+        """Returns an independent copy of this native table.
+
+        The copy owns its own type dictionary, overrides and name.  This
+        keeps state such as the table name (used when prefixing native type
+        names, e.g. ``symbol_table!pointer``) and any class overrides scoped
+        to the owning symbol table, rather than mutating a shared singleton
+        that other symbol tables (potentially in other analysis contexts)
+        continue to use.
+        """
+        return NativeTable(name, self._native_dictionary)
+
     def get_type_class(self, name: str) -> Type[interfaces.objects.ObjectInterface]:
         ntype, _ = self._native_dictionary.get(name, (objects.Integer, None))
         return ntype

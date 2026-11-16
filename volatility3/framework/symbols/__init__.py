@@ -64,6 +64,36 @@ class SymbolSpace(interfaces.symbols.SymbolSpaceInterface):
         for table in table_list:
             table.clear_symbol_cache()
 
+    def invalidate_table_caches(self, table_name: str) -> None:
+        """Drops the resolved templates and symbols cached for one table.
+
+        The symbol space caches fully resolved type templates permanently, so
+        a change that affects how a table builds templates - notably a class
+        override via ``set_type_class`` - would otherwise never reach types
+        that have already been resolved.  Every entry belonging to the table
+        or its native table is removed as a single closure; this prevents a
+        cached parent template from outliving a child template it was wired
+        to.  Entries keyed to other tables are left untouched, so same-named
+        types belonging to a different kernel in the same analysis process
+        retain their own layout and class.
+        """
+        native_name = table_name + "_natives"
+
+        def belongs_to_table(key: str) -> bool:
+            prefix, separator, _remainder = key.partition(constants.BANG)
+            return separator == constants.BANG and prefix in (
+                table_name,
+                native_name,
+            )
+
+        for cache in (self._resolved, self._resolved_symbols):
+            for cached_name in [
+                key for key in cache if belongs_to_table(key)
+            ]:
+                del cache[cached_name]
+        if table_name in self._dict:
+            self._dict[table_name].clear_symbol_cache()
+
     def free_table_name(self, prefix: str = "layer") -> str:
         """Returns an unused table name to ensure no collision occurs when
         inserting a symbol table."""

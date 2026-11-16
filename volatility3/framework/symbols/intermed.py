@@ -145,11 +145,20 @@ class IntermediateSymbolTable(interfaces.symbols.SymbolTableInterface):
             )
 
         # Inherit
+        # Always take an independent native table named after this table.
+        # The native table may be a process-wide shared singleton (legacy ISF
+        # readers) or belong to another symbol table (plugins reuse an existing
+        # table's natives).  Copying it keeps its name and class overrides
+        # scoped to this table instead of leaking into coexisting tables -
+        # including tables interpreting a different kernel in one process.
+        owned_native_types = (native_types or self._delegate.natives).copy(
+            name + "_natives"
+        )
         super().__init__(
             context,
             config_path,
             name,
-            native_types or self._delegate.natives,
+            owned_native_types,
             table_mapping=table_mapping,
             class_types=class_types,
         )
@@ -331,7 +340,14 @@ class ISFormatTable(interfaces.symbols.SymbolTableInterface, metaclass=ABCMeta):
         nt = native_types or self._get_natives()
         if nt is None:
             raise TypeError("Native table not provided")
-        nt.name = name + "_natives"
+        # Take an independent native table.  Legacy ISF readers discover the
+        # process-wide shared singletons (native.x86/x64NativeTable), and
+        # callers may pass another table's natives; mutating either in place
+        # would leak this table's name (used to prefix native type names) and
+        # class overrides into coexisting tables, including tables interpreting
+        # a different kernel in the same process.  The IntermediateSymbolTable
+        # wrapper performs the same copy for its own native table.
+        nt = nt.copy(name + "_natives")
         super().__init__(context, config_path, name, nt, table_mapping=table_mapping)
         self._overrides: Dict[str, Type[interfaces.objects.ObjectInterface]] = {}
         self._symbol_cache: Dict[str, interfaces.symbols.SymbolInterface] = {}
@@ -445,10 +461,30 @@ class Version1Format(ISFormatTable):
         if name not in self.types:
             raise ValueError(f"Symbol type not in {self.name} SymbolTable: {name}")
         self._overrides[name] = clazz
+        self._invalidate_resolved_type_cache()
 
     def del_type_class(self, name: str) -> None:
         if name in self._overrides:
             del self._overrides[name]
+            self._invalidate_resolved_type_cache()
+
+    def _invalidate_resolved_type_cache(self) -> None:
+        """Notifies the owning symbol space that templates cached for this
+        table must be rebuilt.
+
+        The symbol space permanently caches the fully resolved templates that
+        :func:`SymbolSpace.get_type` produces, including the object class
+        bound at construction time.  A class override would otherwise never
+        reach a type already resolved through the symbol space.  Invalidation
+        is delegated to the symbol space so the whole closure of the table's
+        templates is dropped together: removing only individual entries would
+        leave a parent template holding a reference to a child that no longer
+        matches the cache.  Templates belonging to other tables - including
+        same-named types of a second kernel - are never touched.
+        """
+        symbol_space = getattr(self.context, "symbol_space", None)
+        if symbol_space is not None:
+            symbol_space.invalidate_table_caches(self.name)
 
     def _interdict_to_template(
         self, dictionary: Dict[str, Any]

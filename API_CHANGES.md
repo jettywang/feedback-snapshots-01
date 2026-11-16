@@ -4,6 +4,11 @@ API Changes
 When an addition to the existing API is made, the minor version is bumped.
 When an API feature or function is removed or changed, the major version is bumped.
 
+Unreleased
+==========
+`NativeTableInterface` now provides `copy(name)`, returning an independent native table; every symbol table owns its native table instead of mutating a shared process-wide singleton.
+`SymbolSpaceInterface` now provides `invalidate_table_caches(table_name)` so class overrides (`set_type_class`/`del_type_class`) rebuild only the affected table's cached templates while other tables' caches remain intact.
+
 2.25.0
 ======
 Pointer class now supports `get_raw_value()`.

@@ -15,6 +15,7 @@ Below is the main documentation regarding volatility 3:
     basics
     development
     symbol-tables
+    symbol-table-isolation
     vol2to3
     volshell
     glossary
