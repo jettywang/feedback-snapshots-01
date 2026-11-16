@@ -7,7 +7,7 @@ import functools
 import logging
 import math
 import struct
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Tuple
 
 from volatility3 import classproperty
 from volatility3.framework import constants, exceptions, interfaces
@@ -17,6 +17,102 @@ from volatility3.framework.layers import linear
 vollog = logging.getLogger(__name__)
 
 INTEL_TRANSLATION_DEBUGGING = False
+
+# Flags found in the low bits of an Intel paging-structure entry
+_PAGE_BIT_RW = 1  # Read/write bit
+_PAGE_BIT_NX = 63  # No-execute bit (only present on 8-byte entries)
+_PAGE_RW = 1 << _PAGE_BIT_RW
+_PAGE_NX = 1 << _PAGE_BIT_NX
+
+# Status values reported by :meth:`Intel.explain`
+EXPLAIN_STATUS_MAPPED = "mapped"
+EXPLAIN_STATUS_NOT_PRESENT = "not-present"
+EXPLAIN_STATUS_UNREADABLE_TABLE = "unreadable-table"
+
+
+class PageTableEntryRecord(NamedTuple):
+    """One entry observed while walking the paging structures.
+
+    The record only describes what is stored in the memory image; it never
+    infers processor state that is not part of the page tables (such as the
+    current CR0/CR4/EFER register values).
+
+    Args:
+        level_name: Name of the paging-structure level this entry belongs to
+        entry_index: Index of the entry within its table, or ``None`` for the
+            synthesized root (page-map) record
+        entry_value: Raw value of the entry as stored in memory, or ``None``
+            when the physical page holding the entry could not be read
+        entry_location: Physical address at which the entry bytes live, or
+            ``None`` for the synthesized root record
+        table_location: Physical base address of the table containing the
+            entry, or ``None`` for the synthesized root record
+        present: Whether the entry's present bit was set according to the
+            layer's own validity rules; ``None`` when the entry was unreadable
+        writable_bit: Value of the read/write bit (bit 1); ``None`` when the
+            entry was unreadable
+        execute_disabled_bit: Value of the no-execute bit (bit 63); ``None``
+            when the entry format has no NX bit or the entry was unreadable
+        large_page: Whether the entry terminates the walk as a large page
+    """
+
+    level_name: str
+    entry_index: Optional[int]
+    entry_value: Optional[int]
+    entry_location: Optional[int]
+    table_location: Optional[int]
+    present: Optional[bool]
+    writable_bit: Optional[bool]
+    execute_disabled_bit: Optional[bool]
+    large_page: bool
+
+
+class PermissionExplanation(NamedTuple):
+    """Effective page permissions derived from the page table entries.
+
+    The verdict fields are tri-state: ``True`` allows the access according to
+    the paging entries, ``False`` is denied by at least one traversed entry,
+    and ``None`` means the entries that were readable do not settle the
+    question because part of the walk could not be inspected. "Could not
+    check" is therefore never reported as a denial.
+
+    Args:
+        writable: Effective writable verdict across all traversed entries
+        executable: Effective executable verdict; ``None`` when the entry
+            format cannot express execute permission at all (32-bit non-PAE)
+        write_basis: Human-readable justification for the writable verdict
+        execute_basis: Human-readable justification for the executable verdict
+    """
+
+    writable: Optional[bool]
+    executable: Optional[bool]
+    write_basis: str
+    execute_basis: str
+
+
+class AddressExplanation(NamedTuple):
+    """Result of explaining a single virtual address from the page tables.
+
+    Args:
+        virtual_address: Virtual address that was explained
+        status: One of the ``EXPLAIN_STATUS_*`` constants
+        incomplete_reason: Why the walk stopped before a present leaf, if it did
+        walk: Every entry observed, in traversal order including the root
+        large_page: Whether translation terminated at a large-page entry
+        page_size: Bytes covered by the terminal mapping, when present
+        physical_address: Translated physical address, when a present leaf was
+            reached; this matches the layer's regular read/translate interface
+        permissions: Effective permissions, when the walk reached a leaf
+    """
+
+    virtual_address: int
+    status: str
+    incomplete_reason: Optional[str]
+    walk: List[PageTableEntryRecord]
+    large_page: bool
+    page_size: Optional[int]
+    physical_address: Optional[int]
+    permissions: Optional[PermissionExplanation]
 
 
 class Intel(linear.LinearlyMappedLayer):
@@ -320,6 +416,285 @@ class Intel(linear.LinearlyMappedLayer):
     def is_dirty(self, offset: int) -> bool:
         """Returns whether the page at offset is marked dirty"""
         return self._page_is_dirty(self._translate_entry(offset & self.page_mask)[0])
+
+    def _has_nx_bit(self) -> bool:
+        """Returns whether this entry format can carry a no-execute bit.
+
+        8-byte entries (PAE, Intel32e) encode NX in bit 63; 4-byte 32-bit
+        entries have no field for execute permission.
+        """
+        return self._entry_size == struct.calcsize("<Q")
+
+    def _nx_bit(self, entry: int) -> bool:
+        """Returns the value of the no-execute bit stored in an entry."""
+        return bool(entry & _PAGE_NX)
+
+    def _explain_permissions(
+        self, walk: List[PageTableEntryRecord], complete: bool
+    ) -> PermissionExplanation:
+        """Combines the permission bits of every confirmed walk entry.
+
+        A denial recorded in any traversed entry is conclusive even when
+        lower levels could not be read. Without a confirmed denial, an
+        incomplete walk yields ``None`` rather than reporting a denial.
+        """
+        evidence = [
+            record
+            for record in walk
+            if record.entry_location is not None
+            and record.entry_value is not None
+            and record.present
+        ]
+
+        write_denial = next(
+            (record for record in evidence if record.writable_bit is False), None
+        )
+        if write_denial is not None:
+            writable: Optional[bool] = False
+            write_basis = (
+                "read/write bit clear in the "
+                f"{write_denial.level_name} entry (index {write_denial.entry_index})"
+            )
+        elif complete:
+            writable = True
+            write_basis = "read/write bit set in every traversed page table entry"
+        else:
+            unread = next(
+                record for record in walk if record.entry_value is None
+            )
+            writable = None
+            write_basis = (
+                "no readable entry forbids writing, but the "
+                f"{unread.level_name} table at physical address "
+                f"{hex(unread.table_location)} could not be inspected"
+            )
+
+        if not self._has_nx_bit():
+            executable: Optional[bool] = None
+            execute_basis = (
+                "this paging format has no no-execute bit, so execute "
+                "permission cannot be established from the page tables alone"
+            )
+        else:
+            execute_denial = next(
+                (
+                    record
+                    for record in evidence
+                    if record.execute_disabled_bit is True
+                ),
+                None,
+            )
+            if execute_denial is not None:
+                executable = False
+                execute_basis = (
+                    "no-execute bit set in the "
+                    f"{execute_denial.level_name} entry "
+                    f"(index {execute_denial.entry_index})"
+                )
+            elif complete:
+                executable = True
+                execute_basis = (
+                    "no-execute bit clear in every traversed page table entry"
+                )
+            else:
+                unread = next(
+                    record for record in walk if record.entry_value is None
+                )
+                executable = None
+                execute_basis = (
+                    "no readable entry forbids execution, but the "
+                    f"{unread.level_name} table at physical address "
+                    f"{hex(unread.table_location)} could not be inspected"
+                )
+
+        return PermissionExplanation(
+            writable=writable,
+            executable=executable,
+            write_basis=write_basis,
+            execute_basis=execute_basis,
+        )
+
+    def explain(self, offset: int) -> AddressExplanation:
+        """Explains, read-only, how the page tables treat ``offset``.
+
+        The walk records each paging-structure entry's raw value, the physical
+        address at which that value was read, and its permission bits. Large
+        pages terminate the walk early, exactly as during ordinary
+        translation. If an intermediate table cannot be read, every entry
+        confirmed before the failure is retained and the permission verdicts
+        stay unconfirmed (``None``) instead of being reported as denials.
+
+        Only permission bits actually stored in the page tables are examined;
+        processor register state such as CR0.WP, CR4.SMEP or EFER.NXE is not
+        inferred.
+
+        Args:
+            offset: Virtual address to explain (it is page aligned internally)
+
+        Returns:
+            An :class:`AddressExplanation` containing the ordered entry walk,
+            the terminal mapping (if present) and the effective permissions
+        """
+        page_address = offset & self.page_mask
+        walk: List[PageTableEntryRecord] = []
+
+        position = self._initial_position
+        entry = self._initial_entry
+
+        if not (
+            self.minimum_address
+            <= (page_address & self.address_mask)
+            <= self.maximum_address
+        ):
+            raise exceptions.PagedInvalidAddressException(
+                self.name,
+                page_address,
+                position + 1,
+                entry,
+                "Entry outside virtual address range: " + hex(entry),
+            )
+
+        # Synthesized root record: the page map offset itself, not an entry
+        # stored in a table, so it carries no physical entry location and does
+        # not participate in the effective permission calculation.
+        walk.append(
+            PageTableEntryRecord(
+                level_name="page map",
+                entry_index=None,
+                entry_value=entry,
+                entry_location=None,
+                table_location=None,
+                present=True,
+                writable_bit=bool(entry & _PAGE_RW),
+                execute_disabled_bit=(
+                    self._nx_bit(entry) if self._has_nx_bit() else None
+                ),
+                large_page=False,
+            )
+        )
+
+        status = EXPLAIN_STATUS_NOT_PRESENT
+        incomplete_reason: Optional[str] = None
+        large_page = False
+        mapped = False
+
+        for name, size, large_page_capable in self._structure:
+            if not self._page_is_valid(entry):
+                status = EXPLAIN_STATUS_NOT_PRESENT
+                incomplete_reason = (
+                    f"Entry {hex(entry)} in {name} is not present; "
+                    "the walk stopped before reaching this level"
+                )
+                break
+
+            base_address = self._mask(
+                entry, self._maxphyaddr - 1, size + self._index_shift
+            )
+            table = self._get_valid_table(base_address)
+
+            start = position
+            position -= size
+            index = (
+                self._mask(page_address, start, position + 1) >> (position + 1)
+            )
+            entry_location = base_address + (index << self._index_shift)
+
+            if table is None:
+                walk.append(
+                    PageTableEntryRecord(
+                        level_name=name,
+                        entry_index=index,
+                        entry_value=None,
+                        entry_location=entry_location,
+                        table_location=base_address,
+                        present=None,
+                        writable_bit=None,
+                        execute_disabled_bit=None,
+                        large_page=False,
+                    )
+                )
+                status = EXPLAIN_STATUS_UNREADABLE_TABLE
+                incomplete_reason = (
+                    f"The {name} table at physical address "
+                    f"{hex(base_address)} could not be read"
+                )
+                break
+
+            entry_data_start = index << self._index_shift
+            entry_data = table[
+                entry_data_start : entry_data_start + self._entry_size
+            ]
+            (entry,) = struct.unpack(self._entry_format, entry_data)
+
+            is_large_page = bool(
+                large_page_capable and (entry & self._PAGE_PSE)
+            )
+            walk.append(
+                PageTableEntryRecord(
+                    level_name=name,
+                    entry_index=index,
+                    entry_value=entry,
+                    entry_location=entry_location,
+                    table_location=base_address,
+                    present=self._page_is_valid(entry),
+                    writable_bit=bool(entry & _PAGE_RW),
+                    execute_disabled_bit=(
+                        self._nx_bit(entry) if self._has_nx_bit() else None
+                    ),
+                    large_page=is_large_page,
+                )
+            )
+
+            if is_large_page:
+                large_page = True
+                # The PAT large-page bit occupies a physical-address bit; the
+                # raw value remains in the walk record, translation drops it.
+                if entry & self._PAGE_PAT_LARGE:
+                    entry = entry - self._PAGE_PAT_LARGE
+                if not self._page_is_valid(entry):
+                    status = EXPLAIN_STATUS_NOT_PRESENT
+                    incomplete_reason = (
+                        f"Large page entry {hex(entry)} in {name} "
+                        "is not present"
+                    )
+                    break
+                mapped = True
+                status = EXPLAIN_STATUS_MAPPED
+                break
+
+            if not self._page_is_valid(entry):
+                status = EXPLAIN_STATUS_NOT_PRESENT
+                incomplete_reason = (
+                    f"Entry {hex(entry)} in {name} is not present"
+                )
+                break
+        else:
+            if self._page_is_valid(entry):
+                mapped = True
+                status = EXPLAIN_STATUS_MAPPED
+
+        physical_address: Optional[int] = None
+        page_size: Optional[int] = None
+        permissions: Optional[PermissionExplanation] = None
+
+        if mapped:
+            # Reuse the ordinary translation path so the explained physical
+            # address is guaranteed to match read()/mapping() byte for byte.
+            physical_address, page_size, _layer_name = self._translate(offset)
+            permissions = self._explain_permissions(walk, complete=True)
+        elif status == EXPLAIN_STATUS_UNREADABLE_TABLE:
+            permissions = self._explain_permissions(walk, complete=False)
+
+        return AddressExplanation(
+            virtual_address=offset,
+            status=status,
+            incomplete_reason=incomplete_reason,
+            walk=walk,
+            large_page=large_page,
+            page_size=page_size,
+            physical_address=physical_address,
+            permissions=permissions,
+        )
 
     def mapping(
         self, offset: int, length: int, ignore_errors: bool = False
