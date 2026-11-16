@@ -13,6 +13,7 @@ import io
 import gzip
 import tarfile
 import pickle
+import struct
 from dfir_ntfs import MFT, WSL, USN, Attributes, LogFile, BootSector, ShadowCopy, PartitionTable, MoveTable
 from dfir_ntfs.addons import FAT, exFAT
 
@@ -1447,6 +1448,340 @@ def test_logfile_20_4k():
 
 	for lsn in diff:
 		assert lsn > highest_lsn
+
+	f.close()
+
+def _log_lsn_for_offset(absolute_offset):
+	sequence_number_bits = 42
+	sequence_number = 2
+
+	return (sequence_number << (64 - sequence_number_bits)) | (absolute_offset >> 3)
+
+def _log_protect_page(page):
+	page = bytearray(page)
+	usa_offset = 40
+	usa_size = 9
+
+	struct.pack_into('<HH', page, 4, usa_offset, usa_size)
+	struct.pack_into('<H', page, usa_offset, 1)
+
+	i = 1
+	while i < usa_size:
+		end = i * 512 - 2
+		struct.pack_into('<H', page, usa_offset + i * 2, struct.unpack_from('<H', page, end)[0])
+		struct.pack_into('<H', page, end, 1)
+		i += 1
+
+	return bytes(page)
+
+def _log_restart_page(current_lsn, oldest_lsn, client_restart_lsn, chkdsk_lsn):
+	page = bytearray(4096)
+	page[0 : 4] = b'RSTR'
+
+	struct.pack_into('<Q', page, 8, chkdsk_lsn)
+	struct.pack_into('<L', page, 16, 4096)
+	struct.pack_into('<L', page, 20, 4096)
+	struct.pack_into('<H', page, 24, 48)
+	struct.pack_into('<H', page, 26, 1)
+	struct.pack_into('<H', page, 28, 1)
+
+	restart_area = 48
+	struct.pack_into('<Q', page, restart_area, current_lsn)
+	struct.pack_into('<H', page, restart_area + 8, 1)
+	struct.pack_into('<H', page, restart_area + 10, 0xFFFF)
+	struct.pack_into('<H', page, restart_area + 12, 0xFFFF)
+	struct.pack_into('<H', page, restart_area + 14, 0x2)
+	struct.pack_into('<L', page, restart_area + 16, 42)
+	struct.pack_into('<H', page, restart_area + 20, 224)
+	struct.pack_into('<H', page, restart_area + 22, 64)
+	struct.pack_into('<q', page, restart_area + 24, 4096 * 8)
+	struct.pack_into('<H', page, restart_area + 36, 48)
+	struct.pack_into('<H', page, restart_area + 38, 64)
+
+	client_record = restart_area + 64
+	struct.pack_into('<Q', page, client_record, oldest_lsn)
+	struct.pack_into('<Q', page, client_record + 8, client_restart_lsn)
+	struct.pack_into('<H', page, client_record + 16, 0xFFFF)
+	struct.pack_into('<H', page, client_record + 18, 0xFFFF)
+	struct.pack_into('<L', page, client_record + 28, 8)
+	page[client_record + 32 : client_record + 40] = b'N\x00T\x00F\x00S\x00'
+
+	return _log_protect_page(page)
+
+def _log_client_data(redo_operation, target_attribute, redo_data, undo_data = b'', undo_operation = 0):
+	body = bytearray(struct.pack('<HHHHHHHHHHHHq', redo_operation, undo_operation, 0, 0, 0, 0, target_attribute, 0, 0, 0, 0, 0, 0))
+	redo_offset = 32
+	undo_offset = 32 + len(redo_data)
+
+	struct.pack_into('<H', body, 4, redo_offset)
+	struct.pack_into('<H', body, 6, len(redo_data))
+	struct.pack_into('<H', body, 8, undo_offset if len(undo_data) > 0 else 0)
+	struct.pack_into('<H', body, 10, len(undo_data))
+
+	body += redo_data
+	body += undo_data
+
+	while len(body) % 8 != 0:
+		body += b'\x00'
+
+	return bytes(body)
+
+def _log_open_attribute_data(slot, file_reference, attribute_name):
+	entry = bytearray(40)
+	struct.pack_into('<L', entry, 0, 0xFFFFFFFF)
+	struct.pack_into('<L', entry, 4, 4096)
+	struct.pack_into('<L', entry, 8, 0xA0)
+	struct.pack_into('<Q', entry, 16, file_reference)
+	struct.pack_into('<Q', entry, 24, 0)
+
+	return bytes(entry), attribute_name.encode('utf-16le')
+
+def _log_open_attribute_table_dump(entries):
+	entry_size = 40
+	highest_slot = max(entries.keys())
+	count = (highest_slot - 24) // entry_size + 1
+	dump = bytearray(24 + count * entry_size)
+
+	struct.pack_into('<H', dump, 0, entry_size)
+	struct.pack_into('<H', dump, 2, 24)
+	struct.pack_into('<H', dump, 4, count)
+	struct.pack_into('<L', dump, 8, 0)
+	struct.pack_into('<L', dump, 12, 0xFFFFFFFF)
+	struct.pack_into('<L', dump, 16, len(dump))
+	struct.pack_into('<L', dump, 20, len(dump))
+
+	offset = 24
+	while offset < len(dump):
+		if offset in entries:
+			file_reference, open_lsn = entries[offset]
+			struct.pack_into('<L', dump, offset, 0xFFFFFFFF)
+			struct.pack_into('<L', dump, offset + 8, 0xA0)
+			struct.pack_into('<Q', dump, offset + 16, file_reference)
+			struct.pack_into('<Q', dump, offset + 24, open_lsn)
+		else:
+			struct.pack_into('<L', dump, offset, offset + entry_size)
+
+		offset += entry_size
+
+	return bytes(dump)
+
+def _log_attribute_names_dump(names):
+	dump = bytearray()
+
+	for slot in sorted(names.keys()):
+		name = names[slot].encode('utf-16le')
+		dump += struct.pack('<HH', slot, len(name))
+		dump += name
+		dump += b'\x00\x00'
+
+	return bytes(dump)
+
+def _log_build_file(records):
+	"""Build a minimal log file (version 1.1). Each record is (client data, record type). Return (data, LSNs)."""
+
+	pages = []
+	page = None
+	position = 64
+	previous_lsn = 0
+	last_lsn = 0
+	lsns = []
+
+	def new_page():
+		new_page_buf = bytearray(4096)
+		new_page_buf[0 : 4] = b'RCRD'
+
+		return new_page_buf
+
+	def finish_page():
+		struct.pack_into('<Q', page, 8, last_lsn)
+		struct.pack_into('<L', page, 16, 1)
+		struct.pack_into('<H', page, 20, 1)
+		struct.pack_into('<H', page, 22, 1)
+		struct.pack_into('<H', page, 24, position)
+		struct.pack_into('<Q', page, 32, last_lsn)
+
+		pages.append(_log_protect_page(page))
+
+	page = new_page()
+
+	for client_data, record_type in records:
+		record_size = 48 + len(client_data)
+		if position + record_size > 4096:
+			finish_page()
+			page = new_page()
+			position = 64
+
+		absolute_offset = (len(pages) + 2) * 4096 + position
+		lsn = _log_lsn_for_offset(absolute_offset)
+
+		header = bytearray(48)
+		struct.pack_into('<Q', header, 0, lsn)
+		struct.pack_into('<Q', header, 8, previous_lsn)
+		struct.pack_into('<L', header, 24, len(client_data))
+		struct.pack_into('<L', header, 32, record_type)
+
+		page[position : position + 48] = header
+		page[position + 48 : position + 48 + len(client_data)] = client_data
+
+		lsns.append(lsn)
+		previous_lsn = lsn
+		last_lsn = lsn
+		position += record_size
+
+	finish_page()
+
+	restart_page_1 = _log_restart_page(last_lsn, lsns[0], last_lsn, last_lsn)
+	restart_page_2 = _log_restart_page(last_lsn, lsns[0], last_lsn, last_lsn)
+
+	return restart_page_1 + restart_page_2 + b''.join(pages), lsns
+
+def test_logfile_attribute_history_slot_reuse():
+	f = open(LOGFILE_7, 'rb')
+	lf = LogFile.LogFileParser(f)
+
+	early_record = None
+	late_record = None
+
+	for log_record in lf.parse_ntfs_records(True):
+		if type(log_record) is not LogFile.NTFSLogRecord:
+			continue
+
+		if log_record.lsn == 8391193:
+			early_record = log_record
+
+		if log_record.lsn == 8402201:
+			late_record = log_record
+
+	assert early_record is not None and late_record is not None
+
+	early_resolution = early_record.calculate_target_attribute_resolution()
+	assert early_resolution is not None
+	assert early_resolution.slot == 112
+	assert early_resolution.is_certain()
+	assert early_resolution.attribute_name_known
+	assert early_resolution.attribute_name == ''
+	assert early_resolution.file_reference & 0xFFFFFFFFFFFF == 6
+	assert early_resolution.table_version_kind == 'open'
+	assert early_resolution.table_version_lsn == 8391176
+	assert early_resolution.table_version_lsn <= early_record.lsn
+
+	late_resolution = late_record.calculate_target_attribute_resolution()
+	assert late_resolution is not None
+	assert late_resolution.slot == 112
+	assert late_resolution.is_certain()
+	assert late_resolution.attribute_name_known
+	assert late_resolution.attribute_name == '$I30'
+	assert late_resolution.file_reference & 0xFFFFFFFFFFFF == 29
+	assert late_resolution.table_version_lsn == 8402183
+	assert late_resolution.table_version_lsn <= late_record.lsn
+
+	# The same slot in two pieces of history belongs to different files.
+	assert early_resolution.file_reference != late_resolution.file_reference
+	assert early_record.calculate_mft_target_reference_and_name() != late_record.calculate_mft_target_reference_and_name()
+
+	# The early record must not be attributed to the later occupant of this slot.
+	assert late_record.calculate_mft_target_reference_and_name()[0] & 0xFFFFFFFFFFFF == 29
+
+	f.close()
+
+def test_logfile_attribute_history_small_log():
+	slot = 64
+	file_a = 0x100000000000A
+	file_b = 0x100000000000B
+	file_c = 0x100000000000C
+
+	# An old record: no table version in the retained log covers this slot yet.
+	records = [ (_log_client_data(LogFile.UpdateNonresidentValue, slot, b'\x00' * 8, b'\x00' * 8), 1) ]
+
+	# An exact open record binds the slot to file A (with a name).
+	open_a_redo, open_a_undo = _log_open_attribute_data(slot, file_a, '$I30')
+	records.append((_log_client_data(LogFile.OpenNonresidentAttribute, slot, open_a_redo, open_a_undo), 1))
+	records.append((_log_client_data(LogFile.UpdateFileNameAllocation, slot, b'\x11' * 8, b'\x22' * 8), 1))
+
+	# A table dump (an observation) confirms file A, and the names table confirms the name.
+	records.append((_log_client_data(LogFile.OpenAttributeTableDump, 24, _log_open_attribute_table_dump({ slot: (file_a, 0) })), 1))
+	records.append((_log_client_data(LogFile.AttributeNamesDump, 24, _log_attribute_names_dump({ slot: '$I30' })), 1))
+	records.append((_log_client_data(LogFile.UpdateNonresidentValue, slot, b'\x33' * 8, b'\x44' * 8), 1))
+
+	# Another table dump observes file B. No OpenNonresidentAttribute record marks this reuse:
+	# the exact reuse time is unknown, so a record before this dump keeps both candidates.
+	records.append((_log_client_data(LogFile.OpenAttributeTableDump, 24, _log_open_attribute_table_dump({ slot: (file_b, 0) })), 1))
+	records.append((_log_client_data(LogFile.AttributeNamesDump, 24, _log_attribute_names_dump({ slot: '$SII' })), 1))
+	records.append((_log_client_data(LogFile.UpdateNonresidentValue, slot, b'\x55' * 8, b'\x66' * 8), 1))
+
+	# An exact open record binds the slot to file C. From this point, file C is known.
+	open_c_redo, open_c_undo = _log_open_attribute_data(slot, file_c, '$SDH')
+	records.append((_log_client_data(LogFile.OpenNonresidentAttribute, slot, open_c_redo, open_c_undo), 1))
+	records.append((_log_client_data(LogFile.UpdateNonresidentValue, slot, b'\x77' * 8, b'\x88' * 8), 1))
+
+	data, lsns = _log_build_file(records)
+	f = io.BytesIO(data)
+
+	lf = LogFile.LogFileParser(f)
+	resolutions = dict()
+
+	for log_record in lf.parse_ntfs_records(False):
+		if type(log_record) is LogFile.NTFSLogRecord:
+			resolution = log_record.calculate_target_attribute_resolution()
+			if resolution is not None:
+				resolutions[log_record.lsn] = (log_record, resolution)
+
+	assert len(resolutions) == 5
+
+	# The old record: the numeric slot and candidate bindings are preserved.
+	old_record, old_resolution = resolutions[lsns[0]]
+	assert old_resolution.slot == slot
+	assert not old_resolution.is_certain()
+	assert old_resolution.table_version_lsn is None
+	assert set(candidate.file_reference for candidate in old_resolution.candidates) == set([ file_a, file_b, file_c ])
+	assert old_record.calculate_mft_target_reference_and_name() is None
+
+	# The record backed by the exact open record: file A and its name, at the state of this record.
+	a_record, a_resolution = resolutions[lsns[2]]
+	assert a_resolution.is_certain()
+	assert a_resolution.file_reference == file_a
+	assert a_resolution.attribute_name_known
+	assert a_resolution.attribute_name == '$I30'
+	assert a_resolution.table_version_kind == 'open'
+	assert a_resolution.table_version_lsn == lsns[1]
+	assert a_record.calculate_mft_target_reference_and_name() == (file_a, '$I30')
+
+	# The record between two dumps observing different files: both candidates, no definite path.
+	between_record, between_resolution = resolutions[lsns[5]]
+	assert not between_resolution.is_certain()
+	assert set(candidate.file_reference for candidate in between_resolution.candidates) == set([ file_a, file_b ])
+	assert any('exact reuse time is not logged' in reason for reason in between_resolution.uncertain_reasons)
+	assert between_record.calculate_mft_target_reference_and_name() is None
+
+	# The name also changes between two observations, and no exact record marks the change.
+	assert not between_resolution.attribute_name_known
+	assert set(name for name_lsn, name in between_resolution.name_candidates) == set([ '$I30', '$SII' ])
+	assert any('attribute name changes at LSN' in reason for reason in between_resolution.uncertain_reasons)
+
+	# The record after the second dump but before the exact open record: file B.
+	b_record, b_resolution = resolutions[lsns[8]]
+	assert b_resolution.is_certain()
+	assert b_resolution.file_reference == file_b
+	assert b_resolution.table_version_kind == 'oat_dump'
+	assert b_resolution.table_version_lsn == lsns[6]
+	assert b_record.calculate_mft_target_reference_and_name() == (file_b, '$SII')
+
+	assert b_resolution.attribute_name_known
+	assert b_resolution.attribute_name == '$SII'
+
+	# The record after the exact open record: file C and its name.
+	c_record, c_resolution = resolutions[lsns[10]]
+	assert c_resolution.is_certain()
+	assert c_resolution.file_reference == file_c
+	assert c_resolution.attribute_name_known
+	assert c_resolution.attribute_name == '$SDH'
+	assert c_resolution.table_version_lsn == lsns[9]
+	assert c_record.calculate_mft_target_reference_and_name() == (file_c, '$SDH')
+
+	# Every resolution can be traced back to a table version at or before the record.
+	for log_record, resolution in resolutions.values():
+		if resolution.table_version_lsn is not None:
+			assert resolution.table_version_lsn <= log_record.lsn
 
 	f.close()
 

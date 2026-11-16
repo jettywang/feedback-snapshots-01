@@ -1,3 +1,11 @@
+Version: 1.1.21
+
+Resolve $LogFile targets using versioned open attribute table and attribute names histories.
+Track slot reuse and attribute name changes across checkpoints, and keep numeric slot references
+and candidate bindings when a record cannot be attributed with certainty.
+
+---
+
 Version: 1.1.20
 
 Improve handling of unusual FAT volumes.

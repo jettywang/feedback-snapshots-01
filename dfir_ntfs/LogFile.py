@@ -7,6 +7,7 @@ import struct
 import io
 import shutil
 import binascii
+import bisect
 
 UPDATE_SEQUENCE_STRIDE = 512
 PAGE_SIZE = 4096 # This is the size of a single memory page.
@@ -716,6 +717,8 @@ class LogFileParser(object):
 
 		self.cluster_size = CLUSTER_SIZE_DEFAULT # Adjusted in the 'collect_lsns' method.
 		self.oat_version = 1 # Adjusted in the 'collect_lsns' method.
+		self.use_dumps = True
+		self.attribute_histories = dict()
 
 	def lsn_to_offset(self, lsn):
 		"""Convert a log sequence number (LSN) to a file offset, return a (log_page_number, offset_in_page) tuple."""
@@ -1321,6 +1324,7 @@ class LogFileParser(object):
 	def parse_ntfs_records(self, recover_log_data = True):
 		"""This method yields NTFS client data (NTFSRestartArea and NTFSLogRecord) from each log record found in the log file.
 		If 'recover_log_data' is True, apply a tail log record page or fast log record pages before parsing the log data.
+		Each log record is resolved using the open attribute table (and attribute names table) state at its LSN.
 		"""
 
 		if recover_log_data:
@@ -1335,66 +1339,87 @@ class LogFileParser(object):
 		self.sort_lsns()
 
 		for client_id in self.lsns_sorted.keys():
-			latest_oat_dump = None
-			old_oat_dump = None
-			latest_an_dump = None
-			old_an_dump = None
+			lsns = self.lsns_sorted[client_id]
 
-			oat_dump_count = 0
-			an_dump_count = 0
+			# First pass: build versioned histories of open attribute table slots and attribute names.
+			oldest_lsn = None
+			if len(lsns) > 0:
+				oldest_lsn = lsns[0]
 
-			oat = dict()
+			history = AttributeTableHistory(self.oat_version, oldest_lsn)
 
-			for lsn in self.lsns_sorted[client_id]:
+			decoded_records = []
+
+			for lsn in lsns:
 				client_data = self.get_client_data(lsn)
 				try:
 					client_data_decoded = client_data.data_decoded()
 				except NotImplementedError:
-					pass
-				else:
-					if type(client_data_decoded) is NTFSLogRecord:
-						redo_op = client_data_decoded.get_redo_operation()
-						if redo_op == OpenNonresidentAttribute:
-							attribute_name = client_data_decoded.get_undo_data().decode('utf-16le', errors = 'replace')
+					continue
 
-							oat_index = client_data_decoded.get_target_attribute()
-							oat_entry_data = client_data_decoded.get_redo_data()
+				decoded_records.append(client_data_decoded)
 
-							try:
-								if self.oat_version >= 1:
-									oat_entry = OpenAttributeEntry1(oat_entry_data)
-								else:
-									oat_entry = OpenAttributeEntry0(oat_entry_data)
-							except ClientException:
-								# Something is wrong, clear the open attribute table.
-								oat = dict()
-							else:
-								oat[oat_index] = (oat_entry.get_file_reference(), attribute_name)
-						elif self.use_dumps and redo_op == OpenAttributeTableDump:
-							old_oat_dump = latest_oat_dump
-							latest_oat_dump = OpenAttributeTableDumpParser(client_data_decoded.get_redo_data(), self.oat_version)
-							oat_dump_count += 1
-						elif self.use_dumps and redo_op == AttributeNamesDump:
-							old_an_dump = latest_an_dump
-							latest_an_dump = AttributeNamesDumpParser(client_data_decoded.get_redo_data())
-							an_dump_count += 1
+				if type(client_data_decoded) is NTFSRestartArea:
+					history.add_restart_area(lsn, client_data_decoded)
+					continue
 
-						client_data_decoded.oat = oat.copy()
+				redo_op = client_data_decoded.get_redo_operation()
 
-						if self.use_dumps and oat_dump_count > 0 and oat_dump_count == an_dump_count:
-							client_data_decoded.oat_dump = latest_oat_dump
-							client_data_decoded.an_dump = latest_an_dump
-						elif self.use_dumps and oat_dump_count > 0 and oat_dump_count != an_dump_count:
-							client_data_decoded.oat_dump = old_oat_dump
-							client_data_decoded.an_dump = old_an_dump
+				if redo_op == OpenNonresidentAttribute:
+					attribute_name = client_data_decoded.get_undo_data().decode('utf-16le', errors = 'replace')
+
+					slot = client_data_decoded.get_target_attribute()
+					entry_data = client_data_decoded.get_redo_data()
+
+					try:
+						if self.oat_version >= 1:
+							entry = OpenAttributeEntry1(entry_data)
 						else:
-							client_data_decoded.oat_dump = None
-							client_data_decoded.an_dump = None
+							entry = OpenAttributeEntry0(entry_data)
+					except ClientException:
+						# Something is wrong, do not trust this update.
+						pass
+					else:
+						history.add_open_attribute(lsn, slot, entry, attribute_name)
 
-					yield client_data_decoded
+				elif self.use_dumps and redo_op == OpenAttributeTableDump:
+					try:
+						dump_parser = OpenAttributeTableDumpParser(client_data_decoded.get_redo_data(), self.oat_version)
+					except ClientException:
+						pass
+					else:
+						history.add_open_attribute_table_dump(lsn, dump_parser)
+
+				elif self.use_dumps and redo_op == AttributeNamesDump:
+					history.add_attribute_names_dump(lsn, AttributeNamesDumpParser(client_data_decoded.get_redo_data()))
+
+			self.attribute_histories[client_id] = history
+
+			# Second pass: resolve each record using the state at its LSN.
+			for client_data_decoded in decoded_records:
+				if type(client_data_decoded) is NTFSLogRecord:
+					client_data_decoded.attribute_history = history
+					client_data_decoded.target_attribute_resolution = None
+
+					# Keep the legacy open attribute table snapshot for callers which use it directly.
+					client_data_decoded.oat = history.snapshot(client_data_decoded.lsn)
+					client_data_decoded.oat_dump = None
+					client_data_decoded.an_dump = None
+
+					client_data_decoded.calculate_target_attribute_resolution()
+
+				yield client_data_decoded
 
 		if recover_log_data:
 			self.discard_changes()
+
+	def get_attribute_history(self, client_id = None):
+		"""Get and return an AttributeTableHistory for a client (or a dictionary of histories if no client ID is given)."""
+
+		if client_id is None:
+			return self.attribute_histories
+
+		return self.attribute_histories.get(client_id)
 
 	def __str__(self):
 		return 'LogFileParser, file size: {}'.format(self.file_size)
@@ -1550,6 +1575,511 @@ class NTFSRestartArea(object):
 	def __str__(self):
 		return 'NTFSRestartArea (LSN: {}), version: {}.{}, start of checkpoint LSN: {}'.format(self.lsn, self.get_major_version(), self.get_minor_version(), self.get_start_of_checkpoint_lsn())
 
+class AttributeTableBinding(object):
+	"""A versioned binding of an open attribute table slot to a file reference."""
+
+	slot = None
+	"""The open attribute table slot (a byte offset used by log records)."""
+
+	file_reference = None
+	"""The file reference stored in the slot."""
+
+	attribute_type_code = None
+	"""The attribute type code stored in the slot (None, if unknown)."""
+
+	open_lsn = None
+	"""The LSN of an OpenNonresidentAttribute record which opened this binding."""
+
+	source = None
+	"""Where this binding was seen: 'open' or 'oat_dump'."""
+
+	table_version_lsn = None
+	"""The LSN of the log record which established this version of the slot."""
+
+	table_version_serial = None
+	"""A monotonically increasing number of the table version (within a client)."""
+
+	entry_offset = None
+	"""The byte offset of the entry in an open attribute table dump (None for open records)."""
+
+	def __init__(self, slot, file_reference, attribute_type_code = None, open_lsn = None, source = None, table_version_lsn = None, table_version_serial = None, entry_offset = None):
+		self.slot = slot
+		self.file_reference = file_reference
+		self.attribute_type_code = attribute_type_code
+		self.open_lsn = open_lsn
+		self.source = source
+		self.table_version_lsn = table_version_lsn
+		self.table_version_serial = table_version_serial
+		self.entry_offset = entry_offset
+
+	def __str__(self):
+		return 'AttributeTableBinding (slot: {}, file reference: {}, open LSN: {}, source: {}, table version LSN: {})'.format(self.slot, self.file_reference, self.open_lsn, self.source, self.table_version_lsn)
+
+class AttributeNameBinding(object):
+	"""A versioned attribute name associated with an open attribute table slot."""
+
+	name = None
+	"""The attribute name (an empty string means an unnamed attribute, None means unknown)."""
+
+	lsn = None
+	"""The LSN of the log record which established this name."""
+
+	source = None
+	"""Where this name was seen: 'open' or 'attribute_names_dump'."""
+
+	known = False
+	"""Whether the name is known (an absent entry in a complete dump means an unnamed attribute)."""
+
+	def __init__(self, name, lsn, source, known = True):
+		self.name = name
+		self.lsn = lsn
+		self.source = source
+		self.known = known
+
+class TargetAttributeResolution(object):
+	"""A result of resolving the target attribute of a log record using the table state at that time."""
+
+	slot = None
+	"""The open attribute table slot (a numeric reference preserved even when no binding is known)."""
+
+	file_reference = None
+	"""The resolved file reference (None, if no binding is known at this LSN)."""
+
+	binding_certain = False
+	"""Whether the file reference is known with certainty for this LSN."""
+
+	attribute_name = None
+	"""The resolved attribute name (an empty string if the attribute is unnamed)."""
+
+	attribute_name_known = False
+	"""Whether the attribute name (including an explicitly unnamed attribute) is known."""
+
+	binding = None
+	"""The AttributeTableBinding used (None, if not found)."""
+
+	table_version_lsn = None
+	"""The LSN of the log record which established the used table version."""
+
+	table_version_kind = None
+	"""The kind of the used table version: 'open' or 'oat_dump'."""
+
+	table_version_serial = None
+	"""The serial number of the used table version."""
+
+	name_source_lsn = None
+	"""The LSN of the log record which established the used attribute name."""
+
+	name_source_kind = None
+	"""The kind of the used name source: 'open' or 'attribute_names_dump'."""
+
+	candidates = None
+	"""A list of candidate AttributeTableBinding objects for this slot (used when the record cannot be attributed with certainty)."""
+
+	name_candidates = None
+	"""A list of (LSN, name) candidate attribute names (used when the attribute name is not known with certainty)."""
+
+	uncertain_reasons = None
+	"""A list of reasons why this resolution is not fully certain."""
+
+	def __init__(self, slot):
+		self.slot = slot
+		self.candidates = []
+		self.name_candidates = []
+		self.uncertain_reasons = []
+
+	def is_certain(self):
+		"""Return True if the target file reference is known with certainty for this LSN."""
+
+		return self.binding_certain
+
+	def __str__(self):
+		name = self.attribute_name
+		if not self.attribute_name_known:
+			name = 'unknown'
+
+		certainty = 'certain'
+		if not self.binding_certain:
+			certainty = 'uncertain'
+
+		return 'TargetAttributeResolution (slot: {}, file reference: {}, attribute name: {}, table version LSN: {}, {})'.format(self.slot, self.file_reference, name, self.table_version_lsn, certainty)
+
+class AttributeTableHistory(object):
+	"""A versioned history of open attribute table slots (and attribute names) for a log client.
+
+	The history is built in log sequence number (LSN) order. Every slot reuse, file reference change,
+	and attribute name change is recorded together with the LSN and the kind of log record which
+	established it, so that a log record is resolved using the table state at the time of that record
+	rather than the last table dump present in the log file.
+
+	An OpenNonresidentAttribute record is an exact event: it tells us when a slot was (re)used.
+	A table dump is an observation: it tells us what a slot contained at the dump LSN, but not when
+	a binding appeared. If two observations (with no exact event between them) bind the same slot to
+	different files, the reuse time is not known, and records between those observations keep both
+	candidates instead of being attributed to one of them.
+
+	Slots are byte offsets used by log records (the index is not a sequential entry number). A slot
+	which is not covered by any available table version keeps its numeric value and the candidates
+	seen anywhere in the log, so that a report never invents a file path for it.
+	"""
+
+	oat_version = None
+	"""A version of OPEN_ATTRIBUTE_ENTRY structures."""
+
+	oldest_lsn = None
+	"""The oldest LSN available for this client (None, if unknown)."""
+
+	newest_lsn = None
+	"""The newest LSN available for this client (None, if unknown)."""
+
+	def __init__(self, oat_version, oldest_lsn = None):
+		self.oat_version = oat_version
+		self.oldest_lsn = oldest_lsn
+		self.newest_lsn = oldest_lsn
+
+		self.slot_events = dict() # slot -> sorted list of (LSN, kind, AttributeTableBinding or None)
+		self.name_events = dict() # slot -> sorted list of (LSN, kind, name or None)
+		self.table_versions = list() # list of (LSN, kind, serial, slot, binding)
+		self.restart_areas = list() # list of (LSN, checkpoint LSN, open attribute table LSN, attribute names LSN)
+
+		self.serial = 0
+
+	def _next_serial(self):
+		self.serial += 1
+		return self.serial
+
+	def _add_slot_event(self, lsn, slot, kind, binding):
+		self.slot_events.setdefault(slot, []).append((lsn, kind, binding))
+
+	def _add_name_event(self, lsn, slot, kind, name):
+		self.name_events.setdefault(slot, []).append((lsn, kind, name))
+
+	def add_open_attribute(self, lsn, slot, entry, attribute_name):
+		"""Record an OpenNonresidentAttribute update (an entry in the open attribute table is (re)used)."""
+
+		try:
+			file_reference = entry.get_file_reference()
+		except ClientException:
+			return
+
+		attribute_type_code = None
+		try:
+			attribute_type_code = entry.get_attribute_type_code()
+		except ClientException:
+			pass
+
+		open_lsn = lsn
+		try:
+			open_lsn = entry.get_lsn_of_open_record()
+		except ClientException:
+			pass
+
+		binding = AttributeTableBinding(slot, file_reference, attribute_type_code, open_lsn, 'open', lsn, self._next_serial())
+		self._add_slot_event(lsn, slot, 'open', binding)
+
+		if attribute_name is None:
+			attribute_name = ''
+
+		# Names in log records are not null-terminated; strip an accidental terminator for consistency
+		# with the attribute names dump parser.
+		attribute_name = attribute_name.rstrip('\x00')
+
+		self._add_name_event(lsn, slot, 'open', attribute_name)
+
+		self.table_versions.append((lsn, 'open', binding.table_version_serial, slot, binding))
+		self._update_newest_lsn(lsn)
+
+	def add_open_attribute_table_dump(self, lsn, dump_parser):
+		"""Record an OpenAttributeTableDump (a complete snapshot of the open attribute table)."""
+
+		allocated = dict()
+		free_slots = []
+
+		try:
+			for offset, entry in dump_parser.entries():
+				if not entry.is_allocated():
+					free_slots.append(offset)
+					continue
+
+				attribute_type_code = None
+				try:
+					attribute_type_code = entry.get_attribute_type_code()
+				except ClientException:
+					pass
+
+				open_lsn = None
+				try:
+					open_lsn = entry.get_lsn_of_open_record()
+				except ClientException:
+					pass
+
+				allocated[offset] = (entry.get_file_reference(), attribute_type_code, open_lsn)
+		except ClientException:
+			# Do not trust a truncated or malformed dump.
+			return
+
+		# A complete dump is authoritative for the slots it lists: unallocated entries are free at this LSN.
+		for slot in free_slots:
+			self._add_slot_event(lsn, slot, 'oat_dump', None)
+
+		for slot in sorted(allocated.keys()):
+			file_reference, attribute_type_code, open_lsn = allocated[slot]
+			binding = AttributeTableBinding(slot, file_reference, attribute_type_code, open_lsn, 'oat_dump', lsn, self._next_serial(), slot)
+			self._add_slot_event(lsn, slot, 'oat_dump', binding)
+			self.table_versions.append((lsn, 'oat_dump', binding.table_version_serial, slot, binding))
+
+		self._update_newest_lsn(lsn)
+
+	def add_attribute_names_dump(self, lsn, names_parser):
+		"""Record an AttributeNamesDump (a complete snapshot of the attribute names table)."""
+
+		names = dict()
+		try:
+			for index, name in names_parser.entries():
+				names[index] = name
+		except ClientException:
+			# Do not trust a malformed dump.
+			return
+
+		# A complete names dump is authoritative for every slot it mentions.
+		for slot in sorted(names.keys()):
+			self._add_name_event(lsn, slot, 'attribute_names_dump', names[slot])
+
+		# A complete names dump is also authoritative for slots which are bound at this LSN but absent
+		# from the dump: such attributes are unnamed. A truncated dump is not trusted for this.
+		if names_parser.complete:
+			for slot in sorted(self.slot_events.keys()):
+				if slot in names:
+					continue
+
+				previous_event, __ = self._locate_event(self.slot_events.get(slot, []), lsn)
+				if previous_event is None or previous_event[2] is None:
+					continue
+
+				self._add_name_event(lsn, slot, 'attribute_names_dump', '')
+
+		self._update_newest_lsn(lsn)
+
+	def add_restart_area(self, lsn, restart_area):
+		"""Record an NTFS restart area (a checkpoint) without changing the table state."""
+
+		try:
+			self.restart_areas.append((lsn, restart_area.get_start_of_checkpoint_lsn(), restart_area.get_open_attribute_table_lsn(), restart_area.get_attribute_names_lsn()))
+		except ClientException:
+			pass
+
+		self._update_newest_lsn(lsn)
+
+	def _update_newest_lsn(self, lsn):
+		if self.newest_lsn is None or lsn > self.newest_lsn:
+			self.newest_lsn = lsn
+
+	@staticmethod
+	def _er_lsn(event):
+		return event[0]
+
+	def _locate_event(self, events, lsn):
+		"""Find and return (the latest event at or before an LSN, the earliest event after that LSN)."""
+
+		if events is None or len(events) == 0:
+			return (None, None)
+
+		pos = bisect.bisect_right([ self._er_lsn(event) for event in events ], lsn)
+		previous_event = None
+		next_event = None
+
+		if pos > 0:
+			previous_event = events[pos - 1]
+		if pos < len(events):
+			next_event = events[pos]
+
+		return (previous_event, next_event)
+
+	def _all_bindings_for_slot(self, slot):
+		candidates = []
+		seen = set()
+
+		for event_lsn, event_kind, binding in self.slot_events.get(slot, []):
+			if binding is None:
+				continue
+
+			key = binding.file_reference
+			if key in seen:
+				continue
+			seen.add(key)
+			candidates.append(binding)
+
+		return candidates
+
+	def _bindings_differ(self, first, second):
+		if first is None and second is None:
+			return False
+		if first is None or second is None:
+			return True
+		return first.file_reference != second.file_reference
+
+	def snapshot(self, lsn):
+		"""Build and return an open attribute table snapshot (slot -> (file reference, attribute name)) at a given LSN."""
+
+		snapshot = dict()
+
+		for slot in self.slot_events.keys():
+			previous_event, __ = self._locate_event(self.slot_events.get(slot, []), lsn)
+			if previous_event is None or previous_event[2] is None:
+				continue
+
+			binding = previous_event[2]
+			attribute_name = None
+
+			previous_name_event, __ = self._locate_event(self.name_events.get(slot, []), lsn)
+			if previous_name_event is not None:
+				name_lsn, name_kind, name = previous_name_event
+				if binding.open_lsn is None or binding.open_lsn == 0 or name_lsn >= binding.open_lsn:
+					attribute_name = name
+
+			snapshot[slot] = (binding.file_reference, attribute_name)
+
+		return snapshot
+
+	def _name_candidates_for_slot(self, slot, lsn, all_events = False):
+		"""Return (LSN, name) pairs which could describe a slot near a given LSN.
+
+		If 'all_events' is True (used when the slot binding itself is unknown), every name ever
+		associated with this slot is a candidate.
+		"""
+
+		if all_events:
+			events = self.name_events.get(slot, [])
+		else:
+			previous_event, next_event = self._locate_event(self.name_events.get(slot, []), lsn)
+			events = [ previous_event, next_event ]
+
+		candidates = []
+		seen = set()
+
+		for event in events:
+			if event is None:
+				continue
+
+			event_lsn, event_kind, name = event
+			if name is None:
+				name = ''
+
+			key = (event_lsn, name)
+			if key in seen:
+				continue
+			seen.add(key)
+			candidates.append((event_lsn, name))
+
+		return candidates
+
+	def resolve(self, slot, lsn):
+		"""Resolve an open attribute table slot using the state at a given LSN.
+
+		This always returns a TargetAttributeResolution object (even when no binding is known), so that
+		the numeric slot and candidate bindings are preserved for a report.
+		"""
+
+		resolution = TargetAttributeResolution(slot)
+
+		previous_event, next_event = self._locate_event(self.slot_events.get(slot, []), lsn)
+
+		if previous_event is None:
+			resolution.candidates = self._all_bindings_for_slot(slot)
+			if resolution.candidates:
+				resolution.uncertain_reasons.append('no table version covers this slot at this LSN (candidate bindings are preserved)')
+			else:
+				resolution.uncertain_reasons.append('slot is not present in the available table versions')
+
+			resolution.name_candidates = self._name_candidates_for_slot(slot, lsn, True)
+			return resolution
+
+		event_lsn, event_kind, binding = previous_event
+
+		if binding is None:
+			# The slot was observed as free at this table version.
+			resolution.uncertain_reasons.append('slot was observed as free at LSN {}'.format(event_lsn))
+
+			if next_event is not None and next_event[2] is not None:
+				resolution.candidates = [ next_event[2] ]
+				resolution.uncertain_reasons.append('the slot was reused later (first seen at LSN {}), so this record cannot be attributed with certainty'.format(next_event[0]))
+
+			resolution.name_candidates = self._name_candidates_for_slot(slot, lsn)
+			return resolution
+
+		resolution.binding = binding
+		resolution.file_reference = binding.file_reference
+		resolution.table_version_lsn = binding.table_version_lsn
+		resolution.table_version_kind = binding.source
+		resolution.table_version_serial = binding.table_version_serial
+		resolution.binding_certain = True
+
+		if next_event is not None and next_event[1] == 'oat_dump' and self._bindings_differ(binding, next_event[2]):
+			# The next table version is an observation (a dump) which binds this slot to another file.
+			# If the reuse had an exact OpenNonresidentAttribute record, it would be the next event.
+			# Without such a record, the reuse could have happened anywhere in this interval (including
+			# before this record), so keep both candidates instead of choosing one.
+			resolution.uncertain_reasons.append('slot binding changes at LSN {} (the exact reuse time is not logged)'.format(next_event[0]))
+			resolution.binding_certain = False
+			resolution.candidates = [ binding ]
+			if next_event[2] is not None:
+				resolution.candidates.append(next_event[2])
+
+		if len(resolution.candidates) == 0:
+			resolution.candidates = [ binding ]
+
+		resolution.name_candidates = self._name_candidates_for_slot(slot, lsn)
+
+		previous_name_event, next_name_event = self._locate_event(self.name_events.get(slot, []), lsn)
+
+		if previous_name_event is None:
+			resolution.uncertain_reasons.append('no attribute name table version covers this slot at this LSN')
+			return resolution
+
+		name_lsn, name_kind, name = previous_name_event
+
+		# A name is applicable only if the slot was bound to the same file at the moment that name
+		# was recorded. Otherwise, it may describe a previous (or a later) occupant of the slot.
+		name_binding_event, __ = self._locate_event(self.slot_events.get(slot, []), name_lsn)
+		name_binding = None
+		if name_binding_event is not None:
+			name_binding = name_binding_event[2]
+
+		if name_binding is None or name_binding.file_reference != binding.file_reference:
+			resolution.uncertain_reasons.append('the attribute name version was recorded for a different occupant of this slot')
+			resolution.name_candidates = self._name_candidates_for_slot(slot, lsn)
+			return resolution
+
+		if binding.open_lsn is not None and binding.open_lsn > 0 and name_lsn < binding.open_lsn:
+			# The name predates the exact open record for this binding (it belongs to a previous
+			# occupant, or the change is not covered); keep the candidates.
+			resolution.uncertain_reasons.append('the attribute name table version is older than this slot binding')
+			resolution.name_candidates = self._name_candidates_for_slot(slot, lsn)
+			return resolution
+
+		if next_name_event is not None and next_name_event[1] == 'attribute_names_dump':
+			next_name = next_name_event[2]
+			if next_name is None:
+				next_name = ''
+
+			current_name = name if name is not None else ''
+			if next_name != current_name:
+				# Two names dumps disagree and no exact OpenNonresidentAttribute record marks the
+				# name change, so the name at this LSN cannot be chosen with certainty.
+				resolution.uncertain_reasons.append('attribute name changes at LSN {} (the exact change time is not logged)'.format(next_name_event[0]))
+				resolution.name_candidates = self._name_candidates_for_slot(slot, lsn)
+				return resolution
+
+		if name is None:
+			name = ''
+
+		resolution.attribute_name = name
+		resolution.attribute_name_known = True
+		resolution.name_source_lsn = name_lsn
+		resolution.name_source_kind = name_kind
+
+		return resolution
+
+
 class NTFSLogRecord(object):
 	"""This class is used work with an NTFS log record."""
 
@@ -1567,6 +2097,12 @@ class NTFSLogRecord(object):
 
 	an_dump = None
 	"""An attribute names dump (as raw bytes; it is set externally in the 'parse_ntfs_records' method of the LogFileParser class)."""
+
+	attribute_history = None
+	"""A versioned attribute table history (it is set externally in the 'parse_ntfs_records' method of the LogFileParser class)."""
+
+	target_attribute_resolution = None
+	"""A TargetAttributeResolution for this record (it is set externally in the 'parse_ntfs_records' method of the LogFileParser class)."""
 
 	transaction_id = None
 	"""A transaction ID."""
@@ -1722,10 +2258,46 @@ class NTFSLogRecord(object):
 		elif self.get_redo_operation() in LOGGED_NONRESIDENT_UPDATES or self.get_undo_operation() in LOGGED_NONRESIDENT_UPDATES:
 			return self.get_target_vcn() * self.cluster_size + self.get_cluster_block_offset() * 512 + self.get_attribute_offset() + self.get_record_offset()
 
+	def calculate_target_attribute_resolution(self):
+		"""Resolve the target attribute of this log record using the table state at the LSN of this record.
+
+		The result keeps the numeric slot reference and candidate bindings when the file reference
+		or the attribute name is not known for sure. Return None if this record has no open attribute table target.
+		"""
+
+		if self.get_redo_operation() not in LOGGED_NONRESIDENT_UPDATES and self.get_undo_operation() not in LOGGED_NONRESIDENT_UPDATES:
+			return
+
+		if self.target_attribute_resolution is not None:
+			return self.target_attribute_resolution
+
+		if self.attribute_history is None:
+			return
+
+		resolution = self.attribute_history.resolve(self.get_target_attribute(), self.lsn)
+		self.target_attribute_resolution = resolution
+
+		return resolution
+
 	def calculate_mft_target_reference_and_name(self):
 		"""Calculate and return the reference to a target file record segment (FRS) and a target attribute name as a tuple (or None, if not applicable or not found).
 		Note: this is for nonresident updates present in an open attribute table.
+		The table state at the LSN of this record is used (not the last table dump found in the log file).
+		Only a certain resolution is returned, so that an early record is not attributed to a later occupant of the same slot.
 		"""
+
+		if self.attribute_history is not None:
+			resolution = self.calculate_target_attribute_resolution()
+			if resolution is None:
+				return
+
+			if not resolution.binding_certain:
+				return
+
+			if resolution.attribute_name_known:
+				return (resolution.file_reference, resolution.attribute_name)
+
+			return (resolution.file_reference, None)
 
 		if self.oat is None:
 			return
@@ -1768,7 +2340,13 @@ class NTFSLogRecord(object):
 			frs_reference_and_attribute_name = self.calculate_mft_target_reference_and_name()
 			if frs_reference_and_attribute_name is not None:
 				frs_reference, attribute_name = frs_reference_and_attribute_name
+				if attribute_name is None:
+					attribute_name = 'unnamed or unknown'
+
 				target_spec = '{}/{} (FRS reference / attribute name)'.format(frs_reference, attribute_name)
+			elif self.calculate_target_attribute_resolution() is not None:
+				resolution = self.calculate_target_attribute_resolution()
+				target_spec = '{} (slot; candidates: {})'.format(resolution.slot, ', '.join(str(candidate.file_reference) for candidate in resolution.candidates) if len(resolution.candidates) > 0 else 'none')
 			else:
 				target_spec = 'unknown'
 
@@ -1781,6 +2359,9 @@ class NTFSLogRecord(object):
 class OpenAttributeEntry1(object):
 	"""This class is used to work with the OPEN_ATTRIBUTE_ENTRY structure (version: 1.0+)."""
 
+	sizeof = 40
+	"""The size of this structure."""
+
 	buf = None
 	"""Data of this OPEN_ATTRIBUTE_ENTRY structure."""
 
@@ -1789,6 +2370,11 @@ class OpenAttributeEntry1(object):
 
 		if len(self.buf) < 40:
 			raise ClientException('Invalid open attribute entry length: {}'.format(len(self.buf)))
+
+	def is_allocated(self):
+		"""Return True if this entry is allocated."""
+
+		return self.get_allocated_or_next_free() == 0xFFFFFFFF
 
 	def get_allocated_or_next_free(self):
 		"""Get the free link (this value is 0xFFFFFFFF if this entry is allocated)."""
@@ -1822,6 +2408,9 @@ class OpenAttributeEntry1(object):
 class OpenAttributeEntry0(object):
 	"""This class is used to work with the OPEN_ATTRIBUTE_ENTRY structure (version: 0.0)."""
 
+	sizeof = 44
+	"""The size of this structure."""
+
 	buf = None
 	"""Data of this OPEN_ATTRIBUTE_ENTRY structure."""
 
@@ -1830,6 +2419,11 @@ class OpenAttributeEntry0(object):
 
 		if len(self.buf) < 44:
 			raise ClientException('Invalid open attribute entry length: {}'.format(len(self.buf)))
+
+	def is_allocated(self):
+		"""Return True if this entry is allocated."""
+
+		return self.get_allocated_or_next_free() == 0xFFFFFFFF
 
 	def get_allocated_or_next_free(self):
 		"""Get the free link (this value is 0xFFFFFFFF if this entry is allocated)."""
@@ -1902,11 +2496,16 @@ class AttributeNamesDumpParser(object):
 	buf = None
 	"""Data of this array."""
 
+	complete = False
+	"""Whether this array was parsed until a normal terminator (so that an absent slot means an unnamed attribute)."""
+
 	def __init__(self, attribute_names_dump_raw):
 		self.buf = attribute_names_dump_raw
 
-	def find_name_by_index(self, index):
-		"""Find and return the name by its index (or None, if not found)."""
+	def entries(self):
+		"""Yield (index, name) tuples for each entry."""
+
+		self.complete = False
 
 		pos = 0
 		while pos < len(self.buf):
@@ -1915,13 +2514,28 @@ class AttributeNamesDumpParser(object):
 			try:
 				attribute_name_entry = AttributeNameEntry(attribute_name_entry_buf)
 			except ClientException:
+				# A complete dump can end with a small zero-filled terminator.
+				if self.buf[pos : ].count(0) == len(self.buf) - pos:
+					self.complete = True
+
 				break
 
-			attribute_name_entry_index = attribute_name_entry.get_index()
-			if attribute_name_entry_index == index:
-				return attribute_name_entry.get_name()
+			yield (attribute_name_entry.get_index(), attribute_name_entry.get_name())
 
-			pos += attribute_name_entry.calculate_sizeof()
+			entry_size = attribute_name_entry.calculate_sizeof()
+			if entry_size <= 0:
+				break
+
+			pos += entry_size
+		else:
+			self.complete = True
+
+	def find_name_by_index(self, index):
+		"""Find and return the name by its index (or None, if not found)."""
+
+		for entry_index, name in self.entries():
+			if entry_index == index:
+				return name
 
 class OpenAttributeTableDumpParser(object):
 	"""This class is used to work with the array of OPEN_ATTRIBUTE_ENTRY structures."""
@@ -1932,6 +2546,9 @@ class OpenAttributeTableDumpParser(object):
 	oat_class = None
 	"""Either OpenAttributeEntry0 or OpenAttributeEntry1."""
 
+	header_size = 24
+	"""The size of the dump header."""
+
 	def __init__(self, attribute_names_dump_raw, version):
 		self.buf = attribute_names_dump_raw
 
@@ -1940,11 +2557,29 @@ class OpenAttributeTableDumpParser(object):
 		else:
 			self.oat_class = OpenAttributeEntry0
 
+	def entries(self):
+		"""Yield (slot, entry) tuples for each entry in this dump.
+
+		The slot is the byte offset of the entry (this is the index used by log records).
+		"""
+
+		entry_size = self.oat_class.sizeof
+
+		pos = self.header_size
+		while pos + entry_size <= len(self.buf):
+			entry = self.oat_class(self.buf[pos : ])
+			yield (pos, entry)
+			pos += entry_size
+
 	def find_file_reference_by_index(self, index):
 		"""Find and return the file reference using the entry index."""
 
-		if index >= len(self.buf):
+		if index < self.header_size or index >= len(self.buf):
 			raise ClientException('Invalid index: {}'.format(index))
+
+		entry_size = self.oat_class.sizeof
+		if (index - self.header_size) % entry_size != 0:
+			raise ClientException('Index is not aligned to an entry: {}'.format(index))
 
 		open_attribute_entry_buf = self.buf[index : ]
 		open_attribute_entry = self.oat_class(open_attribute_entry_buf)

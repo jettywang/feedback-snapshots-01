@@ -379,34 +379,58 @@ def process_log():
 			if fr_file_path is not None:
 				output_lines.append('Target path (from $MFT, likely wrong if the file was deleted later): {}'.format(fr_file_path))
 		else:
-			target = log_record.calculate_mft_target_reference_and_name()
-			if target is not None:
-				target_reference, target_attribute_name = target
+			resolution = log_record.calculate_target_attribute_resolution()
 
-				output_lines.append('Target (file reference number): {}'.format(target_reference))
-
-				if target_attribute_name is None:
-					target_attribute_name = '-'
-
-				output_lines.append('Target (attribute name): {}'.format(target_attribute_name))
-
-				fr_number, fr_sequence = MFT.DecodeFileRecordSegmentReference(target_reference)
-
-				try:
-					file_record = mft_file.get_file_record_by_number(fr_number, fr_sequence)
-					file_paths = mft_file.build_full_paths(file_record)
-				except MFT.MasterFileTableException:
-					fr_file_path = None
-				else:
-					if len(file_paths) > 0:
-						fr_file_path = file_paths[0]
-					else:
-						fr_file_path = None
-
-				if fr_file_path is not None:
-					output_lines.append('Target path (from $MFT): {}'.format(fr_file_path))
-			else:
+			if resolution is None:
 				output_lines.append('Unknown target, target attribute: {}'.format(log_record.get_target_attribute()))
+			else:
+				output_lines.append('Target attribute slot: {}'.format(resolution.slot))
+
+				if resolution.binding_certain:
+					output_lines.append('Target (file reference number): {}'.format(resolution.file_reference))
+					output_lines.append('Target table version: {} (LSN: {})'.format(resolution.table_version_kind, resolution.table_version_lsn))
+
+					if resolution.attribute_name_known:
+						output_lines.append('Target (attribute name): {}'.format(resolution.attribute_name if resolution.attribute_name != '' else '-'))
+						output_lines.append('Target attribute name version: {} (LSN: {})'.format(resolution.name_source_kind, resolution.name_source_lsn))
+
+						target_attribute_name = resolution.attribute_name
+					else:
+						output_lines.append('Target (attribute name): unknown (the name table does not cover this binding)')
+						for name_lsn, candidate_name in resolution.name_candidates:
+							output_lines.append('Target (attribute name candidate): {} (from LSN: {})'.format(candidate_name if candidate_name != '' else '-', name_lsn))
+
+					fr_number, fr_sequence = MFT.DecodeFileRecordSegmentReference(resolution.file_reference)
+
+					try:
+						file_record = mft_file.get_file_record_by_number(fr_number, fr_sequence)
+						file_paths = mft_file.build_full_paths(file_record)
+					except MFT.MasterFileTableException:
+						fr_file_path = None
+					else:
+						if len(file_paths) > 0:
+							fr_file_path = file_paths[0]
+						else:
+							fr_file_path = None
+
+					if fr_file_path is not None:
+						output_lines.append('Target path (from $MFT): {}'.format(fr_file_path))
+				else:
+					if resolution.table_version_lsn is None:
+						output_lines.append('Target (file reference number): unknown for this LSN (no table version covers this slot at this LSN)')
+					else:
+						output_lines.append('Target (file reference number): unknown for this LSN (the slot was reused and the exact time is not logged)')
+
+					output_lines.append('Target (file reference candidates):')
+
+					for candidate_binding in resolution.candidates:
+						output_lines.append(' * {} (open LSN: {}, table version: {} at LSN: {})'.format(candidate_binding.file_reference, candidate_binding.open_lsn, candidate_binding.source, candidate_binding.table_version_lsn))
+
+					if resolution.binding is not None:
+						output_lines.append('Target table version (last covering this LSN): {} (LSN: {})'.format(resolution.table_version_kind, resolution.table_version_lsn))
+
+				for reasoning in resolution.uncertain_reasons:
+					output_lines.append('Target note: {}'.format(reasoning))
 
 		offset_in_target = log_record.calculate_offset_in_target()
 		if offset_in_target is not None:
