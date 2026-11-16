@@ -22,6 +22,7 @@ from dissect.btrfs.exceptions import (
     NotADirectoryError,
     NotASymlinkError,
 )
+from dissect.btrfs.qgroup import QuotaTree
 from dissect.btrfs.stream import ChunkStream, Extent, ExtentStream, decode_extent
 from dissect.btrfs.tree import BTree
 
@@ -127,6 +128,21 @@ class Btrfs:
             parent: Optional parent node to attach to the root of the subvolume.
         """
         return Subvolume(self, objectid, parent)
+
+    def qgroups(self) -> QuotaTree | None:
+        """Parse the quota tree and return the qgroup metadata.
+
+        Returns None if the filesystem has no quota tree (quotas were never
+        enabled). Check :attr:`QuotaTree.consistent` and
+        :meth:`QuotaTree.warnings` before drawing capacity conclusions from
+        the counters.
+        """
+        try:
+            tree = self._open_tree(c_btrfs.BTRFS_QUOTA_TREE_OBJECTID)
+        except KeyError:
+            return None
+
+        return QuotaTree.from_tree(tree)
 
     def _initialize_chunks(self) -> None:
         """Initialize the logical data stream by reading the system chunk array and traversing the chunk tree."""

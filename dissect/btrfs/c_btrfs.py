@@ -271,6 +271,31 @@ btrfs_def = """
 #define BTRFS_QGROUP_RELATION_KEY       246
 
 /*
+ * Flags for btrfs_qgroup_status_item.flags.
+ *
+ * ON: quota accounting is enabled. Without it, qgroup info items are
+ * absent or stale and must not be used for capacity conclusions.
+ * RESCAN: a rescan is in progress, counters are incomplete until it
+ * clears. The rescan field holds the progress (last scanned objectid).
+ * INCONSISTENT: the kernel flagged the counters as known-inconsistent
+ * (e.g. relations changed while a rescan was needed).
+ */
+#define BTRFS_QGROUP_STATUS_FLAG_ON             0x1
+#define BTRFS_QGROUP_STATUS_FLAG_RESCAN         0x2
+#define BTRFS_QGROUP_STATUS_FLAG_INCONSISTENT   0x4
+
+/*
+ * Flags for btrfs_qgroup_limit.flags. A limit field is only meaningful
+ * when its flag is set, otherwise there is no limit for that counter.
+ */
+#define BTRFS_QGROUP_LIMIT_MAX_RFER             0x1
+#define BTRFS_QGROUP_LIMIT_MAX_EXCL             0x2
+#define BTRFS_QGROUP_LIMIT_RSV_RFER             0x4
+#define BTRFS_QGROUP_LIMIT_RSV_EXCL             0x8
+#define BTRFS_QGROUP_LIMIT_RFER_CMPR            0x10
+#define BTRFS_QGROUP_LIMIT_EXCL_CMPR            0x20
+
+/*
  * Obsolete name, see BTRFS_TEMPORARY_ITEM_KEY.
  */
 #define BTRFS_BALANCE_ITEM_KEY          248
@@ -872,6 +897,54 @@ struct btrfs_file_extent_item_reg {
      * always reflects the size uncompressed and without encoding.
      */
     uint64      num_bytes;
+};
+
+/*
+ * Overall state of qgroup accounting. Stored as
+ * (0, BTRFS_QGROUP_STATUS_KEY, 0) in the quota tree.
+ */
+struct btrfs_qgroup_status_item {
+    uint64      version;
+    /* generation of the status item itself */
+    uint64      generation;
+    /* BTRFS_QGROUP_STATUS_FLAG_* */
+    uint64      flags;
+    /* progress of an ongoing rescan (objectid of last scanned tree) */
+    uint64      rescan;
+};
+
+/*
+ * Accounting counters of one qgroup. Stored as
+ * (0, BTRFS_QGROUP_INFO_KEY, qgroupid) in the quota tree.
+ *
+ * rfer/excl count the uncompressed (logical) size of referenced extents,
+ * rfer_cmpr/excl_cmpr count the same extents after compression, i.e. the
+ * bytes actually allocated on disk.
+ */
+struct btrfs_qgroup_info {
+    uint64      generation;
+    /* total bytes referenced by this qgroup, including shared extents */
+    uint64      rfer;
+    /* compressed size of the referenced extents */
+    uint64      rfer_cmpr;
+    /* bytes referenced only by this qgroup (subset of rfer) */
+    uint64      excl;
+    /* compressed size of the exclusive extents */
+    uint64      excl_cmpr;
+};
+
+/*
+ * Configured limits of one qgroup. Stored as
+ * (0, BTRFS_QGROUP_LIMIT_KEY, qgroupid) in the quota tree.
+ * A field is only valid if the corresponding BTRFS_QGROUP_LIMIT_* flag
+ * is set.
+ */
+struct btrfs_qgroup_limit {
+    uint64      flags;
+    uint64      max_rfer;
+    uint64      max_excl;
+    uint64      rsv_rfer;
+    uint64      rsv_excl;
 };
 """
 

@@ -7,6 +7,7 @@ from dissect.btrfs.exceptions import (
     NotADirectoryError,
     NotASymlinkError,
 )
+from dissect.btrfs.qgroup import QGroup, QGroupInfo, QGroupLimit, QGroupStatus, QuotaTree
 
 __all__ = [
     "Btrfs",
@@ -15,5 +16,10 @@ __all__ = [
     "INode",
     "NotADirectoryError",
     "NotASymlinkError",
+    "QGroup",
+    "QGroupInfo",
+    "QGroupLimit",
+    "QGroupStatus",
+    "QuotaTree",
     "Subvolume",
 ]
