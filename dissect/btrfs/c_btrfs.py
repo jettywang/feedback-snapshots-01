@@ -222,6 +222,12 @@ btrfs_def = """
 #define BTRFS_BLOCK_GROUP_ITEM_KEY      192
 
 /*
+ * flags for btrfs_extent_item.flags
+ */
+#define BTRFS_EXTENT_FLAG_DATA          0x0001
+#define BTRFS_EXTENT_FLAG_TREE_BLOCK    0x0002
+
+/*
  * Every block group is represented in the free space tree by a free space info
  * item, which stores some accounting information. It is keyed on
  * (block_group_start, FREE_SPACE_INFO, block_group_length).
@@ -777,6 +783,66 @@ struct btrfs_root_ref {
     uint64      sequence;
     uint16      name_len;
     char        name[name_len];
+};
+
+struct btrfs_extent_item {
+    /* number of references to this extent */
+    uint64      refs;
+    /* transaction id that created this extent */
+    uint64      generation;
+    /* BTRFS_EXTENT_FLAG_* */
+    uint64      flags;
+};
+
+/*
+ * Additional information stored after btrfs_extent_item for tree blocks
+ * when the extent is keyed as BTRFS_EXTENT_ITEM_KEY (non-skinny metadata).
+ * For BTRFS_METADATA_ITEM_KEY the level is stored in the key offset instead
+ * and this structure is omitted.
+ */
+struct btrfs_tree_block_info {
+    struct btrfs_disk_key   key;
+    uint8       level;
+};
+
+/*
+ * Backreferences stored inside an extent item. The offset member is a
+ * discriminated union that depends on the type:
+ *
+ * - BTRFS_TREE_BLOCK_REF_KEY: objectid of the root owning the block
+ * - BTRFS_SHARED_BLOCK_REF_KEY: bytenr of the parent tree block
+ * - BTRFS_EXTENT_DATA_REF_KEY: objectid of the root owning the reference,
+ *   followed by a btrfs_extent_data_ref
+ * - BTRFS_SHARED_DATA_REF_KEY: bytenr of the parent tree block,
+ *   followed by a btrfs_shared_data_ref
+ */
+struct btrfs_extent_inline_ref {
+    uint8       type;
+    uint64      offset;
+};
+
+/*
+ * When stored after a btrfs_extent_inline_ref, objectid is the inode owning
+ * the file extent item and offset is the file offset (the referencing root is
+ * in the inline ref header). When stored as a standalone
+ * BTRFS_EXTENT_DATA_REF_KEY item, objectid is the referencing root and offset
+ * is the inode (the file offset is folded into the key offset hash).
+ */
+struct btrfs_extent_data_ref {
+    uint64      objectid;
+    uint64      offset;
+    /* number of file extent items referencing the extent */
+    uint32      count;
+};
+
+struct btrfs_shared_data_ref {
+    uint32      count;
+};
+
+/* obsolete backref format, only found on ancient filesystems */
+struct btrfs_extent_ref_v0 {
+    uint64      objectid;
+    uint64      count;
 };
 
 enum {
