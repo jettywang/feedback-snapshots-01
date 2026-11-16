@@ -13,7 +13,8 @@ import io
 import gzip
 import tarfile
 import pickle
-from dfir_ntfs import MFT, WSL, USN, Attributes, LogFile, BootSector, ShadowCopy, PartitionTable, MoveTable
+import struct
+from dfir_ntfs import MFT, WSL, USN, Attributes, LogFile, TransactionEvidence, BootSector, ShadowCopy, PartitionTable, MoveTable
 from dfir_ntfs.addons import FAT, exFAT
 
 TEST_DATA_DIR = 'test_data'
@@ -1455,6 +1456,290 @@ def test_logfile_empty():
 
 	with pytest.raises(LogFile.EmptyLogFileException):
 		lf = LogFile.LogFileParser(f)
+
+	f.close()
+
+# A minimal, USA-protected $LogFile used to exercise the transaction evidence view deterministically.
+SYNTH_LOG_PAGE_SIZE = 4096
+SYNTH_LOG_DATA_OFFSET = 0x40
+SYNTH_LOG_RECORD_HEADER_LENGTH = 48
+SYNTH_LOG_SEQUENCE_NUMBER_BITS = 43
+SYNTH_LOG_CLIENT_RECORD_SIZE = 32
+SYNTH_LOG_RECORD_STRIDE = SYNTH_LOG_RECORD_HEADER_LENGTH + SYNTH_LOG_CLIENT_RECORD_SIZE
+
+def _synth_finalize_usa(buf):
+	usa_sequence = 0xABCD
+	struct.pack_into('<H', buf, 0x28, usa_sequence)
+
+	for sector_index in range(1, 9):
+		sector_end = sector_index * 512 - 2
+		saved_word = buf[sector_end] | (buf[sector_end + 1] << 8)
+		struct.pack_into('<H', buf, 0x28 + sector_index * 2, saved_word)
+		struct.pack_into('<H', buf, sector_end, usa_sequence)
+
+	return bytes(buf)
+
+def _synth_restart_page(seed_lsn):
+	buf = bytearray(b'\xFF' * SYNTH_LOG_PAGE_SIZE)
+	buf[0 : 4] = b'RSTR'
+	struct.pack_into('<HH', buf, 26, 1, 1) # Minor and major version: 1.1.
+	struct.pack_into('<LL', buf, 16, SYNTH_LOG_PAGE_SIZE, SYNTH_LOG_PAGE_SIZE)
+	struct.pack_into('<H', buf, 24, 0x40) # Restart area offset.
+
+	restart_area = 0x40
+	struct.pack_into('<Q', buf, restart_area + 0, seed_lsn) # Current LSN.
+	struct.pack_into('<HH', buf, restart_area + 8, 1, LogFile.LFS_NO_CLIENT) # One client, empty free list.
+	struct.pack_into('<H', buf, restart_area + 12, 0) # In-use list.
+	struct.pack_into('<L', buf, restart_area + 16, SYNTH_LOG_SEQUENCE_NUMBER_BITS)
+	struct.pack_into('<H', buf, restart_area + 20, 0xA0) # Restart area length.
+	struct.pack_into('<H', buf, restart_area + 22, 0x40) # Client array offset.
+	struct.pack_into('<q', buf, restart_area + 24, 4 * SYNTH_LOG_PAGE_SIZE) # File size.
+	struct.pack_into('<H', buf, restart_area + 36, SYNTH_LOG_RECORD_HEADER_LENGTH)
+	struct.pack_into('<H', buf, restart_area + 38, SYNTH_LOG_DATA_OFFSET)
+
+	client_record = restart_area + 0x40
+	struct.pack_into('<QQ', buf, client_record + 0, seed_lsn, seed_lsn) # Oldest and client restart LSNs.
+	struct.pack_into('<HH', buf, client_record + 16, LogFile.LFS_NO_CLIENT, LogFile.LFS_NO_CLIENT)
+	struct.pack_into('<H', buf, client_record + 20, 1) # Client sequence number.
+	struct.pack_into('<L', buf, client_record + 28, 8) # Client name length.
+	buf[client_record + 32 : client_record + 40] = 'NTFS'.encode('utf-16le')
+
+	struct.pack_into('<HH', buf, 4, 0x28, 9) # Update sequence array: offset and size.
+	return _synth_finalize_usa(buf)
+
+def _synth_record_page(records, last_lsn):
+	buf = bytearray(b'\xFF' * SYNTH_LOG_PAGE_SIZE)
+	buf[0 : 4] = b'RCRD'
+	struct.pack_into('<Q', buf, 8, last_lsn) # Last LSN.
+	struct.pack_into('<L', buf, 16, LogFile.LOG_PAGE_LOG_RECORD_END)
+	struct.pack_into('<Q', buf, 32, last_lsn) # Last end LSN.
+
+	offset = SYNTH_LOG_DATA_OFFSET
+	for this_lsn, previous_lsn, undo_next_lsn, transaction_id, redo_operation, undo_operation in records:
+		client_data = struct.pack('<12H', redo_operation, undo_operation, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) + struct.pack('<q', 0)
+		assert len(client_data) == SYNTH_LOG_CLIENT_RECORD_SIZE
+
+		struct.pack_into('<Q', buf, offset + 0, this_lsn)
+		struct.pack_into('<Q', buf, offset + 8, previous_lsn)
+		struct.pack_into('<Q', buf, offset + 16, undo_next_lsn)
+		struct.pack_into('<L', buf, offset + 24, len(client_data))
+		struct.pack_into('<L', buf, offset + 28, 0) # Client ID.
+		struct.pack_into('<L', buf, offset + 32, LogFile.LfsClientRecord)
+		struct.pack_into('<L', buf, offset + 36, transaction_id)
+		buf[offset + SYNTH_LOG_RECORD_HEADER_LENGTH : offset + SYNTH_LOG_RECORD_HEADER_LENGTH + len(client_data)] = client_data
+
+		offset += SYNTH_LOG_RECORD_STRIDE
+
+	struct.pack_into('<HH', buf, 4, 0x28, 9)
+	return _synth_finalize_usa(buf)
+
+def _synth_make_lsn(page_number, offset_in_page, sequence_number):
+	absolute_offset = page_number * SYNTH_LOG_PAGE_SIZE + offset_in_page
+	return (absolute_offset >> 3) | (sequence_number << (64 - SYNTH_LOG_SEQUENCE_NUMBER_BITS))
+
+def _build_interleaved_rollback_missing_log():
+	"""Build a short log with interleaved transactions, one full rollback and one missing predecessor."""
+
+	sequence_number = 1
+
+	def record_offset(index):
+		return SYNTH_LOG_DATA_OFFSET + index * SYNTH_LOG_RECORD_STRIDE
+
+	# Transaction A (ID 7) and transaction B (ID 9) interleave on page 2.
+	a1 = _synth_make_lsn(2, record_offset(0), sequence_number)
+	a2 = _synth_make_lsn(2, record_offset(1), sequence_number)
+	b1 = _synth_make_lsn(2, record_offset(2), sequence_number)
+	a3 = _synth_make_lsn(2, record_offset(3), sequence_number)
+	b2 = _synth_make_lsn(2, record_offset(4), sequence_number)
+	a_commit = _synth_make_lsn(2, record_offset(5), sequence_number)
+	b3 = _synth_make_lsn(2, record_offset(6), sequence_number)
+	b_clr = _synth_make_lsn(2, record_offset(7), sequence_number)
+	b_forget = _synth_make_lsn(2, record_offset(8), sequence_number)
+
+	# A disconnected fragment on page 3: its second record names an absent predecessor.
+	c1 = _synth_make_lsn(3, SYNTH_LOG_DATA_OFFSET, sequence_number)
+	c2 = _synth_make_lsn(3, SYNTH_LOG_DATA_OFFSET + SYNTH_LOG_RECORD_STRIDE, sequence_number)
+	missing_predecessor_lsn = 999999
+
+	page_2 = [
+		(a1, 0, a1, 7, LogFile.UpdateResidentValue, LogFile.UpdateResidentValue),
+		(a2, a1, a2, 7, LogFile.CreateAttribute, LogFile.DeleteAttribute),
+		(b1, 0, b1, 9, LogFile.AddIndexEntryRoot, LogFile.DeleteIndexEntryRoot),
+		(a3, a2, a3, 7, LogFile.UpdateResidentValue, LogFile.UpdateResidentValue),
+		(b2, b1, b2, 9, LogFile.UpdateFileNameRoot, LogFile.UpdateFileNameRoot),
+		(a_commit, a3, 0, 7, LogFile.CommitTransaction, LogFile.Noop),
+		(b3, b2, b2, 9, LogFile.SetNewAttributeSizes, LogFile.SetNewAttributeSizes),
+		(b_clr, b3, b1, 9, LogFile.Noop, LogFile.CompensationLogRecord),
+		(b_forget, b_clr, 0, 9, LogFile.ForgetTransaction, LogFile.CompensationLogRecord)
+	]
+	page_3 = [
+		(c1, 0, c1, 11, LogFile.UpdateResidentValue, LogFile.UpdateResidentValue),
+		(c2, missing_predecessor_lsn, 0, 11, LogFile.CreateAttribute, LogFile.DeleteAttribute)
+	]
+
+	data = _synth_restart_page(a_commit) + _synth_restart_page(a_commit)
+	data += _synth_record_page(page_2, b_forget) + _synth_record_page(page_3, c2)
+
+	return io.BytesIO(data), {
+		'a_lsns': [ a1, a2, a3, a_commit ],
+		'b_lsns': [ b1, b2, b3, b_clr, b_forget ],
+		'fragment_lsns': [ c1, c2 ],
+		'missing_predecessor_lsn': missing_predecessor_lsn
+	}
+
+def test_transaction_evidence_interleaved_rollback_missing():
+	stream, expected = _build_interleaved_rollback_missing_log()
+
+	lf = LogFile.LogFileParser(stream)
+	analyzer = TransactionEvidence.TransactionEvidenceAnalyzer(lf)
+	instances = analyzer.analyze()
+
+	assert len(instances) == 4
+
+	by_state = dict()
+	for instance in instances:
+		assert instance.state not in by_state # Each state below is represented by one instance.
+		by_state[instance.state] = instance
+
+	# The interleaved, committed transaction.
+	committed = by_state[TransactionEvidence.STATE_COMMITTED]
+	assert committed.transaction_id == 7
+	assert [record.lsn for record in committed.records] == expected['a_lsns']
+	assert len(list(committed.user_operations())) == 3
+	assert len(list(committed.compensation_records())) == 0
+	assert any(record.kind == TransactionEvidence.KIND_COMMIT for record in committed.records)
+	# Every conclusion carries an original physical location.
+	assert all(record.log_page_number is not None and record.file_offset is not None for record in committed.records)
+
+	# The interleaved, fully rolled-back transaction: the CLR is not counted as a user operation.
+	rolled_back = by_state[TransactionEvidence.STATE_ROLLED_BACK]
+	assert rolled_back.transaction_id == 9
+	assert [record.lsn for record in rolled_back.records] == expected['b_lsns']
+	assert len(list(rolled_back.user_operations())) == 3
+	assert len(list(rolled_back.compensation_records())) == 1
+	clr_record = next(rolled_back.compensation_records())
+	assert clr_record.undo_next_lsn == expected['b_lsns'][0]
+	assert clr_record.undo_target_present is True
+	# The forget record is boundary bookkeeping, not a user operation and not proof of commit.
+	forget_record = next(record for record in rolled_back.records if record.kind == TransactionEvidence.KIND_FORGET)
+	assert forget_record.is_clr is True
+
+	# The open fragment: no commit, no CLR, so the outcome cannot be confirmed.
+	open_unknown = by_state[TransactionEvidence.STATE_OPEN_UNKNOWN]
+	assert [record.lsn for record in open_unknown.records] == [ expected['fragment_lsns'][0] ]
+
+	# The fragment with a missing predecessor must never be assumed committed.
+	missing_link = by_state[TransactionEvidence.STATE_MISSING_LINK]
+	assert [record.lsn for record in missing_link.records] == [ expected['fragment_lsns'][1] ]
+	assert expected['missing_predecessor_lsn'] in missing_link.missing_predecessor_lsns
+	assert any('absent' in reason for reason in missing_link.state_reasons)
+
+	# The transaction ID 11 is reused by two distinct instances split by the broken chain.
+	reused = analyzer._reused_transaction_ids()
+	assert reused == { 11: 2 }
+
+	# The causal graph exposes both predecessor and undo edges, including the absent node.
+	graph = analyzer.render_graph()
+	assert 'prev->ABSENT {}'.format(expected['missing_predecessor_lsn']) in graph
+	assert 'undo->{}'.format(expected['b_lsns'][0]) in graph
+	assert '[ABSENT LSN {}]'.format(expected['missing_predecessor_lsn']) in graph
+
+	stream.close()
+
+def test_transaction_evidence_locations_and_dedup():
+	stream, expected = _build_interleaved_rollback_missing_log()
+
+	lf = LogFile.LogFileParser(stream)
+	analyzer = TransactionEvidence.TransactionEvidenceAnalyzer(lf)
+	analyzer.analyze()
+
+	# Physical location is retained for every record and matches the parser LSN translation.
+	for record in analyzer.records.values():
+		page_number, offset_in_page = lf.lsn_to_offset(record.lsn)
+		assert record.log_page_number == page_number
+		assert record.offset_in_page == offset_in_page
+		assert record.file_offset == page_number * lf.log_page_size + offset_in_page
+
+	# No compensation record is ever classified as a user operation (no double counting).
+	for instance in analyzer.instances:
+		for record in instance.records:
+			if record.is_clr:
+				assert record.kind != TransactionEvidence.KIND_USER_OPERATION
+
+	# The LSN order, not the physical page order, defines the record order of an instance.
+	for instance in analyzer.instances:
+		lsns = [record.lsn for record in instance.records]
+		assert lsns == sorted(lsns)
+
+	stream.close()
+
+def test_transaction_evidence_missing_predecessor_on_real_log():
+	# Simulate a short log in which the circular area overwrote the first segment of a chain:
+	# a surviving chain root is rewritten to name a predecessor that no longer exists in the file.
+	# The surviving fragment must be reported with a missing link, never as a successful commit.
+	with open(LOGFILE_10, 'rb') as source:
+		original = bytearray(source.read())
+
+	lf = LogFile.LogFileParser(io.BytesIO(original))
+	lf.collect_lsns()
+	lf.sort_lsns()
+
+	root_lsn = None
+	for lsn_list in lf.lsns_sorted.values():
+		for lsn in lsn_list:
+			page_number, offset_in_page = lf.lsn_to_offset(lsn)
+			page = lf.get_log_record_page_by_number(page_number)
+			header = page.get_log_record_at_offset(offset_in_page, lf.record_header_length)
+			if header.get_record_type() == LogFile.LfsClientRecord and header.get_client_previous_lsn() == 0:
+				root_lsn = lsn
+				root_location = (page_number, offset_in_page)
+				break
+
+		if root_lsn is not None:
+			break
+
+	assert root_lsn is not None
+	missing_predecessor_lsn = 7777777
+	page_number, offset_in_page = root_location
+	struct.pack_into('<Q', original, page_number * lf.log_page_size + offset_in_page + 8, missing_predecessor_lsn)
+
+	lf_broken = LogFile.LogFileParser(io.BytesIO(original))
+	analyzer = TransactionEvidence.TransactionEvidenceAnalyzer(lf_broken)
+	instances = analyzer.analyze()
+
+	assert len(instances) > 0
+	# Exactly the rewritten fragment carries a dangling predecessor reference.
+	fragments = [instance for instance in instances if instance.missing_predecessor_lsns]
+	assert len(fragments) == 1
+	fragment = fragments[0]
+	assert fragment.missing_predecessor_lsns == [ missing_predecessor_lsn ]
+	# A missing chain segment is never promoted to committed without complete evidence.
+	assert fragment.state in (TransactionEvidence.STATE_MISSING_LINK, TransactionEvidence.STATE_INDETERMINATE)
+	assert any('absent' in reason for reason in fragment.state_reasons)
+
+def test_transaction_evidence_real_log_rollback():
+	# This real log contains one abort chain whose compensation record points back along the undo chain.
+	f = open(LOGFILE_10_4K, 'rb')
+
+	lf = LogFile.LogFileParser(f)
+	analyzer = TransactionEvidence.TransactionEvidenceAnalyzer(lf)
+	instances = analyzer.analyze()
+
+	rolled_back = [instance for instance in instances if instance.state == TransactionEvidence.STATE_ROLLED_BACK]
+	assert len(rolled_back) == 1
+	instance = rolled_back[0]
+
+	clr_records = list(instance.compensation_records())
+	assert len(clr_records) == 1
+	clr_record = clr_records[0]
+	assert clr_record.is_clr is True
+	assert clr_record.undo_next_lsn != 0
+	assert clr_record.undo_target_present is True
+	# The undo-next target is an earlier record of the same instance (a true rollback trail).
+	assert clr_record.undo_next_lsn in [record.lsn for record in instance.records]
+	assert clr_record.undo_next_lsn < clr_record.lsn
+	# Compensation records never inflate the user operation count.
+	assert len(list(instance.user_operations())) + len(clr_records) <= len(instance.records)
 
 	f.close()
 

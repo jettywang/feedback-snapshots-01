@@ -1,5 +1,7 @@
 Version: 1.1.20
 
+Add a read-only transaction evidence view for the $LogFile journal (the new '--log-tx' mode of ntfs_parser).
+It correlates records of the same log client into transaction instances using LSN, client sequence numbers and the predecessor/undo-next chains, distinguishes committed, rolled-back and unconfirmed fragments, never treats a missing chain segment as a successful commit, and does not count compensation log records as separate user operations.
 Improve handling of unusual FAT volumes.
 
 ---
