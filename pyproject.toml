@@ -118,6 +118,7 @@ beacon-xordecode = "dissect.cobaltstrike.xordecode:main"
 beacon-pcap = "dissect.cobaltstrike.pcap:main"
 beacon-client = "dissect.cobaltstrike.client:main"
 c2profile-dump = "dissect.cobaltstrike.c2profile:main"
+beacon-guardrails = "dissect.cobaltstrike.guardrails:main"
 
 [tool.hatch]
 version.source = "vcs"

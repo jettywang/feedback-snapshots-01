@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `beacon-guardrails` CLI and `dissect.cobaltstrike.guardrails.diagnose_guardrails` API to
+  correlate Guardrails candidates with Beacon configurations. The report enumerates every
+  candidate and patch size, exposes decoding material and checksum evidence, is independent
+  of candidate ordering, and preserves ambiguity when multiple intervals or payload keys fit.
+
 ## [1.3.0] - 2026-10-01
 
 ### Added
