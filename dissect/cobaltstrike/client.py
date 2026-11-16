@@ -50,6 +50,7 @@ from dissect.cobaltstrike.c2 import (
     C2Http,
     CallbackPacket,
     ClientC2Data,
+    HttpFields,
     HttpRequest,
     HttpResponse,
     TaskPacket,
@@ -336,8 +337,8 @@ class HttpBeaconClient:
         return HttpRequest(
             method=self.get_verb,
             uri=self.get_uri.encode(),
-            headers={b"User-Agent": self.user_agent.encode(), b"Host": self.host_header.encode()},
-            params={},
+            headers=HttpFields([(b"User-Agent", self.user_agent.encode()), (b"Host", self.host_header.encode())]),
+            params=HttpFields(case_insensitive=False),
             body=b"",
         )
 
@@ -346,8 +347,8 @@ class HttpBeaconClient:
         return HttpRequest(
             method=self.submit_verb,
             uri=self.submit_uri.encode(),
-            headers={b"User-Agent": self.user_agent.encode(), b"Host": self.host_header.encode()},
-            params={},
+            headers=HttpFields([(b"User-Agent", self.user_agent.encode()), (b"Host", self.host_header.encode())]),
+            params=HttpFields(case_insensitive=False),
             body=b"",
         )
 
@@ -377,11 +378,11 @@ class HttpBeaconClient:
         )
 
         url = urllib.parse.urljoin(self.base_url, req.uri.decode())
-        params = {k.decode(): v.decode() for k, v in req.params.items()}
+        params = [(k.decode(), v.decode()) for k, v in req.params.items()]
         try:
             self.logger.debug("requesting : %r", req)
             response = httpx.request(
-                req.method, url, headers=req.headers, params=params, content=req.body, verify=self.verify
+                req.method, url, headers=list(req.headers.items()), params=params, content=req.body, verify=self.verify
             )
             response.raise_for_status()
         except httpx.RequestError as exc:
@@ -393,9 +394,14 @@ class HttpBeaconClient:
         else:
             req = HttpResponse(
                 body=response.content,
-                headers=response.headers,
+                # httpx exposes header names lower-cased; mark them so ambiguity reports can
+                # distinguish transport normalization from the original wire spelling.
+                headers=HttpFields(
+                    [(k.encode(), v.encode()) for k, v in response.headers.multi_items()],
+                    normalized_transport=True,
+                ),
                 status=response.status_code,
-                reason=response.reason_phrase,
+                reason=response.reason_phrase.encode("utf-8", errors="replace"),
             )
             for packet in self.c2http.iter_recover_http(req):
                 if packet.command == BeaconCommand.COMMAND_NOOP:
@@ -427,10 +433,10 @@ class HttpBeaconClient:
 
         # Construct url for callback
         url = urllib.parse.urljoin(self.base_url, req.uri.decode())
-        params = {k.decode(): v.decode() for k, v in req.params.items()}
+        params = [(k.decode(), v.decode()) for k, v in req.params.items()]
         try:
             response = httpx.request(
-                req.method, url, headers=req.headers, params=params, content=req.body, verify=self.verify
+                req.method, url, headers=list(req.headers.items()), params=params, content=req.body, verify=self.verify
             )
             response.raise_for_status()
         except httpx.RequestError as exc:

@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `HttpFields`, an occurrence-preserving container for HTTP headers and query parameters,
+  exposed through `HttpRequest.headers`/`params` and `HttpResponse.headers`. Field names keep
+  their original spelling, values stay raw bytes and repeated fields are not collapsed.
+- `CarrierSource` provenance on `C2Data.sources` and recovered packets, naming the exact
+  header/parameter occurrence (or URI/body) a value was read from, plus `C2Data.source_for()`.
+- Distinct `MissingFieldError`, `AmbiguousFieldError`, `FieldDecodeError`,
+  `UnrelatedRequestError` and `AmbiguousRequestError` for carrier selection failures.
+
+### Changed
+
+- `parse_raw_http` no longer URL-decodes query parameters or percent-decodes the request
+  path, and header names are matched case-insensitively per HTTP while retaining their
+  original case.
+- Request targets are matched against configured URIs exactly, unless the transform uses
+  `uri-append`; look-alike short paths are rejected instead of silently selected by
+  `startswith`.
+- `HttpDataTransform.recover` fails explicitly on missing, duplicated or undecodable carrier
+  fields instead of relying on dictionary insertion order.
+- The HTTP beacon client now builds and consumes `HttpFields` and keeps duplicate headers
+  when forwarding them to `httpx`.
+
 ## [1.3.0] - 2026-10-01
 
 ### Added

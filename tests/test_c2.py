@@ -6,6 +6,8 @@ from Crypto.PublicKey import RSA
 
 from dissect.cobaltstrike.beacon import BeaconConfig
 from dissect.cobaltstrike.c2 import (
+    AmbiguousFieldError,
+    AmbiguousRequestError,
     BeaconCallback,
     BeaconCommand,
     BeaconKeys,
@@ -13,11 +15,15 @@ from dissect.cobaltstrike.c2 import (
     C2Http,
     ClientC2Data,
     EncryptedPacket,
+    FieldDecodeError,
     HttpDataTransform,
+    HttpFields,
     HttpRequest,
     HttpResponse,
+    MissingFieldError,
     ServerC2Data,
     TaskPacket,
+    UnrelatedRequestError,
     decrypt_metadata,
     decrypt_packet,
     derive_aes_hmac_keys,
@@ -430,3 +436,201 @@ def test_encrypt_packet():
     plaintext = decrypt_packet(packet, **keys._asdict())
     assert plaintext == b"hello worldAAAAA"
     assert plaintext == pad(msg)
+
+
+def _get_with_cookie(cookie: bytes, target: bytes = b"/ptj") -> bytes:
+    return b"GET " + target + b" HTTP/1.1\r\n" b"Host: example.com\r\n" b"Cookie: " + cookie + b"\r\n\r\n"
+
+
+def test_parse_raw_http_preserves_occurrences_and_raw_values():
+    raw = (
+        b"GET /ptj?x=1&x=2&X=3 HTTP/1.1\r\n"
+        b"CoOkIe: first\r\n"
+        b"cookie: second\r\n"
+        b"X-Test: a%2Fb+c\r\n\r\n"
+    )
+    http = parse_raw_http(raw)
+
+    assert isinstance(http, HttpRequest)
+    assert http.uri == b"/ptj"
+    assert http.headers.names() == [b"CoOkIe", b"cookie", b"X-Test"]
+    assert http.headers.get_all(b"Cookie") == [b"first", b"second"]
+    assert http.headers.occurrences(b"cookie") == [0, 1]
+    # Values remain raw bytes: no percent or plus decoding.
+    assert http.headers.get_all(b"X-Test") == [b"a%2Fb+c"]
+
+    # Query parameter names are case sensitive and repeated names are not collapsed.
+    assert http.params.get_all(b"x") == [b"1", b"2"]
+    assert http.params.get_all(b"X") == [b"3"]
+
+
+def test_parse_raw_http_request_target_not_decoded():
+    http = parse_raw_http(b"GET /pt%6A%2Fsub?q=a%26b HTTP/1.1\r\nHost: example.com\r\n\r\n")
+
+    assert isinstance(http, HttpRequest)
+    assert http.uri == b"/pt%6A%2Fsub"
+    assert http.params.get_all(b"q") == [b"a%26b"]
+
+
+def test_recover_header_name_case_insensitive_and_reports_source(c2http):
+    raw = http_request_checkin.replace(b"Cookie:", b"cOoKiE:")
+    http = parse_raw_http(raw)
+
+    c2data = c2http.transform_get.recover(http)
+    metadata = decrypt_metadata(c2data.metadata, rsa_private)
+
+    assert metadata.bid == 105175268
+    source = c2data.source_for("metadata")
+    assert source.carrier == "header"
+    assert source.name == b"cOoKiE"
+    assert source.occurrence == 0
+    assert source.wire_index == 1
+    assert source.value == http.headers.get_all(b"cookie")[0]
+    assert source.value == raw.partition(b"cOoKiE: ")[2].partition(b"\r\n")[0]
+
+
+def test_recover_duplicate_header_conflicting_values_is_ambiguous(c2http):
+    raw = http_request_checkin.replace(
+        b"Cache-Control: no-cache", b"Cookie: other-value\r\nCache-Control: no-cache"
+    )
+    http = parse_raw_http(raw)
+
+    with pytest.raises(AmbiguousFieldError) as excinfo:
+        c2http.transform_get.recover(http)
+
+    error = excinfo.value
+    assert error.name == b"Cookie"
+    assert error.values[0] == http.headers.get_all(b"cookie")[0]
+    assert error.values[1] == b"other-value"
+    assert error.positions == [1, 5]
+    assert not isinstance(error, (MissingFieldError, FieldDecodeError))
+
+
+def test_recover_duplicate_header_identical_values_is_ambiguous(c2http):
+    cookie = parse_raw_http(http_request_checkin).headers.get_all(b"Cookie")[0]
+    raw = http_request_checkin.replace(
+        b"Cache-Control: no-cache", b"Cookie: " + cookie + b"\r\nCache-Control: no-cache"
+    )
+    http = parse_raw_http(raw)
+
+    with pytest.raises(AmbiguousFieldError) as excinfo:
+        c2http.transform_get.recover(http)
+
+    assert excinfo.value.values == [cookie, cookie]
+    assert excinfo.value.positions == [1, 5]
+
+
+def test_recover_missing_header_is_distinct_from_ambiguity(c2http):
+    raw = b"GET /ptj HTTP/1.1\r\nHost: example.com\r\n\r\n"
+    http = parse_raw_http(raw)
+
+    with pytest.raises(MissingFieldError) as excinfo:
+        c2http.transform_get.recover(http)
+
+    assert excinfo.value.name == b"Cookie"
+    assert not isinstance(excinfo.value, (AmbiguousFieldError, FieldDecodeError))
+
+
+def test_recover_bad_base64_is_decode_error_with_source(c2http):
+    http = parse_raw_http(_get_with_cookie(b"!!!!"))
+
+    with pytest.raises(FieldDecodeError) as excinfo:
+        c2http.transform_get.recover(http)
+
+    error = excinfo.value
+    assert error.transform == "base64"
+    assert error.name == b"Cookie"
+    assert error.value == b"!!!!"
+    assert error.source.carrier == "header"
+    assert not isinstance(error, (MissingFieldError, AmbiguousFieldError))
+
+
+def test_recover_parameter_raw_value_and_source(c2http):
+    raw = http_post_callback.replace(b"?id=242569267", b"?id=242%35%36%39")
+    http = parse_raw_http(raw)
+
+    c2data = c2http.transform_submit.recover(http)
+
+    assert c2data.id == b"242%35%36%39"
+    assert c2data.output == http.body
+    id_source = c2data.source_for("id")
+    assert id_source.carrier == "parameter"
+    assert id_source.name == b"id"
+    assert id_source.value == b"242%35%36%39"
+    body_source = c2data.source_for("output")
+    assert body_source.carrier == "body"
+    assert body_source.value == http.body
+
+
+def test_recover_duplicate_parameter_conflicting_values_is_ambiguous(c2http):
+    raw = http_post_callback.replace(b"?id=242569267", b"?id=111&id=222")
+    http = parse_raw_http(raw)
+
+    with pytest.raises(AmbiguousFieldError) as excinfo:
+        c2http.transform_submit.recover(http)
+
+    assert excinfo.value.name == b"id"
+    assert excinfo.value.values == [b"111", b"222"]
+    assert excinfo.value.positions == [0, 1]
+
+
+def test_recover_duplicate_parameter_identical_values_is_ambiguous(c2http):
+    raw = http_post_callback.replace(b"?id=242569267", b"?id=242569267&id=242569267")
+    http = parse_raw_http(raw)
+
+    with pytest.raises(AmbiguousFieldError):
+        c2http.transform_submit.recover(http)
+
+
+@pytest.mark.parametrize(
+    ("method", "target"),
+    [
+        (b"GET", b"/ptjX"),
+        (b"GET", b"/ptj.bak"),
+        (b"GET", b"/pt"),
+        (b"GET", b"/pt%6A"),
+        (b"GET", b"/ptj/extra"),
+        (b"POST", b"/submit.php.bak"),
+        (b"POST", b"/submit.ph"),
+    ],
+)
+def test_uri_lookalike_is_unrelated(c2http, method, target):
+    raw = method + b" " + target + b" HTTP/1.1\r\nHost: example.com\r\n\r\n"
+    http = parse_raw_http(raw)
+
+    with pytest.raises(UnrelatedRequestError) as excinfo:
+        c2http.get_transform_for_http(http)
+
+    assert excinfo.value.uri == target
+    assert excinfo.value.method == method
+    assert not isinstance(excinfo.value, AmbiguousRequestError)
+
+
+def test_uri_exact_match_still_selected(c2http):
+    assert c2http.get_transform_for_http(parse_raw_http(_get_with_cookie(b"x"))) == c2http.transform_get
+
+    raw = b"POST /submit.php HTTP/1.1\r\nHost: example.com\r\n\r\n"
+    assert c2http.get_transform_for_http(parse_raw_http(raw)) == c2http.transform_submit
+
+
+def test_uri_ambiguous_configured_candidates(c2http):
+    c2http.get_uris = (b"/ptj", b"/ptj")
+    http = parse_raw_http(b"GET /ptj HTTP/1.1\r\nHost: example.com\r\n\r\n")
+
+    with pytest.raises(AmbiguousRequestError) as excinfo:
+        c2http.get_transform_for_http(http)
+
+    assert excinfo.value.uri == b"/ptj"
+    assert excinfo.value.candidates == [b"/ptj", b"/ptj"]
+
+
+def test_uri_append_prefix_ambiguity(c2http):
+    c2http.get_uris = (b"/ptj", b"/ptjx")
+    c2http.transform_get = HttpDataTransform(steps=[("URI_APPEND", True), ("BUILD", "metadata")])
+
+    http = parse_raw_http(b"GET /ptjx-extra HTTP/1.1\r\nHost: example.com\r\n\r\n")
+
+    with pytest.raises(AmbiguousRequestError) as excinfo:
+        c2http.get_transform_for_http(http)
+
+    assert excinfo.value.candidates == [b"/ptj", b"/ptjx"]
