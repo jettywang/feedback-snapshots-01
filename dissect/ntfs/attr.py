@@ -8,7 +8,7 @@ from dissect.util.ts import wintimestamp
 
 from dissect.ntfs.c_ntfs import ATTRIBUTE_TYPE_CODE, IO_REPARSE_TAG, c_ntfs
 from dissect.ntfs.exceptions import MftNotAvailableError, VolumeNotAvailableError
-from dissect.ntfs.util import ensure_volume, get_full_path, segment_reference, ts_to_ns, varint
+from dissect.ntfs.util import ensure_volume, get_full_path, segment_reference, ts_to_ns
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -195,32 +195,65 @@ class AttributeHeader:
 
         Raises:
             TypeError: If attribute is resident.
+            ValueError: If a mapping pair is malformed or runs past the end of the attribute record.
         """
         if self.resident:
             raise TypeError("Resident attributes don't have dataruns")
 
         fh = self.fh
 
-        fh.seek(self.offset + self.header.Form.Nonresident.MappingPairsOffset)
+        # NTFS mapping pairs encode run lengths as unsigned integers and LCN deltas as signed integers. Reading only
+        # within the attribute record keeps a truncated field or missing terminator from consuming the next attribute.
+        start = self.offset + self.header.Form.Nonresident.MappingPairsOffset
+        end = self.offset + self.record_length
+        if start > end:
+            raise ValueError(f"Mapping pairs offset {start:#x} out of range for attribute record ending at {end:#x}")
+
+        fh.seek(start)
+        buf = fh.read(end - start)
 
         runs = []
-        run_offset = None
-        run_size = None
-        offset = 0
+        lcn = 0
+        pos = 0
 
         while True:
-            value = fh.read(1)[0]  # Get the integer value
-            if value == 0:
+            if pos >= len(buf):
+                raise ValueError("Mapping pairs missing terminator byte")
+
+            header = buf[pos]
+            pos += 1
+
+            if header == 0:
                 break
 
-            size_len = value & 0xF
-            offset_len = (value >> 4) & 0xF
+            size_len = header & 0xF
+            offset_len = (header >> 4) & 0xF
 
-            run_size = varint(fh.read(size_len))
-            if offset_len == 0:  # Sparse run
+            if size_len == 0:
+                raise ValueError("Mapping pair has a zero-length run size field")
+
+            if size_len > 8 or offset_len > 8:
+                raise ValueError(f"Mapping pair has an invalid field width: size={size_len} offset={offset_len}")
+
+            if pos + size_len + offset_len > len(buf):
+                raise ValueError("Mapping pair runs past the end of the attribute record")
+
+            # Run lengths are unsigned, LCN deltas are signed
+            run_size = int.from_bytes(buf[pos : pos + size_len], "little")
+            pos += size_len
+
+            if run_size == 0:
+                raise ValueError("Mapping pair has a zero-length run")
+
+            if offset_len:
+                delta = int.from_bytes(buf[pos : pos + offset_len], "little", signed=True)
+                pos += offset_len
+                lcn += delta
+                if lcn < 0:
+                    raise ValueError(f"Mapping pair resolves to a negative LCN: {lcn}")
+                run_offset = lcn
+            else:  # Sparse run
                 run_offset = None
-            else:
-                run_offset = offset = offset + varint(fh.read(offset_len))
 
             runs.append((run_offset, run_size))
 
