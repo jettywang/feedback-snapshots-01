@@ -645,6 +645,99 @@ struct xfs_acl {
 
 
 /*
+ * Extended attribute (xattr) structures.
+ *
+ * Small attribute sets are stored "shortform" in the inode attribute fork,
+ * larger sets in leaf blocks of an extent-based attribute fork.
+ */
+#define XFS_ATTR_LEAF_MAGIC                 0xfbee
+#define XFS_ATTR3_LEAF_MAGIC                0x3bee
+#define XFS_ATTR_LEAF_MAPSIZE               8           /* number of freespace map entries */
+
+#define XFS_ATTR_LOCAL                      0x01        /* attr value is stored locally */
+#define XFS_ATTR_ROOT                       0x02        /* limit access to trusted attrs */
+#define XFS_ATTR_SECURE                     0x08        /* limit access to secure attrs */
+#define XFS_ATTR_INCOMPLETE                 0x80        /* attr in middle of create/delete */
+
+typedef struct xfs_attr_sf_hdr {
+    uint16_t        totsize;                            /* total bytes in shortform list */
+    uint8_t         count;                              /* number of active entries */
+} xfs_attr_sf_hdr_t;
+
+typedef struct xfs_attr_sf_entry {
+    uint8_t         namelen;                            /* actual length of name (no NULL) */
+    uint8_t         valuelen;                           /* actual length of value (no NULL) */
+    uint8_t         flags;                              /* XFS_ATTR_* flags */
+    /* name (namelen bytes) and value (valuelen bytes) follow */
+} xfs_attr_sf_entry_t;
+
+struct xfs_da_blkinfo {
+    uint32_t        forw;                               /* previous block in list */
+    uint32_t        back;                               /* following block in list */
+    uint16_t        magic;                              /* magic number for this block type */
+    uint16_t        pad;
+};
+
+struct xfs_da3_blkinfo {
+    uint32_t        forw;
+    uint32_t        back;
+    uint16_t        magic;
+    uint16_t        pad;
+    uint32_t        crc;
+    uint64_t        blkno;
+    uint64_t        lsn;
+    char            uuid[16];
+    uint32_t        owner;
+};
+
+typedef struct xfs_attr_leaf_map {
+    uint16_t        base;                               /* base of free region */
+    uint16_t        size;                               /* size of free region */
+} xfs_attr_leaf_map_t;
+
+struct xfs_attr_leaf_hdr {
+    xfs_da_blkinfo  info;
+    uint16_t        count;                              /* number of active entries */
+    uint16_t        usedbytes;                          /* bytes used by names and values */
+    uint16_t        firstused;                          /* first used byte in name area */
+    uint8_t         holes;                              /* != 0 if block needs compaction */
+    uint8_t         pad1;
+    xfs_attr_leaf_map freemap[XFS_ATTR_LEAF_MAPSIZE];
+};
+
+struct xfs_attr3_leaf_hdr {
+    xfs_da3_blkinfo info;
+    uint16_t        count;
+    uint16_t        usedbytes;
+    uint16_t        firstused;
+    uint8_t         holes;
+    uint8_t         pad1;
+    xfs_attr_leaf_map freemap[XFS_ATTR_LEAF_MAPSIZE];
+    uint32_t        pad2;                               /* 64 bit alignment */
+};
+
+struct xfs_attr_leaf_entry {
+    uint32_t        hashval;                            /* hash value of name */
+    uint16_t        nameidx;                            /* offset of name within block */
+    uint8_t         flags;                              /* XFS_ATTR_* flags */
+    uint8_t         pad2;
+};
+
+struct xfs_attr_leaf_name_local {
+    uint16_t        valuelen;                           /* number of bytes in value */
+    uint8_t         namelen;                            /* number of bytes in name */
+    /* name (namelen bytes) and value (valuelen bytes) follow */
+};
+
+struct xfs_attr_leaf_name_remote {
+    uint32_t        valueblk;                           /* block number of value start */
+    uint32_t        valuelen;                           /* number of bytes in value */
+    uint8_t         namelen;                            /* number of bytes in name */
+    /* name (namelen bytes) follows */
+};
+
+
+/*
  * Directory version 2.
  *
  * There are 4 possible formats:

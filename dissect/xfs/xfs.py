@@ -27,6 +27,36 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 log.setLevel(os.getenv("DISSECT_LOG_XFS", "CRITICAL"))
 
+ATTR_NAMESPACE_PREFIX = (
+    (c_xfs.XFS_ATTR_ROOT, "trusted."),
+    (c_xfs.XFS_ATTR_SECURE, "security."),
+)
+
+
+class Attr:
+    """An extended attribute of an inode.
+
+    ``name`` is the raw on-disk name, ``fullname`` the name with its
+    namespace prefix applied (``user.`` if no namespace flag is set).
+    """
+
+    __slots__ = ("name", "fullname", "flags", "value")
+
+    def __init__(self, name: str, flags: int, value: bytes):
+        self.name = name
+        self.flags = flags
+        self.value = value
+
+        prefix = "user."
+        for flag, namespace in ATTR_NAMESPACE_PREFIX:
+            if flags & flag:
+                prefix = namespace
+                break
+        self.fullname = prefix + name
+
+    def __repr__(self) -> str:
+        return f"<attr {self.fullname} ({len(self.value)} bytes)>"
+
 
 class XFS:
     def __init__(self, fh: BinaryIO):
@@ -476,6 +506,61 @@ class INode:
         return RangeStream(self._buf, offset, size)
 
     @cached_property
+    def attrruns(self) -> list[tuple[int, int]]:
+        """Logical (block, count) runs of the extent-based attribute fork."""
+        if self.inode.di_aformat != c_xfs.xfs_dinode_fmt.XFS_DINODE_FMT_EXTENTS:
+            raise Error(f"{self!r} has no extent-based attribute fork")
+
+        runs = []
+        buf = self.attrfork().read(self.attr_extents * 16)
+        for extent_num in range(self.attr_extents):
+            _, block, count, _ = parse_fsblock(buf[extent_num * 16 : (extent_num + 1) * 16])
+
+            # Convert filesystem blocks to logical blocks
+            agnum, blknum = fsb_to_bb(block, self.ag.sb.sb_agblklog)
+            block = agnum * self.xfs.sb.sb_agblocks + blknum
+
+            runs.append((block, count))
+        return runs
+
+    def iterattr(self) -> Iterator[Attr]:
+        """Iterate the extended attributes of this inode.
+
+        Remote attribute values and node/btree attribute forks are not
+        supported and raise :exc:`UnsupportedDataforkException`.
+        """
+        if self.inode.di_forkoff == 0:
+            return
+
+        aformat = self.inode.di_aformat
+        if aformat == c_xfs.xfs_dinode_fmt.XFS_DINODE_FMT_LOCAL:
+            yield from parse_shortform_attrs(self.attrfork())
+        elif aformat == c_xfs.xfs_dinode_fmt.XFS_DINODE_FMT_EXTENTS:
+            for block, count in self.attrruns:
+                for sub_block in range(count):
+                    self.xfs.fh.seek((block + sub_block) * self.xfs.block_size)
+                    block_data = io.BytesIO(self.xfs.fh.read(self.xfs.block_size))
+                    yield from parse_leaf_attrs(block_data)
+        else:
+            dinode_type = c_xfs.xfs_dinode_fmt(aformat)
+            raise UnsupportedDataforkException(f"{self!r} has an unsupported attribute fork: {dinode_type}")
+
+    def listattr(self) -> dict[str, Attr]:
+        return {attr.fullname: attr for attr in self.iterattr()}
+
+    def get_xattr(self, name: str) -> bytes | None:
+        """Return the value of the extended attribute ``name``, or ``None`` if absent.
+
+        Matches against both the namespace-prefixed name and the raw on-disk
+        name (e.g. ``system.posix_acl_access`` is stored on disk as
+        ``posix_acl_access``).
+        """
+        for attr in self.iterattr():
+            if attr.fullname == name or attr.name == name:
+                return attr.value
+        return None
+
+    @cached_property
     def dataruns(self) -> list[tuple[int | None, int]]:
         runs = []
         run_offset = 0
@@ -529,6 +614,47 @@ class INode:
             raise UnsupportedDataforkException(f"{self!r} is a character/block device.")
         dinode_type = c_xfs.xfs_dinode_fmt(self.inode.di_format)
         raise UnsupportedDataforkException(f"{self!r} is an unsupported datafork: {dinode_type}")
+
+
+def parse_shortform_attrs(buf: BinaryIO) -> Iterator[Attr]:
+    """Parse a shortform (inode-resident) attribute list."""
+    header = c_xfs.xfs_attr_sf_hdr(buf)
+    for _ in range(header.count):
+        entry = c_xfs.xfs_attr_sf_entry(buf)
+        name = buf.read(entry.namelen).decode(errors="surrogateescape")
+        value = buf.read(entry.valuelen)
+        yield Attr(name, entry.flags, value)
+
+
+def parse_leaf_attrs(buf: BinaryIO) -> Iterator[Attr]:
+    """Parse the local attributes of one attribute leaf block."""
+    magic_offset = 8  # offset of the magic field within xfs_da_blkinfo
+    pos = buf.tell()
+    buf.seek(pos + magic_offset)
+    magic = c_xfs.uint16(buf)
+    buf.seek(pos)
+
+    if magic == c_xfs.XFS_ATTR_LEAF_MAGIC:
+        header = c_xfs.xfs_attr_leaf_hdr(buf)
+    elif magic == c_xfs.XFS_ATTR3_LEAF_MAGIC:
+        header = c_xfs.xfs_attr3_leaf_hdr(buf)
+    else:
+        raise Error(f"Invalid attribute leaf magic: 0x{magic:x}")
+
+    entries = c_xfs.xfs_attr_leaf_entry[header.count](buf)
+    for entry in entries:
+        if entry.flags & c_xfs.XFS_ATTR_INCOMPLETE:
+            continue
+
+        buf.seek(entry.nameidx)
+        if entry.flags & c_xfs.XFS_ATTR_LOCAL:
+            name_local = c_xfs.xfs_attr_leaf_name_local(buf)
+            name = buf.read(name_local.namelen).decode(errors="surrogateescape")
+            value = buf.read(name_local.valuelen)
+        else:
+            raise UnsupportedDataforkException("Remote attribute values are not supported")
+
+        yield Attr(name, entry.flags, value)
 
 
 def parse_fsblock(s: bytes) -> tuple[int, int, int, int]:
