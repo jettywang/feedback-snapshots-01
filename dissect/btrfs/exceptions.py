@@ -19,3 +19,15 @@ class NotADirectoryError(Error, NotADirectoryError):
 
 class NotASymlinkError(Error):
     pass
+
+
+class SendStreamError(Error):
+    pass
+
+
+class BaselineMismatchError(SendStreamError):
+    pass
+
+
+class UnknownRegionError(SendStreamError):
+    pass
