@@ -553,6 +553,66 @@ struct xfs_inobt_rec {
 
 
 /*
+ * Reverse Mapping Btree (rmapbt)
+ *
+ * The rmapbt tracks the owner of every physical block in an allocation group.
+ * Both the key and the on-disk record are 24 bytes. Records live in small
+ * (AG relative, 32 bit pointer) btree blocks.
+ */
+#define XFS_RMAP_CRC_MAGIC                  0x524d4233  /* 'RMB3' */
+#define XFS_RMAP_MAGIC                      0x524d4254  /* 'RMBT' */
+
+typedef struct xfs_rmap_rec {
+    uint32_t        rm_startblock;                      /* starting block number */
+    uint32_t        rm_blockcount;                      /* count of blocks */
+    uint64_t        rm_owner;                           /* owner of the blocks */
+    uint64_t        rm_offset;                          /* logical offset + flags */
+} xfs_rmap_rec_t, xfs_rmap_key_t;
+
+/*
+ * Special rmap owner values. Inode owners use the inode number directly.
+ */
+#define XFS_RMAP_OWN_FS                     0xFFFFFFFFFFFFFFFF
+#define XFS_RMAP_OWN_NULL                   0xFFFFFFFFFFFFFFFE
+#define XFS_RMAP_OWN_AG                     0xFFFFFFFFFFFFFFFD
+#define XFS_RMAP_OWN_INOBT                  0xFFFFFFFFFFFFFFFC
+#define XFS_RMAP_OWN_INODES                 0xFFFFFFFFFFFFFFFB
+#define XFS_RMAP_OWN_REFC                   0xFFFFFFFFFFFFFFFA
+#define XFS_RMAP_OWN_MIN                    0xFFFFFFFFFFFFFFF0
+
+/*
+ * Flags packed into the low bits of the rmapbt offset field. The remaining
+ * bits hold the logical block offset (file offset for inode owners).
+ */
+#define XFS_RMAP_OFF_ATTR_FORK              0x1
+#define XFS_RMAP_OFF_BMBT_BLOCK             0x2
+#define XFS_RMAP_OFF_UNWRITTEN              0x4
+#define XFS_RMAP_OFF_FLAGS                  0x7
+#define XFS_RMAP_OFF_COW                    (1ULL << 63)
+
+
+/*
+ * Reference Count Btree (refcountbt)
+ *
+ * The refcountbt records physical extents that are shared between multiple
+ * inodes through reflink. A refcount of one is valid and means the extent is
+ * still referenced but no longer shared. Staging extents waiting for copy on
+ * write (COW) use the XFS_REFC_COW_START sentinel as their start block; in that
+ * case the physical AG block is stored in the refcount field.
+ */
+#define XFS_REFC_CRC_MAGIC                  0x52334643  /* 'R3FC' */
+#define XFS_REFC_MAGIC                      0x52464343  /* 'RFC3' */
+
+typedef struct xfs_refcount_rec {
+    uint32_t        rc_startblock;                      /* starting physical AG block */
+    uint32_t        rc_blockcount;                      /* count of blocks */
+    uint32_t        rc_refcount;                        /* number of references */
+} xfs_refcount_rec_t, xfs_refcount_key_t;
+
+#define XFS_REFC_COW_START                  0xFFFFFFFF
+
+
+/*
  * BMAP Btree format definitions
  *
  * This includes both the root block definition that sits inside an inode fork

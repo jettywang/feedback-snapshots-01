@@ -21,7 +21,7 @@ from dissect.xfs.exceptions import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
     from datetime import datetime
 
 log = logging.getLogger(__name__)
@@ -191,8 +191,10 @@ class AllocationGroup:
 
         # This seems to be all related to allocation
         # Do we really need to parse this?
-        # fh.seek(sb.sb_sectsize * 1)
-        # self.agf = c_xfs.xfs_agf(fh)
+        fh.seek(sb.sb_sectsize * 1)
+        self.agf = c_xfs.xfs_agf(fh)
+        if self.agf.agf_magicnum != c_xfs.XFS_AGF_MAGIC:
+            raise Error("Not a valid XFS filesystem (AGF magic mismatch)")
 
         fh.seek(sb.sb_sectsize * 2)
         self.agi = c_xfs.xfs_agi(fh)
@@ -220,14 +222,36 @@ class AllocationGroup:
     def walk_agi(self) -> Iterator[c_xfs.xfs_inobt_rec]:
         yield from self.xfs.walk_agi(self.agi.agi_root, self.num)
 
-    def walk_tree(self, fsb: int, magic: list[int] | None = None, small: bool = False) -> Iterator[bytes]:
+    def walk_tree(
+        self, fsb: int, magic: list[int] | None = None, small: bool = False, leaf_size: int = 16
+    ) -> Iterator[bytes]:
         agnum, blknum = fsb_to_bb(fsb, self.sb.sb_agblklog)
         block = agnum * self.xfs.sb.sb_agblocks + blknum
 
         if small:
-            yield from self.xfs.walk_small_tree(block, agnum, 16, magic)
+            yield from self.xfs.walk_small_tree(block, agnum, leaf_size, magic)
         else:
-            yield from self.xfs.walk_large_tree(block, 16, magic)
+            yield from self.xfs.walk_large_tree(block, leaf_size, magic)
+
+    def has_rmap_btree(self) -> bool:
+        return self.agf.agf_levels[2] > 0
+
+    def has_refcount_btree(self) -> bool:
+        return self.agf.agf_refcount_level > 0
+
+    def walk_rmap(self) -> Iterator[c_xfs.xfs_rmap_rec]:
+        if not self.has_rmap_btree():
+            return
+        magic = (c_xfs.XFS_RMAP_MAGIC, c_xfs.XFS_RMAP_CRC_MAGIC)
+        for raw in self.walk_tree(self.agf.agf_roots[2], magic=magic, small=True, leaf_size=24):
+            yield c_xfs.xfs_rmap_rec(raw)
+
+    def walk_refcount(self) -> Iterator[c_xfs.xfs_refcount_rec]:
+        if not self.has_refcount_btree():
+            return
+        magic = (c_xfs.XFS_REFC_MAGIC, c_xfs.XFS_REFC_CRC_MAGIC)
+        for raw in self.walk_tree(self.agf.agf_refcount_root, magic=magic, small=True, leaf_size=12):
+            yield c_xfs.xfs_refcount_rec(raw)
 
 
 class INode:
@@ -500,13 +524,23 @@ class INode:
         return runs
 
     def _iter_blocks(self) -> Iterator[tuple[int, int, int, int]]:
-        if self.inode.di_format == c_xfs.xfs_dinode_fmt.XFS_DINODE_FMT_EXTENTS:
-            buf = self.datafork().read(self.data_extents * 16)
-            for extent_num in range(self.data_extents):
+        yield from self._iter_fork_blocks(self.inode.di_format, self.data_extents, self.datafork)
+
+    def _iter_attr_blocks(self) -> Iterator[tuple[int, int, int, int]]:
+        if not self.inode.di_forkoff:
+            return
+        yield from self._iter_fork_blocks(self.inode.di_aformat, self.attr_extents, self.attrfork)
+
+    def _iter_fork_blocks(
+        self, fmt: int, extent_count: int, fork: Callable[[], BinaryIO]
+    ) -> Iterator[tuple[int, int, int, int]]:
+        if fmt == c_xfs.xfs_dinode_fmt.XFS_DINODE_FMT_EXTENTS:
+            buf = fork().read(extent_count * 16)
+            for extent_num in range(extent_count):
                 yield parse_fsblock(buf[extent_num * 16 : (extent_num + 1) * 16])
-        elif self.inode.di_format == c_xfs.xfs_dinode_fmt.XFS_DINODE_FMT_BTREE:
+        elif fmt == c_xfs.xfs_dinode_fmt.XFS_DINODE_FMT_BTREE:
             # B+tree extent lists are always large trees (64bit block numbers)
-            df = self.datafork()
+            df = fork()
             root = c_xfs.xfs_bmdr_block(df)
 
             # Pointers start around halfway
