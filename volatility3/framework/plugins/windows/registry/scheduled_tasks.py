@@ -2,7 +2,6 @@
 # which is available at https://www.volatilityfoundation.org/license/vsl-v1.0
 #
 
-import base64
 import binascii
 import dataclasses
 import datetime
@@ -185,6 +184,24 @@ NULL = "\u0000"
 
 
 class _ScheduledTasksReader(io.BytesIO):
+    def __init__(self, data: bytes = b"") -> None:
+        super().__init__(data)
+        self.truncated = False
+
+    def _mark_truncated(self) -> None:
+        self.truncated = True
+
+    def _skip(self, count: int) -> bool:
+        if self.tell() + count > len(self.getbuffer()):
+            self._mark_truncated()
+            return False
+        self.seek(count, io.SEEK_CUR)
+        return True
+
+    def _align(self, boundary: int = 8) -> bool:
+        padding = (boundary - (self.tell() % boundary)) % boundary
+        return self._skip(padding)
+
     def read_task_scheduler_time(self) -> Optional[datetime.datetime]:
         _ = bool(self.read_aligned_u1())  # is_localized
         filetime = self.decode_filetime()
@@ -196,11 +213,12 @@ class _ScheduledTasksReader(io.BytesIO):
     def read_bool(self, aligned=False) -> Optional[bool]:
         try:
             val = struct.unpack("?", self.read(1))[0]
-            if aligned:
-                self.seek(7)
-            return val
         except struct.error:
+            self._mark_truncated()
             return None
+        if aligned and not self._skip(7):
+            return None
+        return val
 
     def decode_filetime(self) -> Optional[datetime.datetime]:
         filetime = self.read_u8()
@@ -220,11 +238,12 @@ class _ScheduledTasksReader(io.BytesIO):
     ) -> Optional[int]:
         try:
             val = struct.unpack(format, self.read(size))[0]
-            if aligned:
-                self.seek(8 - size, io.SEEK_CUR)
-            return val
         except struct.error:
+            self._mark_truncated()
             return None
+        if aligned and not self._skip(8 - size):
+            return None
+        return val
 
     def read_aligned_u1(self) -> Optional[int]:
         return self._read_uint(1, "B", True)
@@ -244,13 +263,47 @@ class _ScheduledTasksReader(io.BytesIO):
     def read_aligned_u4(self) -> Optional[int]:
         return self._read_uint(4, "<I", True)
 
+    def read_exact(self, count: int) -> Optional[bytes]:
+        data = self.read(count)
+        if len(data) != count:
+            self._mark_truncated()
+            return None
+        return data
+
+    def peek_uint(
+        self, size: int, format: str, aligned: bool = False
+    ) -> Optional[int]:
+        position = self.tell()
+        was_truncated = self.truncated
+        try:
+            return self._read_uint(size, format, aligned)
+        finally:
+            self.seek(position)
+            self.truncated = was_truncated
+
+    def remaining(self) -> int:
+        return len(self.getbuffer()) - self.tell()
+
+    def _next_magic_is_valid(self, values, size: int, format: str) -> bool:
+        position = self.tell()
+        remaining = self.getbuffer()[position:]
+        if len(remaining) < size:
+            return True
+        if not any(remaining):
+            return True
+        next_magic = self.peek_uint(size, format)
+        return next_magic in values
+
     def read_buffer(self, aligned=False) -> Optional[bytes]:
         count = self.read_u4() if not aligned else self.read_aligned_u4()
         if count is None:
             return None
         data = self.read(count)
-        if aligned:
-            self.seek((8 - (count % 8)) % 8, io.SEEK_CUR)
+        if len(data) != count:
+            self._mark_truncated()
+            return None
+        if aligned and not self._align():
+            return None
         return data
 
     def read_bstring(self, aligned=False) -> Optional[str]:
@@ -259,12 +312,15 @@ class _ScheduledTasksReader(io.BytesIO):
             return None
         try:
             raw = self.read(size)
+            if len(raw) != size:
+                self._mark_truncated()
+                return None
             val = raw.decode("utf-16le", errors="replace").rstrip(NULL) or None
         except UnicodeDecodeError:
             val = None
 
-        if aligned:
-            self.seek((8 - (size % 8)) % 8, io.SEEK_CUR)
+        if aligned and not self._align():
+            return None
 
         return val
 
@@ -278,11 +334,16 @@ class _ScheduledTasksReader(io.BytesIO):
             return None
 
         try:
-            content = self.read(byte_count).decode("utf-16le")
+            raw = self.read(byte_count)
+            if len(raw) != byte_count:
+                self._mark_truncated()
+                return None
+            content = raw.decode("utf-16le")
         except UnicodeDecodeError:
             content = None
 
-        self.seek((8 - (byte_count % 8)) % 8, io.SEEK_CUR)
+        if not self._align():
+            return None
         return content.rstrip("\x00") if content is not None else None
 
     def read_tstimeperiod(self) -> Optional[TaskSchedulerTimePeriod]:
@@ -353,6 +414,8 @@ class TaskAction:
         cls, reader: _ScheduledTasksReader
     ) -> Optional["TaskAction"]:
         caption, content = reader.read_bstring(), reader.read_bstring()
+        if reader.truncated:
+            return None
         return cls(
             ActionType.MessageBox,
             f'"{caption or "<Unknown>"}": {content or "<Unknown>"}',
@@ -370,8 +433,13 @@ class TaskAction:
             return None
 
         workdir = reader.read_bstring()
+        if workdir is None and reader.truncated:
+            return None
+
         if version == 3:
             _flags = reader.read_u2()
+            if _flags is None:
+                return None
 
         return cls(ActionType.Exe, command, args, workdir)
 
@@ -392,6 +460,9 @@ class TaskAction:
 
         num_attachment_filenames = reader.read_u4()
         if num_attachment_filenames is not None:
+            if num_attachment_filenames > reader.remaining() // 4:
+                reader._mark_truncated()
+                return None
             attachment_filenames = [
                 reader.read_bstring() for _ in range(num_attachment_filenames)
             ]
@@ -408,6 +479,9 @@ class TaskAction:
 
         num_headers = reader.read_u4()
         if num_headers is not None:
+            if num_headers > reader.remaining() // 8:
+                reader._mark_truncated()
+                return None
             headers = [
                 (reader.read_bstring(), reader.read_bstring())
                 for _ in range(num_headers)
@@ -423,7 +497,10 @@ class TaskAction:
                 + ">"
             )
 
-        cls(
+        if reader.truncated:
+            return None
+
+        return cls(
             ActionType.Email,
             ", ".join(
                 f"{key}: {value}" for key, value in props.items() if value is not None
@@ -436,11 +513,13 @@ class TaskAction:
     def _decode_comhandler_action(
         cls, reader: _ScheduledTasksReader
     ) -> Optional["TaskAction"]:
-        guid_raw = reader.read(16)
-        if not guid_raw and len(guid_raw) == 16:
+        guid_raw = reader.read_exact(16)
+        if guid_raw is None:
             return None
         clsid = conversion.windows_bytes_to_guid(guid_raw)
         args = reader.read_bstring()
+        if reader.truncated:
+            return None
 
         return cls(ActionType.ComHandler, clsid, args, None)
 
@@ -572,12 +651,15 @@ class _JobSchedule:
         data2 = reader.read_u2()
         data3 = reader.read_u2()
 
-        reader.seek(2, io.SEEK_CUR)  # pad
+        reader._skip(2)  # pad
         stop_tasks_at_duration_end = reader.read_bool()
         is_enabled = reader.read_bool()
-        reader.seek(6, io.SEEK_CUR)  # pad (2) + unknown (4)
+        reader._skip(6)  # pad (2) + unknown (4)
         max_delay_seconds = reader.read_u4()
-        reader.seek(4, io.SEEK_CUR)  # pad
+        reader._skip(4)  # pad
+
+        if reader.truncated:
+            return None
 
         return cls(
             start_boundary,
@@ -626,17 +708,26 @@ class UserInfo:
 
     @classmethod
     def _decode(cls, reader: _ScheduledTasksReader) -> Optional["UserInfo"]:
-        skip_user = reader.read_aligned_u1() != 0
+        user_flag = reader.read_aligned_u1()
+        if user_flag is None:
+            return None
+        skip_user = user_flag != 0
         if not skip_user:
-            skip_sid = reader.read_aligned_u1() != 0
+            sid_flag = reader.read_aligned_u1()
+            if sid_flag is None:
+                return None
+            skip_sid = sid_flag != 0
         else:
             skip_sid = None
 
         sid_type = None
         sid = None
         if not skip_user and not skip_sid:
+            sid_type_raw = reader.read_aligned_u4()
+            if sid_type_raw is None:
+                return None
             try:
-                sid_type = SidType(reader.read_aligned_u4())
+                sid_type = SidType(sid_type_raw)
             except ValueError:
                 sid_type = SidType.Unknown
 
@@ -646,6 +737,8 @@ class UserInfo:
             sid = decode_sid(sid_raw)
 
         username = reader.read_bstring(aligned=True) if not skip_user else None
+        if reader.truncated:
+            return None
 
         return UserInfo(sid_type, sid, username)
 
@@ -681,13 +774,16 @@ class OptionalSettings:
             reader.read_u4(),
             reader.read_u4(),
             reader.read_u4(),
-            binascii.hexlify(reader.read(16)),
         )
+        network_id = reader.read_exact(16)
+        if network_id is None:
+            return None
+        base_values += (binascii.hexlify(network_id),)
 
         if any(value is None for value in base_values):
             return None
 
-        reader.seek(4, io.SEEK_CUR)  # padding
+        reader._skip(4)  # padding
 
         privileges = None
         periodicity = None
@@ -704,7 +800,10 @@ class OptionalSettings:
             periodicity = reader.read_tstimeperiod()
             deadline = reader.read_tstimeperiod()
             exclusive = reader.read_bool()
-            reader.seek(3, io.SEEK_CUR)  # padding
+            reader._skip(3)  # padding
+
+        if reader.truncated:
+            return None
 
         return OptionalSettings(
             *base_values, privileges, periodicity, deadline, exclusive
@@ -736,11 +835,19 @@ class JobBucket:
         display_name = None
         if version >= 0x16:
             principal_id = reader.read_bstring(aligned=True)
+            if principal_id is None and reader.truncated:
+                return None
         if version >= 0x17:
             display_name = reader.read_bstring(aligned=True)
+            if display_name is None and reader.truncated:
+                return None
 
         user_info = UserInfo._decode(reader)
+        if user_info is None and reader.truncated:
+            return None
         optional_settings = OptionalSettings._decode(reader)
+        if optional_settings is None and reader.truncated:
+            return None
 
         return JobBucket(
             flags, crc32, principal_id, display_name, user_info, optional_settings
@@ -819,14 +926,19 @@ class TaskTrigger:
         _ = reader.read_u4()  # repetition duration seconds 2
 
         _ = reader.read_bool()  # stop at duration end
-        reader.seek(3, io.SEEK_CUR)
-        trigger_enabled = bool(reader.read_aligned_u1())
-        reader.seek(8, io.SEEK_CUR)  # unknown field
+        reader._skip(3)
+        trigger_enabled = reader.read_aligned_u1()
+        if trigger_enabled is None:
+            return None
+        trigger_enabled = bool(trigger_enabled)
+        reader._skip(8)  # unknown field
 
         if version >= 0x16:
-            cur = reader.tell()
             _ = reader.read_bstring()  # trigger id
-            reader.seek((8 - (reader.tell() - cur)) % 8, io.SEEK_CUR)  # pad to block
+            reader._align()  # pad to block
+
+        if reader.truncated:
+            return None
 
         return cls(
             start_boundary,
@@ -846,6 +958,8 @@ class TaskTrigger:
             return None
 
         user = UserInfo._decode(reader)
+        if user is None and reader.truncated:
+            return None
         if user is not None and user.username is not None:
             base.description = f"{user.username}: {user.sid} ({user.sid_type})"
 
@@ -859,7 +973,9 @@ class TaskTrigger:
         if base is None:
             return None
         session_type_raw = reader.read_u4()
-        reader.seek(4, io.SEEK_CUR)
+        reader._skip(4)
+        if session_type_raw is None or reader.truncated:
+            return None
 
         try:
             session_type = SessionState(session_type_raw)
@@ -867,6 +983,8 @@ class TaskTrigger:
             session_type = SessionState.Unknown
 
         user_info = UserInfo._decode(reader)
+        if user_info is None and reader.truncated:
+            return None
         if user_info is not None and user_info.username is not None:
             base.description = f"{session_type.name} for user {user_info.username}"
         else:
@@ -883,9 +1001,11 @@ class TaskTrigger:
             return None
 
         if version >= 0x16:
-            cur = reader.tell()
             _ = reader.read_bstring()  # trigger id
-            reader.seek((8 - (reader.tell() - cur)) % 8, io.SEEK_CUR)  # pad to block
+            reader._align()  # pad to block
+
+        if reader.truncated:
+            return None
 
         return cls(
             job_schedule.start_boundary,
@@ -905,12 +1025,22 @@ class TaskTrigger:
             return base
 
         subscription = reader.read_aligned_bstring_expand_sz()
-        reader.seek(8, io.SEEK_CUR)  # 2 4-byte unknown fields
-        reader.read_aligned_bstring_expand_sz()  # another unknown field
+        reader._skip(8)  # 2 4-byte unknown fields
+        _ = reader.read_aligned_bstring_expand_sz()  # another unknown field
         len_value_queries = reader.read_aligned_u4()
 
+        if reader.truncated:
+            return None
         if len_value_queries is None:
             return base
+        # Every query holds two aligned expand-strings, so each one needs at
+        # least 16 bytes; a larger count cannot fit in the remaining data.
+        if len_value_queries > reader.remaining() // 16:
+            vollog.warning(
+                f"Event trigger declares {len_value_queries} queries but only "
+                f"{reader.remaining()} bytes remain, discarding it"
+            )
+            return None
 
         queries = [
             (
@@ -919,6 +1049,8 @@ class TaskTrigger:
             )
             for _ in range(len_value_queries)
         ]
+        if reader.truncated:
+            return None
         valid = [(k, v) for (k, v) in queries if k is not None and v is not None]
         if base.description is None:
             base.description = "Event Trigger"
@@ -941,9 +1073,16 @@ class TaskTrigger:
         if base is None:
             return None
 
-        state_name = binascii.hexlify(reader.read(8)).decode("ascii")
+        state_raw = reader.read_exact(8)
+        if state_raw is None:
+            return None
+        state_name = binascii.hexlify(state_raw).decode("ascii")
         datalen = reader.read_aligned_u4()
-        _ = base64.b64encode(reader.read(datalen))  # state binary data
+        if datalen is None:
+            return None
+        state_data = reader.read_exact(datalen)
+        if state_data is None:
+            return None
         base.description = f"WNF state {state_name}"
         return base
 
@@ -1013,6 +1152,16 @@ class TriggerSet:
                     f"Invalid trigger magic {hex(magic)} encountered at offset {hex(reader.tell() - 8)}, stopping parsing"
                 )
                 break
+            if trigger is None or reader.truncated:
+                break
+            if not reader._next_magic_is_valid(
+                {trigger_type.value for trigger_type in TriggerType}, 4, "<I"
+            ):
+                vollog.warning(
+                    f"Trigger at offset {hex(reader.tell())} is not followed by a "
+                    "valid trigger magic, discarding it"
+                )
+                break
             triggers.append(trigger)
 
         return cls(job_bucket, triggers)
@@ -1034,6 +1183,8 @@ class ActionSet:
 
         if version in [2, 3]:
             action_context = reader.read_bstring()
+            if action_context is None and reader.truncated:
+                return None
         else:
             action_context = None
 
@@ -1045,6 +1196,8 @@ class ActionSet:
             _ = (
                 reader.read_bstring()
             )  # action identifier, usually (but not always) empty
+            if reader.truncated:
+                break
 
             if magic == ActionType.Email.value:
                 action = TaskAction._decode_email_action(reader)
@@ -1055,6 +1208,16 @@ class ActionSet:
             elif magic == ActionType.MessageBox.value:
                 action = TaskAction.decode_messagebox_action(reader)
             else:
+                break
+            if action is None or reader.truncated:
+                break
+            if not reader._next_magic_is_valid(
+                {action_type.value for action_type in ActionType}, 2, "<H"
+            ):
+                vollog.warning(
+                    f"Action at offset {hex(reader.tell())} is not followed by a "
+                    "valid action magic, discarding it"
+                )
                 break
             actions.append(action)
 
@@ -1090,10 +1253,13 @@ class DynamicInfo:
         creation_time = reader.decode_filetime()
         last_run_time = reader.decode_filetime()
 
-        reader.seek(4, io.SEEK_CUR)  # deprecated field 'TaskState'
+        reader._skip(4)  # deprecated field 'TaskState'
 
         last_error_code = reader.read_u4()
         last_success_time = reader.decode_filetime()
+
+        if reader.truncated:
+            return None
 
         vollog.debug((creation_time, last_run_time, last_success_time))
 
