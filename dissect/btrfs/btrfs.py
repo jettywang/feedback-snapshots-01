@@ -22,6 +22,7 @@ from dissect.btrfs.exceptions import (
     NotADirectoryError,
     NotASymlinkError,
 )
+from dissect.btrfs.lineage import Lineage, lineage
 from dissect.btrfs.stream import ChunkStream, Extent, ExtentStream, decode_extent
 from dissect.btrfs.tree import BTree
 
@@ -118,6 +119,18 @@ class Btrfs:
                 return subvolume
 
         return None
+
+    def lineage(self) -> Lineage:
+        """Build a read-only lineage view over all subvolume roots.
+
+        The view preserves the root ID, UUIDs (``uuid``, ``parent_uuid``,
+        ``received_uuid``) and transaction IDs of every subvolume root item,
+        and connects local snapshot and receive claims to the roots present
+        on this filesystem. Claims that cannot be connected (deleted parents,
+        incomplete receive records or identifier conflicts) are kept as
+        candidate or dangling edges; no definitive backup history is inferred.
+        """
+        return lineage(self)
 
     def open_subvolume(self, objectid: int, parent: INode | None = None) -> Subvolume:
         """Open a subvolume.
