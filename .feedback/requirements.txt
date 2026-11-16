@@ -1,0 +1,16 @@
+annotated-types==0.8.0
+cffi==2.1.1
+cryptography==50.0.2
+iniconfig==2.3.1
+nassl==5.4.0
+packaging==26.3
+pluggy==1.7.0
+pycparser==3.12
+pydantic==2.14.3
+pydantic-core==2.50.4
+pygments==2.21.0
+pytest==9.2.0
+pytest-mock==3.17.0
+tls-parser==2.0.2
+typing-extensions==4.16.0
+typing-inspection==0.4.5
