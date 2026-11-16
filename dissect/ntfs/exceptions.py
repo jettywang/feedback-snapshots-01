@@ -39,3 +39,19 @@ class NotAReparsePointError(Error):
 
 class VolumeNotAvailableError(Error):
     pass
+
+
+class WofError(Error):
+    """Base class for errors while parsing or decompressing WOF compressed data."""
+
+
+class UnsupportedWofProviderError(WofError):
+    """Raised when a WOF reparse point references a provider that is not supported."""
+
+
+class UnsupportedWofAlgorithmError(WofError):
+    """Raised when a WofCompressedData stream uses an unknown compression algorithm."""
+
+
+class BrokenWofDataError(WofError):
+    """Raised when the on-disk WofCompressedData stream is corrupt or incomplete."""

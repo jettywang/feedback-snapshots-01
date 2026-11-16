@@ -284,6 +284,19 @@ typedef struct _CLOUD_FILTER_REPARSE_BUFFER {
     // WCHAR    Name[NameLength];
 } _CLOUD_FILTER_REPARSE_BUFFER;
 
+/* The reparse data of an IO_REPARSE_TAG_WOF reparse point identifies the WOF provider managing the file. */
+typedef struct _WOF_REPARSE_BUFFER {
+    ULONG       WofVersion;
+    ULONG       WofProvider;
+} _WOF_REPARSE_BUFFER;
+
+/* Header of the WofCompressedData stream (the default $DATA stream of a WOF compressed file). */
+typedef struct _WOF_COMPRESSED_DATA_HEADER {
+    CHAR        Signature[4];
+    UCHAR       CompressionAlgorithm;
+    UCHAR       Reserved[3];
+} _WOF_COMPRESSED_DATA_HEADER;
+
 /* ================ Index ================ */
 
 enum COLLATION : ULONG {
@@ -616,6 +629,32 @@ FILE_NAME_DOS = 0x02
 COMPRESSION_FORMAT_NONE = 0x0000
 COMPRESSION_FORMAT_DEFAULT = 0x0001
 COMPRESSION_FORMAT_LZNT1 = 0x0002
+
+# WOF (Windows Overlay Filter) provider identifiers, stored in the WOF reparse buffer
+WOF_PROVIDER_WIM = 0x00000001
+WOF_PROVIDER_FILE = 0x00000002
+WOF_PROVIDER_CLOUD = 0x00000003
+
+# Compression algorithms used by the WOF FILE provider, stored in the WofCompressedData header
+WOF_COMPRESSION_XPRESS4K = 0x00
+WOF_COMPRESSION_XPRESS8K = 0x01
+WOF_COMPRESSION_XPRESS16K = 0x02
+WOF_COMPRESSION_XPRESS32K = 0x03
+
+# Signature of a WofCompressedData stream ("XMFW")
+WOF_COMPRESSED_DATA_SIGNATURE = b"XMFW"
+
+# Logical chunk size per WOF FILE provider compression algorithm
+WOF_CHUNK_SIZE = {
+    WOF_COMPRESSION_XPRESS4K: 4096,
+    WOF_COMPRESSION_XPRESS8K: 8192,
+    WOF_COMPRESSION_XPRESS16K: 16384,
+    WOF_COMPRESSION_XPRESS32K: 32768,
+}
+
+# Size of a WofCompressedData header and of a single chunk table entry
+WOF_COMPRESSED_DATA_HEADER_SIZE = 8
+WOF_CHUNK_TABLE_ENTRY_SIZE = 4
 
 # Index and index entry flags
 INDEX_NODE = 0x01

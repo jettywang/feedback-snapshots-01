@@ -27,6 +27,7 @@ from dissect.ntfs.exceptions import (
 )
 from dissect.ntfs.index import Index
 from dissect.ntfs.util import AttributeMap, apply_fixup, segment_reference
+from dissect.ntfs.wof import WofFile
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -389,6 +390,39 @@ class MftRecord:
             IO_REPARSE_TAG.CLOUD_E,
             IO_REPARSE_TAG.CLOUD_F,
         )
+
+    def is_wof_file(self) -> bool:
+        """Return whether this record is a WOF (Windows Overlay Filter) reparse point."""
+        attr = self.attributes[ATTRIBUTE_TYPE_CODE.REPARSE_POINT]
+        return bool(attr) and attr.tag == IO_REPARSE_TAG.WOF
+
+    def wof(self, name: str = "") -> WofFile:
+        """Parse this record as a WOF compressed file and return its explicit :class:`~dissect.ntfs.wof.WofFile`.
+
+        The WOF ``FILE`` provider layout is parsed from the reparse information and the named ``$DATA``
+        (``WofCompressedData``) stream. This does not change the meaning of :meth:`open`, which still returns the
+        raw, compressed ``$DATA`` attribute.
+
+        Args:
+            name: The name of the ``$DATA`` stream holding the ``WofCompressedData`` stream.
+
+        Raises:
+            WofError: If this record is not a WOF reparse point or its WOF data is corrupt.
+            UnsupportedWofProviderError: If the reparse point references a WOF provider other than FILE.
+            UnsupportedWofAlgorithmError: If the compression algorithm is unknown.
+        """
+        return WofFile(self, name)
+
+    def open_wof(self, name: str = "") -> BinaryIO:
+        """Open the logical, decompressed content of a WOF compressed file.
+
+        See :meth:`wof` for the supported layout. The returned stream supports small random reads on chunk
+        boundaries and raises instead of returning zero-filled data when a chunk is corrupt or missing.
+
+        Args:
+            name: The name of the ``$DATA`` stream holding the ``WofCompressedData`` stream.
+        """
+        return self.wof(name).open()
 
     @cached_property
     def reparse_point_name(self) -> str:

@@ -458,6 +458,35 @@ class _c_ntfs(__cs__.cstruct):
         @overload
         def __init__(self, fh: bytes | memoryview | bytearray | BinaryIO, /): ...
 
+    class _WOF_REPARSE_BUFFER(__cs__.Structure):
+        WofVersion: _c_ntfs.uint32
+        WofProvider: _c_ntfs.uint32
+        @overload
+        def __init__(
+            self,
+            WofVersion: _c_ntfs.uint32 | None = ...,
+            WofProvider: _c_ntfs.uint32 | None = ...,
+        ): ...
+        @overload
+        def __init__(self, fh: bytes | memoryview | bytearray | BinaryIO, /): ...
+
+    WOF_REPARSE_BUFFER: TypeAlias = _WOF_REPARSE_BUFFER
+    class _WOF_COMPRESSED_DATA_HEADER(__cs__.Structure):
+        Signature: __cs__.Array[_c_ntfs.char]
+        CompressionAlgorithm: _c_ntfs.uint8
+        Reserved: __cs__.Array[_c_ntfs.uint8]
+        @overload
+        def __init__(
+            self,
+            Signature: bytes | memoryview | bytearray | BinaryIO | None = ...,
+            CompressionAlgorithm: _c_ntfs.uint8 | None = ...,
+            Reserved: bytes | memoryview | bytearray | BinaryIO | None = ...,
+        ): ...
+        @overload
+        def __init__(self, fh: bytes | memoryview | bytearray | BinaryIO, /): ...
+
+    WOF_COMPRESSED_DATA_HEADER: TypeAlias = _WOF_COMPRESSED_DATA_HEADER
+
     class COLLATION(__cs__.Enum):
         BINARY = ...
         FILE_NAME = ...

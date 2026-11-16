@@ -7,6 +7,7 @@ from dissect.ntfs.mft import Mft, MftRecord
 from dissect.ntfs.ntfs import NTFS
 from dissect.ntfs.secure import ACE, ACL, Secure, SecurityDescriptor
 from dissect.ntfs.usnjrnl import UsnJrnl, UsnRecord
+from dissect.ntfs.wof import WofCompressedStream, WofFile
 
 __all__ = [
     "ACE",
@@ -25,4 +26,6 @@ __all__ = [
     "SecurityDescriptor",
     "UsnJrnl",
     "UsnRecord",
+    "WofCompressedStream",
+    "WofFile",
 ]
