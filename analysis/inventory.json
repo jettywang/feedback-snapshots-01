@@ -1,0 +1,3090 @@
+{
+ "124552cf": {
+  "file": "124552cf674b362e0c916ab79b9e7a56.bin",
+  "md5": "124552cf674b362e0c916ab79b9e7a56",
+  "version": "Cobalt Strike 4.10 (Jul 16, 2024)",
+  "protocol": "https",
+  "port": 443,
+  "xorkey": "2e",
+  "xorencoded": false,
+  "max_enum": 78,
+  "arch": "x64",
+  "stages": [],
+  "n_settings": 52,
+  "settings": [
+   {
+    "idx": 1,
+    "name": "SETTING_PROTOCOL",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0008"
+   },
+   {
+    "idx": 2,
+    "name": "SETTING_PORT",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "01bb"
+   },
+   {
+    "idx": 3,
+    "name": "SETTING_SLEEPTIME",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000ea60"
+   },
+   {
+    "idx": 4,
+    "name": "SETTING_MAXGET",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00100000"
+   },
+   {
+    "idx": 5,
+    "name": "SETTING_JITTER",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 7,
+    "name": "SETTING_PUBKEY",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "30819f300d06092a864886f70d010101050003818d003081"
+   },
+   {
+    "idx": 8,
+    "name": "SETTING_DOMAINS",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "3138352e332e34352e362c2f64706978656c000000000000"
+   },
+   {
+    "idx": 67,
+    "name": "SETTING_DOMAIN_STRATEGY",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 68,
+    "name": "SETTING_DOMAIN_STRATEGY_SECONDS",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "ffffffff"
+   },
+   {
+    "idx": 69,
+    "name": "SETTING_DOMAIN_STRATEGY_FAIL_X",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "ffffffff"
+   },
+   {
+    "idx": 70,
+    "name": "SETTING_DOMAIN_STRATEGY_FAIL_SECONDS",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "ffffffff"
+   },
+   {
+    "idx": 14,
+    "name": "SETTING_SPAWNTO",
+    "type": "TYPE_PTR",
+    "len": 16,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000000000000000000000000000000"
+   },
+   {
+    "idx": 29,
+    "name": "SETTING_SPAWNTO_X86",
+    "type": "TYPE_PTR",
+    "len": 64,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "2577696e646972255c737973776f7736345c72756e646c6c"
+   },
+   {
+    "idx": 30,
+    "name": "SETTING_SPAWNTO_X64",
+    "type": "TYPE_PTR",
+    "len": 64,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "2577696e646972255c7379736e61746976655c72756e646c"
+   },
+   {
+    "idx": 31,
+    "name": "SETTING_CRYPTO_SCHEME",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 26,
+    "name": "SETTING_C2_VERB_GET",
+    "type": "TYPE_PTR",
+    "len": 16,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "47455400000000000000000000000000"
+   },
+   {
+    "idx": 27,
+    "name": "SETTING_C2_VERB_POST",
+    "type": "TYPE_PTR",
+    "len": 16,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "504f5354000000000000000000000000"
+   },
+   {
+    "idx": 28,
+    "name": "SETTING_C2_CHUNK_POST",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000000"
+   },
+   {
+    "idx": 37,
+    "name": "SETTING_WATERMARK",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "3ba14e9f"
+   },
+   {
+    "idx": 36,
+    "name": "SETTING_WATERMARKHASH",
+    "type": "TYPE_PTR",
+    "len": 32,
+    "stock_type_ok": null,
+    "raw_hex_prefix": "4770515a63343630665a63546e55744254342b684a773d3d"
+   },
+   {
+    "idx": 38,
+    "name": "SETTING_CLEANUP",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 39,
+    "name": "SETTING_CFG_CAUTION",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 76,
+    "name": "SETTING_DATA_STORE_SIZE",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000010"
+   },
+   {
+    "idx": 71,
+    "name": "SETTING_MAX_RETRY_STRATEGY_ATTEMPTS",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000000"
+   },
+   {
+    "idx": 72,
+    "name": "SETTING_MAX_RETRY_STRATEGY_INCREASE",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000000"
+   },
+   {
+    "idx": 73,
+    "name": "SETTING_MAX_RETRY_STRATEGY_DURATION",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000000"
+   },
+   {
+    "idx": 9,
+    "name": "SETTING_USERAGENT",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "4d6f7a696c6c612f352e30202857696e646f7773204e5420"
+   },
+   {
+    "idx": 10,
+    "name": "SETTING_SUBMITURI",
+    "type": "TYPE_PTR",
+    "len": 64,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "2f7375626d69742e70687000000000000000000000000000"
+   },
+   {
+    "idx": 11,
+    "name": "SETTING_C2_RECOVER",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000000040000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 12,
+    "name": "SETTING_C2_REQUEST",
+    "type": "TYPE_PTR",
+    "len": 512,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000000700000000000000030000000600000006436f6f6b"
+   },
+   {
+    "idx": 13,
+    "name": "SETTING_C2_POSTREQ",
+    "type": "TYPE_PTR",
+    "len": 512,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000000a00000026436f6e74656e742d547970653a206170"
+   },
+   {
+    "idx": 54,
+    "name": "SETTING_HOST_HEADER",
+    "type": "TYPE_PTR",
+    "len": 128,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000000000000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 50,
+    "name": "SETTING_HTTP_NO_COOKIES",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0001"
+   },
+   {
+    "idx": 35,
+    "name": "SETTING_PROXY_BEHAVIOR",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0002"
+   },
+   {
+    "idx": 58,
+    "name": "SETTING_TCP_FRAME_HEADER",
+    "type": "TYPE_PTR",
+    "len": 128,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000400000000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 57,
+    "name": "SETTING_SMB_FRAME_HEADER",
+    "type": "TYPE_PTR",
+    "len": 128,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000400000000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 55,
+    "name": "SETTING_EXIT_FUNK",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 40,
+    "name": "SETTING_KILLDATE",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000000"
+   },
+   {
+    "idx": 41,
+    "name": "SETTING_GARGLE_NOOK",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000000"
+   },
+   {
+    "idx": 43,
+    "name": "SETTING_PROCINJ_PERMS_I",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0040"
+   },
+   {
+    "idx": 44,
+    "name": "SETTING_PROCINJ_PERMS",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0040"
+   },
+   {
+    "idx": 45,
+    "name": "SETTING_PROCINJ_MINALLOC",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000000"
+   },
+   {
+    "idx": 46,
+    "name": "SETTING_PROCINJ_TRANSFORM_X86",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000000000000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 47,
+    "name": "SETTING_PROCINJ_TRANSFORM_X64",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000000000000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 53,
+    "name": "SETTING_PROCINJ_STUB",
+    "type": "TYPE_PTR",
+    "len": 16,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0990936ad7039f2c4ddf69a2226b00af"
+   },
+   {
+    "idx": 51,
+    "name": "SETTING_PROCINJ_EXECUTE",
+    "type": "TYPE_PTR",
+    "len": 128,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "010203040000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 52,
+    "name": "SETTING_PROCINJ_ALLOCATOR",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 48,
+    "name": "SETTING_PROCINJ_BOF_REUSE_MEM",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": null,
+    "raw_hex_prefix": "0001"
+   },
+   {
+    "idx": 16,
+    "name": "SETTING_BOF_ALLOCATOR",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": null,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 74,
+    "name": "SETTING_MASKED_WATERMARK",
+    "type": "TYPE_PTR",
+    "len": 32,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "05850eabd7039f34078a38c3091f36fa66e0d51c8250b446"
+   },
+   {
+    "idx": 17,
+    "name": "SETTING_SYSCALL_METHOD",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": null,
+    "raw_hex_prefix": "00000000"
+   },
+   {
+    "idx": 78,
+    "name": "SETTING_BEACON_GATE",
+    "type": "TYPE_PTR",
+    "len": 64,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000000000000000000000000000000000000000000000000"
+   }
+  ]
+ },
+ "1897a6cd": {
+  "file": "1897a6cdf17271807bd6ec7c60fffea3.bin",
+  "md5": "1897a6cdf17271807bd6ec7c60fffea3",
+  "version": "Cobalt Strike 4.3 (Mar 03, 2021)",
+  "protocol": "http",
+  "port": 80,
+  "xorkey": "2e",
+  "xorencoded": true,
+  "max_enum": 70,
+  "arch": "x64",
+  "stages": [
+   "XorEncodedFile"
+  ],
+  "n_settings": 43,
+  "settings": [
+   {
+    "idx": 1,
+    "name": "SETTING_PROTOCOL",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 2,
+    "name": "SETTING_PORT",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0050"
+   },
+   {
+    "idx": 3,
+    "name": "SETTING_SLEEPTIME",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00001388"
+   },
+   {
+    "idx": 4,
+    "name": "SETTING_MAXGET",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "001c759d"
+   },
+   {
+    "idx": 5,
+    "name": "SETTING_JITTER",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0016"
+   },
+   {
+    "idx": 7,
+    "name": "SETTING_PUBKEY",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "30819f300d06092a864886f70d010101050003818d003081"
+   },
+   {
+    "idx": 8,
+    "name": "SETTING_DOMAINS",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "6369726974652e636f6d2c2f6c742e637373000000000000"
+   },
+   {
+    "idx": 67,
+    "name": "SETTING_DOMAIN_STRATEGY",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 68,
+    "name": "SETTING_DOMAIN_STRATEGY_SECONDS",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "ffffffff"
+   },
+   {
+    "idx": 69,
+    "name": "SETTING_DOMAIN_STRATEGY_FAIL_X",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "ffffffff"
+   },
+   {
+    "idx": 70,
+    "name": "SETTING_DOMAIN_STRATEGY_FAIL_SECONDS",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "ffffffff"
+   },
+   {
+    "idx": 14,
+    "name": "SETTING_SPAWNTO",
+    "type": "TYPE_PTR",
+    "len": 16,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000000000000000000000000000000"
+   },
+   {
+    "idx": 29,
+    "name": "SETTING_SPAWNTO_X86",
+    "type": "TYPE_PTR",
+    "len": 64,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "2577696e646972255c737973776f7736345c72756e646c6c"
+   },
+   {
+    "idx": 30,
+    "name": "SETTING_SPAWNTO_X64",
+    "type": "TYPE_PTR",
+    "len": 64,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "2577696e646972255c7379736e61746976655c72756e646c"
+   },
+   {
+    "idx": 31,
+    "name": "SETTING_CRYPTO_SCHEME",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 26,
+    "name": "SETTING_C2_VERB_GET",
+    "type": "TYPE_PTR",
+    "len": 16,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "47455400000000000000000000000000"
+   },
+   {
+    "idx": 27,
+    "name": "SETTING_C2_VERB_POST",
+    "type": "TYPE_PTR",
+    "len": 16,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "504f5354000000000000000000000000"
+   },
+   {
+    "idx": 28,
+    "name": "SETTING_C2_CHUNK_POST",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000000"
+   },
+   {
+    "idx": 37,
+    "name": "SETTING_WATERMARK",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000000"
+   },
+   {
+    "idx": 38,
+    "name": "SETTING_CLEANUP",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0001"
+   },
+   {
+    "idx": 39,
+    "name": "SETTING_CFG_CAUTION",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 9,
+    "name": "SETTING_USERAGENT",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "4d6f7a696c6c612f352e3020284d6163696e746f73683b20"
+   },
+   {
+    "idx": 10,
+    "name": "SETTING_SUBMITURI",
+    "type": "TYPE_PTR",
+    "len": 64,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "2f6e6c000000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 11,
+    "name": "SETTING_C2_RECOVER",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000000400000002000003d5000000030000000d00000000"
+   },
+   {
+    "idx": 12,
+    "name": "SETTING_C2_REQUEST",
+    "type": "TYPE_PTR",
+    "len": 512,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000001000000010486f73743a207265646469742e636f6d"
+   },
+   {
+    "idx": 13,
+    "name": "SETTING_C2_POSTREQ",
+    "type": "TYPE_PTR",
+    "len": 512,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000001000000010486f73743a207265646469742e636f6d"
+   },
+   {
+    "idx": 54,
+    "name": "SETTING_HOST_HEADER",
+    "type": "TYPE_PTR",
+    "len": 128,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000000000000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 50,
+    "name": "SETTING_HTTP_NO_COOKIES",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0001"
+   },
+   {
+    "idx": 35,
+    "name": "SETTING_PROXY_BEHAVIOR",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0002"
+   },
+   {
+    "idx": 58,
+    "name": "SETTING_TCP_FRAME_HEADER",
+    "type": "TYPE_PTR",
+    "len": 128,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000400000000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 57,
+    "name": "SETTING_SMB_FRAME_HEADER",
+    "type": "TYPE_PTR",
+    "len": 128,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000400000000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 55,
+    "name": "SETTING_EXIT_FUNK",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 40,
+    "name": "SETTING_KILLDATE",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000000"
+   },
+   {
+    "idx": 41,
+    "name": "SETTING_GARGLE_NOOK",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0002bbf2"
+   },
+   {
+    "idx": 42,
+    "name": "SETTING_GARGLE_SECTIONS",
+    "type": "TYPE_PTR",
+    "len": 40,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00c00200b2b8030000c003006892040000a0040070c00400"
+   },
+   {
+    "idx": 43,
+    "name": "SETTING_PROCINJ_PERMS_I",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0004"
+   },
+   {
+    "idx": 44,
+    "name": "SETTING_PROCINJ_PERMS",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0020"
+   },
+   {
+    "idx": 45,
+    "name": "SETTING_PROCINJ_MINALLOC",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00002b2d"
+   },
+   {
+    "idx": 46,
+    "name": "SETTING_PROCINJ_TRANSFORM_X86",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000000059090909090000000000000000000000000000000"
+   },
+   {
+    "idx": 47,
+    "name": "SETTING_PROCINJ_TRANSFORM_X64",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000000059090909090000000000000000000000000000000"
+   },
+   {
+    "idx": 53,
+    "name": "SETTING_PROCINJ_STUB",
+    "type": "TYPE_PTR",
+    "len": 16,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "32cd41edf0810c5b5f498edf4731cc6d"
+   },
+   {
+    "idx": 51,
+    "name": "SETTING_PROCINJ_EXECUTE",
+    "type": "TYPE_PTR",
+    "len": 128,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "010304000000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 52,
+    "name": "SETTING_PROCINJ_ALLOCATOR",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   }
+  ]
+ },
+ "37882262": {
+  "file": "37882262c9b5e971067fd989b26afe28.bin",
+  "md5": "37882262c9b5e971067fd989b26afe28",
+  "version": "Cobalt Strike 4.2 (Nov 06, 2020)",
+  "protocol": "http",
+  "port": 8080,
+  "xorkey": "2e",
+  "xorencoded": true,
+  "max_enum": 58,
+  "arch": "x86",
+  "stages": [
+   "XorEncodedFile"
+  ],
+  "n_settings": 38,
+  "settings": [
+   {
+    "idx": 1,
+    "name": "SETTING_PROTOCOL",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 2,
+    "name": "SETTING_PORT",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "1f90"
+   },
+   {
+    "idx": 3,
+    "name": "SETTING_SLEEPTIME",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000ea60"
+   },
+   {
+    "idx": 4,
+    "name": "SETTING_MAXGET",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00100000"
+   },
+   {
+    "idx": 5,
+    "name": "SETTING_JITTER",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 7,
+    "name": "SETTING_PUBKEY",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "30819f300d06092a864886f70d010101050003818d003081"
+   },
+   {
+    "idx": 8,
+    "name": "SETTING_DOMAINS",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "3139322e3235342e37392e37312c2f70746a000000000000"
+   },
+   {
+    "idx": 14,
+    "name": "SETTING_SPAWNTO",
+    "type": "TYPE_PTR",
+    "len": 16,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000000000000000000000000000000"
+   },
+   {
+    "idx": 29,
+    "name": "SETTING_SPAWNTO_X86",
+    "type": "TYPE_PTR",
+    "len": 64,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "2577696e646972255c737973776f7736345c72756e646c6c"
+   },
+   {
+    "idx": 30,
+    "name": "SETTING_SPAWNTO_X64",
+    "type": "TYPE_PTR",
+    "len": 64,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "2577696e646972255c7379736e61746976655c72756e646c"
+   },
+   {
+    "idx": 31,
+    "name": "SETTING_CRYPTO_SCHEME",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 26,
+    "name": "SETTING_C2_VERB_GET",
+    "type": "TYPE_PTR",
+    "len": 16,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "47455400000000000000000000000000"
+   },
+   {
+    "idx": 27,
+    "name": "SETTING_C2_VERB_POST",
+    "type": "TYPE_PTR",
+    "len": 16,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "504f5354000000000000000000000000"
+   },
+   {
+    "idx": 28,
+    "name": "SETTING_C2_CHUNK_POST",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000000"
+   },
+   {
+    "idx": 37,
+    "name": "SETTING_WATERMARK",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000000"
+   },
+   {
+    "idx": 38,
+    "name": "SETTING_CLEANUP",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 39,
+    "name": "SETTING_CFG_CAUTION",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 9,
+    "name": "SETTING_USERAGENT",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "4d6f7a696c6c612f352e302028636f6d70617469626c653b"
+   },
+   {
+    "idx": 10,
+    "name": "SETTING_SUBMITURI",
+    "type": "TYPE_PTR",
+    "len": 64,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "2f7375626d69742e70687000000000000000000000000000"
+   },
+   {
+    "idx": 11,
+    "name": "SETTING_C2_RECOVER",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000000040000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 12,
+    "name": "SETTING_C2_REQUEST",
+    "type": "TYPE_PTR",
+    "len": 512,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000000700000000000000030000000600000006436f6f6b"
+   },
+   {
+    "idx": 13,
+    "name": "SETTING_C2_POSTREQ",
+    "type": "TYPE_PTR",
+    "len": 512,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000000a00000026436f6e74656e742d547970653a206170"
+   },
+   {
+    "idx": 54,
+    "name": "SETTING_HOST_HEADER",
+    "type": "TYPE_PTR",
+    "len": 128,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000000000000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 50,
+    "name": "SETTING_HTTP_NO_COOKIES",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0001"
+   },
+   {
+    "idx": 35,
+    "name": "SETTING_PROXY_BEHAVIOR",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0002"
+   },
+   {
+    "idx": 58,
+    "name": "SETTING_TCP_FRAME_HEADER",
+    "type": "TYPE_PTR",
+    "len": 128,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000400000000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 57,
+    "name": "SETTING_SMB_FRAME_HEADER",
+    "type": "TYPE_PTR",
+    "len": 128,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000400000000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 55,
+    "name": "SETTING_EXIT_FUNK",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 40,
+    "name": "SETTING_KILLDATE",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000000"
+   },
+   {
+    "idx": 41,
+    "name": "SETTING_GARGLE_NOOK",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000000"
+   },
+   {
+    "idx": 43,
+    "name": "SETTING_PROCINJ_PERMS_I",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0040"
+   },
+   {
+    "idx": 44,
+    "name": "SETTING_PROCINJ_PERMS",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0040"
+   },
+   {
+    "idx": 45,
+    "name": "SETTING_PROCINJ_MINALLOC",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000000"
+   },
+   {
+    "idx": 46,
+    "name": "SETTING_PROCINJ_TRANSFORM_X86",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000000000000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 47,
+    "name": "SETTING_PROCINJ_TRANSFORM_X64",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000000000000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 53,
+    "name": "SETTING_PROCINJ_STUB",
+    "type": "TYPE_PTR",
+    "len": 16,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "b54afe01ec6a75edf35e1a44f8bd3929"
+   },
+   {
+    "idx": 51,
+    "name": "SETTING_PROCINJ_EXECUTE",
+    "type": "TYPE_PTR",
+    "len": 128,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "010203040000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 52,
+    "name": "SETTING_PROCINJ_ALLOCATOR",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   }
+  ]
+ },
+ "3fdf9257": {
+  "file": "3fdf92571d10485b05904e35c635c655.bin",
+  "md5": "3fdf92571d10485b05904e35c635c655",
+  "version": "Cobalt Strike 4.4 (Aug 04, 2021)",
+  "protocol": "https",
+  "port": 443,
+  "xorkey": "cc",
+  "xorencoded": true,
+  "max_enum": 70,
+  "arch": "x86",
+  "stages": [
+   "XorEncodedFile"
+  ],
+  "n_settings": 43,
+  "settings": [
+   {
+    "idx": 1,
+    "name": "SETTING_PROTOCOL",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0008"
+   },
+   {
+    "idx": 2,
+    "name": "SETTING_PORT",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "01bb"
+   },
+   {
+    "idx": 3,
+    "name": "SETTING_SLEEPTIME",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000368f"
+   },
+   {
+    "idx": 4,
+    "name": "SETTING_MAXGET",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00156afc"
+   },
+   {
+    "idx": 5,
+    "name": "SETTING_JITTER",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0032"
+   },
+   {
+    "idx": 7,
+    "name": "SETTING_PUBKEY",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "30819f300d06092a864886f70d010101050003818d003081"
+   },
+   {
+    "idx": 8,
+    "name": "SETTING_DOMAINS",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "67726f75702e6363622e636f6d2e6473612e646e7376312e"
+   },
+   {
+    "idx": 67,
+    "name": "SETTING_DOMAIN_STRATEGY",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 68,
+    "name": "SETTING_DOMAIN_STRATEGY_SECONDS",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "ffffffff"
+   },
+   {
+    "idx": 69,
+    "name": "SETTING_DOMAIN_STRATEGY_FAIL_X",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "ffffffff"
+   },
+   {
+    "idx": 70,
+    "name": "SETTING_DOMAIN_STRATEGY_FAIL_SECONDS",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "ffffffff"
+   },
+   {
+    "idx": 14,
+    "name": "SETTING_SPAWNTO",
+    "type": "TYPE_PTR",
+    "len": 16,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000000000000000000000000000000"
+   },
+   {
+    "idx": 29,
+    "name": "SETTING_SPAWNTO_X86",
+    "type": "TYPE_PTR",
+    "len": 64,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "2577696e646972255c737973776f7736345c617564697470"
+   },
+   {
+    "idx": 30,
+    "name": "SETTING_SPAWNTO_X64",
+    "type": "TYPE_PTR",
+    "len": 64,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "2577696e646972255c7379736e61746976655c6175646974"
+   },
+   {
+    "idx": 31,
+    "name": "SETTING_CRYPTO_SCHEME",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 26,
+    "name": "SETTING_C2_VERB_GET",
+    "type": "TYPE_PTR",
+    "len": 16,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "47455400000000000000000000000000"
+   },
+   {
+    "idx": 27,
+    "name": "SETTING_C2_VERB_POST",
+    "type": "TYPE_PTR",
+    "len": 16,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "504f5354000000000000000000000000"
+   },
+   {
+    "idx": 28,
+    "name": "SETTING_C2_CHUNK_POST",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000000"
+   },
+   {
+    "idx": 37,
+    "name": "SETTING_WATERMARK",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "499602d2"
+   },
+   {
+    "idx": 38,
+    "name": "SETTING_CLEANUP",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0001"
+   },
+   {
+    "idx": 39,
+    "name": "SETTING_CFG_CAUTION",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 9,
+    "name": "SETTING_USERAGENT",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "4d6f7a696c6c612f352e3020285831313b204c696e757820"
+   },
+   {
+    "idx": 10,
+    "name": "SETTING_SUBMITURI",
+    "type": "TYPE_PTR",
+    "len": 64,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "2f6a71756572792d332e332e322e6d696e2e6a7300000000"
+   },
+   {
+    "idx": 11,
+    "name": "SETTING_C2_RECOVER",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000000400000001000005f2000000020000005400000002"
+   },
+   {
+    "idx": 12,
+    "name": "SETTING_C2_REQUEST",
+    "type": "TYPE_PTR",
+    "len": 512,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000000a000000474163636570743a20746578742f68746d"
+   },
+   {
+    "idx": 13,
+    "name": "SETTING_C2_POSTREQ",
+    "type": "TYPE_PTR",
+    "len": 512,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000000a000000474163636570743a20746578742f68746d"
+   },
+   {
+    "idx": 54,
+    "name": "SETTING_HOST_HEADER",
+    "type": "TYPE_PTR",
+    "len": 128,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "486f73743a2067726f75702e6363622e636f6d0d0a000000"
+   },
+   {
+    "idx": 50,
+    "name": "SETTING_HTTP_NO_COOKIES",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0001"
+   },
+   {
+    "idx": 35,
+    "name": "SETTING_PROXY_BEHAVIOR",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0002"
+   },
+   {
+    "idx": 58,
+    "name": "SETTING_TCP_FRAME_HEADER",
+    "type": "TYPE_PTR",
+    "len": 128,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000400000000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 57,
+    "name": "SETTING_SMB_FRAME_HEADER",
+    "type": "TYPE_PTR",
+    "len": 128,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000400000000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 55,
+    "name": "SETTING_EXIT_FUNK",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 40,
+    "name": "SETTING_KILLDATE",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000000"
+   },
+   {
+    "idx": 41,
+    "name": "SETTING_GARGLE_NOOK",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00026268"
+   },
+   {
+    "idx": 42,
+    "name": "SETTING_GARGLE_SECTIONS",
+    "type": "TYPE_PTR",
+    "len": 32,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00700200010c03000010030020b7030000c0030020de0300"
+   },
+   {
+    "idx": 43,
+    "name": "SETTING_PROCINJ_PERMS_I",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0004"
+   },
+   {
+    "idx": 44,
+    "name": "SETTING_PROCINJ_PERMS",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0020"
+   },
+   {
+    "idx": 45,
+    "name": "SETTING_PROCINJ_MINALLOC",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000224c"
+   },
+   {
+    "idx": 46,
+    "name": "SETTING_PROCINJ_TRANSFORM_X86",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000000099090909090909090900000000000000000000000"
+   },
+   {
+    "idx": 47,
+    "name": "SETTING_PROCINJ_TRANSFORM_X64",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000000099090909090909090900000000000000000000000"
+   },
+   {
+    "idx": 53,
+    "name": "SETTING_PROCINJ_STUB",
+    "type": "TYPE_PTR",
+    "len": 16,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000000000000000000000000000000"
+   },
+   {
+    "idx": 51,
+    "name": "SETTING_PROCINJ_EXECUTE",
+    "type": "TYPE_PTR",
+    "len": 128,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0622850000000a6e74646c6c2e646c6c000000001352746c"
+   },
+   {
+    "idx": 52,
+    "name": "SETTING_PROCINJ_ALLOCATOR",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   }
+  ]
+ },
+ "4f571c0b": {
+  "file": "4f571c0bc97c20eefc58fa3faf32148d.bin",
+  "md5": "4f571c0bc97c20eefc58fa3faf32148d",
+  "version": "Cobalt Strike 4.2 (Nov 06, 2020)",
+  "protocol": "https",
+  "port": 443,
+  "xorkey": "2e",
+  "xorencoded": true,
+  "max_enum": 58,
+  "arch": "x86",
+  "stages": [
+   "XorEncodedFile"
+  ],
+  "n_settings": 39,
+  "settings": [
+   {
+    "idx": 1,
+    "name": "SETTING_PROTOCOL",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0008"
+   },
+   {
+    "idx": 2,
+    "name": "SETTING_PORT",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "01bb"
+   },
+   {
+    "idx": 3,
+    "name": "SETTING_SLEEPTIME",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000f25c"
+   },
+   {
+    "idx": 4,
+    "name": "SETTING_MAXGET",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "002ab193"
+   },
+   {
+    "idx": 5,
+    "name": "SETTING_JITTER",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0029"
+   },
+   {
+    "idx": 7,
+    "name": "SETTING_PUBKEY",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "30819f300d06092a864886f70d010101050003818d003081"
+   },
+   {
+    "idx": 8,
+    "name": "SETTING_DOMAINS",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "6c6f6e646f6e746565612e636f6d2c2f66617669636f6e2e"
+   },
+   {
+    "idx": 14,
+    "name": "SETTING_SPAWNTO",
+    "type": "TYPE_PTR",
+    "len": 16,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000000000000000000000000000000"
+   },
+   {
+    "idx": 29,
+    "name": "SETTING_SPAWNTO_X86",
+    "type": "TYPE_PTR",
+    "len": 64,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "2577696e646972255c737973776f7736345c57554155434c"
+   },
+   {
+    "idx": 30,
+    "name": "SETTING_SPAWNTO_X64",
+    "type": "TYPE_PTR",
+    "len": 64,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "2577696e646972255c7379736e61746976655c5755415543"
+   },
+   {
+    "idx": 31,
+    "name": "SETTING_CRYPTO_SCHEME",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 26,
+    "name": "SETTING_C2_VERB_GET",
+    "type": "TYPE_PTR",
+    "len": 16,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "47455400000000000000000000000000"
+   },
+   {
+    "idx": 27,
+    "name": "SETTING_C2_VERB_POST",
+    "type": "TYPE_PTR",
+    "len": 16,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "504f5354000000000000000000000000"
+   },
+   {
+    "idx": 28,
+    "name": "SETTING_C2_CHUNK_POST",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000000"
+   },
+   {
+    "idx": 37,
+    "name": "SETTING_WATERMARK",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "5109bf6d"
+   },
+   {
+    "idx": 38,
+    "name": "SETTING_CLEANUP",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0001"
+   },
+   {
+    "idx": 39,
+    "name": "SETTING_CFG_CAUTION",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 9,
+    "name": "SETTING_USERAGENT",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "4d6f7a696c6c612f352e3020286950686f6e653b20435055"
+   },
+   {
+    "idx": 10,
+    "name": "SETTING_SUBMITURI",
+    "type": "TYPE_PTR",
+    "len": 64,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "2f72656d6f76650000000000000000000000000000000000"
+   },
+   {
+    "idx": 11,
+    "name": "SETTING_C2_RECOVER",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000000400000002000006e7000000030000000800000000"
+   },
+   {
+    "idx": 12,
+    "name": "SETTING_C2_REQUEST",
+    "type": "TYPE_PTR",
+    "len": 512,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000000a00000011436f6e6e656374696f6e3a20636c6f73"
+   },
+   {
+    "idx": 13,
+    "name": "SETTING_C2_POSTREQ",
+    "type": "TYPE_PTR",
+    "len": 512,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000000a00000011436f6e6e656374696f6e3a20636c6f73"
+   },
+   {
+    "idx": 54,
+    "name": "SETTING_HOST_HEADER",
+    "type": "TYPE_PTR",
+    "len": 128,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000000000000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 50,
+    "name": "SETTING_HTTP_NO_COOKIES",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0001"
+   },
+   {
+    "idx": 35,
+    "name": "SETTING_PROXY_BEHAVIOR",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0002"
+   },
+   {
+    "idx": 58,
+    "name": "SETTING_TCP_FRAME_HEADER",
+    "type": "TYPE_PTR",
+    "len": 128,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000400000000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 57,
+    "name": "SETTING_SMB_FRAME_HEADER",
+    "type": "TYPE_PTR",
+    "len": 128,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000400000000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 55,
+    "name": "SETTING_EXIT_FUNK",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 40,
+    "name": "SETTING_KILLDATE",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000000"
+   },
+   {
+    "idx": 41,
+    "name": "SETTING_GARGLE_NOOK",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00025d0a"
+   },
+   {
+    "idx": 42,
+    "name": "SETTING_GARGLE_SECTIONS",
+    "type": "TYPE_PTR",
+    "len": 32,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00600200d1fb020000000300a0a0030000b003008acd0300"
+   },
+   {
+    "idx": 43,
+    "name": "SETTING_PROCINJ_PERMS_I",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0004"
+   },
+   {
+    "idx": 44,
+    "name": "SETTING_PROCINJ_PERMS",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0020"
+   },
+   {
+    "idx": 45,
+    "name": "SETTING_PROCINJ_MINALLOC",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00006eef"
+   },
+   {
+    "idx": 46,
+    "name": "SETTING_PROCINJ_TRANSFORM_X86",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000000079090909090909000000000000000000000000000"
+   },
+   {
+    "idx": 47,
+    "name": "SETTING_PROCINJ_TRANSFORM_X64",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000000079090909090909000000000000000000000000000"
+   },
+   {
+    "idx": 53,
+    "name": "SETTING_PROCINJ_STUB",
+    "type": "TYPE_PTR",
+    "len": 16,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0ce2f55444e4793516b5afe967be9255"
+   },
+   {
+    "idx": 51,
+    "name": "SETTING_PROCINJ_EXECUTE",
+    "type": "TYPE_PTR",
+    "len": 128,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "010403000000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 52,
+    "name": "SETTING_PROCINJ_ALLOCATOR",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   }
+  ]
+ },
+ "5a197a8b": {
+  "file": "5a197a8bb628a2555f5a86c51b85abd7.bin",
+  "md5": "5a197a8bb628a2555f5a86c51b85abd7",
+  "version": "Cobalt Strike 4.2 (Nov 06, 2020)",
+  "protocol": "https",
+  "port": 443,
+  "xorkey": "2e",
+  "xorencoded": true,
+  "max_enum": 58,
+  "arch": "x86",
+  "stages": [
+   "XorEncodedFile"
+  ],
+  "n_settings": 38,
+  "settings": [
+   {
+    "idx": 1,
+    "name": "SETTING_PROTOCOL",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0008"
+   },
+   {
+    "idx": 2,
+    "name": "SETTING_PORT",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "01bb"
+   },
+   {
+    "idx": 3,
+    "name": "SETTING_SLEEPTIME",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00001388"
+   },
+   {
+    "idx": 4,
+    "name": "SETTING_MAXGET",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00100000"
+   },
+   {
+    "idx": 5,
+    "name": "SETTING_JITTER",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 7,
+    "name": "SETTING_PUBKEY",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "30819f300d06092a864886f70d010101050003818d003081"
+   },
+   {
+    "idx": 8,
+    "name": "SETTING_DOMAINS",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "6be7692e636f6d2c2f732f7265663d6e625f73625f6e6f73"
+   },
+   {
+    "idx": 14,
+    "name": "SETTING_SPAWNTO",
+    "type": "TYPE_PTR",
+    "len": 16,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "b78ecc2f47fc72950ccbc6afbfecac65"
+   },
+   {
+    "idx": 29,
+    "name": "SETTING_SPAWNTO_X86",
+    "type": "TYPE_PTR",
+    "len": 64,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "2577696e646972255c737973776f7736345c72756e646c6c"
+   },
+   {
+    "idx": 30,
+    "name": "SETTING_SPAWNTO_X64",
+    "type": "TYPE_PTR",
+    "len": 64,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "2577696e646972255c7379736e61746976655c72756e646c"
+   },
+   {
+    "idx": 31,
+    "name": "SETTING_CRYPTO_SCHEME",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 26,
+    "name": "SETTING_C2_VERB_GET",
+    "type": "TYPE_PTR",
+    "len": 16,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "47455400000000000000000000000000"
+   },
+   {
+    "idx": 27,
+    "name": "SETTING_C2_VERB_POST",
+    "type": "TYPE_PTR",
+    "len": 16,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "504f5354000000000000000000000000"
+   },
+   {
+    "idx": 28,
+    "name": "SETTING_C2_CHUNK_POST",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000000"
+   },
+   {
+    "idx": 37,
+    "name": "SETTING_WATERMARK",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "179550d4"
+   },
+   {
+    "idx": 38,
+    "name": "SETTING_CLEANUP",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 39,
+    "name": "SETTING_CFG_CAUTION",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 9,
+    "name": "SETTING_USERAGENT",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "4d6f7a696c6c612f352e30202857696e646f7773204e5420"
+   },
+   {
+    "idx": 10,
+    "name": "SETTING_SUBMITURI",
+    "type": "TYPE_PTR",
+    "len": 64,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "2f4e343231352f61646a2f616d7a6e2e75732e73722e6170"
+   },
+   {
+    "idx": 11,
+    "name": "SETTING_C2_RECOVER",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000000040000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 12,
+    "name": "SETTING_C2_REQUEST",
+    "type": "TYPE_PTR",
+    "len": 512,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000000a0000000b4163636570743a202a2f2a0000001000"
+   },
+   {
+    "idx": 13,
+    "name": "SETTING_C2_POSTREQ",
+    "type": "TYPE_PTR",
+    "len": 512,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000000a0000000b4163636570743a202a2f2a0000000a00"
+   },
+   {
+    "idx": 54,
+    "name": "SETTING_HOST_HEADER",
+    "type": "TYPE_PTR",
+    "len": 128,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000000000000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 50,
+    "name": "SETTING_HTTP_NO_COOKIES",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0001"
+   },
+   {
+    "idx": 35,
+    "name": "SETTING_PROXY_BEHAVIOR",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0002"
+   },
+   {
+    "idx": 58,
+    "name": "SETTING_TCP_FRAME_HEADER",
+    "type": "TYPE_PTR",
+    "len": 128,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000400000000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 57,
+    "name": "SETTING_SMB_FRAME_HEADER",
+    "type": "TYPE_PTR",
+    "len": 128,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000400000000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 55,
+    "name": "SETTING_EXIT_FUNK",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 40,
+    "name": "SETTING_KILLDATE",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000000"
+   },
+   {
+    "idx": 41,
+    "name": "SETTING_GARGLE_NOOK",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000000"
+   },
+   {
+    "idx": 43,
+    "name": "SETTING_PROCINJ_PERMS_I",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0040"
+   },
+   {
+    "idx": 44,
+    "name": "SETTING_PROCINJ_PERMS",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0040"
+   },
+   {
+    "idx": 45,
+    "name": "SETTING_PROCINJ_MINALLOC",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000000"
+   },
+   {
+    "idx": 46,
+    "name": "SETTING_PROCINJ_TRANSFORM_X86",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000000000000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 47,
+    "name": "SETTING_PROCINJ_TRANSFORM_X64",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000000000000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 53,
+    "name": "SETTING_PROCINJ_STUB",
+    "type": "TYPE_PTR",
+    "len": 16,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "b54afe01ec6a75edf35e1a44f8bd3929"
+   },
+   {
+    "idx": 51,
+    "name": "SETTING_PROCINJ_EXECUTE",
+    "type": "TYPE_PTR",
+    "len": 128,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "010203040000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 52,
+    "name": "SETTING_PROCINJ_ALLOCATOR",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   }
+  ]
+ },
+ "a1573fe6": {
+  "file": "a1573fe60c863ed40fffe54d377b393a.bin",
+  "md5": "a1573fe60c863ed40fffe54d377b393a",
+  "version": "Cobalt Strike 4.3 (Mar 03, 2021)",
+  "protocol": "dns",
+  "port": 53,
+  "xorkey": "af",
+  "xorencoded": false,
+  "max_enum": 70,
+  "arch": "x86",
+  "stages": [],
+  "n_settings": 48,
+  "settings": [
+   {
+    "idx": 1,
+    "name": "SETTING_PROTOCOL",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0001"
+   },
+   {
+    "idx": 2,
+    "name": "SETTING_PORT",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0035"
+   },
+   {
+    "idx": 3,
+    "name": "SETTING_SLEEPTIME",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000d958"
+   },
+   {
+    "idx": 4,
+    "name": "SETTING_MAXGET",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "001c78af"
+   },
+   {
+    "idx": 5,
+    "name": "SETTING_JITTER",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "002b"
+   },
+   {
+    "idx": 7,
+    "name": "SETTING_PUBKEY",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "30819f300d06092a864886f70d010101050003818d003081"
+   },
+   {
+    "idx": 8,
+    "name": "SETTING_DOMAINS",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "6e73312e77696e646f7773757064617461732e636f6d2c2f"
+   },
+   {
+    "idx": 67,
+    "name": "SETTING_DOMAIN_STRATEGY",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 68,
+    "name": "SETTING_DOMAIN_STRATEGY_SECONDS",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "ffffffff"
+   },
+   {
+    "idx": 69,
+    "name": "SETTING_DOMAIN_STRATEGY_FAIL_X",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "ffffffff"
+   },
+   {
+    "idx": 70,
+    "name": "SETTING_DOMAIN_STRATEGY_FAIL_SECONDS",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "ffffffff"
+   },
+   {
+    "idx": 14,
+    "name": "SETTING_SPAWNTO",
+    "type": "TYPE_PTR",
+    "len": 16,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000000000000000000000000000000"
+   },
+   {
+    "idx": 29,
+    "name": "SETTING_SPAWNTO_X86",
+    "type": "TYPE_PTR",
+    "len": 64,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "2577696e646972255c737973776f7736345c737663686f73"
+   },
+   {
+    "idx": 30,
+    "name": "SETTING_SPAWNTO_X64",
+    "type": "TYPE_PTR",
+    "len": 64,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "2577696e646972255c7379736e61746976655c737663686f"
+   },
+   {
+    "idx": 31,
+    "name": "SETTING_CRYPTO_SCHEME",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 26,
+    "name": "SETTING_C2_VERB_GET",
+    "type": "TYPE_PTR",
+    "len": 16,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "47455400000000000000000000000000"
+   },
+   {
+    "idx": 27,
+    "name": "SETTING_C2_VERB_POST",
+    "type": "TYPE_PTR",
+    "len": 16,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "504f5354000000000000000000000000"
+   },
+   {
+    "idx": 28,
+    "name": "SETTING_C2_CHUNK_POST",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000000"
+   },
+   {
+    "idx": 37,
+    "name": "SETTING_WATERMARK",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "1969a08d"
+   },
+   {
+    "idx": 38,
+    "name": "SETTING_CLEANUP",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0001"
+   },
+   {
+    "idx": 39,
+    "name": "SETTING_CFG_CAUTION",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 6,
+    "name": "SETTING_MAXDNS",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00fb"
+   },
+   {
+    "idx": 19,
+    "name": "SETTING_DNS_IDLE",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "13075bf1"
+   },
+   {
+    "idx": 20,
+    "name": "SETTING_DNS_SLEEP",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000091"
+   },
+   {
+    "idx": 60,
+    "name": "SETTING_DNS_BEACON_BEACON",
+    "type": "TYPE_PTR",
+    "len": 33,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "736d74702e00000000000000000000000000000000000000"
+   },
+   {
+    "idx": 61,
+    "name": "SETTING_DNS_BEACON_GET_A",
+    "type": "TYPE_PTR",
+    "len": 33,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "75702e000000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 62,
+    "name": "SETTING_DNS_BEACON_GET_AAAA",
+    "type": "TYPE_PTR",
+    "len": 33,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "626f782e0000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 63,
+    "name": "SETTING_DNS_BEACON_GET_TXT",
+    "type": "TYPE_PTR",
+    "len": 33,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "6c616e7465726e2e00000000000000000000000000000000"
+   },
+   {
+    "idx": 64,
+    "name": "SETTING_DNS_BEACON_PUT_METADATA",
+    "type": "TYPE_PTR",
+    "len": 33,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "746573742e00000000000000000000000000000000000000"
+   },
+   {
+    "idx": 65,
+    "name": "SETTING_DNS_BEACON_PUT_OUTPUT",
+    "type": "TYPE_PTR",
+    "len": 33,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "616e737765722e0000000000000000000000000000000000"
+   },
+   {
+    "idx": 66,
+    "name": "SETTING_DNSRESOLVER",
+    "type": "TYPE_PTR",
+    "len": 15,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000000000000000000000000000000"
+   },
+   {
+    "idx": 54,
+    "name": "SETTING_HOST_HEADER",
+    "type": "TYPE_PTR",
+    "len": 128,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000000000000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 50,
+    "name": "SETTING_HTTP_NO_COOKIES",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0001"
+   },
+   {
+    "idx": 35,
+    "name": "SETTING_PROXY_BEHAVIOR",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0002"
+   },
+   {
+    "idx": 58,
+    "name": "SETTING_TCP_FRAME_HEADER",
+    "type": "TYPE_PTR",
+    "len": 128,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000400000000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 57,
+    "name": "SETTING_SMB_FRAME_HEADER",
+    "type": "TYPE_PTR",
+    "len": 128,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000400000000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 55,
+    "name": "SETTING_EXIT_FUNK",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 40,
+    "name": "SETTING_KILLDATE",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000000"
+   },
+   {
+    "idx": 41,
+    "name": "SETTING_GARGLE_NOOK",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00025ee5"
+   },
+   {
+    "idx": 42,
+    "name": "SETTING_GARGLE_SECTIONS",
+    "type": "TYPE_PTR",
+    "len": 32,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00600200affc02000000030030a7030000b00300e6cd0300"
+   },
+   {
+    "idx": 43,
+    "name": "SETTING_PROCINJ_PERMS_I",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0004"
+   },
+   {
+    "idx": 44,
+    "name": "SETTING_PROCINJ_PERMS",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0020"
+   },
+   {
+    "idx": 45,
+    "name": "SETTING_PROCINJ_MINALLOC",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00001a8c"
+   },
+   {
+    "idx": 46,
+    "name": "SETTING_PROCINJ_TRANSFORM_X86",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000000059090909090000000000000000000000000000000"
+   },
+   {
+    "idx": 47,
+    "name": "SETTING_PROCINJ_TRANSFORM_X64",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000000059090909090000000000000000000000000000000"
+   },
+   {
+    "idx": 53,
+    "name": "SETTING_PROCINJ_STUB",
+    "type": "TYPE_PTR",
+    "len": 16,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "bf223469fd9c1c681445b6451f4a8e41"
+   },
+   {
+    "idx": 51,
+    "name": "SETTING_PROCINJ_EXECUTE",
+    "type": "TYPE_PTR",
+    "len": 128,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "010403000000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 52,
+    "name": "SETTING_PROCINJ_ALLOCATOR",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   }
+  ]
+ },
+ "d972234f": {
+  "file": "d972234f6b1e2f3635b24c9754e2b252.bin",
+  "md5": "d972234f6b1e2f3635b24c9754e2b252",
+  "version": "Cobalt Strike 4.12 (Nov 24, 2025)",
+  "protocol": "dns",
+  "port": 53,
+  "xorkey": "2e",
+  "xorencoded": false,
+  "max_enum": 89,
+  "arch": "x86",
+  "stages": [
+   "ObfuscatedBeacon(OBFUSCATION_BASE64)",
+   "ObfuscatedBeacon(OBFUSCATION_XOR)",
+   "ObfuscatedBeacon(OBFUSCATION_RC4)",
+   "ObfuscatedBeacon(OBFUSCATION_LZNT1)",
+   "ObfuscatedBeacon(OBFUSCATION_NONE)"
+  ],
+  "n_settings": 68,
+  "settings": [
+   {
+    "idx": 1,
+    "name": "SETTING_PROTOCOL",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0001"
+   },
+   {
+    "idx": 2,
+    "name": "SETTING_PORT",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0035"
+   },
+   {
+    "idx": 3,
+    "name": "SETTING_SLEEPTIME",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000ea60"
+   },
+   {
+    "idx": 4,
+    "name": "SETTING_MAXGET",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "002aaac2"
+   },
+   {
+    "idx": 5,
+    "name": "SETTING_JITTER",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 7,
+    "name": "SETTING_PUBKEY",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "30819f300d06092a864886f70d010101050003818d003081"
+   },
+   {
+    "idx": 8,
+    "name": "SETTING_DOMAINS",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "636f72702e6369747269782d636c6f75642e636f6d2c2f61"
+   },
+   {
+    "idx": 67,
+    "name": "SETTING_DOMAIN_STRATEGY",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 68,
+    "name": "SETTING_DOMAIN_STRATEGY_SECONDS",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "ffffffff"
+   },
+   {
+    "idx": 69,
+    "name": "SETTING_DOMAIN_STRATEGY_FAIL_X",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "ffffffff"
+   },
+   {
+    "idx": 70,
+    "name": "SETTING_DOMAIN_STRATEGY_FAIL_SECONDS",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "ffffffff"
+   },
+   {
+    "idx": 14,
+    "name": "SETTING_SPAWNTO",
+    "type": "TYPE_PTR",
+    "len": 16,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000000000000000000000000000000"
+   },
+   {
+    "idx": 29,
+    "name": "SETTING_SPAWNTO_X86",
+    "type": "TYPE_PTR",
+    "len": 64,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "2577696e646972255c737973776f7736345c576572466175"
+   },
+   {
+    "idx": 30,
+    "name": "SETTING_SPAWNTO_X64",
+    "type": "TYPE_PTR",
+    "len": 64,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "2577696e646972255c7379736e61746976655c5765724661"
+   },
+   {
+    "idx": 31,
+    "name": "SETTING_CRYPTO_SCHEME",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 26,
+    "name": "SETTING_C2_VERB_GET",
+    "type": "TYPE_PTR",
+    "len": 16,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "47455400000000000000000000000000"
+   },
+   {
+    "idx": 27,
+    "name": "SETTING_C2_VERB_POST",
+    "type": "TYPE_PTR",
+    "len": 16,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "504f5354000000000000000000000000"
+   },
+   {
+    "idx": 80,
+    "name": "SETTING_C2_CHUNK_POST_POST_SIZE",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000000"
+   },
+   {
+    "idx": 79,
+    "name": "SETTING_C2_CHUNK_POST_PACKET_SIZE",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00001000"
+   },
+   {
+    "idx": 28,
+    "name": "SETTING_C2_CHUNK_POST",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000060"
+   },
+   {
+    "idx": 37,
+    "name": "SETTING_WATERMARK",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "19cfa403"
+   },
+   {
+    "idx": 36,
+    "name": "SETTING_WATERMARKHASH",
+    "type": "TYPE_PTR",
+    "len": 32,
+    "stock_type_ok": null,
+    "raw_hex_prefix": "395844667146624f376e5177793151377076553979413d3d"
+   },
+   {
+    "idx": 38,
+    "name": "SETTING_CLEANUP",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0001"
+   },
+   {
+    "idx": 39,
+    "name": "SETTING_CFG_CAUTION",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 76,
+    "name": "SETTING_DATA_STORE_SIZE",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000010"
+   },
+   {
+    "idx": 71,
+    "name": "SETTING_MAX_RETRY_STRATEGY_ATTEMPTS",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000000"
+   },
+   {
+    "idx": 72,
+    "name": "SETTING_MAX_RETRY_STRATEGY_INCREASE",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000000"
+   },
+   {
+    "idx": 73,
+    "name": "SETTING_MAX_RETRY_STRATEGY_DURATION",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000000"
+   },
+   {
+    "idx": 6,
+    "name": "SETTING_MAXDNS",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00ff"
+   },
+   {
+    "idx": 19,
+    "name": "SETTING_DNS_IDLE",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "a2dd9f91"
+   },
+   {
+    "idx": 20,
+    "name": "SETTING_DNS_SLEEP",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000000"
+   },
+   {
+    "idx": 60,
+    "name": "SETTING_DNS_BEACON_BEACON",
+    "type": "TYPE_PTR",
+    "len": 33,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "646f632e62632e0000000000000000000000000000000000"
+   },
+   {
+    "idx": 61,
+    "name": "SETTING_DNS_BEACON_GET_A",
+    "type": "TYPE_PTR",
+    "len": 33,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "63646e2e0000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 62,
+    "name": "SETTING_DNS_BEACON_GET_AAAA",
+    "type": "TYPE_PTR",
+    "len": 33,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "777777362e00000000000000000000000000000000000000"
+   },
+   {
+    "idx": 63,
+    "name": "SETTING_DNS_BEACON_GET_TXT",
+    "type": "TYPE_PTR",
+    "len": 33,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "6170692e0000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 64,
+    "name": "SETTING_DNS_BEACON_PUT_METADATA",
+    "type": "TYPE_PTR",
+    "len": 33,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "646f632e6d642e0000000000000000000000000000000000"
+   },
+   {
+    "idx": 65,
+    "name": "SETTING_DNS_BEACON_PUT_OUTPUT",
+    "type": "TYPE_PTR",
+    "len": 33,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "646f632e706f2e0000000000000000000000000000000000"
+   },
+   {
+    "idx": 66,
+    "name": "SETTING_DNSRESOLVER",
+    "type": "TYPE_PTR",
+    "len": 15,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000000000000000000000000000000"
+   },
+   {
+    "idx": 81,
+    "name": "SETTING_DNS_DOH_ENABLED",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0001"
+   },
+   {
+    "idx": 83,
+    "name": "SETTING_DNS_DOH_USERAGENT",
+    "type": "TYPE_PTR",
+    "len": 129,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "4d6f7a696c6c612f342e302028636f6d70617469626c653b"
+   },
+   {
+    "idx": 84,
+    "name": "SETTING_DNS_DOH_PROXY_SERVER",
+    "type": "TYPE_PTR",
+    "len": 65,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "687474703a2f2f696e65742d70726f78792d612e61646e73"
+   },
+   {
+    "idx": 85,
+    "name": "SETTING_DNS_DOH_SERVERS",
+    "type": "TYPE_PTR",
+    "len": 257,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "646f682e6f70656e646e732e636f6d000000000000000000"
+   },
+   {
+    "idx": 86,
+    "name": "SETTING_DNS_DOH_ACCEPT",
+    "type": "TYPE_PTR",
+    "len": 129,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "6170706c69636174696f6e2f646e732d6d65737361676500"
+   },
+   {
+    "idx": 87,
+    "name": "SETTING_DNS_DOH_HEADERS",
+    "type": "TYPE_PTR",
+    "len": 513,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "436f6e74656e742d547970653a206170706c69636174696f"
+   },
+   {
+    "idx": 54,
+    "name": "SETTING_HOST_HEADER",
+    "type": "TYPE_PTR",
+    "len": 128,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000000000000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 50,
+    "name": "SETTING_HTTP_NO_COOKIES",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0001"
+   },
+   {
+    "idx": 35,
+    "name": "SETTING_PROXY_BEHAVIOR",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0002"
+   },
+   {
+    "idx": 58,
+    "name": "SETTING_TCP_FRAME_HEADER",
+    "type": "TYPE_PTR",
+    "len": 128,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000400000000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 57,
+    "name": "SETTING_SMB_FRAME_HEADER",
+    "type": "TYPE_PTR",
+    "len": 128,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000400000000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 55,
+    "name": "SETTING_EXIT_FUNK",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 40,
+    "name": "SETTING_KILLDATE",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000000"
+   },
+   {
+    "idx": 41,
+    "name": "SETTING_GARGLE_NOOK",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000001"
+   },
+   {
+    "idx": 42,
+    "name": "SETTING_GARGLE_SECTIONS",
+    "type": "TYPE_PTR",
+    "len": 40,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000000000010000000e002009280030000900300d4c80400"
+   },
+   {
+    "idx": 43,
+    "name": "SETTING_PROCINJ_PERMS_I",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0040"
+   },
+   {
+    "idx": 44,
+    "name": "SETTING_PROCINJ_PERMS",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0020"
+   },
+   {
+    "idx": 45,
+    "name": "SETTING_PROCINJ_MINALLOC",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00004000"
+   },
+   {
+    "idx": 46,
+    "name": "SETTING_PROCINJ_TRANSFORM_X86",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000000029090000000000000000000000000000000000000"
+   },
+   {
+    "idx": 47,
+    "name": "SETTING_PROCINJ_TRANSFORM_X64",
+    "type": "TYPE_PTR",
+    "len": 256,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000000000000000000000000000000000000000000000000"
+   },
+   {
+    "idx": 53,
+    "name": "SETTING_PROCINJ_STUB",
+    "type": "TYPE_PTR",
+    "len": 16,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "c0f5928c29401663a7e585dabdabd1c0"
+   },
+   {
+    "idx": 51,
+    "name": "SETTING_PROCINJ_EXECUTE",
+    "type": "TYPE_PTR",
+    "len": 128,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "090600000000000a6e74646c6c2e646c6c00000000135274"
+   },
+   {
+    "idx": 52,
+    "name": "SETTING_PROCINJ_ALLOCATOR",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 48,
+    "name": "SETTING_PROCINJ_BOF_REUSE_MEM",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": null,
+    "raw_hex_prefix": "0001"
+   },
+   {
+    "idx": 16,
+    "name": "SETTING_BOF_ALLOCATOR",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": null,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 74,
+    "name": "SETTING_MASKED_WATERMARK",
+    "type": "TYPE_PTR",
+    "len": 32,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "d6c670c52940167bddaefd9488cabbf2b5afc3d4480f252c"
+   },
+   {
+    "idx": 88,
+    "name": "SETTING_PROCINJ_DRIP_LOAD",
+    "type": "TYPE_SHORT",
+    "len": 2,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "0000"
+   },
+   {
+    "idx": 89,
+    "name": "SETTING_PROCINJ_DRIP_LOAD_DELAY",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "00000064"
+   },
+   {
+    "idx": 17,
+    "name": "SETTING_SYSCALL_METHOD",
+    "type": "TYPE_INT",
+    "len": 4,
+    "stock_type_ok": null,
+    "raw_hex_prefix": "00000000"
+   },
+   {
+    "idx": 78,
+    "name": "SETTING_BEACON_GATE",
+    "type": "TYPE_PTR",
+    "len": 64,
+    "stock_type_ok": true,
+    "raw_hex_prefix": "000101010000000000000000000000000000000000000000"
+   }
+  ]
+ }
+}
