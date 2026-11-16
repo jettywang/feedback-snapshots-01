@@ -1,5 +1,6 @@
 import hmac
 import random
+from typing import Tuple
 
 import pytest
 from Crypto.PublicKey import RSA
@@ -11,6 +12,7 @@ from dissect.cobaltstrike.c2 import (
     BeaconKeys,
     BeaconMetadata,
     C2Http,
+    CallbackPacket,
     ClientC2Data,
     EncryptedPacket,
     HttpDataTransform,
@@ -430,3 +432,181 @@ def test_encrypt_packet():
     plaintext = decrypt_packet(packet, **keys._asdict())
     assert plaintext == b"hello worldAAAAA"
     assert plaintext == pad(msg)
+
+
+# ---------------------------------------------------------------------------
+# Multi-session support: a single C2Http instance processes interleaved traffic
+# from multiple Beacon sessions without mixing up their session keys.
+# ---------------------------------------------------------------------------
+
+
+def _synthetic_session(bid: int, aes_rand: bytes) -> Tuple[BeaconKeys, BeaconMetadata]:
+    keys = BeaconKeys.from_aes_rand(aes_rand)
+    metadata = BeaconMetadata(
+        magic=0xBEEF,
+        pid=1000 + bid,
+        aes_rand=aes_rand,
+        bid=bid,
+        info=f"host-{bid}\tuser\tprocess".encode(),
+    )
+    return keys, metadata
+
+
+def _checkin_request(c2http: C2Http, metadata: BeaconMetadata) -> HttpRequest:
+    blob = encrypt_metadata(metadata, c2http.pub)
+    return c2http.transform_get.transform(
+        ClientC2Data(metadata=blob),
+        request=HttpRequest(method=c2http.get_verb, uri=next(iter(c2http.get_uris)), headers={}, params={}, body=b""),
+    )
+
+
+def _callback_request(c2http: C2Http, session: Tuple[BeaconKeys, BeaconMetadata], data: bytes, counter: int) -> HttpRequest:
+    keys, metadata = session
+    packet = CallbackPacket(counter=counter, size=len(data), callback=BeaconCallback.CALLBACK_OUTPUT, data=data)
+    enc_packet = encrypt_packet(packet.dumps(), keys.aes_key, keys.hmac_key)
+    return c2http.transform_submit.transform(
+        ClientC2Data(id=str(metadata.bid).encode(), output=enc_packet.dumps()),
+        request=HttpRequest(method=c2http.submit_verb, uri=c2http.submit_uri, headers={}, params={}, body=b""),
+    )
+
+
+def _task_response(c2http: C2Http, keys: BeaconKeys, data: bytes, request: HttpRequest) -> HttpResponse:
+    packet = TaskPacket(
+        epoch=1, total_size=len(data), command=BeaconCommand.COMMAND_SLEEP, size=len(data), data=data
+    )
+    enc_packet = encrypt_packet(packet.dumps(), keys.aes_key, keys.hmac_key)
+    # Server-side output is ciphertext + signature without a length frame header.
+    return HttpResponse(
+        status=200, headers={}, reason=b"OK", body=enc_packet.ciphertext + enc_packet.signature, request=request
+    )
+
+
+def test_c2http_interleaved_sessions(bconfig):
+    session_a = _synthetic_session(111110, b"\x01" * 16)
+    session_b = _synthetic_session(222220, b"\x02" * 16)
+    c2http = C2Http(bconfig, rsa_private_key=rsa_private)
+
+    stream = [
+        _checkin_request(c2http, session_a[1]),
+        _checkin_request(c2http, session_b[1]),
+        _callback_request(c2http, session_a, data=b"alpha-1", counter=1),
+        _callback_request(c2http, session_b, data=b"bravo-1", counter=1),
+        _callback_request(c2http, session_a, data=b"alpha-2", counter=2),
+        _callback_request(c2http, session_b, data=b"bravo-2", counter=2),
+    ]
+
+    packets = [packet for http in stream for packet in c2http.iter_recover_http(http)]
+
+    metadata = [packet for packet in packets if isinstance(packet, BeaconMetadata)]
+    callbacks = [packet for packet in packets if isinstance(packet, CallbackPacket)]
+
+    assert [packet.bid for packet in metadata] == [111110, 222220]
+    assert [packet.data for packet in callbacks] == [b"alpha-1", b"bravo-1", b"alpha-2", b"bravo-2"]
+    # Each session keeps its own confirmed keys.
+    assert c2http.session_keys_by_id[b"111110"] == session_a[0]
+    assert c2http.session_keys_by_id[b"222220"] == session_b[0]
+
+
+def test_c2http_swapped_order_and_duplicate_metadata(bconfig):
+    session_a = _synthetic_session(111110, b"\x01" * 16)
+    session_b = _synthetic_session(222220, b"\x02" * 16)
+    c2http = C2Http(bconfig, rsa_private_key=rsa_private)
+
+    # Session B checks in first, and A's (randomized) metadata is delivered twice.
+    stream = [
+        _checkin_request(c2http, session_b[1]),
+        _checkin_request(c2http, session_a[1]),
+        _checkin_request(c2http, session_a[1]),
+        _callback_request(c2http, session_b, data=b"bravo-x", counter=3),
+        _callback_request(c2http, session_a, data=b"alpha-x", counter=3),
+    ]
+    packets = [packet for http in stream for packet in c2http.iter_recover_http(http)]
+    metadata = [packet for packet in packets if isinstance(packet, BeaconMetadata)]
+    callbacks = [packet for packet in packets if isinstance(packet, CallbackPacket)]
+
+    assert [packet.bid for packet in metadata] == [222220, 111110, 111110]
+    assert [packet.data for packet in callbacks] == [b"bravo-x", b"alpha-x"]
+
+    # Repeated (re-randomized) metadata must resolve to the same cached session keys.
+    assert c2http.session_keys_by_id[b"111110"] is c2http.session_keys_by_metadata[session_a[1]]
+    assert c2http.session_keys_by_id[b"222220"] is c2http.session_keys_by_metadata[session_b[1]]
+
+
+def test_c2http_bad_packet_keeps_confirmed_sessions(bconfig):
+    session_a = _synthetic_session(111110, b"\x01" * 16)
+    session_b = _synthetic_session(222220, b"\x02" * 16)
+    c2http = C2Http(bconfig, rsa_private_key=rsa_private)
+
+    for http in (_checkin_request(c2http, session_a[1]), _checkin_request(c2http, session_b[1])):
+        list(c2http.iter_recover_http(http))
+
+    # A packet encrypted with B's keys but presented under A's Beacon ID must fail authentication.
+    bad_packet = encrypt_packet(
+        CallbackPacket(counter=9, size=4, callback=BeaconCallback.CALLBACK_OUTPUT, data=b"evil").dumps(),
+        session_b[0].aes_key,
+        session_b[0].hmac_key,
+    )
+    bad_request = c2http.transform_submit.transform(
+        ClientC2Data(id=str(session_a[1].bid).encode(), output=bad_packet.dumps()),
+        request=HttpRequest(method=c2http.submit_verb, uri=c2http.submit_uri, headers={}, params={}, body=b""),
+    )
+    with pytest.raises(ValueError, match="Invalid HMAC signature"):
+        list(c2http.iter_recover_http(bad_request))
+
+    # Confirmed session contexts are untouched and later authenticated traffic still decrypts.
+    assert c2http.session_keys_by_id[b"111110"] == session_a[0]
+    assert c2http.session_keys_by_id[b"222220"] == session_b[0]
+    assert list(c2http.iter_recover_http(_callback_request(c2http, session_a, b"after-bad", 5)))[0].data == b"after-bad"
+    assert list(c2http.iter_recover_http(_callback_request(c2http, session_b, b"still-good", 5)))[0].data == b"still-good"
+
+
+def test_c2http_bad_metadata_does_not_pollute_sessions(bconfig):
+    session_a = _synthetic_session(111110, b"\x01" * 16)
+    c2http = C2Http(bconfig, rsa_private_key=rsa_private)
+    list(c2http.iter_recover_http(_checkin_request(c2http, session_a[1])))
+
+    bad_blob = b"\x00" * 128
+    bad_request = c2http.transform_get.transform(
+        ClientC2Data(metadata=bad_blob),
+        request=HttpRequest(method=c2http.get_verb, uri=next(iter(c2http.get_uris)), headers={}, params={}, body=b""),
+    )
+    with pytest.raises(ValueError):
+        list(c2http.iter_recover_http(bad_request))
+
+    assert bad_blob not in c2http.metadata_cache
+    assert c2http.session_keys_by_id == {b"111110": session_a[0]}
+
+
+def test_c2http_explicit_keys_take_precedence(bconfig):
+    session_a = _synthetic_session(111110, b"\x01" * 16)
+    session_b = _synthetic_session(222220, b"\x02" * 16)
+    c2http = C2Http(bconfig, rsa_private_key=rsa_private)
+    for http in (_checkin_request(c2http, session_a[1]), _checkin_request(c2http, session_b[1])):
+        list(c2http.iter_recover_http(http))
+
+    request = _callback_request(c2http, session_b, data=b"explicit", counter=7)
+    # Explicitly supplied keys are used for decryption regardless of session tracking.
+    packet = list(c2http.iter_recover_http(request, keys=session_b[0]))[0]
+    assert packet.data == b"explicit"
+
+    # Wrong explicit keys fail and do not alter the confirmed session tables.
+    with pytest.raises(ValueError, match="Invalid HMAC signature"):
+        list(c2http.iter_recover_http(_callback_request(c2http, session_b, data=b"nope", counter=8), keys=session_a[0]))
+    assert c2http.session_keys_by_id[b"222220"] == session_b[0]
+
+
+def test_c2http_interleaved_task_responses(bconfig):
+    session_a = _synthetic_session(111110, b"\x01" * 16)
+    session_b = _synthetic_session(222220, b"\x02" * 16)
+    c2http = C2Http(bconfig, rsa_private_key=rsa_private)
+
+    request_a = _checkin_request(c2http, session_a[1])
+    request_b = _checkin_request(c2http, session_b[1])
+    list(c2http.iter_recover_http(request_a))
+    list(c2http.iter_recover_http(request_b))
+
+    response_a = _task_response(c2http, session_a[0], b"task-A", request_a)
+    response_b = _task_response(c2http, session_b[0], b"task-B", request_b)
+
+    assert list(c2http.iter_recover_http(response_b))[0].data == b"task-B"
+    assert list(c2http.iter_recover_http(response_a))[0].data == b"task-A"

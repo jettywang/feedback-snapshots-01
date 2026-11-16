@@ -456,10 +456,22 @@ class C2Http:
             steps=bconfig.settings["SETTING_C2_RECOVER"], reverse=True, build="output"
         )
 
-        # Used to map unencrypted metadata to decrypted BeaconMetadata
+        # Used to map unencrypted (RSA encrypted) metadata to decrypted BeaconMetadata
         self.metadata_cache: Dict[bytes, BeaconMetadata] = {}
 
-        # Default decryption keys
+        # Per-session state so a single C2Http can safely process interleaved traffic from
+        # multiple Beacon sessions. The keys are indexed by the decrypted BeaconMetadata (which is
+        # stable across repeated check-ins even though PKCS#1 v1.5 randomizes the encrypted blob)
+        # and by Beacon ID (the ``id`` parameter of a callback request), so each session's
+        # confirmed :class:`BeaconKeys` can be found through either identifier.
+        self.session_keys_by_metadata: Dict[BeaconMetadata, BeaconKeys] = {}
+        self.session_keys_by_id: Dict[bytes, BeaconKeys] = {}
+
+        # Fallback decryption keys, as explicitly provided by the caller (or derived from
+        # ``aes_rand``). When the caller provides no complete keys, the keys derived from the first
+        # valid metadata are adopted here so single-session traffic keeps decrypting. Explicitly
+        # supplied keys are never replaced, and this fallback never overrides a session-specific
+        # entry in ``session_keys_by_id`` / ``session_keys_by_metadata``.
         self.beacon_keys = BeaconKeys(aes_key=self.aes_key, hmac_key=self.hmac_key)
 
     def get_transform_for_http(self, http: Union[HttpRequest, HttpResponse, bytes]) -> HttpDataTransform:
@@ -485,44 +497,111 @@ class C2Http:
             return self.transform_response
         raise ValueError(f"Possible unrelated HTTP Request or Response, cannot find correct transform for {http!r}")
 
+    def _recover_metadata(self, encrypted_metadata: bytes) -> BeaconMetadata:
+        """Return the decrypted :class:`BeaconMetadata` for `encrypted_metadata`.
+
+        Successfully decrypted metadata is cached by its encrypted blob so the same metadata is
+        only RSA decrypted once. A failed decryption is never cached, so bad data cannot replace
+        or pollute a confirmed session.
+        """
+        metadata = self.metadata_cache.get(encrypted_metadata)
+        if metadata is not None:
+            return metadata
+        metadata = decrypt_metadata(encrypted_metadata, self.priv)
+        self.metadata_cache[encrypted_metadata] = metadata
+        return metadata
+
+    def _remember_session_keys(self, metadata: BeaconMetadata, keys: BeaconKeys) -> None:
+        """Bind the confirmed `keys` to the session identified by `metadata`.
+
+        The keys are stored both under the decrypted :class:`BeaconMetadata` and under the Beacon
+        ID so later traffic can be attributed to the correct session through either identifier.
+        """
+        self.session_keys_by_metadata[metadata] = keys
+        self.session_keys_by_id[str(metadata.bid).encode()] = keys
+
+    def _resolve_session_id(self, http: Union[HttpRequest, HttpResponse], c2data: C2Data) -> Optional[bytes]:
+        """Return the Beacon ID identifying the session that produced `http`, if available."""
+        if isinstance(http, HttpRequest):
+            return c2data.id
+        # A response belongs to the request it answers. Prefer the callback ID of a POST request,
+        # otherwise recover the metadata of a GET (check-in) request and use its Beacon ID.
+        if http.request is not None:
+            try:
+                request_c2data = self.get_transform_for_http(http.request).recover(http.request)
+            except ValueError:
+                return None
+            if isinstance(request_c2data, ClientC2Data):
+                if request_c2data.id is not None:
+                    return request_c2data.id
+                if request_c2data.metadata is not None:
+                    metadata = self.metadata_cache.get(request_c2data.metadata)
+                    if metadata is not None:
+                        return str(metadata.bid).encode()
+        return None
+
     def iter_recover_http(
         self, http: Union[bytes, HttpRequest, HttpResponse], keys: Optional[BeaconKeys] = None
     ) -> Iterator[C2Packet]:
         """Yield decrypted :class:`C2Packet` objects from given `http` object.
 
-        You can pass your own set of :class:`BeaconKeys` `keys` to use for decryption instead of the default
-        initialized ones. This can be useful if you are processing multiple Beacon sessions and do some sort of session
-        tracking outside this class.
+        You can pass your own set of :class:`BeaconKeys` `keys` to use for decryption. This is
+        useful for processing multiple Beacon sessions with a single :class:`C2Http` instance:
+        sessions are tracked automatically by their encrypted metadata and Beacon ID, and traffic
+        that cannot be attributed to a known session falls back to `keys` (or the keys given at
+        construction time).
 
         Args:
             http: A :class:`HttpRequest` or :class:`HttpResponse` object, or raw HTTP request or response bytes.
-            keys: Optional :class:`BeaconKeys` to use for decryption instead of current default keys.
+            keys: Optional :class:`BeaconKeys` to use for decryption instead of the default keys.
 
         Yields:
             C2Packet: A :class:`C2Packet` object for each decrypted packet found in the HTTP request or response.
         """
         http = parse_raw_http(http) if isinstance(http, bytes) else http
-        keys = keys or self.beacon_keys
 
         transform = self.get_transform_for_http(http)
         c2data = transform.recover(http)
 
+        # The keys used to decrypt the encrypted output of this HTTP message. Selection follows a
+        # single, consistent rule for both cache hits and first-time decodes:
+        #   1. keys explicitly passed by the caller,
+        #   2. keys of the session identified by the request metadata,
+        #   3. keys of the session identified by the Beacon ID,
+        #   4. the default keys supplied at construction time.
+        decrypt_keys = keys or self.beacon_keys
+
         # decrypt c2data.metadata, if available and we have a private key
         if c2data.metadata and self.priv:
-            metadata = self.metadata_cache.get(c2data.metadata)
-            if metadata is None:
-                metadata = decrypt_metadata(c2data.metadata, self.priv)
-                self.metadata_cache[c2data.metadata] = metadata
-                # if we do not have an AES key or HMAC key yet, we derive it.
+            # This raises on failure before any session state is mutated, so bad metadata can
+            # never replace a confirmed session context.
+            metadata = self._recover_metadata(c2data.metadata)
+            session_keys = self.session_keys_by_metadata.get(metadata)
+            if session_keys is None:
+                # First time we see this (valid) metadata: derive and remember its session keys.
+                session_keys = BeaconKeys.from_beacon_metadata(metadata)
+                self._remember_session_keys(metadata, session_keys)
+                logging.info("Derived AES + HMAC keys from %r", metadata)
+                # If the caller did not provide complete default keys, adopt the derived keys as
+                # the fallback so un-attributable traffic still decrypts (single-session mode).
                 if not all([self.beacon_keys.aes_key, self.beacon_keys.hmac_key]):
-                    aes_key, hmac_key = derive_aes_hmac_keys(metadata.aes_rand)
-                    self.beacon_keys = BeaconKeys(aes_key, hmac_key)
-                    logging.info("Derived AES + HMAC keys from %r", metadata)
+                    self.beacon_keys = session_keys
+            if keys is None:
+                decrypt_keys = session_keys
             yield metadata
 
-        # decrypt c2data.output, if any
+        # Attribute non-metadata traffic to its session through the Beacon ID, so interleaved
+        # sessions never reuse each other's keys.
+        session_id = self._resolve_session_id(http, c2data)
+        if keys is None and session_id is not None:
+            session_keys = self.session_keys_by_id.get(session_id)
+            if session_keys is not None:
+                decrypt_keys = session_keys
+
+        # decrypt c2data.output, if any. A HMAC or AES failure propagates to the caller without
+        # mutating any session state.
         for enc_packet in c2data.iter_encrypted_packets():
-            plaintext = decrypt_packet(enc_packet, verify=self.verify_hmac, **keys._asdict())
+            plaintext = decrypt_packet(enc_packet, verify=self.verify_hmac, **decrypt_keys._asdict())
             if isinstance(c2data, ClientC2Data):
                 yield CallbackPacket(plaintext)
             elif isinstance(c2data, ServerC2Data):
