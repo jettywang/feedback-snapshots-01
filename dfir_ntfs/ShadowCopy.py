@@ -49,6 +49,16 @@ DIFF_AREA_TABLE_ENTRY_UNKNOWN_20 = 0x20 # A regular entry with an unknown flag.
 DIFF_AREA_TABLE_ENTRY_UNKNOWN_40 = 0x40 # A regular entry with an unknown flag.
 DIFF_AREA_TABLE_ENTRY_UNKNOWN_80 = 0x80 # A regular entry with an unknown flag.
 
+# Block sources (the provenance of data returned by this module):
+BLOCK_SOURCE_STORE = 'store' # A data block preserved in the diff area (snapshot content).
+BLOCK_SOURCE_ORIGINAL = 'original' # A data block read from the original volume, the block was tracked in the bitmap (snapshot content).
+BLOCK_SOURCE_ORIGINAL_UNTRACKED = 'original_untracked' # A data block read from the original volume, the block was not tracked in the bitmap (not snapshot content, a read policy artifact).
+BLOCK_SOURCE_ORIGINAL_UNCHECKED = 'original_unchecked' # A data block read from the original volume, the tracking state is unknown because the bitmap data is missing or truncated (not reliable as snapshot content).
+BLOCK_SOURCE_NULL_FILL = 'null_fill' # Null bytes synthesized by this parser (not snapshot content, a read policy artifact).
+
+# Block sources that represent actual snapshot content (other sources describe read policy artifacts or placeholders):
+BLOCK_SOURCES_WITH_CONTENT = frozenset([ BLOCK_SOURCE_STORE, BLOCK_SOURCE_ORIGINAL ])
+
 ShadowCopyInformation = namedtuple('ShadowCopyInformation', [ 'stack_position', 'timestamp', 'store_guid', 'volume_size' ])
 LocationDescriptionItems = namedtuple('LocationDescriptionItems', [ 'volume_offset', 'store_offset', 'size' ])
 OnDiskTableEntry = namedtuple('OnDiskTableEntry', [ 'original_volume_offset', 'data_block_offset_in_store', 'data_block_volume_offset', 'flags', 'allocation_bitmap' ])
@@ -971,9 +981,25 @@ class ShadowParser(object):
 		else:
 			return False
 
-	def translate_exact_offset(self, offset, ignore_overlay_entries = False, do_forward_lookup = False):
-		"""Translate a given aligned volume offset of a data block to a list of offsets describing the same data block in a shadow copy, this list is then returned.
+	def bitmap_bit_is_known(self, offset):
+		"""Check if the bitmap bit for a given offset is backed by actual bitmap data (in the current bitmap and, when present, in the previous one).
+		When this returns False, the bit is unknown (the bitmap is missing or truncated) and any bitmap-based decision for this offset silently uses a default (unset) value.
+		"""
+
+		byte_pos = (offset // 0x4000) // 8
+
+		if byte_pos >= len(self.current_bitmap):
+			return False
+
+		if self.current_previous_bitmap is not None and len(self.current_previous_bitmap) > 0 and byte_pos >= len(self.current_previous_bitmap):
+			return False
+
+		return True
+
+	def _translate_exact_offset(self, offset, ignore_overlay_entries = False, do_forward_lookup = False):
+		"""Translate a given aligned volume offset of a data block to a list of (source, offset) tuples describing the same data block in a shadow copy, this list is then returned.
 		The list is empty if a given volume offset is not found. Each offset in the list points to a 512-byte block. The offset can be None for a 512-byte block filled with null bytes.
+		The source is one of the BLOCK_SOURCE_* constants, it describes the provenance of a 512-byte block.
 		If the 'ignore_overlay_entries' argument is True, ignore data from overlays (used internally when switching to the next store from the current one).
 		If the 'do_forward_lookup' argument is True, do the forward lookup (used internally).
 		"""
@@ -981,21 +1007,26 @@ class ShadowParser(object):
 		def lookup_in_next_store(offset, do_forward_lookup):
 			if self.current_next_parser is None:
 				if not self.check_bitmap(offset): # Return the original offsets of data blocks.
+					if self.bitmap_bit_is_known(offset):
+						block_source = BLOCK_SOURCE_ORIGINAL
+					else: # The bitmap data is missing (or truncated), the tracking state of this block is unknown.
+						block_source = BLOCK_SOURCE_ORIGINAL_UNCHECKED
+
 					offsets = []
 
 					for i in range(0, 32):
-						offsets.append(offset + i * 512)
+						offsets.append((block_source, offset + i * 512))
 				elif self.return_null_blocks and not do_forward_lookup: # Return the dummy offsets.
-					offsets = [ None ] * 32
+					offsets = [ (BLOCK_SOURCE_NULL_FILL, None) ] * 32
 				else: # Return the original offsets of data blocks.
 					offsets = []
 
 					for i in range(0, 32):
-						offsets.append(offset + i * 512)
+						offsets.append((BLOCK_SOURCE_ORIGINAL_UNTRACKED, offset + i * 512))
 
 				return offsets
 
-			return self.current_next_parser.translate_exact_offset(offset, True, do_forward_lookup)
+			return self.current_next_parser._translate_exact_offset(offset, True, do_forward_lookup)
 
 		def can_switch_to_next_store(offset):
 			next_parser = self.current_next_parser
@@ -1078,20 +1109,25 @@ class ShadowParser(object):
 							if switch_mode == 1: # Use offsets from the next store.
 								new_offsets = lookup_in_next_store(offset, False)
 							elif not bitmap_check_result: # Use the original offsets.
+								if self.bitmap_bit_is_known(offset):
+									block_source = BLOCK_SOURCE_ORIGINAL
+								else: # The bitmap data is missing (or truncated), the tracking state of this block is unknown.
+									block_source = BLOCK_SOURCE_ORIGINAL_UNCHECKED
+
 								for i in range(0, 32):
-									new_offsets.append(offset + i * 512)
+									new_offsets.append((block_source, offset + i * 512))
 							else:
 								if self.return_null_blocks: # Use the dummy offsets.
-									new_offsets = [ None ] * 32
+									new_offsets = [ (BLOCK_SOURCE_NULL_FILL, None) ] * 32
 								else: # Use the original offsets.
 									for i in range(0, 32):
-										new_offsets.append(offset + i * 512)
+										new_offsets.append((BLOCK_SOURCE_ORIGINAL_UNTRACKED, offset + i * 512))
 
 						cumulative_allocation_bitmap |= table_entry.allocation_bitmap # Extend the cumulative allocation bitmap.
 
 						for i in range(0, 32):
 							if (table_entry.allocation_bitmap >> i) & 1 > 0: # Overwrite an existing (used) 512-byte block.
-								new_offsets[i] = new_offset + i * 512
+								new_offsets[i] = (BLOCK_SOURCE_STORE, new_offset + i * 512)
 
 					continue
 
@@ -1100,11 +1136,11 @@ class ShadowParser(object):
 
 					if len(new_offsets) == 0: # Use the entire block.
 						for i in range(0, 32):
-							new_offsets.append(new_offset + i * 512)
+							new_offsets.append((BLOCK_SOURCE_STORE, new_offset + i * 512))
 					else: # Account for previously seen partially used data blocks (overlays).
 						for i in range(0, 32):
 							if (cumulative_allocation_bitmap >> i) & 1 == 0: # Overwrite an unused block.
-								new_offsets[i] = new_offset + i * 512
+								new_offsets[i] = (BLOCK_SOURCE_STORE, new_offset + i * 512)
 
 		if forwarder_entry_found and not regular_entry_found:
 			if overlay_entry_found and not ignore_overlay_entries: # Offsets from the forward lookup should be used partially.
@@ -1117,16 +1153,32 @@ class ShadowParser(object):
 
 		if (not regular_entry_found) and (not do_forward_lookup) and offset in self.current_possible_null_targets and \
 		 switch_mode == 0 and self.return_null_blocks: # This is a null target of a forwarder block.
-			return [ None ] * 32
+			return [ (BLOCK_SOURCE_NULL_FILL, None) ] * 32
 
 		if (not forwarder_entry_found) and (not regular_entry_found) and (not overlay_entry_found) and \
 		 bitmap_check_result and switch_mode == 0 and self.return_null_blocks: # This is an unused block.
-			return [ None ] * 32
+			return [ (BLOCK_SOURCE_NULL_FILL, None) ] * 32
 
 		if len(new_offsets) == 0: # Switch to the next store (or to the original volume).
 			return lookup_in_next_store(offset, False)
 
 		return new_offsets
+
+	def translate_exact_offset(self, offset, ignore_overlay_entries = False, do_forward_lookup = False):
+		"""Translate a given aligned volume offset of a data block to a list of offsets describing the same data block in a shadow copy, this list is then returned.
+		The list is empty if a given volume offset is not found. Each offset in the list points to a 512-byte block. The offset can be None for a 512-byte block filled with null bytes.
+		If the 'ignore_overlay_entries' argument is True, ignore data from overlays (used internally when switching to the next store from the current one).
+		If the 'do_forward_lookup' argument is True, do the forward lookup (used internally).
+		"""
+
+		return [ block_offset for (block_source, block_offset) in self._translate_exact_offset(offset, ignore_overlay_entries, do_forward_lookup) ]
+
+	def classify_exact_offset(self, offset):
+		"""Classify each 512-byte block of a data block at a given aligned volume offset according to its provenance, return a list of 32 items (BLOCK_SOURCE_* constants).
+		The list is empty if a given volume offset is not found. Sources in BLOCK_SOURCES_WITH_CONTENT describe actual snapshot content, other sources describe read policy artifacts (or placeholders).
+		"""
+
+		return [ block_source for (block_source, block_offset) in self._translate_exact_offset(offset) ]
 
 	def read_at_exact_offset(self, offset, debug_fill = False):
 		"""Read a block at a given aligned volume offset.
@@ -1559,9 +1611,10 @@ class ShadowParserTwoVolumes(ShadowParser):
 
 		return items
 
-	def translate_exact_offset(self, offset, ignore_overlay_entries = False, do_forward_lookup = False):
-		"""Translate a given aligned volume offset of a data block to a list of (use_storage_volume, offset) tuples describing the same data block in a shadow copy, this list is then returned.
+	def _translate_exact_offset(self, offset, ignore_overlay_entries = False, do_forward_lookup = False):
+		"""Translate a given aligned volume offset of a data block to a list of (source, use_storage_volume, offset) tuples describing the same data block in a shadow copy, this list is then returned.
 		The list is empty if a given volume offset is not found. Each offset in the list points to a 512-byte block. The offset can be None for a 512-byte block filled with null bytes.
+		The source is one of the BLOCK_SOURCE_* constants, it describes the provenance of a 512-byte block.
 		If the 'use_storage_volume' item is True, read data from a storage volume (instead of the original one).
 		If the 'ignore_overlay_entries' argument is True, ignore data from overlays (used internally when switching to the next store from the current one).
 		If the 'do_forward_lookup' argument is True, do the forward lookup (used internally).
@@ -1570,21 +1623,26 @@ class ShadowParserTwoVolumes(ShadowParser):
 		def lookup_in_next_store(offset, do_forward_lookup):
 			if self.current_next_parser is None:
 				if not self.check_bitmap(offset): # Return the original offsets of data blocks.
+					if self.bitmap_bit_is_known(offset):
+						block_source = BLOCK_SOURCE_ORIGINAL
+					else: # The bitmap data is missing (or truncated), the tracking state of this block is unknown.
+						block_source = BLOCK_SOURCE_ORIGINAL_UNCHECKED
+
 					offsets = []
 
 					for i in range(0, 32):
-						offsets.append((False, offset + i * 512))
+						offsets.append((block_source, False, offset + i * 512))
 				elif self.return_null_blocks and not do_forward_lookup: # Return the dummy offsets.
-					offsets = [ (None, None) ] * 32
+					offsets = [ (BLOCK_SOURCE_NULL_FILL, None, None) ] * 32
 				else: # Return the original offsets of data blocks.
 					offsets = []
 
 					for i in range(0, 32):
-						offsets.append((False, offset + i * 512))
+						offsets.append((BLOCK_SOURCE_ORIGINAL_UNTRACKED, False, offset + i * 512))
 
 				return offsets
 
-			return self.current_next_parser.translate_exact_offset(offset, True, do_forward_lookup)
+			return self.current_next_parser._translate_exact_offset(offset, True, do_forward_lookup)
 
 		def can_switch_to_next_store(offset):
 			next_parser = self.current_next_parser
@@ -1667,20 +1725,25 @@ class ShadowParserTwoVolumes(ShadowParser):
 							if switch_mode == 1: # Use offsets from the next store.
 								new_offsets = lookup_in_next_store(offset, False)
 							elif not bitmap_check_result: # Use the original offsets.
+								if self.bitmap_bit_is_known(offset):
+									block_source = BLOCK_SOURCE_ORIGINAL
+								else: # The bitmap data is missing (or truncated), the tracking state of this block is unknown.
+									block_source = BLOCK_SOURCE_ORIGINAL_UNCHECKED
+
 								for i in range(0, 32):
-									new_offsets.append((False, offset + i * 512))
+									new_offsets.append((block_source, False, offset + i * 512))
 							else:
 								if self.return_null_blocks: # Use the dummy offsets.
-									new_offsets = [ (None, None) ] * 32
+									new_offsets = [ (BLOCK_SOURCE_NULL_FILL, None, None) ] * 32
 								else: # Use the original offsets.
 									for i in range(0, 32):
-										new_offsets.append((False, offset + i * 512))
+										new_offsets.append((BLOCK_SOURCE_ORIGINAL_UNTRACKED, False, offset + i * 512))
 
 						cumulative_allocation_bitmap |= table_entry.allocation_bitmap # Extend the cumulative allocation bitmap.
 
 						for i in range(0, 32):
 							if (table_entry.allocation_bitmap >> i) & 1 > 0: # Overwrite an existing (used) 512-byte block.
-								new_offsets[i] = (True, new_offset + i * 512)
+								new_offsets[i] = (BLOCK_SOURCE_STORE, True, new_offset + i * 512)
 
 					continue
 
@@ -1689,11 +1752,11 @@ class ShadowParserTwoVolumes(ShadowParser):
 
 					if len(new_offsets) == 0: # Use the entire block.
 						for i in range(0, 32):
-							new_offsets.append((True, new_offset + i * 512))
+							new_offsets.append((BLOCK_SOURCE_STORE, True, new_offset + i * 512))
 					else: # Account for previously seen partially used data blocks (overlays).
 						for i in range(0, 32):
 							if (cumulative_allocation_bitmap >> i) & 1 == 0: # Overwrite an unused block.
-								new_offsets[i] = (True, new_offset + i * 512)
+								new_offsets[i] = (BLOCK_SOURCE_STORE, True, new_offset + i * 512)
 
 		if forwarder_entry_found and not regular_entry_found:
 			if overlay_entry_found and not ignore_overlay_entries: # Offsets from the forward lookup should be used partially.
@@ -1706,16 +1769,33 @@ class ShadowParserTwoVolumes(ShadowParser):
 
 		if (not regular_entry_found) and (not do_forward_lookup) and offset in self.current_possible_null_targets and \
 		 switch_mode == 0 and self.return_null_blocks: # This is a null target of a forwarder block.
-			return [ (None, None) ] * 32
+			return [ (BLOCK_SOURCE_NULL_FILL, None, None) ] * 32
 
 		if (not forwarder_entry_found) and (not regular_entry_found) and (not overlay_entry_found) and \
 		 bitmap_check_result and switch_mode == 0 and self.return_null_blocks: # This is an unused block.
-			return [ (None, None) ] * 32
+			return [ (BLOCK_SOURCE_NULL_FILL, None, None) ] * 32
 
 		if len(new_offsets) == 0: # Switch to the next store (or to the original volume).
 			return lookup_in_next_store(offset, False)
 
 		return new_offsets
+
+	def translate_exact_offset(self, offset, ignore_overlay_entries = False, do_forward_lookup = False):
+		"""Translate a given aligned volume offset of a data block to a list of (use_storage_volume, offset) tuples describing the same data block in a shadow copy, this list is then returned.
+		The list is empty if a given volume offset is not found. Each offset in the list points to a 512-byte block. The offset can be None for a 512-byte block filled with null bytes.
+		If the 'use_storage_volume' item is True, read data from a storage volume (instead of the original one).
+		If the 'ignore_overlay_entries' argument is True, ignore data from overlays (used internally when switching to the next store from the current one).
+		If the 'do_forward_lookup' argument is True, do the forward lookup (used internally).
+		"""
+
+		return [ (use_storage_volume, block_offset) for (block_source, use_storage_volume, block_offset) in self._translate_exact_offset(offset, ignore_overlay_entries, do_forward_lookup) ]
+
+	def classify_exact_offset(self, offset):
+		"""Classify each 512-byte block of a data block at a given aligned volume offset according to its provenance, return a list of 32 items (BLOCK_SOURCE_* constants).
+		The list is empty if a given volume offset is not found. Sources in BLOCK_SOURCES_WITH_CONTENT describe actual snapshot content, other sources describe read policy artifacts (or placeholders).
+		"""
+
+		return [ block_source for (block_source, use_storage_volume, block_offset) in self._translate_exact_offset(offset) ]
 
 	def read_at_exact_offset(self, offset):
 		"""Read a block at a given aligned volume offset.

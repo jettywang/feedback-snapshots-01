@@ -13,6 +13,7 @@ import io
 import gzip
 import tarfile
 import pickle
+import struct
 from dfir_ntfs import MFT, WSL, USN, Attributes, LogFile, BootSector, ShadowCopy, PartitionTable, MoveTable
 from dfir_ntfs.addons import FAT, exFAT
 
@@ -2996,6 +2997,169 @@ def test_shadow_invalid_offsets():
 	vss = ShadowCopy.ShadowParser(f, 2048 * 512)
 
 	f.close()
+
+def _make_synthetic_vss_image(store_flags = ShadowCopy.STORE_FLAG_UNKNOWN_NAME_400, bitmap_offset = 0x8000, previous_bitmap_offset = 0xA000):
+	"""Build a minimal synthetic image of a volume with one shadow copy (for provenance tests)."""
+
+	VOLUME_SIZE = 0x40000 # Sixteen data blocks of 0x4000 bytes each.
+	STORE_GUID = b'\x11' * 16
+
+	def shadow_block_header(block_type, offset_1, offset_2, offset_3):
+		return ShadowCopy.VSP_DIFF_AREA_FILE_GUID + struct.pack('<LLQQQ', 1, block_type, offset_1, offset_2, offset_3)
+
+	image = bytearray(b'\x00' * 0x38000)
+
+	# A volume start (with a start block).
+	image[3 : 11] = b'NTFS    '
+	image[7680 : 7680 + 48] = shadow_block_header(ShadowCopy.SHADOW_BLOCK_TYPE_UNKNOWN_NAME_1, 7680, 7680, 0)
+	struct.pack_into('<Q', image, 7728, 0x4000) # The first control block.
+	struct.pack_into('<Q', image, 7736, 0) # The maximum diff area size.
+	image[7744 : 7760] = b'\x22' * 16 # The volume GUID.
+	image[7760 : 7776] = b'\x22' * 16 # The storage GUID (the same volume).
+
+	# A control block (with two items).
+	image[0x4000 : 0x4000 + 48] = shadow_block_header(ShadowCopy.SHADOW_BLOCK_TYPE_UNKNOWN_NAME_2, 0, 0x4000, 0)
+
+	cbi2 = bytearray(b'\x00' * 0x80)
+	struct.pack_into('<L', cbi2, 0, 2) # The item type.
+	struct.pack_into('<Q', cbi2, 8, VOLUME_SIZE)
+	cbi2[16 : 32] = STORE_GUID
+	struct.pack_into('<Q', cbi2, 32, 1) # The stack position.
+	struct.pack_into('<Q', cbi2, 40, store_flags)
+	image[0x4080 : 0x4100] = cbi2
+
+	cbi3 = bytearray(b'\x00' * 0x80)
+	struct.pack_into('<L', cbi3, 0, 3) # The item type.
+	struct.pack_into('<Q', cbi3, 8, 0xC000) # The diff area block offset.
+	cbi3[16 : 32] = STORE_GUID
+	struct.pack_into('<Q', cbi3, 48, bitmap_offset)
+	struct.pack_into('<Q', cbi3, 72, previous_bitmap_offset)
+	image[0x4100 : 0x4180] = cbi3
+
+	# A bitmap block (and a previous bitmap block).
+	# Bit 9 (the block at 0x24000) is set in both bitmaps, bit 13 (the block at 0x34000) is set in the current bitmap only.
+	if bitmap_offset != 0:
+		image[bitmap_offset : bitmap_offset + 48] = shadow_block_header(ShadowCopy.SHADOW_BLOCK_TYPE_UNKNOWN_NAME_6, 0, bitmap_offset, 0)
+		image[bitmap_offset + 0x81] = 0x22
+
+	if previous_bitmap_offset != 0:
+		image[previous_bitmap_offset : previous_bitmap_offset + 48] = shadow_block_header(ShadowCopy.SHADOW_BLOCK_TYPE_UNKNOWN_NAME_6, 0, previous_bitmap_offset, 0)
+		image[previous_bitmap_offset + 0x81] = 0x02
+
+	# A diff area table block (with three regular entries).
+	image[0xC000 : 0xC000 + 48] = shadow_block_header(ShadowCopy.SHADOW_BLOCK_TYPE_UNKNOWN_NAME_3, 0, 0xC000, 0)
+
+	diff_entries = [
+		(0x20000, 0x10000), # Preserved data (all null bytes) for the block at 0x20000.
+		(0x2C000, 0x14000), # Preserved data ('D' bytes) for the block at 0x2C000.
+		(0x30000, 0x40000), # Preserved data for the block at 0x30000 (points beyond the end of the image).
+	]
+
+	for i in range(len(diff_entries)):
+		original_volume_offset, data_block_volume_offset = diff_entries[i]
+		struct.pack_into('<QQQLL', image, 0xC080 + i * 32, original_volume_offset, 0, data_block_volume_offset, 0x10, 0)
+
+	# Data blocks in the diff area.
+	image[0x14000 : 0x18000] = b'D' * 0x4000
+
+	# Data blocks on the (current) volume.
+	image[0x24000 : 0x28000] = b'B' * 0x4000 # Not tracked in the bitmap (unused at snapshot time).
+	image[0x34000 : 0x38000] = b'G' * 0x4000 # Tracked in the bitmap (in use at snapshot time).
+
+	return io.BytesIO(image)
+
+def test_shadow_parser_provenance():
+	null_block_md5 = hashlib.md5(b'\x00' * 0x4000).hexdigest()
+
+	# A shadow copy with the "return null blocks" store flag set.
+	f = _make_synthetic_vss_image()
+	vss = ShadowCopy.ShadowParser(f, 0)
+	vss.select_shadow(1)
+
+	assert vss.current_volume_size == 0x40000
+
+	# The bitmap relations for the blocks used below.
+	assert vss.check_bitmap(0x24000) # Set in the current bitmap and in the previous one.
+	assert vss.check_bitmap(0x24000, False) # Set in the current bitmap.
+	assert not vss.check_bitmap(0x34000) # Set in the current bitmap, but not in the previous one.
+	assert vss.check_bitmap(0x34000, False) # Set in the current bitmap.
+	assert not vss.check_bitmap(0x28000) # Not set at all.
+
+	# The block at 0x20000: null bytes preserved in the diff area (actual snapshot content).
+	vss.seek(0x20000)
+	buf_preserved = vss.read(0x4000)
+	assert buf_preserved == b'\x00' * 0x4000
+	assert vss.classify_exact_offset(0x20000) == [ ShadowCopy.BLOCK_SOURCE_STORE ] * 32
+
+	# The block at 0x24000: null bytes synthesized by the parser (a read policy artifact, the block was unused at snapshot time).
+	vss.seek(0x24000)
+	buf_null_fill = vss.read(0x4000)
+	assert buf_null_fill == b'\x00' * 0x4000
+	assert vss.classify_exact_offset(0x24000) == [ ShadowCopy.BLOCK_SOURCE_NULL_FILL ] * 32
+
+	# The block at 0x28000: null bytes read from the original volume (actual snapshot content, the block was tracked and not modified).
+	vss.seek(0x28000)
+	buf_original = vss.read(0x4000)
+	assert buf_original == b'\x00' * 0x4000
+	assert vss.classify_exact_offset(0x28000) == [ ShadowCopy.BLOCK_SOURCE_ORIGINAL ] * 32
+
+	# The same digest, three different sources: a digest alone cannot tell content from a read policy artifact.
+	assert hashlib.md5(buf_preserved).hexdigest() == null_block_md5
+	assert hashlib.md5(buf_null_fill).hexdigest() == null_block_md5
+	assert hashlib.md5(buf_original).hexdigest() == null_block_md5
+
+	# The block at 0x2C000: nonzero data preserved in the diff area.
+	vss.seek(0x2C000)
+	assert vss.read(0x4000) == b'D' * 0x4000
+	assert vss.classify_exact_offset(0x2C000) == [ ShadowCopy.BLOCK_SOURCE_STORE ] * 32
+
+	# The block at 0x30000: preserved data points beyond the end of the image, nothing can be read (and nothing is filled with null bytes).
+	vss.seek(0x30000)
+	assert vss.read(0x4000) == b''
+	assert vss.classify_exact_offset(0x30000) == [ ShadowCopy.BLOCK_SOURCE_STORE ] * 32
+
+	# The block at 0x34000: data from the original volume (tracked in the current bitmap only).
+	vss.seek(0x34000)
+	assert vss.read(0x4000) == b'G' * 0x4000
+	assert vss.classify_exact_offset(0x34000) == [ ShadowCopy.BLOCK_SOURCE_ORIGINAL ] * 32
+
+	# The same image, but the store flag is unset: the block at 0x24000 is now filled with current data from the original volume (a read policy artifact, not snapshot content).
+	f = _make_synthetic_vss_image(store_flags = 0)
+	vss = ShadowCopy.ShadowParser(f, 0)
+	vss.select_shadow(1)
+
+	vss.seek(0x24000)
+	assert vss.read(0x4000) == b'B' * 0x4000
+	assert vss.classify_exact_offset(0x24000) == [ ShadowCopy.BLOCK_SOURCE_ORIGINAL_UNTRACKED ] * 32
+
+	# The same image, but the bitmap is missing: the tracking state cannot be established, the block is still read from the original volume.
+	f = _make_synthetic_vss_image(bitmap_offset = 0, previous_bitmap_offset = 0)
+	vss = ShadowCopy.ShadowParser(f, 0)
+	vss.select_shadow(1)
+
+	assert not vss.check_bitmap(0x24000) # A default (unset) value is silently used.
+	assert not vss.bitmap_bit_is_known(0x24000)
+
+	vss.seek(0x24000)
+	assert vss.read(0x4000) == b'B' * 0x4000
+	assert vss.classify_exact_offset(0x24000) == [ ShadowCopy.BLOCK_SOURCE_ORIGINAL_UNCHECKED ] * 32
+
+	# The same image, but the volume has been shrunk: blocks past the new volume size are invisible (reads look like an end-of-file).
+	f = _make_synthetic_vss_image()
+	vss = ShadowCopy.ShadowParser(f, 0, 0x28000)
+	vss.select_shadow(1)
+
+	assert vss.current_volume_size == 0x40000 # The snapshot covers more data than the shrunk volume exposes.
+
+	vss.seek(0x2C000)
+	assert vss.read(0x4000) == b'' # No data, although the diff area contains a preserved block (see above).
+
+	with pytest.raises(ValueError):
+		vss.classify_exact_offset(0x2C000)
+
+	vss.seek(0x20000)
+	assert vss.read(0x4000) == b'\x00' * 0x4000 # Blocks below the new volume size are still readable.
+	assert vss.classify_exact_offset(0x20000) == [ ShadowCopy.BLOCK_SOURCE_STORE ] * 32
 
 def test_gpt():
 	f = gzip.open(PT_GPT_0_GZ, 'rb')
