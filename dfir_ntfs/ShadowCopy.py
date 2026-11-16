@@ -76,6 +76,17 @@ class ShadowCopyNotFoundException(ShadowCopyException):
 
 	pass
 
+class VolumePairingException(ShadowCopyNotFoundException):
+	"""This exception is raised when an original volume cannot be paired with its storage volume.
+
+	It is raised when the identity chain (original volume -> storage volume -> store) cannot be
+	established: either a start block does not describe the expected role, the storage GUID of an
+	original volume does not match the volume GUID of a storage volume, or a store referenced from
+	one side of the pair is not backed by the matching control block item on the other side.
+	"""
+
+	pass
+
 class ShadowBlockException(ShadowCopyException):
 	"""This exception is raised when a shadow block is invalid."""
 
@@ -1311,6 +1322,8 @@ class ShadowParserTwoVolumes(ShadowParser):
 		if not self.use_second_volume:
 			raise NotImplementedError('Local volume shadow copies are not supported by this parser')
 
+		self._validate_volume_pairing()
+
 		self.control_blocks = []
 		self.control_blocks_storage = []
 
@@ -1339,6 +1352,31 @@ class ShadowParserTwoVolumes(ShadowParser):
 			self.control_blocks_storage.append(control_block)
 
 			curr_offset = control_block.get_next_control_block_volume_offset()
+
+	def _validate_volume_pairing(self):
+		"""Establish the original-volume -> storage-volume identity link from the start blocks.
+
+		The pairing is accepted only when the storage GUID embedded in the original volume start
+		block is identical to the volume GUID of the storage volume start block, and the storage
+		volume describes itself as a local storage area. Volume names, file ordering and coincidental
+		on-disk signatures are never consulted, only the GUID identity chain is.
+		"""
+
+		original_volume_guid = self.start_block.get_volume_guid()
+		expected_storage_guid = self.start_block.get_storage_guid()
+
+		storage_volume_guid = self.start_block_storage.get_volume_guid()
+		storage_self_guid = self.start_block_storage.get_storage_guid()
+
+		if not self.start_block_storage.is_storage_local():
+			raise VolumePairingException(
+				'The storage volume is not a local storage area: its volume GUID {} differs from its storage GUID {}'.format(
+					storage_volume_guid, storage_self_guid))
+
+		if expected_storage_guid != storage_volume_guid:
+			raise VolumePairingException(
+				'Volume pairing rejected: the original volume {} points to storage GUID {}, but the supplied storage volume identifies itself as {}'.format(
+					original_volume_guid, expected_storage_guid, storage_volume_guid))
 
 	def select_shadow(self, store_guid_or_stack_position):
 		"""Select a shadow copy by its store GUID or its stack position."""
@@ -1371,11 +1409,22 @@ class ShadowParserTwoVolumes(ShadowParser):
 					cnt_2 += 1
 
 		if cnt_3 != cnt_2:
-			raise ShadowCopyException('Cannot select a shadow copy (invalid control block items)')
+			raise VolumePairingException(
+				'Volume pairing rejected for store {}: the original volume contributes {} control block item(s) (type 2) but the storage volume contributes {} diff area item(s) (type 3); the store identity chain is incomplete'.format(
+					store_guid, cnt_2, cnt_3))
 
 		cnt = cnt_3
 		if cnt == 0:
-			raise ShadowCopyNotFoundException('Cannot select a shadow copy (not found)')
+			if store_guid is None:
+				missing_side = 'the original volume (no store with this stack position)'
+			elif cnt_2 == 0:
+				missing_side = 'the original volume (no type 2 control block item references this store)'
+			else:
+				missing_side = 'the storage volume (no type 3 diff area item backs this store)'
+
+			raise VolumePairingException(
+				'Cannot select a shadow copy (not found): the store identity {} is missing on {}'.format(
+					store_guid, missing_side))
 		elif cnt > 1:
 			raise ShadowCopyException('Cannot select a shadow copy (more than one found)')
 

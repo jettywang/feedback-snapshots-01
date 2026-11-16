@@ -13,6 +13,8 @@ import io
 import gzip
 import tarfile
 import pickle
+import tempfile
+import shutil
 from dfir_ntfs import MFT, WSL, USN, Attributes, LogFile, BootSector, ShadowCopy, PartitionTable, MoveTable
 from dfir_ntfs.addons import FAT, exFAT
 
@@ -3557,6 +3559,238 @@ def test_movetable_guess_sector_size():
 	m = MoveTable.MoveTableParser(f)
 	assert m.sector_size == 512
 	f.close()
+
+VSS_TWO_VOLUME_OFFSET = 67584 * 512
+VSS_TWO_START_VOLUME_GUID_OFFSET = VSS_TWO_VOLUME_OFFSET + 7744
+VSS_TWO_START_STORAGE_GUID_OFFSET = VSS_TWO_VOLUME_OFFSET + 7760
+
+class _PatchedRawFile(io.RawIOBase):
+	"""A seekable file object overlaying byte patches on top of an on-disk file.
+
+	Only file objects are used here (no block devices are opened). Patches are applied on read,
+	the underlying file is never modified.
+	"""
+
+	def __init__(self, path, patches = None, zero_ranges = None):
+		self._file = open(path, 'rb', buffering = 0)
+		self._patches = dict(patches) if patches else {}
+		self._zero_ranges = list(zero_ranges) if zero_ranges else []
+
+	def readable(self):
+		return True
+
+	def seekable(self):
+		return True
+
+	def seek(self, offset, whence = 0):
+		return self._file.seek(offset, whence)
+
+	def tell(self):
+		return self._file.tell()
+
+	def readinto(self, b):
+		position = self._file.tell()
+		count = self._file.readinto(b)
+		if not count:
+			return 0
+
+		for patch_offset, patch_bytes in self._patches.items():
+			start = max(0, patch_offset - position)
+			end = min(count, patch_offset + len(patch_bytes) - position)
+			if end > start:
+				src_start = max(0, position - patch_offset)
+				b[start : end] = patch_bytes[src_start : src_start + (end - start)]
+
+		for range_start, range_end in self._zero_ranges:
+			start = max(0, range_start - position)
+			end = min(count, range_end - position)
+			if end > start:
+				b[start : end] = b'\x00' * (end - start)
+
+		return count
+
+	def close(self):
+		self._file.close()
+		super(_PatchedRawFile, self).close()
+
+@pytest.fixture(scope = 'module')
+def vss_two_volume_paths():
+	"""Extract the two-volume shadow copy set once and return (original path, storage path)."""
+
+	tmp_dir = tempfile.mkdtemp(prefix = 'dfir_ntfs_vss_')
+	try:
+		with tarfile.open(VOLUME_VSS_TWO_1, 'r') as archive:
+			archive.extract('vss_1_vol.raw', tmp_dir, filter = 'data')
+
+		with tarfile.open(VOLUME_VSS_TWO_2, 'r') as archive:
+			archive.extract('vss_2_stor.raw', tmp_dir, filter = 'data')
+
+		yield (os.path.join(tmp_dir, 'vss_1_vol.raw'), os.path.join(tmp_dir, 'vss_2_stor.raw'))
+	finally:
+		shutil.rmtree(tmp_dir, ignore_errors = True)
+
+def test_shadow_two_volumes_identity_pairing(vss_two_volume_paths):
+	original_path, storage_path = vss_two_volume_paths
+
+	# The identity chain of a correct pair is exposed by the start blocks.
+	parser = ShadowCopy.ShadowParserTwoVolumes(open(original_path, 'rb'), open(storage_path, 'rb'),
+	 VSS_TWO_VOLUME_OFFSET, None, VSS_TWO_VOLUME_OFFSET)
+
+	assert parser.start_block.get_storage_guid() == parser.start_block_storage.get_volume_guid()
+	assert parser.start_block_storage.is_storage_local()
+	assert parser.start_block.get_volume_guid() != parser.start_block_storage.get_volume_guid()
+
+	# Swapping the inputs (the original image in the storage slot) breaks the storage-side role.
+	with pytest.raises(ShadowCopy.VolumePairingException) as exc_info:
+		ShadowCopy.ShadowParserTwoVolumes(open(original_path, 'rb'), open(original_path, 'rb'),
+		 VSS_TWO_VOLUME_OFFSET, None, VSS_TWO_VOLUME_OFFSET)
+
+	assert 'storage volume is not a local storage area' in str(exc_info.value)
+
+	# The storage image in the original slot describes a local (single-volume) store, not a remote one.
+	with pytest.raises(NotImplementedError):
+		ShadowCopy.ShadowParserTwoVolumes(open(storage_path, 'rb'), open(storage_path, 'rb'),
+		 VSS_TWO_VOLUME_OFFSET, None, VSS_TWO_VOLUME_OFFSET)
+
+	# Two same-geometry diff volumes with different GUIDs: the storage volume keeps a valid signature
+	# at every offset, but its identity no longer matches the storage GUID referenced by the original.
+	replacement_guid = uuid.uuid4().bytes_le
+	foreign_storage = io.BufferedReader(_PatchedRawFile(storage_path, patches = {
+		VSS_TWO_START_VOLUME_GUID_OFFSET: replacement_guid,
+		VSS_TWO_START_STORAGE_GUID_OFFSET: replacement_guid, # Still internally consistent (local).
+	}))
+
+	with pytest.raises(ShadowCopy.VolumePairingException) as exc_info:
+		ShadowCopy.ShadowParserTwoVolumes(open(original_path, 'rb'), foreign_storage,
+		 VSS_TWO_VOLUME_OFFSET, None, VSS_TWO_VOLUME_OFFSET)
+
+	message = str(exc_info.value)
+	assert 'Volume pairing rejected' in message
+	assert str(parser.start_block.get_storage_guid()) in message
+	assert str(uuid.UUID(bytes_le = replacement_guid)) in message
+
+def test_shadow_two_volumes_cross_volume_reads(vss_two_volume_paths):
+	original_path, storage_path = vss_two_volume_paths
+
+	parser = ShadowCopy.ShadowParserTwoVolumes(open(original_path, 'rb'), open(storage_path, 'rb'),
+	 VSS_TWO_VOLUME_OFFSET, None, VSS_TWO_VOLUME_OFFSET)
+	parser.select_shadow(1)
+
+	storage_contrib_offset = None
+	original_contrib_offset = None
+
+	block_count = parser.current_volume_size // 0x4000
+	for block in range(block_count):
+		volume_offset = block * 0x4000
+		routing = parser.translate_exact_offset(volume_offset)
+		if not routing:
+			continue
+
+		sources = { use_storage for use_storage, storage_offset in routing }
+		if sources == { True } and storage_contrib_offset is None:
+			storage_contrib_offset = volume_offset
+			storage_routing = routing
+		elif sources == { False } and original_contrib_offset is None:
+			original_contrib_offset = volume_offset
+			original_routing = routing
+
+		if storage_contrib_offset is not None and original_contrib_offset is not None:
+			break
+
+	assert storage_contrib_offset is not None
+	assert original_contrib_offset is not None
+
+	# The storage contribution is bound to the storage address space, not read at the same offset
+	# on the original volume.
+	parser.seek(storage_contrib_offset)
+	storage_view = parser.read(0x4000)
+	real_storage_offset = storage_routing[0][1]
+
+	with open(storage_path, 'rb') as storage_file:
+		storage_file.seek(VSS_TWO_VOLUME_OFFSET + real_storage_offset)
+		storage_bytes = storage_file.read(0x4000)
+
+	with open(original_path, 'rb') as original_file:
+		original_file.seek(VSS_TWO_VOLUME_OFFSET + storage_contrib_offset)
+		same_offset_original_bytes = original_file.read(0x4000)
+		original_file.seek(VSS_TWO_VOLUME_OFFSET + original_contrib_offset)
+		original_bytes = original_file.read(0x4000)
+
+	assert storage_view == storage_bytes
+	assert storage_view != same_offset_original_bytes
+
+	# The untouched contribution keeps being served from the original volume address space.
+	parser.seek(original_contrib_offset)
+	original_view = parser.read(0x4000)
+
+	assert original_routing[0][0] is False
+	assert original_view == original_bytes
+
+	# A single read spanning both kinds of blocks combines bytes from each address space.
+	span_start = min(storage_contrib_offset, original_contrib_offset)
+	span_end = max(storage_contrib_offset, original_contrib_offset) + 0x4000
+
+	parser.seek(span_start)
+	span = parser.read(span_end - span_start)
+
+	with open(original_path, 'rb') as original_file, open(storage_path, 'rb') as storage_file:
+		cursor = span_start
+		while cursor < span_end:
+			for use_storage, storage_offset in parser.translate_exact_offset(cursor):
+				file_object = storage_file if use_storage else original_file
+				file_offset = VSS_TWO_VOLUME_OFFSET + storage_offset
+				file_object.seek(file_offset)
+				expected = file_object.read(512)
+
+				index = cursor - span_start
+				assert span[index : index + 512] == expected
+				cursor += 512
+
+def test_shadow_two_volumes_incomplete_identity_chain(vss_two_volume_paths):
+	original_path, storage_path = vss_two_volume_paths
+
+	# Discover the on-disk control block offsets of each side.
+	reference = ShadowCopy.ShadowParserTwoVolumes(open(original_path, 'rb'), open(storage_path, 'rb'),
+	 VSS_TWO_VOLUME_OFFSET, None, VSS_TWO_VOLUME_OFFSET)
+
+	storage_control_block_offsets = [ block.get_volume_offset() for block in reference.control_blocks_storage ]
+	original_control_block_offsets = [ block.get_volume_offset() for block in reference.control_blocks ]
+
+	# Partial material #1: the storage volume lost its type 3 (diff area) control block items.
+	storage_zero_ranges = [
+		(VSS_TWO_VOLUME_OFFSET + offset + 0x80, VSS_TWO_VOLUME_OFFSET + offset + 0x4000)
+		for offset in storage_control_block_offsets
+	]
+	storage_without_stores = io.BufferedReader(_PatchedRawFile(storage_path, zero_ranges = storage_zero_ranges))
+
+	parser = ShadowCopy.ShadowParserTwoVolumes(open(original_path, 'rb'), storage_without_stores,
+	 VSS_TWO_VOLUME_OFFSET, None, VSS_TWO_VOLUME_OFFSET)
+
+	with pytest.raises(ShadowCopy.VolumePairingException) as exc_info:
+		parser.select_shadow(1)
+
+	message = str(exc_info.value)
+	assert 'store identity chain is incomplete' in message
+	assert 'storage volume contributes 0' in message
+	assert 'original volume contributes 1' in message
+
+	# Partial material #2: the original volume lost its type 2 (store) control block items, so the
+	# store referenced from the storage side has no counterpart on the original volume.
+	original_zero_ranges = [
+		(VSS_TWO_VOLUME_OFFSET + offset + 0x80, VSS_TWO_VOLUME_OFFSET + offset + 0x4000)
+		for offset in original_control_block_offsets
+	]
+	original_without_stores = io.BufferedReader(_PatchedRawFile(original_path, zero_ranges = original_zero_ranges))
+
+	parser = ShadowCopy.ShadowParserTwoVolumes(original_without_stores, open(storage_path, 'rb'),
+	 VSS_TWO_VOLUME_OFFSET, None, VSS_TWO_VOLUME_OFFSET)
+
+	with pytest.raises(ShadowCopy.VolumePairingException) as exc_info:
+		parser.select_shadow(1)
+
+	message = str(exc_info.value)
+	assert 'not found' in message
+	assert 'original volume' in message
 
 def test_shadow_two_volumes_1():
 	f1 = tarfile.open(VOLUME_VSS_TWO_1, 'r').extractfile('vss_1_vol.raw')
