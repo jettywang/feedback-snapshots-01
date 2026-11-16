@@ -171,14 +171,21 @@ class Intel(linear.LinearlyMappedLayer):
                 f"Page Fault at entry {hex(entry)} in page entry",
             )
 
-        pfn = self._pte_pfn(entry)
+        large_page = (1 << (position + 1)) > self.page_size
+        pfn = self._pte_pfn(entry, large_page)
         page_offset = self._mask(offset, position, 0)
         page = pfn << self.page_shift | page_offset
 
         return page, 1 << (position + 1), self._base_layer
 
-    def _pte_pfn(self, entry: int) -> int:
-        """Extracts the page frame number (PFN) from the page table entry (PTE) entry"""
+    def _pte_pfn(self, entry: int, large_page: bool = False) -> int:
+        """Extracts the page frame number (PFN) from the page table entry (PTE) entry.
+
+        For large pages bit 12 is the PAT flag rather than part of the PFN, so
+        it must be removed before shifting.
+        """
+        if large_page:
+            entry &= ~self._PAGE_PAT_LARGE
         return self._mask(entry, self._maxphyaddr - 1, 0) >> self.page_shift
 
     @functools.lru_cache(maxsize=1024)
@@ -257,10 +264,11 @@ class Intel(linear.LinearlyMappedLayer):
 
             # Check if we're a large page
             if large_page and (entry & self._PAGE_PSE):
-                # Mask off the PAT bit
-                if entry & self._PAGE_PAT_LARGE:
-                    entry -= self._PAGE_PAT_LARGE
                 # We're a large page, the rest is finished below
+                # The PAT bit overlaps the PFN field for large pages, so it is
+                # removed when the PFN is extracted rather than here.  This is
+                # important for Linux PROT_NONE entries, whose PFN is inverted:
+                # clearing the PAT bit before un-inverting corrupts the address.
                 # If we want to implement PSE-36, it would need to be done here
                 break
 
@@ -569,6 +577,13 @@ class LinuxMixin(Intel):
         return (1 << self._bits_per_register) - 1
 
     @functools.cached_property
+    def _entry_mask(self) -> int:
+        # Page-table entries can be wider than a virtual address register (for
+        # example PAE has 64-bit entries with 32-bit virtual addresses), so the
+        # PFN and flag masks are based on the entry width, not the register.
+        return (1 << (8 * struct.calcsize(self._entry_format))) - 1
+
+    @functools.cached_property
     def _physical_mask(self) -> int:
         # From kernels 4.18 the physical mask is dynamic: See AMD SME, Intel Multi-Key Total
         # Memory Encryption and CONFIG_DYNAMIC_PHYSICAL_MASK: 94d49eb30e854c84d1319095b5dd0405a7da9362
@@ -585,7 +600,7 @@ class LinuxMixin(Intel):
 
     @functools.cached_property
     def _physical_page_mask(self) -> int:
-        return self.page_mask & self._physical_mask
+        return ~(self.page_size - 1) & self._physical_mask
 
     @functools.cached_property
     def _pte_pfn_mask(self) -> int:
@@ -593,7 +608,7 @@ class LinuxMixin(Intel):
 
     @functools.cached_property
     def _pte_flags_mask(self) -> int:
-        return ~self._pte_pfn_mask & self._register_mask
+        return ~self._pte_pfn_mask & self._entry_mask
 
     def _pte_flags(self, pte) -> int:
         return pte & self._pte_flags_mask
@@ -614,11 +629,20 @@ class LinuxMixin(Intel):
 
     def _protnone_mask(self, entry: int) -> int:
         """Gets a mask to XOR with the page table entry to get the correct PFN"""
-        return self._register_mask if self._pte_needs_invert(entry) else 0
+        # Only the PFN field is inverted; flags such as NX or PAT must not be
+        # folded into the physical page number.
+        return self._pte_pfn_mask if self._pte_needs_invert(entry) else 0
 
-    def _pte_pfn(self, entry: int) -> int:
-        """Extracts the page frame number from the page table entry"""
+    def _pte_pfn(self, entry: int, large_page: bool = False) -> int:
+        """Extracts the page frame number from the page table entry.
+
+        PROT_NONE entries store an inverted PFN, so the entry is inverted
+        before the PFN field is masked out.  The large-page PAT bit overlaps
+        the PFN field, so it is also removed from the inverted entry.
+        """
         pfn = entry ^ self._protnone_mask(entry)
+        if large_page:
+            pfn &= ~self._PAGE_PAT_LARGE
         return (pfn & self._pte_pfn_mask) >> self.page_shift
 
 
