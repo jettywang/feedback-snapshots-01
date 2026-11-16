@@ -140,6 +140,103 @@ typedef struct xfs_sb {
 #define XFS_SB_FEAT_INCOMPAT_NEEDSREPAIR    (1 << 4)    /* needs xfs_repair */
 #define XFS_SB_FEAT_INCOMPAT_NREXT64        (1 << 5)    /* large extent counters */
 
+/* Quota bigtime timestamps, stored in the read-only compatible feature mask */
+#define XFS_SB_FEAT_RO_COMPAT_QUOTABIGTIME  (1 << 3)
+
+/*
+ * Quota flags (sb_qflags).
+ *
+ * The high nibble of sb_qflags carries the flag layout version (0 for the
+ * v1 layout, XFS_QF_VERSION for the v2 layout). Only the lower bits below are
+ * persisted quota state. On the v1 layout group and project quota share the
+ * OQUOTA enforcement/checked bits, so project quota cannot be distinguished.
+ */
+#define XFS_QF_VERSION                      (1 << 15)
+
+#define XFS_UQUOTA_ACCT                     (1 << 0)
+#define XFS_UQUOTA_ENFD                     (1 << 1)
+#define XFS_UQUOTA_CHKD                     (1 << 2)
+
+#define XFS_GQUOTA_ACCT                     (1 << 3)
+#define XFS_OQUOTA_ENFD                     (1 << 4)    /* v1: group, v2: project */
+#define XFS_OQUOTA_CHKD                     (1 << 5)    /* v1: group, v2: project */
+
+#define XFS_PQUOTA_ACCT                     (1 << 6)
+#define XFS_GQUOTA_ENFD                     (1 << 7)
+#define XFS_GQUOTA_CHKD                     (1 << 8)
+
+#define XFS_PQUOTA_ENFD                     XFS_OQUOTA_ENFD
+#define XFS_PQUOTA_CHKD                     XFS_OQUOTA_CHKD
+
+/* Persisted in the quota file header; marks quota blocks as CRC protected */
+#define XFS_QF_QUOTA_CRC                    (1 << 0)
+
+#define XFS_UQUOTA_ACTIVE                   (1 << 12)
+#define XFS_GQUOTA_ACTIVE                   (1 << 13)
+#define XFS_PQUOTA_ACTIVE                   (1 << 14)
+
+
+/*
+ * On-disk disk quota block ("dquot") format.
+ *
+ * Quota data lives in regular files referenced by the sb_uquotino, sb_gquotino
+ * and sb_pquotino inodes. The first block of each file is an xfs_dqblk_hdr,
+ * every subsequent block packs XFS_DQUOTS_PER_BLOCK quota records. Block, soft
+ * and hard limit counters are expressed in 512 byte basic blocks, never in the
+ * filesystem's logical block size.
+ */
+#define XFS_DQUOT_MAGIC                     0x4451      /* 'DQ' */
+#define XFS_DQUOT_VERSION                   1
+#define XFS_QF_MAGIC                        0x58514649  /* 'XQFI' */
+
+/* Basic block size used for all quota block counters, independent of sb_blocksize */
+#define XFS_DQUOT_BLOCK_SIZE                512
+
+/* d_flags identity of an on-disk dquot record */
+#define XFS_DQTYPE_USER                     0x01
+#define XFS_DQTYPE_GROUP                    0x02
+#define XFS_DQTYPE_PROJ                     0x04
+
+struct xfs_disk_dquot {
+    uint16_t        d_magic;                            /* dquot magic == XFS_DQUOT_MAGIC */
+    uint8_t         d_version;                          /* dquot version == XFS_DQUOT_VERSION */
+    uint8_t         d_flags;                            /* XFS_DQTYPE_* identity of this record */
+    uint32_t        d_id;                               /* user, group or project id */
+    uint64_t        d_blk_hardlimit;                    /* absolute limit on disk blocks */
+    uint64_t        d_blk_softlimit;                    /* preferred limit on disk blocks */
+    uint64_t        d_ino_hardlimit;                    /* maximum # allocated inodes */
+    uint64_t        d_ino_softlimit;                    /* preferred inode limit */
+    uint64_t        d_bcount;                           /* # disk blocks owned by the user */
+    uint64_t        d_icount;                           /* # inodes owned by the user */
+    int32_t         d_btimer;                           /* relative/absolute block grace deadline */
+    int32_t         d_itimer;                           /* relative/absolute inode grace deadline */
+    uint16_t        d_btime_hi;                         /* bigtime: high bits of block timer */
+    uint16_t        d_itime_hi;                         /* bigtime: high bits of inode timer */
+    uint16_t        d_iwarns;                           /* warnings issued on inode limit */
+    uint16_t        d_bwarns;                           /* warnings issued on block limit */
+    int32_t         d_pad2[4];                          /* padding for future expansion */
+    uint64_t        d_btimer_bigtime;                   /* bigtime block grace deadline */
+    uint64_t        d_itimer_bigtime;                   /* bigtime inode grace deadline */
+};
+
+struct xfs_dqblk {
+    xfs_disk_dquot  dd_diskdq;
+    uint32_t        d_crc;                              /* CRC32C of the full quota block, stored little endian */
+    uint32_t        d_pad3;                             /* padding to 64 bit alignment */
+    int64_t         d_lsn;                              /* log sequence number of last write */
+    uint64_t        d_blkno;                            /* filesystem block number of this block */
+};
+
+/* First block of every quota file */
+struct xfs_dqblk_hdr {
+    uint32_t        d_magic;                            /* XFS_QF_MAGIC */
+    uint32_t        d_crc;                              /* CRC32C of the header block, stored little endian */
+    uint32_t        d_version;                          /* header version == 1 */
+    uint32_t        d_flags;                            /* XFS_QF_QUOTA_CRC and friends */
+    uint32_t        d_pad[10];                          /* zero filled */
+    uint64_t        d_lsn;                              /* log sequence number of last write */
+};
+
 
 #define XFS_AGF_MAGIC                       0x58414746  /* 'XAGF' */
 #define XFS_AGI_MAGIC                       0x58414749  /* 'XAGI' */

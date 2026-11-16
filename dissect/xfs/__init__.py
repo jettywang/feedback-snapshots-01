@@ -8,6 +8,15 @@ from dissect.xfs.exceptions import (
     SymlinkUnavailableException,
     UnsupportedDataforkException,
 )
+from dissect.xfs.quota import (
+    QuotaEvidence,
+    QuotaHeader,
+    QuotaManager,
+    QuotaPolicy,
+    QuotaPolicyFlag,
+    QuotaType,
+    diff_dquots,
+)
 from dissect.xfs.xfs import XFS
 
 __all__ = [
@@ -16,6 +25,13 @@ __all__ = [
     "FileNotFoundError",
     "NotADirectoryError",
     "NotASymlinkError",
+    "QuotaEvidence",
+    "QuotaHeader",
+    "QuotaManager",
+    "QuotaPolicy",
+    "QuotaPolicyFlag",
+    "QuotaType",
     "SymlinkUnavailableException",
     "UnsupportedDataforkException",
+    "diff_dquots",
 ]
