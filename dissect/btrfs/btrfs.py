@@ -22,6 +22,7 @@ from dissect.btrfs.exceptions import (
     NotADirectoryError,
     NotASymlinkError,
 )
+from dissect.btrfs.freespace import FreeSpaceAudit, audit_free_space
 from dissect.btrfs.stream import ChunkStream, Extent, ExtentStream, decode_extent
 from dissect.btrfs.tree import BTree
 
@@ -82,6 +83,14 @@ class Btrfs:
 
         self.default_subvolume = self._open_default_subvolume()
         self.root = self.default_subvolume.root
+
+    def audit_free_space(self) -> FreeSpaceAudit:
+        """Audit the free-space tree against the block groups and allocation records in the extent tree.
+
+        The audit is read-only: it classifies every region of every block group as free, used,
+        conflicting or unknown, but never writes to the filesystem.
+        """
+        return audit_free_space(self)
 
     def get(self, path: str | int, node: INode | None = None) -> INode:
         """Retrieve a Btrfs inode by path or inode number.

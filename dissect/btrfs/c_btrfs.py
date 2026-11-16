@@ -329,6 +329,11 @@ btrfs_def = """
  */
 #define BTRFS_STRING_ITEM_KEY           253
 
+/*
+ * flags for btrfs_free_space_info.flags
+ */
+#define BTRFS_FREE_SPACE_USING_BITMAPS  1
+
 /* Maximum metadata block size (nodesize) */
 #define BTRFS_MAX_METADATA_BLOCKSIZE    65536
 
@@ -519,6 +524,21 @@ struct btrfs_key_ptr {
 struct btrfs_node {
     struct btrfs_header     header;
     struct btrfs_key_ptr    ptrs[];
+};
+
+struct btrfs_block_group_item {
+    uint64      used;
+    uint64      chunk_objectid;
+    BTRFS_BLOCK_GROUP   flags;
+};
+
+/*
+ * stores accounting information for the free space of one block group,
+ * keyed on (block_group_start, BTRFS_FREE_SPACE_INFO_KEY, block_group_length)
+ */
+struct btrfs_free_space_info {
+    uint32      extent_count;
+    uint32      flags;
 };
 
 struct btrfs_dev_item {
