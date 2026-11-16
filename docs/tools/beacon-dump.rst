@@ -32,6 +32,37 @@ The output format can be specified using the ``-f`` or ``--format`` option. The 
    - ``c2profile``: output the beacon configuration as a malleable C2 profile
    - ``raw``: output the raw beacon configuration
 
+Configuration normalization
+----------------------------
+
+Some beacons are built with a modified ``SettingsType`` enum so that the type numbers stored in the
+configuration no longer match the stock values (``TYPE_SHORT=1``, ``TYPE_INT=2``, ``TYPE_PTR=3``).
+``beacon-dump`` normalizes these blocks before parsing. Normalization never mutates the observed input;
+use ``--normalize-report`` to print an auditable, reproducible account of every decision:
+
+.. code-block:: bash
+
+   $ beacon-dump --normalize-report <beacon-file>
+
+Each reported line identifies the setting header offset, the type number the sample *actually declared*,
+the normalized type number (never presented as the originally declared number), the evidence class and the
+normalizer that made the decision. Three evidence classes are used:
+
+   - ``stock``: a known beacon setting and its stock setting type support the mapping,
+   - ``length``: only the value-length heuristic (2, 4 or more than 4 bytes) supports the mapping,
+   - ``unknown``: the observed type number cannot be confirmed. Its original bytes are retained and the
+     field is listed under unconfirmed types instead of being guessed.
+
+When more than one normalizer proposes a different type for the same field, the contradiction is reported
+as a conflict and the original bytes are kept. The report also contains the SHA-256 hash of the original
+input block, so two samples that differ only in their type enum mapping can be compared: their normalized
+blocks and semantic values are equal while their original hashes remain distinct.
+
+The same information is available from the API on
+:attr:`BeaconConfig.modifications <dissect.cobaltstrike.beacon.BeaconConfig.modifications>`, see
+:class:`BeaconModifications <dissect.cobaltstrike.beacon.BeaconModifications>` and
+:meth:`BeaconModifications.explain() <dissect.cobaltstrike.beacon.BeaconModifications.explain>`.
+
 .. sphinx_argparse_cli::
   :module: dissect.cobaltstrike.beacon
   :func: build_parser

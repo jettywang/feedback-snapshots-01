@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `normalize.py` now records an auditable normalization report on
+  `BeaconModifications`: the original and normalized config bytes, the original
+  input SHA-256, per-setting `TypeFieldChange` records with their evidence
+  (`stock`, `length`, `unknown`), unconfirmable observed types whose original
+  bytes are retained, and explicit `NormalizationConflict` entries when
+  normalizers contradict each other (the original bytes win).
+- `infer_type_mapping()` for evidence-based observed-type to stock-type
+  inference; `settings_type_modifications()` now only returns mappings backed
+  by sufficient evidence.
+- `beacon-dump` CLI: `--normalize-report` flag to print the per-byte
+  normalization report, including original versus normalized type numbers.
+
 ## [1.3.0] - 2026-10-01
 
 ### Added

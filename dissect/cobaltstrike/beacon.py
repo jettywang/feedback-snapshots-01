@@ -465,15 +465,125 @@ class BeaconConfigBlock:
 
 
 @dataclass
+class TypeFieldChange:
+    """A single proposed or applied modification of a setting's type field.
+
+    The type field is the big-endian ``uint16`` at ``offset + 2`` of a packed ``(index, type, length)``
+    setting header. One record describes exactly one such field, so every byte-level change is auditable.
+    """
+
+    offset: int
+    """Absolute byte offset of the setting header (the ``index`` field) inside the config block."""
+    index: int
+    """Setting index as declared in the *original* block."""
+    original_type: int
+    """Type number as declared in the *original* block. Never overwritten with the normalized value."""
+    proposed_type: Optional[int]
+    """Normalized type number proposed by the normalizer, or ``None`` when the type could not be confirmed."""
+    reason: str
+    """Human-readable explanation of the evidence the decision is based on."""
+    normalizer: str
+    """Name of the normalizer that produced this record."""
+    evidence: str = "unknown"
+    """Evidence class: ``"stock"`` (known setting), ``"length"`` (size heuristic) or ``"unknown"``."""
+    applied: bool = False
+    """Whether ``proposed_type`` was actually written into the normalized block."""
+    conflict: bool = False
+    """Whether multiple normalizers proposed conflicting values for this field."""
+
+    @property
+    def type_offset(self) -> int:
+        """Offset of the first (high) byte of the big-endian type field."""
+        return self.offset + 2
+
+    @property
+    def is_change(self) -> bool:
+        """True when the normalized type differs from the originally declared type."""
+        return self.proposed_type is not None and self.proposed_type != self.original_type
+
+
+@dataclass
+class NormalizationConflict:
+    """A contradiction between normalizers at the same byte offset."""
+
+    offset: int
+    """Absolute byte offset of the contested setting header."""
+    index: int
+    """Setting index as declared in the original block."""
+    original_type: int
+    """Type number as declared in the original block (left untouched on conflict)."""
+    proposals: dict[str, int] = field(default_factory=dict)
+    """Mapping of normalizer name to the type number it proposed."""
+
+    @property
+    def reason(self) -> str:
+        parts = ", ".join(f"{name} -> {typ}" for name, typ in self.proposals.items())
+        return f"conflicting normalizer proposals for setting {self.index} at offset {self.offset}: {parts}"
+
+
+@dataclass
 class BeaconModifications:
     """Class for tracking modifications made to a Beacon configuration block"""
 
     tags: list[str] = field(default_factory=list)
     """List of tags associated with the Beacon config block (e.g., "remapped_types", "remapped_indexes")"""
     remapped_types: dict[int, int] = field(default_factory=dict)
-    """Mapping of remapped setting types (type -> correct type) for the Beacon config block"""
+    """Mapping of remapped setting types (observed type -> normalized type) for the Beacon config block.
+
+    Only contains mappings supported by sufficient evidence; unconfirmed observed types are absent here.
+    """
     remapped_indexes: dict[int, int] = field(default_factory=dict)
     """Mapping of remapped setting indexes (index -> correct index) for the Beacon config block"""
+    original_data: Optional[bytes] = None
+    """Untouched original config block bytes as fed into the normalization pipeline."""
+    normalized_data: Optional[bytes] = None
+    """Config block bytes after normalization; equals :attr:`original_data` when nothing was applied."""
+    original_sha256: Optional[str] = None
+    """SHA-256 hex digest of :attr:`original_data`, for reproducibility checks."""
+    type_changes: list[TypeFieldChange] = field(default_factory=list)
+    """Per-setting type-field records, including confirmed mappings, identity rows and unknown types."""
+    conflicts: list[NormalizationConflict] = field(default_factory=list)
+    """Contradictory proposals from different normalizers; the original bytes were retained for these."""
+    unknown_types: dict[int, list[int]] = field(default_factory=dict)
+    """Observed type numbers that no normalizer could confirm, mapped to the affected setting indexes."""
+
+    @property
+    def applied_changes(self) -> list[TypeFieldChange]:
+        """Records that actually altered a byte in the normalized block."""
+        return [change for change in self.type_changes if change.applied and change.is_change]
+
+    @property
+    def input_preserved(self) -> bool:
+        """True when the original input bytes are still byte-identical to what was provided."""
+        return self.original_data is None or self.original_sha256 == hashlib.sha256(self.original_data).hexdigest()
+
+    def explain(self) -> list[str]:
+        """Render a human-readable, reproducible summary of every decision made during normalization."""
+        lines: list[str] = []
+        if self.original_sha256:
+            lines.append(f"original config sha256: {self.original_sha256}")
+        if not self.type_changes and not self.conflicts:
+            lines.append("no normalization decisions recorded")
+            return lines
+        for change in self.type_changes:
+            location = f"offset=0x{change.offset:04x} setting={change.index}"
+            if change.proposed_type is None:
+                lines.append(
+                    f"{location} original_type={change.original_type} UNCONFIRMED ({change.evidence}); "
+                    f"original bytes retained [{change.normalizer}: {change.reason}]"
+                )
+            else:
+                status = "applied" if change.applied else "not applied"
+                if change.conflict:
+                    status = "conflict, original bytes retained"
+                lines.append(
+                    f"{location} original_type={change.original_type} -> "
+                    f"normalized_type={change.proposed_type} ({status}, evidence={change.evidence}) "
+                    f"[{change.normalizer}: {change.reason}]"
+                )
+        for conflict in self.conflicts:
+            lines.append(f"CONFLICT offset=0x{conflict.offset:04x} setting={conflict.index}: {conflict.reason}")
+        return lines
 
 
 Normalizer = Callable[
@@ -1573,6 +1683,11 @@ def build_parser():
         help="exit with non-zero code on error (default: continue processing other files)",
     )
     parser.add_argument(
+        "--normalize-report",
+        action="store_true",
+        help="print the per-byte normalization report (original vs normalized types, evidence and conflicts)",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="count",
@@ -1642,6 +1757,11 @@ def main():
             continue
 
         dumped = True
+        if args.normalize_report and config.modifications is not None:
+            print(f"# normalization report for {fname}", file=sys.stderr)
+            for line in config.modifications.explain():
+                print(f"# {line}", file=sys.stderr)
+
         if args.type == "raw":
             for setting in config.settings_tuple:
                 print(setting)
