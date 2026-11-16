@@ -44,73 +44,168 @@ class PdbMultiStreamFormat(linear.LinearlyMappedLayer):
     def pdb_symbol_table(self) -> str:
         return self._pdb_symbol_table
 
+    def _read_pages(self, pages: List[int], length: int, description: str) -> bytes:
+        """Reads ``length`` logical bytes from a list of MSF page numbers.
+
+        The read is bounded by both the requested length and the supplied page
+        list.  A short list or a page outside the base layer is reported against
+        this MSF layer rather than silently borrowing bytes from the surrounding
+        container or another stream.
+        """
+        page_size = self.page_size
+        base_layer = self.context.layers[self._base_layer]
+        base_size = base_layer.maximum_address + 1
+        output = bytearray()
+        for page in pages:
+            if len(output) >= length:
+                break
+            page = int(page)
+            page_start = page * page_size
+            chunk_size = min(page_size, length - len(output))
+            if (
+                page < 0
+                or page_start >= base_size
+                or page_start + chunk_size > base_size
+            ):
+                raise PDBFormatException(
+                    self.name,
+                    f"{description} page number {page} is outside the base layer",
+                )
+            try:
+                output += base_layer.read(page_start, chunk_size)
+            except exceptions.InvalidAddressException as exc:
+                raise PDBFormatException(
+                    self.name, f"{description} page {page} could not be read"
+                ) from exc
+        if len(output) != length:
+            raise PDBFormatException(
+                self.name,
+                f"{description} is truncated: expected {length} bytes from "
+                f"{len(pages)} pages, read {len(output)}",
+            )
+        return bytes(output)
+
     def read_streams(self):
         # Shortcut in case they've already been read
         if self._streams:
             return None
 
+        directory_size = int(self._header.StreamInfo.StreamInfoSize)
+        if directory_size <= 0:
+            raise PDBFormatException(self.name, "Stream directory is empty")
+
         # Recover the root table, by recovering the root table index table...
         module = self.context.module(self.pdb_symbol_table, self._base_layer, offset=0)
         entry_size = module.get_type("unsigned long").size
 
-        root_table_num_pages = math.ceil(
-            self._header.StreamInfo.StreamInfoSize / self._header.PageSize
+        directory_page_count = math.ceil(directory_size / self.page_size)
+        root_index_count = math.ceil(
+            (directory_page_count * entry_size) / self.page_size
         )
-        root_index_size = math.ceil(
-            (root_table_num_pages * entry_size) / self._header.PageSize
+        root_index_offset = self._header.vol.size
+        root_index_length = root_index_count * entry_size
+        try:
+            root_index_data = self.context.layers.read(
+                self._base_layer, root_index_offset, root_index_length
+            )
+        except exceptions.InvalidAddressException as exc:
+            raise PDBFormatException(
+                self.name, "Stream directory index extends beyond the base layer"
+            ) from exc
+        if len(root_index_data) != root_index_length:
+            raise PDBFormatException(
+                self.name,
+                f"Stream directory index is truncated: expected "
+                f"{root_index_length} bytes, read {len(root_index_data)}",
+            )
+        root_index_pages = [
+            int.from_bytes(
+                root_index_data[offset : offset + entry_size], byteorder="little"
+            )
+            for offset in range(0, len(root_index_data), entry_size)
+        ]
+
+        page_list_data = self._read_pages(
+            root_index_pages,
+            directory_page_count * entry_size,
+            "Stream directory page list",
         )
-        root_index = module.object(
-            object_type="array",
-            offset=self._header.vol.size,
-            count=root_index_size,
-            subtype=module.get_type("unsigned long"),
-        )
-        root_index_layer_name = self.create_stream_from_pages(
-            "root_index",
-            self._header.StreamInfo.StreamInfoSize,
-            [x for x in root_index],
+        directory_pages = [
+            int.from_bytes(
+                page_list_data[offset : offset + entry_size], byteorder="little"
+            )
+            for offset in range(0, len(page_list_data), entry_size)
+        ]
+        directory = self._read_pages(
+            directory_pages, directory_size, "Stream directory"
         )
 
-        module = self.context.module(
-            self.pdb_symbol_table, root_index_layer_name, offset=0
-        )
-        root_pages = module.object(
-            object_type="array",
-            offset=0,
-            count=root_table_num_pages,
-            subtype=module.get_type("unsigned long"),
-        )
-        root_layer_name = self.create_stream_from_pages(
-            "root", self._header.StreamInfo.StreamInfoSize, [x for x in root_pages]
-        )
+        def directory_entry(offset: int) -> int:
+            return int.from_bytes(
+                directory[offset : offset + entry_size], byteorder="little"
+            )
 
-        module = self.context.module(self.pdb_symbol_table, root_layer_name, offset=0)
-        num_streams = module.object(object_type="unsigned long", offset=0)
-        stream_sizes = module.object(
-            object_type="array",
-            offset=entry_size,
-            count=num_streams,
-            subtype=module.get_type("unsigned long"),
-        )
+        num_streams = directory_entry(0)
+        max_streams = (directory_size // entry_size) - 1
+        if num_streams > max_streams:
+            raise PDBFormatException(
+                self.name,
+                f"Stream directory is truncated: it declares {num_streams} streams "
+                f"but can only contain {max_streams} stream sizes",
+            )
+
+        stream_sizes = [
+            directory_entry((index + 1) * entry_size) for index in range(num_streams)
+        ]
 
         current_offset = (num_streams + 1) * entry_size
+        stream_pages: Dict[int, Optional[List[int]]] = {}
+        page_count_needed = 0
+        for stream_size in stream_sizes:
+            if stream_size not in (0, 0xFFFFFFFF):
+                page_count_needed += math.ceil(stream_size / self.page_size)
+        page_list_bytes = page_count_needed * entry_size
+        directory_end = current_offset + page_list_bytes
+        if directory_end > directory_size:
+            raise PDBFormatException(
+                self.name,
+                f"Stream page lists require {page_list_bytes} bytes but only "
+                f"{directory_size - current_offset} remain in the "
+                f"{directory_size}-byte stream directory",
+            )
+        if directory_end != directory_size:
+            # A producer may pad the directory tail, but the padding must not
+            # look like another stream's page numbers hidden in unused space.
+            if directory_end > directory_size or any(
+                directory[directory_end:directory_size]
+            ):
+                raise PDBFormatException(
+                    self.name,
+                    f"Stream page lists end at {directory_end} but the stream "
+                    f"directory is {directory_size} bytes; stream sizes and page "
+                    f"lists disagree",
+                )
 
+        # Validate the entire directory before constructing any stream layers, so
+        # that a truncated page list cannot consume another stream's page numbers.
         for stream in range(num_streams):
-            list_size = math.ceil(stream_sizes[stream] / self.page_size)
-            if list_size == 0 or stream_sizes[stream] == 0xFFFFFFFF:
+            stream_size = stream_sizes[stream]
+            list_size = math.ceil(stream_size / self.page_size)
+            if list_size == 0 or stream_size == 0xFFFFFFFF:
+                stream_pages[stream] = None
+                continue
+            stream_pages[stream] = [
+                directory_entry(current_offset + (page * entry_size))
+                for page in range(list_size)
+            ]
+            current_offset += list_size * entry_size
+
+        for stream, pages in stream_pages.items():
+            if pages is None:
                 self._streams[stream] = None
             else:
-                stream_page_list = module.object(
-                    object_type="array",
-                    offset=current_offset,
-                    count=list_size,
-                    subtype=module.get_type("unsigned long"),
-                )
-                current_offset += list_size * entry_size
                 self._streams[stream] = self.create_stream_from_pages(
-                    "stream" + str(stream),
-                    stream_sizes[stream],
-                    [x for x in stream_page_list],
+                    "stream" + str(stream), stream_sizes[stream], pages
                 )
 
     def create_stream_from_pages(
@@ -200,6 +295,18 @@ class PdbMSFStream(linear.LinearlyMappedLayer):
             raise PDBFormatException(name, "Invalid/no pages specified")
         if not isinstance(self._pdb_layer, PdbMultiStreamFormat):
             raise TypeError("Base Layer must be a PdbMultiStreamFormat layer")
+        self._maximum_size = int(self.config.get("maximum_size", 0))
+        if self._maximum_size < 0:
+            raise PDBFormatException(
+                name, f"Invalid stream size: {self._maximum_size}"
+            )
+        expected_pages = math.ceil(self._maximum_size / self._pdb_layer.page_size)
+        if self._pages_len != expected_pages:
+            raise PDBFormatException(
+                name,
+                f"Stream size {self._maximum_size} requires {expected_pages} pages "
+                f"but {self._pages_len} page numbers were supplied",
+            )
 
     @property
     def pdb_symbol_table(self) -> Optional[str]:
@@ -219,28 +326,91 @@ class PdbMSFStream(linear.LinearlyMappedLayer):
             requirements.IntRequirement(name="maximum_size"),
         ]
 
+    def _map_offset(self, stream_offset: int) -> int:
+        """Translates a logical stream offset to a physical container offset.
+
+        Raises InvalidAddressException against this stream for offsets outside
+        the declared size, page numbers outside the stream's page list, and page
+        numbers that map outside the MSF container.
+        """
+        if stream_offset < 0 or stream_offset >= self._maximum_size:
+            raise exceptions.InvalidAddressException(self.name, stream_offset)
+        page_size = self._pdb_layer.page_size
+        page = stream_offset // page_size
+        if page >= self._pages_len:
+            raise exceptions.InvalidAddressException(self.name, stream_offset)
+        page_number = int(self._pages[page])
+        page_position = stream_offset % page_size
+        mapped_offset = page_number * page_size + page_position
+        physical_size = self._pdb_layer.maximum_address + 1
+        if page_number < 0 or mapped_offset < 0 or mapped_offset >= physical_size:
+            raise exceptions.InvalidAddressException(
+                self.name,
+                stream_offset,
+                f"Stream page {page} maps outside the MSF container",
+            )
+        return mapped_offset
+
     def mapping(
         self, offset: int, length: int, ignore_errors: bool = False
     ) -> Iterable[Tuple[int, int, int, int, str]]:
-        returned = 0
+        if length < 0:
+            if not ignore_errors:
+                raise exceptions.InvalidAddressException(self.name, offset)
+            return
+        if length == 0:
+            # A zero-length mapping keeps translate() and boundary probes
+            # working without yielding any bytes that belong to another stream.
+            try:
+                if (
+                    offset == self._maximum_size
+                    and self._maximum_size > 0
+                    and self._pages_len
+                ):
+                    page_size = self._pdb_layer.page_size
+                    mapped_offset = (
+                        int(self._pages[-1]) * page_size
+                        + (self._maximum_size % page_size or page_size)
+                    )
+                else:
+                    mapped_offset = self._map_offset(offset)
+            except exceptions.InvalidAddressException:
+                if not ignore_errors:
+                    raise
+                return
+            yield offset, 0, mapped_offset, 0, self._base_layer
+            return
         page_size = self._pdb_layer.page_size
+        returned = 0
         while length > 0:
-            page = (offset + returned) // page_size
-            page_position = (offset + returned) % page_size
-            chunk_size = min(page_size - page_position, length)
-            if page >= self._pages_len:
+            stream_offset = offset + returned
+            try:
+                mapped_offset = self._map_offset(stream_offset)
+            except exceptions.InvalidAddressException:
+                if not ignore_errors:
+                    raise
+                return
+            chunk_size = min(
+                page_size - (stream_offset % page_size),
+                length,
+                self._maximum_size - stream_offset,
+            )
+            if mapped_offset + chunk_size > self._pdb_layer.maximum_address + 1:
                 if not ignore_errors:
                     raise exceptions.InvalidAddressException(
-                        layer_name=self.name, invalid_address=offset + returned
+                        self.name,
+                        stream_offset,
+                        f"Stream page {stream_offset // page_size} maps outside "
+                        f"the MSF container",
                     )
-            else:
-                yield (
-                    offset + returned,
-                    chunk_size,
-                    (self._pages[page] * page_size) + page_position,
-                    chunk_size,
-                    self._base_layer,
-                )
+                return
+            yield (
+                stream_offset,
+                chunk_size,
+                mapped_offset,
+                chunk_size,
+                self._base_layer,
+            )
             returned += chunk_size
             length -= chunk_size
 
@@ -249,7 +419,21 @@ class PdbMSFStream(linear.LinearlyMappedLayer):
         return [self._base_layer]
 
     def is_valid(self, offset: int, length: int = 1) -> bool:
-        return self.context.layers[self._base_layer].is_valid(offset, length)
+        if offset < 0 or length < 0:
+            return False
+        if offset + length > self._maximum_size:
+            return False
+        try:
+            mapped_length = 0
+            for _, chunk_size, mapped_offset, mapped_size, layer in self.mapping(
+                offset, length, ignore_errors=True
+            ):
+                if not self.context.layers[layer].is_valid(mapped_offset, mapped_size):
+                    return False
+                mapped_length += chunk_size
+            return mapped_length == length
+        except exceptions.InvalidAddressException:
+            return False
 
     @property
     def minimum_address(self) -> int:
@@ -257,9 +441,9 @@ class PdbMSFStream(linear.LinearlyMappedLayer):
 
     @property
     def maximum_address(self) -> int:
-        return self.config.get(
-            "maximum_size", len(self._pages) * self._pdb_layer.page_size
-        )
+        # Existing PDB consumers (notably pdbconv) treat this as the stream
+        # length, so keep the declared size rather than the last valid offset.
+        return self._maximum_size
 
     @property
     def _pdb_layer(self) -> PdbMultiStreamFormat:
