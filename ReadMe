@@ -25,7 +25,18 @@ The MACE notation is used:
 In the WSL set of timestamps (and FAT):
 - inode changed (CH).
 
-4. License
+4. Restart page audit
+
+A read-only helper is included for conflicting $LogFile restart pages:
+
+  logfile_restart_audit.py --self-check
+  logfile_restart_audit.py <$LogFile> [--recover]
+
+It never repairs or rewrites a log file. It reports which restart page the
+loader selects, which required LSNs resolve under each page's own geometry,
+and when a higher LSN cannot support a completeness claim.
+
+5. License
 
 This project is made available under the terms of the GNU GPL, version 3.
 See the 'License' file.
