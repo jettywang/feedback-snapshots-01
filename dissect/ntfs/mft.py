@@ -31,7 +31,7 @@ from dissect.ntfs.util import AttributeMap, apply_fixup, segment_reference
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-    from dissect.ntfs.index import IndexEntry
+    from dissect.ntfs.index import IndexEntry, ResidualIndexEntry
     from dissect.ntfs.ntfs import NTFS
     from dissect.ntfs.util import AttributeCollection
 
@@ -524,6 +524,22 @@ class MftRecord:
             if ignore_dos and entry.attribute.flags == FILE_NAME_DOS:
                 continue
             yield entry.dereference() if dereference else entry
+
+    def iterdir_residual(self) -> Iterator[ResidualIndexEntry]:
+        """Yield candidate deleted directory entries of this record, recovered from index slack space.
+
+        Unlike :func:`iterdir`, which only returns active entries, this scans the slack space of the
+        ``$I30`` index for structurally valid remnants of deleted entries. A yielded
+        :class:`~dissect.ntfs.index.ResidualIndexEntry` is only a candidate; inspect its
+        ``mft_check`` to see whether its file reference could be confirmed against the MFT.
+
+        Raises:
+            NotADirectoryError: If this record is not a directory.
+        """
+        if not self.is_dir():
+            raise NotADirectoryError(f"{self!r} is not a directory")
+
+        yield from self.index("$I30").residual_entries()
 
     def listdir(self, dereference: bool = False, ignore_dos: bool = False) -> dict[str, IndexEntry | MftRecord]:
         """Return a dictionary of the directory entries of this record.

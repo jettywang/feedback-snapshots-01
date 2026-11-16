@@ -27,6 +27,24 @@ class Match(Enum):
     Greater = auto()
 
 
+# Fixed portion of a _FILE_NAME structure, up to and including the Flags field
+_FILE_NAME_HEADER_SIZE = 66
+
+
+class MftReferenceCheck(Enum):
+    """Result of cross-checking the file reference of a :class:`ResidualIndexEntry` against the MFT."""
+
+    #: No MFT is available to perform the cross-check.
+    UNCHECKED = auto()
+    #: The referenced MFT record exists and its sequence number matches.
+    MATCH = auto()
+    #: The referenced MFT record exists but its sequence number no longer matches, so the
+    #: relationship between the recovered name and the current record cannot be confirmed.
+    STALE_SEQUENCE = auto()
+    #: The referenced MFT record could not be read.
+    MISSING = auto()
+
+
 class Index:
     """Open an index with he given name on the given MFT record.
 
@@ -140,6 +158,40 @@ class Index:
 
                 vcn += 1
 
+    def residual_entries(self) -> Iterator[ResidualIndexEntry]:
+        """Yield candidate deleted :class:`ResidualIndexEntry`'s recovered from slack space in this index.
+
+        Normal enumeration with :func:`entries` only returns active entries. Deleted entries may linger
+        in the slack space of the index root and of index buffers in the index allocation; this generator
+        scans those regions for bytes that still form structurally valid index entries.
+
+        Child nodes are traversed by following node VCNs from the index root. Every node is scanned at
+        most once, even if multiple entries point at the same (shared) child node.
+        """
+        yield from self.root.residual_entries()
+
+        if not self._index_stream:
+            return
+
+        visited = set()
+        vcns = [entry.node_vcn for entry in self.root.entries() if entry.is_node]
+        while vcns:
+            vcn = vcns.pop()
+            if vcn in visited:
+                continue
+            visited.add(vcn)
+
+            try:
+                buffer = self.index_buffer(vcn)
+            except (Error, EOFError):
+                continue
+
+            yield from buffer.residual_entries()
+
+            for entry in buffer.entries():
+                if entry.is_node and entry.node_vcn not in visited:
+                    vcns.append(entry.node_vcn)
+
 
 class IndexRoot:
     """Represents the ``$INDEX_ROOT``.
@@ -185,6 +237,16 @@ class IndexRoot:
             self.header.IndexHeader.TotalSizeOfEntries,
         )
 
+    def residual_entries(self) -> Iterator[ResidualIndexEntry]:
+        """Yield candidate deleted entries from the slack space of this :class:`IndexRoot`."""
+        self.fh.seek(0)
+        data = self.fh.read()
+
+        # The slack space starts right after the last active entry; the entries region
+        # is relative to the _INDEX_HEADER at offset 0x10
+        start = 0x10 + self.header.IndexHeader.TotalSizeOfEntries
+        yield from _iter_slack_entries(self.index, data, start, len(data), 0, None)
+
 
 class IndexBuffer:
     """Represent an index buffer in ``$INDEX_ALLOCATION``.
@@ -226,6 +288,159 @@ class IndexBuffer:
             self.header.IndexHeader.FirstEntryOffset + 0x18,
             self.header.IndexHeader.TotalSizeOfEntries,
         )
+
+    def residual_entries(self) -> Iterator[ResidualIndexEntry]:
+        """Yield candidate deleted entries from the slack space of this :class:`IndexBuffer`."""
+        yield from _iter_slack_entries(
+            self.index,
+            self.data,
+            # The slack space starts right after the last active entry; the entries region
+            # is relative to the _INDEX_HEADER at offset 0x18
+            self.header.IndexHeader.TotalSizeOfEntries + 0x18,
+            len(self.data),
+            self.offset,
+            self.header.Vcn,
+        )
+
+
+class ResidualIndexEntry:
+    """A candidate deleted index entry recovered from index slack space.
+
+    A residual entry only shows that bytes in slack space still form a structurally valid index
+    entry; it is never proof that the file (still) exists. Use :attr:`mft_check` to inspect whether
+    the file reference could be cross-checked against the MFT.
+
+    Args:
+        index: The :class:`Index` class instance this entry was recovered from.
+        vcn: The VCN of the index buffer this entry was recovered from, or ``None`` for the index root.
+        offset: The absolute offset in the source stream where the raw entry starts.
+        length: The length of the raw entry in bytes.
+        raw: The raw bytes of the recovered entry.
+        header: The parsed ``_INDEX_ENTRY`` header.
+        file_name: The parsed ``_FILE_NAME`` structure of the key, if the index holds file names.
+    """
+
+    def __init__(
+        self,
+        index: Index,
+        vcn: int | None,
+        offset: int,
+        length: int,
+        raw: bytes,
+        header: c_ntfs._INDEX_ENTRY,
+        file_name: c_ntfs._FILE_NAME | None,
+    ):
+        self.index = index
+        self.vcn = vcn
+        self.offset = offset
+        self.length = length
+        self.raw = raw
+        self.header = header
+        self.file_name = file_name
+
+    def __repr__(self) -> str:
+        return f"<ResidualIndexEntry {self.filename!r} @ {self.offset:#x}>"
+
+    @classmethod
+    def from_bytes(
+        cls,
+        index: Index,
+        data: bytes,
+        offset: int,
+        end: int,
+        base_offset: int = 0,
+        vcn: int | None = None,
+    ) -> ResidualIndexEntry | None:
+        """Try to parse a residual index entry at ``offset`` in ``data``.
+
+        Returns ``None`` if the bytes at ``offset`` do not form a structurally valid entry. Forged
+        or inconsistent lengths are rejected so they can never be mistaken for a real entry.
+        """
+        if offset + len(c_ntfs._INDEX_ENTRY) > end:
+            return None
+
+        header = c_ntfs._INDEX_ENTRY(data[offset : offset + len(c_ntfs._INDEX_ENTRY)])
+
+        length = header.Length
+        if (
+            # Entries are at least a header long and always aligned to 8 bytes
+            length < len(c_ntfs._INDEX_ENTRY)
+            or length % 8
+            # The entry must fit in the slack region
+            or offset + length > end
+            # An end marker is not a residual entry
+            or header.Flags & INDEX_ENTRY_END
+            # The key must fit in the entry
+            or header.KeyLength > length - len(c_ntfs._INDEX_ENTRY)
+        ):
+            return None
+
+        key = data[offset + len(c_ntfs._INDEX_ENTRY) : offset + len(c_ntfs._INDEX_ENTRY) + header.KeyLength]
+
+        file_name = None
+        if index.root.attribute_type == ATTRIBUTE_TYPE_CODE.FILE_NAME:
+            if header.KeyLength < _FILE_NAME_HEADER_SIZE:
+                return None
+
+            try:
+                file_name = c_ntfs._FILE_NAME(key)
+            except Exception:
+                return None
+
+            # The key must be exactly one _FILE_NAME structure; a forged FileNameLength or
+            # KeyLength means the bytes merely look like a file name and cannot be trusted
+            expected_key_length = _FILE_NAME_HEADER_SIZE + file_name.FileNameLength * 2
+            if not file_name.FileNameLength or expected_key_length != header.KeyLength:
+                return None
+
+        return cls(index, vcn, base_offset + offset, length, data[offset : offset + length], header, file_name)
+
+    @property
+    def segment_number(self) -> int:
+        """Return the segment number of the MFT record this entry points to."""
+        return segment_reference(self.header.FileReference)
+
+    @property
+    def sequence_number(self) -> int:
+        """Return the sequence number of the MFT record this entry points to."""
+        return self.header.FileReference.SequenceNumber
+
+    @property
+    def filename(self) -> str | None:
+        """Return the recovered file name, or ``None`` if this entry has no ``$FILE_NAME`` key."""
+        return self.file_name.FileName if self.file_name else None
+
+    @cached_property
+    def mft_record(self) -> MftRecord | None:
+        """Return the MFT record this entry points to, or ``None`` if it could not be retrieved."""
+        record = self.index.record
+        if not record or not record.ntfs or not record.ntfs.mft:
+            return None
+
+        try:
+            return record.ntfs.mft.get(self.segment_number)
+        except (EOFError, Error):
+            return None
+
+    @cached_property
+    def mft_check(self) -> MftReferenceCheck:
+        """Cross-check the file reference against the MFT.
+
+        A ``STALE_SEQUENCE`` result means the sequence number no longer matches, so the relationship
+        between the recovered name and the current MFT record cannot be confirmed.
+        """
+        record = self.index.record
+        if not record or not record.ntfs or not record.ntfs.mft:
+            return MftReferenceCheck.UNCHECKED
+
+        mft_record = self.mft_record
+        if mft_record is None:
+            return MftReferenceCheck.MISSING
+
+        if mft_record.header.SequenceNumber != self.sequence_number:
+            return MftReferenceCheck.STALE_SEQUENCE
+
+        return MftReferenceCheck.MATCH
 
 
 class IndexEntry:
@@ -329,6 +544,26 @@ def _iter_entries(index: Index, fh: BinaryIO, offset: int, size: int) -> Iterato
             break
 
         offset += entry.length
+
+
+def _iter_slack_entries(
+    index: Index,
+    data: bytes,
+    start: int,
+    end: int,
+    base_offset: int,
+    vcn: int | None,
+) -> Iterator[ResidualIndexEntry]:
+    """Scan the slack space in ``data`` between ``start`` and ``end`` for residual index entries."""
+    offset = start
+    while offset + len(c_ntfs._INDEX_ENTRY) <= end:
+        candidate = ResidualIndexEntry.from_bytes(index, data, offset, end, base_offset, vcn)
+        if candidate is None:
+            offset += 8
+            continue
+
+        yield candidate
+        offset += candidate.length
 
 
 def _bsearch(entries: list[IndexEntry], value: Any, cmp: Callable[[IndexEntry, Any], Match]) -> IndexEntry:
