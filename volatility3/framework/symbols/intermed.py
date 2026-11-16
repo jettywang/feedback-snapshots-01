@@ -783,23 +783,61 @@ class Version8Format(Version7Format):
         """
         members = {}
         for new_offset, member_name, member_value in self._reduce_fields(fields):
+            if member_name in members:
+                existing_offset = members[member_name][0]
+                raise exceptions.SymbolSpaceError(
+                    f"Conflicting field name {member_name!r} while reducing "
+                    f"anonymous types: already present at offset {existing_offset}, "
+                    f"redeclared at offset {new_offset}"
+                )
             member = (new_offset, self._interdict_to_template(member_value["type"]))
             members[member_name] = member
         return members
 
     def _reduce_fields(
-        self, fields: Dict[str, Dict[str, Any]], parent_offset: int = 0
+        self,
+        fields: Dict[str, Dict[str, Any]],
+        parent_offset: int = 0,
+        type_chain: Optional[List[str]] = None,
     ) -> Generator[Tuple[int, str, Dict], None, None]:
         """Reduce the fields bringing them one level up. It supports anonymous types such as structs or unions in any
-        level of depth."""
+        level of depth.
+
+        Only anonymous members are inlined, so a pointer (or any other non-anonymous member) referring back to its
+        own type terminates naturally. An anonymous by-value reference to a type still being expanded can never be
+        laid out in memory and would recurse forever, so it is rejected instead of overflowing the stack.
+        """
+        if type_chain is None:
+            type_chain = []
         for member_name, member_value in fields.items():
             new_offset = parent_offset + member_value.get("offset", 0)
             if member_value.get("anonymous", False) and isinstance(member_value, dict):
                 # Gets the subtype from the json ISF and recursively reduce its fields
-                subtype = self._json_object["user_types"].get(
-                    member_value["type"]["name"], {}
+                type_descriptor = member_value["type"]
+                if (
+                    not isinstance(type_descriptor, dict)
+                    or type_descriptor.get("kind")
+                    not in objects.AggregateTypes.values()
+                    or "name" not in type_descriptor
+                ):
+                    raise exceptions.SymbolSpaceError(
+                        f"Anonymous member {member_name!r} must reference a named "
+                        f"struct, union or class type: {type_descriptor}"
+                    )
+                subtype_name = type_descriptor["name"]
+                if subtype_name in type_chain:
+                    raise exceptions.SymbolSpaceError(
+                        f"Recursive anonymous expansion of type {subtype_name!r}: "
+                        f"anonymous by-value nesting chain {' -> '.join(type_chain + [subtype_name])}"
+                    )
+                subtype = self._json_object["user_types"].get(subtype_name)
+                if subtype is None:
+                    raise exceptions.SymbolSpaceError(
+                        f"Anonymous member {member_name!r} references unknown type: {subtype_name!r}"
+                    )
+                yield from self._reduce_fields(
+                    subtype["fields"], new_offset, type_chain + [subtype_name]
                 )
-                yield from self._reduce_fields(subtype["fields"], new_offset)
             else:
                 yield new_offset, member_name, member_value
 
