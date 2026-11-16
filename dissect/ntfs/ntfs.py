@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from functools import cached_property
+from io import BytesIO
 from typing import TYPE_CHECKING, BinaryIO
 
+from dissect.ntfs.attr import AttributeHeader
 from dissect.ntfs.c_ntfs import (
     ATTRIBUTE_TYPE_CODE,
     DEFAULT_CLUSTER_SIZE,
@@ -13,11 +15,17 @@ from dissect.ntfs.c_ntfs import (
     NTFS_SIGNATURE,
     c_ntfs,
 )
-from dissect.ntfs.exceptions import Error, FileNotFoundError, VolumeNotAvailableError
+from dissect.ntfs.exceptions import (
+    Error,
+    FileNotFoundError,
+    MftUnreachableError,
+    VolumeNotAvailableError,
+)
 from dissect.ntfs.mft import Mft, MftRecord
 from dissect.ntfs.secure import Secure
 from dissect.ntfs.usnjrnl import UsnJrnl
-from dissect.ntfs.util import bsf
+from dissect.ntfs.util import bsf, segment_reference
+from dissect.util.stream import RunlistStream
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -91,32 +99,7 @@ class NTFS:
         if mft:
             self.mft = Mft(mft, ntfs=self)
         elif self.fh:
-            # Small preface for what's happening here:
-            # - MFT records have one or more $DATA attributes to describe where data is stored on disk
-            # - When data is extremely fragmented, you need more than one $DATA attribute
-            # - When you run out of space in the MFT record itself, attributes are stored in other MFT records
-            #   and referenced by an $ATTRIBUTE_LIST in the main MFT record
-            # - To be able to look up these other MFT records, you need to be able to find them in the $MFT file
-            #
-            # This is all fine, until you realize that the $MFT file itself can be extremely fragmented,
-            # creating a chicken-egg problem. We need the MFT in order to open the $MFT file.
-
-            # First, parse just the MFT record
-            mft_offset = self.boot_sector.MftStartLcn * self.cluster_size
-            mft_record = MftRecord.from_fh(fh, mft_offset, ntfs=self)
-
-            # Second, we open a temporary MFT with the resident $DATA attributes we parsed from the MFT record
-            # This is because if there's no MFT loaded yet (mft attribute on this class) we don't load attribute lists
-            self.mft = Mft(mft_record.open(), ntfs=self)
-
-            # With this initial MFT object we can properly resolve attribute list entries, since the next MFT record
-            # containing the next $DATA attribute is guaranteed to be within the $DATA runs that we already parsed
-            if ATTRIBUTE_TYPE_CODE.ATTRIBUTE_LIST in mft_record.attributes:
-                for datarun in _get_dataruns_from_attribute_list(mft_record):
-                    # Update the RunlistStream of the MFT with new runs as we find them as the next
-                    # attribute list entry may point to an MFT record that is contained in the previous
-                    # attribute list entry's $DATA
-                    self.mft.fh.runlist += datarun
+            self.mft = self._bootstrap_fragmented_mft()
 
         if sds:
             self.secure = Secure(sds=sds)
@@ -150,8 +133,214 @@ class NTFS:
         except (AttributeError, FileNotFoundError):
             return None
 
+    def _bootstrap_fragmented_mft(self) -> Mft:
+        """Incrementally open a fragmented ``$MFT`` without assuming the whole file is readable up front.
 
-def _get_dataruns_from_attribute_list(record: MftRecord) -> Iterator[list[tuple[int, int]]]:
-    for attr in record.attributes[ATTRIBUTE_TYPE_CODE.ATTRIBUTE_LIST].attributes():
-        if attr.type == ATTRIBUTE_TYPE_CODE.DATA:
-            yield attr.dataruns()
+        The bootstrap proceeds in explicit stages, and at every stage the only ``$MFT`` bytes that may be
+        read are the ones covered by the runs confirmed in the preceding stages:
+
+        1. Parse the single ``$MFT`` record located through the boot sector. Its own ``$DATA`` attribute
+           describes the first fragment of the ``$MFT`` file.
+        2. Open a temporary :class:`~dissect.ntfs.mft.Mft` on exactly those initial runs. Because no MFT is
+           bound yet, attribute lists are not dereferenced at this point.
+        3. Walk the ``$ATTRIBUTE_LIST`` in stored order. Each ``$DATA`` entry references another MFT record,
+           which must be reachable through the runs confirmed so far. Its runs are appended before the next
+           entry is considered, so reachability is established one fragment at a time.
+
+        The attribute list is parsed from the record bytes directly rather than through
+        :attr:`MftRecord.attributes`, because that property eagerly dereferences every referenced record and
+        would defeat the staged reachability checks.
+
+        Raises:
+            MftUnreachableError: If an attribute list entry references a record outside the confirmed range,
+                if entries are ordered in a way that breaks incremental reachability, or if the references
+                form a cycle. The error carries the failing stage and the confirmed VCN range at that point.
+        """
+        # Stage 1: only the single $MFT record pointed at by the boot sector is readable
+        mft_offset = self.boot_sector.MftStartLcn * self.cluster_size
+        mft_record = MftRecord.from_fh(self.fh, mft_offset, ntfs=self)
+
+        # Stage 2: a temporary MFT covering only the runs described by the initial $MFT record.
+        # self.mft is deliberately left unbound while scanning the record, so the cached
+        # MftRecord.attributes property can not recursively dereference the attribute list yet.
+        mft = Mft(mft_record.open(), ntfs=self)
+
+        list_attribute = _find_attribute_header(mft_record, ATTRIBUTE_TYPE_CODE.ATTRIBUTE_LIST)
+        if list_attribute is None:
+            return mft
+        list_offset, list_header = list_attribute
+
+        data_entries = [
+            entry
+            for entry in _iter_attribute_list_entries(mft_record, list_offset, list_header, self.fh)
+            if entry.AttributeTypeCode == ATTRIBUTE_TYPE_CODE.DATA
+        ]
+
+        # Stage 3: resolve $ATTRIBUTE_LIST entries in order, extending the confirmed range after each $DATA run.
+        # Segment 0 is the initial record whose runs already back the temporary MFT. Its LowestVcn 0 entry is
+        # the legitimate self-description of the first fragment; any later entry pointing back at an already
+        # resolved segment adds no runs and is a circular dependency.
+        initial_segment = mft_record.segment if mft_record.segment is not None else 0
+        resolved_segments: set[int] = {initial_segment}
+        previous_vcn = 0
+        for stage, entry in enumerate(data_entries):
+            segment = segment_reference(entry.SegmentReference)
+            confirmed_clusters = _runlist_length(mft.fh.runlist)
+
+            if segment == initial_segment and entry.LowestVcn == 0 and stage == 0:
+                # The initial fragment is already part of the confirmed runs
+                continue
+
+            if segment in resolved_segments:
+                # A self or mutual reference can never add new runs and would only loop back on itself
+                raise MftUnreachableError(
+                    f"Circular $ATTRIBUTE_LIST reference at stage {stage}: segment {segment} was already "
+                    "used to describe part of the $MFT",
+                    stage=stage,
+                    segment=segment,
+                    confirmed_runs=mft.fh.runlist,
+                )
+
+            if not _segment_in_runlist(mft.fh.runlist, segment, self._record_size, self.cluster_size):
+                raise MftUnreachableError(
+                    f"$ATTRIBUTE_LIST entry at stage {stage} references segment {segment}, which is outside "
+                    f"the confirmed $MFT range of {confirmed_clusters} clusters; the referenced record must be "
+                    "described by a previously confirmed run",
+                    stage=stage,
+                    segment=segment,
+                    confirmed_runs=mft.fh.runlist,
+                )
+
+            if entry.LowestVcn < previous_vcn:
+                raise MftUnreachableError(
+                    f"$ATTRIBUTE_LIST entry at stage {stage} starts at VCN {entry.LowestVcn}, before the "
+                    f"previously confirmed VCN {previous_vcn}; entries must be ordered so each extension is "
+                    "reachable before it is referenced",
+                    stage=stage,
+                    segment=segment,
+                    confirmed_runs=mft.fh.runlist,
+                )
+
+            try:
+                extension_record = mft.get(segment)
+            except MftUnreachableError as e:
+                raise MftUnreachableError(
+                    f"$ATTRIBUTE_LIST entry at stage {stage} references segment {segment}, but the record "
+                    "could not be read through the currently confirmed runs",
+                    stage=stage,
+                    segment=segment,
+                    confirmed_runs=mft.fh.runlist,
+                ) from e
+            extension_runs = _get_dataruns_from_record(extension_record)
+            if not extension_runs:
+                raise MftUnreachableError(
+                    f"$ATTRIBUTE_LIST entry at stage {stage} references segment {segment}, which provides no "
+                    "$DATA runs to extend the $MFT",
+                    stage=stage,
+                    segment=segment,
+                    confirmed_runs=mft.fh.runlist,
+                )
+
+            mft.fh.runlist += extension_runs
+            # The runlist now covers more of the $MFT stream; grow the stream size so the newly confirmed
+            # records become readable. The original FileSize only describes the initial fragment.
+            mft.fh.size = _runlist_length(mft.fh.runlist) * self.cluster_size
+            resolved_segments.add(segment)
+            previous_vcn = entry.LowestVcn
+
+        return mft
+
+
+def _runlist_length(runlist: list[tuple[int | None, int]]) -> int:
+    """Return the total number of clusters described by a runlist, including sparse runs."""
+    return sum(run_length for _, run_length in runlist)
+
+
+def _segment_in_runlist(
+    runlist: list[tuple[int | None, int]], segment: int, record_size: int, cluster_size: int
+) -> bool:
+    """Return whether the MFT record at ``segment`` is fully inside the cluster range covered by ``runlist``.
+
+    The runlist is interpreted in VCN order, so this only checks the logical length of the confirmed
+    ``$MFT`` stream: a record whose offset is below that length is readable through the confirmed runs.
+    """
+    record_offset = segment * record_size
+    record_end = record_offset + record_size
+    confirmed_bytes = _runlist_length(runlist) * cluster_size
+    return record_end <= confirmed_bytes
+
+
+def _iter_record_attributes(record: MftRecord) -> Iterator[tuple[int, AttributeHeader]]:
+    """Yield ``(offset, AttributeHeader)`` pairs by scanning a record's raw bytes.
+
+    Unlike :attr:`MftRecord.attributes`, this never dereferences an ``$ATTRIBUTE_LIST`` and therefore stays
+    safe to use while the ``$MFT`` is only partially confirmed.
+    """
+    fh = BytesIO(record.data)
+    offset = record.header.FirstAttributeOffset
+    while True:
+        try:
+            header = AttributeHeader(fh, offset, record)
+        except EOFError:
+            return
+
+        if header.type == ATTRIBUTE_TYPE_CODE.END or header.record_length == 0:
+            return
+
+        yield offset, header
+        offset += header.record_length
+
+
+def _find_attribute_header(
+    record: MftRecord, attr_type: ATTRIBUTE_TYPE_CODE
+) -> tuple[int, AttributeHeader] | None:
+    """Return the offset and header of the first attribute with the given type, without dereferencing lists."""
+    for offset, header in _iter_record_attributes(record):
+        if header.type == attr_type:
+            return offset, header
+    return None
+
+
+def _iter_attribute_list_entries(
+    record: MftRecord, list_offset: int, list_header: AttributeHeader, volume_fh: BinaryIO
+) -> Iterator[c_ntfs._ATTRIBUTE_LIST_ENTRY]:
+    """Yield the entries of an ``$ATTRIBUTE_LIST`` attribute without binding or dereferencing an MFT.
+
+    A non-resident list is read straight from the volume through the header's dataruns. The normal
+    :meth:`AttributeHeader.open` path refuses non-resident attributes when no volume is bound, which is
+    precisely the state during the earliest bootstrap stages, so the volume is wired through explicitly here.
+    """
+    if list_header.resident:
+        value_offset = list_offset + list_header.header.Form.Resident.ValueOffset
+        value_length = list_header.header.Form.Resident.ValueLength
+        list_data = record.data[value_offset : value_offset + value_length]
+    else:
+        list_data = RunlistStream(
+            volume_fh,
+            list_header.dataruns(),
+            list_header.size,
+            record.ntfs.cluster_size,
+        ).read(list_header.size)
+
+    offset = 0
+    while offset < len(list_data):
+        entry = c_ntfs._ATTRIBUTE_LIST_ENTRY(BytesIO(list_data[offset:]))
+        if entry.RecordLength == 0:
+            break
+        yield entry
+        offset += entry.RecordLength
+
+
+def _get_dataruns_from_record(record: MftRecord) -> list[tuple[int | None, int]]:
+    """Collect the non-resident ``$DATA`` runs of an MFT record, ordered by lowest VCN."""
+    data_headers = [
+        header
+        for _, header in _iter_record_attributes(record)
+        if header.type == ATTRIBUTE_TYPE_CODE.DATA and not header.resident
+    ]
+    data_headers.sort(key=lambda header: header.lowest_vcn)
+
+    runs: list[tuple[int | None, int]] = []
+    for header in data_headers:
+        runs += header.dataruns()
+    return runs

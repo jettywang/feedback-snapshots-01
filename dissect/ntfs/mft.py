@@ -22,6 +22,7 @@ from dissect.ntfs.exceptions import (
     Error,
     FileNotFoundError,
     MftNotAvailableError,
+    MftUnreachableError,
     NotADirectoryError,
     NotAReparsePointError,
 )
@@ -211,11 +212,32 @@ class MftRecord:
             fh: The file-like object to parse an MFT record from.
             offset: The offset in the file-like object to parse the MFT record from.
             ntfs: An optional NTFS class instance.
+
+        Raises:
+            MftUnreachableError: If the file-like object can not provide a full record at ``offset``, for
+                example because the confirmed runs of a fragmented ``$MFT`` do not extend that far yet or
+                the underlying volume has no mapping for the requested region.
         """
         record_size = ntfs._record_size if ntfs else DEFAULT_RECORD_SIZE
 
         fh.seek(offset)
-        data = fh.read(record_size)
+        try:
+            data = fh.read(record_size)
+        except EOFError as e:
+            raise MftUnreachableError(
+                f"Unable to read MFT record at offset {offset}: the underlying stream has no mapping for "
+                "the region described by the currently confirmed runs",
+                stage="record-read",
+                segment=offset // record_size,
+            ) from e
+
+        if len(data) < record_size:
+            raise MftUnreachableError(
+                f"Short read of {len(data)} bytes for MFT record at offset {offset}: the record is outside "
+                "the currently confirmed range",
+                stage="record-read",
+                segment=offset // record_size,
+            )
 
         obj = cls.from_bytes(data, ntfs)
         obj.offset = offset
