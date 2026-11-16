@@ -6,7 +6,18 @@ from dissect.ntfs.index import Index, IndexEntry
 from dissect.ntfs.mft import Mft, MftRecord
 from dissect.ntfs.ntfs import NTFS
 from dissect.ntfs.secure import ACE, ACL, Secure, SecurityDescriptor
-from dissect.ntfs.usnjrnl import UsnJrnl, UsnRecord
+from dissect.ntfs.usnjrnl import (
+    CoverageFinding,
+    CoverageStatus,
+    JournalIdStatus,
+    UsnCoverage,
+    UsnCoverageComparison,
+    UsnJournalData,
+    UsnJrnl,
+    UsnRecord,
+    compare_coverage,
+    ensure_same_generation,
+)
 
 __all__ = [
     "ACE",
@@ -17,12 +28,20 @@ __all__ = [
     "Attribute",
     "AttributeHeader",
     "AttributeRecord",
+    "CoverageFinding",
+    "CoverageStatus",
     "Index",
     "IndexEntry",
+    "JournalIdStatus",
     "Mft",
     "MftRecord",
     "Secure",
     "SecurityDescriptor",
+    "UsnCoverage",
+    "UsnCoverageComparison",
+    "UsnJournalData",
     "UsnJrnl",
     "UsnRecord",
+    "compare_coverage",
+    "ensure_same_generation",
 ]

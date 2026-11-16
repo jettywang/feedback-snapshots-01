@@ -560,6 +560,43 @@ typedef struct {
     WORD        NumberOfExtents;
     WORD        ExtentSize;
 } USN_RECORD_V4;
+
+typedef struct {
+    ULONG64     UsnJournalID;
+    LONGLONG    FirstUsn;
+    LONGLONG    NextUsn;
+    LONGLONG    LowestValidUsn;
+    LONGLONG    MaxUsn;
+    ULONG64     MaximumSize;
+    ULONG64     AllocationDelta;
+} USN_JOURNAL_DATA_V0;
+
+typedef struct {
+    ULONG64     UsnJournalID;
+    LONGLONG    FirstUsn;
+    LONGLONG    NextUsn;
+    LONGLONG    LowestValidUsn;
+    LONGLONG    MaxUsn;
+    ULONG64     MaximumSize;
+    ULONG64     AllocationDelta;
+    WORD        MinSupportedMajorVersion;
+    WORD        MaxSupportedMajorVersion;
+} USN_JOURNAL_DATA_V1;
+
+typedef struct {
+    ULONG64     UsnJournalID;
+    LONGLONG    FirstUsn;
+    LONGLONG    NextUsn;
+    LONGLONG    LowestValidUsn;
+    LONGLONG    MaxUsn;
+    ULONG64     MaximumSize;
+    ULONG64     AllocationDelta;
+    WORD        MinSupportedMajorVersion;
+    WORD        MaxSupportedMajorVersion;
+    DWORD       Flags;
+    ULONG64     RangeTrackChunkSize;
+    LONGLONG    RangeTrackFileSizeThreshold;
+} USN_JOURNAL_DATA_V2;
 """
 
 c_ntfs = cstruct().load(ntfs_def)

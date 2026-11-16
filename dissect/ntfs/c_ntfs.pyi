@@ -872,6 +872,86 @@ class _c_ntfs(__cs__.cstruct):
         @overload
         def __init__(self, fh: bytes | memoryview | bytearray | BinaryIO, /): ...
 
+    class USN_JOURNAL_DATA_V0(__cs__.Structure):
+        UsnJournalID: _c_ntfs.uint64
+        FirstUsn: _c_ntfs.int64
+        NextUsn: _c_ntfs.int64
+        LowestValidUsn: _c_ntfs.int64
+        MaxUsn: _c_ntfs.int64
+        MaximumSize: _c_ntfs.uint64
+        AllocationDelta: _c_ntfs.uint64
+        @overload
+        def __init__(
+            self,
+            UsnJournalID: _c_ntfs.uint64 | None = ...,
+            FirstUsn: _c_ntfs.int64 | None = ...,
+            NextUsn: _c_ntfs.int64 | None = ...,
+            LowestValidUsn: _c_ntfs.int64 | None = ...,
+            MaxUsn: _c_ntfs.int64 | None = ...,
+            MaximumSize: _c_ntfs.uint64 | None = ...,
+            AllocationDelta: _c_ntfs.uint64 | None = ...,
+        ): ...
+        @overload
+        def __init__(self, fh: bytes | memoryview | bytearray | BinaryIO, /): ...
+
+    class USN_JOURNAL_DATA_V1(__cs__.Structure):
+        UsnJournalID: _c_ntfs.uint64
+        FirstUsn: _c_ntfs.int64
+        NextUsn: _c_ntfs.int64
+        LowestValidUsn: _c_ntfs.int64
+        MaxUsn: _c_ntfs.int64
+        MaximumSize: _c_ntfs.uint64
+        AllocationDelta: _c_ntfs.uint64
+        MinSupportedMajorVersion: _c_ntfs.uint16
+        MaxSupportedMajorVersion: _c_ntfs.uint16
+        @overload
+        def __init__(
+            self,
+            UsnJournalID: _c_ntfs.uint64 | None = ...,
+            FirstUsn: _c_ntfs.int64 | None = ...,
+            NextUsn: _c_ntfs.int64 | None = ...,
+            LowestValidUsn: _c_ntfs.int64 | None = ...,
+            MaxUsn: _c_ntfs.int64 | None = ...,
+            MaximumSize: _c_ntfs.uint64 | None = ...,
+            AllocationDelta: _c_ntfs.uint64 | None = ...,
+            MinSupportedMajorVersion: _c_ntfs.uint16 | None = ...,
+            MaxSupportedMajorVersion: _c_ntfs.uint16 | None = ...,
+        ): ...
+        @overload
+        def __init__(self, fh: bytes | memoryview | bytearray | BinaryIO, /): ...
+
+    class USN_JOURNAL_DATA_V2(__cs__.Structure):
+        UsnJournalID: _c_ntfs.uint64
+        FirstUsn: _c_ntfs.int64
+        NextUsn: _c_ntfs.int64
+        LowestValidUsn: _c_ntfs.int64
+        MaxUsn: _c_ntfs.int64
+        MaximumSize: _c_ntfs.uint64
+        AllocationDelta: _c_ntfs.uint64
+        MinSupportedMajorVersion: _c_ntfs.uint16
+        MaxSupportedMajorVersion: _c_ntfs.uint16
+        Flags: _c_ntfs.uint32
+        RangeTrackChunkSize: _c_ntfs.uint64
+        RangeTrackFileSizeThreshold: _c_ntfs.int64
+        @overload
+        def __init__(
+            self,
+            UsnJournalID: _c_ntfs.uint64 | None = ...,
+            FirstUsn: _c_ntfs.int64 | None = ...,
+            NextUsn: _c_ntfs.int64 | None = ...,
+            LowestValidUsn: _c_ntfs.int64 | None = ...,
+            MaxUsn: _c_ntfs.int64 | None = ...,
+            MaximumSize: _c_ntfs.uint64 | None = ...,
+            AllocationDelta: _c_ntfs.uint64 | None = ...,
+            MinSupportedMajorVersion: _c_ntfs.uint16 | None = ...,
+            MaxSupportedMajorVersion: _c_ntfs.uint16 | None = ...,
+            Flags: _c_ntfs.uint32 | None = ...,
+            RangeTrackChunkSize: _c_ntfs.uint64 | None = ...,
+            RangeTrackFileSizeThreshold: _c_ntfs.int64 | None = ...,
+        ): ...
+        @overload
+        def __init__(self, fh: bytes | memoryview | bytearray | BinaryIO, /): ...
+
 # Technically `c_ntfs` is an instance of `_c_ntfs`, but then we can't use it in type hints
 c_ntfs: TypeAlias = _c_ntfs
 

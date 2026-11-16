@@ -39,3 +39,16 @@ class NotAReparsePointError(Error):
 
 class VolumeNotAvailableError(Error):
     pass
+
+
+class UsnJournalMergeError(Error):
+    """Raised when USN journal materials cannot be combined into one continuous history.
+
+    Args:
+        message: A description of why the materials cannot be combined.
+        reason: A short machine-readable reason, for example ``"journal-id-mismatch"``.
+    """
+
+    def __init__(self, message: str, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason

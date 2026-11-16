@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 from functools import cached_property
 from typing import TYPE_CHECKING, BinaryIO
 
@@ -22,6 +23,8 @@ from dissect.ntfs.util import bsf
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    from dissect.ntfs.usnjrnl import UsnCoverage
+
 
 class NTFS:
     """Implementation for Microsoft NTFS.
@@ -36,6 +39,7 @@ class NTFS:
         boot: A file-like object for the ``$BOOT`` file.
         mft: A file-like object for the ``$MFT`` file.
         usnjrnl: A file-like object for the ``$Extend/$Usnjrnl:$J`` file.
+        usnjrnl_max: A file-like object for the ``$Extend/$Usnjrnl:$Max`` file.
         sds: A file-like object for the ``$Secure:$SDS`` file.
     """
 
@@ -45,6 +49,7 @@ class NTFS:
         boot: BinaryIO | None = None,
         mft: BinaryIO | None = None,
         usnjrnl: BinaryIO | None = None,
+        usnjrnl_max: BinaryIO | None = None,
         sds: BinaryIO | None = None,
     ):
         self.fh = fh
@@ -127,12 +132,20 @@ class NTFS:
                 pass
 
         if usnjrnl:
-            self.usnjrnl = UsnJrnl(usnjrnl, ntfs=self)
+            self.usnjrnl = UsnJrnl(usnjrnl, ntfs=self, max_fh=usnjrnl_max)
         elif self.mft:
+            max_fh = None
             try:
-                self.usnjrnl = UsnJrnl(self.mft.get("$Extend\\$Usnjrnl").open("$J"), ntfs=self)
+                usnjrnl_record = self.mft.get("$Extend\\$Usnjrnl")
+                with contextlib.suppress(FileNotFoundError, VolumeNotAvailableError):
+                    max_fh = usnjrnl_record.open("$Max")
+                self.usnjrnl = UsnJrnl(usnjrnl_record.open("$J"), ntfs=self, max_fh=max_fh)
             except (FileNotFoundError, NotADirectoryError, VolumeNotAvailableError):
                 pass
+
+    def usn_coverage(self) -> UsnCoverage | None:
+        """Return the USN journal coverage report, if a journal is available."""
+        return self.usnjrnl.coverage() if self.usnjrnl else None
 
     @cached_property
     def serial(self) -> int | None:
