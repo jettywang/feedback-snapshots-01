@@ -7,6 +7,7 @@ from dissect.util.stream import RangeStream, RunlistStream
 from dissect.util.ts import wintimestamp
 
 from dissect.ntfs.c_ntfs import ATTRIBUTE_TYPE_CODE, IO_REPARSE_TAG, c_ntfs
+from dissect.ntfs.ea import parse_ea_entries
 from dissect.ntfs.exceptions import MftNotAvailableError, VolumeNotAvailableError
 from dissect.ntfs.util import ensure_volume, get_full_path, segment_reference, ts_to_ns, varint
 
@@ -593,9 +594,59 @@ class ReparsePoint(AttributeRecord):
         return self.tag_header.Flags == c_ntfs.SYMLINK_FLAG.RELATIVE
 
 
+class ExtendedAttributeInformation(AttributeRecord):
+    """Specific :class:`AttributeRecord` parser for ``$EA_INFORMATION``."""
+
+    __slots__ = ("attr",)
+
+    def __init__(self, fh: BinaryIO, record: MftRecord | None = None):
+        super().__init__(fh, record)
+        # Data can be less than the _EA_INFORMATION structure size, so pad remaining fields with null bytes
+        data = fh.read().ljust(len(c_ntfs._EA_INFORMATION), b"\x00")
+        self.attr = c_ntfs._EA_INFORMATION(data)
+
+    def __repr__(self) -> str:
+        return "<$EA_INFORMATION>"
+
+    @property
+    def ea_length(self) -> int:
+        """Return the packed size of the extended attributes."""
+        return self.attr.EaLength
+
+    @property
+    def need_ea_count(self) -> int:
+        """Return the number of extended attributes with the ``NEED_EA`` flag set."""
+        return self.attr.NeedEaCount
+
+    @property
+    def ea_query_length(self) -> int:
+        """Return the buffer size required to query the extended attributes."""
+        return self.attr.EaQueryLength
+
+
+class ExtendedAttribute(AttributeRecord):
+    """Specific :class:`AttributeRecord` parser for ``$EA``.
+
+    Entries are parsed defensively: a truncated entry stops the parse so trailing
+    bytes can never be mistaken for a complete entry.
+    """
+
+    __slots__ = ("data", "entries", "issues")
+
+    def __init__(self, fh: BinaryIO, record: MftRecord | None = None):
+        super().__init__(fh, record)
+        self.data = fh.read()
+        self.entries, self.issues, _ = parse_ea_entries(self.data)
+
+    def __repr__(self) -> str:
+        return "<$EA>"
+
+
 ATTRIBUTE_CLASS_MAP = {
     ATTRIBUTE_TYPE_CODE.STANDARD_INFORMATION: StandardInformation,
     ATTRIBUTE_TYPE_CODE.ATTRIBUTE_LIST: AttributeList,
     ATTRIBUTE_TYPE_CODE.FILE_NAME: FileName,
     ATTRIBUTE_TYPE_CODE.REPARSE_POINT: ReparsePoint,
+    ATTRIBUTE_TYPE_CODE.EA_INFORMATION: ExtendedAttributeInformation,
+    ATTRIBUTE_TYPE_CODE.EA: ExtendedAttribute,
 }

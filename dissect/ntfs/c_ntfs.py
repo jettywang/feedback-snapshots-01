@@ -170,6 +170,24 @@ typedef struct _ATTRIBUTE_LIST_ENTRY {
     WCHAR       AttributeName[AttributeNameLength];
 } ATTRIBUTE_LIST_ENTRY;
 
+typedef struct _EA_INFORMATION {
+    ULONG       EaLength;
+    USHORT      NeedEaCount;
+    ULONG       EaQueryLength;
+} EA_INFORMATION;
+
+flag EA_FLAG : UCHAR {
+    NEED_EA                 = 0x80,
+};
+
+typedef struct _FILE_FULL_EA_INFORMATION {
+    ULONG       NextEntryOffset;
+    UCHAR       Flags;
+    UCHAR       EaNameLength;
+    USHORT      EaValueLength;
+    CHAR        EaName[EaNameLength];
+} FILE_FULL_EA_INFORMATION;
+
 typedef struct _FILE_NAME {
     FILE_REFERENCE  ParentDirectory;
     LONGLONG    CreationTime;

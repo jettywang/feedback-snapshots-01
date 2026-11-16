@@ -310,6 +310,43 @@ class _c_ntfs(__cs__.cstruct):
         def __init__(self, fh: bytes | memoryview | bytearray | BinaryIO, /): ...
 
     ATTRIBUTE_LIST_ENTRY: TypeAlias = _ATTRIBUTE_LIST_ENTRY
+    class _EA_INFORMATION(__cs__.Structure):
+        EaLength: _c_ntfs.uint32
+        NeedEaCount: _c_ntfs.uint16
+        EaQueryLength: _c_ntfs.uint32
+        @overload
+        def __init__(
+            self,
+            EaLength: _c_ntfs.uint32 | None = ...,
+            NeedEaCount: _c_ntfs.uint16 | None = ...,
+            EaQueryLength: _c_ntfs.uint32 | None = ...,
+        ): ...
+        @overload
+        def __init__(self, fh: bytes | memoryview | bytearray | BinaryIO, /): ...
+
+    EA_INFORMATION: TypeAlias = _EA_INFORMATION
+    class EA_FLAG(__cs__.Flag):
+        NEED_EA = ...
+
+    class _FILE_FULL_EA_INFORMATION(__cs__.Structure):
+        NextEntryOffset: _c_ntfs.uint32
+        Flags: _c_ntfs.uint8
+        EaNameLength: _c_ntfs.uint8
+        EaValueLength: _c_ntfs.uint16
+        EaName: __cs__.CharArray
+        @overload
+        def __init__(
+            self,
+            NextEntryOffset: _c_ntfs.uint32 | None = ...,
+            Flags: _c_ntfs.uint8 | None = ...,
+            EaNameLength: _c_ntfs.uint8 | None = ...,
+            EaValueLength: _c_ntfs.uint16 | None = ...,
+            EaName: __cs__.CharArray | None = ...,
+        ): ...
+        @overload
+        def __init__(self, fh: bytes | memoryview | bytearray | BinaryIO, /): ...
+
+    FILE_FULL_EA_INFORMATION: TypeAlias = _FILE_FULL_EA_INFORMATION
     class _FILE_NAME(__cs__.Structure):
         ParentDirectory: _c_ntfs._MFT_SEGMENT_REFERENCE
         CreationTime: _c_ntfs.int64

@@ -17,6 +17,7 @@ from dissect.ntfs.c_ntfs import (
     IO_REPARSE_TAG,
     c_ntfs,
 )
+from dissect.ntfs.ea import EaView, ea_view
 from dissect.ntfs.exceptions import (
     BrokenMftError,
     Error,
@@ -506,6 +507,14 @@ class MftRecord:
             name: The index name to open. For example, ``"$I30"``.
         """
         return Index(self, name)
+
+    def ea_view(self) -> EaView:
+        """Build an extended attribute investigation view for this record.
+
+        Links every ``$EA`` entry (resident or non-resident) to the ``$EA_INFORMATION``
+        summary, with per-entry provenance and an overall consistency status.
+        """
+        return ea_view(self)
 
     def iterdir(self, dereference: bool = False, ignore_dos: bool = False) -> Iterator[IndexEntry | MftRecord]:
         """Yield directory entries of this record.

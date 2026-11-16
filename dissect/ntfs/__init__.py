@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dissect.ntfs.attr import Attribute, AttributeHeader, AttributeRecord
 from dissect.ntfs.c_ntfs import ATTRIBUTE_TYPE_CODE, NTFS_SIGNATURE
+from dissect.ntfs.ea import EaEntry, EaInformation, EaSource, EaStatus, EaView
 from dissect.ntfs.index import Index, IndexEntry
 from dissect.ntfs.mft import Mft, MftRecord
 from dissect.ntfs.ntfs import NTFS
@@ -17,6 +18,11 @@ __all__ = [
     "Attribute",
     "AttributeHeader",
     "AttributeRecord",
+    "EaEntry",
+    "EaInformation",
+    "EaSource",
+    "EaStatus",
+    "EaView",
     "Index",
     "IndexEntry",
     "Mft",
