@@ -8,7 +8,7 @@ from __future__ import annotations
 import io
 import stat
 from functools import cache, cached_property, lru_cache
-from typing import TYPE_CHECKING, BinaryIO
+from typing import TYPE_CHECKING, BinaryIO, NamedTuple
 from uuid import UUID
 
 from dissect.util import ts
@@ -28,6 +28,22 @@ from dissect.btrfs.tree import BTree
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from datetime import datetime
+
+
+class SubvolumeEdge(NamedTuple):
+    """A ROOT_REF relation between two roots, discovered during subvolume enumeration.
+
+    Attributes:
+        parent: Object ID of the root that holds the ROOT_REF item.
+        objectid: Object ID of the referenced root.
+        trusted: Whether this relation was followed during enumeration.
+        reason: If the relation was not followed, why not: ``"cycle"``, ``"duplicate"`` or ``"missing"``.
+    """
+
+    parent: int
+    objectid: int
+    trusted: bool
+    reason: str | None = None
 
 
 class Btrfs:
@@ -93,19 +109,68 @@ class Btrfs:
         return self.default_subvolume.get(path, node)
 
     def subvolumes(self) -> Iterator[Subvolume]:
-        """Yield all subvolumes."""
+        """Yield all subvolumes.
+
+        Traversal is controlled by root identity, so every reachable root is yielded exactly once,
+        even if the ROOT_REF graph contains duplicate, cyclic or dangling references.
+        Use :meth:`subvolume_edges` to inspect those abnormal relations.
+        """
         yield self.fs_tree
 
-        search_ids = [c_btrfs.BTRFS_FS_TREE_OBJECTID]
+        for edge in self.subvolume_edges():
+            if edge.trusted:
+                yield self.open_subvolume(edge.objectid)
 
+    def subvolume_edges(self) -> list[SubvolumeEdge]:
+        """Walk the ROOT_REF graph of the root tree and return all discovered relations.
+
+        Every encountered ROOT_REF is returned as a :class:`SubvolumeEdge`, including relations that
+        could not be followed. Edges that were followed during enumeration are marked as trusted.
+        Untrusted edges carry a reason:
+
+        -   ``"cycle"``: the referenced root is an ancestor of (or equal to) the referencing root.
+        -   ``"duplicate"``: the referenced root was already reached through another relation.
+        -   ``"missing"``: the referenced root has no root item in the root tree.
+
+        Untrusted edges are never followed, so a corrupted subgraph can neither loop the
+        enumeration nor hide other confirmable subvolumes.
+        """
+        edges = []
+        visited = {c_btrfs.BTRFS_FS_TREE_OBJECTID}
+        parents = {}
+
+        search_ids = [c_btrfs.BTRFS_FS_TREE_OBJECTID]
         cursor = self._root_tree.cursor()
         for object_id in search_ids:
             for item, _ in cursor.iter(
                 objectid=object_id, type=c_btrfs.BTRFS_ROOT_REF_KEY, offset=0, ignore_offset=True
             ):
-                search_ids.append(item.key.offset)
-                yield self.open_subvolume(item.key.offset)
+                target = item.key.offset
+                if target in visited:
+                    reason = "cycle" if _is_ancestor(parents, object_id, target) else "duplicate"
+                    edges.append(SubvolumeEdge(object_id, target, False, reason))
+                elif not self._has_root(target):
+                    edges.append(SubvolumeEdge(object_id, target, False, "missing"))
+                else:
+                    visited.add(target)
+                    parents[target] = object_id
+                    search_ids.append(target)
+                    edges.append(SubvolumeEdge(object_id, target, True))
             cursor.reset()
+
+        return edges
+
+    def _has_root(self, objectid: int) -> bool:
+        """Return whether a root item exists for the given object ID.
+
+        Args:
+            objectid: The object ID to check.
+        """
+        try:
+            self._root_tree.find(objectid, c_btrfs.BTRFS_ROOT_ITEM_KEY)
+        except KeyError:
+            return False
+        return True
 
     def find_subvolume(self, path: str | None = None) -> Subvolume | None:
         """Find a subvolume by path.
@@ -592,3 +657,16 @@ class INode:
 def _parse_ts(timespec: c_btrfs.btrfs_timespec) -> int:
     """Parse a Btrfs time specification into a nanosecond timestamp."""
     return (timespec.sec * 1000000000) + timespec.nsec
+
+
+def _is_ancestor(parents: dict[int, int], object_id: int, target: int) -> bool:
+    """Return whether ``target`` is ``object_id`` itself or one of its ancestors.
+
+    The ``parents`` map links every discovered root to the root it was first referenced by,
+    so walking it always terminates at the filesystem tree root.
+    """
+    while object_id != c_btrfs.BTRFS_FS_TREE_OBJECTID:
+        if object_id == target:
+            return True
+        object_id = parents[object_id]
+    return target == c_btrfs.BTRFS_FS_TREE_OBJECTID

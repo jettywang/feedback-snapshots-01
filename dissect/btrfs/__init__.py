@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dissect.btrfs.btrfs import Btrfs, INode, Subvolume
+from dissect.btrfs.btrfs import Btrfs, INode, Subvolume, SubvolumeEdge
 from dissect.btrfs.exceptions import (
     Error,
     FileNotFoundError,
@@ -16,4 +16,5 @@ __all__ = [
     "NotADirectoryError",
     "NotASymlinkError",
     "Subvolume",
+    "SubvolumeEdge",
 ]

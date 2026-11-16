@@ -2,14 +2,19 @@ from __future__ import annotations
 
 import datetime
 import hashlib
-from typing import BinaryIO
+from collections import Counter
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, BinaryIO
 
 import pytest
 from dissect.util.stream import BufferedStream
 
-from dissect.btrfs.btrfs import Btrfs
+from dissect.btrfs.btrfs import Btrfs, Subvolume, SubvolumeEdge
 from dissect.btrfs.c_btrfs import c_btrfs
 from dissect.btrfs.exceptions import Error
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 def assert_test_data(fs: Btrfs) -> None:
@@ -278,3 +283,121 @@ def test_btrfs_sparse(btrfs_sparse: BinaryIO) -> None:
     assert entry.open().read() == (b"\x01" * (4096 + 123)) + (b"\x02") + (b"\x01" * ((4096 * 19) - 124)) + (
         (b"\x00" * 4096) * 40
     )
+
+
+class FakeRootTree:
+    """Minimal root tree stand-in, serving scripted ROOT_REF edges and root items."""
+
+    def __init__(self, refs: dict[int, list[int]], roots: set[int]) -> None:
+        self.refs = refs
+        self.roots = roots
+        self.iterations: Counter[int] = Counter()
+
+    def cursor(self) -> FakeRootTreeCursor:
+        return FakeRootTreeCursor(self)
+
+    def find(self, objectid: int | None = None, type: int | None = None, offset: int | None = None) -> tuple:
+        if type == c_btrfs.BTRFS_ROOT_ITEM_KEY and objectid in self.roots:
+            return None, None
+        raise KeyError(objectid)
+
+
+class FakeRootTreeCursor:
+    def __init__(self, tree: FakeRootTree) -> None:
+        self.tree = tree
+
+    def reset(self) -> None:
+        pass
+
+    def iter(
+        self,
+        objectid: int | None = None,
+        type: int | None = None,
+        offset: int | None = None,
+        ignore_offset: bool = False,
+    ) -> Iterator[tuple]:
+        self.tree.iterations[objectid] += 1
+        for target in self.tree.refs.get(objectid, []):
+            key = SimpleNamespace(objectid=objectid, type=type, offset=target)
+            yield SimpleNamespace(key=key), None
+
+
+def make_ref_fs(refs: dict[int, list[int]], roots: set[int]) -> Btrfs:
+    """Build a Btrfs instance that enumerates subvolumes from a scripted ROOT_REF graph."""
+    fs = object.__new__(Btrfs)
+    fs._root_tree = FakeRootTree(refs, roots)
+    fs.fs_tree = Subvolume(fs, c_btrfs.BTRFS_FS_TREE_OBJECTID)
+    return fs
+
+
+def test_btrfs_subvolumes_cycle() -> None:
+    """A cycle in the ROOT_REF graph must terminate and be reported as an untrusted edge."""
+    fs = make_ref_fs({5: [256], 256: [257], 257: [256]}, {5, 256, 257})
+
+    subvolumes = list(fs.subvolumes())
+    assert [subvol.objectid for subvol in subvolumes] == [5, 256, 257]
+    # Every root is visited exactly once, so enumeration is bounded
+    assert dict(fs._root_tree.iterations) == {5: 1, 256: 1, 257: 1}
+
+    assert fs.subvolume_edges() == [
+        SubvolumeEdge(5, 256, True),
+        SubvolumeEdge(256, 257, True),
+        SubvolumeEdge(257, 256, False, "cycle"),
+    ]
+
+
+def test_btrfs_subvolumes_self_loop_and_duplicate_ref() -> None:
+    """Self loops and repeated ROOT_REF items are reported but not followed."""
+    fs = make_ref_fs({5: [256, 256], 256: [256]}, {5, 256})
+
+    subvolumes = list(fs.subvolumes())
+    assert [subvol.objectid for subvol in subvolumes] == [5, 256]
+    assert dict(fs._root_tree.iterations) == {5: 1, 256: 1}
+
+    assert fs.subvolume_edges() == [
+        SubvolumeEdge(5, 256, True),
+        SubvolumeEdge(5, 256, False, "duplicate"),
+        SubvolumeEdge(256, 256, False, "cycle"),
+    ]
+
+
+def test_btrfs_subvolumes_diamond() -> None:
+    """A subvolume referenced from multiple parents is yielded once, but all edges are kept."""
+    fs = make_ref_fs({5: [256, 257], 256: [258], 257: [258]}, {5, 256, 257, 258})
+
+    subvolumes = list(fs.subvolumes())
+    assert [subvol.objectid for subvol in subvolumes] == [5, 256, 257, 258]
+    assert dict(fs._root_tree.iterations) == {5: 1, 256: 1, 257: 1, 258: 1}
+
+    assert fs.subvolume_edges() == [
+        SubvolumeEdge(5, 256, True),
+        SubvolumeEdge(5, 257, True),
+        SubvolumeEdge(256, 258, True),
+        SubvolumeEdge(257, 258, False, "duplicate"),
+    ]
+
+
+def test_btrfs_subvolumes_missing_root() -> None:
+    """A dangling ROOT_REF must not mask other confirmable subvolumes."""
+    fs = make_ref_fs({5: [999, 256], 256: [888]}, {5, 256})
+
+    subvolumes = list(fs.subvolumes())
+    assert [subvol.objectid for subvol in subvolumes] == [5, 256]
+
+    assert fs.subvolume_edges() == [
+        SubvolumeEdge(5, 999, False, "missing"),
+        SubvolumeEdge(5, 256, True),
+        SubvolumeEdge(256, 888, False, "missing"),
+    ]
+    # Dangling targets are never descended into
+    assert 999 not in fs._root_tree.iterations
+    assert 888 not in fs._root_tree.iterations
+
+
+def test_btrfs_subvolume_nested_edges(btrfs_subvolume_nested: BinaryIO) -> None:
+    """A healthy nested subvolume graph only produces trusted edges."""
+    fs = Btrfs(btrfs_subvolume_nested)
+
+    edges = fs.subvolume_edges()
+    assert all(edge.trusted for edge in edges)
+    assert sorted(edge.objectid for edge in edges) == [256, 257, 258]
