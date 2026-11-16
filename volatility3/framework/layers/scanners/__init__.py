@@ -20,14 +20,16 @@ class BytesScanner(layers.ScannerInterface):
         self.needle = needle
 
     def __call__(self, data: bytes, data_offset: int) -> Generator[int, None, None]:
-        """Runs through the data looking for the needle, and yields all offsets
-        where the needle is found."""
+        """Runs through the data looking for the needle, and yields the
+        absolute logical offset of every occurrence.
+
+        Matches that start inside a chunk's trailing overlap are yielded here
+        but discarded centrally by the scanning framework (they are re-scanned
+        at the start of the next chunk), so each logical match is reported once
+        regardless of chunk size or parallel scheduling."""
         find_pos = data.find(self.needle)
         while find_pos >= 0:
-            # Ensure that if we're in the overlap, we don't report it
-            # It'll be returned when the next block is scanned
-            if find_pos < self.chunk_size:
-                yield find_pos + data_offset
+            yield find_pos + data_offset
             find_pos = data.find(self.needle, find_pos + 1)
 
 
@@ -49,13 +51,16 @@ class RegExScanner(layers.ScannerInterface):
         self.regex = re.compile(pattern, flags)
 
     def __call__(self, data: bytes, data_offset: int) -> Generator[int, None, None]:
-        """Runs through the data looking for the needle, and yields all offsets
-        where the needle is found."""
+        """Runs through the data looking for the regular expression, and yields
+        the absolute logical offset of every match.
+
+        Matches that start inside a chunk's trailing overlap are yielded here
+        but discarded centrally by the scanning framework (they are re-scanned
+        at the start of the next chunk), so each logical match is reported once
+        regardless of chunk size or parallel scheduling."""
         find_pos = self.regex.finditer(data)
         for match in find_pos:
-            offset = match.start()
-            if offset < self.chunk_size:
-                yield offset + data_offset
+            yield match.start() + data_offset
 
 
 class MultiStringScanner(layers.ScannerInterface):
@@ -127,10 +132,15 @@ class MultiStringScanner(layers.ScannerInterface):
     def __call__(
         self, data: bytes, data_offset: int
     ) -> Generator[Tuple[int, bytes], None, None]:
-        """Runs through the data looking for the needles."""
+        """Runs through the data looking for the needles, yielding the absolute
+        logical offset and matched pattern of every occurrence.
+
+        Matches that start inside a chunk's trailing overlap are yielded here
+        but discarded centrally by the scanning framework (they are re-scanned
+        at the start of the next chunk), so each logical match is reported once
+        regardless of chunk size or parallel scheduling."""
         for offset, pattern in self.search(data):
-            if offset < self.chunk_size:
-                yield offset + data_offset, pattern
+            yield offset + data_offset, pattern
 
     def search(self, haystack: bytes) -> Generator[Tuple[int, bytes], None, None]:
         if not isinstance(haystack, bytes):

@@ -75,6 +75,39 @@ class BufferDataLayer(interfaces.layers.DataLayerInterface):
         ]
 
 
+class CountingBufferDataLayer(BufferDataLayer):
+    """A :class:`BufferDataLayer` that records how much data is read.
+
+    The counters make the effect of overlap de-duplication visible without a
+    large memory image: scanning the same buffer with the overlap cache enabled
+    must request fewer bytes from the underlying layer than scanning it without
+    the cache, while producing the same result set.
+    """
+
+    def __init__(
+        self,
+        context: interfaces.context.ContextInterface,
+        config_path: str,
+        name: str,
+        buffer: bytes,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(
+            context=context,
+            config_path=config_path,
+            name=name,
+            buffer=buffer,
+            metadata=metadata,
+        )
+        self.read_calls = 0
+        self.bytes_read = 0
+
+    def read(self, address: int, length: int, pad: bool = False) -> bytes:
+        self.read_calls += 1
+        self.bytes_read += length
+        return super().read(address, length, pad)
+
+
 class DummyLock:
     def __enter__(self) -> None:
         pass
