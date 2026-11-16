@@ -27,6 +27,16 @@ from ._exceptions import (
     request_context,
 )
 from ._models import Cookies, Headers, Request, Response
+from ._proxy import (
+    ENVIRONMENT_BYPASS,
+    ENVIRONMENT_PROXY,
+    EXPLICIT_BYPASS,
+    EXPLICIT_PROXY,
+    UNPARSEABLE_RULE,
+    ProxyDecision,
+    ProxyRule,
+    explain_proxy_rules,
+)
 from ._status_codes import codes
 from ._transports.base import AsyncBaseTransport, BaseTransport
 from ._transports.default import AsyncHTTPTransport, HTTPTransport
@@ -46,12 +56,22 @@ from ._types import (
     TimeoutTypes,
 )
 from ._urls import URL, QueryParams
-from ._utils import URLPattern, get_environment_proxies
+from ._utils import (
+    NO_PROXY_WILDCARD_KEY,
+    URLPattern,
+    get_environment_proxy_entries,
+)
 
 if typing.TYPE_CHECKING:
     import ssl  # pragma: no cover
 
-__all__ = ["USE_CLIENT_DEFAULT", "AsyncClient", "Client"]
+__all__ = [
+    "USE_CLIENT_DEFAULT",
+    "AsyncClient",
+    "Client",
+    "ProxyDecision",
+    "ProxyRule",
+]
 
 # The type annotation for @classmethod and context managers here follows PEP 484
 # https://www.python.org/dev/peps/pep-0484/#annotating-instance-and-class-methods
@@ -184,6 +204,10 @@ class BoundAsyncStream(AsyncByteStream):
 
 EventHook = typing.Callable[..., typing.Any]
 
+# The shared `BaseClient` helpers deal in either kind of transport, since the
+# sync and async clients both build `ProxyRule` lists through them.
+AnyTransport = BaseTransport | AsyncBaseTransport
+
 
 class BaseClient:
     def __init__(
@@ -241,14 +265,243 @@ class BaseClient:
     ) -> dict[str, Proxy | None]:
         if proxy is None:
             if allow_env_proxies:
-                return {
-                    key: None if url is None else Proxy(url=url)
-                    for key, url in get_environment_proxies().items()
-                }
+                proxy_map: dict[str, Proxy | None] = {}
+                for entry in get_environment_proxy_entries():
+                    if entry.key == NO_PROXY_WILDCARD_KEY:
+                        # `NO_PROXY=*` bypasses every request.
+                        return {}
+                    try:
+                        URLPattern(entry.key)
+                    except (ValueError, InvalidURL):
+                        # An unparseable environment rule cannot drive a
+                        # transport; it is retained by the explanation layer
+                        # but skipped here.
+                        continue
+                    proxy_map[entry.key] = (
+                        None
+                        if entry.proxy_url is None
+                        else Proxy(url=entry.proxy_url)
+                    )
+                return proxy_map
             return {}
         else:
             proxy = Proxy(url=proxy) if isinstance(proxy, (str, URL)) else proxy
             return {"all://": proxy}
+
+    def _build_proxy_rules(
+        self,
+        *,
+        proxy: ProxyTypes | None,
+        mounts: typing.Mapping[str, AnyTransport | None] | None,
+        allow_env_proxies: bool,
+        proxy_transport: AnyTransport | None,
+        env_proxy_transports: typing.Mapping[str, AnyTransport],
+    ) -> list[ProxyRule]:
+        """
+        Build the ordered list of routing rules shared by transport selection
+        and by `explain_proxy()`. Both code paths consume exactly this list,
+        so an explanation can never describe a rule that the send chain would
+        not actually apply.
+        """
+        rules: list[ProxyRule] = []
+
+        if proxy is not None:
+            explicit_proxy = (
+                Proxy(url=proxy) if isinstance(proxy, (str, URL)) else proxy
+            )
+            rules.append(
+                ProxyRule(
+                    key="all://",
+                    kind=EXPLICIT_PROXY,
+                    source="proxy argument",
+                    transport=proxy_transport,
+                    direct=False,
+                    proxy_url=explicit_proxy.url,
+                    pattern=URLPattern("all://"),
+                )
+            )
+        elif allow_env_proxies:
+            for entry in get_environment_proxy_entries():
+                if entry.key == NO_PROXY_WILDCARD_KEY:
+                    # `NO_PROXY=*` bypasses everything. A wildcard host pattern
+                    # only matches a literal "*" host, so ordinary URLs miss
+                    # this rule and fall through to the default transport.
+                    rules.append(
+                        ProxyRule(
+                            key=entry.key,
+                            kind=ENVIRONMENT_BYPASS,
+                            source=entry.source,
+                            transport=None,
+                            direct=True,
+                            proxy_url=None,
+                            pattern=URLPattern(entry.key),
+                            error=None,
+                        )
+                    )
+                    continue
+
+                try:
+                    pattern = URLPattern(entry.key)
+                except (ValueError, InvalidURL) as exc:
+                    # An unparseable environment rule can neither match a URL
+                    # nor drive a transport, so it is recorded for the
+                    # explanation instead of taking the client down.
+                    rules.append(
+                        ProxyRule(
+                            key=entry.key,
+                            kind=UNPARSEABLE_RULE,
+                            source=entry.source,
+                            transport=None,
+                            direct=True,
+                            proxy_url=None,
+                            pattern=None,
+                            error=str(exc),
+                        )
+                    )
+                    continue
+
+                if entry.proxy_url is None:
+                    rules.append(
+                        ProxyRule(
+                            key=entry.key,
+                            kind=ENVIRONMENT_BYPASS,
+                            source=entry.source,
+                            transport=None,
+                            direct=True,
+                            proxy_url=None,
+                            pattern=pattern,
+                        )
+                    )
+                else:
+                    # Mirror `Proxy`, which strips credentials from the URL and
+                    # keeps them in the auth tuple, so explanations never carry
+                    # proxy passwords.
+                    proxy_url = URL(entry.proxy_url)
+                    if proxy_url.username or proxy_url.password:
+                        proxy_url = proxy_url.copy_with(
+                            username=None, password=None
+                        )
+                    rules.append(
+                        ProxyRule(
+                            key=entry.key,
+                            kind=ENVIRONMENT_PROXY,
+                            source=entry.source,
+                            transport=env_proxy_transports[entry.key],
+                            direct=False,
+                            proxy_url=proxy_url,
+                            pattern=pattern,
+                        )
+                    )
+
+        if mounts is not None:
+            for key, mount_transport in mounts.items():
+                try:
+                    pattern = URLPattern(key)
+                except (ValueError, InvalidURL) as exc:
+                    # Explicit mounts keep raising on construction, but the
+                    # raw entry is still recorded so an explanation can show
+                    # why no transport was derived from it.
+                    rules.append(
+                        ProxyRule(
+                            key=key,
+                            kind=UNPARSEABLE_RULE,
+                            source="mounts argument",
+                            transport=None,
+                            direct=True,
+                            proxy_url=None,
+                            pattern=None,
+                            error=str(exc),
+                        )
+                    )
+                    raise
+                if mount_transport is None:
+                    rules.append(
+                        ProxyRule(
+                            key=key,
+                            kind=EXPLICIT_BYPASS,
+                            source="mounts argument",
+                            transport=None,
+                            direct=True,
+                            proxy_url=None,
+                            pattern=pattern,
+                        )
+                    )
+                else:
+                    rules.append(
+                        ProxyRule(
+                            key=key,
+                            kind=EXPLICIT_PROXY,
+                            source="mounts argument",
+                            transport=mount_transport,
+                            direct=False,
+                            proxy_url=self._proxy_url_of_transport(mount_transport),
+                            pattern=pattern,
+                        )
+                    )
+
+        return self._sort_proxy_rules(rules)
+
+    @staticmethod
+    def _proxy_url_of_transport(transport: AnyTransport) -> URL | None:
+        # The default transports expose the configured proxy through their
+        # underlying httpcore connection pool. Other transports (e.g.
+        # MockTransport) do not carry a proxy URL.
+        pool = getattr(transport, "_pool", None)
+        proxy_url = getattr(pool, "_proxy_url", None)
+        if proxy_url is None:
+            return None
+        return URL(
+            scheme=proxy_url.scheme.decode("ascii"),
+            host=proxy_url.host.decode("ascii"),
+            port=proxy_url.port,
+        )
+
+    @staticmethod
+    def _sort_proxy_rules(rules: list[ProxyRule]) -> list[ProxyRule]:
+        # Explicit mounts are appended after the environment-derived rules, so
+        # deduplicating by pattern with last-write-wins preserves the previous
+        # dict-update semantics where explicit mounts override environment
+        # rules for the same key. `URLPattern` ordering then puts the most
+        # specific remaining rule first, matching `_mounts` first-match-wins.
+        deduped: dict[URLPattern, ProxyRule] = {}
+        unparseable: list[ProxyRule] = []
+        for rule in rules:
+            if rule.pattern is None:
+                unparseable.append(rule)
+            else:
+                deduped[rule.pattern] = rule
+        return unparseable + sorted(deduped.values(), key=lambda item: item.pattern)
+
+    def _select_transport(
+        self, url: URL
+    ) -> tuple[AnyTransport, ProxyRule | None]:
+        for rule in self._proxy_rules:
+            if not rule.unparseable and rule.matches(url):
+                return (
+                    self._transport
+                    if rule.transport is None
+                    else rule.transport
+                ), rule
+        return self._transport, None
+
+    def explain_proxy(self, url: URL | str) -> ProxyDecision:
+        """
+        Explain how an outbound request to `url` would be routed.
+
+        The evaluation reuses the client's ordered routing rules, so the
+        reported transport is the very same instance used when sending a
+        request. No DNS lookups are performed and proxy passwords are never
+        included. Note that proxy selection is not an SSRF defence: it only
+        records whether a request goes direct or through a configured proxy.
+        """
+        if not isinstance(url, URL):
+            url = URL(url)
+        return explain_proxy_rules(
+            url,
+            self._proxy_rules,
+            transport=self._transport,
+            trust_env=self._trust_env,
+        )
 
     @property
     def timeout(self) -> Timeout:
@@ -694,11 +947,14 @@ class Client(BaseClient):
             limits=limits,
             transport=transport,
         )
-        self._mounts: dict[URLPattern, BaseTransport | None] = {
-            URLPattern(key): None
-            if proxy is None
-            else self._init_proxy_transport(
-                proxy,
+
+        proxy_transport: BaseTransport | None = None
+        if proxy is not None:
+            explicit_proxy = (
+                Proxy(url=proxy) if isinstance(proxy, (str, URL)) else proxy
+            )
+            proxy_transport = self._init_proxy_transport(
+                explicit_proxy,
                 verify=verify,
                 cert=cert,
                 trust_env=trust_env,
@@ -706,14 +962,33 @@ class Client(BaseClient):
                 http2=http2,
                 limits=limits,
             )
-            for key, proxy in proxy_map.items()
-        }
-        if mounts is not None:
-            self._mounts.update(
-                {URLPattern(key): transport for key, transport in mounts.items()}
-            )
 
-        self._mounts = dict(sorted(self._mounts.items()))
+        env_proxy_transports = {
+            key: self._init_proxy_transport(
+                proxy_instance,
+                verify=verify,
+                cert=cert,
+                trust_env=trust_env,
+                http1=http1,
+                http2=http2,
+                limits=limits,
+            )
+            for key, proxy_instance in proxy_map.items()
+            if proxy_instance is not None
+        }
+
+        self._proxy_rules: list[ProxyRule] = self._build_proxy_rules(
+            proxy=proxy,
+            mounts=mounts,
+            allow_env_proxies=allow_env_proxies,
+            proxy_transport=proxy_transport,
+            env_proxy_transports=env_proxy_transports,
+        )
+        self._mounts: dict[URLPattern, BaseTransport | None] = {
+            rule.pattern: rule.transport
+            for rule in self._proxy_rules
+            if rule.pattern is not None
+        }
 
     def _init_transport(
         self,
@@ -762,11 +1037,8 @@ class Client(BaseClient):
         Returns the transport instance that should be used for a given URL.
         This will either be the standard connection pool, or a proxy.
         """
-        for pattern, transport in self._mounts.items():
-            if pattern.matches(url):
-                return self._transport if transport is None else transport
-
-        return self._transport
+        transport, _ = self._select_transport(url)
+        return typing.cast(BaseTransport, transport)
 
     def request(
         self,
@@ -1009,6 +1281,9 @@ class Client(BaseClient):
             raise RuntimeError(
                 "Attempted to send an async request with a sync Client instance."
             )
+
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("%s", self.explain_proxy(request.url).masked_summary())
 
         with request_context(request=request):
             response = transport.handle_request(request)
@@ -1409,11 +1684,13 @@ class AsyncClient(BaseClient):
             transport=transport,
         )
 
-        self._mounts: dict[URLPattern, AsyncBaseTransport | None] = {
-            URLPattern(key): None
-            if proxy is None
-            else self._init_proxy_transport(
-                proxy,
+        proxy_transport: AsyncBaseTransport | None = None
+        if proxy is not None:
+            explicit_proxy = (
+                Proxy(url=proxy) if isinstance(proxy, (str, URL)) else proxy
+            )
+            proxy_transport = self._init_proxy_transport(
+                explicit_proxy,
                 verify=verify,
                 cert=cert,
                 trust_env=trust_env,
@@ -1421,13 +1698,33 @@ class AsyncClient(BaseClient):
                 http2=http2,
                 limits=limits,
             )
-            for key, proxy in proxy_map.items()
-        }
-        if mounts is not None:
-            self._mounts.update(
-                {URLPattern(key): transport for key, transport in mounts.items()}
+
+        env_proxy_transports = {
+            key: self._init_proxy_transport(
+                proxy_instance,
+                verify=verify,
+                cert=cert,
+                trust_env=trust_env,
+                http1=http1,
+                http2=http2,
+                limits=limits,
             )
-        self._mounts = dict(sorted(self._mounts.items()))
+            for key, proxy_instance in proxy_map.items()
+            if proxy_instance is not None
+        }
+
+        self._proxy_rules: list[ProxyRule] = self._build_proxy_rules(
+            proxy=proxy,
+            mounts=mounts,
+            allow_env_proxies=allow_env_proxies,
+            proxy_transport=proxy_transport,
+            env_proxy_transports=env_proxy_transports,
+        )
+        self._mounts: dict[URLPattern, AsyncBaseTransport | None] = {
+            rule.pattern: rule.transport
+            for rule in self._proxy_rules
+            if rule.pattern is not None
+        }
 
     def _init_transport(
         self,
@@ -1476,11 +1773,8 @@ class AsyncClient(BaseClient):
         Returns the transport instance that should be used for a given URL.
         This will either be the standard connection pool, or a proxy.
         """
-        for pattern, transport in self._mounts.items():
-            if pattern.matches(url):
-                return self._transport if transport is None else transport
-
-        return self._transport
+        transport, _ = self._select_transport(url)
+        return typing.cast(AsyncBaseTransport, transport)
 
     async def request(
         self,
@@ -1725,6 +2019,9 @@ class AsyncClient(BaseClient):
             raise RuntimeError(
                 "Attempted to send a sync request with an AsyncClient instance."
             )
+
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("%s", self.explain_proxy(request.url).masked_summary())
 
         with request_context(request=request):
             response = await transport.handle_async_request(request)

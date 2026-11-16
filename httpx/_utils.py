@@ -4,12 +4,31 @@ import ipaddress
 import os
 import re
 import typing
+from dataclasses import dataclass
 from urllib.request import getproxies
 
 from ._types import PrimitiveData
 
 if typing.TYPE_CHECKING:  # pragma: no cover
     from ._urls import URL
+
+
+@dataclass(frozen=True)
+class EnvProxyEntry:
+    """
+    A single proxy rule derived from the process environment.
+
+    `key` is the mount-style URL pattern the rule maps to (for example
+    `"http://"` or `"all://*example.com"`). `proxy_url` is `None` for
+    `NO_PROXY` bypass entries, and the (still raw, possibly credentialed)
+    proxy URL for `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` entries.
+    `source` records the environment variable, including its original
+    casing, that the entry came from.
+    """
+
+    key: str
+    proxy_url: str | None
+    source: str
 
 
 def primitive_value_to_str(value: PrimitiveData) -> str:
@@ -27,53 +46,112 @@ def primitive_value_to_str(value: PrimitiveData) -> str:
     return str(value)
 
 
-def get_environment_proxies() -> dict[str, str | None]:
-    """Gets proxy information from the environment"""
+def _environment_variable_for(value: str, names: tuple[str, ...]) -> str:
+    """
+    Return the environment variable (preserving its original casing) whose
+    value matches `value`, checking `names` in order. The comparison is case
+    insensitive because proxy variables are commonly read in either casing.
+    Falls back to the first name when the value was supplied outside of the
+    environment, such as via the Windows registry or the macOS system
+    configuration.
+    """
+    for name in names:
+        env_value = os.environ.get(name)
+        if env_value is not None and env_value.lower() == value.lower():
+            return name
+    return names[0]
+
+
+# Sentinel mount key representing a `NO_PROXY=*` rule that bypasses every
+# request. The bare "*" host only matches a URL whose host is literally "*",
+# so requests with ordinary hosts fall through to the direct connection pool.
+NO_PROXY_WILDCARD_KEY = "all://*"
+
+
+def _no_proxy_key(hostname: str) -> str:
+    # See https://curl.haxx.se/libcurl/c/CURLOPT_NOPROXY.html for details
+    # on how names in `NO_PROXY` are handled.
+    # NO_PROXY=.google.com is marked as "all://*.google.com,
+    #   which disables "www.google.com" but not "google.com"
+    # NO_PROXY=google.com is marked as "all://*google.com,
+    #   which disables "www.google.com" and "google.com".
+    #   (But not "wwwgoogle.com")
+    # NO_PROXY can include domains, IPv6, IPv4 addresses and "localhost"
+    #   NO_PROXY=example.com,::1,localhost,192.168.0.0/16
+    if "://" in hostname:
+        return hostname
+    elif is_ipv4_hostname(hostname):
+        return f"all://{hostname}"
+    elif is_ipv6_hostname(hostname):
+        return f"all://[{hostname}]"
+    elif hostname.lower() == "localhost":
+        return f"all://{hostname}"
+    else:
+        return f"all://*{hostname}"
+
+
+def get_environment_proxy_entries() -> list[EnvProxyEntry]:
+    """
+    Gets proxy information from the environment, as ordered rule entries that
+    also record which environment variable each rule came from.
+    """
 
     # urllib.request.getproxies() falls back on System
     # Registry and Config for proxies on Windows and macOS.
     # We don't want to propagate non-HTTP proxies into
     # our configuration such as 'TRAVIS_APT_PROXY'.
     proxy_info = getproxies()
-    mounts: dict[str, str | None] = {}
+    entries: list[EnvProxyEntry] = []
 
+    scheme_variables = {
+        "http": ("HTTP_PROXY", "http_proxy"),
+        "https": ("HTTPS_PROXY", "https_proxy"),
+        "all": ("ALL_PROXY", "all_proxy"),
+    }
     for scheme in ("http", "https", "all"):
         if proxy_info.get(scheme):
             hostname = proxy_info[scheme]
-            mounts[f"{scheme}://"] = (
-                hostname if "://" in hostname else f"http://{hostname}"
+            key = f"{scheme}://"
+            proxy_url = hostname if "://" in hostname else f"http://{hostname}"
+            source = _environment_variable_for(
+                proxy_info[scheme], scheme_variables[scheme]
             )
+            entries.append(EnvProxyEntry(key=key, proxy_url=proxy_url, source=source))
 
-    no_proxy_hosts = [host.strip() for host in proxy_info.get("no", "").split(",")]
+    no_proxy_value = proxy_info.get("no", "")
+    no_proxy_source = _environment_variable_for(
+        no_proxy_value, ("NO_PROXY", "no_proxy")
+    )
+    no_proxy_hosts = [host.strip() for host in no_proxy_value.split(",")]
     for hostname in no_proxy_hosts:
-        # See https://curl.haxx.se/libcurl/c/CURLOPT_NOPROXY.html for details
-        # on how names in `NO_PROXY` are handled.
         if hostname == "*":
             # If NO_PROXY=* is used or if "*" occurs as any one of the comma
             # separated hostnames, then we should just bypass any information
             # from HTTP_PROXY, HTTPS_PROXY, ALL_PROXY, and always ignore
             # proxies.
-            return {}
+            return [
+                EnvProxyEntry(
+                    key=NO_PROXY_WILDCARD_KEY, proxy_url=None, source=no_proxy_source
+                )
+            ]
         elif hostname:
-            # NO_PROXY=.google.com is marked as "all://*.google.com,
-            #   which disables "www.google.com" but not "google.com"
-            # NO_PROXY=google.com is marked as "all://*google.com,
-            #   which disables "www.google.com" and "google.com".
-            #   (But not "wwwgoogle.com")
-            # NO_PROXY can include domains, IPv6, IPv4 addresses and "localhost"
-            #   NO_PROXY=example.com,::1,localhost,192.168.0.0/16
-            if "://" in hostname:
-                mounts[hostname] = None
-            elif is_ipv4_hostname(hostname):
-                mounts[f"all://{hostname}"] = None
-            elif is_ipv6_hostname(hostname):
-                mounts[f"all://[{hostname}]"] = None
-            elif hostname.lower() == "localhost":
-                mounts[f"all://{hostname}"] = None
-            else:
-                mounts[f"all://*{hostname}"] = None
+            entries.append(
+                EnvProxyEntry(
+                    key=_no_proxy_key(hostname),
+                    proxy_url=None,
+                    source=no_proxy_source,
+                )
+            )
 
-    return mounts
+    return entries
+
+
+def get_environment_proxies() -> dict[str, str | None]:
+    """Gets proxy information from the environment"""
+    entries = get_environment_proxy_entries()
+    if len(entries) == 1 and entries[0].key == NO_PROXY_WILDCARD_KEY:
+        return {}
+    return {entry.key: entry.proxy_url for entry in entries}
 
 
 def to_bytes(value: str | bytes, encoding: str = "utf-8") -> bytes:

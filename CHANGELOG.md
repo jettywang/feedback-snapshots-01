@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 
 * Expose `FunctionAuth` from the public API. (#3699)
+* Add `Client.explain_proxy()`/`AsyncClient.explain_proxy()` returning a `ProxyDecision` that records whether a request connects directly or via a proxy, together with the matched rule, its source (`trust_env` variables, `NO_PROXY` or explicit mounts) and the exact transport that would handle the request. Proxy credentials are omitted and no DNS resolution is performed.
 
 ## 0.28.1 (6th December, 2024)
 

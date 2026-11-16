@@ -65,6 +65,32 @@ How exactly step 2/ is performed depends on which of two proxying mechanisms is 
 
 If you encounter issues when setting up proxies, please refer to our [Troubleshooting guide](../troubleshooting.md#proxies).
 
+## Explaining proxy selection
+
+Managed backends sometimes need an auditable answer to "for this outbound request, did we connect directly, and if not which proxy rule applied?". `Client.explain_proxy()` (also available on `AsyncClient`) evaluates the same ordered routing rules used by the send chain — `trust_env` proxies, `NO_PROXY` bypasses and explicit `mounts`, matched against the target scheme, host and port — and returns a `ProxyDecision` describing the outcome.
+
+```python
+decision = client.explain_proxy("https://internal.example.com/v1")
+
+print(decision.outcome)        # "direct" or "proxied"
+print(decision.direct)         # True for a direct connection
+print(decision.matched_key)    # e.g. "all://*example.com"
+print(decision.source)         # e.g. "NO_PROXY", "HTTP_PROXY" or "mounts argument"
+print(decision.transport)      # the exact transport used to send the request
+print(decision.masked_summary())
+# Proxy decision for https://internal.example.com/v1: direct connection (...)
+```
+
+Because the explanation is produced from the client's own rule list rather than a parallel interpreter, `decision.transport` is guaranteed to be the same transport instance that `client.send(...)` would call. The ordered `decision.rules` list keeps every candidate with its `kind`, `source` and match pattern, so rule precedence and conflicts between environment and explicit mounts are visible. Any rule that could not be parsed is reported with `kind="unparseable_rule"` and an `error` message instead of silently disappearing.
+
+Matching reuses httpx's `URLPattern` logic. Exact hosts, subdomain rules (`*.example.com` vs `*example.com`) and IPv6 literals are therefore distinct — a domain is never treated as matching by a naive string suffix. A debug-level log line using `masked_summary()` is emitted for each request when the `"httpx"` logger is set to `DEBUG`.
+
+The explanation only describes routing:
+
+* Proxy passwords are never included; credentialed proxy URLs have their userinfo stripped, and `masked_summary()` masks any remaining password.
+* No DNS resolution is performed. The target host is treated purely as a string.
+* Recording that a request goes direct or through a proxy is **not** itself an SSRF defence — it explains the routing decision, it does not validate or block the destination.
+
 ## SOCKS
 
 In addition to HTTP proxies, `httpcore` also supports proxies using the SOCKS protocol.
