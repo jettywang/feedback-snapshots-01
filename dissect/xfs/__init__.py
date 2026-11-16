@@ -8,6 +8,7 @@ from dissect.xfs.exceptions import (
     SymlinkUnavailableException,
     UnsupportedDataforkException,
 )
+from dissect.xfs.recovery import ResidualDirEntry
 from dissect.xfs.xfs import XFS
 
 __all__ = [
@@ -16,6 +17,7 @@ __all__ = [
     "FileNotFoundError",
     "NotADirectoryError",
     "NotASymlinkError",
+    "ResidualDirEntry",
     "SymlinkUnavailableException",
     "UnsupportedDataforkException",
 ]

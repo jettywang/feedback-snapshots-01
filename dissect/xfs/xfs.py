@@ -19,6 +19,7 @@ from dissect.xfs.exceptions import (
     NotASymlinkError,
     UnsupportedDataforkException,
 )
+from dissect.xfs.recovery import ResidualDirEntry, iter_residual_entries
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -357,6 +358,18 @@ class INode:
         return {node.filename: node for node in self.iterdir()}
 
     dirlist = listdir
+
+    def iterdir_residual(self) -> Iterator[ResidualDirEntry]:
+        """Iterate residual (possibly deleted) directory entry candidates.
+
+        This is an independent recovery view over the free records in the
+        directory data blocks. Candidates are never part of ``listdir`` and
+        must not be treated as definite paths.
+        """
+        if self.filetype != stat.S_IFDIR:
+            raise NotADirectoryError(f"{self!r} is not a directory")
+
+        yield from iter_residual_entries(self)
 
     def iterdir(self) -> Iterator[INode]:
         if self.filetype != stat.S_IFDIR:
