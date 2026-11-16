@@ -47,16 +47,27 @@ class NonLinearlySegmentedLayer(
 
     def is_valid(self, offset: int, length: int = 1) -> bool:
         """Returns whether the address offset can be translated to a valid
-        address."""
+        address.
+
+        Every mapped chunk is checked against the base layer over its full
+        *mapped* (physical) extent, not merely at its first byte. A segment may
+        start on a valid byte while the remainder of its mapped range is missing
+        in the base layer; such a range must not be reported as fully readable.
+        The mapped length is used rather than the logical length because, for
+        non-linearly mapped layers (such as compressed blocks), the two differ.
+        """
         try:
             base_layer = self._context.layers[self._base_layer]
             return all(
-                base_layer.is_valid(mapped_offset)
-                for _i, _i, mapped_offset, _i, _s in self.mapping(offset, length)
+                base_layer.is_valid(mapped_offset, mapped_length)
+                for _offset,
+                _length,
+                mapped_offset,
+                mapped_length,
+                _layer in self.mapping(offset, length)
             )
         except exceptions.InvalidAddressException:
             return False
-
     def _find_segment(
         self, offset: int, next: bool = False
     ) -> Tuple[int, int, int, int]:
