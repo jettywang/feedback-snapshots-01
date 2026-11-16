@@ -177,6 +177,33 @@ class CM_KEY_NODE(objects.StructType):
             raise TypeError("CM_KEY_NODE was not instantiated on a RegistryHive layer")
         return bool(self.vol.offset & 0x80000000)
 
+    def get_cell_index(self) -> int:
+        """Returns the full cell index of this node, including the volatile bit.
+
+        Node objects are instantiated four bytes into their cell (the HCELL
+        size prefix is skipped), so subtracting four reconstructs the cell index
+        as stored in the hive's indexes.
+
+        Raises TypeError if the key was not instantiated on a RegistryHive layer
+        """
+        hive = self._context.layers[self.vol.layer_name]
+        if not isinstance(hive, registry.RegistryHive):
+            raise TypeError("CM_KEY_NODE was not instantiated on a RegistryHive layer")
+        return self.vol.offset - 4
+
+    def get_provenance(self) -> "registry.CellProvenance":
+        """Returns the store and memory provenance of this key node's cell.
+
+        The lookup uses the complete cell index (volatile bit included), so a
+        stable and volatile node sharing the same low index are resolved in
+        their own stores.  Raises RegistryIndexOutOfRange or
+        RegistryCellPagedOut when the cell cannot be read.
+        """
+        hive = self._context.layers[self.vol.layer_name]
+        if not isinstance(hive, registry.RegistryHive):
+            raise TypeError("CM_KEY_NODE was not instantiated on a RegistryHive layer")
+        return hive.cell_provenance(self.vol.offset - 4)
+
     def get_subkeys(self) -> Iterator["CM_KEY_NODE"]:
         """Returns a list of the key nodes.
 
@@ -300,6 +327,37 @@ class CM_KEY_VALUE(objects.StructType):
         namelength = self.NameLength
         self.Name.count = namelength
         return self.Name.cast("string", max_length=namelength, encoding="latin-1")
+
+    def get_volatile(self) -> bool:
+        """Returns whether this value node lives in the volatile store.
+
+        Raises TypeError if the value was not instantiated on a RegistryHive layer
+        """
+        hive = self._context.layers[self.vol.layer_name]
+        if not isinstance(hive, registry.RegistryHive):
+            raise TypeError("CM_KEY_VALUE was not instantiated on a RegistryHive layer")
+        return bool((self.vol.offset - 4) & 0x80000000)
+
+    def get_cell_index(self) -> int:
+        """Returns the full cell index of this value node, volatile bit included.
+
+        Raises TypeError if the value was not instantiated on a RegistryHive layer
+        """
+        hive = self._context.layers[self.vol.layer_name]
+        if not isinstance(hive, registry.RegistryHive):
+            raise TypeError("CM_KEY_VALUE was not instantiated on a RegistryHive layer")
+        return self.vol.offset - 4
+
+    def get_provenance(self) -> "registry.CellProvenance":
+        """Returns the store and memory provenance of this value node's cell.
+
+        Raises RegistryIndexOutOfRange or RegistryCellPagedOut when the cell
+        cannot be read from its own store.
+        """
+        hive = self._context.layers[self.vol.layer_name]
+        if not isinstance(hive, registry.RegistryHive):
+            raise TypeError("CM_KEY_VALUE was not instantiated on a RegistryHive layer")
+        return hive.cell_provenance(self.vol.offset - 4)
 
     def get_type(self) -> RegValueTypes:
         """Get the type of the registry value"""

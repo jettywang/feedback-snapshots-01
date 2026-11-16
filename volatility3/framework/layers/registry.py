@@ -2,6 +2,7 @@
 # which is available at https://www.volatilityfoundation.org/license/vsl-v1.0
 #
 import contextlib
+import dataclasses
 import logging
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
@@ -13,9 +14,71 @@ from volatility3.framework.symbols.windows import extensions
 
 vollog = logging.getLogger(__name__)
 
+# Index of the stable (on-disk) storage inside _HHIVE.Storage
+STABLE_STORE = 0
+# Index of the volatile (memory-only) storage inside _HHIVE.Storage
+VOLATILE_STORE = 1
+# Bit that marks a cell index as belonging to the volatile storage
+VOLATILE_BIT = 0x80000000
+
+
+@dataclasses.dataclass(frozen=True)
+class CellProvenance:
+    """Evidence of where a single registry cell was actually read from.
+
+    The registry keeps two independent storage areas: a stable (non-volatile,
+    backed by the hive file) store and a volatile (memory-only) store.  A cell
+    index's low 31 bits are only meaningful together with the high (volatile)
+    bit, so the same low index in the two stores names two different objects.
+    This record preserves the full index rather than masking the bit away,
+    allowing every read to be traced back to a specific store and memory page.
+
+    Attributes:
+        cell_index: The full cell index as referenced by the hive, including
+            the volatile high bit when set.
+        cell_offset: The hive-relative offset of the cell's data, i.e. the
+            index with the volatile bit removed.
+        store: ``STABLE_STORE`` (0) or ``VOLATILE_STORE`` (1).
+        is_volatile: Whether the index belongs to the volatile store.
+        directory_index: Directory entry used by the storage map.
+        table_index: Table entry used by the storage map.
+        suboffset: Offset within the mapped 4 KiB page.
+        mapped_offset: Physical offset in the underlying memory layer that the
+            cell maps to.
+        memory_layer: Name of the underlying layer supplying the bytes.
+        hive_name: Name of the owning hive.
+    """
+
+    cell_index: int
+    cell_offset: int
+    store: int
+    is_volatile: bool
+    directory_index: int
+    table_index: int
+    suboffset: int
+    mapped_offset: int
+    memory_layer: str
+    hive_name: str
+
 
 class RegistryException(exceptions.LayerException):
-    """Base Registry Exception class for catching Registry layer errors."""
+    """Base Registry Exception class for catching Registry layer errors.
+
+    The optional ``cell_index`` carries the full index (volatile bit included)
+    that was being resolved, so failures can be attributed to a specific store
+    without ever consulting the other one.
+    """
+
+    def __init__(
+        self,
+        layer_name: str,
+        *args: Any,
+        cell_index: Optional[int] = None,
+        store: Optional[int] = None,
+    ) -> None:
+        super().__init__(layer_name, *args)
+        self.cell_index = cell_index
+        self.store = store
 
 
 class RegistryFormatException(RegistryException):
@@ -24,6 +87,26 @@ class RegistryFormatException(RegistryException):
 
 class RegistryInvalidIndex(RegistryException):
     """Thrown when an index that doesn't exist or can't be found occurs."""
+
+
+class RegistryIndexOutOfRange(RegistryInvalidIndex):
+    """Thrown when a cell index exceeds the owning store's hive range.
+
+    This is a structural failure: the index names an offset that the store was
+    never large enough to hold.  It must not be retried against the other
+    storage, because the volatile bit is part of the index and the two stores
+    do not share an address space.
+    """
+
+
+class RegistryCellPagedOut(RegistryInvalidIndex):
+    """Thrown when a cell index is in range but its map entry is not resident.
+
+    The storage map points at a page that the underlying memory layer cannot
+    provide (for example a swapped-out bin).  Distinguishing this from
+    :class:`RegistryIndexOutOfRange` and from a genuinely absent key lets an
+    investigator tell missing memory apart from missing data.
+    """
 
 
 class RegistryHive(linear.LinearlyMappedLayer):
@@ -169,6 +252,107 @@ class RegistryHive(linear.LinearlyMappedLayer):
         )
         return cell
 
+    def cell_provenance(self, cell_index: int) -> CellProvenance:
+        """Resolves a full cell index to the store and memory it reads from.
+
+        The high bit of ``cell_index`` selects the store and is never stripped
+        in order to consult the other storage: the same low 31-bit index in the
+        stable and volatile stores is a different object.
+
+        Raises:
+            RegistryIndexOutOfRange: if the index exceeds the selected store's
+                hive range.
+            RegistryCellPagedOut: if the storage map entry cannot be read from
+                the underlying memory layer.
+        """
+        volatile = bool(cell_index & VOLATILE_BIT)
+        store = VOLATILE_STORE if volatile else STABLE_STORE
+        hive_relative = cell_index & 0x7FFFFFFF
+        if hive_relative > self._get_hive_maxaddr(volatile):
+            vollog.log(
+                constants.LOGLEVEL_VVV,
+                "Layer {} couldn't translate index {}, greater than {} in {} store of {}".format(
+                    self.name,
+                    hex(cell_index),
+                    hex(self._get_hive_maxaddr(volatile)),
+                    "volatile" if volatile else "non-volatile",
+                    self.get_name(),
+                ),
+            )
+            raise RegistryIndexOutOfRange(
+                self.name,
+                "Cell index {} is outside the {} store hive range".format(
+                    hex(cell_index), "volatile" if volatile else "stable"
+                ),
+                cell_index=cell_index,
+                store=store,
+            )
+
+        storage = self.hive.Storage[store]
+        dir_index = self._mask(cell_index, 30, 21) >> 21
+        table_index = self._mask(cell_index, 20, 12) >> 12
+        suboffset = self._mask(cell_index, 11, 0) >> 0
+
+        try:
+            table = storage.Map.Directory[dir_index]
+            entry = table.Table[table_index]
+            block_offset = entry.get_block_offset()
+        except exceptions.InvalidAddressException as excp:
+            vollog.log(
+                constants.LOGLEVEL_VVV,
+                "Layer {} map entry for cell {} ({} store) is not resident: {}".format(
+                    self.name,
+                    hex(cell_index),
+                    "volatile" if volatile else "stable",
+                    excp,
+                ),
+            )
+            raise RegistryCellPagedOut(
+                self.name,
+                "Storage map entry for cell {} in the {} store is not resident".format(
+                    hex(cell_index), "volatile" if volatile else "stable"
+                ),
+                cell_index=cell_index,
+                store=store,
+            ) from excp
+
+        return CellProvenance(
+            cell_index=cell_index,
+            cell_offset=hive_relative,
+            store=store,
+            is_volatile=volatile,
+            directory_index=dir_index,
+            table_index=table_index,
+            suboffset=suboffset,
+            mapped_offset=block_offset + suboffset,
+            memory_layer=self._base_layer,
+            hive_name=self.get_name(),
+        )
+
+    def get_node_provenance(
+        self, cell_index: int
+    ) -> Tuple["objects.StructType", CellProvenance]:
+        """Returns a node together with the provenance of its backing cell.
+
+        Raises the same exceptions as :meth:`cell_provenance`, or
+        RegistryCellPagedOut if the cell's bytes are unreadable despite a
+        resolvable map entry.  A key that simply does not exist is reported by
+        callers via KeyError rather than any of these exceptions.
+        """
+        provenance = self.cell_provenance(cell_index)
+        try:
+            node = self.get_node(cell_index)
+        except (RegistryException, exceptions.InvalidAddressException) as excp:
+            if isinstance(excp, RegistryException):
+                raise
+            raise RegistryCellPagedOut(
+                self.name,
+                f"Cell at {hex(cell_index)} cannot be read from the underlying memory",
+                cell_index=cell_index,
+                store=provenance.store,
+            ) from excp
+        return node, provenance
+
     def get_node(self, cell_offset: int) -> "objects.StructType":
         """Returns the appropriate Node, interpreted from the Cell based on its
         Signature."""
@@ -284,33 +468,14 @@ class RegistryHive(linear.LinearlyMappedLayer):
 
     def _translate(self, offset: int) -> int:
         """Translates a single cell index to a cell memory offset and the
-        suboffset within it."""
+        suboffset within it.
 
-        # Ignore the volatile bit when determining maxaddr validity
-        volatile = self._mask(offset, 31, 31) >> 31
-        if offset & 0x7FFFFFFF > self._get_hive_maxaddr(volatile):
-            vollog.log(
-                constants.LOGLEVEL_VVV,
-                "Layer {} couldn't translate offset {}, greater than {} in {} store of {}".format(
-                    self.name,
-                    hex(offset & 0x7FFFFFFF),
-                    hex(self._get_hive_maxaddr(volatile)),
-                    "volatile" if volatile else "non-volatile",
-                    self.get_name(),
-                ),
-            )
-            raise RegistryInvalidIndex(
-                self.name, "Mapping request for value greater than maxaddr"
-            )
-
-        storage = self.hive.Storage[volatile]
-        dir_index = self._mask(offset, 30, 21) >> 21
-        table_index = self._mask(offset, 20, 12) >> 12
-        suboffset = self._mask(offset, 11, 0) >> 0
-
-        table = storage.Map.Directory[dir_index]
-        entry = table.Table[table_index]
-        return entry.get_block_offset() + suboffset
+        The store is selected solely from the volatile high bit; the bit is
+        never masked off to look the index up in the other storage.  Range
+        failures and non-resident map entries surface as the distinct
+        RegistryIndexOutOfRange and RegistryCellPagedOut exceptions.
+        """
+        return self.cell_provenance(offset).mapped_offset
 
     def mapping(
         self, offset: int, length: int, ignore_errors: bool = False
