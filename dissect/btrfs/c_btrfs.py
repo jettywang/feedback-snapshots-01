@@ -335,6 +335,12 @@ btrfs_def = """
 /* 32 bytes in various csum fields */
 #define BTRFS_CSUM_SIZE                 32
 
+/* Checksum types */
+#define BTRFS_CSUM_TYPE_CRC32C          0
+#define BTRFS_CSUM_TYPE_XXHASH          1
+#define BTRFS_CSUM_TYPE_SHA256          2
+#define BTRFS_CSUM_TYPE_BLAKE2          3
+
 /*
  * flags definitions for directory entry item type
  *

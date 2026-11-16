@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import struct
 from functools import lru_cache
 from typing import TYPE_CHECKING, Literal
 
+from dissect.util.hash import crc32c
+
 from dissect.btrfs.c_btrfs import c_btrfs
+from dissect.btrfs.exceptions import Error
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -20,9 +24,20 @@ class BTree:
         btrfs: The filesystem this B-tree belongs to.
         root_item: Optional ``btrfs_root_item`` to open the B-tree from.
         root_offset: Optional offset to open the B-tree from.
+        owner: The expected tree owner of every block in this B-tree.
+        root_generation: The expected generation of the root block. Required when opening from ``root_offset``.
+        root_level: The expected level of the root block. Required when opening from ``root_offset``.
     """
 
-    def __init__(self, btrfs: Btrfs, root_item: c_btrfs.btrfs_root_item | None = None, root_offset: int | None = None):
+    def __init__(
+        self,
+        btrfs: Btrfs,
+        root_item: c_btrfs.btrfs_root_item | None = None,
+        root_offset: int | None = None,
+        owner: int | None = None,
+        root_generation: int | None = None,
+        root_level: int | None = None,
+    ):
         self.btrfs = btrfs
 
         if not root_item and not root_offset:
@@ -30,6 +45,19 @@ class BTree:
 
         self.root_item = root_item
         self.root_offset = root_offset or root_item.bytenr
+
+        if owner is None:
+            raise ValueError("owner is required when opening a B-tree")
+        self.root_owner = owner
+
+        if root_item is not None:
+            self.root_generation = root_generation if root_generation is not None else root_item.generation
+            self.root_level = root_level if root_level is not None else root_item.level
+        else:
+            if root_generation is None or root_level is None:
+                raise ValueError("root_generation and root_level are required when opening from root_offset")
+            self.root_generation = root_generation
+            self.root_level = root_level
 
         self._read_node = lru_cache(8192)(self._read_node)
 
@@ -54,7 +82,12 @@ class BTree:
         return cursor.get()
 
     def _read_node(self, address: int) -> tuple[memoryview, c_btrfs.btrfs_header]:
-        """Helper method for reading a node in the B-tree.
+        """Read a node in the B-tree and perform the address intrinsic checks.
+
+        Only the checks that hold for every caller of this address are performed here: the on-disk checksum is
+        verified and the block's own ``bytenr`` header field must match the address it was read from. Caller
+        specific constraints (owner, level, generation) are checked by :meth:`_verify_node` at every call site,
+        so a cached block can never be reused outside of the context that fetched it.
 
         Args:
             address: The address of the node to read.
@@ -62,7 +95,59 @@ class BTree:
         node = memoryview(self.btrfs._read_node(address))
         header = c_btrfs.btrfs_header(node)
 
+        if header.bytenr != address:
+            raise Error(f"B-tree block at 0x{address:x} has mismatching bytenr header field: 0x{header.bytenr:x}")
+
+        self._verify_csum(address, node, header)
+
         return node, header
+
+    def _verify_csum(self, address: int, node: memoryview, header: c_btrfs.btrfs_header) -> None:
+        """Verify the on-disk checksum of a B-tree block.
+
+        Args:
+            address: The address the block was read from.
+            node: The raw B-tree block.
+            header: The parsed block header.
+        """
+        csum_type = self.btrfs.sb.csum_type
+        if csum_type != c_btrfs.BTRFS_CSUM_TYPE_CRC32C:
+            raise Error(f"Unsupported metadata checksum type {csum_type} for B-tree block at 0x{address:x}")
+
+        expected = crc32c.crc32c(node[len(header.csum) :])
+        (stored,) = struct.unpack("<I", header.csum[:4])
+        if stored != expected:
+            raise Error(f"Checksum mismatch for B-tree block at 0x{address:x}")
+
+    def _verify_node(
+        self,
+        address: int,
+        header: c_btrfs.btrfs_header,
+        expected_owner: int,
+        expected_level: int,
+        expected_generation: int,
+    ) -> None:
+        """Verify a block against the constraints of the call site that requested it.
+
+        A block with a valid checksum is not necessarily the block that belongs at this position in this tree.
+        Reject a block before any of its items are interpreted when it belongs to another tree (``owner``),
+        sits at another tree depth (``level``) or was written by another transaction (``generation``).
+
+        Args:
+            address: The address the block was read from.
+            header: The parsed block header.
+            expected_owner: The tree owner the block must carry.
+            expected_level: The tree level the block must be at.
+            expected_generation: The generation the block must have.
+        """
+        if header.owner != expected_owner:
+            raise Error(f"B-tree block at 0x{address:x} has owner {header.owner}, expected {expected_owner}")
+        if header.level != expected_level:
+            raise Error(f"B-tree block at 0x{address:x} has level {header.level}, expected {expected_level}")
+        if header.generation != expected_generation:
+            raise Error(
+                f"B-tree block at 0x{address:x} has generation {header.generation}, expected {expected_generation}"
+            )
 
 
 class Cursor:
@@ -100,9 +185,27 @@ class Cursor:
             address: The address of the node to push down to.
             initial_index: The initial index to seek to in the new node. ``-1`` means the last item.
         """
+        if self._header is None:
+            # The first node of a tree is its root block: validate it against the tree's root item or
+            # superblock reference.
+            expected_owner = self.btree.root_owner
+            expected_level = self.btree.root_level
+            expected_generation = self.btree.root_generation
+        else:
+            # Every subsequent block is referenced by a key pointer in the current parent node. That pointer
+            # determines the generation the child must have, while owner is inherited from the tree and the
+            # child sits one level below its parent.
+            expected_owner = self.btree.root_owner
+            expected_level = self._header.level - 1
+            expected_generation = self.item().generation
+
+        node, header = self.btree._read_node(address)
+        self.btree._verify_node(address, header, expected_owner, expected_level, expected_generation)
+
         self._path.append((self._node, self._header, self._keys, self._items, self._index))
 
-        self._node, self._header = self.btree._read_node(address)
+        self._node = node
+        self._header = header
         self._keys = {}
         self._items = {}
         self._index = self._header.nritems if initial_index == -1 else initial_index

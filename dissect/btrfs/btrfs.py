@@ -76,7 +76,13 @@ class Btrfs:
         self._logical_fh = ChunkStream(self)
         self._initialize_chunks()
 
-        self._root_tree = BTree(self, root_offset=self.sb.root)
+        self._root_tree = BTree(
+            self,
+            root_offset=self.sb.root,
+            owner=c_btrfs.BTRFS_ROOT_TREE_OBJECTID,
+            root_generation=self.sb.generation,
+            root_level=self.sb.root_level,
+        )
 
         self.fs_tree = self.open_subvolume(c_btrfs.BTRFS_FS_TREE_OBJECTID)
 
@@ -142,7 +148,13 @@ class Btrfs:
             if sys_chunk_array.tell() == self.sb.sys_chunk_array_size:
                 break
 
-        chunk_tree = BTree(self, root_offset=self.sb.chunk_root)
+        chunk_tree = BTree(
+            self,
+            root_offset=self.sb.chunk_root,
+            owner=c_btrfs.BTRFS_CHUNK_TREE_OBJECTID,
+            root_generation=self.sb.chunk_root_generation,
+            root_level=self.sb.chunk_root_level,
+        )
         for item, data in chunk_tree.cursor().iter(
             objectid=c_btrfs.BTRFS_FIRST_CHUNK_TREE_OBJECTID,
             type=c_btrfs.BTRFS_CHUNK_ITEM_KEY,
@@ -160,7 +172,7 @@ class Btrfs:
         """
         _, data = self._root_tree.find(objectid, c_btrfs.BTRFS_ROOT_ITEM_KEY)
         root_item = c_btrfs.btrfs_root_item(data)
-        return BTree(self, root_item)
+        return BTree(self, root_item, owner=objectid)
 
     def _open_default_subvolume(self) -> Subvolume:
         """Find and open the subvolume that's configured as default."""
