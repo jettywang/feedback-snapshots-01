@@ -15,6 +15,7 @@ from dissect.ntfs.c_ntfs import (
 )
 from dissect.ntfs.exceptions import Error, FileNotFoundError, VolumeNotAvailableError
 from dissect.ntfs.mft import Mft, MftRecord
+from dissect.ntfs.objectid import ObjectIdIndex
 from dissect.ntfs.secure import Secure
 from dissect.ntfs.usnjrnl import UsnJrnl
 from dissect.ntfs.util import bsf
@@ -137,6 +138,11 @@ class NTFS:
     @cached_property
     def serial(self) -> int | None:
         return self.boot_sector.SerialNumber if self.boot_sector else None
+
+    @cached_property
+    def objid(self) -> ObjectIdIndex | None:
+        """Return the read-only ``$Extend/$ObjId:$O`` index, or ``None`` if it is not available."""
+        return ObjectIdIndex.from_ntfs(self)
 
     @cached_property
     def volume_name(self) -> str | None:

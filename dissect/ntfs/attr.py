@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 from typing import TYPE_CHECKING, Any, BinaryIO
+from uuid import UUID
 
 from dissect.util.stream import RangeStream, RunlistStream
 from dissect.util.ts import wintimestamp
@@ -332,6 +333,86 @@ class AttributeList(AttributeRecord):
                 yield from attr_list
 
 
+class ObjectId(AttributeRecord):
+    """Specific :class:`AttributeRecord` parser for ``$OBJECT_ID``."""
+
+    __slots__ = ("attr", "raw")
+
+    def __init__(self, fh: BinaryIO, record: MftRecord | None = None):
+        super().__init__(fh, record)
+        self.raw = fh.read()
+        self.attr = c_ntfs._OBJECT_ID(self.raw[: len(c_ntfs._OBJECT_ID)].ljust(len(c_ntfs._OBJECT_ID), b"\x00"))
+
+    def __repr__(self) -> str:
+        return f"<$OBJECT_ID {self.object_id}>"
+
+    @property
+    def object_id_raw(self) -> bytes:
+        """Return the raw on-disk bytes of the current object ID."""
+        return bytes(self.attr.ObjectId)
+
+    @property
+    def birth_volume_id_raw(self) -> bytes | None:
+        """Return the raw on-disk bytes of the birth volume ID, or ``None`` if absent."""
+        value = bytes(self.attr.BirthVolumeId)
+        return value if any(value) else None
+
+    @property
+    def birth_object_id_raw(self) -> bytes | None:
+        """Return the raw on-disk bytes of the birth object ID, or ``None`` if absent."""
+        value = bytes(self.attr.BirthObjectId)
+        return value if any(value) else None
+
+    @property
+    def domain_id_raw(self) -> bytes | None:
+        """Return the raw on-disk bytes of the domain ID, or ``None`` if absent."""
+        value = bytes(self.attr.DomainId)
+        return value if any(value) else None
+
+    @property
+    def object_id(self) -> UUID:
+        """Return the current object ID as a :class:`~uuid.UUID`."""
+        return UUID(bytes_le=self.object_id_raw)
+
+    @property
+    def object_id_display(self) -> str:
+        """Return the current object ID in the canonical GUID display form."""
+        return str(self.object_id)
+
+    @property
+    def birth_volume_id(self) -> UUID | None:
+        """Return the birth volume ID as a :class:`~uuid.UUID`, or ``None`` if absent."""
+        value = self.birth_volume_id_raw
+        return UUID(bytes_le=value) if value else None
+
+    @property
+    def birth_volume_id_display(self) -> str | None:
+        """Return the birth volume ID in the canonical GUID display form, or ``None`` if absent."""
+        return str(self.birth_volume_id) if self.birth_volume_id else None
+
+    @property
+    def birth_object_id(self) -> UUID | None:
+        """Return the birth object ID as a :class:`~uuid.UUID`, or ``None`` if absent."""
+        value = self.birth_object_id_raw
+        return UUID(bytes_le=value) if value else None
+
+    @property
+    def birth_object_id_display(self) -> str | None:
+        """Return the birth object ID in the canonical GUID display form, or ``None`` if absent."""
+        return str(self.birth_object_id) if self.birth_object_id else None
+
+    @property
+    def domain_id(self) -> UUID | None:
+        """Return the domain ID as a :class:`~uuid.UUID`, or ``None`` if absent."""
+        value = self.domain_id_raw
+        return UUID(bytes_le=value) if value else None
+
+    @property
+    def domain_id_display(self) -> str | None:
+        """Return the domain ID in the canonical GUID display form, or ``None`` if absent."""
+        return str(self.domain_id) if self.domain_id else None
+
+
 class StandardInformation(AttributeRecord):
     """Specific :class:`AttributeRecord` parser for ``$STANDARD_INFORMATION``."""
 
@@ -597,5 +678,6 @@ ATTRIBUTE_CLASS_MAP = {
     ATTRIBUTE_TYPE_CODE.STANDARD_INFORMATION: StandardInformation,
     ATTRIBUTE_TYPE_CODE.ATTRIBUTE_LIST: AttributeList,
     ATTRIBUTE_TYPE_CODE.FILE_NAME: FileName,
+    ATTRIBUTE_TYPE_CODE.OBJECT_ID: ObjectId,
     ATTRIBUTE_TYPE_CODE.REPARSE_POINT: ReparsePoint,
 }

@@ -225,6 +225,7 @@ class IndexBuffer:
             # Offset starts from the _INDEX_HEADER
             self.header.IndexHeader.FirstEntryOffset + 0x18,
             self.header.IndexHeader.TotalSizeOfEntries,
+            self.header.Vcn,
         )
 
 
@@ -235,12 +236,14 @@ class IndexEntry:
         index: The :class:`Index` class instance this :class:`IndexEntry` belongs to.
         fh: The file-like object to parse an index entry on.
         offset: The offset in the file-like object to parse an index entry at.
+        vcn: Optional virtual cluster number of the index buffer this entry resides in.
     """
 
-    def __init__(self, index: Index, fh: BinaryIO, offset: int):
+    def __init__(self, index: Index, fh: BinaryIO, offset: int, vcn: int | None = None):
         self.index = index
         self.fh = fh
         self.offset = offset
+        self.vcn = vcn
 
         fh.seek(offset)
         self.header = c_ntfs._INDEX_ENTRY(fh)
@@ -315,11 +318,11 @@ class IndexEntry:
         return self.header.KeyLength
 
 
-def _iter_entries(index: Index, fh: BinaryIO, offset: int, size: int) -> Iterator[IndexEntry]:
+def _iter_entries(index: Index, fh: BinaryIO, offset: int, size: int, vcn: int | None = None) -> Iterator[IndexEntry]:
     max_offset = offset + size
     while offset < max_offset:
         try:
-            entry = IndexEntry(index, fh, offset)
+            entry = IndexEntry(index, fh, offset, vcn)
         except EOFError:
             break
 

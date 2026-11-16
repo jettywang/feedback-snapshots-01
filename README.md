@@ -19,6 +19,28 @@ pip install dissect.ntfs
 
 This module is also automatically installed if you install the `dissect` package.
 
+## Object ID reports
+
+Files with an `$OBJECT_ID` attribute can be correlated with the volume-level `$ObjId:$O` index. Reports are
+read-only and keep both the raw GUID bytes and their display form:
+
+```python
+from dissect.ntfs import NTFS
+
+fs = NTFS(open("ntfs.raw", "rb"))
+report = fs.objid.report_path("Directory/File.txt") if fs.objid else None
+
+print(report.status)  # "consistent", "conflict" or "insufficient"
+print(report.attribute.describe())  # the concrete $OBJECT_ID attribute
+print(report.index_entry.describe())  # the concrete $ObjId:$O index entry
+```
+
+The current object ID is compared with the index key and its MFT file reference (segment and record generation).
+Birth volume/object IDs are compared separately. A cross-volume move is only reported as proven
+(`report.proven_cross_volume_move`) when both the attribute and index carry matching birth information and the
+current volume ID is known; one-sided material, conflicting IDs, or missing birth information remain
+`insufficient` or `conflict` instead of a proven move.
+
 ## Build and test instructions
 
 This project uses `tox` to build source and wheel distributions. Run the following command from the root folder to build

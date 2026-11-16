@@ -250,6 +250,20 @@ enum IO_REPARSE_TAG : ULONG {
     WCI_LINK_1              = 0xA0001027,
 };
 
+typedef struct _OBJECT_ID {
+    CHAR        ObjectId[16];
+    CHAR        BirthVolumeId[16];
+    CHAR        BirthObjectId[16];
+    CHAR        DomainId[16];
+} OBJECT_ID;
+
+typedef struct _OBJECT_ID_INDEX_DATA {
+    FILE_REFERENCE  FileReference;
+    CHAR        BirthVolumeId[16];
+    CHAR        BirthObjectId[16];
+    CHAR        DomainId[16];
+} OBJECT_ID_INDEX_DATA;
+
 typedef struct _REPARSE_DATA_BUFFER {
     IO_REPARSE_TAG  ReparseTag;
     USHORT      ReparseDataLength;

@@ -5,6 +5,14 @@ from dissect.ntfs.c_ntfs import ATTRIBUTE_TYPE_CODE, NTFS_SIGNATURE
 from dissect.ntfs.index import Index, IndexEntry
 from dissect.ntfs.mft import Mft, MftRecord
 from dissect.ntfs.ntfs import NTFS
+from dissect.ntfs.objectid import (
+    Guid,
+    ObjectIdEvidence,
+    ObjectIdIndex,
+    ObjectIdIndexEntry,
+    ObjectIdReport,
+    ObjectIdStatus,
+)
 from dissect.ntfs.secure import ACE, ACL, Secure, SecurityDescriptor
 from dissect.ntfs.usnjrnl import UsnJrnl, UsnRecord
 
@@ -17,10 +25,16 @@ __all__ = [
     "Attribute",
     "AttributeHeader",
     "AttributeRecord",
+    "Guid",
     "Index",
     "IndexEntry",
     "Mft",
     "MftRecord",
+    "ObjectIdEvidence",
+    "ObjectIdIndex",
+    "ObjectIdIndexEntry",
+    "ObjectIdReport",
+    "ObjectIdStatus",
     "Secure",
     "SecurityDescriptor",
     "UsnJrnl",

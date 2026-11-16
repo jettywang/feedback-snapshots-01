@@ -348,6 +348,40 @@ class _c_ntfs(__cs__.cstruct):
 
     FILE_NAME: TypeAlias = _FILE_NAME
     FILE_NAME_INDEX_PRESENT: Literal[0x10000000] = ...
+    class _OBJECT_ID(__cs__.Structure):
+        ObjectId: __cs__.CharArray
+        BirthVolumeId: __cs__.CharArray
+        BirthObjectId: __cs__.CharArray
+        DomainId: __cs__.CharArray
+        @overload
+        def __init__(
+            self,
+            ObjectId: __cs__.CharArray | None = ...,
+            BirthVolumeId: __cs__.CharArray | None = ...,
+            BirthObjectId: __cs__.CharArray | None = ...,
+            DomainId: __cs__.CharArray | None = ...,
+        ): ...
+        @overload
+        def __init__(self, fh: bytes | memoryview | bytearray | BinaryIO, /): ...
+
+    OBJECT_ID: TypeAlias = _OBJECT_ID
+    class _OBJECT_ID_INDEX_DATA(__cs__.Structure):
+        FileReference: _c_ntfs._MFT_SEGMENT_REFERENCE
+        BirthVolumeId: __cs__.CharArray
+        BirthObjectId: __cs__.CharArray
+        DomainId: __cs__.CharArray
+        @overload
+        def __init__(
+            self,
+            FileReference: _c_ntfs._MFT_SEGMENT_REFERENCE | None = ...,
+            BirthVolumeId: __cs__.CharArray | None = ...,
+            BirthObjectId: __cs__.CharArray | None = ...,
+            DomainId: __cs__.CharArray | None = ...,
+        ): ...
+        @overload
+        def __init__(self, fh: bytes | memoryview | bytearray | BinaryIO, /): ...
+
+    OBJECT_ID_INDEX_DATA: TypeAlias = _OBJECT_ID_INDEX_DATA
     class IO_REPARSE_TAG(__cs__.Enum):
         RESERVED_ZERO = ...
         RESERVED_ONE = ...
