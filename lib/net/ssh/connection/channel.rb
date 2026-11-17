@@ -1,4 +1,5 @@
 require 'net/ssh/loggable'
+require 'net/ssh/errors'
 require 'net/ssh/connection/constants'
 require 'net/ssh/connection/term'
 
@@ -58,6 +59,11 @@ module Net
         # OpenSSH's CHAN_SES_WINDOW_DEFAULT; some servers (e.g. Mikrotik) truncate output with smaller windows (#726).
         DEFAULT_MAX_WIN_SIZE = 0x200000
 
+        # The default upper bound, in bytes, on the channel's pending output
+        # queue (see #max_pending_output_size). Bounded so that a channel whose
+        # remote window stays at zero cannot accumulate unlimited memory.
+        DEFAULT_MAX_PENDING_OUTPUT_SIZE = 0x400000
+
         # The local id for this channel, assigned by the Net::SSH::Connection::Session instance.
         attr_reader :local_id
 
@@ -101,6 +107,15 @@ module Net
         # the event loop. See Connection::Session#process and #enqueue_pending_output.
         attr_reader :output # :nodoc:
 
+        # The maximum number of bytes that may sit in the channel's pending
+        # output queue, waiting for the remote window to open. When #send_data
+        # would exceed this bound it raises Net::SSH::ChannelPendingOutputLimitExceeded
+        # instead of appending, so a stalled channel applies explicit backpressure
+        # to its producer rather than growing memory without limit. Set to +nil+
+        # to disable the bound (the legacy, unbounded behavior). Defaults to
+        # DEFAULT_MAX_PENDING_OUTPUT_SIZE.
+        attr_accessor :max_pending_output_size
+
         # The list of pending requests. Each time a request is sent which requires
         # a reply, the corresponding callback is pushed onto this queue. As responses
         # arrive, they are shifted off the front and handled.
@@ -127,11 +142,13 @@ module Net
           @on_confirm_open = on_confirm_open
 
           @output = Buffer.new
+          @max_pending_output_size = DEFAULT_MAX_PENDING_OUTPUT_SIZE
+          @output_backpressured = false
 
           @properties = {}
 
           @pending_requests = []
-          @on_open_failed = @on_data = @on_extended_data = @on_process = @on_close = @on_eof = nil
+          @on_open_failed = @on_data = @on_extended_data = @on_process = @on_close = @on_eof = @on_output_drain = nil
           @on_request = {}
           @closing = @eof = @sent_eof = @local_closed = @remote_closed = false
         end
@@ -249,6 +266,15 @@ module Net
         # instance, it has filled its data window and has not yet been resized by
         # the remote end-point.)
         #
+        # The pending output queue is bounded by #max_pending_output_size. If
+        # appending +data+ would exceed that bound, a
+        # Net::SSH::ChannelPendingOutputLimitExceeded exception is raised and
+        # _none_ of +data+ is appended, so the caller can retry the identical
+        # chunk later; bytes are never silently dropped or partially queued.
+        # Use #pending_output_bytes and #writable? to inspect the queue, and
+        # #on_output_drain to be notified when it has drained enough to accept
+        # more data.
+        #
         # This will raise an exception if the channel has previously declared
         # that no more data will be sent (see #eof!).
         #
@@ -256,7 +282,47 @@ module Net
         def send_data(data)
           raise EOFError, "cannot send data if channel has declared eof" if eof?
 
-          output.append(data.to_s)
+          data = data.to_s
+          if @max_pending_output_size && output.length + data.bytesize > @max_pending_output_size
+            @output_backpressured = true
+            raise Net::SSH::ChannelPendingOutputLimitExceeded,
+                  "pending output limit exceeded on channel #{local_id}: " \
+                  "#{output.length} + #{data.bytesize} bytes > #{@max_pending_output_size} byte limit"
+          end
+
+          output.append(data)
+          @output_backpressured = true unless writable?
+          data.bytesize
+        end
+
+        # The number of bytes currently queued in the channel's pending output
+        # buffer, waiting for remote window space. This remains inspectable
+        # while the channel is closing, so the disposition of queued data can
+        # be observed when window adjustments and close interleave.
+        def pending_output_bytes
+          output.length
+        end
+
+        # True if #send_data can accept at least one more byte without
+        # exceeding #max_pending_output_size. Always true when the bound is
+        # disabled (see #max_pending_output_size).
+        def writable?
+          @max_pending_output_size.nil? || output.length < @max_pending_output_size
+        end
+
+        # Registers a callback to be invoked when the pending output queue
+        # drains back below #max_pending_output_size after having reached it
+        # (i.e. after backpressure was applied). This is the resume signal
+        # for producers that paused after #writable? became false or after
+        # rescuing Net::SSH::ChannelPendingOutputLimitExceeded. The channel is
+        # the sole argument to the callback.
+        #
+        #   channel.on_output_drain do |ch|
+        #     ch.send_data(next_chunk) if ch.writable?
+        #   end
+        def on_output_drain(&block)
+          old, @on_output_drain = @on_output_drain, block
+          old
         end
 
         # Internal and experimental, used by port forwarding: from now on window
@@ -528,6 +594,13 @@ module Net
         # #do_open_confirmation). This is called automatically by #process, which
         # is called from the event loop (Connection::Session#process). You will
         # generally not need to invoke it directly.
+        #
+        # Each packet is capped by both the remaining remote window and the
+        # remote maximum packet size, so the server is never sent more data
+        # than it has advertised window space for. Whatever does not fit stays
+        # queued (see #pending_output_bytes). Once the queue drains back below
+        # #max_pending_output_size after backpressure was applied, the
+        # #on_output_drain callback is invoked.
         def enqueue_pending_output # :nodoc:
           return unless remote_id
 
@@ -544,6 +617,8 @@ module Net
               break
             end
           end
+
+          notify_output_drained
         end
 
         # Invoked when the server confirms that a channel has been opened.
@@ -665,6 +740,16 @@ module Net
         end
 
         private
+
+        # Invokes the #on_output_drain callback once, when the pending output
+        # queue transitions from backpressured (at or above
+        # #max_pending_output_size) back to writable.
+        def notify_output_drained
+          return unless @output_backpressured && writable?
+
+          @output_backpressured = false
+          @on_output_drain.call(self) if @on_output_drain
+        end
 
         # Runs the SSH event loop until the remote confirmed channel open
         # experimental api

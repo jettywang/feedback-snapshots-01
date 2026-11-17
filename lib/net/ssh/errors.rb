@@ -36,6 +36,13 @@ module Net
     # a "channel failure" message.
     class ChannelRequestFailed < Net::SSH::Exception; end
 
+    # Raised by Net::SSH::Connection::Channel#send_data when appending the
+    # given data would push the channel's pending output queue past its
+    # configured #max_pending_output_size. No bytes are appended when this
+    # is raised, so the producer can retry the exact same chunk once the
+    # queue has drained (see Net::SSH::Connection::Channel#on_output_drain).
+    class ChannelPendingOutputLimitExceeded < Net::SSH::Exception; end
+
     # This is exception is primarily used internally, but if you have a channel
     # open handler (see Net::SSH::Connection::Session#on_open_channel) and you
     # want to fail in such a way that the server knows it failed, you can

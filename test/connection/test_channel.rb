@@ -63,6 +63,63 @@ module Connection
       assert_equal "helloworld", channel.output.to_s
     end
 
+    def test_send_data_should_default_to_bounded_pending_output
+      assert_equal Net::SSH::Connection::Channel::DEFAULT_MAX_PENDING_OUTPUT_SIZE, channel.max_pending_output_size
+      assert_equal 0, channel.pending_output_bytes
+      assert channel.writable?
+    end
+
+    def test_send_data_should_raise_without_appending_when_pending_output_limit_would_be_exceeded
+      channel.max_pending_output_size = 10
+      channel.send_data("12345")
+      assert_equal 5, channel.pending_output_bytes
+
+      assert_raises(Net::SSH::ChannelPendingOutputLimitExceeded) { channel.send_data("123456") }
+      assert_equal "12345", channel.output.to_s
+      assert channel.writable?
+
+      channel.send_data("67890")
+      refute channel.writable?
+      assert_raises(Net::SSH::ChannelPendingOutputLimitExceeded) { channel.send_data("!") }
+      assert_equal "1234567890", channel.output.to_s
+    end
+
+    def test_send_data_should_be_unbounded_when_limit_is_nil
+      channel.max_pending_output_size = nil
+      channel.send_data("x" * (Net::SSH::Connection::Channel::DEFAULT_MAX_PENDING_OUTPUT_SIZE + 1))
+      assert channel.writable?
+    end
+
+    def test_on_output_drain_should_fire_once_queue_drains_below_limit_after_backpressure
+      channel.do_open_confirmation(0, 4, 4)
+      channel.max_pending_output_size = 8
+      channel.send_data("12345678")
+      assert_raises(Net::SSH::ChannelPendingOutputLimitExceeded) { channel.send_data("!") }
+
+      drained = 0
+      channel.on_output_drain { |ch| drained += 1 if ch.writable? }
+
+      connection.expect { |_t, p| assert_equal CHANNEL_DATA, p.type }
+      channel.enqueue_pending_output
+      assert_equal 4, channel.pending_output_bytes
+      assert_equal 1, drained
+
+      channel.do_window_adjust(4)
+      connection.expect { |_t, p| assert_equal CHANNEL_DATA, p.type }
+      channel.enqueue_pending_output
+      assert_equal 0, channel.pending_output_bytes
+      assert_equal 1, drained, "drain callback should fire only once per backpressure episode"
+    end
+
+    def test_on_output_drain_should_not_fire_without_backpressure
+      channel.do_open_confirmation(0, 100, 100)
+      channel.on_output_drain { flunk "drain callback fired without backpressure" }
+      channel.send_data("hello")
+
+      connection.expect { |_t, p| assert_equal CHANNEL_DATA, p.type }
+      channel.enqueue_pending_output
+    end
+
     def test_close_before_channel_has_been_confirmed_should_set_closing
       assert !channel.closing?
       channel.close
