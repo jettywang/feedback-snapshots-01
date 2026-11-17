@@ -43,6 +43,15 @@ MeCompressionTypes = ["COMP_TYPE_NOT_COMPRESSED",
 COMP_TYPE_NOT_COMPRESSED = 0
 COMP_TYPE_HUFFMAN = 1
 COMP_TYPE_LZMA = 2
+COMP_TYPE_UNKNOWN = 3
+
+# Decode states, kept on every module so a caller can tell an uncompressed
+# module from an unsupported one without treating both as a failed decode.
+DECODE_NONE = "none"
+DECODE_DECODED = "decoded"
+DECODE_FAILED = "failed"
+DECODE_UNSUPPORTED = "unsupported"
+
 MeModuleTypes = ["DEFAULT", "PRE_ME_KERNEL",
                  "VENOM_TPM", "APPS_QST_DT", "APPS_AMT", "TEST"]
 MeApiTypes = ["API_TYPE_DATA", "API_TYPE_ROMAPI",
@@ -89,11 +98,19 @@ class MeObject(StructuredObject, FirmwareObject):
             print(" (huffman)")
         elif self.compression == COMP_TYPE_LZMA:
             print(" (lzma)")
-        else:
+        elif self.compression == COMP_TYPE_NOT_COMPRESSED:
             print("")
+        else:
+            print(" (unknown)")
 
     # The LZMA module's data, decompressed when parsed.
     decompressed = None
+
+    # The bytes found in the image and the bytes the parser changed them to,
+    # kept apart so the former is still available after a decode or repair.
+    raw_data = None
+    module_data = None
+    decode_status = DECODE_NONE
 
     def decompress_module(self):
         '''Decompress an LZMA module.
@@ -103,11 +120,20 @@ class MeObject(StructuredObject, FirmwareObject):
         at one small stream that claims a large output.
         '''
         self.decompressed = None
+        self.decode_status = DECODE_NONE
+        if self.compression in (COMP_TYPE_HUFFMAN, COMP_TYPE_UNKNOWN):
+            # Huffman needs the manifest's LUT, which is not applied here,
+            # and an unknown encoding is not decoded by guessing.
+            self.decode_status = DECODE_UNSUPPORTED
+            return
         if self.compression != COMP_TYPE_LZMA:
             return
         results = decompress([efi_compressor.LzmaDecompress], self.data)
         if results is not None:
             self.decompressed = results[1]
+            self.decode_status = DECODE_DECODED
+        else:
+            self.decode_status = DECODE_FAILED
 
     def dump_module(self, parent, duplicate=0):
         name = safe_path_component(self.name)
@@ -115,13 +141,33 @@ class MeObject(StructuredObject, FirmwareObject):
             # Keep each module that repeats an earlier module's name.
             name += "-%d" % duplicate
         if self.compression == COMP_TYPE_LZMA:
-            dump_data(safe_path(parent, "%s.module.lzma" % name), self.data)
+            # Always keep the bytes as found, before any header repair.
+            raw = self.raw_data if self.raw_data is not None else self.data
+            dump_data(safe_path(parent, "%s.module.lzma" % name), raw)
+            if self.module_data is not None and self.module_data != raw:
+                dump_data(
+                    safe_path(parent, "%s.module.lzma.repaired" % name),
+                    self.module_data)
             if self.decompressed is None:
                 print("Cannot extract (%s), Failed to decompress" % self.name)
                 return
             dump_data(safe_path(parent, "%s.module" % name), self.decompressed)
         elif self.compression == COMP_TYPE_NOT_COMPRESSED:
+            raw = self.raw_data if self.raw_data is not None else self.data
             dump_data(safe_path(parent, "%s.module" % name), self.data)
+            if raw != self.data:
+                # Type 1 LZMA modules are rewritten into an LZMA header. Keep
+                # the bytes that were in the image as well.
+                dump_data(safe_path(parent, "%s.module.raw" % name), raw)
+        elif self.compression == COMP_TYPE_HUFFMAN:
+            # Huffman is decoded with the manifest's LLUT, so keep the bytes
+            # that were actually claimed by this entry rather than dropping
+            # the module from the dump.
+            raw = self.raw_data if self.raw_data is not None else self.data
+            dump_data(safe_path(parent, "%s.module.huffman" % name), raw)
+        else:
+            raw = self.raw_data if self.raw_data is not None else self.data
+            dump_data(safe_path(parent, "%s.module.raw" % name), raw)
 
 
 class MeModule(MeObject):
@@ -171,11 +217,19 @@ class MeModule(MeObject):
         # print "Debug: module data 0x%08X - 0x%08X" % (
         #    self.offset, self.offset + self.structure.Size)
         self.data = bytes(data[self.offset:self.offset + self.structure.Size])
+        self.raw_data = self.data
+        self.module_data = self.data
 
     def process(self):
+        # A module may be processed more than once. Start from the bytes in
+        # the image rather than a stream a previous call rewrote.
+        self.data = self.raw_data
+        self.module_data = self.raw_data
+        self.decode_status = DECODE_NONE
         if self.compression == COMP_TYPE_HUFFMAN:
             # The individual modules are compressed together in a partition
             # chunk
+            self.decode_status = DECODE_UNSUPPORTED
             return True
 
         if self.structure_type == MeModuleHeader1Type:
@@ -190,6 +244,7 @@ class MeModule(MeObject):
                     "<Q", module_file.structure.UncompressedSize)
                 raw_data += self.data[0x55:]
                 self.data = raw_data
+                self.module_data = raw_data
         self.decompress_module()
         return True
 
@@ -539,9 +594,12 @@ class MeManifestHeader(MeObject):
 
 
 class CPDEntry(MeObject):
-    # The entry's offset field holds the offset in bits 0-24 and flags above.
-    OFFSET_MASK = 0x01FFFFFF
+    # The entry's offset field holds the offset in bits 0-23 and flags above.
+    # The high byte selects the encoding, it is not part of the offset.
+    OFFSET_MASK = 0x00FFFFFF
     HUFFMAN_FLAG = 0x02000000
+    UNCOMPRESSED_FLAG = 0x04000000
+    LZMA_HEADER_SIZE = 13
 
     def __init__(self, data, header_offset):
         self.parse_structure(
@@ -554,28 +612,69 @@ class CPDEntry(MeObject):
             # This is invalid, end of data out of bounds
             return
         self.valid_header = True
-        self.data = data[self.offset:end]
+        self.data = bytes(data[self.offset:end])
+        self.raw_data = self.data
+        self.module_data = self.data
+        self.decode_status = DECODE_NONE
+
+    def _try_lzma_header_repair(self):
+        '''Decode an LZMA stream with extra zero bytes in its header.
+
+        Some images insert three zero bytes after the 13-byte LZMA header,
+        either immediately after it or one byte later. The repair is only
+        accepted when the unchanged bytes do not decode and the repaired
+        stream does, so a valid stream whose body happens to start with
+        zeros is never changed.
+        '''
+        for start in (self.LZMA_HEADER_SIZE, self.LZMA_HEADER_SIZE + 1):
+            if len(self.data) < start + 3 or \
+                    self.data[start:start + 3] != b'\x00\x00\x00':
+                continue
+            repaired = self.data[:start] + self.data[start + 3:]
+            results = decompress([efi_compressor.LzmaDecompress], repaired)
+            if results is None:
+                continue
+            self.data = repaired
+            self.module_data = repaired
+            self.decompressed = results[1]
+            self.decode_status = DECODE_DECODED
+            return True
+        return False
 
     def process(self):
         if not self.valid_header:
             return False
         self.name = self.structure.Name.rstrip(b'\0')
+        # Keep the bytes as read from the image. A process() call may happen
+        # more than once, and must not rewrite the original with a repaired
+        # stream from the first call.
+        self.data = self.raw_data
+        self.module_data = self.raw_data
+        self.decompressed = None
 
-        # The manifest (.man) and metadata (.met) entries are not compressed.
-        compression = self.structure.Offset >> 24
+        # The high byte of Offset is an encoding flag, not part of the
+        # offset. The manifest (.man) and metadata (.met) entries are never
+        # compressed, whatever that flag says.
+        encoding = (self.structure.Offset & ~self.OFFSET_MASK) >> 24
         if self.name.endswith((".man", ".met")):
             self.compression = COMP_TYPE_NOT_COMPRESSED
-        elif self.structure.Offset & self.HUFFMAN_FLAG:
+        elif encoding == 0x02:
             self.compression = COMP_TYPE_HUFFMAN
-        elif compression == 0x00:
+        elif encoding == 0x00:
             self.compression = COMP_TYPE_LZMA
-            # There is an odd state to check for that includes an additional
-            # \x00\x00\x00 after the initial LZMA header block.
-            if self.data[0x0e:0x11] == b'\x00\x00\x00':
-                self.data = self.data[:0x0e] + self.data[0x11:]
-        else:
+        elif encoding == 0x04:
             self.compression = COMP_TYPE_NOT_COMPRESSED
-        self.decompress_module()
+        else:
+            self.compression = COMP_TYPE_UNKNOWN
+
+        if self.compression == COMP_TYPE_LZMA:
+            self.decompress_module()
+            if self.decode_status == DECODE_FAILED:
+                self._try_lzma_header_repair()
+        elif self.compression in (COMP_TYPE_HUFFMAN, COMP_TYPE_UNKNOWN):
+            self.decompress_module()
+        else:
+            self.decode_status = DECODE_NONE
         return True
 
     def showinfo(self, ts='', index=None):
