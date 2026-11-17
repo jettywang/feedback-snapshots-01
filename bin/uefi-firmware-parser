@@ -140,6 +140,15 @@ def _process_file(file_name, input_data):
             file_name, parser.type()))
         return 3
 
+    if args.inventory:
+        from uefi_firmware.pe_inventory import collect_images
+        inventory = collect_images(firmware)
+        if args.json:
+            print(json.dumps(inventory.to_dict()))
+        else:
+            inventory.showinfo()
+        return 0
+
     if args.json:
         res = firmware.to_dict()
         print(json.dumps(res))
@@ -176,6 +185,9 @@ if __name__ == "__main__":
     argparser.add_argument(
         '--depex', default=False, action="store_true",
         help='The input is a DEPEX blob')
+    argparser.add_argument(
+        '--inventory', default=False, action="store_true",
+        help='List embedded PE/TE images (read-only analysis).')
 
     argparser.add_argument(
         '-q', "--quiet", default=False, action="store_true",

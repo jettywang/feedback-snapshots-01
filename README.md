@@ -36,8 +36,8 @@ Installing the package adds a `uefi-firmware-parser` command:
 
 ```console
 $ uefi-firmware-parser -h
-usage: uefi-firmware-parser [-h] [-b] [--superbrute] [--depex] [-q]
-                            [--color {always,never,auto}] [-p] [-o OUTPUT]
+usage: uefi-firmware-parser [-h] [-b] [--superbrute] [--depex] [--inventory]
+                            [-q] [--color {always,never,auto}] [-p] [-o OUTPUT]
                             [-O] [-c] [-e] [-g GENERATE] [-j] [--test]
                             [--verbose]
                             file [file ...]
@@ -53,6 +53,7 @@ options:
   --superbrute          The input is a blob and may contain any sort of
                         firmware object
   --depex               The input is a DEPEX blob
+  --inventory           List embedded PE/TE images (read-only analysis).
   -q, --quiet           Do not show info.
   --color {always,never,auto}
                         Control the use of ANSI colors in the output. (auto is
@@ -86,6 +87,19 @@ $ uefi-firmware-parser --test ~/firmware/*
 Run without `--test` to print the full object hierarchy, add `-j` for JSON instead
 of the tree view, or add `-e -o DIR` to extract every volume, file, and section
 into `DIR`.
+
+Use `--inventory` for a read-only listing of the PE/TE images embedded in the
+firmware. Each entry reports the architecture and entry point, plus the image's
+position in its firmware volume, file, and section. Images inside compressed
+sections are reported with their transform chain and offset in the decoded
+stream, since they have no physical position in the input:
+
+```console
+$ uefi-firmware-parser --inventory firmware.bin
+PE32+ image: arch= x86_64 entry RVA= 0x1010 VA= 0x100001010
+  path: firmware_volume+0x800 / ffs_file 9e21fd93-... / section+0x60 / ...
+  decoded-stream offset= 0x4 (via decompress(compression section type 0x01)), ...
+```
 
 A few options help with larger jobs:
 

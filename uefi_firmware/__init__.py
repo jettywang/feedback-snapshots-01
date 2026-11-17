@@ -91,7 +91,8 @@ class AutoParser(object):
             self.firmware = None
             return None
 
-        if self.base > 0 and isinstance(self.firmware, uefi.FirmwareVolume):
+        if self.base + self.offset > 0 and \
+                isinstance(self.firmware, uefi.FirmwareVolume):
             # Volumes are named by offset, and each one found after the
             # first would otherwise be named 0 and dump to the same path.
             self.firmware.name = hex(self.base + self.offset)
