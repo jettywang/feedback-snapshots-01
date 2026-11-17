@@ -3,6 +3,7 @@ from __future__ import print_function
 import argparse
 import base64
 import binascii
+import bisect
 import datetime
 import io
 import itertools
@@ -1105,6 +1106,32 @@ class MatchListener(STIXPatternListener):
         # Holds intermediate results
         self.__compute_stack = []
 
+        # Instrumentation of the FOLLOWEDBY join.  "pairs considered" counts
+        # every (lhs_binding, rhs_binding) pair the join tests against the
+        # disjointness/temporal predicates; "pairs joined" counts the pairs
+        # which pass both predicates and become output bindings.  The counters
+        # accumulate across all FOLLOWEDBY nodes in the pattern and are meant
+        # to quantify (and guard against regressions of) candidate enumeration.
+        self.__followed_by_pairs_considered = 0
+        self.__followed_by_pairs_joined = 0
+
+    def get_followed_by_stats(self):
+        """
+        Returns instrumentation counters for the FOLLOWEDBY joins performed
+        during the most recent pattern walk:
+
+        - pairs_considered: number of candidate (lhs, rhs) binding pairs for
+          which the disjointness and temporal predicates were evaluated
+        - pairs_joined: number of those pairs which satisfied both predicates
+          and were emitted as joined bindings
+
+        :return: A dict with the two counters.
+        """
+        return {
+            "pairs_considered": self.__followed_by_pairs_considered,
+            "pairs_joined": self.__followed_by_pairs_joined,
+        }
+
     def __split_multi_observed_data(self, observed_data_bundles):
         new_bundles = []
         merged_bundle = {}
@@ -1289,6 +1316,22 @@ class MatchListener(STIXPatternListener):
           by the observation's first_observed and last_observed timestamps) for
           all observations such that the timestamps on the RHS binding are >=
           than the timestamps on the LHS binding.
+
+        A naive join enumerates every (lhs_binding, rhs_binding) pair, which is
+        O(L*R) even when most pairs cannot possibly satisfy the temporal
+        relationship.  Here the per-binding scalar timestamp bounds and
+        observation-index sets are computed once, each side is kept in an
+        incrementally built, timestamp-sorted index (with stable arrival
+        sequence ids), and a binary search restricts every fixed-side join to
+        exactly the bindings whose temporal bound can pass.  The original lazy,
+        interleaved merge structure (and therefore the exact emission order of
+        the joined bindings, which downstream REPEATS pruning relies on) is
+        preserved: bindings are pulled from the child generators on demand and
+        every (lhs, rhs) pair is tested at most once, when the later-arriving
+        side is processed.  This is a pure index-based prune: every pair skipped
+        by the binary search is provably rejected by the temporal predicate
+        too, so no satisfying pair (and therefore no witness binding) is ever
+        dropped, and no candidate count is ever truncated.
         """
         num_operands = len(ctx.observationExpressions())
 
@@ -1308,70 +1351,125 @@ class MatchListener(STIXPatternListener):
         rhs_bindings = self.__pop(debug_label)
         lhs_bindings = self.__pop(debug_label)
 
-        # we need to return the filtered cartesian product of rhs_bindings
-        # and lhs_bindings but they are generators:
-        # we need to store the generated elements
         def joined_bindings():
-            _rhs_cache = []
-            _lhs_cache = []
-            _next_rhs_binding = next(rhs_bindings, None)
-            _next_lhs_binding = next(lhs_bindings, None)
-            if _next_rhs_binding is None or _next_lhs_binding is None:
-                # cache and one generator are empty
-                return
-            while _next_rhs_binding is not None or _next_lhs_binding is not None:
-                # while there are new bindings to explore
-                if _next_rhs_binding is not None:
-                    # if there is a new rhs binding yield valid combinations
-                    for combination in self.__followed_by_right_join(_lhs_cache, _next_rhs_binding):
-                        yield combination
-                    # update cache
-                    _rhs_cache.append(_next_rhs_binding)
-                    _next_rhs_binding = next(rhs_bindings, None)
+            # Each side keeps three parallel structures:
+            #   *_cache: entries in child-generator arrival order, which is the
+            #            order pairs must be emitted in.  Each entry is
+            #            (arrival_seq, obs_index_set, temporal_bound, binding);
+            #            arrival_seq is a stable id assigned as each binding
+            #            arrives and doubles as its cache position.
+            #   *_sorted_bounds: temporal bounds kept sorted, used to binary
+            #            search the prune threshold with bisect.
+            #   *_sorted_seqs: arrival_seq values aligned entry-for-entry with
+            #            *_sorted_bounds, mapping a prune threshold back to the
+            #            corresponding cached bindings.
+            #
+            # bisect locates exactly the cached bindings whose temporal bound
+            # can satisfy the predicate; their arrival_seq ids become a small
+            # membership set, and the arrival-ordered cache is filtered through
+            # it.  Thus the disjointness predicate runs only for temporally
+            # feasible pairs (the count the instrumentation exposes), the
+            # original interleaved emission order is retained even when the
+            # input is not ordered in time, and equal-timestamp entries are all
+            # included because the threshold is searched over pure bounds.
+            # Bounds and obs-index sets are computed once per binding rather
+            # than once per candidate pair, and no candidate count is ever
+            # truncated: every skipped pair is provably temporally impossible.
+            lhs_cache = []
+            rhs_cache = []
+            lhs_sorted_bounds = []
+            lhs_sorted_seqs = []
+            rhs_sorted_bounds = []
+            rhs_sorted_seqs = []
 
-                if _next_lhs_binding is not None:
-                    # if there is a new rhs binding yield valid combinations
-                    for combination in self.__followed_by_left_join(_next_lhs_binding, _rhs_cache):
-                        yield combination
-                    # update cache
-                    _lhs_cache.append(_next_lhs_binding)
-                    _next_lhs_binding = next(lhs_bindings, None)
+            next_rhs = next(rhs_bindings, None)
+            next_lhs = next(lhs_bindings, None)
+            if next_rhs is None or next_lhs is None:
+                # One child produced no bindings: the cross-product is empty.
+                return
+
+            while next_rhs is not None or next_lhs is not None:
+                if next_rhs is not None:
+                    # Temporal predicate: latest_lhs_first <= rhs_bound.
+                    rhs_obs_idxs = self.__binding_obs_indices(next_rhs)
+                    rhs_bound = self.__earliest_last_timestamp(next_rhs)
+                    rhs_seq = len(rhs_cache)
+                    rhs_cache.append(
+                        (rhs_seq, rhs_obs_idxs, rhs_bound, next_rhs)
+                    )
+                    insert_at = bisect.bisect_right(
+                        rhs_sorted_bounds, rhs_bound
+                    )
+                    rhs_sorted_bounds.insert(insert_at, rhs_bound)
+                    rhs_sorted_seqs.insert(insert_at, rhs_seq)
+
+                    # bisect_right includes every equal-timestamp LHS entry, so
+                    # the inclusive <= boundary is preserved.
+                    qualify = bisect.bisect_right(
+                        lhs_sorted_bounds, rhs_bound
+                    )
+                    qualifying_seqs = set(lhs_sorted_seqs[:qualify])
+                    for lhs_seq, lhs_obs_idxs, _, lhs_binding in lhs_cache:
+                        if lhs_seq not in qualifying_seqs:
+                            # Provably impossible temporal relationship: pruned
+                            # without running the disjointness predicate.
+                            continue
+                        self.__followed_by_pairs_considered += 1
+                        if lhs_obs_idxs.isdisjoint(rhs_obs_idxs):
+                            self.__followed_by_pairs_joined += 1
+                            yield lhs_binding + next_rhs
+
+                    next_rhs = next(rhs_bindings, None)
+
+                if next_lhs is not None:
+                    # Temporal predicate: lhs_bound <= earliest_rhs_last.
+                    lhs_obs_idxs = self.__binding_obs_indices(next_lhs)
+                    lhs_bound = self.__latest_first_timestamp(next_lhs)
+                    lhs_seq = len(lhs_cache)
+                    lhs_cache.append(
+                        (lhs_seq, lhs_obs_idxs, lhs_bound, next_lhs)
+                    )
+                    insert_at = bisect.bisect_left(
+                        lhs_sorted_bounds, lhs_bound
+                    )
+                    lhs_sorted_bounds.insert(insert_at, lhs_bound)
+                    lhs_sorted_seqs.insert(insert_at, lhs_seq)
+
+                    # bisect_left starts at the first bound >= lhs_bound, so
+                    # equal-timestamp RHS entries are included (<= is inclusive).
+                    start = bisect.bisect_left(
+                        rhs_sorted_bounds, lhs_bound
+                    )
+                    qualifying_seqs = set(rhs_sorted_seqs[start:])
+                    for rhs_seq, rhs_obs_idxs, _, rhs_binding in rhs_cache:
+                        if rhs_seq not in qualifying_seqs:
+                            # Provably impossible temporal relationship: pruned
+                            # without running the disjointness predicate.
+                            continue
+                        self.__followed_by_pairs_considered += 1
+                        if lhs_obs_idxs.isdisjoint(rhs_obs_idxs):
+                            self.__followed_by_pairs_joined += 1
+                            yield next_lhs + rhs_binding
+
+                    next_lhs = next(lhs_bindings, None)
 
         self.__push(joined_bindings(), debug_label)
 
-    def __followed_by_left_join(self, lhs_binding, rhs_bindings):
-        # Yield all valid FOLLOWEDBY joins between a single lhs_binding
-        # and a list of rhs_bindings
+    def __binding_obs_indices(self, binding):
+        """
+        Returns the set of observation indices referenced by a binding.
 
-        # To ensure a satisfying selection of timestamps is possible,
-        # we make the most optimistic choices: choose the earliest
-        # possible timestamps for LHS bindings and latest possible for
-        # RHS bindings.  Then as a shortcut, only ensure proper
-        # ordering of the latest LHS timestamp and earliest RHS
-        # timestamp.
-        latest_lhs_first_timestamp = self.__latest_first_timestamp(lhs_binding)
-
-        for rhs_binding in rhs_bindings:
-
-            if _disjoint(lhs_binding, rhs_binding):
-                earliest_rhs_last_timestamp = self.__earliest_last_timestamp(rhs_binding)
-
-                if latest_lhs_first_timestamp <= earliest_rhs_last_timestamp:
-                    yield (lhs_binding + rhs_binding)
-
-    def __followed_by_right_join(self, lhs_bindings, rhs_binding):
-        # Yield all valid FOLLOWEDBY joins between a list of lhs_bindings
-        # and a single rhs_binding
-
-        earliest_rhs_last_timestamp = self.__earliest_last_timestamp(rhs_binding)
-
-        for lhs_binding in lhs_bindings:
-
-            if _disjoint(lhs_binding, rhs_binding):
-                latest_lhs_first_timestamp = self.__latest_first_timestamp(lhs_binding)
-
-                if latest_lhs_first_timestamp <= earliest_rhs_last_timestamp:
-                    yield (lhs_binding + rhs_binding)
+        The disjointness rule used by the observation operators (see
+        _disjoint()) operates at the observation level: an observation may not
+        be bound on both sides even when each side uses a different instance
+        (number_observed > 1) of it.  So this set is keyed by obs_idx rather
+        than by the full (obs_idx, inst_idx) instance id.
+        """
+        return {
+            self.get_obs_index(inst_id)
+            for inst_id in binding
+            if inst_id is not None
+        }
 
     def __latest_first_timestamp(self, binding):
         return max(

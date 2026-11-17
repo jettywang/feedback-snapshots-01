@@ -1,6 +1,15 @@
 CHANGELOG
 =========
 
+Unreleased
+
+* Optimize the FOLLOWEDBY observation operator for large observation sets.
+  Candidate bindings are indexed by their temporal bound and binary search
+  prunes pairs that cannot satisfy the LHS-before-RHS timestamp relationship,
+  while preserving the original lazy evaluation, witness set semantics and
+  emission order.  Instrumentation counters are exposed via
+  ``MatchListener.get_followed_by_stats()``.
+
 3.0.0 - 2022-07-19
 
 * Added STIX 2.1 support
