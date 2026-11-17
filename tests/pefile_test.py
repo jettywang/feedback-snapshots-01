@@ -439,6 +439,140 @@ class TestPEFile(unittest.TestCase):
                 self.assertIsNotNone(load_config_data)
                 self.assertIsNone(load_config_data.dynamic_relocations)
 
+    def test_dynamic_relocations_v2_mixed_known_and_unknown(self):
+        """Version 2 tables enumerate every record via HeaderSize/FixupInfoSize.
+
+        A table interleaving documented symbols (3, 4, 5) with an unknown
+        symbol must decode the documented fixups, preserve the unknown fixup
+        bytes verbatim, and still locate the records that follow the unknown
+        one. An unsupported symbol must never surface as an empty table.
+        """
+        # Block virtual addresses stay below the 0x3000 SizeOfImage so the
+        # existing base-relocation sanity checks accept them.
+        known_3 = _base_reloc_block(0x1200, [0x300A, 0x0000])
+        unknown_body = bytes(range(0x30, 0x3C))
+        known_5 = _base_reloc_block(0x1400, [0x500C, 0x500D, 0x500E, 0x500F])
+        known_4 = _base_reloc_block(0x1300, [0x400B])
+
+        records = b"".join(
+            [
+                _dvrt_v2_record(3, known_3, symbol_group=1),
+                _dvrt_v2_record(99, unknown_body, symbol_group=7, flags=0xDEAD),
+                _dvrt_v2_record(5, known_5, symbol_group=2),
+                _dvrt_v2_record(4, known_4),
+            ]
+        )
+        pe = pefile.PE(data=_make_dvrt_pe(records))
+        relocations = pe.parse_dynamic_relocations(_DVRT_TABLE_OFFSET, 1)
+
+        # "Unsupported" is a parsed table with a preserved entry, not None.
+        self.assertIsNotNone(relocations)
+        self.assertEqual([item.symbol for item in relocations], [3, 99, 5, 4])
+
+        # Documented symbols decode into base relocation blocks.
+        first, unknown, third, fourth = relocations
+        self.assertIsInstance(first, pefile.DynamicRelocationData)
+        self.assertEqual(first.relocations[0].struct.VirtualAddress, 0x1200)
+        self.assertEqual(third.relocations[0].struct.VirtualAddress, 0x1400)
+        self.assertEqual(fourth.relocations[0].struct.VirtualAddress, 0x1300)
+
+        # The unknown record keeps its raw body and header metadata instead of
+        # exposing (or being walked as) a base relocation list.
+        self.assertIsInstance(unknown, pefile.UnknownDynamicRelocationData)
+        self.assertEqual(unknown.fixup_data, unknown_body)
+        self.assertEqual(unknown.symbol_group, 7)
+        self.assertEqual(unknown.flags, 0xDEAD)
+        self.assertTrue(
+            any("No parser available" in warning for warning in pe.get_warnings())
+        )
+
+        # Successive records are reached through the per-record lengths, so the
+        # header file offsets must line up with the declared sizes.
+        first_rva = first.struct.get_file_offset()
+        self.assertEqual(
+            unknown.struct.get_file_offset(),
+            first_rva + _DVRT_V2_HEADER_SIZE + len(known_3),
+        )
+
+    def test_dynamic_relocations_v2_unknown_body_is_not_a_record(self):
+        """An unknown record's body is never interpreted as the next record."""
+        # Bytes that, if misread as a header, would look like a symbol-4 record.
+        decoy_header = struct.pack(
+            "<IIIII", _DVRT_V2_HEADER_SIZE, 8, 4, 0, 0
+        )
+        following = _dvrt_v2_record(
+            5, _base_reloc_block(0x1500, [0x5010, 0x5011, 0x5012, 0x5013])
+        )
+        records = _dvrt_v2_record(99, decoy_header) + following
+        pe = pefile.PE(data=_make_dvrt_pe(records))
+        relocations = pe.parse_dynamic_relocations(_DVRT_TABLE_OFFSET, 1)
+
+        self.assertEqual([item.symbol for item in relocations], [99, 5])
+        self.assertIsInstance(relocations[0], pefile.UnknownDynamicRelocationData)
+        self.assertEqual(relocations[0].fixup_data, decoy_header)
+        self.assertEqual(
+            relocations[1].relocations[0].struct.VirtualAddress, 0x1500
+        )
+
+    def test_dynamic_relocations_v2_truncated_fixup_length(self):
+        """A FixupInfoSize reaching past the table stops enumeration cleanly.
+
+        The valid leading record is retained while the over-long record is
+        rejected with a warning instead of being parsed from stray bytes or
+        silently dropped into an empty success.
+        """
+        good = _dvrt_v2_record(3, _base_reloc_block(0x1200, [0x300A, 0x0000]))
+        # Header claims a 100-byte fixup, but the table ends right after it.
+        bad = struct.pack("<IIIII", _DVRT_V2_HEADER_SIZE, 100, 99, 0, 0)
+        records = good + bad
+        pe = pefile.PE(data=_make_dvrt_pe(records))
+        relocations = pe.parse_dynamic_relocations(_DVRT_TABLE_OFFSET, 1)
+
+        self.assertEqual([item.symbol for item in relocations], [3])
+        self.assertTrue(
+            any("extends past the table" in warning for warning in pe.get_warnings())
+        )
+
+    def test_dynamic_relocations_v2_section_bounds(self):
+        """Section index and table offset/size must stay inside the section."""
+        good = _dvrt_v2_record(3, _base_reloc_block(0x1200, [0x300A, 0x0000]))
+
+        # Section index beyond the available sections.
+        pe = pefile.PE(data=_make_dvrt_pe(good))
+        self.assertIsNone(pe.parse_dynamic_relocations(_DVRT_TABLE_OFFSET, 5))
+        self.assertTrue(
+            any(
+                "Section index out of range" in warning
+                for warning in pe.get_warnings()
+            )
+        )
+
+        # Table offset outside the section.
+        pe = pefile.PE(data=_make_dvrt_pe(good))
+        self.assertIsNone(pe.parse_dynamic_relocations(0x3000, 1))
+        self.assertTrue(
+            any("outside of section" in warning for warning in pe.get_warnings())
+        )
+
+        # Declared table size larger than the section that holds it.
+        pe = pefile.PE(data=_make_dvrt_pe(good, declared_size=0x5000))
+        self.assertIsNone(pe.parse_dynamic_relocations(_DVRT_TABLE_OFFSET, 1))
+        self.assertTrue(
+            any("extends past its section" in warning for warning in pe.get_warnings())
+        )
+
+    def test_dynamic_relocations_v1_still_supported(self):
+        """Version 1 records keep their existing parsing results."""
+        fixup = _base_reloc_block(0x1200, [0x300A, 0x0000])
+        record = struct.pack("<II", 3, len(fixup)) + fixup
+        pe = pefile.PE(data=_make_dvrt_pe(record, version=1))
+        relocations = pe.parse_dynamic_relocations(_DVRT_TABLE_OFFSET, 1)
+
+        self.assertEqual(len(relocations), 1)
+        self.assertIsInstance(relocations[0], pefile.DynamicRelocationData)
+        self.assertEqual(relocations[0].symbol, 3)
+        self.assertEqual(relocations[0].relocations[0].struct.VirtualAddress, 0x1200)
+
     def test_relocated_memory_mapped_image(self):
         """Test different rebasing methods produce the same image"""
 
@@ -923,3 +1057,43 @@ def _create_pe(virtual_size, size_of_raw_data):
     # Fill raw section data with a sentinel byte so leakage is obvious
     section_data = b"\xCC" * size_of_raw_data
     return bytes(headers) + section_data
+
+
+# ---------------------------------------------------------------------------
+# Dynamic Value Relocation Table (DVRT) version 2 fixtures
+# ---------------------------------------------------------------------------
+
+# PE32 IMAGE_DYNAMIC_RELOCATION_V2 header: five DWORDs.
+_DVRT_V2_HEADER_SIZE = 20
+_DVRT_TABLE_OFFSET = 0x100
+_DVRT_RAW_OFFSET = 0x400 + _DVRT_TABLE_OFFSET
+
+
+def _base_reloc_block(virtual_address, entry_words):
+    """Build one IMAGE_BASE_RELOCATION block from 16-bit entry words."""
+    body = b"".join(struct.pack("<H", word) for word in entry_words)
+    return struct.pack("<II", virtual_address, 8 + len(body)) + body
+
+
+def _dvrt_v2_record(symbol, fixup, symbol_group=0, flags=0, header_size=None):
+    """Build one version 2 dynamic relocation record (PE32)."""
+    if header_size is None:
+        header_size = _DVRT_V2_HEADER_SIZE
+    header = struct.pack(
+        "<IIIII",
+        header_size,
+        len(fixup),
+        symbol,
+        symbol_group,
+        flags,
+    )
+    return header + fixup
+
+
+def _make_dvrt_pe(records, version=2, declared_size=None, section_size=0x2000):
+    """Embed a DVRT made of `records` into a minimal one-section PE32."""
+    data = bytearray(_create_pe(section_size, section_size))
+    table_size = declared_size if declared_size is not None else len(records)
+    table = struct.pack("<II", version, table_size) + records
+    data[_DVRT_RAW_OFFSET : _DVRT_RAW_OFFSET + len(table)] = table
+    return bytes(data)

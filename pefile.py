@@ -1714,6 +1714,21 @@ class DynamicRelocationData(DataContainer):
     """
 
 
+class UnknownDynamicRelocationData(DataContainer):
+    """Holds a dynamic relocation whose Symbol has no documented parser.
+
+    Used by version 2 dynamic relocation tables. The fixup information cannot
+    be interpreted, so its raw bytes are preserved verbatim instead of being
+    misread as another record.
+
+    struct:        IMAGE_DYNAMIC_RELOCATION_V2 structure
+    symbol:        Symbol carried by the record
+    symbol_group:  Symbol group carried by the record
+    flags:         Flags carried by the record
+    fixup_data:    Raw fixup information bytes (FixupInfoSize bytes)
+    """
+
+
 class FunctionOverrideData(DataContainer):
     """Holds Function and bdd dynamic relocation information.
 
@@ -4131,10 +4146,27 @@ class PE:
             return None
 
         if dynamic_value_reloc_table_section > len(self.sections):
+            self.__warnings.append(
+                "Invalid IMAGE_DYNAMIC_RELOCATION_TABLE information. "
+                f"Section index out of range: {dynamic_value_reloc_table_section}"
+            )
             return None
 
         section = self.sections[dynamic_value_reloc_table_section - 1]
         rva = section.VirtualAddress + dynamic_value_reloc_table_offset
+
+        # Bytes the section actually exposes: capped both by its mapped size
+        # and by the raw data present in the file. The table must start inside
+        # this extent and its declared size must not cross it.
+        section_size = min(section.Misc_VirtualSize, section.SizeOfRawData)
+        section_end = section.VirtualAddress + section_size
+        if dynamic_value_reloc_table_offset >= section_size:
+            self.__warnings.append(
+                "Invalid IMAGE_DYNAMIC_RELOCATION_TABLE information. "
+                f"Table offset outside of section at RVA: {rva:#x}"
+            )
+            return None
+
         reloc_table_size = Structure(
             self.__IMAGE_DYNAMIC_RELOCATION_TABLE_format__
         ).sizeof()
@@ -4158,15 +4190,34 @@ class PE:
             )
             return None
 
-        if image_dynamic_reloc_table_struct.Version != 1:
+        table_rva = rva
+        records_rva = rva + reloc_table_size
+        table_end = records_rva + image_dynamic_reloc_table_struct.Size
+
+        if table_end > section_end:
             self.__warnings.append(
-                "No parsing available for IMAGE_DYNAMIC_RELOCATION_TABLE.Version = "
-                f"{image_dynamic_reloc_table_struct.Version}"
+                "Invalid IMAGE_DYNAMIC_RELOCATION_TABLE information. "
+                f"Table of size {image_dynamic_reloc_table_struct.Size:#x} extends "
+                f"past its section (RVA {table_rva:#x})"
             )
             return None
 
-        rva += reloc_table_size
-        end = rva + image_dynamic_reloc_table_struct.Size
+        version = image_dynamic_reloc_table_struct.Version
+        if version == 1:
+            return self.parse_dynamic_relocations_v1(records_rva, table_end)
+        if version == 2:
+            return self.parse_dynamic_relocations_v2(
+                records_rva, table_end, section_end
+            )
+
+        self.__warnings.append(
+            "No parsing available for IMAGE_DYNAMIC_RELOCATION_TABLE.Version = "
+            f"{version}"
+        )
+        return None
+
+    def parse_dynamic_relocations_v1(self, rva, end):
+        """Parse version 1 IMAGE_DYNAMIC_RELOCATION records."""
         dynamic_relocations = []
 
         while rva < end:
@@ -4226,6 +4277,128 @@ class PE:
                 )
 
             rva += size
+
+        return dynamic_relocations
+
+    def parse_dynamic_relocations_v2(self, rva, end, section_end):
+        """Parse version 2 IMAGE_DYNAMIC_RELOCATION_V2 records.
+
+        Every record is located through its own HeaderSize and FixupInfoSize
+        instead of being inferred from the fixup bytes. Symbols with a
+        documented layout are decoded; any other symbol keeps its raw fixup
+        bytes so an unknown record's body is never treated as a new record.
+        """
+        format = self.__IMAGE_DYNAMIC_RELOCATION_V2_format__
+
+        if self.PE_TYPE == OPTIONAL_HEADER_MAGIC_PE_PLUS:
+            format = self.__IMAGE_DYNAMIC_RELOCATION64_V2_format__
+
+        header_size = Structure(format).sizeof()
+        dynamic_relocations = []
+
+        while rva < end:
+            if rva + header_size > end:
+                self.__warnings.append(
+                    "Invalid version 2 dynamic relocation. "
+                    f"Truncated header at RVA: {rva:#x}"
+                )
+                break
+
+            dynamic_rlc = self.__unpack_data__(
+                format,
+                self.get_data(rva, header_size),
+                file_offset=self.get_offset_from_rva(rva),
+            )
+
+            if not dynamic_rlc:
+                self.__warnings.append(
+                    "Invalid version 2 dynamic relocation. "
+                    f"Can't read header at RVA: {rva:#x}"
+                )
+                break
+
+            record_header_size = dynamic_rlc.HeaderSize
+            fixup_size = dynamic_rlc.FixupInfoSize
+
+            # A record claiming a smaller header than the documented one, or a
+            # body that runs past the table/section, cannot be walked safely.
+            if record_header_size < header_size:
+                self.__warnings.append(
+                    "Invalid version 2 dynamic relocation. "
+                    f"HeaderSize {record_header_size:#x} below the minimum "
+                    f"{header_size:#x} at RVA: {rva:#x}"
+                )
+                break
+
+            record_end = rva + record_header_size + fixup_size
+            if record_end > end or record_end > section_end:
+                self.__warnings.append(
+                    "Invalid version 2 dynamic relocation. "
+                    f"Record of HeaderSize {record_header_size:#x} and "
+                    f"FixupInfoSize {fixup_size:#x} extends past the table "
+                    f"at RVA: {rva:#x}"
+                )
+                break
+
+            fixup_rva = rva + record_header_size
+            symbol = dynamic_rlc.Symbol
+
+            if symbol in self.dynamic_relocation_format_by_symbol:
+                relocations = self.parse_image_base_relocation_list(
+                    fixup_rva,
+                    fixup_size,
+                    self.dynamic_relocation_format_by_symbol[symbol],
+                )
+                dynamic_relocations.append(
+                    DynamicRelocationData(
+                        struct=dynamic_rlc, symbol=symbol, relocations=relocations
+                    )
+                )
+
+            elif symbol == 7:
+                try:
+                    func_relocs, bdd_relocs = self.parse_function_override_data(
+                        fixup_rva
+                    )
+                except PEFormatError:
+                    self.__warnings.append(
+                        "Invalid version 2 function override relocation. "
+                        f"Can't read fixup data at RVA: {fixup_rva:#x}"
+                    )
+                    func_relocs, bdd_relocs = [], []
+                dynamic_relocations.append(
+                    FunctionOverrideData(
+                        struct=dynamic_rlc,
+                        symbol=symbol,
+                        bdd_relocs=bdd_relocs,
+                        func_relocs=func_relocs,
+                    )
+                )
+
+            else:
+                fixup_data = self.get_data(fixup_rva, fixup_size)
+                if len(fixup_data) != fixup_size:
+                    self.__warnings.append(
+                        "Invalid version 2 dynamic relocation. "
+                        f"Truncated fixup data at RVA: {fixup_rva:#x}"
+                    )
+                    break
+                self.__warnings.append(
+                    "No parser available for version 2 dynamic relocation "
+                    f"symbol {symbol}; preserving {fixup_size:#x} raw fixup "
+                    f"bytes at RVA: {fixup_rva:#x}"
+                )
+                dynamic_relocations.append(
+                    UnknownDynamicRelocationData(
+                        struct=dynamic_rlc,
+                        symbol=symbol,
+                        symbol_group=dynamic_rlc.SymbolGroup,
+                        flags=dynamic_rlc.Flags,
+                        fixup_data=fixup_data,
+                    )
+                )
+
+            rva = record_end
 
         return dynamic_relocations
 
