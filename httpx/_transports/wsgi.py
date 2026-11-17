@@ -4,6 +4,7 @@ import io
 import itertools
 import sys
 import typing
+from urllib.parse import unquote_to_bytes
 
 from .._models import Request, Response
 from .._types import SyncByteStream
@@ -93,6 +94,13 @@ class WSGITransport(BaseTransport):
         wsgi_input = io.BytesIO(request.content)
 
         port = request.url.port or {"http": 80, "https": 443}[request.url.scheme]
+        # PEP 3333 requires `PATH_INFO` to be a "bytes-to-text" decoding of
+        # the percent-decoded URL path, using latin-1. Decoding from the raw
+        # path bytes (rather than using the already-decoded `url.path`) keeps
+        # the environ byte-faithful, so that `PATH_INFO.encode("latin-1")`
+        # always round-trips to the exact bytes that were requested.
+        raw_path = request.url.raw_path.split(b"?", 1)[0]
+        path_info = unquote_to_bytes(raw_path).decode("latin-1")
         environ = {
             "wsgi.version": (1, 0),
             "wsgi.url_scheme": request.url.scheme,
@@ -103,7 +111,7 @@ class WSGITransport(BaseTransport):
             "wsgi.run_once": False,
             "REQUEST_METHOD": request.method,
             "SCRIPT_NAME": self.script_name,
-            "PATH_INFO": request.url.path,
+            "PATH_INFO": path_info,
             "QUERY_STRING": request.url.query.decode("ascii"),
             "SERVER_NAME": request.url.host,
             "SERVER_PORT": str(port),

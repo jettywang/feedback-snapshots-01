@@ -14,6 +14,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 * Expose `FunctionAuth` from the public API. (#3699)
 
+### Fixed
+
+* `WSGITransport` now builds `PATH_INFO` following the PEP 3333 byte-to-text convention, percent-decoding the raw path bytes and decoding them as latin-1, so the WSGI environ stays byte-faithful for non-ASCII and encoded paths.
+
 ## 0.28.1 (6th December, 2024)
 
 * Fix SSL case where `verify=False` together with client side certificates.
