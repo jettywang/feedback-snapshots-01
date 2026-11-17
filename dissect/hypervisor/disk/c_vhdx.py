@@ -106,6 +106,26 @@ c_vhdx = cstruct().load(vhdx_def)
 ALIGNMENT = 64 * 1024
 MB = 1024 * 1024
 
+# [MS-VHDX] 2.6/2.7: both the region and metadata tables fit inside a single 64 KiB structure
+# and may describe at most 1024 entries (a 32-byte header followed by 1024 32-byte entries).
+MAX_TABLE_ENTRIES = 1024
+TABLE_SIZE = c_vhdx.region_table_header.size + MAX_TABLE_ENTRIES * c_vhdx.region_table_entry.size
+
+# Region table entries describe 1 MiB-aligned, non-overlapping regions.
+REGION_OFFSET_ALIGNMENT = MB
+# Metadata item offsets are relative to the start of the metadata region and must be 4-byte aligned.
+METADATA_OFFSET_ALIGNMENT = 4
+
+# Known sizes of the well-known metadata items, used to validate conflicting table entries.
+FILE_PARAMETERS_SIZE = c_vhdx.file_parameters.size
+VIRTUAL_DISK_SIZE_SIZE = 8
+VIRTUAL_DISK_ID_SIZE = c_vhdx.virtual_disk_id.size
+LOGICAL_SECTOR_SIZE_SIZE = 4
+PHYSICAL_SECTOR_SIZE_SIZE = 4
+
+# The only logical sector sizes a VHDX may expose.
+VALID_LOGICAL_SECTOR_SIZES = (512, 4096)
+
 BAT_REGION_GUID = UUID("2DC27766-F623-4200-9D64-115E9BFD4A08")
 FILE_PARAMETERS_GUID = UUID("CAA16737-FA36-4D43-B3B6-33F0AA44E76B")
 LOGICAL_SECTOR_SIZE_GUID = UUID("8141BF1D-A96F-4709-BA47-F233A8FAAB5F")
