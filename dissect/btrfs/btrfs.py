@@ -22,6 +22,7 @@ from dissect.btrfs.exceptions import (
     NotADirectoryError,
     NotASymlinkError,
 )
+from dissect.btrfs.link import DEFAULT_MAX_HOPS, LinkResolution, resolve_link
 from dissect.btrfs.stream import ChunkStream, Extent, ExtentStream, decode_extent
 from dissect.btrfs.tree import BTree
 
@@ -91,6 +92,53 @@ class Btrfs:
             node: Optional inode used for relative lookups.
         """
         return self.default_subvolume.get(path, node)
+
+    def resolve_link(
+        self,
+        path: str | int | INode,
+        *,
+        root: Subvolume | INode | str | int | None = None,
+        node: INode | None = None,
+        max_hops: int = DEFAULT_MAX_HOPS,
+        follow_final: bool = True,
+        strict: bool = False,
+    ) -> LinkResolution:
+        """Explicitly resolve a symlink and return the evidence chain.
+
+        Relative targets are interpreted from the directory containing the
+        link. Absolute targets are interpreted from ``root``, which is the
+        evidence root selected by the caller and also acts as a namespace
+        boundary. Resolution never consults a host path.
+
+        Args:
+            path: Path, inode or symlink to resolve.
+            root: Optional evidence root (subvolume, directory inode, path or subvolume id).
+            node: Optional directory inode to start a relative path from.
+            max_hops: Caller supplied maximum number of symlink expansions.
+            follow_final: Whether to follow a symlink in the final path component.
+            strict: Raise on failure instead of returning a failed result.
+        """
+        if isinstance(path, INode):
+            return resolve_link(
+                path,
+                root=root,
+                max_hops=max_hops,
+                follow_final=follow_final,
+                strict=strict,
+            )
+
+        return resolve_link(
+            self,
+            path,
+            root=root,
+            node=node,
+            max_hops=max_hops,
+            follow_final=follow_final,
+            strict=strict,
+        )
+
+    # Historical/alternative spelling.
+    resolve_symlink = resolve_link
 
     def subvolumes(self) -> Iterator[Subvolume]:
         """Yield all subvolumes."""
@@ -273,14 +321,60 @@ class Subvolume:
             dir_item_type = dir_item.location.type
 
             if dir_item_type == c_btrfs.BTRFS_ROOT_ITEM_KEY:
-                subvolume = self.btrfs.open_subvolume(dir_item.location.objectid, subvolume)
+                # Keep the containing directory as parent context so ".."
+                # from the subvolume root returns here, not to a separately
+                # opened copy or to a host path.
+                subvolume = self.btrfs.open_subvolume(dir_item.location.objectid, node)
                 node = subvolume.root
             elif dir_item_type == c_btrfs.BTRFS_INODE_ITEM_KEY:
-                node = subvolume.inode(dir_item.location.objectid, dir_item.type, subvolume)
+                node = subvolume.inode(dir_item.location.objectid, dir_item.type, node)
             else:
                 raise NotImplementedError(f"Unknown dir_item type: {dir_item}")
 
         return node
+
+    def resolve_link(
+        self,
+        path: str | int | INode,
+        *,
+        node: INode | None = None,
+        max_hops: int = DEFAULT_MAX_HOPS,
+        follow_final: bool = True,
+        strict: bool = False,
+    ) -> LinkResolution:
+        """Explicitly resolve a symlink in this subvolume's namespace.
+
+        Relative targets are interpreted from the directory containing the
+        link. Absolute targets are interpreted from this subvolume's root,
+        which also bounds ``..``. No host path is consulted.
+
+        Args:
+            path: Path or symlink inode to resolve.
+            node: Optional directory inode to start a relative path from.
+            max_hops: Caller supplied maximum number of symlink expansions.
+            follow_final: Whether to follow a symlink in the final path component.
+            strict: Raise on failure instead of returning a failed result.
+        """
+        if isinstance(path, INode):
+            return resolve_link(
+                path,
+                root=self,
+                max_hops=max_hops,
+                follow_final=follow_final,
+                strict=strict,
+            )
+
+        return resolve_link(
+            self,
+            path,
+            node=node,
+            max_hops=max_hops,
+            follow_final=follow_final,
+            strict=strict,
+        )
+
+    # Historical/alternative spelling.
+    resolve_symlink = resolve_link
 
     def inode(self, inum: int, type: int | None = None, parent: INode | None = None) -> INode:
         """Return an :class:`INode` by number, optionally attaching a type and parent."""
@@ -438,10 +532,42 @@ class INode:
 
     @cached_property
     def link_inode(self) -> INode:
-        """Resolve the symlink target to an inode."""
-        link = self.link
-        relnode = None if link.startswith("/") else self.parent
-        return self.subvolume.get(self.link, relnode)
+        """Resolve the symlink target to an inode.
+
+        Relative targets are interpreted from the directory containing this
+        link. Use :meth:`resolve_link` for the full evidence chain.
+        """
+        if not self.is_symlink():
+            raise NotASymlinkError(f"{self!r} is not a symlink")
+
+        return self.resolve_link(strict=True).final
+
+    def resolve_link(
+        self,
+        *,
+        root: Subvolume | INode | str | int | None = None,
+        max_hops: int = DEFAULT_MAX_HOPS,
+        follow_final: bool = True,
+        strict: bool = False,
+    ) -> LinkResolution:
+        """Explicitly resolve this symlink and return the evidence chain.
+
+        Args:
+            root: Optional evidence root. Defaults to this inode's subvolume.
+            max_hops: Caller supplied maximum number of symlink expansions.
+            follow_final: Whether to follow a symlink in the final path component.
+            strict: Raise on failure instead of returning a failed result.
+        """
+        return resolve_link(
+            self,
+            root=root,
+            max_hops=max_hops,
+            follow_final=follow_final,
+            strict=strict,
+        )
+
+    # Historical/alternative spelling.
+    resolve_symlink = resolve_link
 
     @property
     def parents(self) -> Iterator[INode]:
@@ -523,12 +649,16 @@ class INode:
             name = dir_item.name.decode(errors="surrogateescape")
 
             if dir_item_type == c_btrfs.BTRFS_ROOT_ITEM_KEY:
-                subvolume = self.btrfs.open_subvolume(dir_item.location.objectid, self)
-                yield name, subvolume.root
+                # Keep the containing directory as parent context so ".."
+                # from the subvolume root returns here, not to a separately
+                # opened copy or to a host path.
+                child = self.btrfs.open_subvolume(dir_item.location.objectid, self).root
             elif dir_item_type == c_btrfs.BTRFS_INODE_ITEM_KEY:
-                yield name, self.subvolume.inode(dir_item.location.objectid, dir_item.type, self)
+                child = self.subvolume.inode(dir_item.location.objectid, dir_item.type, self)
             else:
                 raise NotImplementedError(f"Unknown dir_item type: {dir_item}")
+
+            yield name, child
 
     def extents(self) -> list[Extent] | None:
         with self.open() as fh:
