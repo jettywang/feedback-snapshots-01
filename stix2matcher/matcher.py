@@ -283,6 +283,11 @@ def _get_table_symmetric(table, val1, val2):
         return tmp.get(val1)
 
 
+_BASE64_VALUE_RE = re.compile(
+    u"^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+)
+
+
 def _process_prop_suffix(prop_name, value):
     """
     Some JSON properties have suffixes indicating the type of the value.  This
@@ -297,10 +302,26 @@ def _process_prop_suffix(prop_name, value):
 
     if prop_name.endswith(u"_hex"):
         # binary type, expressed as hex
-        value = binascii.a2b_hex(value)
+        try:
+            value = binascii.a2b_hex(value)
+        except (binascii.Error, TypeError, ValueError) as e:
+            # A malformed binary value must not silently turn into empty bytes
+            # (which would make e.g. a NOT comparison succeed).
+            six.raise_from(MatcherException(u"Invalid hex value for property "
+                            u"'{}': {!r}".format(prop_name, value)), e)
     elif prop_name.endswith(u"_bin"):
         # binary type, expressed as base64
-        value = base64.standard_b64decode(value)
+        try:
+            # b64decode() silently skips characters outside the base64
+            # alphabet, which would let a malformed value masquerade as a
+            # shorter one.  Check the shape first.
+            if not isinstance(value, six.text_type) or \
+                    not _BASE64_VALUE_RE.match(value):
+                raise ValueError(u"not base64")
+            value = base64.standard_b64decode(value)
+        except (binascii.Error, TypeError, ValueError) as e:
+            six.raise_from(MatcherException(u"Invalid base64 value for "
+                            u"property '{}': {!r}".format(prop_name, value)), e)
 
     return value
 
@@ -446,7 +467,7 @@ def _literal_terminal_to_python_val(literal_terminal):
 
 
 def _like_to_regex(like):
-    """Convert a "like" pattern to a regex."""
+    """Convert a "like" pattern to a text regex."""
 
     with io.StringIO() as sbuf:
         # "like" always must match the whole string, so surround with anchors
@@ -465,6 +486,18 @@ def _like_to_regex(like):
 
     # print(like, "=>", s)
     return s
+
+
+def _like_to_bytes_regex(like):
+    """
+    Convert a "like" pattern to a bytes regex.  The pattern is interpreted as
+    a sequence of single-byte values (one per codepoint), not as text to be
+    UTF-8 encoded.  Each codepoint must be < 256; the caller is responsible
+    for checking that.
+    """
+    # The regex syntax is the same; latin-1 maps each codepoint directly to
+    # the corresponding byte value.
+    return _like_to_regex(like).encode("latin-1")
 
 
 def _str_to_datetime(timestamp_str, ignore_case=False):
@@ -1916,9 +1949,12 @@ class MatchListener(STIXPatternListener):
                 result = cmp_func(value, literal_value)
             except ValueError:
                 # The only comparison func that raises ValueError as of this
-                # writing is for binary<->string comparisons, when the string is
-                # of the wrong form.  Spec says the result must be false.
-                result = False
+                # writing is for binary<->string comparisons, when the string
+                # can't be converted to a single-byte sequence.  No ordering
+                # exists in that case, so the test fails for the operator and
+                # for its NOT form: negating an unperformed comparison must
+                # not manufacture a match.
+                return False
             else:
                 if ctx.LT():
                     result = result < 0
@@ -2017,21 +2053,35 @@ class MatchListener(STIXPatternListener):
 
         obs_values = self.__pop(debug_label)
 
-        operand_str = unicodedata.normalize("NFC", operand_str)
-        regex = _like_to_regex(operand_str)
-        # compile and cache this to improve performance
-        compiled_re = re.compile(regex)
-        is_binary_convertible = all(ord(c) < 256 for c in regex)
+        # Text values and the text pattern are normalized to NFC.  A binary
+        # value is matched against the pattern's codepoints as raw byte
+        # values; there is no text decoding and no Unicode normalization.
+        #
+        # LIKE's "_" and "%" wildcards match any value, including a newline
+        # (the regex "." does not, hence DOTALL).  MATCHES leaves regex
+        # semantics alone.
+        text_pattern = unicodedata.normalize("NFC", operand_str)
+        compiled_re = re.compile(_like_to_regex(text_pattern), re.DOTALL)
+
+        # If any raw pattern codepoint can't be represented as a single byte,
+        # no binary value can match.
+        is_binary_convertible = all(ord(c) < 256 for c in operand_str)
+        if is_binary_convertible:
+            compiled_bin_re = re.compile(
+                _like_to_bytes_regex(operand_str), re.DOTALL
+            )
 
         def like_pred(value):
-            if isinstance(value, six.binary_type) and is_binary_convertible:
-                value = value.decode('utf8')
-
-            # non-strings can't match
-            if isinstance(value, six.text_type):
+            if isinstance(value, six.binary_type):
+                if is_binary_convertible:
+                    result = compiled_bin_re.match(value)
+                else:
+                    result = False
+            elif isinstance(value, six.text_type):
                 value = unicodedata.normalize("NFC", value)
                 result = compiled_re.match(value)
             else:
+                # non-strings can't match
                 result = False
 
             if ctx.NOT():
@@ -2066,17 +2116,19 @@ class MatchListener(STIXPatternListener):
         obs_values = self.__pop(debug_label)
 
         regex = _literal_terminal_to_python_val(regex_terminal)
-        regex = unicodedata.normalize("NFC", regex)
-        compiled_re = re.compile(regex)
+        text_regex = unicodedata.normalize("NFC", regex)
+        compiled_re = re.compile(text_regex)
 
-        # Support for binary pattern matching.
+        # Support for binary pattern matching.  The binary regex is built from
+        # the unnormalized pattern codepoints: bytes are compared as byte
+        # values, never as (normalized) text.
         is_binary_convertible = all(ord(c) < 256 for c in regex)
         if is_binary_convertible:
             if six.PY2:
                 # This will be a pattern compiled from a unicode string, but
                 # python2 doesn't seem to care.  It'll match against a 'str'
                 # just fine.
-                compiled_bin_re = compiled_re
+                compiled_bin_re = re.compile(regex)
             else:
                 # Python3 requires an actual binary regex.
                 bin_regex = six.binary_type(ord(c) for c in regex)
