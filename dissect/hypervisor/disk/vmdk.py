@@ -60,12 +60,36 @@ class VMDK(AlignedStream):
                     self.parent = open_parent(path.parent, self.descriptor.attr["parentFileNameHint"])
 
                 for extent in self.descriptor.extents:
-                    if extent.type in ["SPARSE", "VMFSSPARSE", "SESPARSE"]:
+                    extent_size = extent.sectors * SECTOR_SIZE
+
+                    if extent.type == "ZERO":
+                        self.disks.append(ZeroDisk(extent_size))
+                    elif extent.type in ["SPARSE", "VMFSSPARSE", "SESPARSE"]:
+                        if not extent.filename:
+                            log.warning("Sparse extent without filename, using zeroes: %s", extent)
+                            self.disks.append(ZeroDisk(extent_size))
+                            continue
+
                         sdisk_fh = path.with_name(extent.filename).open("rb")
-                        self.disks.append(SparseDisk(sdisk_fh, parent=self.parent))
+                        self.disks.append(SparseDisk(sdisk_fh, parent=self.parent, size=extent_size))
                     elif extent.type in ["VMFS", "FLAT"]:
+                        if not extent.filename:
+                            log.warning("Flat extent without filename, using zeroes: %s", extent)
+                            self.disks.append(ZeroDisk(extent_size))
+                            continue
+
                         rdisk_fh = path.with_name(extent.filename).open("rb")
-                        self.disks.append(RawDisk(rdisk_fh, extent.sectors * SECTOR_SIZE))
+                        self.disks.append(
+                            RawDisk(
+                                rdisk_fh,
+                                extent_size,
+                                start_sector=extent.start_sector or 0,
+                            )
+                        )
+                    else:
+                        # We can't read these extents, but they still occupy a range in the virtual disk
+                        log.warning("Unsupported extent type %s, using zeroes: %s", extent.type, extent)
+                        self.disks.append(ZeroDisk(extent_size))
 
             elif magic in (COWD_MAGIC, VMDK_MAGIC, SESPARSE_MAGIC):
                 sparse_disk = SparseDisk(fh)
@@ -79,10 +103,9 @@ class VMDK(AlignedStream):
 
         size = 0
         for disk in self.disks:
-            if size != 0:
-                self._disk_offsets.append(self.sector_count)
             disk.offset = size
             disk.sector_offset = self.sector_count
+            self._disk_offsets.append(self.sector_count)
             size += disk.size
             self.sector_count += disk.sector_count
 
@@ -91,17 +114,41 @@ class VMDK(AlignedStream):
     def read_sectors(self, sector: int, count: int) -> bytes:
         log.debug("VMDK::read_sectors(0x%x, 0x%x)", sector, count)
 
+        if count <= 0:
+            return b""
+
+        # Never read past the virtual disk size. Any aligned read extending past the end is padded in _read.
+        available = self.sector_count - sector
+        if available <= 0:
+            return b""
+
+        count = min(count, available)
         sectors_read = []
 
-        disk_idx = bisect_right(self._disk_offsets, sector)
+        # _disk_offsets contains the starting sector of every disk, so the last matching start is the disk to use.
+        # bisect_right also handles zero-sized extents by picking the next disk that actually covers the sector.
+        disk_idx = bisect_right(self._disk_offsets, sector) - 1
 
         while count > 0:
+            if disk_idx >= len(self.disks):
+                break
+
             disk = self.disks[disk_idx]
-
             disk_remaining_sectors = disk.sector_count - (sector - disk.sector_offset)
-            disk_sectors = min(disk_remaining_sectors, count)
 
-            sectors_read.append(disk.read_sectors(sector, disk_sectors))
+            if disk_remaining_sectors <= 0:
+                disk_idx += 1
+                continue
+
+            disk_sectors = min(disk_remaining_sectors, count)
+            sector_data = disk.read_sectors(sector, disk_sectors)
+
+            # Missing backing material must stay contained to this extent and read as zeroes.
+            expected_size = disk_sectors * SECTOR_SIZE
+            if len(sector_data) < expected_size:
+                sector_data += b"\x00" * (expected_size - len(sector_data))
+
+            sectors_read.append(sector_data[:expected_size])
 
             sector += disk_sectors
             count -= disk_sectors
@@ -115,16 +162,32 @@ class VMDK(AlignedStream):
         sector = offset // SECTOR_SIZE
         count = (length + SECTOR_SIZE - 1) // SECTOR_SIZE
 
-        return self.read_sectors(sector, count)
+        data = self.read_sectors(sector, count)
+
+        # AlignedStream can request a block that extends past the virtual disk size, which must read as zeroes.
+        expected_size = count * SECTOR_SIZE
+        if len(data) < expected_size:
+            data += b"\x00" * (expected_size - len(data))
+
+        return data
 
 
 class RawDisk:
-    def __init__(self, fh: BinaryIO, size: int | None = None, offset: int = 0, sector_offset: int = 0):
+    def __init__(
+        self,
+        fh: BinaryIO,
+        size: int | None = None,
+        offset: int = 0,
+        sector_offset: int = 0,
+        start_sector: int = 0,
+    ):
         self.fh = fh
         self.offset = offset
         self.sector_offset = sector_offset
+        # The sector in the backing file that corresponds to the start of this extent.
+        self.start_sector = start_sector
 
-        if not size:
+        if size is None:
             fh.seek(0, io.SEEK_END)
             self.size = fh.tell()
             fh.seek(0)
@@ -140,13 +203,51 @@ class RawDisk:
     def read_sectors(self, sector: int, count: int) -> bytes:
         log.debug("RawDisk::read_sectors(0x%x)", sector)
 
-        self.fh.seek((sector - self.sector_offset) * SECTOR_SIZE)
-        return self.fh.read(count * SECTOR_SIZE)
+        disk_sector = sector - self.sector_offset
+        if disk_sector < 0 or disk_sector >= self.sector_count or count <= 0:
+            return b""
+
+        count = min(count, self.sector_count - disk_sector)
+
+        self.fh.seek((self.start_sector + disk_sector) * SECTOR_SIZE)
+        data = self.fh.read(count * SECTOR_SIZE)
+
+        # A file shorter than the declared extent only affects this extent, the remainder reads as zeroes.
+        expected_size = count * SECTOR_SIZE
+        if len(data) < expected_size:
+            data += b"\x00" * (expected_size - len(data))
+
+        return data
+
+
+class ZeroDisk:
+    """An extent that is defined to read as zeroes, such as a ``ZERO`` extent."""
+
+    def __init__(self, size: int, offset: int = 0, sector_offset: int = 0):
+        self.size = size
+        self.offset = offset
+        self.sector_offset = sector_offset
+        self.sector_count = size // SECTOR_SIZE
+
+    def read_sectors(self, sector: int, count: int) -> bytes:
+        log.debug("ZeroDisk::read_sectors(0x%x, 0x%x)", sector, count)
+
+        disk_sector = sector - self.sector_offset
+        if disk_sector < 0 or disk_sector >= self.sector_count or count <= 0:
+            return b""
+
+        count = min(count, self.sector_count - disk_sector)
+        return b"\x00" * (count * SECTOR_SIZE)
 
 
 class SparseDisk:
     def __init__(
-        self, fh: BinaryIO, parent: VMDK | RawDisk | SparseDisk | None = None, offset: int = 0, sector_offset: int = 0
+        self,
+        fh: BinaryIO,
+        parent: VMDK | RawDisk | SparseDisk | None = None,
+        offset: int = 0,
+        sector_offset: int = 0,
+        size: int | None = None,
     ):
         self.fh = fh
         self.parent = parent
@@ -200,6 +301,13 @@ class SparseDisk:
 
         self.size = self.header.capacity * SECTOR_SIZE
         self.sector_count = self.header.capacity
+        # The sparse header describes the extent contents. A descriptor can declare a different range,
+        # in which case the descriptor wins and any material outside of the header capacity reads as zeroes.
+        self.capacity = self.header.capacity
+
+        if size is not None:
+            self.size = size
+            self.sector_count = size // SECTOR_SIZE
 
         self._lookup_grain_table = lru_cache(128)(self._lookup_grain_table)
 
@@ -263,7 +371,6 @@ class SparseDisk:
 
     def get_runs(self, sector: int, count: int) -> list[tuple[int, int, int, int | None]]:
         disk_sector = sector - self.sector_offset
-
         run_type = None
         run_offset = 0
         run_count = 0
@@ -280,7 +387,9 @@ class SparseDisk:
 
         while read_count > 0:
             grain, grain_offset = divmod(read_sector, self.header.grain_size)
-            grain_sector = self._lookup_grain(grain)
+            # Sectors beyond the sparse header capacity have no grain table entry, so they must read as zeroes
+            # instead of falling through to a parent.
+            grain_sector = 1 if read_sector >= self.capacity else self._lookup_grain(grain)
             read_sector_count = min(read_count, self.header.grain_size - grain_offset)
 
             if (run_type == 0 and grain_sector == 0) or (run_type == 1 and grain_sector == 1):
@@ -318,29 +427,36 @@ class SparseDisk:
     def read_sectors(self, sector: int, count: int) -> bytes:
         log.debug("SparseDisk::read_sectors(0x%x, 0x%x)", sector, count)
 
+        disk_sector = sector - self.sector_offset
+        if disk_sector < 0 or disk_sector >= self.sector_count or count <= 0:
+            return b""
+
+        count = min(count, self.sector_count - disk_sector)
+
         runs = self.get_runs(sector, count)
         sectors_read = []
 
         for run_type, run_offset, run_count, run_parent in runs:
+            expected_size = run_count * SECTOR_SIZE
+
             # Grain not present
             if run_type == 0:
-                if self.parent:
-                    sector_data = self.parent.read_sectors(run_parent, run_count)
-                else:
-                    sector_data = b"\x00" * (run_count * SECTOR_SIZE)
-                sectors_read.append(sector_data)
+                sector_data = self.parent.read_sectors(run_parent, run_count) if self.parent else b""
+                # Missing parent material may only fill this run, never shift later runs
+                sectors_read.append(sector_data + b"\x00" * (expected_size - len(sector_data)))
                 continue
 
             # Sparse grain
             if run_type == 1:
-                sectors_read.append(b"\x00" * (run_count * SECTOR_SIZE))
+                sectors_read.append(b"\x00" * expected_size)
                 continue
 
             # Uncompressed grain
             if self.header.flags & c_vmdk.SPARSEFLAG_COMPRESSED == 0:
                 self.fh.seek((run_type + run_offset) * SECTOR_SIZE)
-                sector_data = self.fh.read(run_count * SECTOR_SIZE)
-                sectors_read.append(sector_data)
+                sector_data = self.fh.read(expected_size)
+                # A truncated backing file must not shift later runs into this range
+                sectors_read.append(sector_data + b"\x00" * (expected_size - len(sector_data)))
                 continue
 
             # Compressed grain
@@ -352,7 +468,9 @@ class SparseDisk:
                 read_count = min(run_count, grain_remaining)
 
                 buf = self._read_compressed_grain(run_type)
-                sectors_read.append(buf[offset : offset + read_count * SECTOR_SIZE])
+                sector_data = buf[offset : offset + read_count * SECTOR_SIZE]
+                # A truncated compressed grain must only zero-fill its own range
+                sectors_read.append(sector_data + b"\x00" * (read_count * SECTOR_SIZE - len(sector_data)))
 
                 # If we loop, we're going to the next run, which means we'll start at offset 0
                 run_offset = 0
