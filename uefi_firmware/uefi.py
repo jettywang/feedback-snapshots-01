@@ -329,6 +329,8 @@ class NVARVariable(FirmwareVariable):
         self.subsections = []
         self.name = None
         self.guid = None
+        self.guid_index = None
+        self.offset = 0
         self.data = data
 
     def process(self):
@@ -351,7 +353,10 @@ class NVARVariable(FirmwareVariable):
             self.guid = self.data[offset:offset + 16]
             offset += 16
         else:
-            # Increment data by 1!
+            # The GUID is a 1-byte index into the store's trailing GUID
+            # table. Keep it so the chain view can resolve the identity.
+            if offset < self.size:
+                self.guid_index = self.data[offset]
             offset += 1
 
         if bit_set(self.structure.Attributes, NVRAM_ATTRIBUTES["DATA"]):
@@ -373,6 +378,20 @@ class NVARVariable(FirmwareVariable):
         # if self.data_offset+1 < self.size:
         #    self.subsections.append(RawObject(self.data[offset:]))
         return True
+
+    @property
+    def next_offset(self):
+        '''Offset of the next linked entry, from the 24-bit Next field.'''
+        # Read the raw header: a c_char array truncates at the first NUL.
+        return int.from_bytes(self.structure_data[6:9], "little")
+
+    @property
+    def is_valid(self):
+        return bit_set(self.structure.Attributes, NVRAM_ATTRIBUTES["VLD"])
+
+    @property
+    def is_data_only(self):
+        return bit_set(self.structure.Attributes, NVRAM_ATTRIBUTES["DATA"])
 
     def build(self, generate_checksum=False, debug=False):
         header = self.structure_data
@@ -417,9 +436,25 @@ class NVARVariableStore(FirmwareVariableStore):
         self.valid_header = False
         self.data = data
         self.free_space = b""
+        self.guid_table = []
+        self.guid_table_offset = None
         if not NVARVariable.valid_nvar(data):
             return
         self.valid_header = True
+
+    def _parse_guid_table(self, total_size):
+        '''Treat a trailing run of 16-byte values as the GUID table.'''
+        tail = self.free_space
+        if not self.variables or not tail or len(tail) % 16 != 0:
+            return
+        if tail[:4] == b"NVAR":
+            return
+        if all(byte == 0xFF for byte in tail) or \
+                all(byte == 0x00 for byte in tail):
+            return
+        self.guid_table = [
+            bytes(tail[i:i + 16]) for i in range(0, len(tail), 16)]
+        self.guid_table_offset = total_size
 
     def process(self):
         dlog(self, 'NVRAM')
@@ -432,6 +467,7 @@ class NVARVariableStore(FirmwareVariableStore):
             nvar = NVARVariable(view[total_size:])
             if not nvar.process():
                 break
+            nvar.offset = total_size
             total_size += nvar.size
             self.variables.append(nvar)
 
@@ -439,6 +475,7 @@ class NVARVariableStore(FirmwareVariableStore):
         # store builds to its original size.
         self.free_space = self.data[total_size:]
         self.data = self.data[:total_size]
+        self._parse_guid_table(total_size)
         self.attrs = {"variables": len(self.variables)}
         return True
 
@@ -478,6 +515,295 @@ class NVARVariableStore(FirmwareVariableStore):
         return {
             'variables': variables,
         }
+
+    def chain_evidence(self):
+        '''Link entries, data-only successors and the GUID table.'''
+        return NVARChainEvidence(self)
+
+
+class NVAREvidenceNode(object):
+    '''One NVAR entry as chain evidence, keeping its raw store offset.'''
+
+    # Next values that end a chain: unwritten flash and the null link.
+    TERMINAL_NEXT = (0, 0xFFFFFF)
+
+    def __init__(self, variable):
+        self.variable = variable
+        self.offset = variable.offset
+        self.size = variable.size
+        self.attributes = variable.attrs["attrs"]
+        self.next_offset = variable.next_offset
+        self.name = variable.name
+        self.guid = variable.guid
+        self.guid_index = variable.guid_index
+        self.data_only = variable.is_data_only
+        self.valid = variable.is_valid
+        self.data = variable.data[variable.data_offset:]
+        self.resolved_identity = None
+
+    @property
+    def role(self):
+        return "data" if self.data_only else "named"
+
+    @property
+    def guid_inline(self):
+        '''True when the GUID is stored in the entry, not the GUID table.'''
+        return self.guid is not None
+
+    def identity(self, guid_table=()):
+        '''(name, guid) of a named entry; data-only entries have none.'''
+        if self.data_only:
+            return None
+        guid = self.guid
+        if guid is None and self.guid_index is not None and \
+                self.guid_index < len(guid_table):
+            guid = guid_table[self.guid_index]
+        return (self.name, guid)
+
+
+class NVARChain(object):
+    '''Entries connected by their Next pointers, from a chain head on.'''
+
+    def __init__(self):
+        self.nodes = []
+        self.issues = []
+        self.closed = False
+
+    @property
+    def head(self):
+        return self.nodes[0] if self.nodes else None
+
+    @property
+    def identity(self):
+        for node in self.nodes:
+            if node.resolved_identity is not None:
+                return node.resolved_identity
+        return None
+
+
+class NVARVariableEvidence(object):
+    '''Every update generation sharing one variable identity.
+
+    Only a newest generation that is still valid and sits on a closed
+    chain is a confirmed current variable. Anything else stays a
+    candidate or history, so unclosed chains keep their uncertainty.
+    '''
+
+    STATUS_CURRENT = "current"
+    STATUS_DELETED = "deleted"
+    STATUS_UNCERTAIN = "uncertain"
+
+    def __init__(self, identity):
+        self.identity = identity
+        self.generations = []
+        self.chains = {}
+        self.issues = []
+        self.current = None
+        self.status = None
+
+    @property
+    def name(self):
+        return self.identity[0]
+
+    @property
+    def guid(self):
+        return self.identity[1]
+
+    @property
+    def candidates(self):
+        '''Newest generation when it cannot be confirmed as current.'''
+        if self.status == self.STATUS_UNCERTAIN and self.generations:
+            return [self.generations[-1]]
+        return []
+
+    @property
+    def invalidated_predecessors(self):
+        return [node for node in self.generations[:-1] if not node.valid]
+
+    @property
+    def history(self):
+        if self.status == self.STATUS_CURRENT:
+            return list(self.generations[:-1])
+        return list(self.generations)
+
+    def show(self, ts=""):
+        name, guid = self.identity
+        label = name.decode("utf-8", "replace") if isinstance(
+            name, bytes) else "%r" % (name,)
+        print ("%s %s %s %s" % (
+            blue("%sVariable evidence:" % ts),
+            purple(label),
+            green(sguid(guid) if guid else "<no-guid>"),
+            "status= %s" % self.status
+        ))
+        for node in self.generations:
+            chain = self.chains[node.offset]
+            marks = []
+            if node is self.current:
+                marks.append("current")
+            elif node in self.candidates:
+                marks.append("candidate")
+            else:
+                marks.append("history")
+            if not node.valid:
+                marks.append("invalidated")
+            if not chain.closed:
+                marks.append("unclosed-chain")
+            print ("%s   @0x%06x %-4s next=0x%06x attrs=0x%02x %s" % (
+                ts, node.offset, node.role, node.next_offset,
+                node.attributes, ",".join(marks)))
+            for successor in chain.nodes:
+                if successor.data_only:
+                    print ("%s   @0x%06x data next=0x%06x (successor)" % (
+                        ts, successor.offset, successor.next_offset))
+        for issue in self.issues:
+            print ("%s   ! %s" % (ts, issue))
+
+
+class NVARChainEvidence(object):
+    '''Chained evidence view over an NVARVariableStore.
+
+    Follows Next pointers (not physical order) to connect named entries
+    with their data-only successors, resolves indexed GUIDs against the
+    trailing GUID table, and groups generations by variable identity.
+    '''
+
+    def __init__(self, store):
+        self.store = store
+        self.guid_table = store.guid_table
+        self.guid_table_offset = store.guid_table_offset
+        self.issues = []
+        self.orphans = []
+        self.nodes = [NVAREvidenceNode(v) for v in store.variables]
+        self.chains = self._build_chains()
+        self.variables = self._build_variables()
+
+    def _build_chains(self):
+        by_offset = {node.offset: node for node in self.nodes}
+        incoming = {}
+        for node in self.nodes:
+            if node.next_offset in NVAREvidenceNode.TERMINAL_NEXT:
+                continue
+            incoming.setdefault(node.next_offset, []).append(node)
+
+        visited = set()
+        chains = []
+        heads = [node for node in self.nodes if node.offset not in incoming]
+        # Nodes reachable only through a cycle have no head; walk them
+        # last so the loop is still reported.
+        heads += [node for node in self.nodes if node.offset in incoming]
+        for head in sorted(heads, key=lambda node: node.offset):
+            if head.offset in visited:
+                continue
+            chain = NVARChain()
+            node = head
+            local = set()
+            while True:
+                chain.nodes.append(node)
+                visited.add(node.offset)
+                local.add(node.offset)
+                next_offset = node.next_offset
+                if next_offset in NVAREvidenceNode.TERMINAL_NEXT:
+                    chain.closed = True
+                    break
+                if next_offset in local:
+                    chain.issues.append(
+                        "loop: next 0x%x revisits this chain" % next_offset)
+                    break
+                target = by_offset.get(next_offset)
+                if target is None:
+                    chain.issues.append(
+                        "bad-link: next 0x%x is not an entry start" %
+                        next_offset)
+                    break
+                if target.offset in visited:
+                    chain.issues.append(
+                        "shared-next: 0x%x is linked from another chain" %
+                        next_offset)
+                    break
+                node = target
+            chains.append(chain)
+
+        # Resolve identities along each chain, inheriting across data-only
+        # successors, and flag data-only entries no named entry claims.
+        for chain in chains:
+            identity = None
+            for node in chain.nodes:
+                named_identity = node.identity(self.guid_table)
+                if named_identity is not None:
+                    identity = named_identity
+                node.resolved_identity = identity
+            if chain.identity is None:
+                self.orphans.extend(chain.nodes)
+                chain.issues.append(
+                    "orphan-data: no named entry heads this chain")
+        return chains
+
+    def _build_variables(self):
+        groups = {}
+        for chain in self.chains:
+            for node in chain.nodes:
+                if node.data_only or node.resolved_identity is None:
+                    continue
+                groups.setdefault(node.resolved_identity, []).append(
+                    (node, chain))
+
+        variables = []
+        for identity, members in groups.items():
+            evidence = NVARVariableEvidence(identity)
+            members.sort(key=lambda member: member[0].offset)
+            for node, chain in members:
+                evidence.generations.append(node)
+                evidence.chains[node.offset] = chain
+            newest, newest_chain = members[-1]
+            for predecessor in evidence.generations[:-1]:
+                if predecessor.valid:
+                    evidence.issues.append(
+                        "duplicate-identity: predecessor at 0x%x is still "
+                        "marked valid" % predecessor.offset)
+            if not newest.valid:
+                evidence.status = NVARVariableEvidence.STATUS_DELETED
+            elif newest_chain.closed and not newest_chain.issues:
+                evidence.status = NVARVariableEvidence.STATUS_CURRENT
+                evidence.current = newest
+            else:
+                evidence.status = NVARVariableEvidence.STATUS_UNCERTAIN
+                evidence.issues.extend(newest_chain.issues)
+            variables.append(evidence)
+        variables.sort(key=lambda evidence: evidence.generations[0].offset)
+        return variables
+
+    def current_variables(self):
+        '''Confirmed current variables (valid, on a closed chain).'''
+        return [evidence for evidence in self.variables
+                if evidence.status == NVARVariableEvidence.STATUS_CURRENT]
+
+    def uncertain_variables(self):
+        '''Variables whose newest bytes cannot be confirmed as current.'''
+        return [evidence for evidence in self.variables
+                if evidence.status == NVARVariableEvidence.STATUS_UNCERTAIN]
+
+    def history(self):
+        '''All history nodes: superseded, invalidated or deleted entries.'''
+        nodes = []
+        for evidence in self.variables:
+            nodes.extend(evidence.history)
+        return nodes
+
+    def show(self, ts=""):
+        print ("%s %s" % (
+            blue("%sNVAR chain evidence:" % ts),
+            "entries: %d, chains: %d, identities: %d" % (
+                len(self.nodes), len(self.chains), len(self.variables))
+        ))
+        if self.guid_table:
+            print ("%s  GUID table @0x%06x: %d entries" % (
+                ts, self.guid_table_offset, len(self.guid_table)))
+        for evidence in self.variables:
+            evidence.show("%s  " % ts)
+        for orphan in self.orphans:
+            print ("%s  orphan @0x%06x (%s)" % (
+                ts, orphan.offset, orphan.role))
 
 
 class EfiSection(FirmwareObject):
