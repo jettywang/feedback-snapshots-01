@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from dissect.database.sqlite3.util import parse_table_columns_constraints
+from dissect.database.sqlite3.exception import InvalidSQL
+from dissect.database.sqlite3.util import GeneratedColumnType, parse_generated_column, parse_table_columns_constraints
 
 testdata = [
     pytest.param(
@@ -170,9 +171,89 @@ testdata = [
         ),
         id="primary-key-constraint-multiple-parts",
     ),
+    # Generated columns: virtual ones do not change the physical column list, but they must still be parsed as columns.
+    pytest.param(
+        "CREATE TABLE gen (a INTEGER, b GENERATED ALWAYS AS (a + 1) VIRTUAL, c AS (a * 2) STORED, d TEXT DEFAULT 'x')",
+        (
+            None,
+            [
+                ("a", "INTEGER"),
+                ("b", "GENERATED ALWAYS AS (a + 1) VIRTUAL"),
+                ("c", "AS (a * 2) STORED"),
+                ("d", "TEXT DEFAULT 'x'"),
+            ],
+            [],
+        ),
+        id="create-table-generated-columns",
+    ),
+    # Commas inside quoted identifiers and generated expressions must not split a column definition.
+    pytest.param(
+        'CREATE TABLE "q t" ("id, x" INTEGER PRIMARY KEY, "weird ""name" TEXT, '
+        '"virt,col" AS (CASE WHEN "weird ""name" IS NULL THEN \'a,b\' ELSE "weird ""name" END), '
+        '"store col" AS (length("weird ""name")) STORED, tail INTEGER DEFAULT 5, UNIQUE("store col"))',
+        (
+            "id, x",
+            [
+                ("id, x", "INTEGER PRIMARY KEY"),
+                ('weird "name', "TEXT"),
+                ("virt,col", 'AS (CASE WHEN "weird ""name" IS NULL THEN \'a,b\' ELSE "weird ""name" END)'),
+                ("store col", 'AS (length("weird ""name")) STORED'),
+                ("tail", "INTEGER DEFAULT 5"),
+            ],
+            [
+                'UNIQUE("store col")',
+            ],
+        ),
+        id="create-table-quoted-identifiers-with-commas",
+    ),
 ]
 
 
 @pytest.mark.parametrize(("sql", "result"), testdata)
 def test_parse_table_columns_constraints(sql: str, result: tuple) -> None:
     assert parse_table_columns_constraints(sql) == result
+
+
+@pytest.mark.parametrize(
+    ("description", "generated_type", "expression"),
+    [
+        ("INTEGER", GeneratedColumnType.NONE, None),
+        ("TEXT DEFAULT 'x'", GeneratedColumnType.NONE, None),
+        ("AS (a + 1)", GeneratedColumnType.VIRTUAL, "(a + 1)"),
+        ("GENERATED ALWAYS AS (a + 1)", GeneratedColumnType.VIRTUAL, "(a + 1)"),
+        ("GENERATED ALWAYS AS (a + 1) VIRTUAL", GeneratedColumnType.VIRTUAL, "(a + 1)"),
+        ("GENERATED ALWAYS AS (a + 1) STORED", GeneratedColumnType.STORED, "(a + 1)"),
+        ("AS (a + 1) STORED", GeneratedColumnType.STORED, "(a + 1)"),
+        # Commas and nested parentheses inside the expression are preserved verbatim.
+        (
+            "AS (substr(x, 1, 2) || coalesce(y, 'a,b'))",
+            GeneratedColumnType.VIRTUAL,
+            "(substr(x, 1, 2) || coalesce(y, 'a,b'))",
+        ),
+        # A CASE expression containing commas and quoted strings.
+        (
+            "AS (CASE WHEN a > 0 THEN 'p,q' ELSE 'r' END) STORED",
+            GeneratedColumnType.STORED,
+            "(CASE WHEN a > 0 THEN 'p,q' ELSE 'r' END)",
+        ),
+        # AS inside a parenthesized type/constraint is not a top-level generated expression.
+        ("VARCHAR(1337) DEFAULT ('x')", GeneratedColumnType.NONE, None),
+        # Unknown storage syntax degrades to virtual so no physical slot gets consumed.
+        ("AS (a + 1) MATERIALIZED", GeneratedColumnType.VIRTUAL, "(a + 1)"),
+        ("AS (a + 1) SOMETHING_UNKNOWN", GeneratedColumnType.VIRTUAL, "(a + 1)"),
+    ],
+)
+def test_parse_generated_column(description: str, generated_type: GeneratedColumnType, expression: str | None) -> None:
+    assert parse_generated_column(description) == (generated_type, expression)
+
+
+def test_parse_generated_column_quoted_as_keyword() -> None:
+    # An "AS" inside a quoted identifier must not be treated as the generated column keyword.
+    assert parse_generated_column('TEXT DEFAULT "as if"') == (GeneratedColumnType.NONE, None)
+
+
+def test_split_quoted_identifier_unterminated() -> None:
+    from dissect.database.sqlite3.util import split_quoted_identifier
+
+    with pytest.raises(InvalidSQL):
+        split_quoted_identifier('"unterminated')

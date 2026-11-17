@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from enum import Enum
 from typing import TYPE_CHECKING
 
 from dissect.database.sqlite3.exception import InvalidSQL
@@ -11,7 +12,8 @@ if TYPE_CHECKING:
 
 def split_sql_list(sql: str) -> Iterator[str]:
     """Split a string on comma's (``,``) while ignoring any comma's contained
-    within an arbitrary level of nested braces (``( )``).
+    within an arbitrary level of nested braces (``( )``) or quoted identifiers
+    (``"``, ``'`` and backticks).
     """
     level = 0
     comment = 0
@@ -34,7 +36,7 @@ def split_sql_list(sql: str) -> Iterator[str]:
             elif char == ")":
                 level -= 1
                 line_buf += char
-            elif char == "," and level == 0:
+            elif char == "," and level == 0 and not quote:
                 yield line_buf.strip()
                 line_buf = ""
             else:
@@ -109,17 +111,44 @@ def parse_table_columns_constraints(sql: str) -> tuple[str | None, list[str], li
 
 def split_column_def(sql: str, column_def: str) -> tuple[str, str]:
     """Splits the column definition to name and constraint."""
-    column_parts = column_def.split(maxsplit=1)
-    if not column_parts:
+    column_def = column_def.lstrip()
+    if not column_def:
         raise InvalidSQL(f"Not a valid CREATE TABLE definition: empty column definition in {sql!r}")
 
-    column_name = column_parts[0]
-    column_type_constraint = column_parts[1] if len(column_parts) > 1 else ""
-
-    if column_name[0] in ('"', "'", "`"):
-        column_name = column_name[1:-1]
+    if column_def[0] in ('"', "'", "`"):
+        column_name, remainder = split_quoted_identifier(column_def)
+        column_type_constraint = remainder.lstrip()
+    else:
+        column_parts = column_def.split(maxsplit=1)
+        column_name = column_parts[0]
+        column_type_constraint = column_parts[1] if len(column_parts) > 1 else ""
 
     return column_name, column_type_constraint
+
+
+def split_quoted_identifier(identifier: str) -> tuple[str, str]:
+    """Split a leading quoted identifier from the remainder of a definition.
+
+    Handles ``"..."``, ``'...'`` and backtick quoted identifiers, including doubled quote characters that represent
+    an escaped quote (for example ``"weird ""name"``). Returns the unquoted name and everything that follows it.
+    """
+    quote = identifier[0]
+    index = 1
+    chars = []
+
+    while index < len(identifier):
+        char = identifier[index]
+        if char == quote:
+            # A doubled quote is an escaped quote and stays part of the identifier.
+            if index + 1 < len(identifier) and identifier[index + 1] == quote:
+                chars.append(quote)
+                index += 2
+                continue
+            return "".join(chars), identifier[index + 1 :]
+        chars.append(char)
+        index += 1
+
+    raise InvalidSQL(f"Not a valid SQL identifier: unterminated quoted identifier {identifier!r}")
 
 
 def get_primary_key_from_constraint(column_type_constraint: str, column_def: str, sql: str) -> str | None:
@@ -139,3 +168,106 @@ def get_primary_key_from_constraint(column_type_constraint: str, column_def: str
         primary_key_parts = primary_key_defs[0].split(maxsplit=1)
         primary_key = primary_key_parts[0].strip("'\"")
     return primary_key
+
+
+class GeneratedColumnType(str, Enum):
+    """The storage behaviour of a generated column.
+
+    See https://sqlite.org/gencol.html. A ``VIRTUAL`` generated column does not occupy a value slot in the
+    on-disk record, whereas a ``STORED`` generated column does.
+    """
+
+    NONE = "NONE"
+    VIRTUAL = "VIRTUAL"
+    STORED = "STORED"
+
+
+def parse_generated_column(column_type_constraint: str) -> tuple[GeneratedColumnType, str | None]:
+    """Parse the generated column clause (``AS (expr) [VIRTUAL|STORED]``) from a column definition.
+
+    Generated columns are identified by a top-level ``AS`` keyword followed by a parenthesized expression. Commas
+    inside the expression, nested parentheses and quoted identifiers are ignored while scanning. The expression is
+    returned verbatim and is never evaluated.
+
+    Returns a tuple of the detected :class:`GeneratedColumnType` and the expression (including its surrounding
+    parentheses). For a non-generated column the type is :attr:`GeneratedColumnType.NONE` and the expression is
+    ``None``.
+
+    When a generated column is detected but its storage keyword cannot be recognized, it is treated as
+    :attr:`GeneratedColumnType.VIRTUAL`. Virtual columns do not consume a physical record value, which keeps the
+    columns following them aligned instead of shifting the whole record.
+    """
+    expression_start = _find_generated_expression(column_type_constraint)
+    if expression_start is None:
+        return GeneratedColumnType.NONE, None
+
+    level = 0
+    quote = None
+    index = expression_start
+    while index < len(column_type_constraint):
+        char = column_type_constraint[index]
+
+        if quote is not None:
+            if char == quote:
+                quote = None
+        elif char in ('"', "'", "`"):
+            quote = char
+        elif char == "(":
+            level += 1
+        elif char == ")":
+            level -= 1
+            if level == 0:
+                expression_end = index + 1
+                break
+
+        index += 1
+    else:
+        # Unbalanced parentheses: we cannot tell where the expression ends. Treat the column as virtual so the
+        # physical record stays aligned with the regular columns that follow it.
+        return GeneratedColumnType.VIRTUAL, column_type_constraint[expression_start:].strip() or None
+
+    expression = column_type_constraint[expression_start:expression_end].strip()
+    suffix = column_type_constraint[expression_end:].strip().upper()
+
+    if re.search(r"\bSTORED\b", suffix):
+        generated_type = GeneratedColumnType.STORED
+    elif re.search(r"\bVIRTUAL\b", suffix):
+        generated_type = GeneratedColumnType.VIRTUAL
+    else:
+        # Unknown or missing storage keyword. Assume virtual so no physical value slot is consumed.
+        generated_type = GeneratedColumnType.VIRTUAL
+
+    return generated_type, expression
+
+
+def _find_generated_expression(column_type_constraint: str) -> int | None:
+    """Return the index of the opening parenthesis of a top-level generated column expression, if any."""
+    level = 0
+    quote = None
+    tokens = re.finditer(r"\bAS\b|[()\"'`]", column_type_constraint)
+
+    for match in tokens:
+        token = match.group()
+        if quote is not None:
+            if token == quote:
+                quote = None
+            continue
+
+        if token in ('"', "'", "`"):
+            quote = token
+        elif token == "(":
+            level += 1
+        elif token == ")":
+            level -= 1
+        elif level == 0:
+            expression_start = _next_non_whitespace(column_type_constraint, match.end())
+            if expression_start is not None and column_type_constraint[expression_start] == "(":
+                return expression_start
+
+    return None
+
+
+def _next_non_whitespace(value: str, index: int) -> int | None:
+    while index < len(value) and value[index].isspace():
+        index += 1
+    return index if index < len(value) else None

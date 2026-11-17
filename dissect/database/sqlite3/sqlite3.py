@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import itertools
 import re
+from enum import Enum
 from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
@@ -14,7 +14,7 @@ from dissect.database.sqlite3.exception import (
     InvalidPageType,
     NoCellData,
 )
-from dissect.database.sqlite3.util import parse_table_columns_constraints
+from dissect.database.sqlite3.util import GeneratedColumnType, parse_generated_column, parse_table_columns_constraints
 from dissect.database.sqlite3.wal import WAL
 
 if TYPE_CHECKING:
@@ -249,6 +249,39 @@ class SQLite3:
             yield from page.cells()
 
 
+class ColumnSource(str, Enum):
+    """Describes where the value of a column comes from when decoding a record."""
+
+    RECORD = "record"
+    """The value is physically stored as a value slot in the record."""
+
+    ROWID = "rowid"
+    """The value is the rowid alias of an ``INTEGER PRIMARY KEY`` column and is not part of the record payload."""
+
+    DEFAULT = "default"
+    """No value slot is present in the record, so the column's ``DEFAULT`` value is used."""
+
+    GENERATED_VIRTUAL = "generated_virtual"
+    """A virtual generated column without stored bytes; the expression is retained but not evaluated."""
+
+
+class UnevaluatedExpression:
+    """Placeholder for a virtual generated column whose expression is not evaluated.
+
+    Virtual generated columns do not occupy any bytes in the on-disk record. We keep their expression text instead of
+    executing it (the SQL found in the evidence is never run).
+    """
+
+    def __init__(self, expression: str):
+        self.expression = expression
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, UnevaluatedExpression) and other.expression == self.expression
+
+    def __repr__(self) -> str:
+        return f"<UnevaluatedExpression expression={self.expression!r}>"
+
+
 class Column:
     """Describes a column of a sqlite table."""
 
@@ -260,6 +293,7 @@ class Column:
     def __init__(self, name: str, description: str):
         self.name = name
         self.default_value = self._parse_default_value_from_description(description)
+        self.generated_type, self.expression = parse_generated_column(description)
 
     def _parse_default_value_from_description(self, description: str) -> bool | str | int | float | None:
         """Find the default from the description string."""
@@ -318,13 +352,31 @@ class Column:
 
         raise ValueError("Unknown literal")
 
+    @property
+    def is_generated(self) -> bool:
+        """Whether this column is a generated column (virtual or stored)."""
+        return self.generated_type is not GeneratedColumnType.NONE
+
+    @property
+    def is_stored(self) -> bool:
+        """Whether this column occupies a physical value slot in the record."""
+        return self.generated_type is not GeneratedColumnType.VIRTUAL
+
     def __eq__(self, other: object) -> bool:
         if isinstance(other, Column):
-            return other.name == self.name and other.default_value == self.default_value
+            return (
+                other.name == self.name
+                and other.default_value == self.default_value
+                and other.generated_type == self.generated_type
+                and other.expression == self.expression
+            )
         return False
 
     def __repr__(self) -> str:
-        return f"<Column name={self.name} default_value={self.default_value}>"
+        return (
+            f"<Column name={self.name} default_value={self.default_value} "
+            f"generated_type={self.generated_type.value} expression={self.expression}>"
+        )
 
 
 class Table:
@@ -372,7 +424,7 @@ class Row:
     def __init__(self, table: Table, cell: Cell):
         self._table = table
         self._cell = cell
-        self._values, self._unknowns = self._match_columns_to_values(table.columns, cell.values)
+        self._values, self._sources, self._unknowns = self._match_columns_to_values(table.columns, cell.values)
 
         # If there is no primary key or the primary key is a compound key,
         # primary_key will be None, but then all (primary key) columns will
@@ -380,24 +432,42 @@ class Row:
         primary_key = table.primary_key
         if primary_key and self._values.get(primary_key, None) is None and self._cell.key is not None:
             self._values[primary_key] = self._cell.key
+            self._sources[primary_key] = ColumnSource.ROWID
 
-    def _match_columns_to_values(self, columns: list[Column], values: list[Any]) -> tuple[dict[str, Any], list[Any]]:
+    def _match_columns_to_values(
+        self, columns: list[Column], values: list[Any]
+    ) -> tuple[dict[str, Any], dict[str, ColumnSource], list[Any]]:
         """Match all table columns to the cell values in this row.
 
-        If there are any cell values with unknown column names
-        they get added to the unknown list.
+        Only stored columns (regular and ``STORED`` generated columns) consume a physical value slot from the record,
+        in declaration order. Virtual generated columns have no stored bytes: their expression is retained in an
+        :class:`UnevaluatedExpression` placeholder without being evaluated. Stored columns without a value slot (for
+        example trailing columns that rely on their ``DEFAULT``) fall back to the column default.
+
+        If there are any cell values with unknown column names they get added to the unknown list.
         """
         row_values = {}
+        sources = {}
         unknowns = []
 
-        for column, value in itertools.zip_longest(columns, values, fillvalue=Empty):
-            column_value = column.default_value if value is Empty else value
-            if column is Empty:
-                unknowns.append(column_value)
+        physical_columns = [column for column in columns if column.is_stored]
+        for index, column in enumerate(physical_columns):
+            if index < len(values):
+                row_values[column.name] = values[index]
+                sources[column.name] = ColumnSource.RECORD
             else:
-                row_values.update({column.name: column_value})
+                row_values[column.name] = column.default_value
+                sources[column.name] = ColumnSource.DEFAULT
 
-        return row_values, unknowns
+        for column in columns:
+            if not column.is_stored:
+                row_values[column.name] = UnevaluatedExpression(column.expression)
+                sources[column.name] = ColumnSource.GENERATED_VIRTUAL
+
+        for value in values[len(physical_columns) :]:
+            unknowns.append(value)
+
+        return row_values, sources, unknowns
 
     def __iter__(self) -> Iterator[tuple[str, Any]]:
         for col in self._table.columns:
@@ -419,9 +489,9 @@ class Row:
     def get(self, key: str, default: Any = None) -> Any:
         return self._values.get(key, default)
 
-
-class Empty:
-    pass
+    def column_source(self, key: str) -> ColumnSource | None:
+        """Return the :class:`ColumnSource` describing where the column's value came from."""
+        return self._sources.get(key)
 
 
 class Page:
