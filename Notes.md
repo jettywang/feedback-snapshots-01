@@ -14,6 +14,24 @@ maintains a list of candidate bindings and other state, pruning away those which
 don't work as it goes.  At the end, the result is a list of many bindings, not
 just the first one found.
 
+## FOLLOWEDBY and Observation Intervals
+
+An observed-data object does not fix a single instant: it asserts that its
+observations occurred somewhere in the closed interval from `first_observed`
+to `last_observed`, inclusive.  `FOLLOWEDBY` is therefore satisfied when
+timestamps can be chosen from every observation interval on the left and right
+such that every left timestamp is less than or equal to every right timestamp.
+Choosing the earliest possible left timestamps and the latest possible right
+timestamps is optimal, so the test reduces to:
+
+    max(LHS first_observed) <= min(RHS last_observed)
+
+The comparison is non-strict.  Intervals which only touch at an endpoint are
+valid in either order, because the shared endpoint is a legal timestamp for
+both observations.  Candidate bindings are still joined without reusing the
+same observation instance on both sides.  Input order is not part of the
+decision; only the intervals matter.
+
 ## Caveats
 
 - **The number of bindings found can be large.**  If each observation

@@ -603,6 +603,44 @@ def _disjoint(first_seq, *rest_seq):
     )
 
 
+def _intervals_follow(lhs_intervals, rhs_intervals):
+    """
+    Test whether two sets of closed observation intervals can satisfy the
+    FOLLOWEDBY operator.
+
+    An observed-data object describes observations occurring somewhere within
+    the closed interval [first_observed, last_observed].  FOLLOWEDBY is
+    satisfied when it is possible to choose a timestamp from every LHS
+    interval and every RHS interval such that all LHS timestamps are less than
+    or equal to all RHS timestamps.  Choosing the earliest LHS timestamps and
+    the latest RHS timestamps is optimal, so this reduces to comparing the
+    latest LHS first_observed with the earliest RHS last_observed.
+
+    The comparison is deliberately non-strict.  Intervals which only touch at
+    an endpoint are allowed to satisfy the relation in either direction,
+    because the shared endpoint is a legal timestamp for both observations.
+
+    Empty interval sequences cannot satisfy the relation; they occur when a
+    compound binding has no observations on one side.
+
+    :param lhs_intervals: A sequence of (first_observed, last_observed) pairs
+        for the left-hand binding.
+    :param rhs_intervals: A sequence of (first_observed, last_observed) pairs
+        for the right-hand binding.
+    :return: True if a valid selection of timestamps exists, False otherwise.
+    """
+    lhs_intervals = list(lhs_intervals)
+    rhs_intervals = list(rhs_intervals)
+
+    if not lhs_intervals or not rhs_intervals:
+        return False
+
+    return (
+        max(interval[0] for interval in lhs_intervals)
+        <= min(interval[1] for interval in rhs_intervals)
+    )
+
+
 # Constants used as return values of the _overlap() function.
 _OVERLAP_NONE = 0
 _OVERLAP = 1
@@ -1342,52 +1380,32 @@ class MatchListener(STIXPatternListener):
     def __followed_by_left_join(self, lhs_binding, rhs_bindings):
         # Yield all valid FOLLOWEDBY joins between a single lhs_binding
         # and a list of rhs_bindings
-
-        # To ensure a satisfying selection of timestamps is possible,
-        # we make the most optimistic choices: choose the earliest
-        # possible timestamps for LHS bindings and latest possible for
-        # RHS bindings.  Then as a shortcut, only ensure proper
-        # ordering of the latest LHS timestamp and earliest RHS
-        # timestamp.
-        latest_lhs_first_timestamp = self.__latest_first_timestamp(lhs_binding)
+        lhs_intervals = self.__binding_intervals(lhs_binding)
 
         for rhs_binding in rhs_bindings:
 
-            if _disjoint(lhs_binding, rhs_binding):
-                earliest_rhs_last_timestamp = self.__earliest_last_timestamp(rhs_binding)
-
-                if latest_lhs_first_timestamp <= earliest_rhs_last_timestamp:
-                    yield (lhs_binding + rhs_binding)
+            if _disjoint(lhs_binding, rhs_binding) and _intervals_follow(
+                    lhs_intervals, self.__binding_intervals(rhs_binding)):
+                yield (lhs_binding + rhs_binding)
 
     def __followed_by_right_join(self, lhs_bindings, rhs_binding):
         # Yield all valid FOLLOWEDBY joins between a list of lhs_bindings
         # and a single rhs_binding
-
-        earliest_rhs_last_timestamp = self.__earliest_last_timestamp(rhs_binding)
+        rhs_intervals = self.__binding_intervals(rhs_binding)
 
         for lhs_binding in lhs_bindings:
 
-            if _disjoint(lhs_binding, rhs_binding):
-                latest_lhs_first_timestamp = self.__latest_first_timestamp(lhs_binding)
+            if _disjoint(lhs_binding, rhs_binding) and _intervals_follow(
+                    self.__binding_intervals(lhs_binding), rhs_intervals):
+                yield (lhs_binding + rhs_binding)
 
-                if latest_lhs_first_timestamp <= earliest_rhs_last_timestamp:
-                    yield (lhs_binding + rhs_binding)
-
-    def __latest_first_timestamp(self, binding):
-        return max(
+    def __binding_intervals(self, binding):
+        return [
             # time interval is based on the original obs_index
-            self.__time_intervals[self.get_obs_index(inst_id)][0]
+            self.__time_intervals[self.get_obs_index(inst_id)]
             for inst_id in binding
             if inst_id is not None
-        )
-
-    def __earliest_last_timestamp(self, binding):
-        return min(
-            # time interval is based on the original obs_index
-            self.__time_intervals[self.get_obs_index(inst_id)][1]
-            for inst_id in binding
-            if inst_id is not None
-        )
+        ]
 
     def exitObservationExpressionOr(self, ctx):
         """
