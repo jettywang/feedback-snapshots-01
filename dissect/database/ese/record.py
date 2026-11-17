@@ -387,6 +387,7 @@ class RecordData:
     def _get_tagged(self, column: Column) -> bytes | None:
         """Parse a specific tagged column."""
         tag_field = None
+        value = None
 
         idx = self._find_tag_field_idx(column.identifier)
         if idx is not None:
