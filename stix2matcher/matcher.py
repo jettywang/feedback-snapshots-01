@@ -5,7 +5,6 @@ import base64
 import binascii
 import datetime
 import io
-import itertools
 import json
 import operator
 import pprint
@@ -582,24 +581,438 @@ def _ip_or_cidr_in_subnet(ip_or_cidr_str, subnet_cidr):
     return masked_containee_ip == masked_container_ip
 
 
-def _disjoint(first_seq, *rest_seq):
+class _Binding(object):
     """
-    Checks whether the values in first sequence are disjoint from the
-    values in the sequences in rest_seq.
+    A compact, capacity-aware observation binding.
 
-    All 'None' values in the sequences are ignored.
+    The matcher treats one observed-data SDO with ``number_observed == N`` as N
+    distinct, non-reusable observation instances.  Enumerating all N instances
+    up front is wasteful and impossible for a large N, so a binding stores how
+    many instances of each observed-data SDO it consumes instead of listing
+    them.
 
-    :return: True if first_seq is disjoint from the rest, False otherwise.
+    Instances of the same SDO are interchangeable: they expose identical Cyber
+    Observable content and an identical observed timestamp interval.  All
+    matching operators can therefore work on per-observation counts:
+
+    * two bindings consume disjoint instances of an SDO if and only if the sum
+      of their counts does not exceed that SDO's ``number_observed`` capacity;
+    * temporal qualifiers and FOLLOWEDBY only inspect interval minima/maxima,
+      which are unchanged by collapsing repeated intervals;
+    * the public binding representation (observation index for the first
+      instance of each SDO, then ``None`` for additional instances) and the
+      consumed instance counts can both be reconstructed from the counts.
+
+    The public representation is produced lazily by :meth:`public_slots`; it is
+    never materialized internally.  This keeps both work and peak memory
+    independent of the total ``number_observed`` count.
+
+    ``_counts`` is a tuple of ``(observation_index, count)`` pairs, ordered by
+    first appearance.  ``_none_count`` records filler slots created by OR
+    joins.  Iteration yields the historical public representation.
     """
 
-    if len(rest_seq) == 0:
+    __slots__ = ("_counts", "_none_count", "_capacities", "_signature", "_size")
+
+    def __init__(self, counts=(), none_count=0, capacities=None):
+        merged = {}
+        order = []
+        for obs_idx, count in counts:
+            if count < 0:
+                raise MatcherInternalError(
+                    u"Negative instance count in binding: {}".format(count))
+            if not count:
+                continue
+            if obs_idx not in merged:
+                order.append(obs_idx)
+                merged[obs_idx] = 0
+            merged[obs_idx] += count
+
+        self._counts = tuple((obs_idx, merged[obs_idx]) for obs_idx in order)
+        self._none_count = int(none_count)
+        self._capacities = capacities or {}
+        # Signature must be independent of insertion order so that equivalent
+        # bindings produced by different combination orders de-duplicate.
+        self._signature = (
+            tuple(sorted(merged.items())),
+            self._none_count,
+        )
+        self._size = sum(merged.values()) + self._none_count
+
+    @classmethod
+    def for_observation(cls, obs_idx, capacities=None):
+        """A binding consuming exactly one instance of the observation."""
+        return cls(((obs_idx, 1),), 0, capacities)
+
+    @classmethod
+    def filler(cls, count, capacities=None):
+        """A binding of ``count`` None slots, consuming no instances."""
+        return cls((), count, capacities)
+
+    @classmethod
+    def from_legacy(cls, values, capacities=None):
+        """Build a binding from a historical instance-id tuple."""
+        counts = []
+        none_count = 0
+        for value in values:
+            if value is None:
+                none_count += 1
+            elif isinstance(value, tuple):
+                counts.append((value[0], 1))
+            else:
+                counts.append((value, 1))
+        return cls(counts, none_count, capacities)
+
+    @property
+    def counts(self):
+        """Consumed ``(observation_index, count)`` pairs, by first use."""
+        return self._counts
+
+    @property
+    def capacities(self):
+        return self._capacities
+
+    @property
+    def none_count(self):
+        return self._none_count
+
+    @property
+    def observations(self):
+        """Distinct observation indices consumed by this binding."""
+        return (obs_idx for obs_idx, _ in self._counts)
+
+    def public_slots(self):
+        """
+        Yield the historical public binding representation, lazily.
+
+        One observation index per consumed SDO (its first instance) and
+        ``None`` for every additional instance or explicit filler slot.
+        """
+        for obs_idx, count in self._counts:
+            yield obs_idx
+            for _ in range(count - 1):
+                yield None
+        for _ in range(self._none_count):
+            yield None
+
+    def instance_ids(self):
+        """
+        Yield raw instance ids ``(obs_idx, instance_idx)``, lazily.
+
+        O(total consumed instances); use :attr:`counts` when counts suffice.
+        """
+        for obs_idx, count in self._counts:
+            for inst_idx in range(count):
+                yield (obs_idx, inst_idx)
+
+    def __len__(self):
+        return self._size
+
+    def __iter__(self):
+        # Match the historical public binding format: observation index for
+        # the first instance of each SDO, None afterwards.
+        return self.public_slots()
+
+    def __getitem__(self, index):
+        if index < 0:
+            index += self._size
+        if index < 0 or index >= self._size:
+            raise IndexError(index)
+
+        offset = 0
+        for obs_idx, count in self._counts:
+            if index < offset + count:
+                return obs_idx if index == offset else None
+            offset += count
+
+        return None
+
+    def combine(self, other, check_capacity=True):
+        """
+        Merge two bindings, enforcing instance non-reusability.
+
+        Returns ``None`` when the merged binding would consume more instances of
+        an observation than its ``number_observed`` capacity.  Two branches
+        drawing from the same SDO therefore compete for that SDO's instances;
+        they cannot each count the whole batch.
+        """
+        if not isinstance(other, _Binding):
+            other = _Binding.from_legacy(other, self._capacities)
+
+        merged = {}
+        order = []
+        for source in (self, other):
+            for obs_idx, count in source._counts:
+                if obs_idx not in merged:
+                    order.append(obs_idx)
+                    merged[obs_idx] = 0
+                merged[obs_idx] += count
+
+        capacities = self._capacities or other._capacities
+        if check_capacity and capacities:
+            for obs_idx, count in merged.items():
+                if count > capacities[obs_idx]:
+                    return None
+
+        return _Binding(
+            ((obs_idx, merged[obs_idx]) for obs_idx in order),
+            self._none_count + other._none_count,
+            capacities,
+        )
+
+    def concatenate(self, other):
+        """Concatenate without a capacity check; used for OR filler only."""
+        return self.combine(other, check_capacity=False)
+
+    def __add__(self, other):
+        return self.concatenate(other)
+
+    def __eq__(self, other):
+        if isinstance(other, _Binding):
+            return self._signature == other._signature
+        try:
+            if len(self) != len(other):
+                return False
+        except TypeError:
+            return NotImplemented
+        return tuple(self.public_slots()) == tuple(other)
+
+    def __ne__(self, other):
+        result = self.__eq__(other)
+        if result is NotImplemented:
+            return result
+        return not result
+
+    def __hash__(self):
+        return hash(self._signature)
+
+    def __repr__(self):
+        return u"_Binding(counts={!r}, none_count={})".format(
+            self._counts, self._none_count)
+
+
+def _unique_bindings(bindings):
+    """
+    Yield distinct bindings, preserving first-seen order.
+
+    Operators work with binding *classes*: all instance-level candidates which
+    consume the same number of instances of each observation are equivalent for
+    matching purposes.  Collapsing them keeps result sets finite and polynomial
+    in the pattern size, even when an SDO represents billions of instances.
+    """
+    seen = set()
+    for binding in bindings:
+        key = binding._signature
+        if key not in seen:
+            seen.add(key)
+            yield binding
+
+
+def _materialize_bindings(bindings):
+    """Return the distinct binding classes from a binding generator."""
+    return list(_unique_bindings(bindings))
+
+
+def _repeat_bindings(bindings, rep_count, capacities):
+    """
+    Yield binding classes satisfying a REPEATS qualifier.
+
+    ``bindings`` is a lazy iterable of distinct binding classes for the
+    qualified sub-expression.  That sub-expression must occur ``rep_count``
+    times, each occurrence consuming pairwise-disjoint observation instances.
+
+    The historical implementation enumerated every ``rep_count``-sized
+    combination of virtual *instances*.  That is exponential in
+    ``number_observed`` and cannot even be started for a huge value.  Instances
+    of one observed-data SDO are interchangeable, so only the number of copies
+    of each distinct binding class matters.  This function enumerates those
+    copy counts.
+
+    Work and state are bounded by the number of distinct binding classes and
+    by ``rep_count``; nothing is allocated per virtual instance.  The capacity
+    check in :meth:`_Binding.combine` (via :func:`_repeat_class`) rejects any
+    copy count which would consume more instances of an observation than its
+    ``number_observed`` capacity, so instances are never reused.
+    """
+    if rep_count < 1:
+        raise MatcherException(
+            u"Invalid repetition count: {}".format(rep_count))
+
+    classes = _materialize_bindings(bindings)
+    if not classes:
+        return
+
+    # Per-class copy bound: copies of a class cannot consume more instances of
+    # an observation than that observation's capacity.  Classes consuming no
+    # instances (OR filler) are limited only by the repeat count itself.
+    max_copies = []
+    for binding_class in classes:
+        copies = rep_count
+        for obs_idx, count in binding_class.counts:
+            capacity = capacities.get(obs_idx) if capacities else None
+            if capacity is None or count <= 0:
+                continue
+            copies = min(copies, capacity // count)
+        max_copies.append(copies)
+
+    total_capacity = sum(max_copies)
+    if total_capacity < rep_count:
+        # Even using every class to its per-observation capacity cannot reach
+        # the required repeat count.  This is only a necessary condition; the
+        # search below performs the exact per-observation capacity check.
+        return
+
+    base = _Binding.filler(0, capacities)
+    num_classes = len(classes)
+
+    # Depth-first search over per-class copy counts, using an explicit stack.
+    # The stack depth is bounded by the number of distinct classes, not by the
+    # number of virtual instances or by number_observed.
+    # A frame is [class_idx, remaining, current_binding, take_iterator].
+    stack = [[0, rep_count, base, None]]
+    while stack:
+        frame = stack[-1]
+        class_idx, remaining, current = frame[0], frame[1], frame[2]
+
+        if class_idx >= num_classes:
+            if remaining == 0:
+                yield current
+            stack.pop()
+            continue
+
+        if frame[3] is None:
+            # Bound by both the class-wide copy bound and by the capacity still
+            # available in the current partial binding, so no attempt is made
+            # for a copy count which cannot fit.
+            max_take = _max_copies(
+                current, classes[class_idx],
+                min(max_copies[class_idx], remaining),
+            )
+            frame[3] = iter(range(max_take, -1, -1))
+
+        for take in frame[3]:
+            combined = _repeat_class(
+                current, classes[class_idx], take)
+            if combined is None:
+                continue
+            stack.append([class_idx + 1, remaining - take, combined, None])
+            break
+        else:
+            stack.pop()
+
+
+def _repeat_class(current, binding_class, copies):
+    """
+    Add ``copies`` repetitions of one binding class to ``current``.
+
+    Returns the combined compact binding, or None if that would exceed an
+    observation's instance capacity.  The work is O(number of observations in
+    the class), independent of ``copies`` and of ``number_observed``.
+    """
+    if copies == 0:
+        return current
+
+    counts = dict(binding_class.counts)
+    merged = {}
+    order = []
+    for source in (current,):
+        for obs_idx, count in source.counts:
+            order.append(obs_idx)
+            merged[obs_idx] = merged.get(obs_idx, 0) + count
+    for obs_idx, count in counts.items():
+        if obs_idx not in merged:
+            order.append(obs_idx)
+            merged[obs_idx] = 0
+        merged[obs_idx] += count * copies
+
+    capacities = current.capacities
+    if capacities:
+        for obs_idx, count in merged.items():
+            if count > capacities[obs_idx]:
+                return None
+
+    combined = _Binding.__new__(_Binding)
+    combined._counts = tuple((obs_idx, merged[obs_idx]) for obs_idx in order)
+    combined._none_count = current.none_count + binding_class.none_count * copies
+    combined._capacities = capacities
+    combined._signature = (
+        tuple(sorted(merged.items())),
+        combined._none_count,
+    )
+    combined._size = sum(merged.values()) + combined._none_count
+    return combined
+
+
+def _max_copies(current, binding_class, limit):
+    """
+    Maximum copies of ``binding_class`` which still fit in ``current``.
+
+    Considers the residual per-observation capacity, so the search never tries
+    copy counts which are guaranteed to fail.  Returns at most ``limit``.
+    """
+    copies = limit
+    for obs_idx, count in binding_class.counts:
+        if count <= 0:
+            continue
+        capacity = current.capacities.get(obs_idx) if current.capacities else None
+        if capacity is None:
+            continue
+        used = dict(current.counts).get(obs_idx, 0)
+        copies = min(copies, max(0, (capacity - used) // count))
+    return copies
+
+
+def _combine_disjoint(lhs_binding, rhs_binding):
+    """
+    Combine two bindings, returning None if they share an instance.
+
+    Compact bindings are merged by count, which simultaneously checks that the
+    two branches do not exceed any observation's ``number_observed`` capacity.
+    Legacy tuple bindings (used by callers constructing the matcher manually)
+    fall back to the historical instance-set disjointness test.
+    """
+    if isinstance(lhs_binding, _Binding) and isinstance(rhs_binding, _Binding):
+        return lhs_binding.combine(rhs_binding)
+
+    if not _disjoint(lhs_binding, rhs_binding):
+        return None
+
+    if isinstance(lhs_binding, _Binding):
+        return lhs_binding.concatenate(rhs_binding)
+    if isinstance(rhs_binding, _Binding):
+        return rhs_binding.concatenate(lhs_binding)
+    return lhs_binding + rhs_binding
+
+
+def _disjoint(first_binding, *rest_bindings):
+    """
+    Check that ``first_binding`` shares no observation instance with the rest.
+
+    Compact bindings are compared by per-observation counts, which is exact and
+    independent of ``number_observed``.  Historical tuple bindings fall back to
+    set disjointness.  'None' values are ignored.
+
+    :return: True if the bindings are pairwise instance-disjoint.
+    """
+    if len(rest_bindings) == 0:
         return True
 
-    # is there a faster way to do this?
-    fs = set(x for x in first_seq if x is not None)
+    if isinstance(first_binding, _Binding) and all(
+            isinstance(binding, _Binding) for binding in rest_bindings):
+        return all(
+            first_binding.combine(binding) is not None
+            for binding in rest_bindings
+        )
+
+    def instance_set(binding):
+        if isinstance(binding, _Binding):
+            return set(binding.instance_ids())
+        return {value for value in binding if value is not None}
+
+    first = instance_set(first_binding)
     return all(
-        fs.isdisjoint(x for x in seq if x is not None)
-        for seq in rest_seq
+        first.isdisjoint(instance_set(binding))
+        for binding in rest_bindings
     )
 
 
@@ -803,168 +1216,6 @@ def _obs_map_prop_test(obs_map, predicate):
     return passed_obs
 
 
-class NotEnoughValues(ValueError):
-    pass
-
-
-def _filtered_combinations(value_generator, combo_size):
-    """
-    Finds disjoint combinations of values of the given size from the given sequence.
-
-    This function builds up the combinations incrementally.
-
-    :param values: The sequence of values
-    :param combo_size: The desired combination size (must be >= 1)
-    :return: The combinations, as a generator of tuples.
-    """
-
-    if combo_size < 1:
-        raise ValueError(u"combo_size must be >= 1")
-    elif combo_size == 1:
-        # Each value is its own combo
-        for value in value_generator:
-            yield (value,)
-        return
-
-    # combo_size > 1
-    # generate up to combo_size - 1 values
-    generated_values = [x for _, x in zip(range(combo_size - 1), value_generator)]
-
-    for next_value in value_generator:
-        filtered_values = [
-            candidate
-            for candidate in generated_values
-            if _disjoint(candidate, next_value)
-        ]
-        sub_combos = _filtered_combinations_from_list(
-            filtered_values,
-            combo_size - 1,
-        )
-        try:
-            for sub_combo in sub_combos:
-                yield sub_combo + (next_value,)
-        except NotEnoughValues:
-            pass
-
-        generated_values.append(next_value)
-
-
-def _tuple_size(value):
-    """
-    return number of non-None elements
-    """
-    return sum(idx is not None for idx in value)
-
-
-def _ceildiv(a, b):
-    return -(-a // b)
-
-
-def _bound_largest_combination(value_list):
-    """
-    Returns an upper bound on the largest disjoint combination
-
-    Given a valid combination of disjoint tuples, replacing a tuple
-    with a sub-tuple (smaller and included) leads to a valid combination
-    of the same size. Thus we can bound size of largest possible combination
-    by considering small tuples first.
-
-    :param value_list: List of tuples of obs (internal) ids
-    """
-    if value_list == []:
-        return 0
-
-    # First get max tuple size
-    max_size = max(_tuple_size(value) for value in value_list)
-
-    # init array of sets of obs_idx
-    obs_idx = [set() for _ in range(max_size + 1)]
-    for value in value_list:
-        obs_idx[_tuple_size(value)] |= {idx for idx in value if idx is not None}
-
-    # build largest combination
-    # considering that all possible tuples are availables
-    consumed_idx = set()
-    combination_size = 0
-    for i in range(1, max_size):
-        available_idx = obs_idx[i] - consumed_idx
-        # each tuple consumes i idx
-        # (rounded up since we remove all idx from bigger tuples)
-        combination_size += _ceildiv(len(available_idx), i)
-        # update mark all idx as consumed
-        consumed_idx |= available_idx
-    # last size does not need rounding up
-    available_idx = obs_idx[max_size] - consumed_idx
-    combination_size += len(available_idx) // max_size
-    return combination_size
-
-
-def _filtered_combinations_from_list(value_list, combo_size):
-    """
-    _filtered_combinations that works on lists
-
-    :param value_list: The sequence of values
-    :param combo_size: The desired combination size (must be >= 1)
-    :return: The combinations, as a generator of tuples.
-    """
-
-    if combo_size < 1:
-        raise ValueError(u"combo_size must be >= 1")
-    elif combo_size == 1:
-        # Each value is its own combo
-        for value in value_list:
-            yield (value,)
-        return
-
-    bound = _bound_largest_combination(value_list)
-    if bound < combo_size:
-        # there is no way we can build a combination large enough
-        # `combo_size - bound` tuples are missing
-        raise NotEnoughValues(combo_size - bound)
-
-    for i in range(len(value_list) + 1 - combo_size):
-        filtered_values = [
-            candidate
-            for candidate in value_list[i + 1:]
-            if _disjoint(value_list[i], candidate)
-        ]
-
-        sub_combos = _filtered_combinations_from_list(
-            filtered_values,
-            combo_size - 1,
-        )
-
-        yielded_combos = False
-        try:
-            for sub_combo in sub_combos:
-                yield (value_list[i],) + sub_combo
-                yielded_combos = True
-        except NotEnoughValues as e:
-            if yielded_combos:
-                continue
-            # retrieve number of missing values to build a combo of size `combo_size - 1`
-            # from `filtered_values` (value_list[i + 1:] disjoint value_list[i])
-            missing_values = e.args[0]
-            # Bound number of additional values we can expect if we do not remove
-            # those that intersect with value_list[i]
-            # - it is smaller than the number of values we removed
-            # - and smaller than `_tuple_size(value_list[i])` because they all intersect
-            #   value_list[i] and can not intersect each other to be in the same combo
-            max_add_values = min(
-                len(value_list[i + 1:]) - len(filtered_values),
-                _tuple_size(value_list[i]),
-            )
-            # +1 because we now want combo of size `combo_size` (not `combo_size - 1`)
-            expected_missing_values = missing_values + 1 - max_add_values
-            if expected_missing_values > 0:
-                # no need to inspect `value_list[i + 1:]` and others
-                # there is no way we can build a combo large enough
-                if i == 0:
-                    raise NotEnoughValues(expected_missing_values)
-                else:
-                    return
-
-
 def _compute_expected_binding_size(ctx):
     """
     Computes the expected size of bindings to the given subset of the pattern.
@@ -1062,6 +1313,8 @@ class MatchListener(STIXPatternListener):
         self.__observations = []
         self.__time_intervals = []  # 2-tuples of first,last timestamps
         self.__number_observed = []
+        # Per-observation instance capacities, consumed by compact bindings.
+        self.__capacities = {}
 
         if stix_version == VARSION_2_1:
             observed_data_sdos = self.__split_multi_observed_data(observed_data_sdos)
@@ -1090,6 +1343,15 @@ class MatchListener(STIXPatternListener):
                         "STIX v2.0 SDO must have all the following keys: "
                         "number_observed, first_observed, last_observed.")
 
+            # Validate the observation before any matching work.  In
+            # particular, number_observed drives instance expansion, so a bad
+            # value must be rejected here rather than surfacing later (or
+            # causing an expansion attempt).
+            if isinstance(number_observed, bool) or not isinstance(
+                    number_observed, six.integer_types):
+                raise MatcherException(
+                    "SDO with invalid number_observed "
+                    "(must be an integer >= 1): {!r}".format(number_observed))
             if number_observed < 1:
                 raise MatcherException(
                     "SDO with invalid number_observed "
@@ -1099,6 +1361,7 @@ class MatchListener(STIXPatternListener):
             self.__time_intervals.append((_str_to_datetime(first_observed),
                                           _str_to_datetime(last_observed)))
             self.__number_observed.append(number_observed)
+            self.__capacities[len(self.__observations) - 1] = number_observed
 
         self.__verbose = verbose
         self.__stix_version = stix_version
@@ -1216,9 +1479,67 @@ class MatchListener(STIXPatternListener):
         # could be anything... so don't call this function in that situation!
         if self.__compute_stack:
             for binding in self.__compute_stack[0]:
-                # convert back from complex instance_id to obs_index
-                yield tuple(map(self.get_obs_index_filtered, binding))
+                if isinstance(binding, _Binding):
+                    # Public bindings are tuples of observation indices, with
+                    # None for additional instances of the same observation.
+                    # This is generated lazily by the binding; materializing
+                    # it here is the caller's explicit request for the full
+                    # public binding.
+                    yield tuple(binding.public_slots())
+                else:
+                    # convert back from complex instance_id to obs_index
+                    yield tuple(map(self.get_obs_index_filtered, binding))
         return
+
+    def first_binding_sdos(self):
+        """
+        Resolve the first binding directly to SDOs, without materializing its
+        public tuple representation.
+
+        A binding may consume a huge number of virtual instances; the SDO list
+        only depends on which observations are consumed, so this avoids work and
+        memory proportional to ``number_observed``.  Returns an empty list if
+        the pattern did not match.
+        """
+        if not self.__compute_stack:
+            return []
+
+        for binding in self.__compute_stack[0]:
+            if isinstance(binding, _Binding):
+                obs_indices = sorted(binding.observations)
+                sdos = []
+                for obs_idx in obs_indices:
+                    if not sdos or sdos[-1] is not self.__observations[obs_idx]:
+                        sdos.append(self.__observations[obs_idx])
+                return sdos
+
+            return self.get_sdos_from_binding(
+                map(self.get_obs_index_filtered, binding))
+
+        return []
+
+    def matched_bindings(self):
+        """
+        Yield the matched bindings as compact objects.
+
+        Each item is a :class:`_Binding`, which exposes :attr:`_Binding.counts`:
+        the ``(observation_index, instance_count)`` pairs actually consumed.
+        A single observed-data SDO may stand for many virtual observations, so
+        this is the lossless form; together with :meth:`get_sdos_from_binding`
+        it reconstructs both the observations and the number of instances
+        consumed from each.
+
+        :meth:`matched` retains the historical tuple representation for
+        compatibility, which collapses additional instances of the same
+        observation into ``None`` slots.
+        """
+        if self.__compute_stack:
+            for binding in self.__compute_stack[0]:
+                if isinstance(binding, _Binding):
+                    yield binding
+                else:
+                    yield _Binding.from_legacy(
+                        binding, self.__capacities)
 
     def get_sdos_from_binding(self, binding):
         """
@@ -1228,8 +1549,13 @@ class MatchListener(STIXPatternListener):
             iterable of ints.
         :return: A list of SDOs.
         """
+        if isinstance(binding, _Binding):
+            obs_indices = sorted(binding.observations)
+        else:
+            obs_indices = sorted(val for val in binding if val is not None)
+
         sdos = []
-        for obs_idx in sorted(val for val in binding if val is not None):
+        for obs_idx in obs_indices:
             if not sdos or sdos[-1] is not self.__observations[obs_idx]:
                 sdos.append(self.__observations[obs_idx])
 
@@ -1353,11 +1679,12 @@ class MatchListener(STIXPatternListener):
 
         for rhs_binding in rhs_bindings:
 
-            if _disjoint(lhs_binding, rhs_binding):
+            combined = _combine_disjoint(lhs_binding, rhs_binding)
+            if combined is not None:
                 earliest_rhs_last_timestamp = self.__earliest_last_timestamp(rhs_binding)
 
                 if latest_lhs_first_timestamp <= earliest_rhs_last_timestamp:
-                    yield (lhs_binding + rhs_binding)
+                    yield combined
 
     def __followed_by_right_join(self, lhs_bindings, rhs_binding):
         # Yield all valid FOLLOWEDBY joins between a list of lhs_bindings
@@ -1367,26 +1694,25 @@ class MatchListener(STIXPatternListener):
 
         for lhs_binding in lhs_bindings:
 
-            if _disjoint(lhs_binding, rhs_binding):
+            combined = _combine_disjoint(lhs_binding, rhs_binding)
+            if combined is not None:
                 latest_lhs_first_timestamp = self.__latest_first_timestamp(lhs_binding)
 
                 if latest_lhs_first_timestamp <= earliest_rhs_last_timestamp:
-                    yield (lhs_binding + rhs_binding)
+                    yield combined
 
     def __latest_first_timestamp(self, binding):
+        # Instances of one SDO share a timestamp interval, so one interval per
+        # consumed observation is equivalent to one per instance.
         return max(
-            # time interval is based on the original obs_index
-            self.__time_intervals[self.get_obs_index(inst_id)][0]
-            for inst_id in binding
-            if inst_id is not None
+            self.__time_intervals[obs_idx][0]
+            for obs_idx, _ in binding.counts
         )
 
     def __earliest_last_timestamp(self, binding):
         return min(
-            # time interval is based on the original obs_index
-            self.__time_intervals[self.get_obs_index(inst_id)][1]
-            for inst_id in binding
-            if inst_id is not None
+            self.__time_intervals[obs_idx][1]
+            for obs_idx, _ in binding.counts
         )
 
     def exitObservationExpressionOr(self, ctx):
@@ -1455,17 +1781,17 @@ class MatchListener(STIXPatternListener):
         first_lhs_binding = next(lhs_bindings, None)
         first_rhs_binding = next(rhs_bindings, None)
         if first_lhs_binding is not None:
-            lhs_binding_none = (None,) * len(first_lhs_binding)
+            lhs_binding_none = _Binding.filler(len(first_lhs_binding))
         else:
             left_binding_size = _compute_expected_binding_size(
                 ctx.observationExpressionOr(0))
-            lhs_binding_none = (None,) * left_binding_size
+            lhs_binding_none = _Binding.filler(left_binding_size)
         if first_rhs_binding is not None:
-            rhs_binding_none = (None,) * len(first_rhs_binding)
+            rhs_binding_none = _Binding.filler(len(first_rhs_binding))
         else:
             right_binding_size = _compute_expected_binding_size(
                 ctx.observationExpressionOr(0))
-            rhs_binding_none = (None,) * right_binding_size
+            rhs_binding_none = _Binding.filler(right_binding_size)
 
         def joined_bindings():
             _lhs_binding = first_lhs_binding
@@ -1522,9 +1848,13 @@ class MatchListener(STIXPatternListener):
                 if _next_rhs_binding is not None:
                     # if there is a new rhs binding
                     for lhs_binding in _lhs_cache:
-                        # yield valid combinations
-                        if _disjoint(lhs_binding, _next_rhs_binding):
-                            yield (lhs_binding + _next_rhs_binding)
+                        # yield valid combinations, enforcing that the two
+                        # sides do not draw more instances from an observation
+                        # than its number_observed capacity
+                        combined = _combine_disjoint(
+                            lhs_binding, _next_rhs_binding)
+                        if combined is not None:
+                            yield combined
                     # update cache
                     _rhs_cache.append(_next_rhs_binding)
                     _next_rhs_binding = next(rhs_bindings, None)
@@ -1533,8 +1863,10 @@ class MatchListener(STIXPatternListener):
                     # if there is a new rhs binding
                     for rhs_binding in _rhs_cache:
                         # yield valid combinations
-                        if _disjoint(_next_lhs_binding, rhs_binding):
-                            yield (_next_lhs_binding + rhs_binding)
+                        combined = _combine_disjoint(
+                            _next_lhs_binding, rhs_binding)
+                        if combined is not None:
+                            yield combined
                     # update cache
                     _lhs_cache.append(_next_lhs_binding)
                     _next_lhs_binding = next(lhs_bindings, None)
@@ -1545,31 +1877,42 @@ class MatchListener(STIXPatternListener):
         """
         Consumes the results of the inner comparison expression.  See
         exitComparisonExpression().
-        Produces: a generator of 1-tuples of the IDs.  At this stage, the root
+        Produces a generator of compact bindings.  At this stage, the root
         Cyber Observable object IDs are no longer needed, and are dropped.
 
-        This is a preparatory transformative step, so that higher-level
-        processing has consistent structures to work with (always generator of
-        tuples).
+        An observed-data SDO with ``number_observed == N`` stands for N distinct
+        observation instances.  Rather than allocating N instance ids per
+        matching SDO, one compact binding per SDO is produced which records that
+        one instance is consumed.  The REPEATS and AND/FOLLOWEDBY operators
+        merge these counts while enforcing per-SDO capacities, so repeated
+        occurrences always draw new instances and never reuse one.
         """
 
         debug_label = u"exitObservationExpression (simple)"
         obs_ids = self.__pop(debug_label)
-        # "Unpack" the instances of observables based on `number_observed`
-        # field by creating complex instance_id
-        obs_id_tuples = ((self.create_instance_id(obs_id, i),) for obs_id in obs_ids.keys()
-                         for i in range(0, self.__number_observed[obs_id]))
 
-        self.__push(obs_id_tuples, debug_label)
+        self.__push(
+            (
+                _Binding.for_observation(obs_idx, self.__capacities)
+                for obs_idx in obs_ids.keys()
+            ),
+            debug_label,
+        )
 
     # Don't need to do anything for exitObservationExpressionCompound
 
     def exitObservationExpressionRepeated(self, ctx):
         """
-        Consumes a generator of bindings for the qualified observation expression.
+        Consumes a generator of bindings for the qualified observation
+        expression.
         Produces a generator of bindings which account for the repetition. The
         length of each new binding is equal to the length of the old bindings
         times the repeat count.
+
+        The repeat count applies to observation instances, not to SDOs: each of
+        the repeated occurrences must consume distinct instances of the
+        observed-data SDOs.  Compact bindings make this O(number of matching
+        SDOs x repeat count) instead of O(number_observed x repeat count).
         """
 
         rep_count = _literal_terminal_to_python_val(
@@ -1581,8 +1924,6 @@ class MatchListener(STIXPatternListener):
 
         bindings = self.__pop(debug_label)
 
-        # Need to find all 'rep_count'-sized disjoint combinations of
-        # bindings.
         if rep_count < 1:
             raise MatcherException(u"Invalid repetition count: {}".format(
                 rep_count))
@@ -1591,16 +1932,8 @@ class MatchListener(STIXPatternListener):
             # as-is.
             filtered_bindings = bindings
         else:
-            # A generator of tuples goes in (bindings)
-            filtered_bindings = _filtered_combinations(bindings, rep_count)
-            # ... and a generator of tuples of tuples comes out
-            # (filtered_bindings).  The following flattens each outer
-            # tuple.  I could have also written a generic flattener, but
-            # since this structure is predictable, I could do something
-            # simpler.  Other code dealing with bindings doesn't expect any
-            # nested structure, so I do the flattening here.
-            filtered_bindings = (tuple(itertools.chain.from_iterable(binding))
-                                 for binding in filtered_bindings)
+            filtered_bindings = _repeat_bindings(
+                bindings, rep_count, self.__capacities)
 
         self.__push(filtered_bindings, debug_label)
 
@@ -1619,12 +1952,9 @@ class MatchListener(STIXPatternListener):
 
         def check_within(binding):
             return _timestamp_intervals_within(
-                [
-                    # time interval is based on the original obs_index
-                    self.__time_intervals[self.get_obs_index(inst_id)]
-                    for inst_id in binding
-                    if inst_id is not None
-                ],
+                # Instances of one SDO share an interval, so one interval per
+                # consumed observation is equivalent to one per instance.
+                self.__binding_time_intervals(binding),
                 duration
             )
 
@@ -1655,12 +1985,9 @@ class MatchListener(STIXPatternListener):
 
         def check_overlap(binding):
             return all(
-                    _overlap(start_time, stop_time, *self.__time_intervals[
-                        # time interval is based on the original obs_index
-                        self.get_obs_index(obs_id)
-                    ])
+                    _overlap(start_time, stop_time, *time_interval)
                     in (_OVERLAP, _OVERLAP_TOUCH_OUTER)
-                    for obs_id in binding if obs_id is not None
+                    for time_interval in self.__binding_time_intervals(binding)
                 )
 
         # If start and stop are equal, the constraint is impossible to
@@ -1672,6 +1999,27 @@ class MatchListener(STIXPatternListener):
             filtered_bindings = iter(())
 
         self.__push(filtered_bindings, debug_label)
+
+    def __binding_time_intervals(self, binding):
+        """
+        Return the timestamp intervals consumed by a binding.
+
+        Compact bindings report one interval per consumed observation, which is
+        equivalent to the per-instance intervals the historical implementation
+        used: repeats of an interval do not change overlap, minimum, or maximum
+        results.  Legacy tuple bindings are still accepted.
+        """
+        if isinstance(binding, _Binding):
+            return [
+                self.__time_intervals[obs_idx]
+                for obs_idx in binding.observations
+            ]
+
+        return [
+            self.__time_intervals[self.get_obs_index(inst_id)]
+            for inst_id in binding
+            if inst_id is not None
+        ]
 
     def exitStartStopQualifier(self, ctx):
         """
@@ -2483,10 +2831,7 @@ class Pattern:
         matcher = MatchListener(observed_data_sdos, verbose, stix_version=self.__stix_version)
         self.__pattern.walk(matcher)
 
-        first_binding = next(matcher.matched(), [])
-        matching_sdos = matcher.get_sdos_from_binding(first_binding)
-
-        return matching_sdos
+        return matcher.first_binding_sdos()
 
 
 def match(pattern, observed_data_sdos, verbose=False, stix_version=DEFAULT_VERSION):
