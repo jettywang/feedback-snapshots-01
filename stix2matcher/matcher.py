@@ -28,7 +28,17 @@ from stix2patterns.v20.pattern import Pattern as Stix2Pattern20
 from stix2patterns.v21.pattern import Pattern as Stix2Pattern21
 
 from stix2matcher import DEFAULT_VERSION, VARSION_2_1
+from stix2matcher import regex_safety
+from stix2matcher.budget import (
+    BudgetExhausted, STAGE_COMBINATION, STAGE_DEREFERENCE, STAGE_INPUT,
+    STAGE_PATH, STAGE_PREFLIGHT, STAGE_PROPERTY_TEST, STAGE_REGEX,
+    STAGE_REGEX_COMPILE, STAGE_RESULT, WorkBudget,
+)
 from stix2matcher.enums import TYPES_V21
+from stix2matcher.errors import (
+    MatcherException, MatcherInternalError, UnsupportedOperatorError,
+    UnsupportedRuleError,
+)
 
 # Example observed-data SDO.  This represents N observations, where N is
 # the value of the "number_observed" property (in this case, 5).
@@ -224,29 +234,6 @@ _COMPARE_ORDER_FUNCS = {
 }
 
 
-class MatcherException(Exception):
-    """Base class for matcher exceptions."""
-    pass
-
-
-class MatcherInternalError(MatcherException):
-    """For errors that probably represent bugs or incomplete matcher
-    implementation."""
-    pass
-
-
-class UnsupportedOperatorError(MatcherInternalError):
-    """This means I just haven't yet added support for a particular operator.
-    (A genuinely invalid operator ought to be caught during parsing right??)
-    I found I was throwing internal errors for this in several places, so I
-    just gave the error its own class to make it easier.
-    """
-    def __init__(self, op_str):
-        super(UnsupportedOperatorError, self).__init__(
-            u"Unsupported operator: '{}'".format(op_str)
-        )
-
-
 class MatcherErrorListener(antlr4.error.ErrorListener.ErrorListener):
     """
     Simple error listener which just remembers the last error message received.
@@ -305,7 +292,7 @@ def _process_prop_suffix(prop_name, value):
     return value
 
 
-def _step_into_objs(objs, step):
+def _step_into_objs(objs, step, budget=None):
     """
     'objs' is a list of Cyber Observable object (sub)structures.  'step'
     describes a step into the structure, relative to the top level: if an int,
@@ -317,6 +304,9 @@ def _step_into_objs(objs, step):
     This will also automatically convert values of specially suffixed
     properties into the proper type.  See _process_prop_suffix().
 
+    Each structure examined is charged to the budget (when given), before the
+    step is attempted.
+
     :return: A new list containing the "stepped-into" structures, minus
        any structures which couldn't be stepped into.
     """
@@ -324,11 +314,17 @@ def _step_into_objs(objs, step):
     stepped_cyber_obs_objs = []
     if isinstance(step, int):
         for obj in objs:
+            if budget is not None:
+                budget.charge(1, stage=STAGE_PATH,
+                              detail=u"stepping into a list index")
             if isinstance(obj, list) and 0 <= step < len(obj):
                 stepped_cyber_obs_objs.append(obj[step])
             # can't index non-lists
     elif isinstance(step, six.text_type):
         for obj in objs:
+            if budget is not None:
+                budget.charge(1, stage=STAGE_PATH,
+                              detail=u"stepping into a property")
             if isinstance(obj, dict) and step in obj:
                 processed_value = _process_prop_suffix(step, obj[step])
                 stepped_cyber_obs_objs.append(processed_value)
@@ -341,7 +337,7 @@ def _step_into_objs(objs, step):
     return stepped_cyber_obs_objs
 
 
-def _step_filter_observations(observations, step):
+def _step_filter_observations(observations, step, budget=None):
     """
     A helper for the listener.  Given a particular structure in 'observations'
     (see exitObjectType(), exitFirstPathComponent()), representing a set of
@@ -359,7 +355,9 @@ def _step_filter_observations(observations, step):
     for obs_idx, cyber_obs_obj_map in six.iteritems(observations):
         filtered_cyber_obs_obj_map = {}
         for cyber_obs_obj_id, cyber_obs_objs in six.iteritems(cyber_obs_obj_map):
-            filtered_cyber_obs_obj_list = _step_into_objs(cyber_obs_objs, step)
+            filtered_cyber_obs_obj_list = _step_into_objs(
+                cyber_obs_objs, step, budget
+            )
 
             if len(filtered_cyber_obs_obj_list) > 0:
                 filtered_cyber_obs_obj_map[cyber_obs_obj_id] = filtered_cyber_obs_obj_list
@@ -370,7 +368,7 @@ def _step_filter_observations(observations, step):
     return filtered_obs_map
 
 
-def _step_filter_observations_index_star(observations):
+def _step_filter_observations_index_star(observations, budget=None):
     """
     Does an index "star" step, i.e. "[*]".  This will pull out all elements of
     the list as if they were parts of separate Cyber Observable objects, which
@@ -391,6 +389,11 @@ def _step_filter_observations_index_star(observations):
             for cyber_obs_obj in cyber_obs_objs:
                 if not isinstance(cyber_obs_obj, list):
                     continue
+                if budget is not None:
+                    budget.charge(
+                        len(cyber_obs_obj), stage=STAGE_PATH,
+                        detail=u"expanding a [*] path step"
+                    )
 
                 stepped_cyber_obs_objs.extend(cyber_obs_obj)
 
@@ -717,11 +720,15 @@ def _timestamp_intervals_within(timestamp_intervals, duration):
     return result
 
 
-def _dereference_cyber_obs_objs(cyber_obs_objs, cyber_obs_obj_references, ref_prop_name, stix_version=DEFAULT_VERSION):
+def _dereference_cyber_obs_objs(cyber_obs_objs, cyber_obs_obj_references, ref_prop_name, stix_version=DEFAULT_VERSION, budget=None):
     """
     Dereferences a sequence of Cyber Observable object references.  Returns a list of
     the referenced objects.  If a reference does not resolve, it is not
     treated as an error, it is ignored.
+
+    Each reference resolved is charged to the budget (when given), before the
+    lookup is performed.  This is what makes reference-heavy paths, including
+    circular ones, stop at a predictable point.
 
     :param cyber_obs_objs: The context for reference resolution.  This is a mapping
         from Cyber Observable object ID to Cyber Observable object, i.e. the "objects" property of
@@ -735,6 +742,10 @@ def _dereference_cyber_obs_objs(cyber_obs_objs, cyber_obs_obj_references, ref_pr
     """
     dereferenced_cyber_obs_objs = []
     for referenced_obj_id in cyber_obs_obj_references:
+        if budget is not None:
+            budget.charge(1, stage=STAGE_DEREFERENCE,
+                          detail=u"resolving a '{}' reference".format(
+                              ref_prop_name))
         if not isinstance(referenced_obj_id, six.text_type):
             raise MatcherException(
                 u"{} value of reference property '{}' was not "
@@ -745,6 +756,11 @@ def _dereference_cyber_obs_objs(cyber_obs_objs, cyber_obs_obj_references, ref_pr
                     ref_prop_name, referenced_obj_id
                 ))
         if stix_version == VARSION_2_1:
+            if budget is not None:
+                budget.charge(
+                    len(cyber_obs_objs), stage=STAGE_DEREFERENCE,
+                    detail=u"scanning objects for a reference target"
+                )
             ref_obj = [d for d in cyber_obs_objs if d['id'] == referenced_obj_id]
             if ref_obj:
                 dereferenced_cyber_obs_objs.extend(ref_obj)
@@ -755,7 +771,7 @@ def _dereference_cyber_obs_objs(cyber_obs_objs, cyber_obs_obj_references, ref_pr
     return dereferenced_cyber_obs_objs
 
 
-def _obs_map_prop_test(obs_map, predicate):
+def _obs_map_prop_test(obs_map, predicate, budget=None):
     """
     Property tests always perform the same structural transformation of
     observation data on the stack.  There are several callbacks within the
@@ -786,6 +802,9 @@ def _obs_map_prop_test(obs_map, predicate):
     :param obs_map: Observation data, as selected by an object path.
     :param predicate: This encompasses the actual test to perform.  It must
         be a function of one parameter, which returns True or False.
+    :param budget: A work budget, charged once per value examined.  This makes
+        property tests (in particular regex tests) stop predictably rather
+        than relying on wall-clock timeouts.
     :return: The transformed and filtered data, according to predicate.
     """
     passed_obs = {}
@@ -793,6 +812,9 @@ def _obs_map_prop_test(obs_map, predicate):
         passed_cyber_obs_obj_roots = set()
         for cyber_obs_obj_id, values in six.iteritems(cyber_obs_obj_map):
             for value in values:
+                if budget is not None:
+                    budget.charge(1, stage=STAGE_PROPERTY_TEST,
+                                  detail=u"testing a property value")
                 if predicate(value):
                     passed_cyber_obs_obj_roots.add(cyber_obs_obj_id)
                     break
@@ -807,7 +829,7 @@ class NotEnoughValues(ValueError):
     pass
 
 
-def _filtered_combinations(value_generator, combo_size):
+def _filtered_combinations(value_generator, combo_size, budget=None):
     """
     Finds disjoint combinations of values of the given size from the given sequence.
 
@@ -815,6 +837,8 @@ def _filtered_combinations(value_generator, combo_size):
 
     :param values: The sequence of values
     :param combo_size: The desired combination size (must be >= 1)
+    :param budget: An optional work budget; each candidate pairing is charged
+        before it is tested, so enumeration stops at a predictable point.
     :return: The combinations, as a generator of tuples.
     """
 
@@ -831,6 +855,9 @@ def _filtered_combinations(value_generator, combo_size):
     generated_values = [x for _, x in zip(range(combo_size - 1), value_generator)]
 
     for next_value in value_generator:
+        if budget is not None:
+            budget.charge(1, stage=STAGE_COMBINATION,
+                          detail=u"building a repeat combination")
         filtered_values = [
             candidate
             for candidate in generated_values
@@ -839,6 +866,7 @@ def _filtered_combinations(value_generator, combo_size):
         sub_combos = _filtered_combinations_from_list(
             filtered_values,
             combo_size - 1,
+            budget=budget,
         )
         try:
             for sub_combo in sub_combos:
@@ -899,12 +927,13 @@ def _bound_largest_combination(value_list):
     return combination_size
 
 
-def _filtered_combinations_from_list(value_list, combo_size):
+def _filtered_combinations_from_list(value_list, combo_size, budget=None):
     """
     _filtered_combinations that works on lists
 
     :param value_list: The sequence of values
     :param combo_size: The desired combination size (must be >= 1)
+    :param budget: An optional work budget; charged per candidate examined.
     :return: The combinations, as a generator of tuples.
     """
 
@@ -916,6 +945,11 @@ def _filtered_combinations_from_list(value_list, combo_size):
             yield (value,)
         return
 
+    if budget is not None:
+        budget.charge(
+            len(value_list), stage=STAGE_COMBINATION,
+            detail=u"bounding repeat-combination growth"
+        )
     bound = _bound_largest_combination(value_list)
     if bound < combo_size:
         # there is no way we can build a combination large enough
@@ -923,6 +957,11 @@ def _filtered_combinations_from_list(value_list, combo_size):
         raise NotEnoughValues(combo_size - bound)
 
     for i in range(len(value_list) + 1 - combo_size):
+        if budget is not None:
+            budget.charge(
+                len(value_list) - i, stage=STAGE_COMBINATION,
+                detail=u"testing repeat-combination candidates"
+            )
         filtered_values = [
             candidate
             for candidate in value_list[i + 1:]
@@ -932,6 +971,7 @@ def _filtered_combinations_from_list(value_list, combo_size):
         sub_combos = _filtered_combinations_from_list(
             filtered_values,
             combo_size - 1,
+            budget=budget,
         )
 
         yielded_combos = False
@@ -1050,7 +1090,7 @@ class MatchListener(STIXPatternListener):
     affecting correctness.
     """
 
-    def __init__(self, observed_data_sdos, verbose=False, stix_version=DEFAULT_VERSION):
+    def __init__(self, observed_data_sdos, verbose=False, stix_version=DEFAULT_VERSION, budget=None):
         """
         Initialize this match listener.
 
@@ -1058,7 +1098,14 @@ class MatchListener(STIXPatternListener):
         :param verbose: If True, dump detailed information about triggered
             callbacks and stack activity to stdout.  This can provide useful
             information about what the matcher is doing.
+        :param budget: An optional :class:`stix2matcher.budget.WorkBudget`
+            shared by all work performed for this match.  When it is
+            exhausted, matching stops by raising
+            :class:`stix2matcher.budget.BudgetExhausted` at the operation
+            which could not be started.
         """
+        self.__budget = budget if budget is not None else WorkBudget()
+        self.__budget.enter_stage(STAGE_INPUT)
         self.__observations = []
         self.__time_intervals = []  # 2-tuples of first,last timestamps
         self.__number_observed = []
@@ -1067,6 +1114,7 @@ class MatchListener(STIXPatternListener):
             observed_data_sdos = self.__split_multi_observed_data(observed_data_sdos)
 
         for sdo in observed_data_sdos:
+            self.__budget.charge(1, detail=u"normalizing an observed-data SDO")
             number_observed = 0
             if stix_version == VARSION_2_1:
                 for obj in sdo["objects"]:
@@ -1216,6 +1264,11 @@ class MatchListener(STIXPatternListener):
         # could be anything... so don't call this function in that situation!
         if self.__compute_stack:
             for binding in self.__compute_stack[0]:
+                # The binding generator performs work lazily; charge before
+                # handing a binding to the caller so exhaustion is signalled
+                # from within the match, not noticed later by a consumer.
+                self.__budget.charge(1, stage=STAGE_RESULT,
+                                     detail=u"producing a final binding")
                 # convert back from complex instance_id to obs_index
                 yield tuple(map(self.get_obs_index_filtered, binding))
         return
@@ -1352,6 +1405,8 @@ class MatchListener(STIXPatternListener):
         latest_lhs_first_timestamp = self.__latest_first_timestamp(lhs_binding)
 
         for rhs_binding in rhs_bindings:
+            self.__budget.charge(1, stage=STAGE_COMBINATION,
+                                 detail=u"joining FOLLOWEDBY bindings")
 
             if _disjoint(lhs_binding, rhs_binding):
                 earliest_rhs_last_timestamp = self.__earliest_last_timestamp(rhs_binding)
@@ -1366,6 +1421,8 @@ class MatchListener(STIXPatternListener):
         earliest_rhs_last_timestamp = self.__earliest_last_timestamp(rhs_binding)
 
         for lhs_binding in lhs_bindings:
+            self.__budget.charge(1, stage=STAGE_COMBINATION,
+                                 detail=u"joining FOLLOWEDBY bindings")
 
             if _disjoint(lhs_binding, rhs_binding):
                 latest_lhs_first_timestamp = self.__latest_first_timestamp(lhs_binding)
@@ -1472,9 +1529,13 @@ class MatchListener(STIXPatternListener):
             _rhs_binding = first_rhs_binding
             while _lhs_binding is not None or _rhs_binding is not None:
                 if _lhs_binding is not None:
+                    self.__budget.charge(1, stage=STAGE_COMBINATION,
+                                         detail=u"merging OR bindings")
                     yield _lhs_binding + rhs_binding_none
                     _lhs_binding = next(lhs_bindings, None)
                 if _rhs_binding is not None:
+                    self.__budget.charge(1, stage=STAGE_COMBINATION,
+                                         detail=u"merging OR bindings")
                     yield lhs_binding_none + _rhs_binding
                     _rhs_binding = next(rhs_bindings, None)
 
@@ -1522,6 +1583,9 @@ class MatchListener(STIXPatternListener):
                 if _next_rhs_binding is not None:
                     # if there is a new rhs binding
                     for lhs_binding in _lhs_cache:
+                        self.__budget.charge(
+                            1, stage=STAGE_COMBINATION,
+                            detail=u"joining AND bindings")
                         # yield valid combinations
                         if _disjoint(lhs_binding, _next_rhs_binding):
                             yield (lhs_binding + _next_rhs_binding)
@@ -1532,6 +1596,9 @@ class MatchListener(STIXPatternListener):
                 if _next_lhs_binding is not None:
                     # if there is a new rhs binding
                     for rhs_binding in _rhs_cache:
+                        self.__budget.charge(
+                            1, stage=STAGE_COMBINATION,
+                            detail=u"joining AND bindings")
                         # yield valid combinations
                         if _disjoint(_next_lhs_binding, rhs_binding):
                             yield (_next_lhs_binding + rhs_binding)
@@ -1557,8 +1624,19 @@ class MatchListener(STIXPatternListener):
         obs_ids = self.__pop(debug_label)
         # "Unpack" the instances of observables based on `number_observed`
         # field by creating complex instance_id
-        obs_id_tuples = ((self.create_instance_id(obs_id, i),) for obs_id in obs_ids.keys()
-                         for i in range(0, self.__number_observed[obs_id]))
+        budget = self.__budget
+        number_observed = self.__number_observed
+
+        def instances():
+            for obs_id in obs_ids.keys():
+                budget.charge(
+                    number_observed[obs_id], stage=STAGE_COMBINATION,
+                    detail=u"expanding number_observed instances"
+                )
+                for i in range(0, number_observed[obs_id]):
+                    yield (self.create_instance_id(obs_id, i),)
+
+        obs_id_tuples = instances()
 
         self.__push(obs_id_tuples, debug_label)
 
@@ -1592,15 +1670,26 @@ class MatchListener(STIXPatternListener):
             filtered_bindings = bindings
         else:
             # A generator of tuples goes in (bindings)
-            filtered_bindings = _filtered_combinations(bindings, rep_count)
-            # ... and a generator of tuples of tuples comes out
-            # (filtered_bindings).  The following flattens each outer
-            # tuple.  I could have also written a generic flattener, but
-            # since this structure is predictable, I could do something
-            # simpler.  Other code dealing with bindings doesn't expect any
-            # nested structure, so I do the flattening here.
-            filtered_bindings = (tuple(itertools.chain.from_iterable(binding))
-                                 for binding in filtered_bindings)
+            filtered_bindings = _filtered_combinations(
+                bindings, rep_count, budget=self.__budget
+            )
+
+            def flatten(combos):
+                for binding in combos:
+                    self.__budget.charge(
+                        1, stage=STAGE_RESULT,
+                        detail=u"emitting a repeated binding"
+                    )
+                    # ... and a generator of tuples of tuples comes out
+                    # (filtered_bindings).  This flattens each outer tuple.
+                    # I could have also written a generic flattener, but
+                    # since this structure is predictable, I could do
+                    # something simpler.  Other code dealing with bindings
+                    # doesn't expect any nested structure, so I do the
+                    # flattening here.
+                    yield tuple(itertools.chain.from_iterable(binding))
+
+            filtered_bindings = flatten(filtered_bindings)
 
         self.__push(filtered_bindings, debug_label)
 
@@ -1628,7 +1717,16 @@ class MatchListener(STIXPatternListener):
                 duration
             )
 
-        filtered_bindings = (binding for binding in bindings if check_within(binding))
+        def filtered():
+            for binding in bindings:
+                self.__budget.charge(
+                    1, stage=STAGE_COMBINATION,
+                    detail=u"checking a WITHIN constraint"
+                )
+                if check_within(binding):
+                    yield binding
+
+        filtered_bindings = filtered()
 
         self.__push(filtered_bindings, debug_label)
 
@@ -1667,7 +1765,16 @@ class MatchListener(STIXPatternListener):
         # satisfy, since a value can't be both >= and < the same number.
         # And of course it's impossible if start > stop.
         if start_time < stop_time:
-            filtered_bindings = (binding for binding in bindings if check_overlap(binding))
+            def filtered():
+                for binding in bindings:
+                    self.__budget.charge(
+                        1, stage=STAGE_COMBINATION,
+                        detail=u"checking a START/STOP constraint"
+                    )
+                    if check_overlap(binding):
+                        yield binding
+
+            filtered_bindings = filtered()
         else:
             filtered_bindings = iter(())
 
@@ -1857,7 +1964,7 @@ class MatchListener(STIXPatternListener):
 
             return result
 
-        passed_obs = _obs_map_prop_test(obs_values, equality_pred)
+        passed_obs = _obs_map_prop_test(obs_values, equality_pred, budget=self.__budget)
 
         self.__push(passed_obs, debug_label)
 
@@ -1937,7 +2044,7 @@ class MatchListener(STIXPatternListener):
 
             return result
 
-        passed_obs = _obs_map_prop_test(obs_values, order_pred)
+        passed_obs = _obs_map_prop_test(obs_values, order_pred, budget=self.__budget)
 
         self.__push(passed_obs, debug_label)
 
@@ -1991,7 +2098,7 @@ class MatchListener(STIXPatternListener):
 
             return result
 
-        passed_obs = _obs_map_prop_test(obs_values, set_pred)
+        passed_obs = _obs_map_prop_test(obs_values, set_pred, budget=self.__budget)
 
         self.__push(passed_obs, debug_label)
 
@@ -2019,9 +2126,8 @@ class MatchListener(STIXPatternListener):
 
         operand_str = unicodedata.normalize("NFC", operand_str)
         regex = _like_to_regex(operand_str)
-        # compile and cache this to improve performance
-        compiled_re = re.compile(regex)
-        is_binary_convertible = all(ord(c) < 256 for c in regex)
+        compiled_re, compiled_bin_re, analysis = self.__compile_regex(regex)
+        is_binary_convertible = compiled_bin_re is not None
 
         def like_pred(value):
             if isinstance(value, six.binary_type) and is_binary_convertible:
@@ -2030,7 +2136,9 @@ class MatchListener(STIXPatternListener):
             # non-strings can't match
             if isinstance(value, six.text_type):
                 value = unicodedata.normalize("NFC", value)
-                result = compiled_re.match(value)
+                result = self.__run_regex(
+                    analysis, compiled_re, value, match=True
+                )
             else:
                 result = False
 
@@ -2039,7 +2147,7 @@ class MatchListener(STIXPatternListener):
 
             return result
 
-        passed_obs = _obs_map_prop_test(obs_values, like_pred)
+        passed_obs = _obs_map_prop_test(obs_values, like_pred, budget=self.__budget)
 
         self.__push(passed_obs, debug_label)
 
@@ -2067,29 +2175,16 @@ class MatchListener(STIXPatternListener):
 
         regex = _literal_terminal_to_python_val(regex_terminal)
         regex = unicodedata.normalize("NFC", regex)
-        compiled_re = re.compile(regex)
-
-        # Support for binary pattern matching.
-        is_binary_convertible = all(ord(c) < 256 for c in regex)
-        if is_binary_convertible:
-            if six.PY2:
-                # This will be a pattern compiled from a unicode string, but
-                # python2 doesn't seem to care.  It'll match against a 'str'
-                # just fine.
-                compiled_bin_re = compiled_re
-            else:
-                # Python3 requires an actual binary regex.
-                bin_regex = six.binary_type(ord(c) for c in regex)
-                compiled_bin_re = re.compile(bin_regex)
+        compiled_re, compiled_bin_re, analysis = self.__compile_regex(regex)
 
         def regex_pred(value):
             if isinstance(value, six.text_type):
                 value = unicodedata.normalize("NFC", value)
-                result = compiled_re.search(value)
+                result = self.__run_regex(analysis, compiled_re, value)
 
             elif isinstance(value, six.binary_type):
-                if is_binary_convertible:
-                    result = compiled_bin_re.search(value)
+                if compiled_bin_re is not None:
+                    result = self.__run_regex(analysis, compiled_bin_re, value)
                 else:
                     result = False
 
@@ -2101,7 +2196,7 @@ class MatchListener(STIXPatternListener):
 
             return result
 
-        passed_obs = _obs_map_prop_test(obs_values, regex_pred)
+        passed_obs = _obs_map_prop_test(obs_values, regex_pred, budget=self.__budget)
 
         self.__push(passed_obs, debug_label)
 
@@ -2137,7 +2232,7 @@ class MatchListener(STIXPatternListener):
 
             return result
 
-        passed_obs = _obs_map_prop_test(obs_values, subnet_pred)
+        passed_obs = _obs_map_prop_test(obs_values, subnet_pred, budget=self.__budget)
 
         self.__push(passed_obs, debug_label)
 
@@ -2173,7 +2268,7 @@ class MatchListener(STIXPatternListener):
 
             return result
 
-        passed_obs = _obs_map_prop_test(obs_values, contains_pred)
+        passed_obs = _obs_map_prop_test(obs_values, contains_pred, budget=self.__budget)
 
         self.__push(passed_obs, debug_label)
 
@@ -2203,6 +2298,61 @@ class MatchListener(STIXPatternListener):
         # value.  But I keep this function here for the sake of documentation.
         pass
 
+    def __compile_regex(self, regex):
+        """
+        Analyze and compile a regex for MATCHES/LIKE.
+
+        The analysis is a *preflight* check, charged to the budget before the
+        regex is used: regexes whose execution cannot be bounded are rejected
+        with :class:`UnsupportedRuleError` (a rule error, not a non-match), and
+        every later match attempt charges a conservative upper bound before
+        calling into the regex engine.  This is what keeps a pathological
+        regex from outliving the match's budget.
+
+        :return: a 3-tuple of (text regex, bytes regex or None, analysis).
+            The bytes regex is None when the pattern is not convertible to
+            bytes.
+        """
+        self.__budget.charge(
+            len(regex) + 1, stage=STAGE_REGEX_COMPILE,
+            detail=u"analyzing a regular expression"
+        )
+        analysis = regex_safety.analyze(regex)
+
+        # Support for binary pattern matching: only applicable if every
+        # codepoint fits in a byte.
+        compiled_bin_re = None
+        if analysis.text_byte_safe:
+            bin_regex = six.binary_type(ord(c) for c in regex)
+            self.__budget.charge(1, stage=STAGE_REGEX_COMPILE,
+                                 detail=u"compiling a binary regex")
+            compiled_bin_re = re.compile(bin_regex)
+
+        self.__budget.charge(1, stage=STAGE_REGEX_COMPILE,
+                             detail=u"compiling a regex")
+        compiled_re = re.compile(regex)
+        return compiled_re, compiled_bin_re, analysis
+
+    def __run_regex(self, analysis, compiled_re, subject, match=False):
+        """
+        Execute a compiled regex against one subject, charging the budget
+        first.
+
+        The charge is the analysis' conservative upper bound for a subject of
+        this length, so a regex which does not fit in the remaining budget is
+        never started.  When it does fit, the charge happens before the call
+        and covers the attempt, so nothing is charged after the fact for work
+        which may already have blown up.
+        """
+        self.__budget.charge(
+            analysis.estimated_call_cost(len(subject)),
+            stage=STAGE_REGEX,
+            detail=u"executing a regular expression",
+        )
+        if match:
+            return compiled_re.match(subject)
+        return compiled_re.search(subject)
+
     def exitObjectType(self, ctx):
         """
         Consumes nothing from the stack.
@@ -2215,6 +2365,8 @@ class MatchListener(STIXPatternListener):
         results = {}
         if not (self.__stix_version == VARSION_2_1 and type_ in TYPES_V21):
             for obs_idx, obs in enumerate(self.__observations):
+                self.__budget.charge(1, stage=STAGE_PATH,
+                                     detail=u"scanning an observation")
 
                 if "objects" not in obs:
                     continue
@@ -2223,6 +2375,10 @@ class MatchListener(STIXPatternListener):
                 iterator = self.__cyber_obs_obj_iterator(obs["objects"])
 
                 for obj_id, obj in iterator:
+                    self.__budget.charge(
+                        1, stage=STAGE_PATH,
+                        detail=u"examining a Cyber Observable object"
+                    )
                     if u"type" in obj and obj[u"type"] == type_:
                         objects_from_this_obs[obj_id] = [obj]
 
@@ -2273,7 +2429,8 @@ class MatchListener(STIXPatternListener):
                         self.__observations[obs_idx]["objects"],
                         references,
                         prop_name,
-                        self.__stix_version
+                        self.__stix_version,
+                        budget=self.__budget
                     )
 
                     if len(dereferenced_cyber_obs_objs) > 0:
@@ -2305,7 +2462,8 @@ class MatchListener(STIXPatternListener):
                             self.__observations[obs_idx]["objects"],
                             reference_list,
                             prop_name,
-                            self.__stix_version
+                            self.__stix_version,
+                            budget=self.__budget
                         )
 
                         if len(dereferenced_cyber_obs_objs) > 0:
@@ -2346,7 +2504,7 @@ class MatchListener(STIXPatternListener):
         debug_label = u"exitFirstPathComponent ({})".format(prop_name)
         obs_val = self.__pop(debug_label)
 
-        filtered_obs_map = _step_filter_observations(obs_val, prop_name)
+        filtered_obs_map = _step_filter_observations(obs_val, prop_name, self.__budget)
         dereferenced_obs_map = self.__dereference_objects(prop_name,
                                                           filtered_obs_map)
 
@@ -2364,7 +2522,7 @@ class MatchListener(STIXPatternListener):
         debug_label = u"exitKeyPathStep ({})".format(prop_name)
         obs_val = self.__pop(debug_label)
 
-        filtered_obs_map = _step_filter_observations(obs_val, prop_name)
+        filtered_obs_map = _step_filter_observations(obs_val, prop_name, self.__budget)
         dereferenced_obs_map = self.__dereference_objects(prop_name,
                                                           filtered_obs_map)
 
@@ -2382,14 +2540,14 @@ class MatchListener(STIXPatternListener):
             debug_label = u"exitIndexPathStep ({})".format(index)
             obs_val = self.__pop(debug_label)
 
-            filtered_obs_map = _step_filter_observations(obs_val, index)
+            filtered_obs_map = _step_filter_observations(obs_val, index, self.__budget)
 
         elif ctx.ASTERISK():
             # In this case, we step into all of the list elements.
             debug_label = u"exitIndexPathStep (*)"
             obs_val = self.__pop(debug_label)
 
-            filtered_obs_map = _step_filter_observations_index_star(obs_val)
+            filtered_obs_map = _step_filter_observations_index_star(obs_val, self.__budget)
 
         else:
             # reallly shouldn't happen...
@@ -2448,6 +2606,96 @@ class MatchListener(STIXPatternListener):
         self.__push(s, u"exitSetLiteral ({})".format(ctx.getText()))
 
 
+class MatchResult(object):
+    """
+    Structured outcome of a budgeted match.
+
+    ``status`` is one of:
+
+    - ``"match"``: a binding was found; ``sdos`` holds the matching SDOs for
+      the first binding.  ``completed`` is True.
+    - ``"no_match"``: the matcher completed the pattern without finding a
+      binding.  ``completed`` is True.  This is the only status which means
+      "nothing in the observations satisfies the pattern".
+    - ``"exhausted"``: the work budget ran out before the pattern was fully
+      evaluated.  ``completed`` is False.  ``stop_stage`` and ``detail`` say
+      where it stopped.  This is *not* a non-match and must not be reported as
+      one: the observations were only partially examined.
+    - ``"rejected"``: the pattern uses a construct outside the supported,
+      bounded-execution subset (see
+      :class:`stix2matcher.errors.UnsupportedRuleError`).  Nothing was
+      evaluated.  ``completed`` is False.
+
+    :ivar status: one of the status strings above.
+    :ivar sdos: matching SDOs for the first binding, or an empty list.
+    :ivar completed: whether the matcher finished evaluating the pattern.
+    :ivar budget: the :class:`stix2matcher.budget.WorkBudget` used.
+    :ivar stop_stage: for ``"exhausted"``, the stage which was running.
+    :ivar detail: a short explanation of where/why work stopped, if any.
+    :ivar error: for ``"rejected"``, the :class:`UnsupportedRuleError`.
+    """
+
+    MATCH = "match"
+    NO_MATCH = "no_match"
+    EXHAUSTED = "exhausted"
+    REJECTED = "rejected"
+
+    __slots__ = (
+        "status", "sdos", "completed", "budget", "stop_stage", "detail",
+        "error",
+    )
+
+    def __init__(self, status, sdos=None, completed=True, budget=None,
+                 stop_stage=None, detail=None, error=None):
+        self.status = status
+        self.sdos = sdos if sdos is not None else []
+        self.completed = completed
+        self.budget = budget
+        self.stop_stage = stop_stage
+        self.detail = detail
+        self.error = error
+
+    @property
+    def matched(self):
+        """True only for a completed match; exhaustion is never "matched"."""
+        return self.status == self.MATCH
+
+    @property
+    def exhausted(self):
+        return self.status == self.EXHAUSTED
+
+    @property
+    def rejected(self):
+        return self.status == self.REJECTED
+
+    @property
+    def work_used(self):
+        return self.budget.work_used if self.budget is not None else 0
+
+    @property
+    def work_limit(self):
+        return self.budget.work_limit if self.budget is not None else None
+
+    def __bool__(self):
+        """
+        True only for a completed match.  In particular, an exhausted or
+        rejected result is falsy, so ``if match(...)`` never claims a match
+        which was not actually established.  Use ``status`` to distinguish
+        exhaustion from a real non-match.
+        """
+        return self.status == self.MATCH
+
+    __nonzero__ = __bool__
+
+    def __repr__(self):
+        return (
+            u"<MatchResult status={} completed={} work={}/{} stage={}>".format(
+                self.status, self.completed, self.work_used, self.work_limit,
+                self.stop_stage
+            )
+        )
+
+
 class Pattern:
     def __init__(self, pattern_str, stix_version=DEFAULT_VERSION):
         """
@@ -2463,33 +2711,117 @@ class Pattern:
         else:
             self.__pattern = Stix2Pattern20(pattern_str)
 
+        # Reject unsupported regexes up front, so a rule which cannot be
+        # executed within a budget is refused even when no budget is used.
+        for regex in _iter_pattern_regexes(self.__pattern):
+            regex_safety.analyze(regex)
+
     def __getattr__(self, name):
         return self.__pattern.__getattribute__(name)
 
-    def match(self, observed_data_sdos, verbose=False):
+    def match(self, observed_data_sdos, verbose=False, max_work=None,
+              budget=None):
         """
         Match this pattern against the given observations.  Returns matching
         SDOs.  The matcher can find many bindings; this function returns the
         SDOs corresponding to only the first binding found.
 
+        If ``max_work`` (or a pre-built ``budget``) is given, the match runs
+        under a work budget.  In that case, use :meth:`match_result` to
+        distinguish a completed non-match from an exhausted budget.
+
         :param observed_data_sdos: A list of observed-data SDOs, as a list of
             dicts.  STIX JSON should be parsed into native Python structures
             before calling this method.
         :param verbose: Whether to dump detailed info about matcher operation
+        :param max_work: Optional integer work limit for this match.  None
+            (the default) keeps the historical unlimited behaviour, except
+            that regexes outside the bounded-execution subset are rejected.
+        :param budget: Optional :class:`stix2matcher.budget.WorkBudget`.  May
+            not be combined with ``max_work``.
         :return: Matching SDOs if the pattern matched; an empty list if it
-            didn't match.
+            didn't match, was rejected, or the budget was exhausted.
         :raises MatcherException: If an error occurs during matching
+        :raises UnsupportedRuleError: If the pattern is outside the supported
+            subset (whether or not a budget was given)
+        :raises BudgetExhausted: If the budget is exhausted.  Use
+            :meth:`match_result` to receive exhaustion as a result instead.
         """
-        matcher = MatchListener(observed_data_sdos, verbose, stix_version=self.__stix_version)
-        self.__pattern.walk(matcher)
+        result = self.match_result(
+            observed_data_sdos, verbose=verbose, max_work=max_work,
+            budget=budget,
+        )
+        if result.status == MatchResult.EXHAUSTED:
+            budget = result.budget
+            raise BudgetExhausted(
+                result.stop_stage, budget.work_used, budget.work_limit,
+                result.detail
+            )
+        if result.status == MatchResult.REJECTED:
+            raise result.error
+        return result.sdos
 
-        first_binding = next(matcher.matched(), [])
-        matching_sdos = matcher.get_sdos_from_binding(first_binding)
+    def match_result(self, observed_data_sdos, verbose=False, max_work=None,
+                     budget=None):
+        """
+        Match this pattern and return a :class:`MatchResult`.
 
-        return matching_sdos
+        Unlike :meth:`match`, this reports budget exhaustion and unsupported
+        rules as statuses rather than exceptions, so callers can tell "no
+        match" apart from "did not finish".  It never raises for exhaustion or
+        rule rejection; genuine matcher errors and pattern parse errors are
+        still raised.
+
+        :param observed_data_sdos: A list of observed-data SDOs.
+        :param verbose: Whether to dump detailed info about matcher operation.
+        :param max_work: Optional integer work limit.  None means unlimited.
+        :param budget: Optional :class:`stix2matcher.budget.WorkBudget`.  May
+            not be combined with ``max_work``.
+        :return: a :class:`MatchResult`.
+        """
+        if budget is None:
+            budget = WorkBudget(max_work)
+        elif max_work is not None:
+            raise ValueError(u"Specify either max_work or budget, not both")
+
+        budget.enter_stage(STAGE_PREFLIGHT)
+        try:
+            matcher = MatchListener(
+                observed_data_sdos, verbose, stix_version=self.__stix_version,
+                budget=budget,
+            )
+            budget.enter_stage(STAGE_PATH)
+            self.__pattern.walk(matcher)
+            budget.enter_stage(STAGE_RESULT)
+            first_binding = next(matcher.matched(), [])
+            matching_sdos = matcher.get_sdos_from_binding(first_binding)
+        except BudgetExhausted as e:
+            # Do not retain the traceback: it references the matcher's frames
+            # (and therefore the observation data) for as long as the result
+            # lives.  The result carries the information callers need.
+            stop_stage, detail = e.stage, e.detail
+            e.__traceback__ = None
+            return MatchResult(
+                MatchResult.EXHAUSTED, completed=False, budget=budget,
+                stop_stage=stop_stage, detail=detail,
+            )
+        except UnsupportedRuleError as e:
+            reason = e.reason
+            e.__traceback__ = None
+            return MatchResult(
+                MatchResult.REJECTED, completed=False, budget=budget,
+                stop_stage=budget.stop_stage, detail=reason, error=e,
+            )
+
+        if matching_sdos:
+            return MatchResult(
+                MatchResult.MATCH, sdos=matching_sdos, budget=budget
+            )
+        return MatchResult(MatchResult.NO_MATCH, budget=budget)
 
 
-def match(pattern, observed_data_sdos, verbose=False, stix_version=DEFAULT_VERSION):
+def match(pattern, observed_data_sdos, verbose=False,
+          stix_version=DEFAULT_VERSION, max_work=None):
     """
     Match the given pattern against the given observations.  Returns matching
     SDOs.  The matcher can find many bindings; this function returns the SDOs
@@ -2500,14 +2832,90 @@ def match(pattern, observed_data_sdos, verbose=False, stix_version=DEFAULT_VERSI
         STIX JSON should be parsed into native Python structures before calling
         this function.
     :param verbose: Whether to dump detailed info about matcher operation
+    :param max_work: Optional integer work limit for this match.  See
+        :meth:`Pattern.match`.
     :return: Matching SDOs if the pattern matched; an empty list if it didn't
-        match.
+        match (or work stopped early).
     :raises stix2patterns.pattern.ParseException: If there is a parse error
     :raises MatcherException: If an error occurs during matching
+    :raises UnsupportedRuleError: If the pattern is outside the supported
+        subset
+    :raises BudgetExhausted: If the budget is exhausted
     """
 
     compiled_pattern = Pattern(pattern, stix_version)
-    return compiled_pattern.match(observed_data_sdos, verbose)
+    return compiled_pattern.match(
+        observed_data_sdos, verbose, max_work=max_work
+    )
+
+
+def match_result(pattern, observed_data_sdos, verbose=False,
+                 stix_version=DEFAULT_VERSION, max_work=None, budget=None):
+    """
+    Like :func:`match`, but returns a :class:`MatchResult`.
+
+    This is the entry point for callers which must distinguish a completed
+    non-match from an exhausted work budget, and want to see an unsupported
+    rule as a status instead of an exception.
+
+    :param max_work: Optional integer work limit for this match.  None means
+        unlimited (preserving historical behaviour apart from the regex
+        capability check).
+    :param budget: Optional pre-built
+        :class:`stix2matcher.budget.WorkBudget`; may not be combined with
+        ``max_work``.
+    :return: a :class:`MatchResult`.
+    """
+    try:
+        compiled_pattern = Pattern(pattern, stix_version)
+    except UnsupportedRuleError as e:
+        # Report the capability boundary as a status, like any other rejected
+        # rule, rather than as an exception.
+        reason = e.reason
+        e.__traceback__ = None
+        rejected_budget = budget if budget is not None else WorkBudget(max_work)
+        return MatchResult(
+            MatchResult.REJECTED, completed=False, budget=rejected_budget,
+            stop_stage=None, detail=reason, error=e,
+        )
+    return compiled_pattern.match_result(
+        observed_data_sdos, verbose=verbose, max_work=max_work, budget=budget
+    )
+
+
+_MATCHES_NODE_NAME = "PropTestRegexContext"
+_LIKE_NODE_NAME = "PropTestLikeContext"
+
+
+def _iter_pattern_regexes(compiled_pattern):
+    """
+    Yield the regex strings in a compiled pattern's parse tree.
+
+    stix2patterns exposes the tree only through a private attribute; if that
+    changes, we simply skip the eager check.  The match-time analysis is
+    authoritative either way, so this only affects when the rejection is
+    reported.
+    """
+    tree = getattr(compiled_pattern, "_Pattern__parse_tree", None)
+    if tree is None:
+        return
+
+    stack = [tree]
+    while stack:
+        node = stack.pop()
+        node_name = type(node).__name__
+        if node_name == _MATCHES_NODE_NAME:
+            yield _literal_terminal_to_python_val(node.StringLiteral())
+            continue
+        if node_name == _LIKE_NODE_NAME:
+            operand = _literal_terminal_to_python_val(node.StringLiteral())
+            operand = unicodedata.normalize("NFC", operand)
+            yield _like_to_regex(operand)
+            continue
+        if isinstance(node, antlr4.TerminalNode):
+            continue
+        for i in range(node.getChildCount()):
+            stack.append(node.getChild(i))
 
 
 def main():
