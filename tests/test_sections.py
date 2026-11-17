@@ -111,6 +111,35 @@ class DepexTest(unittest.TestCase):
         self.assertEqual(lines, [
             "AFTER %s" % guid, "TRUE", "FALSE", "AND", "SOR", "END", "ee?"])
 
+    def test_interpretation_uses_section_phase_and_keeps_unknown_unknown(self):
+        guid = uuid.UUID("01234567-89ab-4def-8123-456789abcdef")
+        body = b"\x02" + guid.bytes_le + b"\x08"
+        section = FirmwareFileSystemSection(
+            make_section(0x1b, body), FILE_GUID)
+        self.assertTrue(section.process())
+
+        interpretation = section.interpret_depex()
+        self.assertEqual(interpretation['phase'], 'pei')
+        self.assertEqual(interpretation['result'], 'unknown')
+        self.assertEqual(
+            interpretation['dependencies'][0]['available'], 'unknown')
+
+        satisfied = section.interpret_depex(known_protocols=[guid])
+        self.assertEqual(satisfied['result'], 'true')
+
+        # to_dict keeps the opcode list unless evidence is supplied.
+        self.assertIsInstance(section.to_dict()['data'], list)
+        enriched = section.to_dict(known_protocols=[guid])['data']
+        self.assertEqual(
+            enriched['interpretation']['result'], 'true')
+        self.assertEqual(enriched['opcodes'], section.to_dict()['data'])
+
+    def test_non_depex_section_has_no_interpretation(self):
+        section = FirmwareFileSystemSection(
+            make_section(0x19, b"\x00" * 8), FILE_GUID)
+        self.assertTrue(section.process())
+        self.assertIsNone(section.interpret_depex())
+
 
 class RawSectionTest(unittest.TestCase):
 

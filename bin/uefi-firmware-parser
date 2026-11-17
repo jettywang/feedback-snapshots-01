@@ -10,10 +10,44 @@ import traceback
 from datetime import datetime
 
 from uefi_firmware.uefi import *
+from uefi_firmware.depex import interpret_depex
 from uefi_firmware.generator import uefi as uefi_generator
 from uefi_firmware import AutoParser
 from uefi_firmware.utils import safe_path
 import uefi_firmware.utils # import nocolor
+
+
+def _read_guid_list(path):
+    '''Read GUID strings (one per line, '#' comments allowed) into a set.'''
+    with open(path, 'r') as fh:
+        return {
+            line.split('#', 1)[0].strip()
+            for line in fh if line.split('#', 1)[0].strip()}
+
+
+def _process_depex(input_data):
+    if not args.depex_interpret:
+        depex = parse_depex(input_data)
+        for op in depex:
+            if 'guid' in op:
+                if 'name' in op and op['name'] is not None:
+                    print("{} {} ({})".format(op['op'], op['guid'], op['name']))
+                else:
+                    print("{} {}".format(op['op'], op['guid']))
+            else:
+                print("{}".format(op['op']))
+        return 0
+
+    known = _read_guid_list(args.known_protocols) \
+        if args.known_protocols else None
+    unavailable = _read_guid_list(args.unavailable_protocols) \
+        if args.unavailable_protocols else None
+    result = interpret_depex(
+        input_data, phase=args.depex_phase,
+        known_protocols=known, unavailable_protocols=unavailable)
+    print(json.dumps(result, indent=2))
+    return 0 if result['valid'] else 4
+
 
 def _process_show_extract(parsed_object):
     if parsed_object is None:
@@ -105,16 +139,7 @@ def _top_level_volumes(firmware_object):
 def _process_file(file_name, input_data):
     '''Parse, show and extract one input file, returning its exit code.'''
     if args.depex:
-        depex = parse_depex(input_data)
-        for op in depex:
-            if 'guid' in op:
-                if 'name' in op and op['name'] is not None:
-                    print("{} {} ({})".format(op['op'], op['guid'], op['name']))
-                else:
-                    print("{} {}".format(op['op'], op['guid']))
-            else:
-                print("{}".format(op['op']))
-        return 0
+        return _process_depex(input_data)
 
     if args.superbrute:
         superbrute_search(input_data)
@@ -176,6 +201,22 @@ if __name__ == "__main__":
     argparser.add_argument(
         '--depex', default=False, action="store_true",
         help='The input is a DEPEX blob')
+    argparser.add_argument(
+        '--depex-interpret', default=False, action="store_true",
+        help='With --depex, statically interpret the expression (tri-state'
+        ' result, dependencies, ordering constraints and a byte-level trace)'
+        ' instead of listing opcodes')
+    argparser.add_argument(
+        '--depex-phase', default='dxe', choices=('dxe', 'pei', 'smm'),
+        help='Dispatch phase used when interpreting a DEPEX blob')
+    argparser.add_argument(
+        '--known-protocols', default=None,
+        help='File of protocol GUIDs (one per line) already installed at the'
+        ' phase')
+    argparser.add_argument(
+        '--unavailable-protocols', default=None,
+        help='File of protocol GUIDs (one per line) positively not installed;'
+        ' any other GUID stays unknown')
 
     argparser.add_argument(
         '-q', "--quiet", default=False, action="store_true",

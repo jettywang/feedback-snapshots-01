@@ -36,7 +36,11 @@ Installing the package adds a `uefi-firmware-parser` command:
 
 ```console
 $ uefi-firmware-parser -h
-usage: uefi-firmware-parser [-h] [-b] [--superbrute] [--depex] [-q]
+usage: uefi-firmware-parser [-h] [-b] [--superbrute] [--depex]
+                            [--depex-interpret] [--depex-phase {dxe,pei,smm}]
+                            [--known-protocols KNOWN_PROTOCOLS]
+                            [--unavailable-protocols UNAVAILABLE_PROTOCOLS]
+                            [-q]
                             [--color {always,never,auto}] [-p] [-o OUTPUT]
                             [-O] [-c] [-e] [-g GENERATE] [-j] [--test]
                             [--verbose]
@@ -141,7 +145,7 @@ Supported formats:
 - Intel PCH flash descriptors and regions
 - Intel ME modules and partition manifests (ME, TXE, and others)
 - Dell PFS (HDR) updates
-- DEPEX (dependency expression) blobs
+- DEPEX (dependency expression) blobs, including static interpretation
 
 Other capabilities:
 
@@ -149,6 +153,39 @@ Other capabilities:
 - JSON output of the parsed object hierarchy
 - FDF (flash description file) generation from parsed firmware volumes
 - Replacement of sections and files in a firmware volume by GUID
+
+## Dependency expression (DEPEX) interpretation
+
+Listing opcodes does not say whether a driver can dispatch. The
+`uefi_firmware.depex` module statically interprets a DEPEX blob for a dispatch
+phase and the protocols known at that point:
+
+```python
+from uefi_firmware.depex import interpret_depex
+
+result = interpret_depex(
+    blob,
+    phase="dxe",                       # "dxe", "pei" or "smm"
+    known_protocols=[protocol_guid],   # installed: PUSH evaluates true
+    unavailable_protocols=[other_guid] # positively absent: evaluates false
+)
+```
+
+The boolean postfix expression and the `BEFORE`/`AFTER` ordering constraints are
+kept separate. `result` is three-valued (`true`, `false` or `unknown`) for a
+valid expression, or `invalid` when the program breaks the PI grammar (stack
+underflow, a GUID operand that runs past the end, or a bad `END`/`SOR`
+combination). A protocol in neither evidence set stays `unknown`; absence from
+the input is never treated as proof that a driver did or did not run. The return
+value also carries the `dependencies`, every `unknown_reasons` entry, the
+ordering `constraints`/`conflicts`, structural `problems` and a per-instruction
+`trace` whose offsets point back into the original bytes.
+
+A parsed DXE/PEI/SMM DEPEX section exposes the same interface through
+`FirmwareFileSystemSection.interpret_depex(...)`, choosing its phase from the
+section type. On the command line, `--depex --depex-interpret` prints the full
+interpretation as JSON, with `--depex-phase`, `--known-protocols` and
+`--unavailable-protocols` supplying the evidence; an invalid expression exits 4.
 
 ## Helper scripts
 

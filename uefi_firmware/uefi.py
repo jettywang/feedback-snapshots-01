@@ -16,57 +16,29 @@ from .structs.uefi_structs import *
 from .structs.flash_structs import *
 
 from uefi_firmware import efi_compressor
+from .depex import decode_depex, interpret_depex
+
+# EFI section types that carry a dependency expression, mapped to the dispatch
+# phase their ordering and SOR rules are evaluated against.
+DEPEX_SECTION_PHASES = {0x13: 'dxe', 0x1b: 'pei', 0x1c: 'smm'}
 
 def parse_depex(input_data):
-    depex = []
-    offset = 0
-    while offset < len(input_data):
-        opcode = ord(input_data[offset:offset+1])
-        offset = offset + 1
-        if opcode == 0x00:
-            guid = input_data[offset:offset+16]
-            guid_name = get_guid_name(guid)
-            offset = offset + 16
-            depex.append({
-                'op': "BEFORE",
-                'name': guid_name,
-                'guid': sguid(guid),
-            })
-        elif opcode == 0x01:
-            guid = input_data[offset:offset+16]
-            guid_name = get_guid_name(guid)
-            offset = offset + 16
-            depex.append({
-                'op': "AFTER",
-                'name': guid_name,
-                'guid': sguid(guid),
-            })
-        elif opcode == 0x02:
-            guid = input_data[offset:offset+16]
-            guid_name = get_guid_name(guid)
-            offset = offset + 16
-            depex.append({
-                'op': "PUSH",
-                'name': guid_name,
-                'guid': sguid(guid),
-            })
-        elif opcode == 0x03:
-            depex.append({ 'op': "AND" })
-        elif opcode == 0x04:
-            depex.append({ 'op': "OR" })
-        elif opcode == 0x05:
-            depex.append({ 'op': "NOT" })
-        elif opcode == 0x06:
-            depex.append({ 'op': "TRUE" })
-        elif opcode == 0x07:
-            depex.append({ 'op': "FALSE" })
-        elif opcode == 0x08:
-            depex.append({ 'op': "END" })
-        elif opcode == 0x09:
-            depex.append({ 'op': "SOR" })
-        else:
-            depex.append({ 'op': opcode })
+    '''Disassemble a DEPEX blob into one dictionary per instruction.
 
+    This is the opcode-level view kept for the CLI and existing callers. Use
+    :func:`interpret_depex` for static evaluation: it separates the boolean
+    expression from BEFORE/AFTER ordering, checks stack depth and the END/SOR
+    combinations, and reports what cannot be decided from the supplied
+    protocols.
+    '''
+    instructions, _ = decode_depex(input_data)
+    depex = []
+    for instruction in instructions:
+        entry = {'op': instruction['op']}
+        if 'guid' in instruction:
+            entry['name'] = instruction['name']
+            entry['guid'] = instruction['guid']
+        depex.append(entry)
     return depex
 
 def build_sections(sections, original, generate_checksum=False):
@@ -1088,7 +1060,7 @@ class FirmwareFileSystemSection(EfiSection):
             print ("%s  Version: %s BuildNum: %d" % (
                 ts, printable(self.name), self.build_number))
         # DXE, PEI and SMM DEPEX sections
-        if self.type == 0x13 or self.type == 0x1b or self.type == 0x1c:
+        if self.type in DEPEX_SECTION_PHASES:
             for op in parse_depex(self.data):
                 if not isinstance(op['op'], str):
                     print ("%s  %02x?" % (ts, op['op']))
@@ -1104,7 +1076,30 @@ class FirmwareFileSystemSection(EfiSection):
             '''If this is a specific object, show that object's info.'''
             self.parsed_object.showinfo(ts + '  ')
 
-    def to_dict(self):
+    def interpret_depex(self, known_protocols=None,
+                        unavailable_protocols=None):
+        '''Statically interpret this section's DEPEX (section types 0x13/1b/1c).
+
+        Args:
+            known_protocols (iterable): Protocol GUIDs already installed at the
+                section's dispatch phase, as canonical strings, uuid.UUID or
+                16 raw bytes.
+            unavailable_protocols (iterable): GUIDs positively known not to be
+                installed; anything in neither set stays unknown.
+
+        Returns:
+            dict: The tri-state result, dependencies, unknown reasons, ordering
+            constraints, structural problems and a trace back to each original
+            instruction. Returns None for non-DEPEX sections.
+        '''
+        if self.type not in DEPEX_SECTION_PHASES:
+            return None
+        return interpret_depex(
+            self.data, phase=DEPEX_SECTION_PHASES[self.type],
+            known_protocols=known_protocols,
+            unavailable_protocols=unavailable_protocols)
+
+    def to_dict(self, known_protocols=None, unavailable_protocols=None):
         data = None
         if self.parsed_object is not None:
             data = self.parsed_object.to_dict()
@@ -1113,8 +1108,15 @@ class FirmwareFileSystemSection(EfiSection):
         # 0x13 - DXE DepEx
         # 0x1b - PEI DepEx
         # 0x1c - SMM DepEx
-        if self.type == 0x13 or self.type == 0x1b or self.type == 0x1c:
+        if self.type in DEPEX_SECTION_PHASES:
             data = parse_depex(self.data)
+            if known_protocols is not None or \
+                    unavailable_protocols is not None:
+                data = {
+                    'opcodes': data,
+                    'interpretation': self.interpret_depex(
+                        known_protocols, unavailable_protocols),
+                }
 
         return {
             'type': self.type,
