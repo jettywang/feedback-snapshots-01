@@ -4,14 +4,17 @@ import io
 import logging
 import os
 import stat
+from bisect import bisect_right
+from collections import OrderedDict
+from dataclasses import dataclass
 from functools import cached_property
 from typing import TYPE_CHECKING, BinaryIO
 from uuid import UUID
 
 from dissect.util import ts
-from dissect.util.stream import RangeStream, RunlistStream
+from dissect.util.stream import AlignedStream, RangeStream, RunlistStream
 
-from dissect.xfs.c_xfs import FILETYPES, c_xfs
+from dissect.xfs.c_xfs import FILETYPES, XFS_NULL, c_xfs
 from dissect.xfs.exceptions import (
     Error,
     FileNotFoundError,
@@ -26,6 +29,348 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 log.setLevel(os.getenv("DISSECT_LOG_XFS", "CRITICAL"))
+
+# Bounded on-disk node cache for range-addressed bmap lookups. A handful of levels plus leaves is
+# enough to make repeated local reads cheap without ever holding a large extent tree in memory.
+BMAP_NODE_CACHE_SIZE = 64
+# XFS tree height is small in practice; a malformed tree must not recurse without bound.
+BMAP_MAX_DEPTH = 32
+# Upper bound for the 54 bit logical block field of a bmap extent record.
+_BMBT_FILEOFF_LIMIT = 1 << 54
+
+
+@dataclass(frozen=True)
+class Extent:
+    """A mapped data fork extent.
+
+    Args:
+        offset: First logical block of the extent.
+        block: First physical block on the whole device.
+        fsblock: On-disk ``xfs_fsblock_t`` value (allocation group and block within it).
+        count: Length of the extent in blocks.
+        flags: Raw extent flag bits (``XFS_EXT_UNWRITTEN`` for preallocated, never written blocks).
+    """
+
+    offset: int
+    block: int
+    fsblock: int
+    count: int
+    flags: int = 0
+
+    @property
+    def unwritten(self) -> bool:
+        """Whether this extent is allocated but never written."""
+        return bool(self.flags & c_xfs.XFS_EXT_UNWRITTEN)
+
+    @property
+    def end(self) -> int:
+        """First logical block after this extent."""
+        return self.offset + self.count
+
+
+class BmapResolver:
+    """Resolve file logical blocks to extents without walking the whole bmap tree.
+
+    The inode-embedded bmap root (``xfs_bmdr_block``) is parsed in place. External bmap blocks are
+    large-format trees: their keys and pointers are 8 bytes each and their pointers are full
+    ``xfs_fsblock_t`` values, not allocation-group relative short-tree addresses. Descending a key
+    tree only reads the nodes on the path to the requested logical block; covering a range that
+    crosses leaf boundaries follows the leaf right-sibling links.
+    """
+
+    def __init__(self, inode: INode):
+        self.inode = inode
+        self.xfs = inode.xfs
+        self.block_size = inode.xfs.block_size
+        self.agblklog = inode.ag.sb.sb_agblklog
+        self.agblocks = inode.ag.sb.sb_agblocks
+
+        self._root: tuple[int, tuple[int, ...], tuple[int, ...] | None] | None = None
+
+    def extents(self, start: int, end: int) -> Iterator[Extent]:
+        """Yield extents overlapping the half-open logical block range ``[start, end)``."""
+        if start >= end:
+            return
+
+        fmt = self.inode.inode.di_format
+        if fmt == c_xfs.xfs_dinode_fmt.XFS_DINODE_FMT_EXTENTS:
+            yield from self._leaf_range(self._inline_records(), start, end)
+            return
+
+        if fmt != c_xfs.xfs_dinode_fmt.XFS_DINODE_FMT_BTREE:
+            return
+
+        level, keys, ptrs = self._root_node()
+        if level == 0:
+            # The inode fork itself holds the leaf records; there is no sibling link to follow.
+            yield from self._leaf_range(self._inline_btree_records(), start, end)
+            return
+
+        level -= 1
+        block, limit = self._child_for(keys, ptrs, start)
+        visited: set[int] = set()
+        while block is not None:
+            if block in visited:
+                raise Error(f"{self.inode!r} bmap tree contains a cycle at block {block}")
+            visited.add(block)
+
+            block_level, block_keys, block_ptrs, records, rightsib = self._parse_node(self._read_node(block), level)
+            if block_level > 0:
+                level = block_level - 1
+                block, limit = self._child_for(block_keys, block_ptrs, start, limit)
+                continue
+
+            yield from self._leaf_range(records, start, end)
+
+            # Stop at the subtree's key bound: no extent in a later sibling can start before the
+            # bound, so a query inside a hole does not need to read the next leaf.
+            if limit is not None and end <= limit:
+                return
+
+            # Only follow the sibling when the last record in this leaf does not already cover
+            # the requested end. Records are keyed by extent start and a hole may separate two
+            # leaves, so do not assume adjacency.
+            if records and records[-1].end >= end:
+                return
+
+            limit = None
+            block = rightsib
+
+    def lookup(self, logical_block: int) -> Extent | None:
+        """Return the mapped extent containing ``logical_block``, or ``None`` for a hole."""
+        for extent in self.extents(logical_block, logical_block + 1):
+            if extent.offset <= logical_block < extent.end:
+                return extent
+        return None
+
+    def _inline_records(self) -> tuple[Extent, ...]:
+        extents = self.inode.data_extents
+        if extents == 0:
+            return ()
+
+        fork = self.inode.datafork()
+        expected = extents * 16
+        buf = fork.read(expected)
+        if len(buf) < expected:
+            raise Error(f"{self.inode!r} declares {extents} inline extents but its data fork is truncated")
+
+        records = [
+            self._make_extent(parse_fsblock(buf[extent_num * 16 : (extent_num + 1) * 16]))
+            for extent_num in range(extents)
+        ]
+        return self._validate_records(records)
+
+    def _inline_btree_records(self) -> tuple[Extent, ...]:
+        data = self._fork_bytes()
+        header = c_xfs.xfs_bmdr_block(io.BytesIO(data))
+        maxrecs = (len(data) - len(c_xfs.xfs_bmdr_block)) // 16
+        if header.bb_numrecs > maxrecs:
+            raise Error(f"{self.inode!r} bmap root claims {header.bb_numrecs} records, fork holds at most {maxrecs}")
+
+        records = []
+        pos = len(c_xfs.xfs_bmdr_block)
+        for extent_num in range(header.bb_numrecs):
+            offset = pos + extent_num * 16
+            records.append(self._make_extent(parse_fsblock(data[offset : offset + 16])))
+        return self._validate_records(records)
+
+    def _root_node(self) -> tuple[int, tuple[int, ...], tuple[int, ...] | None]:
+        if self._root is not None:
+            return self._root
+
+        data = self._fork_bytes()
+        header = c_xfs.xfs_bmdr_block(io.BytesIO(data))
+        level = header.bb_level
+        if level > BMAP_MAX_DEPTH:
+            raise Error(f"{self.inode!r} bmap root has an invalid level: {level}")
+
+        maxrecs = (len(data) - len(c_xfs.xfs_bmdr_block)) // 16
+        if header.bb_numrecs > maxrecs:
+            raise Error(f"{self.inode!r} bmap root claims {header.bb_numrecs} records, fork holds at most {maxrecs}")
+
+        if level == 0:
+            self._root = (0, (), None)
+            return self._root
+
+        # Root keys start directly after the 4 byte bmdr header and the pointer array starts at the
+        # maximum-record boundary, unlike on-disk btree blocks where pointers are packed at the end.
+        keys_at = len(c_xfs.xfs_bmdr_block)
+        ptrs_at = keys_at + maxrecs * 8
+        numrecs = header.bb_numrecs
+        if ptrs_at + numrecs * 8 > len(data):
+            raise Error(f"{self.inode!r} bmap root pointer array exceeds its data fork")
+
+        keys = tuple(c_xfs.uint64[numrecs](io.BytesIO(data[keys_at : keys_at + numrecs * 8])))
+        ptrs = tuple(c_xfs.uint64[numrecs](io.BytesIO(data[ptrs_at : ptrs_at + numrecs * 8])))
+        self._root = (level, keys, ptrs)
+        return self._root
+
+    def _fork_bytes(self) -> bytes:
+        fork = self.inode.datafork()
+        return fork.read()
+
+    def _child_for(
+        self, keys: tuple[int, ...], ptrs: tuple[int, ...] | None, target: int, limit: int | None = None
+    ) -> tuple[int | None, int | None]:
+        """Pick the child covering ``target`` and its exclusive upper key bound, if known."""
+        if ptrs is None:
+            raise Error(f"{self.inode!r} bmap index node has no pointers")
+        if not ptrs:
+            return None, limit
+
+        idx = bisect_right(keys, target) - 1
+        if idx < 0:
+            idx = 0
+
+        next_key = keys[idx + 1] if idx + 1 < len(keys) else limit
+        return ptrs[idx], next_key
+
+    def _read_node(self, fsblock: int) -> bytes:
+        block = self._resolve_fsblock(fsblock)
+        return self.xfs.read_bmap_node(block)
+
+    def _parse_node(
+        self, data: bytes, expected_level: int
+    ) -> tuple[int, tuple[int, ...], tuple[int, ...] | None, tuple[Extent, ...], int | None]:
+        node = self.xfs._lblock_s(io.BytesIO(data))
+        if node.bb_magic not in (c_xfs.XFS_BMAP_MAGIC, c_xfs.XFS_BMAP_CRC_MAGIC):
+            raise Error(f"{self.inode!r} bmap node has invalid magic: 0x{node.bb_magic:x}")
+        if node.bb_level != expected_level:
+            raise Error(f"{self.inode!r} bmap node level mismatch: expected {expected_level}, got {node.bb_level}")
+        if node.bb_level > BMAP_MAX_DEPTH:
+            raise Error(f"{self.inode!r} bmap node has an invalid level: {node.bb_level}")
+
+        header_size = len(self.xfs._lblock_s)
+        maxrecs = (self.block_size - header_size) // 16
+        numrecs = node.bb_numrecs
+        if numrecs > maxrecs:
+            raise Error(f"{self.inode!r} bmap node claims {numrecs} records, block holds at most {maxrecs}")
+
+        rightsib = None if node.bb_rightsib == XFS_NULL else node.bb_rightsib
+        if node.bb_level == 0:
+            records = []
+            pos = header_size
+            for extent_num in range(numrecs):
+                offset = pos + extent_num * 16
+                records.append(self._make_extent(parse_fsblock(data[offset : offset + 16])))
+            return 0, (), None, self._validate_records(records), rightsib
+
+        keys_at = header_size
+        # The pointer array is anchored at the maximum record capacity, not at the used record
+        # count, so partially filled nodes are parsed correctly.
+        ptrs_at = header_size + maxrecs * 8
+        keys = tuple(c_xfs.uint64[numrecs](io.BytesIO(data[keys_at : keys_at + numrecs * 8])))
+        ptrs = tuple(c_xfs.uint64[numrecs](io.BytesIO(data[ptrs_at : ptrs_at + numrecs * 8])))
+        return node.bb_level, keys, ptrs, (), rightsib
+
+    def _make_extent(self, record: tuple[int, int, int, int]) -> Extent:
+        offset, fsblock, count, flags = record
+        if count == 0:
+            raise Error(f"{self.inode!r} bmap extent at logical block {offset} has zero length")
+        block = self._resolve_fsblock(fsblock)
+        return Extent(offset=offset, block=block, fsblock=fsblock, count=count, flags=flags)
+
+    def _validate_records(self, records: list[Extent]) -> tuple[Extent, ...]:
+        previous = -1
+        for extent in records:
+            if extent.offset <= previous:
+                raise Error(f"{self.inode!r} bmap records are not strictly ordered at logical block {extent.offset}")
+            previous = extent.offset
+        return tuple(records)
+
+    def _resolve_fsblock(self, fsblock: int) -> int:
+        """Translate an on-disk 64 bit fsblock into a whole-device block, validating it."""
+        agnum, blknum = fsb_to_bb(fsblock, self.agblklog)
+        if agnum >= self.xfs.sb.sb_agcount or blknum >= self.agblocks:
+            raise Error(f"{self.inode!r} bmap extent references an invalid block: 0x{fsblock:x}")
+        block = agnum * self.agblocks + blknum
+        if block >= self.xfs.sb.sb_dblocks:
+            raise Error(f"{self.inode!r} bmap extent references a block outside the filesystem: 0x{fsblock:x}")
+        return block
+
+    def _leaf_range(self, records: tuple[Extent, ...], start: int, end: int) -> Iterator[Extent]:
+        if not records:
+            return
+
+        offsets = [extent.offset for extent in records]
+        idx = bisect_right(offsets, start) - 1
+        if idx < 0:
+            idx = 0
+        elif records[idx].end <= start:
+            idx += 1
+
+        for extent in records[idx:]:
+            if extent.offset >= end:
+                return
+            if extent.end > start:
+                yield extent
+
+
+class BmapStream(AlignedStream):
+    """Logical file stream backed by range-addressed bmap lookups.
+
+    Reads only resolve the extents overlapping the requested block range. Holes and unwritten
+    (preallocated but never written) extents produce zeroes, matching the logical file contents.
+    """
+
+    def __init__(self, inode: INode, size: int, block_size: int):
+        super().__init__(size, block_size)
+        self.inode = inode
+        self.resolver = inode.bmap
+        self.block_size = block_size
+
+    def read_range(self, offset: int, length: int) -> bytes:
+        """Read a byte range without going through the alignment buffer.
+
+        This resolves only the extents that overlap ``[offset, offset + length)`` and does not
+        change the stream position.
+        """
+        if offset < 0:
+            raise ValueError("offset cannot be negative")
+        if length < 0:
+            raise ValueError("length cannot be negative")
+        if self.size is not None:
+            length = min(length, max(0, self.size - offset))
+        return self._read(offset, length)
+
+    def _read(self, offset: int, length: int) -> bytes:
+        if length <= 0:
+            return b""
+
+        block_size = self.block_size
+        block_start = offset // block_size
+        block_end = (offset + length + block_size - 1) // block_size
+
+        if self.size is not None:
+            size_blocks = (self.size + block_size - 1) // block_size
+            block_end = min(block_end, max(block_start, size_blocks))
+
+        buf = bytearray(length)
+        request_end = offset + length
+        fh = self.inode.xfs.fh
+
+        for extent in self.resolver.extents(block_start, block_end):
+            # Clip the extent's byte range against the actual (possibly unaligned) request.
+            start = max(offset, extent.offset * block_size)
+            end = min(request_end, extent.end * block_size)
+            if start >= end:
+                continue
+
+            if extent.unwritten:
+                # Allocated but never written: logically zero, never expose stale disk bytes.
+                continue
+
+            dest = start - offset
+            count = end - start
+            fh.seek(extent.block * block_size + (start - extent.offset * block_size))
+            data = fh.read(count)
+            if len(data) != count:
+                raise Error(
+                    f"{self.inode!r} has a short read for a mapped extent at logical block {start // block_size}"
+                )
+            buf[dest : dest + count] = data
+
+        return bytes(buf)
 
 
 class XFS:
@@ -50,6 +395,11 @@ class XFS:
 
         self._lblock_s = c_xfs.xfs_btree_lblock_crc if self._has_crc else c_xfs.xfs_btree_lblock
         self._sblock_s = c_xfs.xfs_btree_sblock_crc if self._has_crc else c_xfs.xfs_btree_sblock
+
+        # Bounded cache of on-disk bmap nodes, keyed by whole-device block. This is deliberately
+        # small and separate from the per-inode resolver state so local reads stay local.
+        self._bmap_node_cache: OrderedDict[int, bytes] = OrderedDict()
+        self._bmap_node_reads = 0
 
         self.name = self.sb.sb_fname.split(b"\x00")[0].decode(errors="surrogateescape")
         self.uuid = UUID(bytes=self.sb.sb_uuid)
@@ -96,6 +446,33 @@ class XFS:
     def walk_agi(self, block: int, agnum: int) -> Iterator[c_xfs.xfs_inobt_rec]:
         for record in self.walk_small_tree(block, agnum, 16, (c_xfs.XFS_IBT_MAGIC, c_xfs.XFS_IBT_CRC_MAGIC)):
             yield c_xfs.xfs_inobt_rec(record)
+
+    @property
+    def bmap_node_reads(self) -> int:
+        """Number of physical bmap node reads performed (cache misses)."""
+        return self._bmap_node_reads
+
+    def clear_bmap_cache(self) -> None:
+        """Drop all cached bmap nodes (useful before measuring locality)."""
+        self._bmap_node_cache.clear()
+
+    def read_bmap_node(self, block: int) -> bytes:
+        """Read one bmap tree block, reusing a bounded cache of recently read nodes."""
+        cached = self._bmap_node_cache.get(block)
+        if cached is not None:
+            self._bmap_node_cache.move_to_end(block)
+            return cached
+
+        self.fh.seek(block * self.block_size)
+        data = self.fh.read(self.block_size)
+        if len(data) != self.block_size:
+            raise Error(f"Short read for bmap node at block {block}")
+
+        self._bmap_node_reads += 1
+        self._bmap_node_cache[block] = data
+        if len(self._bmap_node_cache) > BMAP_NODE_CACHE_SIZE:
+            self._bmap_node_cache.popitem(last=False)
+        return data
 
     def walk_extents(self, block: int) -> Iterator[tuple[int, int, int, int]]:
         for record in self.walk_large_tree(block, 16, (c_xfs.XFS_BMAP_MAGIC, c_xfs.XFS_BMAP_CRC_MAGIC)):
@@ -476,22 +853,31 @@ class INode:
         return RangeStream(self._buf, offset, size)
 
     @cached_property
+    def bmap(self) -> BmapResolver:
+        """Range-addressable bmap resolver for this inode's data fork."""
+        return BmapResolver(self)
+
+    @cached_property
     def dataruns(self) -> list[tuple[int | None, int]]:
         runs = []
         run_offset = 0
         expected_runs = (self.size + self.xfs.block_size - 1) // self.xfs.block_size
 
-        for offset, block, count, _ in self._iter_blocks():
+        for offset, block, count, flags in self._iter_blocks():
             if offset != run_offset:
                 gap = offset - run_offset
                 runs.append((None, gap))
                 run_offset += gap
 
-            # Convert filesystem blocks to logical blocks
-            agnum, blknum = fsb_to_bb(block, self.ag.sb.sb_agblklog)
-            block = agnum * self.xfs.sb.sb_agblocks + blknum
+            if flags & c_xfs.XFS_EXT_UNWRITTEN:
+                # Preallocated but never written: the logical view is zero.
+                runs.append((None, count))
+            else:
+                # Convert filesystem blocks to logical blocks
+                agnum, blknum = fsb_to_bb(block, self.ag.sb.sb_agblklog)
+                block = agnum * self.xfs.sb.sb_agblocks + blknum
 
-            runs.append((block, count))
+                runs.append((block, count))
             run_offset += count
 
         if run_offset < expected_runs:
@@ -499,23 +885,72 @@ class INode:
 
         return runs
 
+    def extent_at(self, logical_block: int) -> Extent | None:
+        """Return the extent covering ``logical_block`` (in file blocks), or ``None`` for a hole."""
+        if logical_block < 0:
+            raise ValueError("logical block cannot be negative")
+        return self.bmap.lookup(logical_block)
+
+    def extents(self, offset: int = 0, length: int | None = None) -> list[Extent]:
+        """Return the extents overlapping a byte range of the logical file.
+
+        Only the bmap nodes needed for that range are read. The returned extents are ordered by
+        logical block and holes are simply absent. A range with ``length=None`` covers the rest of
+        the file and uses the resolved size.
+        """
+        if offset < 0:
+            raise ValueError("offset cannot be negative")
+        if length is not None and length < 0:
+            raise ValueError("length cannot be negative")
+
+        block_size = self.xfs.block_size
+        size = self.size
+        if offset >= size:
+            return []
+        end = size if length is None else min(size, offset + length)
+        if end <= offset:
+            return []
+
+        # Extents are keyed and queried in filesystem blocks, but the caller works in bytes.
+        first = offset // block_size
+        last = (end + block_size - 1) // block_size
+        return list(self.bmap.extents(first, last))
+
+    def read_range(self, offset: int, length: int) -> bytes:
+        """Read a logical byte range without materializing or enumerating the whole extent tree."""
+        if offset < 0:
+            raise ValueError("offset cannot be negative")
+        if length < 0:
+            raise ValueError("length cannot be negative")
+        if length == 0 or offset >= self.size:
+            return b""
+
+        if self.inode.di_format not in (
+            c_xfs.xfs_dinode_fmt.XFS_DINODE_FMT_EXTENTS,
+            c_xfs.xfs_dinode_fmt.XFS_DINODE_FMT_BTREE,
+        ):
+            # Local (in-inode) data and unsupported forks keep their existing open() semantics.
+            stream = self.open()
+            stream.seek(offset)
+            return stream.read(length)
+
+        # Use the range-backed reader directly so a partial-block request resolves only the blocks
+        # it actually touches, not an alignment buffer around it.
+        return self.bmap_stream().read_range(offset, length)
+
     def _iter_blocks(self) -> Iterator[tuple[int, int, int, int]]:
         if self.inode.di_format == c_xfs.xfs_dinode_fmt.XFS_DINODE_FMT_EXTENTS:
             buf = self.datafork().read(self.data_extents * 16)
             for extent_num in range(self.data_extents):
                 yield parse_fsblock(buf[extent_num * 16 : (extent_num + 1) * 16])
         elif self.inode.di_format == c_xfs.xfs_dinode_fmt.XFS_DINODE_FMT_BTREE:
-            # B+tree extent lists are always large trees (64bit block numbers)
-            df = self.datafork()
-            root = c_xfs.xfs_bmdr_block(df)
+            # dataruns is an explicitly full view, including preallocated extents beyond EOF.
+            for extent in self.bmap.extents(0, _BMBT_FILEOFF_LIMIT):
+                yield extent.offset, extent.fsblock, extent.count, extent.flags
 
-            # Pointers start around halfway
-            maxrecs = (df.size - 4) // 16
-            df.seek(4 + maxrecs * 8)
-            ptrs = c_xfs.uint64[root.bb_numrecs](df)
-
-            for ptr in ptrs:
-                yield from self.ag.walk_extents(ptr)
+    def bmap_stream(self) -> BmapStream:
+        """Return a seekable logical stream backed by range-addressed bmap lookups."""
+        return BmapStream(self, self.size, self.xfs.block_size)
 
     def open(self) -> BinaryIO:
         if self.inode.di_format == c_xfs.xfs_dinode_fmt.XFS_DINODE_FMT_LOCAL:
@@ -524,7 +959,7 @@ class INode:
             c_xfs.xfs_dinode_fmt.XFS_DINODE_FMT_EXTENTS,
             c_xfs.xfs_dinode_fmt.XFS_DINODE_FMT_BTREE,
         ):
-            return RunlistStream(self.xfs.fh, self.dataruns, self.size, self.xfs.block_size)
+            return self.bmap_stream()
         if self.inode.di_format == c_xfs.xfs_dinode_fmt.XFS_DINODE_FMT_DEV:
             raise UnsupportedDataforkException(f"{self!r} is a character/block device.")
         dinode_type = c_xfs.xfs_dinode_fmt(self.inode.di_format)
