@@ -13,6 +13,7 @@ import re
 import socket
 import struct
 import sys
+import threading
 import unicodedata
 
 import antlr4
@@ -2448,23 +2449,181 @@ class MatchListener(STIXPatternListener):
         self.__push(s, u"exitSetLiteral ({})".format(ctx.getText()))
 
 
-class Pattern:
-    def __init__(self, pattern_str, stix_version=DEFAULT_VERSION):
+class _CompiledPattern(object):
+    """
+    An immutable, reusable handle on a parsed pattern.
+
+    This object is the shareable boundary between pattern compilation and
+    pattern matching.  It owns only derived, version-specific artifacts:
+
+    - the ANTLR parse tree (including its lexer/token stream), which is never
+      mutated by a tree walk;
+    - the STIX version the pattern was compiled against, which controls the
+      grammar used to build the tree and the semantics applied while walking
+      it.
+
+    Nothing here depends on any particular observation input, match result,
+    or match invocation.  Therefore a single compiled pattern may be walked
+    any number of times, including concurrently or interleaved with other
+    walks, without the invocations interfering with one another.  All
+    per-invocation state (the listener, its compute stack, its lazy
+    generators, and any exception state) is created fresh inside match().
+
+    The parse tree is deliberately shared rather than re-parsed: the
+    performance benefit comes solely from reusing the syntax analysis.  The
+    actual matching work, and its result, is recomputed on every call.
+    """
+
+    def __init__(self, pattern_str, stix_version):
+        self.__pattern_str = pattern_str
+        self.__stix_version = stix_version
+        if stix_version == VARSION_2_1:
+            self.__stix2_pattern = Stix2Pattern21(pattern_str)
+        else:
+            self.__stix2_pattern = Stix2Pattern20(pattern_str)
+
+    @property
+    def pattern_str(self):
+        return self.__pattern_str
+
+    @property
+    def stix_version(self):
+        return self.__stix_version
+
+    @property
+    def parse_tree(self):
+        # stix2patterns stores the tree in a name-mangled private attribute.
+        return self.__stix2_pattern._Pattern__parse_tree
+
+    def walk(self, listener):
         """
-        Compile a pattern.
+        Walk the shared parse tree with a fresh, invocation-specific listener.
+
+        The walker only reads the tree; listener state lives entirely on the
+        given listener instance, so interleaved and repeated walks are safe.
+        """
+        self.__stix2_pattern.walk(listener)
+
+    def inspect(self):
+        return self.__stix2_pattern.inspect()
+
+    def visit(self, visitor):
+        return self.__stix2_pattern.visit(visitor)
+
+    @property
+    def _stix2_pattern(self):
+        return self.__stix2_pattern
+
+
+class CompiledPatternCache(object):
+    """
+    A cache of compiled patterns keyed by both pattern text and STIX version.
+
+    Only compiled syntax (the parse tree) is cached; observation inputs,
+    bindings, and match results are never stored here.  Including the STIX
+    version in the key is essential: the same pattern text can be legal under
+    both the 2.0 and 2.1 grammars yet have different semantics (e.g. object
+    types excluded in 2.1, or timestamp- vs string-literal temporal
+    qualifiers), so a text-only key would let one version reuse the other's
+    parse tree and produce wrong results.
+
+    A failed compilation raises before anything is cached, so a bad pattern
+    never poisons later attempts.  All operations are thread-safe.
+    """
+
+    def __init__(self):
+        self.__compiled = {}
+        self.__lock = threading.RLock()
+
+    @staticmethod
+    def _make_key(pattern_str, stix_version):
+        return stix_version, pattern_str
+
+    def get_or_compile(self, pattern_str, stix_version=DEFAULT_VERSION):
+        key = self._make_key(pattern_str, stix_version)
+        with self.__lock:
+            compiled = self.__compiled.get(key)
+            if compiled is None:
+                compiled = _CompiledPattern(pattern_str, stix_version)
+                self.__compiled[key] = compiled
+            return compiled
+
+    def clear(self):
+        with self.__lock:
+            self.__compiled.clear()
+
+    def __contains__(self, key):
+        version, pattern_str = key
+        with self.__lock:
+            return self._make_key(pattern_str, version) in self.__compiled
+
+    def __len__(self):
+        with self.__lock:
+            return len(self.__compiled)
+
+
+# Process-wide cache of parsed patterns, shared by the module-level match()
+# convenience function.
+COMPILED_PATTERN_CACHE = CompiledPatternCache()
+
+
+class Pattern:
+    def __init__(self, pattern_str, stix_version=DEFAULT_VERSION,
+                 compiled_pattern_cache=COMPILED_PATTERN_CACHE):
+        """
+        Compile a pattern, reusing a cached parse tree when one is available.
 
         :param pattern_str: The pattern to compile
-        :param stix_version: The stix specification version
+        :param stix_version: The stix specification version.  It is part of
+            the cache identity, so identical text compiled for different
+            versions never shares a parse tree.
+        :param compiled_pattern_cache: The cache used to store and reuse
+            compiled syntax.  Pass an isolated CompiledPatternCache to opt
+            out of the shared process-wide cache.
         :raises stix2patterns.pattern.ParseException: If there is a parse error
         """
         self.__stix_version = stix_version
-        if self.__stix_version == VARSION_2_1:
-            self.__pattern = Stix2Pattern21(pattern_str)
-        else:
-            self.__pattern = Stix2Pattern20(pattern_str)
+        self.__compiled = compiled_pattern_cache.get_or_compile(
+            pattern_str, stix_version
+        )
+
+    @property
+    def stix_version(self):
+        return self.__compiled.stix_version
+
+    @property
+    def compiled_pattern(self):
+        return self.__compiled
 
     def __getattr__(self, name):
-        return self.__pattern.__getattribute__(name)
+        # Delegate any other attributes (e.g. inspect/visit) to the
+        # underlying stix2patterns object for backward compatibility.
+        return getattr(self.__compiled._stix2_pattern, name)
+
+    def matched_bindings(self, observed_data_sdos, verbose=False):
+        """
+        Walk this pattern's shared parse tree against the given observations,
+        returning a fresh generator of all found bindings.
+
+        Every call builds a new MatchListener, so each invocation has its own
+        compute stack, lazy binding generators, observation bindings, and
+        exception state.  Neither the compiled parse tree nor any prior
+        invocation's state is mutated.  Calls may therefore be interleaved or
+        repeated (including after a previous failure) safely.
+
+        :param observed_data_sdos: A list of observed-data SDOs, as a list of
+            dicts.  STIX JSON should be parsed into native Python structures
+            before calling this method.
+        :param verbose: Whether to dump detailed info about matcher operation
+        :return: A generator of binding tuples (see MatchListener.matched())
+        :raises MatcherException: If an error occurs during matching
+        """
+        matcher = MatchListener(
+            observed_data_sdos, verbose,
+            stix_version=self.__stix_version
+        )
+        self.__compiled.walk(matcher)
+        return matcher.matched()
 
     def match(self, observed_data_sdos, verbose=False):
         """
@@ -2480,8 +2639,11 @@ class Pattern:
             didn't match.
         :raises MatcherException: If an error occurs during matching
         """
-        matcher = MatchListener(observed_data_sdos, verbose, stix_version=self.__stix_version)
-        self.__pattern.walk(matcher)
+        matcher = MatchListener(
+            observed_data_sdos, verbose,
+            stix_version=self.__stix_version
+        )
+        self.__compiled.walk(matcher)
 
         first_binding = next(matcher.matched(), [])
         matching_sdos = matcher.get_sdos_from_binding(first_binding)
@@ -2494,6 +2656,11 @@ def match(pattern, observed_data_sdos, verbose=False, stix_version=DEFAULT_VERSI
     Match the given pattern against the given observations.  Returns matching
     SDOs.  The matcher can find many bindings; this function returns the SDOs
     corresponding to only the first binding found.
+
+    Pattern compilation is cached (keyed by pattern text and STIX version), so
+    repeated calls with the same pattern reuse its parse tree rather than
+    parsing again.  Matching itself is always re-executed against the given
+    observations; results are not cached.
 
     :param pattern: The STIX pattern
     :param observed_data_sdos: A list of observed-data SDOs, as a list of dicts.
