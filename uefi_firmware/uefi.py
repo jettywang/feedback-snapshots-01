@@ -1151,7 +1151,15 @@ class FirmwareFile(FirmwareObject):
     _LARGE_HEADER_SIZE = 0x20
     _ATTRIB_LARGE_FILE = 0x01
 
-    def __init__(self, data):
+    def __init__(self, data, erase_polarity=1):
+        '''Parse a firmware file header.
+
+        erase_polarity is the EFI_FVB2_ERASE_POLARITY of the volume that
+        contains the file: 1 for flash erased to 0xFF, 0 for flash erased to
+        0x00. The state byte is stored on flash XORed with that polarity, so
+        the logical state is recovered by XORing it back. A file parsed on its
+        own, without a containing volume, assumes the common polarity of 1.
+        '''
         header = data[:self._HEADER_SIZE]
 
         try:
@@ -1161,6 +1169,13 @@ class FirmwareFile(FirmwareObject):
         except Exception as e:
             print_error("Error: invalid FirmwareFile header.")
             raise e
+
+        self.erase_polarity = 1 if erase_polarity else 0
+        self.erased_byte = 0xFF if self.erase_polarity else 0x00
+        # The state byte as it sits in the image, never normalized or rewritten.
+        self.raw_state = self.state
+        self.logical_state = self.state ^ self.erased_byte
+        self.stage, self.state_well_formed = self._interpret_state(self.logical_state)
 
         # A file of 16 MiB or more sets the large file attribute and a size
         # of 0, and stores its size in a 64-bit ExtendedSize field.
@@ -1176,7 +1191,12 @@ class FirmwareFile(FirmwareObject):
             "size": self.size,
             "type": self.type,
             "attributes": self.attributes,
-            "state": self.state ^ 0xFF
+            # The media byte as parsed, and its meaning once the volume's
+            # erase polarity is removed.
+            "state": self.logical_state,
+            "raw_state": self.raw_state,
+            "stage": self.stage,
+            "state_well_formed": self.state_well_formed,
         }
         self.attrs["type_name"] = _get_file_type(self.type)[0]
 
@@ -1187,13 +1207,47 @@ class FirmwareFile(FirmwareObject):
         self.raw_blobs = []
         self.sections = []
 
+    @staticmethod
+    def _interpret_state(logical_state):
+        '''Map a logical state byte (media byte XOR erase polarity) to the
+        file's life-cycle stage.
+
+        Returns the stage name and whether the byte is one of the well-formed
+        state combinations the PI Specification defines. "well formed" only
+        describes the byte shape: a well-formed deleted file still has stage
+        "deleted". When several state bits are set together, the format's bit
+        precedence decides the stage, so a corrupt byte can never turn a
+        deleted file back into a normal driver.
+        '''
+        state = logical_state & 0x3F
+        well_formed = state in FFS_FILE_STAGE
+        if well_formed:
+            return FFS_FILE_STAGE[state], True
+
+        # Corrupt or unknown bit combination. Interpret by bit semantics, from
+        # the terminal state backwards, rather than claiming it is valid.
+        if state & FFS_FILE_STATE["HEADER_INVALID"]:
+            return "deleted", False
+        if state & FFS_FILE_STATE["DELETE"]:
+            return "deleted", False
+        if state & FFS_FILE_STATE["MARKED_FOR_UPDATE"]:
+            return "replaced", False
+        if state & (FFS_FILE_STATE["HEADER_VALID"] |
+                    FFS_FILE_STATE["DATA_VALID"]) == (
+                    FFS_FILE_STATE["HEADER_VALID"] |
+                    FFS_FILE_STATE["DATA_VALID"]):
+            return "valid", False
+        return "created", False
+
     @property
     def objects(self):
         return self.sections + self.raw_blobs
 
     def regen(self, data):
-        # Transitional method, should be adopted by other objects.
-        self.__init__(data)
+        # Transitional method, should be adopted by other objects. Keep the
+        # containing volume's erase polarity, so the replacement file's state
+        # is interpreted in the same context.
+        self.__init__(data, self.erase_polarity)
 
     def process(self):
         '''Parse the file and file sections if appropriate.'''
@@ -1346,14 +1400,16 @@ class FirmwareFile(FirmwareObject):
         else:
             guid_display = "%s (%s)" % (
                 green(sguid(self.guid)), purple(guid_name))
-        print("%s %s type 0x%02x, attr 0x%02x, chsm 0x%04x, state 0x%02x, size 0x%x "
-            "(%d bytes), (%s)" % (
+        print("%s %s type 0x%02x, attr 0x%02x, chsm 0x%04x, state 0x%02x "
+            "(raw 0x%02x, %s), size 0x%x (%d bytes), (%s)" % (
             blue("%sFile %s:" % (ts, index)),
             guid_display,
             self.type,
             self.attributes,
             self.checksum,
-            self.state ^ 0xFF,
+            self.logical_state,
+            self.raw_state,
+            self.stage,
             self.size,
             self.size,
             _get_file_type(self.type)[0]
@@ -1384,7 +1440,12 @@ class FirmwareFile(FirmwareObject):
             'name': get_guid_name(self.guid),
             'type': self.type,
             'attributes': self.attributes,
-            'state': self.state ^ 0xFF,
+            # Logical state: the media byte with the volume erase polarity
+            # removed. raw_state is the byte as stored, stage its meaning.
+            'state': self.logical_state,
+            'raw_state': self.raw_state,
+            'stage': self.stage,
+            'state_well_formed': self.state_well_formed,
             'size': self.size,
             'fileType': _get_file_type(self.type)[0],
             'sections': sections,
@@ -1416,9 +1477,17 @@ class FirmwareFileSystem(FirmwareObject):
     The FFS is a specific GUID within the FirmwareVolume.
     '''
 
-    def __init__(self, data):
+    def __init__(self, data, erase_polarity=1):
+        '''Parse a firmware file system stream.
+
+        erase_polarity is the EFI_FVB2_ERASE_POLARITY of the containing
+        volume; it is passed to every file, whose state byte is stored XORed
+        with it. A file system parsed on its own assumes the common polarity
+        of 1 (flash erased to 0xFF).
+        '''
         self.files = []
         self._data = data
+        self.erase_polarity = 1 if erase_polarity else 0
 
         # Overflow data is non-file data within the filesystem
         self.overflow_data = b""
@@ -1434,9 +1503,12 @@ class FirmwareFileSystem(FirmwareObject):
         view = memoryview(self._data)
         offset = 0
         status = True
+        # The all-erased header marks free space. The erased byte depends on
+        # the volume's erase polarity, not on a fixed 0xFF.
+        erased_header = bytes([0xFF if self.erase_polarity else 0x00]) * 24
         while len(self._data) - offset >= 24 and \
-                view[offset:offset + 24] != (b"\xff" * 24):
-            firmware_file = FirmwareFile(view[offset:])
+                view[offset:offset + 24] != erased_header:
+            firmware_file = FirmwareFile(view[offset:], self.erase_polarity)
 
             if firmware_file.size < firmware_file.header_size:
                 # This is a problem, the file was corrupted.
@@ -1477,8 +1549,9 @@ class FirmwareFileSystem(FirmwareObject):
 
         if is_erased(self.overflow_data):
             # Free space shrinks or grows so the file system keeps its size,
-            # where the files still fit.
-            erased = self.overflow_data[:1] or b"\xFF"
+            # where the files still fit. Fill with the volume's erased byte.
+            erased = self.overflow_data[:1] or \
+                bytes([0xFF if self.erase_polarity else 0x00])
             data += erased * (len(self._data) - len(data))
         else:
             data += self.overflow_data
@@ -1633,6 +1706,13 @@ class FirmwareVolume(FirmwareObject):
     def objects(self):
         return self.firmware_filesystems or []
 
+    @property
+    def erase_polarity(self):
+        '''EFI_FVB2_ERASE_POLARITY: 1 when erased flash reads 0xFF, 0 when
+        it reads 0x00. File state bytes are stored XORed with the erased byte
+        of their own volume.'''
+        return 1 if self.attributes & EFI_FVB2_ERASE_POLARITY else 0
+
     @limit_nesting(False)
     def process(self):
         dlog(self, self.name)
@@ -1673,7 +1753,8 @@ class FirmwareVolume(FirmwareObject):
         # included. The body after the header is a single file system, see
         # the PI Specification 1.7 Errata A, volume 3, section 2.1.2.
         if sguid(self.guid) in ffs_guids:
-            firmware_filesystem = FirmwareFileSystem(self.data)
+            firmware_filesystem = FirmwareFileSystem(
+                self.data, self.erase_polarity)
             if not firmware_filesystem.process():
                 dlog(self, self.name, 'Could not parse FFS')
                 status = False
@@ -1709,7 +1790,7 @@ class FirmwareVolume(FirmwareObject):
         if padding > 0:
             # Free space is erased, which sets every bit when the volume's
             # erase polarity is 1.
-            erased = b"\xff" if self.attributes & 0x800 else b"\x00"
+            erased = b"\xff" if self.erase_polarity else b"\x00"
             data += erased * padding
         elif padding < 0:
             print ("%s truncating %s-bytes from FirmwareVolume: %s" % (

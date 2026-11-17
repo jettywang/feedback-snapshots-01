@@ -100,6 +100,40 @@ EFI_COMPRESSION_TYPES = {
     0x02: "PI_STD"
 }
 
+# EFI_FVB2_ERASE_POLARITY: bit 11 of the firmware volume attributes. When it
+# is set the erased, and therefore initial, value of every flash byte is 0xFF;
+# when clear the erased value is 0x00.
+EFI_FVB2_ERASE_POLARITY = 0x0800
+
+# FFS file state bits, after the media byte is XORed with the volume's erase
+# polarity byte. The numbering matches EFI_FILE_* in the PI Specification and
+# EDK2 (PiFirmwareFile.h). A valid file is HEADER_CONSTRUCTION | HEADER_VALID
+# | DATA_VALID = 0x07, so with polarity 1 its on-flash state byte is 0xF8.
+FFS_FILE_STATE = {
+    "HEADER_CONSTRUCTION": 0x01,
+    "HEADER_VALID":        0x02,
+    "DATA_VALID":          0x04,
+    "MARKED_FOR_UPDATE":   0x08,
+    "DELETE":              0x10,
+    "HEADER_INVALID":      0x20,
+}
+
+# The life-cycle stage each well-formed logical state byte (media byte XOR
+# erase polarity) encodes, per the PI Specification FFS file state table.
+FFS_FILE_STAGE = {
+    # Header being written, or valid while the data is still under construction.
+    0x01: "created",
+    0x02: "created",
+    0x03: "created",
+    # Header and data valid: the file is usable.
+    0x07: "valid",
+    # A valid file marked for replacement; its content is still present.
+    0x0f: "replaced",
+    # Delete in progress, then the header is invalidated.
+    0x1f: "deleted",
+    0x3f: "deleted",
+}
+
 NVRAM_ATTRIBUTES = {
     "RT":         0x01,
     "DESC_ASCII": 0x02,
