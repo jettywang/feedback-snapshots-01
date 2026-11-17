@@ -42,6 +42,7 @@ Some of the tasks that pefile makes possible are:
 
 * Inspecting headers
 * Analyzing of sections' data
+* Reading the in-image COFF symbol table as a read-only evidence view that links primary symbols, auxiliary records, long names and section definitions
 * Retrieving embedded data
 * [Reading strings from the resources](https://github.com/erocarrera/pefile/blob/wiki/ReadingResourceStrings.md)
 * Warnings for suspicious and malformed values

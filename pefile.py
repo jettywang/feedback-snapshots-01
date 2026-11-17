@@ -224,6 +224,74 @@ section_characteristics = [
 SECTION_CHARACTERISTICS = two_way_dict(section_characteristics)
 
 
+# Every COFF symbol table record (primary or auxiliary) occupies this many
+# bytes, so the table is always an array of fixed-size slots.
+COFF_SIZEOF_SYMBOL_RECORD = 18
+
+coff_symbol_storage_classes = [
+    ("IMAGE_SYM_CLASS_END_OF_FUNCTION", 0xFF),
+    ("IMAGE_SYM_CLASS_NULL", 0),
+    ("IMAGE_SYM_CLASS_AUTOMATIC", 1),
+    ("IMAGE_SYM_CLASS_EXTERNAL", 2),
+    ("IMAGE_SYM_CLASS_STATIC", 3),
+    ("IMAGE_SYM_CLASS_REGISTER", 4),
+    ("IMAGE_SYM_CLASS_EXTERNAL_DEF", 5),
+    ("IMAGE_SYM_CLASS_LABEL", 6),
+    ("IMAGE_SYM_CLASS_UNDEFINED_LABEL", 7),
+    ("IMAGE_SYM_CLASS_MEMBER_OF_STRUCT", 8),
+    ("IMAGE_SYM_CLASS_ARGUMENT", 9),
+    ("IMAGE_SYM_CLASS_STRUCT_TAG", 10),
+    ("IMAGE_SYM_CLASS_MEMBER_OF_UNION", 11),
+    ("IMAGE_SYM_CLASS_UNION_TAG", 12),
+    ("IMAGE_SYM_CLASS_TYPE_DEFINITION", 13),
+    ("IMAGE_SYM_CLASS_UNDEFINED_STATIC", 14),
+    ("IMAGE_SYM_CLASS_ENUM_TAG", 15),
+    ("IMAGE_SYM_CLASS_MEMBER_OF_ENUM", 16),
+    ("IMAGE_SYM_CLASS_REGISTER_PARAM", 17),
+    ("IMAGE_SYM_CLASS_BIT_FIELD", 18),
+    ("IMAGE_SYM_CLASS_BLOCK", 100),
+    ("IMAGE_SYM_CLASS_FUNCTION", 101),
+    ("IMAGE_SYM_CLASS_END_OF_STRUCT", 102),
+    ("IMAGE_SYM_CLASS_FILE", 103),
+    ("IMAGE_SYM_CLASS_SECTION", 104),
+    ("IMAGE_SYM_CLASS_WEAK_EXTERNAL", 105),
+    ("IMAGE_SYM_CLASS_CLR_TOKEN", 107),
+]
+
+COFF_SYMBOL_STORAGE_CLASS = two_way_dict(coff_symbol_storage_classes)
+
+# Signed SectionNumber values below one have a special meaning.
+COFF_SPECIAL_SECTION_NUMBERS = two_way_dict(
+    [
+        ("IMAGE_SYM_UNDEFINED", 0),
+        ("IMAGE_SYM_ABSOLUTE", -1),
+        ("IMAGE_SYM_DEBUG", -2),
+    ]
+)
+
+weak_extern_characteristics = [
+    ("IMAGE_WEAK_EXTERN_SEARCH_NOLIBRARY", 1),
+    ("IMAGE_WEAK_EXTERN_SEARCH_LIBRARY", 2),
+    ("IMAGE_WEAK_EXTERN_SEARCH_ALIAS", 3),
+]
+
+COFF_WEAK_EXTERN_CHARACTERISTICS = two_way_dict(weak_extern_characteristics)
+
+comdat_selections = [
+    ("IMAGE_COMDAT_SELECT_NODUPLICATES", 1),
+    ("IMAGE_COMDAT_SELECT_ANY", 2),
+    ("IMAGE_COMDAT_SELECT_SAME_SIZE", 3),
+    ("IMAGE_COMDAT_SELECT_EXACT_MATCH", 4),
+    ("IMAGE_COMDAT_SELECT_ASSOCIATIVE", 5),
+    ("IMAGE_COMDAT_SELECT_LARGEST", 6),
+    ("IMAGE_COMDAT_SELECT_NEWEST", 7),
+]
+
+COFF_COMDAT_SELECTIONS = two_way_dict(comdat_selections)
+
+COFF_AUX_SYMBOL_TYPE_TOKEN_DEF = 1
+
+
 debug_types = [
     ("IMAGE_DEBUG_TYPE_UNKNOWN", 0),
     ("IMAGE_DEBUG_TYPE_COFF", 1),
@@ -1703,6 +1771,71 @@ class DebugData(DataContainer):
     struct:     IMAGE_DEBUG_DIRECTORY structure
     entries:    list of entries (IMAGE_DEBUG_TYPE instances)
     """
+
+
+class CoffAuxRecord(DataContainer):
+    """Holds one 18-byte COFF auxiliary symbol record.
+
+    type:       Interpretation of the slot ("function-definition",
+                "bf-ef", "weak-external", "file", "section-definition",
+                "clr-token" or "unknown")
+    raw_data:   The untouched 18 bytes of the slot, always present so that
+                layouts this version does not understand remain inspectable
+    index:      Zero-based symbol-table slot index of this record
+
+    Parsed fields for the recognized layouts are exposed alongside raw_data;
+    unknown layouts only carry type "unknown" and raw_data.
+    """
+
+
+class CoffSymbol(DataContainer):
+    """Holds one primary IMAGE_SYMBOL record and its auxiliary records.
+
+    Only primary records are represented here. Each 18-byte auxiliary slot
+    is attached through `auxiliary` rather than being mistaken for a symbol
+    of its own.
+
+    index:                 Zero-based symbol-table slot index
+    name:                  Inline name or string-table name (bytes)
+    name_is_long:          True when the name comes from the string table
+    value:                 Value field of the primary record
+    section_number:        Signed SectionNumber field
+    type:                  16-bit Type field
+    storage_class:         Numeric StorageClass field
+    storage_class_name:    Symbolic storage-class name when known
+    number_of_auxiliary:   Auxiliary slot count declared by the record
+    auxiliary:             List of CoffAuxRecord instances
+    aux_record_count:      Number of auxiliary slots actually available
+    aux_truncated:         True when the declared count runs past the table
+    """
+
+
+class CoffSymbolTableData(DataContainer):
+    """Read-only evidence view over the in-image COFF symbol table.
+
+    symbols:           Primary CoffSymbol records in table order
+    string_table:      Raw COFF string-table bytes (including the size prefix)
+    pointer_to_symbol_table: FILE_HEADER.PointerToSymbolTable the view was
+                             built from
+    number_of_symbols: FILE_HEADER.NumberOfSymbols the view was built from
+    table_offset:      File offset of the first symbol slot
+    table_size:        Physical size in bytes of the parsed table
+    truncated:         True when the declared table or string table does not
+                       fully fit inside the file
+    """
+
+    def get_symbol(self, index):
+        """Return the primary CoffSymbol whose slot index is `index`.
+
+        Returns None when no primary record starts at that slot (the index
+        points at an auxiliary record, lies outside the table, or belongs to
+        a truncated tail that could not be parsed).
+        """
+        if not hasattr(self, "_symbols_by_index"):
+            self._symbols_by_index = {
+                symbol.index: symbol for symbol in self.symbols
+            }
+        return self._symbols_by_index.get(index)
 
 
 class DynamicRelocationData(DataContainer):
@@ -3336,6 +3469,11 @@ class PE:
 
         offset = self.parse_sections(sections_offset, max_offset)
 
+        # The COFF symbol table is located from FILE_HEADER rather than from
+        # a data directory, so it is parsed unconditionally, even under
+        # fast_load. It is purely a read-only evidence view.
+        self.parse_coff_symbol_table()
+
         # There could be a problem if there are no raw data sections
         # greater than 0
         # fc91013eb72529da005110a3403541b6 example
@@ -3730,6 +3868,345 @@ class PE:
             )
         else:
             return offset
+
+    def parse_coff_symbol_table(self):
+        """Build a read-only evidence view of the in-image COFF symbol table.
+
+        The table is an array of fixed 18-byte slots located through
+        FILE_HEADER.PointerToSymbolTable / NumberOfSymbols, followed by the
+        COFF string table. A primary record may declare auxiliary records
+        that occupy the slots after it; those slots are attached to their
+        primary record instead of being interpreted as standalone symbols.
+
+        The image is never modified and every read is bounded against the
+        physical file. Auxiliary layouts recognized for the record's storage
+        class are decoded; unrecognized layouts keep their raw bytes. On
+        success `coff_symbol_table` is a CoffSymbolTableData; it is None when
+        no symbol table is declared.
+        """
+        self.coff_symbol_table = None
+
+        header = self.FILE_HEADER
+        table_offset = header.PointerToSymbolTable
+        number_of_symbols = header.NumberOfSymbols
+
+        if not table_offset or not number_of_symbols:
+            return
+
+        data = self.__data__
+        data_size = len(data)
+        declared_size = number_of_symbols * COFF_SIZEOF_SYMBOL_RECORD
+        table_end = table_offset + declared_size
+
+        truncated = False
+        if table_offset >= data_size:
+            self.__warnings.append(
+                "COFF symbol table pointer lies outside the file."
+            )
+            return
+
+        if table_end > data_size:
+            truncated = True
+            available_slots = (
+                data_size - table_offset
+            ) // COFF_SIZEOF_SYMBOL_RECORD
+            self.__warnings.append(
+                "COFF symbol table is truncated: "
+                f"{number_of_symbols} slots declared, {available_slots} fit "
+                "in the file."
+            )
+        else:
+            available_slots = number_of_symbols
+
+        # The string table immediately follows the declared symbol table.
+        string_table_offset = table_end
+        string_table = self.__parse_coff_string_table(
+            string_table_offset, data, data_size
+        )
+        if string_table is None:
+            truncated = True
+            string_table = b""
+
+        symbols = []
+        slot = 0
+        while slot < available_slots:
+            record_offset = table_offset + slot * COFF_SIZEOF_SYMBOL_RECORD
+            (
+                name_field,
+                value,
+                section_number,
+                symbol_type,
+                storage_class,
+                aux_count,
+            ) = struct.unpack_from("<8sIhHBB", data, record_offset)
+
+            name, name_is_long = self.__resolve_coff_name(name_field, string_table)
+
+            # The auxiliary count must stay inside the table. Clamp it so a
+            # corrupt count can never pull a following primary record into
+            # this record's auxiliary chain.
+            slots_left = available_slots - slot - 1
+            aux_truncated = aux_count > slots_left
+            effective_aux_count = min(aux_count, slots_left)
+            if aux_truncated:
+                truncated = True
+                self.__warnings.append(
+                    f"COFF symbol at slot {slot} declares {aux_count} "
+                    f"auxiliary records but only {slots_left} slots remain; "
+                    "the following table is truncated."
+                )
+
+            auxiliary = [
+                self.__parse_coff_auxiliary(
+                    storage_class,
+                    symbol_type,
+                    section_number,
+                    aux_index,
+                    effective_aux_count,
+                    data,
+                    table_offset,
+                    slot,
+                )
+                for aux_index in range(effective_aux_count)
+            ]
+
+            storage_class_name = COFF_SYMBOL_STORAGE_CLASS.get(storage_class)
+
+            symbol = CoffSymbol(
+                index=slot,
+                name=name,
+                name_is_long=name_is_long,
+                value=value,
+                section_number=section_number,
+                type=symbol_type,
+                storage_class=storage_class,
+                storage_class_name=storage_class_name,
+                number_of_auxiliary=aux_count,
+                auxiliary=auxiliary,
+                aux_record_count=effective_aux_count,
+                aux_truncated=aux_truncated,
+            )
+            symbols.append(symbol)
+
+            # Skip the whole declared group, including any truncated tail, so
+            # auxiliary slots are never re-read as primary symbols.
+            slot += 1 + effective_aux_count
+
+        # Resolve weak-external tag indices after every record is known.
+        for symbol in symbols:
+            for aux_record in symbol.auxiliary:
+                if (
+                    aux_record.type == "weak-external"
+                    and hasattr(aux_record, "tag_index")
+                ):
+                    aux_record.tag_symbol = self.__lookup_coff_symbol(
+                        symbols, aux_record.tag_index
+                    )
+
+        self.coff_symbol_table = CoffSymbolTableData(
+            symbols=symbols,
+            string_table=string_table,
+            pointer_to_symbol_table=table_offset,
+            number_of_symbols=number_of_symbols,
+            table_offset=table_offset,
+            table_size=available_slots * COFF_SIZEOF_SYMBOL_RECORD,
+            truncated=truncated,
+        )
+
+    @staticmethod
+    def __lookup_coff_symbol(symbols, index):
+        for symbol in symbols:
+            if symbol.index == index:
+                return symbol
+        return None
+
+    def __parse_coff_string_table(self, offset, data, data_size):
+        """Return the raw COFF string table at `offset`, or None if malformed."""
+        if offset + 4 > data_size:
+            self.__warnings.append(
+                "COFF string table header lies outside the file."
+            )
+            return None
+        size = struct.unpack_from("<I", data, offset)[0]
+        if size < 4:
+            self.__warnings.append(
+                f"COFF string table size {size} is smaller than its header."
+            )
+            return None
+        end = offset + size
+        if end > data_size:
+            self.__warnings.append(
+                "COFF string table extends past the end of the file."
+            )
+            return None
+        return bytes(data[offset:end])
+
+    def __resolve_coff_name(self, name_field, string_table):
+        """Resolve an 8-byte symbol name field to (name, is_long_name).
+
+        Long names use the E.Name union's first four bytes as zeroes,
+        followed by a big-endian offset into the string table. The offset is
+        checked against the string table bounds so a name can never read into
+        another structure. A failed resolution retains the literal field
+        contents.
+        """
+        if name_field[:4] != b"\0\0\0\0":
+            return name_field.split(b"\0", 1)[0], False
+
+        name_offset = struct.unpack(">I", name_field[4:])[0]
+        if not string_table or not 4 <= name_offset < len(string_table):
+            return name_field.split(b"\0", 1)[0], False
+
+        start = name_offset
+        end = string_table.find(b"\0", start)
+        if end < 0:
+            self.__warnings.append(
+                f"COFF string-table offset {name_offset} is not null-terminated."
+            )
+            return name_field.split(b"\0", 1)[0], False
+
+        return bytes(string_table[start:end]), True
+
+    def __parse_coff_auxiliary(
+        self,
+        storage_class,
+        symbol_type,
+        section_number,
+        aux_index,
+        aux_count,
+        data,
+        table_offset,
+        primary_slot,
+    ):
+        """Decode one 18-byte auxiliary slot according to the primary record.
+
+        The layout selected by the primary record's storage class (and, for
+        function begin/end markers, its name chain position) is parsed. Slots
+        whose layout is not recognized are returned with type "unknown" and
+        their raw bytes only.
+        """
+        slot_index = primary_slot + 1 + aux_index
+        record_offset = table_offset + slot_index * COFF_SIZEOF_SYMBOL_RECORD
+        raw_data = bytes(
+            data[record_offset : record_offset + COFF_SIZEOF_SYMBOL_RECORD]
+        )
+
+        aux_type = "unknown"
+        fields = {}
+
+        if storage_class == COFF_SYMBOL_STORAGE_CLASS["IMAGE_SYM_CLASS_FILE"]:
+            aux_type = "file"
+            # A source file name may span every auxiliary slot of the chain;
+            # expose the full name once, on the final slot of that chain.
+            if aux_index == aux_count - 1:
+                fields["file_name"] = self.__coff_file_name(
+                    data, record_offset, aux_count, aux_index
+                )
+
+        elif storage_class == COFF_SYMBOL_STORAGE_CLASS["IMAGE_SYM_CLASS_STATIC"]:
+            aux_type = "section-definition"
+            (
+                length,
+                number_of_relocations,
+                number_of_linenumbers,
+                check_sum,
+                number,
+                selection,
+            ) = struct.unpack_from("<IHHIHB", data, record_offset)
+            fields.update(
+                length=length,
+                number_of_relocations=number_of_relocations,
+                number_of_linenumbers=number_of_linenumbers,
+                check_sum=check_sum,
+                number=number,
+                selection=selection,
+                selection_name=COFF_COMDAT_SELECTIONS.get(selection),
+            )
+
+        elif storage_class == COFF_SYMBOL_STORAGE_CLASS["IMAGE_SYM_CLASS_CLR_TOKEN"]:
+            aux_type = "clr-token"
+            aux_symbol_type, reserved, symbol_table_index = struct.unpack_from(
+                "<BBI", data, record_offset
+            )
+            fields.update(
+                aux_symbol_type=aux_symbol_type,
+                reserved=reserved,
+                symbol_table_index=symbol_table_index,
+                token_definition=aux_symbol_type
+                == COFF_AUX_SYMBOL_TYPE_TOKEN_DEF,
+            )
+
+        elif storage_class == COFF_SYMBOL_STORAGE_CLASS["IMAGE_SYM_CLASS_FUNCTION"]:
+            aux_type = "bf-ef"
+            (
+                _unused_zero,
+                linenumber,
+                _unused_six,
+                pointer_to_next_function,
+                _unused_two,
+            ) = struct.unpack_from("<IH6sIH", data, record_offset)
+            fields.update(
+                linenumber=linenumber,
+                pointer_to_next_function=pointer_to_next_function,
+            )
+
+        elif storage_class == COFF_SYMBOL_STORAGE_CLASS["IMAGE_SYM_CLASS_EXTERNAL"]:
+            if section_number == 0:
+                # An external record in the UNDEFINED section that carries an
+                # auxiliary slot is a weak external (Auxiliary Format 3).
+                aux_type = "weak-external"
+                tag_index, characteristics = struct.unpack_from(
+                    "<II", data, record_offset
+                )
+                fields.update(
+                    tag_index=tag_index,
+                    characteristics=characteristics,
+                    characteristics_name=COFF_WEAK_EXTERN_CHARACTERISTICS.get(
+                        characteristics
+                    ),
+                )
+            elif symbol_type == 0x20:
+                # Auxiliary Format 1 only applies to an external record whose
+                # Type denotes a function (0x20) and whose SectionNumber is
+                # positive. Anything else is an unrecognized external layout.
+                aux_type = "function-definition"
+                (
+                    tag_index,
+                    total_size,
+                    pointer_to_linenumber,
+                    pointer_to_next_function,
+                    _unused,
+                ) = struct.unpack_from("<IIIIH", data, record_offset)
+                fields.update(
+                    tag_index=tag_index,
+                    total_size=total_size,
+                    pointer_to_linenumber=pointer_to_linenumber,
+                    pointer_to_next_function=pointer_to_next_function,
+                )
+
+        record = CoffAuxRecord(
+            type=aux_type,
+            index=slot_index,
+            raw_data=raw_data,
+            **fields,
+        )
+        return record
+
+    def __coff_file_name(self, data, last_record_offset, aux_count, aux_index):
+        """Reassemble a FILE auxiliary chain into one file name.
+
+        A source file name spans all of the primary record's auxiliary slots;
+        the concatenation is split at the first null. Only the slot of the
+        final auxiliary is needed to locate the whole chain.
+        """
+        first_offset = last_record_offset - aux_index * COFF_SIZEOF_SYMBOL_RECORD
+        chain = bytes(
+            data[
+                first_offset : first_offset
+                + aux_count * COFF_SIZEOF_SYMBOL_RECORD
+            ]
+        )
+        return chain.split(b"\0", 1)[0]
 
     def parse_data_directories(
         self, directories=None, forwarded_exports_only=False, import_dllnames_only=False
