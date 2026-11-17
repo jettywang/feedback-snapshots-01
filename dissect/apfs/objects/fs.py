@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 
     from dissect.apfs.objects.btree_node import BTreeNode
     from dissect.apfs.objects.keybag import VolumeKeybag
+    from dissect.apfs.seal import SealReport
 
 
 class FS(Object):
@@ -241,6 +242,26 @@ class FS(Object):
 
         if self._cipher is None:
             raise Error("Failed to unlock volume with the given password")
+
+    def verify_seal(self, *, trusted_root: bytes | None = None) -> SealReport:
+        """Verify this volume's seal hash chains.
+
+        A valid per-object Fletcher checksum is not sufficient: this walks the
+        parent/child hash chains of the sealed B-trees and anchors the root
+        tree against the on-disk integrity metadata, or against an optional
+        caller-supplied ``trusted_root``. Without a trusted root only internal
+        consistency is reported, and the result never claims boot-chain trust.
+
+        Args:
+            trusted_root: Optional trusted hash of the root tree's root node.
+
+        Returns:
+            A :class:`~dissect.apfs.seal.SealReport` with every node inspected
+            and the layer at which any chain breaks.
+        """
+        from dissect.apfs.seal import verify_volume_seal
+
+        return verify_volume_seal(self, trusted_root=trusted_root)
 
     def cursor(self) -> Cursor:
         """Create a new cursor for the volume's root B-tree."""

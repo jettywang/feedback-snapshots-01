@@ -19,6 +19,31 @@ pip install dissect.apfs
 
 This module is also automatically installed if you install the `dissect` package.
 
+## Sealed volume verification
+
+A sealed APFS volume protects its hashed B-trees with a parent/child hash chain, not with the per-object Fletcher-64
+checksum. Passing a Fletcher checksum therefore does not mean the seal is intact: an attacker who changes a node can
+recompute that checksum, but cannot recompute the parent's stored hash or the root digest.
+
+Use `FS.verify_seal()` (or `dissect.apfs.verify_volume_seal()`) to walk the hash chains of a sealed volume:
+
+```python
+from dissect.apfs import SealStatus
+
+report = volume.verify_seal()
+if report.status == SealStatus.INTERNAL_CONSISTENT:
+    # The on-disk chains are self-consistent, but there was no external trusted root.
+    ...
+
+# Anchor the root tree against a trusted root digest obtained out of band.
+report = volume.verify_seal(trusted_root=root_digest)
+```
+
+Only the four documented algorithms are accepted (SHA-256, SHA-512/256, SHA-384 and SHA-512). The report lists every
+node actually inspected, the algorithm used, the root digest source, and the layer at which any chain breaks. Missing
+nodes or unknown layouts never produce a volume-wide success. A successful report only describes the on-disk data; it
+does not prove that the machine's boot chain trusted the volume.
+
 ## Build and test instructions
 
 This project uses `tox` to build source and wheel distributions. Run the following command from the root folder to build
