@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import stat
+import struct
 import unicodedata
 from functools import cached_property, lru_cache
 from io import BytesIO
@@ -27,6 +28,10 @@ if TYPE_CHECKING:
 
     from dissect.apfs.objects.btree_node import BTreeNode
     from dissect.apfs.objects.keybag import VolumeKeybag
+
+
+_Q = struct.Struct("<Q")
+_I = struct.Struct("<I")
 
 
 class FS(Object):
@@ -656,11 +661,12 @@ class INode:
             name_hash = (
                 _hash_filename(name, self.volume.is_case_insensitive) << c_apfs.J_DREC_HASH_SHIFT
             ) & c_apfs.J_DREC_HASH_MASK
-            # If the volume is case sensitive, we can use the name in the search key for an exact match
-            # Otherwise, we set it to None to ignore it in the comparison
-            name_search = None if self.volume.is_case_insensitive else (name.encode() + b"\x00")
-
-            key = ((self.oid, c_apfs.APFS_TYPE.DIR_REC.value), name_hash, name_search)
+            # On case insensitive volumes the name portion of the search key is ignored, as the final
+            # comparison is done by walking the entire hash bucket. On case sensitive (but normalization
+            # insensitive) volumes we could use an exact name here, but that would only match entries whose
+            # on-disk name has the exact same normalization form as the query. Searching without a name and
+            # walking the bucket lets us match normalization equivalents as well.
+            key = ((self.oid, c_apfs.APFS_TYPE.DIR_REC.value), name_hash, None)
             cmp = cmp_fs_dir_hash
 
         cursor = self.volume.cursor()
@@ -669,24 +675,49 @@ class INode:
         except KeyError:
             raise FileNotFoundError(f"File not found: {name}")
 
-        if not self.volume.is_case_insensitive:
-            # On case sensitive volumes, the search is already exact, so no need to check further
+        if not self.volume.is_case_insensitive and not self.volume.is_normalization_insensitive:
+            # On beta volumes without hashed keys the search is an exact byte match, so no further
+            # verification is needed
             return DirectoryEntry(self.volume, cursor.key(), cursor.value())
 
-        lname = name.casefold()
+        # The hash only narrows the search down to a bucket: multiple (possibly unrelated) names can end up
+        # in the same bucket, either because they are normalization/case equivalents or because of an
+        # actual hash collision. A binary search lands on an arbitrary entry within the bucket, so first move
+        # the cursor back to the first entry of this bucket.
+        bucket_hash = name_hash >> c_apfs.J_DREC_HASH_SHIFT
+        while cursor.prev():
+            raw_key = cursor.key()
+            if len(raw_key) < 12:
+                # The previous record belongs to another key type (e.g. an inode), so the bucket starts at
+                # the entry we moved back from
+                cursor.next()
+                break
+
+            (obj_id_and_type,) = _Q.unpack_from(raw_key)
+            (name_len_and_hash,) = _I.unpack_from(raw_key, 8)
+            entry_oid = obj_id_and_type & c_apfs.OBJ_ID_MASK
+            entry_type = (obj_id_and_type & c_apfs.OBJ_TYPE_MASK) >> c_apfs.OBJ_TYPE_SHIFT
+            entry_hash = (name_len_and_hash & c_apfs.J_DREC_HASH_MASK) >> c_apfs.J_DREC_HASH_SHIFT
+            if entry_oid != self.oid or entry_type != c_apfs.APFS_TYPE.DIR_REC or entry_hash != bucket_hash:
+                cursor.next()
+                break
+
+        # Walk the complete bucket, comparing each entry's name with the same rules used to compute the
+        # hash, and only accept a true equivalent. Entries pointing at another inode's name are never
+        # accepted just because they share the bucket.
+        lookup_name = _normalize_filename(name, self.volume.is_case_insensitive)
         while True:
             try:
                 dirent = DirectoryEntry(self.volume, cursor.key(), cursor.value())
             except Exception:
                 raise FileNotFoundError(f"File not found: {name}")
 
-            # To deal with the possibility of hash collisions, verify the name matches
             oid = dirent.key.hdr.obj_id_and_type & c_apfs.OBJ_ID_MASK
             type = (dirent.key.hdr.obj_id_and_type & c_apfs.OBJ_TYPE_MASK) >> c_apfs.OBJ_TYPE_SHIFT
-            if oid != self.oid or type != c_apfs.APFS_TYPE.DIR_REC:
+            if oid != self.oid or type != c_apfs.APFS_TYPE.DIR_REC or dirent.hash != bucket_hash:
                 raise FileNotFoundError(f"File not found: {name}")
 
-            if lname == dirent.name.casefold():
+            if _normalize_filename(dirent.name, self.volume.is_case_insensitive) == lookup_name:
                 return dirent
 
             if not cursor.next():
@@ -878,9 +909,20 @@ def _read_xfields(data: bytes) -> Iterator[tuple[c_apfs.x_field, bytes]]:
         buf.seek((buf.tell() + 7) & (-8))
 
 
-def _hash_filename(name: str, casefold: bool) -> int:
-    """Hash a filename according to APFS rules."""
+def _normalize_filename(name: str, casefold: bool) -> str:
+    """Normalize a filename according to the volume's APFS comparison rules.
+
+    APFS always compares names in NFD form, and additionally casefolds them on case insensitive volumes.
+    This is the single source of truth used for both hash placement and the final name comparison, so a
+    name that lands in a hash bucket because it is equivalent is also accepted by the bucket walk.
+    """
     normalized = unicodedata.normalize("NFD", name)
     if casefold:
         normalized = normalized.casefold()
+    return normalized
+
+
+def _hash_filename(name: str, casefold: bool) -> int:
+    """Hash a filename according to APFS rules."""
+    normalized = _normalize_filename(name, casefold)
     return crc32c(normalized.encode("utf-32-le")) ^ 0xFFFFFFFF
