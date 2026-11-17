@@ -23,7 +23,18 @@ _ASGIApp = typing.Callable[
     [typing.MutableMapping[str, typing.Any], _Receive, _Send], typing.Awaitable[None]
 ]
 
-__all__ = ["ASGITransport"]
+__all__ = ["ASGIProtocolError", "ASGITransport"]
+
+
+class ASGIProtocolError(RuntimeError):
+    """
+    Raised when an ASGI application sends an invalid sequence of response
+    messages, or returns without completing the response.
+
+    Unlike application exceptions, protocol errors are always raised,
+    regardless of `raise_app_exceptions`, so that an invalid event sequence
+    can never be presented to the client as a complete successful response.
+    """
 
 
 def is_running_trio() -> bool:
@@ -149,14 +160,21 @@ class ASGITransport(AsyncBaseTransport):
             nonlocal status_code, response_headers, response_started
 
             if message["type"] == "http.response.start":
-                assert not response_started
+                if response_started:
+                    raise ASGIProtocolError(
+                        "ASGI app sent multiple 'http.response.start' messages."
+                    )
 
                 status_code = message["status"]
                 response_headers = message.get("headers", [])
                 response_started = True
 
             elif message["type"] == "http.response.body":
-                assert not response_complete.is_set()
+                if response_complete.is_set():
+                    raise ASGIProtocolError(
+                        "ASGI app sent 'http.response.body' "
+                        "after the response was complete."
+                    )
                 body = message.get("body", b"")
                 more_body = message.get("more_body", False)
 
@@ -168,17 +186,27 @@ class ASGITransport(AsyncBaseTransport):
 
         try:
             await self.app(scope, receive, send)
+        except ASGIProtocolError:
+            # Protocol violations are never converted into a response,
+            # even with `raise_app_exceptions=False`.
+            raise
         except Exception:  # noqa: PIE-786
             if self.raise_app_exceptions:
                 raise
-
-            response_complete.set()
-            if status_code is None:
+            if not response_complete.is_set():
+                if response_started:
+                    # Once a response has started we cannot synthesize a 500
+                    # in place of a response that will never complete.
+                    raise
+                response_complete.set()
                 status_code = 500
-            if response_headers is None:
                 response_headers = {}
 
-        assert response_complete.is_set()
+        if not response_complete.is_set():
+            raise ASGIProtocolError(
+                "ASGI app returned without completing the response."
+            )
+
         assert status_code is not None
         assert response_headers is not None
 
