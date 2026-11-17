@@ -1,0 +1,104 @@
+IMAGE A  (65536 bytes = 32 ISO blocks = 128 sectors)
+==============================================================================
+Source structure health:
+  BRVD   type=0 magic=b'CD001' checksum_ok=True
+  catalog magic_ok=True checksum_ok=True catalog_range=bytes 36864..38911 (RBA 18)
+  GPT    primary magic=True hdr_crc=True entry_crc=True
+  MBR    signature_ok=True
+
+Entry -> byte range (all offsets absolute into the same byte stream):
+  El Torito UEFI  RBA=20  vsects=8   -> bytes  40960..45055  = blocks 20..21 sha256=c0c84d5bd4384176...
+  GPT ESP         LBA=80 ..87  -> bytes  40960..45055  = blocks 20..21 sha256=c0c84d5bd4384176...
+  MBR 0xEF        LBA=80  count=8   -> bytes  40960..45055  = blocks 20..21
+
+Range relations (the identity decision is made here, not via hash):
+  ElTorito vs GPT : coincident (same byte range)
+  GPT vs MBR      : coincident (same byte range)
+  ElTorito vs MBR : coincident (same byte range)
+  content hash equal (ElTorito==GPT)? True
+  decision: coincident: one physical blob, three metadata names
+
+Corruption study (mutated copies only; original files untouched):
+  [all] clobber BRVD magic at byte 34817:
+     El Torito locatable = False; GPT ESP still resolves = True
+     => GPT geometry survives; the lost claim is the El Torito provenance, not the bytes
+  [all] corrupt primary GPT header CRC at byte 528:
+     primary header_crc_ok = False; backup header_crc_ok = True
+     backup still maps ESP to bytes 40960..45055
+  [A] flip shared byte 40960: both hashes change at once -> proves shared storage, not merely shared content
+
+IMAGE B  (65536 bytes = 32 ISO blocks = 128 sectors)
+==============================================================================
+Source structure health:
+  BRVD   type=0 magic=b'CD001' checksum_ok=True
+  catalog magic_ok=True checksum_ok=True catalog_range=bytes 36864..38911 (RBA 18)
+  GPT    primary magic=True hdr_crc=True entry_crc=True
+  MBR    signature_ok=True
+
+Entry -> byte range (all offsets absolute into the same byte stream):
+  El Torito UEFI  RBA=20  vsects=8   -> bytes  40960..45055  = blocks 20..21 sha256=c0c84d5bd4384176...
+  GPT ESP         LBA=88 ..95  -> bytes  45056..49151  = blocks 22..23 sha256=c0c84d5bd4384176...
+  MBR 0xEF        LBA=88  count=8   -> bytes  45056..49151  = blocks 22..23
+
+Range relations (the identity decision is made here, not via hash):
+  ElTorito vs GPT : disjoint (independent storage)
+  GPT vs MBR      : coincident (same byte range)
+  ElTorito vs MBR : disjoint (independent storage)
+  content hash equal (ElTorito==GPT)? True
+  decision: duplicate copy: identical bytes in two disjoint ranges
+
+Corruption study (mutated copies only; original files untouched):
+  [B-style] flip byte 45063 (GPT range only):
+     El Torito metadata still parseable       = True
+     El Torito payload bytes unchanged        = True
+     GPT entry_crc_ok (CRC covers entries, not payload) = True
+     GPT range still readable from metadata   = True
+     => disjoint storage proven: damaging one copy leaves the other byte-identical
+  [all] clobber BRVD magic at byte 34817:
+     El Torito locatable = False; GPT ESP still resolves = True
+     => GPT geometry survives; the lost claim is the El Torito provenance, not the bytes
+  [all] corrupt primary GPT header CRC at byte 528:
+     primary header_crc_ok = False; backup header_crc_ok = True
+     backup still maps ESP to bytes 45056..49151
+
+IMAGE C  (65536 bytes = 32 ISO blocks = 128 sectors)
+==============================================================================
+Source structure health:
+  BRVD   type=0 magic=b'CD001' checksum_ok=True
+  catalog magic_ok=True checksum_ok=True catalog_range=bytes 36864..38911 (RBA 18)
+  GPT    primary magic=True hdr_crc=True entry_crc=True
+  MBR    signature_ok=True
+
+Entry -> byte range (all offsets absolute into the same byte stream):
+  El Torito UEFI  RBA=20  vsects=8   -> bytes  40960..45055  = blocks 20..21 sha256=a2d6457e7ccb7018...
+  GPT ESP         LBA=84 ..91  -> bytes  43008..47103  = blocks 21..22 sha256=c1d8e0c31d77be96...
+  MBR 0xEF        LBA=84  count=8   -> bytes  43008..47103  = blocks 21..22
+
+Range relations (the identity decision is made here, not via hash):
+  ElTorito vs GPT : overlap: partial, shared=(43008, 2048)
+  GPT vs MBR      : coincident (same byte range)
+  ElTorito vs MBR : overlap: partial, shared=(43008, 2048)
+  content hash equal (ElTorito==GPT)? False
+  decision: partial overlap: ranges intersect but are not equal
+
+Corruption study (mutated copies only; original files untouched):
+  [all] clobber BRVD magic at byte 34817:
+     El Torito locatable = False; GPT ESP still resolves = True
+     => GPT geometry survives; the lost claim is the El Torito provenance, not the bytes
+  [all] corrupt primary GPT header CRC at byte 528:
+     primary header_crc_ok = False; backup header_crc_ok = True
+     backup still maps ESP to bytes 43008..47103
+  [C] flip overlap byte 43008: one mutation is visible through both entries -> the intersection is shared storage
+
+##############################################################################
+VERDICT MATRIX
+##############################################################################
+case ranges equal?   hash equal?   same entity?
+A    True            True          YES (shared bytes)
+B    False           True          NO
+C    False           False         NO
+
+Files written (recompute with dd/xxd/shasum, no mount needed):
+  /Users/apple/Documents/用户反馈项目/batches/feedback-20261116-backend-security-280-17/prepared/FB-20261116-SEC17-144/workspace/efi_identity_lab/images/hybrid_A.iso
+  /Users/apple/Documents/用户反馈项目/batches/feedback-20261116-backend-security-280-17/prepared/FB-20261116-SEC17-144/workspace/efi_identity_lab/images/hybrid_B.iso
+  /Users/apple/Documents/用户反馈项目/batches/feedback-20261116-backend-security-280-17/prepared/FB-20261116-SEC17-144/workspace/efi_identity_lab/images/hybrid_C.iso
