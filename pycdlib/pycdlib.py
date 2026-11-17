@@ -530,12 +530,17 @@ def _yield_children(rec, rr):
                     # This is a relocated entry.  We want to find the entry this
                     # was relocated to; we do that by following the child_link,
                     # then going up to the parent and finding the entry that
-                    # links to the same one as this one.
+                    # links to the same one as this one.  Only follow the swap
+                    # when the moved record's parent is actually a directory;
+                    # otherwise a corrupt CL could hand back a file record whose
+                    # .children would raise or hide the real subtree.
                     cl_parent = child.rock_ridge.cl_to_moved_dr.parent
-                    for cl_child in cl_parent.children:
-                        if cl_child.rock_ridge is not None and cl_child.rock_ridge.name() == child.rock_ridge.name():
-                            child = cl_child
-                            break
+                    if cl_parent.is_dir():
+                        moved_name = child.rock_ridge.name()
+                        for cl_child in cl_parent.children:
+                            if cl_child.rock_ridge is not None and cl_child.rock_ridge.name() == moved_name:
+                                child = cl_child
+                                break
                     # If we didn't find the relocated entry in the parent of the
                     # moved entry, weird; just yield the one we would have anyway.
 
@@ -569,6 +574,11 @@ def _find_dr_record_by_name(vd, path, encoding):
 
     entry = root_dir_record
 
+    # A corrupt image can make child links point at one another; track the
+    # directory records reached through CL records so such a cycle fails
+    # cleanly instead of looping forever.
+    seen_cl_records = set()  # type: Set[int]
+
     while True:
         child = None
 
@@ -596,10 +606,23 @@ def _find_dr_record_by_name(vd, path, encoding):
             break
 
         if child.rock_ridge is not None and child.rock_ridge.child_link_record_exists():
-            # The rock ridge extension has a child link, so follow it.
+            # The rock ridge extension has a child link, so follow it.  Track
+            # both the placeholder record and the relocated target, so a
+            # self-referential link or a pair of links pointing at each other
+            # is detected on the second visit instead of looping forever.  The
+            # check runs unconditionally after the follow, even when this is
+            # the last component of the requested path.
+            placeholder_id = id(child)
             child = child.rock_ridge.cl_to_moved_dr
             if child is None:
                 break
+            target_id = id(child)
+            if target_id in seen_cl_records or target_id == placeholder_id:
+                raise pycdlibexception.PyCdlibInvalidISO(
+                    'Rock Ridge Child Link records form a loop while looking up %s'
+                    % (path,))
+            seen_cl_records.add(placeholder_id)
+            seen_cl_records.add(target_id)
 
         # We found the last child we are looking for; return it.
         if not splitpath:
@@ -1166,6 +1189,19 @@ class PyCdlib:
         have been so that an ISO whose CE records form a cycle cannot spin us
         forever.
 
+        A CE describes raw media bytes (a logical block, an offset within it,
+        and a byte length), so every reference is validated against the ISO and
+        block geometry before any bytes are parsed: an out-of-range block, an
+        area that spills past its block or the end of the ISO, or a zero-length
+        area means a corrupt image and is rejected with the offending starting
+        location rather than silently feeding adjacent records or padding into
+        the Rock Ridge name.  The visited set is keyed on the physical
+        (block, offset) location rather than the declared length, so a chain
+        that returns to a previously visited area with a different (or bogus)
+        length is still caught.  Sharing one continuation area across distinct
+        directory records is legal and is unaffected: this set is local to a
+        single record's chain.
+
         Args:
             new_record: The directory record whose CE chain to follow.
             iso_file_length: The size of the ISO, used to clamp reads.
@@ -1177,40 +1213,79 @@ class PyCdlib:
             return ''
 
         cdfp = self._cdfp
+        block_size = self.logical_block_size
         ce_record = new_record.rock_ridge.dr_entries.ce_record  # type: Optional[rockridge.RRCERecord]
         orig_pos = cdfp.tell()
-        seen_ce_areas = set()  # type: Set[Tuple[int, int, int]]
-        while ce_record is not None:
-            area = (ce_record.bl_cont_area,
-                    ce_record.offset_cont_area,
-                    ce_record.len_cont_area)
-            if area in seen_ce_areas:
-                raise pycdlibexception.PyCdlibInvalidISO('Rock Ridge Continuation Entries form a loop')
-            seen_ce_areas.add(area)
+        seen_ce_locations = set()  # type: Set[Tuple[int, int]]
+        # A defensive upper bound on the number of links in one record's CE
+        # chain.  Every distinct area occupies at least one byte of the ISO, so
+        # a well-formed chain can never have more links than the image has
+        # bytes; the physical-location loop check below already guarantees
+        # termination, this only caps pathological chains before memory grows.
+        max_ce_links = iso_file_length + 1
+        links_followed = 0
+        try:
+            while ce_record is not None:
+                if links_followed >= max_ce_links:
+                    raise pycdlibexception.PyCdlibInvalidISO(
+                        'Rock Ridge Continuation Entry chain starting at block %d offset %d is too long'
+                        % (ce_record.bl_cont_area, ce_record.offset_cont_area))
+                links_followed += 1
 
-            self._seek_to_extent(ce_record.bl_cont_area)
-            cdfp.seek(ce_record.offset_cont_area, os.SEEK_CUR)
-            con_block = self._read_clamped(ce_record.len_cont_area,
-                                           iso_file_length)
-            new_record.rock_ridge.parse(con_block, False,
-                                        new_record.rock_ridge.bytes_to_skip,
-                                        True, new_record.file_identifier())
-            block = self.pvd.track_rr_ce_entry(ce_record.bl_cont_area,
-                                               ce_record.offset_cont_area,
-                                               ce_record.len_cont_area)
-            new_record.rock_ridge.add_ce_area(block,
-                                              ce_record.offset_cont_area,
-                                              ce_record.len_cont_area)
+                block = ce_record.bl_cont_area
+                offset = ce_record.offset_cont_area
+                length = ce_record.len_cont_area
 
-            # Parsing an area stores any CE it contained in ce_entries; take
-            # it as the next link and clear it so the following area can
-            # carry one of its own, and so that no stale link is left behind
-            # at the end.
-            ce_entries = new_record.rock_ridge.ce_entries
-            ce_record = ce_entries.ce_record if ce_entries is not None else None
-            if ce_entries is not None:
-                ce_entries.ce_record = None
-        cdfp.seek(orig_pos)
+                if length <= 0:
+                    raise pycdlibexception.PyCdlibInvalidISO(
+                        'Rock Ridge Continuation Entry at block %d offset %d has an invalid length %d'
+                        % (block, offset, length))
+                if offset < 0 or offset >= block_size or offset + length > block_size:
+                    raise pycdlibexception.PyCdlibInvalidISO(
+                        'Rock Ridge Continuation Entry at block %d offset %d length %d does not fit inside a %d byte block'
+                        % (block, offset, length, block_size))
+
+                area_start = block * block_size + offset
+                if area_start >= iso_file_length or area_start + length > iso_file_length:
+                    raise pycdlibexception.PyCdlibInvalidISO(
+                        'Rock Ridge Continuation Entry at block %d offset %d length %d extends past the end of the ISO'
+                        % (block, offset, length))
+
+                location = (block, offset)
+                if location in seen_ce_locations:
+                    raise pycdlibexception.PyCdlibInvalidISO(
+                        'Rock Ridge Continuation Entries form a loop at block %d offset %d'
+                        % (block, offset))
+                seen_ce_locations.add(location)
+
+                self._seek_to_extent(block)
+                cdfp.seek(offset, os.SEEK_CUR)
+                con_block = self._read_clamped(length, iso_file_length)
+                if len(con_block) != length:
+                    raise pycdlibexception.PyCdlibInvalidISO(
+                        'Short read of Rock Ridge Continuation Entry at block %d offset %d'
+                        % (block, offset))
+
+                # Track the media range before parsing it, so an area that
+                # overlaps a neighboring record's continuation (which would
+                # otherwise swallow adjacent bytes into this record's name) is
+                # rejected rather than interpreted.
+                tracked_block = self.pvd.track_rr_ce_entry(block, offset, length)
+                new_record.rock_ridge.parse(con_block, False,
+                                            new_record.rock_ridge.bytes_to_skip,
+                                            True, new_record.file_identifier())
+                new_record.rock_ridge.add_ce_area(tracked_block, offset, length)
+
+                # Parsing an area stores any CE it contained in ce_entries; take
+                # it as the next link and clear it so the following area can
+                # carry one of its own, and so that no stale link is left behind
+                # at the end.
+                ce_entries = new_record.rock_ridge.ce_entries
+                ce_record = ce_entries.ce_record if ce_entries is not None else None
+                if ce_entries is not None:
+                    ce_entries.ce_record = None
+        finally:
+            cdfp.seek(orig_pos)
 
         return new_record.rock_ridge.rr_version if new_record.rock_ridge else ''
 
@@ -1467,15 +1542,36 @@ class PyCdlib:
 
                 last_record = new_record
 
+        # CL/PL records name extents, not paths.  A corrupt image can point
+        # either at an extent that holds no real directory (a file, padding,
+        # or something past the end of the image), so resolve each link through
+        # the extent map explicitly instead of indexing it and turning a bad
+        # relocation into an uncaught KeyError.  Both links must resolve to a
+        # directory record; the parent additionally has to be a directory, or
+        # the reconstructed logical hierarchy would gain a bogus parent.
         for pl in parent_links:
-            if pl.rock_ridge is not None:
-                pl.rock_ridge.parent_link = all_extent_to_dr[pl.rock_ridge.parent_link_extent()]
+            if pl.rock_ridge is None:
+                continue
+            parent_extent = pl.rock_ridge.parent_link_extent()
+            parent_dr = all_extent_to_dr.get(parent_extent)
+            if parent_dr is None or not parent_dr.is_dir():
+                raise pycdlibexception.PyCdlibInvalidISO(
+                    'Rock Ridge Parent Link on a directory record points at non-directory extent %d'
+                    % (parent_extent))
+            pl.rock_ridge.parent_link = parent_dr
 
         for cl in child_links:
-            if cl.rock_ridge is not None:
-                cl.rock_ridge.cl_to_moved_dr = all_extent_to_dr[cl.rock_ridge.child_link_extent()]
-                if cl.rock_ridge.cl_to_moved_dr.rock_ridge is not None:
-                    cl.rock_ridge.cl_to_moved_dr.rock_ridge.moved_to_cl_dr = cl
+            if cl.rock_ridge is None:
+                continue
+            child_extent = cl.rock_ridge.child_link_extent()
+            moved_dr = all_extent_to_dr.get(child_extent)
+            if moved_dr is None or not moved_dr.is_dir():
+                raise pycdlibexception.PyCdlibInvalidISO(
+                    'Rock Ridge Child Link points at non-directory extent %d'
+                    % (child_extent))
+            cl.rock_ridge.cl_to_moved_dr = moved_dr
+            if moved_dr.rock_ridge is not None:
+                moved_dr.rock_ridge.moved_to_cl_dr = cl
 
         # If our per-record opportunistic detection set self.rock_ridge but
         # no record carried a Rock Ridge ER record (RRIP_1991A or
@@ -6775,7 +6871,17 @@ class PyCdlib:
                 raise pycdlibexception.PyCdlibInvalidInput('Cannot generate a Rock Ridge path on a non-Rock Ridge ISO')
 
             dr_rec = rec  # type: Optional[dr.DirectoryRecord]
+            # A corrupt Parent Link can point back at a directory already on
+            # the way up, which would loop forever; remember every record the
+            # climb visits and stop on a repeat with a clear error.
+            seen_path_records = set()  # type: Set[int]
             while dr_rec is not None:
+                rec_id = id(dr_rec)
+                if rec_id in seen_path_records:
+                    raise pycdlibexception.PyCdlibInvalidISO(
+                        'Rock Ridge Parent Link records form a loop while building the full path')
+                seen_path_records.add(rec_id)
+
                 next_rec = None
                 if dr_rec.is_root:
                     name = b''

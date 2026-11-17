@@ -3568,7 +3568,7 @@ def test_parse_rr_ce_loop(tmpdir):
     iso = pycdlib.PyCdlib()
     with pytest.raises(pycdlib.pycdlibexception.PyCdlibInvalidISO) as excinfo:
         iso.open(outfile)
-    assert(str(excinfo.value) == 'Rock Ridge Continuation Entries form a loop')
+    assert(str(excinfo.value).startswith('Rock Ridge Continuation Entries form a loop at block'))
 
 def test_parse_udf_file_entry_loop(tmpdir):
     # A directory File Identifier whose ICB points back at an
