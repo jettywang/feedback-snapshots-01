@@ -174,6 +174,19 @@ python scripts/fv_injector.py --guid GUID --injection payload.efi -o patched.rom
 With `-g LABEL` it prints them as a Python dictionary that you can import into IDA
 using Snare's plugins.
 
+**Descriptor permissions.** `scripts/descriptor_permissions.py` prints a
+reviewable report of the regions declared by an Intel flash descriptor and the
+read/write access each master (BIOS, ME, GbE) has to them. Every line cites the
+raw base/limit registers and access masks with their image offsets so each entry
+can be recomputed by hand. Disabled regions, zero-valued registers, out-of-bounds
+ranges, and overlapping declarations are reported distinctly. The report only
+reflects declarations inside the image; it cannot prove the host's runtime write
+protection is in effect.
+
+```sh
+python scripts/descriptor_permissions.py firmware.rom
+```
+
 Run any script with `-h` for its full options.
 
 ## Tested vendors
