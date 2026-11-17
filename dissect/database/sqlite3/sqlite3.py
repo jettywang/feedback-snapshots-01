@@ -137,6 +137,15 @@ class SQLite3:
 
         self.page = lru_cache(256)(self.page)
 
+    @property
+    def auto_vacuum(self) -> bool:
+        """Whether the database has auto-vacuum (and thus pointer map pages) enabled.
+
+        The 4-byte big-endian integer at offset 52 of the database header is non-zero
+        only when auto-vacuum (full or incremental) is enabled.
+        """
+        return self.header.largest_root_btree_page != 0
+
     def __repr__(self) -> str:
         return f"<SQLite3 path={self.path} fh={self.fh} wal={self.wal} checkpoint={bool(self.checkpoint)} pages={self.page_count}>"  # noqa: E501
 
