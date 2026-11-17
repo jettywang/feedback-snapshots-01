@@ -15,6 +15,7 @@ from dissect.util.ts import from_unix, from_unix_ns
 from dissect.apfs.c_apfs import FILESYSTEM_OBJECT_TYPE_MAP, XF_MAP, c_apfs
 from dissect.apfs.cursor import Cursor
 from dissect.apfs.exception import Error, FileNotFoundError, NotADirectoryError, NotASymlinkError
+from dissect.apfs.identity import DEFAULT_MAX_CONTENT_SIZE, build_file_identity, build_identity_view
 from dissect.apfs.objects.base import Object
 from dissect.apfs.objects.btree import BTree
 from dissect.apfs.objects.omap import ObjectMap
@@ -22,9 +23,10 @@ from dissect.apfs.stream import DecmpfsStream, FileStream
 from dissect.apfs.util import cmp_fs, cmp_fs_dir, cmp_fs_dir_hash, parse_fs_object_key
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterable, Iterator
     from datetime import datetime
 
+    from dissect.apfs.identity import FileIdentity, IdentityView
     from dissect.apfs.objects.btree_node import BTreeNode
     from dissect.apfs.objects.keybag import VolumeKeybag
 
@@ -327,6 +329,35 @@ class FS(Object):
                 inode = self.inode(oid)
                 inode._inode_raw = value
                 yield inode
+
+    def identity_view(
+        self,
+        nodes: Iterable[INode] | None = None,
+        *,
+        paths: Iterable[str | int | DirectoryEntry] | None = None,
+        check_content: bool = True,
+        max_content_size: int | None = DEFAULT_MAX_CONTENT_SIZE,
+    ) -> IdentityView:
+        """Build an identity relationship view for this volume.
+
+        The view separates hard links (``SIBLING_LINK`` records), clones and shared data streams
+        (``FILE_EXTENT`` records on different or equal stream IDs) and files that only happen to have equal
+        content. A missing sibling record or unreadable stream is reported as unresolved instead of being
+        inferred from a name or a content hash.
+
+        Args:
+            nodes: Optional inodes to inspect. Defaults to all inodes in the volume.
+            paths: Optional paths, object IDs or directory entries to inspect.
+            check_content: Whether to read file content for equal-content observations.
+            max_content_size: Maximum file size to hash, or ``None`` to hash any size.
+        """
+        return build_identity_view(
+            self,
+            nodes,
+            paths=paths,
+            check_content=check_content,
+            max_content_size=max_content_size,
+        )
 
     def get(self, path: str | int | DirectoryEntry, node: INode | None = None) -> INode:
         """Get an inode by its path, object ID, or directory entry.
@@ -713,6 +744,28 @@ class INode:
             raise Error(f"Symlink {self} does not have SYMLINK_EA_NAME xattr")
 
         return self.xattr[c_apfs.SYMLINK_EA_NAME].open().read().decode().rstrip("\x00")
+
+    def identity(
+        self,
+        *,
+        check_content: bool = True,
+        max_content_size: int | None = DEFAULT_MAX_CONTENT_SIZE,
+    ) -> FileIdentity:
+        """Build identity metadata for this inode.
+
+        The result preserves the volume, inode OID, sibling ID and ``private_id``, the supporting name records,
+        and the actual extent ranges of every data stream.
+
+        Args:
+            check_content: Whether to read and hash the file content as extra (non-identity) evidence.
+            max_content_size: Maximum file size to hash, or ``None`` to hash any size.
+        """
+        return build_file_identity(
+            self.volume,
+            self,
+            check_content=check_content,
+            max_content_size=max_content_size,
+        )
 
     def open(self) -> BufferedStream | DecmpfsStream | FileStream:
         """Open a stream for reading the inode data."""
