@@ -4,6 +4,7 @@ from functools import lru_cache
 from typing import TYPE_CHECKING, Literal
 
 from dissect.btrfs.c_btrfs import c_btrfs
+from dissect.btrfs.exceptions import InvalidLeafError
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -61,6 +62,9 @@ class BTree:
         """
         node = memoryview(self.btrfs._read_node(address))
         header = c_btrfs.btrfs_header(node)
+
+        if not header.level:
+            _validate_leaf(node, header)
 
         return node, header
 
@@ -352,6 +356,54 @@ class Cursor:
 
         self._index = None
         return False
+
+
+def _validate_leaf(node: memoryview, header: c_btrfs.btrfs_header) -> None:
+    """Validate the item table and data layout of a leaf node.
+
+    The item table grows forward from the end of the header while item data grows backwards from the end of the
+    node. An item may not point into the item table, past the end of the node, or overlap the data of another item.
+    Multiple items referencing the exact same byte range are a valid duplicate reference, not an overlap. Empty
+    items (for example orphan items) reference no bytes, so only their start offset is bounded.
+
+    Args:
+        node: The raw leaf node.
+        header: The parsed leaf header.
+    """
+    header_size = len(c_btrfs.btrfs_header)
+    item_size = len(c_btrfs.btrfs_item)
+    table_end = header_size + header.nritems * item_size
+
+    if table_end > len(node):
+        raise InvalidLeafError(f"Item table of {header.nritems} items exceeds node size {len(node)}")
+
+    items = [
+        c_btrfs.btrfs_item(node[header_size + index * item_size : header_size + (index + 1) * item_size])
+        for index in range(header.nritems)
+    ]
+
+    ranges = []
+    for index, item in enumerate(items):
+        start = header_size + item.offset
+        end = start + item.size
+        if end > len(node):
+            raise InvalidLeafError(f"Item {index} data extends past the node: {end} > {len(node)}")
+        if not item.size:
+            continue
+        if start < table_end:
+            raise InvalidLeafError(f"Item {index} data starts in the item table: {start} < {table_end}")
+
+        ranges.append((start, end, index))
+
+    ranges.sort()
+    for previous, current in zip(ranges, ranges[1:]):
+        if current[0] < previous[1] and (current[0], current[1]) != (previous[0], previous[1]):
+            raise InvalidLeafError(f"Item {current[2]} data overlaps item {previous[2]}")
+
+    for index in range(1, header.nritems):
+        previous = items[index - 1].key
+        if _cmp_key(items[index].key, previous.objectid, previous.type, previous.offset) < 0:
+            raise InvalidLeafError(f"Leaf keys are not ordered at item {index}")
 
 
 def _cmp_key(

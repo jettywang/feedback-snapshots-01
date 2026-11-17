@@ -19,3 +19,7 @@ class NotADirectoryError(Error, NotADirectoryError):
 
 class NotASymlinkError(Error):
     pass
+
+
+class InvalidLeafError(Error):
+    """Raised when a leaf node has an invalid item or data layout."""

@@ -4,6 +4,7 @@ from dissect.btrfs.btrfs import Btrfs, INode, Subvolume
 from dissect.btrfs.exceptions import (
     Error,
     FileNotFoundError,
+    InvalidLeafError,
     NotADirectoryError,
     NotASymlinkError,
 )
@@ -13,6 +14,7 @@ __all__ = [
     "Error",
     "FileNotFoundError",
     "INode",
+    "InvalidLeafError",
     "NotADirectoryError",
     "NotASymlinkError",
     "Subvolume",
