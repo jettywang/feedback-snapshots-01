@@ -79,7 +79,13 @@ def build_sections(sections, original, generate_checksum=False):
     data = b""
     if sections:
         start, parsed_size = getattr(sections[-1], "parsed_extent", (None, None))
-        tail = original[start + parsed_size:] if start is not None else b""
+        # A section that claimed past the stream was kept at its start, but
+        # its size reaches past the bytes here. The bytes after it hold the
+        # siblings that were recovered, not a tail to keep.
+        if start is not None and start + parsed_size > len(original):
+            tail = b""
+        else:
+            tail = original[start + parsed_size:] if start is not None else b""
     for i, section in enumerate(sections):
         # Sections return their size and data; volumes and raw objects
         # return only their data.
@@ -96,7 +102,8 @@ def build_sections(sections, original, generate_checksum=False):
         fill = b"\x00" * padding
         # Where the section was parsed from, and its size then.
         start, parsed_size = getattr(section, "parsed_extent", (None, None))
-        if start is not None and size == parsed_size:
+        if start is not None and size == parsed_size and \
+                start + size + padding <= len(original):
             kept = original[start + size:start + size + padding]
             if len(kept) == padding:
                 fill = kept
@@ -480,10 +487,43 @@ class NVARVariableStore(FirmwareVariableStore):
         }
 
 
+# Section streams step by 4 bytes, see EfiSection.process_subsections.
+_SECTION_ALIGN = 4
+
+
+def _resume_offset(view, start, guid):
+    '''Return where the next section after an overlong one starts.
+
+    Only called when a section claims more bytes than the stream holds. The
+    bytes written after it hold its siblings, so the first 4-byte aligned
+    header with a known type, a sane minimum body and an end that fits is
+    taken. None means no plausible header follows, and the parse stops.
+    '''
+    limit = len(view)
+    candidate = start + _SECTION_ALIGN
+    while candidate + 4 <= limit:
+        header = FirmwareFileSystemSection(view[candidate:], guid)
+        if header.valid_header:
+            minimum = (8 if header.large_header else 4) + \
+                header._MIN_BODY_SIZE.get(header.type, 0)
+            if header.size >= minimum and \
+                    header.type in EFI_SECTION_TYPES and \
+                    candidate + header.size <= limit:
+                return candidate
+        candidate += _SECTION_ALIGN
+    return None
+
+
 class EfiSection(FirmwareObject):
     # Immutable so that a subclass which appends without creating its own
     # list fails loudly, rather than sharing children across every instance.
     subsections = ()
+
+    # A wrapper serializes its children into a stream of its own, so a child
+    # that claims past the stream's end can be skipped without losing the
+    # siblings written after it. A plain file's section stream stops instead:
+    # its remaining bytes are the file's own padding or truncated data.
+    _resync_truncated_subsections = False
 
     @property
     def objects(self):
@@ -522,7 +562,23 @@ class EfiSection(FirmwareObject):
                 status = False
             self.subsections.append(subsection)
 
-            subsection_offset += subsection.size
+            # A section that claims more bytes than the stream holds would
+            # otherwise take its following siblings with it. Wrappers hold a
+            # stream their siblings were serialized into, so keep the bad
+            # section and resume at the next aligned header that fits. A
+            # plain section stream stops instead, as before.
+            if subsection_offset + subsection.size > len(self.data) and \
+                    self._resync_truncated_subsections:
+                resume = _resume_offset(view, subsection_offset, self.guid)
+                if resume is None:
+                    break
+                # The bytes written for this section are the ones before the
+                # sibling. Keep their count, or build() would emit the
+                # sibling's bytes a second time.
+                subsection._physical_size = resume - subsection_offset
+                subsection_offset = resume
+            else:
+                subsection_offset += subsection.size
         return status
 
     def build(self, generate_checksum=False, debug=False):
@@ -563,6 +619,7 @@ class EfiSection(FirmwareObject):
 
 class CompressedSection(EfiSection):
     name = None
+    _resync_truncated_subsections = True
 
     ATTR_NOT_COMPRESSED = 0x00
     ATTR_STANDARD_COMPRESSION = 0x01
@@ -734,6 +791,7 @@ class GuidDefinedSection(EfiSection):
 
     struct { UCHAR GUID[16]; short offset; short attrs; }
     '''
+    _resync_truncated_subsections = True
 
     ATTR_PROCESSING_REQUIRED = 0x01
     ATTR_AUTH_STATUS_VALID = 0x02
@@ -1060,7 +1118,12 @@ class FirmwareFileSystemSection(EfiSection):
             data = self.data
         if data == self.data and not generate_checksum:
             # Keep the header as parsed, which may claim more data than the
-            # image held.
+            # image held. A section that claimed past a wrapper's stream was
+            # followed by a sibling at its physical end; only its own bytes
+            # belong to it.
+            physical = getattr(self, "_physical_size", None)
+            if physical is not None and physical < len(self._data):
+                return physical, self._data[:physical]
             return len(self._data), self._data
 
         size = len(data) + 4 # for the EFI_COMMON_SECTION_HEADER size
@@ -1127,7 +1190,13 @@ class FirmwareFileSystemSection(EfiSection):
     def dump(self, parent="", index=0):
         self.path = os.path.join(
             parent, "section%d.%s" % (index, _get_section_type(self.type)[1]))
-        dump_data(self.path, self.data)
+        data = self.data
+        physical = getattr(self, "_physical_size", None)
+        header_size = 8 if self.large_header else 4
+        if physical is not None and physical < len(self._data):
+            # The bytes after the sibling's start belong to the sibling.
+            data = self._data[header_size:physical]
+        dump_data(self.path, data)
 
         if self.parsed_object is not None:
             self.parsed_object.dump(os.path.join(parent, "section%d" % index))

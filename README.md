@@ -176,6 +176,35 @@ using Snare's plugins.
 
 Run any script with `-h` for its full options.
 
+**Nested-section mutations.** `scripts/section_mutations.py` builds a small,
+valid FFS2 volume and a fixed set of variants that change one layer at a
+time. The seed nests sections inside a compressed section and a GUID-defined
+section, with normal and extended-length headers. A change updates the size
+of every parent and the padding between siblings, so a reachable variant is
+still parseable at each level.
+
+```sh
+python scripts/section_mutations.py --list
+python scripts/section_mutations.py --write /tmp/nested-corpus
+python scripts/section_mutations.py --check /tmp/nested-corpus
+```
+
+`--write` emits `seed.fv`, `variants/*.fv`, `manifest.json` and a report.
+The report lists each layer with its offset, declared and actual size, the
+range its parent allows, and the alignment it must use: files advance by 8
+bytes, sections by 4, and an extended section header is 8 bytes. Each layer
+also keeps the seed extent it was encoded from. The corpus is deterministic,
+so a run of `--check` sees the same bytes and the same parse results.
+
+The variants cover growing a section, promoting it to the extended header and
+demoting it back, growing a section in a large file, and changing the fill of
+a section's or a file's padding. Two variants make a section inside a
+compressed or GUID-defined wrapper claim more bytes than the wrapper holds;
+the siblings after it, and the outer sections after the wrapper, are still
+parsed. `section-aligned-as-file` pads a section to the file layer's 8-byte
+alignment, and `--check` reports it as a `wrong-alignment` violation while
+the seed layout keeps every section and its source ranges.
+
 ## Tested vendors
 
 The parser has been tested on BIOS, UEFI, and firmware updates from ASRock, Apple,
