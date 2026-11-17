@@ -2518,6 +2518,24 @@ class PyCdlib:
                                                                                 current_extent,
                                                                                 self.logical_block_size)
 
+    @staticmethod
+    def _check_udf_partition_ref(part_ref_num, what):
+        # type: (int, str) -> None
+        """
+        An internal method to verify that a UDF partition reference points at
+        partition 0, the only partition pycdlib supports.  Silently reading
+        the referenced blocks from partition 0 instead would return the wrong
+        data, so anything else is rejected outright.
+
+        Args:
+            part_ref_num: The partition reference number from the descriptor.
+            what: A human-readable description of the descriptor being checked.
+        Returns:
+            Nothing.
+        """
+        if part_ref_num != 0:
+            raise pycdlibexception.PyCdlibInvalidISO('%s references partition %d, but only partition 0 is supported' % (what, part_ref_num))
+
     def _walk_udf_directories(self, extent_to_inode):
         # type: (Dict[int, inode.Inode]) -> None
         """
@@ -2531,6 +2549,8 @@ class PyCdlib:
         """
         part_start = self.udf_main_descs.partitions[0].part_start_location
 
+        self._check_udf_partition_ref(self.udf_file_set.root_dir_icb.part_ref_num,
+                                      'File Set Descriptor root directory ICB')
         abs_file_entry_extent = part_start + self.udf_file_set.root_dir_icb.log_block_num
         self._seek_to_extent(abs_file_entry_extent)
         icbdata = self._cdfp.read(self.udf_file_set.root_dir_icb.extent_length)
@@ -2554,7 +2574,14 @@ class PyCdlib:
                 continue
 
             for desc in udf_file_entry.alloc_descs:
-                abs_file_ident_extent = part_start + desc.log_block_num
+                self._check_udf_partition_ref(getattr(desc, 'part_ref_num', 0),
+                                              'UDF directory allocation descriptor')
+                if isinstance(desc, udfmod.UDFInlineAD):
+                    # Inline data lives inside the File Entry itself, so the
+                    # logical block number is already an absolute extent.
+                    abs_file_ident_extent = desc.log_block_num
+                else:
+                    abs_file_ident_extent = part_start + desc.log_block_num
                 self._seek_to_extent(abs_file_ident_extent)
                 self._cdfp.seek(desc.offset, 1)
                 data = self._cdfp.read(desc.extent_length)
@@ -2573,6 +2600,8 @@ class PyCdlib:
                         udf_file_entry.track_file_ident_desc(file_ident)
                         continue
 
+                    self._check_udf_partition_ref(file_ident.icb.part_ref_num,
+                                                  'UDF File Identifier ICB')
                     abs_file_entry_extent = part_start + file_ident.icb.log_block_num
                     self._seek_to_extent(abs_file_entry_extent)
                     icbdata = self._cdfp.read(file_ident.icb.extent_length)
@@ -2605,8 +2634,20 @@ class PyCdlib:
                         udf_file_entries.append(next_entry)
                     else:
                         udf_data_length = next_entry.get_data_length()
+                        data_offset = 0
                         if udf_data_length > 0:
-                            abs_file_data_extent = part_start + next_entry.alloc_descs[0].log_block_num
+                            data_desc = next_entry.alloc_descs[0]
+                            self._check_udf_partition_ref(getattr(data_desc, 'part_ref_num', 0),
+                                                          'UDF file allocation descriptor')
+                            if isinstance(data_desc, udfmod.UDFInlineAD):
+                                # Inline data lives inside the File Entry
+                                # itself, so the logical block number is
+                                # already an absolute extent and the data
+                                # starts at a byte offset within it.
+                                abs_file_data_extent = data_desc.log_block_num
+                                data_offset = data_desc.offset
+                            else:
+                                abs_file_data_extent = part_start + data_desc.log_block_num
                         else:
                             abs_file_data_extent = 0
                         if self.eltorito_boot_catalog is not None and abs_file_data_extent == self.eltorito_boot_catalog.extent_location():
@@ -2631,7 +2672,8 @@ class PyCdlib:
                                 ino = inode.Inode()
                                 ino.parse(abs_file_data_extent,
                                           udf_data_length,
-                                          self._cdfp, self.logical_block_size)
+                                          self._cdfp, self.logical_block_size,
+                                          data_offset)
                                 if udf_data_length > 0:
                                     extent_to_inode[abs_file_data_extent] = ino
                                 self.inodes.append(ino)

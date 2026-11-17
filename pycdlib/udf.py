@@ -2266,11 +2266,13 @@ class UDFShortAD:
         if self._initialized:
             raise pycdlibexception.PyCdlibInternalError('UDF Short Allocation descriptor already initialized')
 
-        (self.extent_length,
+        (raw_extent_length,
          self.log_block_num) = struct.unpack_from(self.FMT, data, 0)
 
-        self.extent_length = self.extent_length & 0x3FFFFFFF
-        self.extent_type = (self.extent_length & 0xc0000000) >> 30
+        # The extent type lives in the top two bits of the raw length, so it
+        # must be extracted before masking the length down to 30 bits.
+        self.extent_type = (raw_extent_length & 0xC0000000) >> 30
+        self.extent_length = raw_extent_length & 0x3FFFFFFF
 
         self._initialized = True
 

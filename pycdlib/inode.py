@@ -36,7 +36,7 @@ class Inode:
     __slots__ = ('_initialized', 'new_extent_loc', 'orig_extent_loc',
                  'linked_records', 'data_length', 'manage_fp', 'data_fp',
                  'original_data_location', 'fp_offset', 'boot_info_table',
-                 'num_udf')
+                 'num_udf', 'data_offset')
 
     DATA_ON_ORIGINAL_ISO = 1
     DATA_IN_EXTERNAL_FP = 2
@@ -71,17 +71,21 @@ class Inode:
         self.data_fp = fp
         self.manage_fp = manage_fp
         self.fp_offset = offset
+        self.data_offset = 0
         self.original_data_location = self.DATA_IN_EXTERNAL_FP
 
         self._initialized = True
 
-    def parse(self, extent, length, fp, log_block_size):
-        # type: (int, int, IO[Any], int) -> None
+    def parse(self, extent, length, fp, log_block_size, offset=0):
+        # type: (int, int, IO[Any], int, int) -> None
         """
         Parse an existing Inode.  This just saves off the extent for later use.
 
         Args:
             extent: The original extent that the data lives at.
+            offset: The byte offset of the data within the extent; this is
+                only non-zero for UDF inline data, which lives inside the
+                File Entry descriptor itself.
         Returns:
             Nothing.
         """
@@ -95,6 +99,7 @@ class Inode:
         self.data_fp = fp
         self.manage_fp = False
         self.fp_offset = extent * log_block_size
+        self.data_offset = offset
         self.original_data_location = self.DATA_ON_ORIGINAL_ISO
 
         self._initialized = True
@@ -185,6 +190,7 @@ class Inode:
         self.data_fp = fp
         self.data_length = length
         self.fp_offset = 0
+        self.data_offset = 0
         self.manage_fp = manage_fp
 
 
@@ -207,7 +213,7 @@ class InodeOpenData:
             self.data_fp = self.ino.data_fp
 
         if self.ino.original_data_location == self.ino.DATA_ON_ORIGINAL_ISO:
-            self.data_fp.seek(self.ino.orig_extent_loc * self.logical_block_size)
+            self.data_fp.seek(self.ino.orig_extent_loc * self.logical_block_size + self.ino.data_offset)
         else:
             self.data_fp.seek(self.ino.fp_offset)
 
