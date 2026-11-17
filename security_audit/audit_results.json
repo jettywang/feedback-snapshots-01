@@ -1,0 +1,72 @@
+{
+  "A_auth_valid_status_bit": {
+    "claim_under_test": "authStatus == 'AUTH_VALID' means the section content was cryptographically verified",
+    "bit set, original payload": {
+      "attrs_field": 2,
+      "payload_sha256_first8": "05835dad",
+      "parser_reported_authStatus": "AUTH_VALID"
+    },
+    "bit set, tampered payload": {
+      "attrs_field": 2,
+      "payload_sha256_first8": "a1122008",
+      "parser_reported_authStatus": "AUTH_VALID"
+    },
+    "bit clear, original payload": {
+      "attrs_field": 0,
+      "payload_sha256_first8": "05835dad",
+      "parser_reported_authStatus": "ATTR_UNKNOWN"
+    },
+    "source_of_truth": "uefi_firmware/uefi.py GuidDefinedSection.to_dict()/showinfo(): authStatus is 'AUTH_VALID' iff the 2-byte attrs field in the section header == 0x02 (ATTR_AUTH_STATUS_VALID). No signature, certificate or hash is ever checked."
+  },
+  "B_signed_capsule_guid": {
+    "claim_under_test": "a capsule carrying APTIO_SIGNED_CAPSULE_GUID had its signature verified",
+    "signed GUID, intact ROM": {
+      "parsed_type": "FirmwareCapsule",
+      "process_returned": true,
+      "capsule_guid": "4a3ca68b-7723-48fb-803d-578cc1fec44d",
+      "signature_error_raised": false
+    },
+    "unsigned GUID, same ROM": {
+      "parsed_type": "FirmwareCapsule",
+      "process_returned": true,
+      "capsule_guid": "14eebb90-890a-43db-aed1-5d3c4588a418",
+      "signature_error_raised": false
+    },
+    "signed GUID, tampered ROM": {
+      "parsed_type": "FirmwareCapsule",
+      "process_returned": true,
+      "capsule_guid": "4a3ca68b-7723-48fb-803d-578cc1fec44d",
+      "signature_error_raised": false
+    },
+    "detector_implementation": "misc/checker.py AptioSignedCapsuleTester.match(): data[:16] == GUID bytes, nothing else",
+    "detector_accepts_guid_plus_garbage": true,
+    "source_of_truth": "uefi.py FirmwareCapsule.parse_capsule_header(): the signed and unsigned Aptio GUIDs take the identical code path; the AMI signing block is never located, parsed or verified."
+  },
+  "C_independent_crypto_check": {
+    "signed_byte_range": "capsule[0x40:0x1240] (RomImageOffset..end), 4608 bytes",
+    "trust_material": "caller-supplied certificate (/tmp/claude-501/capsule_audit_yx5dxwt0/audit_cert.pem); self-signed here, i.e. NO real trust anchor. uefi_firmware ships no vendor keys and has no API to accept one.",
+    "openssl_transcript": {
+      "keygen": {
+        "returncode": 0,
+        "output": ""
+      },
+      "selfsigned_cert": {
+        "returncode": 0,
+        "output": ""
+      },
+      "sign_body_sha256": {
+        "returncode": 0,
+        "output": ""
+      },
+      "verify_intact": {
+        "returncode": 0,
+        "output": "Verified OK"
+      },
+      "verify_tampered": {
+        "returncode": 1,
+        "output": "Verification failure\n805DF4F301000000:error:0308010C:digital envelope routines:inner_evp_generic_fetch:unsupported:crypto/evp/evp_fetch.c:476:Global default library context, Algorithm (dgst : 0), Properties (<null>)\n805DF4F301000000:error:02000068:rsa routines:ossl_rsa_verify:bad signature:crypto/rsa/rsa_sign.c:441:\n805DF4F301000000:error:1C880004:Provider routines:rsa_verify_directly:RSA lib:providers/implementations/signature/rsa_sig.c:1072:"
+      }
+    },
+    "conclusion": "math verification is possible only with (1) an explicit byte range, (2) a signature blob located by real parsing, (3) a caller-supplied trust root. None of the three exists in uefi_firmware today."
+  }
+}
