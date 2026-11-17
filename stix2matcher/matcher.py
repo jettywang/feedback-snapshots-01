@@ -20,7 +20,6 @@ import antlr4.error.ErrorListener
 import antlr4.error.Errors
 import dateutil.relativedelta
 import dateutil.tz
-from deepmerge import always_merger
 import six
 from stix2patterns.grammars.STIXPatternListener import STIXPatternListener
 from stix2patterns.grammars.STIXPatternParser import STIXPatternParser
@@ -1106,45 +1105,78 @@ class MatchListener(STIXPatternListener):
         self.__compute_stack = []
 
     def __split_multi_observed_data(self, observed_data_bundles):
+        """
+        Split bundles containing several observed-data SDOs into one bundle
+        per observed-data, each containing only the SCOs referenced by that
+        observation's object_refs property.
+
+        Reference resolution is scoped to the bundle an observed-data came
+        from: a reference must not resolve to an SCO which is only present in
+        some other bundle.  An SCO may be referenced by several observations
+        (either in the same bundle or in different bundles); in that case each
+        observation gets its own bundle containing that SCO.
+        """
         new_bundles = []
-        merged_bundle = {}
+
         for bundle in observed_data_bundles:
-            merged_bundle = always_merger.merge(merged_bundle, bundle)
-
-        observed_data_bundles = [merged_bundle]
-        observed_data_list = []
-        sco_data_map = {}
-        if 'objects' not in merged_bundle:
-            raise MatcherException(
-                "STIX v2.1 bundle object must have 'objects' key")
-
-        for sco in merged_bundle['objects']:
-            if sco['type'] == "observed-data":
-                observed_data_list.append(sco)
-            else:
-                sco_data_map[sco['id']] = sco
-
-        new_observed_data_scos = []
-        for observed_data in observed_data_list:
-            new_observed_data_scos = [observed_data]
-            if 'object_refs' not in observed_data:
+            if 'objects' not in bundle:
                 raise MatcherException(
-                    "STIX v2.1 observed-data object must have 'object_refs' key")
-            observed_scos = self.__extract_referenced_scos_for_observed_data(observed_data['object_refs'], sco_data_map)
-            new_observed_data_scos.extend(observed_scos)
-            # make a shallow copy
-            new_bundle = merged_bundle.copy()
-            new_bundle['objects'] = new_observed_data_scos
-            new_bundles.append(new_bundle)
+                    "STIX v2.1 bundle object must have 'objects' key")
+
+            observed_data_list = []
+            sco_data_map = {}
+            seen_objects = {}
+
+            for sco in bundle['objects']:
+                object_id = sco.get('id')
+
+                if object_id is not None:
+                    if object_id in seen_objects:
+                        if seen_objects[object_id] != sco:
+                            raise MatcherException(
+                                "Conflicting STIX v2.1 objects with the same id "
+                                "in one bundle: {}".format(object_id))
+                        # An identical duplicate object contributes nothing
+                        # new; skip it so it can't duplicate an observation.
+                        continue
+                    seen_objects[object_id] = sco
+
+                if sco['type'] == "observed-data":
+                    observed_data_list.append(sco)
+                elif object_id is not None:
+                    sco_data_map[object_id] = sco
+                # SCOs without an id cannot be referenced by object_refs and
+                # therefore are not part of any observation.
+
+            for observed_data in observed_data_list:
+                if 'object_refs' not in observed_data:
+                    raise MatcherException(
+                        "STIX v2.1 observed-data object must have 'object_refs' key")
+                observed_scos = self.__extract_referenced_scos_for_observed_data(
+                    observed_data['object_refs'], sco_data_map)
+                # make a shallow copy so the source bundle isn't mutated
+                new_bundle = bundle.copy()
+                new_bundle['objects'] = [observed_data] + observed_scos
+                new_bundles.append(new_bundle)
 
         return new_bundles
 
     def __extract_referenced_scos_for_observed_data(self, object_refs, sco_data_map):
         scos = []
+        seen_refs = set()
 
         for ref in object_refs:
+            # A repeated reference still denotes the same SCO; including it
+            # twice would put a duplicate object into the split bundle.
+            if ref in seen_refs:
+                continue
+            seen_refs.add(ref)
+
             if ref in sco_data_map:
                 scos.append(sco_data_map[ref])
+            # Unresolved references are deliberately ignored: object_refs is
+            # the complete set of SCOs which make up this observation, so a
+            # missing referent must not be borrowed from another observation.
 
         return scos
 
