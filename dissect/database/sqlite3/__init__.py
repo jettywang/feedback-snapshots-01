@@ -8,6 +8,12 @@ from dissect.database.sqlite3.exception import (
     NoCellData,
     NoWriteAheadLog,
 )
+from dissect.database.sqlite3.residual import (
+    ResidualCandidate,
+    ResidualScan,
+    UnexplainedBytes,
+    scan_residuals,
+)
 from dissect.database.sqlite3.sqlite3 import WAL, Column, Row, SQLite3, Table
 
 __all__ = [
@@ -19,7 +25,11 @@ __all__ = [
     "InvalidSQL",
     "NoCellData",
     "NoWriteAheadLog",
+    "ResidualCandidate",
+    "ResidualScan",
     "Row",
     "SQLite3",
     "Table",
+    "UnexplainedBytes",
+    "scan_residuals",
 ]

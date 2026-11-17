@@ -14,6 +14,7 @@ from dissect.database.sqlite3.exception import (
     InvalidPageType,
     NoCellData,
 )
+from dissect.database.sqlite3.residual import scan_residuals
 from dissect.database.sqlite3.util import parse_table_columns_constraints
 from dissect.database.sqlite3.wal import WAL
 
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
 
     from typing_extensions import Self
 
+    from dissect.database.sqlite3.residual import ResidualScan
     from dissect.database.sqlite3.wal import Checkpoint
 
 ENCODING = {
@@ -247,6 +249,24 @@ class SQLite3:
     def cells(self) -> Iterator[Cell]:
         for page in self.pages():
             yield from page.cells()
+
+    def residuals(self) -> ResidualScan:
+        """Scan unallocated space for residual record candidates.
+
+        This is a separate, read-only entry point. It does not change what
+        :meth:`tables`, :class:`Table` or :class:`Row` return, and it never writes
+        to the database file. Candidates found on freelist pages are marked as
+        such; a matching table is exposed only through ``schema_guess``.
+
+        Returns:
+            A :class:`~dissect.database.sqlite3.residual.ResidualScan` with
+            residual candidates and unexplained unallocated byte ranges.
+
+        References:
+            - https://sqlite.org/fileformat2.html#freelist
+            - https://sqlite.org/fileformat2.html#cell_content_area
+        """
+        return scan_residuals(self)
 
 
 class Column:
