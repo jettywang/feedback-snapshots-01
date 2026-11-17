@@ -1,0 +1,93 @@
+#!/usr/bin/env python3
+
+# Copyright (C) 2026  Chris Lalancette <clalancette@gmail.com>
+
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public
+# License as published by the Free Software Foundation;
+# version 2.1 of the License.
+
+# This library is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# Lesser General Public License for more details.
+
+# You should have received a copy of the GNU Lesser General Public
+# License along with this library; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+
+"""
+The main code for the pycdlib-namespace-diff tool, which produces a read-only
+report of how the ISO9660, Joliet, Rock Ridge, and UDF namespaces of a hybrid
+ISO map paths to on-disk data.  It never selects a "best" namespace: every
+disagreement, and every namespace that fails to enumerate, is shown.
+"""
+
+import argparse
+import sys
+from base64 import b64encode as _b64encode
+
+import pycdlib
+from pycdlib import namespacediff
+
+
+def _to_jsonable(value):
+    """Turn report dataclasses/sets into JSON-compatible structures."""
+    if isinstance(value, (namespacediff.NamespaceDiffReport,
+                          namespacediff.NamespaceResult,
+                          namespacediff.NamespaceEntry,
+                          namespacediff.RecordLocation,
+                          namespacediff.DataRange,
+                          namespacediff.PathComparison)):
+        return {slot: _to_jsonable(getattr(value, slot))
+                for slot in value.__slots__
+                if not slot.startswith('_')}
+    if isinstance(value, dict):
+        return {key: _to_jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_jsonable(item) for item in value]
+    if isinstance(value, set):
+        return sorted(_to_jsonable(item) for item in value)
+    if isinstance(value, bytes):
+        return {'encoding': 'base64', 'data': _b64encode(value).decode('ascii')}
+    return value
+
+
+def render_json(report):
+    """Render a report as a JSON string."""
+    import json
+    return json.dumps(_to_jsonable(report), indent=2, sort_keys=True)
+
+
+def main():
+    """The command-line entry point."""
+    parser = argparse.ArgumentParser(
+        description='Read-only report of how the ISO9660, Joliet, Rock Ridge, '
+                    'and UDF namespaces in an ISO map paths to data.')
+    parser.add_argument('iso_path', help='Path to the ISO image to inspect')
+    parser.add_argument('--json', action='store_true',
+                        help='Emit the report as JSON instead of text')
+    args = parser.parse_args()
+
+    iso = pycdlib.PyCdlib()
+    try:
+        iso.open(args.iso_path)
+    except Exception as exc:  # noqa: BLE001 - report, don't raise a traceback
+        print('Could not open %s: %s: %s'
+              % (args.iso_path, type(exc).__name__, exc), file=sys.stderr)
+        return 1
+
+    report = namespacediff.build_report(iso)
+    if args.json:
+        print(render_json(report))
+    else:
+        print(namespacediff.render_text(report))
+    iso.close()
+
+    # A namespace failing to enumerate is a real finding, not a clean success.
+    return 2 if any(result.error is not None
+                    for result in report.namespaces.values()) else 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())

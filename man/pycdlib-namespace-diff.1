@@ -1,0 +1,48 @@
+.TH PYCDLIB-NAMESPACE-DIFF 1 "Nov 2026" "pycdlib-namespace-diff"
+
+.SH NAME
+pycdlib-namespace-diff - read-only report comparing the ISO9660, Joliet, Rock Ridge, and UDF namespaces in an ISO
+
+.SH SYNOPSIS
+.B pycdlib-namespace-diff [\-\-json] <iso-file>
+
+.SH DESCRIPTION
+A hybrid ISO can carry up to four independent views of the same medium: the
+original ISO9660 namespace, the Joliet namespace, the Rock Ridge namespace,
+and (when present) a UDF namespace.  A path that is spelled identically in two
+of these namespaces does not necessarily resolve to the same on-disk bytes.
+This tool walks each namespace separately and produces a read-only report that
+records, for every entry, its original on-disk name, the location of its name
+record (a directory record or UDF File Identifier Descriptor), and the data
+extent range(s) the name points at.
+
+The report correlates the views on their display paths and on the underlying
+inode they resolve to.  It distinguishes hard links (several names for one
+allocation) from independent copies that happen to hold byte-identical
+content, and flags paths whose names resolve to different payloads.  Each
+finding states whether the difference comes from the name mapping or from the
+data source.  No namespace is treated as authoritative, so disagreements are
+never hidden by selecting a "best" namespace.
+
+If one namespace cannot be enumerated, the failure is recorded and the
+findings from the namespaces that still work are reported unchanged.
+
+.SH OPTIONS
+.TP
+.B \-\-json
+Emit the report as JSON instead of the default human-readable text.
+
+.SH EXIT STATUS
+.TP
+.B 0
+The report was produced and every present namespace enumerated without error.
+.TP
+.B 1
+The ISO could not be opened.
+.TP
+.B 2
+The report was produced, but at least one namespace failed to enumerate; the
+other namespaces are still reported.
+
+.SH SEE ALSO
+pycdlib-explorer(1), pycdlib-extract-files(1), pycdlib-genisoimage(1)
