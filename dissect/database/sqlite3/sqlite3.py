@@ -543,19 +543,31 @@ class Cell:
                 result.append(local_buf[:-4])
 
                 overflow_page = c_sqlite3.uint32(local_buf[-4:])
-                overflow_size = self.size - local_size
+                remaining = self.size - local_size
+                visited = set()
 
                 while overflow_page:
-                    # page_size is the total page size, including the 4 bytes
-                    # for the next overflow page in front of the page data.
-                    # overflow_size is the size of the page data without the
-                    # extra 4 bytes for the next overflow page, so it needs to
-                    # be added.
-                    data_size = min(overflow_size + 4, self.page.sqlite.usable_page_size)
-                    page_buf = self.page.sqlite.raw_page(overflow_page)[:data_size]
+                    if overflow_page in visited:
+                        raise InvalidDatabase("Overflow page chain contains a loop")
+                    if not 1 <= overflow_page <= self.page.sqlite.page_count:
+                        raise InvalidDatabase("Overflow page number exceeds boundaries")
+                    visited.add(overflow_page)
+                    if remaining <= 0:
+                        raise InvalidDatabase("Overflow page chain is longer than the declared payload size")
+
+                    # The first 4 bytes of an overflow page hold the next page
+                    # number, the rest is payload. Advance the remaining payload
+                    # length on every hop and short read the final page so we
+                    # never consume bytes beyond the declared payload size.
+                    chunk_size = min(remaining, self.page.sqlite.usable_page_size - 4)
+                    page_buf = self.page.sqlite.raw_page(overflow_page)[: chunk_size + 4]
 
                     overflow_page = c_sqlite3.uint32(page_buf[:4])
                     result.append(page_buf[4:])
+                    remaining -= chunk_size
+
+                if remaining:
+                    raise InvalidDatabase("Overflow page chain ended before all payload was read")
 
                 buf = b"".join(result)
 
