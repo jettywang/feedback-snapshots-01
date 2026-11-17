@@ -141,6 +141,52 @@ URL('http://httpbin.org/headers')
 
 For a list of all available client parameters, see the [`Client`](../api.md#client) API reference.
 
+## Header provenance auditing
+
+Security-sensitive integrations, such as signing backends, sometimes need to
+confirm that a sensitive header like `Authorization` or `Host` originates from
+exactly one allowed input, rather than being silently merged or overridden.
+
+Clients accept an optional `header_audit` policy that tracks the provenance of
+every raw header pair across client defaults, request-level headers,
+automatically populated defaults, the authentication flow, and redirect
+rebuilds:
+
+```python
+policy = httpx.HeaderAuditPolicy(
+    # `Authorization` may only be applied by the authentication flow.
+    {"Authorization": "auth"},
+    # Duplicates must be declared explicitly. Any sensitive header that
+    # appears more than once in the raw headers and is not listed here
+    # is a violation.
+    allow_duplicates=[],
+    # "reject" raises `httpx.HeaderAuditError` before the request is sent.
+    # "report" only makes the report available on the request.
+    on_violation="reject",
+)
+client = httpx.Client(header_audit=policy)
+```
+
+The audit operates on the raw `(name, value)` pairs that are sent on the wire.
+Comma-merged values such as `request.headers["authorization"]` are never used
+to determine uniqueness, since merging hides duplicates.
+
+The resulting report is available as `request.header_audit`, including within
+transport handlers, and its `entries` correspond one-to-one with
+`request.headers.raw`. Header pairs that were removed along the way, such as
+`Authorization` being stripped on a cross-origin redirect, are recorded in
+`report.removals`.
+
+```python
+response = client.get("https://example.com")
+report = response.request.header_audit
+for entry in report.entries:
+    print(entry.name, entry.value, entry.source)
+```
+
+Auditing is disabled by default, and does not change how requests are sent
+unless a policy is configured.
+
 ---
 
 ## Request instances

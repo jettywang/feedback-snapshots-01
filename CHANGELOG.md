@@ -13,6 +13,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 
 * Expose `FunctionAuth` from the public API. (#3699)
+* Add optional header provenance auditing via `Client(..., header_audit=httpx.HeaderAuditPolicy(...))`, tracking the origin of raw request headers across client defaults, request headers, authentication flows and redirect rebuilds, with reject-before-send enforcement.
 
 ## 0.28.1 (6th December, 2024)
 

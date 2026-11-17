@@ -5,6 +5,7 @@ from ._client import *
 from ._config import *
 from ._content import *
 from ._exceptions import *
+from ._header_audit import *
 from ._models import *
 from ._status_codes import *
 from ._transports import *
@@ -53,7 +54,14 @@ __all__ = [
     "FunctionAuth",
     "get",
     "head",
+    "HeaderAuditEntry",
+    "HeaderAuditError",
+    "HeaderAuditOverride",
+    "HeaderAuditPolicy",
+    "HeaderAuditRemoval",
+    "HeaderAuditReport",
     "Headers",
+    "HeaderSource",
     "HTTPError",
     "HTTPStatusError",
     "HTTPTransport",

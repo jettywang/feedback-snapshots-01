@@ -21,11 +21,13 @@ from ._config import (
 )
 from ._decoders import SUPPORTED_DECODERS
 from ._exceptions import (
+    HeaderAuditError,
     InvalidURL,
     RemoteProtocolError,
     TooManyRedirects,
     request_context,
 )
+from ._header_audit import HeaderAuditPolicy, HeaderAuditTrail, HeaderSource
 from ._models import Cookies, Headers, Request, Response
 from ._status_codes import codes
 from ._transports.base import AsyncBaseTransport, BaseTransport
@@ -200,6 +202,7 @@ class BaseClient:
         base_url: URL | str = "",
         trust_env: bool = True,
         default_encoding: str | typing.Callable[[bytes], str] = "utf-8",
+        header_audit: HeaderAuditPolicy | None = None,
     ) -> None:
         event_hooks = {} if event_hooks is None else event_hooks
 
@@ -218,6 +221,7 @@ class BaseClient:
         }
         self._trust_env = trust_env
         self._default_encoding = default_encoding
+        self._header_audit_policy = header_audit
         self._state = ClientState.UNOPENED
 
     @property
@@ -375,7 +379,12 @@ class BaseClient:
                 else Timeout(timeout)
             )
             extensions = dict(**extensions, timeout=timeout.as_dict())
-        return Request(
+        audit_trail: HeaderAuditTrail | None = None
+        if self._header_audit_policy is not None:
+            audit_trail = HeaderAuditTrail()
+            audit_trail.record(self.headers.raw, HeaderSource.CLIENT)
+            audit_trail.record(Headers(headers).raw, HeaderSource.REQUEST)
+        request = Request(
             method,
             url,
             content=content,
@@ -387,6 +396,10 @@ class BaseClient:
             cookies=cookies,
             extensions=extensions,
         )
+        if audit_trail is not None:
+            audit_trail.record(request.headers.raw, HeaderSource.DEFAULT)
+            request._header_audit_trail = audit_trail
+        return request
 
     def _merge_url(self, url: URL | str) -> URL:
         """
@@ -482,7 +495,7 @@ class BaseClient:
         headers = self._redirect_headers(request, url, method)
         stream = self._redirect_stream(request, method)
         cookies = Cookies(self.cookies)
-        return Request(
+        redirect_request = Request(
             method=method,
             url=url,
             headers=headers,
@@ -490,6 +503,8 @@ class BaseClient:
             stream=stream,
             extensions=request.extensions,
         )
+        self._propagate_header_audit(request, redirect_request, HeaderSource.REDIRECT)
+        return redirect_request
 
     def _redirect_method(self, request: Request, response: Response) -> str:
         """
@@ -590,6 +605,43 @@ class BaseClient:
             )
             request.extensions = dict(**request.extensions, timeout=timeout.as_dict())
 
+    def _propagate_header_audit(
+        self, request: Request, next_request: Request, source: str
+    ) -> None:
+        """
+        Carry the header audit trail over to a follow-up request, recording
+        any header changes made by the given pipeline stage.
+        """
+        if self._header_audit_policy is None:
+            return
+        trail = request._header_audit_trail
+        if trail is None:
+            trail = HeaderAuditTrail()
+            trail.record(request.headers.raw, HeaderSource.REQUEST)
+        next_request._header_audit_trail = trail
+        trail.record(next_request.headers.raw, source)
+
+    def _enforce_header_audit(self, request: Request) -> None:
+        """
+        Finalize the header audit trail for a request that is about to be
+        sent, attach the report to it, and apply the audit policy.
+        """
+        policy = self._header_audit_policy
+        if policy is None:
+            return
+        trail = request._header_audit_trail
+        if trail is None:
+            trail = HeaderAuditTrail()
+            trail.record(request.headers.raw, HeaderSource.REQUEST)
+        report = trail.finalize(request.headers.raw)
+        request._header_audit_report = report
+        violations = policy.evaluate(report)
+        if violations and policy.on_violation == "reject":
+            raise HeaderAuditError(
+                "Header audit failed: " + "; ".join(violations),
+                violations=violations,
+            )
+
 
 class Client(BaseClient):
     """
@@ -658,6 +710,7 @@ class Client(BaseClient):
         base_url: URL | str = "",
         transport: BaseTransport | None = None,
         default_encoding: str | typing.Callable[[bytes], str] = "utf-8",
+        header_audit: HeaderAuditPolicy | None = None,
     ) -> None:
         super().__init__(
             auth=auth,
@@ -671,6 +724,7 @@ class Client(BaseClient):
             base_url=base_url,
             trust_env=trust_env,
             default_encoding=default_encoding,
+            header_audit=header_audit,
         )
 
         if http2:
@@ -936,7 +990,9 @@ class Client(BaseClient):
     ) -> Response:
         auth_flow = auth.sync_auth_flow(request)
         try:
-            request = next(auth_flow)
+            next_request = next(auth_flow)
+            self._propagate_header_audit(request, next_request, HeaderSource.AUTH)
+            request = next_request
 
             while True:
                 response = self._send_handling_redirects(
@@ -952,6 +1008,9 @@ class Client(BaseClient):
 
                     response.history = list(history)
                     response.read()
+                    self._propagate_header_audit(
+                        request, next_request, HeaderSource.AUTH
+                    )
                     request = next_request
                     history.append(response)
 
@@ -1009,6 +1068,8 @@ class Client(BaseClient):
             raise RuntimeError(
                 "Attempted to send an async request with a sync Client instance."
             )
+
+        self._enforce_header_audit(request)
 
         with request_context(request=request):
             response = transport.handle_request(request)
@@ -1372,6 +1433,7 @@ class AsyncClient(BaseClient):
         transport: AsyncBaseTransport | None = None,
         trust_env: bool = True,
         default_encoding: str | typing.Callable[[bytes], str] = "utf-8",
+        header_audit: HeaderAuditPolicy | None = None,
     ) -> None:
         super().__init__(
             auth=auth,
@@ -1385,6 +1447,7 @@ class AsyncClient(BaseClient):
             base_url=base_url,
             trust_env=trust_env,
             default_encoding=default_encoding,
+            header_audit=header_audit,
         )
 
         if http2:
@@ -1651,7 +1714,9 @@ class AsyncClient(BaseClient):
     ) -> Response:
         auth_flow = auth.async_auth_flow(request)
         try:
-            request = await auth_flow.__anext__()
+            next_request = await auth_flow.__anext__()
+            self._propagate_header_audit(request, next_request, HeaderSource.AUTH)
+            request = next_request
 
             while True:
                 response = await self._send_handling_redirects(
@@ -1667,6 +1732,9 @@ class AsyncClient(BaseClient):
 
                     response.history = list(history)
                     await response.aread()
+                    self._propagate_header_audit(
+                        request, next_request, HeaderSource.AUTH
+                    )
                     request = next_request
                     history.append(response)
 
@@ -1725,6 +1793,8 @@ class AsyncClient(BaseClient):
             raise RuntimeError(
                 "Attempted to send a sync request with an AsyncClient instance."
             )
+
+        self._enforce_header_audit(request)
 
         with request_context(request=request):
             response = await transport.handle_async_request(request)

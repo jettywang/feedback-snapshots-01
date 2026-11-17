@@ -21,6 +21,7 @@ Our exception hierarchy:
       - UnsupportedProtocol
     + DecodingError
     + TooManyRedirects
+  x HeaderAuditError
   x HTTPStatusError
 * InvalidURL
 * CookieConflict
@@ -45,6 +46,7 @@ __all__ = [
     "ConnectTimeout",
     "CookieConflict",
     "DecodingError",
+    "HeaderAuditError",
     "HTTPError",
     "HTTPStatusError",
     "InvalidURL",
@@ -253,6 +255,19 @@ class TooManyRedirects(RequestError):
 
 
 # Client errors
+
+
+class HeaderAuditError(HTTPError):
+    """
+    A header provenance audit policy rejected the request.
+
+    Raised before the request is sent when a client is configured with
+    a `HeaderAuditPolicy` using `on_violation="reject"`.
+    """
+
+    def __init__(self, message: str, *, violations: list[str]) -> None:
+        super().__init__(message)
+        self.violations = violations
 
 
 class HTTPStatusError(HTTPError):

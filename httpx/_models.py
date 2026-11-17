@@ -48,6 +48,9 @@ from ._types import (
 from ._urls import URL
 from ._utils import to_bytes_or_str, to_str
 
+if typing.TYPE_CHECKING:  # pragma: no cover
+    from ._header_audit import HeaderAuditReport, HeaderAuditTrail
+
 __all__ = ["Cookies", "Headers", "Request", "Response"]
 
 SENSITIVE_HEADERS = {"authorization", "proxy-authorization"}
@@ -399,6 +402,8 @@ class Request:
         self.url = URL(url) if params is None else URL(url, params=params)
         self.headers = Headers(headers)
         self.extensions = {} if extensions is None else dict(extensions)
+        self._header_audit_trail: HeaderAuditTrail | None = None
+        self._header_audit_report: HeaderAuditReport | None = None
 
         if cookies:
             Cookies(cookies).set_cookie_header(self)
@@ -464,6 +469,16 @@ class Request:
         if not hasattr(self, "_content"):
             raise RequestNotRead()
         return self._content
+
+    @property
+    def header_audit(self) -> HeaderAuditReport | None:
+        """
+        The header provenance audit report for this request.
+
+        Only populated when the client was configured with a
+        `HeaderAuditPolicy`. Returns `None` otherwise.
+        """
+        return self._header_audit_report
 
     def read(self) -> bytes:
         """
