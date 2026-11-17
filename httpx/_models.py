@@ -21,6 +21,7 @@ from ._decoders import (
     TextChunker,
     TextDecoder,
 )
+from ._digest import DigestScope, DigestVerifier
 from ._exceptions import (
     CookieConflict,
     HTTPStatusError,
@@ -543,6 +544,14 @@ class Response:
         self.is_closed = False
         self.is_stream_consumed = False
 
+        # Raw, pre-content-decoding bytes, retained only when the response is
+        # loaded from an in-memory body.
+        self._raw_content: bytes | None = None
+
+        # Active digest verifiers, notified if the response is closed early.
+        self._digest_verifiers: list[DigestVerifier] = []
+        self._stream_complete = False
+
         self.default_encoding = default_encoding
 
         if stream is None:
@@ -551,6 +560,7 @@ class Response:
             self.stream = stream
             if isinstance(stream, ByteStream):
                 # Load the response body, except for streaming content.
+                self._raw_content = stream._stream
                 self.read()
         else:
             # There's an important distinction between `Response(content=...)`,
@@ -863,7 +873,14 @@ class Response:
         return {
             name: value
             for name, value in self.__dict__.items()
-            if name not in ["extensions", "stream", "is_closed", "_decoder"]
+            if name
+            not in [
+                "extensions",
+                "stream",
+                "is_closed",
+                "_decoder",
+                "_digest_verifiers",
+            ]
         }
 
     def __setstate__(self, state: dict[str, typing.Any]) -> None:
@@ -872,6 +889,8 @@ class Response:
         self.is_closed = True
         self.extensions = {}
         self.stream = UnattachedStream()
+        self._digest_verifiers = []
+        self._stream_complete = True
 
     def read(self) -> bytes:
         """
@@ -880,6 +899,45 @@ class Response:
         if not hasattr(self, "_content"):
             self._content = b"".join(self.iter_bytes())
         return self._content
+
+    def verify_digest(
+        self,
+        expected_digest: str | bytes,
+        *,
+        scope: DigestScope | str,
+        algorithm: str | None = None,
+        raise_on_mismatch: bool = True,
+    ) -> DigestVerifier:
+        """
+        Return an optional verifier for a caller supplied response digest.
+
+        `scope="raw"` covers the bytes of the encoded body as received on the
+        wire. `scope="decoded"` covers the body after `Content-Encoding`
+        decoding. The digest value is trusted only because the caller provides
+        it; HTTPX does not treat `Content-Length`, `Content-Digest` or any
+        other header as an authenticated digest.
+
+        Consume the body through the returned verifier. Its status remains
+        `PENDING` until the complete promised range has been consumed and
+        compared. Cancelled, truncated or partially consumed bodies become
+        `INCOMPLETE`, and decode failures become `ERROR`; none of these can be
+        reported as verified.
+
+        For a streaming response, the verifier must be the only consumer.
+        Use its iterators or `read()`/`aread()`.
+        """
+        verifier = DigestVerifier(
+            self,
+            expected_digest,
+            scope=scope,
+            algorithm=algorithm,
+            raise_on_mismatch=raise_on_mismatch,
+        )
+        self._digest_verifiers = [
+            item for item in self._digest_verifiers if item.pending
+        ]
+        self._digest_verifiers.append(verifier)
+        return verifier
 
     def iter_bytes(self, chunk_size: int | None = None) -> typing.Iterator[bytes]:
         """
@@ -956,6 +1014,7 @@ class Response:
         for chunk in chunker.flush():
             yield chunk
 
+        self._stream_complete = True
         self.close()
 
     def close(self) -> None:
@@ -968,6 +1027,10 @@ class Response:
 
         if not self.is_closed:
             self.is_closed = True
+            if not self._stream_complete:
+                for verifier in self._digest_verifiers:
+                    verifier._response_closed()
+                self._digest_verifiers = []
             with request_context(request=self._request):
                 self.stream.close()
 
@@ -1051,15 +1114,22 @@ class Response:
         self._num_bytes_downloaded = 0
         chunker = ByteChunker(chunk_size=chunk_size)
 
-        with request_context(request=self._request):
-            async for raw_stream_bytes in self.stream:
-                self._num_bytes_downloaded += len(raw_stream_bytes)
-                for chunk in chunker.decode(raw_stream_bytes):
-                    yield chunk
+        stream = self.stream.__aiter__()
+        try:
+            with request_context(request=self._request):
+                async for raw_stream_bytes in stream:
+                    self._num_bytes_downloaded += len(raw_stream_bytes)
+                    for chunk in chunker.decode(raw_stream_bytes):
+                        yield chunk
+        finally:
+            aclose = getattr(stream, "aclose", None)
+            if aclose is not None:
+                await aclose()
 
         for chunk in chunker.flush():
             yield chunk
 
+        self._stream_complete = True
         await self.aclose()
 
     async def aclose(self) -> None:
@@ -1072,6 +1142,10 @@ class Response:
 
         if not self.is_closed:
             self.is_closed = True
+            if not self._stream_complete:
+                for verifier in self._digest_verifiers:
+                    verifier._response_closed()
+                self._digest_verifiers = []
             with request_context(request=self._request):
                 await self.stream.aclose()
 

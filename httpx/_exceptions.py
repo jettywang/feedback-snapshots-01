@@ -24,6 +24,9 @@ Our exception hierarchy:
   x HTTPStatusError
 * InvalidURL
 * CookieConflict
+* DigestError
+  x DigestIncompleteError
+  x DigestMismatchError
 * StreamError
   x StreamConsumed
   x StreamClosed
@@ -45,6 +48,9 @@ __all__ = [
     "ConnectTimeout",
     "CookieConflict",
     "DecodingError",
+    "DigestError",
+    "DigestIncompleteError",
+    "DigestMismatchError",
     "HTTPError",
     "HTTPStatusError",
     "InvalidURL",
@@ -286,6 +292,31 @@ class CookieConflict(Exception):
 
     def __init__(self, message: str) -> None:
         super().__init__(message)
+
+
+# Response content digest verification errors...
+
+
+class DigestError(ValueError):
+    """
+    The caller supplied an invalid digest, algorithm, or scope.
+    """
+
+
+class DigestIncompleteError(RequestError):
+    """
+    The response content was not fully verified.
+
+    This may occur when the stream was cancelled, truncated, or when the
+    available decoded content did not cover the complete promised range.
+    """
+
+
+class DigestMismatchError(RequestError):
+    """
+    The response content was fully consumed, but did not match the caller
+    supplied digest.
+    """
 
 
 # Stream exceptions...

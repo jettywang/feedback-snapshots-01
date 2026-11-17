@@ -4,6 +4,7 @@ from ._auth import *
 from ._client import *
 from ._config import *
 from ._content import *
+from ._digest import *
 from ._exceptions import *
 from ._models import *
 from ._status_codes import *
@@ -50,6 +51,12 @@ __all__ = [
     "DecodingError",
     "delete",
     "DigestAuth",
+    "DigestError",
+    "DigestIncompleteError",
+    "DigestMismatchError",
+    "DigestScope",
+    "DigestStatus",
+    "DigestVerifier",
     "FunctionAuth",
     "get",
     "head",

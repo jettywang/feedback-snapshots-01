@@ -103,6 +103,8 @@ be decoded for you. If `brotlipy` is installed, then the `brotli` response
 encoding will be supported. If `zstandard` is installed, then `zstd`
 response encodings will also be supported.
 
+For an optional check that the response body matches a caller supplied digest, see [Response Digests](advanced/digests.md).
+
 For example, to create an image from binary data returned by a request, you can use the following code:
 
 ```pycon

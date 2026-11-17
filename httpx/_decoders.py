@@ -40,6 +40,16 @@ class ContentDecoder:
     def flush(self) -> bytes:
         raise NotImplementedError()  # pragma: no cover
 
+    def is_complete(self) -> bool:
+        """
+        Return `True` if the complete encoded body has been seen.
+
+        This is used by digest verification to distinguish a fully received
+        encoded body from a truncated one that happened to decode without
+        raising an error.
+        """
+        return True
+
 
 class IdentityDecoder(ContentDecoder):
     """
@@ -62,11 +72,13 @@ class DeflateDecoder(ContentDecoder):
 
     def __init__(self) -> None:
         self.first_attempt = True
+        self.seen_data = False
         self.decompressor = zlib.decompressobj()
 
     def decode(self, data: bytes) -> bytes:
         was_first_attempt = self.first_attempt
         self.first_attempt = False
+        self.seen_data = True
         try:
             return self.decompressor.decompress(data)
         except zlib.error as exc:
@@ -81,6 +93,9 @@ class DeflateDecoder(ContentDecoder):
         except zlib.error as exc:  # pragma: no cover
             raise DecodingError(str(exc)) from exc
 
+    def is_complete(self) -> bool:
+        return not self.seen_data or self.decompressor.eof
+
 
 class GZipDecoder(ContentDecoder):
     """
@@ -91,8 +106,10 @@ class GZipDecoder(ContentDecoder):
 
     def __init__(self) -> None:
         self.decompressor = zlib.decompressobj(zlib.MAX_WBITS | 16)
+        self.seen_data = False
 
     def decode(self, data: bytes) -> bytes:
+        self.seen_data = True
         try:
             return self.decompressor.decompress(data)
         except zlib.error as exc:
@@ -103,6 +120,9 @@ class GZipDecoder(ContentDecoder):
             return self.decompressor.flush()
         except zlib.error as exc:  # pragma: no cover
             raise DecodingError(str(exc)) from exc
+
+    def is_complete(self) -> bool:
+        return not self.seen_data or self.decompressor.eof
 
 
 class BrotliDecoder(ContentDecoder):
@@ -157,6 +177,11 @@ class BrotliDecoder(ContentDecoder):
         except brotli.error as exc:  # pragma: no cover
             raise DecodingError(str(exc)) from exc
 
+    def is_complete(self) -> bool:
+        if not self.seen_data:
+            return True
+        return bool(getattr(self.decompressor, "is_finished", lambda: True)())
+
 
 class ZStandardDecoder(ContentDecoder):
     """
@@ -199,6 +224,9 @@ class ZStandardDecoder(ContentDecoder):
             raise DecodingError("Zstandard data is incomplete")  # pragma: no cover
         return bytes(ret)
 
+    def is_complete(self) -> bool:
+        return not self.seen_data or self.decompressor.eof
+
 
 class MultiDecoder(ContentDecoder):
     """
@@ -223,6 +251,9 @@ class MultiDecoder(ContentDecoder):
         for child in self.children:
             data = child.decode(data) + child.flush()
         return data
+
+    def is_complete(self) -> bool:
+        return all(child.is_complete() for child in self.children)
 
 
 class ByteChunker:

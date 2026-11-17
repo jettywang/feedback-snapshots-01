@@ -73,6 +73,7 @@
 * `def .raise_for_status()` - **Response**
 * `def .json()` - **Any**
 * `def .read()` - **bytes**
+* `def .verify_digest(digest, scope=...)` - **DigestVerifier**
 * `def .iter_raw([chunk_size])` - **bytes iterator**
 * `def .iter_bytes([chunk_size])` - **bytes iterator**
 * `def .iter_text([chunk_size])` - **text iterator**
@@ -86,6 +87,30 @@
 * `def .aiter_lines()` - **async text iterator**
 * `def .aclose()` - **None**
 * `def .anext()` - **Response**
+
+## `DigestVerifier`
+
+*Verifies a response body against a caller supplied digest.*
+
+* `.status` - **DigestStatus**
+* `.verified` - **bool**
+* `.pending` - **bool**
+* `.failed` - **bool**
+* `.error` - **RequestError | None**
+* `.algorithm` - **str**
+* `.expected_digest` - **str**
+* `.actual_digest` - **str | None**
+* `def .require_verified()` - **None**
+* `def .read()` - **bytes**
+* `def .iter_bytes([chunk_size])` - **bytes iterator**
+* `def .read_raw()` - **bytes**
+* `def .iter_raw([chunk_size])` - **bytes iterator**
+* `def .abort()` - **None**
+* `def .aread()` - **bytes**
+* `def .aiter_bytes([chunk_size])` - **async bytes iterator**
+* `def .aread_raw()` - **bytes**
+* `def .aiter_raw([chunk_size])` - **async bytes iterator**
+* `def .aclose()` - **None**
 
 ## `Request`
 

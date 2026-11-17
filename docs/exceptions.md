@@ -29,6 +29,9 @@ For an overview of how to work with HTTPX exceptions, see [Exceptions (Quickstar
     * HTTPStatusError
 * InvalidURL
 * CookieConflict
+* DigestError
+    * DigestIncompleteError
+    * DigestMismatchError
 * StreamError
     * StreamConsumed
     * ResponseNotRead
@@ -106,6 +109,15 @@ For an overview of how to work with HTTPX exceptions, see [Exceptions (Quickstar
     :docstring:
 
 ::: httpx.CookieConflict
+    :docstring:
+
+::: httpx.DigestError
+    :docstring:
+
+::: httpx.DigestIncompleteError
+    :docstring:
+
+::: httpx.DigestMismatchError
     :docstring:
 
 ::: httpx.StreamError
