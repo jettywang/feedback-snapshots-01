@@ -52,6 +52,31 @@ DIFF_AREA_TABLE_ENTRY_UNKNOWN_80 = 0x80 # A regular entry with an unknown flag.
 ShadowCopyInformation = namedtuple('ShadowCopyInformation', [ 'stack_position', 'timestamp', 'store_guid', 'volume_size' ])
 LocationDescriptionItems = namedtuple('LocationDescriptionItems', [ 'volume_offset', 'store_offset', 'size' ])
 OnDiskTableEntry = namedtuple('OnDiskTableEntry', [ 'original_volume_offset', 'data_block_offset_in_store', 'data_block_volume_offset', 'flags', 'allocation_bitmap' ])
+ForwarderChainItem = namedtuple('ForwarderChainItem', [ 'store_guid', 'stack_position', 'offset', 'do_forward_lookup', 'ignore_overlay_entries' ])
+
+class ForwarderPartialBlocks(object):
+	"""This class is used to keep 512-byte blocks determined by overlay entries before a forwarder chain failed."""
+
+	def __init__(self, store_guid, stack_position, offset, allocation_bitmap, offsets):
+		self.store_guid = store_guid
+		self.stack_position = stack_position
+		self.offset = offset
+		self.allocation_bitmap = allocation_bitmap
+		self.offsets = list(offsets)
+
+	def determined_offsets(self):
+		"""Get and return a list of (block index, offset) tuples for the 512-byte blocks set in the allocation bitmap."""
+
+		items = []
+
+		for i in range(0, 32):
+			if (self.allocation_bitmap >> i) & 1 > 0 and i < len(self.offsets):
+				items.append((i, self.offsets[i]))
+
+		return items
+
+	def __repr__(self):
+		return 'ForwarderPartialBlocks(store_guid: {}, stack_position: {}, offset: {}, allocation_bitmap: 0x{:X}, determined: {})'.format(self.store_guid, self.stack_position, self.offset, self.allocation_bitmap, self.determined_offsets())
 
 class ShadowCopyException(Exception):
 	"""This is a top-level exception for this module."""
@@ -75,6 +100,55 @@ class ShadowCopyNotFoundException(ShadowCopyException):
 	"""This exception is raised when a shadow copy is not found."""
 
 	pass
+
+class ForwarderChainException(ShadowCopyException):
+	"""This exception is raised when a forwarder chain cannot be resolved.
+
+	The 'chain' attribute contains the stores and offsets visited while resolving the chain
+	(as a list of ForwarderChainItem objects), in the order they were visited.
+	The last item describes the state where the resolution failed.
+	The 'partial_blocks' attribute contains the 512-byte blocks already determined by overlay
+	entries (as a ForwarderPartialBlocks object), or None. If several stores used overlays,
+	the one closest to the original request is kept here and all of them are available
+	in 'partial_blocks_all'.
+	"""
+
+	def __init__(self, value, chain = None):
+		super(ForwarderChainException, self).__init__(value)
+		self.chain = list(chain) if chain is not None else []
+		self.partial_blocks = None
+		self.partial_blocks_all = []
+
+	def determined_offsets(self):
+		"""Get and return a list of (store GUID, stack position, offset, block index, block offset) tuples.
+
+		These are the 512-byte blocks already determined by overlay entries before the chain failed.
+		"""
+
+		items = []
+
+		for partial_blocks in self.partial_blocks_all:
+			for block_index, block_offset in partial_blocks.determined_offsets():
+				items.append((partial_blocks.store_guid, partial_blocks.stack_position, partial_blocks.offset, block_index, block_offset))
+
+		return items
+
+	def __str__(self):
+		value = self._value
+		determined = self.determined_offsets()
+
+		if len(determined) > 0:
+			value = '{}; blocks determined before the failure: {}'.format(value, determined)
+
+		return repr(value)
+
+class _ForwarderContext(object):
+	"""An internal state shared while following a forwarder chain across stores."""
+
+	def __init__(self):
+		self.path = []
+		self.active = set()
+		self.partial_blocks = []
 
 class ShadowBlockException(ShadowCopyException):
 	"""This exception is raised when a shadow block is invalid."""
@@ -971,15 +1045,129 @@ class ShadowParser(object):
 		else:
 			return False
 
+	def _get_forwarder_store_identity(self):
+		"""Get and return an identity of the current store (a tuple with the store GUID and stack position)."""
+
+		cbi2 = getattr(self, 'current_cbi2', None)
+		if cbi2 is None:
+			return (None, None)
+
+		try:
+			return (str(cbi2.get_store_guid()), cbi2.get_stack_position())
+		except Exception:
+			return (None, None)
+
+	def _get_forwarder_state_key(self, offset, ignore_overlay_entries, do_forward_lookup):
+		"""Get and return a key describing a forwarder resolution state (a store, an offset and its mode)."""
+
+		store_guid, stack_position = self._get_forwarder_store_identity()
+		if store_guid is None: # Use the object identity when the store metadata is not available.
+			store_guid = ('object', id(self))
+
+		return (store_guid, stack_position, offset, bool(do_forward_lookup), bool(ignore_overlay_entries))
+
+	def _format_forwarder_chain(self, chain):
+		"""Format a forwarder chain (a list of ForwarderChainItem objects) for an error message."""
+
+		parts = []
+
+		for step, item in enumerate(chain, 1):
+			store_guid = item.store_guid if item.store_guid is not None else '(unknown)'
+			stack_position = item.stack_position if item.stack_position is not None else '(unknown)'
+
+			parts.append('step {}: store {} (stack position {}), offset {} (0x{:X}), forward lookup: {}, ignore overlays: {}'.format(step, store_guid, stack_position, item.offset, item.offset, item.do_forward_lookup, item.ignore_overlay_entries))
+
+		if len(parts) == 0:
+			return '(no stores visited)'
+
+		return ' -> '.join(parts)
+
+	def _record_forwarder_partial_blocks(self, context, offset, allocation_bitmap, overlay_offsets):
+		"""Record the 512-byte blocks determined by overlay entries (used internally)."""
+
+		if allocation_bitmap == 0:
+			return
+
+		store_guid, stack_position = self._get_forwarder_store_identity()
+		offsets = [ overlay_offsets.get(i) for i in range(0, 32) ]
+
+		for existing in context.partial_blocks:
+			if existing.store_guid == store_guid and existing.stack_position == stack_position and \
+			 existing.offset == offset and existing.allocation_bitmap == allocation_bitmap:
+				return
+
+		context.partial_blocks.append(ForwarderPartialBlocks(store_guid, stack_position, offset, allocation_bitmap, offsets))
+
+	def _make_forwarder_chain_exception(self, context, offset, ignore_overlay_entries, do_forward_lookup, reason, partial_blocks = None):
+		"""Create a ForwarderChainException describing the current state and the chain leading to it."""
+
+		store_guid, stack_position = self._get_forwarder_store_identity()
+		item = ForwarderChainItem(store_guid, stack_position, offset, bool(do_forward_lookup), bool(ignore_overlay_entries))
+
+		chain = list(context.path)
+		if len(chain) == 0 or chain[-1] != item:
+			chain.append(item)
+
+		value = 'Cannot resolve a forwarder chain ({}), stores and offsets: {}'.format(reason, self._format_forwarder_chain(chain))
+
+		exception = ForwarderChainException(value, chain)
+
+		if partial_blocks is None and len(context.partial_blocks) > 0:
+			partial_blocks = context.partial_blocks[0]
+
+		exception.partial_blocks = partial_blocks
+		exception.partial_blocks_all = list(context.partial_blocks)
+
+		return exception
+
 	def translate_exact_offset(self, offset, ignore_overlay_entries = False, do_forward_lookup = False):
 		"""Translate a given aligned volume offset of a data block to a list of offsets describing the same data block in a shadow copy, this list is then returned.
 		The list is empty if a given volume offset is not found. Each offset in the list points to a 512-byte block. The offset can be None for a 512-byte block filled with null bytes.
 		If the 'ignore_overlay_entries' argument is True, ignore data from overlays (used internally when switching to the next store from the current one).
 		If the 'do_forward_lookup' argument is True, do the forward lookup (used internally).
+		If a forwarder chain is broken (a cycle without progress or a missing next store), a ForwarderChainException is raised.
 		"""
+
+		return self._translate_exact_offset(offset, ignore_overlay_entries, do_forward_lookup, _ForwarderContext())
+
+	def _translate_exact_offset(self, offset, ignore_overlay_entries, do_forward_lookup, forward_context):
+		"""Translate an offset while tracking the forwarder resolution state (used internally)."""
+
+		if offset % 0x4000 != 0:
+			raise ValueError('Invalid offset: {}'.format(offset))
+
+		if self.volume_size is not None and offset >= self.volume_size:
+			raise ValueError('Offset too large: {} >= {}'.format(offset, self.volume_size))
+
+		if not self.shadow_selected:
+			raise ValueError('No shadow copy selected')
+
+		if offset >= self.current_volume_size and self.volume_size is not None and self.current_volume_size > self.volume_size:
+			# If the volume was resized and the original offset is too large for the new size, give up.
+			return []
+
+		state_key = self._get_forwarder_state_key(offset, ignore_overlay_entries, do_forward_lookup)
+		if state_key in forward_context.active: # The same store, target, forward and overlay modes: no progress.
+			raise self._make_forwarder_chain_exception(forward_context, offset, ignore_overlay_entries, do_forward_lookup, 'repeated state without progress')
+
+		store_guid, stack_position = self._get_forwarder_store_identity()
+		forward_context.active.add(state_key)
+		forward_context.path.append(ForwarderChainItem(store_guid, stack_position, offset, bool(do_forward_lookup), bool(ignore_overlay_entries)))
+
+		try:
+			return self._translate_exact_offset_unchecked(offset, ignore_overlay_entries, do_forward_lookup, forward_context)
+		finally:
+			forward_context.active.discard(state_key)
+			forward_context.path.pop()
+
+	def _translate_exact_offset_unchecked(self, offset, ignore_overlay_entries, do_forward_lookup, forward_context):
+		"""Translate an offset (the actual resolution logic)."""
 
 		def lookup_in_next_store(offset, do_forward_lookup):
 			if self.current_next_parser is None:
+				if do_forward_lookup: # A forwarder target cannot be resolved using the current volume.
+					raise self._make_forwarder_chain_exception(forward_context, offset, ignore_overlay_entries, do_forward_lookup, 'the next store is missing')
+
 				if not self.check_bitmap(offset): # Return the original offsets of data blocks.
 					offsets = []
 
@@ -995,14 +1183,21 @@ class ShadowParser(object):
 
 				return offsets
 
-			return self.current_next_parser.translate_exact_offset(offset, True, do_forward_lookup)
+			return self.current_next_parser._translate_exact_offset(offset, True, do_forward_lookup, forward_context)
 
 		def can_switch_to_next_store(offset):
 			next_parser = self.current_next_parser
 			if next_parser is None:
 				return 2 # Switch to the original volume (there is no next store).
 
+			parsers_seen = set()
+
 			while next_parser is not None:
+				if id(next_parser) in parsers_seen: # A corrupt store chain: stop instead of looping forever.
+					break
+
+				parsers_seen.add(id(next_parser))
+
 				if offset in next_parser.current_diff_area_index.keys():
 					pos = next_parser.current_diff_area_index[offset]
 
@@ -1024,19 +1219,6 @@ class ShadowParser(object):
 
 			return 0 # No switch to the next store.
 
-		if offset % 0x4000 != 0:
-			raise ValueError('Invalid offset: {}'.format(offset))
-
-		if self.volume_size is not None and offset >= self.volume_size:
-			raise ValueError('Offset too large: {} >= {}'.format(offset, self.volume_size))
-
-		if not self.shadow_selected:
-			raise ValueError('No shadow copy selected')
-
-		if offset >= self.current_volume_size and self.volume_size is not None and self.current_volume_size > self.volume_size:
-			# If the volume was resized and the original offset is too large for the new size, give up.
-			return []
-
 		new_offsets = []
 
 		forwarder_entry_found = False
@@ -1050,6 +1232,7 @@ class ShadowParser(object):
 			pos = self.current_diff_area_index[offset]
 
 			cumulative_allocation_bitmap = 0
+			overlay_offsets = dict()
 
 			while True:
 				try:
@@ -1074,6 +1257,14 @@ class ShadowParser(object):
 					overlay_entry_found = True
 
 					if not ignore_overlay_entries:
+						cumulative_allocation_bitmap |= table_entry.allocation_bitmap # Extend the cumulative allocation bitmap.
+
+						for i in range(0, 32):
+							if (table_entry.allocation_bitmap >> i) & 1 > 0: # Save a determined 512-byte block.
+								overlay_offsets[i] = new_offset + i * 512
+
+						self._record_forwarder_partial_blocks(forward_context, offset, cumulative_allocation_bitmap, overlay_offsets)
+
 						if len(new_offsets) == 0: # Fill the list with offsets.
 							if switch_mode == 1: # Use offsets from the next store.
 								new_offsets = lookup_in_next_store(offset, False)
@@ -1086,8 +1277,6 @@ class ShadowParser(object):
 								else: # Use the original offsets.
 									for i in range(0, 32):
 										new_offsets.append(offset + i * 512)
-
-						cumulative_allocation_bitmap |= table_entry.allocation_bitmap # Extend the cumulative allocation bitmap.
 
 						for i in range(0, 32):
 							if (table_entry.allocation_bitmap >> i) & 1 > 0: # Overwrite an existing (used) 512-byte block.
@@ -1109,6 +1298,7 @@ class ShadowParser(object):
 		if forwarder_entry_found and not regular_entry_found:
 			if overlay_entry_found and not ignore_overlay_entries: # Offsets from the forward lookup should be used partially.
 				forward_offsets = lookup_in_next_store(forward_offset, True)
+
 				for i in range(0, 32):
 					if (cumulative_allocation_bitmap >> i) & 1 == 0: # Overwrite a block marked as unused.
 						new_offsets[i] = forward_offsets[i]
@@ -1124,7 +1314,7 @@ class ShadowParser(object):
 			return [ None ] * 32
 
 		if len(new_offsets) == 0: # Switch to the next store (or to the original volume).
-			return lookup_in_next_store(offset, False)
+			return lookup_in_next_store(offset, do_forward_lookup)
 
 		return new_offsets
 
@@ -1565,10 +1755,49 @@ class ShadowParserTwoVolumes(ShadowParser):
 		If the 'use_storage_volume' item is True, read data from a storage volume (instead of the original one).
 		If the 'ignore_overlay_entries' argument is True, ignore data from overlays (used internally when switching to the next store from the current one).
 		If the 'do_forward_lookup' argument is True, do the forward lookup (used internally).
+		If a forwarder chain is broken (a cycle without progress or a missing next store), a ForwarderChainException is raised.
 		"""
+
+		return self._translate_exact_offset(offset, ignore_overlay_entries, do_forward_lookup, _ForwarderContext())
+
+	def _translate_exact_offset(self, offset, ignore_overlay_entries, do_forward_lookup, forward_context):
+		"""Translate an offset while tracking the forwarder resolution state (used internally)."""
+
+		if offset % 0x4000 != 0:
+			raise ValueError('Invalid offset: {}'.format(offset))
+
+		if self.volume_size is not None and offset >= self.volume_size:
+			raise ValueError('Offset too large: {} >= {}'.format(offset, self.volume_size))
+
+		if not self.shadow_selected:
+			raise ValueError('No shadow copy selected')
+
+		if offset >= self.current_volume_size and self.volume_size is not None and self.current_volume_size > self.volume_size:
+			# If the volume was resized and the original offset is too large for the new size, give up.
+			return []
+
+		state_key = self._get_forwarder_state_key(offset, ignore_overlay_entries, do_forward_lookup)
+		if state_key in forward_context.active: # The same store, target, forward and overlay modes: no progress.
+			raise self._make_forwarder_chain_exception(forward_context, offset, ignore_overlay_entries, do_forward_lookup, 'repeated state without progress')
+
+		store_guid, stack_position = self._get_forwarder_store_identity()
+		forward_context.active.add(state_key)
+		forward_context.path.append(ForwarderChainItem(store_guid, stack_position, offset, bool(do_forward_lookup), bool(ignore_overlay_entries)))
+
+		try:
+			return self._translate_exact_offset_unchecked(offset, ignore_overlay_entries, do_forward_lookup, forward_context)
+		finally:
+			forward_context.active.discard(state_key)
+			forward_context.path.pop()
+
+	def _translate_exact_offset_unchecked(self, offset, ignore_overlay_entries, do_forward_lookup, forward_context):
+		"""Translate an offset (the actual resolution logic)."""
 
 		def lookup_in_next_store(offset, do_forward_lookup):
 			if self.current_next_parser is None:
+				if do_forward_lookup: # A forwarder target cannot be resolved using the current volume.
+					raise self._make_forwarder_chain_exception(forward_context, offset, ignore_overlay_entries, do_forward_lookup, 'the next store is missing')
+
 				if not self.check_bitmap(offset): # Return the original offsets of data blocks.
 					offsets = []
 
@@ -1584,14 +1813,21 @@ class ShadowParserTwoVolumes(ShadowParser):
 
 				return offsets
 
-			return self.current_next_parser.translate_exact_offset(offset, True, do_forward_lookup)
+			return self.current_next_parser._translate_exact_offset(offset, True, do_forward_lookup, forward_context)
 
 		def can_switch_to_next_store(offset):
 			next_parser = self.current_next_parser
 			if next_parser is None:
 				return 2 # Switch to the original volume (there is no next store).
 
+			parsers_seen = set()
+
 			while next_parser is not None:
+				if id(next_parser) in parsers_seen: # A corrupt store chain: stop instead of looping forever.
+					break
+
+				parsers_seen.add(id(next_parser))
+
 				if offset in next_parser.current_diff_area_index.keys():
 					pos = next_parser.current_diff_area_index[offset]
 
@@ -1613,19 +1849,6 @@ class ShadowParserTwoVolumes(ShadowParser):
 
 			return 0 # No switch to the next store.
 
-		if offset % 0x4000 != 0:
-			raise ValueError('Invalid offset: {}'.format(offset))
-
-		if self.volume_size is not None and offset >= self.volume_size:
-			raise ValueError('Offset too large: {} >= {}'.format(offset, self.volume_size))
-
-		if not self.shadow_selected:
-			raise ValueError('No shadow copy selected')
-
-		if offset >= self.current_volume_size and self.volume_size is not None and self.current_volume_size > self.volume_size:
-			# If the volume was resized and the original offset is too large for the new size, give up.
-			return []
-
 		new_offsets = []
 
 		forwarder_entry_found = False
@@ -1639,6 +1862,7 @@ class ShadowParserTwoVolumes(ShadowParser):
 			pos = self.current_diff_area_index[offset]
 
 			cumulative_allocation_bitmap = 0
+			overlay_offsets = dict()
 
 			while True:
 				try:
@@ -1663,6 +1887,14 @@ class ShadowParserTwoVolumes(ShadowParser):
 					overlay_entry_found = True
 
 					if not ignore_overlay_entries:
+						cumulative_allocation_bitmap |= table_entry.allocation_bitmap # Extend the cumulative allocation bitmap.
+
+						for i in range(0, 32):
+							if (table_entry.allocation_bitmap >> i) & 1 > 0: # Save a determined 512-byte block.
+								overlay_offsets[i] = (True, new_offset + i * 512)
+
+						self._record_forwarder_partial_blocks(forward_context, offset, cumulative_allocation_bitmap, overlay_offsets)
+
 						if len(new_offsets) == 0: # Fill the list with offsets.
 							if switch_mode == 1: # Use offsets from the next store.
 								new_offsets = lookup_in_next_store(offset, False)
@@ -1675,8 +1907,6 @@ class ShadowParserTwoVolumes(ShadowParser):
 								else: # Use the original offsets.
 									for i in range(0, 32):
 										new_offsets.append((False, offset + i * 512))
-
-						cumulative_allocation_bitmap |= table_entry.allocation_bitmap # Extend the cumulative allocation bitmap.
 
 						for i in range(0, 32):
 							if (table_entry.allocation_bitmap >> i) & 1 > 0: # Overwrite an existing (used) 512-byte block.
@@ -1698,6 +1928,7 @@ class ShadowParserTwoVolumes(ShadowParser):
 		if forwarder_entry_found and not regular_entry_found:
 			if overlay_entry_found and not ignore_overlay_entries: # Offsets from the forward lookup should be used partially.
 				forward_offsets = lookup_in_next_store(forward_offset, True)
+
 				for i in range(0, 32):
 					if (cumulative_allocation_bitmap >> i) & 1 == 0: # Overwrite a block marked as unused.
 						new_offsets[i] = forward_offsets[i]
@@ -1713,7 +1944,7 @@ class ShadowParserTwoVolumes(ShadowParser):
 			return [ (None, None) ] * 32
 
 		if len(new_offsets) == 0: # Switch to the next store (or to the original volume).
-			return lookup_in_next_store(offset, False)
+			return lookup_in_next_store(offset, do_forward_lookup)
 
 		return new_offsets
 

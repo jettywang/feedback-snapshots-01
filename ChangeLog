@@ -1,6 +1,7 @@
 Version: 1.1.20
 
 Improve handling of unusual FAT volumes.
+Detect and report broken forwarder chains in shadow copies (instead of looping forever or silently using the current volume).
 
 ---
 

@@ -13,6 +13,7 @@ import io
 import gzip
 import tarfile
 import pickle
+import struct
 from dfir_ntfs import MFT, WSL, USN, Attributes, LogFile, BootSector, ShadowCopy, PartitionTable, MoveTable
 from dfir_ntfs.addons import FAT, exFAT
 
@@ -2981,6 +2982,241 @@ def test_shadow_parser_file_like():
 
 	f.close()
 
+def _build_synthetic_vss_volume(stores, data_blocks = None):
+	"""Build a synthetic local-storage VSS volume (as a BytesIO object).
+
+	Each store is a dict: { 'stack': int, 'guid': UUID, 'entries': [ (original, target, data_volume_offset, flags, bitmap) ], 'flags': int }.
+	The 'data_blocks' argument maps a volume offset to a byte used to fill a 16 KiB data block.
+	"""
+
+	volume_size = 0x400000
+	control_block_offset = 0x4000
+	diff_area_base = 0x8000
+	volume_guid = uuid.UUID(int = 0x1111)
+
+	buf = bytearray(volume_size)
+	buf[3 : 7] = b'NTFS'
+
+	# A start block.
+	start_offset = 0x1E00
+	buf[start_offset : start_offset + 16] = ShadowCopy.VSP_DIFF_AREA_FILE_GUID
+	struct.pack_into('<L', buf, start_offset + 16, 0)
+	struct.pack_into('<L', buf, start_offset + 20, ShadowCopy.SHADOW_BLOCK_TYPE_UNKNOWN_NAME_1)
+	struct.pack_into('<Q', buf, start_offset + 24, start_offset)
+	struct.pack_into('<Q', buf, start_offset + 32, start_offset)
+	struct.pack_into('<Q', buf, start_offset + 40, 0)
+	struct.pack_into('<Q', buf, start_offset + 48, control_block_offset)
+	struct.pack_into('<Q', buf, start_offset + 56, 0)
+	buf[start_offset + 64 : start_offset + 80] = volume_guid.bytes_le
+	buf[start_offset + 80 : start_offset + 96] = volume_guid.bytes_le
+
+	# A control block with items for each store.
+	buf[control_block_offset : control_block_offset + 16] = ShadowCopy.VSP_DIFF_AREA_FILE_GUID
+	struct.pack_into('<L', buf, control_block_offset + 16, 0)
+	struct.pack_into('<L', buf, control_block_offset + 20, ShadowCopy.SHADOW_BLOCK_TYPE_UNKNOWN_NAME_2)
+	struct.pack_into('<Q', buf, control_block_offset + 24, 0)
+	struct.pack_into('<Q', buf, control_block_offset + 32, control_block_offset)
+	struct.pack_into('<Q', buf, control_block_offset + 40, 0)
+
+	item_offset = control_block_offset + 0x80
+
+	for i, store in enumerate(stores):
+		struct.pack_into('<L', buf, item_offset, ShadowCopy.CONTROL_BLOCK_ITEM_TYPE_UNKNOWN_NAME_2)
+		struct.pack_into('<Q', buf, item_offset + 8, volume_size)
+		buf[item_offset + 16 : item_offset + 32] = store['guid'].bytes_le
+		struct.pack_into('<Q', buf, item_offset + 32, store['stack'])
+		struct.pack_into('<Q', buf, item_offset + 40, store.get('flags', 0))
+		struct.pack_into('<Q', buf, item_offset + 48, 0)
+		item_offset += 0x80
+
+		diff_area_offset = diff_area_base + i * 0x4000
+		struct.pack_into('<L', buf, item_offset, ShadowCopy.CONTROL_BLOCK_ITEM_TYPE_UNKNOWN_NAME_3)
+		struct.pack_into('<Q', buf, item_offset + 8, diff_area_offset)
+		buf[item_offset + 16 : item_offset + 32] = store['guid'].bytes_le
+		item_offset += 0x80
+
+		# A diff area table block.
+		buf[diff_area_offset : diff_area_offset + 16] = ShadowCopy.VSP_DIFF_AREA_FILE_GUID
+		struct.pack_into('<L', buf, diff_area_offset + 16, 0)
+		struct.pack_into('<L', buf, diff_area_offset + 20, ShadowCopy.SHADOW_BLOCK_TYPE_UNKNOWN_NAME_3)
+		struct.pack_into('<Q', buf, diff_area_offset + 24, 0)
+		struct.pack_into('<Q', buf, diff_area_offset + 32, diff_area_offset)
+		struct.pack_into('<Q', buf, diff_area_offset + 40, 0)
+
+		entry_offset = diff_area_offset + 0x80
+		for entry in store.get('entries', []):
+			struct.pack_into('<QQQLL', buf, entry_offset, *entry)
+			entry_offset += 32
+
+	if data_blocks is not None:
+		for offset, value in data_blocks.items():
+			buf[offset : offset + 0x4000] = value * 0x4000
+
+	return io.BytesIO(bytes(buf))
+
+def test_shadow_forwarder_two_levels():
+	original = 0x100000
+	forward_1 = 0x110000
+	forward_2 = 0x120000
+	data_1 = 0x200000
+
+	stream = _build_synthetic_vss_volume([
+		{ 'stack': 1, 'guid': uuid.UUID(int = 1), 'entries': [ (original, forward_1, 0, ShadowCopy.DIFF_AREA_TABLE_ENTRY_UNKNOWN_NAME_1, 0) ] },
+		{ 'stack': 2, 'guid': uuid.UUID(int = 2), 'entries': [ (forward_1, forward_2, 0, ShadowCopy.DIFF_AREA_TABLE_ENTRY_UNKNOWN_NAME_1, 0) ] },
+		{ 'stack': 3, 'guid': uuid.UUID(int = 3), 'entries': [ (forward_2, 0, data_1, 0, 0) ] },
+	], { data_1: b'F' })
+
+	vss = ShadowCopy.ShadowParser(stream, 0)
+	vss.select_shadow(1)
+
+	new_offsets = vss.translate_exact_offset(original)
+	assert new_offsets == [ data_1 + i * 512 for i in range(0, 32) ]
+
+	# The first-level target only exists in the second store (as another forwarder),
+	# and the second-level target exists in the third store.
+	vss.seek(original)
+	assert vss.read(0x4000) == b'F' * 0x4000
+
+	# The intermediate stores know nothing about the original offset, so it is read
+	# from the original volume (a forwarder chain is not a global alias).
+	vss.select_shadow(2)
+	assert vss.translate_exact_offset(original) == [ original + i * 512 for i in range(0, 32) ]
+
+def test_shadow_forwarder_same_offset_across_stores():
+	original = 0x100000
+	first_target = 0x110000
+	data_1 = 0x200000
+
+	# The same offset (0x100000) is used as a forward target in the second store:
+	# this is legal, because the resolution state also includes the store.
+	stream = _build_synthetic_vss_volume([
+		{ 'stack': 1, 'guid': uuid.UUID(int = 1), 'entries': [ (original, first_target, 0, ShadowCopy.DIFF_AREA_TABLE_ENTRY_UNKNOWN_NAME_1, 0) ] },
+		{ 'stack': 2, 'guid': uuid.UUID(int = 2), 'entries': [ (first_target, original, 0, ShadowCopy.DIFF_AREA_TABLE_ENTRY_UNKNOWN_NAME_1, 0) ] },
+		{ 'stack': 3, 'guid': uuid.UUID(int = 3), 'entries': [ (original, 0, data_1, 0, 0) ] },
+	], { data_1: b'R' })
+
+	vss = ShadowCopy.ShadowParser(stream, 0)
+	vss.select_shadow(1)
+
+	assert vss.translate_exact_offset(original) == [ data_1 + i * 512 for i in range(0, 32) ]
+	vss.seek(original)
+	assert vss.read(0x4000) == b'R' * 0x4000
+
+def test_shadow_forwarder_cycle():
+	original = 0x100000
+	forward_1 = 0x110000
+
+	stream = _build_synthetic_vss_volume([
+		{ 'stack': 1, 'guid': uuid.UUID(int = 1), 'entries': [ (original, forward_1, 0, ShadowCopy.DIFF_AREA_TABLE_ENTRY_UNKNOWN_NAME_1, 0) ] },
+		{ 'stack': 2, 'guid': uuid.UUID(int = 2), 'entries': [ (forward_1, original, 0, ShadowCopy.DIFF_AREA_TABLE_ENTRY_UNKNOWN_NAME_1, 0) ] },
+	])
+
+	vss = ShadowCopy.ShadowParser(stream, 0)
+	vss.select_shadow(1)
+
+	# Wire a corrupt store association: the last store points back to the first one.
+	vss.current_next_parser.current_next_parser = vss
+
+	with pytest.raises(ShadowCopy.ForwarderChainException) as e:
+		vss.translate_exact_offset(original)
+
+	message = str(e.value)
+	assert 'repeated state without progress' in message
+	assert '00000000-0000-0000-0000-000000000001' in message and '00000000-0000-0000-0000-000000000002' in message
+	assert str(original) in message and str(forward_1) in message
+
+	offsets = [ item.offset for item in e.value.chain ]
+	assert offsets[0] == original and offsets[-1] == forward_1
+	assert offsets.count(forward_1) == 2 and original in offsets
+
+def test_shadow_forwarder_missing_store():
+	original = 0x100000
+	forward_1 = 0x110000
+	untouched = 0x300000
+
+	stream = _build_synthetic_vss_volume([
+		{ 'stack': 1, 'guid': uuid.UUID(int = 1), 'entries': [ (original, forward_1, 0, ShadowCopy.DIFF_AREA_TABLE_ENTRY_UNKNOWN_NAME_1, 0) ] },
+	], { untouched: b'C' })
+
+	vss = ShadowCopy.ShadowParser(stream, 0)
+	vss.select_shadow(1)
+
+	# A forwarder target must not silently resolve to the current volume contents.
+	with pytest.raises(ShadowCopy.ForwarderChainException) as e:
+		vss.translate_exact_offset(original)
+
+	assert 'the next store is missing' in str(e.value)
+	assert '00000000-0000-0000-0000-000000000001' in str(e.value)
+	assert str(forward_1) in str(e.value)
+
+	# A non-forwarder block still reads from the current volume.
+	vss.seek(untouched)
+	assert vss.read(0x4000) == b'C' * 0x4000
+
+def test_shadow_forwarder_partial_overlay():
+	original = 0x100000
+	forward_1 = 0x110000
+	data_overlay = 0x200000
+	allocation_bitmap = (1 << 0) | (1 << 5) | (1 << 31)
+
+	stream = _build_synthetic_vss_volume([
+		{ 'stack': 1, 'guid': uuid.UUID(int = 1), 'entries': [
+			(original, forward_1, 0, ShadowCopy.DIFF_AREA_TABLE_ENTRY_UNKNOWN_NAME_1, 0),
+			(original, 0, data_overlay, ShadowCopy.DIFF_AREA_TABLE_ENTRY_UNKNOWN_NAME_2, allocation_bitmap),
+		] },
+	], { data_overlay: b'P' })
+
+	vss = ShadowCopy.ShadowParser(stream, 0)
+	vss.select_shadow(1)
+
+	with pytest.raises(ShadowCopy.ForwarderChainException) as e:
+		vss.translate_exact_offset(original)
+
+	assert 'the next store is missing' in str(e.value)
+
+	partial_blocks = e.value.partial_blocks
+	assert partial_blocks is not None
+	assert partial_blocks.allocation_bitmap == allocation_bitmap
+	assert [ pos for pos, __ in partial_blocks.determined_offsets() ] == [ 0, 5, 31 ]
+	assert [ offset for __, offset in partial_blocks.determined_offsets() ] == [ data_overlay, data_overlay + 5 * 512, data_overlay + 31 * 512 ]
+	assert 'blocks determined before the failure' in str(e.value)
+
+def test_shadow_forwarder_partial_overlay_cycle():
+	original = 0x100000
+	forward_1 = 0x110000
+	data_overlay = 0x200000
+	allocation_bitmap = (1 << 0) | (1 << 7) | (1 << 31)
+
+	stream = _build_synthetic_vss_volume([
+		{ 'stack': 1, 'guid': uuid.UUID(int = 1), 'entries': [
+			(original, forward_1, 0, ShadowCopy.DIFF_AREA_TABLE_ENTRY_UNKNOWN_NAME_1, 0),
+			(original, 0, data_overlay, ShadowCopy.DIFF_AREA_TABLE_ENTRY_UNKNOWN_NAME_2, allocation_bitmap),
+		] },
+		{ 'stack': 2, 'guid': uuid.UUID(int = 2), 'entries': [
+			(forward_1, original, 0, ShadowCopy.DIFF_AREA_TABLE_ENTRY_UNKNOWN_NAME_1, 0),
+		] },
+	], { data_overlay: b'P' })
+
+	vss = ShadowCopy.ShadowParser(stream, 0)
+	vss.select_shadow(1)
+
+	# A corrupt store association: the second store points back to the first one.
+	vss.current_next_parser.current_next_parser = vss
+
+	with pytest.raises(ShadowCopy.ForwarderChainException) as e:
+		vss.translate_exact_offset(original)
+
+	assert 'repeated state without progress' in str(e.value)
+
+	determined = []
+	for partial_blocks in e.value.partial_blocks_all:
+		determined.extend(partial_blocks.determined_offsets())
+
+	# The overlay blocks known before the failure are still reported.
+	assert (0, data_overlay) in determined
+	assert (7, data_overlay + 7 * 512) in determined
+	assert (31, data_overlay + 31 * 512) in determined
+
 def test_shadow_invalid_offsets():
 	f = tarfile.open(VOLUME_VSS_10, 'r').extractfile('vss_10.raw')
 
@@ -3722,6 +3958,139 @@ def test_shadow_two_volumes_2():
 	f.seek(4196352 * 512 + 261856 * 4096)
 	buf = f.read(52272)
 	assert buf.strip(b'3') == b''
+
+def _build_synthetic_vss_two_volumes(stores, storage_blocks = None):
+	"""Build synthetic VSS volumes where stores live on a storage volume (as two BytesIO objects).
+
+	Each store is a dict: { 'stack': int, 'guid': UUID, 'entries': [ (original, target, data_volume_offset, flags, bitmap) ] }.
+	The 'storage_blocks' argument maps a storage volume offset to a byte used to fill a 16 KiB block.
+	"""
+
+	volume_size = 0x400000
+	control_block_offset = 0x4000
+	diff_area_base = 0x8000
+	start_offset = 0x1E00
+
+	def make_start(guid_volume, guid_storage):
+		buf = bytearray(volume_size)
+		buf[3 : 7] = b'NTFS'
+		buf[start_offset : start_offset + 16] = ShadowCopy.VSP_DIFF_AREA_FILE_GUID
+		struct.pack_into('<L', buf, start_offset + 16, 0)
+		struct.pack_into('<L', buf, start_offset + 20, ShadowCopy.SHADOW_BLOCK_TYPE_UNKNOWN_NAME_1)
+		struct.pack_into('<Q', buf, start_offset + 24, start_offset)
+		struct.pack_into('<Q', buf, start_offset + 32, start_offset)
+		struct.pack_into('<Q', buf, start_offset + 40, 0)
+		struct.pack_into('<Q', buf, start_offset + 48, control_block_offset)
+		struct.pack_into('<Q', buf, start_offset + 56, 0)
+		buf[start_offset + 64 : start_offset + 80] = guid_volume.bytes_le
+		buf[start_offset + 80 : start_offset + 96] = guid_storage.bytes_le
+		return buf
+
+	def make_control_block(buf):
+		buf[control_block_offset : control_block_offset + 16] = ShadowCopy.VSP_DIFF_AREA_FILE_GUID
+		struct.pack_into('<L', buf, control_block_offset + 16, 0)
+		struct.pack_into('<L', buf, control_block_offset + 20, ShadowCopy.SHADOW_BLOCK_TYPE_UNKNOWN_NAME_2)
+		struct.pack_into('<Q', buf, control_block_offset + 24, 0)
+		struct.pack_into('<Q', buf, control_block_offset + 32, control_block_offset)
+		struct.pack_into('<Q', buf, control_block_offset + 40, 0)
+
+	volume = make_start(uuid.UUID(int = 0x1111), uuid.UUID(int = 0x2222))
+	make_control_block(volume)
+
+	item_offset = control_block_offset + 0x80
+	for store in stores:
+		struct.pack_into('<L', volume, item_offset, ShadowCopy.CONTROL_BLOCK_ITEM_TYPE_UNKNOWN_NAME_2)
+		struct.pack_into('<Q', volume, item_offset + 8, volume_size)
+		volume[item_offset + 16 : item_offset + 32] = store['guid'].bytes_le
+		struct.pack_into('<Q', volume, item_offset + 32, store['stack'])
+		struct.pack_into('<Q', volume, item_offset + 40, store.get('flags', 0))
+		struct.pack_into('<Q', volume, item_offset + 48, 0)
+		item_offset += 0x80
+
+	storage = make_start(uuid.UUID(int = 0x2222), uuid.UUID(int = 0x2222))
+	make_control_block(storage)
+
+	item_offset = control_block_offset + 0x80
+	for i, store in enumerate(stores):
+		diff_area_offset = diff_area_base + i * 0x4000
+		struct.pack_into('<L', storage, item_offset, ShadowCopy.CONTROL_BLOCK_ITEM_TYPE_UNKNOWN_NAME_3)
+		struct.pack_into('<Q', storage, item_offset + 8, diff_area_offset)
+		storage[item_offset + 16 : item_offset + 32] = store['guid'].bytes_le
+		item_offset += 0x80
+
+		storage[diff_area_offset : diff_area_offset + 16] = ShadowCopy.VSP_DIFF_AREA_FILE_GUID
+		struct.pack_into('<L', storage, diff_area_offset + 16, 0)
+		struct.pack_into('<L', storage, diff_area_offset + 20, ShadowCopy.SHADOW_BLOCK_TYPE_UNKNOWN_NAME_3)
+		struct.pack_into('<Q', storage, diff_area_offset + 24, 0)
+		struct.pack_into('<Q', storage, diff_area_offset + 32, diff_area_offset)
+		struct.pack_into('<Q', storage, diff_area_offset + 40, 0)
+
+		entry_offset = diff_area_offset + 0x80
+		for entry in store.get('entries', []):
+			struct.pack_into('<QQQLL', storage, entry_offset, *entry)
+			entry_offset += 32
+
+	if storage_blocks is not None:
+		for offset, value in storage_blocks.items():
+			storage[offset : offset + 0x4000] = value * 0x4000
+
+	return io.BytesIO(bytes(volume)), io.BytesIO(bytes(storage))
+
+def test_shadow_two_volumes_forwarder():
+	original = 0x100000
+	forward_1 = 0x110000
+	data_1 = 0x200000
+
+	volume, storage = _build_synthetic_vss_two_volumes([
+		{ 'stack': 1, 'guid': uuid.UUID(int = 1), 'entries': [ (original, forward_1, 0, ShadowCopy.DIFF_AREA_TABLE_ENTRY_UNKNOWN_NAME_1, 0) ] },
+		{ 'stack': 2, 'guid': uuid.UUID(int = 2), 'entries': [ (forward_1, 0, data_1, 0, 0) ] },
+	], { data_1: b'S' })
+
+	parser = ShadowCopy.ShadowParserTwoVolumes(volume, storage, 0)
+	parser.select_shadow(1)
+
+	assert parser.translate_exact_offset(original) == [ (True, data_1 + i * 512) for i in range(0, 32) ]
+	parser.seek(original)
+	assert parser.read(0x4000) == b'S' * 0x4000
+
+def test_shadow_two_volumes_forwarder_cycle():
+	original = 0x100000
+	forward_1 = 0x110000
+
+	volume, storage = _build_synthetic_vss_two_volumes([
+		{ 'stack': 1, 'guid': uuid.UUID(int = 1), 'entries': [ (original, forward_1, 0, ShadowCopy.DIFF_AREA_TABLE_ENTRY_UNKNOWN_NAME_1, 0) ] },
+		{ 'stack': 2, 'guid': uuid.UUID(int = 2), 'entries': [ (forward_1, original, 0, ShadowCopy.DIFF_AREA_TABLE_ENTRY_UNKNOWN_NAME_1, 0) ] },
+	])
+
+	parser = ShadowCopy.ShadowParserTwoVolumes(volume, storage, 0)
+	parser.select_shadow(1)
+
+	# A corrupt store association: the second store points back to the first one.
+	parser.current_next_parser.current_next_parser = parser
+
+	with pytest.raises(ShadowCopy.ForwarderChainException) as e:
+		parser.translate_exact_offset(original)
+
+	assert 'repeated state without progress' in str(e.value)
+	assert '00000000-0000-0000-0000-000000000001' in str(e.value)
+	assert '00000000-0000-0000-0000-000000000002' in str(e.value)
+
+def test_shadow_two_volumes_forwarder_missing_store():
+	original = 0x100000
+	forward_1 = 0x110000
+
+	volume, storage = _build_synthetic_vss_two_volumes([
+		{ 'stack': 1, 'guid': uuid.UUID(int = 1), 'entries': [ (original, forward_1, 0, ShadowCopy.DIFF_AREA_TABLE_ENTRY_UNKNOWN_NAME_1, 0) ] },
+	])
+
+	parser = ShadowCopy.ShadowParserTwoVolumes(volume, storage, 0)
+	parser.select_shadow(1)
+
+	with pytest.raises(ShadowCopy.ForwarderChainException) as e:
+		parser.translate_exact_offset(original)
+
+	assert 'the next store is missing' in str(e.value)
+	assert str(forward_1) in str(e.value)
 
 def test_fat_bs_bpb():
 	with open(FAT_BS, 'rb') as f:
