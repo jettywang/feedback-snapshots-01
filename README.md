@@ -19,6 +19,28 @@ pip install dissect.xfs
 
 This module is also automatically installed if you install the `dissect` package.
 
+## Read-only journal summary
+
+For investigation work, `dissect.xfs` exposes a strictly read-only view of the internal XFS
+write-ahead log through `XFS.journal`. It reconstructs logical log records from their circular,
+possibly wrapping on-disk layout, orders them by LSN (log cycle and block) rather than physical
+offset, groups them into transactions, and reports whether each transaction is fully committed,
+left uncommitted, or only partially present because log material is missing.
+
+```python
+from dissect.xfs import XFS
+
+xfs = XFS(fh)
+for transaction in xfs.journal.transactions():
+    print(transaction.tid, transaction.status, transaction.operation_types)
+
+print(xfs.journal.summary().render_text())
+```
+
+Redo payloads are described (LSN, transaction id, operation type, source ranges and commit state)
+but never replayed: regular file access keeps reading the original evidence volume unchanged.
+
+
 ## Build and test instructions
 
 This project uses `tox` to build source and wheel distributions. Run the following command from the root folder to build

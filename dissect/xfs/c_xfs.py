@@ -888,6 +888,119 @@ typedef struct xfs_dir2_block_tail {
     uint32_t        count;                              /* count of leaf entries */
     uint32_t        stale;                              /* count of stale lf entries */
 } xfs_dir2_block_tail_t;
+
+
+/*
+ * Journal (write-ahead log) on-disk structures.
+ *
+ * Only the explicitly documented big-endian framing is modelled here. The log
+ * is parsed read-only: none of the structures below are ever applied back onto
+ * the evidence volume. See fs/xfs/libxfs/xfs_log_format.h in the Linux kernel.
+ */
+
+/* xlog_rec_header.h_magic */
+#define XLOG_HEADER_MAGIC                   0xFEEDBABE
+
+/* xlog_rec_header.h_version */
+#define XLOG_REC_HDR_VERSION_1              1
+#define XLOG_REC_HDR_VERSION_2              2
+
+/* Bits stored in the high part of xlog_rec_header.h_type */
+#define XLOG_REC_SHIFT                      21
+#define XLOG_REC_TYPES_MASK                 ((1 << XLOG_REC_SHIFT) - 1)
+
+/* xlog_rec_header.h_type record kinds (low XLOG_REC_SHIFT bits) */
+#define XLOG_START_TRANS                    0x00001
+#define XLOG_COMMIT_TRANS                   0x00002
+#define XLOG_CONTINUE_TRANS                 0x00004
+#define XLOG_WAS_CONT_TRANS                 0x10000
+#define XLOG_RECONT_TRANS_MASK              0x200000
+
+/* Endian/architecture markers OR-ed into the high bits of h_type */
+#define XLOG_ENDIAN_BIG                     0
+#define XLOG_ENDIAN_LITTLE                  (1 << XLOG_REC_SHIFT)
+#define XLOG_ARCHIVE                        (1 << (XLOG_REC_SHIFT + 1))
+#define XLOG_CHECK_VERSION                  (1 << (XLOG_REC_SHIFT + 2))
+
+/* xlog_op_header.oh_flags */
+#define XLOG_UNMOUNT_TRANS                  0x00001
+
+/* xlog_commit_record magic */
+#define XLOG_COMMIT_REC_MAGIC               0x4943524d  /* 'ICRM' */
+
+/* Magic written into xlog_op_header.oh_clientid by historical Linux clients */
+#define XLOG_CLIENT_MAGIC                   0x494D5254  /* 'IMRT' */
+#define XLOG_XACT_MAGIC                     0x58524D54  /* 'XRMR' */
+
+/*
+ * Physical log record header. The common big-endian layout occupies 320 bytes:
+ * the fixed record metadata up to h_crc, reserved space, the embedded legacy
+ * operation mark and filesystem UUID, followed by the version 2 extension
+ * fields. Records are always aligned to a 512 byte log sector.
+ */
+typedef struct xlog_rec_header {
+    uint32_t        h_magic;                            /* XLOG_HEADER_MAGIC */
+    uint32_t        h_oldest;                           /* oldest block in log */
+    uint32_t        h_type;                             /* record kind + endian bits */
+    uint32_t        h_len;                              /* record size in bytes */
+    uint32_t        h_lsn_block;                        /* LSN: basic block number */
+    uint32_t        h_lsn_cycle;                        /* LSN: log generation */
+    uint32_t        h_fmt;                              /* format / embedded mark */
+    uint32_t        h_tid;                              /* transaction id */
+    uint32_t        h_prev_block;                       /* prev record's block */
+    uint32_t        h_num_log_io;                       /* number of log iovecs */
+    uint32_t        h_fmt_block;                        /* block number of fmt data */
+    uint32_t        h_fmt_cycle;                        /* cycle number of fmt data */
+    uint32_t        h_fs_cycle;                         /* fs cycle when written */
+    uint32_t        h_size;                             /* v1 header size hint */
+    uint32_t        h_crc;                              /* v2: crc of this record */
+    char            h_pad[240];                         /* reserved space */
+    uint32_t        h_version;                          /* embedded op / version mark */
+    char            h_fs_uuid[16];                      /* filesystem uuid */
+} xlog_rec_header_t;
+
+/*
+ * Header prepended to every logged operation (redo item). The payload is
+ * oh_len bytes and starts immediately after this header. Payloads are aligned
+ * to an 8 byte boundary within the record.
+ */
+typedef struct xlog_op_header {
+    uint32_t        oh_tid;                             /* transaction id */
+    uint32_t        oh_len;                             /* payload size in bytes */
+    uint32_t        oh_clientid;                        /* client identifier */
+    uint32_t        oh_flags;                           /* XLOG_UNMOUNT_TRANS etc. */
+} xlog_op_header_t;
+
+/* xlog_commit_record: the payload of a commit operation */
+typedef struct xlog_commit_record {
+    uint32_t        cr_magic;                           /* XLOG_COMMIT_REC_MAGIC */
+} xlog_commit_record_t;
+
+/* Log item format type identifiers (xfs_log_format type fields) */
+#define XLOG_LI_EFI                         0x1234  /* extent free intent */
+#define XLOG_LI_EFD                         0x1235  /* extent free done */
+#define XLOG_LI_IUNLINK                     0x1236  /* inode unlinked bucket */
+#define XLOG_LI_INODE                       0x1237  /* inode item */
+#define XLOG_LI_BUF                         0x1238  /* buffered metadata */
+#define XLOG_LI_DQUOT                       0x1239  /* disk quota */
+#define XLOG_LI_QUOTAOFF                    0x123a  /* quota off */
+#define XLOG_LI_ICREATE                     0x123b  /* inode creation */
+#define XLOG_LI_RUI                         0x123c  /* rmap update intent */
+#define XLOG_LI_RUD                         0x123d  /* rmap update done */
+#define XLOG_LI_CUI                         0x123e  /* refcount update intent */
+#define XLOG_LI_CUD                         0x123f  /* refcount update done */
+#define XLOG_LI_BUI                         0x1240  /* bmap map intent */
+#define XLOG_LI_BUD                         0x1241  /* bmap map done */
+#define XLOG_LI_ATTRI                       0x1242  /* attribute intent */
+#define XLOG_LI_ATTRD                       0x1243  /* attribute done */
+#define XLOG_LI_INTEGRITY                   0x1244  /* integrity checkpoint */
+#define XLOG_LI_RFCE                        0x1245  /* refcount intent v2 */
+
+/* Common 16-bit type/size prefix shared by the classic log format headers */
+typedef struct xfs_log_format {
+    uint16_t        type;
+    uint16_t        size;
+} xfs_log_format_t;
 """
 
 c_xfs = cstruct(endian=">").load(xfs_def)

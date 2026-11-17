@@ -19,6 +19,7 @@ from dissect.xfs.exceptions import (
     NotASymlinkError,
     UnsupportedDataforkException,
 )
+from dissect.xfs.log import XFSJournal
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -56,6 +57,10 @@ class XFS:
         self.meta_uuid = UUID(bytes=self.sb.sb_meta_uuid)
 
         self.root = self.get_inode(self.sb.sb_rootino)
+
+    @cached_property
+    def journal(self) -> XFSJournal:
+        return XFSJournal(self)
 
     def get(self, path: int | str, node: INode | None = None) -> INode:
         if isinstance(path, int):
