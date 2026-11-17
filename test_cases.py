@@ -13,6 +13,7 @@ import io
 import gzip
 import tarfile
 import pickle
+import struct
 from dfir_ntfs import MFT, WSL, USN, Attributes, LogFile, BootSector, ShadowCopy, PartitionTable, MoveTable
 from dfir_ntfs.addons import FAT, exFAT
 
@@ -1449,6 +1450,639 @@ def test_logfile_20_4k():
 		assert lsn > highest_lsn
 
 	f.close()
+
+def _logfile_test_align(value, alignment):
+	return (value + alignment - 1) // alignment * alignment
+
+def _logfile_test_wrap_start_page(log_page_size, major_version = 1):
+	"""Compute the first page of the circular area for a version 1.1 (or 2.x) log file."""
+
+	if major_version == 1:
+		auxiliary_page_count = 2
+	else:
+		auxiliary_page_count = 32
+
+	return (2 * 4096) // log_page_size + auxiliary_page_count
+
+class _LogFileSyntheticBuilder(object):
+	"""Build a synthetic $LogFile image from a sequence of logical records.
+
+	This builder is intentionally independent from the parser: it places payload bytes itself and
+	keeps the expected (LSN, payload) pairs.
+	"""
+
+	def __init__(self, log_page_size, sequence_number_bits, total_pages, wrap_start_page, record_header_length = 48, log_page_data_offset = None, system_page_size = 4096):
+		self.log_page_size = log_page_size
+		self.sequence_number_bits = sequence_number_bits
+		self.total_pages = total_pages
+		self.wrap_start_page = wrap_start_page
+		self.record_header_length = record_header_length
+		self.system_page_size = system_page_size
+
+		self.usa_offset = 40
+		self.usa_count = log_page_size // 512 + 1
+
+		if log_page_data_offset is None:
+			log_page_data_offset = _logfile_test_align(max(64, self.usa_offset + 2 * self.usa_count), 8)
+
+		self.log_page_data_offset = log_page_data_offset
+
+		self.pages = dict()
+		self.page_meta = dict()
+		self.records = []
+		self.sequence_number = 1
+		self.page_number = wrap_start_page
+		self.offset_in_page = self.log_page_data_offset
+		self.previous_lsn = 0
+		self.highest_lsn = 0
+
+	def make_lsn(self, page_number, offset_in_page, sequence_number = None):
+		if sequence_number is None:
+			sequence_number = self.sequence_number
+
+		absolute_offset = page_number * self.log_page_size + offset_in_page
+		sequence_number &= (1 << self.sequence_number_bits) - 1 # The field wraps around.
+
+		return ((absolute_offset >> 3) | (sequence_number << (64 - self.sequence_number_bits))) & 0xFFFFFFFFFFFFFFFF
+
+	def get_page(self, page_number):
+		if page_number not in self.pages.keys():
+			self.pages[page_number] = bytearray([ 0xCC ] * self.log_page_size)
+
+		return self.pages[page_number]
+
+	def advance_page(self):
+		# The generation (sequence number) is a part of the LSN. A physical wrap reuses lower offsets,
+		# so the generation stays the same until the logical offset overflows into the sequence field.
+		self.page_number += 1
+
+		if self.page_number >= self.total_pages:
+			self.page_number = self.wrap_start_page
+
+		self.offset_in_page = self.log_page_data_offset
+
+	def set_page_meta(self, page_number, last_lsn, page_count, page_position, next_record_offset):
+		self.page_meta[page_number] = (last_lsn, page_count, page_position, next_record_offset)
+
+	def add_record(self, payload, record_type = 1, client_id = 0):
+		payload = bytes(payload)
+		assert len(payload) % 8 == 0
+
+		if self.offset_in_page + self.record_header_length + 8 > self.log_page_size:
+			self.advance_page()
+
+		first_page_number = self.page_number
+		first_offset = self.offset_in_page
+		lsn = self.make_lsn(first_page_number, first_offset)
+
+		first_payload_length = min(len(payload), self.log_page_size - first_offset - self.record_header_length)
+		payload_left = payload[first_payload_length :]
+
+		continuation_pages = []
+		while len(payload_left) > 0:
+			self.advance_page()
+
+			page_number = self.page_number
+			payload_length = min(len(payload_left), self.log_page_size - self.log_page_data_offset)
+
+			continuation_pages.append((page_number, payload_length))
+
+			payload_left = payload_left[payload_length : ]
+
+		page_count = 1 + len(continuation_pages)
+
+		header = bytearray(self.record_header_length)
+		struct.pack_into('<Q', header, 0, lsn)
+		struct.pack_into('<Q', header, 8, self.previous_lsn)
+		struct.pack_into('<Q', header, 16, 0)
+		struct.pack_into('<L', header, 24, len(payload))
+		struct.pack_into('<L', header, 28, client_id)
+		struct.pack_into('<L', header, 32, record_type)
+		struct.pack_into('<L', header, 36, 1)
+		struct.pack_into('<H', header, 40, 0)
+
+		first_page = self.get_page(first_page_number)
+		first_page[first_offset : first_offset + self.record_header_length] = header
+		first_page[first_offset + self.record_header_length : first_offset + self.record_header_length + first_payload_length] = payload[:first_payload_length]
+
+		self.set_page_meta(first_page_number, lsn, page_count, 1, first_offset + self.record_header_length + first_payload_length)
+
+		payload_offset = first_payload_length
+		for i, (page_number, payload_length) in enumerate(continuation_pages):
+			page = self.get_page(page_number)
+			page[self.log_page_data_offset : self.log_page_data_offset + payload_length] = payload[payload_offset : payload_offset + payload_length]
+
+			anchor_lsn = self.make_lsn(page_number, self.log_page_data_offset)
+			self.set_page_meta(page_number, max(lsn, anchor_lsn), page_count, i + 2, self.log_page_data_offset + payload_length)
+
+			payload_offset += payload_length
+
+		if continuation_pages:
+			self.page_number = continuation_pages[-1][0]
+			self.offset_in_page = self.log_page_data_offset + continuation_pages[-1][1]
+		else:
+			self.page_number = first_page_number
+			self.offset_in_page = first_offset + self.record_header_length + first_payload_length
+
+		self.previous_lsn = lsn
+		self.highest_lsn = max(self.highest_lsn, lsn)
+
+		self.records.append((lsn, payload))
+
+		return lsn
+
+	def fill_trailing_pages(self):
+		for page_number in range(self.wrap_start_page, self.total_pages):
+			page = self.get_page(page_number)
+
+			struct.pack_into('<4s', page, 0, b'RCRD')
+			struct.pack_into('<H', page, 4, self.usa_offset)
+			struct.pack_into('<H', page, 6, self.usa_count)
+
+			if page_number not in self.page_meta.keys():
+				self.set_page_meta(page_number, 0, 1, 1, self.log_page_data_offset)
+
+	def seal_pages(self):
+		for page_number, (last_lsn, page_count, page_position, next_record_offset) in self.page_meta.items():
+			page = self.get_page(page_number)
+
+			struct.pack_into('<4s', page, 0, b'RCRD')
+			struct.pack_into('<H', page, 4, self.usa_offset)
+			struct.pack_into('<H', page, 6, self.usa_count)
+			struct.pack_into('<Q', page, 8, last_lsn)
+			struct.pack_into('<L', page, 16, 1)
+			struct.pack_into('<H', page, 20, page_count)
+			struct.pack_into('<H', page, 22, page_position)
+			struct.pack_into('<H', page, 24, next_record_offset)
+			struct.pack_into('<Q', page, 32, last_lsn)
+
+	def protect_page(self, page_number):
+		page = bytearray(self.get_page(page_number))
+
+		usa_sequence_number = (page_number * 7 + 3) & 0xFFFF
+
+		struct.pack_into('<H', page, self.usa_offset, usa_sequence_number)
+
+		i = 1
+		while i < self.usa_count:
+			position = i * 512 - 2
+			struct.pack_into('<H', page, self.usa_offset + i * 2, struct.unpack('<H', page[position : position + 2])[0])
+			struct.pack_into('<H', page, position, usa_sequence_number)
+
+			i += 1
+
+		return bytes(page)
+
+	def make_restart_page(self, major_version, minor_version, current_lsn):
+		page = bytearray(self.system_page_size)
+
+		struct.pack_into('<4s', page, 0, b'RSTR')
+		struct.pack_into('<H', page, 4, 30)
+		struct.pack_into('<H', page, 6, 9)
+		struct.pack_into('<Q', page, 8, 0)
+		struct.pack_into('<L', page, 16, self.system_page_size)
+		struct.pack_into('<L', page, 20, self.log_page_size)
+		struct.pack_into('<H', page, 24, 48)
+		struct.pack_into('<H', page, 26, minor_version)
+		struct.pack_into('<H', page, 28, major_version)
+
+		restart_area_offset = 48
+
+		struct.pack_into('<Q', page, restart_area_offset, current_lsn)
+		struct.pack_into('<H', page, restart_area_offset + 8, 1)
+		struct.pack_into('<H', page, restart_area_offset + 10, 0xFFFF)
+		struct.pack_into('<H', page, restart_area_offset + 12, 0)
+		struct.pack_into('<H', page, restart_area_offset + 14, 0)
+		struct.pack_into('<L', page, restart_area_offset + 16, self.sequence_number_bits)
+		struct.pack_into('<H', page, restart_area_offset + 20, 224)
+		struct.pack_into('<H', page, restart_area_offset + 22, 64)
+		struct.pack_into('<q', page, restart_area_offset + 24, self.total_pages * self.log_page_size)
+		struct.pack_into('<L', page, restart_area_offset + 32, 0)
+		struct.pack_into('<H', page, restart_area_offset + 36, self.record_header_length)
+		struct.pack_into('<H', page, restart_area_offset + 38, self.log_page_data_offset)
+		struct.pack_into('<L', page, restart_area_offset + 40, 1)
+
+		client_record_offset = restart_area_offset + 64
+		oldest_lsn = self.records[0][0] if len(self.records) > 0 else 0
+
+		struct.pack_into('<Q', page, client_record_offset, oldest_lsn)
+		struct.pack_into('<Q', page, client_record_offset + 8, oldest_lsn)
+		struct.pack_into('<H', page, client_record_offset + 16, 0xFFFF)
+		struct.pack_into('<H', page, client_record_offset + 18, 0xFFFF)
+		struct.pack_into('<H', page, client_record_offset + 20, 1)
+		struct.pack_into('<L', page, client_record_offset + 28, 8)
+		page[client_record_offset + 32 : client_record_offset + 40] = 'NTFS'.encode('utf-16le')
+
+		page = bytearray(page)
+		struct.pack_into('<H', page, 30, 0x4243)
+
+		i = 1
+		while i < 9:
+			position = i * 512 - 2
+			struct.pack_into('<H', page, 30 + i * 2, struct.unpack('<H', page[position : position + 2])[0])
+			struct.pack_into('<H', page, position, 0x4243)
+
+			i += 1
+
+		return bytes(page[ : self.system_page_size])
+
+	def build(self):
+		self.fill_trailing_pages()
+		self.seal_pages()
+
+		image = bytearray()
+
+		image += self.make_restart_page(1, 1, self.highest_lsn)
+		image += self.make_restart_page(1, 1, self.highest_lsn)
+
+		# Two restart pages (system page size each) occupy the first log page numbers.
+		first_log_page = (2 * self.system_page_size) // self.log_page_size
+
+		page_number = first_log_page
+		while page_number < self.total_pages:
+			image += self.protect_page(page_number)
+
+			page_number += 1
+
+		return bytes(image)
+
+	def get_expected(self):
+		return list(self.records)
+
+def _logfile_reassemble_or_reason(log_file_parser, lsn):
+	try:
+		client_data = log_file_parser.get_client_data(lsn)
+	except LogFile.ClientDataReassemblyException as exception:
+		return (exception.kind, str(exception))
+	else:
+		return (None, bytes(client_data.buf))
+
+def test_logfile_reassembly_wrap_across_log_end():
+	"""A client data record crossing the logical end of the log must wrap to the circular area start."""
+
+	for log_page_size in [ 1024, 4096 ]:
+		for sequence_number_bits in [ 8, 20, 42 ]:
+			wrap_start_page = _logfile_test_wrap_start_page(log_page_size)
+			builder = _LogFileSyntheticBuilder(log_page_size, sequence_number_bits, wrap_start_page + 8, wrap_start_page)
+
+			# Fill the last page of the circular area, then add a record crossing the end of the file.
+			last_page = wrap_start_page + 8 - 1
+			builder.page_number = last_page
+			# Make the record start on the last page with just a few bytes of payload space.
+			builder.offset_in_page = builder.log_page_size - builder.record_header_length - 16
+
+			wrap_payload = bytes([ (i * 3 + 1) & 0xFF for i in range(0, 600) ])
+			wrap_lsn = builder.add_record(wrap_payload)
+
+			assert builder.sequence_number == 1 # The logical offset wrapped without a generation change.
+
+			log_file_parser = LogFile.LogFileParser(io.BytesIO(builder.build()))
+
+			# The next page after the wrap must not contribute its header to the payload.
+			assert log_file_parser.get_wrapped_log_record_page_number() == wrap_start_page
+
+			client_data = log_file_parser.get_client_data(wrap_lsn)
+			assert bytes(client_data.buf) == wrap_payload
+
+def test_logfile_reassembly_grid():
+	"""Reassemble payloads byte-by-byte across page sizes, remaining space, alignment and sequence numbers."""
+
+	for log_page_size in [ 1024, 4096 ]:
+		for sequence_number_bits in [ 8, 20, 42 ]:
+			for padding in [ 0, 8, 16, 24 ]:
+				for payload_length in [ 8, 64, 200, 1024, 4096, 5000 ]:
+					wrap_start_page = _logfile_test_wrap_start_page(log_page_size)
+					total_pages = wrap_start_page + 8
+
+					builder = _LogFileSyntheticBuilder(log_page_size, sequence_number_bits, total_pages, wrap_start_page)
+
+					# Move to a position with a specific amount of free space before the first record.
+					builder.page_number = wrap_start_page
+					builder.offset_in_page = builder.log_page_data_offset
+
+					for _ in range(padding // 8):
+						builder.add_record(bytes(8))
+
+					payload = bytes([ (i * 17 + padding) & 0xFF for i in range(payload_length) ])
+					payload = payload + b'\x00' * ((8 - len(payload) % 8) % 8)
+
+					lsn = builder.add_record(payload)
+
+					log_file_parser = LogFile.LogFileParser(io.BytesIO(builder.build()))
+
+					for expected_lsn, expected_payload in builder.get_expected():
+						client_data = log_file_parser.get_client_data(expected_lsn)
+						assert bytes(client_data.buf) == expected_payload, (log_page_size, sequence_number_bits, padding, payload_length, expected_lsn)
+
+					client_data = log_file_parser.get_client_data(lsn)
+					assert bytes(client_data.buf) == payload
+
+def test_logfile_reassembly_no_header_in_payload():
+	"""Payload bytes must never include a continuation page header, regardless of alignment."""
+
+	log_page_size = 1024
+	sequence_number_bits = 42
+
+	for record_header_length in [ 48, 64, 120 ]:
+		for log_page_data_offset in [ 64, 72, 128 ]:
+			if log_page_data_offset + record_header_length > log_page_size:
+				continue
+
+			wrap_start_page = _logfile_test_wrap_start_page(log_page_size)
+			builder = _LogFileSyntheticBuilder(log_page_size, sequence_number_bits, wrap_start_page + 6, wrap_start_page, record_header_length, log_page_data_offset)
+
+			# Place one record so its payload ends exactly at the page boundary and another one that
+			# starts on the next page (the next page header must not be appended).
+			first_payload_length = log_page_size - log_page_data_offset - record_header_length
+			first_payload = bytes([ 0x5A ]) * first_payload_length
+			first_lsn = builder.add_record(first_payload)
+
+			second_payload = bytes([ 0xA5 ]) * (log_page_size - log_page_data_offset)
+			second_lsn = builder.add_record(second_payload)
+
+			log_file_parser = LogFile.LogFileParser(io.BytesIO(builder.build()))
+
+			assert bytes(log_file_parser.get_client_data(first_lsn).buf) == first_payload
+			assert bytes(log_file_parser.get_client_data(second_lsn).buf) == second_payload
+
+def test_logfile_reassembly_stale_generation():
+	"""A continuation page from an older generation must not be stitched into a new record."""
+
+	log_page_size = 1024
+	sequence_number_bits = 42
+	wrap_start_page = _logfile_test_wrap_start_page(log_page_size)
+
+	# Generation 2: a new record starts near the end of the last page and wraps into the first page
+	# of the circular area.
+	second = _LogFileSyntheticBuilder(log_page_size, sequence_number_bits, wrap_start_page + 5, wrap_start_page)
+	second.sequence_number = 2
+	second.page_number = wrap_start_page + 4
+	second.offset_in_page = log_page_size - 48 - 16
+
+	payload = bytes([ 0x33 ]) * 400
+	lsn = second.add_record(payload)
+
+	# Put generation 1 content into the first page of the circular area (it is the continuation page
+	# for the new record only if the implementation ignores generations).
+	stale_image = bytearray(second.build())
+	stale_builder = _LogFileSyntheticBuilder(log_page_size, sequence_number_bits, wrap_start_page + 5, wrap_start_page)
+	stale_builder.sequence_number = 1
+	stale_builder.add_record(bytes([ 0x44 ]) * 128)
+	stale_builder.fill_trailing_pages()
+	stale_builder.seal_pages()
+	stale_page = stale_builder.protect_page(wrap_start_page)
+
+	offset = wrap_start_page * log_page_size
+	stale_image[offset : offset + log_page_size] = stale_page
+
+	log_file_parser = LogFile.LogFileParser(io.BytesIO(bytes(stale_image)))
+
+	kind, result = _logfile_reassemble_or_reason(log_file_parser, lsn)
+	assert kind == 'validation', result
+	assert 'generation' in result
+
+def test_logfile_reassembly_truncated():
+	"""A truncated continuation page must be reported as truncation, not silently shortened."""
+
+	log_page_size = 1024
+	sequence_number_bits = 42
+	wrap_start_page = _logfile_test_wrap_start_page(log_page_size)
+
+	builder = _LogFileSyntheticBuilder(log_page_size, sequence_number_bits, wrap_start_page + 6, wrap_start_page)
+
+	builder.add_record(bytes([ 0x77 ]) * (log_page_size - builder.log_page_data_offset - 48 - 8))
+	payload = bytes([ 0x66 ]) * 1000
+	lsn = builder.add_record(payload)
+
+	image = builder.build()
+
+	# Truncate the image in the middle of the continuation page.
+	expected_page, expected_offset = LogFile.LogFileParser(io.BytesIO(image)).lsn_to_offset(lsn)
+	continuation_page = expected_page + 1
+
+	truncated_length = continuation_page * log_page_size + 10
+	image = image[ : truncated_length]
+
+	log_file_parser = LogFile.LogFileParser(io.BytesIO(image))
+
+	kind, result = _logfile_reassemble_or_reason(log_file_parser, lsn)
+	assert kind == 'truncated', result
+	assert str(continuation_page) in result
+
+def test_logfile_reassembly_validation_reasons():
+	"""An invalid continuation page must be reported as a validation failure with a reason."""
+
+	log_page_size = 1024
+	sequence_number_bits = 42
+	wrap_start_page = _logfile_test_wrap_start_page(log_page_size)
+
+	builder = _LogFileSyntheticBuilder(log_page_size, sequence_number_bits, wrap_start_page + 5, wrap_start_page)
+
+	payload = bytes([ 0x10 ]) * 1200
+	lsn = builder.add_record(payload)
+
+	image = bytearray(builder.build())
+
+	# Corrupt the update sequence array offset of the continuation page.
+	continuation_page = wrap_start_page + 1
+	offset = continuation_page * log_page_size
+	image[offset + 4 : offset + 6] = struct.pack('<H', 0xFFFF)
+
+	log_file_parser = LogFile.LogFileParser(io.BytesIO(bytes(image)))
+
+	kind, result = _logfile_reassemble_or_reason(log_file_parser, lsn)
+	assert kind == 'validation', result
+	assert 'Invalid log page #{}'.format(continuation_page) in result
+
+def test_logfile_reassembly_parse_records():
+	"""parse_ntfs_records must yield exactly the logical record sequence (payloads and LSNs)."""
+
+	for log_page_size in [ 1024, 4096 ]:
+		wrap_start_page = _logfile_test_wrap_start_page(log_page_size)
+		builder = _LogFileSyntheticBuilder(log_page_size, 42, wrap_start_page + 16, wrap_start_page)
+
+		# Keep records away from the first page of the circular area: the record crossing the end of
+		# the log will be continued there.
+		builder.page_number = wrap_start_page + 1
+		builder.offset_in_page = builder.log_page_data_offset
+
+		expected = []
+
+		for i in range(6):
+			payload = bytes([ i ]) * (40 + (i * 37) % 400)
+			payload = payload + b'\x00' * ((8 - len(payload) % 8) % 8)
+			lsn = builder.add_record(payload)
+			expected.append((lsn, payload))
+
+		# Add a record crossing the end of the log to force a wrap.
+		builder.page_number = wrap_start_page + 15
+		builder.offset_in_page = log_page_size - 48 - 16
+		payload = bytes([ 0xAB ]) * 500
+		payload = payload + b'\x00' * ((8 - len(payload) % 8) % 8)
+		lsn = builder.add_record(payload)
+		expected.append((lsn, payload))
+
+		image = builder.build()
+
+		# And via the public parser interface.
+		parsed = []
+		log_file_parser = LogFile.LogFileParser(io.BytesIO(image))
+		for record in log_file_parser.parse_ntfs_records(False):
+			parsed.append((record.lsn, bytes(record.buf)))
+
+		assert parsed == expected
+
+def test_logfile_reassembly_physical_slot_old_generation():
+	"""The same physical slot holding an older generation must not be glued to a new record."""
+
+	log_page_size = 1024
+	sequence_number_bits = 42
+	wrap_start_page = _logfile_test_wrap_start_page(log_page_size)
+
+	# First generation: the first page of the circular area is entirely filled with 0xE1 bytes.
+	builder = _LogFileSyntheticBuilder(log_page_size, sequence_number_bits, wrap_start_page + 4, wrap_start_page)
+	builder.sequence_number = 1
+	builder.add_record(bytes([ 0xE1 ]) * (log_page_size - builder.log_page_data_offset))
+
+	image = bytearray(builder.build())
+
+	# Second generation: a record starts near the end of the last page and wraps to the first page of
+	# the circular area, where the old generation bytes (0xE1) still live in the physical slot.
+	second = _LogFileSyntheticBuilder(log_page_size, sequence_number_bits, wrap_start_page + 4, wrap_start_page)
+	second.sequence_number = 2
+	second.page_number = wrap_start_page + 3
+	second.offset_in_page = log_page_size - 48 - 16
+
+	payload = bytes([ 0x99 ]) * 400
+	lsn = second.add_record(payload)
+
+	# Splice the new generation's last page into the old image; the first page of the circular area
+	# keeps generation 1 content.
+	second.fill_trailing_pages()
+	second.seal_pages()
+
+	last_page = wrap_start_page + 3
+	offset = last_page * log_page_size
+	image[offset : offset + log_page_size] = second.protect_page(last_page)
+
+	# The first page of the circular area is generation 1, while the record belongs to generation 2.
+	log_file_parser = LogFile.LogFileParser(io.BytesIO(bytes(image)))
+
+	kind, result = _logfile_reassemble_or_reason(log_file_parser, lsn)
+	assert kind == 'validation', result
+	assert 'generation' in result
+
+def test_logfile_reassembly_sequence_number_rollover():
+	"""Sequence numbers near the top of their field must still select the right continuation pages."""
+
+	for sequence_number_bits in [ 8, 9, 20, 42 ]:
+		wrap_start_page = _logfile_test_wrap_start_page(1024)
+		max_sequence_number = (1 << sequence_number_bits) - 1
+
+		builder = _LogFileSyntheticBuilder(1024, sequence_number_bits, wrap_start_page + 4, wrap_start_page)
+
+		builder.sequence_number = max_sequence_number
+		builder.page_number = wrap_start_page + 3
+		builder.offset_in_page = 1024 - 48 - 16
+
+		payload = bytes([ 0x42 ]) * 296
+		lsn = builder.add_record(payload)
+
+		assert builder.sequence_number == max_sequence_number # The generation is stored in the LSN.
+
+		log_file_parser = LogFile.LogFileParser(io.BytesIO(builder.build()))
+
+		client_data = log_file_parser.get_client_data(lsn)
+		assert bytes(client_data.buf) == payload
+
+def test_logfile_reassembly_length_past_used_page():
+	"""A declared client data length that runs past the used part of a continuation page is invalid."""
+
+	log_page_size = 1024
+	sequence_number_bits = 42
+	wrap_start_page = _logfile_test_wrap_start_page(log_page_size)
+
+	builder = _LogFileSyntheticBuilder(log_page_size, sequence_number_bits, wrap_start_page + 5, wrap_start_page)
+
+	payload = bytes([ 0x5C ]) * 1096
+	lsn = builder.add_record(payload)
+
+	image = bytearray(builder.build())
+
+	# Inflate the declared client data length: the record then claims bytes from the unused (zero)
+	# area after the real payload. Those bytes must not be accepted as payload.
+	page_number, offset_in_page = LogFile.LogFileParser(io.BytesIO(bytes(image))).lsn_to_offset(lsn)
+	header_offset = page_number * log_page_size + offset_in_page
+	struct.pack_into('<L', image, header_offset + 24, len(payload) + 64)
+
+	log_file_parser = LogFile.LogFileParser(io.BytesIO(bytes(image)))
+
+	kind, result = _logfile_reassemble_or_reason(log_file_parser, lsn)
+	assert kind == 'validation', result
+	assert 'used part' in result
+
+def test_logfile_reassembly_skipped_reasons_are_kept():
+	"""parse_ntfs_records must record why a record was skipped, not only change a total count."""
+
+	log_page_size = 1024
+	sequence_number_bits = 42
+	wrap_start_page = _logfile_test_wrap_start_page(log_page_size)
+
+	builder = _LogFileSyntheticBuilder(log_page_size, sequence_number_bits, wrap_start_page + 5, wrap_start_page)
+
+	good_payload = bytes([ 0x21 ]) * 64
+	good_lsn = builder.add_record(good_payload)
+
+	bad_payload = bytes([ 0x22 ]) * 1200
+	bad_lsn = builder.add_record(bad_payload)
+
+	image = bytearray(builder.build())
+
+	continuation_page = wrap_start_page + 1
+	continuation_offset = continuation_page * log_page_size
+	image[continuation_offset + 4 : continuation_offset + 6] = struct.pack('<H', 0xFFFF)
+
+	log_file_parser = LogFile.LogFileParser(io.BytesIO(bytes(image)))
+
+	parsed_lsns = [ record.lsn for record in log_file_parser.parse_ntfs_records(False) ]
+
+	assert good_lsn in parsed_lsns
+	assert bad_lsn not in parsed_lsns
+
+	assert len(log_file_parser.skipped_client_data) > 0
+	assert all(exception.lsn == bad_lsn for exception in log_file_parser.skipped_client_data)
+	assert log_file_parser.skipped_client_data[0].kind == 'validation'
+	assert 'Invalid log page #{}'.format(continuation_page) in str(log_file_parser.skipped_client_data[0])
+
+def test_logfile_reassembly_errors_are_stable():
+	"""The same corrupted image must yield the same kind of failure every time (not just a record count)."""
+
+	log_page_size = 1024
+	sequence_number_bits = 42
+	wrap_start_page = _logfile_test_wrap_start_page(log_page_size)
+
+	builder = _LogFileSyntheticBuilder(log_page_size, sequence_number_bits, wrap_start_page + 5, wrap_start_page)
+
+	payload = bytes([ 0x31 ]) * 1200
+	lsn = builder.add_record(payload)
+
+	image = bytearray(builder.build())
+
+	# Corrupt the update sequence array of the continuation page.
+	continuation_page = wrap_start_page + 1
+	continuation_offset = continuation_page * log_page_size
+	image[continuation_offset + 4 : continuation_offset + 6] = struct.pack('<H', 0xFFFF)
+
+	results = set()
+	for _ in range(3):
+		log_file_parser = LogFile.LogFileParser(io.BytesIO(bytes(image)))
+		results.add(_logfile_reassemble_or_reason(log_file_parser, lsn))
+
+	assert len(results) == 1
+
+	kind, result = results.pop()
+	assert kind == 'validation'
+	assert 'Invalid log page #{}'.format(continuation_page) in result
 
 def test_logfile_empty():
 	f = open(LOGFILE_empty, 'rb')

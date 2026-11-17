@@ -223,10 +223,50 @@ class LogRecordPageException(LogFileException):
 
 	pass
 
+class LogRecordPageTruncatedException(LogRecordPageException):
+	"""This exception is raised when a log record page is not fully present in the input."""
+
+	pass
+
+class LogRecordPageValidationException(LogRecordPageException):
+	"""This exception is raised when a log record page is present but invalid."""
+
+	pass
+
 class ClientException(LogFileException):
 	"""This exception is raised when something is wrong with client data."""
 
 	pass
+
+class ClientDataReassemblyException(ClientException):
+	"""This exception is raised when client data cannot be reassembled across log record pages.
+
+	The 'kind' attribute is either 'truncated' (the data is not available) or 'validation'
+	(the data is available but violates the log file format or the generation rules).
+	"""
+
+	kind = None
+
+	def __init__(self, lsn, reason, page_number = None, offset_in_page = None):
+		ClientException.__init__(self, reason)
+
+		self.lsn = lsn
+		self.reason = reason
+		self.page_number = page_number
+		self.offset_in_page = offset_in_page
+
+	def __str__(self):
+		return '{} (LSN: {}, page: {}, offset: {}): {}'.format(self.kind, self.lsn, self.page_number, self.offset_in_page, self.reason)
+
+class ClientDataTruncatedException(ClientDataReassemblyException):
+	"""This exception is raised when client data extends beyond the available log data."""
+
+	kind = 'truncated'
+
+class ClientDataValidationException(ClientDataReassemblyException):
+	"""This exception is raised when client data (or a page holding it) is invalid."""
+
+	kind = 'validation'
 
 class RestartPage(object):
 	"""This class is used to work with a restart page."""
@@ -259,7 +299,7 @@ class RestartPage(object):
 		if log_page_size < 1024 or log_page_size % 512 != 0:
 			raise RestartPageException('Invalid log page size: {}'.format(log_page_size))
 
-		if log_page_size != PAGE_SIZE:
+		if log_page_size > PAGE_SIZE or PAGE_SIZE % log_page_size != 0:
 			raise NotImplementedError('The following log page size is not supported: {}'.format(log_page_size))
 
 		restart_offset = self.get_restart_offset()
@@ -647,6 +687,18 @@ class LogFileParser(object):
 	oat_version = None
 	"""A version of the open attribute table to use. (It will be adjusted later.)"""
 
+	use_dumps = False
+	"""Whether open attribute table and attribute names dumps should be used. (It will be adjusted later.)"""
+
+	log_file_size = None
+	"""A size of the log file stored in a restart area (it can be larger than the actual file)."""
+
+	log_page_count = None
+	"""A number of log record pages in the log file (as recorded in a restart area; reads past the input are truncated)."""
+
+	skipped_client_data = None
+	"""A list of client data reassembly exceptions (ClientDataReassemblyException objects) for skipped records."""
+
 	def __init__(self, file_object):
 		self.file_object = file_object
 		self.writable = False
@@ -704,11 +756,27 @@ class LogFileParser(object):
 		self.log_page_size = log_page_size
 		self.log_version = log_version
 
+		self.log_file_size = restart_area.get_file_size()
+		if self.log_file_size <= 0 or self.log_file_size % self.log_page_size != 0:
+			self.log_file_size = self.file_size - (self.file_size % self.log_page_size)
+
+		# The number of pages in the log file (as recorded in a restart area) defines where the log file
+		# wraps. The actual file object can be a truncated (saved) copy, so reads past its end are
+		# reported as truncated pages rather than shifting the wrap point.
+		self.log_page_count = self.log_file_size // self.log_page_size
+		if self.log_page_count <= self.get_wrapped_log_record_page_number() or self.file_size // self.log_page_size <= self.get_wrapped_log_record_page_number():
+			raise LogFileException('The log file is too small for the circular area: {} pages'.format(min(self.log_page_count, self.file_size // self.log_page_size)))
+
 		self.record_header_length = restart_area.get_record_header_length()
 		if self.record_header_length < LogRecordHeader.sizeof:
 			raise LogFileException('Invalid record header length: {} < {}'.format(self.record_header_length, LogRecordHeader.sizeof))
 
+		if self.record_header_length % 8 != 0:
+			raise LogFileException('Invalid (unaligned) record header length: {}'.format(self.record_header_length))
+
 		self.log_page_data_offset = restart_area.get_log_page_data_offset()
+		if self.log_page_data_offset < 8 or self.log_page_data_offset % 8 != 0 or self.log_page_data_offset + LogRecordHeader.sizeof > self.log_page_size:
+			raise LogFileException('Invalid log page data offset: {}'.format(self.log_page_data_offset))
 
 		self.sequence_number_bits = restart_area.get_sequence_number_bits()
 		if self.sequence_number_bits >= 64 or self.sequence_number_bits < 3:
@@ -716,6 +784,8 @@ class LogFileParser(object):
 
 		self.cluster_size = CLUSTER_SIZE_DEFAULT # Adjusted in the 'collect_lsns' method.
 		self.oat_version = 1 # Adjusted in the 'collect_lsns' method.
+
+		self.skipped_client_data = []
 
 	def lsn_to_offset(self, lsn):
 		"""Convert a log sequence number (LSN) to a file offset, return a (log_page_number, offset_in_page) tuple."""
@@ -742,30 +812,97 @@ class LogFileParser(object):
 	def get_log_record_page_by_number(self, log_page_number):
 		"""Get, parse and return a log record page (LogRecordPage) by its number (or None, if not found)."""
 
+		try:
+			return self.read_log_record_page_by_number(log_page_number)
+		except LogRecordPageException:
+			return
+
+	def read_log_record_page_by_number(self, log_page_number):
+		"""Get, parse and return a log record page (LogRecordPage) by its number.
+
+		LogRecordPageTruncatedException is raised when the page is not fully present in the input.
+		LogRecordPageValidationException is raised when the page is present but invalid.
+		"""
+
+		if log_page_number < 0:
+			raise LogRecordPageValidationException('Invalid log page number: {}'.format(log_page_number))
+
+		if log_page_number >= self.log_page_count:
+			raise LogRecordPageValidationException('Log page #{} is outside the log file ({} pages)'.format(log_page_number, self.log_page_count))
+
 		self.file_object.seek(log_page_number * self.log_page_size)
 		buf = self.file_object.read(self.log_page_size)
 
 		if len(buf) != self.log_page_size: # Truncated data.
-			return
+			raise LogRecordPageTruncatedException('Truncated log page #{}: {} of {} bytes'.format(log_page_number, len(buf), self.log_page_size))
 
 		try:
 			log_page = LogRecordPage(buf, log_page_number, self.log_page_data_offset)
-		except (LogFileException, NotImplementedError):
-			log_page = None
+		except (LogFileException, NotImplementedError) as exception:
+			raise LogRecordPageValidationException('Invalid log page #{}: {}'.format(log_page_number, exception))
 
 		return log_page
 
-	def get_wrapped_log_record_page_number(self):
-		"""Return the first log record page number to be used after the log file is wrapped."""
+	def get_auxiliary_log_record_page_numbers(self):
+		"""Return a (first page number, page count) tuple for the tail (version 1.1) or fast (version 2.x) log record pages."""
 
 		if self.log_version[0] == 1 and self.log_version[1] == 1:
-			start_page = 4 # 2 restart pages and 2 tail log record pages.
+			auxiliary_page_count = 2 # 2 tail log record pages.
 		elif self.log_version[0] >= 2:
-			start_page = 34 # 2 restart pages and 32 fast pages.
+			auxiliary_page_count = 32 # 32 fast log record pages.
 		else:
 			raise NotImplementedError('Unknown location of the "infinite" area')
 
-		return start_page
+		start_offset = 2 * PAGE_SIZE
+		if start_offset % self.log_page_size != 0:
+			raise NotImplementedError('The auxiliary area is not log page aligned: {}'.format(start_offset))
+
+		return (start_offset // self.log_page_size, auxiliary_page_count)
+
+	def get_wrapped_log_record_page_number(self):
+		"""Return the first log record page number to be used after the log file is wrapped.
+
+		Two restart pages (each of the system page size) are followed by two tail log record pages
+		(version 1.1) or 32 fast log record pages (version 2.x or higher), each of the log page size.
+		"""
+
+		start_page, auxiliary_page_count = self.get_auxiliary_log_record_page_numbers()
+
+		return start_page + auxiliary_page_count
+
+	def get_log_record_page_data_size(self):
+		"""Return the number of payload bytes available in a continuation log record page."""
+
+		return self.log_page_size - self.log_page_data_offset
+
+	def get_log_record_page_sequence_number(self, log_record_page):
+		"""Get and return the generation (sequence number) of a log record page.
+
+		A regular log record page stores the last LSN in its header. A tail log record page (version 1.1)
+		reuses that field for a file offset. A tail copy can be applied to a regular page slot, so the
+		field is checked for a file offset first (an LSN of a record cannot be log page aligned, because
+		a record header is never at offset zero).
+		"""
+
+		lsn = log_record_page.get_last_lsn()
+
+		auxiliary_start_page, auxiliary_page_count = self.get_auxiliary_log_record_page_numbers()
+		is_auxiliary_page = auxiliary_start_page <= log_record_page.page_number < auxiliary_start_page + auxiliary_page_count
+
+		if lsn == 0 or (self.log_version == (1, 1) and (is_auxiliary_page or lsn % self.log_page_size == 0)):
+			lsn = log_record_page.get_last_end_lsn()
+
+		return self.lsn_to_seqnum(lsn)
+
+	def next_log_record_page_number(self, log_page_number):
+		"""Return the next log record page number in the circular area, together with a flag telling whether the log file is wrapped."""
+
+		candidate = log_page_number + 1
+
+		if candidate >= self.log_page_count:
+			return (self.get_wrapped_log_record_page_number(), True)
+
+		return (candidate, False)
 
 	def collect_lsns(self):
 		"""Collect valid log sequence numbers (LSNs) found in this log file."""
@@ -904,7 +1041,7 @@ class LogFileParser(object):
 				candidate_lsn = self.offset_to_lsn(candidate_log_page_number, candidate_offset_in_page, seqnum_expected)
 
 				# Handle the wrap.
-				if candidate_log_page_number * self.log_page_size >= self.file_size:
+				if candidate_log_page_number >= self.log_page_count:
 					candidate_log_page_number = self.get_wrapped_log_record_page_number()
 					seqnum_expected += 1
 					candidate_lsn = self.offset_to_lsn(candidate_log_page_number, candidate_offset_in_page, seqnum_expected)
@@ -930,10 +1067,8 @@ class LogFileParser(object):
 				candidate_lsn = self.offset_to_lsn(candidate_log_page_number, candidate_offset_in_page, seqnum_expected)
 
 				# Handle the wrap.
-				if candidate_log_page_number * self.log_page_size >= self.file_size:
-					pages_left_in_file = (self.file_size // self.log_page_size) - (log_page_number + 1) # Pages left after the first one with client data.
-
-					candidate_log_page_number = self.get_wrapped_log_record_page_number() + (pages_to_skip - 1) - pages_left_in_file
+				if candidate_log_page_number >= self.log_page_count:
+					candidate_log_page_number = self.get_wrapped_log_record_page_number() + (pages_to_skip - 1) - (self.log_page_count - (log_page_number + 1))
 					seqnum_expected += 1
 					candidate_lsn = self.offset_to_lsn(candidate_log_page_number, candidate_offset_in_page, seqnum_expected)
 
@@ -1067,7 +1202,12 @@ class LogFileParser(object):
 		new_lsns = set()
 
 		for lsn in self.lsns.copy():
-			client_data = self.get_client_data(lsn)
+			try:
+				client_data = self.get_client_data(lsn)
+			except ClientDataReassemblyException as exception:
+				self.skip_client_data(exception)
+				continue
+
 			if client_data.record_type == LfsClientRestart:
 				try:
 					ntfs_restart_area = client_data.data_decoded()
@@ -1196,8 +1336,10 @@ class LogFileParser(object):
 		if self.log_version != (1, 1):
 			raise RuntimeError('The log file version is not 1.1')
 
-		tail_page_1 = self.get_log_record_page_by_number(2)
-		tail_page_2 = self.get_log_record_page_by_number(3)
+		tail_page_number, __ = self.get_auxiliary_log_record_page_numbers()
+
+		tail_page_1 = self.get_log_record_page_by_number(tail_page_number)
+		tail_page_2 = self.get_log_record_page_by_number(tail_page_number + 1)
 
 		if tail_page_1 is None and tail_page_2 is None: # Nothing to do, both tail log record pages are invalid.
 			return
@@ -1235,8 +1377,10 @@ class LogFileParser(object):
 
 		fast_pages = []
 
-		i = 2
-		while i < 34:
+		first_fast_page, fast_page_count = self.get_auxiliary_log_record_page_numbers()
+
+		i = first_fast_page
+		while i < first_fast_page + fast_page_count:
 			fast_page = self.get_log_record_page_by_number(i)
 			if fast_page is not None and fast_page.get_last_lsn() > highest_lsn:
 				fast_pages.append(fast_page)
@@ -1263,10 +1407,10 @@ class LogFileParser(object):
 		if mode == 0:
 			start_page = self.get_wrapped_log_record_page_number()
 		elif mode == 1:
-			start_page = 2 # 2 restart pages.
+			start_page = self.get_auxiliary_log_record_page_numbers()[0] # 2 restart (system) pages.
 
 		i = start_page
-		while i < self.file_size // self.log_page_size:
+		while i < min(self.log_page_count, self.file_size // self.log_page_size):
 			log_page = self.get_log_record_page_by_number(i)
 
 			if log_page is not None:
@@ -1275,48 +1419,121 @@ class LogFileParser(object):
 			i += 1
 
 	def get_client_data(self, lsn):
-		"""Get, parse and return client data (ClientData) for a given log sequence number (LSN)."""
+		"""Get, parse and return client data (ClientData) for a given log sequence number (LSN).
+
+		ClientDataTruncatedException is raised when a part of this client data is not available.
+		ClientDataValidationException is raised when this client data (or a page holding it) is invalid,
+		including a continuation page that belongs to an older generation of the log file.
+		"""
 
 		log_page_number, offset_in_page = self.lsn_to_offset(lsn)
 
-		log_record_page = self.get_log_record_page_by_number(log_page_number)
-		log_record_header = log_record_page.get_log_record_at_offset(offset_in_page, self.record_header_length)
+		if log_page_number == 0 or log_page_number >= self.log_page_count:
+			raise ClientDataValidationException(lsn, 'Invalid log page number: {}'.format(log_page_number), log_page_number, offset_in_page)
+
+		try:
+			log_record_page = self.read_log_record_page_by_number(log_page_number)
+		except LogRecordPageTruncatedException as exception:
+			raise ClientDataTruncatedException(lsn, str(exception), log_page_number, offset_in_page)
+		except LogRecordPageValidationException as exception:
+			raise ClientDataValidationException(lsn, str(exception), log_page_number, offset_in_page)
+
+		if offset_in_page + self.record_header_length > self.log_page_size:
+			raise ClientDataValidationException(lsn, 'A log record header crosses the page boundary', log_page_number, offset_in_page)
+
+		try:
+			log_record_header = log_record_page.get_log_record_at_offset(offset_in_page, self.record_header_length)
+		except LogFileException as exception:
+			raise ClientDataValidationException(lsn, 'Invalid log record header: {}'.format(exception), log_page_number, offset_in_page)
+
+		if log_record_header.get_this_lsn() != lsn:
+			raise ClientDataValidationException(lsn, 'Expected LSN {}, found {}'.format(lsn, log_record_header.get_this_lsn()), log_page_number, offset_in_page)
 
 		client_data_length = log_record_header.get_client_data_length()
+		if client_data_length % 8 != 0:
+			raise ClientDataValidationException(lsn, 'The client data length is not aligned: {}'.format(client_data_length), log_page_number, offset_in_page)
+
+		client_buf = log_record_header.buf[self.record_header_length : self.record_header_length + client_data_length]
+		client_buf = bytes(client_buf)
 
 		if client_data_length <= self.log_page_size - offset_in_page - self.record_header_length: # Client data is in the current log record page only.
-			client_buf = log_record_header.buf[self.record_header_length : self.record_header_length + client_data_length]
-			client_data = ClientData(client_buf, log_record_header.get_record_type(), lsn, log_record_header.get_transaction_id(), self.cluster_size)
+			return ClientData(client_buf, log_record_header.get_record_type(), lsn, log_record_header.get_transaction_id(), self.cluster_size)
 
-			return client_data
+		# Client data is in two or more log record pages.
 
-		else: # Client data is in two or more log record pages.
-			client_buf = log_record_header.buf[self.record_header_length : ]
-			client_data_length_left = client_data_length - len(client_buf)
+		page_data_size = self.get_log_record_page_data_size()
+		if page_data_size <= 0:
+			raise ClientDataValidationException(lsn, 'Invalid log page data offset: {}'.format(self.log_page_data_offset), log_page_number, offset_in_page)
 
-			while client_data_length_left > 0:
-				log_page_number += 1
+		client_data_length_first_page = self.log_page_size - offset_in_page - self.record_header_length
+		client_data_length_left = client_data_length - client_data_length_first_page
 
-				# Handle the wrap.
-				if log_page_number * self.log_page_size >= self.file_size:
-					log_page_number = self.get_wrapped_log_record_page_number()
+		# Pages are consecutive in the circular area. The same physical page can be used only once per
+		# record, otherwise an old generation of the log file would be stitched into it.
+		circular_start_page_number = self.get_wrapped_log_record_page_number()
+		circular_page_count = self.log_page_count - circular_start_page_number
+		if circular_page_count <= 0:
+			raise ClientDataValidationException(lsn, 'The circular area is empty: {} pages'.format(self.log_page_count), log_page_number, offset_in_page)
 
-				log_record_page = self.get_log_record_page_by_number(log_page_number)
-				if log_record_page is None: # This page is missing in the current state of the log file.
-					break
+		continuation_page_count = (client_data_length_left + page_data_size - 1) // page_data_size
+		if continuation_page_count + 1 > circular_page_count:
+			raise ClientDataValidationException(lsn, 'The client data length ({}) exceeds the circular area ({} pages)'.format(client_data_length, circular_page_count), log_page_number, offset_in_page)
 
-				if client_data_length_left >= self.log_page_size - self.log_page_data_offset:
-					client_buf_more_data = log_record_page.buf[self.log_page_data_offset : ]
-				else:
-					client_buf_more_data = log_record_page.buf[self.log_page_data_offset : self.log_page_data_offset + client_data_length_left]
+		sequence_number = self.lsn_to_seqnum(lsn)
+		sequence_number_mask = (1 << self.sequence_number_bits) - 1
 
-				client_buf += client_buf_more_data
+		last_page_number = log_page_number
+		page_offsets = []
 
-				client_data_length_left -= len(client_buf_more_data)
+		while client_data_length_left > 0:
+			candidate_page_number, __ = self.next_log_record_page_number(last_page_number)
+			last_page_number = candidate_page_number
 
-			client_data = ClientData(client_buf, log_record_header.get_record_type(), lsn, log_record_header.get_transaction_id(), self.cluster_size)
+			if candidate_page_number in [ page_number for (page_number, __) in page_offsets ]:
+				raise ClientDataValidationException(lsn, 'Log page #{} is reused within the same client data'.format(candidate_page_number), candidate_page_number, self.log_page_data_offset)
 
-			return client_data
+			try:
+				candidate_log_record_page = self.read_log_record_page_by_number(candidate_page_number)
+			except LogRecordPageTruncatedException as exception:
+				raise ClientDataTruncatedException(lsn, str(exception), candidate_page_number, self.log_page_data_offset)
+			except LogRecordPageValidationException as exception:
+				raise ClientDataValidationException(lsn, str(exception), candidate_page_number, self.log_page_data_offset)
+
+			# A physical wrap does not change the generation. The generation changes only when the
+			# logical offset (stored in the LSN) overflows into the sequence number field.
+			offset_only_lsn = self.offset_to_lsn(candidate_page_number, self.log_page_data_offset, 0)
+			expected_sequence_number = (sequence_number + self.lsn_to_seqnum(offset_only_lsn)) & sequence_number_mask
+
+			page_sequence_number = self.get_log_record_page_sequence_number(candidate_log_record_page)
+			if page_sequence_number != expected_sequence_number:
+				raise ClientDataValidationException(lsn, 'Log page #{} belongs to generation {}, expected generation {}'.format(candidate_page_number, page_sequence_number, expected_sequence_number), candidate_page_number, self.log_page_data_offset)
+
+			client_buf_more_data = candidate_log_record_page.buf[self.log_page_data_offset : self.log_page_data_offset + min(client_data_length_left, page_data_size)]
+			page_offsets.append((candidate_page_number, self.log_page_data_offset + len(client_buf_more_data)))
+
+			client_buf += bytes(client_buf_more_data)
+			client_data_length_left -= len(client_buf_more_data)
+
+		# The last page holding this client data must not contain anything after it (unless the log
+		# record ends exactly at a page boundary).
+		last_page_data_end = page_offsets[-1][1]
+		if last_page_data_end < self.log_page_size:
+			last_page = self.get_log_record_page_by_number(page_offsets[-1][0])
+			if last_page is not None and last_page_data_end > last_page.get_next_record_offset():
+				raise ClientDataValidationException(lsn, 'The client data extends past the used part of log page #{}'.format(last_page.page_number), last_page.page_number, self.log_page_data_offset)
+
+		if len(client_buf) != client_data_length:
+			raise ClientDataValidationException(lsn, 'Reassembled client data has an invalid length: {} != {}'.format(len(client_buf), client_data_length), log_page_number, offset_in_page)
+
+		return ClientData(client_buf, log_record_header.get_record_type(), lsn, log_record_header.get_transaction_id(), self.cluster_size)
+
+	def skip_client_data(self, exception):
+		"""Remember a client data reassembly exception (so a reason for skipping a record is not lost)."""
+
+		if self.skipped_client_data is None:
+			self.skipped_client_data = []
+
+		self.skipped_client_data.append(exception)
 
 	def parse_ntfs_records(self, recover_log_data = True):
 		"""This method yields NTFS client data (NTFSRestartArea and NTFSLogRecord) from each log record found in the log file.
@@ -1346,7 +1563,12 @@ class LogFileParser(object):
 			oat = dict()
 
 			for lsn in self.lsns_sorted[client_id]:
-				client_data = self.get_client_data(lsn)
+				try:
+					client_data = self.get_client_data(lsn)
+				except ClientDataReassemblyException as exception:
+					self.skip_client_data(exception)
+					continue
+
 				try:
 					client_data_decoded = client_data.data_decoded()
 				except NotImplementedError:
