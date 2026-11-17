@@ -27,6 +27,20 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 log.setLevel(os.getenv("DISSECT_LOG_XFS", "CRITICAL"))
 
+XFS_DINODE_CORE_SIZE_V2 = 0x64
+XFS_DINODE_CORE_SIZE_V3 = 0xB0
+XFS_BMBT_REC_SIZE = 16
+XFS_BMDR_BLOCK_SIZE = 4
+XFS_BMDR_KEY_SIZE = 8
+XFS_BMDR_PTR_SIZE = 8
+XFS_BMDR_MAXRECS_DIVISOR = XFS_BMDR_KEY_SIZE + XFS_BMDR_PTR_SIZE
+
+# On-disk extent counter limits, see xfs_inode.h
+XFS_MAX_EXTCNT_DATA_FORK_SMALL = (1 << 31) - 1
+XFS_MAX_EXTCNT_ATTR_FORK_SMALL = (1 << 15) - 1
+XFS_MAX_EXTCNT_DATA_FORK_LARGE = (1 << 48) - 1
+XFS_MAX_EXTCNT_ATTR_FORK_LARGE = (1 << 32) - 1
+
 
 class XFS:
     def __init__(self, fh: BinaryIO):
@@ -267,6 +281,122 @@ class INode:
     def _has_large_extent_counts(self) -> bool:
         return self.inode.di_version >= 3 and self.inode.di_flags2 & c_xfs.XFS_DIFLAG2_NREXT64 != 0
 
+    def _core_size(self) -> int:
+        version = self.inode.di_version
+        if version == 3:
+            return XFS_DINODE_CORE_SIZE_V3
+        if version in (1, 2):
+            return XFS_DINODE_CORE_SIZE_V2
+
+        raise Error(f"{self!r} has an unsupported inode version: {version}")
+
+    @cached_property
+    def _fork_sizes(self) -> tuple[int, int]:
+        """Return the ``(data fork, attr fork)`` sizes in bytes.
+
+        Sizes are relative to the start of the literal area, which begins directly after the inode core. The two
+        forks must be adjacent but can never overlap: the attr fork starts exactly where the data fork ends.
+        """
+        literal_size = self.ag.sb.sb_inodesize - self._core_size()
+        if literal_size <= 0:
+            raise Error(f"{self!r} has an invalid literal area size: {literal_size}")
+
+        forkoff = self.inode.di_forkoff
+        if not forkoff:
+            return literal_size, 0
+
+        data_size = forkoff * 8
+        if data_size >= literal_size:
+            raise Error(
+                f"{self!r} has an invalid attr fork offset: {data_size} >= {literal_size} bytes of literal area"
+            )
+
+        return data_size, literal_size - data_size
+
+    @property
+    def data_fork_size(self) -> int:
+        return self._fork_sizes[0]
+
+    @property
+    def attr_fork_size(self) -> int:
+        return self._fork_sizes[1]
+
+    def _raw_extent_counts(self) -> tuple[int, int]:
+        if self._has_large_extent_counts():
+            return self.inode.di_big_nextents, self.inode.di_big_anextents
+
+        # Actually di_nextents/di_anextents, but we optimized the unions away
+        return self.inode.di_big_anextents, self.inode.di_nrext64_pad
+
+    @cached_property
+    def _extent_counts(self) -> tuple[int, int]:
+        """Return the validated ``(data fork, attr fork)`` extent counts."""
+        self._validate_extent_counts()
+        return self._raw_extent_counts()
+
+    def _validate_extent_counts(self) -> None:
+        """Validate both fork extent counters against their on-disk width and fork capacity."""
+        data_extents, attr_extents = self._raw_extent_counts()
+        is_large = self._has_large_extent_counts()
+
+        max_data = XFS_MAX_EXTCNT_DATA_FORK_LARGE if is_large else XFS_MAX_EXTCNT_DATA_FORK_SMALL
+        max_attr = XFS_MAX_EXTCNT_ATTR_FORK_LARGE if is_large else XFS_MAX_EXTCNT_ATTR_FORK_SMALL
+
+        if data_extents > max_data:
+            raise Error(f"{self!r} has an invalid data fork extent count: {data_extents} > {max_data}")
+        if attr_extents > max_attr:
+            raise Error(f"{self!r} has an invalid attr fork extent count: {attr_extents} > {max_attr}")
+
+        data_size, attr_size = self._fork_sizes
+        data_format = int(self.inode.di_format)
+
+        if data_format == c_xfs.xfs_dinode_fmt.XFS_DINODE_FMT_LOCAL:
+            if data_extents:
+                raise Error(f"{self!r} has a local data fork with {data_extents} extents")
+            if self.size > data_size:
+                raise Error(f"{self!r} has a local data fork that exceeds its fork boundary: {self.size} > {data_size}")
+        elif data_format == c_xfs.xfs_dinode_fmt.XFS_DINODE_FMT_EXTENTS:
+            if data_extents * XFS_BMBT_REC_SIZE > data_size:
+                raise Error(
+                    f"{self!r} has more data fork extents than fit in the data fork: "
+                    f"{data_extents} * {XFS_BMBT_REC_SIZE} > {data_size}"
+                )
+        elif data_format == c_xfs.xfs_dinode_fmt.XFS_DINODE_FMT_BTREE:
+            self._validate_bmap_root(self.datafork(), data_size, attr=False)
+
+        if attr_extents and not attr_size:
+            raise Error(f"{self!r} has attr fork extents without an attr fork")
+
+        if attr_size:
+            attr_format = int(self.inode.di_aformat)
+            if attr_format == c_xfs.xfs_dinode_fmt.XFS_DINODE_FMT_LOCAL:
+                if attr_extents:
+                    raise Error(f"{self!r} has a local attr fork with {attr_extents} extents")
+            elif attr_format == c_xfs.xfs_dinode_fmt.XFS_DINODE_FMT_EXTENTS:
+                if attr_extents * XFS_BMBT_REC_SIZE > attr_size:
+                    raise Error(
+                        f"{self!r} has more attr fork extents than fit in the attr fork: "
+                        f"{attr_extents} * {XFS_BMBT_REC_SIZE} > {attr_size}"
+                    )
+            elif attr_format == c_xfs.xfs_dinode_fmt.XFS_DINODE_FMT_BTREE:
+                self._validate_bmap_root(self.attrfork(), attr_size, attr=True)
+
+    def _validate_bmap_root(self, fork: BinaryIO, fork_size: int, attr: bool) -> None:
+        if fork_size < XFS_BMDR_BLOCK_SIZE:
+            raise Error(f"{self!r} has a bmap root that does not fit in the {'attr' if attr else 'data'} fork")
+
+        pos = fork.tell()
+        fork.seek(0)
+        root = c_xfs.xfs_bmdr_block(fork)
+        fork.seek(pos)
+
+        maxrecs = (fork_size - XFS_BMDR_BLOCK_SIZE) // XFS_BMDR_MAXRECS_DIVISOR
+        if root.bb_numrecs > maxrecs:
+            raise Error(
+                f"{self!r} has a bmap root with more records than fit in the "
+                f"{'attr' if attr else 'data'} fork: {root.bb_numrecs} > {maxrecs}"
+            )
+
     @property
     def size(self) -> int:
         return self.inode.di_size
@@ -277,17 +407,11 @@ class INode:
 
     @property
     def data_extents(self) -> int:
-        if self._has_large_extent_counts():
-            return self.inode.di_big_nextents
-        # Actually di_nextents, but we optimized the union away
-        return self.inode.di_big_anextents
+        return self._extent_counts[0]
 
     @property
     def attr_extents(self) -> int:
-        if self._has_large_extent_counts():
-            return self.inode.di_big_anextents
-        # Actually di_anextents, but we optimized the union away
-        return self.inode.di_nrext64_pad
+        return self._extent_counts[1]
 
     @property
     def filetype(self) -> int:
@@ -455,25 +579,25 @@ class INode:
             raise Error(f"{self!r} has invalid inode format for dirlist")
 
     def datafork(self) -> BinaryIO:
-        offset = 0xB0 if self.inode.di_version == 0x3 else 0x64
+        offset = self._core_size()
+        data_size, _ = self._fork_sizes
+
         if self.inode.di_format == c_xfs.xfs_dinode_fmt.XFS_DINODE_FMT_LOCAL:
+            if self.size > data_size:
+                raise Error(f"{self!r} has a local data fork that exceeds its fork boundary: {self.size} > {data_size}")
             size = self.size
-        elif self.inode.di_forkoff:
-            size = self.inode.di_forkoff * 8
         else:
-            size = self.ag.sb.sb_inodesize - offset
+            size = data_size
 
         return RangeStream(self._buf, offset, size)
 
     def attrfork(self) -> BinaryIO:
-        if self.inode.di_forkoff == 0:
+        offset = self._core_size()
+        data_size, attr_size = self._fork_sizes
+        if attr_size == 0:
             raise Error(f"{self!r} has no extended attributes")
 
-        offset = 0xB0 if self.inode.di_version == 0x3 else 0x64
-        offset += self.inode.di_forkoff * 8
-        size = self.ag.sb.sb_inodesize - offset
-
-        return RangeStream(self._buf, offset, size)
+        return RangeStream(self._buf, offset + data_size, attr_size)
 
     @cached_property
     def dataruns(self) -> list[tuple[int | None, int]]:
@@ -500,18 +624,21 @@ class INode:
         return runs
 
     def _iter_blocks(self) -> Iterator[tuple[int, int, int, int]]:
+        self._validate_extent_counts()
+
         if self.inode.di_format == c_xfs.xfs_dinode_fmt.XFS_DINODE_FMT_EXTENTS:
-            buf = self.datafork().read(self.data_extents * 16)
-            for extent_num in range(self.data_extents):
-                yield parse_fsblock(buf[extent_num * 16 : (extent_num + 1) * 16])
+            data_extents = self.data_extents
+            buf = self.datafork().read(data_extents * XFS_BMBT_REC_SIZE)
+            for extent_num in range(data_extents):
+                yield parse_fsblock(buf[extent_num * XFS_BMBT_REC_SIZE : (extent_num + 1) * XFS_BMBT_REC_SIZE])
         elif self.inode.di_format == c_xfs.xfs_dinode_fmt.XFS_DINODE_FMT_BTREE:
             # B+tree extent lists are always large trees (64bit block numbers)
             df = self.datafork()
             root = c_xfs.xfs_bmdr_block(df)
 
             # Pointers start around halfway
-            maxrecs = (df.size - 4) // 16
-            df.seek(4 + maxrecs * 8)
+            maxrecs = (df.size - XFS_BMDR_BLOCK_SIZE) // XFS_BMDR_MAXRECS_DIVISOR
+            df.seek(XFS_BMDR_BLOCK_SIZE + maxrecs * 8)
             ptrs = c_xfs.uint64[root.bb_numrecs](df)
 
             for ptr in ptrs:
