@@ -4,6 +4,7 @@ from . import uefi
 from .uefi import MultiVolumeContainer
 
 from .misc import checker
+from . import secureboot
 from .base import FirmwareObject, RawObject, AutoRawObject
 from .utils import limit_nesting, nesting_limit_reached, \
     search_firmware_volumes

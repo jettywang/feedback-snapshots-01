@@ -132,6 +132,30 @@ class takes the raw file contents in its constructor and implements:
 - `to_dict()` returns the object hierarchy as a JSON-serializable `dict`.
 - `dump()` walks the hierarchy and writes each object to a file.
 
+### Secure Boot signature databases
+
+`uefi_firmware.secureboot` parses the signature lists in caller-supplied PK,
+KEK, db and dbx variable bytes. It is read-only: it does not authenticate the
+variable, verify a certificate chain, or decide whether a PE image may boot.
+
+```python
+from uefi_firmware.secureboot import parse_secure_boot_policy
+
+policy = parse_secure_boot_policy(
+    {"PK": pk_bytes, "KEK": kek_bytes, "db": db_bytes, "dbx": dbx_bytes})
+view = policy.to_dict()
+for entry in view["allow"]["detailedEntries"]:
+    payload = entry.get("digest") or entry.get("certificate")
+    print(entry["owner"], entry["kind"], payload)
+```
+
+Entries retain their `SignatureType` and owner GUID. Certificates, image
+digests, certificate hashes, public keys and unknown payloads are kept in
+distinct fields instead of one shared hash field. Duplicate entries and
+db/dbx overlaps are reported without being collapsed or resolved. A supplied
+authenticated-write attribute is reported as stored evidence, not as proof
+that the variable came from a trusted source.
+
 ## Features
 
 Supported formats:
