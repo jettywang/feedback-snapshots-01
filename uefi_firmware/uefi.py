@@ -1615,6 +1615,17 @@ class FirmwareVolume(FirmwareObject):
             print_error("Error invalid FV header data (%s)." % str(e))
             return
 
+        if len(self._data) < self.hdrlen:
+            # The header itself is cut off, so none of it can be trusted.
+            dlog(self, name, 'HeaderLength (0x%x) is past the end of the '
+                 'volume (0x%x bytes)' % (self.hdrlen, len(self._data)))
+            return
+
+        conflict = self._geometry_conflict()
+        if conflict is not None:
+            dlog(self, name, conflict)
+            return
+
         if self.exthdroff != 0:
             try:
                 exthdr = self._data[self.exthdroff:self.exthdroff + self._EXT_HEADER_SIZE]
@@ -1628,6 +1639,37 @@ class FirmwareVolume(FirmwareObject):
 
         self.valid_header = True
         pass
+
+    def _geometry_conflict(self):
+        '''Return the length field that contradicts the volume's geometry,
+        or None when the geometry is consistent.
+
+        A header with a correct checksum is trusted, so it is held to its
+        claims: its block map ends in a (0, 0) entry and covers exactly
+        FvLength, and FvLength is the number of bytes the volume has. A
+        header without one is read with the lengths at hand instead.
+        '''
+        header = self._data[:self.hdrlen]
+        if calculate_checksum16(header + b"\x00" * (len(header) % 2)) != 0:
+            return None
+        total = 0
+        terminated = False
+        for offset in range(0, len(self.block_map) - 7, 8):
+            count, length = struct.unpack_from("<II", self.block_map, offset)
+            if (count, length) == (0, 0):
+                terminated = True
+                break
+            total += count * length
+        if not terminated:
+            return ('block map has no (0, 0) terminator within HeaderLength '
+                    '(0x%x)' % self.hdrlen)
+        if total != self.size:
+            return ('FvLength (0x%x) and the block map total (0x%x) '
+                    'disagree' % (self.size, total))
+        if len(self._data) < self.size:
+            return ('FvLength (0x%x) is past the end of the volume (0x%x '
+                    'bytes)' % (self.size, len(self._data)))
+        return None
 
     @property
     def objects(self):
