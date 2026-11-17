@@ -22,6 +22,30 @@ instead of a slower pure Python implementation. Both implementations are provide
 Pre-build wheels are available for most common platforms and the native implementation will automatically be used if available.
 In the rare case that a pre-build wheel is not available, please refer to `dissect.util` for build instructions.
 
+## Btrfs send streams
+
+`dissect.btrfs` can inspect the output of `btrfs send` without performing a receive operation or modifying any file
+system:
+
+```python
+from dissect.btrfs import parse_send_stream
+
+with open("snapshot.send", "rb") as fh:
+    stream = parse_send_stream(fh)
+
+    for command in stream:
+        print(command.index, command.name, command.source_range, command.values())
+
+    report = stream.report()
+    print(report.summary())
+```
+
+Each command exposes its raw header and payload, the raw TLV records, and only the typed attribute values whose type
+and length were confirmed. Unknown commands and attributes are preserved but never reported as confirmed file system
+changes. The report keeps three facts separate: whether the stream was fully parsed (`parsed`), whether an `END`
+command terminated it exactly at end-of-file (`complete`), and, when a baseline is supplied, whether the stream's
+declared identity and operation schema can be applied to that baseline (`applies_to_baseline`).
+
 ## Build and test instructions
 
 This project uses `tox` to build source and wheel distributions. Run the following command from the root folder to build

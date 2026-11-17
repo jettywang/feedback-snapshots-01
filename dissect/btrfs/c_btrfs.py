@@ -823,6 +823,32 @@ struct btrfs_file_extent_item_inline {
     uint8       type;
 };
 
+/*
+ * Btrfs send stream structures. These describe the framing of a send stream,
+ * which is a separate protocol from the on-disk file system format.
+ */
+#define BTRFS_SEND_STREAM_MAGIC         "btrfs-stream"
+#define BTRFS_SEND_STREAM_VERSION       1
+#define BTRFS_SEND_STREAM_MAGIC_LEN     13
+
+struct btrfs_stream_header {
+    char        magic[BTRFS_SEND_STREAM_MAGIC_LEN];
+    uint32      version;
+};
+
+struct btrfs_cmd_header {
+    /* Length of the payload, excluding this header */
+    uint32      len;
+    uint16      cmd;
+    /* Raw CRC32C of the whole command with this field zeroed, seeded with ~0 */
+    uint32      crc;
+};
+
+struct btrfs_tlv_header {
+    uint16      type;
+    uint16      len;
+};
+
 struct btrfs_file_extent_item_reg {
     /*
      * transaction id that created this extent

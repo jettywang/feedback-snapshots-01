@@ -6,6 +6,19 @@ from dissect.btrfs.exceptions import (
     FileNotFoundError,
     NotADirectoryError,
     NotASymlinkError,
+    SendStreamError,
+)
+from dissect.btrfs.send import (
+    SendBaseline,
+    SendCommand,
+    SendIssue,
+    SendReport,
+    SendStream,
+    SendStreamHeader,
+    SendTimestamp,
+    SendTLV,
+    inspect_send_stream,
+    parse_send_stream,
 )
 
 __all__ = [
@@ -15,5 +28,16 @@ __all__ = [
     "INode",
     "NotADirectoryError",
     "NotASymlinkError",
+    "SendBaseline",
+    "SendCommand",
+    "SendIssue",
+    "SendReport",
+    "SendStream",
+    "SendStreamError",
+    "SendStreamHeader",
+    "SendTLV",
+    "SendTimestamp",
     "Subvolume",
+    "inspect_send_stream",
+    "parse_send_stream",
 ]
