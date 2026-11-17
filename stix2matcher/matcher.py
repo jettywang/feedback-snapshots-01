@@ -5,13 +5,12 @@ import base64
 import binascii
 import datetime
 import io
+import ipaddress
 import itertools
 import json
 import operator
 import pprint
 import re
-import socket
-import struct
 import sys
 import unicodedata
 
@@ -497,53 +496,45 @@ def _str_to_datetime(timestamp_str, ignore_case=False):
     return dt
 
 
-def _ip_addr_to_int(ip_str):
+def _parse_ip_network(ip_or_cidr_str, require_cidr):
     """
-    Converts a dotted-quad IP address string to an int.  The int is equal
-    to binary representation of the four bytes in the address concatenated
-    together, in the order they appear in the address.  E.g.
+    Parses an IP address or CIDR subnet string into an ipaddress network
+    object, independent of any host operating system address conversion.
 
-        1.2.3.4
+    - A plain IP address is treated as the single-address network (prefix
+        length equal to the address width), unless require_cidr is True, in
+        which case CIDR notation is mandatory.
+    - CIDR notation is parsed with host bits ignored: the network address is
+        obtained by masking, rather than treating the value as a literal
+        integer.  Malformed notation (out-of-range prefix, non-numeric prefix,
+        non-canonical address syntax, etc.) is rejected.
+    - IPv4 and IPv6 are both supported; the result object records its address
+        family so cross-family comparisons can be handled as disjoint prefix
+        sets rather than relying on host-specific integer coercion.
 
-    converts to
-
-        00000001 00000010 00000011 00000100
-      = 0x01020304
-      = 16909060 (decimal)
+    :param ip_or_cidr_str: An IP address or CIDR subnet as a string.
+    :param require_cidr: If True, require explicit CIDR notation.
+    :raises MatcherException: If the string is not a valid IP or CIDR subnet.
     """
+    if ip_or_cidr_str.find(u"/") == -1:
+        if require_cidr:
+            raise MatcherException(
+                u"Invalid CIDR subnet: {}".format(ip_or_cidr_str))
+        try:
+            parsed = ipaddress.ip_address(ip_or_cidr_str)
+        except ValueError:
+            raise MatcherException(
+                u"Invalid IP address: {}".format(ip_or_cidr_str))
+        return ipaddress.ip_network(parsed)
+
     try:
-        ip_bytes = socket.inet_aton(ip_str)
-    except socket.error:
-        raise MatcherException(u"Invalid IPv4 address: {}".format(ip_str))
-
-    int_val, = struct.unpack(">I", ip_bytes)  # unsigned big-endian
-
-    return int_val
-
-
-def _cidr_subnet_to_ints(subnet_cidr):
-    """
-    Converts a CIDR style subnet string to a 2-tuple of ints.  The
-    first element is the IP address portion as an int, and the second
-    is the prefix size.
-    """
-
-    slash_idx = subnet_cidr.find(u"/")
-    if slash_idx == -1:
-        raise MatcherException(u"Invalid CIDR subnet: {}".format(subnet_cidr))
-
-    ip_str = subnet_cidr[:slash_idx]
-    prefix_str = subnet_cidr[slash_idx+1:]
-
-    ip_int = _ip_addr_to_int(ip_str)
-    if not prefix_str.isdigit():
-        raise MatcherException(u"Invalid CIDR subnet: {}".format(subnet_cidr))
-    prefix_size = int(prefix_str)
-
-    if prefix_size < 1 or prefix_size > 32:
-        raise MatcherException(u"Invalid CIDR subnet: {}".format(subnet_cidr))
-
-    return ip_int, prefix_size
+        # strict=False means host bits are masked away deterministically,
+        # instead of raising; syntactically invalid input still raises
+        # ValueError.
+        return ipaddress.ip_network(ip_or_cidr_str, strict=False)
+    except ValueError:
+        raise MatcherException(
+            u"Invalid CIDR subnet: {}".format(ip_or_cidr_str))
 
 
 def _ip_or_cidr_in_subnet(ip_or_cidr_str, subnet_cidr):
@@ -551,35 +542,30 @@ def _ip_or_cidr_in_subnet(ip_or_cidr_str, subnet_cidr):
     Determine if the IP or CIDR subnet given in the first arg, is contained
     within the CIDR subnet given in the second arg.
 
-    :param ip_or_cidr_str: An IP address as a string in dotted-quad notation,
-        or a subnet as a string in CIDR notation
-    :param subnet_cidr: A subnet as a string in CIDR notation
+    :param ip_or_cidr_str: An IP address as a string, or a subnet as a string
+        in CIDR notation (IPv4 or IPv6)
+    :param subnet_cidr: A subnet as a string in CIDR notation (IPv4 or IPv6)
+    :raises MatcherException: If either argument is malformed.  A mismatch of
+        IP address family is not malformed input: the two prefix sets are
+        simply disjoint, so False is returned rather than raising.
     """
 
     # First arg is the containee, second is the container.  Does the
     # container contain the containee?
+    containee_network = _parse_ip_network(ip_or_cidr_str, require_cidr=False)
+    container_network = _parse_ip_network(subnet_cidr, require_cidr=True)
 
-    # Handle either plain IP or CIDR notation for the containee.
-    slash_idx = ip_or_cidr_str.find(u"/")
-    if slash_idx == -1:
-        containee_ip_int = _ip_addr_to_int(ip_or_cidr_str)
-        containee_prefix_size = 32
-    else:
-        containee_ip_int, containee_prefix_size = _cidr_subnet_to_ints(
-            ip_or_cidr_str)
-
-    container_ip_int, container_prefix_size = _cidr_subnet_to_ints(subnet_cidr)
-
-    if container_prefix_size > containee_prefix_size:
+    # Prefix sets of different address families are always disjoint.  This is
+    # a defined false result, not an error, so observations mixing IPv4 and
+    # IPv6 addresses remain queryable.
+    if containee_network.version != container_network.version:
         return False
 
-    # Use container mask for both IPs
-    container_mask = ((1 << container_prefix_size) - 1) << \
-                     (32 - container_prefix_size)
-    masked_containee_ip = containee_ip_int & container_mask
-    masked_container_ip = container_ip_int & container_mask
-
-    return masked_containee_ip == masked_container_ip
+    return (
+        container_network.network_address <= containee_network.network_address
+        and containee_network.broadcast_address <=
+        container_network.broadcast_address
+    )
 
 
 def _disjoint(first_seq, *rest_seq):
