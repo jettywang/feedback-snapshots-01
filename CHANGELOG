@@ -1,5 +1,11 @@
 Changelog for PyCdlib
 
+Unreleased
+----------
+* Validate ISO9660 multi-extent directory record chains on parse: a continuation record must be followed immediately by a same-named, same-sequence record, and a broken chain, conflicting duplicate name, zero-length non-final segment, or missing final record is now rejected with the offending record named instead of silently concatenating unrelated files
+* Reject directory records whose data extends past the end of the ISO rather than silently shrinking the length and zero-filling the missing tail
+* Make open_file_from_iso streaming reads walk the multi-extent data_continuation chain so they return the same bytes as get_file_from_iso, including across segment boundaries and on backwards/end-relative seeks
+
 1.22.0 (2026-10-09)
 -------------------
 * Fix a potential infinite loop in UDF File Entry parsing; pointed out by R0ck3t (zhangyan8216 on GitHub)

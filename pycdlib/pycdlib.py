@@ -484,6 +484,33 @@ def _check_path_depth(iso_path):
         raise pycdlibexception.PyCdlibInvalidInput('Directory levels too deep (maximum is 7)')
 
 
+def _decode_record_identifier(ident):
+    # type: (bytes) -> str
+    """
+    Decode a directory record file identifier for use in an error message.
+    ISO9660 names are ASCII while Joliet names are UCS-2 (UTF-16-BE).  A
+    naive ASCII decode of UCS-2 "succeeds" because the interleaved NUL bytes
+    are valid ASCII, so detect Joliet identifiers first: an even-length name
+    whose every other byte is NUL is UCS-2.  Fall back to a repr so a
+    malformed identifier still produces a readable, never-failing message that
+    names the offending record.
+
+    Args:
+        ident: The raw file identifier bytes.
+    Returns:
+        A human-readable rendering of the identifier.
+    """
+    if len(ident) % 2 == 0 and len(ident) >= 2 and ident[0::2] == b'\x00' * (len(ident) // 2):
+        try:
+            return ident.decode('utf-16-be')
+        except UnicodeDecodeError:
+            pass
+    try:
+        return ident.decode('ascii')
+    except UnicodeDecodeError:
+        return repr(ident)
+
+
 def _yield_children(rec, rr):
     # type: (dr.DirectoryRecord, bool) -> Generator
     """
@@ -1275,6 +1302,60 @@ class PyCdlib:
 
             yield new_record, rr
 
+    def _check_multi_extent_chain(self, prev_record, new_record):
+        # type: (Optional[dr.DirectoryRecord], dr.DirectoryRecord) -> bool
+        """
+        An internal method to validate the multi-extent relationship between
+        two consecutive non-directory directory records.  ISO9660 describes a
+        file larger than one directory record can cover as a chain of
+        consecutive records sharing one file identifier and one sequence
+        number; every record but the last sets the multi-extent (continuation)
+        flag, and the last record clears it.  A zero-length final record is a
+        legal way to end a chain, so a chain may terminate on a record whose
+        data length is 0; what is not legal is a continuation flag with no
+        following record at all.
+
+        The checks here make sure a broken chain can never be silently stitched
+        onto another file: a continuation must be followed immediately by a
+        record with the same identity, and a same-name record is accepted as a
+        continuation only when the previous record actually asked for one.
+
+        Args:
+            prev_record: The directory record immediately before new_record, or
+                None when new_record is the first record in the directory.
+            new_record: The directory record to validate.
+        Returns:
+            True if new_record is the next extent of the chain started by
+            prev_record, False if it starts a file of its own.
+        """
+        def name_of(record):
+            # type: (dr.DirectoryRecord) -> str
+            return _decode_record_identifier(record.file_identifier())
+
+        multi_extent_bit = 1 << dr.DirectoryRecord.FILE_FLAG_MULTI_EXTENT_BIT
+        prev_continues = prev_record is not None and not prev_record.is_dir() and (prev_record.file_flags & multi_extent_bit)
+        same_identity = prev_record is not None and not prev_record.is_dir() and prev_record.file_identifier() == new_record.file_identifier()
+
+        if prev_continues:
+            if new_record.is_dir():
+                raise pycdlibexception.PyCdlibInvalidISO('Multi-extent file %r marked as continuation is followed by a directory' % name_of(prev_record))
+            if not same_identity:
+                raise pycdlibexception.PyCdlibInvalidISO('Multi-extent chain for %r is broken; next record is %r instead of its continuation' % (name_of(prev_record), name_of(new_record)))
+            if prev_record.seqnum != new_record.seqnum:
+                raise pycdlibexception.PyCdlibInvalidISO('Multi-extent chain for %r has mismatched sequence numbers (%d != %d)' % (name_of(prev_record), prev_record.seqnum, new_record.seqnum))
+            if new_record.file_flags & multi_extent_bit:
+                if new_record.data_length == 0:
+                    raise pycdlibexception.PyCdlibInvalidISO('Non-final extent %r of a multi-extent file has zero data length' % name_of(new_record))
+            else:
+                # The final record may legitimately carry zero data length.
+                pass
+            return True
+
+        if same_identity:
+            raise pycdlibexception.PyCdlibInvalidISO('Duplicate file identifier %r without a multi-extent continuation flag on the preceding record' % name_of(new_record))
+
+        return False
+
     def _link_file_record(self, new_record, is_symlink, data_length,
                           extent_to_inode, vd, iso_file_length, lastbyte):
         # type: (dr.DirectoryRecord, bool, int, Dict[int, inode.Inode], headervd.PrimaryOrSupplementaryVD, int, int) -> int
@@ -1333,13 +1414,13 @@ class PyCdlib:
 
         new_end = extent_to_use * self.logical_block_size + len_to_use
         if new_end > iso_file_length:
-            # The end of the file is beyond the size of the ISO.  Since this
-            # can't be true, truncate the file size.
-            if new_record.inode is not None:
-                truncated_length = iso_file_length - extent_to_use * self.logical_block_size
-                new_record.inode.data_length = truncated_length
-                for rec, _ in new_record.inode.linked_records:
-                    rec.set_data_length(truncated_length)
+            # The end of the file is beyond the size of the ISO.  This is a
+            # truncated extent: the declared data is not fully present.  Do
+            # not shrink the record's length or hand back a short read, since
+            # either would make a later extraction silently zero-fill the
+            # missing tail and erase the evidence of corruption.  Name the
+            # record and the extent where its data runs off the image.
+            raise pycdlibexception.PyCdlibInvalidISO('Directory record %r extent %d extends past the end of the ISO' % (_decode_record_identifier(new_record.file_identifier()), extent_to_use))
         else:
             # The new end is still within the file size, but the PVD size is
             # wrong.  Set the lastbyte appropriately, which will eventually
@@ -1436,12 +1517,33 @@ class PyCdlib:
                 if new_record.parent is None:
                     raise pycdlibexception.PyCdlibInternalError('Trying to track child with no parent')
                 # A file with the same name as the record before it is the
-                # next extent of a multi-extent file.  Any other duplicate
-                # name makes track_child() raise PyCdlibInvalidInput.
-                if not new_record.is_dir() and last_record is not None and last_record.file_identifier() == new_record.file_identifier():
+                # next extent of a multi-extent file -- but only when the
+                # preceding record's continuation flag says so.  The chain
+                # check rejects a broken chain (a different record spliced in),
+                # a conflicting duplicate name, and a bad sequence number,
+                # naming the offending record.  Any other duplicate name makes
+                # track_child() raise PyCdlibInvalidInput.
+                if not new_record.is_dir():
+                    is_continuation = self._check_multi_extent_chain(last_record,
+                                                                      new_record)
+                else:
+                    # A directory can never continue a file's multi-extent
+                    # chain; let the validator raise the specific broken-chain
+                    # error when the preceding record was still expecting its
+                    # next extent.
+                    self._check_multi_extent_chain(last_record, new_record)
+                    is_continuation = False
+                if is_continuation:
                     new_record.parent.track_continuation(new_record,
                                                          self.logical_block_size)
                 else:
+                    # During a parse, a non-continuation file whose name is
+                    # already used by an unrelated record is a corrupt image,
+                    # not a user API mistake.  Name the offending record so a
+                    # broken multi-extent chain cannot be mistaken for a
+                    # benign add conflict.
+                    if not new_record.is_dir() and new_record.parent.child_name_in_use(new_record.file_identifier()):
+                        raise pycdlibexception.PyCdlibInvalidISO('Duplicate file identifier %r is not part of a multi-extent continuation chain' % _decode_record_identifier(new_record.file_identifier()))
                     new_record.parent.track_child(new_record,
                                                   self.logical_block_size)
 
@@ -1466,6 +1568,15 @@ class PyCdlib:
                     interchange_level = max(interchange_level, new_level)
 
                 last_record = new_record
+
+            # A record that ends a directory while still carrying the
+            # multi-extent continuation flag never got its final record.  A
+            # legal zero-length final record would have cleared the flag, so
+            # this is a truncated chain; refuse it rather than presenting the
+            # partial prefix as a complete file (which later reads would have
+            # to zero-pad, hiding the missing data).
+            if last_record is not None and not last_record.is_dir() and (last_record.file_flags & (1 << dr.DirectoryRecord.FILE_FLAG_MULTI_EXTENT_BIT)):
+                raise pycdlibexception.PyCdlibInvalidISO('Multi-extent file %r is missing its final directory record' % _decode_record_identifier(last_record.file_identifier()))
 
         for pl in parent_links:
             if pl.rock_ridge is not None:
@@ -7120,6 +7231,13 @@ class PyCdlib:
         if rec.inode is None:
             raise pycdlibexception.PyCdlibInvalidInput('File has no data')
 
+        if isinstance(rec, dr.DirectoryRecord):
+            # ISO9660 / Joliet files can span a multi-extent chain; hand the
+            # head record to the stream so it walks the same data_continuation
+            # chain that get_file_from_iso_fp does.  UDF File Entries keep a
+            # single Inode and need no chain handling.
+            return pycdlibio.PyCdlibIO(rec.inode, self.logical_block_size,
+                                       head_record=rec)
         return pycdlibio.PyCdlibIO(rec.inode, self.logical_block_size)
 
     def has_rock_ridge(self):
