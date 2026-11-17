@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import io
+import struct
 from enum import Enum, auto
 from functools import cached_property, lru_cache
 from typing import TYPE_CHECKING, Any, BinaryIO
+from uuid import UUID
+
+from dissect.util.sid import write_sid
 
 from dissect.ntfs.attr import AttributeRecord
 from dissect.ntfs.c_ntfs import ATTRIBUTE_TYPE_CODE, COLLATION, INDEX_ENTRY_END, INDEX_ENTRY_NODE, SECTOR_SHIFT, c_ntfs
@@ -81,6 +85,9 @@ class Index:
         Returns the matching node if performing an exact search. Otherwise return the first match that is greater
         than the search value.
 
+        Supported collation rules are ``FILE_NAME``, ``NTOFS_ULONG``, ``NTOFS_ULONGS``, ``NTOFS_SID`` and
+        ``NTOFS_SECURITY_HASH``. A caller-supplied comparator takes precedence over the rule of this index.
+
         Args:
             value: The key to search.
             exact: Result must be an exact match.
@@ -89,10 +96,14 @@ class Index:
         Raises:
             NotImplementedError: If there is no collation (comparator) function for the collation rule of this index.
             KeyError: If an exact match was requested but not found.
+            ValueError: If the key length is invalid for the collation rule of this index.
         """
         cmp_functions = {
             COLLATION.FILE_NAME: _cmp_filename,
             COLLATION.NTOFS_ULONG: _cmp_ulong,
+            COLLATION.NTOFS_ULONGS: _cmp_ulongs,
+            COLLATION.NTOFS_SID: _cmp_sid,
+            COLLATION.NTOFS_SECURITY_HASH: _cmp_security_hash,
         }
 
         cmp = cmp or cmp_functions.get(self.root.collation_rule)
@@ -117,28 +128,36 @@ class Index:
         return entry
 
     def entries(self) -> Iterator[IndexEntry]:
-        """Yield all :class:`IndexEntry`'s in this :class:`Index`."""
-        for entry in self.root.entries():
+        """Yield all :class:`IndexEntry`'s in this :class:`Index` in index order.
+
+        Traversal follows the child node pointers of the B-tree, so the entries are
+        yielded in the order defined by the collation rule of this index.
+        """
+        yield from self._iter_entries(self.root.entries(), set())
+
+    def _iter_entries(self, entries: Iterator[IndexEntry], seen: set[int]) -> Iterator[IndexEntry]:
+        for entry in entries:
             if entry.is_end:
+                if entry.is_node:
+                    yield from self._iter_child(entry.node_vcn, seen)
                 break
+
+            if entry.is_node:
+                yield from self._iter_child(entry.node_vcn, seen)
 
             yield entry
 
-        if self._index_stream:
-            vcn = 0
-            while True:
-                try:
-                    for entry in self.index_buffer(vcn).entries():
-                        if entry.is_end:
-                            break
+    def _iter_child(self, vcn: int, seen: set[int]) -> Iterator[IndexEntry]:
+        if vcn in seen:
+            return
 
-                        yield entry
-                except Error:
-                    pass
-                except EOFError:
-                    break
+        seen.add(vcn)
+        try:
+            entries = self.index_buffer(vcn).entries()
+        except (Error, EOFError):
+            return
 
-                vcn += 1
+        yield from self._iter_entries(entries, seen)
 
 
 class IndexRoot:
@@ -339,8 +358,13 @@ def _bsearch(entries: list[IndexEntry], value: Any, cmp: Callable[[IndexEntry, A
         test_idx = min_idx + (max_idx - min_idx) // 2
         test_entry = entries[test_idx]
 
+        # The end entry has no key and sorts after every real key, so never compare it
+        if test_entry.is_end:
+            max_idx = test_idx
+            continue
+
         result = cmp(test_entry, value)
-        if not test_entry.is_end and result == Match.Greater:
+        if result == Match.Greater:
             min_idx = test_idx + 1
         elif result == Match.Equal:
             return test_entry
@@ -375,3 +399,130 @@ def _cmp_ulong(entry: IndexEntry, value: int) -> Match:
     if value == test_value:
         return Match.Equal
     return Match.Greater
+
+
+def _cmp_ulongs(entry: IndexEntry, value: int | bytes | UUID | list[int] | tuple[int, ...]) -> Match:
+    """Compare a compound integer key (``NTOFS_ULONGS``).
+
+    The key is a fixed sequence of little-endian unsigned 32-bit integers that are
+    compared element-wise. Values can be passed as a sequence of integers, as raw key
+    bytes or as a UUID (the ``$ObjId`` index uses the latter). Values with a different
+    number of integers than the key do not match the original key structure and are
+    rejected.
+    """
+    test_value = _ulongs_from_bytes(entry.key, "entry key")
+    search_value = _ulongs_from_bytes(value, "search value")
+
+    if len(search_value) != len(test_value):
+        raise ValueError(f"Invalid search value length for ULONGS collation: {len(search_value)}")
+
+    if search_value < test_value:
+        return Match.Less
+    if search_value == test_value:
+        return Match.Equal
+    return Match.Greater
+
+
+def _cmp_sid(entry: IndexEntry, value: str | bytes) -> Match:
+    """Compare a binary SID key (``NTOFS_SID``).
+
+    SIDs are compared by their component values, not as text: revision, sub authority
+    count, identifier authority (big-endian) and then each sub authority (unsigned
+    little-endian).
+    """
+    test_value = _sid_from_bytes(entry.key, "entry key")
+    search_value = _sid_from_bytes(value, "search value")
+
+    if search_value < test_value:
+        return Match.Less
+    if search_value == test_value:
+        return Match.Equal
+    return Match.Greater
+
+
+def _cmp_security_hash(entry: IndexEntry, value: bytes | tuple[int, int]) -> Match:
+    """Compare a security descriptor hash key (``NTOFS_SECURITY_HASH``).
+
+    The ``$SDH`` key is made up of the security descriptor hash and the security ID.
+    Keys that share a hash but differ in security ID are distinct keys, so both fields
+    must be compared.
+    """
+    test_value = _security_hash_from_bytes(entry.key, "entry key")
+    search_value = _security_hash_from_bytes(value, "search value")
+
+    if search_value < test_value:
+        return Match.Less
+    if search_value == test_value:
+        return Match.Equal
+    return Match.Greater
+
+
+def _ulongs_from_bytes(
+    value: int | bytes | bytearray | memoryview | UUID | list[int] | tuple[int, ...], name: str
+) -> tuple[int, ...]:
+    """Decode a compound integer key into a tuple of unsigned integers."""
+    if isinstance(value, UUID):
+        value = value.bytes_le
+    elif isinstance(value, int) and not isinstance(value, bool):
+        value = (value,)
+
+    if isinstance(value, (tuple, list)):
+        values = tuple(value)
+        if not values:
+            raise ValueError(f"Invalid empty {name} for ULONGS collation")
+        if any(not isinstance(item, int) or not 0 <= item <= 0xFFFFFFFF for item in values):
+            raise ValueError(f"Invalid {name} for ULONGS collation: {value!r}")
+        return values
+
+    if not isinstance(value, (bytes, bytearray, memoryview)):
+        raise TypeError(f"Unsupported {name} for ULONGS collation: {value!r}")
+
+    value = bytes(value)
+    if not value or len(value) % 4:
+        raise ValueError(f"Invalid {name} length for ULONGS collation: {len(value)}")
+
+    return struct.unpack(f"<{len(value) // 4}I", value)
+
+
+def _sid_from_bytes(value: str | bytes | bytearray | memoryview, name: str) -> tuple[int, int, int, tuple[int, ...]]:
+    """Decode a binary SID into its comparable components."""
+    if isinstance(value, str):
+        try:
+            value = write_sid(value)
+        except (TypeError, ValueError, OverflowError, struct.error) as e:
+            raise ValueError(f"Invalid {name} for SID collation: {value!r}") from e
+
+    if not isinstance(value, (bytes, bytearray, memoryview)):
+        raise TypeError(f"Unsupported {name} for SID collation: {value!r}")
+
+    value = bytes(value)
+    if len(value) < 8:
+        raise ValueError(f"Invalid {name} length for SID collation: {len(value)}")
+
+    revision = value[0]
+    sub_authority_count = value[1]
+    if len(value) != 8 + sub_authority_count * 4:
+        raise ValueError(f"Invalid {name} length for SID collation: {len(value)}")
+
+    authority = int.from_bytes(value[2:8], "big")
+    sub_authorities = struct.unpack(f"<{sub_authority_count}I", value[8:]) if sub_authority_count else ()
+
+    return revision, sub_authority_count, authority, sub_authorities
+
+
+def _security_hash_from_bytes(value: bytes | bytearray | memoryview | tuple[int, int], name: str) -> tuple[int, int]:
+    """Decode a security descriptor hash key into its hash and security ID."""
+    if isinstance(value, (tuple, list)):
+        values = tuple(value)
+        if len(values) != 2 or any(not isinstance(item, int) or not 0 <= item <= 0xFFFFFFFF for item in values):
+            raise ValueError(f"Invalid {name} for SECURITY_HASH collation: {value!r}")
+        return values
+
+    if not isinstance(value, (bytes, bytearray, memoryview)):
+        raise TypeError(f"Unsupported {name} for SECURITY_HASH collation: {value!r}")
+
+    value = bytes(value)
+    if len(value) != 8:
+        raise ValueError(f"Invalid {name} length for SECURITY_HASH collation: {len(value)}")
+
+    return struct.unpack("<II", value)
