@@ -283,24 +283,42 @@ class QCow2Snapshot:
 
         self.entry_size = self.qcow2.fh.tell() - offset
 
-    def open(self) -> QCow2Stream:
-        """Open the snapshot for reading."""
-        return QCow2Stream(self.qcow2, self.l1_table)
-
     @cached_property
     def l1_table(self) -> list[int]:
         # L1 table is usually relatively small, it can be at most 32MB on PB or EB size disks
+        # A snapshot owns its own L1 table and L1 size, which may differ from the active header
         self.qcow2.fh.seek(self.header.l1_table_offset)
-        return c_qcow2.uint64[self.header.l1_size](self.qcow2.fh)
+        try:
+            return c_qcow2.uint64[self.header.l1_size](self.qcow2.fh)
+        except EOFError as e:
+            raise Error(f"Snapshot {self.name!r} (id={self.id!r}) has a truncated L1 table") from e
+
+    @cached_property
+    def disk_size(self) -> int:
+        # Legacy snapshots (e.g. version 2 images) lack the extra data block, in which case
+        # the zero-padded extra data reports a disk size of 0 and we fall back to the image size
+        return self.extra.disk_size or self.qcow2.header.size
+
+    def open(self) -> QCow2Stream:
+        """Open the snapshot for reading."""
+        return QCow2Stream(self.qcow2, self.l1_table, self.header.l1_size, self.disk_size)
 
 
 class QCow2Stream(AlignedStream):
     """Aligned stream for reading QCow2 files."""
 
-    def __init__(self, qcow2: QCow2, l1_table: list[int] | None = None):
-        super().__init__(qcow2.header.size, align=qcow2.cluster_size)
+    def __init__(
+        self,
+        qcow2: QCow2,
+        l1_table: list[int] | None = None,
+        l1_size: int | None = None,
+        size: int | None = None,
+    ):
+        super().__init__(qcow2.header.size if size is None else size, align=qcow2.cluster_size)
         self.qcow2 = qcow2
         self.l1_table = l1_table or qcow2.l1_table
+        # Each view (active disk or snapshot) is bounded by its own L1 table, not the active header
+        self.l1_size = qcow2.header.l1_size if l1_size is None else l1_size
 
     def _yield_runs(self, offset: int, length: int) -> Iterator[tuple[QCow2SubclusterType, int, int, int]]:
         # reference: qcow2_get_host_offset
@@ -321,7 +339,7 @@ class QCow2Stream(AlignedStream):
             bytes_available = (self.qcow2.l2_size - l2_index) << self.qcow2.cluster_bits
             bytes_needed = min(bytes_needed, bytes_available)
 
-            if l1_index > self.qcow2.header.l1_size:
+            if l1_index >= self.l1_size:
                 # bytes_needed is already the smaller value here
                 read_count = bytes_needed - offset_in_cluster
 
