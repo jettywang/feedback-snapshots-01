@@ -659,7 +659,16 @@ struct xfs_acl {
 
 #define XFS_DIR2_BLOCK_MAGIC                0x58443242  /* XD2B: single block dirs */
 #define XFS_DIR2_DATA_MAGIC                 0x58443244  /* XD2D: multiblock dirs */
+#define XFS_DIR2_LEAF1_MAGIC                0x58443231  /* XD21: v1 leaf blocks */
+#define XFS_DIR2_LEAFN_MAGIC                0x58443232  /* XD2N: v2 leaf blocks */
 #define XFS_DIR2_FREE_MAGIC                 0x58443246  /* XD2F: free index blocks */
+
+/*
+ * Directory/attribute node blocks share the generic xfs_da_btree header. A directory data fork can
+ * contain these alongside data blocks, so they are recognized (and skipped) when enumerating entries.
+ */
+#define XFS_DA_NODE_MAGIC                   0xfcfb6d1b  /* 'XN' */
+#define XFS_DA3_NODE_MAGIC                  0x3ebe0ab5  /* 'XN3' */
 
 /*
  * Directory Version 3 With CRCs.
@@ -691,6 +700,8 @@ struct xfs_acl {
 
 #define XFS_DIR3_BLOCK_MAGIC                0x58444233  /* XDB3: single block dirs */
 #define XFS_DIR3_DATA_MAGIC                 0x58444433  /* XDD3: multiblock dirs */
+#define XFS_DIR3_LEAF1_MAGIC                0x58444631  /* XDF1: v3 leaf block */
+#define XFS_DIR3_LEAFN_MAGIC                0x58444632  /* XDFN: v3 leaf block */
 #define XFS_DIR3_FREE_MAGIC                 0x58444633  /* XDF3: free index blocks */
 
 /*

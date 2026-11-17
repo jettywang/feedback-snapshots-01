@@ -4,6 +4,7 @@ import io
 import logging
 import os
 import stat
+from dataclasses import dataclass
 from functools import cached_property
 from typing import TYPE_CHECKING, BinaryIO
 from uuid import UUID
@@ -26,6 +27,27 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 log.setLevel(os.getenv("DISSECT_LOG_XFS", "CRITICAL"))
+
+
+@dataclass(frozen=True)
+class DirectoryEntry:
+    """A single directory entry as observed on disk, before its inode is materialized.
+
+    Attribute:
+        name: The entry name (``.`` and ``..`` included). Decoded with ``surrogateescape``.
+        inum: The absolute inode number recorded in the entry.
+        filetype: The ``XFS_DIR2_FTYPE_*`` value, or ``None`` when the entry carries no ftype byte.
+        offset: The offset of the entry within the directory data, or ``None`` for shortform entries.
+        block: The filesystem block holding the entry, or ``None`` for shortform entries.
+        index: The ordinal of the entry: within the shortform directory, or within its block.
+    """
+
+    name: str
+    inum: int
+    filetype: int | None = None
+    offset: int | None = None
+    block: int | None = None
+    index: int | None = None
 
 
 class XFS:
@@ -231,6 +253,20 @@ class AllocationGroup:
 
 
 class INode:
+    # Directory blocks that share the data fork with entry-carrying blocks but never contain entries.
+    _NON_DATA_DIR_MAGICS = frozenset(
+        {
+            c_xfs.XFS_DIR2_LEAF1_MAGIC,
+            c_xfs.XFS_DIR2_LEAFN_MAGIC,
+            c_xfs.XFS_DIR2_FREE_MAGIC,
+            c_xfs.XFS_DIR3_LEAF1_MAGIC,
+            c_xfs.XFS_DIR3_LEAFN_MAGIC,
+            c_xfs.XFS_DIR3_FREE_MAGIC,
+            c_xfs.XFS_DA_NODE_MAGIC,
+            c_xfs.XFS_DA3_NODE_MAGIC,
+        }
+    )
+
     def __init__(
         self,
         ag: AllocationGroup,
@@ -274,6 +310,25 @@ class INode:
     @property
     def nblocks(self) -> int:
         return self.inode.di_nblocks
+
+    @property
+    def nlink(self) -> int:
+        """Return the hard link count declared by the inode."""
+        return self.inode.di_nlink
+
+    @property
+    def generation(self) -> int:
+        """Return the inode generation used to distinguish reused inode numbers."""
+        return self.inode.di_gen
+
+    @property
+    def dirent_type(self) -> int | None:
+        """Return the file type recorded in the directory entry that found this inode, if any.
+
+        XFS only stores this field when the filesystem has the ``ftype`` feature. A ``None`` value means the
+        type was not recorded, not that the entry has no type.
+        """
+        return self._filetype
 
     @property
     def data_extents(self) -> int:
@@ -362,97 +417,158 @@ class INode:
         if self.filetype != stat.S_IFDIR:
             raise NotADirectoryError(f"{self!r} is not a directory")
 
-        buf = self.open()
+        for entry in self.iter_entries():
+            ftype = FILETYPES[entry.filetype] if entry.filetype is not None else None
+            yield self.xfs.get_inode(entry.inum, entry.name, ftype)
+
+    def iter_entries(self) -> Iterator[DirectoryEntry]:
+        """Iterate the raw directory entries recorded in this inode.
+
+        Unlike :meth:`iterdir`, this does not materialize the referenced inodes and does not map file types
+        through ``FILETYPES``. Each entry keeps the absolute inode number exactly as recorded, the raw ftype
+        value (``None`` when the entry has no ftype byte) and, for block directories, enough position
+        information to re-read the entry.
+
+        Raises:
+            NotADirectoryError: If this inode is not a directory.
+            Error: If the directory data is corrupt. Entries yielded before the corruption remain valid.
+        """
+        if self.filetype != stat.S_IFDIR:
+            raise NotADirectoryError(f"{self!r} is not a directory")
+
         if self.inode.di_format == c_xfs.xfs_dinode_fmt.XFS_DINODE_FMT_LOCAL:
-            header = c_xfs.xfs_dir2_sf_hdr(buf)
-            inum_s = c_xfs.uint64 if header.i8count else c_xfs.uint32
-
-            if header.i8count:
-                header.parent = (header.parent << 32) | c_xfs.uint32(buf)
-
-            yield self.xfs.get_inode(self.inum, filename=".")
-            yield self.xfs.get_inode(header.parent, filename="..")
-
-            for _ in range(header.count):
-                entry = c_xfs.xfs_dir2_sf_entry(buf)
-                fname = entry.name.decode(errors="surrogateescape")
-                ftype = c_xfs.uint8(buf) if self.xfs._has_ftype else 0
-                inum = inum_s(buf)
-
-                ftype = FILETYPES[ftype]
-
-                yield self.xfs.get_inode(inum, fname, ftype)
+            yield from self._iter_shortform_entries()
         elif self.inode.di_format in (
             c_xfs.xfs_dinode_fmt.XFS_DINODE_FMT_EXTENTS,
             c_xfs.xfs_dinode_fmt.XFS_DINODE_FMT_BTREE,
         ):
-            for block_num in range(self.size // self.xfs.block_size):
-                buf.seek(block_num * self.xfs.block_size)
+            yield from self._iter_block_entries()
+        else:
+            raise Error(f"{self!r} has invalid inode format for dirlist")
 
-                block_data = buf.read(self.xfs.block_size)
-                block = io.BytesIO(block_data)
+    def _iter_shortform_entries(self) -> Iterator[DirectoryEntry]:
+        buf = self.open()
+        header = c_xfs.xfs_dir2_sf_hdr(buf)
 
-                block.seek(-len(c_xfs.xfs_dir2_block_tail), io.SEEK_END)
-                tail = c_xfs.xfs_dir2_block_tail(block)
-                block.seek(0)
+        inum_s = c_xfs.uint64 if header.i8count else c_xfs.uint32
+        if header.i8count:
+            header.parent = (header.parent << 32) | c_xfs.uint32(buf)
 
-                if self.data_extents > 1:
-                    entries_end = self.xfs.block_size
-                else:
-                    entries_end = self.xfs.block_size
-                    entries_end -= len(c_xfs.xfs_dir2_block_tail)
-                    entries_end -= len(c_xfs.xfs_dir2_leaf_entry) * tail.count
+        yield DirectoryEntry(name=".", inum=self.inum, index=0)
+        yield DirectoryEntry(name="..", inum=header.parent, index=1)
 
-                if self.xfs.version == 5:
-                    header = c_xfs.xfs_dir3_data_hdr(block)
-                    if header.magic not in (c_xfs.XFS_DIR3_BLOCK_MAGIC, c_xfs.XFS_DIR3_DATA_MAGIC):
-                        # Probably a sparse block
-                        continue
-                else:
-                    header = c_xfs.xfs_dir2_data_hdr(block)
-                    if header.magic not in (c_xfs.XFS_DIR2_BLOCK_MAGIC, c_xfs.XFS_DIR2_DATA_MAGIC):
-                        # Probably a sparse block
-                        continue
+        for index in range(header.count):
+            try:
+                entry = c_xfs.xfs_dir2_sf_entry(buf)
+                fname = entry.name.decode(errors="surrogateescape")
+                ftype = c_xfs.uint8(buf) if self.xfs._has_ftype else None
+                inum = inum_s(buf)
+            except EOFError as exc:
+                raise Error(f"{self!r} has a truncated shortform directory") from exc
 
-                data_entry = c_xfs.xfs_dir2_data_entry_ftype if self.xfs._has_ftype else c_xfs.xfs_dir2_data_entry
+            yield DirectoryEntry(name=fname, inum=inum, filetype=ftype, index=index + 2)
 
-                while True:
-                    if block.tell() >= entries_end:
-                        break
+    def _iter_block_entries(self) -> Iterator[DirectoryEntry]:
+        buf = self.open()
+        data_entry = c_xfs.xfs_dir2_data_entry_ftype if self.xfs._has_ftype else c_xfs.xfs_dir2_data_entry
+        entry_index = 0
 
-                    try:
-                        if block_data[block.tell() : block.tell() + 2] == b"\xff\xff":
-                            unused = c_xfs.xfs_dir2_data_unused(block)
+        for block_num in range(self.size // self.xfs.block_size):
+            buf.seek(block_num * self.xfs.block_size)
 
-                            block.read(unused.length - 6)
+            block_data = buf.read(self.xfs.block_size)
+            if len(block_data) < self.xfs.block_size:
+                block_data = block_data.ljust(self.xfs.block_size, b"\x00")
+            block = io.BytesIO(block_data)
 
-                            misalign = block.tell() % 8
-                            if misalign:
-                                block.seek(8 - misalign, io.SEEK_CUR)
+            block.seek(-len(c_xfs.xfs_dir2_block_tail), io.SEEK_END)
+            tail = c_xfs.xfs_dir2_block_tail(block)
+            block.seek(0)
 
-                            continue
+            if self.data_extents > 1:
+                entries_end = self.xfs.block_size
+            else:
+                entries_end = self.xfs.block_size
+                entries_end -= len(c_xfs.xfs_dir2_block_tail)
+                entries_end -= len(c_xfs.xfs_dir2_leaf_entry) * tail.count
 
-                        entry = data_entry(block)
+            if entries_end <= 0:
+                raise Error(f"{self!r} directory block {block_num} has an invalid entry area")
 
-                        # Entries are 8 byte aligned
-                        # uint64 inum | uint8 namelen | variable name | uint8 ftype | uint16 tag
+            if self.xfs.version == 5:
+                header = c_xfs.xfs_dir3_data_hdr(block)
+                magics = (c_xfs.XFS_DIR3_BLOCK_MAGIC, c_xfs.XFS_DIR3_DATA_MAGIC)
+            else:
+                header = c_xfs.xfs_dir2_data_hdr(block)
+                magics = (c_xfs.XFS_DIR2_BLOCK_MAGIC, c_xfs.XFS_DIR2_DATA_MAGIC)
+
+            if header.magic not in magics:
+                if header.magic in self._NON_DATA_DIR_MAGICS:
+                    # Leaf, free-index and node blocks share the data fork with data blocks but never carry
+                    # directory entries. Skipping them keeps entry enumeration working for multi-block
+                    # directories.
+                    continue
+                if not any(block_data):
+                    # A hole created by a sparse directory (or a directory extent that was never written).
+                    continue
+                raise Error(
+                    f"{self!r} directory block {block_num} has invalid magic 0x{header.magic:x}, "
+                    f"expected one of ({', '.join(f'0x{magic:x}' for magic in magics)})"
+                )
+
+            while True:
+                if block.tell() >= entries_end:
+                    break
+
+                start = block.tell()
+                try:
+                    if block_data[start : start + 2] == b"\xff\xff":
+                        unused = c_xfs.xfs_dir2_data_unused(block)
+                        if unused.length < len(c_xfs.xfs_dir2_data_unused):
+                            raise Error(
+                                f"{self!r} directory block {block_num} has an invalid unused record length "
+                                f"{unused.length} at offset {start}"
+                            )
+
+                        block.read(unused.length - len(c_xfs.xfs_dir2_data_unused))
+
                         misalign = block.tell() % 8
                         if misalign:
                             block.seek(8 - misalign, io.SEEK_CUR)
-                    except EOFError:
-                        break
 
-                    inum = entry.inumber
-                    if inum >> 48 == 0xFFFF:  # XFS_DIR2_DATA_FREE_TAG
-                        break
+                        continue
 
-                    ftype = FILETYPES[entry.ftype] if self.xfs._has_ftype else None
+                    entry = data_entry(block)
 
-                    fname = entry.name.decode(errors="surrogateescape")
+                    # Entries are 8 byte aligned
+                    # uint64 inum | uint8 namelen | variable name | uint8 ftype | uint16 tag
+                    misalign = block.tell() % 8
+                    if misalign:
+                        block.seek(8 - misalign, io.SEEK_CUR)
+                except EOFError as exc:
+                    raise Error(f"{self!r} directory block {block_num} is truncated at offset {start}") from exc
 
-                    yield self.xfs.get_inode(inum, fname, ftype)
-        else:
-            raise Error(f"{self!r} has invalid inode format for dirlist")
+                inum = entry.inumber
+                if inum >> 48 == 0xFFFF:  # XFS_DIR2_DATA_FREE_TAG
+                    break
+
+                if entry.namelen == 0:
+                    # XFS never writes an entry without a name. Zeroed slack space parses as an endless run
+                    # of empty entries, so stop and treat the block as damaged instead of inventing names.
+                    raise Error(f"{self!r} directory block {block_num} has an empty name at offset {start}")
+                if inum == 0:
+                    raise Error(f"{self!r} directory block {block_num} names inode 0 at offset {start}")
+
+                fname = entry.name.decode(errors="surrogateescape")
+                yield DirectoryEntry(
+                    name=fname,
+                    inum=inum,
+                    filetype=entry.ftype if self.xfs._has_ftype else None,
+                    offset=start,
+                    block=block_num,
+                    index=entry_index,
+                )
+                entry_index += 1
 
     def datafork(self) -> BinaryIO:
         offset = 0xB0 if self.inode.di_version == 0x3 else 0x64
