@@ -283,6 +283,59 @@ def _get_table_symmetric(table, val1, val2):
         return tmp.get(val1)
 
 
+def _spec_equals(val1, val2):
+    """
+    STIX-spec-aware equality test, independent of Python's native equality.
+
+    This is the single equality contract shared by the "=" / "!=" comparison
+    operators and the "IN" / "NOT IN" set operators, so that an IN set is
+    treated exactly as the OR-ed chain of "=" comparisons the spec defines.
+
+    It deliberately does *not* rely on Python's overloaded equality (e.g.
+    ``True == 1`` and ``1 == 1.0``), because STIX treats the JSON types as
+    distinct except where the spec explicitly permits interoperability:
+
+    - bool is never equal to a number, even though ``bool`` subclasses ``int``
+      in Python (so ``True`` does not match ``1`` and vice versa).
+    - int and float are interoperable numeric types and may compare equal.
+    - binary and string are interoperable, subject to the spec's codepoint
+      restriction (see _bin_str_equals()).
+    - Any other combination of distinct types is not interoperable and
+      compares unequal; this includes values of unhashable/container types
+      such as dicts and lists.
+
+    Returns True if the two values are equal per the spec, False otherwise.
+    """
+    eq_func = _get_table_symmetric(_COMPARE_EQ_FUNCS, type(val1), type(val2))
+    if eq_func is None:
+        return False
+
+    return eq_func(val1, val2)
+
+
+def _spec_in(value, value_set):
+    """
+    STIX-spec-aware membership test, mirroring _spec_equals().
+
+    Replaces the native Python ``value in value_set`` (which is driven by
+    Python hash/equality and therefore conflates ``True`` and ``1``) with an
+    explicit OR of spec-aware equality against every member of the set.  This
+    makes ``x IN (a, b, c)`` behave identically to ``x = a OR x = b OR x = c``.
+
+    Values of unhashable/container types (dicts, lists, ...) simply never
+    match, since there is no spec-defined equality for them.
+
+    :param value: A value selected from a Cyber Observable object.
+    :param value_set: A homogeneous Python set produced by exitSetLiteral().
+    :return: True if value is spec-equal to any member of the set.
+    """
+    for member in value_set:
+        if _spec_equals(value, member):
+            return True
+
+    return False
+
+
 def _process_prop_suffix(prop_name, value):
     """
     Some JSON properties have suffixes indicating the type of the value.  This
@@ -1842,12 +1895,9 @@ class MatchListener(STIXPatternListener):
                             value
                         )), e)
 
-            result = False
-            eq_func = _get_table_symmetric(_COMPARE_EQ_FUNCS,
-                                           type(literal_value),
-                                           type(value))
-            if eq_func is not None:
-                result = eq_func(value, literal_value)
+            # Use the spec-aware equality contract shared with IN/NOT IN, so
+            # Python's True == 1 relationship can never affect the result.
+            result = _spec_equals(value, literal_value)
 
             if ctx.NEQ():
                 result = not result
@@ -1976,15 +2026,10 @@ class MatchListener(STIXPatternListener):
                             value
                         )), e)
 
-            result = False
-            try:
-                result = value in s
-            except TypeError:
-                # Ignore errors about un-hashability.  Not all values
-                # selected from a Cyber Observable object are hashable (e.g.
-                # lists and dicts).  Those obviously can't be in the
-                # given set!
-                pass
+            # Use the same spec-aware equality contract as "=" / "!=" rather
+            # than Python's native "in" (which would conflate e.g. True and 1).
+            # Container/unhashable values simply never match.
+            result = _spec_in(value, s)
 
             if ctx.NOT():
                 result = not result
