@@ -13,6 +13,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Added
 
 * Expose `FunctionAuth` from the public API. (#3699)
+* Add optional `transport_constraints` to `Client` and `AsyncClient`,
+  restricting outbound requests to caller-provided managed transports and
+  refusing any unmatched URL with `TransportConstraintError`. Routing is
+  re-confirmed on every send, including authentication follow-ups and
+  redirect hops.
 
 ## 0.28.1 (6th December, 2024)
 

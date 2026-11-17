@@ -24,6 +24,7 @@ from ._exceptions import (
     InvalidURL,
     RemoteProtocolError,
     TooManyRedirects,
+    TransportConstraintError,
     request_context,
 )
 from ._models import Cookies, Headers, Request, Response
@@ -57,6 +58,7 @@ __all__ = ["USE_CLIENT_DEFAULT", "AsyncClient", "Client"]
 # https://www.python.org/dev/peps/pep-0484/#annotating-instance-and-class-methods
 T = typing.TypeVar("T", bound="Client")
 U = typing.TypeVar("U", bound="AsyncClient")
+TransportT = typing.TypeVar("TransportT")
 
 
 def _is_https_redirect(url: URL, location: URL) -> bool:
@@ -454,6 +456,55 @@ class BaseClient:
         else:
             raise TypeError(f'Invalid "auth" argument: {auth!r}')
 
+    def _constrained_transport_for_url(
+        self,
+        url: URL,
+        transport_constraints: dict[URLPattern, TransportT],
+    ) -> TransportT:
+        """
+        Resolve the managed transport that is explicitly permitted for the
+        given URL, according to the caller-supplied transport constraints.
+
+        Constraints are evaluated on every call so that each actual send,
+        each authentication follow-up request, and each redirect hop is
+        re-confirmed against the current URL. The normal `URLPattern`
+        priority (most specific first) is preserved. If no constraint
+        pattern matches, raise rather than falling back to the client's
+        default transport or a proxy mount.
+        """
+        for pattern, transport in transport_constraints.items():
+            if pattern.matches(url):
+                return transport
+        raise TransportConstraintError(
+            f"No managed transport constraint matches the request URL {url!s}. "
+            "The request was refused before any transport was invoked."
+        )
+
+    def _build_transport_constraints(
+        self,
+        transport_constraints: None | (typing.Mapping[str, TransportT]),
+    ) -> dict[URLPattern, TransportT]:
+        """
+        Validate and sort the optional outbound transport constraints.
+
+        Only concrete transport instances supplied by the caller are
+        accepted - trust is never inferred from a transport's name or from
+        proxy URLs. Sorting preserves the normal `URLPattern` priority, so
+        more specific mounts take precedence over a broad safe default.
+        """
+        if transport_constraints is None:
+            return {}
+
+        constraints: dict[URLPattern, TransportT] = {}
+        for key, constrained_transport in transport_constraints.items():
+            if constrained_transport is None:
+                raise TypeError(
+                    "Transport constraints must map URL patterns to concrete "
+                    f"transport instances, but {key!r} is mapped to None."
+                )
+            constraints[URLPattern(key)] = constrained_transport
+        return dict(sorted(constraints.items()))
+
     def _build_request_auth(
         self,
         request: Request,
@@ -629,6 +680,12 @@ class Client(BaseClient):
     request URLs.
     * **transport** - *(optional)* A transport class to use for sending requests
     over the network.
+    * **transport_constraints** - *(optional)* A mapping of URL patterns to
+    managed transports. When set, requests may only be sent over one of these
+    explicitly provided transports; any URL that no constraint pattern matches
+    is refused with a `TransportConstraintError` before any transport is
+    invoked. Constraints are re-evaluated for every send, including
+    authentication follow-ups and redirects.
     * **trust_env** - *(optional)* Enables or disables usage of environment
     variables for configuration.
     * **default_encoding** - *(optional)* The default encoding to use for decoding
@@ -650,6 +707,9 @@ class Client(BaseClient):
         http2: bool = False,
         proxy: ProxyTypes | None = None,
         mounts: None | (typing.Mapping[str, BaseTransport | None]) = None,
+        transport_constraints: None | (
+            typing.Mapping[str, BaseTransport]
+        ) = None,
         timeout: TimeoutTypes = DEFAULT_TIMEOUT_CONFIG,
         follow_redirects: bool = False,
         limits: Limits = DEFAULT_LIMITS,
@@ -715,6 +775,10 @@ class Client(BaseClient):
 
         self._mounts = dict(sorted(self._mounts.items()))
 
+        self._transport_constraints: dict[URLPattern, BaseTransport] = (
+            self._build_transport_constraints(transport_constraints)
+        )
+
     def _init_transport(
         self,
         verify: ssl.SSLContext | str | bool = True,
@@ -761,12 +825,34 @@ class Client(BaseClient):
         """
         Returns the transport instance that should be used for a given URL.
         This will either be the standard connection pool, or a proxy.
+
+        When outbound transport constraints are configured the request must
+        instead use one of the caller's managed transports, and is refused
+        outright if no constraint pattern matches.
         """
+        if self._transport_constraints:
+            return self._constrained_transport_for_url(
+                url, self._transport_constraints
+            )
+
         for pattern, transport in self._mounts.items():
             if pattern.matches(url):
                 return self._transport if transport is None else transport
 
         return self._transport
+
+    def _constrained_transports_to_close(self) -> list[BaseTransport]:
+        """
+        Return the managed constraint transports that the client owns and
+        that are not already released via the default transport or mounts.
+        """
+        owned = set(id(transport) for transport in self._mounts.values())
+        owned.add(id(self._transport))
+        return [
+            transport
+            for transport in self._transport_constraints.values()
+            if id(transport) not in owned
+        ]
 
     def request(
         self,
@@ -1002,7 +1088,6 @@ class Client(BaseClient):
         """
         Sends a single request, without handling any redirections.
         """
-        transport = self._transport_for_url(request.url)
         start = time.perf_counter()
 
         if not isinstance(request.stream, SyncByteStream):
@@ -1011,6 +1096,10 @@ class Client(BaseClient):
             )
 
         with request_context(request=request):
+            # Re-confirm the outbound transport on every actual send, so the
+            # constraint also applies to authentication follow-ups and each
+            # redirect hop. A refused URL never reaches any transport.
+            transport = self._transport_for_url(request.url)
             response = transport.handle_request(request)
 
         assert isinstance(response.stream, SyncByteStream)
@@ -1271,6 +1360,8 @@ class Client(BaseClient):
             for transport in self._mounts.values():
                 if transport is not None:
                     transport.close()
+            for transport in self._constrained_transports_to_close():
+                transport.close()
 
     def __enter__(self: T) -> T:
         if self._state != ClientState.UNOPENED:
@@ -1288,6 +1379,8 @@ class Client(BaseClient):
         for transport in self._mounts.values():
             if transport is not None:
                 transport.__enter__()
+        for transport in self._constrained_transports_to_close():
+            transport.__enter__()
         return self
 
     def __exit__(
@@ -1302,6 +1395,8 @@ class Client(BaseClient):
         for transport in self._mounts.values():
             if transport is not None:
                 transport.__exit__(exc_type, exc_value, traceback)
+        for transport in self._constrained_transports_to_close():
+            transport.__exit__(exc_type, exc_value, traceback)
 
 
 class AsyncClient(BaseClient):
@@ -1343,6 +1438,12 @@ class AsyncClient(BaseClient):
     request URLs.
     * **transport** - *(optional)* A transport class to use for sending requests
     over the network.
+    * **transport_constraints** - *(optional)* A mapping of URL patterns to
+    managed transports. When set, requests may only be sent over one of these
+    explicitly provided transports; any URL that no constraint pattern matches
+    is refused with a `TransportConstraintError` before any transport is
+    invoked. Constraints are re-evaluated for every send, including
+    authentication follow-ups and redirects.
     * **trust_env** - *(optional)* Enables or disables usage of environment
     variables for configuration.
     * **default_encoding** - *(optional)* The default encoding to use for decoding
@@ -1363,6 +1464,9 @@ class AsyncClient(BaseClient):
         http2: bool = False,
         proxy: ProxyTypes | None = None,
         mounts: None | (typing.Mapping[str, AsyncBaseTransport | None]) = None,
+        transport_constraints: None | (
+            typing.Mapping[str, AsyncBaseTransport]
+        ) = None,
         timeout: TimeoutTypes = DEFAULT_TIMEOUT_CONFIG,
         follow_redirects: bool = False,
         limits: Limits = DEFAULT_LIMITS,
@@ -1429,6 +1533,10 @@ class AsyncClient(BaseClient):
             )
         self._mounts = dict(sorted(self._mounts.items()))
 
+        self._transport_constraints: dict[URLPattern, AsyncBaseTransport] = (
+            self._build_transport_constraints(transport_constraints)
+        )
+
     def _init_transport(
         self,
         verify: ssl.SSLContext | str | bool = True,
@@ -1475,12 +1583,34 @@ class AsyncClient(BaseClient):
         """
         Returns the transport instance that should be used for a given URL.
         This will either be the standard connection pool, or a proxy.
+
+        When outbound transport constraints are configured the request must
+        instead use one of the caller's managed transports, and is refused
+        outright if no constraint pattern matches.
         """
+        if self._transport_constraints:
+            return self._constrained_transport_for_url(
+                url, self._transport_constraints
+            )
+
         for pattern, transport in self._mounts.items():
             if pattern.matches(url):
                 return self._transport if transport is None else transport
 
         return self._transport
+
+    def _constrained_transports_to_close(self) -> list[AsyncBaseTransport]:
+        """
+        Return the managed constraint transports that the client owns and
+        that are not already released via the default transport or mounts.
+        """
+        owned = set(id(transport) for transport in self._mounts.values())
+        owned.add(id(self._transport))
+        return [
+            transport
+            for transport in self._transport_constraints.values()
+            if id(transport) not in owned
+        ]
 
     async def request(
         self,
@@ -1718,7 +1848,6 @@ class AsyncClient(BaseClient):
         """
         Sends a single request, without handling any redirections.
         """
-        transport = self._transport_for_url(request.url)
         start = time.perf_counter()
 
         if not isinstance(request.stream, AsyncByteStream):
@@ -1727,6 +1856,10 @@ class AsyncClient(BaseClient):
             )
 
         with request_context(request=request):
+            # Re-confirm the outbound transport on every actual send, so the
+            # constraint also applies to authentication follow-ups and each
+            # redirect hop. A refused URL never reaches any transport.
+            transport = self._transport_for_url(request.url)
             response = await transport.handle_async_request(request)
 
         assert isinstance(response.stream, AsyncByteStream)
@@ -1986,6 +2119,8 @@ class AsyncClient(BaseClient):
             for proxy in self._mounts.values():
                 if proxy is not None:
                     await proxy.aclose()
+            for transport in self._constrained_transports_to_close():
+                await transport.aclose()
 
     async def __aenter__(self: U) -> U:
         if self._state != ClientState.UNOPENED:
@@ -2003,6 +2138,8 @@ class AsyncClient(BaseClient):
         for proxy in self._mounts.values():
             if proxy is not None:
                 await proxy.__aenter__()
+        for transport in self._constrained_transports_to_close():
+            await transport.__aenter__()
         return self
 
     async def __aexit__(
@@ -2017,3 +2154,5 @@ class AsyncClient(BaseClient):
         for proxy in self._mounts.values():
             if proxy is not None:
                 await proxy.__aexit__(exc_type, exc_value, traceback)
+        for transport in self._constrained_transports_to_close():
+            await transport.__aexit__(exc_type, exc_value, traceback)

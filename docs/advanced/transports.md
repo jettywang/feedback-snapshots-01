@@ -445,6 +445,44 @@ mounts = {
 }
 ```
 
+### Transport constraints
+
+For sensitive traffic you can pass an optional `transport_constraints` mapping.
+When present, requests may **only** be sent through one of the managed
+transports you explicitly provide. A request whose URL matches none of the
+constraint patterns is refused with an `httpx.TransportConstraintError`,
+raised before any transport is invoked:
+
+```python
+managed = httpx.HTTPTransport(verify=custom_ssl_context)
+
+with httpx.Client(
+    transport=default_transport,
+    transport_constraints={
+        "https://secure.example.com:8443": managed,
+        "https://*.example.com": managed,
+    },
+) as client:
+    # Sent through `managed`.
+    client.get("https://secure.example.com:8443/secret")
+    # Raises `TransportConstraintError` without touching `default_transport`.
+    client.get("https://evil.example.net/")
+```
+
+Constraint patterns use the same URL pattern syntax and specificity ordering
+as `mounts`, so a more specific pattern (for example an exact port) always
+takes precedence over a broader safe default such as `all://`. The
+constraint is re-evaluated for every actual network send, including
+authentication follow-up requests and each hop of a redirect - a redirect to
+an unconstrained URL is refused rather than silently falling back to the
+client's default transport.
+
+Trust is established solely by the transport instances supplied in the
+mapping: HTTPX never infers that a transport is safe from its name or from a
+proxy URL. As with `mounts`, transports owned by the client are closed when
+the client is closed; a single instance shared between `transport` and the
+constraints is only released once.
+
 ### Environment variables
 
 There are also environment variables that can be used to control the dictionary of the client mounts. 

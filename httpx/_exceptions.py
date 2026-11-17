@@ -18,6 +18,7 @@ Our exception hierarchy:
         · LocalProtocolError
         · RemoteProtocolError
       - ProxyError
+      - TransportConstraintError
       - UnsupportedProtocol
     + DecodingError
     + TooManyRedirects
@@ -64,6 +65,7 @@ __all__ = [
     "StreamError",
     "TimeoutException",
     "TooManyRedirects",
+    "TransportConstraintError",
     "TransportError",
     "UnsupportedProtocol",
     "WriteError",
@@ -202,6 +204,16 @@ class CloseError(NetworkError):
 class ProxyError(TransportError):
     """
     An error occurred while establishing a proxy connection.
+    """
+
+
+class TransportConstraintError(TransportError):
+    """
+    A request could not be routed through any of the managed transports
+    explicitly permitted by the client's transport constraints.
+
+    Raised before any transport is invoked, so that sensitive requests can
+    never leak over a transport the caller did not designate.
     """
 
 

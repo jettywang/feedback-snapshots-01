@@ -23,6 +23,7 @@ For an overview of how to work with HTTPX exceptions, see [Exceptions (Quickstar
                 * LocalProtocolError
                 * RemoteProtocolError
             * ProxyError
+            * TransportConstraintError
             * UnsupportedProtocol
         * DecodingError
         * TooManyRedirects
@@ -88,6 +89,9 @@ For an overview of how to work with HTTPX exceptions, see [Exceptions (Quickstar
     :docstring:
 
 ::: httpx.ProxyError
+    :docstring:
+
+::: httpx.TransportConstraintError
     :docstring:
 
 ::: httpx.UnsupportedProtocol
