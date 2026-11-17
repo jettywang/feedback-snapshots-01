@@ -286,6 +286,20 @@ typedef struct xfs_agi {
 
 
 /*
+ * Free list header for the AGFL.  This header is only present on filesystems
+ * with the CRC feature; pre-v5 AGFL blocks start directly with the block
+ * number array.
+ */
+typedef struct xfs_agfl {
+    uint32_t        agfl_magicnum;                      /* magic number == XFS_AGFL_MAGIC */
+    uint32_t        agfl_seqno;                         /* sequence # starting from 0 */
+    char            agfl_uuid[16];                      /* uuid of filesystem */
+    uint64_t        agfl_lsn;                           /* last write sequence */
+    uint32_t        agfl_crc;                           /* crc of agfl sector */
+} xfs_agfl_t;
+
+
+/*
  * XFS Timestamps
  * ==============
  *

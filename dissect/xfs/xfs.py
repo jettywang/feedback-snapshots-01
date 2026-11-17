@@ -11,6 +11,7 @@ from uuid import UUID
 from dissect.util import ts
 from dissect.util.stream import RangeStream, RunlistStream
 
+from dissect.xfs import checksums
 from dissect.xfs.c_xfs import FILETYPES, c_xfs
 from dissect.xfs.exceptions import (
     Error,
@@ -55,7 +56,42 @@ class XFS:
         self.uuid = UUID(bytes=self.sb.sb_uuid)
         self.meta_uuid = UUID(bytes=self.sb.sb_meta_uuid)
 
+        # Metadata objects store sb_meta_uuid (when the meta_uuid feature is
+        # enabled) instead of the user-visible sb_uuid.  Keep the expected
+        # source explicit so callers can report where it came from.
+        self._has_meta_uuid = bool(self.sb.sb_features_incompat & c_xfs.XFS_SB_FEAT_INCOMPAT_META_UUID)
+        self.metadata_uuid = self.meta_uuid if self._has_meta_uuid else self.uuid
+
         self.root = self.get_inode(self.sb.sb_rootino)
+
+    def verify_btree_block(
+        self,
+        block: int,
+        *,
+        long_format: bool | None = None,
+        expected_owner: int | None = None,
+    ) -> checksums.MetadataVerification:
+        """Verify the CRC of an absolute btree block.
+
+        Args:
+            block: Absolute filesystem block number.
+            long_format: Force the long (bmbt) header layout.  When omitted the
+                block magic selects the layout.
+            expected_owner: Expected ``bb_owner`` value.  For allocation group
+                btrees this is the AG number, for bmap btrees an inode number.
+        """
+        if not self._has_crc:
+            raise Error("Btree block checksums are only present in XFS v5 filesystems")
+
+        self.fh.seek(block * self.block_size)
+        buf = self.fh.read(self.block_size)
+        return checksums.verify_btree_block(
+            buf,
+            size=self.block_size,
+            expected_uuid=self.metadata_uuid,
+            expected_owner=expected_owner,
+            long_format=long_format,
+        ).with_source(block * self.block_size)
 
     def get(self, path: int | str, node: INode | None = None) -> INode:
         if isinstance(path, int):
@@ -204,6 +240,15 @@ class AllocationGroup:
         self._inum_mask = (1 << self._inum_bits) - 1
         self._inum_max = sb.sb_agblocks * sb.sb_inopblock
 
+    @cached_property
+    def agf(self) -> c_xfs.xfs_agf:
+        """The allocation group free space header, parsed on first use."""
+        self.fh.seek(self.sb.sb_sectsize)
+        agf = c_xfs.xfs_agf(self.fh)
+        if agf.agf_magicnum != c_xfs.XFS_AGF_MAGIC:
+            raise Error("Not a valid XFS filesystem (AGF magic mismatch)")
+        return agf
+
     def get_inode(
         self,
         inum: int,
@@ -211,6 +256,77 @@ class AllocationGroup:
         filetype: int | None = None,
     ) -> INode:
         return INode(self, inum, filename, filetype)
+
+    def verify_header(self, kind: str) -> checksums.MetadataVerification:
+        """Verify one of this allocation group's CRC-enabled header sectors.
+
+        Args:
+            kind: ``"agf"``, ``"agi"`` or ``"agfl"``.
+        """
+        if not self.xfs._has_crc:
+            raise Error("Allocation group header checksums are only present in XFS v5 filesystems")
+
+        # AGF, AGI and AGFL occupy the first three sectors of the AG.
+        sector = {"agf": 1, "agi": 2, "agfl": 3}[kind]
+        sector_offset = sector * self.sb.sb_sectsize
+        # The backing stream may be a per-AG RangeStream, so the absolute file
+        # offset is the AG base plus the sector within the AG.
+        ag_base = self.num * self.sb.sb_agblocks * self.sb.sb_blocksize
+        self.fh.seek(sector_offset)
+        buf = self.fh.read(self.sb.sb_sectsize)
+
+        return checksums.verify_ag_header(
+            kind,
+            buf,
+            size=self.sb.sb_sectsize,
+            expected_uuid=self.xfs.metadata_uuid,
+            expected_owner=self.num,
+        ).with_source(ag_base + sector_offset)
+
+    def verify_agf(self) -> checksums.MetadataVerification:
+        return self.verify_header("agf")
+
+    def verify_agi(self) -> checksums.MetadataVerification:
+        return self.verify_header("agi")
+
+    def verify_agfl(self) -> checksums.MetadataVerification:
+        return self.verify_header("agfl")
+
+    def verify_btree_roots(self) -> list[checksums.MetadataVerification]:
+        """Verify the CRC of this AG's allocation and inode btree root blocks.
+
+        Root block numbers come from the parsed AGF/AGI.  Absent roots (for
+        example the rmap and refcount roots) are skipped.
+        """
+        results = []
+        for root in (*self.agf.agf_roots, self.agi.agi_root, self.agi.agi_free_root):
+            if not root:
+                continue
+            block = self.num * self.sb.sb_agblocks + root
+            results.append(self.xfs.verify_btree_block(block, expected_owner=self.num))
+        return results
+
+    def verify_all(self) -> checksums.VerificationReport:
+        """Verify all supported metadata in this allocation group.
+
+        The report includes the AGF, AGI, AGFL, btree root blocks and every
+        inode reachable from the AGI inode btree.  Integrity and provenance are
+        reported separately.
+        """
+        results = [self.verify_agf(), self.verify_agi(), self.verify_agfl(), *self.verify_btree_roots()]
+        # Sparse inode records reuse the high 16 bits of ir_freecount as a
+        # holemask marking absent 16-inode chunks.
+        sparse = bool(self.xfs.sb.sb_features_incompat & c_xfs.XFS_SB_FEAT_INCOMPAT_SPINODES)
+        for record in self.walk_agi():
+            holemask = record.ir_freecount >> 16 if sparse else 0
+            for offset in range(64):
+                if holemask and (holemask >> (offset // 16)) & 1:
+                    continue
+                if record.ir_free & (1 << offset):
+                    continue
+                inum = record.ir_startino + offset
+                results.append(self.get_inode(inum).verify())
+        return checksums.build_report(results)
 
     def walk_extents(self, fsb: int) -> Iterator[tuple[int, int, int, int]]:
         agnum, blknum = fsb_to_bb(fsb, self.sb.sb_agblklog)
@@ -260,6 +376,29 @@ class INode:
             raise Error(f"{self!r} has invalid inode magic")
 
         return inode
+
+    def verify(self) -> checksums.MetadataVerification:
+        """Verify this inode's CRC over its full configured on-disk size.
+
+        The CRC covers ``sb_inodesize`` bytes, including any data or attribute
+        fork content inside the inode.  The UUID and inode number fields are
+        reported as provenance data and are not part of the CRC result.
+        """
+        if not self.xfs._has_crc:
+            raise Error("Inode checksums are only present in XFS v5 filesystems")
+
+        inode_size = self.ag.sb.sb_inodesize
+        inode_offset = self.relative_inum * inode_size
+        ag_base = self.ag.num * self.ag.sb.sb_agblocks * self.ag.sb.sb_blocksize
+        self.ag.fh.seek(inode_offset)
+        buf = self.ag.fh.read(inode_size)
+
+        return checksums.verify_inode(
+            buf,
+            size=inode_size,
+            expected_ino=self.inum,
+            expected_uuid=self.xfs.metadata_uuid,
+        ).with_source(ag_base + inode_offset)
 
     def _has_bigtime(self) -> bool:
         return self.inode.di_version >= 3 and self.inode.di_flags2 & c_xfs.XFS_DIFLAG2_BIGTIME != 0
