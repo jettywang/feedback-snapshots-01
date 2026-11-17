@@ -10,6 +10,7 @@ from dissect.util.xmemoryview import xmemoryview
 
 from dissect.database.ese import compression
 from dissect.database.ese.c_ese import PAGE_FLAG, TAGFLD_HEADER, c_ese
+from dissect.database.ese.exception import InvalidDatabase
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -119,6 +120,11 @@ class Record:
 class RecordData:
     """Record class for parsing and interacting with the on-disk record format.
 
+    Both the current (new) record format and the legacy record format are supported. The layout of the tagged field
+    array is selected per record, based on the ``NewRecordFormat`` flag of the page the record lives on. This keeps the
+    parsing assumptions of both formats isolated, so records of either format can be read interleaved within the same
+    process without sharing state.
+
     Templated columns are currently not implemented.
 
     Args:
@@ -126,7 +132,8 @@ class RecordData:
         data: The node data of this record.
 
     Raises:
-        NotImplementedError: If old format tagged fields are encountered.
+        ~dissect.database.ese.exception.InvalidDatabase: If the tagged field layout contradicts the record format or
+            database layout (e.g. legacy tagged fields on a large page database).
     """
 
     def __init__(self, table: Table, node: Node):
@@ -151,6 +158,8 @@ class RecordData:
         self._tagged_data_count = 0
         self._tagged_data_view = None
         self._tagged_fields = {}
+        # The TAGFLD layout (new or legacy) is specific to this record and never shared with other records
+        self._tag_field_cls = NewTagField
 
         if len(self.data) >= 4:
             self.header = c_ese.RECHDR(self.data)
@@ -182,16 +191,20 @@ class RecordData:
                 self._tagged_data_start += self._variable_offsets[-1] & 0x7FFF
 
             if len(self.data) >= self._tagged_data_start + 4:
-                if node.tag.page.flags & PAGE_FLAG.NewRecordFormat == 0:
-                    raise NotImplementedError("Record has tagged fields in an old format, which is not implemented yet")
+                first_tag_value = int.from_bytes(
+                    self.data[self._tagged_data_start : self._tagged_data_start + 4], "little"
+                )
+                # Select the TAGFLD layout from the record (page) format and database layout. The selection is scoped
+                # to this record, so legacy and new records can be read interleaved without sharing assumptions.
+                self._tag_field_cls = _select_tag_field_layout(self, first_tag_value)
 
-                tag_value = int.from_bytes(self.data[self._tagged_data_start : self._tagged_data_start + 4], "little")
-                first_tagged_field = TagField(self, tag_value)
+                first_tagged_field = self._tag_field_cls(self, first_tag_value)
 
                 tagged_field_data_start = self._tagged_data_start
                 tagged_field_data_end = tagged_field_data_start + first_tagged_field.offset
                 tagged_field_data = self.data[self._tagged_data_start : tagged_field_data_end]
 
+                # The offset of the first tagged field spans the entire TAGFLD array
                 self._tagged_data_count = first_tagged_field.offset // 4  # sizeof(TAGFLD)
                 self._tagged_data_view = xmemoryview(tagged_field_data, "<I")
                 self._tagged_fields[first_tagged_field.identifier] = first_tagged_field
@@ -391,6 +404,7 @@ class RecordData:
         idx = self._find_tag_field_idx(column.identifier)
         if idx is not None:
             tag_field = self._get_tag_field(idx)
+            value = None
 
             data_start = tag_field.offset
             if tag_field.has_extended_info:
@@ -410,13 +424,15 @@ class RecordData:
 
     def _get_tag_field(self, idx: int) -> TagField:
         """Retrieve the :class:`TagField` at the given index in the ``TAGFLD`` array."""
-        return TagField(self, self._tagged_data_view[idx])
+        return self._tag_field_cls(self, self._tagged_data_view[idx])
 
     def _find_tag_field_idx(self, identifier: int, is_derived: bool = False) -> TagField | None:
         """Find a tag field by identifier and optional derived flag.
 
         Performs a binary search in the tagged field array for the given identifier. The comparison algorithm used is
-        derived from the ``TAGFLD::CmpTagfld2`` function in the Microsoft codebase.
+        derived from the ``TAGFLD::CmpTagfld2`` function in the Microsoft codebase. The comparison is identical for the
+        legacy and new layout, but the derived bit position differs, so the selected :class:`TagField` class provides
+        the correct mask.
 
         Args:
             identifier: The column identifier to look for.
@@ -430,10 +446,10 @@ class RecordData:
 
         lookup = identifier
         if is_derived:
-            lookup |= TagField.fDerived << 16  # fDerived
+            lookup |= self._tag_field_cls.fDerived << 16  # fDerived
 
         # TAGFLD::CmpTagfld2
-        flip_derived = TagField.fDerived << 16
+        flip_derived = self._tag_field_cls.fDerived << 16
         mask = flip_derived | ((1 << 16) - 1)
         value2 = flip_derived ^ (lookup & mask)
 
@@ -461,29 +477,40 @@ class RecordData:
 
 
 class TagField:
-    """Represents a ``TAGFLD``, which contains information about a tagged field in a record."""
+    """Represents a ``TAGFLD``, which contains information about a tagged field in a record.
+
+    Concrete subclasses implement the on-disk layout of a specific record format. The layout specific values (offset
+    mask, null/derived/extended-info bits) are defined as class constants so that no assumption is shared between the
+    legacy and new record format.
+    """
 
     __slots__ = ("_offset", "flags", "has_extended_info", "identifier", "offset", "record")
 
-    fNullSmallPage = 0x2000
-    fDerived = 0x8000
+    #: Mask applied to the upper word of a TAGFLD to get the tagged data offset (``maskIb``)
+    offset_mask: int = 0
+    #: Bit in the upper word of a TAGFLD marking a null tagged field (``fNull``)
+    fNull: int = 0
+    #: Bit in the upper word of a TAGFLD marking a derived tagged field (``fDerived``)
+    fDerived: int = 0
+    #: Bit in the upper word of a TAGFLD marking the presence of an extended info byte (``fExtendedInfo``)
+    fExtendedInfo: int = 0
 
     def __init__(self, record: RecordData, value: int):
         self.record = record
         self.identifier = value & 0xFFFF
         self._offset = (value >> 16) & 0xFFFF
 
-        if record.db.has_small_pages:
-            self.offset = self._offset & 0x1FFF  # & maskIb
-            self.has_extended_info = bool(self._offset & 0x4000)  # & fExtendedInfo
-        else:
-            self.offset = self._offset & 0x7FFF  # & maskIb
-            self.has_extended_info = True
+        self.offset = self._offset & self.offset_mask  # & maskIb
+        self._configure_layout(record)
 
         if self.has_extended_info and len(self.record.data) >= self.record._tagged_data_start + self.offset:
             self.flags = TAGFLD_HEADER(self.record.data[self.record._tagged_data_start + self.offset])
         else:
             self.flags = TAGFLD_HEADER.Invalid  # Made up flag member to keep the types consistent
+
+    def _configure_layout(self, record: RecordData) -> None:
+        """Set the layout specific offset mask, info bit and null bit for this TAGFLD."""
+        self.has_extended_info = bool(self._offset & self.fExtendedInfo)
 
     def __repr__(self) -> str:
         return f"<TagField identifier={self.identifier} offset={self.offset:#x} flags={str(self.flags).split('.')[1]}>"
@@ -491,14 +518,105 @@ class TagField:
     @property
     def is_null(self) -> bool:
         """Return whether this tagged field is null."""
-        if self.record.db.has_small_pages:
-            return bool(self._offset & TagField.fNullSmallPage)
-        return bool(self.flags & TAGFLD_HEADER.Null)
+        return bool(self._offset & self.fNull)
 
     @property
     def is_derived(self) -> bool:
         """Return whether this tagged field is derived."""
-        return bool(self._offset & TagField.fDerived)
+        return bool(self._offset & self.fDerived)
+
+
+class NewTagField(TagField):
+    """``TAGFLD`` layout of the new record format (``fPageNewRecordFormat``).
+
+    The null and derived bits are layout dependent. On small pages the null flag is stored in the offset word and an
+    explicit extended-info bit signals the ``TAGFLD_HEADER`` byte. On large pages the extended info is implicit and the
+    null state is encoded in the header byte instead.
+    """
+
+    fNullSmallPage = 0x2000
+    fDerived = 0x8000
+
+    def __init__(self, record: RecordData, value: int):
+        if record.db.has_small_pages:
+            self.offset_mask = 0x1FFF  # & maskIb
+            self.fNull = self.fNullSmallPage
+            self.fExtendedInfo = 0x4000  # & fExtendedInfo
+        else:
+            self.offset_mask = 0x7FFF  # & maskIb
+            self.fNull = 0
+            self.fExtendedInfo = 0  # Presence of the extended info byte is implicit on large pages
+
+        super().__init__(record, value)
+
+    def _configure_layout(self, record: RecordData) -> None:
+        if record.db.has_small_pages:
+            self.has_extended_info = bool(self._offset & self.fExtendedInfo)
+        else:
+            # The extended info byte (TAGFLD_HEADER) is always present on large pages; the null flag is encoded in
+            # that byte rather than in the offset word
+            self.has_extended_info = True
+
+    @property
+    def is_null(self) -> bool:
+        """Return whether this tagged field is null."""
+        if self.record.db.has_small_pages:
+            return bool(self._offset & self.fNullSmallPage)
+        return bool(self.flags & TAGFLD_HEADER.Null)
+
+
+class OldTagField(TagField):
+    """Legacy ``TAGFLD`` layout used by records on pages without ``fPageNewRecordFormat``.
+
+    Legacy records only exist in the earliest engine revisions, which are small page (4K) databases. There is no
+    extended info byte: the offset points directly at the tagged data, so compression, multi-values, separated and
+    encrypted data are not representable in this layout.
+    """
+
+    offset_mask = 0x1FFF  # & maskIb (RECOFFSETOLD)
+    fNull = 0x2000  # & fNullOld
+    fDerived = 0x4000  # & fDerivedOld
+    fExtendedInfo = 0  # Legacy TAGFLDs have no extended info byte
+    #: Reserved upper-word bit, only assigned a meaning in the new small page layout (fExtendedInfo)
+    fReserved = 0x4000
+
+
+def _select_tag_field_layout(record: RecordData, first_tag_value: int) -> type[TagField]:
+    """Select the :class:`TagField` layout for a record and reject contradicting combinations.
+
+    The page flag ``NewRecordFormat`` is the authoritative signal for the on-disk record layout. The remaining
+    database characteristics (page size) and the legacy reserved bit are used to validate that the layout is one of
+    the documented, supported combinations. Anything unknown or contradictory is rejected instead of being fed to a
+    parser that assumes the wrong layout.
+
+    Args:
+        record: The record whose tagged fields are being parsed.
+        first_tag_value: The raw first ``TAGFLD`` word, used for legacy consistency checks.
+
+    Raises:
+        ~dissect.database.ese.exception.InvalidDatabase: If the record layout is not a supported combination.
+    """
+    page = record.node.tag.page
+    is_new_record_format = bool(page.flags & PAGE_FLAG.NewRecordFormat)
+
+    if is_new_record_format:
+        return NewTagField
+
+    # Legacy TAGFLDs are only defined for the small page (4K) engine revisions
+    if not record.db.has_small_pages:
+        raise InvalidDatabase(
+            "Record has legacy tagged fields in a large page database, which is not a supported record layout"
+        )
+
+    # In the legacy layout this bit is reserved; a set bit indicates the new small page extended-info layout was
+    # written even though the page advertises the legacy format
+    offset_word = (first_tag_value >> 16) & 0xFFFF
+    if offset_word & OldTagField.fReserved:
+        raise InvalidDatabase(
+            "Legacy tagged field uses the reserved extended-info bit, the record format flags are contradictory"
+        )
+
+    return OldTagField
 
 
 def serialise_record_column_values(record: Record, column_names: list[str] | None = None, max_columns: int = 10) -> str:
