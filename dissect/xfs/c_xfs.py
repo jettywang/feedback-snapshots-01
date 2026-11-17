@@ -562,6 +562,22 @@ struct xfs_inobt_rec {
 #define XFS_BMAP_CRC_MAGIC                  0x424d4133  /* 'BMA3' */
 
 /*
+ * Realtime bitmap and summary file block header. Only present for filesystems
+ * with the NEWRTBM inode flag set.
+ */
+#define XFS_RTBITMAP_MAGIC                  0x58445242  /* 'XDRB' */
+#define XFS_RTSUM_MAGIC                     0x58445342  /* 'XDSB' */
+
+struct xfs_rtbuf_blkinfo {
+    uint32_t        rt_magic;                           /* validity check on block */
+    uint32_t        rt_crc;                             /* CRC of block */
+    uint64_t        rt_blkno;                           /* block number of the block */
+    uint64_t        rt_lsn;                             /* sequence number of last write */
+    char            rt_uuid[16];                        /* filesystem we belong to */
+    uint64_t        rt_owner;                           /* inode that owns the block */
+};
+
+/*
  * Bmap root header, on-disk form only.
  */
 struct xfs_bmdr_block {

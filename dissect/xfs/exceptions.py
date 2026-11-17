@@ -27,3 +27,11 @@ class NotASymlinkError(Error):
 
 class SymlinkUnavailableException(Error):
     pass
+
+
+class RealtimeRangeError(Error):
+    """A realtime extent (or the realtime allocation metadata) is inconsistent."""
+
+
+class RealtimeDeviceMissingException(RealtimeRangeError):
+    """A realtime file was opened without the realtime device being supplied."""

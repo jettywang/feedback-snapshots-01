@@ -10,14 +10,22 @@ from uuid import UUID
 
 from dissect.util import ts
 from dissect.util.stream import RangeStream, RunlistStream
-
 from dissect.xfs.c_xfs import FILETYPES, c_xfs
 from dissect.xfs.exceptions import (
     Error,
     FileNotFoundError,
     NotADirectoryError,
     NotASymlinkError,
+    RealtimeRangeError,
     UnsupportedDataforkException,
+)
+from dissect.xfs.realtime import (
+    RealtimeBitmap,
+    RealtimeDevice,
+    RealtimeGeometry,
+    RealtimeRange,
+    RealtimeRangeStatus,
+    RealtimeStream,
 )
 
 if TYPE_CHECKING:
@@ -29,8 +37,31 @@ log.setLevel(os.getenv("DISSECT_LOG_XFS", "CRITICAL"))
 
 
 class XFS:
-    def __init__(self, fh: BinaryIO):
+    """XFS filesystem implementation.
+
+    Args:
+        fh: A file-like object for the data device of the filesystem.
+        rtdev: An optional file-like object for the realtime device. Realtime
+            extents live on this device and are never read from ``fh``, even
+            when no realtime device is supplied. Supplying a realtime device
+            for a filesystem without one is allowed; it is simply not used.
+
+    A data device and a realtime device are separate evidence. When a realtime
+    file is opened without ``rtdev``, :class:`~dissect.xfs.exceptions.
+    RealtimeDeviceMissingException` is raised instead of reading bytes from the
+    data device. Use :attr:`realtime` to inspect the realtime geometry and the
+    realtime allocation bitmap, and :attr:`INode.realtime_ranges` to inspect the
+    status of every logical range of a realtime file.
+    """
+
+    def __init__(self, fh: BinaryIO, rtdev: BinaryIO | None = None, *, realtime: BinaryIO | None = None):
+        if rtdev is not None and realtime is not None:
+            raise ValueError("Specify the realtime device with either rtdev or realtime, not both")
+        if rtdev is None:
+            rtdev = realtime
+
         self.fh = fh
+        self.rtdev = rtdev
         self.ag = {0: AllocationGroup(self, fh, 0)}
         self.sb = self.ag[0].sb
 
@@ -55,7 +86,18 @@ class XFS:
         self.uuid = UUID(bytes=self.sb.sb_uuid)
         self.meta_uuid = UUID(bytes=self.sb.sb_meta_uuid)
 
+        self.realtime = RealtimeDevice(self, rtdev, RealtimeGeometry.from_superblock(self.sb, self.block_size))
+        if self.realtime.geometry.configured and not self.realtime.geometry.consistent:
+            log.warning("Inconsistent realtime geometry in superblock: %r", self.realtime.geometry)
+        elif rtdev is not None and not self.realtime.geometry.configured:
+            log.warning("A realtime device was supplied but the superblock describes no realtime volume")
+
         self.root = self.get_inode(self.sb.sb_rootino)
+
+    @property
+    def realtime_bitmap(self) -> RealtimeBitmap:
+        """The realtime allocation bitmap."""
+        return self.realtime.bitmap
 
     def get(self, path: int | str, node: INode | None = None) -> INode:
         if isinstance(path, int):
@@ -295,23 +337,172 @@ class INode:
             self._filetype = stat.S_IFMT(self.inode.di_mode)
         return self._filetype
 
+    @property
+    def is_realtime(self) -> bool:
+        """Whether this inode's data fork is stored on the realtime device."""
+        return bool(self.inode.di_flags & c_xfs.XFS_DIFLAG_REALTIME)
+
+    @property
+    def realtime_ranges(self) -> list[RealtimeRange]:
+        """Logical ranges of a realtime file, with an explicit status for each.
+
+        The ranges are ordered by logical file offset and cover the file up to
+        ``size``. Extent records are interpreted as realtime block numbers on
+        the realtime device. Sparse regions are reported as ``HOLE``; mapped
+        regions carry the bitmap result and whether they align with the
+        realtime extent unit. Ranges that contradict the superblock geometry,
+        the bitmap or the realtime device bounds are reported rather than
+        silently skipped.
+
+        Returns an empty list for files that are not on the realtime device.
+        """
+        if not self.is_realtime:
+            return []
+
+        if self.inode.di_format == c_xfs.xfs_dinode_fmt.XFS_DINODE_FMT_LOCAL:
+            return [
+                RealtimeRange(
+                    status=RealtimeRangeStatus.MISALIGNED,
+                    logical_offset=0,
+                    length=self.size,
+                    block_size=self.xfs.block_size,
+                )
+            ]
+
+        return self._build_realtime_ranges(self.size)
+
+    def _build_realtime_ranges(self, size: int) -> list[RealtimeRange]:
+        block_size = self.xfs.block_size
+        device = self.xfs.realtime
+        geometry = device.geometry
+        bitmap = device.bitmap
+
+        ranges: list[RealtimeRange] = []
+        cursor = 0
+        total_blocks = (size + block_size - 1) // block_size
+        previous_end = 0
+
+        def add_hole(start_block: int, end_block: int) -> None:
+            start_block = min(start_block, total_blocks)
+            end_block = min(end_block, total_blocks)
+            if end_block <= start_block:
+                return
+            ranges.append(
+                RealtimeRange(
+                    status=RealtimeRangeStatus.HOLE,
+                    logical_offset=start_block * block_size,
+                    length=(end_block - start_block) * block_size
+                    if end_block < total_blocks
+                    else size - start_block * block_size,
+                    block_size=block_size,
+                )
+            )
+
+        for extent_num, (offset, rt_block, block_count, flag) in enumerate(self._iter_blocks()):
+            if offset > cursor:
+                add_hole(cursor, min(offset, total_blocks))
+                cursor = offset
+
+            extent_end = offset + block_count
+            visible_end = min(extent_end, total_blocks)
+
+            if offset < previous_end and previous_end > offset:
+                overlap_end = min(previous_end, total_blocks)
+                if overlap_end > offset:
+                    ranges.append(
+                        RealtimeRange(
+                            status=RealtimeRangeStatus.OVERLAP,
+                            logical_offset=offset * block_size,
+                            length=(overlap_end - offset) * block_size
+                            if overlap_end < total_blocks
+                            else size - offset * block_size,
+                            block_size=block_size,
+                            rt_block=rt_block,
+                            block_count=overlap_end - offset,
+                            extent_index=extent_num,
+                            extent_aligned=geometry.is_start_aligned(rt_block) if geometry.usable else None,
+                        )
+                    )
+                    offset = overlap_end
+
+            previous_end = max(previous_end, extent_end)
+            if offset >= visible_end:
+                cursor = max(cursor, visible_end)
+                continue
+
+            length_blocks = visible_end - offset
+            allocated = bitmap.all_allocated(rt_block, block_count) if geometry.usable else None
+            aligned = geometry.is_start_aligned(rt_block) if geometry.usable else None
+            unwritten = bool(flag)
+
+            if not geometry.configured:
+                status = RealtimeRangeStatus.NO_REALTIME_VOLUME
+            elif not geometry.usable:
+                status = RealtimeRangeStatus.INVALID_GEOMETRY
+            elif rt_block < 0 or rt_block + block_count > geometry.nr_blocks:
+                status = RealtimeRangeStatus.OUT_OF_BOUNDS
+            elif unwritten:
+                # Unwritten extents are file content that reads as zeroes and
+                # do not require the realtime device to be present.
+                status = RealtimeRangeStatus.UNWRITTEN
+            elif not device.present:
+                status = RealtimeRangeStatus.MISSING_DEVICE
+            elif device.size is not None and (rt_block + block_count) * block_size > device.size:
+                status = RealtimeRangeStatus.TRUNCATED
+            elif allocated is False:
+                status = RealtimeRangeStatus.UNALLOCATED
+            elif not aligned:
+                status = RealtimeRangeStatus.MISALIGNED
+            elif allocated is None:
+                status = RealtimeRangeStatus.MISSING_BITMAP
+            else:
+                status = RealtimeRangeStatus.ALLOCATED
+
+            ranges.append(
+                RealtimeRange(
+                    status=status,
+                    logical_offset=offset * block_size,
+                    length=length_blocks * block_size if visible_end < total_blocks else size - offset * block_size,
+                    block_size=block_size,
+                    rt_block=rt_block,
+                    block_count=length_blocks,
+                    extent_index=extent_num,
+                    allocated=allocated,
+                    extent_aligned=aligned,
+                    unwritten=unwritten,
+                )
+            )
+
+            cursor = max(cursor, visible_end)
+
+        add_hole(cursor, total_blocks)
+        return ranges
+
     @cached_property
     def link(self) -> str:
         if self.filetype != stat.S_IFLNK:
             raise NotASymlinkError(f"{self!r} is not a symlink")
 
         if self.inode.di_format != c_xfs.xfs_dinode_fmt.XFS_DINODE_FMT_LOCAL and self.xfs.version == 5:
-            # Almost always, symlinks (max size of 1024) fit within a block. If the block size if 512, we might
-            # need three blocks. These three blocks could theoretially be distributed over multiple extents.
-            # Linux kernel handles this by using sl_offset to piece the symlink back together.
-            # As this edge case of an edge case is very unlikely, it is unsupported until we observe it.
-            # Ticket: https://github.com/fox-it/dissect.xfs/issues/36
-            if len(self.dataruns) > 1:
-                raise NotImplementedError(f"{self!r} has a symlink distributed over multiple extents")
-
             # We do not use open because for non-resident symlinks self.size does not include the symlink header
             symlink_size = len(c_xfs.xfs_dsymlink_hdr) + self.size
-            fh = RunlistStream(self.xfs.fh, self.dataruns, symlink_size, self.xfs.block_size)
+            if self.is_realtime:
+                fh = RealtimeStream(
+                    self.xfs.realtime,
+                    self._build_realtime_ranges(symlink_size),
+                    symlink_size,
+                    self.xfs.block_size,
+                )
+            else:
+                # Almost always, symlinks (max size of 1024) fit within a block. If the block size if 512, we might
+                # need three blocks. These three blocks could theoretially be distributed over multiple extents.
+                # Linux kernel handles this by using sl_offset to piece the symlink back together.
+                # As this edge case of an edge case is very unlikely, it is unsupported until we observe it.
+                # Ticket: https://github.com/fox-it/dissect.xfs/issues/36
+                if len(self.dataruns) > 1:
+                    raise NotImplementedError(f"{self!r} has a symlink distributed over multiple extents")
+
+                fh = RunlistStream(self.xfs.fh, self.dataruns, symlink_size, self.xfs.block_size)
 
             header = c_xfs.xfs_dsymlink_hdr(fh)
             if header.sl_magic != c_xfs.XFS_SYMLINK_MAGIC:
@@ -477,6 +668,32 @@ class INode:
 
     @cached_property
     def dataruns(self) -> list[tuple[int | None, int]]:
+        """Runs for the data device, in filesystem block units.
+
+        Realtime files store extent start blocks in the realtime device address
+        space, so they have no meaningful data-device runs. Use
+        :attr:`realtime_ranges` or :attr:`realtime_dataruns` for those files.
+        """
+        if self.is_realtime:
+            raise RealtimeRangeError(
+                f"{self!r} is a realtime file; its extents address the realtime device, not the data device"
+            )
+
+        return self._runs(convert=True)
+
+    @cached_property
+    def realtime_dataruns(self) -> list[tuple[int | None, int]]:
+        """Runs for a realtime file, in realtime block units.
+
+        Each non-sparse entry is ``(realtime_block, block_count)`` relative to
+        the start of the realtime device. Sparse entries are ``(None, count)``.
+        """
+        if not self.is_realtime:
+            return []
+
+        return self._runs(convert=False)
+
+    def _runs(self, convert: bool) -> list[tuple[int | None, int]]:
         runs = []
         run_offset = 0
         expected_runs = (self.size + self.xfs.block_size - 1) // self.xfs.block_size
@@ -487,9 +704,10 @@ class INode:
                 runs.append((None, gap))
                 run_offset += gap
 
-            # Convert filesystem blocks to logical blocks
-            agnum, blknum = fsb_to_bb(block, self.ag.sb.sb_agblklog)
-            block = agnum * self.xfs.sb.sb_agblocks + blknum
+            if convert:
+                # Convert filesystem blocks to logical blocks
+                agnum, blknum = fsb_to_bb(block, self.ag.sb.sb_agblklog)
+                block = agnum * self.xfs.sb.sb_agblocks + blknum
 
             runs.append((block, count))
             run_offset += count
@@ -519,11 +737,20 @@ class INode:
 
     def open(self) -> BinaryIO:
         if self.inode.di_format == c_xfs.xfs_dinode_fmt.XFS_DINODE_FMT_LOCAL:
+            if self.is_realtime:
+                raise RealtimeRangeError(f"{self!r} is a realtime file with a local (inline) data fork")
             return self.datafork()
         if self.inode.di_format in (
             c_xfs.xfs_dinode_fmt.XFS_DINODE_FMT_EXTENTS,
             c_xfs.xfs_dinode_fmt.XFS_DINODE_FMT_BTREE,
         ):
+            if self.is_realtime:
+                return RealtimeStream(
+                    self.xfs.realtime,
+                    self.realtime_ranges,
+                    self.size,
+                    self.xfs.block_size,
+                )
             return RunlistStream(self.xfs.fh, self.dataruns, self.size, self.xfs.block_size)
         if self.inode.di_format == c_xfs.xfs_dinode_fmt.XFS_DINODE_FMT_DEV:
             raise UnsupportedDataforkException(f"{self!r} is a character/block device.")

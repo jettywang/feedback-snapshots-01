@@ -19,6 +19,32 @@ pip install dissect.xfs
 
 This module is also automatically installed if you install the `dissect` package.
 
+## Realtime devices
+
+XFS can store file data on a separate realtime device. A realtime device is
+different evidence from the data device, so it must be supplied explicitly:
+
+```python
+from dissect.xfs import XFS
+
+with open("data.img", "rb") as fh, open("realtime.img", "rb") as rt:
+    xfs = XFS(fh, rtdev=rt)
+
+    inode = xfs.get("/some/realtime/file")
+    print(inode.is_realtime)
+    print(inode.realtime_ranges)  # per-range status, logical offsets and length
+    print(xfs.realtime.geometry)  # sb_rblocks, sb_rextsize, sb_rextents, ...
+    print(xfs.realtime.bitmap.state)
+    data = inode.open().read()
+```
+
+Realtime extent records use realtime block numbers; they are never read from
+the data device. Without `rtdev`, opening a realtime file raises
+`RealtimeDeviceMissingException`. Holes and unwritten extents read as zeroes,
+and contradictory ranges (for example unallocated, out-of-bounds, overlapping
+or misaligned extents) raise `RealtimeRangeError` instead of returning other
+evidence.
+
 ## Build and test instructions
 
 This project uses `tox` to build source and wheel distributions. Run the following command from the root folder to build
