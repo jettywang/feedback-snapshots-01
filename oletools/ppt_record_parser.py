@@ -533,50 +533,45 @@ class IterStream(io.RawIOBase):
             return 0    # indicate EOF
 
     def seek(self, offset, whence=io.SEEK_SET):
-        """ can seek to start, possibly end """
-        if offset != 0 and whence == io.SEEK_SET:
-            # logging.debug('IterStream: trying to seek to offset {0}.'
-            #               .format(offset))
-            if offset > self.curr_pos:
-                self.readinto(bytearray(offset - self.curr_pos))
-            elif offset == self.curr_pos:
-                pass
-            else:   # need to re-create iterable
-                self.reset()
-                self.readinto(bytearray(offset))
-            if self.curr_pos != offset:
-                # logging.debug('IterStream: curr_pos {0} != offset {1}!'
-                #               .format(self.curr_pos, offset))
-                raise RuntimeError('programming error in IterStream.tell!')
-            return self.curr_pos
-        elif whence == io.SEEK_END:  # seek to end
-            # logging.debug('IterStream: seek to end')
+        """ move to given position; origin is this stream's own first byte """
+        if whence == io.SEEK_SET:
+            new_pos = offset
+        elif whence == io.SEEK_CUR:
+            new_pos = self.curr_pos + offset
+        elif whence == io.SEEK_END:
             if self.size is None:
                 # logging.debug('IterStream: trying to seek to end but size '
                 #               'unknown --> raise IOError')
                 raise IOError('size unknown, cannot seek to end')
-            self.at_end = True   # fake jumping to the end
-            self.iterable = None   # cannot safely be used any more
-            self.leftover = None
-            return self.size
-        elif whence == io.SEEK_SET:   # seek to start
-            # logging.debug('IterStream: seek to start')
-            self.reset()
-            return 0
-        elif whence == io.SEEK_CUR:   # e.g. called by tell()
-            # logging.debug('IterStream: seek to curr pos')
-            if self.at_end:
-                return self.size
-            return self.curr_pos
-        elif whence not in (io.SEEK_SET, io.SEEK_CUR, io.SEEK_END):
+            new_pos = self.size + offset
+        else:
             # logging.debug('Illegal 2nd argument to seek(): {0}'
             #               .format(whence))
             raise IOError('Illegal 2nd argument to seek(): {0}'.format(whence))
-        else:
-            # logging.debug('not implemented: {0}, {1}'.format(offset, whence))
-            raise NotImplementedError('seek only partially implemented. '
-                                      'Cannot yet seek to {0} from {1}'
-                                      .format(offset, whence))
+        if new_pos < 0:
+            raise IOError('Cannot seek to negative position {0}'
+                          .format(new_pos))
+        if self.size is not None and new_pos >= self.size:
+            # fake jumping to (or beyond) the end: drop iterable state
+            self.iterable = None   # cannot safely be used any more
+            self.leftover = None
+            self.at_end = True
+            self.curr_pos = new_pos
+            return self.curr_pos
+        # need actual data from the iterable: start fresh if moving backwards
+        # or if the iterable was dropped/exhausted
+        if self.at_end or self.iterable is None or new_pos < self.curr_pos:
+            self.reset()
+        while self.curr_pos < new_pos:
+            skipped = self.readinto(bytearray(min(new_pos - self.curr_pos,
+                                                  1024 * 1024)))
+            if skipped == 0:
+                break   # underlying data ended earlier than expected
+        if self.curr_pos != new_pos:
+            # logging.debug('IterStream: curr_pos {0} != new_pos {1}!'
+            #               .format(self.curr_pos, new_pos))
+            raise RuntimeError('programming error in IterStream.seek!')
+        return self.curr_pos
 
     def close(self):
         self.iterable = None
@@ -651,7 +646,10 @@ class PptRecordExOleVbaActiveXAtom(PptRecord):
                                                  self.data[start_idx:end_idx])
             else:
                 result = self.data[start_idx:end_idx]
-            yield result
+            if result:
+                # never yield empty chunks: readinto() of consumers would
+                # mistake them for end-of-stream
+                yield result
             logging.debug('decompressing from {0} to {1} resulted in {2} new'
                           .format(start_idx, end_idx, len(result)))
             out_size += len(result)
@@ -659,7 +657,8 @@ class PptRecordExOleVbaActiveXAtom(PptRecord):
         if must_decomp:
             result = decompressor.flush()
             out_size += len(result)
-            yield result
+            if result:
+                yield result
         if out_size != self.get_uncompressed_size():
             logging.warning('Decompressed data has wrong size {0} != {1}'
                             .format(out_size, self.get_uncompressed_size()))
