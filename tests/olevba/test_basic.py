@@ -170,6 +170,236 @@ class TestOlevbaBasic(unittest.TestCase):
         self.assertIn('Sub Action_Click()\n  MsgBox "The action button clicked!"\nEnd Sub', output)
 
 
+class TestXlmStatusAccounting(unittest.TestCase):
+    """
+    Verify that macro-sheet presence, formula extraction and analysis are
+    reported separately, and that JSON and triage state the same fact.
+
+    Uses the repository's small XLM samples plus controlled fakes for
+    capability failures; no full Office installation or optional
+    XLMMacroDeobfuscator is required.
+    """
+
+    XLM_DIR = join(DATA_BASE_DIR, 'excel4-macros')
+
+    def _json_result(self, filename, args=('-j',)):
+        output, _ = call_and_capture('olevba', args=list(args) + [filename],
+                                     accept_nonzero_exit=True,
+                                     exclude_stderr=True)
+        for entry in json.loads(output):
+            if entry.get('type') in ('MetaInformation', 'msg', 'warning', 'error'):
+                continue
+            return entry
+        self.fail('no result entry in JSON output')
+
+    def _triage_line(self, filename):
+        output, _ = call_and_capture('olevba', args=('-t', filename),
+                                     accept_nonzero_exit=True,
+                                     exclude_stderr=True)
+        for line in output.splitlines():
+            if os.path.basename(filename) in line and '(Flags' not in line:
+                return line
+        self.fail('no triage line for %s in output:\n%s' % (filename, output))
+
+    def test_complete_analysis_no_findings_is_clean(self):
+        """A fully analysed Excel file without macro sheets may be called clean."""
+        filename = join(DATA_BASE_DIR, 'msodde', 'dde-test.xlsx')
+        result = self._json_result(filename)
+        self.assertEqual(result['xlm']['status'], 'none')
+        self.assertFalse(result['xlm']['macro_sheet_found'])
+        self.assertTrue(result['xlm']['analysis_complete'])
+        self.assertTrue(result['xlm']['extraction_complete'])
+        # triage: no M flag, and no "incomplete"/"failed"/"not checked" caveat
+        line = self._triage_line(filename)
+        self.assertIn('OpX:-', line)
+        self.assertNotIn('INCOMPLETE', line)
+        self.assertNotIn('FAILED', line)
+        self.assertNotIn('not checked', line)
+
+    def test_macro_present_and_extracted(self):
+        """OLE XLM sample: present, extracted, analysed, and flagged in both modes."""
+        filename = join(self.XLM_DIR, 'excel4_sample_macro.xls')
+        result = self._json_result(filename)
+        self.assertEqual(result['xlm']['status'], 'extracted')
+        self.assertTrue(result['xlm']['macro_sheet_found'])
+        self.assertTrue(result['xlm']['analysis_complete'])
+        self.assertEqual(result['xlm']['method'], 'plugin_biff')
+        self.assertIn('XLM macro', [e['keyword'] for e in result['analysis']])
+        line = self._triage_line(filename)
+        self.assertIn('OLE:MAS', line)
+        self.assertNotIn('INCOMPLETE', line)
+
+    def test_macro_present_but_not_analysed(self):
+        """OpenXML XLM sample: presence proven, formulas not extracted -> not clean.
+
+        This is the regression for the misleading 'No VBA or XLM macros found.'
+        message and for triage showing no M flag while JSON had no analysis.
+        """
+        for name in ('excel4_sample_macro.xlsm', 'excel4_sample_macro.xltm',
+                     'excel4_sample_macro.xlsb'):
+            filename = join(self.XLM_DIR, name)
+            result = self._json_result(filename)
+            self.assertEqual(result['xlm']['status'], 'present', name)
+            self.assertTrue(result['xlm']['macro_sheet_found'], name)
+            self.assertFalse(result['xlm']['extraction_complete'], name)
+            self.assertFalse(result['xlm']['analysis_complete'], name)
+            # triage must show the macro and the caveat, matching JSON
+            line = self._triage_line(filename)
+            self.assertIn(':M', line, name)
+            self.assertIn('analysis INCOMPLETE', line, name)
+
+            # detailed mode must not claim there are no macros
+            output, _ = call_and_capture('olevba', args=(filename,),
+                                         accept_nonzero_exit=True,
+                                         exclude_stderr=True)
+            self.assertNotIn('No VBA or XLM macros found.', output, name)
+            self.assertIn('not extracted', output, name)
+            self.assertIn('does not cover the XLM code', output, name)
+
+    def test_plugin_biff_failure_is_not_clean_and_not_malicious(self):
+        """Controlled plugin_biff failure: no clean verdict, no malicious verdict."""
+        from oletools import olevba
+
+        class FailingBiff(object):
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def Analyze(self):
+                raise RuntimeError('simulated BIFF parser failure')
+
+        filename = join(self.XLM_DIR, 'excel4_sample_macro.xls')
+        parser = olevba.VBA_Parser(filename)
+        original = olevba.cBIFF
+        try:
+            olevba.cBIFF = FailingBiff
+            self.assertFalse(parser.detect_xlm_macros())
+        finally:
+            olevba.cBIFF = original
+            parser.close()
+
+        status = parser.get_xlm_status()
+        self.assertEqual(status['status'], 'error')
+        self.assertIsNone(status['macro_sheet_found'])
+        self.assertFalse(status['analysis_complete'])
+        self.assertIn('plugin_biff', status['reason'])
+
+    def test_deobfuscator_failure_falls_back_without_clean_verdict(self):
+        """Controlled XLMMacroDeobfuscator failure must not become 'no macro'."""
+        from oletools import olevba
+
+        class FailingDeobfuscator(object):
+            SILENT = False
+
+            @staticmethod
+            def process_file(**kwargs):
+                raise RuntimeError('simulated deobfuscator failure')
+
+        filename = join(self.XLM_DIR, 'excel4_sample_macro.xls')
+        parser = olevba.VBA_Parser(filename)
+        original_flag = olevba.XLMDEOBFUSCATOR
+        original_mod = getattr(olevba, 'xlmdeobfuscator', None)
+        try:
+            olevba.XLMDEOBFUSCATOR = True
+            olevba.xlmdeobfuscator = FailingDeobfuscator
+            # plugin_biff fallback still finds the macro, but the failure is recorded
+            self.assertTrue(parser.detect_xlm_macros())
+        finally:
+            olevba.XLMDEOBFUSCATOR = original_flag
+            if original_mod is not None:
+                olevba.xlmdeobfuscator = original_mod
+            else:
+                del olevba.xlmdeobfuscator
+            parser.close()
+        status = parser.get_xlm_status()
+        self.assertTrue(status['macro_sheet_found'])
+        # the optional capability was reported available for this run
+        self.assertTrue(status['deobfuscation_available'])
+        self.assertEqual(status['status'], 'extracted')
+        self.assertFalse(status['deobfuscation_used'])
+        self.assertIsNotNone(status['deobfuscation_error'])
+        self.assertIn('XLMMacroDeobfuscator', status['deobfuscation_error'])
+
+    def test_plugin_biff_failure_json_and_triage_agree(self):
+        """Parse failure: both outputs say 'failed', neither says clean or malicious."""
+        import io
+        import contextlib
+        from oletools import olevba
+
+        class FailingBiff(object):
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def Analyze(self):
+                raise RuntimeError('simulated BIFF parser failure')
+
+        filename = join(self.XLM_DIR, 'excel4_sample_macro.xls')
+        original = olevba.cBIFF
+        try:
+            olevba.cBIFF = FailingBiff
+            parser = olevba.VBA_Parser_CLI(filename)
+            json_result = parser.process_file_json()
+            parser.close()
+
+            parser = olevba.VBA_Parser_CLI(filename)
+            triage_out = io.StringIO()
+            with contextlib.redirect_stdout(triage_out):
+                parser.process_file_triage()
+            parser.close()
+        finally:
+            olevba.cBIFF = original
+            parser.close()
+
+        self.assertEqual(json_result['xlm']['status'], 'error')
+        self.assertIsNone(json_result['xlm']['macro_sheet_found'])
+        self.assertFalse(json_result['xlm']['analysis_complete'])
+        self.assertEqual(json_result['macros'], [])
+        self.assertIsNone(json_result['analysis'])
+
+        line = triage_out.getvalue()
+        self.assertIn('XLM analysis FAILED', line)
+        self.assertNotIn(':M', line)     # no macro proven, but not called clean either
+        # neither output declares a clean ("none") status or a finding
+        self.assertNotEqual(json_result['xlm']['status'], 'none')
+        self.assertEqual(json_result['analysis'], None)
+
+    def test_no_xlm_is_not_reported_as_clean(self):
+        """--no-xlm skips detection; the output must say so, not claim absence."""
+        filename = join(self.XLM_DIR, 'excel4_sample_macro.xls')
+        result = self._json_result(filename, args=('-j', '--no-xlm'))
+        self.assertEqual(result['xlm']['status'], 'not_checked')
+        self.assertIn('no-xlm', result['xlm']['reason'])
+        self.assertFalse(result['xlm']['analysis_complete'])
+        output, _ = call_and_capture('olevba', args=('--no-xlm', filename),
+                                     accept_nonzero_exit=True)
+        self.assertNotIn('No VBA or XLM macros found.', output)
+        self.assertIn('NOT PERFORMED', output)
+
+    def test_encrypted_file_is_unknown_for_xlm(self):
+        """Encrypted file: XLM status unknown, not 'none'."""
+        filename = join(DATA_BASE_DIR, 'encrypted', 'encrypted.doc')
+        result = self._json_result(filename)
+        self.assertEqual(result['xlm']['status'], 'not_checked')
+        self.assertIsNone(result['xlm']['macro_sheet_found'])
+        self.assertIn('encrypted', result['xlm']['reason'])
+        line = self._triage_line(filename)
+        self.assertIn('XLM not checked', line)
+
+    def test_json_and_triage_agree_on_macro_samples(self):
+        """For every XLM sample, JSON presence and triage M flag must agree."""
+        for name in os.listdir(self.XLM_DIR):
+            filename = join(self.XLM_DIR, name)
+            result = self._json_result(filename)
+            line = self._triage_line(filename)
+            macro_in_json = result['xlm']['macro_sheet_found']
+            macro_in_triage = ':M' in line
+            self.assertEqual(macro_in_json, macro_in_triage,
+                             'JSON/triage disagree for %s: %r vs %r'
+                             % (name, macro_in_json, line))
+            self.assertEqual(result['xlm']['analysis_complete'],
+                             'INCOMPLETE' not in line,
+                             'JSON/triage analysis status disagree for %s' % name)
+
+
 # just in case somebody calls this file as a script
 if __name__ == '__main__':
     unittest.main()

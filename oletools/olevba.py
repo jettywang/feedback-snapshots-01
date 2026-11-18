@@ -565,6 +565,30 @@ TYPE_TEXT = 'Text'
 TYPE_PPT = 'PPT'
 TYPE_SLK = 'SLK'
 
+# Status of XLM/Excel 4 macro handling. These are deliberately separate from
+# the "contains_xlm_macros" boolean: a macro sheet can be present while the
+# formulas could not be extracted or analysed.
+#: No macro sheet: the file was parsed and none was found
+XLM_STATUS_NONE = 'none'
+#: A macro sheet is present and its formulas were extracted
+XLM_STATUS_EXTRACTED = 'extracted'
+#: A macro sheet is present but extraction did not produce formulas
+XLM_STATUS_PRESENT = 'present'
+#: The file was not analysed for XLM because the capability was disabled/absent
+XLM_STATUS_NOT_CHECKED = 'not_checked'
+#: The XLM check failed (I/O, parser or tool error)
+XLM_STATUS_ERROR = 'error'
+
+#: Reasons why XLM detection could not run or did not complete. These are
+#: reported next to the status so that callers do not mistake "not analysed"
+#: for "nothing found".
+XLM_REASON_DISABLED = 'disabled by --no-xlm'
+XLM_REASON_NO_BIFF_STREAM = 'no Workbook/Book stream found'
+XLM_REASON_PLUGIN_BIFF_ERROR = 'error in plugin_biff XLM extraction'
+XLM_REASON_BINARY_MACROSHEET = 'binary macro sheet (XLSB) not parsed'
+XLM_REASON_OPENXML_MACROSHEET = 'OpenXML macro sheet found, formulas not extracted'
+XLM_REASON_DEOBFUSCATOR_ERROR = 'error in XLMMacroDeobfuscator'
+
 # short tag to display file types in triage mode:
 TYPE2TAG = {
     TYPE_OLE: 'OLE:',
@@ -2742,6 +2766,19 @@ class VBA_Parser(object):
         self.encoding = encoding
         self.xlm_macros = []
         self.no_xlm = False
+        #: Detailed XLM status, see XLM_STATUS_* constants. Unlike
+        #: contains_xlm_macros (a boolean answer to "did we find a macro
+        #: sheet?"), this records whether extraction/analysis actually ran, so
+        #: that "not analysed" is never reported as "clean".
+        self.xlm_status = None
+        #: Reason for XLM_STATUS_PRESENT / XLM_STATUS_NOT_CHECKED / XLM_STATUS_ERROR
+        self.xlm_reason = None
+        #: True if the optional XLMMacroDeobfuscator was used (not just importable)
+        self.xlm_deobfuscator_used = False
+        #: Error from the optional deobfuscator, kept even when plugin_biff succeeds
+        self.xlm_deobfuscation_error = None
+        #: Whether the optional deobfuscator was importable when detection ran
+        self.xlm_deobfuscator_available = None
         #: Output from pcodedmp, disassembly of the VBA P-code
         self.disable_pcode = disable_pcode
         self.pcodedmp_output = None
@@ -3153,6 +3190,10 @@ class VBA_Parser(object):
         if xlm_macro_found:
             self.contains_xlm_macros = True
             self.xlm_macros = xlm_macros
+            self.xlm_status = XLM_STATUS_EXTRACTED
+        else:
+            self.contains_xlm_macros = False
+            self.xlm_status = XLM_STATUS_NONE
         self.type = TYPE_SLK
 
 
@@ -3284,7 +3325,13 @@ class VBA_Parser(object):
         """
         vba = self.detect_vba_macros()
         xlm = False
-        if not self.no_xlm:
+        if self.no_xlm:
+            # record that the XLM step was deliberately skipped, instead of
+            # silently treating the file as having no XLM macro sheet:
+            if self.xlm_status is None:
+                self.xlm_status = XLM_STATUS_NOT_CHECKED
+                self.xlm_reason = XLM_REASON_DISABLED
+        else:
             xlm = self.detect_xlm_macros()
         return (vba or xlm)
 
@@ -3367,6 +3414,11 @@ class VBA_Parser(object):
         If XLMMacroDeobfuscator is available, it will be used. Otherwise plugin_biff
         is used as fallback (plugin_biff only supports OLE files, not XLSX or XLSB)
 
+        The return value only answers "is there a macro sheet?". Whether the
+        formulas could actually be extracted and analysed is recorded separately
+        in ``xlm_status``/``xlm_reason`` (see :py:meth:`get_xlm_status`), so that
+        callers do not report an incomplete analysis as a clean file.
+
         :return: bool, True if at least one macro worksheet has been found, False otherwise
         """
         log.debug("detect xlm macros")
@@ -3375,28 +3427,101 @@ class VBA_Parser(object):
             return self.contains_xlm_macros
         # if this is a SLK file, the analysis was done in open_slk:
         if self.type == TYPE_SLK:
-            return self.contains_xlm_macros
+            # open_slk always sets the status; the bool may still be None if
+            # the file was opened before this accounting existed.
+            if self.xlm_status is None:
+                self.xlm_status = (XLM_STATUS_EXTRACTED if self.contains_xlm_macros
+                                   else XLM_STATUS_NONE)
+            return bool(self.contains_xlm_macros)
         # TODO: check also CSV files for formulas?
         self.xlm_macros = []
-        # check if the file is Excel, otherwise return False
+        self.xlm_deobfuscator_available = XLMDEOBFUSCATOR
+        # Encrypted Excel content cannot be inspected: that is an unknown
+        # result, not an absence of macro sheets. This is checked before the
+        # file-type test because ftguess cannot identify the inner format of an
+        # encrypted file. (The decrypted temp file is parsed as a separate,
+        # unencrypted file by the CLI.)
+        if self.type == TYPE_OLE and self.detect_is_encrypted():
+            self.contains_xlm_macros = None
+            self.xlm_status = XLM_STATUS_NOT_CHECKED
+            self.xlm_reason = 'file is encrypted; XLM analysis requires decryption'
+            return False
+        # check if the file is Excel, otherwise return False. XLM macro sheets
+        # cannot be stored in other Office formats, so this is a definitive
+        # "none" and not a skipped check.
         if not self.ftg.is_excel():
             self.contains_xlm_macros = False
+            self.xlm_status = XLM_STATUS_NONE
             return False
-        if XLMDEOBFUSCATOR:
+        if XLMDEOBFUSCATOR and self.file_on_disk:
             # XLMMacroDeobfuscator is available, use it:
             # But it only works with files on disk for now
-            if not self.file_on_disk:
-                log.warning('XLMMacroDeobfuscator only works with files on disk, not in memory. Analysis might be less complete.')
+            try:
+                return self._extract_xlm_xlmdeobf()
+            except Exception:
+                # Do not turn a tool failure into "no macro": keep the error
+                # and try the built-in BIFF fallback for OLE files below.
+                log.error('Error when running XLMMacroDeobfuscator')
+                self.xlm_deobfuscation_error = XLM_REASON_DEOBFUSCATOR_ERROR
+        elif XLMDEOBFUSCATOR:
+            log.warning('XLMMacroDeobfuscator only works with files on disk, not in memory. Analysis might be less complete.')
+        # fall back to plugin_biff (OLE files only):
+        if self.ole_file is not None:
+            return self._extract_xlm_plugin_biff()
+        # OpenXML: plugin_biff cannot read XLSX/XLSB. Detect the macro sheet
+        # from the package structure so that its presence is still reported,
+        # but mark the formulas as not extracted.
+        if self.type == TYPE_OpenXML:
+            found = self._detect_xlm_openxml_macrosheet()
+            if found:
+                self.contains_xlm_macros = True
+                self.xlm_status = XLM_STATUS_PRESENT
+                self.xlm_reason = (self.xlm_deobfuscation_error
+                                   or XLM_REASON_OPENXML_MACROSHEET)
+            elif self.xlm_status == XLM_STATUS_ERROR:
+                self.contains_xlm_macros = None
+            elif not self.file_on_disk:
+                # Cannot inspect the package without a file path: unknown,
+                # not a clean result.
+                self.contains_xlm_macros = None
+                self.xlm_status = XLM_STATUS_NOT_CHECKED
+                self.xlm_reason = 'file in memory, XLM extraction not possible'
             else:
-                try:
-                    return self._extract_xlm_xlmdeobf()
-                except Exception:
-                    log.error('Error when running XLMMacroDeobfuscator')
-        # fall back to plugin_biff:
-        if self.ole_file is None:
-            # TODO: handle OpenXML here
+                self.contains_xlm_macros = False
+                self.xlm_status = XLM_STATUS_NONE
+            return bool(found)
+        # Excel file in memory (no OLE structure and no package access): we
+        # cannot check it, which is not the same as "no macro".
+        self.contains_xlm_macros = None
+        self.xlm_status = XLM_STATUS_NOT_CHECKED
+        self.xlm_reason = 'file in memory, XLM extraction not possible'
+        return False
+
+    def _detect_xlm_openxml_macrosheet(self):
+        """
+        Look for Excel 4 macro sheet parts in an OpenXML/XLSB package.
+
+        This only establishes presence (part name and content type); formulas
+        are not parsed because plugin_biff does not support these containers.
+        """
+        if not self.file_on_disk:
             return False
-        return self._extract_xlm_plugin_biff()
+        try:
+            with zipfile.ZipFile(self.filename) as archive:
+                for name in archive.namelist():
+                    if name.startswith('xl/macrosheets/'):
+                        log.debug('Found XLM macro sheet part %r', name)
+                        return True
+                try:
+                    content_types = archive.read('[Content_Types].xml').decode('utf-8', 'replace')
+                except KeyError:
+                    content_types = ''
+                return 'application/vnd.ms-excel.macrosheet' in content_types
+        except (IOError, zipfile.BadZipfile, zipfile.LargeZipFile) as exc:
+            log.info('Failed to inspect OpenXML package for XLM macro sheets (%s)', exc)
+            self.xlm_status = XLM_STATUS_ERROR
+            self.xlm_reason = 'failed to read OpenXML package: %s' % exc
+            return False
 
     def _extract_xlm_xlmdeobf(self):
         """
@@ -3419,6 +3544,7 @@ class VBA_Parser(object):
         if len(result) == 0:
             # no XLM macro was found
             self.contains_xlm_macros = False
+            self.xlm_status = XLM_STATUS_NONE
             return False
         xlm += result
         xlm.append('- ' * 38)
@@ -3434,6 +3560,8 @@ class VBA_Parser(object):
         log.debug(xlm)
         self.xlm_macros = xlm
         self.contains_xlm_macros = True
+        self.xlm_status = XLM_STATUS_EXTRACTED
+        self.xlm_deobfuscator_used = True
         return True
 
 
@@ -3466,11 +3594,84 @@ class VBA_Parser(object):
                         biff_plugin = cBIFF(name=[excel_stream], stream=data, options='-o DCONN -s')
                         self.xlm_macros += biff_plugin.Analyze()
                         self.contains_xlm_macros = True
+                        # BOUNDSHEET entries are enough to prove presence, but
+                        # only the CSV pass ("Sheet,Reference,Formula,Value"
+                        # followed by rows) means the formulas were read.
+                        has_formulas = False
+                        if 'Sheet,Reference,Formula,Value' in self.xlm_macros:
+                            csv_start = self.xlm_macros.index('Sheet,Reference,Formula,Value')
+                            has_formulas = bool(self.xlm_macros[csv_start + 1:])
+                        if has_formulas:
+                            self.xlm_status = XLM_STATUS_EXTRACTED
+                            self.xlm_reason = None
+                        else:
+                            self.xlm_status = XLM_STATUS_PRESENT
+                            self.xlm_reason = (self.xlm_deobfuscation_error
+                                               or 'macro sheet found, formulas not extracted')
                         return True
-                except:
+                    self.contains_xlm_macros = False
+                    self.xlm_status = XLM_STATUS_NONE
+                    return False
+                except Exception:
                     log.exception('Error when running oledump.plugin_biff, please report to %s' % URL_OLEVBA_ISSUES)
-        self.contains_xlm_macros = False
+                    # An extraction error is not evidence of absence: leave the
+                    # boolean as None (unknown) and record the failure.
+                    self.contains_xlm_macros = None
+                    self.xlm_status = XLM_STATUS_ERROR
+                    self.xlm_reason = XLM_REASON_PLUGIN_BIFF_ERROR
+                    return False
+        self.contains_xlm_macros = None
+        self.xlm_status = XLM_STATUS_NOT_CHECKED
+        self.xlm_reason = XLM_REASON_NO_BIFF_STREAM
         return False
+
+    def get_xlm_status(self):
+        """
+        Return a machine-readable summary of XLM detection, extraction and
+        analysis, so that callers can distinguish "no macro" from "not
+        analysed". All values are JSON-serialisable.
+
+        :return: dict with keys:
+            status: one of XLM_STATUS_* (also stored in self.xlm_status)
+            reason: human-readable explanation or None
+            macro_sheet_found: True/False/None (None = not determined)
+            extraction_complete: bool
+            analysis_complete: bool (True only if formulas were extracted, so
+                that scanning them gives a definitive result)
+            method: extraction method or None
+            deobfuscation_available: bool (optional dependency importable)
+            deobfuscation_used: bool
+            deobfuscation_error: str or None
+        """
+        status = self.xlm_status
+        if status is None:
+            # detection was never attempted: report that, do not assume clean
+            status = XLM_STATUS_NOT_CHECKED
+            reason = 'XLM detection was not run'
+        else:
+            reason = self.xlm_reason
+        if self.no_xlm and status == XLM_STATUS_NONE:
+            status = XLM_STATUS_NOT_CHECKED
+            reason = XLM_REASON_DISABLED
+        found = self.contains_xlm_macros
+        if status == XLM_STATUS_EXTRACTED:
+            method = 'xlmmacro_deobfuscator' if self.xlm_deobfuscator_used else (
+                'slk_parser' if self.type == TYPE_SLK else 'plugin_biff')
+        else:
+            method = None
+        return {
+            'status': status,
+            'reason': reason,
+            'macro_sheet_found': found,
+            'extraction_complete': status in (XLM_STATUS_EXTRACTED, XLM_STATUS_NONE),
+            'analysis_complete': status in (XLM_STATUS_EXTRACTED, XLM_STATUS_NONE),
+            'method': method,
+            'deobfuscation_available': (self.xlm_deobfuscator_available
+                                        if self.xlm_deobfuscator_available is not None
+                                        else XLMDEOBFUSCATOR),
+            'deobfuscation_used': self.xlm_deobfuscator_used,
+            'deobfuscation_error': getattr(self, 'xlm_deobfuscation_error', None),
+        }
 
     def detect_is_encrypted(self):
         if self.ole_file:
@@ -4080,7 +4281,14 @@ class VBA_Parser_CLI(VBA_Parser):
             if self.vba_stomping_detected:
                 print('VBA Stomping detection is experimental: please report any false positive/negative at https://github.com/decalage2/oletools/issues')
         else:
-            print('No suspicious keyword or IOC found.')
+            xlm_status = self.get_xlm_status()
+            if xlm_status['macro_sheet_found'] and not xlm_status['analysis_complete']:
+                # Do not claim the file is clean when the macro sheet was
+                # found but its formulas could not be analysed.
+                print('No suspicious keyword or IOC found, but XLM macro analysis '
+                      'is INCOMPLETE (%s).' % (xlm_status['reason'] or xlm_status['status']))
+            else:
+                print('No suspicious keyword or IOC found.')
 
     def print_analysis_json(self, show_decoded_strings=False, deobfuscate=False):
         """
@@ -4230,11 +4438,34 @@ class VBA_Parser_CLI(VBA_Parser):
                 if not vba_code_only:
                     # analyse the code from all modules at once:
                     self.print_analysis(show_decoded_strings, deobfuscate)
+                    xlm_status = self.get_xlm_status()
+                    if xlm_status['macro_sheet_found'] and not xlm_status['analysis_complete']:
+                        print('NOTE: XLM macro sheet found but its formulas were not '
+                              'extracted (%s). The keyword analysis above does not '
+                              'cover the XLM code.'
+                              % (xlm_status['reason'] or xlm_status['status']))
                 if show_deobfuscated_code:
                     print('MACRO SOURCE CODE WITH DEOBFUSCATED VBA STRINGS (EXPERIMENTAL):\n\n')
                     print(self.reveal())
             else:
-                print('No VBA or XLM macros found.')
+                xlm_status = self.get_xlm_status()
+                if xlm_status['macro_sheet_found']:
+                    # The macro sheet exists but no module could be extracted.
+                    print('XLM macro sheet found, but its formulas could not be '
+                          'extracted (%s). Analysis is INCOMPLETE.'
+                          % (xlm_status['reason'] or xlm_status['status']))
+                elif xlm_status['status'] == XLM_STATUS_ERROR:
+                    print('XLM macro analysis FAILED (%s). The file cannot be '
+                          'declared free of XLM macros.'
+                          % (xlm_status['reason'] or 'unknown error'))
+                elif xlm_status['status'] == XLM_STATUS_NOT_CHECKED:
+                    print('XLM macro analysis was NOT PERFORMED (%s).'
+                          % (xlm_status['reason'] or 'capability disabled'))
+                elif self.contains_vba_macros is None:
+                    print('VBA macro analysis did not complete; no clean result '
+                          'can be reported.')
+                else:
+                    print('No VBA or XLM macros found.')
         except OlevbaBaseException:
             raise
         except Exception as exc:
@@ -4315,6 +4546,10 @@ class VBA_Parser_CLI(VBA_Parser):
                 if show_pcode:
                     result['pcode'] = self.extract_pcode()
             result['macros'] = macros
+            # Record XLM detection/extraction/analysis coverage alongside the
+            # findings, so that a present-but-unanalysed macro sheet is not
+            # represented as "no macros, nothing suspicious".
+            result['xlm'] = self.get_xlm_status()
             result['json_conversion_successful'] = True
         except Exception as exc:
             # display the exception with full stack trace for debugging
@@ -4330,6 +4565,7 @@ class VBA_Parser_CLI(VBA_Parser):
         Process a file in triage mode, showing only summary results on one line.
         """
         #TODO: replace print by writing to a provided output file (sys.stdout by default)
+        self.no_xlm = no_xlm
         try:
             #TODO: handle olefile errors, when an OLE file is malformed
             if self.detect_macros():
@@ -4341,7 +4577,7 @@ class VBA_Parser_CLI(VBA_Parser):
                                     deobfuscate=deobfuscate)
             flags = TYPE2TAG[self.type]
             macros = autoexec = suspicious = iocs = hexstrings = base64obf = dridex = vba_obf = '-'
-            if self.contains_vba_macros: macros = 'M'
+            if self.contains_vba_macros or self.contains_xlm_macros: macros = 'M'
             if self.nb_autoexec: autoexec = 'A'
             if self.nb_suspicious: suspicious = 'S'
             if self.nb_iocs: iocs = 'I'
@@ -4353,6 +4589,17 @@ class VBA_Parser_CLI(VBA_Parser):
                                          base64obf, dridex, vba_obf)
 
             line = '%-12s %s' % (flags, self.filename)
+            xlm_status = self.get_xlm_status()
+            if xlm_status['macro_sheet_found'] and not xlm_status['analysis_complete']:
+                # Same fact JSON reports as xlm.analysis_complete=False
+                line += ' - XLM macro sheet found, analysis INCOMPLETE (%s)' % (
+                    xlm_status['reason'] or xlm_status['status'])
+            elif xlm_status['status'] == XLM_STATUS_ERROR:
+                line += ' - XLM analysis FAILED (%s)' % (
+                    xlm_status['reason'] or 'unknown error')
+            elif xlm_status['status'] == XLM_STATUS_NOT_CHECKED:
+                line += ' - XLM not checked (%s)' % (
+                    xlm_status['reason'] or 'capability disabled')
             print(line)
         except Exception as exc:
             # display the exception with full stack trace for debugging only

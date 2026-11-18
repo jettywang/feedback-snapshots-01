@@ -396,6 +396,43 @@ print 'Dridex obfuscated strings: %d' % vbaparser.nb_dridexstrings
 print 'VBA obfuscated strings: %d' % vbaparser.nb_vbastrings
 ```
 
+### Detect and analyze XLM / Excel 4 macros
+
+The method **detect_xlm_macros** returns True if an Excel 4 macro sheet is
+present. That boolean only answers the presence question: extraction and
+analysis are separate steps, and they may fail or be disabled.
+
+Use **get_xlm_status** to obtain the full picture as a JSON-serialisable dict:
+
+- `status`: `none` (checked, no macro sheet), `extracted` (macro sheet present
+  and formulas extracted), `present` (macro sheet proven, but formulas not
+  extracted), `not_checked` (analysis disabled or impossible, e.g. encrypted
+  file, file in memory, `--no-xlm`), or `error` (I/O or parser failure).
+- `reason`: human-readable explanation for anything but `none`/`extracted`.
+- `macro_sheet_found`: True, False, or None when it could not be determined.
+- `extraction_complete` / `analysis_complete`: whether the formulas were
+  actually read, so that "no suspicious keyword" is a definitive result.
+- `method`: `plugin_biff`, `slk_parser` or `xlmmacro_deobfuscator`.
+- `deobfuscation_available` / `deobfuscation_used` / `deobfuscation_error`:
+  status of the optional XLMMacroDeobfuscator capability.
+
+Only `none` (with `analysis_complete=True`) may be reported as "no XLM
+macros". `present`, `not_checked` and `error` must not be reported as clean,
+and an extraction failure is not evidence of malicious content either.
+
+```python
+status = vbaparser.get_xlm_status()
+if status['macro_sheet_found'] and not status['analysis_complete']:
+    print('XLM macro found but not analysed: %s' % status['reason'])
+```
+
+The `olevba -j` JSON output includes the same dict under the `xlm` key for each
+file, and triage mode adds the same fact to the summary line, e.g.
+`OpX:M-S----- file.xlsm - XLM macro sheet found, analysis INCOMPLETE (...)`.
+This applies to XLSX/XLSB macro sheets too: `plugin_biff` only reads OLE
+files, so their presence is reported but the formulas are not extracted unless
+the optional deobfuscator is installed.
+
 ### Deobfuscate VBA Macro Source Code
 
 The method **reveal** attempts to deobfuscate the macro source code by replacing all

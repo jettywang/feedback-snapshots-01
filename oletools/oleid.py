@@ -454,17 +454,42 @@ class OleID(object):
             if vba_parser is not None:
                 vba_parser.close()
             vba_parser = None
-        # Check XLM macros only for Excel file types:
-        if self.ftg.is_excel():
+        # Check XLM macros only for Excel file types (and SYLK/SLK, which can
+        # also hold Excel 4 macro sheets):
+        self.is_slk = self.data.startswith(b'ID')
+        if self.ftg.is_excel() or self.is_slk:
             # TODO: for now XLM detection only works for files on disk... So we need to reload VBA_Parser from the filename
             #       To be improved once XLMMacroDeobfuscator can work on files in memory
             if self.file_on_disk:
                 try:
                     vba_parser = olevba.VBA_Parser(filename=self.filename)
-                    if vba_parser.detect_xlm_macros():
+                    xlm_found = vba_parser.detect_xlm_macros()
+                    xlm_status = vba_parser.get_xlm_status()
+                    if xlm_found:
                         xlm_indicator.value = 'Yes'
                         xlm_indicator.risk = RISK.MEDIUM
-                        xlm_indicator.description = 'This file contains XLM macros. Use olevba to analyse them.'
+                        if xlm_status['analysis_complete']:
+                            xlm_indicator.description = 'This file contains XLM macros. Use olevba to analyse them.'
+                        else:
+                            # Presence is proven, but the formulas were not
+                            # analysed: do not imply a clean formula scan.
+                            xlm_indicator.description = (
+                                'This file contains XLM macros, but they could not be '
+                                'fully analysed (%s). Use olevba for details.'
+                                % (xlm_status['reason'] or xlm_status['status']))
+                    elif xlm_status['status'] == olevba.XLM_STATUS_ERROR:
+                        xlm_indicator.risk = RISK.ERROR
+                        xlm_indicator.value = 'Error'
+                        xlm_indicator.description = 'Error while checking XLM macros: %s' % (
+                            xlm_status['reason'] or 'unknown error')
+                    elif xlm_status['status'] == olevba.XLM_STATUS_NOT_CHECKED:
+                        xlm_indicator.risk = RISK.UNKNOWN
+                        xlm_indicator.value = 'Unknown'
+                        xlm_indicator.description = 'XLM macros were not checked: %s' % (
+                            xlm_status['reason'] or 'capability disabled')
+                    else:
+                        # Only a completed check may say "does not contain"
+                        xlm_indicator.description = 'This file does not contain Excel 4/XLM macros.'
                 except Exception as e:
                     xlm_indicator.risk = RISK.ERROR
                     xlm_indicator.value = 'Error'
