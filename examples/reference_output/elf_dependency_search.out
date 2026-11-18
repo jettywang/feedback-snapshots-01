@@ -1,0 +1,25 @@
+candidate search only; not a run-time loader resolution
+root: app
+policy: glibc
+secure-execution: disabled
+
+app -> libA.so: candidate candidate-a/libA.so
+  1. object-rpath owner=app owner-origin=/opt/app/bin dir=/opt/app/rpath -> /opt/app/rpath hit candidate=candidate-a/libA.so
+
+app -> libB.so: candidate candidate-b/libB.so
+  1. object-rpath owner=app owner-origin=/opt/app/bin dir=/opt/app/rpath -> /opt/app/rpath hit candidate=candidate-b/libB.so
+
+libA -> libfoo.so: candidate candidate-a/libfoo.so
+  1. object-rpath owner=libA owner-origin=/opt/vendor/a/lib dir=/opt/vendor/a/rpath -> /opt/vendor/a/rpath hit candidate=candidate-a/libfoo.so
+
+libB -> libfoo.so: candidate candidate-b/libfoo.so
+  1. object-rpath owner=libB owner-origin=/opt/vendor/b/lib dir=/opt/vendor/b/rpath -> - skipped reason=rpath-suppressed-by-runpath
+  2. inherited-rpath owner=app owner-origin=/opt/app/bin dir=/opt/app/rpath -> /opt/app/rpath miss
+  3. object-runpath owner=libB owner-origin=/opt/vendor/b/lib dir=/opt/vendor/b/runpath -> /opt/vendor/b/runpath hit candidate=candidate-b/libfoo.so
+
+loaded objects: app, libA, libB
+external candidates (dependencies not modelled): candidate-a/libfoo.so, candidate-b/libfoo.so
+unresolved edges: -
+
+libA: libfoo.so -> candidate-a/libfoo.so
+libB: libfoo.so -> candidate-b/libfoo.so

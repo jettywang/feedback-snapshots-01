@@ -135,6 +135,51 @@ count and enumerate them. There are also some special segment classes
 that have more information about well-known segments. Take a look at
 `elftools/elf/segments.py` for more details.
 
+### Offline dependency search
+
+`elftools/elf/dependency.py` models the RPATH/RUNPATH search order used to
+locate the libraries named by `DT_NEEDED`.  It never consults a dynamic
+loader, the loader cache, `LD_LIBRARY_PATH`, system default directories, or
+the host environment.  The caller must supply:
+
+- a `DependencyGraph` whose `DependencyNode` entries carry `needed`, `rpath`,
+  `runpath`, `origin`, and optionally `soname`;
+- a `CandidateResolver`, called as `resolver(library, directory)`, which
+  returns a caller-defined candidate or `None`;
+- an explicit `SearchPolicy` and `SecureExecution` value.
+
+`DependencyNode.from_elffile` reads the dynamic tags from a real `ELFFile`
+when convenient; the origin still comes from the caller.
+
+Supported search policies:
+
+- `SearchPolicy.GLIBC` - `DT_RUNPATH` applies to direct dependencies only.
+  `DT_RPATH` applies to the object and is inherited by descendants, nearest
+  ancestor first.  When both tags are present on the same object, its
+  `DT_RUNPATH` suppresses its own `DT_RPATH` for that object and its
+  descendants.  A child's `DT_RUNPATH` affects only the child's own entry.
+- `SearchPolicy.RPATH_ONLY` - `DT_RUNPATH` is ignored; `DT_RPATH` applies to the
+  object and all descendants.
+- `SearchPolicy.RUNPATH_ONLY` - `DT_RPATH` is ignored; `DT_RUNPATH` applies to
+  direct dependencies only.
+
+`SecureExecution.ENABLED` disables `$ORIGIN` expansion, as in protected
+execution.  The mode is selected by the caller and is never inferred from file
+ownership or environment.  Unknown policies and invalid secure-execution values
+raise `ELFError` before any resolver call.  Relative path entries are expanded
+only against an explicit absolute `working_directory`; without one they are
+reported as skipped rather than resolved against the host process directory.
+
+Every probe is recorded as a `SearchStep` with its 1-based order, `PathSource`,
+owning object, owning origin, raw and expanded directory, outcome, and any
+`SkipReason`.  Results are `CANDIDATE_ONLY` or `NOT_FOUND`; a candidate is never
+reported as the library a run-time loader would actually use.  The same rule
+applies to `GraphResolution.format_trace()` and to the
+`runtime_library_confirmed` properties, which always return `False`.
+
+`examples/elf_dependency_search.py` contains a three-tier graph where the same
+`libfoo.so` request reaches different candidates from two different parents.
+
 ### Structs and headers
 
 Most objects in ELF and DWARF have \"headers\", and such objects usually
