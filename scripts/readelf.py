@@ -82,6 +82,7 @@ from elftools.elf.descriptions import (
 from elftools.elf.dynamic import DynamicSection
 from elftools.elf.elffile import ELFFile
 from elftools.elf.enums import ENUM_D_TAG
+from elftools.elf.gnu_debugdata import GNUDebugData
 from elftools.elf.gnuversions import (
     GNUVerDefSection,
     GNUVerNeedSection,
@@ -529,6 +530,77 @@ class ReadElf:
                     f"{symbol_shndx:>4} "
                     f"{_format_symbol_name(symbol_name):.25}{version_info}"
                 )
+
+    def display_gnu_debugdata(self, symbol_name: str | None = None) -> None:
+        """Display the .gnu_debugdata mini ELF and its symbol associations.
+
+        If symbol_name is given, only associations with that name are shown.
+        Each row names the layer that produced it and the decision taken, so
+        an embedded supplement is never presented as authenticated data.
+        """
+        try:
+            debugdata = self.elffile.get_gnu_debugdata()
+        except (ELFError, ValueError) as ex:
+            self._emitline(f'.gnu_debugdata: {ex}')
+            return
+
+        if debugdata is None:
+            self._emitline('There is no .gnu_debugdata section in this file.')
+            return
+
+        try:
+            self._display_gnu_debugdata_summary(debugdata)
+            associations = (
+                debugdata.lookup(symbol_name)
+                if symbol_name is not None
+                else list(debugdata.iter_symbols()))
+            if symbol_name is not None and not associations:
+                self._emitline(
+                    f'No symbol named {symbol_name!r} in either layer.')
+                return
+            self._emitline()
+            self._emitline(
+                '  Layer           Decision       Adopted  Value              '
+                'Size Name')
+            for association in associations:
+                decided = 'yes' if association.adopted else 'no'
+                self._emitline(
+                    f'  {association.layer:<15} '
+                    f'{association.decision:<14} '
+                    f'{decided:<8} '
+                    f'{self._format_hex(association.value, fullhex=True)} '
+                    f'{association.size:5d} {_format_symbol_name(association.name)}')
+                self._emitline(f'      reason: {association.reason}')
+        finally:
+            debugdata.close()
+
+    def _display_gnu_debugdata_summary(self, debugdata: GNUDebugData) -> None:
+        embedded = debugdata.embedded_elffile
+        self._emitline('GNU mini debug data (.gnu_debugdata):')
+        self._emitline(
+            f'  Compressed size:    {self._format_hex(debugdata.compressed_size)}')
+        self._emitline(
+            f'  Decompressed size:  {self._format_hex(debugdata.decompressed_size)}')
+        self._emitline(
+            '  Embedded ELF:       ELF{} {}, machine={}, type={}'.format(
+                embedded.elfclass,
+                'little-endian' if embedded.little_endian else 'big-endian',
+                embedded['e_machine'], embedded['e_type']))
+        self._emitline(f'  Compatibility:      {debugdata.status}')
+        for issue in debugdata.incompatibilities:
+            self._emitline(f'    - {issue}')
+        self._emitline(
+            '  Build ID (main):     {}'.format(
+                ', '.join(debugdata.main_build_ids) or 'unavailable'))
+        self._emitline(
+            '  Build ID (embedded): {}'.format(
+                ', '.join(debugdata.embedded_build_ids) or 'unavailable'))
+        self._emitline(
+            '  Build IDs match:     {}'.format(
+                {True: 'yes', False: 'no', None: 'unknown'}[
+                    debugdata.build_id_match]))
+        for warning in debugdata.warnings:
+            self._emitline(f'  Warning:            {warning}')
 
     def display_dynamic_tags(self) -> None:
         """ Display the dynamic tags contained in the file
@@ -1917,6 +1989,12 @@ def main(stream: IO[str] | None = None) -> None:
     argparser.add_argument('-A', '--arch-specific',
             action='store_true', dest='show_arch_specific',
             help='Display the architecture-specific information (if present)')
+    argparser.add_argument('--gnu-debugdata',
+            action='store_true', dest='show_gnu_debugdata',
+            help='Display the .gnu_debugdata mini ELF symbol associations')
+    argparser.add_argument('--gnu-debugdata-symbol',
+            action='store', dest='gnu_debugdata_symbol', metavar='<name>',
+            help='With --gnu-debugdata, show only symbols named <name>')
     argparser.add_argument('--debug-dump',
             action='store', dest='debug_dump_what', metavar='<what>',
             help=(
@@ -1967,6 +2045,8 @@ def main(stream: IO[str] | None = None) -> None:
                 readelf.display_version_info()
             if args.show_arch_specific:
                 readelf.display_arch_specific()
+            if args.show_gnu_debugdata:
+                readelf.display_gnu_debugdata(args.gnu_debugdata_symbol)
             if args.show_hex_dump:
                 readelf.display_hex_dump(args.show_hex_dump)
             if args.show_string_dump:

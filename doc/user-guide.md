@@ -163,6 +163,36 @@ parts of **pyelftools** which define \"structs\". For ELF this is in
 `elftools/dwarf/structs.py`. A word of warning: these are parts of the
 low-level API, use them at your own peril.
 
+### GNU mini debug data
+
+Some distributions strip a binary's symbol table but append a
+`.gnu_debugdata` section containing an XZ-compressed mini ELF with a
+reduced symbol table. Use `ELFFile.has_gnu_debugdata()` and
+`ELFFile.get_gnu_debugdata()` (in `elftools/elf/elffile.py`) to inspect
+it; the section object is `GNUDebugDataSection` in
+`elftools/elf/gnu_debugdata.py`.
+
+The returned `GNUDebugData` keeps the main and embedded ELFs separate and
+validates the XZ boundaries and the decoded ELF layout. It reports the
+architecture and build IDs of both layers. Each symbol is returned as a
+`SymbolAssociation` with a `layer` (`main` or `gnu_debugdata`), a
+`decision` such as `authoritative`, `supplement`, `corroborated`,
+`conflict`, `candidate` or `rejected`, and a human-readable `reason`.
+
+Embedded symbols are never reported as authoritative or authenticated:
+a matching build ID shows consistency, not release authenticity. When an
+embedded symbol conflicts with a main-layer definition at a different
+address, the main file wins and the embedded entry is not adopted. When
+the architecture is incompatible, or no shared build ID and address
+evidence exists, embedded symbols stay candidates or are rejected.
+
+The readelf clone exposes the same view:
+
+``` text
+> python scripts/readelf.py --gnu-debugdata <elf-file>
+> python scripts/readelf.py --gnu-debugdata --gnu-debugdata-symbol main <elf-file>
+```
+
 ### DWARF information
 
 The main entry point for DWARF information in **pyelftools** is the

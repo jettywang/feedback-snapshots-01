@@ -23,6 +23,11 @@ from ..dwarf.dwarfinfo import DebugSectionDescriptor, DwarfConfig, DWARFInfo
 from ..ehabi.ehabiinfo import EHABIInfo
 from .constants import SHN_INDICES
 from .dynamic import DynamicSection, DynamicSegment
+from .gnu_debugdata import (
+    DEFAULT_MAX_DECOMPRESSED_SIZE,
+    GNUDebugData,
+    GNUDebugDataSection,
+)
 from .gnuversions import GNUVerDefSection, GNUVerNeedSection, GNUVerSymSection
 from .hash import ELFHashSection, GNUHashSection
 from .relocation import RelocationHandler, RelocationSection, RelrRelocationSection
@@ -422,6 +427,34 @@ class ELFFile:
             return dwarf_info
         return None
 
+    def has_gnu_debugdata(self) -> bool:
+        """Whether the file has a ``.gnu_debugdata`` section."""
+        return self.has_section('.gnu_debugdata')
+
+    def get_gnu_debugdata(
+        self,
+        *,
+        max_decompressed_size: int = DEFAULT_MAX_DECOMPRESSED_SIZE,
+    ) -> GNUDebugData | None:
+        """Analyse the ``.gnu_debugdata`` section, or return ``None``.
+
+        The section holds an XZ-compressed mini ELF with a symbol table, which
+        distributions add to binaries whose symbols were stripped.  The
+        returned :class:`~elftools.elf.gnu_debugdata.GNUDebugData` keeps the
+        main and embedded ELFs separate and reports, per symbol, which layer it
+        came from and whether it may be used.
+
+        Compression and decoded-format errors raise
+        :class:`~elftools.common.exceptions.ELFCompressionError` or
+        :class:`~elftools.common.exceptions.ELFParseError`.  Architecture or
+        build-ID mismatches are recorded on the returned object instead of
+        being raised, so both layers remain inspectable.
+        """
+        section = self.get_section_by_name('.gnu_debugdata')
+        if section is None:
+            return None
+        return GNUDebugData(
+            self, section, max_decompressed_size=max_decompressed_size)
 
     def has_ehabi_info(self) -> bool:
         """ Check whether this file appears to have arm exception handler index table.
@@ -772,6 +805,8 @@ class ELFFile:
             return NoteSection(section_header, name, self)
         elif sectype == 'SHT_PROGBITS' and name == '.stab':
             return StabSection(section_header, name, self)
+        elif sectype == 'SHT_PROGBITS' and name == '.gnu_debugdata':
+            return GNUDebugDataSection(section_header, name, self)
         elif sectype == 'SHT_ARM_ATTRIBUTES':
             return ARMAttributesSection(section_header, name, self)
         elif sectype == 'SHT_RISCV_ATTRIBUTES':
