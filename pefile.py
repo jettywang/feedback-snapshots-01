@@ -4456,29 +4456,181 @@ class PE:
 
         return entries
 
+    def __get_debug_payload_candidate(self, file_offset, size):
+        """Return (file_offset, available_size) for a debug payload pointer.
+
+        Returns None when the pointer is unset or does not map into the file.
+        The returned size is capped at the number of bytes actually present.
+        """
+
+        if not file_offset or file_offset >= len(self.__data__):
+            return None
+        return file_offset, min(size, len(self.__data__) - file_offset)
+
+    def __get_debug_payload_range_from_rva(self, rva, size):
+        """Map an AddressOfRawData RVA to (file_offset, available_size).
+
+        Returns None when the RVA is unset or does not map to file bytes.
+        Availability is bounded by the containing section, mirroring the
+        bytes the loader would actually see.
+        """
+
+        if not rva:
+            return None
+        try:
+            offset = self.get_offset_from_rva(rva)
+        except PEFormatError:
+            return None
+        if offset is None or offset >= len(self.__data__):
+            return None
+        try:
+            available = len(self.get_data(rva, size))
+        except PEFormatError:
+            return None
+        return offset, available
+
     def parse_debug_directory(self, rva, size):
-        """Parse the debug data."""
+        """Parse the debug data.
+
+        The payload of an IMAGE_DEBUG_DIRECTORY entry is read exclusively
+        through PointerToRawData. AddressOfRawData is treated as an
+        independent view of the same payload: it is used to report ambiguity
+        or an unmappable pointer, but it is never used as a fallback source.
+        """
 
         dbg_size = Structure(self.__IMAGE_DEBUG_DIRECTORY_format__).sizeof()
 
+        entry_count, remainder = divmod(size, dbg_size)
+        if remainder:
+            self.__warnings.append(
+                f"Debug directory at RVA {rva:#x} has size {size:#x}, which is "
+                f"not a multiple of the {dbg_size:#x}-byte entry size; "
+                f"ignoring the trailing {remainder:#x} bytes"
+            )
+
         debug = []
-        for idx in range(size // dbg_size):
+        for idx in range(entry_count):
+            entry_rva = rva + dbg_size * idx
             try:
-                data = self.get_data(rva + dbg_size * idx, dbg_size)
+                data = self.get_data(entry_rva, dbg_size)
             except PEFormatError:
                 self.__warnings.append(
-                    f"Invalid debug information. Can't read data at RVA: {rva:#x}"
+                    f"Invalid debug information. Can't read data at RVA: {entry_rva:#x}"
                 )
-                return None
+                break
+
+            if len(data) < dbg_size:
+                self.__warnings.append(
+                    f"Truncated debug directory at RVA {entry_rva:#x}: only "
+                    f"{len(data):#x} of {dbg_size:#x} entry bytes are available; "
+                    "ignoring the incomplete entry"
+                )
+                break
+
+            try:
+                entry_offset = self.get_offset_from_rva(entry_rva)
+            except PEFormatError:
+                self.__warnings.append(
+                    f"Invalid debug information. Can't map RVA {entry_rva:#x} "
+                    "to a file offset"
+                )
+                break
 
             dbg = self.__unpack_data__(
                 self.__IMAGE_DEBUG_DIRECTORY_format__,
                 data,
-                file_offset=self.get_offset_from_rva(rva + dbg_size * idx),
+                file_offset=entry_offset,
             )
 
             if not dbg:
-                return None
+                self.__warnings.append(
+                    f"Failed to parse debug directory entry {idx} at "
+                    f"RVA {entry_rva:#x}"
+                )
+                break
+
+            # Resolve both pointers independently before interpreting any
+            # payload. This keeps the reported ranges tied to the directory
+            # entry rather than to whichever bytes happen to look familiar.
+            raw_candidate = self.__get_debug_payload_candidate(
+                dbg.PointerToRawData, dbg.SizeOfData
+            )
+            rva_candidate = self.__get_debug_payload_range_from_rva(
+                dbg.AddressOfRawData, dbg.SizeOfData
+            )
+
+            payload = None
+
+            if raw_candidate is None and rva_candidate is None:
+                if dbg.SizeOfData:
+                    self.__warnings.append(
+                        f"Debug directory entry {idx}: neither "
+                        f"PointerToRawData {dbg.PointerToRawData:#x} nor "
+                        f"AddressOfRawData {dbg.AddressOfRawData:#x} maps to a "
+                        "file range; payload not parsed"
+                    )
+
+            elif raw_candidate is None:
+                self.__warnings.append(
+                    f"Debug directory entry {idx}: PointerToRawData "
+                    f"{dbg.PointerToRawData:#x} does not map to a file range, "
+                    f"while AddressOfRawData {dbg.AddressOfRawData:#x} maps to "
+                    f"file range [{rva_candidate[0]:#x}, "
+                    f"{rva_candidate[0] + rva_candidate[1]:#x}); refusing to "
+                    "substitute the RVA payload"
+                )
+
+            else:
+                raw_offset, raw_available = raw_candidate
+                if raw_available < dbg.SizeOfData:
+                    self.__warnings.append(
+                        f"Debug directory entry {idx}: payload at file offset "
+                        f"{raw_offset:#x} declares {dbg.SizeOfData:#x} bytes but "
+                        f"only {raw_available:#x} are available; payload not parsed"
+                    )
+                else:
+                    payload = self.__data__[raw_offset : raw_offset + dbg.SizeOfData]
+
+                if rva_candidate is None:
+                    if dbg.AddressOfRawData:
+                        self.__warnings.append(
+                            f"Debug directory entry {idx}: AddressOfRawData "
+                            f"{dbg.AddressOfRawData:#x} does not map to a file "
+                            f"range; using PointerToRawData -> file range "
+                            f"[{raw_offset:#x}, "
+                            f"{raw_offset + raw_available:#x})"
+                        )
+                elif rva_candidate[0] != raw_offset:
+                    overlap = min(
+                        dbg.SizeOfData, raw_available, rva_candidate[1]
+                    )
+                    raw_bytes = self.__data__[raw_offset : raw_offset + overlap]
+                    rva_bytes = self.__data__[
+                        rva_candidate[0] : rva_candidate[0] + overlap
+                    ]
+                    if raw_bytes != rva_bytes:
+                        self.__warnings.append(
+                            f"Ambiguous debug directory entry {idx}: "
+                            f"PointerToRawData {dbg.PointerToRawData:#x} -> file "
+                            f"range [{raw_offset:#x}, "
+                            f"{raw_offset + raw_available:#x}) and "
+                            f"AddressOfRawData {dbg.AddressOfRawData:#x} -> file "
+                            f"range [{rva_candidate[0]:#x}, "
+                            f"{rva_candidate[0] + rva_candidate[1]:#x}) contain "
+                            "different data; using PointerToRawData"
+                        )
+
+            if dbg.Type not in (1, 2, 4, 16, 20):
+                type_name = DEBUG_TYPE.get(dbg.Type)
+                type_label = (
+                    f"{type_name} ({dbg.Type:#x})"
+                    if isinstance(type_name, str)
+                    else f"{dbg.Type:#x}"
+                )
+                self.__warnings.append(
+                    f"Debug directory entry {idx}: no parser for debug type "
+                    f"{type_label}; payload not interpreted"
+                )
 
             # Apply structure according to DEBUG_TYPE
             # https://www.debuginfo.com/articles/debuginfomatch.html
@@ -4490,13 +4642,26 @@ class PE:
 
             elif dbg.Type == 2:
                 # IMAGE_DEBUG_TYPE_CODEVIEW
+                if payload is None:
+                    if not dbg.SizeOfData:
+                        self.__warnings.append(
+                            f"Debug directory entry {idx}: empty CodeView "
+                            "payload; payload not interpreted"
+                        )
+                    debug.append(DebugData(struct=dbg, entry=dbg_type))
+                    continue
+
                 dbg_type_offset = dbg.PointerToRawData
                 dbg_type_size = dbg.SizeOfData
-                dbg_type_data = self.__data__[
-                    dbg_type_offset : dbg_type_offset + dbg_type_size
-                ]
+                dbg_type_data = payload
 
-                if dbg_type_data[:4] == b"RSDS":
+                if not dbg_type_data:
+                    self.__warnings.append(
+                        f"Debug directory entry {idx}: empty CodeView payload; "
+                        "payload not interpreted"
+                    )
+
+                elif dbg_type_data[:4] == b"RSDS":
                     # pdb7.0
                     __CV_INFO_PDB70_format__ = [
                         "CV_INFO_PDB70",
@@ -4576,13 +4741,51 @@ class PE:
                         __CV_INFO_PDB20_format__, dbg_type_data, dbg_type_offset
                     )
 
+                else:
+                    self.__warnings.append(
+                        f"Debug directory entry {idx}: unrecognized CodeView "
+                        f"payload signature {dbg_type_data[:4]!r}; payload not "
+                        "interpreted"
+                    )
+
+            elif dbg.Type == 16:
+                # IMAGE_DEBUG_TYPE_REPRO
+                # The raw data may be empty or a 4-byte hash length followed
+                # by the hash. It is kept as opaque bytes under a dedicated
+                # structure so that it is never mistaken for CodeView data.
+                if payload is None and not dbg.SizeOfData:
+                    payload = b""
+                if payload is not None:
+                    ___IMAGE_DEBUG_REPRO_format__ = [
+                        "IMAGE_DEBUG_REPRO",
+                        [f"{len(payload)}s,RawData"],
+                    ]
+                    dbg_type = self.__unpack_data__(
+                        ___IMAGE_DEBUG_REPRO_format__,
+                        payload,
+                        dbg.PointerToRawData,
+                    )
+                    if dbg_type is not None and len(payload) >= 4:
+                        dbg_type.HashLength = struct.unpack(
+                            "<I", payload[:4]
+                        )[0]
+                        dbg_type.Hash = payload[4 : 4 + dbg_type.HashLength]
+                        if dbg_type.HashLength > len(payload) - 4:
+                            self.__warnings.append(
+                                f"Debug directory entry {idx}: REPRO payload "
+                                f"declares a {dbg_type.HashLength:#x}-byte hash "
+                                f"but only {len(payload) - 4:#x} bytes follow"
+                            )
+
             elif dbg.Type == 4:
                 # IMAGE_DEBUG_TYPE_MISC
+                if payload is None:
+                    debug.append(DebugData(struct=dbg, entry=dbg_type))
+                    continue
+
                 dbg_type_offset = dbg.PointerToRawData
                 dbg_type_size = dbg.SizeOfData
-                dbg_type_data = self.__data__[
-                    dbg_type_offset : dbg_type_offset + dbg_type_size
-                ]
+                dbg_type_data = payload
                 ___IMAGE_DEBUG_MISC_format__ = [
                     "IMAGE_DEBUG_MISC",
                     [
@@ -4624,11 +4827,12 @@ class PE:
 
             elif dbg.Type == 20:
                 # IMAGE_DEBUG_TYPE_EX_DLLCHARACTERISTICS
+                if payload is None:
+                    debug.append(DebugData(struct=dbg, entry=dbg_type))
+                    continue
+
                 dbg_type_offset = dbg.PointerToRawData
-                dbg_type_size = dbg.SizeOfData
-                dbg_type_data = self.__data__[
-                    dbg_type_offset : dbg_type_offset + dbg_type_size
-                ]
+                dbg_type_data = payload
                 # Note: the names for these formats and structure members are made up.
                 # They are not documented properly.
                 ___IMAGE_DEBUG_EX_DLLCHARACTERISTICS_format__ = [
@@ -4643,14 +4847,21 @@ class PE:
                     dbg_type_offset,
                 )
 
-                ex_dll_characteristics_flags = retrieve_flags(
-                    EX_DLL_CHARACTERISTICS, "IMAGE_DLLCHARACTERISTICS_EX_"
-                )
-                set_flags(
-                    dbg_type,
-                    dbg_type.ExDllCharacteristics,
-                    ex_dll_characteristics_flags,
-                )
+                if dbg_type is not None:
+                    ex_dll_characteristics_flags = retrieve_flags(
+                        EX_DLL_CHARACTERISTICS, "IMAGE_DLLCHARACTERISTICS_EX_"
+                    )
+                    set_flags(
+                        dbg_type,
+                        dbg_type.ExDllCharacteristics,
+                        ex_dll_characteristics_flags,
+                    )
+                else:
+                    self.__warnings.append(
+                        f"Debug directory entry {idx}: truncated "
+                        f"EX_DLLCHARACTERISTICS payload ({len(dbg_type_data):#x} "
+                        "bytes); payload not interpreted"
+                    )
 
             debug.append(DebugData(struct=dbg, entry=dbg_type))
 
