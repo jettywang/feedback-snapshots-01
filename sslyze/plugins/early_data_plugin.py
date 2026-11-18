@@ -25,8 +25,14 @@ from sslyze.connection_helpers.http_request_generator import HttpRequestGenerato
 class EarlyDataScanResult(ScanCommandResult):
     """The result of testing a server for TLS 1.3 early data support.
 
+    This only reports whether the TLS stack acknowledged a single byte of early data on a
+    resumed TLS 1.3 session. It does not send an application request as early data, does
+    not observe any application response, and therefore does not demonstrate replay.
+
     Attributes:
-        supports_early_data: True if the server accepted early data.
+        supports_early_data: True if the server accepted one byte of early data. False
+            also covers TLS 1.3 being unavailable, a timeout, or no resumable session;
+            check the scan attempt status and error fields to distinguish those cases.
     """
 
     supports_early_data: bool
@@ -48,9 +54,11 @@ class _EarlyDataCliConnector(ScanCommandCliConnector[EarlyDataScanResult, None])
     def result_to_console_output(cls, result: EarlyDataScanResult) -> List[str]:
         result_as_txt = [cls._format_title("TLS 1.3 Early Data")]
         if result.supports_early_data:
-            result_as_txt.append(cls._format_field("", "Suppported - Server accepted early data"))
+            result_as_txt.append(cls._format_field("", "TLS stack accepted one byte of early data"))
         else:
-            result_as_txt.append(cls._format_field("", "Not Supported"))
+            result_as_txt.append(
+                cls._format_field("", "Not observed (unsupported, inconclusive, rejected, or no session)")
+            )
         return result_as_txt
 
 

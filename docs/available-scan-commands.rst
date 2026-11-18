@@ -114,6 +114,12 @@ TLS 1.3 Early Data
 
 **ScanCommand.TLS_1_3_EARLY_DATA**: Test the server(s) for TLS 1.3 early data support.
 
+This check reports whether the TLS stack acknowledged one byte of early data on a
+resumed TLS 1.3 session. It does not send an application request as early data or
+observe an application response, so a positive result does not demonstrate that the
+application is vulnerable to 0-RTT replay. See :doc:`/early-data-evidence` for the
+probe sequence and result limits.
+
 Result class
 ============
 

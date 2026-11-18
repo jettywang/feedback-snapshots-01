@@ -53,6 +53,17 @@ parse JSON scan results; it can be used to process the results of SSLyze scans i
    json-output
 
 
+TLS 1.3 Early Data Evidence
+***************************
+
+The early-data scan reports TLS-layer acceptance, not application replay. This page
+documents the probe sequence and how to interpret each result and error state.
+
+.. toctree::
+   :maxdepth: 2
+
+   early-data-evidence
+
 Appendix: Scan Commands
 ***********************
 
