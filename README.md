@@ -44,6 +44,7 @@ Some of the tasks that pefile makes possible are:
 * Analyzing of sections' data
 * Retrieving embedded data
 * [Reading strings from the resources](https://github.com/erocarrera/pefile/blob/wiki/ReadingResourceStrings.md)
+* Reading a managed image's CLR header, metadata streams and MethodDef entry point, distinguishing a native entry RVA from a metadata token
 * Warnings for suspicious and malformed values
 * Basic modifying of PEs, like [writing to some fields](https://github.com/erocarrera/pefile/blob/wiki/UsageExamples.md#reading-and-writing-standard-header-members) and [other parts](https://github.com/erocarrera/pefile/blob/wiki/ModifyingPEImageData.md) of the PE
   * This functionality won't rearrange PE file structures to make room for new fields, so use it with care.

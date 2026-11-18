@@ -362,6 +362,250 @@ ex_dll_characteristics = [
 EX_DLL_CHARACTERISTICS = two_way_dict(ex_dll_characteristics)
 
 
+# CLR (ECMA-335) image flags from the CLI header.  COMIMAGE_FLAGS_NATIVE_ENTRYPOINT
+# changes the meaning of the CLI header's entry point field from a metadata token
+# into an RVA, so it must never be interpreted as a token.
+comimage_flags = [
+    ("COMIMAGE_FLAGS_ILONLY", 0x00000001),
+    ("COMIMAGE_FLAGS_32BITREQUIRED", 0x00000002),
+    ("COMIMAGE_FLAGS_IL_LIBRARY", 0x00000004),
+    ("COMIMAGE_FLAGS_STRONGNAMESIGNED", 0x00000008),
+    ("COMIMAGE_FLAGS_NATIVE_ENTRYPOINT", 0x00000010),
+    ("COMIMAGE_FLAGS_TRACKDEBUGDATA", 0x00010000),
+    ("COMIMAGE_FLAGS_32BITPREFERRED", 0x00020000),
+]
+
+COMIMAGE_FLAGS = two_way_dict(comimage_flags)
+
+COMIMAGE_FLAGS_NATIVE_ENTRYPOINT = COMIMAGE_FLAGS[
+    "COMIMAGE_FLAGS_NATIVE_ENTRYPOINT"
+]
+
+# Metadata stream names and heap-size flags.
+CLR_METADATA_SIGNATURE = 0x424A5342  # "BSJB"
+CLR_TABLE_STREAM_NAMES = ("#~", "#-")
+CLR_STRING_STREAM_NAME = "#Strings"
+CLR_GUID_STREAM_NAME = "#GUID"
+CLR_BLOB_STREAM_NAME = "#Blob"
+CLR_USER_STRING_STREAM_NAME = "#US"
+
+CLR_STREAM_NAMES = frozenset(
+    (
+        *CLR_TABLE_STREAM_NAMES,
+        CLR_STRING_STREAM_NAME,
+        CLR_GUID_STREAM_NAME,
+        CLR_BLOB_STREAM_NAME,
+        CLR_USER_STRING_STREAM_NAME,
+    )
+)
+
+CLR_HEAP_SIZES_STRING = 0x01
+CLR_HEAP_SIZES_GUID = 0x02
+CLR_HEAP_SIZES_BLOB = 0x04
+CLR_HEAP_SIZES_EXTRA_DATA = 0x40
+
+# Metadata table identifiers (ECMA-335 II.22).
+clr_metadata_tables = [
+    ("Module", 0x00),
+    ("TypeRef", 0x01),
+    ("TypeDef", 0x02),
+    ("FieldPtr", 0x03),
+    ("Field", 0x04),
+    ("MethodPtr", 0x05),
+    ("MethodDef", 0x06),
+    ("ParamPtr", 0x07),
+    ("Param", 0x08),
+    ("InterfaceImpl", 0x09),
+    ("MemberRef", 0x0A),
+    ("Constant", 0x0B),
+    ("CustomAttribute", 0x0C),
+    ("FieldMarshal", 0x0D),
+    ("DeclSecurity", 0x0E),
+    ("ClassLayout", 0x0F),
+    ("FieldLayout", 0x10),
+    ("StandAloneSig", 0x11),
+    ("EventMap", 0x12),
+    ("EventPtr", 0x13),
+    ("Event", 0x14),
+    ("PropertyMap", 0x15),
+    ("PropertyPtr", 0x16),
+    ("Property", 0x17),
+    ("MethodSemantics", 0x18),
+    ("MethodImpl", 0x19),
+    ("ModuleRef", 0x1A),
+    ("TypeSpec", 0x1B),
+    ("ImplMap", 0x1C),
+    ("FieldRVA", 0x1D),
+    ("ENCLog", 0x1E),
+    ("ENCMap", 0x1F),
+    ("Assembly", 0x20),
+    ("AssemblyProcessor", 0x21),
+    ("AssemblyOS", 0x22),
+    ("AssemblyRef", 0x23),
+    ("AssemblyRefProcessor", 0x24),
+    ("AssemblyRefOS", 0x25),
+    ("File", 0x26),
+    ("ExportedType", 0x27),
+    ("ManifestResource", 0x28),
+    ("NestedClass", 0x29),
+    ("GenericParam", 0x2A),
+    ("MethodSpec", 0x2B),
+    ("GenericParamConstraint", 0x2C),
+]
+
+CLR_METADATA_TABLES = two_way_dict(clr_metadata_tables)
+CLR_METADATA_TABLE_NAMES = {table_id: name for name, table_id in clr_metadata_tables}
+
+# Coded index definitions: (tag bits, tables indexed by tag value).  A tag value
+# of None is reserved and does not contribute to the index width calculation.
+CLR_CODED_INDEXES = {
+    "TypeDefOrRef": (2, (0x02, 0x01, 0x1B)),
+    "HasConstant": (2, (0x04, 0x08, 0x17)),
+    "HasCustomAttribute": (
+        5,
+        (
+            0x06,
+            0x04,
+            0x01,
+            0x02,
+            0x08,
+            0x09,
+            0x0A,
+            0x00,
+            0x0E,
+            0x17,
+            0x14,
+            0x11,
+            0x1A,
+            0x1B,
+            0x20,
+            0x23,
+            0x26,
+            0x27,
+            0x28,
+            0x2A,
+            0x2B,
+            0x2C,
+        ),
+    ),
+    "HasFieldMarshal": (1, (0x04, 0x08)),
+    "HasDeclSecurity": (2, (0x02, 0x06, 0x20)),
+    "MemberRefParent": (3, (0x02, 0x01, 0x1A, 0x06, 0x1B)),
+    "HasSemantics": (1, (0x14, 0x17)),
+    "MethodDefOrRef": (1, (0x06, 0x0A)),
+    "MemberForwarded": (1, (0x04, 0x06)),
+    "Implementation": (2, (0x26, 0x23, 0x27)),
+    "CustomAttributeType": (3, (None, None, 0x06, 0x0A, None, None, None, None)),
+    "ResolutionScope": (2, (0x00, 0x1A, 0x23, 0x01)),
+    "TypeOrMethodDef": (1, (0x02, 0x06)),
+}
+
+# Row layouts.  "u2"/"u4" are fixed-width fields, "string"/"guid"/"blob" are
+# heap indexes, ("table", id) is a simple table index and ("coded", name) is a
+# coded index.
+CLR_METADATA_TABLE_SCHEMA = {
+    0x00: ("u2", ("string",), ("guid",), ("guid",), ("guid",)),
+    0x01: (("coded", "ResolutionScope"), ("string",), ("string",)),
+    0x02: (
+        "u4",
+        ("string",),
+        ("string",),
+        ("coded", "TypeDefOrRef"),
+        ("table", 0x04),
+        ("table", 0x06),
+    ),
+    0x03: (("table", 0x04),),
+    0x04: ("u2", ("string",), ("blob",)),
+    0x05: (("table", 0x06),),
+    0x06: (
+        "u4",
+        "u2",
+        "u2",
+        ("string",),
+        ("blob",),
+        ("table", 0x08),
+    ),
+    0x07: (("table", 0x08),),
+    0x08: ("u2", "u2", ("string",)),
+    0x09: (("table", 0x02), ("coded", "TypeDefOrRef")),
+    0x0A: (("coded", "MemberRefParent"), ("string",), ("blob",)),
+    0x0B: ("u2", ("coded", "HasConstant"), ("blob",)),
+    0x0C: (("coded", "HasCustomAttribute"), ("coded", "CustomAttributeType"), ("blob",)),
+    0x0D: (("coded", "HasFieldMarshal"), ("blob",)),
+    0x0E: ("u2", ("coded", "HasDeclSecurity"), ("blob",)),
+    0x0F: ("u2", "u4", ("table", 0x02)),
+    0x10: ("u4", ("table", 0x04)),
+    0x11: (("blob",),),
+    0x12: (("table", 0x02), ("table", 0x14)),
+    0x13: (("table", 0x14),),
+    0x14: ("u2", ("string",), ("coded", "TypeDefOrRef")),
+    0x15: (("table", 0x02), ("table", 0x17)),
+    0x16: (("table", 0x17),),
+    0x17: ("u2", ("string",), ("blob",)),
+    0x18: ("u2", ("table", 0x06), ("coded", "HasSemantics")),
+    0x19: (
+        ("table", 0x02),
+        ("coded", "MethodDefOrRef"),
+        ("coded", "MethodDefOrRef"),
+    ),
+    0x1A: (("string",),),
+    0x1B: (("blob",),),
+    0x1C: (
+        "u2",
+        ("coded", "MemberForwarded"),
+        ("string",),
+        ("table", 0x1A),
+    ),
+    0x1D: ("u4", ("table", 0x04)),
+    0x1E: ("u4", "u4"),
+    0x1F: ("u4",),
+    0x20: (
+        "u4",
+        "u2",
+        "u2",
+        "u2",
+        "u2",
+        "u4",
+        ("blob",),
+        ("string",),
+        ("string",),
+    ),
+    0x21: ("u4",),
+    0x22: ("u4", "u4", "u4"),
+    0x23: (
+        "u2",
+        "u2",
+        "u2",
+        "u2",
+        "u4",
+        ("blob",),
+        ("string",),
+        ("string",),
+        ("blob",),
+    ),
+    0x24: ("u4", ("table", 0x23)),
+    0x25: ("u4", "u4", "u4", ("table", 0x23)),
+    0x26: ("u4", ("string",), ("blob",)),
+    0x27: (
+        "u4",
+        "u4",
+        ("string",),
+        ("string",),
+        ("coded", "Implementation"),
+    ),
+    0x28: ("u4", "u4", ("string",), ("coded", "Implementation")),
+    0x29: (("table", 0x02), ("table", 0x02)),
+    0x2A: ("u2", "u2", ("coded", "TypeOrMethodDef"), ("string",)),
+    0x2B: (("coded", "MethodDefOrRef"), ("blob",)),
+    0x2C: (("table", 0x2A), ("coded", "TypeDefOrRef")),
+}
+
+CLR_METADATA_KNOWN_TABLE_MASK = 0
+for _clr_table_id in CLR_METADATA_TABLE_SCHEMA:
+    CLR_METADATA_KNOWN_TABLE_MASK |= 1 << _clr_table_id
+del _clr_table_id
+
+
 # Unwind info-related enums
 
 unwind_info_flags = [
@@ -890,6 +1134,77 @@ def sizeof_type(t):
         count = int("".join(d for d in t if d in string.digits))
         _t = "".join(d for d in t if d not in string.digits)
     return STRUCT_SIZEOF_TYPES[_t] * count
+
+
+def _clr_read_index(data, offset, width):
+    """Read a little-endian heap or table index of the given width."""
+    if offset + width > len(data):
+        return None
+    return int.from_bytes(data[offset : offset + width], "little")
+
+
+def _clr_coded_index_size(tag_bits, table_ids, row_counts):
+    """Return the width of a coded index for the decoded row counts.
+
+    The index must be able to hold the largest row number of every table that
+    the tag can reference, shifted left by the tag bits.  A reserved tag value
+    does not contribute to the width.
+    """
+    max_rows = 0
+    for table_id in table_ids:
+        if table_id is not None:
+            max_rows = max(max_rows, row_counts.get(table_id, 0))
+    if max_rows < (1 << (16 - tag_bits)):
+        return 2
+    return 4
+
+
+def _clr_stream_bytes(stream):
+    """Return the bounded bytes for a stream, or None when unusable."""
+    if not stream.valid or stream.data is None:
+        return None
+    return stream.data
+
+
+def _clr_read_heap_string(stream, index):
+    """Read a null-terminated UTF-8 string from a metadata heap stream."""
+    data = _clr_stream_bytes(stream)
+    if data is None or index >= len(data):
+        return None
+    end = data.find(b"\0", index)
+    if end < 0:
+        return None
+    return data[index:end].decode("utf-8", errors="backslashreplace")
+
+
+def _clr_read_heap_blob(stream, index):
+    """Read a blob from a metadata heap stream, returning (bytes, offset).
+
+    Blobs are prefixed with a compressed length.  The returned offset points at
+    the length prefix so callers can report where the value came from.
+    """
+    data = _clr_stream_bytes(stream)
+    if data is None or index >= len(data):
+        return None, None
+    first = data[index]
+    if first & 0x80 == 0:
+        length, prefix = first, 1
+    elif first & 0xC0 == 0x80:
+        if index + 2 > len(data):
+            return None, None
+        length, prefix = ((first & 0x3F) << 8) | data[index + 1], 2
+    elif first & 0xE0 == 0xC0:
+        if index + 4 > len(data):
+            return None, None
+        length = ((first & 0x1F) << 24) | (data[index + 1] << 16)
+        length |= (data[index + 2] << 8) | data[index + 3]
+        prefix = 4
+    else:
+        return None, None
+    end = index + prefix + length
+    if end > len(data):
+        return None, None
+    return data[index + prefix : end], index
 
 
 @lru_cache_copy(maxsize=2048)
@@ -1784,6 +2099,228 @@ class TlsData(DataContainer):
     """
 
 
+class CLRStreamData(DataContainer):
+    """Holds one stream entry from the CLR metadata stream directory.
+
+    name:        stream name (str), or None when the name is not terminated
+    raw_name:    the name bytes as stored in the stream header
+    offset:      offset of the stream data relative to the metadata root
+    size:        declared stream size
+    rva:         RVA of the stream data
+    file_offset: file offset of the stream data, when it maps to a section
+    valid:       whether the declared range is usable
+    reason:      explanation when the stream is not usable
+    """
+
+
+class CLRMetadataData(DataContainer):
+    """Holds the CLR metadata root and its stream directory.
+
+    struct:     CLR_METADATA_ROOT structure
+    version:    runtime version string
+    streams:    list of CLRStreamData instances
+    errors:     malformed or unsupported details found while reading
+    complete:   whether the stream directory and its required heaps are usable
+    """
+
+    def streams_named(self, name):
+        """Return every stream with the requested name."""
+        return [stream for stream in self.streams if stream.name == name]
+
+    def stream(self, name):
+        """Return the unique stream with the requested name, or None.
+
+        A duplicate name is ambiguous and therefore returns None; callers can
+        use streams_named() to inspect the competing entries.
+        """
+        matches = self.streams_named(name)
+        return matches[0] if len(matches) == 1 else None
+
+
+class CLRMethodDefData(DataContainer):
+    """Holds one decoded MethodDef metadata table row.
+
+    index:                  one-based MethodDef token row index
+    method_index:           physical MethodDef row reached via MethodPtr, if any
+    token:                  0x06000000 | index
+    rva:                    RVA stored in the row (not the token)
+    name:                   method name from #Strings, when it can be read
+    row_rva:                RVA of the complete row
+    rva_field_file_offset:  file offset of the row's RVA field
+    """
+
+
+class CLRTableStreamData(DataContainer):
+    """Holds a decoded CLR metadata table stream (#~ or #-).
+
+    heap_index_sizes:  width in bytes of the #Strings, #GUID and #Blob indexes
+    row_counts:        decoded row count per present table id
+    row_sizes:         decoded row size per present table id
+    table_index_sizes: width in bytes of simple table indexes
+    coded_index_sizes: width in bytes of coded indexes
+    errors:            malformed or unsupported details found while reading
+    complete:          whether the declared layout could be fully interpreted
+    """
+
+    def methoddef_row(self, index):
+        """Decode a one-based MethodDef row, or return None.
+
+        A row is only returned when the table layout is complete and the row
+        lies entirely inside the declared stream.  In unoptimized (#-) streams
+        a MethodPtr table may redirect the token to a different physical row;
+        that indirection is honored when present.
+        """
+        if not self.complete or not self.methoddef_present:
+            return None
+        if index < 1 or index > self.row_counts.get(0x06, 0):
+            return None
+
+        method_index = index
+        if self.row_counts.get(0x05, 0):
+            pointer_offset = self.table_offsets[0x05] + (
+                index - 1
+            ) * self.row_sizes[0x05]
+            if pointer_offset + self.row_sizes[0x05] > len(self.raw_data):
+                return None
+            method_index = _clr_read_index(
+                self.raw_data,
+                pointer_offset,
+                self.table_index_sizes.get(0x06, 2),
+            )
+            if method_index is None or not (
+                1 <= method_index <= self.row_counts.get(0x06, 0)
+            ):
+                return None
+
+        row_offset = self.table_offsets[0x06] + (
+            method_index - 1
+        ) * self.row_sizes[0x06]
+        if row_offset + self.row_sizes[0x06] > len(self.raw_data):
+            return None
+
+        row_data = self.raw_data[row_offset : row_offset + self.row_sizes[0x06]]
+        try:
+            (rva,) = struct.unpack_from("<I", row_data, 0)
+            impl_flags, flags = struct.unpack_from("<HH", row_data, 4)
+        except struct.error:
+            return None
+
+        fields_after_rva = 8
+        name_index = _clr_read_index(
+            row_data, fields_after_rva, self.heap_index_sizes["string"]
+        )
+        fields_after_rva += self.heap_index_sizes["string"]
+        signature_index = _clr_read_index(
+            row_data, fields_after_rva, self.heap_index_sizes["blob"]
+        )
+        fields_after_rva += self.heap_index_sizes["blob"]
+        param_index = _clr_read_index(
+            row_data,
+            fields_after_rva,
+            self.table_index_sizes.get(0x08, 2),
+        )
+        if None in (name_index, signature_index, param_index):
+            return None
+
+        row_rva = self.rva + row_offset
+        row_file_offset = self._file_offset(row_rva)
+        name = None
+        if self.metadata is not None and self.metadata.strings_stream is not None:
+            name = _clr_read_heap_string(
+                self.metadata.strings_stream, name_index
+            )
+
+        return CLRMethodDefData(
+            index=index,
+            method_index=method_index,
+            token=0x06000000 | index,
+            rva=rva,
+            impl_flags=impl_flags,
+            flags=flags,
+            name_index=name_index,
+            signature_index=signature_index,
+            param_index=param_index,
+            name=name,
+            row_rva=row_rva,
+            row_file_offset=row_file_offset,
+            rva_field_rva=row_rva,
+            rva_field_file_offset=row_file_offset,
+        )
+
+    def _file_offset(self, rva):
+        section = self.pe.get_section_by_rva(rva)
+        if section is not None:
+            return section.get_offset_from_rva(rva)
+        return None
+
+
+class CLREntryPointData(DataContainer):
+    """Holds the CLR entry point interpretation.
+
+    kind:       "managed", "native", "none" or "invalid"
+    token:      metadata token when kind is "managed", otherwise None
+    rva:        executable RVA when it can be established, otherwise None
+    method:     decoded MethodDef row when a token resolves, otherwise None
+    raw_value:  the CLI header EntryPointToken/EntryPointRVA field as stored
+    explanation: ordered, source-bearing statements describing the result
+    reason:     why no executable RVA is available, when applicable
+    """
+
+    @property
+    def is_managed(self):
+        return self.kind == "managed"
+
+    @property
+    def is_native(self):
+        return self.kind == "native"
+
+
+class CLRData(DataContainer):
+    """Holds the COM descriptor (CLI header) and its metadata view.
+
+    struct:     IMAGE_COR20_HEADER structure
+    metadata:   CLRMetadataData, or None when the metadata root is unusable
+    table_stream: CLRTableStreamData for the unique #~ or #- stream, or None
+    entry_point: CLREntryPointData
+    errors:     malformed or unsupported details found while reading
+    """
+
+    @property
+    def explanation(self):
+        return self.entry_point.explanation
+
+    @property
+    def native_entry_point(self):
+        return self.entry_point if self.entry_point.kind == "native" else None
+
+    @property
+    def managed_entry_point(self):
+        return self.entry_point if self.entry_point.kind == "managed" else None
+
+    @property
+    def is_il_only(self):
+        return bool(self.struct.Flags & COMIMAGE_FLAGS["COMIMAGE_FLAGS_ILONLY"])
+
+
+class EntryPointData(DataContainer):
+    """Holds a native PE entry point when no COM descriptor is present.
+
+    kind:        "native", "none" or "invalid"
+    rva:         AddressOfEntryPoint when it can be established
+    token:       always None; native entry points have no metadata token
+    explanation: ordered, source-bearing statements describing the result
+    reason:      why no executable RVA is available, when applicable
+    """
+
+    @property
+    def is_managed(self):
+        return False
+
+    @property
+    def is_native(self):
+        return self.kind == "native"
+
+
 class BoundImportDescData(DataContainer):
     """Holds bound import descriptor data.
 
@@ -2412,6 +2949,7 @@ class PE:
     DIRECTORY_ENTRY_BASERELOC (list of BaseRelocationData instances)
     DIRECTORY_ENTRY_TLS
     DIRECTORY_ENTRY_BOUND_IMPORT (list of BoundImportData instances)
+    DIRECTORY_ENTRY_COM_DESCRIPTOR (CLRData instance)
 
     The following dictionary attributes provide ways of mapping different
     constants. They will accept the numeric value and return the string
@@ -2548,6 +3086,55 @@ class PE:
     __IMAGE_DATA_DIRECTORY_format__ = (
         "IMAGE_DATA_DIRECTORY",
         ("I,VirtualAddress", "I,Size"),
+    )
+
+    __IMAGE_COR20_HEADER_format__ = (
+        "IMAGE_COR20_HEADER",
+        (
+            "I,cb",
+            "H,MajorRuntimeVersion",
+            "H,MinorRuntimeVersion",
+            "I,MetaDataVirtualAddress",
+            "I,MetaDataSize",
+            "I,Flags",
+            "I,EntryPointToken,EntryPointRVA",
+            "I,ResourcesVirtualAddress",
+            "I,ResourcesSize",
+            "I,StrongNameSignatureVirtualAddress",
+            "I,StrongNameSignatureSize",
+            "I,CodeManagerTableVirtualAddress",
+            "I,CodeManagerTableSize",
+            "I,VTableFixupsVirtualAddress",
+            "I,VTableFixupsSize",
+            "I,ExportAddressTableJumpsVirtualAddress",
+            "I,ExportAddressTableJumpsSize",
+            "I,ManagedNativeHeaderVirtualAddress",
+            "I,ManagedNativeHeaderSize",
+        ),
+    )
+
+    __CLR_METADATA_ROOT_format__ = (
+        "CLR_METADATA_ROOT",
+        (
+            "I,Signature",
+            "H,MajorVersion",
+            "H,MinorVersion",
+            "I,Reserved",
+            "I,VersionLength",
+        ),
+    )
+
+    __CLR_METADATA_TABLE_HEADER_format__ = (
+        "CLR_METADATA_TABLE_HEADER",
+        (
+            "I,Reserved",
+            "B,MajorVersion",
+            "B,MinorVersion",
+            "B,HeapSizes",
+            "B,Reserved2",
+            "Q,Valid",
+            "Q,Sorted",
+        ),
     )
 
     __IMAGE_SECTION_HEADER_format__ = (
@@ -3782,7 +4369,10 @@ class PE:
             ("IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT", self.parse_directory_bound_imports),
             # IMAGE_DIRECTORY_ENTRY_IAT not processed
             ("IMAGE_DIRECTORY_ENTRY_DELAY_IMPORT", self.parse_delay_import_directory),
-            # IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR not processed
+            (
+                "IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR",
+                self.parse_directory_com_descriptor,
+            ),
             # IMAGE_DIRECTORY_ENTRY_RESERVED not processed
         )
 
@@ -4065,6 +4655,1085 @@ class PE:
             return None
 
         return TlsData(struct=tls_struct)
+
+    def _clr_file_offset(self, rva):
+        """Return the file offset of an RVA, or None when it does not map."""
+        section = self.get_section_by_rva(rva)
+        if section is None:
+            return None
+        return section.get_offset_from_rva(rva)
+
+    def _clr_section_info(self, rva):
+        """Describe the section holding an RVA.
+
+        Returns (section_name, file_offset, executable) or None.
+        """
+        section = self.get_section_by_rva(rva)
+        if section is None:
+            return None
+        name = (
+            section.Name.split(b"\0", 1)[0].decode("ascii", "backslashreplace")
+            if section.Name
+            else ""
+        )
+        executable = bool(
+            section.Characteristics & SECTION_CHARACTERISTICS["IMAGE_SCN_MEM_EXECUTE"]
+        )
+        return name, section.get_offset_from_rva(rva), executable
+
+    @staticmethod
+    def _clr_explanation(source, detail, rva=None, file_offset=None, value=None):
+        return {
+            "source": source,
+            "detail": detail,
+            "rva": rva,
+            "file_offset": file_offset,
+            "value": value,
+        }
+
+    def _clr_native_entry_point(self):
+        """Interpret OPTIONAL_HEADER.AddressOfEntryPoint as a native entry."""
+        entry_rva = self.OPTIONAL_HEADER.AddressOfEntryPoint
+        explanation = [
+            self._clr_explanation(
+                "IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR",
+                "no COM descriptor directory is present",
+            ),
+            self._clr_explanation(
+                "OPTIONAL_HEADER.AddressOfEntryPoint",
+                f"declared native entry RVA {entry_rva:#x}",
+                rva=entry_rva,
+                value=entry_rva,
+            ),
+        ]
+
+        if entry_rva == 0:
+            explanation.append(
+                self._clr_explanation(
+                    "OPTIONAL_HEADER.AddressOfEntryPoint",
+                    "the image declares no entry point",
+                )
+            )
+            return EntryPointData(
+                declared_kind="native",
+                kind="none",
+                rva=None,
+                token=None,
+                raw_value=0,
+                explanation=explanation,
+                reason="AddressOfEntryPoint is zero",
+            )
+
+        info = self._clr_section_info(entry_rva)
+        if info is None:
+            reason = (
+                f"AddressOfEntryPoint {entry_rva:#x} does not map to any section"
+            )
+            explanation.append(
+                self._clr_explanation(
+                    "PE section table", reason, rva=entry_rva
+                )
+            )
+            return EntryPointData(
+                declared_kind="native",
+                kind="invalid",
+                rva=None,
+                token=None,
+                raw_value=entry_rva,
+                explanation=explanation,
+                reason=reason,
+            )
+
+        section_name, file_offset, executable = info
+        explanation.append(
+            self._clr_explanation(
+                "PE section table",
+                f"entry RVA maps to section {section_name!r} at file offset "
+                f"{file_offset:#x}; executable={executable}",
+                rva=entry_rva,
+                file_offset=file_offset,
+            )
+        )
+        return EntryPointData(
+            declared_kind="native",
+            kind="native",
+            rva=entry_rva,
+            token=None,
+            raw_value=entry_rva,
+            section_name=section_name,
+            file_offset=file_offset,
+            executable=executable,
+            explanation=explanation,
+            reason=None,
+        )
+
+    def _clr_entry_point(self, cli_header, metadata, table_stream, rva, file_offset):
+        """Interpret the CLI header entry point field.
+
+        COMIMAGE_FLAGS_NATIVE_ENTRYPOINT makes the field an RVA.  Otherwise the
+        field is a metadata token, which is resolved through the MethodDef table
+        and is never used as an address directly.
+        """
+        raw_value = cli_header.EntryPointToken if cli_header is not None else None
+        explanation = []
+        if cli_header is None:
+            return CLREntryPointData(
+                declared_kind="unknown",
+                kind="invalid",
+                token=None,
+                rva=None,
+                raw_value=raw_value,
+                method=None,
+                explanation=explanation,
+                reason="CLI header could not be read",
+            )
+
+        flags = cli_header.Flags
+        native_flag = bool(flags & COMIMAGE_FLAGS_NATIVE_ENTRYPOINT)
+        explanation.append(
+            self._clr_explanation(
+                "IMAGE_COR20_HEADER.Flags",
+                f"0x{flags:08x} "
+                f"(NATIVE_ENTRYPOINT={native_flag}, "
+                f"ILONLY={bool(flags & COMIMAGE_FLAGS['COMIMAGE_FLAGS_ILONLY'])})",
+                rva=rva,
+                file_offset=file_offset,
+                value=flags,
+            )
+        )
+        explanation.append(
+            self._clr_explanation(
+                "IMAGE_COR20_HEADER.EntryPointToken/EntryPointRVA",
+                f"raw value {raw_value:#x}"
+                if raw_value is not None
+                else "raw value unavailable",
+                rva=rva,
+                file_offset=file_offset,
+                value=raw_value,
+            )
+        )
+
+        if native_flag:
+            declared_kind = "native"
+            if not raw_value:
+                explanation.append(
+                    self._clr_explanation(
+                        "IMAGE_COR20_HEADER.EntryPointRVA",
+                        "NATIVE_ENTRYPOINT is set but the entry point RVA is zero",
+                    )
+                )
+                return CLREntryPointData(
+                    declared_kind=declared_kind,
+                    kind="none",
+                    token=None,
+                    rva=None,
+                    raw_value=raw_value,
+                    method=None,
+                    explanation=explanation,
+                    reason="NATIVE_ENTRYPOINT is set but EntryPointRVA is zero",
+                )
+
+            info = self._clr_section_info(raw_value)
+            if info is None:
+                reason = (
+                    f"native entry RVA {raw_value:#x} does not map to any section"
+                )
+                explanation.append(
+                    self._clr_explanation(
+                        "PE section table", reason, rva=raw_value
+                    )
+                )
+                return CLREntryPointData(
+                    declared_kind=declared_kind,
+                    kind="invalid",
+                    token=None,
+                    rva=None,
+                    raw_value=raw_value,
+                    method=None,
+                    explanation=explanation,
+                    reason=reason,
+                )
+
+            section_name, file_offset, executable = info
+            explanation.append(
+                self._clr_explanation(
+                    "PE section table",
+                    f"native entry RVA maps to section {section_name!r} at file "
+                    f"offset {file_offset:#x}; executable={executable}",
+                    rva=raw_value,
+                    file_offset=file_offset,
+                )
+            )
+            explanation.append(
+                self._clr_explanation(
+                    "IMAGE_COR20_HEADER.EntryPointRVA",
+                    "NATIVE_ENTRYPOINT is set, so this value is an RVA and not a "
+                    "metadata token",
+                    rva=raw_value,
+                    file_offset=file_offset,
+                    value=raw_value,
+                )
+            )
+            return CLREntryPointData(
+                declared_kind=declared_kind,
+                kind="native",
+                token=None,
+                rva=raw_value,
+                raw_value=raw_value,
+                method=None,
+                section_name=section_name,
+                file_offset=file_offset,
+                executable=executable,
+                explanation=explanation,
+                reason=None,
+            )
+
+        # Managed entry point: the field is a metadata token.
+        declared_kind = "managed"
+        if not raw_value:
+            explanation.append(
+                self._clr_explanation(
+                    "IMAGE_COR20_HEADER.EntryPointToken",
+                    "entry point token is zero; this image declares no managed "
+                    "entry point (for example a library)",
+                )
+            )
+            return CLREntryPointData(
+                declared_kind=declared_kind,
+                kind="none",
+                token=0,
+                rva=None,
+                raw_value=raw_value,
+                method=None,
+                explanation=explanation,
+                reason="EntryPointToken is zero",
+            )
+
+        token = raw_value
+        table_id = token >> 24
+        row_index = token & 0xFFFFFF
+        explanation.append(
+            self._clr_explanation(
+                "IMAGE_COR20_HEADER.EntryPointToken",
+                f"token {token:#010x} has table 0x{table_id:02x} and row "
+                f"{row_index}",
+                value=token,
+            )
+        )
+
+        if table_id != CLR_METADATA_TABLES["MethodDef"]:
+            table_name = CLR_METADATA_TABLE_NAMES.get(table_id, "unknown")
+            reason = (
+                f"token {token:#010x} refers to table {table_name} "
+                f"(0x{table_id:02x}), not MethodDef"
+            )
+            explanation.append(
+                self._clr_explanation("CLR metadata token", reason, value=token)
+            )
+            return CLREntryPointData(
+                declared_kind=declared_kind,
+                kind="invalid",
+                token=token,
+                rva=None,
+                raw_value=raw_value,
+                method=None,
+                explanation=explanation,
+                reason=reason,
+            )
+
+        if row_index == 0:
+            reason = "MethodDef token row index 0 is invalid"
+            explanation.append(
+                self._clr_explanation("CLR metadata token", reason, value=token)
+            )
+            return CLREntryPointData(
+                declared_kind=declared_kind,
+                kind="invalid",
+                token=token,
+                rva=None,
+                raw_value=raw_value,
+                method=None,
+                explanation=explanation,
+                reason=reason,
+            )
+
+        if metadata is None:
+            reason = (
+                "metadata root is unavailable, so the MethodDef token cannot be "
+                "resolved"
+            )
+            explanation.append(
+                self._clr_explanation("CLR metadata root", reason)
+            )
+            return CLREntryPointData(
+                declared_kind=declared_kind,
+                kind="invalid",
+                token=token,
+                rva=None,
+                raw_value=raw_value,
+                method=None,
+                explanation=explanation,
+                reason=reason,
+            )
+
+        if not metadata.complete:
+            reason = (
+                "metadata root is incomplete, so the MethodDef token cannot be "
+                "resolved reliably: "
+                + "; ".join(metadata.errors)
+            )
+            explanation.append(
+                self._clr_explanation("CLR metadata root", reason)
+            )
+            return CLREntryPointData(
+                declared_kind=declared_kind,
+                kind="invalid",
+                token=token,
+                rva=None,
+                raw_value=raw_value,
+                method=None,
+                explanation=explanation,
+                reason=reason,
+            )
+
+        if table_stream is None:
+            reason = (
+                "no unambiguous #~ or #- table stream is available, so the "
+                "MethodDef token cannot be resolved"
+            )
+            explanation.append(
+                self._clr_explanation("CLR metadata stream directory", reason)
+            )
+            return CLREntryPointData(
+                declared_kind=declared_kind,
+                kind="invalid",
+                token=token,
+                rva=None,
+                raw_value=raw_value,
+                method=None,
+                explanation=explanation,
+                reason=reason,
+            )
+
+        row_count = table_stream.row_counts.get(0x06)
+        if not table_stream.complete:
+            reason = (
+                "the table stream layout is incomplete, so the MethodDef token "
+                "cannot be resolved reliably: "
+                + "; ".join(table_stream.errors)
+            )
+            explanation.append(
+                self._clr_explanation(
+                    "CLR #~ table stream",
+                    reason,
+                    rva=table_stream.rva,
+                    file_offset=table_stream.file_offset,
+                )
+            )
+            return CLREntryPointData(
+                declared_kind=declared_kind,
+                kind="invalid",
+                token=token,
+                rva=None,
+                raw_value=raw_value,
+                method=None,
+                explanation=explanation,
+                reason=reason,
+            )
+
+        explanation.append(
+            self._clr_explanation(
+                "CLR #~ MethodDef table",
+                f"{row_count} row(s) declared; looking up row {row_index}"
+                if row_count is not None
+                else "MethodDef table is not present",
+                rva=table_stream.rva,
+                file_offset=table_stream.file_offset,
+            )
+        )
+        method = table_stream.methoddef_row(row_index)
+        if method is None:
+            reason = (
+                f"MethodDef row {row_index} is absent or truncated in the "
+                "declared table stream"
+            )
+            explanation.append(
+                self._clr_explanation(
+                    "CLR #~ MethodDef table",
+                    reason,
+                    rva=table_stream.rva,
+                    file_offset=table_stream.file_offset,
+                )
+            )
+            return CLREntryPointData(
+                declared_kind=declared_kind,
+                kind="invalid",
+                token=token,
+                rva=None,
+                raw_value=raw_value,
+                method=None,
+                explanation=explanation,
+                reason=reason,
+            )
+
+        explanation.append(
+            self._clr_explanation(
+                "CLR MethodDef row",
+                f"row {method.index} at RVA {method.row_rva:#x} "
+                f"(file offset {method.row_file_offset:#x}) stores "
+                f"RVA={method.rva:#x}, name={method.name!r}",
+                rva=method.row_rva,
+                file_offset=method.row_file_offset,
+                value=method.rva,
+            )
+        )
+        if method.rva == 0:
+            reason = f"MethodDef row {row_index} has RVA 0"
+            explanation.append(
+                self._clr_explanation("CLR MethodDef row", reason)
+            )
+            return CLREntryPointData(
+                declared_kind=declared_kind,
+                kind="invalid",
+                token=token,
+                rva=None,
+                raw_value=raw_value,
+                method=method,
+                explanation=explanation,
+                reason=reason,
+            )
+
+        info = self._clr_section_info(method.rva)
+        if info is None:
+            reason = (
+                f"MethodDef RVA {method.rva:#x} does not map to any section"
+            )
+            explanation.append(
+                self._clr_explanation(
+                    "PE section table", reason, rva=method.rva
+                )
+            )
+            return CLREntryPointData(
+                declared_kind=declared_kind,
+                kind="invalid",
+                token=token,
+                rva=None,
+                raw_value=raw_value,
+                method=method,
+                explanation=explanation,
+                reason=reason,
+            )
+
+        section_name, file_offset, executable = info
+        explanation.append(
+            self._clr_explanation(
+                "PE section table",
+                f"MethodDef RVA maps to section {section_name!r} at file offset "
+                f"{file_offset:#x}; executable={executable}",
+                rva=method.rva,
+                file_offset=file_offset,
+            )
+        )
+        if self.OPTIONAL_HEADER.AddressOfEntryPoint != method.rva:
+            explanation.append(
+                self._clr_explanation(
+                    "OPTIONAL_HEADER.AddressOfEntryPoint",
+                    f"PE header declares {self.OPTIONAL_HEADER.AddressOfEntryPoint:#x}, "
+                    "which is not the managed entry; the CLR header governs "
+                    "execution for this image",
+                    rva=self.OPTIONAL_HEADER.AddressOfEntryPoint,
+                )
+            )
+        explanation.append(
+            self._clr_explanation(
+                "CLR entry point",
+                "the metadata token was resolved through the MethodDef table; "
+                "the token itself was not used as an RVA",
+                value=token,
+            )
+        )
+        return CLREntryPointData(
+            declared_kind=declared_kind,
+            kind="managed",
+            token=token,
+            rva=method.rva,
+            raw_value=raw_value,
+            method=method,
+            section_name=section_name,
+            file_offset=file_offset,
+            executable=executable,
+            explanation=explanation,
+            reason=None,
+        )
+
+    def parse_clr_metadata(self, rva, size):
+        """Parse a CLR metadata root and its stream directory."""
+        errors = []
+        explanation_base = {
+            "rva": rva,
+            "file_offset": self._clr_file_offset(rva),
+        }
+
+        def incomplete(reason, streams=None, root=None, version=None, data=b""):
+            errors.append(reason)
+            return CLRMetadataData(
+                struct=root,
+                version=version,
+                streams=streams or [],
+                errors=errors,
+                complete=False,
+                rva=rva,
+                file_offset=explanation_base["file_offset"],
+                data=data,
+                strings_stream=None,
+                guid_stream=None,
+                blob_stream=None,
+                user_string_stream=None,
+            )
+
+        if size < Structure(self.__CLR_METADATA_ROOT_format__).sizeof():
+            return incomplete(
+                f"metadata size {size:#x} is too small for a metadata root"
+            )
+
+        try:
+            data = self.get_data(rva, size)
+        except PEFormatError as excp:
+            return incomplete(f"metadata at RVA {rva:#x} cannot be read: {excp}")
+        if len(data) < size:
+            errors.append(
+                f"metadata declares {size:#x} bytes but only {len(data):#x} "
+                "bytes can be read"
+            )
+
+        root_format = self.__CLR_METADATA_ROOT_format__
+        root = Structure(root_format, file_offset=explanation_base["file_offset"] or 0)
+        try:
+            root.__unpack__(data[: root.sizeof()])
+        except PEFormatError as excp:
+            return incomplete(f"metadata root cannot be unpacked: {excp}")
+
+        if root.Signature != CLR_METADATA_SIGNATURE:
+            return incomplete(
+                f"metadata signature is 0x{root.Signature:08x}, expected "
+                f"0x{CLR_METADATA_SIGNATURE:08x} (BSJB)",
+                root=root,
+            )
+
+        version_length = root.VersionLength
+        version_end = root.sizeof() + version_length
+        if version_length < 0 or version_end > len(data):
+            return incomplete(
+                f"metadata version string length {version_length:#x} exceeds the "
+                f"{len(data):#x} readable metadata bytes",
+                root=root,
+            )
+        version = (
+            data[root.sizeof() : version_end]
+            .split(b"\0", 1)[0]
+            .decode("utf-8", "backslashreplace")
+        )
+        cursor = (version_end + 3) & ~3
+        if cursor > len(data):
+            return incomplete(
+                "metadata version string padding exceeds the readable metadata",
+                root=root,
+                version=version,
+                data=data,
+            )
+
+        streams = []
+        directory = []
+        first_stream_offset = None
+        while cursor + 8 <= len(data):
+            if first_stream_offset is not None and cursor >= first_stream_offset:
+                # The earliest usable stream starts here; the header directory
+                # ends before it.  Data is never scanned as another header.
+                break
+            stream_offset, stream_size = struct.unpack_from("<II", data, cursor)
+            name_start = cursor + 8
+            nul_index = data.find(b"\0", name_start, min(name_start + 32, len(data)))
+            if nul_index < 0:
+                errors.append(
+                    f"stream header at metadata offset {cursor:#x} has no "
+                    "NUL-terminated name in its 32-byte name field"
+                )
+                break
+            raw_name = bytes(data[name_start:nul_index])
+            name = raw_name.decode("ascii", "backslashreplace")
+            header_end = name_start + ((nul_index - name_start + 1 + 3) & ~3)
+            if header_end > len(data):
+                errors.append(
+                    f"stream header at metadata offset {cursor:#x} is truncated"
+                )
+                break
+
+            # A header is kept even when its data offset is malformed so the
+            # overlap can be reported instead of silently dropping the stream.
+            directory.append(
+                (cursor, header_end, stream_offset, stream_size, raw_name, name)
+            )
+            if stream_offset > header_end and (
+                first_stream_offset is None or stream_offset < first_stream_offset
+            ):
+                first_stream_offset = stream_offset
+            cursor = header_end
+
+        if not directory:
+            errors.append("metadata stream directory contains no stream headers")
+        directory_end = cursor
+        if first_stream_offset is not None and cursor < first_stream_offset:
+            gap = data[cursor:first_stream_offset]
+            if any(gap):
+                errors.append(
+                    f"{len(gap):#x} non-zero byte(s) remain between the metadata "
+                    "stream directory and the first stream"
+                )
+
+        for (
+            header_offset,
+            header_end,
+            stream_offset,
+            stream_size,
+            raw_name,
+            name,
+        ) in directory:
+            stream_rva = rva + stream_offset
+            stream_file_offset = self._clr_file_offset(stream_rva)
+            stream_valid = bool(name)
+            stream_reason = None
+            if not name:
+                stream_reason = (
+                    f"stream header at metadata offset {header_offset:#x} has an "
+                    "empty name"
+                )
+                errors.append(stream_reason)
+            elif stream_offset < directory_end:
+                stream_valid = False
+                stream_reason = (
+                    f"stream {name!r} data at relative offset "
+                    f"{stream_offset:#x} overlaps the stream directory ending at "
+                    f"{directory_end:#x}"
+                )
+                errors.append(stream_reason)
+            elif stream_offset + stream_size > len(data):
+                stream_valid = False
+                stream_reason = (
+                    f"stream {name!r} range [{stream_offset:#x}, "
+                    f"{stream_offset + stream_size:#x}) exceeds the "
+                    f"{len(data):#x} readable metadata bytes"
+                )
+                errors.append(stream_reason)
+            elif name not in CLR_STREAM_NAMES:
+                # Unknown streams are preserved as material but never used.
+                stream_valid = False
+                stream_reason = (
+                    f"stream {name!r} is not a recognized CLR metadata stream"
+                )
+
+            streams.append(
+                CLRStreamData(
+                    name=name if name else None,
+                    raw_name=raw_name,
+                    offset=stream_offset,
+                    size=stream_size,
+                    rva=stream_rva,
+                    file_offset=stream_file_offset,
+                    header_offset=header_offset,
+                    data=(
+                        bytes(data[stream_offset : stream_offset + stream_size])
+                        if stream_valid
+                        else None
+                    ),
+                    valid=stream_valid,
+                    reason=stream_reason,
+                )
+            )
+
+        # Duplicate names are ambiguous.  Do not silently pick one of them.
+        by_name = defaultdict(list)
+        for stream in streams:
+            if stream.name:
+                by_name[stream.name].append(stream)
+        for name, entries in by_name.items():
+            if len(entries) > 1:
+                errors.append(
+                    f"metadata stream {name!r} appears {len(entries)} times; "
+                    "the stream is ambiguous"
+                )
+
+        # Overlapping data ranges are also ambiguous, even when names differ.
+        valid_streams = sorted(
+            (stream for stream in streams if stream.data is not None),
+            key=lambda stream: stream.offset,
+        )
+        for previous, current in zip(valid_streams, valid_streams[1:]):
+            if previous.offset + previous.size > current.offset:
+                errors.append(
+                    f"metadata streams {previous.name!r} and {current.name!r} "
+                    "have overlapping data ranges"
+                )
+
+        def unique_stream(name):
+            entries = by_name.get(name, [])
+            if len(entries) == 1 and entries[0].valid:
+                return entries[0]
+            return None
+
+        metadata = CLRMetadataData(
+            struct=root,
+            version=version,
+            streams=streams,
+            errors=errors,
+            # Unknown stream names are preserved and do not by themselves make
+            # the directory incomplete; malformed or ambiguous structure does.
+            complete=not errors,
+            rva=rva,
+            file_offset=explanation_base["file_offset"],
+            data=data,
+            strings_stream=unique_stream(CLR_STRING_STREAM_NAME),
+            guid_stream=unique_stream(CLR_GUID_STREAM_NAME),
+            blob_stream=unique_stream(CLR_BLOB_STREAM_NAME),
+            user_string_stream=unique_stream(CLR_USER_STRING_STREAM_NAME),
+        )
+        return metadata
+
+    def parse_clr_table_stream(self, metadata, stream):
+        """Parse a #~ or #- metadata table stream using its declared sizes."""
+        errors = []
+
+        def result(**kwargs):
+            defaults = {
+                "stream": stream,
+                "metadata": metadata,
+                "raw_data": stream.data or b"",
+                "rva": stream.rva,
+                "file_offset": stream.file_offset,
+                "rows_offset": None,
+                "rows_rva": None,
+                "heap_index_sizes": {},
+                "row_counts": {},
+                "row_sizes": {},
+                "table_offsets": {},
+                "table_index_sizes": {},
+                "coded_index_sizes": {},
+                "errors": errors,
+                "complete": False,
+                "data_truncated": False,
+                "methoddef_present": False,
+                "pe": self,
+            }
+            defaults.update(kwargs)
+            return CLRTableStreamData(**defaults)
+
+        if stream is None or not stream.valid or stream.data is None:
+            errors.append("table stream is missing or its range is unusable")
+            return result()
+
+        missing_heaps = [
+            name
+            for name, stream_name in (
+                ("#Strings", CLR_STRING_STREAM_NAME),
+                ("#Blob", CLR_BLOB_STREAM_NAME),
+            )
+            if metadata is not None
+            and metadata.stream(stream_name) is None
+        ]
+        if missing_heaps:
+            errors.append(
+                "required heap stream(s) missing or ambiguous: "
+                + ", ".join(missing_heaps)
+            )
+            return result()
+
+        data = stream.data
+        header_format = self.__CLR_METADATA_TABLE_HEADER_format__
+        header_size = Structure(header_format).sizeof()
+        if len(data) < header_size:
+            errors.append(
+                f"table stream {stream.name!r} declares {len(data):#x} bytes, "
+                f"smaller than the {header_size:#x}-byte table header"
+            )
+            return result()
+
+        header = Structure(
+            header_format,
+            file_offset=(stream.file_offset or 0),
+        )
+        try:
+            header.__unpack__(data[:header_size])
+        except PEFormatError as excp:
+            errors.append(f"table stream header cannot be unpacked: {excp}")
+            return result()
+
+        heap_sizes = header.HeapSizes
+        known_heap_bits = (
+            CLR_HEAP_SIZES_STRING
+            | CLR_HEAP_SIZES_GUID
+            | CLR_HEAP_SIZES_BLOB
+            | CLR_HEAP_SIZES_EXTRA_DATA
+        )
+        unknown_heap_bits = heap_sizes & ~known_heap_bits
+        if unknown_heap_bits:
+            errors.append(
+                f"unknown HeapSizes bit(s) 0x{unknown_heap_bits:02x}; the heap "
+                "index layout cannot be trusted"
+            )
+            return result()
+
+        valid = header.Valid
+        unknown_valid = valid & ~CLR_METADATA_KNOWN_TABLE_MASK
+        if unknown_valid:
+            errors.append(
+                f"unknown metadata table valid bit(s) 0x{unknown_valid:016x}; "
+                "the table row layout cannot be trusted"
+            )
+            return result()
+
+        present_tables = [
+            table_id
+            for table_id in sorted(CLR_METADATA_TABLE_SCHEMA)
+            if valid & (1 << table_id)
+        ]
+
+        counts_offset = header_size
+        counts_end = counts_offset + 4 * len(present_tables)
+        if counts_end > len(data):
+            errors.append(
+                f"table stream row-count array is truncated: needs "
+                f"{counts_end:#x} bytes, has {len(data):#x}"
+            )
+            return result()
+
+        row_counts = {}
+        for index, table_id in enumerate(present_tables):
+            row_counts[table_id] = struct.unpack_from(
+                "<I", data, counts_offset + 4 * index
+            )[0]
+
+        # The unoptimized "#-" stream has an extra 4-byte field after the row
+        # counts before the rows start and sorts its tables by name rather than
+        # by table id.  The optimized "#~" stream has neither.  The extra field
+        # is not needed here, but the row area must start after it.
+        rows_offset = counts_end
+        if stream.name == "#-":
+            rows_offset += 4
+            if rows_offset > len(data):
+                errors.append(
+                    "unoptimized #- table stream is missing its ExtraData field"
+                )
+                return result()
+
+        heap_index_sizes = {
+            "string": 4 if heap_sizes & CLR_HEAP_SIZES_STRING else 2,
+            "guid": 4 if heap_sizes & CLR_HEAP_SIZES_GUID else 2,
+            "blob": 4 if heap_sizes & CLR_HEAP_SIZES_BLOB else 2,
+        }
+
+        table_index_sizes = {}
+        coded_index_sizes = {}
+        referenced_tables = set()
+        referenced_coded = set()
+        for schema in CLR_METADATA_TABLE_SCHEMA.values():
+            for field in schema:
+                if isinstance(field, tuple) and field[0] == "table":
+                    referenced_tables.add(field[1])
+                elif isinstance(field, tuple) and field[0] == "coded":
+                    referenced_coded.add(field[1])
+        for table_id in referenced_tables:
+            table_index_sizes[table_id] = (
+                4 if row_counts.get(table_id, 0) > 0xFFFF else 2
+            )
+        for name in referenced_coded:
+            tag_bits, table_ids = CLR_CODED_INDEXES[name]
+            coded_index_sizes[name] = _clr_coded_index_size(
+                tag_bits, table_ids, row_counts
+            )
+
+        def field_size(field):
+            if field == "u2":
+                return 2
+            if field == "u4":
+                return 4
+            if isinstance(field, str):
+                return heap_index_sizes.get(field)
+            if field[0] == "table":
+                return table_index_sizes.get(field[1], 2)
+            if field[0] == "coded":
+                return coded_index_sizes[field[1]]
+            if field[0] in heap_index_sizes:
+                return heap_index_sizes[field[0]]
+            return None
+
+        row_sizes = {}
+        for table_id in present_tables:
+            total = 0
+            for field in CLR_METADATA_TABLE_SCHEMA[table_id]:
+                width = field_size(field)
+                if width is None:
+                    errors.append(
+                        f"unsupported field layout in table "
+                        f"{CLR_METADATA_TABLE_NAMES[table_id]}"
+                    )
+                    return result()
+                total += width
+            row_sizes[table_id] = total
+
+        rows_rva = stream.rva + rows_offset
+        table_offsets = {}
+        cursor = rows_offset
+        for table_id in present_tables:
+            table_offsets[table_id] = cursor
+            cursor += row_counts[table_id] * row_sizes[table_id]
+
+        expected_end = cursor
+        data_truncated = expected_end > len(data)
+        if data_truncated:
+            errors.append(
+                f"table rows declare {expected_end:#x} bytes but the stream has "
+                f"{len(data):#x}"
+            )
+
+        return result(
+            raw_data=data,
+            rows_offset=rows_offset,
+            rows_rva=rows_rva,
+            heap_index_sizes=heap_index_sizes,
+            row_counts=row_counts,
+            row_sizes=row_sizes,
+            table_offsets=table_offsets,
+            table_index_sizes=table_index_sizes,
+            coded_index_sizes=coded_index_sizes,
+            # A declared row area that runs past the stream means some rows
+            # (and possibly some row fields) are truncated.  Treat the layout
+            # as incomplete so no row can be decoded from partial data.
+            complete=not data_truncated,
+            data_truncated=data_truncated,
+            methoddef_present=row_counts.get(0x06, 0) > 0,
+        )
+
+    def parse_directory_com_descriptor(self, rva, size):
+        """Parse the COM descriptor (CLI header) and its entry point.
+
+        The CLI header's entry point is interpreted as either an RVA (when
+        COMIMAGE_FLAGS_NATIVE_ENTRYPOINT is set) or a metadata token.  A token
+        is resolved through the MethodDef table and is never used as an address
+        by itself.
+        """
+        errors = []
+        file_offset = self._clr_file_offset(rva)
+        header_format = self.__IMAGE_COR20_HEADER_format__
+        header_size = Structure(header_format).sizeof()
+
+        if size < header_size:
+            errors.append(
+                f"COM descriptor size {size:#x} is smaller than the "
+                f"{header_size:#x}-byte IMAGE_COR20_HEADER"
+            )
+
+        cli_header = None
+        try:
+            data = self.get_data(rva, header_size)
+        except PEFormatError as excp:
+            errors.append(f"COM descriptor at RVA {rva:#x} cannot be read: {excp}")
+            data = b""
+        if len(data) < header_size:
+            errors.append(
+                f"COM descriptor at RVA {rva:#x} has only {len(data):#x} readable "
+                f"bytes, needs {header_size:#x}"
+            )
+        else:
+            cli_header = Structure(header_format, file_offset=file_offset or 0)
+            try:
+                cli_header.__unpack__(data[:header_size])
+            except PEFormatError as excp:
+                errors.append(f"COM descriptor cannot be unpacked: {excp}")
+                cli_header = None
+
+        if cli_header is not None:
+            if cli_header.cb < header_size:
+                errors.append(
+                    f"IMAGE_COR20_HEADER.cb is {cli_header.cb:#x}, smaller than "
+                    f"the {header_size:#x}-byte structure"
+                )
+            if size < cli_header.cb:
+                errors.append(
+                    f"COM descriptor directory size {size:#x} is smaller than "
+                    f"IMAGE_COR20_HEADER.cb {cli_header.cb:#x}"
+                )
+            known_flags = 0
+            for _, flag in comimage_flags:
+                known_flags |= flag
+            unknown_flags = cli_header.Flags & ~known_flags
+            if unknown_flags:
+                errors.append(
+                    f"unknown COMIMAGE_FLAGS bit(s) 0x{unknown_flags:08x}; only "
+                    "documented flag bits were interpreted"
+                )
+
+        metadata = None
+        if cli_header is not None:
+            if (
+                cli_header.MetaDataVirtualAddress
+                and cli_header.MetaDataSize
+            ):
+                metadata = self.parse_clr_metadata(
+                    cli_header.MetaDataVirtualAddress, cli_header.MetaDataSize
+                )
+                if not metadata.complete:
+                    errors.append(
+                        "metadata root is incomplete: "
+                        + "; ".join(metadata.errors)
+                    )
+            else:
+                errors.append(
+                    "CLI header does not declare a metadata root RVA and size"
+                )
+
+        table_stream = None
+        if metadata is not None:
+            table_streams = [
+                stream
+                for stream in metadata.streams
+                if stream.name in CLR_TABLE_STREAM_NAMES
+            ]
+            unique_table_streams = [
+                stream for stream in table_streams if stream.valid
+            ]
+            if len(table_streams) == 0:
+                errors.append(
+                    "metadata root has no #~ or #- table stream"
+                )
+            elif len(table_streams) > 1:
+                names = ", ".join(
+                    repr(stream.name) for stream in table_streams
+                )
+                errors.append(
+                    f"metadata root has {len(table_streams)} table streams "
+                    f"({names}); the table layout is ambiguous"
+                )
+            elif not unique_table_streams:
+                errors.append("the #~ or #- table stream range is unusable")
+            else:
+                table_stream = self.parse_clr_table_stream(
+                    metadata, unique_table_streams[0]
+                )
+
+        entry_point = self._clr_entry_point(
+            cli_header, metadata, table_stream, rva, file_offset
+        )
+
+        return CLRData(
+            struct=cli_header,
+            metadata=metadata,
+            table_stream=table_stream,
+            entry_point=entry_point,
+            errors=errors,
+            complete=bool(cli_header is not None),
+            directory_rva=rva,
+            directory_size=size,
+            file_offset=file_offset,
+        )
 
     def parse_directory_load_config(self, rva, size):
         """Parse the load configuration table."""
@@ -5820,6 +7489,48 @@ class PE:
 
         raise Exception("Invalid hashing algorithm specified")
 
+    def get_entry_point(self):
+        """Describe the image's real entry point and where the claim comes from.
+
+        A managed image (one with a COM descriptor) stores a CLI header whose
+        entry point is either an RVA, when COMIMAGE_FLAGS_NATIVE_ENTRYPOINT is
+        set, or a metadata token.  Tokens are resolved through the MethodDef
+        table and are never treated as executable addresses.  Images without a
+        COM descriptor fall back to OPTIONAL_HEADER.AddressOfEntryPoint.
+
+        When the PE was loaded with fast_load the COM descriptor is parsed on
+        demand, so a managed image is never mistaken for a native one.
+
+        Returns an EntryPointData, a CLREntryPointData, or None when the file
+        has neither a native nor a managed entry point declaration.
+        """
+        if not hasattr(self, "DIRECTORY_ENTRY_COM_DESCRIPTOR"):
+            directory = getattr(
+                getattr(self, "OPTIONAL_HEADER", None), "DATA_DIRECTORY", None
+            )
+            com_index = DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_COM_DESCRIPTOR"]
+            com_entry = None
+            if directory is not None and len(directory) > com_index:
+                com_entry = directory[com_index]
+            if com_entry is not None and com_entry.VirtualAddress:
+                # fast_load does not process directories.  Parse the COM
+                # descriptor on demand so a managed image is never described
+                # as if AddressOfEntryPoint were its real entry.
+                clr = self.parse_directory_com_descriptor(
+                    com_entry.VirtualAddress, com_entry.Size
+                )
+                if clr is not None:
+                    setattr(self, "DIRECTORY_ENTRY_COM_DESCRIPTOR", clr)
+                    return clr.entry_point
+            if not hasattr(self, "OPTIONAL_HEADER") or self.OPTIONAL_HEADER is None:
+                return None
+            return self._clr_native_entry_point()
+
+        clr = self.DIRECTORY_ENTRY_COM_DESCRIPTOR
+        if clr is None:
+            return None
+        return clr.entry_point
+
     def get_imphash(self, usedforsecurity=True):
         """Return the imphash of the PE file.
 
@@ -6931,6 +8642,66 @@ class PE:
             dump.add_lines(self.DIRECTORY_ENTRY_LOAD_CONFIG.struct.dump())
             dump.add_newline()
 
+        if (
+            hasattr(self, "DIRECTORY_ENTRY_COM_DESCRIPTOR")
+            and self.DIRECTORY_ENTRY_COM_DESCRIPTOR
+            and self.DIRECTORY_ENTRY_COM_DESCRIPTOR.struct
+        ):
+            clr = self.DIRECTORY_ENTRY_COM_DESCRIPTOR
+            dump.add_header("CLR runtime header")
+            dump.add_lines(clr.struct.dump())
+            dump.add_newline()
+            if clr.metadata is not None:
+                dump.add_header("CLR metadata")
+                dump.add_lines(clr.metadata.struct.dump())
+                dump.add_line(f"Version: {clr.metadata.version}")
+                for stream in clr.metadata.streams:
+                    state = "usable" if stream.valid else f"unusable: {stream.reason}"
+                    dump.add_line(
+                        f"Stream {stream.name!r} offset 0x{stream.offset:x} "
+                        f"size 0x{stream.size:x} ({state})",
+                        2,
+                    )
+                for error in clr.metadata.errors:
+                    dump.add_line(f"Metadata error: {error}", 2)
+                dump.add_newline()
+            if clr.table_stream is not None:
+                table = clr.table_stream
+                dump.add_header("CLR metadata tables")
+                dump.add_line(
+                    "Heap index widths: "
+                    f"#Strings={table.heap_index_sizes.get('string')} "
+                    f"#GUID={table.heap_index_sizes.get('guid')} "
+                    f"#Blob={table.heap_index_sizes.get('blob')}"
+                )
+                for table_id in sorted(table.row_counts):
+                    name = CLR_METADATA_TABLE_NAMES.get(table_id, "Unknown")
+                    dump.add_line(
+                        f"0x{table_id:02x} {name}: {table.row_counts[table_id]} "
+                        f"row(s), {table.row_sizes.get(table_id)} byte row"
+                    )
+                for error in table.errors:
+                    dump.add_line(f"Table error: {error}")
+                dump.add_newline()
+            dump.add_header("Entry point")
+            entry = clr.entry_point
+            dump.add_line(f"Kind: {entry.kind}")
+            if entry.token is not None:
+                dump.add_line(f"Metadata token: 0x{entry.token:08x}")
+            if entry.rva is not None:
+                dump.add_line(f"Executable RVA: 0x{entry.rva:x}")
+            if entry.reason:
+                dump.add_line(f"No executable RVA: {entry.reason}")
+            for step in entry.explanation:
+                location = ""
+                if step["rva"] is not None:
+                    location = f" (RVA 0x{step['rva']:x}"
+                    if step["file_offset"] is not None:
+                        location += f", file offset 0x{step['file_offset']:x}"
+                    location += ")"
+                dump.add_line(f"{step['source']}: {step['detail']}{location}", 2)
+            dump.add_newline()
+
         if hasattr(self, "DIRECTORY_ENTRY_DEBUG"):
             dump.add_header("Debug information")
             for dbg in self.DIRECTORY_ENTRY_DEBUG:
@@ -7228,6 +8999,60 @@ class PE:
             dump_dict[
                 "LOAD_CONFIG"
             ] = self.DIRECTORY_ENTRY_LOAD_CONFIG.struct.dump_dict()
+
+        if (
+            hasattr(self, "DIRECTORY_ENTRY_COM_DESCRIPTOR")
+            and self.DIRECTORY_ENTRY_COM_DESCRIPTOR
+            and self.DIRECTORY_ENTRY_COM_DESCRIPTOR.struct
+        ):
+            clr = self.DIRECTORY_ENTRY_COM_DESCRIPTOR
+            clr_dict = clr.struct.dump_dict()
+            clr_dict["Errors"] = list(clr.errors)
+            if clr.metadata is not None:
+                clr_dict["Metadata"] = clr.metadata.struct.dump_dict()
+                clr_dict["Metadata"]["Version"] = clr.metadata.version
+                clr_dict["Metadata"]["Complete"] = clr.metadata.complete
+                clr_dict["Metadata"]["Errors"] = list(clr.metadata.errors)
+                clr_dict["Metadata"]["Streams"] = [
+                    {
+                        "Name": stream.name,
+                        "Offset": stream.offset,
+                        "Size": stream.size,
+                        "RVA": stream.rva,
+                        "FileOffset": stream.file_offset,
+                        "Valid": stream.valid,
+                        "Reason": stream.reason,
+                    }
+                    for stream in clr.metadata.streams
+                ]
+            if clr.table_stream is not None:
+                clr_dict["Tables"] = {
+                    "HeapIndexSizes": dict(clr.table_stream.heap_index_sizes),
+                    "TableIndexSizes": dict(clr.table_stream.table_index_sizes),
+                    "CodedIndexSizes": dict(clr.table_stream.coded_index_sizes),
+                    "RowCounts": {
+                        CLR_METADATA_TABLE_NAMES.get(table_id, table_id): count
+                        for table_id, count in sorted(clr.table_stream.row_counts.items())
+                    },
+                    "RowSizes": {
+                        CLR_METADATA_TABLE_NAMES.get(table_id, table_id): size
+                        for table_id, size in sorted(clr.table_stream.row_sizes.items())
+                    },
+                    "Complete": clr.table_stream.complete,
+                    "Truncated": clr.table_stream.data_truncated,
+                    "Errors": list(clr.table_stream.errors),
+                }
+            entry = clr.entry_point
+            clr_dict["EntryPoint"] = {
+                "Kind": entry.kind,
+                "DeclaredKind": entry.declared_kind,
+                "Token": entry.token,
+                "RVA": entry.rva,
+                "RawValue": entry.raw_value,
+                "Reason": entry.reason,
+                "Explanation": [dict(step) for step in entry.explanation],
+            }
+            dump_dict["CLR runtime header"] = clr_dict
 
         if hasattr(self, "DIRECTORY_ENTRY_DEBUG"):
             dump_dict["Debug information"] = []
