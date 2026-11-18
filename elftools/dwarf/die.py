@@ -137,7 +137,9 @@ class DIE:
             if self.dwarfinfo.supplementary_dwarfinfo:
                 return self.dwarfinfo.supplementary_dwarfinfo.get_DIE_from_refaddr(attr.raw_value)
             # FIXME: how to distinguish supplementary files from dwo ?
-            raise NotImplementedError(f'{attr.form} to dwo')
+            raise NotImplementedError(
+                f'{attr.form} reference is not supported: no supplementary '
+                f'DWARF info is loaded for this object')
         else:
             raise DWARFError(f'{attr} is not a reference class form attribute')
 

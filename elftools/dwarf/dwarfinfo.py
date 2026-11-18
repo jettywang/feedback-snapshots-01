@@ -153,6 +153,10 @@ class DWARFInfo:
         self._cu_cache: list[CompileUnit] = []
         self._cu_offsets_map: list[int] = []
 
+        # Cache of type units (DWARF v4 .debug_types), keyed by the unit
+        # header offset, so every access path shares the same object.
+        self._tu_cache: dict[int, TypeUnit] = {}
+
     @property
     def has_debug_info(self) -> bool:
         """ Return whether this contains debug information.
@@ -192,16 +196,18 @@ class DWARFInfo:
         return cu.get_DIE_from_refaddr(refaddr)
 
     def get_DIE_by_sig8(self, sig8: int) -> DIE:
-        """ Find and return a DIE referenced by its type signature.
+        """ Find and return the type DIE referenced by a type signature.
             sig8:
-                The 8 byte signature (as a 64-bit unsigned integer)
-            Returns the DIE with the given type signature by searching
-            for the Type Unit with the matching signature then finding
-            the DIE at the offset given by the type_die field in the
-            Type Unit header.
-                Signatures are an 64-bit unsigned integers computed by the
-                DWARF producer as specified in the DWARF standard. Each
-                Type Unit contains one signature and the offset to the
+                The 8 byte signature (as a 64-bit unsigned integer), as found
+                in a DW_FORM_ref_sig8 attribute.
+            Returns the DIE with the given type signature by locating the
+            type unit that owns the signature and reading the DIE named by
+            the type_offset field in its unit header. The base of
+            type_offset is version-specific (section-relative in DWARF v4,
+            unit-relative in DWARF v5); see _type_die_offset().
+                Signatures are 64-bit unsigned integers computed by the
+                DWARF producer as specified in the DWARF standard. Each type
+                unit contains one signature and the offset to the
                 corresponding DW_AT_type DIE in its unit header.
                 Describing a type can generate several DIEs. By moving
                 a DIE and its related DIEs to a Type Unit and generating
@@ -209,12 +215,30 @@ class DWARFInfo:
                 multiple Compile Units in a linked object can reference
                 the same DIE in the overall DWARF structure.
             In DWARF v4 type units are identified by their appearance in the
-            .debug_types section.
+            .debug_types section; in DWARF v5 the equivalent type units
+            (DW_UT_type / DW_UT_split_type) are stored in .debug_info.
+            Raises KeyError if no type unit carries the given signature.
         """
-        tu = self._type_units_by_sig.get(sig8)
-        if tu is None:
-            raise KeyError(f"Signature {sig8:016x} not found in .debug_types")
-        return tu._get_cached_DIE(tu.tu_offset + tu['type_offset'])
+        unit = self._type_units_by_sig.get(sig8)
+        if unit is None:
+            raise KeyError(
+                f"Type signature {sig8:016x} not found in any type unit")
+        return unit._get_cached_DIE(self._type_die_offset(unit))
+
+    def _type_die_offset(self, unit: CompileUnit | TypeUnit) -> int:
+        """ Resolve the absolute section offset of the type DIE named by the
+            type_offset field of a type unit header.
+
+            The base that type_offset is relative to depends on the version:
+            - DWARF v4 .debug_types: type_offset is relative to the start of
+              the .debug_types section (DWARF v4 section 7.5.1.2), i.e. an
+              absolute offset within that section.
+            - DWARF v5 .debug_info type units: type_offset is relative to the
+              start of the unit header (DWARF v5 section 7.5.1.3).
+        """
+        if isinstance(unit, TypeUnit):
+            return unit['type_offset']
+        return unit.cu_offset + unit['type_offset']
 
     def get_CU_containing(self, refaddr: int) -> CompileUnit:
         """ Find the CU that includes the given reference address in the
@@ -272,20 +296,25 @@ class DWARFInfo:
 
         return self._cached_CU_at_offset(offset)
 
-    def get_TU_by_sig8(self, sig8: int) -> TypeUnit:
-        """ Find and return a Type Unit referenced by its signature
+    def get_TU_by_sig8(self, sig8: int) -> CompileUnit | TypeUnit:
+        """ Find and return the type unit that carries the given signature.
 
             sig8:
-                The 8 byte unique signature (as a 64-bit unsigned integer)
+                The 8 byte unique signature (as a 64-bit unsigned integer),
+                as found in a DW_FORM_ref_sig8 attribute.
 
-            Returns the TU with the given type signature by parsing the
-            .debug_types section.
+            Returns the type unit with the given type signature. A DWARF v4
+            type unit is a TypeUnit parsed from .debug_types; a DWARF v5
+            type unit (DW_UT_type / DW_UT_split_type) is a CompileUnit
+            parsed from .debug_info.
 
+            Raises KeyError if no type unit carries the given signature.
         """
-        tu = self._type_units_by_sig.get(sig8)
-        if tu is None:
-            raise KeyError(f"Signature {sig8:016x} not found in .debug_types")
-        return tu
+        unit = self._type_units_by_sig.get(sig8)
+        if unit is None:
+            raise KeyError(
+                f"Type signature {sig8:016x} not found in any type unit")
+        return unit
 
     def iter_CUs(self) -> Iterator[CompileUnit]:
         """ Yield all the compile units (CompileUnit objects) in the debug info
@@ -508,7 +537,7 @@ class DWARFInfo:
             return
 
         while offset < self.debug_types_sec.size:
-            tu = self._parse_TU_at_offset(offset)
+            tu = self._cached_TU_at_offset(offset)
             # Compute the offset of the next TU in the section. The unit_length
             # field of the TU header contains its size not including the length
             # field itself.
@@ -519,26 +548,49 @@ class DWARFInfo:
             yield tu
 
     @cached_property
-    def _type_units_by_sig(self) -> dict[int, TypeUnit]:
-        """ Check if the .debug_types section is previously parsed. If not,
-            parse all TUs and store them in an ordered dict using their unique
-            64-bit signature as the key.
+    def _type_units_by_sig(self) -> dict[int, CompileUnit | TypeUnit]:
+        """ Index every type unit by its unique 64-bit type signature.
 
-            See .get_TU_by_sig8().
+            In DWARF v4 type units live in the .debug_types section and are
+            represented by TypeUnit objects; the signature is carried in the
+            type unit header. In DWARF v5 the type units (DW_UT_type and
+            DW_UT_split_type) were moved into .debug_info and are represented
+            by CompileUnit objects whose header carries the type_signature.
+
+            Both flavours are indexed here so that a DW_FORM_ref_sig8
+            reference resolves regardless of the DWARF version. A signature
+            may name at most one type unit: a duplicate is a malformed input
+            and is reported instead of silently letting the later unit
+            overwrite the earlier one.
+
+            See .get_TU_by_sig8() and .get_DIE_by_sig8().
         """
-        if self.debug_types_sec is None:
-            return {}
+        units: dict[int, CompileUnit | TypeUnit] = {}
 
-        # Parse all the Type Units in the types section for access by sig8
-        units = {}
-        offset = 0
-        while offset < self.debug_types_sec.size:
-            tu = self._parse_TU_at_offset(offset)
-            # Compute the offset of the next TU in the section. The unit_length
-            # field of the TU header contains its size not including the length
-            # field itself.
-            offset += tu['unit_length'] + tu.structs.initial_length_field_size()
-            units[tu['signature']] = tu
+        def _index(sig8: int, unit: CompileUnit | TypeUnit) -> None:
+            if sig8 in units:
+                raise DWARFError(
+                    f'Duplicate type signature {sig8:016x}: units at '
+                    f'offset {units[sig8].cu_offset} and offset '
+                    f'{unit.cu_offset} both claim it')
+            units[sig8] = unit
+
+        # DWARF v4: type units in the .debug_types section.
+        if self.debug_types_sec is not None:
+            offset = 0
+            while offset < self.debug_types_sec.size:
+                tu = self._cached_TU_at_offset(offset)
+                # The unit_length field of the TU header contains its size
+                # not including the length field itself.
+                offset += tu['unit_length'] + tu.structs.initial_length_field_size()
+                _index(tu['signature'], tu)
+
+        # DWARF v5: type units (DW_UT_type / DW_UT_split_type) live in
+        # .debug_info, alongside regular compilation units.
+        for cu in self._parse_CUs_iter():
+            unit_type = cu.header.get('unit_type')
+            if unit_type in ('DW_UT_type', 'DW_UT_split_type'):
+                _index(cu['type_signature'], cu)
 
         return units
 
@@ -614,6 +666,18 @@ class DWARFInfo:
                 structs=cu_structs,
                 cu_offset=offset,
                 cu_die_offset=cu_die_offset)
+
+    def _cached_TU_at_offset(self, offset: int) -> TypeUnit:
+        """ Return the Type Unit with its header at the given offset into the
+            debug_types section, parsing and caching it on first access.
+
+            See _parse_TU_at_offset().
+        """
+        tu = self._tu_cache.get(offset)
+        if tu is None:
+            tu = self._parse_TU_at_offset(offset)
+            self._tu_cache[offset] = tu
+        return tu
 
     def _parse_TU_at_offset(self, offset: int) -> TypeUnit:
         """ Parse and return a Type Unit (TU) at the given offset in the debug_types stream.
