@@ -11,6 +11,7 @@ from __future__ import annotations
 import struct
 from typing import TYPE_CHECKING, Protocol
 
+from ..common.exceptions import ELFParseError
 from ..common.utils import preserve_stream_pos, struct_parse
 from ..construct.lib.container import Container
 from .sections import Section
@@ -76,7 +77,14 @@ class ELFHashTable:
             return None
         hval = self.elf_hash(name) % self.params['nbuckets']
         symndx = self.params['buckets'][hval]
-        while symndx != 0:
+        nchains = self.params['nchains']
+        # A sound chain ends at STN_UNDEF (0) after visiting each of the
+        # nchains slots at most once. Reject chains that run longer (e.g.
+        # loops in a corrupt table) or reference out-of-range slots instead
+        # of walking them forever.
+        for _ in range(nchains):
+            if symndx == 0 or symndx >= nchains:
+                return None
             sym = self._symboltable.get_symbol(symndx)
             if sym and sym.name == name:
                 return sym
@@ -147,6 +155,18 @@ class GNUHashTable:
             self.params['bloom_size'] * self._xwordsize + \
             self.params['nbuckets'] * self._wordsize
 
+    def _chain_words_left(self, chain_offset: int) -> int:
+        """ Upper bound on how many chain words can follow chain_offset.
+
+            A sound GNU hash chain always ends (lowest bit set) within the
+            file, so any walk longer than the number of words left in the
+            stream indicates a corrupt table.
+        """
+        with preserve_stream_pos(self.elffile.stream):
+            self.elffile.stream.seek(0, 2)
+            end_offset = self.elffile.stream.tell()
+        return max(0, (end_offset - chain_offset) // self._wordsize) + 1
+
     def get_number_of_symbols(self) -> int:
         """ Get the number of symbols in the hash table by finding the bucket
             with the highest symbol index and walking to the end of its chain.
@@ -162,13 +182,20 @@ class GNUHashTable:
         self.elffile.stream.seek(max_chain_pos)
         hash_format = '<I' if self.elffile.little_endian else '>I'
 
-        # Walk the chain to its end (lowest bit is set)
-        while True:
-            cur_hash = struct.unpack(hash_format, self.elffile.stream.read(self._wordsize))[0]
+        # Walk the chain to its end (lowest bit is set), but no further than
+        # the end of the stream: a chain that never terminates is corrupt.
+        for _ in range(self._chain_words_left(max_chain_pos)):
+            data = self.elffile.stream.read(self._wordsize)
+            if len(data) < self._wordsize:
+                break
+            cur_hash = struct.unpack(hash_format, data)[0]
             if cur_hash & 1:
                 return max_idx + 1
 
             max_idx += 1
+
+        raise ELFParseError(
+            'GNU hash chain for symbol %d does not terminate' % max_idx)
 
     def _matches_bloom(self, H1: int) -> bool:
         """ Helper function to check if the given hash could be in the hash
@@ -191,10 +218,17 @@ class GNUHashTable:
         if symidx < self.params['symoffset']:
             return None
 
-        self.elffile.stream.seek(self._chain_pos + (symidx - self.params['symoffset']) * self._wordsize)
+        chain_offset = self._chain_pos + \
+            (symidx - self.params['symoffset']) * self._wordsize
+        self.elffile.stream.seek(chain_offset)
         hash_format = '<I' if self.elffile.little_endian else '>I'
-        while True:
-            cur_hash = struct.unpack(hash_format, self.elffile.stream.read(self._wordsize))[0]
+        # A sound chain ends (lowest bit set) within the stream. Reject
+        # chains that run longer instead of walking them forever.
+        for _ in range(self._chain_words_left(chain_offset)):
+            data = self.elffile.stream.read(self._wordsize)
+            if len(data) < self._wordsize:
+                return None
+            cur_hash = struct.unpack(hash_format, data)[0]
             if cur_hash | 1 == namehash | 1:
                 with preserve_stream_pos(self.elffile.stream):
                     symbol = self._symboltable.get_symbol(symidx)
