@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 
     from ..construct.lib.container import Container
     from .elffile import ELFFile
+    from .mips import MipsGOT
 
 
 class RelocationTables(TypedDict, total=False):
@@ -271,6 +272,17 @@ class Dynamic:
                 next(self.iter_tags('DT_PLTREL'))['d_val'] == ENUM_D_TAG['DT_RELA'])
 
         return result
+
+    def get_mips_got(self) -> MipsGOT:
+        """ Interpret the MIPS GOT described by this dynamic table.
+
+            Returns a read-only MipsGOT object cross-referencing the
+            DT_MIPS_* tags, the dynamic symbol table and the GOT bytes in
+            the file. Raises ELFError if this is not a MIPS binary, if
+            required tags are missing or if the declared counts conflict.
+        """
+        from .mips import MipsGOT
+        return MipsGOT(self.elffile, self)
 
 
 class DynamicSection(Section, Dynamic):
