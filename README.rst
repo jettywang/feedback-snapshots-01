@@ -70,6 +70,66 @@ Installing the package creates a ``stix2-matcher`` script:
       -v, --verbose         Be verbose
       -s STIX_VERSION, --stix_version STIX_VERSION
                            Stix specification version. Default is 2.0
+      --diagnostics         Emit a structured JSON report for non-matching
+                           patterns, explaining the semantic stage at which
+                           candidates were eliminated. Exit status and error
+                           behavior are unchanged.
+
+Structured diagnostics
+----------------------
+
+Verbose mode dumps a trace of every stack operation, which is useful while
+developing the matcher but noisy when investigating a rule that does not
+match.  An optional, structured diagnostic report is available instead; it is
+off by default and never changes match results.
+
+In Python, pass ``diagnostics=True`` (or use the ``match_with_diagnostics()``
+helper).  The normal call returns a bare list of matching SDOs; the diagnostic
+call returns a ``DiagnosticReport`` (a ``dict`` subclass) whose ``matches``
+member is identical to the normal return value.
+
+.. code-block:: python
+
+  from stix2matcher.matcher import match_with_diagnostics
+
+  report = match_with_diagnostics(pattern, observations)
+  report.is_match          # same determination as normal mode
+  report["matches"]        # same SDO list as normal mode
+  report["primary_stage"]  # e.g. "comparison_failed" when exactly one stage
+  report["eliminations"]   # bounded list of eliminated candidates
+
+Each elimination entry contains a stable ``stage`` and granular ``reason``,
+the ``rule`` location (line, column, character offsets, and pattern text),
+and only the identities needed to locate the candidate: the observation
+(index and ``id`` where present), the Cyber Observable object ``id``/``type``,
+the object path, and where applicable the pattern-side ``expected`` value and
+the observation-side ``actual`` value.  Container values are summarized by
+type and size, so an unrelated bundle is never emitted.
+
+The stages are:
+
+-  ``path_missing``: an object path step could not be taken (missing key,
+   index out of range, key on a non-object, ``[*]`` on a non-list).
+-  ``reference_unreachable``: a ``_ref``/``_refs`` target was absent or the
+   reference list was empty.
+-  ``type_mismatch``: the value was reached, but its type is not comparable
+   with the pattern literal (e.g. ordering an integer against a string).
+-  ``comparison_failed``: the types are comparable, but the test did not pass
+   (including ``LIKE``/``MATCHES``/``IN`` tests which are false), or a
+   conjunction of comparisons was not satisfied by the same object.
+-  ``temporal_combination_failed``: the comparisons matched, but a temporal
+   combination constraint eliminated the candidate (``WITHIN``,
+   ``START``/``STOP``, ``REPEATS`` sufficiency, or ``FOLLOWEDBY`` ordering),
+   or the observations could not be combined because they were not distinct.
+
+``report["branches"]`` records the availability of each operand of ``OR`` and
+``AND`` (and temporal ``FOLLOWEDBY``) so a successful ``OR`` alternative can
+be told apart from a failed one.  ``report["partial"]`` is true only when a
+non-matching rule had at least one side of a conjunction satisfied; a match is
+never reported as partial.
+
+Parse errors and matcher errors keep their original exception classes; they
+are never converted into a "no match" report.
 
 Testing
 -------

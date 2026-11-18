@@ -255,6 +255,429 @@ class MatcherErrorListener(antlr4.error.ErrorListener.ErrorListener):
         self.error_message = u"{}:{}: {}".format(line, column, msg)
 
 
+# Canonical semantic stages at which a candidate can be eliminated.  These
+# values are stable, machine-readable identifiers used in diagnostic reports.
+DIAG_PATH_MISSING = u"path_missing"
+DIAG_REFERENCE_UNREACHABLE = u"reference_unreachable"
+DIAG_TYPE_MISMATCH = u"type_mismatch"
+DIAG_COMPARISON_FAILED = u"comparison_failed"
+DIAG_TEMPORAL_FAILED = u"temporal_combination_failed"
+
+DIAGNOSTIC_STAGES = (
+    DIAG_PATH_MISSING,
+    DIAG_REFERENCE_UNREACHABLE,
+    DIAG_TYPE_MISMATCH,
+    DIAG_COMPARISON_FAILED,
+    DIAG_TEMPORAL_FAILED,
+)
+
+
+def _diagnostic_value(value, depth=0, expand=False):
+    """
+    Convert a value into a compact JSON-safe representation for diagnostics.
+
+    Diagnostic reports deliberately avoid embedding whole objects or bundles.
+    Observation-side values are represented by their type and size instead of
+    their contents, so a report can identify the relevant candidate without
+    dumping unrelated observation data.  Values the matcher itself constructs
+    for details (for example timestamp bounds or reference IDs) may be expanded
+    with expand=True.
+
+    :param value: Any Python value.
+    :param depth: Current recursion depth.
+    :param expand: If True, containers are expanded (bounded); otherwise they
+        are summarized.
+    :return: A JSON-safe representation.
+    """
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+
+    if isinstance(value, six.text_type):
+        if len(value) > 512:
+            return value[:509] + u"..."
+        return value
+
+    if isinstance(value, datetime.datetime):
+        return value.isoformat()
+
+    if isinstance(value, datetime.date):
+        return value.isoformat()
+
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            encoded = base64.standard_b64encode(bytes(value)).decode(u"ascii")
+        except Exception:
+            encoded = u""
+        return {u"type": u"binary", u"base64": encoded}
+
+    if isinstance(value, (set, frozenset)):
+        safe_values = [
+            _diagnostic_value(v, depth + 1, expand) for v in value
+        ]
+        safe_values.sort(key=lambda v: repr(v))
+        return {u"type": type(value).__name__, u"values": safe_values[:20],
+                u"size": len(value)}
+
+    if isinstance(value, (list, tuple)):
+        if expand and depth < 3:
+            return [_diagnostic_value(v, depth + 1, expand)
+                    for v in value[:20]]
+        return {u"type": type(value).__name__, u"size": len(value)}
+
+    if isinstance(value, dict):
+        if expand and depth < 3:
+            result = {}
+            for idx, key in enumerate(value):
+                if idx >= 20:
+                    break
+                result[six.text_type(key)] = _diagnostic_value(
+                    value[key], depth + 1, expand)
+            return result
+        return {u"type": u"dict", u"size": len(value)}
+
+    try:
+        return {u"type": type(value).__name__,
+                u"repr": repr(value)[:200]}
+    except Exception:
+        return {u"type": type(value).__name__}
+
+
+def _type_name(value):
+    """Return a stable, readable type name for diagnostics."""
+    if value is None:
+        return u"null"
+    if isinstance(value, bool):
+        return u"boolean"
+    if isinstance(value, datetime.datetime):
+        return u"timestamp"
+    return type(value).__name__
+
+
+def _rule_location(ctx, pattern_str=None):
+    """
+    Build a compact description of the pattern location represented by a
+    parse-tree node.
+
+    Line numbers are 1-based and columns are 0-based, matching ANTLR's token
+    positions.  Character offsets refer to the original pattern string.
+
+    :param ctx: An ANTLR parse-tree context, or None.
+    :param pattern_str: The original pattern string, if available.
+    :return: A dict with location information, or None.
+    """
+    if ctx is None:
+        return None
+
+    start = getattr(ctx, u"start", None)
+    stop = getattr(ctx, u"stop", None)
+    if start is None:
+        return None
+
+    start_offset = getattr(start, u"start", None)
+    stop_offset = getattr(stop, u"stop", None) if stop is not None else None
+
+    text = ctx.getText()
+    if pattern_str is not None and \
+            isinstance(start_offset, int) and isinstance(stop_offset, int) and \
+            0 <= start_offset <= stop_offset < len(pattern_str):
+        text = pattern_str[start_offset:stop_offset + 1]
+
+    if len(text) > 300:
+        text = text[:297] + u"..."
+
+    return {
+        u"line": getattr(start, u"line", None),
+        u"column": getattr(start, u"column", None),
+        u"end_line": getattr(stop, u"line", None) if stop is not None else None,
+        u"end_column": getattr(stop, u"column", None) if stop is not None else None,
+        u"start": start_offset,
+        u"stop": stop_offset,
+        u"text": text,
+    }
+
+
+class DiagnosticReport(dict):
+    """
+    A structured diagnostic report.
+
+    This is a regular dict, so it can be serialized with json.dumps() or
+    consumed with normal mapping access.  Convenience attribute access is
+    also supported (e.g. report.matched).
+
+    The match determination is always in the "matched" key; the is_match
+    property provides the same value.  Note that bool(report) deliberately
+    follows normal dict semantics (non-empty mapping), because JSON encoders
+    rely on the truthiness of dict subclasses; use report.is_match or
+    report["matched"] to test the determination.
+    """
+
+    def __getattr__(self, name):
+        try:
+            return self[name]
+        except KeyError:
+            raise AttributeError(name)
+
+    @property
+    def is_match(self):
+        """The match determination, as a boolean."""
+        return bool(self.get(u"matched", False))
+
+
+class MatchDiagnostics(object):
+    """
+    Collects the reasons candidates were eliminated while matching.
+
+    The collector is intentionally passive: it never changes matching
+    decisions, never consumes binding generators on its own, and never
+    swallows matcher or parser exceptions.  It simply records identities and
+    rule locations for candidates which were actually rejected.
+    """
+
+    # Keep reports bounded even for pathological patterns; the report says
+    # when this happens rather than silently dropping everything.
+    MAX_ELIMINATIONS = 1000
+    MAX_BRANCHES = 200
+
+    def __init__(self, pattern=None, stix_version=DEFAULT_VERSION,
+                 observations=None):
+        self.__pattern = pattern
+        self.__stix_version = stix_version
+        self.__observations = observations or []
+        self.__eliminations = []
+        self.__branches = []
+        self.__seen = set()
+        self.__branch_seen = set()
+        self.truncated = False
+
+    def set_observations(self, observations):
+        self.__observations = observations
+
+    @property
+    def eliminations(self):
+        return self.__eliminations
+
+    @property
+    def branches(self):
+        return self.__branches
+
+    def observation_identity(self, obs_idx):
+        """Return a minimal identity for an observation index."""
+        if obs_idx is None:
+            return None
+
+        identity = {u"index": obs_idx}
+        try:
+            sdo = self.__observations[obs_idx]
+        except (IndexError, TypeError):
+            return identity
+
+        if self.__stix_version == VARSION_2_1:
+            for obj in sdo.get(u"objects", []):
+                if isinstance(obj, dict) and \
+                        obj.get(u"type") == u"observed-data":
+                    if u"id" in obj:
+                        identity[u"id"] = obj[u"id"]
+                    break
+        else:
+            if u"id" in sdo:
+                identity[u"id"] = sdo[u"id"]
+
+        return identity
+
+    def object_identity(self, obs_idx, object_id):
+        """Return a minimal identity for a Cyber Observable object."""
+        if object_id is None:
+            return None
+
+        identity = {u"id": object_id}
+        try:
+            sdo = self.__observations[obs_idx]
+        except (IndexError, TypeError):
+            return identity
+
+        if self.__stix_version == VARSION_2_1:
+            for obj in sdo.get(u"objects", []):
+                if isinstance(obj, dict) and obj.get(u"id") == object_id:
+                    if u"type" in obj:
+                        identity[u"type"] = obj[u"type"]
+                    break
+        else:
+            objects = sdo.get(u"objects", {})
+            obj = objects.get(object_id)
+            if obj is None:
+                obj = objects.get(six.text_type(object_id))
+            if isinstance(obj, dict) and u"type" in obj:
+                identity[u"type"] = obj[u"type"]
+
+        return identity
+
+    def record(self, stage, reason, ctx=None, obs_idx=None, obs_idxs=None,
+               object_id=None, path=None, detail=None, expected=None,
+               actual=None, rule=None):
+        """
+        Record one candidate elimination.
+
+        :param stage: One of DIAGNOSTIC_STAGES.
+        :param reason: A granular, machine-readable reason.
+        :param ctx: Parse-tree node for the rule location.
+        :param obs_idx: Observation index, if the candidate is observation
+            scoped.
+        :param obs_idxs: Observation indices, for combination failures.
+        :param object_id: Root Cyber Observable object identity.
+        :param path: The object path text, if relevant.
+        :param detail: Additional JSON-safe details.
+        :param expected: Pattern-side value, if relevant.
+        :param actual: Observation-side value, if relevant.
+        :param rule: Explicit rule location; overrides ctx.
+        """
+        if len(self.__eliminations) >= self.MAX_ELIMINATIONS:
+            self.truncated = True
+            return
+
+        if rule is None:
+            rule = _rule_location(ctx, self.__pattern)
+
+        record = {u"stage": stage, u"reason": reason}
+
+        if rule is not None:
+            record[u"rule"] = rule
+
+        observation = self.observation_identity(obs_idx)
+        if observation is not None:
+            record[u"observation"] = observation
+
+        if obs_idxs is not None:
+            unique_idxs = []
+            for idx in obs_idxs:
+                if idx is not None and idx not in unique_idxs:
+                    unique_idxs.append(idx)
+            record[u"observations"] = [
+                self.observation_identity(idx) for idx in unique_idxs
+            ]
+
+        obj = self.object_identity(obs_idx, object_id)
+        if obj is not None:
+            record[u"object"] = obj
+
+        if path is not None:
+            record[u"path"] = path
+
+        if detail is not None:
+            record[u"detail"] = _diagnostic_value(detail, expand=True)
+
+        if expected is not None:
+            record[u"expected"] = _diagnostic_value(expected, expand=True)
+
+        if actual is not None:
+            record[u"actual"] = _diagnostic_value(actual)
+
+        try:
+            key = json.dumps(record, sort_keys=True, default=repr)
+        except Exception:
+            key = repr(record)
+
+        if key in self.__seen:
+            return
+        self.__seen.add(key)
+        self.__eliminations.append(record)
+
+    def record_branch(self, operator, ctx, left, right, result=None):
+        """
+        Record the availability of the two operands of a boolean or temporal
+        operator.  This makes successful OR branches visible in reports
+        without changing how one-sided OR bindings are generated.
+        """
+        if len(self.__branches) >= self.MAX_BRANCHES:
+            self.truncated = True
+            return
+
+        record = {
+            u"operator": operator,
+            u"left": bool(left),
+            u"right": bool(right),
+        }
+        if result is not None:
+            record[u"result"] = bool(result)
+
+        rule = _rule_location(ctx, self.__pattern)
+        if rule is not None:
+            record[u"rule"] = rule
+
+        try:
+            key = json.dumps(record, sort_keys=True, default=repr)
+        except Exception:
+            key = repr(record)
+
+        if key in self.__branch_seen:
+            return
+        self.__branch_seen.add(key)
+        self.__branches.append(record)
+
+    def build_report(self, matched, matches, binding=None, observation_count=None):
+        """
+        Produce the public DiagnosticReport.
+
+        :param matched: The match determination, identical to normal mode.
+        :param matches: Matching SDOs (only matched observations are included,
+            never the complete input bundle).
+        :param binding: The first binding (observation indices), if any.
+        :param observation_count: Number of input observations.
+        :return: DiagnosticReport
+        """
+        stage_counts = {}
+        for elimination in self.__eliminations:
+            stage = elimination[u"stage"]
+            stage_counts[stage] = stage_counts.get(stage, 0) + 1
+
+        stages = [
+            stage for stage in DIAGNOSTIC_STAGES if stage in stage_counts
+        ]
+        primary_stage = stages[0] if len(stages) == 1 else None
+
+        matching_observations = []
+        if binding:
+            seen_idxs = set()
+            for idx in binding:
+                if idx is None or idx in seen_idxs:
+                    continue
+                seen_idxs.add(idx)
+                identity = self.observation_identity(idx)
+                if identity is not None:
+                    matching_observations.append(identity)
+
+        # "partial" means at least one side of a conjunction was satisfied
+        # even though the whole rule did not match.  It must never be true
+        # for a match, and must never turn a failed comparison into a
+        # claimed success.
+        partial = False
+        if not matched:
+            partial = any(
+                branch.get(u"operator") in (u"AND", u"comparison AND") and
+                (branch.get(u"left") is True or
+                 branch.get(u"right") is True)
+                for branch in self.__branches
+            )
+
+        report = DiagnosticReport({
+            u"matched": bool(matched),
+            u"pattern": self.__pattern,
+            u"stix_version": self.__stix_version,
+            u"observation_count": observation_count,
+            u"binding": list(binding) if binding else [],
+            u"matches": list(matches),
+            u"matching_observations": matching_observations,
+            u"partial": partial,
+            u"primary_stage": None if matched else primary_stage,
+            u"stages": [] if matched else stages,
+            u"stage_counts": stage_counts,
+            u"eliminations": self.__eliminations,
+            u"branches": self.__branches,
+            u"truncated": self.truncated,
+        })
+
+        return report
+
+
 def _get_table_symmetric(table, val1, val2):
     """
     Gets an operator from a table according to the given types.  This
@@ -341,7 +764,27 @@ def _step_into_objs(objs, step):
     return stepped_cyber_obs_objs
 
 
-def _step_filter_observations(observations, step):
+def _step_failure_reason(objs, step):
+    """
+    Explain why a step produced no values for the given Cyber Observable
+    (sub)structures.  Used only for diagnostics.
+    """
+    if isinstance(step, int):
+        if not objs:
+            return u"empty_value_list"
+        if any(not isinstance(obj, list) for obj in objs):
+            return u"index_on_non_list"
+        return u"index_out_of_range"
+
+    if not objs:
+        return u"empty_value_list"
+    if any(not isinstance(obj, dict) for obj in objs):
+        return u"key_on_non_object"
+    return u"missing_key"
+
+
+def _step_filter_observations(observations, step, diagnostics=None, ctx=None,
+                              path=None):
     """
     A helper for the listener.  Given a particular structure in 'observations'
     (see exitObjectType(), exitFirstPathComponent()), representing a set of
@@ -358,19 +801,35 @@ def _step_filter_observations(observations, step):
     filtered_obs_map = {}
     for obs_idx, cyber_obs_obj_map in six.iteritems(observations):
         filtered_cyber_obs_obj_map = {}
+        failures = [] if diagnostics is not None else None
         for cyber_obs_obj_id, cyber_obs_objs in six.iteritems(cyber_obs_obj_map):
             filtered_cyber_obs_obj_list = _step_into_objs(cyber_obs_objs, step)
 
             if len(filtered_cyber_obs_obj_list) > 0:
-                filtered_cyber_obs_obj_map[cyber_obs_obj_id] = filtered_cyber_obs_obj_list
+                filtered_cyber_obs_obj_map[cyber_obs_obj_id] = \
+                    filtered_cyber_obs_obj_list
+            elif diagnostics is not None:
+                failures.append({
+                    u"reason": _step_failure_reason(cyber_obs_objs, step),
+                    u"object_id": cyber_obs_obj_id,
+                })
 
         if len(filtered_cyber_obs_obj_map) > 0:
             filtered_obs_map[obs_idx] = filtered_cyber_obs_obj_map
+        elif failures:
+            for failure in failures:
+                diagnostics.record(
+                    DIAG_PATH_MISSING, failure[u"reason"],
+                    ctx=ctx, obs_idx=obs_idx,
+                    object_id=failure[u"object_id"], path=path,
+                    detail={u"step": step},
+                )
 
     return filtered_obs_map
 
 
-def _step_filter_observations_index_star(observations):
+def _step_filter_observations_index_star(observations, diagnostics=None,
+                                          ctx=None, path=None):
     """
     Does an index "star" step, i.e. "[*]".  This will pull out all elements of
     the list as if they were parts of separate Cyber Observable objects, which
@@ -384,8 +843,10 @@ def _step_filter_observations_index_star(observations):
     """
 
     filtered_obs_map = {}
+    collecting = diagnostics is not None
     for obs_idx, cyber_obs_obj_map in six.iteritems(observations):
         filtered_cyber_obs_obj_map = {}
+        failures = [] if collecting else None
         for cyber_obs_obj_id, cyber_obs_objs in six.iteritems(cyber_obs_obj_map):
             stepped_cyber_obs_objs = []
             for cyber_obs_obj in cyber_obs_objs:
@@ -396,9 +857,25 @@ def _step_filter_observations_index_star(observations):
 
             if len(stepped_cyber_obs_objs) > 0:
                 filtered_cyber_obs_obj_map[cyber_obs_obj_id] = stepped_cyber_obs_objs
+            elif collecting:
+                if any(not isinstance(obj, list) for obj in cyber_obs_objs):
+                    reason = u"index_on_non_list"
+                else:
+                    reason = u"empty_list"
+                failures.append({
+                    u"reason": reason,
+                    u"object_id": cyber_obs_obj_id,
+                })
 
         if filtered_cyber_obs_obj_map:
             filtered_obs_map[obs_idx] = filtered_cyber_obs_obj_map
+        elif failures:
+            for failure in failures:
+                diagnostics.record(
+                    DIAG_PATH_MISSING, failure[u"reason"], ctx=ctx,
+                    obs_idx=obs_idx, object_id=failure[u"object_id"],
+                    path=path, detail={u"step": u"[*]"},
+                )
 
     return filtered_obs_map
 
@@ -755,7 +1232,8 @@ def _dereference_cyber_obs_objs(cyber_obs_objs, cyber_obs_obj_references, ref_pr
     return dereferenced_cyber_obs_objs
 
 
-def _obs_map_prop_test(obs_map, predicate):
+def _obs_map_prop_test(obs_map, predicate, diagnostics=None, ctx=None,
+                       path=None, classify=None):
     """
     Property tests always perform the same structural transformation of
     observation data on the stack.  There are several callbacks within the
@@ -786,19 +1264,58 @@ def _obs_map_prop_test(obs_map, predicate):
     :param obs_map: Observation data, as selected by an object path.
     :param predicate: This encompasses the actual test to perform.  It must
         be a function of one parameter, which returns True or False.
+    :param diagnostics: Optional MatchDiagnostics collector.  When given,
+        predicate failures are recorded.  This does not affect results.
+    :param ctx: Parse-tree node used for diagnostic rule locations.
+    :param path: Object path text, for diagnostics.
+    :param classify: Optional callable taking a value and returning either
+        None (ordinary comparison failure) or a dict with a stage and details
+        describing a more specific failure (e.g. type mismatch).
     :return: The transformed and filtered data, according to predicate.
     """
     passed_obs = {}
+    collecting = diagnostics is not None
     for obs_idx, cyber_obs_obj_map in six.iteritems(obs_map):
         passed_cyber_obs_obj_roots = set()
+        failures = [] if collecting else None
         for cyber_obs_obj_id, values in six.iteritems(cyber_obs_obj_map):
             for value in values:
                 if predicate(value):
                     passed_cyber_obs_obj_roots.add(cyber_obs_obj_id)
                     break
+                elif collecting:
+                    classification = classify(value) if classify else None
+                    if classification:
+                        stage = classification.get(u"stage",
+                                                   DIAG_COMPARISON_FAILED)
+                        reason = classification.get(
+                            u"reason", DIAG_COMPARISON_FAILED)
+                        detail = classification.get(u"detail")
+                        expected = classification.get(u"expected")
+                    else:
+                        stage = DIAG_COMPARISON_FAILED
+                        reason = u"value_did_not_satisfy_test"
+                        detail = None
+                        expected = None
+                    failures.append({
+                        u"stage": stage,
+                        u"reason": reason,
+                        u"object_id": cyber_obs_obj_id,
+                        u"value": value,
+                        u"detail": detail,
+                        u"expected": expected,
+                    })
 
         if passed_cyber_obs_obj_roots:
             passed_obs[obs_idx] = passed_cyber_obs_obj_roots
+        elif failures:
+            for failure in failures:
+                diagnostics.record(
+                    failure[u"stage"], failure[u"reason"], ctx=ctx,
+                    obs_idx=obs_idx, object_id=failure[u"object_id"],
+                    path=path, expected=failure[u"expected"],
+                    actual=failure[u"value"], detail=failure[u"detail"],
+                )
 
     return passed_obs
 
@@ -1050,7 +1567,8 @@ class MatchListener(STIXPatternListener):
     affecting correctness.
     """
 
-    def __init__(self, observed_data_sdos, verbose=False, stix_version=DEFAULT_VERSION):
+    def __init__(self, observed_data_sdos, verbose=False, stix_version=DEFAULT_VERSION,
+                 diagnostics=None):
         """
         Initialize this match listener.
 
@@ -1058,6 +1576,9 @@ class MatchListener(STIXPatternListener):
         :param verbose: If True, dump detailed information about triggered
             callbacks and stack activity to stdout.  This can provide useful
             information about what the matcher is doing.
+        :param diagnostics: Optional MatchDiagnostics collector.  When given,
+            it records why candidates were eliminated.  It never affects
+            matching results.
         """
         self.__observations = []
         self.__time_intervals = []  # 2-tuples of first,last timestamps
@@ -1104,6 +1625,9 @@ class MatchListener(STIXPatternListener):
         self.__stix_version = stix_version
         # Holds intermediate results
         self.__compute_stack = []
+        self.__diagnostics = diagnostics
+        if self.__diagnostics is not None:
+            self.__diagnostics.set_observations(self.__observations)
 
     def __split_multi_observed_data(self, observed_data_bundles):
         new_bundles = []
@@ -1147,6 +1671,11 @@ class MatchListener(STIXPatternListener):
                 scos.append(sco_data_map[ref])
 
         return scos
+
+    def __path_text(self, ctx):
+        """Get the object path text for a property test node, for diagnostics."""
+        path = ctx.objectPath()
+        return path.getText() if path is not None else None
 
     def __push(self, val, label=None):
         """Utility for pushing a value onto the compute stack.
@@ -1219,6 +1748,16 @@ class MatchListener(STIXPatternListener):
                 # convert back from complex instance_id to obs_index
                 yield tuple(map(self.get_obs_index_filtered, binding))
         return
+
+    @property
+    def observations(self):
+        """
+        The observations this listener was initialized with.
+
+        For STIX 2.1 this is the list of split observed-data SDOs, matching the
+        indices used in bindings.
+        """
+        return self.__observations
 
     def get_sdos_from_binding(self, binding):
         """
@@ -1317,13 +1856,24 @@ class MatchListener(STIXPatternListener):
             _next_rhs_binding = next(rhs_bindings, None)
             _next_lhs_binding = next(lhs_bindings, None)
             if _next_rhs_binding is None or _next_lhs_binding is None:
-                # cache and one generator are empty
+                # cache and one generator are empty.  The branch record shows
+                # which side was empty; the reason that side had no
+                # candidates was already recorded deeper in the tree, so it
+                # would be misleading to blame the temporal operator here.
+                if self.__diagnostics is not None:
+                    self.__diagnostics.record_branch(
+                        u"FOLLOWEDBY", ctx,
+                        _next_lhs_binding is not None,
+                        _next_rhs_binding is not None,
+                        result=False,
+                    )
                 return
             while _next_rhs_binding is not None or _next_lhs_binding is not None:
                 # while there are new bindings to explore
                 if _next_rhs_binding is not None:
                     # if there is a new rhs binding yield valid combinations
-                    for combination in self.__followed_by_right_join(_lhs_cache, _next_rhs_binding):
+                    for combination in self.__followed_by_right_join(
+                            _lhs_cache, _next_rhs_binding, ctx):
                         yield combination
                     # update cache
                     _rhs_cache.append(_next_rhs_binding)
@@ -1331,7 +1881,8 @@ class MatchListener(STIXPatternListener):
 
                 if _next_lhs_binding is not None:
                     # if there is a new rhs binding yield valid combinations
-                    for combination in self.__followed_by_left_join(_next_lhs_binding, _rhs_cache):
+                    for combination in self.__followed_by_left_join(
+                            _next_lhs_binding, _rhs_cache, ctx):
                         yield combination
                     # update cache
                     _lhs_cache.append(_next_lhs_binding)
@@ -1339,7 +1890,7 @@ class MatchListener(STIXPatternListener):
 
         self.__push(joined_bindings(), debug_label)
 
-    def __followed_by_left_join(self, lhs_binding, rhs_bindings):
+    def __followed_by_left_join(self, lhs_binding, rhs_bindings, ctx=None):
         # Yield all valid FOLLOWEDBY joins between a single lhs_binding
         # and a list of rhs_bindings
 
@@ -1358,8 +1909,19 @@ class MatchListener(STIXPatternListener):
 
                 if latest_lhs_first_timestamp <= earliest_rhs_last_timestamp:
                     yield (lhs_binding + rhs_binding)
+                elif self.__diagnostics is not None:
+                    self.__record_followed_by_failure(
+                        ctx, lhs_binding, rhs_binding,
+                        latest_lhs_first_timestamp,
+                        earliest_rhs_last_timestamp,
+                    )
+            elif self.__diagnostics is not None:
+                self.__record_combination_failure(
+                    ctx, u"followedby_observations_not_distinct",
+                    lhs_binding, rhs_binding,
+                )
 
-    def __followed_by_right_join(self, lhs_bindings, rhs_binding):
+    def __followed_by_right_join(self, lhs_bindings, rhs_binding, ctx=None):
         # Yield all valid FOLLOWEDBY joins between a list of lhs_bindings
         # and a single rhs_binding
 
@@ -1372,6 +1934,38 @@ class MatchListener(STIXPatternListener):
 
                 if latest_lhs_first_timestamp <= earliest_rhs_last_timestamp:
                     yield (lhs_binding + rhs_binding)
+                elif self.__diagnostics is not None:
+                    self.__record_followed_by_failure(
+                        ctx, lhs_binding, rhs_binding,
+                        latest_lhs_first_timestamp,
+                        earliest_rhs_last_timestamp,
+                    )
+            elif self.__diagnostics is not None:
+                self.__record_combination_failure(
+                    ctx, u"followedby_observations_not_distinct",
+                    lhs_binding, rhs_binding,
+                )
+
+    def __record_followed_by_failure(self, ctx, lhs_binding, rhs_binding,
+                                     latest_lhs, earliest_rhs):
+        """Record a FOLLOWEDBY candidate eliminated due to timestamp order."""
+        obs_idxs = []
+        for binding in (lhs_binding, rhs_binding):
+            for inst_id in binding:
+                obs_idx = self.get_obs_index(inst_id)
+                if obs_idx is not None and obs_idx not in obs_idxs:
+                    obs_idxs.append(obs_idx)
+
+        self.__diagnostics.record(
+            DIAG_TEMPORAL_FAILED,
+            u"followedby_time_order_violated",
+            ctx=ctx,
+            obs_idxs=obs_idxs,
+            detail={
+                u"latest_left_first_observed": latest_lhs,
+                u"earliest_right_last_observed": earliest_rhs,
+            },
+        )
 
     def __latest_first_timestamp(self, binding):
         return max(
@@ -1454,6 +2048,14 @@ class MatchListener(STIXPatternListener):
         # bindings match up with the pattern.
         first_lhs_binding = next(lhs_bindings, None)
         first_rhs_binding = next(rhs_bindings, None)
+        if self.__diagnostics is not None:
+            self.__diagnostics.record_branch(
+                u"OR", ctx,
+                first_lhs_binding is not None,
+                first_rhs_binding is not None,
+                result=(first_lhs_binding is not None or
+                        first_rhs_binding is not None),
+            )
         if first_lhs_binding is not None:
             lhs_binding_none = (None,) * len(first_lhs_binding)
         else:
@@ -1512,10 +2114,26 @@ class MatchListener(STIXPatternListener):
         def joined_bindings():
             _rhs_cache = []
             _lhs_cache = []
+            _report_budget = [20]
+            _joined_count = [0]
             _next_rhs_binding = next(rhs_bindings, None)
             _next_lhs_binding = next(lhs_bindings, None)
+            if self.__diagnostics is not None and \
+                    (_next_lhs_binding is None) != (_next_rhs_binding is None):
+                # Exactly one side has no candidates: the rule is only
+                # partially satisfied.  If both sides have candidates, any
+                # combination failures are recorded below instead.
+                self.__diagnostics.record_branch(
+                    u"AND", ctx,
+                    _next_lhs_binding is not None,
+                    _next_rhs_binding is not None,
+                    result=False,
+                )
             if _next_rhs_binding is None or _next_lhs_binding is None:
-                # cache and one generator are empty
+                # cache and one generator are empty.  Any reason the missing
+                # side has no candidates was already recorded deeper in the
+                # expression tree; the branch record above shows which side
+                # was empty.
                 return
             while _next_rhs_binding is not None or _next_lhs_binding is not None:
                 # while there are new bindings to explore
@@ -1524,7 +2142,15 @@ class MatchListener(STIXPatternListener):
                     for lhs_binding in _lhs_cache:
                         # yield valid combinations
                         if _disjoint(lhs_binding, _next_rhs_binding):
+                            _joined_count[0] += 1
                             yield (lhs_binding + _next_rhs_binding)
+                        elif self.__diagnostics is not None and \
+                                _report_budget[0] > 0:
+                            _report_budget[0] -= 1
+                            self.__record_combination_failure(
+                                ctx, u"observations_not_distinct",
+                                lhs_binding, _next_rhs_binding,
+                            )
                     # update cache
                     _rhs_cache.append(_next_rhs_binding)
                     _next_rhs_binding = next(rhs_bindings, None)
@@ -1534,12 +2160,41 @@ class MatchListener(STIXPatternListener):
                     for rhs_binding in _rhs_cache:
                         # yield valid combinations
                         if _disjoint(_next_lhs_binding, rhs_binding):
+                            _joined_count[0] += 1
                             yield (_next_lhs_binding + rhs_binding)
+                        elif self.__diagnostics is not None and \
+                                _report_budget[0] > 0:
+                            _report_budget[0] -= 1
+                            self.__record_combination_failure(
+                                ctx, u"observations_not_distinct",
+                                _next_lhs_binding, rhs_binding,
+                            )
                     # update cache
                     _lhs_cache.append(_next_lhs_binding)
                     _next_lhs_binding = next(lhs_bindings, None)
 
+            if self.__diagnostics is not None and _joined_count[0] == 0:
+                # Both sides had candidates, but no distinct combination
+                # existed.  Each side was individually satisfied, so this is
+                # a partial satisfaction, not a complete match.
+                self.__diagnostics.record_branch(
+                    u"AND", ctx, True, True, result=False,
+                )
+
         self.__push(joined_bindings(), debug_label)
+
+    def __record_combination_failure(self, ctx, reason, *bindings):
+        """Record a binding combination eliminated by identity constraints."""
+        obs_idxs = []
+        for binding in bindings:
+            for inst_id in binding:
+                obs_idx = self.get_obs_index(inst_id)
+                if obs_idx is not None and obs_idx not in obs_idxs:
+                    obs_idxs.append(obs_idx)
+
+        self.__diagnostics.record(
+            DIAG_TEMPORAL_FAILED, reason, ctx=ctx, obs_idxs=obs_idxs,
+        )
 
     def exitObservationExpressionSimple(self, ctx):
         """
@@ -1591,18 +2246,68 @@ class MatchListener(STIXPatternListener):
             # as-is.
             filtered_bindings = bindings
         else:
-            # A generator of tuples goes in (bindings)
-            filtered_bindings = _filtered_combinations(bindings, rep_count)
-            # ... and a generator of tuples of tuples comes out
-            # (filtered_bindings).  The following flattens each outer
-            # tuple.  I could have also written a generic flattener, but
-            # since this structure is predictable, I could do something
-            # simpler.  Other code dealing with bindings doesn't expect any
-            # nested structure, so I do the flattening here.
-            filtered_bindings = (tuple(itertools.chain.from_iterable(binding))
-                                 for binding in filtered_bindings)
+            if self.__diagnostics is None:
+                # Normal mode: keep the exact original code path.
+                filtered_bindings = _filtered_combinations(
+                    bindings, rep_count,
+                )
+                filtered_bindings = (
+                    tuple(itertools.chain.from_iterable(binding))
+                    for binding in filtered_bindings
+                )
+            else:
+                # Diagnostic mode: count source candidates lazily so a
+                # report can explain insufficient repetition, then flatten
+                # exactly as normal mode does.
+                candidate_count = [0]
+
+                def counted_bindings():
+                    for binding in bindings:
+                        candidate_count[0] += 1
+                        yield binding
+
+                combinations = _filtered_combinations(
+                    counted_bindings(), rep_count,
+                )
+                flat_bindings = (
+                    tuple(itertools.chain.from_iterable(binding))
+                    for binding in combinations
+                )
+                filtered_bindings = self.__check_repeat_sufficiency(
+                    candidate_count, rep_count, flat_bindings, ctx,
+                )
 
         self.__push(filtered_bindings, debug_label)
+
+    def __check_repeat_sufficiency(self, candidate_count, rep_count,
+                                   flat_bindings, ctx):
+        """
+        Pass repeated bindings through unchanged, but report when no distinct
+        combination of the required size could be found.
+
+        This preserves the lazy behavior of the binding generators: the source
+        is only inspected if the combination generator produced nothing, which
+        is exactly what normally ends the match attempt.  A generator which is
+        abandoned early (e.g. because another OR branch produced the winning
+        binding) is not reported.
+        """
+        produced = False
+        exhausted = False
+        try:
+            for binding in flat_bindings:
+                produced = True
+                yield binding
+            exhausted = True
+        finally:
+            if exhausted and not produced:
+                self.__diagnostics.record(
+                    DIAG_TEMPORAL_FAILED, u"repeat_count_not_satisfied",
+                    ctx=ctx,
+                    detail={
+                        u"required_repetitions": rep_count,
+                        u"candidate_bindings_seen": candidate_count[0],
+                    },
+                )
 
     def exitObservationExpressionWithin(self, ctx):
         """
@@ -1628,7 +2333,18 @@ class MatchListener(STIXPatternListener):
                 duration
             )
 
-        filtered_bindings = (binding for binding in bindings if check_within(binding))
+        def within_bindings():
+            for binding in bindings:
+                if check_within(binding):
+                    yield binding
+                elif self.__diagnostics is not None:
+                    self.__record_temporal_binding_failure(
+                        ctx, binding, u"within_duration_exceeded",
+                        {u"duration_seconds": duration.seconds,
+                         u"duration_days": duration.days},
+                    )
+
+        filtered_bindings = within_bindings()
 
         self.__push(filtered_bindings, debug_label)
 
@@ -1667,11 +2383,40 @@ class MatchListener(STIXPatternListener):
         # satisfy, since a value can't be both >= and < the same number.
         # And of course it's impossible if start > stop.
         if start_time < stop_time:
-            filtered_bindings = (binding for binding in bindings if check_overlap(binding))
+            def start_stop_bindings():
+                for binding in bindings:
+                    if check_overlap(binding):
+                        yield binding
+                    elif self.__diagnostics is not None:
+                        self.__record_temporal_binding_failure(
+                            ctx, binding, u"start_stop_interval_missed",
+                            {u"start": start_time, u"stop": stop_time},
+                        )
+
+            filtered_bindings = start_stop_bindings()
         else:
+            if self.__diagnostics is not None:
+                self.__diagnostics.record(
+                    DIAG_TEMPORAL_FAILED, u"invalid_start_stop_interval",
+                    ctx=ctx,
+                    detail={u"start": start_time, u"stop": stop_time},
+                )
             filtered_bindings = iter(())
 
         self.__push(filtered_bindings, debug_label)
+
+    def __record_temporal_binding_failure(self, ctx, binding, reason, detail):
+        """Record a binding eliminated by a temporal qualifier."""
+        obs_idxs = []
+        for inst_id in binding:
+            obs_idx = self.get_obs_index(inst_id)
+            if obs_idx is not None and obs_idx not in obs_idxs:
+                obs_idxs.append(obs_idx)
+
+        self.__diagnostics.record(
+            DIAG_TEMPORAL_FAILED, reason, ctx=ctx, obs_idxs=obs_idxs,
+            detail=detail,
+        )
 
     def exitStartStopQualifier(self, ctx):
         """
@@ -1740,6 +2485,12 @@ class MatchListener(STIXPatternListener):
             obs2 = self.__pop(debug_label)
             obs1 = self.__pop(debug_label)
 
+            if self.__diagnostics is not None:
+                self.__diagnostics.record_branch(
+                    u"comparison OR", ctx, bool(obs1), bool(obs2),
+                    result=bool(obs1) or bool(obs2),
+                )
+
             # We union the observation IDs and their corresponding
             # Cyber Observable object ID sets.
             for obs_id, cyber_obs_obj_ids in six.iteritems(obs2):
@@ -1778,6 +2529,8 @@ class MatchListener(STIXPatternListener):
             obs2 = self.__pop(debug_label)
             obs1 = self.__pop(debug_label)
 
+            obs1_before = set(obs1)
+
             # We intersect the observation IDs and their corresponding
             # Cyber Observable object ID sets.  If any of the Cyber Observable object ID set
             # intersections is empty, we drop the observation from the
@@ -1795,6 +2548,20 @@ class MatchListener(STIXPatternListener):
             # above, so this needs to be a separate pass).
             for obs_id in obs_ids_to_drop:
                 del obs1[obs_id]
+
+            if self.__diagnostics is not None:
+                self.__diagnostics.record_branch(
+                    u"comparison AND", ctx, bool(obs1_before), bool(obs2),
+                    result=bool(obs1),
+                )
+                if not obs1 and obs1_before and obs2:
+                    self.__diagnostics.record(
+                        DIAG_COMPARISON_FAILED,
+                        u"and_not_satisfied_by_same_object",
+                        ctx=ctx,
+                        obs_idxs=list(obs1_before),
+                        detail={u"observations_dropped": len(obs_ids_to_drop)},
+                    )
 
             self.__push(obs1, debug_label)
 
@@ -1827,6 +2594,16 @@ class MatchListener(STIXPatternListener):
 
         obs_values = self.__pop(debug_label)
 
+        def _coerce_timestamp(value):
+            """Mirror the timestamp coercion done by predicates."""
+            if isinstance(literal_value, datetime.datetime) and \
+                    isinstance(value, six.text_type):
+                try:
+                    return _str_to_datetime(value)
+                except ValueError:
+                    return value
+            return value
+
         def equality_pred(value):
 
             # timestamp hackage: if we have a timestamp literal from the
@@ -1857,7 +2634,33 @@ class MatchListener(STIXPatternListener):
 
             return result
 
-        passed_obs = _obs_map_prop_test(obs_values, equality_pred)
+        def classify(value):
+            coerced = _coerce_timestamp(value)
+            eq_func = _get_table_symmetric(_COMPARE_EQ_FUNCS,
+                                           type(literal_value),
+                                           type(coerced))
+            if eq_func is None:
+                return {
+                    u"stage": DIAG_TYPE_MISMATCH,
+                    u"reason": u"unsupported_comparison_types",
+                    u"expected": _type_name(literal_value),
+                    u"detail": {u"pattern_type": _type_name(literal_value),
+                                u"value_type": _type_name(value)},
+                }
+            if ctx.NEQ() or ctx.NOT():
+                reason = u"negated_equality_test_failed"
+            else:
+                reason = u"equality_test_failed"
+            return {
+                u"stage": DIAG_COMPARISON_FAILED,
+                u"reason": reason,
+                u"expected": _diagnostic_value(literal_value),
+            }
+
+        passed_obs = _obs_map_prop_test(
+            obs_values, equality_pred, self.__diagnostics, ctx,
+            self.__path_text(ctx) if self.__diagnostics else None, classify,
+        )
 
         self.__push(passed_obs, debug_label)
 
@@ -1889,6 +2692,16 @@ class MatchListener(STIXPatternListener):
         )
 
         obs_values = self.__pop(debug_label)
+
+        def _coerce_timestamp(value):
+            """Mirror the timestamp coercion done by predicates."""
+            if isinstance(literal_value, datetime.datetime) and \
+                    isinstance(value, six.text_type):
+                try:
+                    return _str_to_datetime(value)
+                except ValueError:
+                    return value
+            return value
 
         def order_pred(value):
 
@@ -1937,7 +2750,29 @@ class MatchListener(STIXPatternListener):
 
             return result
 
-        passed_obs = _obs_map_prop_test(obs_values, order_pred)
+        def classify(value):
+            coerced = _coerce_timestamp(value)
+            cmp_func = _get_table_symmetric(_COMPARE_ORDER_FUNCS,
+                                            type(literal_value),
+                                            type(coerced))
+            if cmp_func is None:
+                return {
+                    u"stage": DIAG_TYPE_MISMATCH,
+                    u"reason": u"unsupported_comparison_types",
+                    u"expected": _type_name(literal_value),
+                    u"detail": {u"pattern_type": _type_name(literal_value),
+                                u"value_type": _type_name(value)},
+                }
+            return {
+                u"stage": DIAG_COMPARISON_FAILED,
+                u"reason": u"order_test_failed",
+                u"expected": _diagnostic_value(literal_value),
+            }
+
+        passed_obs = _obs_map_prop_test(
+            obs_values, order_pred, self.__diagnostics, ctx,
+            self.__path_text(ctx) if self.__diagnostics else None, classify,
+        )
 
         self.__push(passed_obs, debug_label)
 
@@ -1991,7 +2826,42 @@ class MatchListener(STIXPatternListener):
 
             return result
 
-        passed_obs = _obs_map_prop_test(obs_values, set_pred)
+        def classify(value):
+            coerced = value
+            if is_set_of_timestamps and isinstance(value, six.text_type):
+                try:
+                    coerced = _str_to_datetime(value)
+                except ValueError:
+                    coerced = value
+            comparable = any(
+                _get_table_symmetric(_COMPARE_EQ_FUNCS,
+                                     type(member), type(coerced))
+                is not None
+                for member in s
+            )
+            if s and not comparable:
+                return {
+                    u"stage": DIAG_TYPE_MISMATCH,
+                    u"reason": u"unsupported_comparison_types",
+                    u"expected": sorted(_type_name(member) for member in s),
+                    u"detail": {u"pattern_types":
+                                sorted(set(_type_name(m) for m in s)),
+                                u"value_type": _type_name(value)},
+                }
+            if ctx.NOT():
+                reason = u"membership_test_failed_negated"
+            else:
+                reason = u"value_not_in_set"
+            return {
+                u"stage": DIAG_COMPARISON_FAILED,
+                u"reason": reason,
+                u"expected": _diagnostic_value(s),
+            }
+
+        passed_obs = _obs_map_prop_test(
+            obs_values, set_pred, self.__diagnostics, ctx,
+            self.__path_text(ctx) if self.__diagnostics else None, classify,
+        )
 
         self.__push(passed_obs, debug_label)
 
@@ -2039,7 +2909,30 @@ class MatchListener(STIXPatternListener):
 
             return result
 
-        passed_obs = _obs_map_prop_test(obs_values, like_pred)
+        def classify(value):
+            if isinstance(value, six.binary_type) and is_binary_convertible:
+                return {
+                    u"stage": DIAG_COMPARISON_FAILED,
+                    u"reason": u"like_pattern_did_not_match",
+                    u"expected": _diagnostic_value(operand_str),
+                }
+            if not isinstance(value, six.text_type):
+                return {
+                    u"stage": DIAG_TYPE_MISMATCH,
+                    u"reason": u"non_string_value",
+                    u"expected": u"string_pattern",
+                    u"detail": {u"value_type": _type_name(value)},
+                }
+            return {
+                u"stage": DIAG_COMPARISON_FAILED,
+                u"reason": u"like_pattern_did_not_match",
+                u"expected": _diagnostic_value(operand_str),
+            }
+
+        passed_obs = _obs_map_prop_test(
+            obs_values, like_pred, self.__diagnostics, ctx,
+            self.__path_text(ctx) if self.__diagnostics else None, classify,
+        )
 
         self.__push(passed_obs, debug_label)
 
@@ -2101,7 +2994,30 @@ class MatchListener(STIXPatternListener):
 
             return result
 
-        passed_obs = _obs_map_prop_test(obs_values, regex_pred)
+        def classify(value):
+            if isinstance(value, six.binary_type) and is_binary_convertible:
+                return {
+                    u"stage": DIAG_COMPARISON_FAILED,
+                    u"reason": u"regex_did_not_match",
+                    u"expected": _diagnostic_value(regex),
+                }
+            if not isinstance(value, (six.text_type, six.binary_type)):
+                return {
+                    u"stage": DIAG_TYPE_MISMATCH,
+                    u"reason": u"non_string_value",
+                    u"expected": u"string_pattern",
+                    u"detail": {u"value_type": _type_name(value)},
+                }
+            return {
+                u"stage": DIAG_COMPARISON_FAILED,
+                u"reason": u"regex_did_not_match",
+                u"expected": _diagnostic_value(regex),
+            }
+
+        passed_obs = _obs_map_prop_test(
+            obs_values, regex_pred, self.__diagnostics, ctx,
+            self.__path_text(ctx) if self.__diagnostics else None, classify,
+        )
 
         self.__push(passed_obs, debug_label)
 
@@ -2137,7 +3053,24 @@ class MatchListener(STIXPatternListener):
 
             return result
 
-        passed_obs = _obs_map_prop_test(obs_values, subnet_pred)
+        def classify(value):
+            if not isinstance(value, six.text_type):
+                return {
+                    u"stage": DIAG_TYPE_MISMATCH,
+                    u"reason": u"non_string_value",
+                    u"expected": u"cidr_pattern",
+                    u"detail": {u"value_type": _type_name(value)},
+                }
+            return {
+                u"stage": DIAG_COMPARISON_FAILED,
+                u"reason": u"subnet_test_failed",
+                u"expected": _diagnostic_value(subnet_str),
+            }
+
+        passed_obs = _obs_map_prop_test(
+            obs_values, subnet_pred, self.__diagnostics, ctx,
+            self.__path_text(ctx) if self.__diagnostics else None, classify,
+        )
 
         self.__push(passed_obs, debug_label)
 
@@ -2173,7 +3106,24 @@ class MatchListener(STIXPatternListener):
 
             return result
 
-        passed_obs = _obs_map_prop_test(obs_values, contains_pred)
+        def classify(value):
+            if not isinstance(value, six.text_type):
+                return {
+                    u"stage": DIAG_TYPE_MISMATCH,
+                    u"reason": u"non_string_value",
+                    u"expected": u"ip_or_cidr_pattern",
+                    u"detail": {u"value_type": _type_name(value)},
+                }
+            return {
+                u"stage": DIAG_COMPARISON_FAILED,
+                u"reason": u"superset_test_failed",
+                u"expected": _diagnostic_value(ip_or_subnet_str),
+            }
+
+        passed_obs = _obs_map_prop_test(
+            obs_values, contains_pred, self.__diagnostics, ctx,
+            self.__path_text(ctx) if self.__diagnostics else None, classify,
+        )
 
         self.__push(passed_obs, debug_label)
 
@@ -2213,10 +3163,19 @@ class MatchListener(STIXPatternListener):
         type_ = type_token.getText()
 
         results = {}
-        if not (self.__stix_version == VARSION_2_1 and type_ in TYPES_V21):
+        excluded_type = (
+            self.__stix_version == VARSION_2_1 and type_ in TYPES_V21
+        )
+        if not excluded_type:
             for obs_idx, obs in enumerate(self.__observations):
 
                 if "objects" not in obs:
+                    if self.__diagnostics is not None:
+                        self.__diagnostics.record(
+                            DIAG_PATH_MISSING, u"observation_has_no_objects",
+                            ctx=ctx, obs_idx=obs_idx,
+                            detail={u"object_type": type_},
+                        )
                     continue
 
                 objects_from_this_obs = {}
@@ -2228,6 +3187,17 @@ class MatchListener(STIXPatternListener):
 
                 if len(objects_from_this_obs) > 0:
                     results[obs_idx] = objects_from_this_obs
+                elif self.__diagnostics is not None:
+                    self.__diagnostics.record(
+                        DIAG_PATH_MISSING, u"object_type_not_present",
+                        ctx=ctx, obs_idx=obs_idx,
+                        detail={u"object_type": type_},
+                    )
+        elif self.__diagnostics is not None:
+            self.__diagnostics.record(
+                DIAG_PATH_MISSING, u"object_type_not_searchable",
+                ctx=ctx, detail={u"object_type": type_},
+            )
 
         self.__push(results, u"exitObjectType ({})".format(type_))
 
@@ -2240,7 +3210,7 @@ class MatchListener(STIXPatternListener):
 
         return iterator
 
-    def __dereference_objects(self, prop_name, obs_map):
+    def __dereference_objects(self, prop_name, obs_map, ctx=None):
         """
         If prop_name is a reference property, this "dereferences" it,
         substituting the referenced Cyber Observable object for the reference.  Reference
@@ -2257,6 +3227,7 @@ class MatchListener(STIXPatternListener):
         :param obs_map: The observation data after stepping, but before it
             has been pushed onto the stack.  This method acts as an additional
             "processing" step on that data.
+        :param ctx: Parse-tree node used for diagnostic rule locations.
         :return: If prop_name is not a reference property, obs_map is
             returned unchanged.  If it is a reference property, the
             dereferenced observation data is returned.
@@ -2279,6 +3250,20 @@ class MatchListener(STIXPatternListener):
                     if len(dereferenced_cyber_obs_objs) > 0:
                         dereferenced_cyber_obs_obj_map[cyber_obs_obj_id] = \
                             dereferenced_cyber_obs_objs
+                    elif self.__diagnostics is not None:
+                        for referenced_obj_id in references:
+                            self.__diagnostics.record(
+                                DIAG_REFERENCE_UNREACHABLE,
+                                u"reference_target_absent",
+                                ctx=ctx, obs_idx=obs_idx,
+                                object_id=cyber_obs_obj_id,
+                                path=prop_name,
+                                detail={
+                                    u"reference": _diagnostic_value(
+                                        referenced_obj_id),
+                                    u"reference_property": prop_name,
+                                },
+                            )
 
                 if len(dereferenced_cyber_obs_obj_map) > 0:
                     dereferenced_obs_map[obs_idx] = dereferenced_cyber_obs_obj_map
@@ -2311,6 +3296,11 @@ class MatchListener(STIXPatternListener):
                         if len(dereferenced_cyber_obs_objs) > 0:
                             dereferenced_cyber_obs_obj_lists.append(
                                 dereferenced_cyber_obs_objs)
+                        elif self.__diagnostics is not None:
+                            self.__record_unresolved_refs(
+                                ctx, obs_idx, cyber_obs_obj_id, prop_name,
+                                reference_list,
+                            )
 
                     if len(dereferenced_cyber_obs_obj_lists) > 0:
                         dereferenced_cyber_obs_obj_map[cyber_obs_obj_id] = \
@@ -2322,6 +3312,29 @@ class MatchListener(STIXPatternListener):
             obs_map = dereferenced_obs_map
 
         return obs_map
+
+    def __record_unresolved_refs(self, ctx, obs_idx, cyber_obs_obj_id,
+                                 prop_name, reference_list):
+        """Record unresolved references from a reference list, for diagnostics."""
+        if not reference_list:
+            self.__diagnostics.record(
+                DIAG_REFERENCE_UNREACHABLE, u"empty_reference_list",
+                ctx=ctx, obs_idx=obs_idx, object_id=cyber_obs_obj_id,
+                path=prop_name,
+                detail={u"reference_property": prop_name},
+            )
+            return
+
+        for referenced_obj_id in reference_list:
+            self.__diagnostics.record(
+                DIAG_REFERENCE_UNREACHABLE, u"reference_target_absent",
+                ctx=ctx, obs_idx=obs_idx, object_id=cyber_obs_obj_id,
+                path=prop_name,
+                detail={
+                    u"reference": _diagnostic_value(referenced_obj_id),
+                    u"reference_property": prop_name,
+                },
+            )
 
     def exitFirstPathComponent(self, ctx):
         """
@@ -2346,9 +3359,13 @@ class MatchListener(STIXPatternListener):
         debug_label = u"exitFirstPathComponent ({})".format(prop_name)
         obs_val = self.__pop(debug_label)
 
-        filtered_obs_map = _step_filter_observations(obs_val, prop_name)
-        dereferenced_obs_map = self.__dereference_objects(prop_name,
-                                                          filtered_obs_map)
+        path = ctx.parentCtx.getText() if ctx.parentCtx is not None else None
+        filtered_obs_map = _step_filter_observations(
+            obs_val, prop_name, self.__diagnostics, ctx, path,
+        )
+        dereferenced_obs_map = self.__dereference_objects(
+            prop_name, filtered_obs_map, ctx,
+        )
 
         self.__push(dereferenced_obs_map, debug_label)
 
@@ -2364,9 +3381,13 @@ class MatchListener(STIXPatternListener):
         debug_label = u"exitKeyPathStep ({})".format(prop_name)
         obs_val = self.__pop(debug_label)
 
-        filtered_obs_map = _step_filter_observations(obs_val, prop_name)
-        dereferenced_obs_map = self.__dereference_objects(prop_name,
-                                                          filtered_obs_map)
+        path = ctx.parentCtx.getText() if ctx.parentCtx is not None else None
+        filtered_obs_map = _step_filter_observations(
+            obs_val, prop_name, self.__diagnostics, ctx, path,
+        )
+        dereferenced_obs_map = self.__dereference_objects(
+            prop_name, filtered_obs_map, ctx,
+        )
 
         self.__push(dereferenced_obs_map, debug_label)
 
@@ -2375,6 +3396,7 @@ class MatchListener(STIXPatternListener):
         Does the same as exitFirstPathComponent(), but takes a list index
         step.
         """
+        path = ctx.parentCtx.getText() if ctx.parentCtx is not None else None
         if ctx.IntPosLiteral() or ctx.IntNegLiteral():
             index = _literal_terminal_to_python_val(
                 ctx.IntPosLiteral() or ctx.IntNegLiteral()
@@ -2382,14 +3404,18 @@ class MatchListener(STIXPatternListener):
             debug_label = u"exitIndexPathStep ({})".format(index)
             obs_val = self.__pop(debug_label)
 
-            filtered_obs_map = _step_filter_observations(obs_val, index)
+            filtered_obs_map = _step_filter_observations(
+                obs_val, index, self.__diagnostics, ctx, path,
+            )
 
         elif ctx.ASTERISK():
             # In this case, we step into all of the list elements.
             debug_label = u"exitIndexPathStep (*)"
             obs_val = self.__pop(debug_label)
 
-            filtered_obs_map = _step_filter_observations_index_star(obs_val)
+            filtered_obs_map = _step_filter_observations_index_star(
+                obs_val, self.__diagnostics, ctx, path,
+            )
 
         else:
             # reallly shouldn't happen...
@@ -2457,6 +3483,7 @@ class Pattern:
         :param stix_version: The stix specification version
         :raises stix2patterns.pattern.ParseException: If there is a parse error
         """
+        self.__pattern_str = pattern_str
         self.__stix_version = stix_version
         if self.__stix_version == VARSION_2_1:
             self.__pattern = Stix2Pattern21(pattern_str)
@@ -2466,7 +3493,7 @@ class Pattern:
     def __getattr__(self, name):
         return self.__pattern.__getattribute__(name)
 
-    def match(self, observed_data_sdos, verbose=False):
+    def match(self, observed_data_sdos, verbose=False, diagnostics=False):
         """
         Match this pattern against the given observations.  Returns matching
         SDOs.  The matcher can find many bindings; this function returns the
@@ -2476,20 +3503,52 @@ class Pattern:
             dicts.  STIX JSON should be parsed into native Python structures
             before calling this method.
         :param verbose: Whether to dump detailed info about matcher operation
-        :return: Matching SDOs if the pattern matched; an empty list if it
-            didn't match.
+        :param diagnostics: If False (the default), return the matching SDOs
+            exactly as normal.  If True, return a structured
+            DiagnosticReport describing which semantic stage eliminated
+            non-matching candidates, while the "matched" determination and
+            "matches" list remain identical to normal mode.
+        :return: Matching SDOs, or a DiagnosticReport if diagnostics is True.
         :raises MatcherException: If an error occurs during matching
         """
-        matcher = MatchListener(observed_data_sdos, verbose, stix_version=self.__stix_version)
+        collector = None
+        if diagnostics:
+            collector = MatchDiagnostics(
+                self.__pattern_str, self.__stix_version,
+            )
+
+        matcher = MatchListener(
+            observed_data_sdos, verbose, stix_version=self.__stix_version,
+            diagnostics=collector,
+        )
         self.__pattern.walk(matcher)
 
         first_binding = next(matcher.matched(), [])
         matching_sdos = matcher.get_sdos_from_binding(first_binding)
 
-        return matching_sdos
+        if collector is None:
+            return matching_sdos
+
+        # matched() has already converted instance IDs to observation
+        # indexes, exactly as used by normal mode.
+        binding = list(first_binding)
+
+        return collector.build_report(
+            bool(first_binding), matching_sdos, binding=binding,
+            observation_count=len(matcher.observations),
+        )
+
+    def diagnose(self, observed_data_sdos, verbose=False):
+        """
+        Convenience wrapper for match(..., diagnostics=True).
+
+        :return: DiagnosticReport
+        """
+        return self.match(observed_data_sdos, verbose, diagnostics=True)
 
 
-def match(pattern, observed_data_sdos, verbose=False, stix_version=DEFAULT_VERSION):
+def match(pattern, observed_data_sdos, verbose=False,
+          stix_version=DEFAULT_VERSION, diagnostics=False):
     """
     Match the given pattern against the given observations.  Returns matching
     SDOs.  The matcher can find many bindings; this function returns the SDOs
@@ -2500,14 +3559,32 @@ def match(pattern, observed_data_sdos, verbose=False, stix_version=DEFAULT_VERSI
         STIX JSON should be parsed into native Python structures before calling
         this function.
     :param verbose: Whether to dump detailed info about matcher operation
-    :return: Matching SDOs if the pattern matched; an empty list if it didn't
-        match.
+    :param stix_version: STIX specification version
+    :param diagnostics: If True, return a structured DiagnosticReport instead
+        of a bare list.  The determination itself is unchanged; see
+        Pattern.match().
+    :return: Matching SDOs, or a DiagnosticReport if diagnostics is True.
     :raises stix2patterns.pattern.ParseException: If there is a parse error
     :raises MatcherException: If an error occurs during matching
     """
 
     compiled_pattern = Pattern(pattern, stix_version)
-    return compiled_pattern.match(observed_data_sdos, verbose)
+    return compiled_pattern.match(
+        observed_data_sdos, verbose, diagnostics=diagnostics,
+    )
+
+
+def match_with_diagnostics(pattern, observed_data_sdos, verbose=False,
+                           stix_version=DEFAULT_VERSION):
+    """
+    Convenience wrapper for match(..., diagnostics=True).
+
+    :return: DiagnosticReport
+    """
+    return match(
+        pattern, observed_data_sdos, verbose,
+        stix_version=stix_version, diagnostics=True,
+    )
 
 
 def main():
@@ -2536,6 +3613,10 @@ def main():
     Run quietly. One -q will only print out NO MATCH information. Two will
     produce no match-related output. This option does not affect the action
     of -v, and error information will still be displayed.""", default=0)
+    arg_parser.add_argument("--diagnostics", action="store_true", help="""
+    Emit a structured JSON report for non-matching patterns, explaining the
+    semantic stage at which candidates were eliminated. The exit status and
+    error behavior are unchanged.""")
 
     args = arg_parser.parse_args()
 
@@ -2555,7 +3636,20 @@ def main():
                 if pattern[0] == u"#":
                     continue  # skip commented out lines
                 escaped_pattern = pattern.encode("unicode_escape").decode("ascii")
-                if match(pattern, observed_data_sdos, args.verbose, args.stix_version):
+                if args.diagnostics:
+                    report = match(
+                        pattern, observed_data_sdos, args.verbose,
+                        args.stix_version, diagnostics=True,
+                    )
+                    if report.matched:
+                        if args.quiet < 1:
+                            print(u"\nMATCH: ", escaped_pattern)
+                    else:
+                        if args.quiet < 2:
+                            print(u"\nNO MATCH: ", escaped_pattern)
+                            print(json.dumps(report, indent=2, default=str))
+                        return_value = 1
+                elif match(pattern, observed_data_sdos, args.verbose, args.stix_version):
                     if args.quiet < 1:
                         print(u"\nMATCH: ", escaped_pattern)
                 else:
