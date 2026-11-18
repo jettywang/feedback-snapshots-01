@@ -1,3 +1,4 @@
+import datetime
 from dataclasses import dataclass
 
 from typing import Optional, List, Union, cast
@@ -118,11 +119,14 @@ class CertificateDeploymentAnalyzer:
         server_certificate_chain_as_pem: List[str],
         server_ocsp_response: Optional[nassl._nassl.OCSP_RESPONSE],
         trust_stores_for_validation: List[TrustStore],
+        validation_time: Optional[datetime.datetime] = None,
     ) -> None:
         self.server_subject = server_subject
         self.server_certificate_chain_as_pem = server_certificate_chain_as_pem
         self.server_ocsp_response = server_ocsp_response
         self.trust_stores_for_validation = trust_stores_for_validation
+        # The time at which certificate chains are validated; defaults to the current time if None
+        self.validation_time = validation_time
 
     def perform(self) -> CertificateDeploymentAnalysisResult:
         received_certificate_chain = [
@@ -197,7 +201,7 @@ class CertificateDeploymentAnalyzer:
         all_path_validation_results = []
         for trust_store in self.trust_stores_for_validation:
             path_validation_result = trust_store.verify_certificate_chain(
-                self.server_certificate_chain_as_pem, self.server_subject
+                self.server_certificate_chain_as_pem, self.server_subject, validation_time=self.validation_time
             )
             all_path_validation_results.append(path_validation_result)
 
