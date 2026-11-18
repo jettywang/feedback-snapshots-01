@@ -38,8 +38,8 @@ Installing the package adds a `uefi-firmware-parser` command:
 $ uefi-firmware-parser -h
 usage: uefi-firmware-parser [-h] [-b] [--superbrute] [--depex] [-q]
                             [--color {always,never,auto}] [-p] [-o OUTPUT]
-                            [-O] [-c] [-e] [-g GENERATE] [-j] [--test]
-                            [--verbose]
+                            [-O] [-c] [-e] [-g GENERATE] [-j] [--index]
+                            [--test] [--verbose]
                             file [file ...]
 
 Parse, and optionally output, details and data on UEFI-related firmware.
@@ -67,6 +67,8 @@ options:
   -g, --generate GENERATE
                         Generate a FDF, implies extraction (volumes only)
   -j, --json            Output in JSON format
+  --index               List the structure without decoding compressed
+                        branches
   --test                Test file parsing, output name/success.
   --verbose             Enable verbose logging while parsing
 ```
@@ -131,6 +133,48 @@ class takes the raw file contents in its constructor and implements:
 - `showinfo()` prints the object hierarchy.
 - `to_dict()` returns the object hierarchy as a JSON-serializable `dict`.
 - `dump()` walks the hierarchy and writes each object to a file.
+
+### Deferred branches
+
+A full parse decodes every compressed section it meets while it builds the tree.
+When you only need a few drivers out of a large image, `index()` builds the same
+tree without running the decoders. Compressed sections and GUID-defined wrappers
+are listed with an `unexpanded` state and the bytes they were parsed from:
+
+```python
+parser = uefi_firmware.AutoParser(data)
+firmware = parser.index()
+
+# The tree has the usual shape; nothing below a compressed wrapper is decoded.
+for branch in firmware.iter_unexpanded():
+    print(branch.wrapper, branch.compression_kind, len(branch.raw_data))
+
+# Decode just the branch you need. The result is cached, so a second call is free.
+branch = firmware.iter_unexpanded().__next__()
+branch.expand()
+print(branch.subsections[0].data)
+
+# Or decode everything, for the same tree parse() would have built.
+firmware.expand_all()
+```
+
+`parse()` is still the full parser and is unchanged. `parse(lazy=True)` is the
+same as `index()`, `AutoParser(data, lazy=True)` makes that the default, and
+calling `parse()` on an instance that already has an index expands it. A class
+used on its own, such as `FirmwareVolume(data).process(lazy=True)`, also builds
+an index. Each object reports `parse_state`: `parsed` for a decoded branch (the
+same state the full parser assigns), `unexpanded` for a known wrapper that has
+not been decoded, `failed` for a branch whose decoder rejected its payload, and
+`opaque` for a GUID-defined wrapper the parser has no rule for. `raw_data` keeps
+the original bytes for any of these, and `to_index()` returns the structure as
+nested dicts (`to_index_json()` leaves out the object references). The
+`--index` command-line option prints the same list and `--index -j` prints it
+as JSON.
+
+A branch that fails to decode is never retried, and it is not shown as an empty
+subtree: `parse_state`, `failed`, and `parse_error` say what happened while
+`raw_data` keeps the input. Expanding the whole index gives the same objects,
+`to_dict()` output, and dumps as `parse()`.
 
 ## Features
 

@@ -9,7 +9,8 @@ import struct
 import zlib
 
 from .base import FirmwareObject, StructuredObject, RawObject, AutoRawObject, \
-    PaddingObject
+    PaddingObject, PARSE_UNEXPANDED, PARSE_EXPANDED, PARSE_FAILED, \
+    PARSE_OPAQUE
 from .utils import *
 from .guids import get_guid_name
 from .structs.uefi_structs import *
@@ -544,6 +545,7 @@ class EfiSection(FirmwareObject):
         }
 
     def dump(self, parent="", index=0):
+        self.expand()
         for i, subsection in enumerate(self.subsections):
             subsection.dump(parent, i)
 
@@ -585,12 +587,70 @@ class CompressedSection(EfiSection):
         # The bytes before an Intel type 2 stream, and the section as parsed.
         self.prefix = b""
         self._body = bytes(data)
+        self._raw_data = self._body
+        self._wrapper = "compression"
+        self._compression = self._compression_name()
         self.attrs = {
             "decompressed_size": self.decompressed_size, "type": self.type}
 
+    def _compression_name(self):
+        '''Return the compression method a deferred section will use.'''
+        if self.type == 0x00:
+            return None
+        if self.type == 0x01:
+            # EFI and Tiano streams share this type and are told apart by
+            # trying each decoder.
+            return "efi/tiano"
+        return "lzma/tiano/efi"
+
+    def _deferred(self):
+        '''Whether this section holds a compressed payload to decode.'''
+        return lazy_parsing() and self.type in (0x01, 0x02)
+
+    @property
+    def objects(self):
+        '''Return the subsections, decoding this wrapper on first access.
+
+        An index lists this wrapper without touching the payload. A caller
+        that reaches into the branch, by reading its children or traversing
+        the tree, gets the decoded subsections.
+        '''
+        return self.expand().subsections
+
+    def index_children(self):
+        '''Return the children known without decoding this wrapper.
+
+        The subsection list is still empty until the payload is decoded. A
+        failed wrapper keeps the raw child it fell back to, which is real
+        material rather than an empty subtree.
+        '''
+        if self.unexpanded:
+            return []
+        return [child for child in self.subsections if child is not None]
+
     @limit_nesting(False)
-    def process(self):
+    def _expand_payload(self):
+        '''Decode the compressed payload and parse what it holds.'''
+        status = self.process(lazy=False)
+        if not status:
+            self._parse_state = PARSE_FAILED
+            self._failure = self._failure or "cannot expand compressed section"
+        elif self.type > 0x00 and self.data is None:
+            self._parse_state = PARSE_FAILED
+            self._failure = "cannot decompress type %d section" % self.type
+
+    @limit_nesting(False)
+    def process(self, lazy=None):
         dlog(self, sguid(self.guid))
+        if lazy is None:
+            lazy = self._deferred()
+        if lazy and self.type in (0x01, 0x02):
+            # The header is enough to describe this wrapper. The decoder
+            # runs when a caller expands this branch, so an index can list
+            # every branch without inflating all of them.
+            self._parse_state = PARSE_UNEXPANDED
+            return True
+
         def bf_decompress(data):
             return decompress([
                 efi_compressor.LzmaDecompress,
@@ -634,14 +694,26 @@ class CompressedSection(EfiSection):
                 raw = AutoRawObject(self.compressed_data)
                 raw.process()
                 self.subsections.append(raw)
+                # The decode failed. Keep that state, and the bytes it was
+                # parsed from, instead of presenting an empty subtree. The
+                # full parse still succeeds, as it did when the failed
+                # payload was kept as a raw child.
+                self._parse_state = PARSE_FAILED
+                self._failure = "cannot decompress type %d section" % self.type
+                return True
 
         if self.data is None:
             '''No data was uncompressed.'''
             return True
 
+        if self.parse_state == PARSE_UNEXPANDED:
+            # This run was an expansion of a branch the index left closed.
+            self._parse_state = PARSE_EXPANDED
         status = self.process_subsections()
+        if not status:
+            self._parse_state = PARSE_FAILED
+            self._failure = "cannot parse decompressed subsections"
         return status
-        pass
 
     def build(self, generate_checksum=False, debug=False):
         if self.data is None:
@@ -668,12 +740,14 @@ class CompressedSection(EfiSection):
         return header + compressed
 
     def showinfo(self, ts):
+        self.expand()
         if self.name is not None:
             print ("%s %s" % (blue("%sCompressed Name:" % ts), purple(self.name)))
         for i, _object in enumerate(self.subsections):
             _object.showinfo(ts, i)
 
     def to_dict(self):
+        self.expand()
         subsections = []
         for subsection in self.subsections:
             subsections.append(subsection.to_dict())
@@ -754,14 +828,72 @@ class GuidDefinedSection(EfiSection):
         self.attrs = {"attrs": self.attr_mask}
         self.subsections = []
         self._body = bytes(data)
+        self._raw_data = self._body
+        self._wrapper = "guid-defined"
+        self._compression = self._compression_name()
+        self._wrapper_known = self._compression is not None or \
+            sguid(self.guid) in (FIRMWARE_GUIDED_GUIDS["STATIC_GUID"],
+                                 FIRMWARE_GUIDED_GUIDS["FIRMWARE_VOLUME"])
+        self.subtype = 0
+
+    def _compression_name(self):
+        '''Return the transformation a deferred section will apply.'''
+        guid = sguid(self.guid)
+        if guid in [FIRMWARE_GUIDED_GUIDS["LZMA_COMPRESSED"],
+                    FIRMWARE_GUIDED_GUIDS["LZMA_COMPRESSED_HP"]]:
+            return "lzma"
+        if guid == FIRMWARE_GUIDED_GUIDS["TIANO_COMPRESSED"]:
+            return "tiano"
+        if guid == FIRMWARE_GUIDED_GUIDS["ZLIB_COMPRESSED_AMD"]:
+            return "zlib"
+        if guid == FIRMWARE_GUIDED_GUIDS["GZIP_COMPRESSED_QC"]:
+            return "gzip"
+        return None
 
     @property
     def objects(self):
-        return self.subsections
+        '''Return the subsections, applying this wrapper's transformation on
+        first access.'''
+        return self.expand().subsections
+
+    def index_children(self):
+        '''Return the children known without transforming the payload.'''
+        if self.unexpanded:
+            return []
+        return [child for child in self.subsections if child is not None]
 
     @limit_nesting(False)
-    def process(self):
+    def _expand_payload(self):
+        '''Apply the wrapper's transformation and parse what it holds.'''
+        status = self.process(lazy=False)
+        if not status:
+            self._parse_state = PARSE_FAILED
+            self._failure = self._failure or (
+                "cannot expand GUID-defined section")
+        elif not self.subsections and not self.wrapper_known:
+            # An unknown GUID has no rule to apply. Keep its material and say
+            # so, rather than presenting an empty subtree as a result.
+            self._parse_state = PARSE_OPAQUE
+
+    @limit_nesting(False)
+    def process(self, lazy=None):
         dlog(self, sguid(self.guid))
+        if lazy is None:
+            lazy = lazy_parsing()
+        if lazy:
+            if self._compression_name() is not None:
+                # A compressed branch is described from its header. Its
+                # decoder runs only when the branch is expanded.
+                self._parse_state = PARSE_UNEXPANDED
+                return True
+            if sguid(self.guid) not in FIRMWARE_GUIDED_GUIDS.values():
+                # The parser does not know how to transform this wrapper.
+                # Keep the material it was parsed from, and a state that says
+                # so, rather than reporting a subtree that was never
+                # examined. Expanding it runs the fallback below.
+                self._parse_state = PARSE_UNEXPANDED
+                return True
+
         def parse_volume():
             fv = FirmwareVolume(self.data, None)
             if fv.valid_header:
@@ -880,6 +1012,7 @@ class GuidDefinedSection(EfiSection):
         return header + preamble + data
 
     def showinfo(self, ts='', index=0):
+        self.expand()
         auth_status = "ATTR_UNKNOWN"
         if self.attrs["attrs"] == self.ATTR_AUTH_STATUS_VALID:
             auth_status = "AUTH_VALID"
@@ -894,6 +1027,7 @@ class GuidDefinedSection(EfiSection):
                 section.showinfo("%s  " % ts, index=i)
 
     def to_dict(self):
+        self.expand()
         auth_status = "ATTR_UNKNOWN"
         if self.attrs["attrs"] == self.ATTR_AUTH_STATUS_VALID:
             auth_status = "AUTH_VALID"
@@ -914,6 +1048,7 @@ class GuidDefinedSection(EfiSection):
         }
 
     def dump(self, parent="", generate_checksum=False, debug=False):
+        self.expand()
         for i, subsection in enumerate(self.subsections):
             subsection.dump(parent, i)
         dump_data(os.path.join(parent, "guided.preamble"), self.preamble)
@@ -961,6 +1096,7 @@ class FirmwareFileSystemSection(EfiSection):
 
         # data may be a memoryview of the remaining sections; copy this one.
         self._data = bytes(data[:self.size])
+        self._raw_data = self._data
         if self.large_header:
             self.data = self._data[0x8:]
         else:
@@ -970,6 +1106,53 @@ class FirmwareFileSystemSection(EfiSection):
     @property
     def objects(self):
         return [self.parsed_object]
+
+    def index_children(self):
+        '''Return the parsed object without expanding it.
+
+        An index lists this section and the wrapper it holds. Only a caller
+        that reads the branch's children decodes the wrapper.
+        '''
+        if self.parsed_object is None:
+            return []
+        return [self.parsed_object]
+
+    @property
+    def deferred(self):
+        '''Whether this section holds a wrapper that is not yet decoded.'''
+        return self.parsed_object is not None and \
+            self.parsed_object.unexpanded
+
+    def expand_parsed_object(self):
+        '''Expand this section's parsed object, applying the fallback rules.
+
+        The full parse drops a GUID-defined section that fails to decode and
+        keeps a failed compression section with its raw child. Expanding a
+        branch later must settle into the same shape.
+        '''
+        parsed = self.parsed_object
+        if parsed is None or not parsed.unexpanded:
+            return parsed
+        parsed.expand()
+        if parsed.failed and isinstance(parsed, GuidDefinedSection):
+            # The full parse skips a GUID-defined section it cannot unpack,
+            # so a later expansion must not leave an empty wrapper behind.
+            # Record why, so the branch does not look like an empty one.
+            self.parsed_object = None
+            self._parse_state = PARSE_FAILED
+            self._failure = parsed.parse_error or (
+                "cannot expand GUID-defined section")
+            return None
+        return parsed
+
+    def expand(self):
+        self.expand_parsed_object()
+        return self
+
+    def _expand_all(self):
+        self.expand_parsed_object()
+        for child in self.index_children():
+            child._expand_all()
 
     def regen(self, data):
         '''Replace this section with data, a section and its header.'''
@@ -1634,6 +1817,7 @@ class FirmwareVolume(FirmwareObject):
         return self.firmware_filesystems or []
 
     @limit_nesting(False)
+    @lazy_parse_option
     def process(self):
         dlog(self, self.name)
         if self.block_map is None:
@@ -1945,6 +2129,9 @@ class MultiVolumeContainer(FirmwareObject):
     @property
     def objects(self):
         return self.objs
+
+    def index_children(self):
+        return [obj for obj in self.objs if obj is not None]
 
     def showinfo(self, ts='', index=None):
         '''Write structure information to stdout.'''

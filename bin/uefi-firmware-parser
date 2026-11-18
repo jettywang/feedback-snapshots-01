@@ -15,13 +15,36 @@ from uefi_firmware import AutoParser
 from uefi_firmware.utils import safe_path
 import uefi_firmware.utils # import nocolor
 
+def print_index(index, ts=''):
+    '''Print a structural index, marking branches that are still closed.'''
+    state = index['state']
+    if state == "unexpanded":
+        detail = "unexpanded %s, %d raw bytes" % (
+            index.get("wrapper") or "wrapper", index.get("rawSize", 0))
+    elif state == "failed":
+        detail = "failed: %s" % index.get("error", "parse failed")
+    elif state == "opaque":
+        detail = "unknown wrapper, %d raw bytes" % index.get("rawSize", 0)
+    else:
+        detail = "size 0x%x (%d bytes)" % (index['size'], index['size'])
+    print("%s%s %s %s" % (
+        ts, blue(index['type']), index.get('label') or "", detail))
+    for child in index['children']:
+        print_index(child, ts + "  ")
+
+
 def _process_show_extract(parsed_object):
     if parsed_object is None:
         return
 
     global FILENAME
     if not args.quiet:
-        parsed_object.showinfo('')
+        if args.index:
+            # Show which branches are closed and what holds them, without
+            # decoding the ones the caller did not ask about.
+            print_index(parsed_object.to_index())
+        else:
+            parsed_object.showinfo('')
 
     if args.outputfolder:
         autodir = "%s_output" % FILENAME
@@ -134,14 +157,21 @@ def _process_file(file_name, input_data):
         print("Error: cannot parse %s, could not detect firmware type." % (file_name))
         return 2
 
-    firmware = parser.parse()
+    if args.index:
+        # List the known wrappers without decoding their payloads.
+        firmware = parser.index()
+    else:
+        firmware = parser.parse()
     if firmware is None:
         print("Error: cannot parse %s, the %s could not be processed." % (
             file_name, parser.type()))
         return 3
 
     if args.json:
-        res = firmware.to_dict()
+        if args.index:
+            res = firmware.to_index_json()
+        else:
+            res = firmware.to_dict()
         print(json.dumps(res))
         return 0
 
@@ -204,6 +234,9 @@ if __name__ == "__main__":
     argparser.add_argument(
         '-j', "--json", default=False, action='store_true',
         help="Output in JSON format")
+    argparser.add_argument(
+        "--index", default=False, action='store_true',
+        help="List the structure without decoding compressed branches")
     argparser.add_argument(
         "--test", default=False, action='store_true',
         help="Test file parsing, output name/success.")

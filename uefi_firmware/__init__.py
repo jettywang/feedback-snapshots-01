@@ -6,7 +6,7 @@ from .uefi import MultiVolumeContainer
 from .misc import checker
 from .base import FirmwareObject, RawObject, AutoRawObject
 from .utils import limit_nesting, nesting_limit_reached, \
-    search_firmware_volumes
+    search_firmware_volumes, set_lazy_parsing
 
 
 class AutoParser(object):
@@ -24,7 +24,7 @@ class AutoParser(object):
     the type by applying basic checks for known headers.
     '''
 
-    def __init__(self, data, search=True, base=0):
+    def __init__(self, data, search=True, base=0, lazy=False):
         '''Create an AutoParser instance.
 
         Args:
@@ -32,12 +32,18 @@ class AutoParser(object):
             search (Optional[bool]): Allow brute-force discovery of volumes.
             base (Optional[int]): The offset of data in the input file, when
                 it follows other objects.
+            lazy (Optional[bool]): Make parse() build the index instead of
+                decoding every compressed branch. The default, False, is the
+                full parser.
         '''
         self.data_type = 'unknown'
         self.constructor = None
         self.firmware = None
         self.base = base
         self.offset = 0
+        self.default_lazy = bool(lazy)
+        # Which entry built self.firmware: a full parse or an index.
+        self._lazy_mode = None
         # The end of a volume that was found but failed to process. Its bytes,
         # and any volume inside them, have already been parsed once.
         self.failed_end = 0
@@ -66,23 +72,65 @@ class AutoParser(object):
         return self.data_type
 
     @limit_nesting(None)
-    def parse(self):
+    def parse(self, lazy=None):
         '''Call the 'process' method for the discovered type using the input
         file contents. If the file type's parser returns False indicating a
         failure or exception while parsing this will return None.
 
+        Args:
+            lazy (Optional[bool]): Build the structure index instead, leaving
+                compressed branches unexpanded. This is the same as 'index'.
+                When omitted, the parser's 'lazy' setting applies; the
+                default is the full parse.
+
         Return:
             object: The associated file object upon success, otherwise None.
         '''
+        if lazy is None:
+            lazy = self.default_lazy
+        return self._parse(lazy=bool(lazy))
+
+    @limit_nesting(None)
+    def index(self):
+        '''Build an index of the discovered type without decoding every
+        compressed branch.
+
+        The returned object has the same shape as the one 'parse' returns.
+        Compressed and unknown GUID-defined wrappers are listed with their
+        raw material and an 'unexpanded' state; call 'expand' on one of them
+        to decode just that branch, or 'expand_all' on the result to get the
+        structure 'parse' would have given.
+
+        Return:
+            object: The associated file object upon success, otherwise None.
+        '''
+        return self._parse(lazy=True)
+
+    def build_index(self):
+        '''An alias for index.'''
+        return self.index()
+
+    def _parse(self, lazy):
         if self.constructor is None:
             return None
         if self.firmware is not None:
+            if not lazy and self._lazy_mode:
+                # This instance built an index first. The full entry still
+                # gives a fully decoded tree.
+                self.firmware.expand_all()
+                self._lazy_mode = False
             return self.firmware
 
         # Instantiate an instance of the firmware object
         self.firmware = self.constructor(self.data)
+        self._lazy_mode = bool(lazy)
         refused = nesting_limit_reached()
-        if not self.firmware.process():
+        previous = set_lazy_parsing(lazy)
+        try:
+            status = self.firmware.process()
+        finally:
+            set_lazy_parsing(previous)
+        if not status:
             # Parsing failed, remove the object reference. A volume the
             # nesting limit refused was not parsed, so a caller nearer the
             # top may still parse it.
@@ -104,25 +152,29 @@ class AutoParser(object):
             return self.firmware
 
         tried = 0
-        while size < len(self.data):
-            raw = AutoRawObject(
-                self.data[size:], offset=self.base + self.offset + size)
-            if not raw.process() or raw.object.size <= 0:
-                # An object that covers no bytes would be found again here.
-                # Parsing a volume that failed again would double the work
-                # at each level of nesting.
-                tried = raw.failed_end
-                break
-            size += raw.object.size
-            objs.append(raw.object)
+        previous = set_lazy_parsing(lazy)
+        try:
+            while size < len(self.data):
+                raw = AutoRawObject(
+                    self.data[size:], offset=self.base + self.offset + size)
+                if not raw.process() or raw.object.size <= 0:
+                    # An object that covers no bytes would be found again
+                    # here. Parsing a volume that failed again would double
+                    # the work at each level of nesting.
+                    tried = raw.failed_end
+                    break
+                size += raw.object.size
+                objs.append(raw.object)
 
-        mfc = MultiVolumeContainer(self.data[size:], start=tried)
-        if mfc.has_indexes():
-            # Headers were discovered, attempt to process.
-            if mfc.process():
-                size += mfc.size
-                # Add the base (first) firmware volume
-                objs = objs + mfc.objects
+            mfc = MultiVolumeContainer(self.data[size:], start=tried)
+            if mfc.has_indexes():
+                # Headers were discovered, attempt to process.
+                if mfc.process():
+                    size += mfc.size
+                    # Add the base (first) firmware volume
+                    objs = objs + mfc.objects
+        finally:
+            set_lazy_parsing(previous)
 
         if size < len(self.data):
             objs.append(RawObject(self.data[size:]))
@@ -146,6 +198,9 @@ class MultiObject(FirmwareObject):
     @property
     def objects(self):
         return self.objs
+
+    def index_children(self):
+        return [obj for obj in self.objs if obj is not None]
 
     def showinfo(self, ts='', index=None):
         for i in range(len(self.objs)):

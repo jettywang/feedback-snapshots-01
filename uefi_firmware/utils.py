@@ -254,6 +254,46 @@ def reserve_decompression(size):
     return True
 
 
+def lazy_parsing():
+    '''Return whether this parse defers compressed payloads.
+
+    The parser consults this while it builds a structure index. A branch that
+    is expanded later runs under the same setting, so the branches below it
+    stay deferred too.
+    '''
+    return getattr(_parse_state, "lazy", False)
+
+
+def set_lazy_parsing(enabled):
+    '''Set and return the previous deferred-parse flag.
+
+    Callers restore the returned value, so an expanded branch does not change
+    how the parse that requested it behaves.
+    '''
+    previous = getattr(_parse_state, "lazy", False)
+    _parse_state.lazy = bool(enabled)
+    return previous
+
+
+def lazy_parse_option(method):
+    '''Let a process() accept lazy=True, for parsing one object on demand.
+
+    Without the keyword the method runs as it always did, using whatever
+    deferred-parse setting the surrounding parse has.
+    '''
+    @functools.wraps(method)
+    def wrapper(*args, **kwargs):
+        lazy = kwargs.pop("lazy", None)
+        if lazy is None:
+            return method(*args, **kwargs)
+        previous = set_lazy_parsing(lazy)
+        try:
+            return method(*args, **kwargs)
+        finally:
+            set_lazy_parsing(previous)
+    return wrapper
+
+
 def zlib_decompress(data, wbits=zlib.MAX_WBITS):
     '''Decompress a zlib (or, with wbits, gzip) stream within the budget.
 
