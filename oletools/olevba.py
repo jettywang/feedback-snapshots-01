@@ -1441,6 +1441,63 @@ def decompress_stream(compressed_container):
     return bytes(decompressed_container)
 
 
+def _decode_name_record(raw_bytes, encoding):
+    """
+    Decode a VBA name record (MODULENAME, MODULESTREAMNAME, ...) to text.
+
+    The raw bytes are decoded strictly first; if that fails, the record is
+    decoded again with replacement characters and flagged as lossy, so that
+    callers never mistake a lossy rendering for the real name. Two different
+    byte strings can collapse to the same text when replacement characters
+    are inserted, therefore a lossy name must never be used to identify an
+    OLE stream.
+
+    :param raw_bytes: bytes or None, raw record content
+    :param str encoding: codec to decode with (project code page or UTF-16LE)
+    :return: tuple (text or None, lossy flag); text is None iff raw_bytes is None
+    """
+    if raw_bytes is None:
+        return None, False
+    try:
+        return raw_bytes.decode(encoding), False
+    except UnicodeDecodeError:
+        return raw_bytes.decode(encoding, errors='replace'), True
+
+
+def _match_stream_name(name, stream_names):
+    """
+    Match a decoded VBA name against the actual stream names of a storage.
+
+    An exact match always wins. Otherwise, since OLE stream names are
+    case-insensitive (MS-CFB), a case-insensitive match is accepted only when
+    it designates a single stream: if several distinct streams differ only by
+    case, the match is ambiguous and must not be used, otherwise the source
+    code of the wrong stream could be picked up.
+
+    :param str name: decoded candidate name
+    :param stream_names: list of str, actual stream names in the storage
+    :return: tuple (matched stream name or None, list of ambiguous matches)
+    """
+    if name in stream_names:
+        return name, []
+    lowered = name.lower()
+    matches = [stream_name for stream_name in stream_names
+               if stream_name.lower() == lowered]
+    if len(matches) == 1:
+        return matches[0], []
+    return None, matches
+
+
+def _hex_str(raw_bytes):
+    """
+    Hex representation of raw bytes, to keep evidence of undecodable or
+    conflicting name records in logs.
+    """
+    if raw_bytes is None:
+        return None
+    return binascii.hexlify(raw_bytes).decode('ascii')
+
+
 class VBA_Module(object):
     """
     Class to parse a VBA module from an OLE file, and to store all the corresponding
@@ -1469,6 +1526,24 @@ class VBA_Module(object):
         #: Stream name containing the VBA module as a native str (utf8 bytes on py2, str on py3)
         self.streamname_str = None
         self._streamname_unicode = None
+        #: raw bytes of the MODULENAME record, encoded with the project code page
+        self.name_raw = None
+        #: raw bytes of the MODULENAMEUNICODE record (UTF-16LE)
+        self._name_unicode_raw = None
+        #: raw bytes of the MODULESTREAMNAME record, encoded with the project code page
+        self.streamname_raw = None
+        #: raw bytes of the MODULESTREAMNAME unicode record (UTF-16LE)
+        self._streamname_unicode_raw = None
+        #: True when decoding the corresponding record required replacement
+        #: characters (damaged or mismatched code page); a lossy name is never
+        #: used to identify an OLE stream
+        self.name_lossy = False
+        self._name_unicode_lossy = False
+        self.streamname_lossy = False
+        self._streamname_unicode_lossy = False
+        #: evidence about conflicting, ambiguous or undecodable name records
+        #: encountered while resolving the module stream (list of str)
+        self.stream_name_issues = []
         self.docstring = None
         self._docstring_unicode = None
         self.textoffset = None
@@ -1493,8 +1568,10 @@ class VBA_Module(object):
             project.check_value('MODULENAME_Id', 0x0019, _id)
             size = struct.unpack("<L", dir_stream.read(4))[0]
             modulename_bytes = dir_stream.read(size)
-            # Module name always stored as Unicode:
-            self.name = project.decode_bytes(modulename_bytes)
+            # keep the raw bytes as evidence, decode with the project code page:
+            self.name_raw = modulename_bytes
+            self.name, self.name_lossy = _decode_name_record(modulename_bytes,
+                                                             project.codec)
             self.name_str = unicode2str(self.name)
             # account for optional sections
             # TODO: shouldn't this be a loop? (check MS-OVBA)
@@ -1504,7 +1581,9 @@ class VBA_Module(object):
                 # Specifies a VBA identifier as the name of the containing MODULE Record (section 2.3.4.2.3.2).
                 # MUST contain the UTF-16 encoding of MODULENAME Record
                 size = struct.unpack("<L", dir_stream.read(4))[0]
-                self._name_unicode = dir_stream.read(size).decode('UTF-16LE', 'replace')
+                self._name_unicode_raw = dir_stream.read(size)
+                self._name_unicode, self._name_unicode_lossy = \
+                    _decode_name_record(self._name_unicode_raw, 'UTF-16LE')
                 section_id = struct.unpack("<H", dir_stream.read(2))[0]
             if section_id == 0x001A:
                 # 2.3.4.2.3.2.3 MODULESTREAMNAME Record
@@ -1512,13 +1591,17 @@ class VBA_Module(object):
                 # corresponding to the containing MODULE Record
                 size = struct.unpack("<L", dir_stream.read(4))[0]
                 streamname_bytes = dir_stream.read(size)
-                # Store it as Unicode:
-                self.streamname = project.decode_bytes(streamname_bytes)
+                # keep the raw bytes as evidence, decode with the project code page:
+                self.streamname_raw = streamname_bytes
+                self.streamname, self.streamname_lossy = \
+                    _decode_name_record(streamname_bytes, project.codec)
                 self.streamname_str = unicode2str(self.streamname)
                 reserved = struct.unpack("<H", dir_stream.read(2))[0]
                 project.check_value('MODULESTREAMNAME_Reserved', 0x0032, reserved)
                 size = struct.unpack("<L", dir_stream.read(4))[0]
-                self._streamname_unicode = dir_stream.read(size).decode('UTF-16LE', 'replace')
+                self._streamname_unicode_raw = dir_stream.read(size)
+                self._streamname_unicode, self._streamname_unicode_lossy = \
+                    _decode_name_record(self._streamname_unicode_raw, 'UTF-16LE')
                 section_id = struct.unpack("<H", dir_stream.read(2))[0]
             if section_id == 0x001C:
                 # 2.3.4.2.3.2.4 MODULEDOCSTRING Record
@@ -1597,26 +1680,25 @@ class VBA_Module(object):
             log.debug("TextOffset = {0}".format(self.textoffset))
         
             code_data = None
-            # let's try the different names we have, just in case some are missing:
-            try_names = (self.streamname, self._streamname_unicode, self.name, self._name_unicode)
-            for stream_name in try_names:
-                # TODO: if olefile._find were less private, could replace this
-                #        try-except with calls to it
-                if stream_name is not None:
-                    try:
-                        self.code_path = project.vba_root + u'VBA/' + stream_name
-                        log.debug('opening VBA code stream %s' % self.code_path)
-                        code_data = project.ole.openstream(self.code_path).read()
-                        break
-                    except IOError as ioe:
-                        log.debug('failed to open stream VBA/%r (%r), try other name'
-                                  % (stream_name, ioe))
-        
+            # Resolve the module stream by matching the stream name records
+            # against the actual OLE streams of the VBA storage, instead of
+            # blindly opening the first name that happens to exist:
+            self.code_path = self._resolve_code_path(project, module_index)
+            if self.code_path is not None:
+                try:
+                    log.debug('opening VBA code stream %s' % self.code_path)
+                    code_data = project.ole.openstream(self.code_path).read()
+                except IOError as ioe:
+                    log.warning('failed to open confirmed VBA code stream %r (%r)'
+                                % (self.code_path, ioe))
+                    code_data = None
+
             if code_data is None:
-                log.info("Could not open stream %d of %d ('VBA/' + one of %r)!"
+                log.info("Could not open stream %d of %d (module %r, "
+                         "stream name records %r/%r)!"
                          % (module_index, project.modules_count,
-                            '/'.join("'" + stream_name + "'"
-                                     for stream_name in try_names)))
+                            self.name_str, self.streamname_str,
+                            self._streamname_unicode))
                 if project.relaxed:
                     return  # ... continue with next submodule
                 else:
@@ -1651,6 +1733,145 @@ class VBA_Module(object):
             raise
             # if not project.relaxed:
             #     raise
+
+    def _resolve_code_path(self, project, module_index):
+        """
+        Determine the OLE stream that actually contains this module's source
+        code, by matching the module's stream name records against the real
+        stream names of the VBA storage.
+
+        The MODULESTREAMNAME records (ANSI, encoded with the project code
+        page, and its UTF-16 copy) are the stream identity. The MODULENAME
+        records are only display names and are used as a last resort, with a
+        warning. Records that could not be decoded without replacement
+        characters are never used for identification, and contradictory
+        records that designate two different existing streams make the
+        attribution unconfirmable instead of picking one silently.
+
+        All problems are recorded as evidence in self.stream_name_issues.
+
+        :param VBA_Project project: the VBA project this module belongs to
+        :param int module_index: index of the module in the project
+        :return: str, OLE path of the code stream, or None if no stream could
+            be confirmed unambiguously
+        """
+        # actual stream names directly below the VBA storage of this project
+        # (compared case-insensitively, as OLE storage names are):
+        vba_storage_path = [item.lower()
+                            for item in project.vba_root.split('/') if item]
+        vba_storage_path.append('vba')
+        actual_streams = [entry[-1]
+                          for entry in project.ole.listdir(streams=True,
+                                                           storages=False)
+                          if [part.lower() for part in entry[:-1]]
+                             == vba_storage_path]
+        log.debug('actual streams in VBA storage: %r' % actual_streams)
+
+        # Candidate names, most authoritative first. Each entry is a tuple
+        # (label, decoded name, lossy flag, raw bytes):
+        stream_candidates = [
+            ('MODULESTREAMNAME (ANSI, codepage {0})'.format(project.codepage),
+             self.streamname, self.streamname_lossy, self.streamname_raw),
+            ('MODULESTREAMNAME (Unicode)',
+             self._streamname_unicode, self._streamname_unicode_lossy,
+             self._streamname_unicode_raw),
+        ]
+        # The module name is only a display name (MS-OVBA 2.3.4.2.3.2.1), it
+        # must not silently replace the actual stream identity:
+        fallback_candidates = [
+            ('MODULENAME (ANSI, codepage {0})'.format(project.codepage),
+             self.name, self.name_lossy, self.name_raw),
+            ('MODULENAME (Unicode)',
+             self._name_unicode, self._name_unicode_lossy,
+             self._name_unicode_raw),
+        ]
+
+        ansi_label, ansi_name, ansi_lossy, ansi_raw = stream_candidates[0]
+        uni_label, uni_name, uni_lossy, uni_raw = stream_candidates[1]
+
+        if not actual_streams:
+            # could not enumerate the VBA storage: fall back to the historical
+            # behaviour, trying each candidate name in turn
+            log.debug('no stream list available, trying candidate names')
+            for label, name, lossy, raw in stream_candidates + fallback_candidates:
+                if name is None:
+                    continue
+                try:
+                    code_path = project.vba_root + u'VBA/' + name
+                    if project.ole.exists(code_path):
+                        return code_path
+                except IOError:
+                    continue
+            return None
+
+        # If both MODULESTREAMNAME records are present, decodable and
+        # different, check whether they designate two different real streams:
+        if (ansi_name is not None and uni_name is not None
+                and not ansi_lossy and not uni_lossy
+                and ansi_name != uni_name):
+            ansi_match, _ = _match_stream_name(ansi_name, actual_streams)
+            uni_match, _ = _match_stream_name(uni_name, actual_streams)
+            if (ansi_match is not None and uni_match is not None
+                    and ansi_match != uni_match):
+                self.stream_name_issues.append(
+                    'MODULESTREAMNAME records contradict each other and match '
+                    'different streams: ANSI %r (raw %s) -> stream %r, '
+                    'Unicode %r (raw %s) -> stream %r; source code '
+                    'attribution is unconfirmable'
+                    % (ansi_name, _hex_str(ansi_raw), ansi_match,
+                       uni_name, _hex_str(uni_raw), uni_match))
+                for issue in self.stream_name_issues:
+                    log.warning('Module %d: %s' % (module_index, issue))
+                return None
+            # the contradiction is harmless: at most one record designates a
+            # real stream, keep it as evidence and continue
+            self.stream_name_issues.append(
+                'MODULESTREAMNAME records disagree: ANSI %r (raw %s), '
+                'Unicode %r (raw %s)'
+                % (ansi_name, _hex_str(ansi_raw),
+                   uni_name, _hex_str(uni_raw)))
+            log.warning('Module %d: %s'
+                        % (module_index, self.stream_name_issues[-1]))
+
+        for candidates, is_fallback in ((stream_candidates, False),
+                                        (fallback_candidates, True)):
+            for label, name, lossy, raw in candidates:
+                if name is None:
+                    continue
+                if lossy:
+                    # a name decoded with replacement characters cannot
+                    # identify a stream: different byte strings may collapse
+                    # to the same text and merge distinct modules
+                    self.stream_name_issues.append(
+                        '%s could not be decoded without replacement '
+                        'characters: %r (raw %s); not used to identify the '
+                        'module stream' % (label, name, _hex_str(raw)))
+                    log.warning('Module %d: %s'
+                                % (module_index, self.stream_name_issues[-1]))
+                    continue
+                match, ambiguous = _match_stream_name(name, actual_streams)
+                if match is not None:
+                    if is_fallback:
+                        self.stream_name_issues.append(
+                            'no usable MODULESTREAMNAME record, using module '
+                            'display name %r (%s) as stream name'
+                            % (name, label))
+                        log.warning('Module %d: %s'
+                                    % (module_index,
+                                       self.stream_name_issues[-1]))
+                    if match != name:
+                        log.debug('Module %d: stream name %r matched %r '
+                                  'case-insensitively'
+                                  % (module_index, name, match))
+                    return project.vba_root + u'VBA/' + match
+                if ambiguous:
+                    self.stream_name_issues.append(
+                        '%s %r (raw %s) matches several streams %r: '
+                        'ambiguous, source code attribution is unconfirmable'
+                        % (label, name, _hex_str(raw), ambiguous))
+                    log.warning('Module %d: %s'
+                                % (module_index, self.stream_name_issues[-1]))
+        return None
 
 
 class VBA_Project(object):
@@ -2080,9 +2301,23 @@ class VBA_Project(object):
         unused = projectcookierecord_cookie
 
         log.debug("parsing {0} modules".format(self.modules_count))
+        seen_code_paths = {}
         for module_index in xrange(0, self.modules_count):
             module = VBA_Module(self, self.dir_stream, module_index=module_index)
             self.modules.append(module)
+            if module.code_path is None:
+                # The module stream could not be confirmed (missing, ambiguous
+                # or contradictory name records): do not yield an empty entry,
+                # the evidence is in module.stream_name_issues and in the logs.
+                continue
+            if module.code_path.lower() in seen_code_paths:
+                log.warning('modules %d and %d both resolve to stream %r: '
+                            'the same source code is attributed to two '
+                            'modules'
+                            % (seen_code_paths[module.code_path.lower()],
+                               module_index, module.code_path))
+            else:
+                seen_code_paths[module.code_path.lower()] = module_index
             yield (module.code_path, module.filename_str, module.code_str)
         _ = unused   # make pylint happy: now variable "unused" is being used ;-)
         return
