@@ -75,6 +75,80 @@ def test_brotli():
     assert response.content == body
 
 
+def test_identity_bounded_decode():
+    decoder = httpx._decoders.IdentityDecoder()
+    assert not decoder.has_pending
+
+    assert decoder.decode(b"Hello, world!", max_length=5) == b"Hello"
+    assert decoder.has_pending
+
+    # Retained input is drained before any new input is consumed.
+    assert decoder.decode(b"", max_length=5) == b", wor"
+    assert decoder.decode(b"") == b"ld!"
+    assert not decoder.has_pending
+    assert decoder.flush() == b""
+
+    # Any input retained at the end of the stream is returned by `flush()`.
+    assert decoder.decode(b"Hello", max_length=2) == b"He"
+    assert decoder.flush() == b"llo"
+
+
+def test_gzip_bounded_decode():
+    body = b"test 123" * 100
+    compressor = zlib.compressobj(9, zlib.DEFLATED, zlib.MAX_WBITS | 16)
+    compressed_body = compressor.compress(body) + compressor.flush()
+
+    decoder = httpx._decoders.GZipDecoder()
+    parts = [decoder.decode(compressed_body, max_length=10)]
+    assert len(parts[0]) == 10
+    assert decoder.has_pending
+
+    while decoder.has_pending:
+        part = decoder.decode(b"", max_length=10)
+        assert len(part) <= 10
+        parts.append(part)
+    parts.append(decoder.flush())
+
+    # Bounded decoding delivers the exact same content, byte for byte.
+    assert b"".join(parts) == body
+
+
+def test_deflate_bounded_decode():
+    body = b"test 123" * 100
+    # Deflate encoding may use either 'zlib' or 'deflate' in the wild.
+    compressor = zlib.compressobj(9, zlib.DEFLATED, -zlib.MAX_WBITS)
+    compressed_bodies = [
+        zlib.compress(body),
+        compressor.compress(body) + compressor.flush(),
+    ]
+
+    for compressed_body in compressed_bodies:
+        decoder = httpx._decoders.DeflateDecoder()
+        parts = []
+        data = compressed_body
+        while data or decoder.has_pending:
+            part = decoder.decode(data, max_length=10)
+            assert len(part) <= 10
+            parts.append(part)
+            data = b""
+        parts.append(decoder.flush())
+
+        assert b"".join(parts) == body
+
+
+def test_gzip_unbounded_decode_ignores_pending():
+    body = b"test 123" * 100
+    compressor = zlib.compressobj(9, zlib.DEFLATED, zlib.MAX_WBITS | 16)
+    compressed_body = compressor.compress(body) + compressor.flush()
+
+    # A `decode()` call without `max_length` decodes everything,
+    # leaving no retained input.
+    decoder = httpx._decoders.GZipDecoder()
+    assert decoder.decode(compressed_body) == body
+    assert not decoder.has_pending
+    assert decoder.flush() == b""
+
+
 def test_zstd():
     body = b"test 123"
     compressed_body = zstd.compress(body)

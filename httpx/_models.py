@@ -885,6 +885,17 @@ class Response:
         """
         A byte-iterator over the decoded response content.
         This allows us to handle gzip, deflate, brotli, and zstd encoded responses.
+
+        Buffering is bounded when `chunk_size` is used. Raw reads pull at
+        most `chunk_size` bytes at a time, and at most `chunk_size` bytes
+        of decoded content are buffered pending delivery. Decoders retain
+        less than `2 * chunk_size` bytes of undecoded input, which is fully
+        drained before any further raw content is read. For 'identity',
+        'gzip' and 'deflate' content the total in-flight data is a small
+        multiple of `chunk_size`, regardless of the response size or
+        compression ratio. For 'br' and 'zstd' content the underlying
+        libraries do not support bounded output, so a single raw read may
+        decode to a larger amount of buffered content.
         """
         if hasattr(self, "_content"):
             chunk_size = len(self._content) if chunk_size is None else chunk_size
@@ -894,10 +905,15 @@ class Response:
             decoder = self._get_content_decoder()
             chunker = ByteChunker(chunk_size=chunk_size)
             with request_context(request=self._request):
-                for raw_bytes in self.iter_raw():
-                    decoded = decoder.decode(raw_bytes)
-                    for chunk in chunker.decode(decoded):
-                        yield chunk
+                for raw_bytes in self.iter_raw(chunk_size=chunk_size):
+                    data = raw_bytes
+                    while True:
+                        decoded = decoder.decode(data, max_length=chunk_size)
+                        data = b""
+                        for chunk in chunker.decode(decoded):
+                            yield chunk
+                        if not decoder.has_pending:
+                            break
                 decoded = decoder.flush()
                 for chunk in chunker.decode(decoded):
                     yield chunk  # pragma: no cover
@@ -913,7 +929,7 @@ class Response:
         decoder = TextDecoder(encoding=self.encoding or "utf-8")
         chunker = TextChunker(chunk_size=chunk_size)
         with request_context(request=self._request):
-            for byte_content in self.iter_bytes():
+            for byte_content in self.iter_bytes(chunk_size=chunk_size):
                 text_content = decoder.decode(byte_content)
                 for chunk in chunker.decode(text_content):
                     yield chunk
@@ -985,6 +1001,17 @@ class Response:
         """
         A byte-iterator over the decoded response content.
         This allows us to handle gzip, deflate, brotli, and zstd encoded responses.
+
+        Buffering is bounded when `chunk_size` is used. Raw reads pull at
+        most `chunk_size` bytes at a time, and at most `chunk_size` bytes
+        of decoded content are buffered pending delivery. Decoders retain
+        less than `2 * chunk_size` bytes of undecoded input, which is fully
+        drained before any further raw content is read. For 'identity',
+        'gzip' and 'deflate' content the total in-flight data is a small
+        multiple of `chunk_size`, regardless of the response size or
+        compression ratio. For 'br' and 'zstd' content the underlying
+        libraries do not support bounded output, so a single raw read may
+        decode to a larger amount of buffered content.
         """
         if hasattr(self, "_content"):
             chunk_size = len(self._content) if chunk_size is None else chunk_size
@@ -994,10 +1021,15 @@ class Response:
             decoder = self._get_content_decoder()
             chunker = ByteChunker(chunk_size=chunk_size)
             with request_context(request=self._request):
-                async for raw_bytes in self.aiter_raw():
-                    decoded = decoder.decode(raw_bytes)
-                    for chunk in chunker.decode(decoded):
-                        yield chunk
+                async for raw_bytes in self.aiter_raw(chunk_size=chunk_size):
+                    data = raw_bytes
+                    while True:
+                        decoded = decoder.decode(data, max_length=chunk_size)
+                        data = b""
+                        for chunk in chunker.decode(decoded):
+                            yield chunk
+                        if not decoder.has_pending:
+                            break
                 decoded = decoder.flush()
                 for chunk in chunker.decode(decoded):
                     yield chunk  # pragma: no cover
@@ -1015,7 +1047,7 @@ class Response:
         decoder = TextDecoder(encoding=self.encoding or "utf-8")
         chunker = TextChunker(chunk_size=chunk_size)
         with request_context(request=self._request):
-            async for byte_content in self.aiter_bytes():
+            async for byte_content in self.aiter_bytes(chunk_size=chunk_size):
                 text_content = decoder.decode(byte_content)
                 for chunk in chunker.decode(text_content):
                     yield chunk

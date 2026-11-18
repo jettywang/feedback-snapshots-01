@@ -14,6 +14,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 * Expose `FunctionAuth` from the public API. (#3699)
 
+### Fixed
+
+* Bound the amount of response data buffered when using `iter_bytes()` and `aiter_bytes()` with a `chunk_size`. Raw reads, decoder output, and pending content are now all bounded by `chunk_size`, so highly compressed responses can no longer cause unbounded read-ahead before the first chunk is delivered.
+
 ## 0.28.1 (6th December, 2024)
 
 * Fix SSL case where `verify=False` together with client side certificates.

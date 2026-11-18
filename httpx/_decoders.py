@@ -34,11 +34,32 @@ except ImportError:  # pragma: no cover
 
 
 class ContentDecoder:
-    def decode(self, data: bytes) -> bytes:
+    """
+    Decoders are used incrementally, with `decode()` called for each
+    portion of raw content, and a final `flush()` once the stream ends.
+
+    Decoders support bounded output through the optional `max_length`
+    argument. When it is used, at most `max_length` bytes are returned,
+    and any remaining undecoded input is retained internally, as
+    indicated by `has_pending`. The retained input is decoded by
+    subsequent `decode()` calls before any new content is consumed.
+    This ensures that decoding cannot buffer an unbounded amount of
+    data, even for highly compressed content.
+    """
+
+    def decode(self, data: bytes, max_length: int | None = None) -> bytes:
         raise NotImplementedError()  # pragma: no cover
 
     def flush(self) -> bytes:
         raise NotImplementedError()  # pragma: no cover
+
+    @property
+    def has_pending(self) -> bool:
+        """
+        Whether the decoder is retaining undecoded input from a
+        previous bounded `decode()` call.
+        """
+        return False
 
 
 class IdentityDecoder(ContentDecoder):
@@ -46,11 +67,25 @@ class IdentityDecoder(ContentDecoder):
     Handle unencoded data.
     """
 
-    def decode(self, data: bytes) -> bytes:
+    def __init__(self) -> None:
+        self._pending = b""
+
+    @property
+    def has_pending(self) -> bool:
+        return bool(self._pending)
+
+    def decode(self, data: bytes, max_length: int | None = None) -> bytes:
+        if self._pending:
+            data = self._pending + data
+            self._pending = b""
+        if max_length is not None and len(data) > max_length:
+            self._pending = data[max_length:]
+            return data[:max_length]
         return data
 
     def flush(self) -> bytes:
-        return b""
+        data, self._pending = self._pending, b""
+        return data
 
 
 class DeflateDecoder(ContentDecoder):
@@ -63,21 +98,35 @@ class DeflateDecoder(ContentDecoder):
     def __init__(self) -> None:
         self.first_attempt = True
         self.decompressor = zlib.decompressobj()
+        self._pending = b""
 
-    def decode(self, data: bytes) -> bytes:
+    @property
+    def has_pending(self) -> bool:
+        return bool(self._pending)
+
+    def decode(self, data: bytes, max_length: int | None = None) -> bytes:
         was_first_attempt = self.first_attempt
         self.first_attempt = False
+        if self._pending:
+            data = self._pending + data
+            self._pending = b""
         try:
-            return self.decompressor.decompress(data)
+            if max_length is None:
+                return self.decompressor.decompress(data)
+            decoded = self.decompressor.decompress(data, max_length)
+            self._pending = self.decompressor.unconsumed_tail
+            return decoded
         except zlib.error as exc:
             if was_first_attempt:
                 self.decompressor = zlib.decompressobj(-zlib.MAX_WBITS)
-                return self.decode(data)
+                return self.decode(data, max_length)
             raise DecodingError(str(exc)) from exc
 
     def flush(self) -> bytes:
         try:
-            return self.decompressor.flush()
+            decoded = self.decompressor.decompress(self._pending)
+            self._pending = b""
+            return decoded + self.decompressor.flush()
         except zlib.error as exc:  # pragma: no cover
             raise DecodingError(str(exc)) from exc
 
@@ -91,16 +140,30 @@ class GZipDecoder(ContentDecoder):
 
     def __init__(self) -> None:
         self.decompressor = zlib.decompressobj(zlib.MAX_WBITS | 16)
+        self._pending = b""
 
-    def decode(self, data: bytes) -> bytes:
+    @property
+    def has_pending(self) -> bool:
+        return bool(self._pending)
+
+    def decode(self, data: bytes, max_length: int | None = None) -> bytes:
+        if self._pending:
+            data = self._pending + data
+            self._pending = b""
         try:
-            return self.decompressor.decompress(data)
+            if max_length is None:
+                return self.decompressor.decompress(data)
+            decoded = self.decompressor.decompress(data, max_length)
+            self._pending = self.decompressor.unconsumed_tail
+            return decoded
         except zlib.error as exc:
             raise DecodingError(str(exc)) from exc
 
     def flush(self) -> bytes:
         try:
-            return self.decompressor.flush()
+            decoded = self.decompressor.decompress(self._pending)
+            self._pending = b""
+            return decoded + self.decompressor.flush()
         except zlib.error as exc:  # pragma: no cover
             raise DecodingError(str(exc)) from exc
 
@@ -133,7 +196,11 @@ class BrotliDecoder(ContentDecoder):
             # The 'brotli' package.
             self._decompress = self.decompressor.process  # pragma: no cover
 
-    def decode(self, data: bytes) -> bytes:
+    def decode(self, data: bytes, max_length: int | None = None) -> bytes:
+        # The brotli interface does not support bounded output, so
+        # `max_length` cannot be enforced here. Buffering is still
+        # bounded by the raw layer, which limits each `decode()` call
+        # to a single chunk of compressed content.
         if not data:
             return b""
         self.seen_data = True
@@ -177,7 +244,11 @@ class ZStandardDecoder(ContentDecoder):
         self.decompressor = zstandard.ZstdDecompressor().decompressobj()
         self.seen_data = False
 
-    def decode(self, data: bytes) -> bytes:
+    def decode(self, data: bytes, max_length: int | None = None) -> bytes:
+        # The zstandard interface does not support bounded output, so
+        # `max_length` cannot be enforced here. Buffering is still
+        # bounded by the raw layer, which limits each `decode()` call
+        # to a single chunk of compressed content.
         assert zstandard is not None
         self.seen_data = True
         output = io.BytesIO()
@@ -213,7 +284,14 @@ class MultiDecoder(ContentDecoder):
         # Note that we reverse the order for decoding.
         self.children = list(reversed(children))
 
-    def decode(self, data: bytes) -> bytes:
+    @property
+    def has_pending(self) -> bool:
+        return any(child.has_pending for child in self.children)
+
+    def decode(self, data: bytes, max_length: int | None = None) -> bytes:
+        # Bounded output is not enforced across the decoder chain.
+        # Buffering is still bounded by the raw layer, which limits
+        # each `decode()` call to a single chunk of compressed content.
         for child in self.children:
             data = child.decode(data)
         return data

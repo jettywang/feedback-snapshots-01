@@ -1,6 +1,7 @@
 import json
 import pickle
 import typing
+import zlib
 
 import chardet
 import pytest
@@ -567,6 +568,251 @@ def test_iter_bytes_doesnt_return_empty_chunks():
 
     parts = list(response.iter_bytes())
     assert parts == [b"Hello, ", b"world!"]
+
+
+class ControlledDecoder(httpx._decoders.ContentDecoder):
+    """
+    A controllable incremental decoder, used to test bounded streaming.
+
+    Each input byte expands to `factor` output bytes. Bounded `decode()`
+    calls retain any input that does not fit within `max_length` output
+    bytes. Metrics are recorded for assertions on buffering behaviour.
+    """
+
+    def __init__(self, factor=1):
+        self.factor = factor
+        self.pending = b""
+        self.inputs = []  # New input bytes seen by each `decode()` call.
+        self.outputs = []  # Bytes returned by each `decode()` call.
+        self.peak_pending = 0  # Largest retained undecoded input.
+
+    @property
+    def has_pending(self):
+        return bool(self.pending)
+
+    def decode(self, data, max_length=None):
+        self.inputs.append(len(data))
+        data = self.pending + data
+        if max_length is None:
+            count = len(data)
+        else:
+            count = min(len(data), max(1, max_length // self.factor))
+        result = b"".join(bytes([byte]) * self.factor for byte in data[:count])
+        self.pending = data[count:]
+        self.outputs.append(len(result))
+        self.peak_pending = max(self.peak_pending, len(self.pending))
+        return result
+
+    def flush(self):
+        result = b"".join(bytes([byte]) * self.factor for byte in self.pending)
+        self.pending = b""
+        return result
+
+
+class CountingStream(httpx.SyncByteStream):
+    """
+    A sync byte stream that counts how many chunks are pulled from it.
+    """
+
+    def __init__(self, chunks):
+        self._chunks = chunks
+        self.pulls = 0
+
+    def __iter__(self):
+        for chunk in self._chunks:
+            self.pulls += 1
+            yield chunk
+
+    def close(self):
+        pass
+
+
+class AsyncCountingStream(httpx.AsyncByteStream):
+    """
+    An async byte stream that counts how many chunks are pulled from it.
+    """
+
+    def __init__(self, chunks):
+        self._chunks = chunks
+        self.pulls = 0
+
+    async def __aiter__(self):
+        for chunk in self._chunks:
+            self.pulls += 1
+            yield chunk
+
+    async def aclose(self):
+        pass
+
+
+def controlled_response(monkeypatch, stream, decoder):
+    monkeypatch.setitem(
+        httpx._decoders.SUPPORTED_DECODERS, "controlled", lambda: decoder
+    )
+    return httpx.Response(
+        200,
+        headers={"Content-Encoding": "controlled"},
+        stream=stream,
+    )
+
+
+def controlled_raw_chunks():
+    # 500 bytes delivered as 5 chunks of 100 bytes.
+    return [bytes(range(100))] * 5
+
+
+def controlled_expansion(raw, factor):
+    return b"".join(bytes([byte]) * factor for byte in raw)
+
+
+def test_iter_bytes_bounded_buffering(monkeypatch):
+    """
+    Raw reads, decoder output, and buffered content all stay bounded by
+    `chunk_size`, even when decoding expands the content and the stream
+    delivers chunks larger than `chunk_size`.
+    """
+    chunk_size = 64
+    decoder = ControlledDecoder(factor=4)
+    stream = CountingStream(controlled_raw_chunks())
+    response = controlled_response(monkeypatch, stream, decoder)
+
+    parts = list(response.iter_bytes(chunk_size=chunk_size))
+
+    expected = controlled_expansion(b"".join(controlled_raw_chunks()), factor=4)
+    # The final content is delivered exactly, including a short final chunk.
+    assert b"".join(parts) == expected
+    assert all(len(part) == chunk_size for part in parts[:-1])
+    assert len(parts[-1]) == len(expected) % chunk_size
+    # Raw reads seen by the decoder are bounded by `chunk_size`.
+    assert max(decoder.inputs) <= chunk_size
+    # Decoder output is bounded by `chunk_size` per call.
+    assert max(decoder.outputs) <= chunk_size
+    # Retained undecoded input never exceeds a single raw read.
+    assert decoder.peak_pending <= chunk_size
+    # The stream is fully consumed, and the response is closed.
+    assert stream.pulls == 5
+    assert response.is_closed
+
+
+def test_iter_bytes_backpressure(monkeypatch):
+    """
+    A slow consumer applies backpressure: the client does not read
+    ahead of the consumer by more than a single raw chunk.
+    """
+    chunk_size = 64
+    decoder = ControlledDecoder(factor=4)
+    stream = CountingStream(controlled_raw_chunks())
+    response = controlled_response(monkeypatch, stream, decoder)
+
+    iterator = response.iter_bytes(chunk_size=chunk_size)
+    parts = [next(iterator) for _ in range(4)]
+    assert all(len(part) == chunk_size for part in parts)
+    # Four chunks delivered, but only a single raw chunk pulled so far.
+    assert stream.pulls == 1
+
+    parts.append(next(iterator))
+    assert stream.pulls == 2
+
+    parts.extend(iterator)
+    expected = controlled_expansion(b"".join(controlled_raw_chunks()), factor=4)
+    assert b"".join(parts) == expected
+    assert stream.pulls == 5
+
+
+@pytest.mark.anyio
+async def test_aiter_bytes_bounded_buffering(monkeypatch):
+    chunk_size = 64
+    decoder = ControlledDecoder(factor=4)
+    stream = AsyncCountingStream(controlled_raw_chunks())
+    response = controlled_response(monkeypatch, stream, decoder)
+
+    parts = [part async for part in response.aiter_bytes(chunk_size=chunk_size)]
+
+    expected = controlled_expansion(b"".join(controlled_raw_chunks()), factor=4)
+    assert b"".join(parts) == expected
+    assert all(len(part) == chunk_size for part in parts[:-1])
+    assert len(parts[-1]) == len(expected) % chunk_size
+    assert max(decoder.inputs) <= chunk_size
+    assert max(decoder.outputs) <= chunk_size
+    assert decoder.peak_pending <= chunk_size
+    assert stream.pulls == 5
+    assert response.is_closed
+
+
+@pytest.mark.anyio
+async def test_iter_bytes_sync_async_parity(monkeypatch):
+    """
+    Sync and async iteration apply the same bounded buffering, pulling
+    the same number of raw chunks and delivering identical content.
+    """
+    chunk_size = 64
+    sync_decoder = ControlledDecoder(factor=4)
+    sync_stream = CountingStream(controlled_raw_chunks())
+    sync_response = controlled_response(monkeypatch, sync_stream, sync_decoder)
+    sync_parts = list(sync_response.iter_bytes(chunk_size=chunk_size))
+
+    async_decoder = ControlledDecoder(factor=4)
+    async_stream = AsyncCountingStream(controlled_raw_chunks())
+    async_response = controlled_response(monkeypatch, async_stream, async_decoder)
+    async_parts = [
+        part async for part in async_response.aiter_bytes(chunk_size=chunk_size)
+    ]
+
+    assert sync_parts == async_parts
+    assert sync_stream.pulls == async_stream.pulls
+    assert sync_decoder.inputs == async_decoder.inputs
+    assert sync_decoder.outputs == async_decoder.outputs
+    assert sync_decoder.peak_pending == async_decoder.peak_pending
+
+
+def test_iter_bytes_gzip_bounded_read_ahead(monkeypatch):
+    """
+    A highly compressed response delivered as a single large raw chunk
+    is decoded incrementally, bounded by `chunk_size`, rather than being
+    expanded in full before the first chunk is delivered.
+    """
+    body = b"Hello, world!" * 10000
+    compressor = zlib.compressobj(9, zlib.DEFLATED, zlib.MAX_WBITS | 16)
+    compressed_body = compressor.compress(body) + compressor.flush()
+
+    outputs = []
+
+    class RecordingGZipDecoder(httpx._decoders.GZipDecoder):
+        def decode(self, data, max_length=None):
+            result = super().decode(data, max_length)
+            outputs.append(len(result))
+            return result
+
+    monkeypatch.setitem(
+        httpx._decoders.SUPPORTED_DECODERS, "gzip", RecordingGZipDecoder
+    )
+    stream = CountingStream([compressed_body])
+    response = httpx.Response(
+        200,
+        headers={"Content-Encoding": "gzip"},
+        stream=stream,
+    )
+
+    chunk_size = 64
+    iterator = response.iter_bytes(chunk_size=chunk_size)
+    first = next(iterator)
+    # The first chunk is delivered after a single raw pull, without
+    # expanding the whole response in memory.
+    assert len(first) == chunk_size
+    assert stream.pulls == 1
+    assert max(outputs) <= chunk_size
+
+    parts = [first] + list(iterator)
+    assert b"".join(parts) == body
+    assert max(outputs) <= chunk_size
+
+
+def test_iter_bytes_decoding_error_with_chunk_size():
+    headers = [(b"Content-Encoding", b"gzip")]
+    stream = CountingStream([b"invalid-gzip-data"])
+    response = httpx.Response(200, headers=headers, stream=stream)
+    with pytest.raises(httpx.DecodingError):
+        list(response.iter_bytes(chunk_size=4))
 
 
 @pytest.mark.anyio
