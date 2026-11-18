@@ -1,4 +1,5 @@
 import os
+import struct
 import unittest
 from io import BytesIO
 from unittest.mock import Mock
@@ -8,6 +9,7 @@ from elftools.construct import Container
 from elftools.dwarf.dwarf_expr import DWARFExprParser
 from elftools.elf.dynamic import DynamicSection, DynamicSegment
 from elftools.elf.elffile import ELFFile
+from elftools.elf.enums import ENUM_RELOC_TYPE_RISCV
 from elftools.elf.relocation import Relocation, RelocationHandler
 from elftools.elf.sections import SymbolTableSection
 from elftools.elf.structs import ELFStructs
@@ -197,6 +199,369 @@ class TestRelocation(unittest.TestCase):
                 if isinstance(sect, DynamicSection):
                     relos = sect.get_relocation_tables()
                     self.assertEqual(set(relos), {'JMPREL', 'REL'})
+
+class TestRISCVPCRelPairing(unittest.TestCase):
+    # RISC-V is little endian. The synthetic section is a short vector of
+    # 4-byte instruction words plus surrounding filler bytes that must remain
+    # untouched by relocation.
+    HI = ENUM_RELOC_TYPE_RISCV['R_RISCV_PCREL_HI20']
+    LO_I = ENUM_RELOC_TYPE_RISCV['R_RISCV_PCREL_LO12_I']
+    LO_S = ENUM_RELOC_TYPE_RISCV['R_RISCV_PCREL_LO12_S']
+    RELAX = ENUM_RELOC_TYPE_RISCV['R_RISCV_RELAX']
+    ALIGN = ENUM_RELOC_TYPE_RISCV['R_RISCV_ALIGN']
+
+    TARGET_SECTION = 1
+
+    @staticmethod
+    def auipc(rd=1):
+        return 0x00000017 | (rd << 7)
+
+    @staticmethod
+    def addi(rd=2, rs1=1, imm=0):
+        return 0x13 | (rd << 7) | (0 << 12) | (rs1 << 15) | ((imm & 0xFFF) << 20)
+
+    @staticmethod
+    def sw(rs1=1, rs2=3, imm=0):
+        imm &= 0xFFF
+        return (0x23 | (rs2 << 15) | (rs1 << 20)
+                | ((imm & 0x01F) << 7) | ((imm & 0xFE0) << 20))
+
+    @staticmethod
+    def decode_i_imm(word):
+        imm = (word >> 20) & 0xFFF
+        return imm - 0x1000 if imm & 0x800 else imm
+
+    @staticmethod
+    def decode_s_imm(word):
+        imm = ((word >> 20) & 0xFE0) | ((word >> 7) & 0x01F)
+        return imm - 0x1000 if imm & 0x800 else imm
+
+    def _handler(self, symbols=()):
+        elf = Mock(spec=ELFFile)
+        elf.get_machine_arch.return_value = 'RISC-V'
+        elf.structs = ELFStructs(little_endian=True, elfclass=64)
+        elf.structs.create_basic_structs()
+        symtab = self._symtab(symbols)
+        elf.get_section.return_value = symtab
+        return RelocationHandler(elf), symtab
+
+    def _symbol(self, value, bind='STB_LOCAL', shndx=TARGET_SECTION, type='STT_NOTYPE'):
+        return Container(st_value=value,
+                         entry=Container(bind=bind, st_shndx=shndx, type=type))
+
+    def _symtab(self, symbols):
+        symtab = Mock(spec=SymbolTableSection)
+        symtab.num_symbols.return_value = len(symbols)
+        symtab.get_symbol.side_effect = lambda index: symbols[index]
+        return symtab
+
+    def _reloc_section(self, entries, handler):
+        section = Mock()
+        section.__getitem__ = Mock(
+            side_effect=lambda name: {'sh_info': self.TARGET_SECTION,
+                                      'sh_link': 0}[name])
+        section.iter_relocations.return_value = [
+            Relocation(Container(r_info_type=rtype, r_info_sym=sym,
+                                 r_offset=offset, r_addend=addend),
+                       handler.elffile)
+            for rtype, sym, offset, addend in entries]
+        return section
+
+    def _apply(self, data, entries, symbols):
+        stream = BytesIO(data)
+        handler, _ = self._handler(symbols)
+        handler.apply_section_relocations(
+            stream, self._reloc_section(entries, handler))
+        return stream.getvalue()
+
+    def _words(self, blob, base=0):
+        return [struct.unpack_from('<I', blob, base + 4 * i)[0]
+                for i in range(len(blob) // 4)]
+
+    def _word_at(self, blob, offset):
+        return struct.unpack_from('<I', blob, offset)[0]
+
+    def _assert_reconstruction(self, blob, hi_offset, lo_offset, target,
+                               s_type=False, pc=None):
+        # The relocated pair, executed from the AUIPC's own PC, must reach the
+        # destination; in a relocatable section's view that PC is hi_offset.
+        if pc is None:
+            pc = hi_offset
+        # The 20-bit AUIPC field and 12-bit low field are both signed.
+        hi_imm = self._word_at(blob, hi_offset) >> 12
+        if hi_imm & 0x80000:
+            hi_imm -= 0x100000
+        lo_word = self._word_at(blob, lo_offset)
+        lo_imm = (self.decode_s_imm(lo_word) if s_type
+                  else self.decode_i_imm(lo_word))
+        self.assertEqual(pc + (hi_imm << 12) + lo_imm, target)
+
+    # Every success case models a relocatable object's section-relative view:
+    # S and A name a destination offset within the relocated section and P is
+    # the AUIPC's own section offset, so the pair materializes (S + A - P).
+    # Adding that PC-relative value back to the AUIPC offset recovers S + A.
+    BASE = 0
+
+    def test_paired_lo12_i_positive_distance(self):
+        hi_offset, lo_offset = 0, 4
+        target = 0x12345678
+        filler = 0xDEADBEEF
+        data = struct.pack('<3I', self.auipc(), self.addi(), filler)
+        entries = [
+            (self.HI, 0, hi_offset, target),
+            (self.LO_I, 1, lo_offset, 0),
+        ]
+        symbols = [self._symbol(self.BASE),
+                   self._symbol(hi_offset)]
+        blob = self._apply(data, entries, symbols)
+        words = self._words(blob)
+        self.assertEqual(words[0] & 0xFFF, self.auipc() & 0xFFF)
+        self.assertEqual(self.decode_i_imm(words[1]), 0x678)
+        self.assertEqual(words[1] & 0xFFFFF, self.addi() & 0xFFFFF)
+        self._assert_reconstruction(blob, hi_offset, lo_offset, target)
+        self.assertEqual(words[2], filler)
+
+    def test_paired_lo12_i_negative_distance_with_borrow(self):
+        # Destination behind the AUIPC: the PC-relative value is negative and
+        # its signed low 12 bits borrow from the high 20 bits. The destination
+        # is a valid section offset; only the distance V = S + A - P is negative.
+        hi_offset, lo_offset = 0x100, 0x104
+        target = 0x10
+        data = bytearray(0x110)
+        struct.pack_into('<I', data, hi_offset, self.auipc())
+        struct.pack_into('<I', data, lo_offset, self.addi())
+        entries = [
+            (self.HI, 0, hi_offset, target),
+            (self.LO_I, 1, lo_offset, 0),
+        ]
+        symbols = [self._symbol(self.BASE), self._symbol(hi_offset)]
+        before = bytes(data)
+        blob = self._apply(bytes(data), entries, symbols)
+        words = self._words(blob)
+        v = target - hi_offset
+        expected_lo = v - (((v + 0x800) >> 12) << 12)
+        self.assertEqual(self.decode_i_imm(words[lo_offset // 4]), expected_lo)
+        self._assert_reconstruction(blob, hi_offset, lo_offset, target)
+        for offset in (0, hi_offset - 4, lo_offset + 4):
+            self.assertEqual(blob[offset:offset + 4], before[offset:offset + 4])
+
+    def test_paired_lo12_s_positive_with_carry_into_hi(self):
+        # Low 12 bits >= 0x800: the 0x800 compensation carries into hi.
+        hi_offset, lo_offset = 0, 4
+        target = 0x12345ABC
+        filler = b'\xAB\xCD'
+        data = struct.pack('<2I', self.auipc(), self.sw()) + filler
+        entries = [
+            (self.HI, 0, hi_offset, target),
+            (self.LO_S, 1, lo_offset, 0),
+        ]
+        symbols = [self._symbol(self.BASE), self._symbol(hi_offset)]
+        blob = self._apply(data, entries, symbols)
+        words = self._words(blob)
+        self.assertEqual(self.decode_s_imm(words[1]), 0xABC - 0x1000)
+        self.assertEqual(words[1] & 0x01FFF07F, self.sw() & 0x01FFF07F)
+        self._assert_reconstruction(
+            blob, hi_offset, lo_offset, target, s_type=True)
+        self.assertEqual(blob[8:10], filler)
+
+    def test_paired_lo12_s_negative_distance(self):
+        # S-type low half with a destination before the AUIPC (negative V).
+        hi_offset, lo_offset = 0x200, 0x204
+        target = 0x40
+        data = bytearray(0x210)
+        struct.pack_into('<I', data, hi_offset, self.auipc())
+        struct.pack_into('<I', data, lo_offset, self.sw())
+        entries = [
+            (self.HI, 0, hi_offset, target),
+            (self.LO_S, 1, lo_offset, 0),
+        ]
+        symbols = [self._symbol(self.BASE), self._symbol(hi_offset)]
+        blob = self._apply(bytes(data), entries, symbols)
+        self._assert_reconstruction(
+            blob, hi_offset, lo_offset, target, s_type=True)
+
+    def test_one_hi20_shared_by_two_lo12(self):
+        # One AUIPC feeds both an I-type and an S-type low half. Both must
+        # reconstruct the same destination using the same high field.
+        hi_offset, lo_i, lo_s = 0, 4, 8
+        target = 0x7FFFF00
+        data = struct.pack('<3I', self.auipc(), self.addi(), self.sw())
+        entries = [
+            (self.HI, 0, hi_offset, target),
+            (self.LO_I, 1, lo_i, 0),
+            (self.LO_S, 1, lo_s, 0),
+        ]
+        symbols = [self._symbol(self.BASE), self._symbol(hi_offset)]
+        blob = self._apply(data, entries, symbols)
+        self._assert_reconstruction(blob, hi_offset, lo_i, target)
+        self._assert_reconstruction(
+            blob, hi_offset, lo_s, target, s_type=True)
+
+    def _assert_rejected(self, data, entries, symbols, message):
+        handler, _ = self._handler(symbols)
+        stream = BytesIO(data)
+        before = stream.getvalue()
+        with self.assertRaisesRegex(ELFRelocationError, message):
+            handler.apply_section_relocations(
+                stream, self._reloc_section(entries, handler))
+        # A rejected pairing must leave the original evidence bytes intact.
+        self.assertEqual(stream.getvalue(), before)
+
+    def test_lo12_without_hi20_is_rejected(self):
+        data = struct.pack('<I', self.addi())
+        entries = [(self.LO_I, 1, 0, 0)]
+        symbols = [self._symbol(0), self._symbol(0)]
+        self._assert_rejected(
+            data, entries, symbols, 'no matching R_RISCV_PCREL_HI20')
+
+    def test_hi20_without_lo12_is_rejected(self):
+        data = struct.pack('<I', self.auipc())
+        entries = [(self.HI, 0, 0, 0x1000)]
+        symbols = [self._symbol(0)]
+        self._assert_rejected(
+            data, entries, symbols, 'without a matching')
+
+    def test_lo12_symbol_wrong_offset_is_rejected(self):
+        data = struct.pack('<2I', self.auipc(), self.addi())
+        entries = [(self.HI, 0, 0, 0x2000),
+                   (self.LO_I, 1, 4, 0)]
+        # LO12 label names offset 8, where no HI20 relocation exists.
+        symbols = [self._symbol(0), self._symbol(8)]
+        self._assert_rejected(
+            data, entries, symbols, 'no matching R_RISCV_PCREL_HI20')
+
+    def test_lo12_nonzero_addend_is_rejected(self):
+        data = struct.pack('<2I', self.auipc(), self.addi())
+        entries = [(self.HI, 0, 0, 0x2000),
+                   (self.LO_I, 1, 4, 4)]
+        symbols = [self._symbol(0), self._symbol(0)]
+        self._assert_rejected(
+            data, entries, symbols, 'non-zero')
+
+    def test_lo12_global_symbol_is_rejected(self):
+        data = struct.pack('<2I', self.auipc(), self.addi())
+        entries = [(self.HI, 0, 0, 0x2000),
+                   (self.LO_I, 1, 4, 0)]
+        symbols = [self._symbol(0),
+                   self._symbol(0, bind='STB_GLOBAL')]
+        self._assert_rejected(data, entries, symbols, 'local symbol')
+
+    def test_lo12_symbol_other_section_is_rejected(self):
+        data = struct.pack('<2I', self.auipc(), self.addi())
+        entries = [(self.HI, 0, 0, 0x2000),
+                   (self.LO_I, 1, 4, 0)]
+        symbols = [self._symbol(0),
+                   self._symbol(0, shndx=self.TARGET_SECTION + 1)]
+        self._assert_rejected(data, entries, symbols, 'relocated section')
+
+    def test_hi20_wrong_opcode_is_rejected(self):
+        data = struct.pack('<2I', self.addi(), self.addi())
+        entries = [(self.HI, 0, 0, 0x2000),
+                   (self.LO_I, 1, 4, 0)]
+        symbols = [self._symbol(0), self._symbol(0)]
+        self._assert_rejected(data, entries, symbols, 'AUIPC')
+
+    def test_lo12_s_requires_store_instruction(self):
+        data = struct.pack('<2I', self.auipc(), self.addi())
+        entries = [(self.HI, 0, 0, 0x2000),
+                   (self.LO_S, 1, 4, 0)]
+        symbols = [self._symbol(0), self._symbol(0)]
+        self._assert_rejected(data, entries, symbols, 'S-type store')
+
+    def test_lo12_i_rejects_store_instruction(self):
+        data = struct.pack('<2I', self.auipc(), self.sw())
+        entries = [(self.HI, 0, 0, 0x2000),
+                   (self.LO_I, 1, 4, 0)]
+        symbols = [self._symbol(0), self._symbol(0)]
+        self._assert_rejected(data, entries, symbols, 'I-type')
+
+    def test_lo12_i_rejects_non_i_type_instruction(self):
+        # An R-type OP instruction (opcode 0x33) has no 12-bit immediate and
+        # must not be patched by an LO12_I formula.
+        r_type = 0x33
+        data = struct.pack('<2I', self.auipc(), r_type)
+        entries = [(self.HI, 0, 0, 0x2000),
+                   (self.LO_I, 1, 4, 0)]
+        symbols = [self._symbol(0), self._symbol(0)]
+        self._assert_rejected(data, entries, symbols, 'I-type')
+
+    def test_lo12_i_accepts_load_instruction(self):
+        # LOAD (opcode 0x03) is a valid I-type LO12 carrier.
+        load = 0x03 | (3 << 7) | (2 << 12) | (1 << 15)
+        hi_offset, lo_offset, target = 0, 4, 0x5678
+        data = struct.pack('<2I', self.auipc(), load)
+        entries = [(self.HI, 0, hi_offset, target),
+                   (self.LO_I, 1, lo_offset, 0)]
+        symbols = [self._symbol(0), self._symbol(hi_offset)]
+        blob = self._apply(data, entries, symbols)
+        self._assert_reconstruction(blob, hi_offset, lo_offset, target)
+
+    def test_duplicate_hi20_at_same_offset_is_rejected(self):
+        data = struct.pack('<I', self.auipc())
+        entries = [(self.HI, 0, 0, 0x2000),
+                   (self.HI, 0, 0, 0x3000)]
+        symbols = [self._symbol(0)]
+        self._assert_rejected(data, entries, symbols, 'Conflicting')
+
+    def test_duplicate_lo12_at_same_offset_is_rejected(self):
+        data = struct.pack('<2I', self.auipc(), self.addi())
+        entries = [(self.HI, 0, 0, 0x2000),
+                   (self.LO_I, 1, 4, 0),
+                   (self.LO_S, 1, 4, 0)]
+        symbols = [self._symbol(0), self._symbol(0)]
+        self._assert_rejected(data, entries, symbols, 'Conflicting')
+
+    def test_relax_and_align_remain_unsupported(self):
+        data = struct.pack('<I', self.auipc())
+        for rtype in (self.RELAX, self.ALIGN):
+            with self.subTest(rtype=rtype):
+                entries = [(rtype, 0, 0, 0)]
+                self._assert_rejected(
+                    data, entries, [self._symbol(0)], 'relaxation')
+
+    def test_relocation_outside_section_is_rejected(self):
+        data = struct.pack('<I', self.auipc())
+        entries = [(self.HI, 0, 4, 0x2000),
+                   (self.LO_I, 1, 0, 0)]
+        symbols = [self._symbol(0), self._symbol(4)]
+        self._assert_rejected(
+            data, entries, symbols, 'outside the section')
+
+    def test_rvc_style_two_byte_aligned_offset_is_accepted(self):
+        # RVC objects place 4-byte AUIPC/load/store instructions on 2-byte
+        # boundaries; only section bounds are checked, not 4-byte alignment.
+        hi_offset, lo_offset, target = 0xa, 0xe, 0x2000
+        data = bytearray(0x20)
+        struct.pack_into('<I', data, hi_offset, self.auipc())
+        struct.pack_into('<I', data, lo_offset, self.addi())
+        entries = [(self.HI, 0, hi_offset, target),
+                   (self.LO_I, 1, lo_offset, 0)]
+        symbols = [self._symbol(0), self._symbol(hi_offset)]
+        blob = self._apply(bytes(data), entries, symbols)
+        self._assert_reconstruction(blob, hi_offset, lo_offset, target)
+
+    def test_none_and_simple_relocations_still_apply(self):
+        # A section without PCREL pairs keeps using the regular recipes, and
+        # R_RISCV_NONE leaves its bytes untouched.
+        data = bytearray(16)
+        struct.pack_into('<I', data, 8, 0x11111111)
+        entries = [
+            (ENUM_RELOC_TYPE_RISCV['R_RISCV_NONE'], 0, 0, 0),
+            (ENUM_RELOC_TYPE_RISCV['R_RISCV_32'], 0, 8, 0x24),
+        ]
+        symbols = [self._symbol(0x100)]
+        blob = self._apply(bytes(data), entries, symbols)
+        self.assertEqual(blob[0:8], bytes(8))
+        self.assertEqual(struct.unpack_from('<I', blob, 8)[0], 0x124)
+
+    def test_unsupported_simple_type_still_raises(self):
+        # R_RISCV_CALL is not in the recipe table and must fail through the
+        # regular unsupported-type path without modifying the section bytes.
+        data = struct.pack('<2I', self.auipc(), self.addi())
+        entries = [(ENUM_RELOC_TYPE_RISCV['R_RISCV_CALL'], 0, 0, 0)]
+        self._assert_rejected(
+            data, entries, [self._symbol(0)], 'Unsupported relocation type')
+
 
 if __name__ == '__main__':
     unittest.main()

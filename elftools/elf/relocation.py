@@ -27,7 +27,7 @@ from .enums import (
     ENUM_RELOC_TYPE_i386,
     ENUM_RELOC_TYPE_x64,
 )
-from .sections import Section, SymbolTableSection
+from .sections import Section, Symbol, SymbolTableSection
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
@@ -273,6 +273,72 @@ def _riscv_reloc_calc_sub6(value: int, sym_value: int, offset: int, addend: int 
     return (value & 0xc0) | ((value - sym_value - addend) & 0x3f)
 
 
+# RISC-V PC-relative HI/LO pairing support (R_RISCV_PCREL_HI20 paired with
+# R_RISCV_PCREL_LO12_I / R_RISCV_PCREL_LO12_S). The two halves of an address
+# calculation live in different instructions, so they cannot be applied one
+# relocation at a time like the simple recipes below. The pairing follows the
+# psABI: a LO12 relocation references the local symbol whose st_value is the
+# section offset of the instruction carrying its matching HI20 relocation.
+_RISCV_OP_AUIPC = 0x17
+_RISCV_OP_STORE = 0x23
+_RISCV_OP_OP_IMM = 0x13
+_RISCV_OP_LOAD = 0x03
+
+_RISCV_LO12_I_IMM_MASK = 0xFFF
+_RISCV_LO12_S_IMM_MASK = 0xFFF
+_RISCV_S_TYPE_FIXED_MASK = 0x01FFF07F
+
+
+def _riscv_is_lo12_i_instruction(word: int) -> bool:
+    # LO12_I targets an I-type instruction with a 12-bit immediate: either an
+    # integer immediate (OP-IMM, including the 64-bit word variant) or a load.
+    opcode = word & 0x7F
+    return opcode in (_RISCV_OP_OP_IMM, _RISCV_OP_LOAD)
+
+
+def _riscv_is_lo12_s_instruction(word: int) -> bool:
+    # LO12_S targets an S-type store; funct3 only selects the access width.
+    return (word & 0x7F) == _RISCV_OP_STORE
+
+
+def _riscv_pcrel_hi_raw(sym_value: int, addend: int, hi_offset: int) -> int:
+    # Signed PC-relative distance to the destination. The range check runs on
+    # this value before it is split into the two instruction fields.
+    return sym_value + addend - hi_offset
+
+
+def _riscv_pcrel_hi_field(value: int) -> int:
+    # AUIPC's imm[31:12] holds the high 20 bits of the distance. Adding 0x800
+    # compensates for the signed low 12-bit field, including its carry into the
+    # high part; Python's >> is an arithmetic shift for negative values.
+    return ((value + 0x800) >> 12) & 0xFFFFF
+
+
+def _riscv_pcrel_lo_field(value: int) -> int:
+    # The low half holds sign-extended bits [11:0] of the same distance. The
+    # 0x800 added to the high field cancels out once both halves are combined.
+    return value & 0xFFF
+
+
+def _riscv_build_auicode(word: int, hi_field: int) -> int:
+    # AUIPC holds the high 20 bits in imm[31:12]; opcode and rd stay intact.
+    return (word & 0xFFF) | ((hi_field & 0xFFFFF) << 12)
+
+
+def _riscv_build_lo12_i(word: int, lo_value: int) -> int:
+    # I-type: imm[11:0] in bits 31:20; opcode, rd, funct3 and rs1 stay intact.
+    return (word & 0xFFFFF) | ((lo_value & _RISCV_LO12_I_IMM_MASK) << 20)
+
+
+def _riscv_build_lo12_s(word: int, lo_value: int) -> int:
+    # S-type: imm[11:5] in bits 31:25 and imm[4:0] in bits 11:7; opcode,
+    # funct3, rs1 and rs2 stay intact.
+    imm = lo_value & _RISCV_LO12_S_IMM_MASK
+    return ((word & _RISCV_S_TYPE_FIXED_MASK)
+            | ((imm & 0xFE0) << 20)
+            | ((imm & 0x01F) << 7))
+
+
 class RelocationHandler:
     """ Applies a supported subset of ELF relocations to section data,
         primarily for reading DWARF sections.
@@ -316,8 +382,177 @@ class RelocationHandler:
         # The symbol table associated with this relocation section
         symtab = self.elffile.get_section(reloc_section['sh_link'])
         assert isinstance(symtab, SymbolTableSection)
+        if self.elffile.get_machine_arch() == 'RISC-V':
+            self._apply_riscv_relocations(stream, reloc_section, symtab)
+            return
         for reloc in reloc_section.iter_relocations():
             self._do_apply_relocation(stream, reloc, symtab)
+
+    # R_RISCV_PCREL_LO12_I/S must be paired with a R_RISCV_PCREL_HI20: the
+    # LO12 relocation points at the local label placed on the AUIPC
+    # instruction. Neither half can be resolved independently, so these types
+    # deliberately have no entries in _RELOCATION_RECIPES_RISCV.
+    _RISCV_PCREL_HI20 = ENUM_RELOC_TYPE_RISCV['R_RISCV_PCREL_HI20']
+    _RISCV_PCREL_LO12_I = ENUM_RELOC_TYPE_RISCV['R_RISCV_PCREL_LO12_I']
+    _RISCV_PCREL_LO12_S = ENUM_RELOC_TYPE_RISCV['R_RISCV_PCREL_LO12_S']
+    _RISCV_RELAX = ENUM_RELOC_TYPE_RISCV['R_RISCV_RELAX']
+    _RISCV_ALIGN = ENUM_RELOC_TYPE_RISCV['R_RISCV_ALIGN']
+
+    def _apply_riscv_relocations(
+        self,
+        stream: IO[bytes],
+        reloc_section: RelocationSection,
+        symtab: SymbolTableSection,
+    ) -> None:
+        """ Apply RISC-V relocations, resolving explicitly paired
+            R_RISCV_PCREL_HI20 and R_RISCV_PCREL_LO12_I/S instructions.
+
+            All pairing and encoding checks are completed before any byte is
+            written, so a rejected section is left exactly as it was found.
+            Linker relaxation is not modeled: sections carrying
+            R_RISCV_RELAX or R_RISCV_ALIGN are rejected rather than patched
+            with a formula that may no longer match the instruction layout.
+        """
+        target_section_index = reloc_section['sh_info']
+        word_struct = self.elffile.structs.Elf_word('')
+
+        hi_by_offset: dict[int, Relocation] = {}
+        lo_by_offset: dict[int, Relocation] = {}
+        simple_relocs: list[Relocation] = []
+
+        for reloc in reloc_section.iter_relocations():
+            reloc_type = reloc['r_info_type']
+            if reloc_type in self._RELOCATION_NONE_TYPES['RISC-V']:
+                continue
+            if reloc_type in (self._RISCV_RELAX, self._RISCV_ALIGN):
+                raise ELFRelocationError(
+                    'RISC-V linker relaxation is not supported for offline '
+                    f'relocation: {reloc}')
+            if reloc_type == self._RISCV_PCREL_HI20:
+                offset = reloc['r_offset']
+                if offset in hi_by_offset:
+                    raise ELFRelocationError(
+                        'Conflicting R_RISCV_PCREL_HI20 relocations at '
+                        f'offset {offset}: {reloc}')
+                hi_by_offset[offset] = reloc
+            elif reloc_type in (self._RISCV_PCREL_LO12_I,
+                                self._RISCV_PCREL_LO12_S):
+                offset = reloc['r_offset']
+                if offset in lo_by_offset:
+                    raise ELFRelocationError(
+                        'Conflicting R_RISCV_PCREL_LO12 relocations at '
+                        f'offset {offset}: {reloc}')
+                lo_by_offset[offset] = reloc
+            else:
+                # An unsupported simple type must fail before any byte is
+                # written; the regular application path raises the standard
+                # error during the write phase below.
+                simple_relocs.append(reloc)
+
+        def reloc_symbol(reloc: Relocation) -> tuple[int, Symbol]:
+            sym_index = reloc['r_info_sym']
+            if sym_index >= symtab.num_symbols():
+                raise ELFRelocationError(
+                    'Invalid symbol reference in relocation: '
+                    f'index {sym_index}')
+            return sym_index, symtab.get_symbol(sym_index)
+
+        def read_word(offset: int) -> int:
+            # RVC objects place 4-byte instructions on 2-byte boundaries, so
+            # only the section bounds are enforced here, not 4-byte alignment.
+            if offset < 0 or offset + word_struct.sizeof() > len(stream.getbuffer()):
+                raise ELFRelocationError(
+                    'RISC-V PCREL relocation points outside the section '
+                    f'data: offset {offset}')
+            return struct_parse(word_struct, stream, stream_pos=offset)
+
+        # Resolve every LO12 half to its HI20 partner and validate the
+        # instruction words. Nothing is written in this phase.
+        hi_values: dict[int, int] = {}
+        hi_words: dict[int, int] = {}
+        lo_patches: list[tuple[int, int]] = []
+        paired_hi_offsets: set[int] = set()
+
+        for hi_offset, hi_reloc in hi_by_offset.items():
+            _, hi_symbol = reloc_symbol(hi_reloc)
+            word = read_word(hi_offset)
+            if word & 0x7F != _RISCV_OP_AUIPC:
+                raise ELFRelocationError(
+                    'R_RISCV_PCREL_HI20 must target an AUIPC instruction at '
+                    f'offset {hi_offset}: {hi_reloc}')
+            value = _riscv_pcrel_hi_raw(
+                hi_symbol['st_value'], hi_reloc['r_addend'], hi_offset)
+            if not (-(1 << 31) <= value < (1 << 31)):
+                raise ELFRelocationError(
+                    'R_RISCV_PCREL_HI20 value does not fit in 20 bits for '
+                    f'relocation: {hi_reloc}')
+            hi_values[hi_offset] = value
+            hi_words[hi_offset] = word
+
+        for lo_reloc in lo_by_offset.values():
+            lo_offset = lo_reloc['r_offset']
+            lo_type = lo_reloc['r_info_type']
+            _, lo_symbol = reloc_symbol(lo_reloc)
+
+            if lo_symbol.entry.get('bind', 'STB_LOCAL') != 'STB_LOCAL':
+                raise ELFRelocationError(
+                    'R_RISCV_PCREL_LO12 must reference a local symbol naming '
+                    f'its paired AUIPC: {lo_reloc}')
+            if (lo_symbol.entry.get('st_shndx', target_section_index)
+                    != target_section_index):
+                raise ELFRelocationError(
+                    'R_RISCV_PCREL_LO12 symbol is not defined in the '
+                    f'relocated section: {lo_reloc}')
+            if lo_reloc['r_addend'] != 0:
+                raise ELFRelocationError(
+                    'R_RISCV_PCREL_LO12 carries an unexpected non-zero '
+                    f'addend; only the paired HI20 addend is used: {lo_reloc}')
+
+            hi_offset = lo_symbol['st_value']
+            hi_reloc = hi_by_offset.get(hi_offset)
+            if hi_reloc is None:
+                raise ELFRelocationError(
+                    'R_RISCV_PCREL_LO12 has no matching R_RISCV_PCREL_HI20 '
+                    f'at symbol offset {hi_offset}: {lo_reloc}')
+
+            word = read_word(lo_offset)
+            lo_field = _riscv_pcrel_lo_field(hi_values[hi_offset])
+            if lo_type == self._RISCV_PCREL_LO12_S:
+                if not _riscv_is_lo12_s_instruction(word):
+                    raise ELFRelocationError(
+                        'R_RISCV_PCREL_LO12_S must target an S-type store '
+                        f'instruction at offset {lo_offset}: {lo_reloc}')
+                patched = _riscv_build_lo12_s(word, lo_field)
+            else:
+                if not _riscv_is_lo12_i_instruction(word):
+                    raise ELFRelocationError(
+                        'R_RISCV_PCREL_LO12_I must target an I-type '
+                        f'instruction at offset {lo_offset}: {lo_reloc}')
+                patched = _riscv_build_lo12_i(word, lo_field)
+
+            lo_patches.append((lo_offset, patched))
+            paired_hi_offsets.add(hi_offset)
+
+        orphaned = hi_by_offset.keys() - paired_hi_offsets
+        if orphaned:
+            raise ELFRelocationError(
+                'R_RISCV_PCREL_HI20 without a matching R_RISCV_PCREL_LO12_I '
+                f'or R_RISCV_PCREL_LO12_S at offset(s): '
+                f'{sorted(orphaned)}')
+
+        # All checks passed: simple relocations first, then the paired
+        # instruction words. The surrounding bytes are never touched.
+        for reloc in simple_relocs:
+            self._do_apply_relocation(stream, reloc, symtab)
+
+        for hi_offset, word in hi_words.items():
+            hi_field = _riscv_pcrel_hi_field(hi_values[hi_offset])
+            patched = _riscv_build_auicode(word, hi_field)
+            stream.seek(hi_offset)
+            word_struct.build_stream(patched, stream)
+        for lo_offset, patched in lo_patches:
+            stream.seek(lo_offset)
+            word_struct.build_stream(patched, stream)
 
     def _do_apply_relocation(
         self,
