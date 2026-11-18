@@ -346,6 +346,7 @@ from oletools.common.io_encoding import ensure_stdout_handles_unicode
 from oletools.common import codepages
 from oletools import ftguess
 from oletools.common.log_helper import log_helper
+from oletools import ooxml_macros
 
 # === PYTHON 2+3 SUPPORT ======================================================
 
@@ -2709,13 +2710,21 @@ class VBA_Parser(object):
             # open file from disk:
             _file = filename
             self.file_on_disk = True
+            self._openxml_data = None
         else:
             # file already read in memory, make it a file-like object for zipfile:
             _file = BytesIO(data)
             self.file_on_disk = False
+            # keep the raw bytes so OpenXML candidate bytes can be read back
+            # from their physical members without touching the host directory
+            self._openxml_data = data
         #self.file = _file
         self.ole_file = None
         self.ole_subfiles = []
+        # For OpenXML inputs: identity-preserving macro project discovery.
+        # Maps the display name of each adopted physical ZIP member
+        # ("part/name.bin#index") to an ooxml_macros.MacroProjectCandidate.
+        self.ooxml_candidates = {}
         self.filename = filename
         self.container = container
         self.relaxed = relaxed
@@ -2845,67 +2854,49 @@ class VBA_Parser(object):
         Open an OpenXML file
         :param _file: filename or file contents in a file object
         :return: nothing
+
+        Macro project parts are located through
+        :py:mod:`oletools.ooxml_macros`, which keeps the identity of every
+        physical ZIP member: same-named members, contradictory relationships
+        or content types never cause one member to silently replace another.
         """
-        # This looks like a zip file, need to look for vbaProject.bin inside
-        # It can be any OLE file inside the archive
-        #...because vbaProject.bin can be renamed:
+        # The macro project can be any OLE part inside the archive, because
+        # vbaProject.bin can be renamed:
         # see http://www.decalage.info/files/JCV07_Lagadec_OpenDocument_OpenXML_v4_decalage.pdf#page=18
         log.info('Opening ZIP/OpenXML file %s' % self.filename)
         try:
             z = zipfile.ZipFile(_file)
-            #TODO: check if this is actually an OpenXML file
             #TODO: if the zip file is encrypted, suggest to use the -z option, or try '-z infected' automatically
-            # check each file within the zip if it is an OLE file, by reading its magic:
-            for subfile in z.namelist():
-                log.debug("OpenXML subfile {}".format(subfile))
-                with z.open(subfile) as file_handle:
-                    # found_ole = False
-                    # template_injection_detected = False
-                    # xml_macrosheet_found = False
-                    magic = file_handle.read(len(olefile.MAGIC))
-                    if magic == olefile.MAGIC:
-                #         found_ole = True
-                #     # in case we did not find an OLE file,
-                #     # there could be a XLM macrosheet or a template injection attempt
-                #     if not found_ole:
-                #         read_all_file = file_handle.read()
-                #         # try to detect template injection attempt
-                #         # https://ired.team/offensive-security/initial-access/phishing-with-ms-office/inject-macros-from-a-remote-dotm-template-docx-with-macros
-                #         subfile_that_can_contain_templates = "word/_rels/settings.xml.rels"
-                #         if subfile == subfile_that_can_contain_templates:
-                #             regex_template = b"Type=\"http://schemas\.openxmlformats\.org/officeDocument/\d{4}/relationships/attachedTemplate\"\s+Target=\"(.+?)\""
-                #             template_injection_found = re.search(regex_template, read_all_file)
-                #             if template_injection_found:
-                #                 injected_template_url = template_injection_found.group(1).decode()
-                #                 message = "Found injected template in subfile {}. Template URL: {}"\
-                #                           "".format(subfile_that_can_contain_templates, injected_template_url)
-                #                 log.info(message)
-                #                 template_injection_detected = True
-                #                 self.template_injection_found = True
-                #         # try to find a XML macrosheet
-                #         macro_sheet_footer = b"</xm:macrosheet>"
-                #         len_macro_sheet_footer = len(macro_sheet_footer)
-                #         last_bytes_to_check = read_all_file[-len_macro_sheet_footer:]
-                #         if last_bytes_to_check == macro_sheet_footer:
-                #             message = "Found XLM Macro in subfile: {}".format(subfile)
-                #             log.info(message)
-                #             xml_macrosheet_found = True
-                #             self.xlm_macrosheet_found = True
-                #
-                # if found_ole or xml_macrosheet_found or template_injection_detected:
-                        log.debug('Opening OLE file %s within zip' % subfile)
-                        with z.open(subfile) as file_handle:
-                            ole_data = file_handle.read()
-                        try:
-                            self.append_subfile(filename=subfile, data=ole_data)
-                        except OlevbaBaseException as exc:
-                            if self.relaxed:
-                                log.info('%s is not a valid OLE file (%s)' % (subfile, exc))
-                                log.debug('Trace:', exc_info=True)
-                                continue
-                            else:
-                                raise SubstreamOpenError(self.filename, subfile,
-                                                         exc)
+            discovery = ooxml_macros.OOXMLMacroDiscovery(z)
+            discovery.discover()
+            for anomaly in discovery.anomalies:
+                log.info('OOXML package anomaly in %s: %s'
+                         % (self.filename, anomaly))
+            self._log_macro_candidates(discovery)
+            # Adopt every explicit, conflicting or orphan OLE candidate. We
+            # never pick a winner among same-named members: each physical
+            # member is parsed from its own bytes through its own ZipInfo.
+            for candidate in discovery.adopted_candidates():
+                ole_data = discovery.read_candidate_bytes(candidate)
+                try:
+                    self.append_subfile(
+                        filename=discovery.display_name(candidate),
+                        data=ole_data,
+                        container=self.filename, candidate=candidate)
+                except OlevbaBaseException as exc:
+                    if self.relaxed:
+                        log.info('%s is not a valid OLE file (%s)'
+                                 % (discovery.display_name(candidate), exc))
+                        log.debug('Trace:', exc_info=True)
+                        continue
+                    raise SubstreamOpenError(
+                        self.filename, discovery.display_name(candidate), exc)
+            for candidate in discovery.rejected_candidates():
+                if candidate.referenced or \
+                        'vbaProject' in candidate.content_type_evidence:
+                    log.info('Rejected macro project candidate %s: %s'
+                             % (discovery.display_name(candidate),
+                                '; '.join(candidate.reasons)))
             z.close()
             # set type only if parsing succeeds
             self.type = TYPE_OpenXML
@@ -2921,6 +2912,116 @@ class VBA_Parser(object):
             log.info('Failed Zip/OpenXML parsing for file %r (%s)'
                           % (self.filename, exc))
             log.debug('Trace:', exc_info=True)
+
+    def _log_macro_candidates(self, discovery):
+        """Log the evidence behind each macro project candidate category."""
+        groups = (
+            ('explicit', discovery.explicit_candidates()),
+            ('conflicting', discovery.conflict_candidates()),
+            ('orphan', discovery.orphan_candidates()),
+            ('rejected', discovery.rejected_candidates()),
+        )
+        for label, candidates in groups:
+            if not candidates:
+                continue
+            for candidate in candidates:
+                log.info('OOXML %s macro candidate %s in %s: %s'
+                         % (label, discovery.display_name(candidate),
+                            self.filename,
+                            '; '.join(candidate.reasons) or 'no evidence'))
+
+    def get_ooxml_macro_candidates(self):
+        """
+        Return the classified macro project candidates found in this package.
+
+        Only meaningful for OpenXML inputs. Returns a dict with three lists of
+        :py:class:`oletools.ooxml_macros.MacroProjectCandidate`:
+        ``explicit`` (referenced or declared vbaProject), ``conflict``
+        (duplicate part name or contradictory content type) and ``orphan``
+        (OLE member neither referenced nor declared). Each candidate carries
+        the physical member identity and the reasons for its classification.
+        """
+        result = {'explicit': [], 'conflict': [], 'orphan': []}
+        for candidate in self.ooxml_candidates.values():
+            if candidate.category == ooxml_macros.CATEGORY_EXPLICIT:
+                result['explicit'].append(candidate)
+            elif candidate.category == ooxml_macros.CATEGORY_CONFLICT:
+                result['conflict'].append(candidate)
+            elif candidate.category == ooxml_macros.CATEGORY_ORPHAN:
+                result['orphan'].append(candidate)
+        return result
+
+    def read_ooxml_candidate_bytes(self, candidate):
+        """
+        Read back the exact bytes of an OpenXML macro project candidate.
+
+        The bytes are read from the physical ZIP member the candidate stands
+        for, so same-named members always return their own content. Returns
+        None for non-OpenXML inputs or an unknown candidate.
+        """
+        if self.type != TYPE_OpenXML or \
+                not isinstance(candidate, ooxml_macros.MacroProjectCandidate):
+            return None
+        with zipfile.ZipFile(self._openxml_source()) as zipper:
+            return candidate.read_bytes(zipper)
+
+    def _openxml_source(self):
+        if self.file_on_disk:
+            return self.filename
+        return BytesIO(self._openxml_data)
+
+    def ooxml_macro_candidates_summary(self):
+        """JSON-serialisable summary of the classified macro candidates."""
+        if self.type != TYPE_OpenXML:
+            return None
+        summary = {}
+        for group, candidates in self.get_ooxml_macro_candidates().items():
+            summary[group] = [{
+                'part_name': candidate.part_name,
+                'member_index': candidate.member_index,
+                'display_name': candidate.display_name(
+                    self._candidate_name_is_duplicate(candidate)),
+                'file_size': candidate.file_size,
+                'crc32': candidate.crc,
+                'reasons': list(candidate.reasons),
+            } for candidate in candidates]
+        return summary
+
+    def _candidate_name_is_duplicate(self, candidate):
+        count = 0
+        for other in self.ooxml_candidates.values():
+            if other.normalized_name == candidate.normalized_name:
+                count += 1
+        return count > 1
+
+    def print_ooxml_macro_candidates(self):
+        """Print explicit, conflicting and orphan macro parts separately.
+
+        No candidate is hidden behind another same-named member: every line is
+        attributed to a specific physical ZIP member with the evidence that
+        caused its classification.
+        """
+        if self.type != TYPE_OpenXML:
+            return
+        grouped = self.get_ooxml_macro_candidates()
+        labels = (
+            ('explicit', 'Explicit macro project parts'),
+            ('conflict', 'Conflicting macro project parts (all kept)'),
+            ('orphan', 'Orphan OLE macro project parts'),
+        )
+        for group, title in labels:
+            candidates = grouped[group]
+            if not candidates:
+                continue
+            print('OOXML %s:' % title)
+            for candidate in candidates:
+                name = candidate.display_name(
+                    self._candidate_name_is_duplicate(candidate))
+                print('  - %s (member #%d, size=%d, crc32=0x%08x)'
+                      % (name, candidate.member_index,
+                         candidate.file_size, candidate.crc))
+                for reason in candidate.reasons:
+                    print('      * %s' % reason)
 
     def open_word2003xml(self, data):
         """
@@ -3171,14 +3272,25 @@ class VBA_Parser(object):
         # set type only if parsing succeeds
         self.type = TYPE_TEXT
 
-    def append_subfile(self, filename, data, container=None):
+    def append_subfile(self, filename, data, container=None, candidate=None):
         """
         Create sub-parser for given subfile/data and append to subfiles.
+
+        When ``candidate`` is given (an OpenXML
+        :py:class:`oletools.ooxml_macros.MacroProjectCandidate`), it is kept
+        keyed by the sub-parser filename so the physical member identity and
+        its classification evidence stay available after parsing.
         """
-        self.ole_subfiles.append(VBA_Parser(filename, data, container,
-                                            relaxed=self.relaxed,
-                                            encoding=self.encoding,
-                                            disable_pcode=self.disable_pcode))
+        sub_parser = VBA_Parser(filename, data, container,
+                                relaxed=self.relaxed,
+                                encoding=self.encoding,
+                                disable_pcode=self.disable_pcode)
+        self.ole_subfiles.append(sub_parser)
+        if candidate is not None:
+            self.ooxml_candidates[filename] = candidate
+            sub_parser.ooxml_part_name = candidate.part_name
+            sub_parser.ooxml_member_index = candidate.member_index
+            sub_parser.ooxml_category = candidate.category
 
     def find_vba_projects(self):
         """
@@ -4154,6 +4266,7 @@ class VBA_Parser_CLI(VBA_Parser):
         try:
             #TODO: handle olefile errors, when an OLE file is malformed
             print('Type: %s'% self.type)
+            self.print_ooxml_macro_candidates()
             if self.detect_macros():
                 # run analysis before displaying VBA code, in order to colorize found keywords
                 self.run_analysis(show_decoded_strings=show_decoded_strings, deobfuscate=deobfuscate)
@@ -4288,6 +4401,8 @@ class VBA_Parser_CLI(VBA_Parser):
         try:
             #TODO: handle olefile errors, when an OLE file is malformed
             result['type'] = self.type
+            result['ooxml_macro_candidates'] = \
+                self.ooxml_macro_candidates_summary()
             macros = []
             if self.detect_macros():
                 for (subfilename, stream_path, vba_filename, vba_code) in self.extract_all_macros():
