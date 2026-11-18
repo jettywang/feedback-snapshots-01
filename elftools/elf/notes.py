@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 from ..common.utils import bytes2str, roundup, struct_parse
 from ..construct import CString
+from .auxv import AuxvVector
 from .enums import ENUM_ANDROID_NOTE_N_TYPE, ENUM_CORE_NOTE_N_TYPE, ENUM_NOTE_N_TYPE
 
 if TYPE_CHECKING:
@@ -90,6 +91,8 @@ def iter_notes(elffile: ELFFile, offset: int, size: int) -> Iterator[Container]:
         elif note['n_type'] == 'NT_FILE':
             note['n_desc'] = struct_parse(elffile.structs.Elf_Nt_File,
                                           BytesIO(desc_data))
+        elif note['n_type'] == 'NT_AUXV':
+            note['n_desc'] = AuxvVector.from_core(elffile, desc_data)
         elif note['n_type'] == 'NT_GNU_PROPERTY_TYPE_0':
             off = 0
             desc_stream = BytesIO(desc_data)

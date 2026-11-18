@@ -135,6 +135,46 @@ count and enumerate them. There are also some special segment classes
 that have more information about well-known segments. Take a look at
 `elftools/elf/segments.py` for more details.
 
+### Core files and the auxiliary vector (NT_AUXV)
+
+ET_CORE files carry their metadata in `PT_NOTE` segments. Iterate the
+notes of a `NoteSegment`; the `NT_AUXV` note is parsed into an
+`AuxvVector` (from `elftools/elf/auxv.py`) instead of raw bytes.
+
+The vector is decoded for the *target* process\'s ABI - word size and
+endianness come from the core header, so a 32-bit big-endian core is
+read differently from a 64-bit little-endian one. Each `AuxvEntry` keeps
+the original pair untouched in `a_type` / `a_val`; recognized `a_type`
+values become symbolic names such as `AT_PHDR`, while unknown ones stay
+as integers. The raw descriptor is still available in the note\'s
+`n_descdata`.
+
+Pointer-like entries (`AT_PHDR`, `AT_ENTRY`, `AT_BASE`, `AT_PLATFORM`,
+`AT_EXECFN`, and so on) are dereferenced only inside the memory ranges
+the core itself saved. Every attempt is recorded in `vector.reads` as a
+`PointerRead` carrying the virtual address, the containing segment\'s
+range, the exact file offset and number of bytes read, and a status of
+`ok`, `unterminated`, or `unmapped`. An address outside every saved
+`PT_LOAD` reads zero bytes and is reported as `unmapped`; missing memory
+is never reconstructed from the host process. Use `vector.string(...)`
+for NUL-terminated entries and `vector.value(...)` for plain integers.
+
+`AT_SECURE` is treated as an ordinary integer flag. Its value says
+nothing by itself about whether the environment was actually cleaned;
+that has to be established separately from saved memory.
+
+Given a caller-provided main program ELF,
+`vector.executable_load_offset(elf)` derives the executable\'s load
+offset. It only confirms an offset when independent estimates agree -
+`AT_PHDR` vs. the ELF\'s `PT_PHDR` address and `AT_ENTRY` vs. `e_entry`
+- with `AT_PHENT`/`AT_PHNUM` cross-checked against `e_phentsize`/
+`e_phnum`. The returned `LoadOffsetEvidence` lists the mutually
+consistent `sources`, any `conflicts`, and `missing` fields; when the
+dump is insufficient the offset is `None` rather than a guess.
+`vector.interpreter_load_offset()` reports the dynamic linker base from
+the single `AT_BASE` field. See `examples/elf_core_auxv.py` for a
+runnable demonstration, including a missing-page core.
+
 ### Structs and headers
 
 Most objects in ELF and DWARF have \"headers\", and such objects usually

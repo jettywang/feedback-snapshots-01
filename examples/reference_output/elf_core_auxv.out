@@ -1,0 +1,97 @@
+==============================================================================
+Case 1 - ET_EXEC main program, loaded at its link base
+==============================================================================
+  ABI: ELFCLASS64, little endian, 8-byte words; 9 entries
+  raw auxiliary pairs (original keys/values preserved):
+    [ 0] AT_PHDR            0x0000000000400040
+    [ 1] AT_PHENT           0x0000000000000038
+    [ 2] AT_PHNUM           0x0000000000000009
+    [ 3] AT_BASE            0x000000007f000000
+    [ 4] AT_ENTRY           0x0000000000400430
+    [ 5] AT_PLATFORM        0x0000000000401000
+    [ 6] AT_SECURE          0x0000000000000000
+    [ 7] AT_EXECFN          0x0000000000402000
+    [ 8] AT_NULL            0x0000000000000000
+  bounded pointer reads (target -> saved file range):
+    AT_PHDR            vaddr=0x0000000000400040 status=ok
+        segment vaddr=[0x400000,0x401000) file_offset=0x1040 bytes_read=8 data=b'\x00\x00\x00\x00\x00\x00\x00\x00'
+    AT_BASE            vaddr=0x000000007f000000 status=UNMAPPED (no PT_LOAD covers it; 0 bytes read)
+    AT_ENTRY           vaddr=0x0000000000400430 status=ok
+        segment vaddr=[0x400000,0x401000) file_offset=0x1430 bytes_read=8 data=b'\x00\x00\x00\x00\x00\x00\x00\x00'
+    AT_PLATFORM        vaddr=0x0000000000401000 status=ok
+        segment vaddr=[0x401000,0x402000) file_offset=0x2000 bytes_read=6 data=b'x86_64'
+    AT_EXECFN          vaddr=0x0000000000402000 status=ok
+        segment vaddr=[0x402000,0x403001) file_offset=0x3000 bytes_read=14 data=b'./et_exec_demo'
+  AT_SECURE raw value = 0
+      (this is only the kernel flag; any actual environment/
+       sanitization must be established separately from memory.)
+  interpreter load base (AT_BASE, single-field evidence):
+      offset=0x7f000000
+  executable load offset: 0x0 (CONFIRMED)
+      derived from mutually consistent fields:
+        - AT_PHDR - PT_PHDR.vaddr
+        - AT_ENTRY - e_entry
+        - AT_PHENT == e_phentsize
+        - AT_PHNUM == e_phnum
+
+==============================================================================
+Case 2 - PIE main program, relocated by a nonzero slide
+==============================================================================
+  ABI: ELFCLASS64, little endian, 8-byte words; 9 entries
+  raw auxiliary pairs (original keys/values preserved):
+    [ 0] AT_PHDR            0x0000555555554040
+    [ 1] AT_PHENT           0x0000000000000038
+    [ 2] AT_PHNUM           0x0000000000000009
+    [ 3] AT_BASE            0x00007faaaa000000
+    [ 4] AT_ENTRY           0x0000555555554430
+    [ 5] AT_PLATFORM        0x0000555555555000
+    [ 6] AT_SECURE          0x0000000000000001
+    [ 7] AT_EXECFN          0x0000555555556000
+    [ 8] AT_NULL            0x0000000000000000
+  bounded pointer reads (target -> saved file range):
+    AT_PHDR            vaddr=0x0000555555554040 status=ok
+        segment vaddr=[0x555555554000,0x555555555000) file_offset=0x1040 bytes_read=8 data=b'\x00\x00\x00\x00\x00\x00\x00\x00'
+    AT_BASE            vaddr=0x00007faaaa000000 status=UNMAPPED (no PT_LOAD covers it; 0 bytes read)
+    AT_ENTRY           vaddr=0x0000555555554430 status=ok
+        segment vaddr=[0x555555554000,0x555555555000) file_offset=0x1430 bytes_read=8 data=b'\x00\x00\x00\x00\x00\x00\x00\x00'
+    AT_PLATFORM        vaddr=0x0000555555555000 status=ok
+        segment vaddr=[0x555555555000,0x555555556000) file_offset=0x2000 bytes_read=6 data=b'x86_64'
+    AT_EXECFN          vaddr=0x0000555555556000 status=ok
+        segment vaddr=[0x555555556000,0x555555557001) file_offset=0x3000 bytes_read=10 data=b'./pie_demo'
+  AT_SECURE raw value = 1
+      (this is only the kernel flag; any actual environment/
+       sanitization must be established separately from memory.)
+  interpreter load base (AT_BASE, single-field evidence):
+      offset=0x7faaaa000000
+  executable load offset: 0x555555554000 (CONFIRMED)
+      derived from mutually consistent fields:
+        - AT_PHDR - PT_PHDR.vaddr
+        - AT_ENTRY - e_entry
+        - AT_PHENT == e_phentsize
+        - AT_PHNUM == e_phnum
+
+==============================================================================
+Case 3 - missing-page core (pointer targets not in the dump)
+==============================================================================
+  ABI: ELFCLASS64, little endian, 8-byte words; 7 entries
+  raw auxiliary pairs (original keys/values preserved):
+    [ 0] AT_PHDR            0x0000555555554040
+    [ 1] AT_PHENT           0x0000000000000038
+    [ 2] AT_PHNUM           0x0000000000000009
+    [ 3] AT_PLATFORM        0x000000007fff0000
+    [ 4] AT_EXECFN          0x000000007fff1000
+    [ 5] AT_SECURE          0x0000000000000000
+    [ 6] AT_NULL            0x0000000000000000
+  bounded pointer reads (target -> saved file range):
+    AT_PHDR            vaddr=0x0000555555554040 status=UNMAPPED (no PT_LOAD covers it; 0 bytes read)
+    AT_PLATFORM        vaddr=0x000000007fff0000 status=UNMAPPED (no PT_LOAD covers it; 0 bytes read)
+    AT_EXECFN          vaddr=0x000000007fff1000 status=UNMAPPED (no PT_LOAD covers it; 0 bytes read)
+  AT_SECURE raw value = 0
+      (this is only the kernel flag; any actual environment/
+       sanitization must be established separately from memory.)
+  interpreter load base (AT_BASE, single-field evidence):
+      unknown; missing=('AT_BASE',)
+  executable load offset: UNKNOWN
+      missing fields: ('AT_ENTRY',)
+      reason: only one offset estimate available; need mutually consistent AT_PHDR and AT_ENTRY to confirm
+

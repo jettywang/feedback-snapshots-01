@@ -1,6 +1,14 @@
 Changelog
 =========
 
++ Unreleased
+
+  - Interpret the NT_AUXV note of ET_CORE files: per-ABI decoding of the
+    auxiliary vector with raw key/value pairs preserved, pointer reads bounded
+    to the memory ranges saved in the core, and load-offset derivation from
+    mutually consistent AUXV/ELF fields (see elftools/elf/auxv.py and
+    examples/elf_core_auxv.py)
+
 + Starting with version 0.31, please use the GitHub UI
   at https://github.com/eliben/pyelftools/tags
   to compare tags in order to find out what changed.

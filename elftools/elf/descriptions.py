@@ -251,14 +251,28 @@ def describe_note(x: Container, machine: str | int) -> str:
         desc = f'\n    Version: {n_desc}'
     elif x['n_type'] == 'NT_GNU_PROPERTY_TYPE_0':
         desc = '\n      Properties: ' + describe_note_gnu_properties(x['n_desc'], machine)
+    elif x['n_type'] == 'NT_AUXV':
+        lines = ['\n      Auxiliary vector (target ABI, raw values preserved):']
+        for entry in n_desc.iter_entries():
+            name = (entry.a_type if isinstance(entry.a_type, str)
+                    else f'AT_0x{entry.a_type:x}')
+            line = f'\n        {name:18s} {entry.a_val:#x}'
+            if entry.read is not None and entry.read.status != 'unmapped' \
+                    and entry.is_string and entry.read.data is not None:
+                line += f'  "{entry.read.data.decode(errors="replace")}"'
+            lines.append(line)
+        desc = ''.join(lines)
     else:
         desc = f'\n      description data: {bytes(n_desc).hex()}'
 
     note_type = (x['n_type'] if isinstance(x['n_type'], str)
                 else 'Unknown note type:')
-    note_type_desc = ('0x{:08x}'.format(x['n_type'])
-                    if isinstance(x['n_type'], int) else
-                    _DESCR_NOTE_N_TYPE.get(x['n_type'], _unknown))
+    if isinstance(x['n_type'], int):
+        note_type_desc = '0x{:08x}'.format(x['n_type'])
+    else:
+        note_type_desc = (
+            _DESCR_CORE_NOTE_N_TYPE.get(x['n_type'])
+            or _DESCR_NOTE_N_TYPE.get(x['n_type'], _unknown))
     return f'{note_type} ({note_type_desc}){desc}'
 
 
@@ -666,6 +680,17 @@ _DESCR_NOTE_N_TYPE = {
     "NT_GNU_BUILD_ID": 'unique build ID bitstring',
     "NT_GNU_GOLD_VERSION": 'gold version',
     "NT_GNU_PROPERTY_TYPE_0": 'program properties'
+}
+
+# Human descriptions for the CORE owner's note types in ET_CORE files.
+_DESCR_CORE_NOTE_N_TYPE = {
+    'NT_PRSTATUS': 'prstatus',
+    'NT_FPREGSET': 'floating-point register set',
+    'NT_PRPSINFO': 'prpsinfo',
+    'NT_TASKSTRUCT': 'task structure',
+    'NT_AUXV': 'auxiliary vector',
+    'NT_SIGINFO': 'siginfo',
+    'NT_FILE': 'mapped files',
 }
 
 
