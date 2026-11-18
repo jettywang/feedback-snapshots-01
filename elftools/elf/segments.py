@@ -14,6 +14,7 @@ from ..common.utils import stream_read, struct_parse
 from ..construct import CString
 from .constants import SH_FLAGS
 from .notes import iter_notes
+from .prstatus import ThreadRegisters, collect_core_registers
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -134,6 +135,14 @@ class NoteSegment(Segment):
     def __init__(self, header: Container, stream: IO[bytes], elffile: ELFFile) -> None:
         super().__init__(header, stream)
         self.elffile = elffile
+
+    def iter_core_thread_registers(self) -> Iterator[ThreadRegisters]:
+        """ Yield NT_PRSTATUS evidence for threads whose note lives here.
+
+        Only notes in this segment are considered, so callers can walk the
+        segments of a core and inspect each thread's original note range.
+        """
+        return collect_core_registers(self.elffile, self).iter_threads()
 
     def iter_notes(self) -> Iterator[Container]:
         """ Yield all the notes in the segment.  Each result is a dictionary-

@@ -1,6 +1,15 @@
 Changelog
 =========
 
++ Unreleased
+
+  - Interpret the NT_PRSTATUS note of ET_CORE files: per-target-ABI
+    decoding of thread registers (i386, x86-64, ARM, AArch64, RISC-V) with
+    thread ids, raw register words and exact note ranges preserved.
+    Truncated or unknown layouts keep their raw descriptor, and
+    thread-scoped notes are never merged by file adjacency (see
+    elftools/elf/prstatus.py and examples/elf_core_prstatus.py)
+
 + Starting with version 0.31, please use the GitHub UI
   at https://github.com/eliben/pyelftools/tags
   to compare tags in order to find out what changed.

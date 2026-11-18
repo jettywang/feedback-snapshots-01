@@ -1,0 +1,21 @@
+Two-thread x86-64 core:
+  target: ELFCLASS64, little-endian, machine=EM_X86_64
+    Threads with NT_PRSTATUS notes: 2
+    Thread 101:
+      note range: offset=0x78 size=356
+      ABI: x86-64
+       rip = 0x110
+    Thread 102:
+      note range: offset=0x200 size=356
+      ABI: x86-64
+       rip = 0x210
+    Unassociated thread notes: 1 (kept raw)
+Big-endian 32-bit core with an unsupported register layout:
+  target: ELFCLASS32, big-endian, machine=EM_MIPS
+    Threads with NT_PRSTATUS notes: 1
+    Thread 201:
+      note range: offset=0x54 size=164
+      registers: unavailable (raw note preserved)
+Processing file: ./examples/sample_exe64.elf
+  Target: ELFCLASS64, little-endian, machine=EM_X86_64
+  Threads with NT_PRSTATUS notes: 0

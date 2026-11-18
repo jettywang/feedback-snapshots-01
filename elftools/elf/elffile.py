@@ -25,6 +25,7 @@ from .constants import SHN_INDICES
 from .dynamic import DynamicSection, DynamicSegment
 from .gnuversions import GNUVerDefSection, GNUVerNeedSection, GNUVerSymSection
 from .hash import ELFHashSection, GNUHashSection
+from .prstatus import CoreRegisters, ThreadRegisters, collect_core_registers
 from .relocation import RelocationHandler, RelocationSection, RelrRelocationSection
 from .sections import (
     ARMAttributesSection,
@@ -441,6 +442,21 @@ class ELFFile:
             for section in self.iter_sections(type='SHT_ARM_EXIDX')
         ]
         return _ret if _ret else None
+
+    def get_core_registers(self) -> CoreRegisters:
+        """ Collect per-thread register evidence from an ET_CORE file.
+
+        Each NT_PRSTATUS note is decoded for the core's own target ABI and
+        becomes one thread. Notes that cannot be associated with a thread
+        (or whose layout is unknown/truncated) keep their raw bytes rather
+        than producing a thread with fabricated registers.
+        """
+        return collect_core_registers(self)
+
+    def iter_thread_registers(self) -> Iterator[ThreadRegisters]:
+        """ Yield the register evidence of every thread in an ET_CORE file.
+        """
+        return iter(self.get_core_registers().threads)
 
     def get_machine_arch(self) -> str:
         """ Return the machine architecture, as detected from the ELF header.

@@ -135,6 +135,51 @@ count and enumerate them. There are also some special segment classes
 that have more information about well-known segments. Take a look at
 `elftools/elf/segments.py` for more details.
 
+### Core files and thread registers (NT_PRSTATUS)
+
+An `ET_CORE` dump records one `NT_PRSTATUS` note per thread. Notes are
+reached through `NoteSegment.iter_notes()` as usual; for cores the
+`NT_PRSTATUS` descriptor is decoded for the *target* ABI into a
+`PrstatusEvidence` object (from `elftools/elf/prstatus.py`). A descriptor
+that is not a complete layout for a supported ABI stays as raw bytes in
+`n_desc`, and `n_descdata` always keeps the original bytes.
+
+Two higher-level entry points collect whole threads:
+
+- `ELFFile.get_core_registers()` returns a `CoreRegisters` object with
+  one `ThreadRegisters` per `NT_PRSTATUS` note, in file order.
+- `ELFFile.iter_thread_registers()` and
+  `NoteSegment.iter_core_thread_registers()` iterate them directly.
+
+The register layout follows `e_machine` and `elfclass` from the core
+header, and the field byte order follows its `EI_DATA`; the host's word
+size is never consulted. i386, x86-64, ARM, AArch64 and RISC-V (32/64)
+layouts are supported. Each `PrstatusEvidence` keeps the thread id from
+`pr_pid`, a `RegisterWord` per pr_reg slot with its ABI name (when the
+layout gives one), the raw bytes and the integer value, plus the exact
+note range in `note_range` and the untouched descriptor in
+`raw_descdata`. `register(name)`, `register_raw(name)` and
+`register_map()` are convenience lookups; `registers` remains the
+authoritative file-order view.
+
+Notes are never associated with a thread by file adjacency. Thread
+scoped notes such as `NT_FPREGSET` or `NT_X86_XSTATE` have no thread
+identifier in a plain ELF core, so they are returned in
+`CoreRegisters.unassociated_notes` with their raw descriptor and range,
+and `ThreadRegisters.attached_notes` stays empty. A note whose owner is
+not `CORE` is not treated as a thread status at all.
+
+If a note is truncated, `ThreadRegisters.status` is `None`: no complete
+status is claimed. Whole register words that were captured remain
+available in `ThreadRegisters.partial_registers` (with `complete` set to
+`False`), and missing words are never zero-filled. An unknown
+architecture likewise yields `status is None` while keeping the raw note;
+if the status header is intact, the recorded thread id is still reported.
+A note too short for even the status header, or one that cannot be tied to
+a thread, goes to `unassociated_notes` and creates no thread.
+
+See `examples/elf_core_prstatus.py` for a runnable demonstration.
+
 ### Structs and headers
 
 Most objects in ELF and DWARF have \"headers\", and such objects usually

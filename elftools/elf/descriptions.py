@@ -32,6 +32,7 @@ from .enums import (
     ENUM_RELOC_TYPE_i386,
     ENUM_RELOC_TYPE_x64,
 )
+from .prstatus import PrstatusEvidence, register_layout_for_machine
 
 if TYPE_CHECKING:
     from collections.abc import Container as TContainer
@@ -251,15 +252,41 @@ def describe_note(x: Container, machine: str | int) -> str:
         desc = f'\n    Version: {n_desc}'
     elif x['n_type'] == 'NT_GNU_PROPERTY_TYPE_0':
         desc = '\n      Properties: ' + describe_note_gnu_properties(x['n_desc'], machine)
+    elif x['n_type'] == 'NT_PRSTATUS' and isinstance(n_desc, PrstatusEvidence):
+        desc = describe_prstatus(n_desc)
     else:
         desc = f'\n      description data: {bytes(n_desc).hex()}'
 
     note_type = (x['n_type'] if isinstance(x['n_type'], str)
                 else 'Unknown note type:')
-    note_type_desc = ('0x{:08x}'.format(x['n_type'])
-                    if isinstance(x['n_type'], int) else
-                    _DESCR_NOTE_N_TYPE.get(x['n_type'], _unknown))
+    if isinstance(x['n_type'], int):
+        note_type_desc = '0x{:08x}'.format(x['n_type'])
+    else:
+        note_type_desc = (_DESCR_CORE_NOTE_N_TYPE.get(x['n_type'])
+                          or _DESCR_NOTE_N_TYPE.get(x['n_type'], _unknown))
     return f'{note_type} ({note_type_desc}){desc}'
+
+
+def describe_prstatus(evidence: PrstatusEvidence) -> str:
+    lines = [
+        f'\n      Target: {evidence.label} '
+        f'(ELFCLASS{evidence.elfclass}, '
+        f'{"little" if evidence.little_endian else "big"}-endian)',
+        f'\n      Thread ID: {evidence.tid}',
+        f'\n      Current signal: {evidence.header.pr_cursig}',
+    ]
+    if not evidence.complete:
+        expected = register_layout_for_machine(
+            evidence.machine, evidence.elfclass)
+        total = expected.register_count if expected is not None else '?'
+        lines.append(
+            f'\n      Registers: incomplete '
+            f'({evidence.register_count} of {total} whole words present)')
+    lines.append('\n      Registers (raw values in file order):')
+    for word in evidence.registers:
+        name = word.name if word.name is not None else f'[{word.index}]'
+        lines.append(f'\n        {name:12s} {word.value:#x}')
+    return ''.join(lines)
 
 
 def describe_attr_tag_arm(tag: str, val: Any, extra: str | None) -> str:
@@ -666,6 +693,16 @@ _DESCR_NOTE_N_TYPE = {
     "NT_GNU_BUILD_ID": 'unique build ID bitstring',
     "NT_GNU_GOLD_VERSION": 'gold version',
     "NT_GNU_PROPERTY_TYPE_0": 'program properties'
+}
+
+# Human descriptions for CORE-owner note types in ET_CORE files
+_DESCR_CORE_NOTE_N_TYPE = {
+    'NT_PRSTATUS': 'prstatus',
+    'NT_FPREGSET': 'floating-point register set',
+    'NT_PRPSINFO': 'prpsinfo',
+    'NT_TASKSTRUCT': 'task structure',
+    'NT_SIGINFO': 'siginfo',
+    'NT_FILE': 'mapped files',
 }
 
 

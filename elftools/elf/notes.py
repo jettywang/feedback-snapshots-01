@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 from ..common.utils import bytes2str, roundup, struct_parse
 from ..construct import CString
 from .enums import ENUM_ANDROID_NOTE_N_TYPE, ENUM_CORE_NOTE_N_TYPE, ENUM_NOTE_N_TYPE
+from .prstatus import NoteRange, decode_prstatus, register_layout_for
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -90,6 +91,26 @@ def iter_notes(elffile: ELFFile, offset: int, size: int) -> Iterator[Container]:
         elif note['n_type'] == 'NT_FILE':
             note['n_desc'] = struct_parse(elffile.structs.Elf_Nt_File,
                                           BytesIO(desc_data))
+        elif note['n_type'] == 'NT_PRSTATUS':
+            # Decode only a complete layout for the core's own target ABI.
+            # An unsupported machine or a short register area keeps the raw
+            # descriptor in n_desc, exactly like any other unknown note.
+            layout = register_layout_for(elffile)
+            evidence = None
+            if layout is not None:
+                evidence = decode_prstatus(
+                    desc_data,
+                    layout,
+                    elffile.little_endian,
+                    NoteRange(offset, note_end - offset),
+                )
+            # An incomplete layout has no decoded n_desc: the raw descriptor
+            # is preserved instead, so a short register area is never
+            # presented as a fully interpreted thread status.
+            if evidence is not None and evidence.complete:
+                note['n_desc'] = evidence
+            else:
+                note['n_desc'] = desc_data
         elif note['n_type'] == 'NT_GNU_PROPERTY_TYPE_0':
             off = 0
             desc_stream = BytesIO(desc_data)
