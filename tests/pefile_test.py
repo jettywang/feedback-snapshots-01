@@ -439,6 +439,133 @@ class TestPEFile(unittest.TestCase):
                 self.assertIsNotNone(load_config_data)
                 self.assertIsNone(load_config_data.dynamic_relocations)
 
+    def test_guard_targets_pe32_and_pe32_plus(self):
+        """GuardCF and EH continuation tables must report real targets."""
+        for pe_type in ("pe32", "pe32+"):
+            with self.subTest(pe_type=pe_type):
+                data = _create_guard_pe(pe_type)
+                pe = pefile.PE(data=data)
+                targets = pe.DIRECTORY_ENTRY_LOAD_CONFIG.guard_targets
+
+                self.assertEqual(targets.guard_flags & 0xFFFFFFFF, 0x10400400)
+                self.assertEqual(targets.stride, 1)
+
+                cf = targets.cf_table
+                self.assertEqual(cf.status, "ok")
+                self.assertEqual(cf.entry_size, 5)
+                self.assertEqual(cf.declared_count, 3)
+                self.assertEqual(cf.declared_bytes, 15)
+                self.assertEqual(cf.entries_read, 3)
+                self.assertFalse(cf.truncated)
+                self.assertEqual(cf.table_rva, 0x12F0)
+                self.assertEqual(cf.target_rvas, [0x1010, 0x1020, 0x1040])
+                self.assertEqual(cf.mapped_entries, 3)
+                self.assertEqual(cf.executable_entries, 3)
+                self.assertEqual(cf.unmapped_target_rvas, [])
+
+                # The RVA is the first four bytes verbatim; the stride byte
+                # stays separate because the PE spec does not define it.
+                self.assertEqual(cf.entries[0].value, 0x1010)
+                self.assertEqual(cf.entries[0].rva, 0x1010)
+                self.assertEqual(cf.entries[0].extra, b"\x01")
+                self.assertEqual(cf.entries[1].value, 0x1020)
+                self.assertEqual(cf.entries[1].extra, b"\x02")
+                self.assertEqual(cf.entries[2].value, 0x1040)
+                self.assertEqual(cf.entries[2].extra, b"\x00")
+
+                eh = targets.eh_continuation_table
+                self.assertEqual(eh.status, "ok")
+                self.assertEqual(eh.entry_size, 4)
+                self.assertEqual(eh.declared_count, 2)
+                self.assertEqual(eh.target_rvas, [0x1030, 0x1045])
+                self.assertEqual(eh.entries_read, 2)
+
+                # The view is available from the load config and through the
+                # explicit accessor, without changing default dump output.
+                rebuilt = pe.parse_guard_targets()
+                self.assertEqual(
+                    rebuilt.cf_table.target_rvas, targets.cf_table.target_rvas
+                )
+                self.assertEqual(
+                    rebuilt.eh_continuation_table.target_rvas,
+                    targets.eh_continuation_table.target_rvas,
+                )
+                self.assertIn(
+                    "[GUARD_TARGETS]",
+                    "\n".join(targets.dump()),
+                )
+                self.assertNotIn("[GUARD_TARGETS]", pe.dump_info())
+                self.assertNotIn("GUARD_TARGETS", pe.dump_dict())
+
+    def test_guard_targets_declared_count_exceeds_table_bytes(self):
+        """A count past the available table bytes must be reported, not filled."""
+        for pe_type in ("pe32", "pe32+"):
+            with self.subTest(pe_type=pe_type):
+                data = _create_guard_pe(pe_type, cf_count=6, eh_count=0)
+                pe = pefile.PE(data=data)
+                targets = pe.DIRECTORY_ENTRY_LOAD_CONFIG.guard_targets
+                cf = targets.cf_table
+
+                self.assertEqual(cf.declared_count, 6)
+                self.assertEqual(cf.declared_bytes, 30)
+                # 30 declared bytes run past VirtualSize 0x300; only the
+                # three whole entries backed by mapped bytes are decoded.
+                self.assertEqual(cf.entries_read, 3)
+                self.assertTrue(cf.truncated)
+                self.assertEqual(cf.status, "truncated")
+                self.assertEqual(cf.target_rvas, [0x1010, 0x1020, 0x1040])
+                self.assertTrue(
+                    any("declares 6 entries" in line for line in cf.limitations)
+                )
+                self.assertTrue(
+                    any("beyond the mapped end" in line for line in cf.limitations)
+                )
+                self.assertEqual(targets.eh_continuation_table.status, "empty")
+
+    def test_guard_targets_absent_and_unknown_layout(self):
+        """Fields outside the load config's real size must not be invented."""
+        data = _create_guard_pe("pe32", load_config_size=0x50)
+        pe = pefile.PE(data=data)
+        targets = pe.DIRECTORY_ENTRY_LOAD_CONFIG.guard_targets
+
+        self.assertIsNone(targets.guard_flags)
+        self.assertIsNone(targets.stride)
+        # 0x50 does not cover GuardCFFunctionTable or anything after it.
+        self.assertEqual(targets.cf_table.status, "field-not-present")
+        self.assertEqual(targets.eh_continuation_table.status, "field-not-present")
+        self.assertEqual(targets.cf_table.entries, [])
+        self.assertTrue(
+            any("not present" in line.lower() for line in targets.limitations)
+        )
+        # The image-level DllCharacteristics flag is not turned into coverage.
+        self.assertTrue(
+            any(
+                "does not prove that every function" in line
+                for line in targets.limitations
+            )
+        )
+
+    def test_guard_targets_follow_moved_table(self):
+        """The evidence range must follow the address in the parsed struct."""
+        data = _create_guard_pe("pe32")
+        pe = pefile.PE(data=data)
+        before = pe.DIRECTORY_ENTRY_LOAD_CONFIG.guard_targets.cf_table
+        self.assertEqual(before.table_file_offset, 0x6F0)
+        self.assertEqual(before.available_bytes, 15)
+
+        image_base = pe.OPTIONAL_HEADER.ImageBase
+        pe.DIRECTORY_ENTRY_LOAD_CONFIG.struct.GuardCFFunctionTable = (
+            image_base + 0x130
+        )
+        after = pe.parse_guard_targets().cf_table
+        self.assertEqual(after.table_rva, 0x130)
+        self.assertEqual(after.table_file_offset, 0x130)  # still header bytes
+        self.assertEqual(after.available_bytes, 15)
+        self.assertEqual(after.entries_read, 3)
+        self.assertEqual(len(after.target_rvas), 3)
+        self.assertNotEqual(after.target_rvas, before.target_rvas)
+        self.assertGreater(len(after.unmapped_target_rvas), 0)
+
     def test_relocated_memory_mapped_image(self):
         """Test different rebasing methods produce the same image"""
 
@@ -923,3 +1050,115 @@ def _create_pe(virtual_size, size_of_raw_data):
     # Fill raw section data with a sentinel byte so leakage is obvious
     section_data = b"\xCC" * size_of_raw_data
     return bytes(headers) + section_data
+
+
+def _create_guard_pe(
+    pe_type,
+    *,
+    cf_count=3,
+    eh_count=2,
+    load_config_size=None,
+):
+    """Build a small PE32/PE32+ whose load config points at guard tables.
+
+    The image has one executable .text section with VirtualSize 0x300.  The
+    load config sits at RVA 0x1000; the EH continuation table at RVA 0x12E0
+    (8 bytes) and the GFIDS table at RVA 0x12F0 (15 bytes), so the section's
+    VirtualSize leaves little room past the tables for the truncation case.
+    """
+    pe64 = pe_type == "pe32+"
+    image_base = 0x140000000 if pe64 else 0x400000
+    optional_header_size = 0xF0 if pe64 else 0xE0
+    head = bytearray(0x400)
+
+    head[0:2] = b"MZ"
+    struct.pack_into("<I", head, 0x3C, 0x40)
+    head[0x40:0x44] = b"PE\0\0"
+    struct.pack_into(
+        "<HHIIIHH",
+        head,
+        0x44,
+        0x8664 if pe64 else 0x14C,  # Machine
+        1,  # NumberOfSections
+        0,
+        0,
+        0,
+        optional_header_size,
+        0x102,
+    )
+
+    opt = 0x58
+    struct.pack_into("<H", head, opt, 0x20B if pe64 else 0x10B)
+    struct.pack_into("<I", head, opt + 16, 0x1000)  # AddressOfEntryPoint
+    if pe64:
+        struct.pack_into("<Q", head, opt + 24, image_base)
+        struct.pack_into("<II", head, opt + 32, 0x1000, 0x200)
+        struct.pack_into("<I", head, opt + 56, 0x2000)  # SizeOfImage
+        struct.pack_into("<I", head, opt + 60, 0x400)  # SizeOfHeaders
+        struct.pack_into("<H", head, opt + 70, 0xC160)  # GUARD_CF | NX | DYNAMIC_BASE
+        struct.pack_into("<I", head, opt + 108, 16)  # NumberOfRvaAndSizes
+        directories = opt + 112
+    else:
+        struct.pack_into("<I", head, opt + 28, image_base)
+        struct.pack_into("<II", head, opt + 32, 0x1000, 0x200)
+        struct.pack_into("<I", head, opt + 56, 0x2000)
+        struct.pack_into("<I", head, opt + 60, 0x400)
+        struct.pack_into("<H", head, opt + 70, 0xC160)
+        struct.pack_into("<I", head, opt + 92, 16)
+        directories = opt + 96
+
+    load_config_rva = 0x1000
+    load_config_size = load_config_size or (0xAC if not pe64 else 0x118)
+    struct.pack_into(
+        "<II", head, directories + 10 * 8, load_config_rva, load_config_size
+    )
+
+    section = opt + optional_header_size
+    head[section : section + 8] = b".text\0\0\0"
+    struct.pack_into(
+        "<IIII",
+        head,
+        section + 8,
+        0x300,  # VirtualSize: ends right after both tables
+        0x1000,  # VirtualAddress
+        0x800,  # SizeOfRawData
+        0x400,  # PointerToRawData
+    )
+    struct.pack_into("<I", head, section + 36, 0x60000020)  # code | execute | read
+
+    data = head + bytearray(0x800)
+    load_config = bytearray(load_config_size)
+    struct.pack_into("<I", load_config, 0, load_config_size)
+
+    cf_table_va_offset = 0x80 if pe64 else 0x50
+    cf_count_offset = 0x88 if pe64 else 0x54
+    guard_flags_offset = 0x90 if pe64 else 0x58
+    eh_table_va_offset = 0x108 if pe64 else 0xA4
+    eh_count_offset = 0x110 if pe64 else 0xA8
+
+    def put(field_offset, value):
+        size = 8 if pe64 and field_offset in (
+            cf_table_va_offset,
+            cf_count_offset,
+            eh_table_va_offset,
+            eh_count_offset,
+        ) else 4
+        struct.pack_into("<Q" if size == 8 else "<I", load_config, field_offset, value)
+
+    if load_config_size >= guard_flags_offset + 4:
+        struct.pack_into("<I", load_config, guard_flags_offset, 0x10400400)
+    if load_config_size >= cf_count_offset + (8 if pe64 else 4):
+        put(cf_table_va_offset, image_base + 0x12F0)
+        put(cf_count_offset, cf_count)
+    if load_config_size >= eh_count_offset + (8 if pe64 else 4):
+        put(eh_table_va_offset, image_base + 0x12E0)
+        put(eh_count_offset, eh_count)
+
+    data[0x400:0x400 + load_config_size] = load_config
+
+    # Three GFIDS entries at RVA 0x12F0, each a verbatim RVA plus one stride
+    # byte that the PE spec does not define; it must stay out of the address.
+    struct.pack_into("<IBIB", data, 0x6F0, 0x1010, 0x01, 0x1020, 0x02)
+    struct.pack_into("<IB", data, 0x6FA, 0x1040, 0x00)
+    struct.pack_into("<II", data, 0x6E0, 0x1030, 0x1045)
+    return bytes(data)

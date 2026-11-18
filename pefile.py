@@ -91,6 +91,11 @@ MAX_DLL_LENGTH = 0x200
 MAX_IMPORT_NAME_LENGTH = 0x200
 MAX_SYMBOL_NAME_LENGTH = 0x200
 
+# Limit maximum number of entries decoded from a GuardCF or EH continuation
+# table. The declared count is reported as-is; only the entries backed by
+# bytes in the mapped image are decoded.
+MAX_GUARD_TABLE_ENTRIES = 0x4000
+
 # Limit maximum number of sections before processing of sections will stop
 MAX_SECTIONS = 0x800
 
@@ -360,6 +365,36 @@ ex_dll_characteristics = [
 ]
 
 EX_DLL_CHARACTERISTICS = two_way_dict(ex_dll_characteristics)
+
+
+# Control Flow Guard metadata flags stored in
+# IMAGE_LOAD_CONFIG_DIRECTORY's GuardFlags field.  The top nibble is not a
+# flag: it carries the number of additional bytes in each GuardCF function
+# table entry (the stride).
+IMAGE_GUARD_FLAGS = [
+    ("IMAGE_GUARD_CF_INSTRUMENTED", 0x00000100),
+    ("IMAGE_GUARD_CFW_INSTRUMENTED", 0x00000200),
+    ("IMAGE_GUARD_CF_FUNCTION_TABLE_PRESENT", 0x00000400),
+    ("IMAGE_GUARD_SECURITY_COOKIE_UNUSED", 0x00000800),
+    ("IMAGE_GUARD_PROTECT_DELAYLOAD_IAT", 0x00001000),
+    ("IMAGE_GUARD_DELAYLOAD_IAT_IN_ITS_OWN_SECTION", 0x00002000),
+    ("IMAGE_GUARD_CF_EXPORT_SUPPRESSION_INFO_PRESENT", 0x00004000),
+    ("IMAGE_GUARD_CF_ENABLE_EXPORT_SUPPRESSION", 0x00008000),
+    ("IMAGE_GUARD_CF_LONGJUMP_TABLE_PRESENT", 0x00010000),
+    ("IMAGE_GUARD_RF_INSTRUMENTED", 0x00020000),
+    ("IMAGE_GUARD_RF_ENABLE", 0x00040000),
+    ("IMAGE_GUARD_RF_STRICT", 0x00080000),
+    ("IMAGE_GUARD_RETPOLINE_PRESENT", 0x00100000),
+    ("IMAGE_GUARD_EH_CONTINUATION_TABLE_PRESENT", 0x00400000),
+    ("IMAGE_GUARD_XFG_ENABLED", 0x00800000),
+    ("IMAGE_GUARD_CASTGUARD_PRESENT", 0x01000000),
+    ("IMAGE_GUARD_MEMCPY_PRESENT", 0x02000000),
+]
+
+GUARD_FLAGS = two_way_dict(IMAGE_GUARD_FLAGS)
+
+IMAGE_GUARD_CF_FUNCTION_TABLE_SIZE_MASK = 0xF0000000
+IMAGE_GUARD_CF_FUNCTION_TABLE_SIZE_SHIFT = 28
 
 
 # Unwind info-related enums
@@ -718,6 +753,13 @@ def set_flags(obj, flag_field, flags):
 
 def power_of_two(val):
     return val != 0 and (val & (val - 1)) == 0
+
+
+def _fmt_optional_hex(value):
+    """Render an integer as hex, or a placeholder when it is unknown."""
+    if value is None:
+        return "None"
+    return f"0x{value:X}"
 
 
 class AddressSet(set):
@@ -1808,7 +1850,217 @@ class LoadConfigData(DataContainer):
 
     struct:     IMAGE_LOAD_CONFIG_DIRECTORY structure
     dynamic_relocations: dynamic relocation information, if present
+    guard_targets: GuardCF/EH continuation targets derived from the parsed
+                   struct, if the fields backing them are present
+    directory_size: size value from the data directory entry
+    declared_size: value of the structure's own Size field
+    size_source: "Size", "directory" or None, whichever determined which
+                 fields were decoded
+    size_covered: number of bytes represented by the decoded fields
     """
+
+
+class GuardTarget(DataContainer):
+    """A single decoded GuardCF or EH continuation table entry.
+
+    index:            index in the table
+    raw:              entry bytes as stored (4-byte RVA plus stride bytes)
+    value:            the 32-bit entry word exactly as stored
+    rva:              the RVA, exactly the first four bytes of the entry
+    va:               ImageBase + rva, when the entry maps into the image
+    file_offset:      file offset of the entry's first byte
+    extra:            stride bytes carried after the RVA, preserved verbatim
+    mapped:           whether rva resolves into the mapped image
+    section:          section containing rva, if any
+    executable:       whether that section is executable
+    """
+
+    def dump(self):
+        parts = [f"Entry[{self.index}]:"]
+        parts.append(f"Raw=0x{self.value:08X}")
+        parts.append(f"RVA=0x{self.rva:08X}")
+        parts.append(f"VA={_fmt_optional_hex(self.va)}")
+        parts.append(f"FileOffset={_fmt_optional_hex(self.file_offset)}")
+        parts.append(
+            "Section="
+            + (
+                self.section.get_name().decode("utf-8", "backslashreplace")
+                if self.section is not None
+                else "None"
+            )
+        )
+        parts.append(f"Mapped={self.mapped}")
+        parts.append(f"Executable={self.executable}")
+        if self.extra:
+            parts.append("Extra=" + self.extra.hex())
+        return " ".join(parts)
+
+    def dump_dict(self):
+        return {
+            "Index": self.index,
+            "Raw": self.value,
+            "RVA": self.rva,
+            "VA": self.va,
+            "FileOffset": self.file_offset,
+            "Section": (
+                self.section.get_name().decode("utf-8", "backslashreplace")
+                if self.section is not None
+                else None
+            ),
+            "Mapped": self.mapped,
+            "Executable": self.executable,
+            "Extra": self.extra.hex() if self.extra else "",
+        }
+
+
+class GuardTargetTable(DataContainer):
+    """A GuardCF function table or EH continuation table and its evidence.
+
+    table_va:           VA stored in the load config directory
+    table_rva:          table_va translated through ImageBase
+    table_file_offset:  file offset of the table's first byte
+    section:            section containing the table, if any
+    count_source:       load config field the count came from
+    declared_count:     count field from the load config directory
+    entry_size:         4-byte RVA plus the stride encoded in GuardFlags
+                        (None when GuardFlags is absent)
+    declared_bytes:     declared_count * entry_size
+    declared_end_rva:   table_rva + declared_bytes (exclusive)
+    declared_end_va:    ImageBase + declared_end_rva
+    available_bytes:    bytes backed by the mapped image at the table RVA
+    entries_read:       number of entries decoded from available bytes
+    truncated:          whether fewer entries were decoded than declared
+    status:             why the table is empty or incomplete, or "ok"
+    target_rvas:        decoded target RVAs, in table order
+    mapped_entries:     number of targets that resolve into a section
+    executable_entries: number of targets that resolve into executable code
+    unmapped_target_rvas: targets that resolve into no section or past
+                        SizeOfImage
+    limitations:        layout/interpretation limits that still apply
+    entries:            list of GuardTarget
+    """
+
+    def dump(self):
+        lines = [f"[{self.name}]"]
+        lines.append(f"TableVA={_fmt_optional_hex(self.table_va)}")
+        lines.append(f"TableRVA={_fmt_optional_hex(self.table_rva)}")
+        lines.append(f"TableFileOffset={_fmt_optional_hex(self.table_file_offset)}")
+        lines.append(
+            "Section="
+            + (
+                self.section.get_name().decode("utf-8", "backslashreplace")
+                if self.section is not None
+                else "None"
+            )
+        )
+        lines.append(f"EntrySize={self.entry_size}")
+        lines.append(f"CountSource={self.count_source}")
+        lines.append(f"DeclaredCount={self.declared_count}")
+        lines.append(f"DeclaredBytes={self.declared_bytes}")
+        lines.append(f"DeclaredEndRVA={_fmt_optional_hex(self.declared_end_rva)}")
+        lines.append(f"DeclaredEndVA={_fmt_optional_hex(self.declared_end_va)}")
+        lines.append(f"AvailableBytes={self.available_bytes}")
+        lines.append(f"EntriesRead={self.entries_read}")
+        lines.append(f"Truncated={self.truncated}")
+        lines.append(f"Status={self.status}")
+        lines.append(
+            "TargetRVAs="
+            + (
+                "[" + ", ".join(f"0x{rva:X}" for rva in self.target_rvas) + "]"
+                if self.target_rvas
+                else "[]"
+            )
+        )
+        lines.append(f"MappedEntries={self.mapped_entries}")
+        lines.append(f"ExecutableEntries={self.executable_entries}")
+        lines.append(
+            "UnmappedTargetRVAs="
+            + (
+                "["
+                + ", ".join(f"0x{rva:X}" for rva in self.unmapped_target_rvas)
+                + "]"
+                if self.unmapped_target_rvas
+                else "[]"
+            )
+        )
+        if self.limitations:
+            lines.append("Limitations: " + "; ".join(self.limitations))
+        for entry in self.entries:
+            lines.append(entry.dump())
+        return lines
+
+    def dump_dict(self):
+        return {
+            "TableVA": self.table_va,
+            "TableRVA": self.table_rva,
+            "TableFileOffset": self.table_file_offset,
+            "Section": (
+                self.section.get_name().decode("utf-8", "backslashreplace")
+                if self.section is not None
+                else None
+            ),
+            "EntrySize": self.entry_size,
+            "CountSource": self.count_source,
+            "DeclaredCount": self.declared_count,
+            "DeclaredBytes": self.declared_bytes,
+            "DeclaredEndRVA": self.declared_end_rva,
+            "DeclaredEndVA": self.declared_end_va,
+            "AvailableBytes": self.available_bytes,
+            "EntriesRead": self.entries_read,
+            "Truncated": self.truncated,
+            "Status": self.status,
+            "TargetRVAs": list(self.target_rvas),
+            "MappedEntries": self.mapped_entries,
+            "ExecutableEntries": self.executable_entries,
+            "UnmappedTargetRVAs": list(self.unmapped_target_rvas),
+            "Limitations": list(self.limitations),
+            "Entries": [entry.dump_dict() for entry in self.entries],
+        }
+
+
+class GuardTargetsData(DataContainer):
+    """GuardCF and EH continuation targets with their provenance.
+
+    struct:         the parsed IMAGE_LOAD_CONFIG_DIRECTORY structure
+    declared_size:  value of the load config Size field
+    size_source:    which size determined field presence
+    guard_flags:    raw GuardFlags value (None when the field is absent)
+    guard_flag_names: decoded GuardFlags names
+    stride:         additional bytes per GuardCF entry
+    cf_table:       GuardTargetTable for GuardCFFunctionTable/Count
+    eh_continuation_table: GuardTargetTable for GuardEHContinuationTable/Count
+    limitations:    whole-view limitations, including absent fields
+    """
+
+    def dump(self):
+        """Return a line-oriented view of the guard targets."""
+        lines = [
+            "[GUARD_TARGETS]",
+            f"LoadConfigDeclaredSize: {_fmt_optional_hex(self.declared_size)}"
+            f" (source: {self.size_source or 'unknown'})",
+            f"GuardFlags: {_fmt_optional_hex(self.guard_flags)}",
+        ]
+        if self.guard_flag_names:
+            lines.append("GuardFlagsNames: " + ", ".join(self.guard_flag_names))
+        lines.append(f"GuardCFStride: {self.stride}")
+        lines.extend(self.cf_table.dump())
+        lines.extend(self.eh_continuation_table.dump())
+        if self.limitations:
+            lines.append("Limitations: " + "; ".join(self.limitations))
+        return lines
+
+    def dump_dict(self):
+        """Return the guard targets as a dictionary with provenance."""
+        return {
+            "DeclaredSize": self.declared_size,
+            "SizeSource": self.size_source,
+            "GuardFlags": self.guard_flags,
+            "GuardFlagNames": list(self.guard_flag_names),
+            "GuardCFStride": self.stride,
+            "GuardCFFunctionTable": self.cf_table.dump_dict(),
+            "GuardEHContinuationTable": self.eh_continuation_table.dump_dict(),
+            "Limitations": list(self.limitations),
+        }
 
 
 class BoundImportRefData(DataContainer):
@@ -4067,60 +4319,571 @@ class PE:
         return TlsData(struct=tls_struct)
 
     def parse_directory_load_config(self, rva, size):
-        """Parse the load configuration table."""
+        """Parse the load configuration table.
 
-        if self.PE_TYPE == OPTIONAL_HEADER_MAGIC_PE:
-            load_config_dir_sz = self.get_dword_at_rva(rva)
-            fmt = self.__IMAGE_LOAD_CONFIG_DIRECTORY_format__
-        elif self.PE_TYPE == OPTIONAL_HEADER_MAGIC_PE_PLUS:
-            load_config_dir_sz = self.get_dword_at_rva(rva)
-            fmt = self.__IMAGE_LOAD_CONFIG_DIRECTORY64_format__
-        else:
+        Which fields exist is decided from the size information attached to
+        the table itself, not from the full structure definition:
+
+        * ``Size`` is the load config directory's own size field and is
+          authoritative when non-zero.
+        * ``size`` is the data directory entry's Size, used when ``Size`` is
+          zero and only recorded as a mismatch otherwise.
+        * the number of bytes actually readable at ``rva`` further bounds the
+          fields, so a truncated file never yields extra decoded fields.
+
+        A field is decoded only when its last byte is covered by that
+        effective size. Trailing bytes beyond the known layout, sizes ending
+        inside a field, and size mismatches are kept as limitations in the
+        returned object.
+        """
+        if self.PE_TYPE not in (OPTIONAL_HEADER_MAGIC_PE, OPTIONAL_HEADER_MAGIC_PE_PLUS):
             self.__warnings.append(
                 "Don't know how to parse LOAD_CONFIG information for non-PE32/"
                 "PE32+ file"
             )
             return None
 
-        # load config directory size can be less than represented by 'fmt' variable;
-        # generate truncated fmt corresponding to the load config directory size
-        fields_counter = 0
-        cumulative_sz = 0
-        for field in fmt[1]:
-            fields_counter += 1
-            cumulative_sz += STRUCT_SIZEOF_TYPES[field.split(",")[0]]
-            if cumulative_sz == load_config_dir_sz:
-                break
-        fmt = fmt[0], fmt[1][:fields_counter]
+        if self.PE_TYPE == OPTIONAL_HEADER_MAGIC_PE:
+            fmt = self.__IMAGE_LOAD_CONFIG_DIRECTORY_format__
+        else:
+            fmt = self.__IMAGE_LOAD_CONFIG_DIRECTORY64_format__
 
-        load_config = None
-        try:
-            load_config = self.__unpack_data__(
-                fmt,
-                self.get_data(rva, Structure(fmt).sizeof()),
-                file_offset=self.get_offset_from_rva(rva),
-            )
-        except PEFormatError:
+        declared_size = self.get_dword_at_rva(rva)
+        if declared_size is None:
             self.__warnings.append(
                 f"Invalid LOAD_CONFIG information. Can't read data at RVA: {rva:#x}"
             )
+            return None
+
+        directory_size = size or 0
+
+        # The Size field inside the structure is what the loader uses to
+        # decide which fields exist; a divergent directory size is recorded
+        # but does not hide fields that Size covers. Only when Size is absent
+        # or zero does the directory size drive field presence.
+        known_size = Structure(fmt).sizeof()
+        limitations = []
+
+        if declared_size:
+            effective_size = declared_size
+            size_source = "Size"
+            if directory_size and directory_size != declared_size:
+                limitations.append(
+                    "Load config Size field is "
+                    f"0x{declared_size:X} but the data directory declares "
+                    f"0x{directory_size:X}; field presence follows the Size field"
+                )
+        elif directory_size:
+            effective_size = directory_size
+            size_source = "directory"
+            limitations.append(
+                "Load config Size field is zero; fields are bounded by the "
+                f"data directory size 0x{directory_size:X}"
+            )
+        else:
+            effective_size = known_size
+            size_source = "assumed"
+            limitations.append(
+                "Load config has no usable Size information; the known layout "
+                "was assumed for field presence"
+            )
+
+        if effective_size > known_size:
+            limitations.append(
+                f"Load config declares 0x{effective_size:X} bytes but only "
+                f"0x{known_size:X} bytes have a known layout; trailing bytes "
+                "are not interpreted"
+            )
+            effective_size = known_size
+
+        # Never claim bytes that cannot be read from the file.
+        try:
+            available_data = self.get_data(rva, effective_size)
+        except PEFormatError:
+            available_data = b""
+        if len(available_data) < effective_size:
+            limitations.append(
+                f"Load config declares 0x{effective_size:X} bytes but only "
+                f"0x{len(available_data):X} bytes can be read at RVA 0x{rva:X}"
+            )
+            effective_size = len(available_data)
+
+        fields = []
+        covered_size = 0
+        truncated_field = None
+        for field in fmt[1]:
+            field_size = STRUCT_SIZEOF_TYPES[field.split(",", 1)[0]]
+            if covered_size + field_size > effective_size:
+                truncated_field = field.split(",", 1)[1]
+                break
+            fields.append(field)
+            covered_size += field_size
+
+        if not fields:
+            self.__warnings.append(
+                "Invalid LOAD_CONFIG information. Size is too small to cover "
+                f"any field at RVA: {rva:#x}"
+            )
+            return None
+
+        if truncated_field is not None and effective_size:
+            if covered_size == effective_size:
+                limitations.append(
+                    f"Size ends before {truncated_field}; that field and all "
+                    "later fields are not decoded"
+                )
+            else:
+                limitations.append(
+                    f"Size ends inside {truncated_field}; that field and all "
+                    "later fields are not decoded"
+                )
+
+        fmt = fmt[0], tuple(fields)
+        load_config = self.__unpack_data__(
+            fmt,
+            available_data[:covered_size],
+            file_offset=self.get_offset_from_rva(rva),
+        )
 
         if not load_config:
+            self.__warnings.append(
+                f"Invalid LOAD_CONFIG information. Can't read data at RVA: {rva:#x}"
+            )
             return None
 
         dynamic_relocations = None
-        # DynamicValueRelocTableOffset is field 38 and
-        # DynamicValueRelocTableSection is field 39, so the truncated structure
-        # must cover at least 39 fields before either can be read.
-        if fields_counter >= 39:
+        if hasattr(load_config, "DynamicValueRelocTableOffset") and hasattr(
+            load_config, "DynamicValueRelocTableSection"
+        ):
             dynamic_relocations = self.parse_dynamic_relocations(
                 load_config.DynamicValueRelocTableOffset,
                 load_config.DynamicValueRelocTableSection,
             )
 
-        return LoadConfigData(
-            struct=load_config, dynamic_relocations=dynamic_relocations
+        load_config_data = LoadConfigData(
+            struct=load_config,
+            dynamic_relocations=dynamic_relocations,
+            declared_size=declared_size,
+            directory_size=directory_size,
+            size_source=size_source,
+            size_covered=covered_size,
+            limitations=tuple(limitations),
         )
+        load_config_data.guard_targets = self.parse_guard_targets(load_config_data)
+        return load_config_data
+
+    def parse_guard_targets(self, load_config=None):
+        """Return a GuardCF/EH continuation target view derived from load config.
+
+        The view is static: no PE code is executed. The table addresses are
+        read from the load config as VAs and translated through ImageBase;
+        target entries are 4-byte RVAs plus, for the CF table only, the number
+        of extra bytes encoded in the top nibble of GuardFlags.
+
+        The view is rebuilt on every call, so changing a table address in the
+        parsed load config changes the evidence range reported here. It does
+        not by itself assert that every function is protected: an image-level
+        CFG flag is reported alongside the actual enumerated targets.
+
+        Zero-valued targets and targets outside the image are kept and also
+        listed in ``unmapped_target_rvas``; only bytes that are actually
+        file-backed are decoded, so BSS or truncated tables are reported as
+        truncated rather than silently zero-filled.
+        """
+        if load_config is None:
+            load_config = getattr(self, "DIRECTORY_ENTRY_LOAD_CONFIG", None)
+        if load_config is None:
+            return None
+
+        load_config_struct = getattr(load_config, "struct", load_config)
+        if load_config_struct is None:
+            return None
+
+        layout_limitations = list(getattr(load_config, "limitations", ()))
+        image_base = getattr(self.OPTIONAL_HEADER, "ImageBase", 0) or 0
+
+        guard_flags = getattr(load_config_struct, "GuardFlags", None)
+        guard_flag_names = []
+        if guard_flags is not None:
+            guard_flag_names = [
+                name
+                for name, value in IMAGE_GUARD_FLAGS
+                if value and guard_flags & value
+            ]
+        stride = None
+        if guard_flags is not None:
+            stride = (guard_flags >> IMAGE_GUARD_CF_FUNCTION_TABLE_SIZE_SHIFT) & 0xF
+        limitations = list(layout_limitations)
+        if stride:
+            limitations.append(
+                f"GuardCF entries carry {stride} extra byte(s) per entry; "
+                "those bytes are preserved verbatim but not interpreted"
+            )
+        if guard_flags is None:
+            limitations.append(
+                "GuardFlags is not present in this load config; the GuardCF "
+                "entry stride is unknown, so CF entries are not decoded"
+            )
+
+        cf_table = self._guard_table_view(
+            "GuardCFFunctionTable",
+            load_config_struct,
+            "GuardCFFunctionTable",
+            "GuardCFFunctionCount",
+            None if stride is None else 4 + stride,
+            image_base,
+            is_cf=True,
+            guard_flags=guard_flags,
+        )
+        eh_table = self._guard_table_view(
+            "GuardEHContinuationTable",
+            load_config_struct,
+            "GuardEHContinuationTable",
+            "GuardEHContinuationCount",
+            4,
+            image_base,
+            is_cf=False,
+            guard_flags=guard_flags,
+        )
+
+        for table in (cf_table, eh_table):
+            for limitation in table.limitations:
+                if limitation not in limitations:
+                    limitations.append(limitation)
+
+        # A CFG claim is image-level. Make that explicit rather than letting
+        # callers read the flag as per-function coverage.
+        cfg_claimed = bool(
+            getattr(self.OPTIONAL_HEADER, "IMAGE_DLLCHARACTERISTICS_GUARD_CF", False)
+            or (
+                guard_flags is not None
+                and guard_flags
+                & (
+                    GUARD_FLAGS["IMAGE_GUARD_CF_INSTRUMENTED"]
+                    | GUARD_FLAGS["IMAGE_GUARD_CFW_INSTRUMENTED"]
+                )
+            )
+        )
+        if cfg_claimed:
+            limitations.append(
+                "An image-level CFG flag does not prove that every function is "
+                "protected; only the addresses enumerated in these tables are "
+                "reported as targets"
+            )
+
+        return GuardTargetsData(
+            struct=load_config_struct,
+            declared_size=getattr(load_config, "declared_size", None),
+            size_source=getattr(load_config, "size_source", None),
+            guard_flags=guard_flags,
+            guard_flag_names=guard_flag_names,
+            stride=stride,
+            cf_table=cf_table,
+            eh_continuation_table=eh_table,
+            limitations=tuple(limitations),
+        )
+
+    def _guard_table_view(
+        self,
+        name,
+        load_config_struct,
+        table_field,
+        count_field,
+        entry_size,
+        image_base,
+        is_cf,
+        guard_flags,
+    ):
+        """Build a GuardTargetTable, with the evidence bounds for its bytes."""
+        limitations = []
+        table_present = hasattr(load_config_struct, table_field)
+        count_present = hasattr(load_config_struct, count_field)
+
+        if not table_present or not count_present:
+            missing = [
+                field
+                for field, present in (
+                    (table_field, table_present),
+                    (count_field, count_present),
+                )
+                if not present
+            ]
+            limitations.append(
+                "Load config size does not cover "
+                + " and ".join(missing)
+                + f"; {name} is not interpreted"
+            )
+            return GuardTargetTable(
+                name=name,
+                table_va=None,
+                table_rva=None,
+                table_file_offset=None,
+                section=None,
+                count_source=count_field,
+                declared_count=None,
+                entry_size=entry_size,
+                declared_bytes=None,
+                declared_end_rva=None,
+                declared_end_va=None,
+                available_bytes=None,
+                entries_read=0,
+                truncated=False,
+                status="field-not-present",
+                target_rvas=[],
+                mapped_entries=0,
+                executable_entries=0,
+                unmapped_target_rvas=[],
+                limitations=tuple(limitations),
+                entries=[],
+            )
+
+        table_va = getattr(load_config_struct, table_field)
+        declared_count = getattr(load_config_struct, count_field)
+        table_rva = None
+        table_file_offset = None
+        section = None
+        available_bytes = None
+        entries = []
+        status = "ok"
+
+        if not table_va:
+            status = "empty" if not declared_count else "table-va-zero"
+            if declared_count:
+                limitations.append(
+                    f"{table_field} is zero while {count_field} is "
+                    f"{declared_count}; no target addresses exist"
+                )
+        elif not declared_count:
+            status = "empty"
+            limitations.append(
+                f"{count_field} is zero; no {name} entries are decoded"
+            )
+        elif entry_size is None:
+            status = "entry-size-unknown"
+            limitations.append(
+                f"{name} has no usable entry size because GuardFlags is absent; "
+                "the declared count is reported but entries are not decoded"
+            )
+
+        if table_va:
+            if table_va < image_base:
+                status = "va-below-image-base"
+                limitations.append(
+                    f"{table_field} value 0x{table_va:X} is below ImageBase "
+                    f"0x{image_base:X}; it is not a VA in this image, so no "
+                    "targets are resolved"
+                )
+            else:
+                table_rva = table_va - image_base
+                try:
+                    table_file_offset = self.get_offset_from_rva(table_rva)
+                except PEFormatError:
+                    table_file_offset = None
+
+        size_of_image = getattr(self.OPTIONAL_HEADER, "SizeOfImage", 0) or 0
+        if table_rva is not None and table_rva >= size_of_image:
+            status = "table-outside-image"
+            limitations.append(
+                f"{table_field} resolves to RVA 0x{table_rva:X}, outside "
+                f"SizeOfImage 0x{size_of_image:X}"
+            )
+
+        if table_rva is not None and table_rva < size_of_image and entry_size:
+            section = self.get_section_by_rva(table_rva)
+            if section is not None:
+                table_file_offset = section.get_offset_from_rva(table_rva)
+
+            declared_bytes_here = (
+                declared_count * entry_size if declared_count else 0
+            )
+            if declared_bytes_here:
+                declared_end_rva_here = table_rva + declared_bytes_here
+                if declared_end_rva_here > size_of_image:
+                    status = "table-range-outside-image"
+                    limitations.append(
+                        f"{name} declares 0x{declared_bytes_here:X} bytes at "
+                        f"RVA 0x{table_rva:X} ending at 0x"
+                        f"{declared_end_rva_here:X}, beyond SizeOfImage "
+                        f"0x{size_of_image:X}"
+                    )
+                if section is not None:
+                    if section.Misc_VirtualSize:
+                        section_end_rva = (
+                            section.get_VirtualAddress_adj()
+                            + section.Misc_VirtualSize
+                        )
+                    elif section.SizeOfRawData:
+                        section_end_rva = (
+                            section.get_VirtualAddress_adj()
+                            + section.SizeOfRawData
+                        )
+                    else:
+                        section_end_rva = None
+                    if (
+                        section_end_rva is not None
+                        and declared_end_rva_here > section_end_rva
+                    ):
+                        limitations.append(
+                            f"{name} declares bytes through RVA 0x"
+                            f"{declared_end_rva_here:X}, beyond the mapped end "
+                            f"0x{section_end_rva:X} of section "
+                            f"{section.get_name().decode('utf-8', 'backslashreplace')}"
+                        )
+
+            # Read only file-backed bytes within the section's mapped size; a
+            # table cannot be validated from zero-filled BSS or from raw
+            # padding beyond VirtualSize.
+            max_entries = min(declared_count, MAX_GUARD_TABLE_ENTRIES)
+            wanted = max_entries * entry_size
+            if section is not None and section.Misc_VirtualSize:
+                mapped_end = section.get_VirtualAddress_adj() + section.Misc_VirtualSize
+                wanted = min(wanted, max(0, mapped_end - table_rva))
+            try:
+                if section is not None:
+                    table_data = section.get_data(table_rva, wanted)
+                elif table_rva < len(self.header):
+                    table_data = self.header[table_rva : table_rva + wanted]
+                else:
+                    table_data = b""
+            except PEFormatError:
+                table_data = b""
+            available_bytes = len(table_data)
+
+            if declared_count > MAX_GUARD_TABLE_ENTRIES:
+                limitations.append(
+                    f"{count_field} is {declared_count}, above the "
+                    f"{MAX_GUARD_TABLE_ENTRIES}-entry parse limit; only the "
+                    "first entries are decoded"
+                )
+
+            entries_read = min(
+                max_entries,
+                available_bytes // entry_size,
+            )
+            if entries_read < declared_count:
+                limitations.append(
+                    f"{name} declares {declared_count} entries "
+                    f"(0x{declared_count * entry_size:X} bytes) but only "
+                    f"{available_bytes} bytes are available at RVA "
+                    f"0x{table_rva:X}; {entries_read} entries decoded"
+                )
+                if status == "ok":
+                    status = "truncated"
+
+            for index in range(entries_read):
+                entry_offset = index * entry_size
+                raw = table_data[entry_offset : entry_offset + entry_size]
+                value = struct.unpack("<I", raw[:4])[0]
+                # The first four bytes are the target RVA verbatim.  Stride
+                # bytes follow it and are preserved without interpretation:
+                # the PE spec defines only their count, not their layout.
+                target_rva = value
+                target_section = self.get_section_by_rva(target_rva)
+                mapped = (
+                    target_rva < size_of_image
+                    and (
+                        target_section is not None
+                        or target_rva < len(self.header)
+                    )
+                )
+                entries.append(
+                    GuardTarget(
+                        index=index,
+                        raw=raw,
+                        value=value,
+                        rva=target_rva,
+                        va=image_base + target_rva,
+                        file_offset=self._offset_from_rva_or_none(target_rva),
+                        extra=raw[4:],
+                        mapped=mapped,
+                        section=target_section,
+                        executable=bool(
+                            mapped
+                            and getattr(
+                                target_section, "IMAGE_SCN_MEM_EXECUTE", False
+                            )
+                        ),
+                    )
+                )
+
+        if table_present and table_va and guard_flags is not None:
+            if is_cf:
+                flag = GUARD_FLAGS["IMAGE_GUARD_CF_FUNCTION_TABLE_PRESENT"]
+                flag_set = bool(guard_flags & flag)
+                if flag_set and not declared_count:
+                    limitations.append(
+                        "IMAGE_GUARD_CF_FUNCTION_TABLE_PRESENT is set but the "
+                        "CF table/count are empty"
+                    )
+                elif declared_count and not flag_set:
+                    limitations.append(
+                        "GuardCFFunctionTable/Count are non-zero but "
+                        "IMAGE_GUARD_CF_FUNCTION_TABLE_PRESENT is not set"
+                    )
+            else:
+                flag = GUARD_FLAGS["IMAGE_GUARD_EH_CONTINUATION_TABLE_PRESENT"]
+                if declared_count and not (guard_flags & flag):
+                    limitations.append(
+                        "GuardEHContinuationTable/Count are non-zero but "
+                        "IMAGE_GUARD_EH_CONTINUATION_TABLE_PRESENT is not set"
+                    )
+                elif (guard_flags & flag) and not declared_count:
+                    limitations.append(
+                        "IMAGE_GUARD_EH_CONTINUATION_TABLE_PRESENT is set but "
+                        "the EH continuation table/count are empty"
+                    )
+
+        declared_bytes = (
+            declared_count * entry_size
+            if declared_count is not None and entry_size is not None
+            else None
+        )
+        declared_end_rva = (
+            table_rva + declared_bytes
+            if table_rva is not None and declared_bytes is not None
+            else None
+        )
+
+        return GuardTargetTable(
+            name=name,
+            table_va=table_va,
+            table_rva=table_rva,
+            table_file_offset=table_file_offset,
+            section=section,
+            count_source=count_field,
+            declared_count=declared_count,
+            entry_size=entry_size,
+            declared_bytes=declared_bytes,
+            declared_end_rva=declared_end_rva,
+            declared_end_va=(
+                image_base + declared_end_rva
+                if declared_end_rva is not None
+                else None
+            ),
+            available_bytes=available_bytes,
+            entries_read=len(entries),
+            truncated=(
+                declared_count is not None
+                and len(entries) < declared_count
+                and status in ("ok", "truncated")
+            ),
+            status=status,
+            target_rvas=[entry.rva for entry in entries],
+            mapped_entries=sum(1 for entry in entries if entry.mapped),
+            executable_entries=sum(1 for entry in entries if entry.executable),
+            unmapped_target_rvas=[
+                entry.rva for entry in entries if not entry.mapped
+            ],
+            limitations=tuple(limitations),
+            entries=entries,
+        )
+
+    def _offset_from_rva_or_none(self, rva):
+        try:
+            return self.get_offset_from_rva(rva)
+        except PEFormatError:
+            return None
+
 
     def parse_dynamic_relocations(
         self, dynamic_value_reloc_table_offset, dynamic_value_reloc_table_section
