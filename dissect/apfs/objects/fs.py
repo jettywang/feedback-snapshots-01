@@ -186,6 +186,14 @@ class FS(Object):
         return c_apfs.APFS_VOL_ROLE(self.object.apfs_role)
 
     @cached_property
+    def volume_group_id(self) -> UUID | None:
+        """The volume group UUID, if this volume is part of a volume group."""
+        group_id = bytes(self.object.apfs_volume_group_id)
+        if group_id == b"\x00" * 16:
+            return None
+        return UUID(bytes_le=group_id)
+
+    @cached_property
     def snapshots(self) -> list[Snapshot]:
         """All snapshots in the filesystem."""
         result = []
@@ -575,6 +583,18 @@ class INode:
     def is_whiteout(self) -> bool:
         """Return whether this inode is a whiteout."""
         return stat.S_ISWHT(self.mode)
+
+    def is_firmlink(self) -> bool:
+        """Return whether this inode is marked as a firmlink."""
+        return bool(self.bsd_flags & c_apfs.SF_FIRMLINK)
+
+    @cached_property
+    def firmlink_target(self) -> str | None:
+        """The raw firmlink target of this inode, if it is a firmlink."""
+        xattr = self.xattr.get(c_apfs.FIRMLINK_EA_NAME)
+        if xattr is None:
+            return None
+        return xattr.open().read().decode().rstrip("\x00")
 
     @cached_property
     def size(self) -> int:
