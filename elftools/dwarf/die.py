@@ -18,9 +18,10 @@ from .dwarf_util import _get_base_offset, _resolve_via_offset_table
 from .enums import DW_FORM_raw2name
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterable, Iterator
 
     from .compileunit import CompileUnit
+    from .provenance import ResolvedAttribute
     from .typeunit import TypeUnit
 
 
@@ -140,6 +141,35 @@ class DIE:
             raise NotImplementedError(f'{attr.form} to dwo')
         else:
             raise DWARFError(f'{attr} is not a reference class form attribute')
+
+    def get_attribute_provenance(self, name: str) -> ResolvedAttribute:
+        """ Resolve a possibly inherited attribute and return its provenance.
+
+            The returned object carries the effective value, whether it was
+            direct or inherited, and the exact abstract-origin/specification
+            chain that supplied it. Unresolved graphs are reported explicitly
+            instead of falling back to another value. This DIE is not modified.
+
+            name:
+                The DW_AT_* name of the attribute to resolve.
+        """
+        from .provenance import DIEProvenanceResolver
+        return DIEProvenanceResolver(self.dwarfinfo).resolve(self, name)
+
+    def resolve_attribute(self, name: str) -> ResolvedAttribute:
+        """ Alias for get_attribute_provenance(). """
+        return self.get_attribute_provenance(name)
+
+    def get_resolved_attributes(
+        self,
+        names: Iterable[str] | None = None,
+        *,
+        include_links: bool = False,
+    ) -> dict[str, ResolvedAttribute]:
+        """ Resolve several attributes, or all reachable attributes. """
+        from .provenance import DIEProvenanceResolver
+        return DIEProvenanceResolver(self.dwarfinfo).resolve_many(
+            self, names, include_links=include_links)
 
     def get_parent(self) -> DIE | None:
         """ Return the parent DIE of this DIE, or None if the DIE has no

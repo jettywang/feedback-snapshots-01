@@ -394,6 +394,8 @@ class ELFFile:
                 )
         if follow_links:
             dwarfinfo.supplementary_dwarfinfo = self.get_supplementary_dwarfinfo(dwarfinfo)
+            if dwarfinfo.supplementary_dwarfinfo is not None:
+                dwarfinfo.supplementary_dwarfinfo.primary_dwarfinfo = dwarfinfo
         return dwarfinfo
 
     def has_dwarf_link(self) -> bool:

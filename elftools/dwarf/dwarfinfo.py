@@ -28,12 +28,13 @@ from .structs import DWARFStructs
 from .typeunit import TypeUnit
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterable, Iterator
 
     from ..construct.lib.container import ListContainer
     from .callframe import ZERO, CFIEntry
     from .die import DIE
     from .namelut import NameLUTEntry
+    from .provenance import DIEIdentity, ResolvedAttribute, UnitIdentity
 
 
 # Describes a debug section
@@ -134,6 +135,9 @@ class DWARFInfo:
         # to something else, typically a DWARFInfo file read from an ELFFile
         # which path is stored in the debug_sup_sec or gnu_debugaltlink_sec.
         self.supplementary_dwarfinfo: DWARFInfo | None = None
+        # Set on a supplementary DWARFInfo by ELFFile when it is bound to its
+        # primary object. Used to preserve unit identity in provenance results.
+        self.primary_dwarfinfo: DWARFInfo | None = None
 
         # This is the DWARFStructs the context uses, so it doesn't depend on
         # DWARF format and address_size (these are determined per CU) - set them
@@ -190,6 +194,39 @@ class DWARFInfo:
         if cu is None:
             cu = self.get_CU_containing(refaddr)
         return cu.get_DIE_from_refaddr(refaddr)
+
+    def get_attribute_provenance(self, die: DIE, name: str) -> ResolvedAttribute:
+        """ Resolve a possibly inherited attribute of ``die`` with provenance.
+
+            See elftools.dwarf.provenance for the result structure.
+        """
+        from .provenance import DIEProvenanceResolver
+        return DIEProvenanceResolver(self).resolve(die, name)
+
+    def resolve_attribute(self, die: DIE, name: str) -> ResolvedAttribute:
+        """ Alias for get_attribute_provenance(). """
+        return self.get_attribute_provenance(die, name)
+
+    def get_resolved_attributes(
+        self,
+        die: DIE,
+        names: Iterable[str] | None = None,
+        *,
+        include_links: bool = False,
+    ) -> dict[str, ResolvedAttribute]:
+        """ Resolve several attributes, or all reachable attributes. """
+        from .provenance import DIEProvenanceResolver
+        return DIEProvenanceResolver(self).resolve_many(
+            die, names, include_links=include_links)
+
+    def get_die_identity(self, die: DIE) -> DIEIdentity:
+        """ Return the unit-aware identity of ``die``. """
+        from .provenance import DIEProvenanceResolver
+        return DIEProvenanceResolver(self).identify(die)
+
+    def get_unit_identity(self, die: DIE) -> UnitIdentity:
+        """ Return the identity of the unit owning ``die``. """
+        return self.get_die_identity(die).unit
 
     def get_DIE_by_sig8(self, sig8: int) -> DIE:
         """ Find and return a DIE referenced by its type signature.

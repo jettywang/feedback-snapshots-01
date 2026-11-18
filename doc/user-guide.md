@@ -186,6 +186,42 @@ The [type references example](../examples/dwarf_type_references.py) demonstrates
 following these references through typedefs and other types, and displays both
 the stored values and the resolved DIE offsets.
 
+#### Attribute provenance
+
+A DIE does not always carry every attribute needed to describe its entity. A
+concrete inlined instance usually gets its name and declaration information from
+its `DW_AT_abstract_origin`, and the abstract instance may in turn refer to a
+non-defining declaration through `DW_AT_specification`. The reference can cross
+compilation units or point into a supplementary debug object that has already
+been bound to the main `DWARFInfo`.
+
+Use `die.get_attribute_provenance(name)` (or
+`dwarfinfo.get_attribute_provenance(die, name)`) to resolve such an attribute
+without modifying the DIE:
+
+```python
+result = die.get_attribute_provenance('DW_AT_name')
+if result.is_resolved:
+    print(result.value)          # effective value
+    print(result.status)         # 'direct' or 'inherited'
+    for link in result.chain:
+        print(link.attribute, link.source.unit, link.target)
+```
+
+The result distinguishes direct values from inherited values. A direct value
+takes precedence, but inherited branches that were shadowed remain available in
+`result.candidates`. Each `ReferenceLink` records the attribute name, form, raw
+value, and the identities of the source and target DIEs. A `DIEIdentity` includes
+a `UnitIdentity`, so two units at the same offset in different containers (for
+example a main file and its supplementary file) remain distinct.
+
+Unresolved situations are explicit: `missing`, `broken_reference`, `cycle`, and
+`conflict`. A broken reference, a cycle, or contradictory values from different
+branches is reported as such rather than being replaced with the first non-empty
+value. Use `die.get_resolved_attributes()` to resolve every attribute reachable
+through the graph in one pass. The underlying implementation is in
+`elftools/dwarf/provenance.py`.
+
 Contrary to ELF with its structured set of sections and segments, DWARF
 information is quite ad hoc for the special needs it serves. Each DWARF
 section contains different information that has to be decoded and
