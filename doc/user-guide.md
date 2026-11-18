@@ -193,3 +193,18 @@ interpreted in a special manner. **pyelftools** attempts to provide a
 convenient Pythonic API for this information whenever possible. There\'s
 no way around it - to even understand the API one must have some grasp
 of the [DWARF standard](https://dwarfstd.org/).
+
+### DWARF5 range lists
+
+For DWARF5, pass the `DW_AT_ranges` attribute (not an already-resolved
+section offset) to `RangeLists.get_range_list_state(attr, cu)`. The reader
+resolves `DW_FORM_rnglistx` through the CU's `DW_AT_rnglists_base`, and
+resolves address indexes through the CU's `DW_AT_addr_base`. The same index
+in two compilation units therefore names different section locations and
+different addresses; state is never shared between CUs or between lists.
+
+Each returned `RangeListState` starts from the CU's `DW_AT_low_pc`, applies
+only the base-address entries in its own list, and exposes three disjoint
+views: `ranges` (resolved), `empty_ranges` (zero-length) and
+`unknown_ranges` (unresolvable address index or undefined base). A list with
+only an end-of-list entry has `is_empty_list` set and no intervals.
