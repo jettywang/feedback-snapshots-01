@@ -2,6 +2,7 @@ from dataclasses import dataclass
 import datetime
 from pathlib import Path
 
+from cryptography.hazmat.primitives import hashes
 from cryptography.x509 import Certificate
 from cryptography.x509 import ExtensionNotFound, CertificatePolicies
 from cryptography.x509 import ObjectIdentifier
@@ -11,26 +12,43 @@ from typing import Optional
 from cryptography.x509 import load_pem_x509_certificates, DNSName, IPAddress, load_pem_x509_certificate
 from cryptography.x509.verification import PolicyBuilder, Store, VerificationError
 
+from sslyze.plugins.certificate_info._symantec import SymantecDistructTester
+
 
 @dataclass(frozen=True)
 class PathValidationResult:
     """The result of trying to validate a server's certificate chain using a specific trust store.
 
+    Each trust store can build a different path when the server deploys cross-signed certificates, potentially with a
+    different anchor, signature algorithm and validity period. The fields below are therefore specific to this trust
+    store and must not be inferred from another trust store's result.
+
     Attributes:
         trust_store: The trust store used for validation.
-        verified_certificate_chain: The verified certificate chain returned by OpenSSL.
+        verified_certificate_chain: The verified certificate chain built by this trust store.
             Index 0 is the leaf certificate and the last element is the anchor/CA certificate from the trust store.
             Will be None if the validation failed or the verified chain could not be built.
             Each certificate is parsed using the cryptography module; documentation is available at
             https://cryptography.io/en/latest/x509/reference/#x-509-certificate-object.
         validation_error: The error returned by the cryptography module's validation function; None if validation was
             successful.
-        was_validation_successful: Whether the certificate chain is trusted when using supplied the trust_stores.
+        received_chain_contains_anchor_certificate: Whether the anchor from this verified chain was also sent by the
+            server. ``None`` if this trust store did not build a verified chain, as the answer is unknown in that case.
+        verified_chain_has_sha1_signature: ``True`` if a leaf or intermediate certificate in this verified chain is
+            signed using SHA-1. ``None`` if this trust store did not build a verified chain, as the answer is unknown in
+            that case.
+        verified_chain_has_legacy_symantec_anchor: ``True`` if this verified chain contains a distrusted Symantec
+            anchor. ``None`` if this trust store did not build a verified chain, as the answer is unknown in that case.
+        was_validation_successful: Whether the certificate chain is trusted when using this trust store.
     """
 
     trust_store: "TrustStore"
     verified_certificate_chain: Optional[List[Certificate]]
     validation_error: Optional[str]
+
+    received_chain_contains_anchor_certificate: Optional[bool] = None
+    verified_chain_has_sha1_signature: Optional[bool] = None
+    verified_chain_has_legacy_symantec_anchor: Optional[bool] = None
 
     @property
     def was_validation_successful(self) -> bool:
@@ -92,7 +110,30 @@ class TrustStore:
             error_message = e.args[0]
             verified_chain = None
 
+        # These conclusions are specific to the path that THIS trust store was able to build. If no path was built,
+        # they must remain unknown instead of being inferred from another trust store's path.
+        received_chain_contains_anchor_certificate: Optional[bool] = None
+        verified_chain_has_sha1_signature: Optional[bool] = None
+        verified_chain_has_legacy_symantec_anchor: Optional[bool] = None
+        if verified_chain:
+            anchor_certificate = verified_chain[-1]
+            received_certificates = [leaf_cert, *intermediate_certs]
+            received_chain_contains_anchor_certificate = anchor_certificate in received_certificates
+
+            # Root certificates can still be signed with SHA1 so we only check leaf and intermediate certificates
+            verified_chain_has_sha1_signature = any(
+                isinstance(cert.signature_hash_algorithm, hashes.SHA1) for cert in verified_chain[:-1]
+            )
+
+            symantec_distrust_timeline = SymantecDistructTester.get_distrust_timeline(verified_chain)
+            verified_chain_has_legacy_symantec_anchor = True if symantec_distrust_timeline else False
+
         path_result = PathValidationResult(
-            trust_store=self, verified_certificate_chain=verified_chain, validation_error=error_message
+            trust_store=self,
+            verified_certificate_chain=verified_chain,
+            validation_error=error_message,
+            received_chain_contains_anchor_certificate=received_chain_contains_anchor_certificate,
+            verified_chain_has_sha1_signature=verified_chain_has_sha1_signature,
+            verified_chain_has_legacy_symantec_anchor=verified_chain_has_legacy_symantec_anchor,
         )
         return path_result

@@ -1281,7 +1281,7 @@
       "type": "object"
     },
     "_CertificateDeploymentAnalysisResultAsJson": {
-      "description": "The result of analyzing a server's certificate to verify its validity.\n\nAny certificate available within the fields that follow is parsed as a ``Certificate`` object using the cryptography\nmodule; documentation is available at\nhttps://cryptography.io/en/latest/x509/reference.html?highlight=Certificate#cryptography.x509.Certificate\n\nAttributes:\n    received_certificate_chain: The certificate chain sent by the server; index 0 is the leaf certificate.\n    verified_certificate_chain: The verified certificate chain returned by OpenSSL for one of the trust stores\n        packaged within SSLyze. Will be ``None`` if the validation failed with all of the available trust stores\n        (Apple, Mozilla, etc.). This is essentially a shortcut to\n        ``path_validation_result_list[0].verified_certificate_chain``.\n    path_validation_results: The result of validating the server's\n        certificate chain using each trust store that is packaged with SSLyze (Mozilla, Apple, etc.).\n        If for a given trust store, the validation was successful, the verified certificate chain can be\n         retrieved from the ``PathValidationResult``.\n    leaf_certificate_is_ev: ``True`` if the leaf certificate is Extended Validation, according to Mozilla.\n    leaf_certificate_has_must_staple_extension: ``True`` if the OCSP must-staple extension is present in the leaf\n        certificate.\n    leaf_certificate_signed_certificate_timestamps_count: The number of Signed Certificate\n        Timestamps (SCTs) for Certificate Transparency embedded in the leaf certificate. ``None`` if the version of\n        OpenSSL installed on the system is too old to be able to parse the SCT extension.\n    received_chain_has_valid_order: ``True`` if the certificate chain returned by the server was sent in the right\n        order. `None`` if any of the certificates in the chain could not be parsed.\n    received_chain_contains_anchor_certificate: ``True`` if the server included the anchor/root\n        certificate in the chain it sends back to clients. ``None`` if the verified chain could not be built.\n    verified_chain_has_sha1_signature: ``True`` if any of the leaf or intermediate certificates are\n        signed using the SHA-1 algorithm. ``None`` if the verified chain could not be built.\n    verified_chain_has_legacy_symantec_anchor: ``True`` if the certificate chain contains a distrusted Symantec\n        anchor\n        (https://blog.qualys.com/ssllabs/2017/09/26/google-and-mozilla-deprecating-existing-symantec-certificates).\n        ``None`` if the verified chain could not be built.\n    ocsp_response: The OCSP response returned by the server. ``None`` if no response was sent by the server or if\n        the scan was run through an HTTP proxy (the proxy will not forward the server's OCSP response). If present,\n        the OCSP response is an ``OCSPResponse`` object parsed using the cryptography module; documentation is\n        available at\n        https://cryptography.io/en/latest/x509/ocsp.html?highlight=OCSPResponse#cryptography.x509.ocsp.OCSPResponse\n    ocsp_response_is_trusted: ``True`` if the OCSP response is trusted using the Mozilla trust store.\n        ``None`` if no OCSP response was sent by the server.",
+      "description": "The result of analyzing a server's certificate to verify its validity.\n\nAny certificate available within the fields that follow is parsed as a ``Certificate`` object using the cryptography\nmodule; documentation is available at\nhttps://cryptography.io/en/latest/x509/reference.html?highlight=Certificate#cryptography.x509.Certificate\n\nAttributes:\n    received_certificate_chain: The certificate chain sent by the server; index 0 is the leaf certificate.\n    verified_certificate_chain: A convenience view of the chain built by\n        ``verified_certificate_chain_trust_store``, which is the first trust store that successfully built a path\n        when ``path_validation_results`` is in deterministic order. Will be ``None`` if no trust store was able to\n        build a path. This must not be treated as the result for every trust store: for cross-signed deployments,\n        different trust stores can build different paths with different anchors, signature algorithms and validity\n        periods. Use ``path_validation_results`` to get each trust store's own path and conclusions.\n    verified_certificate_chain_trust_store: The trust store whose path is exposed by the convenience fields\n        ``verified_certificate_chain``, ``received_chain_contains_anchor_certificate``,\n        ``verified_chain_has_sha1_signature`` and ``verified_chain_has_legacy_symantec_anchor``. Will be ``None`` if\n        no trust store built a path; in that case those convenience fields are ``None`` (unknown) as well. Other\n        trust stores may have different conclusions.\n    path_validation_results: The per-trust-store validation results, ordered deterministically by trust store name,\n        version and path, regardless of the order in which the trust stores were configured. Each result contains\n        the verified chain that this specific trust store built and the conclusions derived from it.\n    leaf_certificate_is_ev: ``True`` if the leaf certificate is Extended Validation, according to Mozilla.\n    leaf_certificate_has_must_staple_extension: ``True`` if the OCSP must-staple extension is present in the leaf\n        certificate.\n    leaf_certificate_signed_certificate_timestamps_count: The number of Signed Certificate\n        Timestamps (SCTs) for Certificate Transparency embedded in the leaf certificate. ``None`` if the version of\n        OpenSSL installed on the system is too old to be able to parse the SCT extension.\n    received_chain_has_valid_order: ``True`` if the certificate chain returned by the server was sent in the right\n        order. `None`` if any of the certificates in the chain could not be parsed.\n    received_chain_contains_anchor_certificate: Convenience warning derived only from the path built by\n        ``verified_certificate_chain_trust_store``. ``True`` if the server also sent that anchor certificate.\n        ``None`` if no trust store built a path, in which case this is unknown; it is not a statement about other\n        trust stores.\n    verified_chain_has_sha1_signature: Convenience check derived only from the path built by\n        ``verified_certificate_chain_trust_store``. ``True`` if a leaf or intermediate certificate in that path is\n        signed using SHA-1. ``None`` if no trust store built a path, in which case this is unknown; other trust\n        stores may have built paths with different signature algorithms.\n    verified_chain_has_legacy_symantec_anchor: Convenience check derived only from the path built by\n        ``verified_certificate_chain_trust_store``. ``True`` if that path contains a distrusted Symantec anchor\n        (https://blog.qualys.com/ssllabs/2017/09/26/google-and-mozilla-deprecating-existing-symantec-certificates).\n        ``None`` if no trust store built a path, in which case this is unknown.\n    ocsp_response: The OCSP response returned by the server. ``None`` if no response was sent by the server or if\n        the scan was run through an HTTP proxy (the proxy will not forward the server's OCSP response). If present,\n        the OCSP response is an ``OCSPResponse`` object parsed using the cryptography module; documentation is\n        available at\n        https://cryptography.io/en/latest/x509/ocsp.html?highlight=OCSPResponse#cryptography.x509.ocsp.OCSPResponse\n    ocsp_response_is_trusted: ``True`` if the OCSP response is trusted using\n        ``verified_certificate_chain_trust_store``, the trust store that built the convenience verified chain.\n        ``None`` if no OCSP response was sent by the server or if no trust store built a verified chain.",
       "properties": {
         "received_certificate_chain": {
           "items": {
@@ -1394,6 +1394,17 @@
             }
           ],
           "title": "Verified Certificate Chain"
+        },
+        "verified_certificate_chain_trust_store": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/_TrustStoreAsJson"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -1800,7 +1811,7 @@
       "type": "object"
     },
     "_PathValidationResultAsJson": {
-      "description": "The result of trying to validate a server's certificate chain using a specific trust store.\n\nAttributes:\n    trust_store: The trust store used for validation.\n    verified_certificate_chain: The verified certificate chain returned by OpenSSL.\n        Index 0 is the leaf certificate and the last element is the anchor/CA certificate from the trust store.\n        Will be None if the validation failed or the verified chain could not be built.\n        Each certificate is parsed using the cryptography module; documentation is available at\n        https://cryptography.io/en/latest/x509/reference/#x-509-certificate-object.\n    validation_error: The error returned by the cryptography module's validation function; None if validation was\n        successful.\n    was_validation_successful: Whether the certificate chain is trusted when using supplied the trust_stores.",
+      "description": "The result of trying to validate a server's certificate chain using a specific trust store.\n\nEach trust store can build a different path when the server deploys cross-signed certificates, potentially with a\ndifferent anchor, signature algorithm and validity period. The fields below are therefore specific to this trust\nstore and must not be inferred from another trust store's result.\n\nAttributes:\n    trust_store: The trust store used for validation.\n    verified_certificate_chain: The verified certificate chain built by this trust store.\n        Index 0 is the leaf certificate and the last element is the anchor/CA certificate from the trust store.\n        Will be None if the validation failed or the verified chain could not be built.\n        Each certificate is parsed using the cryptography module; documentation is available at\n        https://cryptography.io/en/latest/x509/reference/#x-509-certificate-object.\n    validation_error: The error returned by the cryptography module's validation function; None if validation was\n        successful.\n    received_chain_contains_anchor_certificate: Whether the anchor from this verified chain was also sent by the\n        server. ``None`` if this trust store did not build a verified chain, as the answer is unknown in that case.\n    verified_chain_has_sha1_signature: ``True`` if a leaf or intermediate certificate in this verified chain is\n        signed using SHA-1. ``None`` if this trust store did not build a verified chain, as the answer is unknown in\n        that case.\n    verified_chain_has_legacy_symantec_anchor: ``True`` if this verified chain contains a distrusted Symantec\n        anchor. ``None`` if this trust store did not build a verified chain, as the answer is unknown in that case.\n    was_validation_successful: Whether the certificate chain is trusted when using this trust store.",
       "properties": {
         "trust_store": {
           "$ref": "#/$defs/_TrustStoreAsJson"
@@ -1833,6 +1844,42 @@
         "was_validation_successful": {
           "title": "Was Validation Successful",
           "type": "boolean"
+        },
+        "received_chain_contains_anchor_certificate": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Received Chain Contains Anchor Certificate"
+        },
+        "verified_chain_has_sha1_signature": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Verified Chain Has Sha1 Signature"
+        },
+        "verified_chain_has_legacy_symantec_anchor": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Verified Chain Has Legacy Symantec Anchor"
         }
       },
       "required": [

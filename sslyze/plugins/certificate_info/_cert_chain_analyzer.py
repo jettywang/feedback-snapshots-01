@@ -1,10 +1,9 @@
 from dataclasses import dataclass
 
-from typing import Optional, List, Union, cast
+from typing import Optional, List, Union, cast, Tuple
 
 import cryptography
 from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.serialization import Encoding
 from cryptography.x509 import (
     ExtensionNotFound,
@@ -18,7 +17,6 @@ from cryptography.x509 import (
 from cryptography.x509.ocsp import load_der_ocsp_response, OCSPResponseStatus, OCSPResponse
 import nassl.ocsp_response
 
-from sslyze.plugins.certificate_info._symantec import SymantecDistructTester
 from sslyze.plugins.certificate_info.trust_stores.trust_store import TrustStore, PathValidationResult
 
 
@@ -32,14 +30,20 @@ class CertificateDeploymentAnalysisResult:
 
     Attributes:
         received_certificate_chain: The certificate chain sent by the server; index 0 is the leaf certificate.
-        verified_certificate_chain: The verified certificate chain returned by OpenSSL for one of the trust stores
-            packaged within SSLyze. Will be ``None`` if the validation failed with all of the available trust stores
-            (Apple, Mozilla, etc.). This is essentially a shortcut to
-            ``path_validation_result_list[0].verified_certificate_chain``.
-        path_validation_results: The result of validating the server's
-            certificate chain using each trust store that is packaged with SSLyze (Mozilla, Apple, etc.).
-            If for a given trust store, the validation was successful, the verified certificate chain can be
-             retrieved from the ``PathValidationResult``.
+        verified_certificate_chain: A convenience view of the chain built by
+            ``verified_certificate_chain_trust_store``, which is the first trust store that successfully built a path
+            when ``path_validation_results`` is in deterministic order. Will be ``None`` if no trust store was able to
+            build a path. This must not be treated as the result for every trust store: for cross-signed deployments,
+            different trust stores can build different paths with different anchors, signature algorithms and validity
+            periods. Use ``path_validation_results`` to get each trust store's own path and conclusions.
+        verified_certificate_chain_trust_store: The trust store whose path is exposed by the convenience fields
+            ``verified_certificate_chain``, ``received_chain_contains_anchor_certificate``,
+            ``verified_chain_has_sha1_signature`` and ``verified_chain_has_legacy_symantec_anchor``. Will be ``None`` if
+            no trust store built a path; in that case those convenience fields are ``None`` (unknown) as well. Other
+            trust stores may have different conclusions.
+        path_validation_results: The per-trust-store validation results, ordered deterministically by trust store name,
+            version and path, regardless of the order in which the trust stores were configured. Each result contains
+            the verified chain that this specific trust store built and the conclusions derived from it.
         leaf_certificate_is_ev: ``True`` if the leaf certificate is Extended Validation, according to Mozilla.
         leaf_certificate_has_must_staple_extension: ``True`` if the OCSP must-staple extension is present in the leaf
             certificate.
@@ -48,21 +52,26 @@ class CertificateDeploymentAnalysisResult:
             OpenSSL installed on the system is too old to be able to parse the SCT extension.
         received_chain_has_valid_order: ``True`` if the certificate chain returned by the server was sent in the right
             order. `None`` if any of the certificates in the chain could not be parsed.
-        received_chain_contains_anchor_certificate: ``True`` if the server included the anchor/root
-            certificate in the chain it sends back to clients. ``None`` if the verified chain could not be built.
-        verified_chain_has_sha1_signature: ``True`` if any of the leaf or intermediate certificates are
-            signed using the SHA-1 algorithm. ``None`` if the verified chain could not be built.
-        verified_chain_has_legacy_symantec_anchor: ``True`` if the certificate chain contains a distrusted Symantec
-            anchor
+        received_chain_contains_anchor_certificate: Convenience warning derived only from the path built by
+            ``verified_certificate_chain_trust_store``. ``True`` if the server also sent that anchor certificate.
+            ``None`` if no trust store built a path, in which case this is unknown; it is not a statement about other
+            trust stores.
+        verified_chain_has_sha1_signature: Convenience check derived only from the path built by
+            ``verified_certificate_chain_trust_store``. ``True`` if a leaf or intermediate certificate in that path is
+            signed using SHA-1. ``None`` if no trust store built a path, in which case this is unknown; other trust
+            stores may have built paths with different signature algorithms.
+        verified_chain_has_legacy_symantec_anchor: Convenience check derived only from the path built by
+            ``verified_certificate_chain_trust_store``. ``True`` if that path contains a distrusted Symantec anchor
             (https://blog.qualys.com/ssllabs/2017/09/26/google-and-mozilla-deprecating-existing-symantec-certificates).
-            ``None`` if the verified chain could not be built.
+            ``None`` if no trust store built a path, in which case this is unknown.
         ocsp_response: The OCSP response returned by the server. ``None`` if no response was sent by the server or if
             the scan was run through an HTTP proxy (the proxy will not forward the server's OCSP response). If present,
             the OCSP response is an ``OCSPResponse`` object parsed using the cryptography module; documentation is
             available at
             https://cryptography.io/en/latest/x509/ocsp.html?highlight=OCSPResponse#cryptography.x509.ocsp.OCSPResponse
-        ocsp_response_is_trusted: ``True`` if the OCSP response is trusted using the Mozilla trust store.
-            ``None`` if no OCSP response was sent by the server.
+        ocsp_response_is_trusted: ``True`` if the OCSP response is trusted using
+            ``verified_certificate_chain_trust_store``, the trust store that built the convenience verified chain.
+            ``None`` if no OCSP response was sent by the server or if no trust store built a verified chain.
 
     """
 
@@ -74,6 +83,7 @@ class CertificateDeploymentAnalysisResult:
     received_chain_has_valid_order: Optional[bool]
 
     path_validation_results: List[PathValidationResult]
+    verified_certificate_chain_trust_store: Optional[TrustStore]
     verified_chain_has_sha1_signature: Optional[bool]
     verified_chain_has_legacy_symantec_anchor: Optional[bool]
 
@@ -82,9 +92,15 @@ class CertificateDeploymentAnalysisResult:
 
     @property
     def verified_certificate_chain(self) -> Optional[List[Certificate]]:
-        """Get one of the verified certificate chains if one was successfully built using any of the trust stores."""
+        """Get the convenience verified chain, built by ``verified_certificate_chain_trust_store``.
+
+        Use ``path_validation_results`` to get the chain built by each individual trust store.
+        """
+        if self.verified_certificate_chain_trust_store is None:
+            return None
+
         for path_result in self.path_validation_results:
-            if path_result.was_validation_successful:
+            if path_result.trust_store is self.verified_certificate_chain_trust_store:
                 return path_result.verified_certificate_chain
         return None
 
@@ -201,43 +217,46 @@ class CertificateDeploymentAnalyzer:
             )
             all_path_validation_results.append(path_validation_result)
 
-        # Keep one trust store that was able to build the verified chain to then run additional checks
-        trust_store_that_can_build_verified_chain = None
-        verified_certificate_chain = None
-
-        # But first sort the path validation results so the same trust_store always get picked for a given server
-        def sort_function(path_validation: PathValidationResult) -> str:
-            return path_validation.trust_store.name.lower()
+        # Sort deterministically so that the result order never depends on the order in which the trust stores were
+        # configured. Name alone is not enough: a custom CA file can share a name with a packaged store, and two custom
+        # CA files can share the same name.
+        def sort_function(path_validation: PathValidationResult) -> Tuple[str, str, str]:
+            return (
+                path_validation.trust_store.name.lower(),
+                path_validation.trust_store.version.lower(),
+                str(path_validation.trust_store.path),
+            )
 
         all_path_validation_results.sort(key=sort_function)
 
-        # Then keep a trust store with a verified chain
+        # Keep the first trust store that built a verified chain. This selection is deterministic, and the convenience
+        # fields below are explicitly documented as being about this one trust store; each other trust store's path and
+        # conclusions stay available in all_path_validation_results.
+        trust_store_that_can_build_verified_chain = None
+        convenience_path_validation_result = None
         for path_validation_result in all_path_validation_results:
             if path_validation_result.was_validation_successful:
                 trust_store_that_can_build_verified_chain = path_validation_result.trust_store
-                verified_certificate_chain = path_validation_result.verified_certificate_chain
+                convenience_path_validation_result = path_validation_result
                 break
 
-        # Check if the anchor was sent by the server
-        has_anchor_in_certificate_chain = None
-        if verified_certificate_chain:
-            has_anchor_in_certificate_chain = verified_certificate_chain[-1] in received_certificate_chain
-
-        # Check if a SHA1-signed certificate is in the chain
-        # Root certificates can still be signed with SHA1 so we only check leaf and intermediate certificates
-        has_sha1_in_certificate_chain = None
-        if verified_certificate_chain:
-            has_sha1_in_certificate_chain = False
-            for cert in verified_certificate_chain[:-1]:
-                if isinstance(cert.signature_hash_algorithm, hashes.SHA1):
-                    has_sha1_in_certificate_chain = True
-                    break
-
-        # Check if this is a distrusted Symantec-issued chain
-        verified_chain_has_legacy_symantec_anchor = None
-        if verified_certificate_chain:
-            symantec_distrust_timeline = SymantecDistructTester.get_distrust_timeline(verified_certificate_chain)
-            verified_chain_has_legacy_symantec_anchor = True if symantec_distrust_timeline else False
+        # The convenience fields mirror the path built by the selected trust store, including "unknown" (None) when it
+        # could not build a path. They are never populated from a different trust store's path.
+        has_anchor_in_certificate_chain = (
+            convenience_path_validation_result.received_chain_contains_anchor_certificate
+            if convenience_path_validation_result
+            else None
+        )
+        has_sha1_in_certificate_chain = (
+            convenience_path_validation_result.verified_chain_has_sha1_signature
+            if convenience_path_validation_result
+            else None
+        )
+        verified_chain_has_legacy_symantec_anchor = (
+            convenience_path_validation_result.verified_chain_has_legacy_symantec_anchor
+            if convenience_path_validation_result
+            else None
+        )
 
         # Check the OCSP response if there is one
         is_ocsp_response_trusted = None
@@ -270,6 +289,7 @@ class CertificateDeploymentAnalyzer:
             verified_chain_has_sha1_signature=has_sha1_in_certificate_chain,
             verified_chain_has_legacy_symantec_anchor=verified_chain_has_legacy_symantec_anchor,
             path_validation_results=all_path_validation_results,
+            verified_certificate_chain_trust_store=trust_store_that_can_build_verified_chain,
             ocsp_response=final_ocsp_response,
             ocsp_response_is_trusted=is_ocsp_response_trusted,
         )

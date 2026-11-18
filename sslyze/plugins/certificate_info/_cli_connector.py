@@ -14,6 +14,7 @@ from sslyze.plugins.certificate_info._certificate_utils import (
     get_common_names,
     parse_subject_alternative_name_extension,
 )
+from sslyze.plugins.certificate_info.trust_stores.trust_store import PathValidationResult
 
 from sslyze.plugins.plugin_base import ScanCommandCliConnector, OptParseCliOption
 
@@ -65,6 +66,7 @@ class _CertificateInfoCliConnector(
         return is_scan_cmd_enabled, extra_arguments
 
     TRUST_FORMAT = "{store_name} CA Store ({store_version}):"
+    TRUST_FORMAT_INLINE = "{store_name} CA Store ({store_version})"
     NO_VERIFIED_CHAIN_ERROR_TXT = "ERROR - Could not build verified chain (certificate untrusted?)"
 
     @classmethod
@@ -128,6 +130,10 @@ class _CertificateInfoCliConnector(
 
         # Path validation that was successfully tested
         for path_result in cert_deployment.path_validation_results:
+            store_name = cls.TRUST_FORMAT.format(
+                store_name=path_result.trust_store.name, store_version=path_result.trust_store.version
+            )
+
             if path_result.was_validation_successful:
                 # EV certs - Only Mozilla supported for now
                 ev_txt = ""
@@ -138,40 +144,74 @@ class _CertificateInfoCliConnector(
             else:
                 path_txt = f"FAILED - Certificate is NOT Trusted: {path_result.validation_error}"
 
-            deployment_as_txt.append(
-                cls._format_field(
-                    cls.TRUST_FORMAT.format(
-                        store_name=path_result.trust_store.name, store_version=path_result.trust_store.version
-                    ),
-                    path_txt,
+            deployment_as_txt.append(cls._format_field(store_name, path_txt))
+
+            # Report the path that this specific trust store built, if any. Cross-signed deployments can lead each
+            # store to build a different path, so this cannot be replaced by a single deployment-wide chain.
+            if path_result.verified_certificate_chain:
+                path_cns = [_get_subject_as_short_text(cert) for cert in path_result.verified_certificate_chain]
+                deployment_as_txt.append(cls._format_field("  Built Path:", " --> ".join(path_cns)))
+                deployment_as_txt.extend(cls._per_store_conclusions_to_console_output(path_result))
+            else:
+                deployment_as_txt.append(cls._format_field("  Built Path:", cls.NO_VERIFIED_CHAIN_ERROR_TXT))
+                deployment_as_txt.append(
+                    cls._format_field(
+                        "  SHA1 / Symantec / Anchor:",
+                        "UNKNOWN - no path was built with this trust store",
+                    )
                 )
+
+        # Deployment-wide legacy summary. It is explicitly tied to the trust store whose path was selected above, and
+        # is therefore not a statement about every trust store.
+        has_convenience_path = cert_deployment.verified_certificate_chain_trust_store is not None
+        if cert_deployment.verified_certificate_chain_trust_store:
+            convenience_store_name = cls.TRUST_FORMAT_INLINE.format(
+                store_name=cert_deployment.verified_certificate_chain_trust_store.name,
+                store_version=cert_deployment.verified_certificate_chain_trust_store.version,
             )
+        else:
+            convenience_store_name = "none - no trust store built a path"
+
+        unknown_convenience_txt = cls.NO_VERIFIED_CHAIN_ERROR_TXT
+        if not has_convenience_path:
+            unknown_convenience_txt = "UNKNOWN - no trust store built a path"
 
         if cert_deployment.verified_chain_has_legacy_symantec_anchor is None:
-            symantec_str = cls.NO_VERIFIED_CHAIN_ERROR_TXT
+            symantec_str = "UNKNOWN - no trust store built a path"
         elif cert_deployment.verified_chain_has_legacy_symantec_anchor is True:
             symantec_str = "WARNING: Certificate distrusted by Google and Mozilla since 2018"
         elif cert_deployment.verified_chain_has_legacy_symantec_anchor is False:
             symantec_str = "OK - Not a Symantec-issued certificate"
         else:
             raise RuntimeError("Should never happen")
-        deployment_as_txt.append(cls._format_field("Symantec 2018 Deprecation:", symantec_str))
+        deployment_as_txt.append(
+            cls._format_field(
+                "Symantec 2018 Deprecation:",
+                f"{symantec_str} (path built by {convenience_store_name}; see per-store results above)",
+            )
+        )
 
-        # Print the Common Names within the received certificate chain
+        # Print the Common Names within the received certificate chain. This is the chain as sent by the server, which
+        # is independent from any verified chain built locally by a trust store.
         cns_in_received_chain: List[str] = [
             _get_subject_as_short_text(cert) for cert in cert_deployment.received_certificate_chain
         ]
         deployment_as_txt.append(cls._format_field("Received Chain:", " --> ".join(cns_in_received_chain)))
 
-        # Print the Common Names within the verified certificate chain if validation was successful
+        # Print the Common Names within the convenience verified certificate chain if validation was successful
         if cert_deployment.verified_certificate_chain:
             cns_in_certificate_chain = [
                 _get_subject_as_short_text(cert) for cert in cert_deployment.verified_certificate_chain
             ]
             verified_chain_txt = " --> ".join(cns_in_certificate_chain)
         else:
-            verified_chain_txt = cls.NO_VERIFIED_CHAIN_ERROR_TXT
-        deployment_as_txt.append(cls._format_field("Verified Chain:", verified_chain_txt))
+            verified_chain_txt = unknown_convenience_txt
+        deployment_as_txt.append(
+            cls._format_field(
+                "Verified Chain (convenience):",
+                f"{verified_chain_txt} [built by {convenience_store_name}]",
+            )
+        )
 
         if cert_deployment.verified_certificate_chain:
             chain_with_anchor_txt = (
@@ -180,8 +220,13 @@ class _CertificateInfoCliConnector(
                 else "WARNING - Received certificate chain contains the anchor certificate"
             )
         else:
-            chain_with_anchor_txt = cls.NO_VERIFIED_CHAIN_ERROR_TXT
-        deployment_as_txt.append(cls._format_field("Received Chain Contains Anchor:", chain_with_anchor_txt))
+            chain_with_anchor_txt = unknown_convenience_txt
+        deployment_as_txt.append(
+            cls._format_field(
+                "Received Chain Contains Anchor:",
+                f"{chain_with_anchor_txt} [{convenience_store_name}]",
+            )
+        )
 
         chain_order_txt = (
             "OK - Order is valid"
@@ -197,8 +242,13 @@ class _CertificateInfoCliConnector(
                 else "INSECURE - SHA1-signed certificate in the verified certificate chain"
             )
         else:
-            sha1_text = cls.NO_VERIFIED_CHAIN_ERROR_TXT
-        deployment_as_txt.append(cls._format_field("Verified Chain contains SHA1:", sha1_text))
+            sha1_text = unknown_convenience_txt
+        deployment_as_txt.append(
+            cls._format_field(
+                "Verified Chain contains SHA1:",
+                f"{sha1_text} [{convenience_store_name}]",
+            )
+        )
 
         # Extensions section
         deployment_as_txt.append(cls._format_subtitle("Certificate Extensions"))
@@ -285,6 +335,47 @@ class _CertificateInfoCliConnector(
 
         # All done
         return deployment_as_txt
+
+    @classmethod
+    def _per_store_conclusions_to_console_output(cls, path_result: PathValidationResult) -> List[str]:
+        # All of these conclusions are derived from the path built by this trust store only.
+        verified_chain = path_result.verified_certificate_chain
+        if not verified_chain:
+            return []
+        anchor_certificate = verified_chain[-1]
+        signature_algorithms = []
+        for certificate in verified_chain:
+            if certificate.signature_hash_algorithm:
+                signature_algorithms.append(certificate.signature_hash_algorithm.name)
+            else:
+                signature_algorithms.append(certificate.signature_algorithm_oid.dotted_string)
+
+        anchor_txt = (
+            "WARNING - The path anchor was also sent by the server"
+            if path_result.received_chain_contains_anchor_certificate
+            else "OK - Path anchor was not sent by the server"
+        )
+        sha1_txt = (
+            "INSECURE - SHA1-signed leaf or intermediate certificate in this path"
+            if path_result.verified_chain_has_sha1_signature
+            else "OK - No SHA1-signed certificate in this path"
+        )
+        symantec_txt = (
+            "WARNING - Distrusted Symantec anchor in this path"
+            if path_result.verified_chain_has_legacy_symantec_anchor
+            else "OK - No distrusted Symantec anchor in this path"
+        )
+        return [
+            cls._format_field(
+                "  Anchor:",
+                f"{_get_subject_as_short_text(anchor_certificate)}"
+                f" (not after {anchor_certificate.not_valid_after_utc.date().isoformat()})",
+            ),
+            cls._format_field("  Signature Algorithms:", " --> ".join(signature_algorithms)),
+            cls._format_field("  Anchor Sent:", anchor_txt),
+            cls._format_field("  SHA1 Signature:", sha1_txt),
+            cls._format_field("  Symantec Anchor:", symantec_txt),
+        ]
 
     @classmethod
     def _get_basic_certificate_text(cls, certificate: Certificate) -> List[str]:

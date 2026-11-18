@@ -258,6 +258,11 @@ class _PathValidationResultAsJson(BaseModelWithOrmMode):
     validation_error: Optional[str]
     was_validation_successful: bool
 
+    # These fields were added after the initial model; defaults keep older JSON output parseable
+    received_chain_contains_anchor_certificate: Optional[bool] = None
+    verified_chain_has_sha1_signature: Optional[bool] = None
+    verified_chain_has_legacy_symantec_anchor: Optional[bool] = None
+
 
 assert PathValidationResult.__doc__
 _PathValidationResultAsJson.__doc__ = PathValidationResult.__doc__
@@ -279,6 +284,9 @@ class _CertificateDeploymentAnalysisResultAsJson(BaseModelWithOrmMode):
     ocsp_response_is_trusted: Optional[bool]
 
     verified_certificate_chain: Optional[List[_CertificateAsJson]]
+
+    # This field was added after the initial model; a default keeps older JSON output parseable
+    verified_certificate_chain_trust_store: Optional[_TrustStoreAsJson] = None
 
 
 assert CertificateDeploymentAnalysisResult.__doc__
