@@ -1,0 +1,92 @@
+======================================================================
+conflict_lab/samples/S1_ole_renamed.docx
+  [candidates]
+    - extension suggests: .docx (informational only, never verified)
+    - OLE/CFB magic at offset 0
+    - ZIP EOCD found (archive end record)
+  [verified]
+    - OLE-view: OLE/CFB parsed, root CLSID=64818D10-4F9B-11CF-86EA-00AA00B929E8 (Microsoft Powerpoint.Show.8), 4 streams
+    - ZIP-view: ZIP parsed, 4 parts
+  [capabilities]
+    - OLE-view: VBA macros detected (olevba parse ok)
+  [conflicts]
+    -   (none)
+  [unverifiable]
+    -   (none)
+======================================================================
+conflict_lab/samples/S2_ole_zip_polyglot.doc
+  [candidates]
+    - extension suggests: .doc (informational only, never verified)
+    - OLE/CFB magic at offset 0
+    - ZIP EOCD found (archive end record)
+  [verified]
+    - OLE-view: OLE/CFB parsed, root CLSID=64818D10-4F9B-11CF-86EA-00AA00B929E8 (Microsoft Powerpoint.Show.8), 4 streams
+    - ZIP-view: ZIP parsed, 4 parts
+    - ZIP-view: [Content_Types].xml declares main part = DOCM
+  [capabilities]
+    - OLE-view: VBA macros detected (olevba parse ok)
+    - ZIP-view: vbaProject.bin part present: ['word/vbaProject.bin']
+    - ZIP-view: VBA macros detected (olevba parse ok)
+  [conflicts]
+    -   (none)
+  [unverifiable]
+    -   (none)
+======================================================================
+conflict_lab/samples/S3_docm_declared_as_docx.docx
+  [candidates]
+    - extension suggests: .docx (informational only, never verified)
+    - ZIP EOCD found (archive end record)
+  [verified]
+    - ZIP-view: ZIP parsed, 4 parts
+    - ZIP-view: [Content_Types].xml declares main part = DOCX
+  [capabilities]
+    - ZIP-view: vbaProject.bin part present: ['word/vbaProject.bin']
+    - ZIP-view: VBA macros detected (olevba parse ok)
+  [conflicts]
+    - ZIP-view: declared DOCX (macro-free) but ['word/vbaProject.bin'] exists - declaration is not proof
+  [unverifiable]
+    -   (none)
+======================================================================
+conflict_lab/samples/S4_ole_magic_only.doc
+  [candidates]
+    - extension suggests: .doc (informational only, never verified)
+    - OLE/CFB magic at offset 0
+  [verified]
+    -   (none)
+  [capabilities]
+    -   (none)
+  [conflicts]
+    -   (none)
+  [unverifiable]
+    - OLE-view: OLE magic present but CFB parse failed (ValueError: Exceeds the limit (4300 digits) for integer string conversion; use sys.set_int_max_str_digits() to increase the limit) - NOT proven corrupt, structure unverified
+======================================================================
+conflict_lab/samples/S5_xlsx_with_ole_embed.xlsx
+  [candidates]
+    - extension suggests: .xlsx (informational only, never verified)
+    - ZIP EOCD found (archive end record)
+  [verified]
+    - ZIP-view: ZIP parsed, 5 parts
+    - ZIP-view: [Content_Types].xml declares main part = XLSX
+    - ZIP-view!xl/embeddings/oleObject1.bin: OLE/CFB parsed, root CLSID=64818D10-4F9B-11CF-86EA-00AA00B929E8 (Microsoft Powerpoint.Show.8), 4 streams
+  [capabilities]
+    - ZIP-view: embedded OLE part xl/embeddings/oleObject1.bin
+    - ZIP-view!xl/embeddings/oleObject1.bin: VBA macros detected (olevba parse ok)
+  [conflicts]
+    -   (none)
+  [unverifiable]
+    -   (none)
+======================================================================
+conflict_lab/samples/S6_clsid_spoofed.doc
+  [candidates]
+    - extension suggests: .doc (informational only, never verified)
+    - OLE/CFB magic at offset 0
+    - ZIP EOCD found (archive end record)
+  [verified]
+    - OLE-view: OLE/CFB parsed, root CLSID=00020906-0000-0000-C000-000000000046 (Microsoft Word 97-2003 Document (Word.Document.8)), 4 streams
+    - ZIP-view: ZIP parsed, 4 parts
+  [capabilities]
+    - OLE-view: VBA macros detected (olevba parse ok)
+  [conflicts]
+    -   (none)
+  [unverifiable]
+    -   (none)

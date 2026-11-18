@@ -1,0 +1,28 @@
+===== conflict_lab/samples/S1_ole_renamed.docx =====
+FILE: conflict_lab/samples/S1_ole_renamed.docx
+Type: PPT
+WARNING  For now, VBA stomping cannot be detected for files in memory
+VBA MACRO Module1.bas 
+===== conflict_lab/samples/S2_ole_zip_polyglot.doc =====
+FILE: conflict_lab/samples/S2_ole_zip_polyglot.doc
+Type: PPT
+WARNING  For now, VBA stomping cannot be detected for files in memory
+VBA MACRO Module1.bas 
+===== conflict_lab/samples/S3_docm_declared_as_docx.docx =====
+FILE: conflict_lab/samples/S3_docm_declared_as_docx.docx
+Type: OpenXML
+WARNING  For now, VBA stomping cannot be detected for files in memory
+WARNING  Returned info is not complete for PPT types!
+VBA MACRO Module1.bas 
+===== conflict_lab/samples/S4_ole_magic_only.doc =====
+===== conflict_lab/samples/S5_xlsx_with_ole_embed.xlsx =====
+FILE: conflict_lab/samples/S5_xlsx_with_ole_embed.xlsx
+Type: OpenXML
+WARNING  For now, VBA stomping cannot be detected for files in memory
+WARNING  Returned info is not complete for PPT types!
+VBA MACRO Module1.bas 
+===== conflict_lab/samples/S6_clsid_spoofed.doc =====
+FILE: conflict_lab/samples/S6_clsid_spoofed.doc
+Type: PPT
+WARNING  For now, VBA stomping cannot be detected for files in memory
+VBA MACRO Module1.bas 

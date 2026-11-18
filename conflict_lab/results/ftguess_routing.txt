@@ -1,0 +1,27 @@
+===== conflict_lab/samples/S1_ole_renamed.docx =====
+File Type  : MS Powerpoint 97 Presentation
+Application: MS PowerPoint
+Container  : OLE
+Root CLSID : 64818D10-4F9B-11CF-86EA-00AA00B929E8 - Microsoft Powerpoint.Show.8
+===== conflict_lab/samples/S2_ole_zip_polyglot.doc =====
+File Type  : MS Powerpoint 97 Presentation
+Application: MS PowerPoint
+Container  : OLE
+Root CLSID : 64818D10-4F9B-11CF-86EA-00AA00B929E8 - Microsoft Powerpoint.Show.8
+===== conflict_lab/samples/S3_docm_declared_as_docx.docx =====
+File Type  : MS Word 2007+ Document
+Application: MS Word
+Container  : OpenXML
+===== conflict_lab/samples/S4_ole_magic_only.doc =====
+File Type  : Unknown file type
+Application: Unknown Application
+Container  : Unknown Container
+===== conflict_lab/samples/S5_xlsx_with_ole_embed.xlsx =====
+File Type  : MS Excel 2007+ Workbook
+Application: MS Excel
+Container  : OpenXML
+===== conflict_lab/samples/S6_clsid_spoofed.doc =====
+File Type  : MS Word 97 Document
+Application: MS Word
+Container  : OLE
+Root CLSID : 00020906-0000-0000-C000-000000000046 - Microsoft Word 97-2003 Document (Word.Document.8)
