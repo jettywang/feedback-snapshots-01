@@ -193,3 +193,47 @@ interpreted in a special manner. **pyelftools** attempts to provide a
 convenient Pythonic API for this information whenever possible. There\'s
 no way around it - to even understand the API one must have some grasp
 of the [DWARF standard](https://dwarfstd.org/).
+
+### ARM exception handling information
+
+For ARM ELF files, `ELFFile.has_ehabi_info()` reports whether an
+`SHT_ARM_EXIDX` section is present, and `ELFFile.get_ehabi_infos()`
+returns one `EHABIInfo` object per such section
+(`elftools/ehabi/ehabiinfo.py`). These are *not* DWARF call frame
+information; the bytecode belongs to the ARM Exception Handling ABI.
+
+Each `EHABIInfo` can resolve an instruction address to its table entry:
+
+```python
+for info in elf.get_ehabi_infos():
+    lookup = info.lookup_address(0x4f51)
+    lookup.status        # 'found', 'not_covered', 'ambiguous', ...
+    lookup.entry         # EHABIEntry, CannotUnwindEHABIEntry, ...
+    lookup.function_start, lookup.function_end
+```
+
+`lookup_address` bounds the last function with the section referenced
+from `.ARM.exidx`'s `sh_link` (normally `.text`). It does not guess when
+the table is unsorted, has duplicate function offsets, or has a corrupt
+entry in the interval; those cases return `ambiguous` with a reason.
+
+`EHABIInfo.unwind_by_address(address, registers, memory)` (or
+`EHABIEntry.unwind(...)`) evaluates the restricted compact bytecode.
+Registers and memory are *provided by the caller* — pyelftools never
+reads the host process or executes a personality routine found in the
+sample. `registers` is a mapping (or an object with
+`get_register(name)`) of `r0`..`r15`, `fp`, `ip`, `sp`, `lr`, `pc`.
+`memory` is a mapping from address to integer, or any object with
+`read_word(address)` / `read_double(address)`, or an
+`elftools.ehabi.unwind.EHABIBytesMemory` wrapper around caller-owned
+bytes.
+
+The result reports `status`, `reason`, per-step `steps` (with the exact
+bytecode bytes and their file offsets), `initial_vsp`, `final_vsp`,
+`changed_registers`, `missing`, and `tail`. Fully interpreting one
+entry never produces a complete call stack: results describe one frame
+basis, and `missing` lists every input that was unavailable. `status`
+distinguishes, among others, `completed`, `refused`, `cannot_unwind`,
+`generic_personality`, `corrupt`, `truncated`, `unsupported` and
+`incomplete`. Generic personality models are returned as evidence with
+`personality_executed == False`; their code is not run.

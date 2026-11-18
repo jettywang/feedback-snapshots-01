@@ -12,6 +12,46 @@ from collections.abc import Callable
 from typing import NamedTuple
 
 
+class EHABITruncatedBytecode(Exception):
+    """ Raised internally when a compact instruction lacks an operand.
+    """
+
+
+class EHABIInstruction(NamedTuple):
+    """ One decoded compact instruction.
+
+        offset:
+            Byte offset of the instruction inside the bytecode array.
+
+        bytecode:
+            Exactly the bytes this instruction consumed.
+
+        mnemonic:
+            Human-readable form, matching the historical printer output.
+
+        kind:
+            Machine-readable operation. GPR/VFP/iWMMX pops, VSP adjustments,
+            and finish/refuse have an intentionally restricted, documented
+            meaning; spare/reserved have none.
+
+        operands:
+            Normalized operands used by the restricted evaluator. Operations
+            without modelled operands use an empty mapping.
+    """
+
+    offset: int
+    bytecode: tuple[int, ...]
+    mnemonic: str
+    kind: str
+    operands: dict[str, int]
+
+
+class _Decoded(NamedTuple):
+    mnemonic: str
+    kind: str
+    operands: dict[str, int]
+
+
 class EHABIBytecodeDecoder:
     """ Decoder of a sequence of ARM exception handler abi bytecode.
 
@@ -21,50 +61,117 @@ class EHABIBytecodeDecoder:
 
         Accessible attributes:
 
+            instructions:
+                EHABIInstruction array with the bytes consumed by each step.
+
             mnemonic_array:
-                MnemonicItem array.
+                MnemonicItem array, kept for compatibility with callers that
+                print the unwind table.
+
+            truncated:
+                True when an instruction was cut short by the end of the
+                bytecode array.
+
+            truncation_reason:
+                Human-readable explanation of that truncation.
 
         Parameters:
 
             bytecode_array:
                 Integer array, raw data of bytecode.
-
     """
 
     def __init__(self, bytecode_array: list[int]) -> None:
-        self._bytecode_array = bytecode_array
+        self._bytecode_array = list(bytecode_array)
         self._index: int = 0
+        self.instructions: list[EHABIInstruction] = []
         self.mnemonic_array: list[MnemonicItem] | None = None
+        self.truncated: bool = False
+        self.truncation_reason: str | None = None
         self._decode()
 
+    def _remaining(self) -> int:
+        return len(self._bytecode_array) - self._index
+
+    def _require(self, count: int, what: str) -> None:
+        if self._remaining() < count:
+            raise EHABITruncatedBytecode(
+                f'missing {what}: need {count} byte(s), have {self._remaining()}')
+
     def _decode(self) -> None:
-        """ Decode bytecode array, put result into mnemonic_array.
+        """ Decode bytecode array, put result into instructions/mnemonic_array.
         """
         self._index = 0
+        self.instructions = []
         self.mnemonic_array = []
-        while self._index < len(self._bytecode_array):
-            for mask, value, handler in self.ring:
-                if (self._bytecode_array[self._index] & mask) == value:
-                    start_idx = self._index
-                    mnemonic = handler(self)
-                    end_idx = self._index
-                    self.mnemonic_array.append(
-                        MnemonicItem(self._bytecode_array[start_idx: end_idx], mnemonic))
-                    break
+        self.truncated = False
+        self.truncation_reason = None
 
-    def _decode_00xxxxxx(self) -> str:
+        while self._index < len(self._bytecode_array):
+            opcode = self._bytecode_array[self._index]
+            for mask, value, handler in self.ring:
+                if (opcode & mask) == value:
+                    start_idx = self._index
+                    try:
+                        decoded = handler(self)
+                    except EHABITruncatedBytecode as e:
+                        self.truncated = True
+                        self.truncation_reason = str(e)
+                        # Record the bytes that were available for this
+                        # instruction, including a lone leading opcode byte,
+                        # so callers can point at the cut-off material.
+                        self._index = len(self._bytecode_array)
+                        self.instructions.append(EHABIInstruction(
+                            offset=start_idx,
+                            bytecode=tuple(self._bytecode_array[start_idx:]),
+                            mnemonic='truncated',
+                            kind='truncated',
+                            operands={}))
+                        break
+                    self.instructions.append(EHABIInstruction(
+                        offset=start_idx,
+                        bytecode=tuple(self._bytecode_array[start_idx:self._index]),
+                        mnemonic=decoded.mnemonic,
+                        kind=decoded.kind,
+                        operands=decoded.operands))
+                    break
+            else:
+                # No recipe matched; consume the byte so decoding terminates.
+                # This cannot happen with the current ring, but keep the
+                # decoder bounded for malformed input.
+                start_idx = self._index
+                self._index += 1
+                self.instructions.append(EHABIInstruction(
+                    offset=start_idx,
+                    bytecode=(opcode,),
+                    mnemonic='spare',
+                    kind='spare',
+                    operands={}))
+
+            if self.truncated:
+                break
+
+        self.mnemonic_array = [
+            MnemonicItem(list(instruction.bytecode), instruction.mnemonic)
+            for instruction in self.instructions]
+
+    def _decode_00xxxxxx(self) -> _Decoded:
         #   SW.startLine() << format("0x%02X      ; vsp = vsp + %u\n", Opcode,
         #                            ((Opcode & 0x3f) << 2) + 4);
+        self._require(1, 'compact 0x00 opcode')
         opcode = self._bytecode_array[self._index]
         self._index += 1
-        return f'vsp = vsp + {int(((opcode & 63) << 2) + 4)}'
+        amount = int(((opcode & 63) << 2) + 4)
+        return _Decoded(f'vsp = vsp + {amount}', 'vsp_plus', {'amount': amount})
 
-    def _decode_01xxxxxx(self) -> str:
-        # SW.startLine() << format("0x%02X      ; vsp = vsp - %u\n", Opcode,
+    def _decode_01xxxxxx(self) -> _Decoded:
+        #   SW.startLine() << format("0x%02X      ; vsp = vsp - %u\n", Opcode,
         #                          ((Opcode & 0x3f) << 2) + 4);
+        self._require(1, 'compact 0x40 opcode')
         opcode = self._bytecode_array[self._index]
         self._index += 1
-        return f'vsp = vsp - {int(((opcode & 63) << 2) + 4)}'
+        amount = int(((opcode & 63) << 2) + 4)
+        return _Decoded(f'vsp = vsp - {amount}', 'vsp_minus', {'amount': amount})
 
     gpr_register_names = ("r0", "r1", "r2", "r3", "r4", "r5", "r6", "r7",
                           "r8", "r9", "r10", "fp", "ip", "sp", "lr", "pc")
@@ -80,177 +187,175 @@ class EHABIBytecodeDecoder:
         hits = [prefix + str(i) for i in range(32) if vfp_mask & (1 << i) != 0]
         return '{{{}}}'.format(', '.join(hits))
 
-    def _decode_1000iiii_iiiiiiii(self) -> str:
+    def _decode_1000iiii_iiiiiiii(self) -> _Decoded:
+        self._require(2, 'two-byte GPR pop')
         op0 = self._bytecode_array[self._index]
         self._index += 1
         op1 = self._bytecode_array[self._index]
         self._index += 1
         #   uint16_t GPRMask = (Opcode1 << 4) | ((Opcode0 & 0x0f) << 12);
-        #   SW.startLine()
-        #     << format("0x%02X 0x%02X ; %s",
-        #               Opcode0, Opcode1, GPRMask ? "pop " : "refuse to unwind");
-        #   if (GPRMask)
-        #     PrintGPR(GPRMask);
         gpr_mask = (op1 << 4) | ((op0 & 0x0f) << 12)
         if gpr_mask == 0:
-            return 'refuse to unwind'
-        else:
-            return f'pop {self._printGPR(gpr_mask)}'
+            return _Decoded('refuse to unwind', 'refuse_to_unwind', {'mask': 0})
+        return _Decoded(f'pop {self._printGPR(gpr_mask)}', 'pop_gpr', {'mask': gpr_mask})
 
-    def _decode_10011101(self) -> str:
+    def _decode_10011101(self) -> _Decoded:
+        self._require(1, 'compact 0x9d opcode')
         self._index += 1
-        return 'reserved (ARM MOVrr)'
+        return _Decoded('reserved (ARM MOVrr)', 'reserved', {})
 
-    def _decode_10011111(self) -> str:
+    def _decode_10011111(self) -> _Decoded:
+        self._require(1, 'compact 0x9f opcode')
         self._index += 1
-        return 'reserved (WiMMX MOVrr)'
+        return _Decoded('reserved (WiMMX MOVrr)', 'reserved', {})
 
-    def _decode_1001nnnn(self) -> str:
+    def _decode_1001nnnn(self) -> _Decoded:
         # SW.startLine() << format("0x%02X      ; vsp = r%u\n", Opcode, (Opcode & 0x0f));
+        self._require(1, 'compact 0x90 opcode')
         opcode = self._bytecode_array[self._index]
         self._index += 1
-        return f'vsp = r{int(opcode & 15)}'
+        reg = int(opcode & 15)
+        return _Decoded(f'vsp = r{reg}', 'vsp_from_reg', {'register': reg})
 
-    def _decode_10100nnn(self) -> str:
-        # SW.startLine() << format("0x%02X      ; pop ", Opcode);
-        # PrintGPR((((1 << ((Opcode & 0x7) + 1)) - 1) << 4));
+    def _decode_10100nnn(self) -> _Decoded:
+        #   PrintGPR((((1 << ((Opcode & 0x7) + 1)) - 1) << 4));
+        self._require(1, 'compact 0xa0 opcode')
         opcode = self._bytecode_array[self._index]
         self._index += 1
-        return f'pop {self._printGPR(self._calculate_range(4, opcode & 0x07))}'
+        mask = self._calculate_range(4, opcode & 0x07)
+        return _Decoded(f'pop {self._printGPR(mask)}', 'pop_range_gpr', {'mask': mask})
 
-    def _decode_10101nnn(self) -> str:
-        # SW.startLine() << format("0x%02X      ; pop ", Opcode);
-        # PrintGPR((((1 << ((Opcode & 0x7) + 1)) - 1) << 4) | (1 << 14));
+    def _decode_10101nnn(self) -> _Decoded:
+        #   PrintGPR((((1 << ((Opcode & 0x7) + 1)) - 1) << 4) | (1 << 14));
+        self._require(1, 'compact 0xa8 opcode')
         opcode = self._bytecode_array[self._index]
         self._index += 1
-        return f'pop {self._printGPR(self._calculate_range(4, opcode & 0x07) | (1 << 14))}'
+        mask = self._calculate_range(4, opcode & 0x07) | (1 << 14)
+        return _Decoded(f'pop {self._printGPR(mask)}', 'pop_range_gpr', {'mask': mask})
 
-    def _decode_10110000(self) -> str:
+    def _decode_10110000(self) -> _Decoded:
         # SW.startLine() << format("0x%02X      ; finish\n", Opcode);
+        self._require(1, 'compact 0xb0 opcode')
         self._index += 1
-        return 'finish'
+        return _Decoded('finish', 'finish', {})
 
-    def _decode_10110001_0000iiii(self) -> str:
-        # SW.startLine()
-        #   << format("0x%02X 0x%02X ; %s", Opcode0, Opcode1,
-        #             ((Opcode1 & 0xf0) || Opcode1 == 0x00) ? "spare" : "pop ");
-        # if (((Opcode1 & 0xf0) == 0x00) && Opcode1)
-        #   PrintGPR((Opcode1 & 0x0f));
+    def _decode_10110001_0000iiii(self) -> _Decoded:
+        self._require(2, 'compact 0xb1 pop')
         self._index += 1  # skip constant byte
         op1 = self._bytecode_array[self._index]
         self._index += 1
         if (op1 & 0xf0) != 0 or op1 == 0x00:
-            return 'spare'
-        else:
-            return f'pop {self._printGPR(op1 & 0x0f)}'
+            return _Decoded('spare', 'spare', {})
+        mask = op1 & 0x0f
+        return _Decoded(f'pop {self._printGPR(mask)}', 'pop_gpr_low', {'mask': mask})
 
-    def _decode_10110010_uleb128(self) -> str:
-        #  SmallVector<uint8_t, 4> ULEB;
+    def _decode_10110010_uleb128(self) -> _Decoded:
         #  do { ULEB.push_back(Opcodes[OI ^ 3]); } while (Opcodes[OI++ ^ 3] & 0x80);
-        #  uint64_t Value = 0;
-        #  for (unsigned BI = 0, BE = ULEB.size(); BI != BE; ++BI)
-        #    Value = Value | ((ULEB[BI] & 0x7f) << (7 * BI));
-        #  OS << format("; vsp = vsp + %" PRIu64 "\n", 0x204 + (Value << 2));
+        #  ULEB values are little-endian base-128: stop at the first byte with
+        #  its high bit clear.
+        self._require(1, 'compact 0xb2 opcode')
         self._index += 1   # skip constant byte
-        uleb_buffer = [self._bytecode_array[self._index]]
-        self._index += 1
-        while self._bytecode_array[self._index] & 0x80 == 0:
-            uleb_buffer.append(self._bytecode_array[self._index])
-            self._index += 1
         value = 0
-        for b in reversed(uleb_buffer):
-            value = (value << 7) + (b & 0x7F)
-        return f'vsp = vsp + {int(516 + (value << 2))}'
+        shift = 0
+        while True:
+            if self._index >= len(self._bytecode_array):
+                raise EHABITruncatedBytecode('missing ULEB128 continuation byte')
+            byte = self._bytecode_array[self._index]
+            self._index += 1
+            value |= (byte & 0x7f) << shift
+            if byte & 0x80 == 0:
+                break
+            shift += 7
+            if shift > 63:
+                raise EHABITruncatedBytecode('ULEB128 operand is too long')
+        amount = int(0x204 + (value << 2))
+        return _Decoded(f'vsp = vsp + {amount}', 'vsp_plus_uleb', {'amount': amount})
 
-    def _decode_10110011_sssscccc(self) -> str:
-        # these two decoders are equal
-        return self._decode_11001001_sssscccc()
+    def _decode_10110011_sssscccc(self) -> _Decoded:
+        # b3 uses the same VFP register range encoding as c9.
+        return self._pop_d_range(0, 'compact 0xb3 pop')
 
-    def _decode_101101nn(self) -> str:
-        return self._spare()
+    def _decode_101101nn(self) -> _Decoded:
+        self._require(1, 'compact 0xb4 opcode')
+        self._index += 1
+        return _Decoded('spare', 'spare', {})
 
-    def _decode_10111nnn(self) -> str:
-        #  SW.startLine() << format("0x%02X      ; pop ", Opcode);
+    def _decode_10111nnn(self) -> _Decoded:
         #  PrintRegisters((((1 << ((Opcode & 0x07) + 1)) - 1) << 8), "d");
+        self._require(1, 'compact 0xb8 pop')
         opcode = self._bytecode_array[self._index]
         self._index += 1
-        return 'pop {}'.format(self._print_registers(self._calculate_range(8, opcode & 0x07), "d"))
+        mask = self._calculate_range(8, opcode & 0x07)
+        return _Decoded('pop {}'.format(self._print_registers(mask, 'd')),
+                        'pop_vfp', {'mask': mask})
 
-    def _decode_11000110_sssscccc(self) -> str:
-        #  SW.startLine() << format("0x%02X 0x%02X ; pop ", Opcode0, Opcode1);
-        #  uint8_t Start = ((Opcode1 & 0xf0) >> 4);
-        #  uint8_t Count = ((Opcode1 & 0x0f) >> 0);
+    def _decode_11000110_sssscccc(self) -> _Decoded:
         #  PrintRegisters((((1 << (Count + 1)) - 1) << Start), "wR");
+        self._require(2, 'compact 0xc6 pop')
         self._index += 1  # skip constant byte
         op1 = self._bytecode_array[self._index]
         self._index += 1
         start = ((op1 & 0xf0) >> 4)
         count = ((op1 & 0x0f) >> 0)
-        return 'pop {}'.format(self._print_registers(self._calculate_range(start, count), "wR"))
+        mask = self._calculate_range(start, count)
+        return _Decoded('pop {}'.format(self._print_registers(mask, 'wR')),
+                        'pop_iwmmx', {'mask': mask})
 
-    def _decode_11000111_0000iiii(self) -> str:
-        #   SW.startLine()
-        #     << format("0x%02X 0x%02X ; %s", Opcode0, Opcode1,
-        #               ((Opcode1 & 0xf0) || Opcode1 == 0x00) ? "spare" : "pop ");
-        #   if ((Opcode1 & 0xf0) == 0x00 && Opcode1)
-        #       PrintRegisters(Opcode1 & 0x0f, "wCGR");
+    def _decode_11000111_0000iiii(self) -> _Decoded:
+        self._require(2, 'compact 0xc7 pop')
         self._index += 1  # skip constant byte
         op1 = self._bytecode_array[self._index]
         self._index += 1
         if (op1 & 0xf0) != 0 or op1 == 0x00:
-            return 'spare'
-        else:
-            return 'pop {}'.format(self._print_registers(op1 & 0x0f, "wCGR"))
+            return _Decoded('spare', 'spare', {})
+        mask = op1 & 0x0f
+        return _Decoded('pop {}'.format(self._print_registers(mask, 'wCGR')),
+                        'pop_iwmmx_cgr', {'mask': mask})
 
-    def _decode_11001000_sssscccc(self) -> str:
-        #   SW.startLine() << format("0x%02X 0x%02X ; pop ", Opcode0, Opcode1);
-        #   uint8_t Start = 16 + ((Opcode1 & 0xf0) >> 4);
-        #   uint8_t Count = ((Opcode1 & 0x0f) >> 0);
-        #   PrintRegisters((((1 << (Count + 1)) - 1) << Start), "d");
+    def _pop_d_range(self, start: int, what: str) -> _Decoded:
+        self._require(2, what)
         self._index += 1  # skip constant byte
         op1 = self._bytecode_array[self._index]
         self._index += 1
-        start = 16 + ((op1 & 0xf0) >> 4)
+        start = start + ((op1 & 0xf0) >> 4)
         count = ((op1 & 0x0f) >> 0)
-        return 'pop {}'.format(self._print_registers(self._calculate_range(start, count), "d"))
+        mask = self._calculate_range(start, count)
+        return _Decoded('pop {}'.format(self._print_registers(mask, 'd')),
+                        'pop_vfp', {'mask': mask})
 
-    def _decode_11001001_sssscccc(self) -> str:
-        #   SW.startLine() << format("0x%02X 0x%02X ; pop ", Opcode0, Opcode1);
-        #   uint8_t Start = ((Opcode1 & 0xf0) >> 4);
-        #   uint8_t Count = ((Opcode1 & 0x0f) >> 0);
-        #   PrintRegisters((((1 << (Count + 1)) - 1) << Start), "d");
-        self._index += 1  # skip constant byte
-        op1 = self._bytecode_array[self._index]
+    def _decode_11001000_sssscccc(self) -> _Decoded:
+        return self._pop_d_range(16, 'compact 0xc8 pop')
+
+    def _decode_11001001_sssscccc(self) -> _Decoded:
+        return self._pop_d_range(0, 'compact 0xc9 pop')
+
+    def _decode_11001yyy(self) -> _Decoded:
+        self._require(1, 'compact 0xc0 opcode')
         self._index += 1
-        start = ((op1 & 0xf0) >> 4)
-        count = ((op1 & 0x0f) >> 0)
-        return 'pop {}'.format(self._print_registers(self._calculate_range(start, count), "d"))
+        return _Decoded('spare', 'spare', {})
 
-    def _decode_11001yyy(self) -> str:
-        return self._spare()
-
-    def _decode_11000nnn(self) -> str:
-        #   SW.startLine() << format("0x%02X      ; pop ", Opcode);
+    def _decode_11000nnn(self) -> _Decoded:
         #   PrintRegisters((((1 << ((Opcode & 0x07) + 1)) - 1) << 10), "wR");
+        self._require(1, 'compact 0xc0 pop')
         opcode = self._bytecode_array[self._index]
         self._index += 1
-        return 'pop {}'.format(self._print_registers(self._calculate_range(10, opcode & 0x07), "wR"))
+        mask = self._calculate_range(10, opcode & 0x07)
+        return _Decoded('pop {}'.format(self._print_registers(mask, 'wR')),
+                        'pop_iwmmx', {'mask': mask})
 
-    def _decode_11010nnn(self) -> str:
+    def _decode_11010nnn(self) -> _Decoded:
         # these two decoders are equal
         return self._decode_10111nnn()
 
-    def _decode_11xxxyyy(self) -> str:
-        return self._spare()
-
-    def _spare(self) -> str:
+    def _decode_11xxxyyy(self) -> _Decoded:
+        self._require(1, 'compact 0xd0 opcode')
         self._index += 1
-        return 'spare'
+        return _Decoded('spare', 'spare', {})
 
     class _DECODE_RECIPE_TYPE(NamedTuple):
         mask: int
         value: int
-        handler: Callable[[EHABIBytecodeDecoder], str]
+        handler: Callable[[EHABIBytecodeDecoder], _Decoded]
 
     ring = (
         _DECODE_RECIPE_TYPE(mask=0xc0, value=0x00, handler=_decode_00xxxxxx),
