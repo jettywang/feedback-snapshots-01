@@ -803,6 +803,341 @@ def _obs_map_prop_test(obs_map, predicate):
     return passed_obs
 
 
+def _set_literal_to_python_value(ctx):
+    """
+    Convert a set literal parse-tree node to a Python set, using the same
+    type-sensitive rules as the matcher callbacks.
+    """
+    literal_nodes = ctx.primitiveLiteral()
+
+    # Make a python set from the set literal.  Can't go directly to a set
+    # though because values of heterogenous types might overwrite each
+    # other, e.g. 1 and True (which both hash to 1).  So collect the values
+    # to an intermediate list first.
+    first_type = None
+    has_only_numbers = is_homogenous = True
+    python_values = []
+    for literal_node in literal_nodes:
+        literal_terminal = _get_first_terminal_descendant(literal_node)
+        literal_value = _literal_terminal_to_python_val(literal_terminal)
+
+        if first_type is None:
+            first_type = type(literal_value)
+        elif first_type is not type(literal_value):
+            is_homogenous = False
+
+        # bool is a subclass of int!
+        if not isinstance(literal_value, (int, float)) or \
+                isinstance(literal_value, bool):
+            has_only_numbers = False
+
+        python_values.append(literal_value)
+
+    if python_values:
+        if is_homogenous:
+            s = set(python_values)
+        elif has_only_numbers:
+            # If it's mix of just ints and floats, let that pass through.
+            # Python treats those more interoperably, e.g. 1.0 == 1, and
+            # hash(1.0) == hash(1), so I don't think it's necessary to
+            # promote ints to floats.
+            s = set(python_values)
+            is_homogenous = True
+
+        if not is_homogenous:
+            raise MatcherException(u"Nonhomogenous set: {}".format(
+                ctx.getText()))
+    else:
+        s = set()
+
+    return s
+
+
+class _PropTestSpec(object):
+    """
+    A reusable description of a property test.  The matcher callbacks and
+    the optional witness/explanation code both use this so their semantics
+    cannot drift apart.
+    """
+
+    def __init__(self, ctx, operator, literal, predicate,
+                 literal_text=None, path_ctx=None):
+        self.ctx = ctx
+        self.operator = operator
+        self.literal = literal
+        self.predicate = predicate
+        self.literal_text = literal_text
+        self.path_ctx = path_ctx or ctx.objectPath()
+
+
+def _build_prop_test_spec(ctx):
+    """
+    Build the predicate for a property test parse-tree node.  This mirrors
+    the behaviour of the individual exitPropTest*() callbacks; those
+    callbacks delegate here instead of defining the predicates inline.
+    """
+    ctx_name = type(ctx).__name__
+
+    if ctx_name == u"PropTestEqualContext":
+        literal_node = ctx.primitiveLiteral()
+        literal_terminal = _get_first_terminal_descendant(literal_node)
+        literal_value = _literal_terminal_to_python_val(literal_terminal)
+        op_tok = ctx.EQ() or ctx.NEQ()
+
+        def equality_pred(value):
+            # timestamp hackage: if we have a timestamp literal from the
+            # pattern and a string from the json, try to interpret the json
+            # value as a timestamp too.
+            if isinstance(literal_value, datetime.datetime) and \
+                    isinstance(value, six.text_type):
+                try:
+                    value = _str_to_datetime(value)
+                except ValueError as e:
+                    six.raise_from(
+                        MatcherException(u"Invalid timestamp in JSON: {}".format(
+                            value
+                        )), e)
+
+            result = False
+            eq_func = _get_table_symmetric(_COMPARE_EQ_FUNCS,
+                                           type(literal_value),
+                                           type(value))
+            if eq_func is not None:
+                result = eq_func(value, literal_value)
+
+            if ctx.NEQ():
+                result = not result
+
+            if ctx.NOT():
+                result = not result
+
+            return result
+
+        operator = u"{}{}".format(
+            u"NOT " if ctx.NOT() else u"", op_tok.getText()
+        )
+        return _PropTestSpec(
+            ctx, operator, literal_value, equality_pred,
+            literal_terminal.getText()
+        )
+
+    elif ctx_name == u"PropTestOrderContext":
+        literal_node = ctx.orderableLiteral()
+        literal_terminal = _get_first_terminal_descendant(literal_node)
+        literal_value = _literal_terminal_to_python_val(literal_terminal)
+        op_tok = ctx.GT() or ctx.LT() or ctx.GE() or ctx.LE()
+
+        def order_pred(value):
+            # timestamp hackage: if we have a timestamp literal from the
+            # pattern and a string from the json, try to interpret the json
+            # value as a timestamp too.
+            if isinstance(literal_value, datetime.datetime) and \
+                    isinstance(value, six.text_type):
+                try:
+                    value = _str_to_datetime(value)
+                except ValueError as e:
+                    six.raise_from(
+                        MatcherException(u"Invalid timestamp in JSON: {}".format(
+                            value
+                        )), e)
+
+            cmp_func = _get_table_symmetric(_COMPARE_ORDER_FUNCS,
+                                            type(literal_value),
+                                            type(value))
+
+            if cmp_func is None:
+                return False
+
+            try:
+                result = cmp_func(value, literal_value)
+            except ValueError:
+                # The only comparison func that raises ValueError as of this
+                # writing is for binary<->string comparisons, when the string
+                # is of the wrong form.  Spec says the result must be false.
+                result = False
+            else:
+                if ctx.LT():
+                    result = result < 0
+                elif ctx.GT():
+                    result = result > 0
+                elif ctx.LE():
+                    result = result <= 0
+                elif ctx.GE():
+                    result = result >= 0
+                else:
+                    # shouldn't ever happen, right?
+                    raise UnsupportedOperatorError(op_tok.getText())
+
+            if ctx.NOT():
+                result = not result
+
+            return result
+
+        operator = u"{}{}".format(
+            u"NOT " if ctx.NOT() else u"", op_tok.getText()
+        )
+        return _PropTestSpec(
+            ctx, operator, literal_value, order_pred,
+            literal_terminal.getText()
+        )
+
+    elif ctx_name == u"PropTestSetContext":
+        s = _set_literal_to_python_value(ctx.setLiteral())
+        # Only need to check one member; the set literal is homogeneous.
+        is_set_of_timestamps = s and \
+            isinstance(next(iter(s)), datetime.datetime)
+
+        def set_pred(value):
+            # timestamp hackage: if we have a set of timestamp literals from
+            # the pattern and a string from the json, try to interpret the
+            # json value as a timestamp too.
+            if is_set_of_timestamps and isinstance(value, six.text_type):
+                try:
+                    value = _str_to_datetime(value)
+                except ValueError as e:
+                    six.raise_from(
+                        MatcherException(u"Invalid timestamp in JSON: {}".format(
+                            value
+                        )), e)
+
+            result = False
+            try:
+                result = value in s
+            except TypeError:
+                # Ignore errors about un-hashability.  Not all values
+                # selected from a Cyber Observable object are hashable (e.g.
+                # lists and dicts).  Those obviously can't be in the
+                # given set!
+                pass
+
+            if ctx.NOT():
+                result = not result
+
+            return result
+
+        operator = u"NOT IN" if ctx.NOT() else u"IN"
+        return _PropTestSpec(
+            ctx, operator, s, set_pred, ctx.setLiteral().getText()
+        )
+
+    elif ctx_name == u"PropTestLikeContext":
+        operand_str = _literal_terminal_to_python_val(ctx.StringLiteral())
+        operand_str = unicodedata.normalize("NFC", operand_str)
+        regex = _like_to_regex(operand_str)
+        compiled_re = re.compile(regex)
+        is_binary_convertible = all(ord(c) < 256 for c in regex)
+
+        def like_pred(value):
+            if isinstance(value, six.binary_type) and is_binary_convertible:
+                value = value.decode('utf8')
+
+            # non-strings can't match
+            if isinstance(value, six.text_type):
+                value = unicodedata.normalize("NFC", value)
+                result = compiled_re.match(value)
+            else:
+                result = False
+
+            if ctx.NOT():
+                result = not result
+
+            return result
+
+        operator = u"NOT LIKE" if ctx.NOT() else u"LIKE"
+        return _PropTestSpec(
+            ctx, operator, operand_str, like_pred,
+            ctx.StringLiteral().getText()
+        )
+
+    elif ctx_name == u"PropTestRegexContext":
+        regex_terminal = ctx.StringLiteral()
+        regex = _literal_terminal_to_python_val(regex_terminal)
+        regex = unicodedata.normalize("NFC", regex)
+        compiled_re = re.compile(regex)
+
+        # Support for binary pattern matching.
+        is_binary_convertible = all(ord(c) < 256 for c in regex)
+        compiled_bin_re = None
+        if is_binary_convertible:
+            if six.PY2:
+                # This will be a pattern compiled from a unicode string, but
+                # python2 doesn't seem to care.  It'll match against a 'str'
+                # just fine.
+                compiled_bin_re = compiled_re
+            else:
+                # Python3 requires an actual binary regex.
+                bin_regex = six.binary_type(ord(c) for c in regex)
+                compiled_bin_re = re.compile(bin_regex)
+
+        def regex_pred(value):
+            if isinstance(value, six.text_type):
+                value = unicodedata.normalize("NFC", value)
+                result = compiled_re.search(value)
+
+            elif isinstance(value, six.binary_type):
+                if is_binary_convertible:
+                    result = compiled_bin_re.search(value)
+                else:
+                    result = False
+
+            else:
+                result = False
+
+            if ctx.NOT():
+                result = not result
+
+            return result
+
+        operator = u"NOT MATCHES" if ctx.NOT() else u"MATCHES"
+        return _PropTestSpec(
+            ctx, operator, regex, regex_pred, regex_terminal.getText()
+        )
+
+    elif ctx_name == u"PropTestIsSubsetContext":
+        subnet_str = _literal_terminal_to_python_val(ctx.StringLiteral())
+
+        def subnet_pred(value):
+            if isinstance(value, six.text_type):
+                result = _ip_or_cidr_in_subnet(value, subnet_str)
+            else:
+                result = False
+
+            if ctx.NOT():
+                result = not result
+
+            return result
+
+        operator = u"NOT ISSUBSET" if ctx.NOT() else u"ISSUBSET"
+        return _PropTestSpec(
+            ctx, operator, subnet_str, subnet_pred,
+            ctx.StringLiteral().getText()
+        )
+
+    elif ctx_name == u"PropTestIsSupersetContext":
+        ip_or_subnet_str = _literal_terminal_to_python_val(ctx.StringLiteral())
+
+        def contains_pred(value):
+            if isinstance(value, six.text_type):
+                result = _ip_or_cidr_in_subnet(ip_or_subnet_str, value)
+            else:
+                result = False
+
+            if ctx.NOT():
+                result = not result
+
+            return result
+
+        operator = u"NOT ISSUPERSET" if ctx.NOT() else u"ISSUPERSET"
+        return _PropTestSpec(
+            ctx, operator, ip_or_subnet_str, contains_pred,
+            ctx.StringLiteral().getText()
+        )
+
+    raise MatcherInternalError(
+        u"Unsupported property test: {}".format(ctx_name)
+    )
+
+
 class NotEnoughValues(ValueError):
     pass
 
@@ -975,9 +1310,13 @@ def _compute_expected_binding_size(ctx):
         pattern.
     :return: A binding size (a number)
     """
-    if isinstance(ctx, STIXPatternParser.ComparisonExpressionContext):
+    # The v20 and v21 packages each ship their own generated grammar, so a
+    # context cannot be identified with a single imported grammar class.
+    # Match on the rule name instead; this keeps binding sizes correct for
+    # both STIX versions, which the explanation slot layout relies on.
+    if type(ctx).__name__ == u"ComparisonExpressionContext":
         return 1
-    elif isinstance(ctx, STIXPatternParser.ObservationExpressionRepeatedContext):
+    elif type(ctx).__name__ == u"ObservationExpressionRepeatedContext":
         # Guess I ought to correctly handle the repeat-qualified observation
         # expressions too huh?
         child_count = _compute_expected_binding_size(
@@ -996,6 +1335,1251 @@ def _compute_expected_binding_size(ctx):
         # getChildCount() and getChild().
         return sum(_compute_expected_binding_size(ctx.getChild(i))
                    for i in range(ctx.getChildCount()))
+
+
+class Witness(dict):
+    """
+    A single, JSON-friendly witness record.
+
+    A witness is intentionally a plain mapping (with attribute access for
+    convenience) so it can be serialized, persisted, and replayed without
+    depending on matcher internals.  It never contains a complete input
+    bundle; only the objects, paths, values, observation identity, and
+    temporal evidence needed to justify one observation-expression binding.
+    """
+
+    def __getattr__(self, name):
+        try:
+            return self[name]
+        except KeyError:
+            raise AttributeError(name)
+
+
+def _wrap_witness(value):
+    """Recursively give explanation mappings attribute access."""
+    if isinstance(value, dict):
+        return Witness(
+            (key, _wrap_witness(item))
+            for key, item in six.iteritems(value)
+        )
+    if isinstance(value, list):
+        return [_wrap_witness(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_wrap_witness(item) for item in value)
+    return value
+
+
+class MatchExplanation(list):
+    """
+    The result of a match when explanations are requested.
+
+    This deliberately subclasses ``list``: it contains the same matching
+    observed-data SDOs the default API returns, so existing call sites can
+    keep treating the result as the matching-SDO list.  The explanation is
+    attached as additional attributes, and string indexing works too::
+
+        result = match(pattern, observations, explain=True)
+        result[0]                  # first matching observed-data SDO
+        result.witnesses           # tuple of witness mappings
+        result["witnesses"]        # same
+        result.to_dict()           # JSON-friendly explanation
+
+    ``to_dict()`` is the interchange form; it contains no whole input bundle.
+    """
+
+    def __init__(self, sdos, pattern, stix_version, witnesses,
+                 time_constraints):
+        super(MatchExplanation, self).__init__(sdos)
+        self.pattern = pattern
+        self.stix_version = stix_version
+        self.witnesses = tuple(_wrap_witness(w) for w in witnesses)
+        self.time_constraints = tuple(Witness(t) for t in time_constraints)
+        self.matched_sdos = self
+        self.sdos = self
+
+    @property
+    def matched(self):
+        return bool(self.witnesses)
+
+    def to_dict(self):
+        return {
+            u"pattern": self.pattern,
+            u"stix_version": self.stix_version,
+            u"matched": self.matched,
+            u"witnesses": [dict(w) for w in self.witnesses],
+            u"time_constraints": [dict(t) for t in self.time_constraints],
+        }
+
+    def get(self, key, default=None):
+        if key == u"witnesses":
+            return list(self.witnesses)
+        if key == u"time_constraints":
+            return list(self.time_constraints)
+        if key == u"matched":
+            return self.matched
+        if key == u"pattern":
+            return self.pattern
+        if key == u"stix_version":
+            return self.stix_version
+        if key == u"sdos":
+            return list(self)
+        return default
+
+    def keys(self):
+        return (
+            u"pattern", u"stix_version", u"matched", u"witnesses",
+            u"time_constraints"
+        )
+
+    def __contains__(self, item):
+        if isinstance(item, six.string_types):
+            return item in self.keys()
+        return super(MatchExplanation, self).__contains__(item)
+
+    def __getitem__(self, key):
+        if isinstance(key, six.string_types):
+            sentinel = object()
+            value = self.get(key, sentinel)
+            if value is sentinel:
+                raise KeyError(key)
+            return value
+        return super(MatchExplanation, self).__getitem__(key)
+
+    def __repr__(self):
+        return u"MatchExplanation(matched={}, witnesses={}, sdos={})".format(
+            self.matched, len(self.witnesses), len(self)
+        )
+
+    def verify(self, observed_data_sdos=None, stix_version=None):
+        """
+        Verify this explanation against the given observations.
+
+        With no observations, this checks structural completeness.  With
+        observations, every selected comparison is re-evaluated against the
+        current objects, every referenced object must still resolve, and the
+        temporal constraints are re-checked.  Mutating a key object used as
+        the reason therefore makes verification fail; mutating an object in an
+        unselected OR branch does not.
+        """
+        return verify_explanation(
+            self, observed_data_sdos,
+            stix_version=stix_version or self.stix_version,
+        )
+
+
+_REQUIRED_WITNESS_KEYS = (
+    u"slot", u"expression", u"observation", u"root_sco", u"comparisons",
+    u"time",
+)
+
+
+def _source_text(pattern_str, ctx):
+    """Return the original pattern text covered by a parse-tree node."""
+    try:
+        start = ctx.start.start
+        stop = ctx.stop.stop
+        if start is not None and stop is not None and stop >= start:
+            return pattern_str[start:stop + 1]
+    except (AttributeError, TypeError):
+        pass
+    try:
+        return ctx.getText()
+    except AttributeError:
+        return u""
+
+
+def _json_safe(value):
+    """Convert a matched value to a deterministic JSON-friendly value."""
+    if isinstance(value, datetime.datetime):
+        return value.isoformat().replace(u"+00:00", u"Z")
+    if isinstance(value, bytes):
+        return {
+            u"encoding": u"base64",
+            u"data": base64.standard_b64encode(value).decode(u"ascii"),
+        }
+    if isinstance(value, set):
+        return sorted(
+            (_json_safe(v) for v in value),
+            key=lambda v: repr(v),
+        )
+    if isinstance(value, dict):
+        return dict(
+            (six.text_type(k), _json_safe(v))
+            for k, v in value.items()
+        )
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(v) for v in value]
+    return value
+
+
+def _value_type_name(value):
+    if isinstance(value, bool):
+        return u"bool"
+    if isinstance(value, datetime.datetime):
+        return u"timestamp"
+    if isinstance(value, bytes):
+        return u"binary"
+    if isinstance(value, six.text_type):
+        return u"string"
+    if isinstance(value, int):
+        return u"integer"
+    if isinstance(value, float):
+        return u"float"
+    if value is None:
+        return u"null"
+    if isinstance(value, dict):
+        return u"object"
+    if isinstance(value, (list, tuple)):
+        return u"array"
+    return type(value).__name__
+
+
+def _token_attr(ctx, method):
+    """Call a generated ANTLR accessor and return its non-None result(s)."""
+    accessor = getattr(ctx, method, None)
+    if accessor is None:
+        return None
+    value = accessor()
+    if value is None:
+        return None
+    return value
+
+
+def _one_token_attr(ctx, method):
+    value = _token_attr(ctx, method)
+    if isinstance(value, list):
+        return value[0] if value else None
+    return value
+
+
+def _path_step_contexts(path_ctx):
+    """
+    Return path steps in textual order.  Consecutive steps are nested in the
+    parse tree, so a pre-order traversal of the step nodes preserves order.
+    """
+    steps = []
+
+    def visit(node):
+        name = type(node).__name__
+        if name in (u"IndexPathStepContext", u"KeyPathStepContext"):
+            steps.append(node)
+            return
+        for i in range(getattr(node, u"getChildCount", lambda: 0)()):
+            child = node.getChild(i)
+            if isinstance(child, antlr4.ParserRuleContext):
+                visit(child)
+
+    component = _token_attr(path_ctx, u"objectPathComponent")
+    if component is not None:
+        if isinstance(component, list):
+            for c in component:
+                visit(c)
+        else:
+            visit(component)
+    return steps
+
+
+def _path_component_name(ctx):
+    if _token_attr(ctx, u"IdentifierWithoutHyphen") is not None:
+        return _token_attr(ctx, u"IdentifierWithoutHyphen").getText()
+    return _literal_terminal_to_python_val(ctx.StringLiteral())
+
+
+def _path_parse(path_ctx):
+    """
+    Parse an object path into a type, a textual path, and path steps.
+    """
+    type_ = path_ctx.objectType().getText()
+    first_ctx = path_ctx.firstPathComponent()
+    steps = [{
+        u"kind": u"property",
+        u"name": _path_component_name(first_ctx),
+    }]
+
+    for ctx in _path_step_contexts(path_ctx):
+        if type(ctx).__name__ == u"IndexPathStepContext":
+            if _token_attr(ctx, u"ASTERISK") is not None:
+                steps.append({u"kind": u"index", u"index": None})
+            else:
+                index = _literal_terminal_to_python_val(
+                    ctx.IntPosLiteral() or ctx.IntNegLiteral()
+                )
+                steps.append({u"kind": u"index", u"index": index})
+        else:
+            steps.append({
+                u"kind": u"key",
+                u"name": _path_component_name(ctx),
+            })
+
+    return type_, steps
+
+
+def _observation_objects(sdo, stix_version):
+    """
+    Return a deterministic list of (object id, object) pairs from a
+    normalized observation.
+    """
+    objects = sdo.get(u"objects")
+    if objects is None:
+        return []
+    if stix_version == VARSION_2_1:
+        if isinstance(objects, dict):
+            return sorted(six.iteritems(objects), key=lambda kv: six.text_type(kv[0]))
+        return [
+            (obj.get(u"id"), obj)
+            for obj in objects
+            if isinstance(obj, dict)
+        ]
+    return sorted(six.iteritems(objects), key=lambda kv: six.text_type(kv[0]))
+
+
+def _observation_id(sdo, stix_version):
+    if stix_version == VARSION_2_1:
+        for obj in sdo.get(u"objects", []):
+            if isinstance(obj, dict) and obj.get(u"type") == u"observed-data":
+                return obj.get(u"id")
+    return sdo.get(u"id")
+
+
+def _format_timestamp(dt):
+    return dt.isoformat().replace(u"+00:00", u"Z")
+
+
+def _resolve_reference(obs, ref, stix_version):
+    """Resolve a reference within one normalized observation."""
+    if not isinstance(ref, six.text_type):
+        return None
+    if stix_version == VARSION_2_1:
+        for obj in obs.get(u"objects", []):
+            if isinstance(obj, dict) and obj.get(u"id") == ref:
+                return ref, obj
+        return None
+    objects = obs.get(u"objects", {})
+    if isinstance(objects, dict) and ref in objects:
+        return ref, objects[ref]
+    return None
+
+
+def _apply_path_step(states, step, obs, stix_version):
+    next_states = []
+    if step[u"kind"] == u"index":
+        index = step[u"index"]
+        for state in states:
+            value = state[u"value"]
+            if not isinstance(value, list):
+                continue
+            if index is None:
+                for i, child in enumerate(value):
+                    next_states.append({
+                        u"value": child,
+                        u"tokens": state[u"tokens"] + [{
+                            u"kind": u"index", u"index": i,
+                        }],
+                        u"ref_ids": [state[u"ref_ids"][i]]
+                    if state.get(u"ref_ids") else [],
+                    })
+            elif 0 <= index < len(value):
+                next_states.append({
+                    u"value": value[index],
+                    u"tokens": state[u"tokens"] + [{
+                        u"kind": u"index", u"index": index,
+                    }],
+                    u"ref_ids": [state[u"ref_ids"][index]]
+                    if state.get(u"ref_ids") else [],
+                })
+        return next_states
+
+    # A key/property step.
+    name = step[u"name"]
+    for state in states:
+        value = state[u"value"]
+        if not isinstance(value, dict) or name not in value:
+            continue
+
+        raw = value[name]
+        tokens = state[u"tokens"] + [{
+            u"kind": u"property", u"name": name,
+        }]
+
+        if name.endswith(u"_ref"):
+            if not isinstance(raw, six.text_type):
+                raise MatcherException(
+                    u"The value of reference property '{}' was not "
+                    u"a string!  Got {}".format(name, raw)
+                )
+            resolved = _resolve_reference(obs, raw, stix_version)
+            if resolved is None:
+                continue
+            target_id, target = resolved
+            next_states.append({
+                u"value": target,
+                u"tokens": tokens + [{
+                    u"kind": u"reference",
+                    u"property": name,
+                    u"target_sco_id": target_id,
+                }],
+                u"ref_ids": [target_id],
+            })
+        elif name.endswith(u"_refs"):
+            if not isinstance(raw, list):
+                raise MatcherException(
+                    u"The value of reference list property '{}' was not "
+                    u"a list!  Got {}".format(name, raw)
+                )
+            refs = []
+            ref_ids = []
+            for ref in raw:
+                if not isinstance(ref, six.text_type):
+                    raise MatcherException(
+                        u"A value of reference property '{}' was not "
+                        u"a string!  Got {}".format(name, ref)
+                    )
+                resolved = _resolve_reference(obs, ref, stix_version)
+                if resolved is not None:
+                    ref_id, ref_obj = resolved
+                    ref_ids.append(ref_id)
+                    refs.append(ref_obj)
+            if refs:
+                # The matcher substitutes the list of resolved referents for
+                # the reference list.  Keep that shape for index steps.
+                next_states.append({
+                    u"value": refs,
+                    u"tokens": tokens + [{
+                        u"kind": u"references",
+                        u"property": name,
+                        u"target_sco_ids": ref_ids,
+                    }],
+                    u"ref_ids": ref_ids,
+                })
+        else:
+            next_states.append({
+                u"value": _process_prop_suffix(name, raw),
+                u"tokens": tokens,
+                u"ref_ids": [],
+            })
+
+    return next_states
+
+
+def _reference_chain(tokens):
+    chain = [tokens[0][u"sco_id"]]
+    for token in tokens:
+        if token[u"kind"] == u"reference":
+            chain.append(token[u"target_sco_id"])
+        elif token[u"kind"] == u"references":
+            chain.extend(token[u"target_sco_ids"])
+    return chain
+
+
+def _finalize_tokens(tokens):
+    """
+    Collapse a reference-list token plus the index chosen from it into a
+    single reference token.  This keeps the witness precise: a list-valued
+    reference property does not drag every sibling referent into the reason,
+    only the one actually selected.
+    """
+    result = [dict(tokens[0])]
+    i = 1
+    while i < len(tokens):
+        token = tokens[i]
+        if token[u"kind"] == u"references" and i + 1 < len(tokens):
+            index_token = tokens[i + 1]
+            if index_token[u"kind"] == u"index" and \
+                    index_token[u"index"] is not None:
+                target_ids = token[u"target_sco_ids"]
+                index = index_token[u"index"]
+                if 0 <= index < len(target_ids):
+                    result.append({
+                        u"kind": u"reference",
+                        u"property": token[u"property"],
+                        u"target_sco_id": target_ids[index],
+                    })
+                    i += 2
+                    continue
+        result.append(dict(token))
+        i += 1
+    return result
+
+
+def _eval_prop_test(spec, obs_idx, obs, pattern_str, stix_version):
+    """
+    Evaluate one property test for every root SCO in the observation.
+
+    Returns a mapping from root SCO ID to a comparison witness.  Only the
+    first passing value per root is recorded, which is enough for an
+    existential witness and keeps output deterministic.
+    """
+    path_ctx = spec.path_ctx
+    type_, steps = _path_parse(path_ctx)
+    if stix_version == VARSION_2_1 and type_ in TYPES_V21:
+        return {}
+
+    path_text = _source_text(pattern_str, path_ctx).split(u":", 1)[-1]
+    expression = _source_text(pattern_str, spec.ctx)
+
+    results = {}
+    for root_id, root_obj in _observation_objects(obs, stix_version):
+        if not isinstance(root_obj, dict) or root_obj.get(u"type") != type_:
+            continue
+
+        states = [{
+            u"value": root_obj,
+            u"tokens": [{
+                u"kind": u"root",
+                u"sco_id": root_id,
+                u"type": type_,
+            }],
+            u"ref_ids": [],
+        }]
+        for step in steps:
+            states = _apply_path_step(states, step, obs, stix_version)
+            if not states:
+                break
+
+        for state in states:
+            if spec.predicate(state[u"value"]):
+                tokens = _finalize_tokens(state[u"tokens"])
+                results[root_id] = {
+                    u"kind": u"comparison",
+                    u"expression": expression,
+                    u"path": path_text,
+                    u"object_type": type_,
+                    u"operator": spec.operator,
+                    u"literal": _json_safe(spec.literal),
+                    u"literal_text": spec.literal_text,
+                    u"value": _json_safe(state[u"value"]),
+                    u"value_type": _value_type_name(state[u"value"]),
+                    u"tokens": tokens,
+                    u"reference_chain": _reference_chain(tokens),
+                    u"root_sco": {
+                        u"id": root_id,
+                        u"type": root_obj.get(u"type"),
+                    },
+                }
+                break
+
+    return results
+
+
+def _eval_comparison_node(ctx, obs_idx, obs, pattern_str, stix_version):
+    """
+    Evaluate a comparison-expression subtree, returning root-ID-keyed
+    witnesses.
+
+    OR records only the branch that actually justified each root; an
+    unsatisfied branch is never included.  AND requires both sides to hold
+    for the same root SCO.
+    """
+    name = type(ctx).__name__
+
+    if name == u"PropTestParenContext":
+        return _eval_comparison_node(
+            ctx.comparisonExpression(), obs_idx, obs,
+            pattern_str, stix_version
+        )
+
+    if name.startswith(u"PropTest") and name.endswith(u"Context"):
+        spec = _build_prop_test_spec(ctx)
+        test_map = _eval_prop_test(
+            spec, obs_idx, obs, pattern_str, stix_version
+        )
+        return dict(
+            (root_id, {
+                u"kind": u"test",
+                u"children": [test],
+                u"comparisons": [test],
+            })
+            for root_id, test in six.iteritems(test_map)
+        )
+
+    if name == u"ComparisonExpressionAndContext":
+        children = _token_attr(ctx, u"comparisonExpressionAnd")
+        if children and len(children) == 2:
+            left = _eval_comparison_node(
+                children[0], obs_idx, obs, pattern_str, stix_version
+            )
+            right = _eval_comparison_node(
+                children[1], obs_idx, obs, pattern_str, stix_version
+            )
+            result = {}
+            for root_id in sorted(set(left) & set(right), key=six.text_type):
+                lw = left[root_id]
+                rw = right[root_id]
+                result[root_id] = {
+                    u"kind": u"and",
+                    u"children": [lw, rw],
+                    u"comparisons": (
+                        list(lw[u"comparisons"]) +
+                        list(rw[u"comparisons"])
+                    ),
+                }
+            return result
+        prop_test = _one_token_attr(ctx, u"propTest")
+        if prop_test is None:
+            raise MatcherInternalError(
+                u"Unsupported comparison AND node: {}".format(ctx.getText())
+            )
+        return _eval_comparison_node(
+            prop_test, obs_idx, obs, pattern_str, stix_version
+        )
+
+    if name == u"ComparisonExpressionContext":
+        children = _token_attr(ctx, u"comparisonExpression")
+        if children and len(children) == 2:
+            left = _eval_comparison_node(
+                children[0], obs_idx, obs, pattern_str, stix_version
+            )
+            right = _eval_comparison_node(
+                children[1], obs_idx, obs, pattern_str, stix_version
+            )
+            result = {}
+            for root_id in sorted(set(left) | set(right), key=six.text_type):
+                if root_id in left:
+                    chosen = left[root_id]
+                    branch = 0
+                else:
+                    chosen = right[root_id]
+                    branch = 1
+                result[root_id] = {
+                    u"kind": u"or",
+                    u"selected_branch": branch,
+                    u"children": [chosen],
+                    u"comparisons": list(chosen[u"comparisons"]),
+                }
+            return result
+        and_ctx = _one_token_attr(ctx, u"comparisonExpressionAnd")
+        if and_ctx is None:
+            raise MatcherInternalError(
+                u"Unsupported comparison expression: {}".format(ctx.getText())
+            )
+        return _eval_comparison_node(
+            and_ctx, obs_idx, obs, pattern_str, stix_version
+        )
+
+    raise MatcherInternalError(
+        u"Unsupported comparison node: {}".format(name)
+    )
+
+
+def _slot_layout(ctx, pattern_str, stix_version, scopes):
+    """
+    Build the binding-slot layout for the parse tree.
+
+    Each returned slot corresponds to one position in a binding tuple, in
+    exactly the order the matcher produces them.  Qualifier scopes are
+    accumulated for later temporal verification.
+    """
+    name = type(ctx).__name__
+
+    if name == u"PatternContext":
+        return _slot_layout(
+            ctx.observationExpressions(), pattern_str, stix_version, scopes
+        )
+
+    if name == u"ObservationExpressionsContext":
+        children = _token_attr(ctx, u"observationExpressions")
+        if children and len(children) == 2:
+            left = _slot_layout(
+                children[0], pattern_str, stix_version, scopes
+            )
+            right = _slot_layout(
+                children[1], pattern_str, stix_version, scopes
+            )
+            members = left + right
+            scope = {
+                u"kind": u"followedby",
+                u"members": members,
+                u"left": left,
+                u"right": right,
+            }
+            scopes.append(scope)
+            for slot in members:
+                slot[u"scopes"].append(scope)
+            return members
+        return _slot_layout(
+            ctx.observationExpressionOr(), pattern_str, stix_version, scopes
+        )
+
+    if name == u"ObservationExpressionOrContext":
+        children = _token_attr(ctx, u"observationExpressionOr")
+        if children and len(children) == 2:
+            return (
+                _slot_layout(children[0], pattern_str, stix_version, scopes) +
+                _slot_layout(children[1], pattern_str, stix_version, scopes)
+            )
+        return _slot_layout(
+            ctx.observationExpressionAnd(), pattern_str, stix_version, scopes
+        )
+
+    if name == u"ObservationExpressionAndContext":
+        children = _token_attr(ctx, u"observationExpressionAnd")
+        if children and len(children) == 2:
+            left = _slot_layout(
+                children[0], pattern_str, stix_version, scopes
+            )
+            right = _slot_layout(
+                children[1], pattern_str, stix_version, scopes
+            )
+            members = left + right
+            scope = {
+                u"kind": u"and",
+                u"members": members,
+            }
+            scopes.append(scope)
+            for slot in members:
+                slot[u"scopes"].append(scope)
+            return members
+        child = _one_token_attr(ctx, u"observationExpression")
+        if child is None:
+            raise MatcherInternalError(
+                u"Unsupported observation AND node: {}".format(ctx.getText())
+            )
+        return _slot_layout(child, pattern_str, stix_version, scopes)
+
+    if name == u"ObservationExpressionSimpleContext":
+        return [{
+            u"ctx": ctx,
+            u"expression": _source_text(pattern_str, ctx),
+            u"scopes": [],
+            u"repeats": [],
+        }]
+
+    if name == u"ObservationExpressionCompoundContext":
+        return _slot_layout(
+            ctx.observationExpressions(), pattern_str, stix_version, scopes
+        )
+
+    if name == u"ObservationExpressionWithinContext":
+        child = _slot_layout(
+            ctx.observationExpression(), pattern_str, stix_version, scopes
+        )
+        value = _literal_terminal_to_python_val(
+            ctx.withinQualifier().FloatPosLiteral() or
+            ctx.withinQualifier().IntPosLiteral()
+        )
+        if value <= 0:
+            raise MatcherException(
+                u"Invalid WITHIN value (must be positive): {}".format(value)
+            )
+        scope = {
+            u"kind": u"within",
+            u"seconds": value,
+            u"members": child,
+        }
+        scopes.append(scope)
+        for slot in child:
+            slot[u"scopes"].append(scope)
+        return child
+
+    if name == u"ObservationExpressionStartStopContext":
+        child = _slot_layout(
+            ctx.observationExpression(), pattern_str, stix_version, scopes
+        )
+        qualifier = ctx.startStopQualifier()
+        if stix_version == VARSION_2_1:
+            start_dt = _literal_terminal_to_python_val(
+                qualifier.TimestampLiteral(0)
+            )
+            stop_dt = _literal_terminal_to_python_val(
+                qualifier.TimestampLiteral(1)
+            )
+        else:
+            start_str = _literal_terminal_to_python_val(
+                qualifier.StringLiteral(0)
+            )
+            stop_str = _literal_terminal_to_python_val(
+                qualifier.StringLiteral(1)
+            )
+            try:
+                start_dt = _str_to_datetime(start_str)
+                stop_dt = _str_to_datetime(stop_str)
+            except ValueError as e:
+                six.raise_from(MatcherException(*e.args), e)
+        scope = {
+            u"kind": u"start_stop",
+            u"start": _format_timestamp(start_dt),
+            u"stop": _format_timestamp(stop_dt),
+            u"members": child,
+        }
+        scopes.append(scope)
+        for slot in child:
+            slot[u"scopes"].append(scope)
+        return child
+
+    if name == u"ObservationExpressionRepeatedContext":
+        times = _literal_terminal_to_python_val(
+            ctx.repeatedQualifier().IntPosLiteral()
+        )
+        if times < 1:
+            raise MatcherException(
+                u"Invalid repetition count: {}".format(times)
+            )
+        members = []
+        for repeat_index in range(times):
+            # Rebuild the child layout for each repetition so every
+            # repetition owns distinct slot objects, and any qualifier scopes
+            # inside the repeated expression refer to slots in the final
+            # binding (not to discarded layout copies).
+            child = _slot_layout(
+                ctx.observationExpression(), pattern_str, stix_version,
+                scopes,
+            )
+            for child_slot in child:
+                child_slot[u"repeats"] = list(child_slot[u"repeats"]) + [{
+                    u"times": times,
+                    u"index": repeat_index,
+                }]
+                members.append(child_slot)
+        scope = {
+            u"kind": u"repeats",
+            u"times": times,
+            u"members": members,
+        }
+        scopes.append(scope)
+        for slot in members:
+            slot[u"scopes"].append(scope)
+        return members
+
+    raise MatcherInternalError(
+        u"Unsupported observation expression node: {}".format(name)
+    )
+
+
+def _scope_to_dict(scope):
+    result = {
+        key: value
+        for key, value in six.iteritems(scope)
+        if key not in (u"members", u"left", u"right")
+    }
+    result[u"slots"] = sorted(slot[u"slot"] for slot in scope[u"members"])
+    if u"left" in scope:
+        result[u"left_slots"] = sorted(
+            slot[u"slot"] for slot in scope[u"left"]
+        )
+        result[u"right_slots"] = sorted(
+            slot[u"slot"] for slot in scope[u"right"]
+        )
+    return result
+
+
+def _build_explanation(pattern, pattern_str, matcher, raw_binding,
+                       stix_version):
+    """
+    Build a MatchExplanation from a successful (or empty) raw binding.
+
+    The binding contains the instance IDs chosen by the matcher; the witness
+    builder independently re-selects the actual root SCO, path, value and
+    reference chain from the observation, so the explanation is self-contained
+    and does not expose the matcher's debug stack.
+    """
+    observations = matcher.get_observations()
+    tree = pattern.get_parse_tree()
+    scopes = []
+    slots = _slot_layout(tree, pattern_str, stix_version, scopes)
+    for index, slot in enumerate(slots):
+        slot[u"slot"] = index
+
+    sorted_scopes = sorted(
+        scopes,
+        key=lambda s: (
+            min(slot[u"slot"] for slot in s[u"members"]),
+            s[u"kind"],
+        )
+    )
+    witnesses = []
+    for slot in slots:
+        slot_index = slot[u"slot"]
+        if slot_index >= len(raw_binding):
+            continue
+        instance_id = raw_binding[slot_index]
+        if instance_id is None:
+            # The matcher chose the other side of an OR; this slot is not
+            # part of the reason.
+            continue
+        obs_idx, inst_idx = instance_id
+        obs = observations[obs_idx]
+        leaf_ctx = slot[u"ctx"]
+        comparison_ctx = leaf_ctx.comparisonExpression()
+        eval_map = _eval_comparison_node(
+            comparison_ctx, obs_idx, obs, pattern_str, stix_version
+        )
+        if not eval_map:
+            # The matcher bound this slot, so the selected expression must
+            # hold.  If not, the explanation could not be recomputed: refuse
+            # to fabricate a reason rather than emitting a misleading one.
+            raise MatcherInternalError(
+                u"Unable to explain bound observation expression: {}".format(
+                    slot[u"expression"]
+                )
+            )
+
+        root_id = sorted(eval_map, key=six.text_type)[0]
+        node = eval_map[root_id]
+        comparisons = list(node[u"comparisons"])
+        first = comparisons[0] if comparisons else {}
+
+        interval = matcher.get_time_interval(obs_idx)
+        observation = {
+            u"index": obs_idx,
+            u"instance": inst_idx,
+            u"id": _observation_id(obs, stix_version),
+            u"first_observed": _format_timestamp(interval[0]),
+            u"last_observed": _format_timestamp(interval[1]),
+            u"number_observed": matcher.get_number_observed(obs_idx),
+        }
+        qualifiers = [
+            _scope_to_dict(scope)
+            for scope in slot[u"scopes"]
+        ]
+        witness = {
+            u"slot": slot_index,
+            u"expression": slot[u"expression"],
+            u"observation": observation,
+            u"root_sco": {
+                u"id": root_id,
+                u"type": first.get(u"object_type"),
+            },
+            u"sco_id": root_id,
+            u"path": first.get(u"path"),
+            u"property": first.get(u"path"),
+            u"operator": first.get(u"operator"),
+            u"literal": first.get(u"literal"),
+            u"literal_text": first.get(u"literal_text"),
+            u"value": first.get(u"value"),
+            u"value_type": first.get(u"value_type"),
+            u"comparisons": comparisons,
+            u"evaluation": node,
+            u"time": {
+                u"first_observed": observation[u"first_observed"],
+                u"last_observed": observation[u"last_observed"],
+                u"instance": inst_idx,
+            },
+            u"qualifiers": qualifiers,
+            u"repeats": list(slot[u"repeats"]),
+        }
+        witnesses.append(witness)
+
+    witnesses.sort(key=lambda w: w[u"slot"])
+
+    # Only constraints which constrain a selected slot are part of the
+    # reason.  A qualifier wholly inside an unselected OR branch is omitted,
+    # and a shared qualifier is narrowed to the selected side.
+    selected_slots = set(w[u"slot"] for w in witnesses)
+    scope_dicts = []
+    for scope in sorted_scopes:
+        scope_dict = _scope_to_dict(scope)
+        scope_dict[u"slots"] = [
+            slot for slot in scope_dict[u"slots"]
+            if slot in selected_slots
+        ]
+        if u"left_slots" in scope_dict:
+            scope_dict[u"left_slots"] = [
+                slot for slot in scope_dict[u"left_slots"]
+                if slot in selected_slots
+            ]
+            scope_dict[u"right_slots"] = [
+                slot for slot in scope_dict[u"right_slots"]
+                if slot in selected_slots
+            ]
+            if not scope_dict[u"left_slots"] or \
+                    not scope_dict[u"right_slots"]:
+                continue
+        if not scope_dict[u"slots"]:
+            continue
+        scope_dicts.append(scope_dict)
+
+    explanation_dict = {
+        u"pattern": pattern_str,
+        u"stix_version": stix_version,
+        u"matched": bool(witnesses),
+        u"witnesses": witnesses,
+        u"time_constraints": scope_dicts,
+    }
+    return explanation_dict
+
+
+def _walk_tokens(tokens, obs, stix_version):
+    """
+    Replay a witness token path from the current observation data.  Returns
+    the selected value, or raises KeyError/MatcherException if it no longer
+    resolves.
+    """
+    if not tokens:
+        raise KeyError(u"empty token path")
+    root_token = tokens[0]
+    if root_token.get(u"kind") != u"root":
+        raise KeyError(u"token path does not start at a root SCO")
+    resolved = _resolve_reference(
+        obs, root_token[u"sco_id"], stix_version
+    )
+    if resolved is None:
+        # v2.0 object keys are not references but local IDs; look them up
+        # directly as well.
+        objects = obs.get(u"objects", {})
+        if isinstance(objects, dict) and root_token[u"sco_id"] in objects:
+            value = objects[root_token[u"sco_id"]]
+        else:
+            raise KeyError(root_token[u"sco_id"])
+    else:
+        value = resolved[1]
+
+    for token in tokens[1:]:
+        kind = token.get(u"kind")
+        if kind == u"property":
+            if not isinstance(value, dict) or token[u"name"] not in value:
+                raise KeyError(token[u"name"])
+            value = _process_prop_suffix(token[u"name"], value[token[u"name"]])
+        elif kind == u"reference":
+            # The previous property step yielded either a raw reference
+            # value or (for _refs) the raw reference list.  Resolve the
+            # recorded target and confirm it is still reachable.
+            target_id = token[u"target_sco_id"]
+            candidates = value if isinstance(value, list) else [value]
+            matched = None
+            for candidate in candidates:
+                resolved = _resolve_reference(obs, candidate, stix_version)
+                if resolved is not None and resolved[0] == target_id:
+                    matched = resolved[1]
+                    break
+            if matched is None:
+                raise KeyError(target_id)
+            value = matched
+        elif kind == u"references":
+            # The previous property step yielded the raw reference list.
+            if not isinstance(value, list):
+                raise KeyError(token[u"property"])
+            resolved_objs = []
+            for ref_id in token[u"target_sco_ids"]:
+                resolved = _resolve_reference(obs, ref_id, stix_version)
+                if resolved is None:
+                    raise KeyError(ref_id)
+                resolved_objs.append(resolved[1])
+            value = resolved_objs
+        elif kind == u"index":
+            if not isinstance(value, list):
+                raise KeyError(u"index")
+            index = token[u"index"]
+            if index is None:
+                return value
+            if index < 0 or index >= len(value):
+                raise KeyError(index)
+            value = value[index]
+        else:
+            raise KeyError(kind)
+    return value
+
+
+def _comparison_matches(existing, candidate):
+    return (
+        existing.get(u"path") == candidate.get(u"path") and
+        existing.get(u"operator") == candidate.get(u"operator") and
+        existing.get(u"literal") == candidate.get(u"literal") and
+        existing.get(u"value") == candidate.get(u"value") and
+        existing.get(u"value_type") == candidate.get(u"value_type") and
+        existing.get(u"reference_chain") == candidate.get(u"reference_chain")
+    )
+
+
+def _verify_time_constraints(witnesses, time_constraints, matcher):
+    by_slot = dict((w[u"slot"], w) for w in witnesses)
+
+    for constraint in time_constraints:
+        kind = constraint.get(u"kind")
+        slots = constraint.get(u"slots", [])
+        selected = [by_slot[s] for s in slots if s in by_slot]
+
+        # A scope belonging entirely to an unselected OR branch is not part
+        # of the reason, so it is not re-checked.  This is precisely what
+        # keeps unselected branches out of the explanation.
+        if not selected:
+            continue
+
+        if kind in (u"repeats", u"and"):
+            pairs = [
+                (w[u"observation"][u"index"], w[u"observation"][u"instance"])
+                for w in selected
+            ]
+            if len(pairs) != len(set(pairs)):
+                return False
+        elif kind == u"within":
+            intervals = [
+                matcher.get_time_interval(w[u"observation"][u"index"])
+                for w in selected
+            ]
+            duration = dateutil.relativedelta.relativedelta(
+                seconds=constraint[u"seconds"]
+            )
+            if intervals and not _timestamp_intervals_within(
+                    intervals, duration):
+                return False
+
+        elif kind == u"start_stop":
+            start = _str_to_datetime(constraint[u"start"])
+            stop = _str_to_datetime(constraint[u"stop"])
+            if start >= stop:
+                return False
+            for witness in selected:
+                interval = matcher.get_time_interval(
+                    witness[u"observation"][u"index"]
+                )
+                if _overlap(start, stop, *interval) not in (
+                        _OVERLAP, _OVERLAP_TOUCH_OUTER):
+                    return False
+
+        elif kind == u"followedby":
+            left_slots = constraint.get(u"left_slots", [])
+            right_slots = constraint.get(u"right_slots", [])
+            left = [by_slot[s] for s in left_slots if s in by_slot]
+            right = [by_slot[s] for s in right_slots if s in by_slot]
+            if not left or not right:
+                return False
+            left_instances = set(
+                (w[u"observation"][u"index"], w[u"observation"][u"instance"])
+                for w in left
+            )
+            right_instances = set(
+                (w[u"observation"][u"index"], w[u"observation"][u"instance"])
+                for w in right
+            )
+            if left_instances & right_instances:
+                return False
+            latest_left = max(
+                matcher.get_time_interval(w[u"observation"][u"index"])[0]
+                for w in left
+            )
+            earliest_right = min(
+                matcher.get_time_interval(w[u"observation"][u"index"])[1]
+                for w in right
+            )
+            if latest_left > earliest_right:
+                return False
+
+    return True
+
+
+def _verify_witnesses(pattern_str, stix_version, witnesses,
+                      time_constraints, observations):
+    """
+    Re-evaluate explanation witnesses against observations.  This is the
+    independent replay used by MatchExplanation.verify().
+    """
+    for witness in witnesses:
+        for key in _REQUIRED_WITNESS_KEYS:
+            if key not in witness:
+                return False
+
+    compiled = Pattern(pattern_str, stix_version)
+    matcher = MatchListener(
+        observations, verbose=False, stix_version=stix_version
+    )
+    normalized = matcher.get_observations()
+    tree = compiled.get_parse_tree()
+    scopes = []
+    slots = _slot_layout(tree, pattern_str, stix_version, scopes)
+    for index, slot in enumerate(slots):
+        slot[u"slot"] = index
+    slots_by_index = dict((s[u"slot"], s) for s in slots)
+
+    for witness in witnesses:
+        slot = slots_by_index.get(witness[u"slot"])
+        if slot is None:
+            return False
+        obs_idx = witness[u"observation"][u"index"]
+        if obs_idx < 0 or obs_idx >= len(normalized):
+            return False
+        obs = normalized[obs_idx]
+
+        # Observation identity and temporal evidence must still agree.
+        if witness[u"observation"].get(u"id") is not None:
+            if _observation_id(obs, stix_version) != \
+                    witness[u"observation"][u"id"]:
+                return False
+        interval = matcher.get_time_interval(obs_idx)
+        if _format_timestamp(interval[0]) != \
+                witness[u"time"][u"first_observed"]:
+            return False
+        if _format_timestamp(interval[1]) != \
+                witness[u"time"][u"last_observed"]:
+            return False
+
+        # Re-evaluate the exact slot and require the selected branch and
+        # comparison evidence to still be present.
+        eval_map = _eval_comparison_node(
+            slot[u"ctx"].comparisonExpression(),
+            obs_idx, obs, pattern_str, stix_version,
+        )
+        root_id = witness[u"root_sco"][u"id"]
+        if root_id not in eval_map:
+            return False
+        new_comparisons = eval_map[root_id][u"comparisons"]
+
+        for old in witness[u"comparisons"]:
+            if not any(
+                    _comparison_matches(old, new)
+                    for new in new_comparisons):
+                return False
+            try:
+                current_value = _walk_tokens(
+                    old[u"tokens"], obs, stix_version
+                )
+            except (KeyError, MatcherException):
+                return False
+            if _json_safe(current_value) != old[u"value"]:
+                return False
+            if _value_type_name(current_value) != old[u"value_type"]:
+                return False
+
+    return _verify_time_constraints(
+        witnesses, time_constraints, matcher
+    )
+
+
+def verify_explanation(explanation, observed_data_sdos=None,
+                       stix_version=None):
+    """
+    Verify a MatchExplanation (or its to_dict() form) against observations.
+
+    :param explanation: A MatchExplanation, an explanation dict, or a list of
+        witness mappings.
+    :param observed_data_sdos: The observations to replay against.  If None,
+        only structural completeness is checked.
+    :param stix_version: Overrides the version recorded in the explanation.
+    :return: True if the explanation is complete and still valid.
+    """
+    if isinstance(explanation, MatchExplanation):
+        data = explanation.to_dict()
+    elif isinstance(explanation, dict):
+        data = explanation
+    else:
+        data = {u"witnesses": list(explanation)}
+
+    witnesses = list(data.get(u"witnesses", []))
+    if any(
+            not all(key in witness for key in _REQUIRED_WITNESS_KEYS)
+            for witness in witnesses):
+        return False
+
+    if observed_data_sdos is None:
+        # Structural-only verification: witnesses must carry enough
+        # information to replay a comparison.
+        for witness in witnesses:
+            if not witness.get(u"comparisons"):
+                return False
+            for comparison in witness[u"comparisons"]:
+                if not comparison.get(u"tokens"):
+                    return False
+        return True
+
+    version = stix_version or data.get(u"stix_version") or DEFAULT_VERSION
+    pattern_str = data.get(u"pattern")
+    if not pattern_str:
+        return False
+    return _verify_witnesses(
+        pattern_str, version, witnesses,
+        list(data.get(u"time_constraints", [])),
+        observed_data_sdos,
+    )
+
 
 
 def _unicode_escape(src):
@@ -1194,7 +2778,7 @@ class MatchListener(STIXPatternListener):
 
         return val
 
-    def matched(self):
+    def matched(self, raw=False):
         """
         After a successful parse tree traveral, this will tell you whether the
         pattern matched its input.  You should only call this if the parse
@@ -1208,6 +2792,10 @@ class MatchListener(STIXPatternListener):
         SDOs from a binding, see get_sdos_from_binding().  If the pattern
         didn't match, an empty generator is returned.
 
+        :param raw: If True, yield the matcher's internal instance IDs
+            (observation index, instance index) instead of collapsing every
+            observation to a single slot int.  This is only meant for the
+            optional explanation machinery; the default contract is unchanged.
         :return: The found bindings, if any.
         """
         # At the end of the parse, the top stack element will be a generator of
@@ -1216,8 +2804,11 @@ class MatchListener(STIXPatternListener):
         # could be anything... so don't call this function in that situation!
         if self.__compute_stack:
             for binding in self.__compute_stack[0]:
-                # convert back from complex instance_id to obs_index
-                yield tuple(map(self.get_obs_index_filtered, binding))
+                if raw:
+                    yield tuple(binding)
+                else:
+                    # convert back from complex instance_id to obs_index
+                    yield tuple(map(self.get_obs_index_filtered, binding))
         return
 
     def get_sdos_from_binding(self, binding):
@@ -1234,6 +2825,19 @@ class MatchListener(STIXPatternListener):
                 sdos.append(self.__observations[obs_idx])
 
         return sdos
+
+    def get_observations(self):
+        """Return the normalized observations used by the matcher."""
+        return self.__observations
+
+    def get_time_interval(self, obs_idx):
+        """Return the (first_observed, last_observed) interval for an
+        observation index."""
+        return self.__time_intervals[obs_idx]
+
+    def get_number_observed(self, obs_idx):
+        """Return number_observed for an observation index."""
+        return self.__number_observed[obs_idx]
 
     @staticmethod
     def get_obs_index(instance_id):
@@ -1464,7 +3068,7 @@ class MatchListener(STIXPatternListener):
             rhs_binding_none = (None,) * len(first_rhs_binding)
         else:
             right_binding_size = _compute_expected_binding_size(
-                ctx.observationExpressionOr(0))
+                ctx.observationExpressionOr(1))
             rhs_binding_none = (None,) * right_binding_size
 
         def joined_bindings():
@@ -1814,50 +3418,14 @@ class MatchListener(STIXPatternListener):
         should verify what to do here.)
         """
 
-        # Figure out what literal value was given in the pattern
-        literal_node = ctx.primitiveLiteral()
-        literal_terminal = _get_first_terminal_descendant(literal_node)
-        literal_value = _literal_terminal_to_python_val(literal_terminal)
-        op_tok = ctx.EQ() or ctx.NEQ()
-        debug_label = u"exitPropTestEqual ({}{} {})".format(
-            u"NOT " if ctx.NOT() else u"",
-            op_tok.getText(),
-            literal_terminal.getText()
+        spec = _build_prop_test_spec(ctx)
+        debug_label = u"exitPropTestEqual ({} {})".format(
+            spec.operator, spec.literal_text
         )
 
         obs_values = self.__pop(debug_label)
 
-        def equality_pred(value):
-
-            # timestamp hackage: if we have a timestamp literal from the
-            # pattern and a string from the json, try to interpret the json
-            # value as a timestamp too.
-            if isinstance(literal_value, datetime.datetime) and \
-                    isinstance(value, six.text_type):
-                try:
-                    value = _str_to_datetime(value)
-                except ValueError as e:
-                    six.raise_from(
-                        MatcherException(u"Invalid timestamp in JSON: {}".format(
-                            value
-                        )), e)
-
-            result = False
-            eq_func = _get_table_symmetric(_COMPARE_EQ_FUNCS,
-                                           type(literal_value),
-                                           type(value))
-            if eq_func is not None:
-                result = eq_func(value, literal_value)
-
-            if ctx.NEQ():
-                result = not result
-
-            if ctx.NOT():
-                result = not result
-
-            return result
-
-        passed_obs = _obs_map_prop_test(obs_values, equality_pred)
+        passed_obs = _obs_map_prop_test(obs_values, spec.predicate)
 
         self.__push(passed_obs, debug_label)
 
@@ -1877,67 +3445,14 @@ class MatchListener(STIXPatternListener):
         a >= b would be false.  That's certainly not normal semantics for
         these operators...
         """
-        # Figure out what literal value was given in the pattern
-        literal_node = ctx.orderableLiteral()
-        literal_terminal = _get_first_terminal_descendant(literal_node)
-        literal_value = _literal_terminal_to_python_val(literal_terminal)
-        op_tok = ctx.GT() or ctx.LT() or ctx.GE() or ctx.LE()
-        debug_label = u"exitPropTestOrder ({}{} {})".format(
-            u"NOT " if ctx.NOT() else u"",
-            op_tok.getText(),
-            literal_terminal.getText()
+        spec = _build_prop_test_spec(ctx)
+        debug_label = u"exitPropTestOrder ({} {})".format(
+            spec.operator, spec.literal_text
         )
 
         obs_values = self.__pop(debug_label)
 
-        def order_pred(value):
-
-            # timestamp hackage: if we have a timestamp literal from the
-            # pattern and a string from the json, try to interpret the json
-            # value as a timestamp too.
-            if isinstance(literal_value, datetime.datetime) and \
-                    isinstance(value, six.text_type):
-                try:
-                    value = _str_to_datetime(value)
-                except ValueError as e:
-                    six.raise_from(
-                        MatcherException(u"Invalid timestamp in JSON: {}".format(
-                            value
-                        )), e)
-
-            cmp_func = _get_table_symmetric(_COMPARE_ORDER_FUNCS,
-                                            type(literal_value),
-                                            type(value))
-
-            if cmp_func is None:
-                return False
-
-            try:
-                result = cmp_func(value, literal_value)
-            except ValueError:
-                # The only comparison func that raises ValueError as of this
-                # writing is for binary<->string comparisons, when the string is
-                # of the wrong form.  Spec says the result must be false.
-                result = False
-            else:
-                if ctx.LT():
-                    result = result < 0
-                elif ctx.GT():
-                    result = result > 0
-                elif ctx.LE():
-                    result = result <= 0
-                elif ctx.GE():
-                    result = result >= 0
-                else:
-                    # shouldn't ever happen, right?
-                    raise UnsupportedOperatorError(op_tok.getText())
-
-            if ctx.NOT():
-                result = not result
-
-            return result
-
-        passed_obs = _obs_map_prop_test(obs_values, order_pred)
+        passed_obs = _obs_map_prop_test(obs_values, spec.predicate)
 
         self.__push(passed_obs, debug_label)
 
@@ -1952,46 +3467,15 @@ class MatchListener(STIXPatternListener):
           set of root Cyber Observable object IDs.  See _obs_map_prop_test().
         """
 
-        debug_label = u"exitPropTestSet{}".format(
-            u" (not)" if ctx.NOT() else u""
-        )
-        s = self.__pop(debug_label)  # pop the set
-        obs_values = self.__pop(debug_label)  # pop the observation values
+        spec = _build_prop_test_spec(ctx)
+        debug_label = u"exitPropTestSet ({})".format(spec.operator)
 
-        # Only need to check one member; exitSetLiteral() ensures that all
-        # members of the set have the same type.
-        is_set_of_timestamps = s and \
-            isinstance(next(iter(s)), datetime.datetime)
+        # The set literal is still on the stack; pop it to keep the stack
+        # balanced.  The predicate was built from the parse tree above.
+        self.__pop(debug_label)
+        obs_values = self.__pop(debug_label)
 
-        def set_pred(value):
-            # timestamp hackage: if we have a set of timestamp literals from
-            # the pattern and a string from the json, try to interpret the json
-            # value as a timestamp too.
-            if is_set_of_timestamps and isinstance(value, six.text_type):
-                try:
-                    value = _str_to_datetime(value)
-                except ValueError as e:
-                    six.raise_from(
-                        MatcherException(u"Invalid timestamp in JSON: {}".format(
-                            value
-                        )), e)
-
-            result = False
-            try:
-                result = value in s
-            except TypeError:
-                # Ignore errors about un-hashability.  Not all values
-                # selected from a Cyber Observable object are hashable (e.g.
-                # lists and dicts).  Those obviously can't be in the
-                # given set!
-                pass
-
-            if ctx.NOT():
-                result = not result
-
-            return result
-
-        passed_obs = _obs_map_prop_test(obs_values, set_pred)
+        passed_obs = _obs_map_prop_test(obs_values, spec.predicate)
 
         self.__push(passed_obs, debug_label)
 
@@ -2009,37 +3493,14 @@ class MatchListener(STIXPatternListener):
         errors.
         """
 
-        operand_str = _literal_terminal_to_python_val(ctx.StringLiteral())
-        debug_label = u"exitPropTestLike ({}{})".format(
-            u"not " if ctx.NOT() else u"",
-            operand_str
+        spec = _build_prop_test_spec(ctx)
+        debug_label = u"exitPropTestLike ({} {})".format(
+            spec.operator, spec.literal_text
         )
 
         obs_values = self.__pop(debug_label)
 
-        operand_str = unicodedata.normalize("NFC", operand_str)
-        regex = _like_to_regex(operand_str)
-        # compile and cache this to improve performance
-        compiled_re = re.compile(regex)
-        is_binary_convertible = all(ord(c) < 256 for c in regex)
-
-        def like_pred(value):
-            if isinstance(value, six.binary_type) and is_binary_convertible:
-                value = value.decode('utf8')
-
-            # non-strings can't match
-            if isinstance(value, six.text_type):
-                value = unicodedata.normalize("NFC", value)
-                result = compiled_re.match(value)
-            else:
-                result = False
-
-            if ctx.NOT():
-                result = not result
-
-            return result
-
-        passed_obs = _obs_map_prop_test(obs_values, like_pred)
+        passed_obs = _obs_map_prop_test(obs_values, spec.predicate)
 
         self.__push(passed_obs, debug_label)
 
@@ -2057,51 +3518,14 @@ class MatchListener(STIXPatternListener):
         errors.
         """
 
-        regex_terminal = ctx.StringLiteral()
-        debug_label = u"exitPropTestRegex ({}{})".format(
-            u"not " if ctx.NOT() else u"",
-            regex_terminal.getText()
+        spec = _build_prop_test_spec(ctx)
+        debug_label = u"exitPropTestRegex ({} {})".format(
+            spec.operator, spec.literal_text
         )
 
         obs_values = self.__pop(debug_label)
 
-        regex = _literal_terminal_to_python_val(regex_terminal)
-        regex = unicodedata.normalize("NFC", regex)
-        compiled_re = re.compile(regex)
-
-        # Support for binary pattern matching.
-        is_binary_convertible = all(ord(c) < 256 for c in regex)
-        if is_binary_convertible:
-            if six.PY2:
-                # This will be a pattern compiled from a unicode string, but
-                # python2 doesn't seem to care.  It'll match against a 'str'
-                # just fine.
-                compiled_bin_re = compiled_re
-            else:
-                # Python3 requires an actual binary regex.
-                bin_regex = six.binary_type(ord(c) for c in regex)
-                compiled_bin_re = re.compile(bin_regex)
-
-        def regex_pred(value):
-            if isinstance(value, six.text_type):
-                value = unicodedata.normalize("NFC", value)
-                result = compiled_re.search(value)
-
-            elif isinstance(value, six.binary_type):
-                if is_binary_convertible:
-                    result = compiled_bin_re.search(value)
-                else:
-                    result = False
-
-            else:
-                result = False
-
-            if ctx.NOT():
-                result = not result
-
-            return result
-
-        passed_obs = _obs_map_prop_test(obs_values, regex_pred)
+        passed_obs = _obs_map_prop_test(obs_values, spec.predicate)
 
         self.__push(passed_obs, debug_label)
 
@@ -2118,26 +3542,14 @@ class MatchListener(STIXPatternListener):
         Non-string values are treated as non-matching, and don't produce
         errors.
         """
-        subnet_str = _literal_terminal_to_python_val(ctx.StringLiteral())
+        spec = _build_prop_test_spec(ctx)
 
-        debug_label = u"exitPropTestIsSubset ({}{})".format(
-            u"not " if ctx.NOT() else u"",
-            subnet_str
+        debug_label = u"exitPropTestIsSubset ({} {})".format(
+            spec.operator, spec.literal_text
         )
         obs_values = self.__pop(debug_label)
 
-        def subnet_pred(value):
-            if isinstance(value, six.text_type):
-                result = _ip_or_cidr_in_subnet(value, subnet_str)
-            else:
-                result = False
-
-            if ctx.NOT():
-                result = not result
-
-            return result
-
-        passed_obs = _obs_map_prop_test(obs_values, subnet_pred)
+        passed_obs = _obs_map_prop_test(obs_values, spec.predicate)
 
         self.__push(passed_obs, debug_label)
 
@@ -2154,28 +3566,17 @@ class MatchListener(STIXPatternListener):
         Non-string values are treated as non-matching, and don't produce
         errors.
         """
-        ip_or_subnet_str = _literal_terminal_to_python_val(ctx.StringLiteral())
+        spec = _build_prop_test_spec(ctx)
 
-        debug_label = u"exitPropTestIsSuperset ({}{})".format(
-            u"not " if ctx.NOT() else u"",
-            ip_or_subnet_str
+        debug_label = u"exitPropTestIsSuperset ({} {})".format(
+            spec.operator, spec.literal_text
         )
         obs_values = self.__pop(debug_label)
 
-        def contains_pred(value):
-            if isinstance(value, six.text_type):
-                result = _ip_or_cidr_in_subnet(ip_or_subnet_str, value)
-            else:
-                result = False
-
-            if ctx.NOT():
-                result = not result
-
-            return result
-
-        passed_obs = _obs_map_prop_test(obs_values, contains_pred)
+        passed_obs = _obs_map_prop_test(obs_values, spec.predicate)
 
         self.__push(passed_obs, debug_label)
+
 
     def exitObjectPath(self, ctx):
         """
@@ -2458,6 +3859,7 @@ class Pattern:
         :raises stix2patterns.pattern.ParseException: If there is a parse error
         """
         self.__stix_version = stix_version
+        self.__pattern_str = pattern_str
         if self.__stix_version == VARSION_2_1:
             self.__pattern = Stix2Pattern21(pattern_str)
         else:
@@ -2466,7 +3868,19 @@ class Pattern:
     def __getattr__(self, name):
         return self.__pattern.__getattribute__(name)
 
-    def match(self, observed_data_sdos, verbose=False):
+    def get_stix_version(self):
+        """Return the STIX version this pattern was compiled for."""
+        return self.__stix_version
+
+    def get_pattern_str(self):
+        """Return the original pattern text."""
+        return self.__pattern_str
+
+    def get_parse_tree(self):
+        """Return the underlying ANTLR parse tree."""
+        return self.__pattern._Pattern__parse_tree
+
+    def match(self, observed_data_sdos, verbose=False, explain=False):
         """
         Match this pattern against the given observations.  Returns matching
         SDOs.  The matcher can find many bindings; this function returns the
@@ -2476,6 +3890,10 @@ class Pattern:
             dicts.  STIX JSON should be parsed into native Python structures
             before calling this method.
         :param verbose: Whether to dump detailed info about matcher operation
+        :param explain: If True, return a MatchExplanation instead.  It is a
+            list subclass containing the same matching SDOs, with a
+            ``witnesses`` attribute describing exactly what satisfied the
+            pattern.  The default (False) return contract is unchanged.
         :return: Matching SDOs if the pattern matched; an empty list if it
             didn't match.
         :raises MatcherException: If an error occurs during matching
@@ -2483,13 +3901,37 @@ class Pattern:
         matcher = MatchListener(observed_data_sdos, verbose, stix_version=self.__stix_version)
         self.__pattern.walk(matcher)
 
-        first_binding = next(matcher.matched(), [])
+        first_raw_binding = next(matcher.matched(raw=True), ())
+        first_binding = tuple(
+            map(MatchListener.get_obs_index_filtered, first_raw_binding)
+        )
         matching_sdos = matcher.get_sdos_from_binding(first_binding)
+
+        if explain:
+            explanation = _build_explanation(
+                self, self.__pattern_str, matcher, first_raw_binding,
+                self.__stix_version,
+            )
+            return MatchExplanation(
+                matching_sdos,
+                explanation[u"pattern"],
+                explanation[u"stix_version"],
+                explanation[u"witnesses"],
+                explanation[u"time_constraints"],
+            )
 
         return matching_sdos
 
+    def explain(self, observed_data_sdos, verbose=False):
+        """
+        Match and return a MatchExplanation.  Convenience alias for
+        match(..., explain=True).
+        """
+        return self.match(observed_data_sdos, verbose, explain=True)
 
-def match(pattern, observed_data_sdos, verbose=False, stix_version=DEFAULT_VERSION):
+
+def match(pattern, observed_data_sdos, verbose=False, stix_version=DEFAULT_VERSION,
+          explain=False):
     """
     Match the given pattern against the given observations.  Returns matching
     SDOs.  The matcher can find many bindings; this function returns the SDOs
@@ -2500,6 +3942,9 @@ def match(pattern, observed_data_sdos, verbose=False, stix_version=DEFAULT_VERSI
         STIX JSON should be parsed into native Python structures before calling
         this function.
     :param verbose: Whether to dump detailed info about matcher operation
+    :param explain: If True, the result is a MatchExplanation: a list of the
+        same matching SDOs, with a ``witnesses`` attribute carrying the
+        recomputable explanation.  The default return contract is unchanged.
     :return: Matching SDOs if the pattern matched; an empty list if it didn't
         match.
     :raises stix2patterns.pattern.ParseException: If there is a parse error
@@ -2507,7 +3952,22 @@ def match(pattern, observed_data_sdos, verbose=False, stix_version=DEFAULT_VERSI
     """
 
     compiled_pattern = Pattern(pattern, stix_version)
-    return compiled_pattern.match(observed_data_sdos, verbose)
+    return compiled_pattern.match(observed_data_sdos, verbose, explain=explain)
+
+
+def explain_match(pattern, observed_data_sdos, verbose=False,
+                  stix_version=DEFAULT_VERSION):
+    """
+    Match a pattern and return only the MatchExplanation.
+
+    This is a convenience wrapper for callers who want the witness record
+    without also consuming the matching-SDO list.  The explanation object is
+    still a list of the matching SDOs.
+    """
+    return match(
+        pattern, observed_data_sdos, verbose=verbose,
+        stix_version=stix_version, explain=True,
+    )
 
 
 def main():
@@ -2532,6 +3992,9 @@ def main():
     """)
     arg_parser.add_argument("-v", "--verbose", action="store_true",
                             help="""Be verbose""")
+    arg_parser.add_argument("-x", "--explain", action="store_true",
+                            help="""Print the witness explanation as JSON.
+                            This does not change matching decisions.""")
     arg_parser.add_argument("-q", "--quiet", action="count", help="""
     Run quietly. One -q will only print out NO MATCH information. Two will
     produce no match-related output. This option does not affect the action
@@ -2555,13 +4018,19 @@ def main():
                 if pattern[0] == u"#":
                     continue  # skip commented out lines
                 escaped_pattern = pattern.encode("unicode_escape").decode("ascii")
-                if match(pattern, observed_data_sdos, args.verbose, args.stix_version):
+                result = match(
+                    pattern, observed_data_sdos, args.verbose,
+                    args.stix_version, explain=args.explain,
+                )
+                if result:
                     if args.quiet < 1:
                         print(u"\nMATCH: ", escaped_pattern)
                 else:
                     if args.quiet < 2:
                         print(u"\nNO MATCH: ", escaped_pattern)
                     return_value = 1
+                if args.explain:
+                    print(json.dumps(result.to_dict(), sort_keys=True))
     except Exception:
         return_value = 2
         sys.excepthook(*sys.exc_info())

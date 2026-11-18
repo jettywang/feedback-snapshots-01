@@ -14,6 +14,36 @@ maintains a list of candidate bindings and other state, pruning away those which
 don't work as it goes.  At the end, the result is a list of many bindings, not
 just the first one found.
 
+## Match explanations
+
+`match(..., explain=True)` returns a `MatchExplanation`, a `list` subclass
+holding the same matching observed-data SDOs as the default API.  Its
+`witnesses` attribute contains one record per observation expression used by
+the first binding.  Each record carries:
+
+- the rule subexpression text and its binding slot;
+- the root SCO (type and id);
+- the actual property/reference path and the specific referent selected from
+  a `_ref`/`_refs` property;
+- the operator, literal, observed value and its type;
+- the observation identity (index, `number_observed` instance, SDO id) and
+  its first/last observed interval;
+- the `WITHIN`, `START`/`STOP`, `REPEATS` and `FOLLOWEDBY` constraints that
+  admitted the binding.
+
+Only the branch of an OR that actually held is described; a qualifier wholly
+inside an unselected branch is omitted, and a shared qualifier is narrowed to
+the selected slots.  This keeps the explanation a reason for the hit instead
+of a transcript of the search.
+
+`MatchExplanation.verify(observations)` independently re-selects each recorded
+path, resolves each recorded reference, re-runs each comparison, and re-checks
+the temporal constraints.  `to_dict()` is JSON-friendly and is the intended
+form for storage; `verify_explanation(dict, observations)` replays it without
+needing the original `MatchExplanation` object.
+
+The default return contract of `match()` is unchanged.
+
 ## Caveats
 
 - **The number of bindings found can be large.**  If each observation

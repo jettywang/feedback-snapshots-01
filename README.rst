@@ -70,6 +70,51 @@ Installing the package creates a ``stix2-matcher`` script:
       -v, --verbose         Be verbose
       -s STIX_VERSION, --stix_version STIX_VERSION
                            Stix specification version. Default is 2.0
+      -x, --explain         Print the witness explanation as JSON
+
+Match explanations
+------------------
+
+``match()`` keeps its original return contract by default: a list of the
+matching observed-data SDOs.  Pass ``explain=True`` to also receive a
+replayable explanation::
+
+    from stix2matcher.matcher import explain_match
+
+    result = explain_match(
+        "([person:knows_ref.name = 'bob'] OR [person:name = 'zelda']) "
+        "WITHIN 10 SECONDS",
+        observations,
+        stix_version="2.1",
+    )
+
+    result.matched            # True if the pattern matched
+    result.witnesses          # one witness per used observation expression
+    result.time_constraints   # WITHIN / START-STOP / REPEATS / FOLLOWEDBY
+    result.to_dict()          # JSON-friendly interchange form
+    result.verify(observations)  # independently recompute the reason
+
+Each witness records the rule subexpression, the root SCO (type and id), the
+actual property or reference path (including which referent was followed),
+the compared literal and observed value, the observation instance, and the
+temporal qualifier that accepted it.  An OR explains only the branch which
+actually held; unsatisfied branches are omitted rather than claimed as
+reasons.  The explanation is a bounded reason, not a debug stack and not a
+copy of the input bundle.
+
+The explanation can be persisted and replayed later::
+
+    stored = result.to_dict()
+    ...
+    from stix2matcher.matcher import verify_explanation
+    verify_explanation(stored, observations)   # False if a key object changed
+
+Verification re-evaluates every selected comparison against the current
+objects, re-resolves each recorded reference, and re-checks the recorded
+time constraints.  Replacing an object used as a reason therefore makes
+verification fail, while changing an unrelated object (or an unselected OR
+branch) does not.  With no observations, ``verify()`` checks structural
+completeness only.
 
 Testing
 -------
