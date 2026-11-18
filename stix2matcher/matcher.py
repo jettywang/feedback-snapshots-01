@@ -4,8 +4,8 @@ import argparse
 import base64
 import binascii
 import datetime
+import decimal
 import io
-import itertools
 import json
 import operator
 import pprint
@@ -467,34 +467,94 @@ def _like_to_regex(like):
     return s
 
 
-def _str_to_datetime(timestamp_str, ignore_case=False):
+_TIMESTAMP_RE = re.compile(
+    r"^(?P<date>\d{4}-\d{2}-\d{2})T"
+    r"(?P<time>\d{2}:\d{2}:\d{2})"
+    r"(?:\.(?P<fraction>\d+))?"
+    r"(?P<zone>Z|[+-]\d{2}:?\d{2})$"
+)
+
+
+def _fraction_to_microseconds(fraction):
     """
-    Convert a timestamp string from a pattern to a datetime.datetime object.
-    If conversion fails, raises a ValueError.
+    Convert a fractional-second digit string to microseconds.  Extra digits
+    are truncated (not rounded), since datetime only has microsecond
+    resolution.  A missing fraction is zero.
     """
 
-    # strptime() appears to work case-insensitively.  I think we require
-    # case-sensitivity for timestamp literals inside patterns and JSON
-    # (for the "T" and "Z" chars).  So check case first.
+    if not fraction:
+        return 0
+
+    if len(fraction) < 6:
+        fraction = fraction.ljust(6, u"0")
+    else:
+        fraction = fraction[:6]
+
+    return int(fraction)
+
+
+def _parse_utc_offset(zone):
+    """
+    Parse a trailing timestamp zone designator into a UTC offset, in
+    microseconds.  'Z' means zero; '+HH:MM', '+HHMM', '-HH:MM', and '-HHMM'
+    are accepted.  Raises ValueError if the offset is out of range.
+    """
+
+    if zone == u"Z":
+        return 0
+
+    sign = -1 if zone[0] == u"-" else 1
+    digits = zone[1:].replace(u":", u"")
+    if len(digits) != 4 or not digits.isdigit():
+        raise ValueError(u"Invalid timestamp UTC offset: {}".format(zone))
+
+    hours = int(digits[:2])
+    minutes = int(digits[2:])
+    if hours > 23 or minutes > 59:
+        raise ValueError(u"Invalid timestamp UTC offset: {}".format(zone))
+
+    return sign * (hours * 3600 + minutes * 60) * 1000000
+
+
+def _str_to_datetime(timestamp_str, ignore_case=False):
+    """
+    Convert a timestamp string from a pattern or observed-data SDO to a
+    timezone-aware datetime.datetime object.  If conversion fails, raises a
+    ValueError.
+
+    Only the extended ISO-8601 form used by STIX is accepted: a four-digit
+    year, 'T' separator, seconds field, optional fraction, and an explicit
+    zone designator ('Z' or a numeric UTC offset).  Sub-microsecond digits
+    are truncated because datetime cannot represent them.
+    """
+
+    # We require case-sensitivity for timestamp literals inside patterns and
+    # JSON (for the "T" and "Z" chars), although strptime() itself appears to
+    # work case-insensitively.  JSON validation is handled separately
+    # (ignore_case allows callers which have already enforced the rules).
     if not ignore_case and any(c.islower() for c in timestamp_str):
         raise ValueError(u"Invalid timestamp format "
                          u"(require upper case): {}".format(timestamp_str))
 
-    # Can't create a pattern with an optional part... so use two patterns
-    if u"." in timestamp_str:
-        fmt = u"%Y-%m-%dT%H:%M:%S.%fZ"
-        # maximum supported precision by Datetime is microsecond
-        timestamp_parts = timestamp_str.split(u".")
-        if len(timestamp_parts[1]) > 7 and timestamp_parts[1].endswith(u"Z"):
-            timestamp_parts[1] = timestamp_parts[1][:6] + timestamp_parts[1][-1:]
-            timestamp_str = u".".join(timestamp_parts)
-    else:
-        fmt = u"%Y-%m-%dT%H:%M:%SZ"
+    match = _TIMESTAMP_RE.match(timestamp_str)
+    if match is None:
+        raise ValueError(u"Invalid timestamp format: {}".format(timestamp_str))
 
-    dt = datetime.datetime.strptime(timestamp_str, fmt)
-    dt = dt.replace(tzinfo=dateutil.tz.tzutc())
+    microsecond = _fraction_to_microseconds(match.group(u"fraction"))
+    utc_offset_us = _parse_utc_offset(match.group(u"zone"))
 
-    return dt
+    dt = datetime.datetime.strptime(
+        match.group(u"date") + u"T" + match.group(u"time"),
+        u"%Y-%m-%dT%H:%M:%S",
+    ).replace(microsecond=microsecond)
+
+    # Normalize to UTC.  This makes values with different offsets directly
+    # comparable (datetime would otherwise compare aware values by their
+    # absolute instants anyway, but normalizing keeps interval arithmetic
+    # consistent and makes any datetime unambiguous).
+    dt = dt - datetime.timedelta(microseconds=utc_offset_us)
+
+    return dt.replace(tzinfo=dateutil.tz.tzutc())
 
 
 def _ip_addr_to_int(ip_str):
@@ -715,6 +775,337 @@ def _timestamp_intervals_within(timestamp_intervals, duration):
             break
 
     return result
+
+
+_EPOCH = datetime.datetime(1970, 1, 1, tzinfo=dateutil.tz.tzutc())
+
+
+def _datetime_to_microseconds(value):
+    """
+    Convert a timezone-aware datetime to an integer number of microseconds
+    since the Unix epoch, for exact difference-constraint arithmetic.
+    """
+
+    delta = value - _EPOCH
+    return ((delta.days * 86400 + delta.seconds) * 1000000
+            + delta.microseconds)
+
+
+def _duration_to_microseconds(duration):
+    """
+    Convert a WITHIN duration to an exact number of microseconds.
+
+    relativedelta keeps a fractional `seconds` value as a float, so compute
+    in microseconds directly.  Parsed timestamps have microsecond
+    resolution, so the result is truncated (not rounded up) to whole
+    microseconds.  This keeps equality at a window boundary meaningful: a
+    duration of 0.0000009 seconds is not enough to contain two timestamps
+    one microsecond apart.
+    """
+
+    whole_seconds = (
+        ((int(duration.days) * 24 + int(duration.hours)) * 60
+         + int(duration.minutes)) * 60 + int(duration.seconds)
+    )
+    # decimal.Decimal(str(...)) avoids binary floating point edge cases like
+    # 0.9999999 * 1e6 evaluating to 999999.8999999999.
+    fractional = int(
+        (decimal.Decimal(str(duration.seconds % 1)) * 1000000).to_integral_value(
+            rounding="ROUND_FLOOR"
+        )
+    )
+    return (whole_seconds * 1000000
+            + fractional
+            + int(duration.microseconds))
+
+
+class _TemporalConstraint:
+    """
+    Temporal requirements accumulated for one binding.
+
+    A binding is a tuple of observation-instance IDs (or None for a portion
+    of the pattern to which no observation was bound).  Alongside it we
+    track, for each bound observation, the interval of timestamps still legal
+    for it, plus a set of "span groups".  A span group says that the
+    timestamps chosen for a group of observations must all fit within a
+    window of a particular duration (a WITHIN qualifier).  START/STOP
+    qualifiers instead narrow every bound observation's interval.
+
+    Carrying these forward is what makes nested qualifiers compose
+    correctly.  An inner qualifier prunes the intervals and/or records its
+    group; an outer qualifier is then evaluated against the pruned state.
+    Without this, each qualifier would be checked independently against the
+    raw observed-data first/last interval, and a nested pattern could be
+    accepted even though no single assignment of timestamps satisfies all
+    qualifiers at once.
+
+    An interval is a (first, last, stop_exclusive) triple.  `first` and
+    `last` are inclusive bounds, except that when `stop_exclusive` is true
+    the timestamp must be strictly less than `last` (a START/STOP stop value
+    is itself out of range, per the specification).
+    """
+
+    __slots__ = ("intervals", "span_groups", "needs_joint_check")
+
+    def __init__(self, intervals=None, span_groups=None,
+                 needs_joint_check=False):
+        # instance id -> (first, last, stop_exclusive)
+        self.intervals = intervals if intervals is not None else {}
+        # list of (frozenset-of-instance-ids, duration-us)
+        self.span_groups = span_groups if span_groups is not None else []
+        # True once a qualifier has restricted an interval or added more than
+        # a single span group in a way that makes the cheap checks
+        # insufficient.  Used purely as a performance fast path.
+        self.needs_joint_check = needs_joint_check
+
+    def copy(self):
+        return _TemporalConstraint(
+            dict(self.intervals),
+            list(self.span_groups),
+            self.needs_joint_check,
+        )
+
+    @classmethod
+    def for_observation(cls, inst_id, interval):
+        constraint = cls()
+        constraint.intervals[inst_id] = (interval[0], interval[1], False)
+        return constraint
+
+    def merge(self, other):
+        """
+        Combine constraints from two disjoint bindings.  The instance IDs are
+        disjoint by construction (bindings are only joined when they are
+        disjoint), so interval entries simply union.
+        """
+
+        merged = _TemporalConstraint(
+            dict(self.intervals),
+            list(self.span_groups),
+            self.needs_joint_check or other.needs_joint_check,
+        )
+        merged.intervals.update(other.intervals)
+        merged.span_groups.extend(other.span_groups)
+        return merged
+
+    def restrict_to_window(self, start, stop):
+        """
+        Intersect every known interval with the START/STOP window [start,
+        stop).  Returns False if some observation has no legal timestamp left.
+
+        A START/STOP qualifier constrains every observation bound within the
+        expression it applies to, not just a single leaf.
+        """
+
+        if start >= stop:
+            return False
+
+        self.needs_joint_check = True
+        for inst_id, (first, last, exclusive) in list(self.intervals.items()):
+            new_first = max(first, start)
+            new_last = min(last, stop)
+            new_exclusive = exclusive or stop <= last
+
+            if new_first > new_last:
+                return False
+            if new_exclusive and new_first == new_last:
+                return False
+
+            self.intervals[inst_id] = (new_first, new_last, new_exclusive)
+
+        return True
+
+    def add_span_group(self, inst_ids, duration_us):
+        """
+        Record that the given bound observations must all fit within a window
+        of the given duration.  Returns False if the result is infeasible.
+        """
+
+        inst_ids = frozenset(i for i in inst_ids if i is not None)
+        if len(inst_ids) < 2:
+            # A single observation trivially fits in any non-negative
+            # window; its own interval needs no additional restriction.
+            return True
+
+        self.span_groups.append((inst_ids, duration_us))
+
+        # Fast path: when a single WITHIN qualifier applies to raw
+        # observation intervals (no nested restrictions), feasibility is
+        # simply whether the latest possible "first" and the earliest
+        # possible "last" are within the duration.  If all intervals share a
+        # common instant, zero span suffices; otherwise the cheapest choices
+        # are the latest start and the earliest end.  Anything more complex
+        # (nested span groups, start/stop restrictions) is solved jointly.
+        if not self.needs_joint_check and len(self.span_groups) == 1:
+            latest_first = max(
+                self.intervals[i][0]
+                for i in inst_ids
+            )
+            earliest_last = min(
+                self.intervals[i][1]
+                for i in inst_ids
+            )
+            gap = (_datetime_to_microseconds(latest_first)
+                   - _datetime_to_microseconds(earliest_last))
+            return gap <= duration_us
+
+        self.needs_joint_check = True
+        return self.is_feasible()
+
+    def is_feasible(self, ordering_pairs=()):
+        """
+        Check whether there is a single timestamp assignment satisfying every
+        interval, every span group, and any additional ordering constraints.
+
+        Simple cases are decided without a graph search:
+        - no span groups and no ordering: every interval is independent, so
+          feasibility is just "each interval is non-empty";
+        - one span group and no ordering: the group's extreme endpoints
+          decide it.
+
+        Anything else may combine overlapping groups arbitrarily, so it is
+        solved as a difference-constraint system.  Nodes are the bound
+        observation instances plus a source node; interval bounds become
+        unary constraints, a span group of size k adds t_j - t_i <= duration
+        for each ordered pair, and each (before, after) pair in
+        `ordering_pairs` adds t_before <= t_after.  A solution exists iff the
+        graph has no negative cycle, which Bellman-Ford detects in O(V*E).
+        """
+
+        if not ordering_pairs and len(self.span_groups) <= 1:
+            # For an exclusive (START/STOP) upper bound the bound value
+            # itself is not usable; timestamps have microsecond resolution,
+            # so the latest usable value is one microsecond earlier.
+            usable = {}
+            for inst_id, (first, last, exclusive) in self.intervals.items():
+                high = _datetime_to_microseconds(last)
+                if exclusive:
+                    high -= 1
+                low = _datetime_to_microseconds(first)
+                if high < low:
+                    return False
+                usable[inst_id] = (low, high)
+
+            if not self.span_groups:
+                return True
+
+            group, duration_us = self.span_groups[0]
+            # Every member's interval must overlap the same window of the
+            # given duration.  The tightest window starts at the latest
+            # usable "first" and must reach the earliest usable "last".
+            latest_first = max(usable[i][0] for i in group if i in usable)
+            earliest_last = min(usable[i][1] for i in group if i in usable)
+            return latest_first - earliest_last <= duration_us
+
+        ids = list(self.intervals)
+        index = {inst_id: i + 1 for i, inst_id in enumerate(ids)}
+        size = len(ids) + 1
+
+        # Edges (u, v, weight) mean t_v <= t_u + weight.
+        edges = []
+        for inst_id, (first, last, exclusive) in self.intervals.items():
+            v = index[inst_id]
+            high = _datetime_to_microseconds(last)
+            if exclusive:
+                high -= 1  # last itself is not allowed
+            low = _datetime_to_microseconds(first)
+            if high < low:
+                return False
+            edges.append((0, v, high))
+            edges.append((v, 0, -low))
+
+        for group, duration_us in self.span_groups:
+            members = [index[i] for i in group if i in index]
+            for u in members:
+                for v in members:
+                    if u != v:
+                        edges.append((u, v, duration_us))
+
+        for before, after in ordering_pairs:
+            if before in index and after in index:
+                # t_before <= t_after: edge from "after" to "before".
+                edges.append((index[after], index[before], 0))
+
+        # Super-source initialization: every node may start at any distance.
+        dist = [0] * size
+        for _ in range(size):
+            changed = False
+            for u, v, weight in edges:
+                candidate = dist[u] + weight
+                if candidate < dist[v]:
+                    dist[v] = candidate
+                    changed = True
+            if not changed:
+                return True
+
+        return False
+
+
+class _Binding(tuple):
+    """
+    A tuple of observation-instance IDs, carrying the temporal constraints
+    accumulated from any qualifiers which produced it.
+
+    Subclassing tuple keeps the existing binding algebra (concatenation,
+    disjointness checks, combination search) working unchanged, while
+    `__add__` transparently merges temporal constraints when subexpressions
+    are joined by AND, OR, or FOLLOWEDBY.
+    """
+
+    # No __slots__: tuple subclasses cannot have non-empty slots, and we need
+    # one extra attribute for the constraint state.
+
+    def __new__(cls, values=(), temporal=None):
+        self = super(_Binding, cls).__new__(cls, values)
+        self.temporal = temporal if temporal is not None else _TemporalConstraint()
+        return self
+
+    def __add__(self, other):
+        if isinstance(other, _Binding):
+            return _Binding(
+                tuple.__add__(self, other),
+                self.temporal.merge(other.temporal),
+            )
+
+        # A plain tuple can occur as a filler for an unbound pattern portion.
+        # It contributes no temporal constraints.
+        return _Binding(
+            tuple.__add__(self, other),
+            self.temporal.copy(),
+        )
+
+    def __radd__(self, other):
+        # Used when OR pads a binding with None placeholders on the left.
+        # The filler is a plain tuple and contributes no constraints; any
+        # binding on the other side is already encoded in `other`.
+        return _Binding(tuple.__add__(other, self), self.temporal.copy())
+
+
+def _merge_bindings(bindings):
+    """
+    Concatenate a sequence of bindings into one binding, merging their
+    temporal constraints.  Used when flattening repeated expressions.
+
+    This is a hot path for REPEATS, so constraints are collected in a single
+    pass instead of repeatedly copying merged dictionaries.
+    """
+
+    values = []
+    intervals = {}
+    span_groups = []
+    needs_joint_check = False
+
+    for binding in bindings:
+        values.extend(binding)
+        if isinstance(binding, _Binding):
+            temporal = binding.temporal
+            intervals.update(temporal.intervals)
+            span_groups.extend(temporal.span_groups)
+            needs_joint_check = needs_joint_check or temporal.needs_joint_check
+
+    return _Binding(
+        values,
+        _TemporalConstraint(intervals, span_groups, needs_joint_check),
+    )
 
 
 def _dereference_cyber_obs_objs(cyber_obs_objs, cyber_obs_obj_references, ref_prop_name, stix_version=DEFAULT_VERSION):
@@ -1095,9 +1486,15 @@ class MatchListener(STIXPatternListener):
                     "SDO with invalid number_observed "
                     "(must be >= 1): {}".format(number_observed))
 
+            first_dt = _str_to_datetime(first_observed)
+            last_dt = _str_to_datetime(last_observed)
+            if first_dt > last_dt:
+                raise MatcherException(
+                    "SDO with last_observed before first_observed: "
+                    "{} > {}".format(first_observed, last_observed))
+
             self.__observations.append(sdo)
-            self.__time_intervals.append((_str_to_datetime(first_observed),
-                                          _str_to_datetime(last_observed)))
+            self.__time_intervals.append((first_dt, last_dt))
             self.__number_observed.append(number_observed)
 
         self.__verbose = verbose
@@ -1343,51 +1740,43 @@ class MatchListener(STIXPatternListener):
         # Yield all valid FOLLOWEDBY joins between a single lhs_binding
         # and a list of rhs_bindings
 
-        # To ensure a satisfying selection of timestamps is possible,
-        # we make the most optimistic choices: choose the earliest
-        # possible timestamps for LHS bindings and latest possible for
-        # RHS bindings.  Then as a shortcut, only ensure proper
-        # ordering of the latest LHS timestamp and earliest RHS
-        # timestamp.
-        latest_lhs_first_timestamp = self.__latest_first_timestamp(lhs_binding)
-
         for rhs_binding in rhs_bindings:
 
             if _disjoint(lhs_binding, rhs_binding):
-                earliest_rhs_last_timestamp = self.__earliest_last_timestamp(rhs_binding)
-
-                if latest_lhs_first_timestamp <= earliest_rhs_last_timestamp:
-                    yield (lhs_binding + rhs_binding)
+                combined = lhs_binding + rhs_binding
+                if combined.temporal.is_feasible(
+                        self.__followed_by_ordering(lhs_binding, rhs_binding)):
+                    yield combined
 
     def __followed_by_right_join(self, lhs_bindings, rhs_binding):
         # Yield all valid FOLLOWEDBY joins between a list of lhs_bindings
         # and a single rhs_binding
 
-        earliest_rhs_last_timestamp = self.__earliest_last_timestamp(rhs_binding)
-
         for lhs_binding in lhs_bindings:
 
             if _disjoint(lhs_binding, rhs_binding):
-                latest_lhs_first_timestamp = self.__latest_first_timestamp(lhs_binding)
+                combined = lhs_binding + rhs_binding
+                if combined.temporal.is_feasible(
+                        self.__followed_by_ordering(lhs_binding, rhs_binding)):
+                    yield combined
 
-                if latest_lhs_first_timestamp <= earliest_rhs_last_timestamp:
-                    yield (lhs_binding + rhs_binding)
+    @staticmethod
+    def __followed_by_ordering(lhs_binding, rhs_binding):
+        """
+        Enumerate the timestamp-order constraints implied by FOLLOWEDBY: every
+        RHS observation must occur at or after every LHS observation.
 
-    def __latest_first_timestamp(self, binding):
-        return max(
-            # time interval is based on the original obs_index
-            self.__time_intervals[self.get_obs_index(inst_id)][0]
-            for inst_id in binding
-            if inst_id is not None
-        )
+        These must be checked jointly with the accumulated qualifier
+        constraints rather than as the separate shortcut "latest possible LHS
+        <= earliest possible RHS".  An inner qualifier can pin an LHS
+        observation to a late window and an RHS observation to an early one
+        while their raw first/last intervals still look orderable; only the
+        joint check catches that.
+        """
 
-    def __earliest_last_timestamp(self, binding):
-        return min(
-            # time interval is based on the original obs_index
-            self.__time_intervals[self.get_obs_index(inst_id)][1]
-            for inst_id in binding
-            if inst_id is not None
-        )
+        lhs_ids = [i for i in lhs_binding if i is not None]
+        rhs_ids = [i for i in rhs_binding if i is not None]
+        return [(lhs_id, rhs_id) for lhs_id in lhs_ids for rhs_id in rhs_ids]
 
     def exitObservationExpressionOr(self, ctx):
         """
@@ -1472,10 +1861,18 @@ class MatchListener(STIXPatternListener):
             _rhs_binding = first_rhs_binding
             while _lhs_binding is not None or _rhs_binding is not None:
                 if _lhs_binding is not None:
-                    yield _lhs_binding + rhs_binding_none
+                    # None placeholders stand for the branch which was not
+                    # taken; they carry no observations and no constraints.
+                    yield _Binding(
+                        tuple(_lhs_binding) + rhs_binding_none,
+                        _lhs_binding.temporal.copy(),
+                    )
                     _lhs_binding = next(lhs_bindings, None)
                 if _rhs_binding is not None:
-                    yield lhs_binding_none + _rhs_binding
+                    yield _Binding(
+                        lhs_binding_none + tuple(_rhs_binding),
+                        _rhs_binding.temporal.copy(),
+                    )
                     _rhs_binding = next(rhs_bindings, None)
 
         self.__push(joined_bindings(), debug_label)
@@ -1557,8 +1954,17 @@ class MatchListener(STIXPatternListener):
         obs_ids = self.__pop(debug_label)
         # "Unpack" the instances of observables based on `number_observed`
         # field by creating complex instance_id
-        obs_id_tuples = ((self.create_instance_id(obs_id, i),) for obs_id in obs_ids.keys()
-                         for i in range(0, self.__number_observed[obs_id]))
+        obs_id_tuples = (
+            _Binding(
+                (self.create_instance_id(obs_id, i),),
+                _TemporalConstraint.for_observation(
+                    self.create_instance_id(obs_id, i),
+                    self.__time_intervals[obs_id],
+                ),
+            )
+            for obs_id in obs_ids.keys()
+            for i in range(0, self.__number_observed[obs_id])
+        )
 
         self.__push(obs_id_tuples, debug_label)
 
@@ -1599,7 +2005,7 @@ class MatchListener(STIXPatternListener):
             # since this structure is predictable, I could do something
             # simpler.  Other code dealing with bindings doesn't expect any
             # nested structure, so I do the flattening here.
-            filtered_bindings = (tuple(itertools.chain.from_iterable(binding))
+            filtered_bindings = (_merge_bindings(binding)
                                  for binding in filtered_bindings)
 
         self.__push(filtered_bindings, debug_label)
@@ -1616,19 +2022,19 @@ class MatchListener(STIXPatternListener):
 
         duration = self.__pop(debug_label)
         bindings = self.__pop(debug_label)
+        duration_us = _duration_to_microseconds(duration)
 
         def check_within(binding):
-            return _timestamp_intervals_within(
-                [
-                    # time interval is based on the original obs_index
-                    self.__time_intervals[self.get_obs_index(inst_id)]
-                    for inst_id in binding
-                    if inst_id is not None
-                ],
-                duration
-            )
+            temporal = binding.temporal.copy()
+            if not temporal.add_span_group(binding, duration_us):
+                return None
+            return _Binding(tuple(binding), temporal)
 
-        filtered_bindings = (binding for binding in bindings if check_within(binding))
+        filtered_bindings = (
+            constrained
+            for constrained in (check_within(binding) for binding in bindings)
+            if constrained is not None
+        )
 
         self.__push(filtered_bindings, debug_label)
 
@@ -1653,21 +2059,21 @@ class MatchListener(STIXPatternListener):
         start_time, stop_time = self.__pop(debug_label)
         bindings = self.__pop(debug_label)
 
-        def check_overlap(binding):
-            return all(
-                    _overlap(start_time, stop_time, *self.__time_intervals[
-                        # time interval is based on the original obs_index
-                        self.get_obs_index(obs_id)
-                    ])
-                    in (_OVERLAP, _OVERLAP_TOUCH_OUTER)
-                    for obs_id in binding if obs_id is not None
-                )
+        def check_window(binding):
+            temporal = binding.temporal.copy()
+            if not temporal.restrict_to_window(start_time, stop_time):
+                return None
+            return _Binding(tuple(binding), temporal)
 
         # If start and stop are equal, the constraint is impossible to
         # satisfy, since a value can't be both >= and < the same number.
         # And of course it's impossible if start > stop.
         if start_time < stop_time:
-            filtered_bindings = (binding for binding in bindings if check_overlap(binding))
+            filtered_bindings = (
+                constrained
+                for constrained in (check_window(binding) for binding in bindings)
+                if constrained is not None
+            )
         else:
             filtered_bindings = iter(())
 
