@@ -601,3 +601,17 @@ ENUM_DW_CC = dict(
     DW_CC_lo_user           = 0x40,
     DW_CC_hi_user           = 0xff
 )
+
+# DWARFv5 .debug_names name index entry attribute indexes (section 6.1.1.4.2)
+ENUM_DW_IDX = dict(
+    DW_IDX_compile_unit = 0x01,
+    DW_IDX_type_unit    = 0x02,
+    DW_IDX_die_offset   = 0x03,
+    DW_IDX_parent       = 0x04,
+    DW_IDX_type_hash    = 0x05,
+    DW_IDX_lo_user      = 0x2000,
+    DW_IDX_hi_user      = 0x3fff
+)
+
+# Inverse mapping for ENUM_DW_IDX
+DW_IDX_raw2name = dict((v, k) for k, v in ENUM_DW_IDX.items())

@@ -33,6 +33,7 @@ from ..construct import (
     If,
     IfThenElse,
     LengthValueAdapter,
+    MetaField,
     PrefixedArray,
     Rename,
     SBInt8,
@@ -229,6 +230,7 @@ class DWARFStructs:
         self._create_callframe_entry_headers()
         self._create_aranges_header()
         self._create_nameLUT_header()
+        self._create_debug_names_header()
         self._create_string_offsets_table_header()
         self._create_address_table_header()
         self._create_loclists_parsers()
@@ -415,6 +417,21 @@ class DWARFStructs:
             self.Dwarf_offset('debug_info_offset'),
             self.Dwarf_length('debug_info_length')
             )
+
+    def _create_debug_names_header(self) -> None:
+        self.Dwarf_debug_names_header = Struct("Dwarf_debug_names_header",
+            self.Dwarf_initial_length('unit_length'),
+            self.Dwarf_uint16('version'),
+            self.Dwarf_uint16('padding'),
+            self.Dwarf_uint32('comp_unit_count'),
+            self.Dwarf_uint32('local_type_unit_count'),
+            self.Dwarf_uint32('foreign_type_unit_count'),
+            self.Dwarf_uint32('bucket_count'),
+            self.Dwarf_uint32('name_count'),
+            self.Dwarf_uint32('abbrev_table_size'),
+            self.Dwarf_uint32('augmentation_string_size'),
+            MetaField('augmentation_string',
+                lambda ctx: ctx['augmentation_string_size']))
 
     def _create_string_offsets_table_header(self) -> None:
         self.Dwarf_string_offsets_table_header = Struct(

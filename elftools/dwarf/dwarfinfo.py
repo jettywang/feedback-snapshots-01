@@ -19,6 +19,7 @@ from .abbrevtable import AbbrevTable
 from .aranges import ARanges
 from .callframe import CallFrameInfo
 from .compileunit import CompileUnit
+from .debugnames import DebugNames
 from .dwarf_util import _get_base_offset
 from .lineprogram import LineProgram
 from .locationlists import LocationLists, LocationListsPair
@@ -32,6 +33,7 @@ if TYPE_CHECKING:
 
     from ..construct.lib.container import ListContainer
     from .callframe import ZERO, CFIEntry
+    from .debugnames import NameIndexEntry
     from .die import DIE
     from .namelut import NameLUTEntry
 
@@ -100,6 +102,7 @@ class DWARFInfo:
         debug_sup_sec: DebugSectionDescriptor | None,
         gnu_debugaltlink_sec: DebugSectionDescriptor | None,
         debug_types_sec: DebugSectionDescriptor | None,
+        debug_names_sec: DebugSectionDescriptor | None = None,
     ) -> None:
         """ config:
                 A DwarfConfig object
@@ -129,6 +132,7 @@ class DWARFInfo:
         self.debug_sup_sec = debug_sup_sec
         self.gnu_debugaltlink_sec = gnu_debugaltlink_sec
         self.debug_types_sec = debug_types_sec
+        self.debug_names_sec = debug_names_sec
 
         # Sets the supplementary_dwarfinfo to None. Client code can set this
         # to something else, typically a DWARFInfo file read from an ELFFile
@@ -176,6 +180,21 @@ class DWARFInfo:
         """
         cu = self.get_CU_at(lut_entry.cu_ofs)
         return self.get_DIE_from_refaddr(lut_entry.die_ofs, cu)
+
+    def get_DIE_from_name_index_entry(self, entry: NameIndexEntry) -> DIE:
+        """ Get the DIE for a .debug_names name index entry.
+
+            entry:
+                A NameIndexEntry object from a DebugNames lookup (see
+                .get_debug_names).
+
+            The DIE is resolved strictly within the unit recorded in the
+            entry: the DIE offset must be contained in that unit's range,
+            otherwise a DWARFError is raised. A corrupt entry can therefore
+            not resolve to an object that happens to sit at the same
+            offset in another unit.
+        """
+        return entry.unit.get_DIE_from_refaddr(entry.die_offset)
 
     def get_DIE_from_refaddr(self, refaddr: int, cu: CompileUnit | None = None) -> DIE:
         """ Given a .debug_info section offset of a DIE, return the DIE.
@@ -286,6 +305,25 @@ class DWARFInfo:
         if tu is None:
             raise KeyError(f"Signature {sig8:016x} not found in .debug_types")
         return tu
+
+    def get_TU_at(self, offset: int) -> TypeUnit:
+        """ Given a TU header offset, return the parsed TypeUnit.
+
+            offset:
+                The offset may come from an accelerated access table such
+                as the .debug_names local type unit list.
+
+            The offset is validated against the size of the .debug_types
+            section.
+        """
+        dwarf_assert(
+            self.debug_types_sec is not None,
+            'TU lookup but no debug types section')
+        assert self.debug_types_sec is not None
+        dwarf_assert(
+            0 <= offset < self.debug_types_sec.size,
+            f"offset {offset} beyond .debug_types size")
+        return self._parse_TU_at_offset(offset)
 
     def iter_CUs(self) -> Iterator[CompileUnit]:
         """ Yield all the compile units (CompileUnit objects) in the debug info
@@ -418,6 +456,25 @@ class DWARFInfo:
             return NameLUT(self.debug_pubnames_sec.stream,
                     self.debug_pubnames_sec.size,
                     self.structs)
+        else:
+            return None
+
+    def get_debug_names(self) -> DebugNames | None:
+        """
+        Returns a DebugNames object that contains information read from the
+        .debug_names section (the DWARFv5 accelerated access name index) in
+        the ELF file, or None if the section doesn't exist.
+
+        DebugNames.lookup(name) returns a list of NameIndexEntry candidates
+        - one per indexed entity with that name, each carrying the actual
+        CU/TU object it belongs to. See the DebugNames docstring for more
+        details.
+        """
+        if self.debug_names_sec:
+            return DebugNames(self.debug_names_sec.stream,
+                    self.debug_names_sec.size,
+                    self.structs,
+                    self)
         else:
             return None
 
