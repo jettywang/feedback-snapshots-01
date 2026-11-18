@@ -2672,6 +2672,186 @@ def scan_vba(vba_code, include_decoded_strings, deobfuscate=False):
     return VBA_Scanner(vba_code).scan(include_decoded_strings, deobfuscate)
 
 
+#=== VBA STOMPING DETECTION ==================================================
+
+# Per-module statuses reported by the VBA stomping detection.
+# The three "not analysed" statuses must never be cached as a negative result
+# ("no stomping"): they mean the P-code/source comparison could not be done.
+#: P-code and source code of the module could be compared and match
+STOMPING_MATCH = 'match'
+#: comparable P-code content is absent from the module's own source code
+STOMPING_MISMATCH = 'mismatch'
+#: the module has P-code but no VBA source code could be extracted
+STOMPING_SOURCE_MISSING = 'source_missing'
+#: pcodedmp is not installed or failed to run, so no P-code was available
+STOMPING_PCODE_UNSUPPORTED = 'pcode_unsupported'
+#: the input is an in-memory file which pcodedmp cannot process yet
+STOMPING_IN_MEMORY = 'in_memory'
+#: pcodedmp ran but could not disassemble the P-code (corrupt/unknown format)
+STOMPING_PCODE_PARSE_ERROR = 'pcode_parse_error'
+
+#: Statuses for which the comparison actually ran and produced a verdict
+STOMPING_ANALYSED_STATUSES = (STOMPING_MATCH, STOMPING_MISMATCH, STOMPING_SOURCE_MISSING)
+#: Statuses that explicitly mean the comparison could not be performed
+STOMPING_UNANALYSED_STATUSES = (STOMPING_PCODE_UNSUPPORTED, STOMPING_IN_MEMORY,
+                                STOMPING_PCODE_PARSE_ERROR)
+
+#: pcodedmp prints one such line before the disassembly of every module stream,
+#: for example "VBA/Module1 - 1145 bytes" or "Macros/VBA/Module1 - 12 bytes"
+RE_PCODE_MODULE_HEADER = re.compile(
+    r'^(?:(?P<prefix>.*[\\/])?VBA[\\/])?(?P<name>[^\\/]+)\s+-\s+\d+\s+bytes\s*$')
+#: pcodedmp prefixes every disassembled instruction line with a tab character
+RE_PCODE_INSTRUCTION = re.compile(r'^\t\s*(?P<mnemonic>\S+)(?:\s+(?P<args>.*\S))?\s*$')
+#: pcodedmp reports failures itself, with lines starting with "Error:"
+RE_PCODE_ERROR_LINE = re.compile(r'^\s*Error:')
+
+#: P-code mnemonics whose first argument is an identifier that also appears in
+#: the VBA source code (variable/function/label names)
+PCODE_NAME_MNEMONICS = ('ArgsCall', 'ArgsLd', 'St', 'Ld', 'MemSt', 'Label')
+
+
+def _module_key_from_stream_path(stream_path):
+    """
+    Normalize an OLE module stream path or a pcodedmp module path into the bare
+    VBA module name used to associate P-code with source code.
+
+    Both "VBA/Module1" and "Macros/VBA/Module1" return "Module1". If the path
+    does not contain a "VBA" component, the last path component is returned.
+
+    :param str stream_path: module stream path as reported by olevba or pcodedmp
+    :return: bare module name
+    :rtype: str
+    """
+    parts = re.split(r'[\\/]+', stream_path.strip())
+    parts = [part for part in parts if part]
+    for index, part in enumerate(parts):
+        if part.upper() == 'VBA' and index + 1 < len(parts):
+            return parts[index + 1]
+    return parts[-1] if parts else stream_path.strip()
+
+
+def parse_pcodedmp_output(pcodedmp_output):
+    """
+    Split the text output of pcodedmp into per-module disassembly blocks and
+    extract the comparable content (identifiers and string literals) of each.
+
+    This is a pure function so it can be unit-tested with synthetic pcodedmp
+    output: no OLE file and no call to pcodedmp is required.
+
+    :param str pcodedmp_output: full text captured from pcodedmp.processFile
+    :return: tuple (modules, error_lines) where:
+        - modules is a dict mapping a bare module name to a dict with keys:
+            stream_path: full module path printed by pcodedmp
+            keywords: set of identifiers/string literals found in the P-code
+            raw_lines: list of the disassembled instruction lines (with tabs)
+        - error_lines is a list of "Error: ..." lines emitted by pcodedmp
+    :rtype: tuple(dict, list)
+    """
+    modules = {}
+    error_lines = []
+    current_module = None
+    for line in pcodedmp_output.splitlines():
+        if RE_PCODE_ERROR_LINE.match(line):
+            error_lines.append(line.strip())
+        header_match = RE_PCODE_MODULE_HEADER.match(line)
+        if header_match:
+            current_module = header_match.group('name')
+            prefix = header_match.group('prefix') or ''
+            modules.setdefault(current_module, {
+                'stream_path': '{0}VBA/{1}'.format(prefix, current_module),
+                'keywords': set(),
+                'raw_lines': [],
+            })
+            continue
+        if current_module is None:
+            # header/preamble before the first "Module streams:" section
+            continue
+        instruction_match = RE_PCODE_INSTRUCTION.match(line)
+        if not instruction_match:
+            # "Line #n:" markers and blank lines carry no comparable token
+            continue
+        module_entry = modules[current_module]
+        module_entry['raw_lines'].append(line)
+        mnemonic = instruction_match.group('mnemonic')
+        args = instruction_match.group('args') or ''
+        if mnemonic in PCODE_NAME_MNEMONICS:
+            # sometimes ArgsCall is followed by "(Call)", if so remove it (issue #489)
+            if args.startswith('(Call) '):
+                args = args[7:]
+            if not args:
+                continue
+            name = args.split(None, 1)[0]
+            # pcodedmp sometimes reports names such as "id_FFFF", which are not
+            # directly present in the VBA source code (e.g. "Me" -> "id_FFFF")
+            if not name.startswith('id_'):
+                module_entry['keywords'].add(name)
+        elif mnemonic == 'LitStr':
+            tokens = args.split(None, 1)
+            if len(tokens) != 2:
+                continue
+            string_literal = tokens[1]
+            # When a string contains double quotes, pcodedmp returns a single "
+            # whereas the VBA source always doubles them (""), so normalize:
+            if len(string_literal) >= 2:
+                if string_literal[0] != '"' or string_literal[-1] != '"':
+                    continue
+                inner = string_literal[1:-1].replace('"', '""')
+                string_literal = '"' + inner + '"'
+            module_entry['keywords'].add(string_literal)
+    return modules, error_lines
+
+
+def compare_pcode_with_source(pcode_modules, source_modules):
+    """
+    Compare P-code content with VBA source code strictly within each module.
+
+    Association is done by module name: a keyword extracted from the P-code of
+    module A is only looked up in the source code of module A. This prevents a
+    same-named identifier/string living in another module from hiding a real
+    P-code/source divergence in module A.
+
+    Limitation of the heuristic: the comparison is keyword based, not semantic.
+    Benign edits that remove or rename a variable/string (re-compilation in a
+    different Office version, dead code removal, etc.) also produce mismatches,
+    so a mismatch is evidence worth reviewing, not proof of malicious stomping.
+
+    :param dict pcode_modules: output of parse_pcodedmp_output()
+    :param dict source_modules: dict mapping a bare module name to its VBA
+        source code (str); modules whose source could not be extracted are
+        simply absent from this dict
+    :return: dict mapping each bare module name to a result dict with keys:
+        status: one of the STOMPING_* statuses
+        missing_keywords: keywords present in P-code but not in this module's
+            own source code (empty for non-mismatch statuses)
+        pcode_keyword_count: number of comparable keywords extracted from P-code
+        source_present: True if source code was available for the module
+    :rtype: dict
+    """
+    results = {}
+    for module_name, module_entry in pcode_modules.items():
+        keywords = module_entry['keywords']
+        source_code = source_modules.get(module_name)
+        result = {
+            'status': STOMPING_MATCH,
+            'missing_keywords': [],
+            'pcode_keyword_count': len(keywords),
+            'source_present': source_code is not None,
+        }
+        if source_code is None:
+            # The P-code exists but the corresponding source code stream could
+            # not be extracted: the comparison cannot be performed for it.
+            result['status'] = STOMPING_SOURCE_MISSING
+            result['missing_keywords'] = sorted(keywords)
+        else:
+            missing = sorted(keyword for keyword in keywords
+                             if keyword not in source_code)
+            if missing:
+                result['status'] = STOMPING_MISMATCH
+                result['missing_keywords'] = missing
+        results[module_name] = result
+    return results
+
+
 #=== CLASSES =================================================================
 
 class VBA_Parser(object):
@@ -2745,8 +2925,19 @@ class VBA_Parser(object):
         #: Output from pcodedmp, disassembly of the VBA P-code
         self.disable_pcode = disable_pcode
         self.pcodedmp_output = None
-        #: Flag set to True/False if VBA stomping detected
+        #: Why P-code analysis is unavailable, None when it ran or was not attempted
+        #: (one of the STOMPING_* "unanalysed" statuses, see detect_vba_stomping)
+        self.pcode_status = None
+        #: "Error: ..." lines reported by pcodedmp while disassembling the P-code
+        self.pcode_errors = []
+        #: Flag set to True only when VBA stomping is actually evidenced.
+        #: None means the analysis has not run yet; False means it ran and no
+        #: module shows a divergence. Unanalysed inputs stay None, they are
+        #: never cached as "no stomping".
         self.vba_stomping_detected = None
+        #: Per-module stomping report produced by detect_vba_stomping(),
+        #: None until the analysis runs. See detect_vba_stomping() for its shape.
+        self.vba_stomping_report = None
         # will be set to True or False by detect_is_encrypted method
         self.is_encrypted = False
         # TODO: those are disabled for now:
@@ -3665,13 +3856,38 @@ class VBA_Parser(object):
             # Analyze the whole code at once:
             scanner = VBA_Scanner(self.vba_code_all_modules)
             self.analysis_results = scanner.scan(show_decoded_strings, deobfuscate)
+            stomping_report = self.get_vba_stomping_report()
             if self.detect_vba_stomping():
                 log.debug('adding VBA stomping to suspicious keywords')
                 keyword = 'VBA Stomping'
-                description = 'VBA Stomping was detected: the VBA source code and P-code are different, '\
-                    'this may have been used to hide malicious code'
+                description = 'VBA Stomping was detected: in module(s) {modules}, P-code content '\
+                    'is missing from the same module\'s VBA source code ({evidence}). This is a '\
+                    'keyword-based heuristic: it indicates a real P-code/source divergence that may '\
+                    'have been used to hide code, but does not by itself prove the file is malicious.'\
+                    .format(
+                        modules=', '.join(stomping_report['mismatched_modules']),
+                        evidence='; '.join(
+                            '{0}: {1}'.format(
+                                module_name,
+                                ', '.join(result['missing_keywords'][:5]))
+                            for module_name, result in stomping_report['modules'].items()
+                            if result['status'] == STOMPING_MISMATCH))
                 scanner.suspicious_keywords.append((keyword, description))
                 scanner.results.append(('Suspicious', keyword, description))
+            elif stomping_report['overall_status'] == STOMPING_SOURCE_MISSING:
+                # No proven mismatch, but some modules could not be compared:
+                # report this as inconclusive, never as "no stomping".
+                keyword = 'VBA Stomping'
+                description = 'VBA stomping could not be fully assessed: module(s) {modules} have '\
+                    'P-code but no extractable VBA source code, so their P-code was not compared.'\
+                    .format(modules=', '.join(stomping_report['source_missing_modules']))
+                scanner.results.append(('warning', keyword, description))
+            elif not stomping_report['analysed']:
+                keyword = 'VBA Stomping'
+                description = 'VBA stomping was not analysed ({status}): {reason}'\
+                    .format(status=stomping_report['overall_status'],
+                            reason=stomping_report['reason'])
+                scanner.results.append(('warning', keyword, description))
             if self.contains_xlm_macros:
                 log.debug('adding XLM macrosheet found to suspicious keywords')
                 keyword = 'XLM macro'
@@ -3877,6 +4093,9 @@ class VBA_Parser(object):
                 # TODO: this is a workaround, we just ignore P-code
                 # TODO: here we just use log.info, because the word "error" in the output makes some of the tests fail...
                 log.info('Exception when importing pcodedmp: {}'.format(e))
+                # Remember that the P-code could not be analysed: this must not
+                # be turned into a negative stomping result later on.
+                self.pcode_status = STOMPING_PCODE_UNSUPPORTED
                 self.pcodedmp_output = ''
                 return ''
             # logging is disabled after importing pcodedmp, need to re-enable it
@@ -3912,6 +4131,10 @@ class VBA_Parser(object):
                 # set sys.stdout back to its original value
                 # sys.stdout = stdout
                 log.exception('Error while running pcodedmp')
+                # The disassembly could not be produced: keep this explicit so
+                # the stomping check reports "not analysed" instead of "clean".
+                self.pcode_status = STOMPING_PCODE_PARSE_ERROR
+                self.pcode_errors.append('Error while running pcodedmp: {0}'.format(e))
             # finally:
             #     # set sys.stdout back to its original value
             #     sys.stdout = stdout
@@ -3922,90 +4145,210 @@ class VBA_Parser(object):
 
     def detect_vba_stomping(self):
         """
-        Detect VBA stomping, by comparing the keywords present in the P-code and
-        in the VBA source code.
+        Detect VBA stomping by comparing the P-code and the VBA source code of
+        each module separately, so that a same-named identifier or string in
+        another module cannot mask a real divergence.
 
-        :return: True if VBA stomping detected, False otherwise
-        :rtype: bool
+        The detection is keyword based (identifiers and string literals visible
+        in the P-code disassembly must also appear in the source code of the
+        same module). This is a heuristic, not a semantic diff: benign changes
+        (recompilation with another Office version, renamed/removed variables,
+        dead code) can also produce mismatches. A mismatch is therefore evidence
+        to review, not a verdict that the file is malicious.
+
+        Cases where the comparison cannot be performed are kept explicit and
+        are never cached as "no stomping":
+            - STOMPING_PCODE_UNSUPPORTED: pcodedmp is not available
+            - STOMPING_IN_MEMORY: the file is only available in memory
+            - STOMPING_PCODE_PARSE_ERROR: pcodedmp could not disassemble the P-code
+            - STOMPING_SOURCE_MISSING: a module has P-code but no extractable source
+
+        :return: True only when at least one module shows a P-code/source
+            mismatch. False when every analysed module matches. None when the
+            analysis could not be performed (see get_vba_stomping_report()).
+        :rtype: bool or None
         """
         log.debug('detect_vba_stomping')
         # only run it once:
-        if self.vba_stomping_detected is not None:
+        if self.vba_stomping_report is not None:
             return self.vba_stomping_detected
-        # Text and SLK files cannot be stomped:
+        # Text and SLK files cannot be stomped, this is a real negative result:
         if self.type in (TYPE_SLK, TYPE_TEXT):
             self.vba_stomping_detected = False
+            self.vba_stomping_report = {
+                'overall_status': STOMPING_MATCH,
+                'analysed': True,
+                'status': STOMPING_MATCH,
+                'reason': 'text and SLK files contain no P-code and cannot be stomped',
+                'modules': {},
+            }
             return False
-        # TODO: Files in memory cannot be analysed with pcodedmp yet
+        # Files in memory cannot be analysed with pcodedmp yet. This is not a
+        # negative result: the file simply was not checked for stomping.
         if not self.file_on_disk:
             log.warning('For now, VBA stomping cannot be detected for files in memory')
+            self.pcode_status = STOMPING_IN_MEMORY
+            self.vba_stomping_detected = None
+            self.vba_stomping_report = {
+                'overall_status': STOMPING_IN_MEMORY,
+                'analysed': False,
+                'status': STOMPING_IN_MEMORY,
+                'reason': 'files in memory are not supported by pcodedmp yet',
+                'modules': {},
+            }
+            return None
+
+        log.debug('Analysing the P-code to detect VBA stomping')
+        self.extract_pcode()
+        log.debug('pcodedmp done, pcode_status=%r' % self.pcode_status)
+
+        # pcodedmp missing/crashed: nothing was actually compared
+        if self.pcode_status in (STOMPING_PCODE_UNSUPPORTED, STOMPING_PCODE_PARSE_ERROR):
+            self.vba_stomping_detected = None
+            self.vba_stomping_report = {
+                'overall_status': self.pcode_status,
+                'analysed': False,
+                'status': self.pcode_status,
+                'reason': 'the P-code could not be disassembled with pcodedmp',
+                'pcode_errors': list(self.pcode_errors),
+                'modules': {},
+            }
+            return None
+
+        pcode_modules, error_lines = parse_pcodedmp_output(self.pcodedmp_output)
+        self.pcode_errors.extend(error_lines)
+
+        # pcodedmp ran but produced no module disassembly (unknown VBA version,
+        # corrupt performance cache, unrecognized opcode aborting the dump...):
+        # again this is "not analysed", not "no stomping".
+        if not pcode_modules:
+            reason = 'pcodedmp returned no disassembled module streams'
+            if error_lines:
+                reason = reason + ': ' + '; '.join(error_lines)
+            self.pcode_status = STOMPING_PCODE_PARSE_ERROR
+            self.vba_stomping_detected = None
+            self.vba_stomping_report = {
+                'overall_status': STOMPING_PCODE_PARSE_ERROR,
+                'analysed': False,
+                'status': STOMPING_PCODE_PARSE_ERROR,
+                'reason': reason,
+                'pcode_errors': list(self.pcode_errors),
+                'modules': {},
+            }
+            return None
+
+        # A module header with no instruction line means pcodedmp could not walk
+        # its performance cache (e.g. the 0xCAFE magic check failed). Such a
+        # module has no comparable P-code: treat the whole file as not analysed
+        # rather than silently matching on an empty keyword set.
+        empty_modules = sorted(name for name, entry in pcode_modules.items()
+                               if not entry['raw_lines'])
+        if empty_modules:
+            reason = ('pcodedmp could not disassemble the P-code of module(s): {0} '
+                      '(no instruction produced, the performance cache is corrupt or '
+                      'uses an unsupported format)'.format(', '.join(empty_modules)))
+            self.pcode_status = STOMPING_PCODE_PARSE_ERROR
+            self.vba_stomping_detected = None
+            self.vba_stomping_report = {
+                'overall_status': STOMPING_PCODE_PARSE_ERROR,
+                'analysed': False,
+                'status': STOMPING_PCODE_PARSE_ERROR,
+                'reason': reason,
+                'pcode_errors': list(self.pcode_errors),
+                'modules': {},
+            }
+            return None
+
+        # Build the per-module source map, keyed by the same bare module name
+        # used by parse_pcodedmp_output() (e.g. stream "VBA/Module1" -> "Module1").
+        source_modules = {}
+        for (_subfilename, stream_path, _vba_filename, vba_code) in self.extract_all_macros():
+            module_name = _module_key_from_stream_path(stream_path)
+            # The synthetic "VBA P-code" module is appended only after stomping
+            # has been decided; ignore it if a previous run left it cached.
+            if stream_path == 'VBA P-code':
+                continue
+            source_modules[module_name] = vba_code
+
+        module_results = compare_pcode_with_source(pcode_modules, source_modules)
+        for module_name, result in module_results.items():
+            result['stream_path'] = pcode_modules[module_name]['stream_path']
+            if result['status'] == STOMPING_MISMATCH:
+                log.debug('VBA STOMPING EVIDENCE in module %r: keywords missing from '
+                          'its own source code: %r'
+                          % (module_name, result['missing_keywords']))
+            elif result['status'] == STOMPING_SOURCE_MISSING:
+                log.debug('Module %r has P-code but no VBA source code could be '
+                          'extracted' % module_name)
+            else:
+                log.debug('Module %r: P-code keywords all present in its source code'
+                          % module_name)
+
+        mismatched = sorted(name for name, result in module_results.items()
+                            if result['status'] == STOMPING_MISMATCH)
+        source_missing = sorted(name for name, result in module_results.items()
+                                if result['status'] == STOMPING_SOURCE_MISSING)
+        if mismatched:
+            overall_status = STOMPING_MISMATCH
+            self.vba_stomping_detected = True
+        elif source_missing:
+            # No outright mismatch, but at least one module could not be compared:
+            # do not claim either stomping or a clean bill of health.
+            overall_status = STOMPING_SOURCE_MISSING
+            self.vba_stomping_detected = None
+        else:
+            overall_status = STOMPING_MATCH
             self.vba_stomping_detected = False
-            return False
-        # only run it once:
-        if self.vba_stomping_detected is None:
-            log.debug('Analysing the P-code to detect VBA stomping')
-            self.extract_pcode()
-            # print('pcodedmp OK')
-            log.debug('pcodedmp OK')
-            # process the output to extract keywords, to detect VBA stomping
-            keywords = set()
-            for line in self.pcodedmp_output.splitlines():
-                if line.startswith('\t'):
-                    log.debug('P-code: ' + line.strip())
-                    tokens = line.split(None, 1)
-                    mnemonic = tokens[0]
-                    args = ''
-                    if len(tokens) == 2:
-                        args = tokens[1].strip()
-                    # log.debug(repr([mnemonic, args]))
-                    # if mnemonic in ('VarDefn',):
-                    #     # just add the rest of the line
-                    #     keywords.add(args)
-                    # if mnemonic == 'FuncDefn':
-                    #     # function definition: just strip parentheses
-                    #     funcdefn = args.strip('()')
-                    #     keywords.add(funcdefn)
-                    if mnemonic in ('ArgsCall', 'ArgsLd', 'St', 'Ld', 'MemSt', 'Label'):
-                        # sometimes ArgsCall is followed by "(Call)", if so we remove it (issue #489)
-                        if args.startswith('(Call) '):
-                            args = args[7:]
-                        # add 1st argument:
-                        name = args.split(None, 1)[0]
-                        # sometimes pcodedmp reports names like "id_FFFF", which are not
-                        # directly present in the VBA source code
-                        # (for example "Me" in VBA appears as id_FFFF in P-code)
-                        if not name.startswith('id_'):
-                            keywords.add(name)
-                    if mnemonic == 'LitStr':
-                        # re_string = re.compile(r'\"([^\"]|\"\")*\"')
-                        # for match in re_string.finditer(line):
-                        #     print('\t' + match.group())
-                        # the string is the 2nd argument:
-                        s = args.split(None, 1)[1]
-                        # tricky issue: when a string contains double quotes inside,
-                        # pcodedmp returns a single ", whereas in the VBA source code
-                        # it is always a double "".
-                        # We have to remove the " around the strings, then double the remaining ",
-                        # and put back the " around:
-                        if len(s)>=2:
-                            assert(s[0]=='"' and s[-1]=='"')
-                            s = s[1:-1]
-                            s = s.replace('"', '""')
-                            s = '"' + s + '"'
-                        keywords.add(s)
-            log.debug('Keywords extracted from P-code: ' + repr(sorted(keywords)))
-            self.vba_stomping_detected = False
-            # get all VBA code as one string
-            vba_code_all_modules = self.get_vba_code_all_modules()
-            for keyword in keywords:
-                if keyword not in vba_code_all_modules:
-                    log.debug('Keyword {!r} not found in VBA code'.format(keyword))
-                    log.debug('VBA STOMPING DETECTED!')
-                    self.vba_stomping_detected = True
-                    break
-            if not self.vba_stomping_detected:
-                log.debug('No VBA stomping detected.')
+        self.vba_stomping_report = {
+            'overall_status': overall_status,
+            'analysed': True,
+            'status': overall_status,
+            'reason': 'keyword-based per-module comparison of P-code disassembly '
+                      'against the VBA source code',
+            'pcode_errors': list(self.pcode_errors),
+            'mismatched_modules': mismatched,
+            'source_missing_modules': source_missing,
+            'modules': module_results,
+        }
         return self.vba_stomping_detected
+
+    def get_vba_stomping_report(self):
+        """
+        Return the detailed, per-module VBA stomping report.
+
+        Runs detect_vba_stomping() on first call. The report associates every
+        conclusion with its module and the comparison evidence:
+
+            {
+              'overall_status': one of the STOMPING_* constants,
+              'analysed': bool, False when the comparison could not run,
+              'status': same as overall_status (kept for per-module symmetry),
+              'reason': human-readable explanation of the status,
+              'pcode_errors': list of error lines reported by pcodedmp,
+              'mismatched_modules': list of module names with a mismatch,
+              'source_missing_modules': list of module names without source,
+              'modules': {
+                 '<module name>': {
+                    'stream_path': module stream path printed by pcodedmp,
+                    'status': STOMPING_MATCH / STOMPING_MISMATCH /
+                              STOMPING_SOURCE_MISSING,
+                    'missing_keywords': P-code keywords absent from this
+                        module's own source code (the evidence),
+                    'pcode_keyword_count': number of compared P-code keywords,
+                    'source_present': whether source code was extracted,
+                 }, ...
+              }
+            }
+
+        The keyword heuristic only proves that comparable P-code content is
+        absent from the module source; it does not prove malice.
+
+        :return: report dict (never None after this call)
+        :rtype: dict
+        """
+        if self.vba_stomping_report is None:
+            self.detect_vba_stomping()
+        return self.vba_stomping_report
 
     def close(self):
         """
@@ -4077,10 +4420,48 @@ class VBA_Parser_CLI(VBA_Parser):
                 color_type = COLOR_TYPE.get(kw_type, None)
                 t.write_row((kw_type, keyword, description), colors=(color_type, None, None))
             t.close()
-            if self.vba_stomping_detected:
-                print('VBA Stomping detection is experimental: please report any false positive/negative at https://github.com/decalage2/oletools/issues')
+            self.print_vba_stomping_report()
         else:
             print('No suspicious keyword or IOC found.')
+            # Even with no scanner hit, an inconclusive stomping check must be visible:
+            self.print_vba_stomping_report()
+
+    def print_vba_stomping_report(self):
+        """
+        Print the per-module VBA stomping evidence on the console.
+
+        Match results stay silent. Mismatches are printed with the module name
+        and the P-code keywords that module's own source code is missing.
+        Unanalysed inputs and modules without source code are printed as
+        warnings rather than as a clean result.
+        """
+        report = self.get_vba_stomping_report()
+        if report is None:
+            return
+        status = report['overall_status']
+        if status == STOMPING_MATCH:
+            return
+        if status == STOMPING_MISMATCH:
+            print('VBA Stomping detection is experimental: please report any false '
+                  'positive/negative at https://github.com/decalage2/oletools/issues')
+            for module_name in report['mismatched_modules']:
+                result = report['modules'][module_name]
+                print('VBA Stomping evidence in module {0} (stream {1}): the following '
+                      'P-code identifiers/strings are absent from this module\'s source '
+                      'code:'.format(module_name, result['stream_path']))
+                for keyword in result['missing_keywords']:
+                    print('    - {0}'.format(keyword))
+            print('Note: this is a keyword-based heuristic. A P-code/source divergence is '
+                  'not proof of malicious code; benign recompilation or edits can cause it.')
+        elif status == STOMPING_SOURCE_MISSING:
+            print('VBA Stomping check inconclusive: module(s) {0} have P-code but no '
+                  'extractable VBA source code, so their P-code was not compared.'
+                  .format(', '.join(report['source_missing_modules'])))
+        else:
+            print('VBA Stomping check not performed ({0}): {1}'
+                  .format(status, report['reason']))
+            for error_line in report.get('pcode_errors', []):
+                print('    {0}'.format(error_line))
 
     def print_analysis_json(self, show_decoded_strings=False, deobfuscate=False):
         """

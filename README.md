@@ -103,6 +103,39 @@ Tools:
 - [olemap](https://github.com/decalage2/oletools/wiki/olemap): to display a map of all the sectors in an OLE file.
 
 
+VBA stomping detection (olevba)
+--------------------------------
+
+VBA stomping replaces the VBA source code stored in a document while leaving the
+compiled P-code (the performance cache that Office actually executes) untouched.
+olevba detects this by comparing the P-code disassembly produced by pcodedmp with
+the VBA source code.
+
+The comparison is done **per module and per VBA project**: an identifier or
+string found in the P-code of module A is only looked up in the source code of
+module A. This prevents the same-named constant/string living in another module
+from masking a real divergence in module A. Every mismatch is reported together
+with the module name, its OLE stream path and the exact P-code keywords that the
+module's own source code is missing, so the conclusion can be traced back to its
+module and the comparison basis (`VBA_Parser.get_vba_stomping_report()`).
+
+This is a **keyword-based heuristic, not a semantic diff**: a P-code/source
+mismatch only proves that comparable P-code content is absent from the module
+source. Benign changes such as recompiling with another Office version,
+renaming/removing variables or deleting dead code can produce the same signal.
+A mismatch is therefore evidence to review, not a verdict that the file is
+malicious.
+
+When the comparison cannot be performed, olevba reports an explicit
+inconclusive state instead of "no stomping", and never caches it as a clean
+result:
+
+- `in_memory`: the file is only available in memory, which pcodedmp cannot process yet
+- `pcode_unsupported`: pcodedmp is not installed or failed to import
+- `pcode_parse_error`: pcodedmp ran but could not disassemble the P-code (corrupt or unsupported cache)
+- `source_missing`: a module has P-code but no VBA source code could be extracted
+
+
 Projects using oletools:
 ------------------------
 
