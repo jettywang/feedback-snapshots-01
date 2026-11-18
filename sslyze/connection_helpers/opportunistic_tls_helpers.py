@@ -2,8 +2,7 @@ import socket
 import struct
 from abc import abstractmethod, ABC
 from enum import Enum
-from smtplib import SMTP, SMTPException
-from typing import ClassVar, Optional
+from typing import ClassVar, List, Optional, Tuple
 
 
 class ProtocolWithOpportunisticTlsEnum(str, Enum):
@@ -60,48 +59,120 @@ class _OpportunisticTlsHelper(ABC):
 
 
 class _SmtpHelper(_OpportunisticTlsHelper):
-    """Perform an SMTP StartTLS negotiation."""
+    """Perform an SMTP StartTLS negotiation.
+
+    The negotiation is implemented directly on top of the socket (instead of smtplib) so that:
+    * The full reply to each command (greeting, EHLO, STARTTLS) is tracked, including multiline
+      replies, however fragmented the underlying reads are.
+    * Bytes are consumed one at a time, ensuring that no data belonging to the subsequent TLS
+      handshake is ever read from the socket during the plaintext negotiation.
+    """
+
+    # Upper bound on the size of a single reply line, to prevent a broken or malicious server
+    # from making the client read an unbounded amount of data
+    _MAX_REPLY_LINE_LENGTH = 8192
 
     def __init__(self, smtp_ehlo_hostname: str):
         self._smtp_ehlo_hostname = smtp_ehlo_hostname
 
     def prepare_socket_for_tls_handshake(self, sock: socket.socket) -> None:
-        # SMTP parsing has some complicated areas and some unusual but legal
-        # server behavior - this code uses Python's smtplib to handle the protocol.
-        smtp = SMTP(local_hostname=self._smtp_ehlo_hostname)
-        smtp.sock = sock
-
         try:
-            code, server_reply_as_bytes = smtp.getreply()
-        except SMTPException as exc:
-            raise OpportunisticTlsError(f"Unexpected error while performing the SMTP EHLO handshake: {str(exc)}")
+            self._do_starttls_negotiation(sock)
+        except Exception:
+            # The negotiation failed; the socket cannot be reused so close it right away.
+            # socket.timeout and OSError are re-raised as-is so the caller's retry logic applies;
+            # protocol-level problems were already converted to OpportunisticTlsError
+            sock.close()
+            raise
 
+    def _do_starttls_negotiation(self, sock: socket.socket) -> None:
+        # Wait for the server greeting
+        code, reply_lines = self._read_full_reply(sock)
         if code != 220:
-            server_reply_as_str = server_reply_as_bytes.decode()
             raise OpportunisticTlsError(
-                f"Server did not send a '220 service ready' SMTP message: {server_reply_as_str}"
+                f"Server did not send a '220 service ready' SMTP message: {_format_smtp_reply(reply_lines)}"
             )
 
-        try:
-            code, server_reply_as_bytes = smtp.ehlo()
-        except SMTPException as exc:
-            raise OpportunisticTlsError(f"Unexpected error while performing the SMTP EHLO handshake: {str(exc)}")
-
+        # Send EHLO and parse the server's extensions
+        self._send_command(sock, f"EHLO {self._smtp_ehlo_hostname}\r\n".encode("utf-8"))
+        code, reply_lines = self._read_full_reply(sock)
         if code != 250:
-            server_reply_as_str = server_reply_as_bytes.decode()
-            raise OpportunisticTlsError(f"SMTP EHLO was rejected: {server_reply_as_str}")
+            raise OpportunisticTlsError(f"SMTP EHLO was rejected: {_format_smtp_reply(reply_lines)}")
 
-        if not smtp.has_extn("starttls"):
+        if not any(line.split(" ", 1)[0].upper() == "STARTTLS" for line in reply_lines):
             raise OpportunisticTlsError("Server does not support STARTTLS with SMTP")
 
-        try:
-            code, server_reply_as_bytes = smtp.docmd("STARTTLS")
-        except SMTPException as exc:
-            raise OpportunisticTlsError(f"Unexpected error while performing the SMTP EHLO handshake: {str(exc)}")
-
+        # Request the TLS upgrade; only a complete 220 reply means the handshake can start
+        self._send_command(sock, b"STARTTLS\r\n")
+        code, reply_lines = self._read_full_reply(sock)
         if code != 220:
-            server_reply_as_str = server_reply_as_bytes.decode()
-            raise OpportunisticTlsError(f"SMTP STARTTLS rejected: {server_reply_as_str}")
+            raise OpportunisticTlsError(f"SMTP STARTTLS rejected: {_format_smtp_reply(reply_lines)}")
+
+    @staticmethod
+    def _send_command(sock: socket.socket, command: bytes) -> None:
+        # sendall() to transparently handle partial writes
+        sock.sendall(command)
+
+    @classmethod
+    def _read_full_reply(cls, sock: socket.socket) -> Tuple[int, List[str]]:
+        """Read a complete, possibly multiline, SMTP reply.
+
+        Returns the reply code and the text of each reply line. A rejection code or an
+        unterminated multiline reply can never be mistaken for a success, regardless of what
+        text the server puts in subsequent lines.
+        """
+        reply_code: Optional[int] = None
+        reply_lines: List[str] = []
+        while True:
+            line = cls._read_reply_line(sock)
+            if len(line) < 3 or not line[:3].isdigit():
+                raise OpportunisticTlsError(f"Received a malformed SMTP reply line: {line!r}")
+
+            line_code = int(line[:3])
+            if reply_code is None:
+                reply_code = line_code
+            elif line_code != reply_code:
+                raise OpportunisticTlsError(
+                    f"Received an inconsistent SMTP multiline reply: {_format_smtp_reply(reply_lines + [line])}"
+                )
+
+            # Per RFC 5321, a "-" after the reply code means more lines are coming;
+            # a space (or nothing) marks the last line of the reply
+            separator = line[3:4]
+            if separator == "-":
+                reply_lines.append(line[4:])
+            elif separator in (" ", ""):
+                reply_lines.append(line[4:])
+                return reply_code, reply_lines
+            else:
+                raise OpportunisticTlsError(f"Received a malformed SMTP reply line: {line!r}")
+
+    @classmethod
+    def _read_reply_line(cls, sock: socket.socket) -> str:
+        """Read a single CRLF-terminated reply line, one byte at a time.
+
+        Reading one byte at a time guarantees that no byte past the end of the reply (i.e. data
+        belonging to the next stage of the connection, such as the TLS handshake) is consumed.
+        Short reads are handled by looping; a timeout is propagated to the caller as-is.
+        """
+        line_bytes = bytearray()
+        while True:
+            next_byte = sock.recv(1)
+            if not next_byte:
+                raise OpportunisticTlsError(
+                    "Server unexpectedly closed the connection during the SMTP STARTTLS negotiation"
+                )
+            line_bytes += next_byte
+            if next_byte == b"\n":
+                break
+            if len(line_bytes) > cls._MAX_REPLY_LINE_LENGTH:
+                raise OpportunisticTlsError("Received an SMTP reply line that was too long")
+
+        return line_bytes.decode("utf-8", errors="replace").rstrip("\r\n")
+
+
+def _format_smtp_reply(reply_lines: List[str]) -> str:
+    return " ".join(reply_lines)
 
 
 class _XmppHelper(_OpportunisticTlsHelper):

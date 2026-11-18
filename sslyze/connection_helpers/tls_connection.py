@@ -241,11 +241,16 @@ class SslConnection:
             try:
                 opportunistic_tls_helper.prepare_socket_for_tls_handshake(sock)
             except OpportunisticTlsError as e:
+                sock.close()
                 raise ServerRejectedOpportunisticTlsNegotiation(
                     server_location=self._server_location,
                     error_message=e.args[0],
                     network_configuration=self._network_configuration,
                 )
+            except OSError:
+                # The negotiation failed midway (e.g. a timeout); make sure the socket does not leak
+                sock.close()
+                raise
 
         # Pass the connected socket to the SSL client
         self.ssl_client.set_underlying_socket(sock)
