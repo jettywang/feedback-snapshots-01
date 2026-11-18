@@ -322,7 +322,7 @@ def consume_OleSiteConcreteControl(stream):
         if propmask.fPosition:
             stream.read(8)
         control_tip_text = stream.read(control_tip_text_len)
-        if (len(control_tip_text) == 0):
+        if not propmask.fControlTipText:
             control_tip_text = None
         return {'name': name, 'tag': tag, 'id': id, 'tabindex': tabindex,
                 'ClsidCacheIndex': ClsidCacheIndex, 'value': None, 'caption': None,
@@ -400,15 +400,13 @@ def consume_MorphDataControl(stream):
         # MorphDataExtraDataBlock: [MS-OFORMS] 2.2.5.4
         # Discard Size
         stream.read(8)
-        value = stream.read(value_size)
-        # Read caption text.
-        caption = ""
-        if (caption_size > 0):
-            caption = stream.read(caption_size)
-        # Read groupname text.
-        group_name = ""
-        if (group_name_size > 0):
-            group_name = stream.read(group_name_size)
+        # A zero-length value (empty string) is kept as b'' and must not be
+        # confused with an absent property, which stays None.
+        value = stream.read(value_size) if propmask.fValue else None
+        # Read caption text: an empty Caption stays b'', an absent one stays None.
+        caption = stream.read(caption_size) if propmask.fCaption else None
+        # Read groupname text: same empty-vs-absent distinction.
+        group_name = stream.read(group_name_size) if propmask.fGroupName else None
             
     # MorphDataStreamData: [MS-OFORMS] 2.2.5.5
     if propmask.fMouseIcon:
@@ -502,7 +500,8 @@ def consume_LabelControl(stream):
                                       ('fSpecialEffect', 2), ('fPicture', 2),
                                       ('fAccelerator', 2), ('fMouseIcon', 2)])
         # LabelExtraDataBlock: [MS-OFORMS] 2.2.4.4
-        caption = stream.read(caption_size)
+        # Empty Caption (size 0) stays b'', absent Caption stays None.
+        caption = stream.read(caption_size) if propmask.fCaption else None
         stream.read(8)
     # LabelStreamData: [MS-OFORMS] 2.2.4.5
     if propmask.fPicture:
@@ -551,7 +550,10 @@ def extract_OleFormVariables(ole_file, stream_dir):
         elif var['ClsidCacheIndex'] == 57:
             consume_FormControl(data)
         else:
-            # TODO: use logging instead of print
-            print('ERROR: Unsupported stored type in user form: {0}'.format(str(var['ClsidCacheIndex'])))
-            break
+            # An unknown control type cannot be skipped safely: stopping here
+            # would silently attribute later o-stream data to earlier controls.
+            # Raise instead so callers know f and o streams are out of sync.
+            data.raise_error(
+                'Unsupported stored type in user form: {0}'.format(
+                    str(var['ClsidCacheIndex'])))
     return variables
