@@ -759,6 +759,113 @@
       "title": "ProtocolWithOpportunisticTlsEnum",
       "type": "string"
     },
+    "ResumptionAttemptEvidenceAsJson": {
+      "additionalProperties": false,
+      "description": "Auditable evidence for one single session resumption attempt.\n\nEach attempt is fully described by its own evidence record: which target the initial session was obtained from\n(hostname, port, IP address), which SNI and TLS version were configured for the attempt's connections, and what\nthe outcome was. Because every attempt carries its own evidence, scan jobs can complete in any order without\none server's session ever being attributed to another server's result.\n\nThe evidence never contains session secrets: instead of the raw session ID or TLS ticket (which could be\nreplayed to resume the session), only one-way SHA-256 fingerprints are stored. This allows auditors to confirm\nthat the initial and resumed sessions match, without exposing reusable material.\n\nAttributes:\n    mechanism: Whether the attempt exercised session ID or TLS ticket resumption.\n    server_hostname: The hostname of the server the initial session was obtained from.\n    server_port: The port of the server the initial session was obtained from.\n    server_ip_address: The IP address of the server the initial session was obtained from, if known.\n    tls_server_name_indication: The SNI hostname sent in the attempt's ClientHello messages.\n    tls_version_used: The TLS version configured for the attempt's connections.\n    outcome: The outcome of the attempt.\n    initial_session_fingerprint: The SHA-256 fingerprint of the session ID or TLS ticket obtained on the\n        initial connection; None if the server did not assign one.\n    resumed_session_fingerprint: The SHA-256 fingerprint of the session ID or TLS ticket received on the\n        follow-up connection; None if the follow-up connection did not happen or none was assigned.\n    error_message: The connectivity error if the attempt could not be completed; None otherwise.",
+      "properties": {
+        "mechanism": {
+          "$ref": "#/$defs/ResumptionMechanismEnum"
+        },
+        "server_hostname": {
+          "title": "Server Hostname",
+          "type": "string"
+        },
+        "server_port": {
+          "title": "Server Port",
+          "type": "integer"
+        },
+        "server_ip_address": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Server Ip Address"
+        },
+        "tls_server_name_indication": {
+          "title": "Tls Server Name Indication",
+          "type": "string"
+        },
+        "tls_version_used": {
+          "title": "Tls Version Used",
+          "type": "string"
+        },
+        "outcome": {
+          "$ref": "#/$defs/ResumptionAttemptOutcomeEnum"
+        },
+        "initial_session_fingerprint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Initial Session Fingerprint"
+        },
+        "resumed_session_fingerprint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Resumed Session Fingerprint"
+        },
+        "error_message": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error Message"
+        }
+      },
+      "required": [
+        "mechanism",
+        "server_hostname",
+        "server_port",
+        "server_ip_address",
+        "tls_server_name_indication",
+        "tls_version_used",
+        "outcome"
+      ],
+      "title": "ResumptionAttemptEvidenceAsJson",
+      "type": "object"
+    },
+    "ResumptionAttemptOutcomeEnum": {
+      "description": "The auditable outcome of a single session resumption attempt.\n\nAttributes:\n    RESUMED: The server accepted the initial session and resumed it.\n    FULL_REHANDSHAKE: The server ignored the initial session and performed a full handshake instead.\n    NO_SESSION_ASSIGNED: The server did not assign a session ID or TLS ticket on the initial connection, so\n        there was no session to resume.\n    INITIAL_HANDSHAKE_FAILED: The initial connection (to obtain the session) failed; the attempt could not be\n        completed.\n    RESUMPTION_HANDSHAKE_FAILED: The follow-up connection (to resume the session) failed; the attempt could not\n        be completed.",
+      "enum": [
+        "RESUMED",
+        "FULL_REHANDSHAKE",
+        "NO_SESSION_ASSIGNED",
+        "INITIAL_HANDSHAKE_FAILED",
+        "RESUMPTION_HANDSHAKE_FAILED"
+      ],
+      "title": "ResumptionAttemptOutcomeEnum",
+      "type": "string"
+    },
+    "ResumptionMechanismEnum": {
+      "description": "Which TLS 1.2 session resumption mechanism a single resumption attempt exercised.",
+      "enum": [
+        "SESSION_ID",
+        "TLS_TICKET"
+      ],
+      "title": "ResumptionMechanismEnum",
+      "type": "string"
+    },
     "RobotScanAttemptAsJson": {
       "additionalProperties": false,
       "properties": {
@@ -1052,7 +1159,7 @@
     },
     "SessionResumptionSupportScanResultAsJson": {
       "additionalProperties": false,
-      "description": "The result of testing a server for TLS 1.2 session resumption support, using Session IDs and TLS tickets.\n\nAttributes:\n    session_id_resumption_result: The overall result of session ID resumption testing.\n    session_id_attempted_resumptions_count: The total number of session ID resumptions that were attempted.\n    session_id_successful_resumptions_count: The number of session ID resumptions that were successful.\n    tls_ticket_resumption_result: The overall result of TLS ticket resumption testing.\n    tls_ticket_attempted_resumptions_count: The total number of TLS ticket resumptions that were attempted.\n    tls_ticket_successful_resumptions_count: The number of TLS ticket resumptions that were successful.",
+      "description": "The result of testing a server for TLS 1.2 session resumption support, using Session IDs and TLS tickets.\n\nAttributes:\n    session_id_resumption_result: The overall result of session ID resumption testing.\n    session_id_attempted_resumptions_count: The total number of session ID resumptions that were attempted.\n    session_id_successful_resumptions_count: The number of session ID resumptions that were successful.\n    tls_ticket_resumption_result: The overall result of TLS ticket resumption testing.\n    tls_ticket_attempted_resumptions_count: The total number of TLS ticket resumptions that were attempted.\n    tls_ticket_successful_resumptions_count: The number of TLS ticket resumptions that were successful.\n    session_id_attempts: The auditable evidence for each session ID resumption attempt, in completion order.\n    tls_ticket_attempts: The auditable evidence for each TLS ticket resumption attempt, in completion order.",
       "properties": {
         "session_id_resumption_result": {
           "$ref": "#/$defs/TlsResumptionSupportEnum"
@@ -1075,6 +1182,22 @@
         "tls_ticket_successful_resumptions_count": {
           "title": "Tls Ticket Successful Resumptions Count",
           "type": "integer"
+        },
+        "session_id_attempts": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ResumptionAttemptEvidenceAsJson"
+          },
+          "title": "Session Id Attempts",
+          "type": "array"
+        },
+        "tls_ticket_attempts": {
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ResumptionAttemptEvidenceAsJson"
+          },
+          "title": "Tls Ticket Attempts",
+          "type": "array"
         }
       },
       "required": [
@@ -2208,7 +2331,7 @@
       "type": "string"
     },
     "sslyze_version": {
-      "default": "6.3.0",
+      "default": "6.3.1",
       "title": "Sslyze Version",
       "type": "string"
     },

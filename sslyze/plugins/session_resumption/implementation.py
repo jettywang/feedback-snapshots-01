@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Optional, Dict, Any, Tuple, Union
+from typing import List, Optional, Dict, Tuple, Union
 
 from sslyze.plugins.plugin_base import (
     ScanCommandResult,
@@ -15,6 +15,9 @@ from sslyze.plugins.session_resumption._resumption_with_id import (
     _ScanJobResultEnum,
     TlsResumptionSupportEnum,
     ServerOnlySupportsTls13,
+    ResumptionAttemptEvidence,
+    ResumptionAttemptOutcomeEnum,
+    ResumptionMechanismEnum,
 )
 from sslyze.plugins.session_resumption._resumption_with_ticket import resume_with_tls_ticket
 from sslyze.server_connectivity import ServerConnectivityInfo
@@ -44,6 +47,8 @@ class SessionResumptionSupportScanResult(ScanCommandResult):
         tls_ticket_resumption_result: The overall result of TLS ticket resumption testing.
         tls_ticket_attempted_resumptions_count: The total number of TLS ticket resumptions that were attempted.
         tls_ticket_successful_resumptions_count: The number of TLS ticket resumptions that were successful.
+        session_id_attempts: The auditable evidence for each session ID resumption attempt, in completion order.
+        tls_ticket_attempts: The auditable evidence for each TLS ticket resumption attempt, in completion order.
 
     """
 
@@ -54,6 +59,9 @@ class SessionResumptionSupportScanResult(ScanCommandResult):
     tls_ticket_resumption_result: TlsResumptionSupportEnum
     tls_ticket_attempted_resumptions_count: int
     tls_ticket_successful_resumptions_count: int
+
+    session_id_attempts: Tuple[ResumptionAttemptEvidence, ...] = ()
+    tls_ticket_attempts: Tuple[ResumptionAttemptEvidence, ...] = ()
 
 
 def _resumption_result_to_console_output(
@@ -75,6 +83,33 @@ def _resumption_result_to_console_output(
     )
 
     return f"{resumption_support_txt} {resum_rate_txt}"
+
+
+def _resumption_attempt_to_console_output(attempt_index: int, attempt: ResumptionAttemptEvidence) -> str:
+    target_txt = f"{attempt.server_hostname}:{attempt.server_port}"
+    connection_config_txt = f"SNI: {attempt.tls_server_name_indication}, {attempt.tls_version_used.name}"
+
+    if attempt.outcome == ResumptionAttemptOutcomeEnum.RESUMED:
+        outcome_txt = "RESUMED - the server resumed the initial session"
+    elif attempt.outcome == ResumptionAttemptOutcomeEnum.FULL_REHANDSHAKE:
+        outcome_txt = "NOT RESUMED - the server performed a full handshake instead"
+    elif attempt.outcome == ResumptionAttemptOutcomeEnum.NO_SESSION_ASSIGNED:
+        outcome_txt = "NOT RESUMED - the server did not assign a session ID or TLS ticket"
+    elif attempt.outcome == ResumptionAttemptOutcomeEnum.INITIAL_HANDSHAKE_FAILED:
+        outcome_txt = f"INCOMPLETE - the initial handshake failed ({attempt.error_message})"
+    elif attempt.outcome == ResumptionAttemptOutcomeEnum.RESUMPTION_HANDSHAKE_FAILED:
+        outcome_txt = f"INCOMPLETE - the resumption handshake failed ({attempt.error_message})"
+    else:
+        raise ValueError(f"Unexpected value: {attempt.outcome}")
+
+    fingerprints_txt = ""
+    if attempt.initial_session_fingerprint:
+        fingerprints_txt = f" [initial session sha256: {attempt.initial_session_fingerprint[:16]}..."
+        if attempt.resumed_session_fingerprint:
+            fingerprints_txt += f", resumed session sha256: {attempt.resumed_session_fingerprint[:16]}..."
+        fingerprints_txt += "]"
+
+    return f"        #{attempt_index} {target_txt} ({connection_config_txt}): {outcome_txt}{fingerprints_txt}"
 
 
 class _SessionResumptionSupportCliConnector(
@@ -148,16 +183,26 @@ class _SessionResumptionSupportCliConnector(
             )
         result_as_txt.append(f"      With TLS Tickets: {tls_ticket_support_txt}.")
 
+        # Per-attempt evidence, so each attempt's target, TLS configuration and outcome can be audited individually
+        if result.session_id_attempts:
+            result_as_txt.append("      Session ID resumption attempts:")
+            for attempt_index, attempt in enumerate(result.session_id_attempts, start=1):
+                result_as_txt.append(_resumption_attempt_to_console_output(attempt_index, attempt))
+        if result.tls_ticket_attempts:
+            result_as_txt.append("      TLS ticket resumption attempts:")
+            for attempt_index, attempt in enumerate(result.tls_ticket_attempts, start=1):
+                result_as_txt.append(_resumption_attempt_to_console_output(attempt_index, attempt))
+
         return result_as_txt
 
 
 def _process_resumption_attempt_results(
-    resumption_attempt_results: List[bool],
+    resumption_attempts: List[ResumptionAttemptEvidence],
 ) -> Tuple[TlsResumptionSupportEnum, int, int]:
-    total_attempts_count = len(resumption_attempt_results)
+    total_attempts_count = len(resumption_attempts)
     successful_attempts_count = 0
-    for was_resumption_successful in resumption_attempt_results:
-        if was_resumption_successful:
+    for attempt in resumption_attempts:
+        if attempt.outcome == ResumptionAttemptOutcomeEnum.RESUMED:
             successful_attempts_count += 1
 
     if successful_attempts_count == 0:
@@ -211,15 +256,16 @@ class SessionResumptionSupportImplementation(
         if len(scan_job_results) == 0:
             raise RuntimeError(f"Unexpected number of scan jobs received: {scan_job_results}")
 
-        # Sort TLS ticket VS session ID results
-        results_dict: Dict[_ScanJobResultEnum, List[Any]] = {
+        # Sort TLS ticket VS session ID results; each job returns its own self-contained evidence record, so
+        # attribution to a target never depends on the order in which the jobs completed
+        results_dict: Dict[_ScanJobResultEnum, List[ResumptionAttemptEvidence]] = {
             _ScanJobResultEnum.SESSION_ID_RESUMPTION: [],
             _ScanJobResultEnum.TLS_TICKET_RESUMPTION: [],
         }
         for job in scan_job_results:
             try:
-                result_enum, value = job.get_result()
-                results_dict[result_enum].append(value)
+                result_enum, attempt_evidence = job.get_result()
+                results_dict[result_enum].append(attempt_evidence)
             except ServerOnlySupportsTls13:
                 # If the server only supports TLS 1.3, none of the resumption mechanisms in this plugin are supported
                 # by the server
@@ -250,4 +296,6 @@ class SessionResumptionSupportImplementation(
             tls_ticket_resumption_result=tls_ticket_result,
             tls_ticket_attempted_resumptions_count=tls_ticket_total_count,
             tls_ticket_successful_resumptions_count=tls_ticket_successful_count,
+            session_id_attempts=tuple(results_dict[_ScanJobResultEnum.SESSION_ID_RESUMPTION]),
+            tls_ticket_attempts=tuple(results_dict[_ScanJobResultEnum.TLS_TICKET_RESUMPTION]),
         )

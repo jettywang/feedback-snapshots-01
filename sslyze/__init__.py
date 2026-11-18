@@ -68,6 +68,9 @@ from sslyze.plugins.session_resumption.implementation import (
     SessionResumptionSupportScanResult,
     TlsResumptionSupportEnum,
     SessionResumptionSupportExtraArgument,
+    ResumptionAttemptEvidence,
+    ResumptionAttemptOutcomeEnum,
+    ResumptionMechanismEnum,
 )
 from sslyze.plugins.compression_plugin import CompressionScanResult
 from sslyze.plugins.early_data_plugin import EarlyDataScanResult
