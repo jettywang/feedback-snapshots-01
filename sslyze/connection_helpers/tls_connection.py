@@ -1,6 +1,7 @@
 import socket
+from http.client import HTTPException
 from pathlib import Path
-from typing import Optional, TYPE_CHECKING
+from typing import Any, Optional, TYPE_CHECKING, cast
 
 from nassl.legacy_ssl_client import LegacySslClient
 
@@ -21,7 +22,7 @@ from sslyze.errors import (
     ServerTlsConfigurationNotSupported,
     TlsHandshakeTimedOut,
 )
-from sslyze.connection_helpers.http_response_parser import HttpResponseParser
+from sslyze.connection_helpers.http_response_parser import HttpResponseParser, NotAValidHttpResponseError
 
 import time
 
@@ -53,6 +54,29 @@ class _ConnectionToHttpProxyFailed(Exception):
     pass
 
 
+class _SocketWithLeftoverData:
+    """A wrapper to return data read past the end of the proxy's CONNECT response before the socket's data.
+
+    When the proxy's response and the beginning of the tunneled TLS stream are received in a single read, the
+    extra bytes must be handed over to the TLS client instead of being discarded.
+    """
+
+    def __init__(self, connected_socket: socket.socket, leftover_data: bytes) -> None:
+        self._connected_socket = connected_socket
+        self._leftover_data = leftover_data
+
+    def recv(self, bufsize: int, flags: int = 0) -> bytes:
+        if self._leftover_data:
+            data = self._leftover_data[:bufsize]
+            self._leftover_data = self._leftover_data[bufsize:]
+            return data
+        return self._connected_socket.recv(bufsize, flags)
+
+    def __getattr__(self, name: str) -> Any:
+        # Delegate everything else (send, close, settimeout, etc.) to the underlying socket
+        return getattr(self._connected_socket, name)
+
+
 def _open_socket_for_connection_via_http_proxy(
     server_location: ServerNetworkLocation, network_timeout: int
 ) -> socket.socket:
@@ -62,19 +86,6 @@ def _open_socket_for_connection_via_http_proxy(
             (server_location.http_proxy_settings.hostname, server_location.http_proxy_settings.port),
             timeout=network_timeout,
         )
-
-        # Send a CONNECT request with the host we want to tunnel to
-        proxy_authorization_header = server_location.http_proxy_settings.proxy_authorization_header
-        if proxy_authorization_header is None:
-            sock.send(f"CONNECT {server_location.hostname}:{server_location.port} HTTP/1.1\r\n\r\n".encode("utf-8"))
-        else:
-            sock.send(
-                (
-                    f"CONNECT {server_location.hostname}:{server_location.port} HTTP/1.1\r\n"
-                    f"Proxy-Authorization: Basic {proxy_authorization_header}\r\n\r\n"
-                ).encode("utf-8")
-            )
-        http_response = HttpResponseParser.parse_from_socket(sock)
     except socket.timeout:
         raise _ConnectionToHttpProxyTimedOut()
     except ConnectionError:
@@ -82,10 +93,42 @@ def _open_socket_for_connection_via_http_proxy(
     except socket.error:
         raise _ConnectionToHttpProxyFailed()
 
+    # Send a CONNECT request with the host we want to tunnel to
+    # The proxy's credentials are only sent as part of this request, never within the tunnel
+    proxy_authorization_header = server_location.http_proxy_settings.proxy_authorization_header
+    if proxy_authorization_header is None:
+        connect_request = f"CONNECT {server_location.hostname}:{server_location.port} HTTP/1.1\r\n\r\n"
+    else:
+        connect_request = (
+            f"CONNECT {server_location.hostname}:{server_location.port} HTTP/1.1\r\n"
+            f"Proxy-Authorization: Basic {proxy_authorization_header}\r\n\r\n"
+        )
+
+    try:
+        sock.sendall(connect_request.encode("utf-8"))
+
+        # Read the proxy's response; interim 1xx responses are skipped by the parser, and any extra bytes
+        # received after the final response's headers belong to the tunneled TLS stream
+        http_response, leftover_data = HttpResponseParser.parse_from_socket_and_return_leftover(sock)
+    except socket.timeout:
+        sock.close()
+        raise _ConnectionToHttpProxyTimedOut()
+    except ConnectionError:
+        sock.close()
+        raise _HttpProxyRejectedConnection("The HTTP proxy rejected the connection")
+    except (socket.error, NotAValidHttpResponseError, HTTPException):
+        sock.close()
+        raise _ConnectionToHttpProxyFailed()
+
     # Check if the proxy was able to connect to the host
     if http_response.status != 200:
+        sock.close()
         raise _HttpProxyRejectedConnection("The HTTP proxy rejected the CONNECT request")
 
+    if leftover_data:
+        # Bytes received past the end of the CONNECT response are the beginning of the TLS stream
+        # nassl only relies on recv/send/close so the wrapper can be passed wherever a socket is expected
+        return cast(socket.socket, _SocketWithLeftoverData(sock, leftover_data))
     return sock
 
 
