@@ -50,6 +50,48 @@ Some of the tasks that pefile makes possible are:
   * Overwriting fields should mostly be safe.
 * Packer detection with [PEiD’s signatures](https://github.com/erocarrera/pefile/blob/wiki/PEiDSignatures.md)
 * [PEiD signature](https://github.com/erocarrera/pefile/blob/wiki/PEiDSignatures.md) generation
+* Following export forwarders across a caller-supplied set of modules
+
+### Export forwarders
+
+`PE.DIRECTORY_ENTRY_EXPORT.symbols` exposes the raw `forwarder` string of each
+export. Resolving that string to an implementation needs the target module.
+`ExportForwardResolver` only uses modules the caller supplies, as a mapping (or
+iterable of pairs) from the caller's module name to a `PE` instance or the raw
+image bytes:
+
+```python
+from pefile import PE, ExportForwardResolver
+
+modules = {
+    "kernelbase.dll": PE("kernelbase.dll"),
+    "kernel32.dll": PE("kernel32.dll"),
+}
+result = ExportForwardResolver(modules).resolve("kernel32.dll", "HeapAlloc")
+
+print(result.status)                     # "resolved"
+print(result.implementation_determined)  # True
+for step in result.steps:
+    print(step.module, step.lookup_kind, step.lookup_value, step.status)
+    if step.forwarder:
+        print(step.provenance["forwarder_string"])
+print(result.terminal["module"], result.terminal["name"], result.terminal["rva"])
+```
+
+* Targets are matched against the names the caller gave the candidates,
+  case-insensitively and optionally without the `.dll` suffix. The export
+  directory's display name, file names and the host system are never used.
+* Exported names are matched case-sensitively, as the loader does. A biased
+  ordinal (`12` or `"#12"`) is looked up with the module's own ordinal base, and
+  forwarders to ordinals such as `"OTHER.#27"` are followed the same way.
+* Same-named candidates, same-named exports and API-set contracts with several
+  targets are reported as ambiguous instead of being guessed.
+* API-set contracts (`api-ms-win-*.dll`) are only expanded through the
+  `api_sets` mapping; unmapped contracts stop with `api_set_unmapped`.
+* Every step keeps the module, the name or ordinal used, the matching export
+  entry and its file offsets, so each edge of the chain has a source.
+  `result.implementation_determined` is only true when a non-forwarded export
+  was reached; a readable forwarder string alone never sets it.
 
 Please, refer to [Usage Examples](https://github.com/erocarrera/pefile/blob/wiki/UsageExamples.md#introduction) for some code snippets that demonstrate how to use _pefile_.
 

@@ -1659,6 +1659,1207 @@ class ExportData(DataContainer):
         self.__dict__[name] = val
 
 
+# ---------------------------------------------------------------------------
+# Export forwarding resolution
+# ---------------------------------------------------------------------------
+
+EXPORT_FORWARD_RESOLVED = "resolved"
+EXPORT_FORWARD_MISSING_MODULE = "missing_module"
+EXPORT_FORWARD_AMBIGUOUS_MODULE = "ambiguous_module"
+EXPORT_FORWARD_MISSING_EXPORT = "missing_export"
+EXPORT_FORWARD_AMBIGUOUS_EXPORT = "ambiguous_export"
+EXPORT_FORWARD_INVALID_MODULE = "invalid_module"
+EXPORT_FORWARD_NO_EXPORT_DIRECTORY = "no_export_directory"
+EXPORT_FORWARD_INVALID_EXPORT_DIRECTORY = "invalid_export_directory"
+EXPORT_FORWARD_API_SET_UNMAPPED = "api_set_unmapped"
+EXPORT_FORWARD_API_SET_LOOP = "api_set_loop"
+EXPORT_FORWARD_INVALID_FORWARDER = "invalid_forwarder"
+EXPORT_FORWARD_CYCLE = "cycle"
+EXPORT_FORWARD_DEPTH_LIMIT = "depth_limit"
+
+# A forwarder string is "<module>.<symbol>" and lives in the export directory.
+# Bound its length so malformed directories cannot make the resolver read
+# arbitrary amounts of data.
+MAX_FORWARDER_STRING_LENGTH = 512
+
+# An API-set contract can map to another contract. Bound the total number of
+# modules one mapping may expand to.
+MAX_API_SET_EXPANSION = 64
+
+
+def _text(value):
+    """Render a PE string without leaking raw bytes into the result."""
+    if value is None:
+        return None
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return bytes(value).decode("utf-8", "backslashreplace")
+    return str(value)
+
+
+def _module_key(name):
+    return _text(name).casefold()
+
+
+def _module_stem(name):
+    key = _module_key(name)
+    return key[: -len(".dll")] if key.endswith(".dll") else key
+
+
+def _is_api_set(name):
+    key = _module_key(name)
+    return (
+        key.startswith("api-ms-")
+        or key.startswith("ext-ms-")
+        or key.startswith("api-set-")
+    )
+
+
+def _json_safe(value):
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return bytes(value).decode("utf-8", "backslashreplace")
+    if isinstance(value, dict):
+        return {_json_safe(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
+def _coerce_candidate_modules(modules):
+    """Validate the caller's explicit candidate modules.
+
+    ``modules`` is a mapping, or an iterable of pairs, from the caller's
+    module name to a :class:`PE` instance or the raw image bytes. File names,
+    paths and other host-system lookups are deliberately rejected so that a
+    forwarder can only be resolved against what the caller supplied.
+    """
+
+    if isinstance(modules, PE):
+        raise TypeError(
+            "modules must be a mapping or an iterable of (name, module) pairs"
+        )
+    if isinstance(modules, dict):
+        items = list(modules.items())
+    else:
+        try:
+            items = list(modules)
+        except TypeError:
+            raise TypeError(
+                "modules must be a mapping or an iterable of (name, module) pairs"
+            ) from None
+
+    candidates = []
+    for item in items:
+        try:
+            name, module = item
+        except (TypeError, ValueError):
+            raise TypeError(
+                "modules must be a mapping or an iterable of (name, module) pairs"
+            ) from None
+        if not isinstance(name, (str, bytes, bytearray)):
+            raise TypeError("candidate module names must be str or bytes")
+        name = _text(name)
+        if not name:
+            raise ValueError("candidate module names must not be empty")
+        if isinstance(module, PE):
+            candidates.append((name, module))
+        elif isinstance(module, (bytes, bytearray, memoryview)):
+            candidates.append((name, bytes(module)))
+        else:
+            raise TypeError(
+                "candidate modules must be PE instances or raw image bytes; "
+                "paths and display names are never resolved on the host"
+            )
+    return candidates
+
+
+class ExportForwardStep(DataContainer):
+    """One export lookup while following a forwarder chain.
+
+    index:              zero-based position of this lookup in the chain
+    module:             caller supplied name of the module that was inspected
+    requested_module:   module name before any API-set mapping was applied
+    lookup_kind:        "name" or "ordinal"
+    lookup_value:       export name or biased ordinal that was looked up
+    status:             outcome of this lookup ("forwarded", "resolved", ...)
+    export:             snapshot of the export entry used, or None
+    forwarder:          raw forwarder string from the export entry, if any
+    target_module:      module parsed from the forwarder string
+    target_symbol:      name or biased ordinal parsed from the forwarder string
+    target_symbol_kind: "name" or "ordinal"
+    provenance:         directory fields, file offsets and module match backing
+                        this step; every forward edge records its source
+    detail:             explanation when the lookup did not succeed
+    repeats_step:       for a cycle, the index of the repeated lookup
+    """
+
+    @property
+    def evidence(self):
+        return self.provenance
+
+    def to_dict(self):
+        return _json_safe(
+            {
+                "index": self.index,
+                "module": self.module,
+                "requested_module": self.requested_module,
+                "lookup": {
+                    "kind": self.lookup_kind,
+                    "value": self.lookup_value,
+                },
+                "status": self.status,
+                "export": self.export,
+                "forwarder": self.forwarder,
+                "target": {
+                    "module": self.target_module,
+                    "symbol": self.target_symbol,
+                    "symbol_kind": self.target_symbol_kind,
+                }
+                if self.target_module is not None
+                else None,
+                "provenance": self.provenance,
+                "detail": self.detail,
+                "repeats_step": self.repeats_step,
+            }
+        )
+
+
+class ExportForwardResult(DataContainer):
+    """Read-only result of resolving one exported symbol through forwarders.
+
+    start_module:      caller supplied name of the module the lookup started in
+    start_symbol:      export name or biased ordinal that was requested
+    status:            "resolved" or the reason resolution stopped
+    implementation_determined:
+                       true only when an implementation export (an export whose
+                       address is not a forwarder) was reached. A readable
+                       forwarder string alone never sets this to true.
+    terminal:          implementation export details when status is "resolved"
+    steps:             ExportForwardStep instances in lookup order
+    failure:           step and reason information for a non-resolved chain
+    detail:            human readable explanation for a non-resolved chain
+    api_sets_provided: API-set contracts the caller supplied a mapping for
+    """
+
+    @property
+    def resolved(self):
+        return self.status == EXPORT_FORWARD_RESOLVED
+
+    @property
+    def implementation(self):
+        return self.terminal
+
+    def to_dict(self):
+        return _json_safe(
+            {
+                "start": {
+                    "module": self.start_module,
+                    "symbol": self.start_symbol,
+                },
+                "status": self.status,
+                "implementation_determined": self.implementation_determined,
+                "terminal": self.terminal,
+                "steps": [step.to_dict() for step in self.steps],
+                "failure": self.failure,
+                "detail": self.detail,
+                "api_sets_provided": self.api_sets_provided,
+            }
+        )
+
+
+class ExportForwardResolver:
+    """Resolve PE export forwarders using only explicitly supplied modules.
+
+    The resolver never looks at the export directory's display name, never
+    opens a file and never searches the host system for a DLL. A forwarder
+    target is matched against the names the caller used for the candidate
+    modules. If several candidates share that name, or several exports share
+    the requested name, the lookup is reported as ambiguous instead of
+    arbitrarily choosing one.
+
+    ``api_sets`` maps an API-set contract name to the module name (or names)
+    that implement it. Contracts without an entry are reported as
+    ``api_set_unmapped``; they are not guessed from the host.
+    """
+
+    RESOLVED = EXPORT_FORWARD_RESOLVED
+    MISSING_MODULE = EXPORT_FORWARD_MISSING_MODULE
+    AMBIGUOUS_MODULE = EXPORT_FORWARD_AMBIGUOUS_MODULE
+    MISSING_EXPORT = EXPORT_FORWARD_MISSING_EXPORT
+    AMBIGUOUS_EXPORT = EXPORT_FORWARD_AMBIGUOUS_EXPORT
+    INVALID_MODULE = EXPORT_FORWARD_INVALID_MODULE
+    NO_EXPORT_DIRECTORY = EXPORT_FORWARD_NO_EXPORT_DIRECTORY
+    INVALID_EXPORT_DIRECTORY = EXPORT_FORWARD_INVALID_EXPORT_DIRECTORY
+    API_SET_UNMAPPED = EXPORT_FORWARD_API_SET_UNMAPPED
+    API_SET_LOOP = EXPORT_FORWARD_API_SET_LOOP
+    INVALID_FORWARDER = EXPORT_FORWARD_INVALID_FORWARDER
+    CYCLE = EXPORT_FORWARD_CYCLE
+    DEPTH_LIMIT = EXPORT_FORWARD_DEPTH_LIMIT
+
+    def __init__(self, modules, api_sets=None, max_depth=32):
+        if (
+            not isinstance(max_depth, int)
+            or isinstance(max_depth, bool)
+            or max_depth < 0
+        ):
+            raise ValueError("max_depth must be a non-negative integer")
+        self.max_depth = max_depth
+
+        self._candidates = _coerce_candidate_modules(modules)
+        self._values = {}
+        self._by_name = defaultdict(list)
+        self._by_stem = defaultdict(list)
+        for index, (name, module) in enumerate(self._candidates):
+            self._by_name[_module_key(name)].append((index, name, module))
+            self._by_stem[_module_stem(name)].append((index, name, module))
+        for name, module in self._candidates:
+            self._values.setdefault(name, module)
+        self._export_cache = {}
+
+        self.api_sets = {}
+        if api_sets is not None:
+            if not hasattr(api_sets, "items"):
+                raise TypeError("api_sets must be a mapping")
+            for contract, targets in api_sets.items():
+                if not isinstance(contract, (str, bytes, bytearray)):
+                    raise TypeError("API-set contract names must be str or bytes")
+                if isinstance(targets, (str, bytes, bytearray)):
+                    targets = [targets]
+                else:
+                    try:
+                        targets = list(targets)
+                    except TypeError:
+                        raise TypeError(
+                            "API-set mappings must be a module name or a list of names"
+                        ) from None
+                names = []
+                for target in targets:
+                    if not isinstance(target, (str, bytes, bytearray)):
+                        raise TypeError(
+                            "API-set mappings must be a module name or a list of names"
+                        )
+                    names.append(_text(target))
+                self.api_sets[_text(contract)] = names
+        self._api_sets_by_key = {
+            _module_key(contract): names
+            for contract, names in self.api_sets.items()
+        }
+        self.api_sets_provided = sorted(self.api_sets)
+
+    # -- candidate matching --------------------------------------------
+
+    def _find_module(self, reference):
+        exact = self._by_name.get(_module_key(reference), [])
+        if len(exact) == 1:
+            return {"status": "found", "module": exact[0][1], "match": "exact"}
+        if len(exact) > 1:
+            return {
+                "status": "ambiguous",
+                "candidates": [name for _index, name, _module in exact],
+                "match": "exact",
+            }
+
+        approximate = self._by_stem.get(_module_stem(reference), [])
+        if len(approximate) == 1:
+            return {
+                "status": "found",
+                "module": approximate[0][1],
+                "match": "extension_insensitive",
+            }
+        if len(approximate) > 1:
+            return {
+                "status": "ambiguous",
+                "candidates": [name for _index, name, _module in approximate],
+                "match": "extension_insensitive",
+            }
+        return {"status": "missing"}
+
+    def _api_set_targets(self, contract):
+        key = _module_key(contract)
+        targets = self._api_sets_by_key.get(key)
+        if targets is not None:
+            return targets
+        stem = _module_stem(contract)
+        for contract_key, names in self._api_sets_by_key.items():
+            if _module_stem(contract_key) == stem:
+                return names
+        return None
+
+    def _expand_api_set(self, contract, trace, seen, expanded):
+        key = _module_key(contract)
+        if key in seen:
+            return {
+                "status": self.API_SET_LOOP,
+                "contract": _text(contract),
+                "trace": list(trace),
+                "detail": f"API-set mappings form a loop at {_text(contract)}",
+            }
+        targets = self._api_set_targets(contract)
+        if targets is None:
+            return {
+                "status": self.API_SET_UNMAPPED,
+                "contract": _text(contract),
+                "trace": list(trace),
+                "detail": "no API-set mapping was supplied for "
+                f"{_text(contract)}",
+            }
+        if not targets:
+            return {
+                "status": self.API_SET_UNMAPPED,
+                "contract": _text(contract),
+                "trace": list(trace),
+                "detail": "the supplied API-set mapping for "
+                f"{_text(contract)} is empty",
+            }
+
+        next_trace = trace + [_text(contract)]
+        for target in targets:
+            if _is_api_set(target):
+                if self._api_set_targets(target) is not None:
+                    result = self._expand_api_set(
+                        target, next_trace, seen | {key}, expanded
+                    )
+                    if isinstance(result, dict):
+                        return result
+                    continue
+                if self._find_module(target)["status"] != "found":
+                    return {
+                        "status": self.API_SET_UNMAPPED,
+                        "contract": _text(target),
+                        "trace": next_trace,
+                        "detail": "no API-set mapping was supplied for "
+                        f"{_text(target)}",
+                    }
+            if len(expanded) >= MAX_API_SET_EXPANSION:
+                return {
+                    "status": self.API_SET_LOOP,
+                    "contract": _text(contract),
+                    "trace": list(trace),
+                    "detail": "API-set mappings expand to too many modules",
+                }
+            expanded.append((next_trace, target))
+        if not expanded:
+            return {
+                "status": self.API_SET_UNMAPPED,
+                "contract": _text(contract),
+                "trace": list(trace),
+                "detail": "the supplied API-set mapping for "
+                f"{_text(contract)} has no concrete module",
+            }
+        return expanded
+
+    def _expand_module_reference(self, reference):
+        if not _is_api_set(reference):
+            return [([], _text(reference))]
+        return self._expand_api_set(reference, [], frozenset(), [])
+
+    # -- export directory parsing --------------------------------------
+
+    @staticmethod
+    def _safe_offset(pe, rva):
+        try:
+            return pe.get_offset_from_rva(rva)
+        except (PEFormatError, TypeError, ValueError):
+            return None
+
+    def _module_exports(self, module):
+        if module in self._export_cache:
+            return self._export_cache[module]
+
+        value = self._values[module]
+        try:
+            if isinstance(value, PE):
+                pe = PE(data=bytes(value.write()), fast_load=True)
+            else:
+                pe = PE(data=value, fast_load=True)
+        except Exception as exc:  # noqa: BLE001 - report malformed candidates
+            result = {
+                "status": self.INVALID_MODULE,
+                "detail": f"candidate module could not be parsed: {exc}",
+            }
+            self._export_cache[module] = result
+            return result
+
+        try:
+            directory = pe.OPTIONAL_HEADER.DATA_DIRECTORY[
+                DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_EXPORT"]
+            ]
+        except (AttributeError, IndexError, TypeError):
+            result = {
+                "status": self.NO_EXPORT_DIRECTORY,
+                "detail": "optional header has no export data directory",
+            }
+            self._export_cache[module] = result
+            return result
+
+        rva, size = directory.VirtualAddress, directory.Size
+        if not rva:
+            result = {
+                "status": self.NO_EXPORT_DIRECTORY,
+                "detail": "export data directory is empty",
+                "directory": {"rva": rva, "size": size},
+            }
+            self._export_cache[module] = result
+            return result
+
+        try:
+            export_dir = pe.parse_export_directory(rva, size)
+        except Exception as exc:  # noqa: BLE001 - report malformed candidates
+            result = {
+                "status": self.INVALID_EXPORT_DIRECTORY,
+                "detail": f"export directory could not be parsed: {exc}",
+                "directory": {"rva": rva, "size": size},
+            }
+            self._export_cache[module] = result
+            return result
+
+        if export_dir is None:
+            result = {
+                "status": self.INVALID_EXPORT_DIRECTORY,
+                "detail": "export directory could not be parsed",
+                "directory": {"rva": rva, "size": size},
+            }
+            self._export_cache[module] = result
+            return result
+
+        structure = export_dir.struct
+        directory_info = {
+            "rva": rva,
+            "size": size,
+            "file_offset": self._safe_offset(pe, rva),
+            "base": structure.Base,
+            "number_of_functions": structure.NumberOfFunctions,
+            "number_of_names": structure.NumberOfNames,
+            "address_of_functions": structure.AddressOfFunctions,
+            "address_of_names": structure.AddressOfNames,
+            "address_of_name_ordinals": structure.AddressOfNameOrdinals,
+            "address_of_functions_offset": self._safe_offset(
+                pe, structure.AddressOfFunctions
+            ),
+            "address_of_names_offset": self._safe_offset(
+                pe, structure.AddressOfNames
+            ),
+            "address_of_name_ordinals_offset": self._safe_offset(
+                pe, structure.AddressOfNameOrdinals
+            ),
+            "name": export_dir.name,
+            "name_text": _text(export_dir.name),
+        }
+        result = {
+            "status": "ok",
+            "pe": pe,
+            "export_dir": export_dir,
+            "directory": directory_info,
+            "image_base": pe.OPTIONAL_HEADER.ImageBase,
+        }
+        self._export_cache[module] = result
+        return result
+
+    @staticmethod
+    def _unique_exports(matches):
+        unique = {}
+        for export in matches:
+            unique[(export.ordinal, export.address, export.forwarder)] = export
+        return list(unique.values())
+
+    def _export_info(self, module_data, export):
+        pe = module_data["pe"]
+        directory = module_data["directory"]
+        ordinal_index = export.ordinal - directory["base"]
+
+        address_offset = getattr(export, "address_offset", None)
+        if address_offset is None and ordinal_index >= 0:
+            address_offset = self._safe_offset(
+                pe, directory["address_of_functions"] + 4 * ordinal_index
+            )
+
+        ordinal_offset = getattr(export, "ordinal_offset", None)
+        name_table_index = None
+        if ordinal_offset is not None:
+            table_offset = directory.get("address_of_name_ordinals_offset")
+            if table_offset is not None and ordinal_offset >= table_offset:
+                name_table_index = (ordinal_offset - table_offset) // 2
+
+        forwarder_offset = getattr(export, "forwarder_offset", None)
+        if forwarder_offset is None and export.forwarder is not None:
+            forwarder_offset = self._safe_offset(pe, export.address)
+
+        return {
+            "ordinal": export.ordinal,
+            "ordinal_index": ordinal_index,
+            "name": export.name,
+            "name_text": _text(export.name),
+            "address": export.address,
+            "address_offset": address_offset,
+            "name_offset": getattr(export, "name_offset", None),
+            "ordinal_offset": ordinal_offset,
+            "name_table_index": name_table_index,
+            "forwarder": export.forwarder,
+            "forwarder_text": _text(export.forwarder),
+            "forwarder_rva": export.address if export.forwarder is not None else None,
+            "forwarder_offset": forwarder_offset,
+            "image_base": module_data["image_base"],
+        }
+
+    def _lookup_export(self, module, kind, value):
+        module_data = self._module_exports(module)
+        if module_data["status"] != "ok":
+            return {
+                "status": module_data["status"],
+                "detail": module_data.get("detail"),
+                "directory": module_data.get("directory"),
+            }
+
+        exports = module_data["export_dir"].symbols
+        match = "ordinal" if kind == "ordinal" else "exact"
+        if kind == "ordinal":
+            matches = [export for export in exports if export.ordinal == value]
+        else:
+            matches = [
+                export
+                for export in exports
+                if export.name is not None and export.name == value
+            ]
+
+        matches = self._unique_exports(matches)
+        directory = module_data["directory"]
+        if len(matches) > 1:
+            return {
+                "status": self.AMBIGUOUS_EXPORT,
+                "detail": "more than one export matches the requested symbol",
+                "directory": directory,
+                "candidates": [
+                    {
+                        "ordinal": export.ordinal,
+                        "name": _text(export.name),
+                        "address": export.address,
+                        "forwarder": _text(export.forwarder),
+                        "address_offset": getattr(export, "address_offset", None),
+                        "forwarder_offset": getattr(
+                            export, "forwarder_offset", None
+                        ),
+                    }
+                    for export in matches
+                ],
+            }
+        if not matches:
+            if kind == "ordinal":
+                detail = (
+                    f"ordinal {value} is not exported (ordinal base "
+                    f"{directory['base']}, index {value - directory['base']}, "
+                    f"{directory['number_of_functions']} export address table "
+                    "entries)"
+                )
+            else:
+                detail = (
+                    f"export {_text(value)!r} is not present in the module's "
+                    f"export directory (ordinal base {directory['base']})"
+                )
+            return {
+                "status": self.MISSING_EXPORT,
+                "detail": detail,
+                "directory": directory,
+            }
+
+        export_info = self._export_info(module_data, matches[0])
+        symbol_lookup = {"kind": kind, "value": _text(value), "match": match}
+        if kind == "ordinal":
+            symbol_lookup["ordinal_base"] = directory["base"]
+            symbol_lookup["ordinal_index"] = value - directory["base"]
+        export_info["symbol_lookup"] = symbol_lookup
+        return {
+            "status": "ok",
+            "export": export_info,
+            "directory": directory,
+        }
+
+    def _has_export(self, module, kind, value):
+        return self._lookup_export(module, kind, value)["status"] == "ok"
+
+    def _resolve_module(self, reference, kind, value):
+        expanded = self._expand_module_reference(reference)
+        if isinstance(expanded, dict):
+            return {
+                "status": expanded["status"],
+                "requested": _text(reference),
+                "detail": expanded.get("detail"),
+                "api_set": expanded,
+                "attempts": [],
+            }
+
+        attempts = []
+        found = {}
+        ambiguous_candidates = []
+        for trace, host in expanded:
+            match = self._find_module(host)
+            attempt = {
+                "module": host,
+                "api_set_trace": trace,
+                "status": match["status"],
+            }
+            if match.get("candidates") is not None:
+                attempt["candidates"] = match["candidates"]
+                ambiguous_candidates.extend(match["candidates"])
+            attempts.append(attempt)
+            if match["status"] == "found":
+                found.setdefault(
+                    match["module"],
+                    {
+                        "trace": trace,
+                        "match": match["match"],
+                    },
+                )
+
+        if ambiguous_candidates:
+            return {
+                "status": "ambiguous",
+                "requested": _text(reference),
+                "candidates": list(dict.fromkeys(ambiguous_candidates)),
+                "attempts": attempts,
+            }
+
+        if len(found) > 1 and _is_api_set(reference):
+            with_export = [
+                module
+                for module in found
+                if self._has_export(module, kind, value)
+            ]
+            if len(with_export) == 1:
+                found = {with_export[0]: found[with_export[0]]}
+        if len(found) > 1:
+            return {
+                "status": "ambiguous",
+                "requested": _text(reference),
+                "candidates": list(found),
+                "attempts": attempts,
+            }
+
+        if found:
+            module, info = next(iter(found.items()))
+            return {
+                "status": "found",
+                "module": module,
+                "match": info["match"],
+                "requested": _text(reference),
+                "api_set": {"trace": info["trace"]} if info["trace"] else None,
+                "attempts": attempts,
+            }
+
+        detail = None
+        for attempt in attempts:
+            if attempt["api_set_trace"]:
+                detail = (
+                    f"API-set {attempt['api_set_trace'][-1]} maps to "
+                    f"{attempt['module']}, which was not supplied as a candidate"
+                )
+                break
+        return {
+            "status": "missing",
+            "requested": _text(reference),
+            "detail": detail,
+            "attempts": attempts,
+        }
+
+    # -- symbols and forwarder strings ---------------------------------
+
+    @staticmethod
+    def _normalize_symbol(symbol):
+        if isinstance(symbol, bool):
+            raise ValueError("symbol must be an export name or a biased ordinal")
+        if isinstance(symbol, int):
+            if symbol < 0:
+                raise ValueError("ordinal must not be negative")
+            return "ordinal", symbol, symbol
+        if isinstance(symbol, (bytes, bytearray, memoryview)):
+            raw = bytes(symbol)
+            text = _text(raw)
+        elif isinstance(symbol, str):
+            text = symbol
+            raw = symbol.encode("utf-8", "backslashreplace")
+        else:
+            raise ValueError("symbol must be an export name or a biased ordinal")
+
+        if text.startswith("#"):
+            digits = text[1:]
+            if digits.lower().startswith("0x"):
+                digits, base = digits[2:], 16
+            else:
+                base = 10
+            if digits and digits.isdigit():
+                return "ordinal", int(digits, base), int(digits, base)
+        if not raw:
+            raise ValueError("export name must not be empty")
+        return "name", raw, text
+
+    @staticmethod
+    def _parse_forwarder(forwarder):
+        raw = bytes(forwarder)
+        if not raw:
+            return {"error": "forwarder string is empty"}
+        if len(raw) > MAX_FORWARDER_STRING_LENGTH:
+            return {"error": "forwarder string is unreasonably long"}
+        if b"\0" in raw:
+            return {"error": "forwarder string contains a null byte"}
+        if b"." not in raw:
+            return {"error": "forwarder string does not contain a module separator"}
+        module, symbol = raw.rsplit(b".", 1)
+        if not module:
+            return {"error": "forwarder string has an empty module name"}
+        if not symbol:
+            return {"error": "forwarder string has an empty symbol"}
+        if b"/" in module or b"\\" in module:
+            return {"error": "forwarder module name contains a path separator"}
+
+        if symbol.startswith(b"#"):
+            digits = _text(symbol[1:])
+            try:
+                ordinal = (
+                    int(digits, 16)
+                    if digits.lower().startswith("0x")
+                    else int(digits, 10)
+                )
+            except ValueError:
+                return {
+                    "error": f"forwarder ordinal is not a number: {_text(symbol)}"
+                }
+            if ordinal < 0:
+                return {"error": "forwarder ordinal is negative"}
+            return {
+                "module": module,
+                "symbol_kind": "ordinal",
+                "symbol": ordinal,
+                "symbol_text": ordinal,
+            }
+
+        return {
+            "module": module,
+            "symbol_kind": "name",
+            "symbol": symbol,
+            "symbol_text": _text(symbol),
+        }
+
+    # -- result assembly -----------------------------------------------
+
+    @staticmethod
+    def _new_step(index, requested_module, module, kind, value):
+        return ExportForwardStep(
+            index=index,
+            requested_module=requested_module,
+            module=module,
+            lookup_kind=kind,
+            lookup_value=_text(value) if kind == "name" else value,
+            ordinal=None,
+            name=None,
+            address=None,
+            address_offset=None,
+            name_offset=None,
+            ordinal_offset=None,
+            status="unresolved",
+            export=None,
+            forwarder=None,
+            target_module=None,
+            target_symbol=None,
+            target_symbol_kind=None,
+            provenance={},
+            detail=None,
+            repeats_step=None,
+        )
+
+    @staticmethod
+    def _module_provenance(module, resolution):
+        provenance = {
+            "requested": resolution.get("requested", module),
+            "matched": module,
+            "match": resolution.get("match"),
+        }
+        if resolution.get("api_set") is not None:
+            provenance["api_set"] = resolution["api_set"]
+        if resolution.get("attempts"):
+            provenance["attempts"] = resolution["attempts"]
+        if resolution.get("candidates"):
+            provenance["candidates"] = resolution["candidates"]
+        return provenance
+
+    def _result(
+        self,
+        start_module,
+        start_symbol,
+        steps,
+        status,
+        terminal=None,
+        failure=None,
+        detail=None,
+    ):
+        return ExportForwardResult(
+            start_module=start_module,
+            start_symbol=start_symbol,
+            status=status,
+            implementation_determined=status == self.RESOLVED,
+            terminal=terminal,
+            steps=steps,
+            failure=failure,
+            detail=detail,
+            api_sets_provided=self.api_sets_provided,
+        )
+
+    def _module_failure_step(self, index, reference, kind, value, resolution):
+        status = self.MISSING_MODULE
+        if resolution["status"] == "ambiguous":
+            status = self.AMBIGUOUS_MODULE
+        elif resolution["status"] in (self.API_SET_UNMAPPED, self.API_SET_LOOP):
+            status = resolution["status"]
+
+        requested = resolution.get("requested", reference)
+        step = self._new_step(index, requested, requested, kind, value)
+        step.status = status
+        step.detail = resolution.get("detail")
+        if status == self.AMBIGUOUS_MODULE and step.detail is None:
+            candidates = resolution.get("candidates") or []
+            step.detail = (
+                "the module reference matches several supplied candidates: "
+                + ", ".join(candidates)
+            )
+        module_provenance = self._module_provenance(requested, resolution)
+        module_provenance["matched"] = None
+        module_provenance["match"] = None
+        step.provenance = {"module": module_provenance}
+        return step, status
+
+    def resolve(self, module, symbol):
+        """Resolve ``symbol`` in candidate module ``module``.
+
+        ``module`` is the caller supplied candidate name. ``symbol`` is an
+        export name or a biased ordinal (an int, or a string such as "#27").
+        The result is a plain snapshot and does not modify or refer back to
+        the candidate PE objects.
+        """
+
+        if not isinstance(module, (str, bytes, bytearray)):
+            raise TypeError("module must be the caller supplied name of a candidate")
+        start_module = _text(module)
+        kind, value, display_symbol = self._normalize_symbol(symbol)
+        steps = []
+
+        resolution = self._resolve_module(start_module, kind, value)
+        if resolution["status"] != "found":
+            step, status = self._module_failure_step(
+                0, start_module, kind, value, resolution
+            )
+            steps.append(step)
+            return self._result(
+                start_module,
+                display_symbol,
+                steps,
+                status,
+                failure={"step": 0, "kind": status, "detail": step.detail},
+                detail=step.detail,
+            )
+
+        current_module = resolution["module"]
+        current_resolution = resolution
+        hops = 0
+        visited = {}
+        pending_edge = None
+
+        while True:
+            key = (current_module, kind, value)
+            if key in visited:
+                step = self._new_step(
+                    len(steps),
+                    current_resolution.get("requested", current_module),
+                    current_module,
+                    kind,
+                    value,
+                )
+                step.status = self.CYCLE
+                step.repeats_step = visited[key]
+                step.detail = (
+                    f"lookup repeats step {visited[key]}: "
+                    f"{current_module}!{_text(value)}"
+                )
+                step.provenance = {
+                    "module": self._module_provenance(
+                        current_module, current_resolution
+                    ),
+                    "lookup": {
+                        "kind": kind,
+                        "value": value,
+                        "first_seen_step": visited[key],
+                    },
+                }
+                if pending_edge is not None:
+                    step.provenance["edge"] = pending_edge
+                steps.append(step)
+                return self._result(
+                    start_module,
+                    display_symbol,
+                    steps,
+                    self.CYCLE,
+                    failure={
+                        "step": step.index,
+                        "kind": self.CYCLE,
+                        "repeats_step": step.repeats_step,
+                        "detail": step.detail,
+                    },
+                    detail=step.detail,
+                )
+
+            visited[key] = len(steps)
+            step = self._new_step(
+                len(steps),
+                current_resolution.get("requested", current_module),
+                current_module,
+                kind,
+                value,
+            )
+            if pending_edge is not None:
+                step.provenance["edge"] = pending_edge
+
+            lookup = self._lookup_export(current_module, kind, value)
+            directory = lookup.get("directory") or {}
+            module_provenance = self._module_provenance(
+                current_module, current_resolution
+            )
+            module_provenance["display_name"] = directory.get("name_text")
+            step.provenance["module"] = module_provenance
+            step.provenance["export_directory"] = {
+                "rva": directory.get("rva"),
+                "size": directory.get("size"),
+                "file_offset": directory.get("file_offset"),
+                "base": directory.get("base"),
+                "number_of_functions": directory.get("number_of_functions"),
+                "number_of_names": directory.get("number_of_names"),
+            }
+
+            if lookup["status"] != "ok":
+                step.status = lookup["status"]
+                step.detail = lookup.get("detail")
+                if lookup.get("candidates") is not None:
+                    step.provenance["candidates"] = lookup["candidates"]
+                failure = {
+                    "step": step.index,
+                    "kind": lookup["status"],
+                    "detail": step.detail,
+                }
+                if pending_edge is not None:
+                    failure["from_step"] = pending_edge["from_step"]
+                steps.append(step)
+                return self._result(
+                    start_module,
+                    display_symbol,
+                    steps,
+                    lookup["status"],
+                    failure=failure,
+                    detail=step.detail,
+                )
+
+            export_info = lookup["export"]
+            step.export = export_info
+            step.ordinal = export_info["ordinal"]
+            step.name = export_info["name"]
+            step.address = export_info["address"]
+            step.address_offset = export_info["address_offset"]
+            step.name_offset = export_info["name_offset"]
+            step.ordinal_offset = export_info["ordinal_offset"]
+            step.forwarder = export_info["forwarder"]
+            step.provenance["export_entry"] = {
+                "ordinal": export_info["ordinal"],
+                "ordinal_index": export_info["ordinal_index"],
+                "name": export_info["name_text"],
+                "address_rva": export_info["address"],
+                "address_offset": export_info["address_offset"],
+                "name_offset": export_info["name_offset"],
+                "ordinal_offset": export_info["ordinal_offset"],
+                "name_table_index": export_info["name_table_index"],
+                "forwarder_rva": export_info["forwarder_rva"],
+                "forwarder_offset": export_info["forwarder_offset"],
+                "export_directory": {
+                    "rva": directory.get("rva"),
+                    "size": directory.get("size"),
+                    "base": directory.get("base"),
+                    "address_of_functions": directory.get("address_of_functions"),
+                    "address_of_functions_offset": directory.get(
+                        "address_of_functions_offset"
+                    ),
+                    "address_of_names": directory.get("address_of_names"),
+                    "address_of_names_offset": directory.get(
+                        "address_of_names_offset"
+                    ),
+                    "address_of_name_ordinals": directory.get(
+                        "address_of_name_ordinals"
+                    ),
+                    "address_of_name_ordinals_offset": directory.get(
+                        "address_of_name_ordinals_offset"
+                    ),
+                },
+            }
+            step.provenance["symbol_lookup"] = export_info["symbol_lookup"]
+
+            if export_info["forwarder"] is None:
+                step.status = self.RESOLVED
+                steps.append(step)
+                terminal = {
+                    "module": current_module,
+                    "requested_module": current_resolution.get("requested"),
+                    "module_display_name": directory.get("name_text"),
+                    "ordinal": export_info["ordinal"],
+                    "ordinal_index": export_info["ordinal_index"],
+                    "name": export_info["name_text"],
+                    "rva": export_info["address"],
+                    "va": export_info["image_base"] + export_info["address"],
+                    "forwarded": False,
+                    "evidence": {
+                        "address_offset": export_info["address_offset"],
+                        "name_offset": export_info["name_offset"],
+                        "ordinal_offset": export_info["ordinal_offset"],
+                        "name_table_index": export_info["name_table_index"],
+                        "export_directory": {
+                            "rva": directory.get("rva"),
+                            "size": directory.get("size"),
+                            "file_offset": directory.get("file_offset"),
+                            "base": directory.get("base"),
+                            "address_of_functions": directory.get(
+                                "address_of_functions"
+                            ),
+                            "address_of_functions_offset": directory.get(
+                                "address_of_functions_offset"
+                            ),
+                            "address_of_names": directory.get("address_of_names"),
+                            "address_of_names_offset": directory.get(
+                                "address_of_names_offset"
+                            ),
+                            "address_of_name_ordinals": directory.get(
+                                "address_of_name_ordinals"
+                            ),
+                            "address_of_name_ordinals_offset": directory.get(
+                                "address_of_name_ordinals_offset"
+                            ),
+                        },
+                        "symbol_lookup": export_info["symbol_lookup"],
+                    },
+                }
+                return self._result(
+                    start_module,
+                    display_symbol,
+                    steps,
+                    self.RESOLVED,
+                    terminal=terminal,
+                )
+
+            step.status = "forwarded"
+            parsed = self._parse_forwarder(export_info["forwarder"])
+            if "error" in parsed:
+                step.status = self.INVALID_FORWARDER
+                step.detail = parsed["error"]
+                steps.append(step)
+                return self._result(
+                    start_module,
+                    display_symbol,
+                    steps,
+                    self.INVALID_FORWARDER,
+                    failure={
+                        "step": step.index,
+                        "kind": self.INVALID_FORWARDER,
+                        "detail": step.detail,
+                    },
+                    detail=step.detail,
+                )
+
+            step.target_module = _text(parsed["module"])
+            step.target_symbol = parsed["symbol_text"]
+            step.target_symbol_kind = parsed["symbol_kind"]
+            edge = {
+                "from_step": step.index,
+                "module": step.module,
+                "ordinal": export_info["ordinal"],
+                "ordinal_index": export_info["ordinal_index"],
+                "name": export_info["name_text"],
+                "forwarder": export_info["forwarder_text"],
+                "forwarder_rva": export_info["forwarder_rva"],
+                "forwarder_offset": export_info["forwarder_offset"],
+                "target_module": step.target_module,
+                "target_symbol": step.target_symbol,
+                "target_symbol_kind": step.target_symbol_kind,
+            }
+            step.provenance["forwarder_string"] = edge
+
+            hops += 1
+            if hops > self.max_depth:
+                limit_step = self._new_step(
+                    len(steps),
+                    step.target_module,
+                    step.target_module,
+                    parsed["symbol_kind"],
+                    parsed["symbol_text"],
+                )
+                limit_step.status = self.DEPTH_LIMIT
+                limit_step.detail = (
+                    f"forwarder chain exceeds max_depth ({self.max_depth})"
+                )
+                limit_step.provenance["edge"] = edge
+                steps.append(limit_step)
+                return self._result(
+                    start_module,
+                    display_symbol,
+                    steps,
+                    self.DEPTH_LIMIT,
+                    failure={
+                        "step": limit_step.index,
+                        "kind": self.DEPTH_LIMIT,
+                        "detail": limit_step.detail,
+                        "from_step": step.index,
+                    },
+                    detail=limit_step.detail,
+                )
+
+            next_resolution = self._resolve_module(
+                step.target_module, parsed["symbol_kind"], parsed["symbol"]
+            )
+            if next_resolution["status"] != "found":
+                failure_step, status = self._module_failure_step(
+                    len(steps),
+                    step.target_module,
+                    parsed["symbol_kind"],
+                    parsed["symbol_text"],
+                    next_resolution,
+                )
+                failure_step.provenance["edge"] = edge
+                steps.append(step)
+                steps.append(failure_step)
+                return self._result(
+                    start_module,
+                    display_symbol,
+                    steps,
+                    status,
+                    failure={
+                        "step": failure_step.index,
+                        "kind": status,
+                        "detail": failure_step.detail,
+                        "from_step": step.index,
+                    },
+                    detail=failure_step.detail,
+                )
+
+            steps.append(step)
+            pending_edge = edge
+            current_module = next_resolution["module"]
+            current_resolution = next_resolution
+            kind = parsed["symbol_kind"]
+            value = parsed["symbol"]
+
+
+def resolve_export_forwarder(modules, module, symbol, api_sets=None, max_depth=32):
+    """Resolve one exported symbol through explicitly supplied modules.
+
+    Convenience wrapper around :class:`ExportForwardResolver`. ``modules`` is
+    a mapping (or iterable of pairs) from caller supplied module names to PE
+    instances or raw image bytes. No file or host-system lookup is performed.
+    """
+
+    return ExportForwardResolver(
+        modules, api_sets=api_sets, max_depth=max_depth
+    ).resolve(module, symbol)
+
+
 class ResourceDirData(DataContainer):
     """Holds resource directory information.
 
