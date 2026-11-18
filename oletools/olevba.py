@@ -521,6 +521,33 @@ class UnexpectedDataError(OlevbaBaseException):
         self.expected = expected
         self.value = value
 
+
+class ModuleSourceError(OlevbaBaseException):
+    """Raised when a module's MODULEOFFSET-declared source interval is invalid.
+
+    The MS-OVBA MODULEOFFSET record points at the exact start of the compressed
+    source CompressedContainer inside the ModuleStream. If that declaration does
+    not address a readable, well-formed container, the parser must reject the
+    module rather than scanning forward for another byte sequence that happens
+    to decompress (which would let a crafted file forge the source attributed to
+    a module). The reported offset is the physical ModuleStream position at
+    which the declared source could not be interpreted.
+    """
+
+    def __init__(self, stream_path, textoffset, stream_size, reason, position=None):
+        self.stream_path = stream_path
+        self.textoffset = textoffset
+        self.stream_size = stream_size
+        self.reason = reason
+        # physical offset (within the ModuleStream) where interpretation failed
+        self.position = textoffset if position is None else position
+        msg = ('Invalid VBA source declaration in {stream}: MODULEOFFSET='
+               '{offset} (stream size {size}); {reason} at stream offset '
+               '{position}').format(stream=stream_path, offset=textoffset,
+                                    size=stream_size, reason=reason,
+                                    position=self.position)
+        super(ModuleSourceError, self).__init__(msg)
+
 #--- CONSTANTS ----------------------------------------------------------------
 
 # return codes
@@ -1314,6 +1341,21 @@ def copytoken_help(decompressed_current, decompressed_chunk_start):
     return length_mask, offset_mask, bit_count, maximum_length
 
 
+class DecompressionError(ValueError):
+    """A structurally invalid MS-OVBA CompressedContainer.
+
+    Carries ``stream_position``: the byte offset within the compressed
+    container at which interpretation could not continue. Callers that slice a
+    module stream at MODULEOFFSET can add that offset to locate the physical
+    failure position inside the ModuleStream. The parser never retries from a
+    later offset after this error.
+    """
+
+    def __init__(self, message, stream_position=0):
+        super(DecompressionError, self).__init__(message)
+        self.stream_position = stream_position
+
+
 def decompress_stream(compressed_container):
     """
     Decompress a stream according to MS-OVBA section 2.4.1
@@ -1352,7 +1394,9 @@ def decompress_stream(compressed_container):
 
     sig_byte = compressed_container[compressed_current]
     if sig_byte != 0x01:
-        raise ValueError('invalid signature byte {0:02X}'.format(sig_byte))
+        raise DecompressionError(
+            'invalid signature byte {0:02X}'.format(sig_byte),
+            stream_position=compressed_current)
 
     compressed_current += 1
 
@@ -1361,6 +1405,12 @@ def decompress_stream(compressed_container):
     while compressed_current < len(compressed_container):
         # 2.4.1.1.5
         compressed_chunk_start = compressed_current
+        # a chunk header needs two bytes; a truncated header is a structural error
+        if compressed_chunk_start + 2 > len(compressed_container):
+            raise DecompressionError(
+                'truncated CompressedChunk header at offset {0}'.format(
+                    compressed_chunk_start),
+                stream_position=compressed_chunk_start)
         # chunk header = first 16 bits
         compressed_chunk_header = \
             struct.unpack("<H", compressed_container[compressed_chunk_start:compressed_chunk_start + 2])[0]
@@ -1369,7 +1419,9 @@ def decompress_stream(compressed_container):
         # chunk signature = 3 next bits - should always be 0b011
         chunk_signature = (compressed_chunk_header >> 12) & 0x07
         if chunk_signature != 0b011:
-            raise ValueError('Invalid CompressedChunkSignature in VBA compressed stream')
+            raise DecompressionError(
+                'Invalid CompressedChunkSignature in VBA compressed stream',
+                stream_position=compressed_chunk_start)
         # chunk flag = next bit - 1 == compressed, 0 == uncompressed
         chunk_flag = (compressed_chunk_header >> 15) & 0x01
         log.debug("chunk size = {}, offset = {}, compressed flag = {}".format(chunk_size, compressed_chunk_start, chunk_flag))
@@ -1380,15 +1432,26 @@ def decompress_stream(compressed_container):
         # in chunk header before adding 3.
         # Also the first test is not useful since a 12 bits value cannot be larger than 4095.
         if chunk_flag == 1 and chunk_size > 4098:
-            raise ValueError('CompressedChunkSize=%d > 4098 but CompressedChunkFlag == 1' % chunk_size)
+            raise DecompressionError(
+                'CompressedChunkSize=%d > 4098 but CompressedChunkFlag == 1'
+                % chunk_size, stream_position=compressed_chunk_start)
         if chunk_flag == 0 and chunk_size != 4098:
-            raise ValueError('CompressedChunkSize=%d != 4098 but CompressedChunkFlag == 0' % chunk_size)
+            raise DecompressionError(
+                'CompressedChunkSize=%d != 4098 but CompressedChunkFlag == 0'
+                % chunk_size, stream_position=compressed_chunk_start)
 
-        # check if chunk_size goes beyond the compressed data, instead of silently cutting it:
-        #TODO: raise an exception?
+        # check if chunk_size goes beyond the compressed data. A declared chunk
+        # that runs past the end of the CompressedContainer is a truncated /
+        # corrupt chain rather than data to be cut silently: accepting it would
+        # let a crafted stream hide bytes behind the declared interval.
         if compressed_chunk_start + chunk_size > len(compressed_container):
-            log.warning('Chunk size is larger than remaining compressed data')
-        compressed_end = min([len(compressed_container), compressed_chunk_start + chunk_size])
+            raise DecompressionError(
+                'CompressedChunk at offset {0} declares size {1} but only {2} '
+                'bytes remain in the container'.format(
+                    compressed_chunk_start, chunk_size,
+                    len(compressed_container) - compressed_chunk_start),
+                stream_position=compressed_chunk_start)
+        compressed_end = compressed_chunk_start + chunk_size
         # read after chunk header:
         compressed_current = compressed_chunk_start + 2
 
@@ -1472,6 +1535,13 @@ class VBA_Module(object):
         self.docstring = None
         self._docstring_unicode = None
         self.textoffset = None
+        #: Size in bytes of the underlying ModuleStream (set during extraction)
+        self.stream_size = None
+        #: Physical (start, end_exclusive) byte interval of the declared source
+        #: CompressedContainer within the ModuleStream; None until extracted.
+        self.source_interval = None
+        #: ModuleSourceError describing a rejected source declaration, if any.
+        self.source_error = None
         self.type = None
         self.readonly = False
         self.private = False
@@ -1613,10 +1683,11 @@ class VBA_Module(object):
                                   % (stream_name, ioe))
         
             if code_data is None:
+                valid_names = [name for name in try_names if name is not None]
                 log.info("Could not open stream %d of %d ('VBA/' + one of %r)!"
                          % (module_index, project.modules_count,
                             '/'.join("'" + stream_name + "'"
-                                     for stream_name in try_names)))
+                                     for stream_name in valid_names)))
                 if project.relaxed:
                     return  # ... continue with next submodule
                 else:
@@ -1624,9 +1695,54 @@ class VBA_Module(object):
         
             log.debug("length of code_data = {0}".format(len(code_data)))
             log.debug("offset of code_data = {0}".format(self.textoffset))
-            code_data = code_data[self.textoffset:]
+            stream_size = len(code_data)
+            self.stream_size = stream_size
+            # MS-OVBA 2.3.4.3 ModuleStream: MODULEOFFSET gives the exact start of
+            # the source CompressedContainer; everything before it is the
+            # PerformanceCache. Validate the declaration instead of trusting it,
+            # and NEVER scan past it for another byte sequence that decompresses:
+            # doing so would let a crafted stream forge the source attributed to
+            # this module.
+            if self.textoffset is None:
+                self._reject_source(code_data, stream_size,
+                                    'MODULEOFFSET record is missing')
+                return
+            if self.textoffset < 0 or self.textoffset >= stream_size:
+                self._reject_source(
+                    code_data, stream_size,
+                    'MODULEOFFSET points outside the ModuleStream '
+                    '(0..{0})'.format(stream_size - 1))
+                return
+            source_data = code_data[self.textoffset:]
+            if len(source_data) == 0:
+                log.warning("module stream {0} has code data length 0".format(
+                    self.streamname_str))
+                return
+            # The source interval must begin with the CompressedContainer
+            # signature byte exactly at the declared offset.
+            if source_data[0] != 0x01:
+                self._reject_source(
+                    code_data, stream_size,
+                    'byte at MODULEOFFSET is not the CompressedContainer '
+                    'signature (0x01)', position=self.textoffset)
+                return
+            try:
+                decompressed = decompress_stream(bytearray(source_data))
+            except Exception as exc:
+                # Report the physical position at which the declared container
+                # stopped being interpretable; do not retry from another offset.
+                position = getattr(exc, 'stream_position', None)
+                self._reject_source(
+                    code_data, stream_size,
+                    'declared source container failed to decompress '
+                    '({0}: {1})'.format(type(exc).__name__, exc),
+                    position=None if position is None else
+                    self.textoffset + position)
+                return
+            code_data = decompressed
+            # Record the authoritative physical interval that produced the code.
+            self.source_interval = (self.textoffset, stream_size)
             if len(code_data) > 0:
-                code_data = decompress_stream(bytearray(code_data))
                 # store the raw code encoded as bytes with the project's code page:
                 self.code_raw = code_data
                 # decode it to unicode:
@@ -1651,6 +1767,30 @@ class VBA_Module(object):
             raise
             # if not project.relaxed:
             #     raise
+
+    def _reject_source(self, code_data, stream_size, reason, position=None):
+        """Handle a MODULEOFFSET declaration that does not address valid source.
+
+        Records a :class:`ModuleSourceError` with the physical failure position.
+        In strict mode the exception is raised; in relaxed mode the module is
+        kept with ``code_str=None`` and no source is attributed to it. The parser
+        never scans forward for an alternative decompressable byte sequence.
+        """
+        if position is None:
+            position = self.textoffset if self.textoffset is not None else 0
+        error = ModuleSourceError(
+            self.code_path or (u'VBA/' + (self.streamname_str or self.name_str)),
+            self.textoffset, stream_size, reason, position)
+        self.source_error = error
+        self.source_interval = None
+        self.code_raw = None
+        self.code = None
+        self.code_str = None
+        log.warning('Rejected VBA source for module %r: %s',
+                    self.name_str, error.msg)
+        if not self.project.relaxed:
+            raise error
+        return
 
 
 class VBA_Project(object):
