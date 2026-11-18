@@ -8,13 +8,13 @@
 #-------------------------------------------------------------------------------
 from __future__ import annotations
 
-import zlib
 from collections import defaultdict
 from functools import cached_property
 from typing import IO, TYPE_CHECKING, Any, Literal, cast, overload
 
 from elftools.construct.lib.container import Container
 
+from ..common.compression import decompress_zlib, decompress_zstd
 from ..common.exceptions import ELFCompressionError, ELFParseError
 from ..common.utils import (
     check_file_range,
@@ -110,14 +110,9 @@ class Section:
         if self.compressed:
             c_type = self._compression_type
             if c_type == 'ELFCOMPRESS_ZLIB':
-                # Read the data to decompress starting right after the
-                # compression header until the end of the section.
-                hdr_size: int = self.structs.Elf_Chdr.sizeof()
-                compressed = stream_read(
-                    self.stream, self['sh_offset'] + hdr_size, self['sh_size'] - hdr_size)
-
-                decomp = zlib.decompressobj()
-                result = decomp.decompress(compressed, self.data_size)
+                decompress = decompress_zlib
+            elif c_type == 'ELFCOMPRESS_ZSTD':
+                decompress = decompress_zstd
             elif isinstance(c_type, int):
                 raise ELFCompressionError(
                     f'Unknown compression type: {c_type:#0x}'
@@ -127,11 +122,12 @@ class Section:
                     f'Unknown compression type: {c_type!r}'
                 )
 
-            if len(result) != self._decompressed_size:
-                raise ELFCompressionError(
-                    f'Decompressed data is {len(result)} bytes long, should be {self._decompressed_size} bytes'
-                    ' long'
-                )
+            # Read the data to decompress starting right after the
+            # compression header until the end of the section.
+            hdr_size: int = self.structs.Elf_Chdr.sizeof()
+            compressed = stream_read(
+                self.stream, self['sh_offset'] + hdr_size, self['sh_size'] - hdr_size)
+            result = decompress(compressed, self.data_size)
         else:
             result = stream_read(self.stream, self['sh_offset'], self._decompressed_size)
 

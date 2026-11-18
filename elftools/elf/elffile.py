@@ -11,12 +11,12 @@ from __future__ import annotations
 import io
 import os
 import struct
-import zlib
 from functools import cached_property
 from io import BytesIO
 from typing import IO, TYPE_CHECKING, Any
 
-from ..common.exceptions import ELFError, ELFParseError
+from ..common.compression import decompress_zlib
+from ..common.exceptions import ELFCompressionError, ELFError, ELFParseError
 from ..common.utils import elf_assert, struct_parse
 from ..dwarf.dwarf_util import _file_crc32
 from ..dwarf.dwarfinfo import DebugSectionDescriptor, DwarfConfig, DWARFInfo
@@ -944,36 +944,26 @@ class ELFFile:
 
     @staticmethod
     def _decompress_dwarf_section(section: DebugSectionDescriptor) -> DebugSectionDescriptor:
-        """ Returns the uncompressed contents of the provided DWARF section.
+        """ Returns the uncompressed contents of the provided GNU-compressed
+            (.zdebug_) DWARF section.
         """
-        # TODO: support other compression formats from readelf.c
-        assert section.size > 12, 'Unsupported compression format.'
+        if section.size < 12:
+            raise ELFCompressionError('Compressed section is too small for its header')
 
         section.stream.seek(0)
         # According to readelf.c the content should contain "ZLIB"
         # followed by the uncompressed section size - 8 bytes in
         # big-endian order
         compression_type = section.stream.read(4)
-        assert compression_type == b'ZLIB', \
-            f'Invalid compression type: {compression_type!r}'
+        if compression_type != b'ZLIB':
+            raise ELFCompressionError(
+                f'Unsupported compression type: {compression_type!r}')
 
         uncompressed_size = struct.unpack('>Q', section.stream.read(8))[0]
+        compressed = section.stream.read()
+        data = decompress_zlib(compressed, uncompressed_size)
 
-        decompressor = zlib.decompressobj()
-        uncompressed_stream = BytesIO()
-        while True:
-            chunk = section.stream.read(4096)
-            if not chunk:
-                break
-            uncompressed_stream.write(decompressor.decompress(chunk))
-        uncompressed_stream.write(decompressor.flush())
-
-        uncompressed_stream.seek(0, io.SEEK_END)
-        size = uncompressed_stream.tell()
-        assert uncompressed_size == size, \
-                f'Wrong uncompressed size: expected {uncompressed_size!r}, but got {size!r}'
-
-        return section._replace(stream=uncompressed_stream, size=size)
+        return section._replace(stream=BytesIO(data), size=len(data))
 
     def close(self) -> None:
         self.stream.close()
