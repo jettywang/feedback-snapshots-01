@@ -306,10 +306,45 @@ machine_types = [
     ("IMAGE_FILE_MACHINE_AMD64", 0x8664),
     ("IMAGE_FILE_MACHINE_M32R", 0x9041),
     ("IMAGE_FILE_MACHINE_ARM64", 0xAA64),
+    ("IMAGE_FILE_MACHINE_ARM64EC", 0xA641),
+    ("IMAGE_FILE_MACHINE_ARM64X", 0xA64E),
+    ("IMAGE_FILE_MACHINE_CHPE_X86", 0x3A64),
     ("IMAGE_FILE_MACHINE_CEE", 0xC0EE),
 ]
 
 MACHINE_TYPE = two_way_dict(machine_types)
+
+
+# CHPE (Compiled Hybrid PE) / ARM64EC hybrid metadata.
+#
+# The load configuration directory can point at a versioned metadata block
+# that describes which parts of the image contain code for which
+# architecture.  Only the versions whose layout is understood are decoded;
+# callers get the raw bytes for anything else instead of a best-effort
+# interpretation using a different version's structure.
+CHPE_METADATA_ARM64EC = "arm64ec"
+CHPE_METADATA_X86 = "chpe-x86"
+
+CHPE_ARM64EC_CODE_TYPES = ("ARM64", "ARM64EC", "AMD64")
+
+CHPE_ARM64EC_VERSIONS = (1, 2)
+CHPE_X86_VERSIONS = (1, 2, 3)
+
+# Header sizes, in bytes, for the supported versions.  The ARM64EC V2 header
+# appends three fields; the x86 header only grows by one pointer per version.
+CHPE_ARM64EC_HEADER_SIZES = {1: 0x50, 2: 0x5C}
+CHPE_X86_HEADER_SIZES = {1: 0x28, 2: 0x2C, 3: 0x30}
+
+# Bound the raw material retained for unknown or truncated metadata blocks.
+CHPE_RAW_LIMIT = 0x100
+# Do not enumerate an unbounded number of overlapping interval pairs.
+CHPE_OVERLAP_REPORT_LIMIT = 128
+# Upper bound on entries read from any CHPE metadata table.
+CHPE_MAX_TABLE_ENTRIES = 0x4000
+# Upper bound on pairwise overlap comparisons.
+CHPE_OVERLAP_CHECK_LIMIT = 0x20000
+# Upper bound on the number of problems retained for one metadata block.
+CHPE_PROBLEM_LIMIT = 256
 
 
 relocation_types = [
@@ -1811,6 +1846,91 @@ class LoadConfigData(DataContainer):
     """
 
 
+class _CHPEProblems(list):
+    """A bounded problem list for one CHPE metadata block."""
+
+    def __init__(self):
+        super().__init__()
+        self._suppressed = False
+
+    def append(self, message):
+        if len(self) < CHPE_PROBLEM_LIMIT:
+            super().append(message)
+        elif not self._suppressed:
+            self._suppressed = True
+            super().append(
+                "further CHPE problems were suppressed after "
+                f"{CHPE_PROBLEM_LIMIT} entries"
+            )
+
+
+class CHPECodeRangeData(DataContainer):
+    """A single decoded CHPE code address range.
+
+    kind:       ``arm64ec`` or ``chpe-x86``
+    version:    Metadata version that defined the encoding
+    index:      Ordinal of the entry within its metadata table
+    raw_start:  Encoded start field exactly as stored
+    start:      Decoded inclusive start RVA
+    end:        Decoded exclusive end RVA
+    length:     Declared length in bytes
+    code_type:  Declared architecture name, or None for an unknown encoding
+    valid:      False when the range is malformed, unmapped, or unknown
+    native:     For ``chpe-x86`` ranges: True for native ARM64 code,
+                False for x86 code.  None for ``arm64ec`` ranges.
+    """
+
+
+class CHPERedirectionData(DataContainer):
+    """A decoded ARM64EC redirection table entry.
+
+    index:      Ordinal of the entry
+    source:     Source RVA
+    destination: Destination RVA, or None if the entry is truncated
+    mapped:     True when both RVAs resolve inside a mapped section
+    """
+
+
+class CHPECodeRangeEntryPointData(DataContainer):
+    """An ARM64EC code-range-to-entry-point record.
+
+    start:      Inclusive start RVA
+    end:        Exclusive end RVA
+    entry_point: Entry point RVA declared for the range
+    valid:      True when the range and entry point are mapped and sane
+    """
+
+
+class CHPEMetadataData(DataContainer):
+    """Versioned CHPE metadata reached from the load configuration directory.
+
+    kind:              ``arm64ec`` or ``chpe-x86``
+    version:           Declared metadata version
+    version_supported: True if the declared version's layout was decoded
+    header:            Unpacked metadata header structure, or None
+    header_size:       Bytes expected for the declared version's header, or None
+    metadata_rva:      RVA of the metadata block, or None if not mappable
+    ranges:            CHPECodeRangeData entries (empty when unsupported)
+    redirections:      CHPERedirectionData entries (ARM64EC only)
+    entry_points:      CHPECodeRangeEntryPointData entries (ARM64EC only)
+    pointer:           CHPEMetadataPointer value as stored
+    pointer_kind:      ``va`` or ``rva`` after resolution
+    raw:               Raw bytes retained for unsupported or unreadable data
+    problems:          Human readable descriptions of inconsistencies
+    """
+
+
+class CHPEAddressView(DataContainer):
+    """The architecture verdict for one RVA.
+
+    rva:        Queried RVA
+    status:     ``known``, ``unknown``, ``ambiguous`` or ``unsupported``
+    candidates: Ordered architecture names supported by the ranges
+    evidence:   CHPECodeRangeData entries that produced the candidates
+    detail:     Explanation of why the status is not ``known``
+    """
+
+
 class BoundImportRefData(DataContainer):
     """Holds bound import forwarder reference data.
 
@@ -2885,6 +3005,116 @@ class PE:
         ),
     )
 
+    # The x86 metadata header grows by one pointer per version: CompilerIATPointer
+    # appears in version 2 and WowA64RdtscFunctionPointer in version 3.  Each
+    # version therefore gets its own exact format instead of a single layout
+    # padded with guessed fields.
+    __IMAGE_CHPE_METADATA_X86_V1_format__ = (
+        "IMAGE_CHPE_METADATA_X86",
+        (
+            "I,Version",
+            "I,CHPECodeAddressRangeOffset",
+            "I,CHPECodeAddressRangeCount",
+            "I,WowA64ExceptionHandlerFunctionPointer",
+            "I,WowA64DispatchCallFunctionPointer",
+            "I,WowA64DispatchIndirectCallFunctionPointer",
+            "I,WowA64DispatchIndirectCallCfgFunctionPointer",
+            "I,WowA64DispatchRetFunctionPointer",
+            "I,WowA64DispatchRetLeafFunctionPointer",
+            "I,WowA64DispatchJumpFunctionPointer",
+        ),
+    )
+
+    __IMAGE_CHPE_METADATA_X86_V2_format__ = (
+        "IMAGE_CHPE_METADATA_X86",
+        (
+            "I,Version",
+            "I,CHPECodeAddressRangeOffset",
+            "I,CHPECodeAddressRangeCount",
+            "I,WowA64ExceptionHandlerFunctionPointer",
+            "I,WowA64DispatchCallFunctionPointer",
+            "I,WowA64DispatchIndirectCallFunctionPointer",
+            "I,WowA64DispatchIndirectCallCfgFunctionPointer",
+            "I,WowA64DispatchRetFunctionPointer",
+            "I,WowA64DispatchRetLeafFunctionPointer",
+            "I,WowA64DispatchJumpFunctionPointer",
+            "I,CompilerIATPointer",
+        ),
+    )
+
+    __IMAGE_CHPE_METADATA_X86_V3_format__ = (
+        "IMAGE_CHPE_METADATA_X86",
+        (
+            "I,Version",
+            "I,CHPECodeAddressRangeOffset",
+            "I,CHPECodeAddressRangeCount",
+            "I,WowA64ExceptionHandlerFunctionPointer",
+            "I,WowA64DispatchCallFunctionPointer",
+            "I,WowA64DispatchIndirectCallFunctionPointer",
+            "I,WowA64DispatchIndirectCallCfgFunctionPointer",
+            "I,WowA64DispatchRetFunctionPointer",
+            "I,WowA64DispatchRetLeafFunctionPointer",
+            "I,WowA64DispatchJumpFunctionPointer",
+            "I,CompilerIATPointer",
+            "I,WowA64RdtscFunctionPointer",
+        ),
+    )
+
+    __IMAGE_ARM64EC_METADATA_format__ = (
+        "IMAGE_ARM64EC_METADATA",
+        (
+            "I,Version",
+            "I,CodeMap",
+            "I,CodeMapCount",
+            "I,CodeRangesToEntryPoints",
+            "I,RedirectionMetadata",
+            "I,tbd__os_arm64x_dispatch_call_no_redirect",
+            "I,tbd__os_arm64x_dispatch_ret",
+            "I,tbd__os_arm64x_dispatch_call",
+            "I,tbd__os_arm64x_dispatch_icall",
+            "I,tbd__os_arm64x_dispatch_icall_cfg",
+            "I,AlternateEntryPoint",
+            "I,AuxiliaryIAT",
+            "I,CodeRangesToEntryPointsCount",
+            "I,RedirectionMetadataCount",
+            "I,GetX64InformationFunctionPointer",
+            "I,SetX64InformationFunctionPointer",
+            "I,ExtraRFETable",
+            "I,ExtraRFETableSize",
+            "I,__os_arm64x_dispatch_fptr",
+            "I,AuxiliaryIATCopy",
+        ),
+    )
+
+    __IMAGE_ARM64EC_METADATA_V2_format__ = (
+        "IMAGE_ARM64EC_METADATA_V2",
+        (
+            "I,Version",
+            "I,CodeMap",
+            "I,CodeMapCount",
+            "I,CodeRangesToEntryPoints",
+            "I,RedirectionMetadata",
+            "I,tbd__os_arm64x_dispatch_call_no_redirect",
+            "I,tbd__os_arm64x_dispatch_ret",
+            "I,tbd__os_arm64x_dispatch_call",
+            "I,tbd__os_arm64x_dispatch_icall",
+            "I,tbd__os_arm64x_dispatch_icall_cfg",
+            "I,AlternateEntryPoint",
+            "I,AuxiliaryIAT",
+            "I,CodeRangesToEntryPointsCount",
+            "I,RedirectionMetadataCount",
+            "I,GetX64InformationFunctionPointer",
+            "I,SetX64InformationFunctionPointer",
+            "I,ExtraRFETable",
+            "I,ExtraRFETableSize",
+            "I,__os_arm64x_dispatch_fptr",
+            "I,AuxiliaryIATCopy",
+            "I,AuxDelayloadIAT",
+            "I,AuxDelayloadIATCopy",
+            "I,ReservedBitField",
+        ),
+    )
+
     __IMAGE_DYNAMIC_RELOCATION_TABLE_format__ = (
         "IMAGE_DYNAMIC_RELOCATION_TABLE",
         ("I,Version", "I,Size"),
@@ -2941,6 +3171,10 @@ class PE:
         self.max_repeated_import_addresses = max_repeated_import_addresses
 
         self._get_section_by_rva_last_used = None
+
+        # CHPE/ARM64EC metadata is parsed lazily; None means "not parsed yet".
+        self._chpe_metadata_parsed = False
+        self._chpe_metadata = None
 
         self.sections = []
 
@@ -4121,6 +4355,659 @@ class PE:
         return LoadConfigData(
             struct=load_config, dynamic_relocations=dynamic_relocations
         )
+
+    def _get_load_config_data(self):
+        """Return the load config data, parsing it on demand in fast-load mode."""
+        load_config = getattr(self, "DIRECTORY_ENTRY_LOAD_CONFIG", None)
+        if load_config is not None:
+            return load_config
+
+        index = DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG"]
+        try:
+            entry = self.OPTIONAL_HEADER.DATA_DIRECTORY[index]
+        except (AttributeError, IndexError):
+            return None
+        if not entry.VirtualAddress or not entry.Size:
+            return None
+
+        load_config = self.parse_directory_load_config(entry.VirtualAddress, entry.Size)
+        self.DIRECTORY_ENTRY_LOAD_CONFIG = load_config
+        return load_config
+
+    def parse_chpe_metadata(self):
+        """Parse the CHPE/ARM64EC hybrid metadata reached from load config.
+
+        The result is cached.  Returns ``None`` when the image has no load
+        config or no ``CHPEMetadataPointer``.  A pointer that does not map, an
+        unsupported version, and a truncated header all return a
+        ``CHPEMetadataData`` with the reason in ``problems``.
+
+        Only the metadata versions whose layout is known are decoded.  For any
+        other version the raw bytes are retained in ``CHPEMetadataData.raw``
+        and no range or redirection table is interpreted with a different
+        version's structure.
+        """
+        if self._chpe_metadata_parsed:
+            return self._chpe_metadata
+        self._chpe_metadata_parsed = True
+        self._chpe_metadata = self._parse_chpe_metadata()
+        return self._chpe_metadata
+
+    get_chpe_metadata = parse_chpe_metadata
+
+    def get_chpe_code_ranges(self):
+        """Return the decoded CHPE code ranges, or an empty list."""
+        metadata = self.parse_chpe_metadata()
+        if metadata is None:
+            return []
+        return list(metadata.ranges)
+
+    get_chpe_ranges = get_chpe_code_ranges
+
+    def get_chpe_redirect_for_rva(self, rva):
+        """Return the supported ARM64EC redirection whose source is ``rva``."""
+        metadata = self.parse_chpe_metadata()
+        if metadata is None:
+            return None
+        for redirection in metadata.redirections:
+            if redirection.source == rva:
+                return redirection
+        return None
+
+    def get_chpe_architecture(self, rva):
+        """Explain which architecture a single RVA belongs to.
+
+        Returns a ``CHPEAddressView``.  The verdict is derived only from the
+        metadata's code map; a matching ``FILE_HEADER.Machine`` is not used as
+        evidence for a specific address.
+        """
+        metadata = self.parse_chpe_metadata()
+        if metadata is None:
+            return CHPEAddressView(
+                rva=rva,
+                status="unknown",
+                candidates=[],
+                evidence=[],
+                detail="no CHPE metadata is reachable from load config",
+            )
+
+        if metadata.metadata_rva is None:
+            detail = "the CHPE metadata pointer does not map into the image"
+            if metadata.problems:
+                detail += ": " + metadata.problems[-1]
+            return CHPEAddressView(
+                rva=rva,
+                status="unknown",
+                candidates=[],
+                evidence=[],
+                detail=detail,
+            )
+
+        if not metadata.version_supported:
+            return CHPEAddressView(
+                rva=rva,
+                status="unsupported",
+                candidates=[],
+                evidence=[],
+                detail=(
+                    f"CHPE metadata version {metadata.version} is not supported "
+                    f"for the {metadata.kind} layout; raw metadata was retained "
+                    "but not decoded"
+                ),
+            )
+
+        covering = [
+            code_range
+            for code_range in metadata.ranges
+            if code_range.valid
+            and code_range.start <= rva < code_range.end
+        ]
+        if not covering:
+            detail = "RVA is not covered by any valid CHPE code range"
+            rejected = [
+                code_range
+                for code_range in metadata.ranges
+                if code_range.start is not None
+                and code_range.end is not None
+                and code_range.start <= rva < code_range.end
+                and not code_range.valid
+            ]
+            if rejected:
+                detail += (
+                    "; the covering range(s) were rejected, see metadata.problems"
+                )
+            return CHPEAddressView(
+                rva=rva,
+                status="unknown",
+                candidates=[],
+                evidence=rejected,
+                detail=detail,
+            )
+
+        candidates = []
+        for code_range in covering:
+            if code_range.code_type not in candidates:
+                candidates.append(code_range.code_type)
+
+        if len(candidates) > 1:
+            status = "ambiguous"
+            detail = (
+                "RVA is covered by code ranges declaring different architectures: "
+                + ", ".join(candidates)
+            )
+        else:
+            status = "known"
+            detail = f"RVA is covered by {len(covering)} code range(s)"
+        return CHPEAddressView(
+            rva=rva,
+            status=status,
+            candidates=candidates,
+            evidence=covering,
+            detail=detail,
+        )
+
+    get_chpe_architecture_at_rva = get_chpe_architecture
+
+    def _parse_chpe_metadata(self):
+        load_config = self._get_load_config_data()
+        if load_config is None or load_config.struct is None:
+            return None
+
+        pointer = getattr(load_config.struct, "CHPEMetadataPointer", None)
+        if not pointer:
+            return None
+
+        problems = _CHPEProblems()
+        metadata_rva, pointer_kind = self._chpe_metadata_rva(pointer, problems)
+        if metadata_rva is None:
+            return CHPEMetadataData(
+                kind=None,
+                version=None,
+                version_supported=False,
+                header=None,
+                header_size=None,
+                metadata_rva=None,
+                pointer=pointer,
+                pointer_kind=None,
+                ranges=[],
+                redirections=[],
+                entry_points=[],
+                raw=b"",
+                problems=problems,
+            )
+
+        kind = self._chpe_metadata_kind()
+        version = self.get_dword_at_rva(metadata_rva)
+        if version is None:
+            problems.append(
+                f"CHPE metadata at RVA {metadata_rva:#x} cannot be read"
+            )
+            return CHPEMetadataData(
+                kind=kind,
+                version=None,
+                version_supported=False,
+                header=None,
+                header_size=None,
+                metadata_rva=metadata_rva,
+                pointer=pointer,
+                pointer_kind=pointer_kind,
+                ranges=[],
+                redirections=[],
+                entry_points=[],
+                raw=self._chpe_read_bytes(metadata_rva, CHPE_RAW_LIMIT),
+                problems=problems,
+            )
+
+        if kind == CHPE_METADATA_ARM64EC:
+            header_sizes = CHPE_ARM64EC_HEADER_SIZES
+            supported_versions = CHPE_ARM64EC_VERSIONS
+        else:
+            header_sizes = CHPE_X86_HEADER_SIZES
+            supported_versions = CHPE_X86_VERSIONS
+
+        if version not in supported_versions:
+            raw = self._chpe_read_bytes(metadata_rva, CHPE_RAW_LIMIT)
+            if not raw:
+                problems.append(
+                    f"CHPE metadata at RVA {metadata_rva:#x} cannot be read"
+                )
+            problems.append(
+                f"CHPE metadata version {version} is not supported for the "
+                f"{kind} layout; only raw bytes were retained"
+            )
+            return CHPEMetadataData(
+                kind=kind,
+                version=version,
+                version_supported=False,
+                header=None,
+                header_size=None,
+                metadata_rva=metadata_rva,
+                pointer=pointer,
+                pointer_kind=pointer_kind,
+                ranges=[],
+                redirections=[],
+                entry_points=[],
+                raw=raw,
+                problems=problems,
+            )
+
+        header_size = header_sizes[version]
+        data = self._chpe_read_bytes(metadata_rva, header_size)
+        if len(data) < header_size:
+            problems.append(
+                f"CHPE metadata header version {version} is truncated: "
+                f"need {header_size} bytes, have {len(data)}"
+            )
+            return CHPEMetadataData(
+                kind=kind,
+                version=version,
+                version_supported=True,
+                header=None,
+                header_size=header_size,
+                metadata_rva=metadata_rva,
+                pointer=pointer,
+                pointer_kind=pointer_kind,
+                ranges=[],
+                redirections=[],
+                entry_points=[],
+                raw=data,
+                problems=problems,
+            )
+
+        format = self._chpe_header_format(kind, version)
+        try:
+            file_offset = self.get_offset_from_rva(metadata_rva)
+        except PEFormatError:
+            file_offset = 0
+        header = self.__unpack_data__(format, data, file_offset)
+        if header is None:
+            problems.append(
+                f"CHPE metadata header version {version} could not be unpacked"
+            )
+            return CHPEMetadataData(
+                kind=kind,
+                version=version,
+                version_supported=True,
+                header=None,
+                header_size=header_size,
+                metadata_rva=metadata_rva,
+                pointer=pointer,
+                pointer_kind=pointer_kind,
+                ranges=[],
+                redirections=[],
+                entry_points=[],
+                raw=data,
+                problems=problems,
+            )
+
+        if kind == CHPE_METADATA_ARM64EC:
+            ranges = self._parse_arm64ec_code_ranges(header, version, problems)
+            redirections = self._parse_arm64ec_redirections(
+                header, version, problems
+            )
+            entry_points = self._parse_arm64ec_entry_points(
+                header, version, problems
+            )
+        else:
+            ranges = self._parse_x86_code_ranges(
+                header, version, metadata_rva, problems
+            )
+            redirections = []
+            entry_points = []
+
+        self._check_chpe_range_overlaps(ranges, problems)
+
+        return CHPEMetadataData(
+            kind=kind,
+            version=version,
+            version_supported=True,
+            header=header,
+            header_size=header_size,
+            metadata_rva=metadata_rva,
+            pointer=pointer,
+            pointer_kind=pointer_kind,
+            ranges=ranges,
+            redirections=redirections,
+            entry_points=entry_points,
+            raw=b"",
+            problems=problems,
+        )
+
+    def _chpe_header_format(self, kind, version):
+        if kind == CHPE_METADATA_ARM64EC:
+            if version == 2:
+                return self.__IMAGE_ARM64EC_METADATA_V2_format__
+            return self.__IMAGE_ARM64EC_METADATA_format__
+        if version == 1:
+            return self.__IMAGE_CHPE_METADATA_X86_V1_format__
+        if version == 2:
+            return self.__IMAGE_CHPE_METADATA_X86_V2_format__
+        return self.__IMAGE_CHPE_METADATA_X86_V3_format__
+
+    def _chpe_metadata_rva(self, pointer, problems):
+        image_base = getattr(self.OPTIONAL_HEADER, "ImageBase", 0)
+        size_of_image = getattr(self.OPTIONAL_HEADER, "SizeOfImage", 0)
+
+        if pointer >= image_base:
+            rva = pointer - image_base
+            if rva < size_of_image and self.get_section_by_rva(rva) is not None:
+                return rva, "va"
+            problems.append(
+                f"CHPEMetadataPointer {pointer:#x} does not map into the image "
+                f"(ImageBase {image_base:#x}, SizeOfImage {size_of_image:#x})"
+            )
+
+        # Some producers store an RVA despite the documented VA.  Accept it
+        # only when it unambiguously maps and the VA interpretation did not.
+        if pointer < size_of_image and self.get_section_by_rva(pointer) is not None:
+            problems.append(
+                f"CHPEMetadataPointer {pointer:#x} was interpreted as an RVA"
+            )
+            return pointer, "rva"
+
+        return None, None
+
+    def _chpe_metadata_kind(self):
+        """Select the metadata layout from the machine type.
+
+        ARM64 family images use the ARM64EC metadata layout; every other
+        machine that carries CHPE metadata (notably CHPE_X86 and I386) uses
+        the x86 layout.  This is the same dispatch the format's producers use.
+        """
+        machine = getattr(self.FILE_HEADER, "Machine", None)
+        arm64_family = {
+            MACHINE_TYPE.get("IMAGE_FILE_MACHINE_ARM64"),
+            MACHINE_TYPE.get("IMAGE_FILE_MACHINE_ARM64EC"),
+            MACHINE_TYPE.get("IMAGE_FILE_MACHINE_ARM64X"),
+        }
+        if machine in arm64_family:
+            return CHPE_METADATA_ARM64EC
+        return CHPE_METADATA_X86
+
+    def _chpe_image_end(self):
+        end = getattr(self.OPTIONAL_HEADER, "SizeOfImage", 0) or 0
+        for section in self.sections:
+            end = max(
+                end,
+                section.get_VirtualAddress_adj()
+                + max(section.Misc_VirtualSize, section.SizeOfRawData),
+            )
+        return end
+
+    def _chpe_read_bytes(self, rva, size):
+        if rva is None or size is None or size < 0:
+            return b""
+        try:
+            data = self.get_data(rva, size)
+        except PEFormatError:
+            return b""
+        if len(data) > size:
+            data = data[:size]
+        return data
+
+    def _chpe_read_table(self, rva, count, entry_size, label, problems):
+        """Read ``count`` fixed-size entries, reporting truncation/bounds."""
+        if not count:
+            return []
+        if not rva:
+            problems.append(f"{label} has a count of {count} but no table RVA")
+            return []
+        if count > CHPE_MAX_TABLE_ENTRIES:
+            problems.append(
+                f"{label} count {count} exceeds the supported limit "
+                f"{CHPE_MAX_TABLE_ENTRIES}; reading from the start"
+            )
+            count = CHPE_MAX_TABLE_ENTRIES
+        if self.get_section_by_rva(rva) is None:
+            problems.append(f"{label} RVA {rva:#x} cannot be mapped")
+            return []
+
+        available = self._chpe_available_bytes(rva)
+        present = min(count, available // entry_size)
+        if present < count:
+            problems.append(
+                f"{label} is truncated: {count} entries declared, "
+                f"{present} fit in the mapped data"
+            )
+        data = self._chpe_read_bytes(rva, present * entry_size)
+        present = len(data) // entry_size
+        return [
+            data[index * entry_size : (index + 1) * entry_size]
+            for index in range(present)
+        ]
+
+    def _chpe_available_bytes(self, rva):
+        """Bytes readable from ``rva`` without copying the whole section.
+
+        The limit mirrors ``SectionStructure.get_data``: raw data stops at the
+        section's declared ``SizeOfRawData``.
+        """
+        section = self.get_section_by_rva(rva)
+        if section is None or section.PointerToRawData is None:
+            return 0
+        offset = (
+            rva
+            - section.get_VirtualAddress_adj()
+            + section.get_PointerToRawData_adj()
+        )
+        if offset < 0:
+            return 0
+        end = min(
+            len(self.__data__), section.PointerToRawData + section.SizeOfRawData
+        )
+        return max(0, end - offset)
+
+    def _chpe_range_fully_mapped(self, start, end):
+        cursor = start
+        sections = sorted(
+            self.sections, key=lambda section: section.get_VirtualAddress_adj()
+        )
+        while cursor < end:
+            for section in sections:
+                section_start = section.get_VirtualAddress_adj()
+                section_end = section_start + max(
+                    section.Misc_VirtualSize, section.SizeOfRawData
+                )
+                if section_start <= cursor < section_end:
+                    cursor = min(end, section_end)
+                    break
+            else:
+                return False
+        return True
+
+    def _chpe_range_is_valid(self, start, end, label, problems):
+        if start is None or end is None:
+            return False
+        if end <= start:
+            problems.append(f"{label} is empty or inverted ({start:#x}-{end:#x})")
+            return False
+        image_end = self._chpe_image_end()
+        if start >= image_end or end > image_end:
+            problems.append(
+                f"{label} {start:#x}-{end:#x} lies outside the mapped image "
+                f"(end {image_end:#x})"
+            )
+            return False
+        if not self._chpe_range_fully_mapped(start, end):
+            problems.append(
+                f"{label} {start:#x}-{end:#x} includes an unmapped address"
+            )
+            return False
+        return True
+
+    def _parse_arm64ec_code_ranges(self, header, version, problems):
+        entries = self._chpe_read_table(
+            header.CodeMap,
+            header.CodeMapCount,
+            8,
+            "ARM64EC code map",
+            problems,
+        )
+        ranges = []
+        for index, entry in enumerate(entries):
+            start_raw, length = struct.unpack("<II", entry)
+            type_index = start_raw & 3
+            code_type = (
+                CHPE_ARM64EC_CODE_TYPES[type_index] if type_index < 3 else None
+            )
+            start = start_raw & 0xFFFFFFFC
+            end = start + length
+            label = f"ARM64EC code range {index}"
+            valid = self._chpe_range_is_valid(start, end, label, problems)
+            if code_type is None:
+                problems.append(
+                    f"{label} declares unknown type {type_index}; "
+                    "the range is retained but not used"
+                )
+                valid = False
+            ranges.append(
+                CHPECodeRangeData(
+                    kind=CHPE_METADATA_ARM64EC,
+                    version=version,
+                    index=index,
+                    raw_start=start_raw,
+                    start=start,
+                    end=end,
+                    length=length,
+                    code_type=code_type,
+                    native=None,
+                    valid=valid,
+                )
+            )
+        return ranges
+
+    def _parse_x86_code_ranges(self, header, version, metadata_rva, problems):
+        table_rva = metadata_rva + header.CHPECodeAddressRangeOffset
+        entries = self._chpe_read_table(
+            table_rva,
+            header.CHPECodeAddressRangeCount,
+            8,
+            "CHPE-x86 code range table",
+            problems,
+        )
+        ranges = []
+        for index, entry in enumerate(entries):
+            start_raw, length = struct.unpack("<II", entry)
+            native = start_raw & 1
+            # The documented union overlays a 31-bit address field with a
+            # one-bit native-code flag; the length is a byte count.
+            start = start_raw & 0xFFFFFFFE
+            end = start + length
+            label = f"CHPE-x86 code range {index}"
+            valid = self._chpe_range_is_valid(start, end, label, problems)
+            ranges.append(
+                CHPECodeRangeData(
+                    kind=CHPE_METADATA_X86,
+                    version=version,
+                    index=index,
+                    raw_start=start_raw,
+                    start=start,
+                    end=end,
+                    length=length,
+                    code_type="ARM64" if native else "X86",
+                    native=bool(native),
+                    valid=valid,
+                )
+            )
+        return ranges
+
+    def _parse_arm64ec_redirections(self, header, version, problems):
+        entries = self._chpe_read_table(
+            header.RedirectionMetadata,
+            header.RedirectionMetadataCount,
+            8,
+            "ARM64EC redirection table",
+            problems,
+        )
+        redirections = []
+        for index, entry in enumerate(entries):
+            source, destination = struct.unpack("<II", entry)
+            mapped = True
+            label = f"ARM64EC redirection {index}"
+            for name, value in (("source", source), ("destination", destination)):
+                if self.get_section_by_rva(value) is None:
+                    problems.append(
+                        f"{label} {name} RVA {value:#x} cannot be mapped"
+                    )
+                    mapped = False
+            redirections.append(
+                CHPERedirectionData(
+                    index=index,
+                    source=source,
+                    destination=destination,
+                    mapped=mapped,
+                )
+            )
+        return redirections
+
+    def _parse_arm64ec_entry_points(self, header, version, problems):
+        entries = self._chpe_read_table(
+            header.CodeRangesToEntryPoints,
+            header.CodeRangesToEntryPointsCount,
+            12,
+            "ARM64EC code range entry point table",
+            problems,
+        )
+        entry_points = []
+        for index, entry in enumerate(entries):
+            start, end, entry_point = struct.unpack("<III", entry)
+            label = f"ARM64EC code range entry point {index}"
+            valid = self._chpe_range_is_valid(start, end, label, problems)
+            if self.get_section_by_rva(entry_point) is None:
+                problems.append(
+                    f"{label} entry point RVA {entry_point:#x} cannot be mapped"
+                )
+                valid = False
+            entry_points.append(
+                CHPECodeRangeEntryPointData(
+                    index=index,
+                    start=start,
+                    end=end,
+                    entry_point=entry_point,
+                    valid=valid,
+                )
+            )
+        return entry_points
+
+    def _check_chpe_range_overlaps(self, ranges, problems):
+        valid_ranges = sorted(
+            (code_range for code_range in ranges if code_range.valid),
+            key=lambda code_range: code_range.start,
+        )
+        reported = 0
+        comparisons = 0
+        exhausted = False
+        for first_index, first in enumerate(valid_ranges):
+            for second in valid_ranges[first_index + 1 :]:
+                # Sorted by start: once a later range begins at or after the
+                # end of the current one, no later range can overlap it.
+                if second.start >= first.end:
+                    break
+                comparisons += 1
+                if comparisons > CHPE_OVERLAP_CHECK_LIMIT:
+                    exhausted = True
+                    break
+                if first.start < second.end and second.start < first.end:
+                    if reported < CHPE_OVERLAP_REPORT_LIMIT:
+                        problems.append(
+                            "CHPE code ranges overlap: "
+                            f"{first.start:#x}-{first.end:#x} ({first.code_type}) "
+                            f"and {second.start:#x}-{second.end:#x} "
+                            f"({second.code_type})"
+                        )
+                        reported += 1
+                    elif reported == CHPE_OVERLAP_REPORT_LIMIT:
+                        problems.append(
+                            "additional CHPE code range overlaps were not reported"
+                        )
+                        reported += 1
+            if exhausted:
+                break
+        if exhausted:
+            problems.append(
+                "CHPE code range overlap check stopped after "
+                f"{CHPE_OVERLAP_CHECK_LIMIT} comparisons"
+            )
 
     def parse_dynamic_relocations(
         self, dynamic_value_reloc_table_offset, dynamic_value_reloc_table_section

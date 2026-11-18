@@ -48,6 +48,8 @@ Some of the tasks that pefile makes possible are:
 * Basic modifying of PEs, like [writing to some fields](https://github.com/erocarrera/pefile/blob/wiki/UsageExamples.md#reading-and-writing-standard-header-members) and [other parts](https://github.com/erocarrera/pefile/blob/wiki/ModifyingPEImageData.md) of the PE
   * This functionality won't rearrange PE file structures to make room for new fields, so use it with care.
   * Overwriting fields should mostly be safe.
+* A restricted ARM64EC/CHPE hybrid layout: `PE.parse_chpe_metadata()` reads the versioned metadata named by the load config's `CHPEMetadataPointer`, and `PE.get_chpe_architecture(rva)` reports the architecture candidates and evidence for a single RVA.
+  * Unknown metadata versions are retained as raw bytes instead of being decoded with another version's structure.
 * Packer detection with [PEiD’s signatures](https://github.com/erocarrera/pefile/blob/wiki/PEiDSignatures.md)
 * [PEiD signature](https://github.com/erocarrera/pefile/blob/wiki/PEiDSignatures.md) generation
 
