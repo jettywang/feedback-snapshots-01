@@ -146,22 +146,164 @@ class _XmppServerHelper(_XmppHelper):
     )
 
 
+class _LdapMessageRejection(OpportunisticTlsError):
+    """The server sent an LDAP response that does not grant the StartTLS upgrade."""
+
+
 class _LdapHelper(_OpportunisticTlsHelper):
-    """Performs an LDAP StartTLS negotiation."""
+    """Performs an LDAP StartTLS negotiation (RFC 4511 section 4.14).
+
+    The upgrade is granted only if the server returns a well-formed LDAPMessage whose messageID matches our
+    StartTLS request and whose protocolOp is an ExtendedResponse with a success(0) resultCode. Anything else
+    (including responses containing the text "Start TLS request accepted") is rejected.
+    """
 
     START_TLS_CMD = b"0\x1d\x02\x01\x01w\x18\x80\x161.3.6.1.4.1.1466.20037"
-    START_TLS_OK = b"\x30\x0c\x02\x01\x01\x78\x07\x0a\x01\x00\x04\x00\x04"
-    START_TLS_OK2 = b"Start TLS request accepted"
-    START_TLS_OK_APACHEDS = (
-        b"\x30\x26\x02\x01\x01\x78\x21\x0a\x01\x00\x04\x00\x04\x00\x8a\x16\x31\x2e\x33\x2e\x36"
-        b"\x2e\x31\x2e\x34\x2e\x31\x2e\x31\x34\x36\x36\x2e\x32\x30\x30\x33\x37\x8b\x00"
-    )
+
+    _REQUEST_MESSAGE_ID = 1
+    _TAG_SEQUENCE = 0x30
+    _TAG_INTEGER = 0x02
+    _TAG_ENUMERATED = 0x0A
+    _TAG_OCTET_STRING = 0x04
+    _TAG_EXTENDED_RESPONSE = 0x78  # [APPLICATION 24]
+    _TAG_REFERRAL = 0xA3  # LDAPResult [3]
+    _TAG_RESPONSE_NAME = 0x8A  # ExtendedResponse [10]
+    _TAG_RESPONSE_VALUE = 0x8B  # ExtendedResponse [11]
+    _RESULT_CODE_SUCCESS = 0
+    # Hard cap on the size of the StartTLS response we are willing to read; it is tiny in practice
+    _MAX_RESPONSE_SIZE = 64 * 1024
+
+    _RESULT_CODE_NAMES = {
+        0: "success",
+        1: "operationsError",
+        2: "protocolError",
+        10: "referral",
+        49: "invalidCredentials",
+        50: "insufficientAccessRights",
+        52: "unavailable",
+        53: "unwillingToPerform",
+    }
 
     def prepare_socket_for_tls_handshake(self, sock: socket.socket) -> None:
         sock.send(self.START_TLS_CMD)
-        data = sock.recv(2048)
-        if self.START_TLS_OK not in data and self.START_TLS_OK_APACHEDS not in data and self.START_TLS_OK2 not in data:
-            raise OpportunisticTlsError(f"LDAP AUTH TLS was rejected; returned: {repr(data)}")
+        message_content = self._read_ldap_message(sock)
+        self._validate_start_tls_response(message_content)
+
+    @classmethod
+    def _recv_exactly(cls, sock: socket.socket, size: int) -> bytes:
+        chunks = []
+        remaining = size
+        while remaining > 0:
+            chunk = sock.recv(remaining)
+            if not chunk:
+                # Transport interrupted before the TLS client took over; let it surface as a connection error
+                raise ConnectionError("Server closed the connection during the LDAP StartTLS negotiation")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+
+    @classmethod
+    def _parse_length(cls, data: bytes, offset: int) -> tuple:
+        """Parse a BER definite length at data[offset]; return (length, offset of the content)."""
+        if offset >= len(data):
+            raise _LdapMessageRejection("Truncated LDAP message: missing length")
+        first_byte = data[offset]
+        offset += 1
+        if first_byte == 0x80:
+            raise _LdapMessageRejection("LDAP message uses indefinite-length encoding, which LDAP forbids")
+        if first_byte & 0x80:
+            length_bytes_count = first_byte & 0x7F
+            if length_bytes_count > 4:
+                raise _LdapMessageRejection("LDAP message uses an oversized long-form length")
+            if offset + length_bytes_count > len(data):
+                raise _LdapMessageRejection("Truncated LDAP message: incomplete long-form length")
+            length = int.from_bytes(data[offset : offset + length_bytes_count], "big")
+            offset += length_bytes_count
+        else:
+            length = first_byte
+        return length, offset
+
+    @classmethod
+    def _read_ldap_message(cls, sock: socket.socket) -> bytes:
+        """Read exactly one BER-encoded LDAPMessage from the socket and return the content of its SEQUENCE."""
+        header = cls._recv_exactly(sock, 2)
+        if header[0] != cls._TAG_SEQUENCE:
+            raise _LdapMessageRejection(f"Expected an LDAPMessage SEQUENCE, got tag 0x{header[0]:02x}")
+        if header[1] & 0x80:
+            length_bytes_count = header[1] & 0x7F
+            if length_bytes_count == 0:
+                raise _LdapMessageRejection("LDAP message uses indefinite-length encoding, which LDAP forbids")
+            if length_bytes_count > 4:
+                raise _LdapMessageRejection("LDAP message uses an oversized long-form length")
+            header += cls._recv_exactly(sock, length_bytes_count)
+        content_length, content_offset = cls._parse_length(header, 1)
+        if content_length > cls._MAX_RESPONSE_SIZE:
+            raise _LdapMessageRejection(
+                f"LDAP StartTLS response is too large ({content_length} bytes > {cls._MAX_RESPONSE_SIZE})"
+            )
+        return cls._recv_exactly(sock, content_length)
+
+    @classmethod
+    def _parse_tlv(cls, data: bytes, offset: int) -> tuple:
+        """Parse the BER TLV at data[offset]; return (tag, content, offset of the next TLV)."""
+        if offset >= len(data):
+            raise _LdapMessageRejection("Truncated LDAP message: missing field")
+        tag = data[offset]
+        length, content_offset = cls._parse_length(data, offset + 1)
+        end_offset = content_offset + length
+        if end_offset > len(data):
+            raise _LdapMessageRejection("Truncated LDAP message: field extends past the message boundary")
+        return tag, data[content_offset:end_offset], end_offset
+
+    @classmethod
+    def _validate_start_tls_response(cls, message_content: bytes) -> None:
+        tag, message_id_bytes, offset = cls._parse_tlv(message_content, 0)
+        if tag != cls._TAG_INTEGER or not message_id_bytes:
+            raise _LdapMessageRejection("Malformed LDAP message: missing messageID")
+        message_id = int.from_bytes(message_id_bytes, "big")
+        if message_id != cls._REQUEST_MESSAGE_ID:
+            raise _LdapMessageRejection(
+                f"LDAP response is for a different request (messageID {message_id} instead of"
+                f" {cls._REQUEST_MESSAGE_ID})"
+            )
+
+        tag, extended_response, offset = cls._parse_tlv(message_content, offset)
+        if tag != cls._TAG_EXTENDED_RESPONSE:
+            raise _LdapMessageRejection(f"Expected an ExtendedResponse, got protocolOp tag 0x{tag:02x}")
+        if offset != len(message_content):
+            raise _LdapMessageRejection("Unexpected trailing data in the LDAP message")
+
+        tag, result_code_bytes, offset = cls._parse_tlv(extended_response, 0)
+        if tag != cls._TAG_ENUMERATED or not result_code_bytes:
+            raise _LdapMessageRejection("Malformed ExtendedResponse: missing resultCode")
+        result_code = int.from_bytes(result_code_bytes, "big")
+
+        tag, _matched_dn, offset = cls._parse_tlv(extended_response, offset)
+        if tag != cls._TAG_OCTET_STRING:
+            raise _LdapMessageRejection("Malformed ExtendedResponse: missing matchedDN")
+        tag, diagnostic_message, offset = cls._parse_tlv(extended_response, offset)
+        if tag != cls._TAG_OCTET_STRING:
+            raise _LdapMessageRejection("Malformed ExtendedResponse: missing diagnosticMessage")
+
+        # Optional referral ([3]) within LDAPResult; skip it if present
+        if offset < len(extended_response) and extended_response[offset] == cls._TAG_REFERRAL:
+            _, _, offset = cls._parse_tlv(extended_response, offset)
+
+        if result_code != cls._RESULT_CODE_SUCCESS:
+            result_name = cls._RESULT_CODE_NAMES.get(result_code, "unknown")
+            diagnostic_as_text = diagnostic_message.decode("utf-8", errors="replace")
+            raise _LdapMessageRejection(
+                f"LDAP StartTLS was rejected: {result_name} ({result_code});"
+                f" diagnostic message: {diagnostic_as_text!r}"
+            )
+
+        # Optional responseName ([10]) and responseValue ([11]); skip them for compatibility (e.g. ApacheDS)
+        if offset < len(extended_response) and extended_response[offset] == cls._TAG_RESPONSE_NAME:
+            _, _, offset = cls._parse_tlv(extended_response, offset)
+        if offset < len(extended_response) and extended_response[offset] == cls._TAG_RESPONSE_VALUE:
+            _, _, offset = cls._parse_tlv(extended_response, offset)
+        if offset != len(extended_response):
+            raise _LdapMessageRejection("Unexpected trailing data in the ExtendedResponse")
 
 
 class _RdpHelper(_OpportunisticTlsHelper):
