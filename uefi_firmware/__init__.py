@@ -5,6 +5,8 @@ from .uefi import MultiVolumeContainer
 
 from .misc import checker
 from .base import FirmwareObject, RawObject, AutoRawObject
+from .diff import FirmwareDiff, ComponentDiff, ComponentSnapshot, \
+    diff_firmware_trees, diff_firmware_files
 from .utils import limit_nesting, nesting_limit_reached, \
     search_firmware_volumes
 

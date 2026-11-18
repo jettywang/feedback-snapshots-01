@@ -91,6 +91,38 @@ def _generate_fdf(firmware_volume, folder=None):
     dump_data(path, generator.output.encode("utf-8"))
 
 
+def _run_diff(file_names):
+    '''Compare pairs of firmware files without writing anything.'''
+    from uefi_firmware.diff import diff_firmware_files
+
+    if len(file_names) % 2:
+        print("Error: --diff needs an even number of files, as left/right "
+              "pairs.")
+        return 2
+    errcode = 0
+    reports = []
+    for index in range(0, len(file_names), 2):
+        left, right = file_names[index:index + 2]
+        try:
+            report = diff_firmware_files(left, right)
+        except (OSError, ValueError) as error:
+            print("Error: cannot compare %s and %s (%s)." % (
+                left, right, error))
+            errcode = max(errcode, 2)
+            continue
+        reports.append(report)
+        if args.json:
+            continue
+        if args.echo:
+            print("%s %s" % (left, right))
+        report.showinfo()
+
+    if args.json:
+        payload = [report.to_dict() for report in reports]
+        print(json.dumps(payload if len(payload) != 1 else payload[0]))
+    return errcode
+
+
 def _top_level_volumes(firmware_object):
     '''Return the volumes in an object that are not inside another volume.'''
     if isinstance(firmware_object, FirmwareVolume):
@@ -207,6 +239,10 @@ if __name__ == "__main__":
     argparser.add_argument(
         "--test", default=False, action='store_true',
         help="Test file parsing, output name/success.")
+    argparser.add_argument(
+        "--diff", default=False, action='store_true',
+        help="Compare pairs of firmware files without writing anything. "
+             "The file arguments are read as left, right, left, right.")
     argparser.add_argument('--verbose', default=False, action='store_true',
         help='Enable verbose logging while parsing')
     argparser.add_argument(
@@ -224,6 +260,9 @@ if __name__ == "__main__":
         args.color = "always" if sys.stdout.isatty() else "never"
     # Pass the color flag to the util config
     uefi_firmware.utils.nocolor = (args.color == "never")
+
+    if args.diff:
+        sys.exit(_run_diff(args.file))
 
     errcode = 0
 

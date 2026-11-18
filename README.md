@@ -87,6 +87,29 @@ Run without `--test` to print the full object hierarchy, add `-j` for JSON inste
 of the tree view, or add `-e -o DIR` to extract every volume, file, and section
 into `DIR`.
 
+To compare two firmware files without writing anything, pass `--diff`. The
+file arguments are read as left/right pairs:
+
+```console
+$ uefi-firmware-parser --diff old.rom new.rom
+verdict: content_changed
+components: 4, changed payloads: 1, need review: 0
+  content_changed  1
+  identical        2
+  wrapper_only     1
+...
+```
+
+Add `-j` for the same report as JSON. The comparison keeps each component's
+container path, its original bytes and a digest of its decoded payload, and
+reports duplicate GUIDs as separate components instead of collapsing them in
+a GUID-keyed dict. A component whose payload cannot be decoded, or whose
+compression algorithm is unsupported, is reported as `unverified`; it is
+never reported as identical. A component that has no unique partner is
+`ambiguous` and lists its candidates, and its `right` side stays empty so a
+guess is not mistaken for a match. GUIDs and UI section names are shown as
+clues, not used as identity.
+
 A few options help with larger jobs:
 
 - `-O` writes each input's output to its own `${FILENAME}_output/` folder, which is
@@ -149,6 +172,8 @@ Other capabilities:
 - JSON output of the parsed object hierarchy
 - FDF (flash description file) generation from parsed firmware volumes
 - Replacement of sections and files in a firmware volume by GUID
+- Read-only comparison of two parsed firmware trees by container path and
+  decoded payload, including duplicate GUIDs
 
 ## Helper scripts
 
