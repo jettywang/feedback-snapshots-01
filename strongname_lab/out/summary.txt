@@ -1,0 +1,52 @@
+sn_full                token=e20f9bf307719724 | name=Contoso.Utils 1.0.0.0 | flag=True | slot=256B@2052 | rsa=valid | detail=PKCS#1 v1.5 encoded message matches
+                       无 WIN_CERTIFICATE
+sn_delay               token=e20f9bf307719724 | name=Contoso.Utils 1.0.0.0 | flag=False | slot=256B@2052 | rsa=invalid | detail=signature slot is all zero (delay-signed or stripped)
+                       无 WIN_CERTIFICATE
+sn_flag_only           token=e20f9bf307719724 | name=Contoso.Utils 1.0.0.0 | flag=True | slot=0B@None | rsa=invalid | detail=no signature slot or no public key
+                       无 WIN_CERTIFICATE
+sn_no_material         token=e20f9bf307719724 | name=Contoso.Utils 1.0.0.0 | flag=False | slot=0B@None | rsa=invalid | detail=no signature slot or no public key
+                       无 WIN_CERTIFICATE
+sn_sha256              token=e20f9bf307719724 | name=Contoso.Utils 1.0.0.0 | flag=True | slot=256B@2052 | rsa=valid | detail=PKCS#1 v1.5 encoded message matches
+                       无 WIN_CERTIFICATE
+sn_flag_without_public_key_flag token=e20f9bf307719724 | name=Contoso.Utils 1.0.0.0 | flag=True | slot=256B@2052 | rsa=valid | detail=PKCS#1 v1.5 encoded message matches
+                       无 WIN_CERTIFICATE
+sn_other_key_valid     token=dee015d295aa2852 | name=Contoso.Utils 1.0.0.0 | flag=True | slot=256B@2052 | rsa=valid | detail=PKCS#1 v1.5 encoded message matches
+                       无 WIN_CERTIFICATE
+sn_body_tampered       token=e20f9bf307719724 | name=Contoso.Utils 1.0.0.0 | flag=True | slot=256B@2052 | rsa=invalid | detail=PKCS#1 v1.5 encoded message mismatch
+                       无 WIN_CERTIFICATE
+sn_token_forgery       token=e20f9bf307719724 | name=Contoso.Utils 1.0.0.0 | flag=True | slot=256B@2052 | rsa=invalid | detail=PKCS#1 v1.5 encoded message mismatch
+                       无 WIN_CERTIFICATE
+auth_full              token=e20f9bf307719724 | name=Contoso.Utils 1.0.0.0 | flag=True | slot=256B@2052 | rsa=valid | detail=PKCS#1 v1.5 encoded message matches
+                       digest_match=True | signer_ok=True | attrs_digest=True | chain=True | verdict=cryptographically valid/trusted by supplied anchors
+auth_untrusted_root    token=e20f9bf307719724 | name=Contoso.Utils 1.0.0.0 | flag=True | slot=256B@2052 | rsa=valid | detail=PKCS#1 v1.5 encoded message matches
+                       digest_match=True | signer_ok=True | attrs_digest=True | chain=False | verdict=cryptographically valid/not trusted
+auth_wrong_digest      token=e20f9bf307719724 | name=Contoso.Utils 1.0.0.0 | flag=True | slot=256B@2052 | rsa=valid | detail=PKCS#1 v1.5 encoded message matches
+                       digest_match=False | signer_ok=True | attrs_digest=True | chain=True | verdict=invalid/trusted by supplied anchors
+auth_body_tampered     token=e20f9bf307719724 | name=Contoso.Utils 1.0.0.0 | flag=True | slot=256B@2052 | rsa=invalid | detail=PKCS#1 v1.5 encoded message mismatch
+                       digest_match=False | signer_ok=True | attrs_digest=True | chain=True | verdict=invalid/trusted by supplied anchors
+dual_overlay           token=e20f9bf307719724 | name=Contoso.Utils 1.0.0.0 | flag=True | slot=256B@2052 | rsa=valid | detail=PKCS#1 v1.5 encoded message matches
+                       digest_match=False | signer_ok=True | attrs_digest=True | chain=True | verdict=invalid/trusted by supplied anchors
+dual_trailing          token=e20f9bf307719724 | name=Contoso.Utils 1.0.0.0 | flag=True | slot=256B@2052 | rsa=valid | detail=PKCS#1 v1.5 encoded message matches
+                       digest_match=True | signer_ok=True | attrs_digest=True | chain=True | verdict=cryptographically valid/trusted by supplied anchors
+dual_checksum_edit     token=e20f9bf307719724 | name=Contoso.Utils 1.0.0.0 | flag=True | slot=256B@2052 | rsa=valid | detail=PKCS#1 v1.5 encoded message matches
+                       digest_match=True | signer_ok=True | attrs_digest=True | chain=True | verdict=cryptographically valid/trusted by supplied anchors
+case                             sn       token             flag  pk flag  sn rsa  auth digest  auth signer  chain  verdict
+-------------------------------  -------  ----------------  ----  -------  ------  -----------  -----------  -----  -------------------------------------------------------------------------------------------------------------------------
+sn_full                          valid    e20f9bf307719724  yes   yes      yes     -            -            -      no Authenticode signature
+sn_delay                         invalid  e20f9bf307719724  no    yes      no      -            -            -      no Authenticode signature
+sn_flag_only                     invalid  e20f9bf307719724  yes   yes      no      -            -            -      no Authenticode signature
+sn_no_material                   invalid  e20f9bf307719724  no    yes      no      -            -            -      no Authenticode signature
+sn_sha256                        valid    e20f9bf307719724  yes   yes      yes     -            -            -      no Authenticode signature
+sn_flag_without_public_key_flag  valid    e20f9bf307719724  yes   no       yes     -            -            -      no Authenticode signature
+sn_other_key_valid               valid    dee015d295aa2852  yes   yes      yes     -            -            -      no Authenticode signature
+sn_body_tampered                 invalid  e20f9bf307719724  yes   yes      no      -            -            -      no Authenticode signature
+sn_token_forgery                 invalid  e20f9bf307719724  yes   yes      no      -            -            -      no Authenticode signature
+auth_full                        valid    e20f9bf307719724  yes   yes      yes     yes          yes          yes    signature=cryptographically valid; trust=trusted by supplied anchors; trusted-publisher=yes
+auth_untrusted_root              valid    e20f9bf307719724  yes   yes      yes     yes          yes          no     signature=cryptographically valid; trust=not trusted; trusted-publisher=no
+auth_wrong_digest                valid    e20f9bf307719724  yes   yes      yes     no           yes          yes    signature=invalid; trust=trusted by supplied anchors; trusted-publisher=no
+auth_body_tampered               invalid  e20f9bf307719724  yes   yes      no      no           yes          yes    signature=invalid; trust=trusted by supplied anchors; trusted-publisher=no
+dual_overlay                     valid    e20f9bf307719724  yes   yes      yes     no           yes          yes    signature=invalid; trust=trusted by supplied anchors; trusted-publisher=no
+dual_trailing                    valid    e20f9bf307719724  yes   yes      yes     yes          yes          yes    signature=cryptographically valid; trust=trusted by supplied anchors; trusted-publisher=yes; unauthenticated-trailing=32B
+dual_checksum_edit               valid    e20f9bf307719724  yes   yes      yes     yes          yes          yes    signature=cryptographically valid; trust=trusted by supplied anchors; trusted-publisher=yes
+
+report: strongname_lab/out/report.json

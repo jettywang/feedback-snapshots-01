@@ -1,0 +1,2286 @@
+{
+  "generated_at": "2026-11-18T02:00:06+00:00",
+  "fixture_dir": "strongname_lab/fixtures/generated",
+  "trust_anchor": {
+    "subject": "2.5.4.3=Strong-Name Lab Root, 2.5.4.10=Offline Lab",
+    "serial": 4097,
+    "sha256": "75bae95b7b59bdfca6c0973f5c760eb5947502dfebdd82bc439169617edf9c38",
+    "note": "Anchor supplied explicitly to the checker; not the host trust store."
+  },
+  "cases": {
+    "sn_full": {
+      "file": "strongname_lab/fixtures/generated/sn_full.bin",
+      "sha256": "9060d5e9dd515afb2f8c20208e891c314386ef6690500a678689762e9a145042",
+      "size": 2560,
+      "executed": false,
+      "strong_name": {
+        "identity": {
+          "name": "Contoso.Utils",
+          "version": "1.0.0.0",
+          "culture": "",
+          "flags": 1,
+          "has_public_key": true,
+          "public_key_sha256": "b7e935ad7876fdf4ad329b90e745ffded149a12488fc587e3c99745771411612",
+          "public_key_token": "e20f9bf307719724",
+          "hash_algorithm_id": "0x00008004",
+          "hash_algorithm": "sha1"
+        },
+        "cli": {
+          "flags": 9,
+          "il_only": true,
+          "strong_name_signed_flag": true,
+          "strong_name_rva": 9732,
+          "strong_name_size": 256,
+          "signature_file_offset": 2052
+        },
+        "checks": {
+          "public_key_present": true,
+          "public_key_flag_matches_blob": true,
+          "signature_slot_present": true,
+          "strong_name_signed_flag_matches_valid_material": true,
+          "signature_slot_size_matches_key": true,
+          "signature_nonzero": true,
+          "digest_supported": true,
+          "embedded_digest_matches_content": true,
+          "rsa_signature_valid": true,
+          "rsa_verification_detail": "PKCS#1 v1.5 encoded message matches"
+        },
+        "digest": "d08dc963c2a5c3d4e7ab9197a1edbb0ee3e135d4",
+        "embedded_digest": "d08dc963c2a5c3d4e7ab9197a1edbb0ee3e135d4",
+        "covered_ranges": [
+          {
+            "start": 0,
+            "end": 216,
+            "label": "PE headers before checksum",
+            "length": 216
+          },
+          {
+            "start": 220,
+            "end": 280,
+            "label": "between checksum and certificate directory entry",
+            "length": 60
+          },
+          {
+            "start": 288,
+            "end": 512,
+            "label": "after certificate directory entry to SizeOfHeaders",
+            "length": 224
+          },
+          {
+            "start": 512,
+            "end": 2052,
+            "label": "section b'.text\\x00\\x00\\x00' before signature",
+            "length": 1540
+          },
+          {
+            "start": 2308,
+            "end": 2560,
+            "label": "section b'.text\\x00\\x00\\x00' after signature",
+            "length": 252
+          }
+        ],
+        "verdict": {
+          "signature_integrity": "valid",
+          "covered_content_integrity": "intact for selected ranges",
+          "key_identity": "token + public key match each other by construction",
+          "publisher_trust": "not established by strong name",
+          "flag_alone_is_not_evidence": false,
+          "note": "A valid strong-name signature proves possession of the private key for the embedded public key and integrity of the hashed ranges. It does not establish a trusted publisher."
+        },
+        "external": {
+          "covered_bytes": 2292,
+          "hash_algorithm": "sha1",
+          "python_digest": "d08dc963c2a5c3d4e7ab9197a1edbb0ee3e135d4",
+          "openssl_digest": "d08dc963c2a5c3d4e7ab9197a1edbb0ee3e135d4",
+          "openssl_signature": {
+            "available": true,
+            "ok": true,
+            "detail": "Verified OK"
+          }
+        }
+      },
+      "authenticode": {
+        "certificate_entries": [],
+        "authenticode_digest": null,
+        "covered_ranges": [],
+        "signed_content_digest": null,
+        "digest_matches": null,
+        "signer_signature_valid": null,
+        "message_digest_attribute_matches": null,
+        "certificate_chain": null,
+        "verdict": {
+          "signature": "absent",
+          "trust": "not applicable",
+          "note": "No WIN_CERTIFICATE entry; the file has no Authenticode signature."
+        }
+      },
+      "notes": [
+        "完整强名称：公钥存在、槽位存在、SHA-1 签名有效"
+      ]
+    },
+    "sn_delay": {
+      "file": "strongname_lab/fixtures/generated/sn_delay.bin",
+      "sha256": "f33e98408e5c64aec40989e4d97a618838e3c8abbdca90235d246c72efeeb57f",
+      "size": 2560,
+      "executed": false,
+      "strong_name": {
+        "identity": {
+          "name": "Contoso.Utils",
+          "version": "1.0.0.0",
+          "culture": "",
+          "flags": 1,
+          "has_public_key": true,
+          "public_key_sha256": "b7e935ad7876fdf4ad329b90e745ffded149a12488fc587e3c99745771411612",
+          "public_key_token": "e20f9bf307719724",
+          "hash_algorithm_id": "0x00008004",
+          "hash_algorithm": "sha1"
+        },
+        "cli": {
+          "flags": 1,
+          "il_only": true,
+          "strong_name_signed_flag": false,
+          "strong_name_rva": 9732,
+          "strong_name_size": 256,
+          "signature_file_offset": 2052
+        },
+        "checks": {
+          "public_key_present": true,
+          "public_key_flag_matches_blob": true,
+          "signature_slot_present": true,
+          "strong_name_signed_flag_matches_valid_material": false,
+          "signature_slot_size_matches_key": true,
+          "signature_nonzero": false,
+          "digest_supported": true,
+          "embedded_digest_matches_content": false,
+          "rsa_signature_valid": false,
+          "rsa_verification_detail": "signature slot is all zero (delay-signed or stripped)"
+        },
+        "digest": "b76f46e718bd1c0934b8a5cacc7e346701ad7b3d",
+        "embedded_digest": null,
+        "covered_ranges": [
+          {
+            "start": 0,
+            "end": 216,
+            "label": "PE headers before checksum",
+            "length": 216
+          },
+          {
+            "start": 220,
+            "end": 280,
+            "label": "between checksum and certificate directory entry",
+            "length": 60
+          },
+          {
+            "start": 288,
+            "end": 512,
+            "label": "after certificate directory entry to SizeOfHeaders",
+            "length": 224
+          },
+          {
+            "start": 512,
+            "end": 2052,
+            "label": "section b'.text\\x00\\x00\\x00' before signature",
+            "length": 1540
+          },
+          {
+            "start": 2308,
+            "end": 2560,
+            "label": "section b'.text\\x00\\x00\\x00' after signature",
+            "length": 252
+          }
+        ],
+        "verdict": {
+          "signature_integrity": "invalid",
+          "covered_content_integrity": "not established",
+          "key_identity": "token + public key match each other by construction",
+          "publisher_trust": "not established by strong name",
+          "flag_alone_is_not_evidence": false,
+          "note": "A valid strong-name signature proves possession of the private key for the embedded public key and integrity of the hashed ranges. It does not establish a trusted publisher."
+        },
+        "external": {
+          "covered_bytes": 2292,
+          "hash_algorithm": "sha1",
+          "python_digest": "b76f46e718bd1c0934b8a5cacc7e346701ad7b3d",
+          "openssl_digest": "b76f46e718bd1c0934b8a5cacc7e346701ad7b3d",
+          "openssl_signature": {
+            "available": true,
+            "ok": null,
+            "detail": "no signature to verify"
+          }
+        }
+      },
+      "authenticode": {
+        "certificate_entries": [],
+        "authenticode_digest": null,
+        "covered_ranges": [],
+        "signed_content_digest": null,
+        "digest_matches": null,
+        "signer_signature_valid": null,
+        "message_digest_attribute_matches": null,
+        "certificate_chain": null,
+        "verdict": {
+          "signature": "absent",
+          "trust": "not applicable",
+          "note": "No WIN_CERTIFICATE entry; the file has no Authenticode signature."
+        }
+      },
+      "notes": [
+        "延迟签名：分配了签名槽和公钥，但槽位为零"
+      ]
+    },
+    "sn_flag_only": {
+      "file": "strongname_lab/fixtures/generated/sn_flag_only.bin",
+      "sha256": "9bbba8fc94e039e8d1dcb4b2f2084207dd738553e664b92984105c4c80430dd0",
+      "size": 2560,
+      "executed": false,
+      "strong_name": {
+        "identity": {
+          "name": "Contoso.Utils",
+          "version": "1.0.0.0",
+          "culture": "",
+          "flags": 1,
+          "has_public_key": true,
+          "public_key_sha256": "b7e935ad7876fdf4ad329b90e745ffded149a12488fc587e3c99745771411612",
+          "public_key_token": "e20f9bf307719724",
+          "hash_algorithm_id": "0x00008004",
+          "hash_algorithm": "sha1"
+        },
+        "cli": {
+          "flags": 9,
+          "il_only": true,
+          "strong_name_signed_flag": true,
+          "strong_name_rva": 0,
+          "strong_name_size": 0,
+          "signature_file_offset": null
+        },
+        "checks": {
+          "public_key_present": true,
+          "public_key_flag_matches_blob": true,
+          "signature_slot_present": false,
+          "strong_name_signed_flag_matches_valid_material": false,
+          "signature_slot_size_matches_key": null,
+          "signature_nonzero": false,
+          "rsa_signature_valid": false,
+          "rsa_verification_detail": "no signature slot or no public key"
+        },
+        "digest": null,
+        "embedded_digest": null,
+        "covered_ranges": [],
+        "verdict": {
+          "signature_integrity": "invalid",
+          "covered_content_integrity": "not established",
+          "key_identity": "token + public key match each other by construction",
+          "publisher_trust": "not established by strong name",
+          "flag_alone_is_not_evidence": true,
+          "note": "A valid strong-name signature proves possession of the private key for the embedded public key and integrity of the hashed ranges. It does not establish a trusted publisher."
+        },
+        "external": {
+          "covered_bytes": 0,
+          "hash_algorithm": "sha1",
+          "python_digest": "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+          "openssl_digest": "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+          "openssl_signature": {
+            "available": true,
+            "ok": null,
+            "detail": "no signature to verify"
+          }
+        }
+      },
+      "authenticode": {
+        "certificate_entries": [],
+        "authenticode_digest": null,
+        "covered_ranges": [],
+        "signed_content_digest": null,
+        "digest_matches": null,
+        "signer_signature_valid": null,
+        "message_digest_attribute_matches": null,
+        "certificate_chain": null,
+        "verdict": {
+          "signature": "absent",
+          "trust": "not applicable",
+          "note": "No WIN_CERTIFICATE entry; the file has no Authenticode signature."
+        }
+      },
+      "notes": [
+        "仅设置 COMIMAGE_FLAGS_STRONGNAMESIGNED，没有任何签名材料"
+      ]
+    },
+    "sn_no_material": {
+      "file": "strongname_lab/fixtures/generated/sn_no_material.bin",
+      "sha256": "b8b7f666fad11f87e2ca46c2a4be53cacb4515ac20ef9dd3d5e3c181eb14f9c1",
+      "size": 2560,
+      "executed": false,
+      "strong_name": {
+        "identity": {
+          "name": "Contoso.Utils",
+          "version": "1.0.0.0",
+          "culture": "",
+          "flags": 1,
+          "has_public_key": true,
+          "public_key_sha256": "b7e935ad7876fdf4ad329b90e745ffded149a12488fc587e3c99745771411612",
+          "public_key_token": "e20f9bf307719724",
+          "hash_algorithm_id": "0x00008004",
+          "hash_algorithm": "sha1"
+        },
+        "cli": {
+          "flags": 1,
+          "il_only": true,
+          "strong_name_signed_flag": false,
+          "strong_name_rva": 0,
+          "strong_name_size": 0,
+          "signature_file_offset": null
+        },
+        "checks": {
+          "public_key_present": true,
+          "public_key_flag_matches_blob": true,
+          "signature_slot_present": false,
+          "strong_name_signed_flag_matches_valid_material": true,
+          "signature_slot_size_matches_key": null,
+          "signature_nonzero": false,
+          "rsa_signature_valid": false,
+          "rsa_verification_detail": "no signature slot or no public key"
+        },
+        "digest": null,
+        "embedded_digest": null,
+        "covered_ranges": [],
+        "verdict": {
+          "signature_integrity": "invalid",
+          "covered_content_integrity": "not established",
+          "key_identity": "token + public key match each other by construction",
+          "publisher_trust": "not established by strong name",
+          "flag_alone_is_not_evidence": false,
+          "note": "A valid strong-name signature proves possession of the private key for the embedded public key and integrity of the hashed ranges. It does not establish a trusted publisher."
+        },
+        "external": {
+          "covered_bytes": 0,
+          "hash_algorithm": "sha1",
+          "python_digest": "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+          "openssl_digest": "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+          "openssl_signature": {
+            "available": true,
+            "ok": null,
+            "detail": "no signature to verify"
+          }
+        }
+      },
+      "authenticode": {
+        "certificate_entries": [],
+        "authenticode_digest": null,
+        "covered_ranges": [],
+        "signed_content_digest": null,
+        "digest_matches": null,
+        "signer_signature_valid": null,
+        "message_digest_attribute_matches": null,
+        "certificate_chain": null,
+        "verdict": {
+          "signature": "absent",
+          "trust": "not applicable",
+          "note": "No WIN_CERTIFICATE entry; the file has no Authenticode signature."
+        }
+      },
+      "notes": [
+        "无公钥、无槽位、无标志的对照"
+      ]
+    },
+    "sn_sha256": {
+      "file": "strongname_lab/fixtures/generated/sn_sha256.bin",
+      "sha256": "f2eff9c50e48e5e307d5c6e3b1495aba307849c32330a43016926e2ec7e717ed",
+      "size": 2560,
+      "executed": false,
+      "strong_name": {
+        "identity": {
+          "name": "Contoso.Utils",
+          "version": "1.0.0.0",
+          "culture": "",
+          "flags": 1,
+          "has_public_key": true,
+          "public_key_sha256": "b7e935ad7876fdf4ad329b90e745ffded149a12488fc587e3c99745771411612",
+          "public_key_token": "e20f9bf307719724",
+          "hash_algorithm_id": "0x0000800c",
+          "hash_algorithm": "sha256"
+        },
+        "cli": {
+          "flags": 9,
+          "il_only": true,
+          "strong_name_signed_flag": true,
+          "strong_name_rva": 9732,
+          "strong_name_size": 256,
+          "signature_file_offset": 2052
+        },
+        "checks": {
+          "public_key_present": true,
+          "public_key_flag_matches_blob": true,
+          "signature_slot_present": true,
+          "strong_name_signed_flag_matches_valid_material": true,
+          "signature_slot_size_matches_key": true,
+          "signature_nonzero": true,
+          "digest_supported": true,
+          "embedded_digest_matches_content": true,
+          "rsa_signature_valid": true,
+          "rsa_verification_detail": "PKCS#1 v1.5 encoded message matches"
+        },
+        "digest": "946e1d6194b9d8dc3bcf265c9f3e1494053e72c9293378d95e48f6fe48a11fa2",
+        "embedded_digest": "946e1d6194b9d8dc3bcf265c9f3e1494053e72c9293378d95e48f6fe48a11fa2",
+        "covered_ranges": [
+          {
+            "start": 0,
+            "end": 216,
+            "label": "PE headers before checksum",
+            "length": 216
+          },
+          {
+            "start": 220,
+            "end": 280,
+            "label": "between checksum and certificate directory entry",
+            "length": 60
+          },
+          {
+            "start": 288,
+            "end": 512,
+            "label": "after certificate directory entry to SizeOfHeaders",
+            "length": 224
+          },
+          {
+            "start": 512,
+            "end": 2052,
+            "label": "section b'.text\\x00\\x00\\x00' before signature",
+            "length": 1540
+          },
+          {
+            "start": 2308,
+            "end": 2560,
+            "label": "section b'.text\\x00\\x00\\x00' after signature",
+            "length": 252
+          }
+        ],
+        "verdict": {
+          "signature_integrity": "valid",
+          "covered_content_integrity": "intact for selected ranges",
+          "key_identity": "token + public key match each other by construction",
+          "publisher_trust": "not established by strong name",
+          "flag_alone_is_not_evidence": false,
+          "note": "A valid strong-name signature proves possession of the private key for the embedded public key and integrity of the hashed ranges. It does not establish a trusted publisher."
+        },
+        "external": {
+          "covered_bytes": 2292,
+          "hash_algorithm": "sha256",
+          "python_digest": "946e1d6194b9d8dc3bcf265c9f3e1494053e72c9293378d95e48f6fe48a11fa2",
+          "openssl_digest": "946e1d6194b9d8dc3bcf265c9f3e1494053e72c9293378d95e48f6fe48a11fa2",
+          "openssl_signature": {
+            "available": true,
+            "ok": true,
+            "detail": "Verified OK"
+          }
+        }
+      },
+      "authenticode": {
+        "certificate_entries": [],
+        "authenticode_digest": null,
+        "covered_ranges": [],
+        "signed_content_digest": null,
+        "digest_matches": null,
+        "signer_signature_valid": null,
+        "message_digest_attribute_matches": null,
+        "certificate_chain": null,
+        "verdict": {
+          "signature": "absent",
+          "trust": "not applicable",
+          "note": "No WIN_CERTIFICATE entry; the file has no Authenticode signature."
+        }
+      },
+      "notes": [
+        "Assembly.HashAlgId=SHA-256 的强名称签名"
+      ]
+    },
+    "sn_flag_without_public_key_flag": {
+      "file": "strongname_lab/fixtures/generated/sn_flag_without_public_key_flag.bin",
+      "sha256": "bbd4b2d46705e4a7e7748716b7ebdf92528745040a2b5607bfc1d99e653b445d",
+      "size": 2560,
+      "executed": false,
+      "strong_name": {
+        "identity": {
+          "name": "Contoso.Utils",
+          "version": "1.0.0.0",
+          "culture": "",
+          "flags": 0,
+          "has_public_key": true,
+          "public_key_sha256": "b7e935ad7876fdf4ad329b90e745ffded149a12488fc587e3c99745771411612",
+          "public_key_token": "e20f9bf307719724",
+          "hash_algorithm_id": "0x00008004",
+          "hash_algorithm": "sha1"
+        },
+        "cli": {
+          "flags": 9,
+          "il_only": true,
+          "strong_name_signed_flag": true,
+          "strong_name_rva": 9732,
+          "strong_name_size": 256,
+          "signature_file_offset": 2052
+        },
+        "checks": {
+          "public_key_present": true,
+          "public_key_flag_matches_blob": false,
+          "signature_slot_present": true,
+          "strong_name_signed_flag_matches_valid_material": true,
+          "signature_slot_size_matches_key": true,
+          "signature_nonzero": true,
+          "digest_supported": true,
+          "embedded_digest_matches_content": true,
+          "rsa_signature_valid": true,
+          "rsa_verification_detail": "PKCS#1 v1.5 encoded message matches"
+        },
+        "digest": "0c3a1838050d0d0797a1c5a9ab0c112a44d8181e",
+        "embedded_digest": "0c3a1838050d0d0797a1c5a9ab0c112a44d8181e",
+        "covered_ranges": [
+          {
+            "start": 0,
+            "end": 216,
+            "label": "PE headers before checksum",
+            "length": 216
+          },
+          {
+            "start": 220,
+            "end": 280,
+            "label": "between checksum and certificate directory entry",
+            "length": 60
+          },
+          {
+            "start": 288,
+            "end": 512,
+            "label": "after certificate directory entry to SizeOfHeaders",
+            "length": 224
+          },
+          {
+            "start": 512,
+            "end": 2052,
+            "label": "section b'.text\\x00\\x00\\x00' before signature",
+            "length": 1540
+          },
+          {
+            "start": 2308,
+            "end": 2560,
+            "label": "section b'.text\\x00\\x00\\x00' after signature",
+            "length": 252
+          }
+        ],
+        "verdict": {
+          "signature_integrity": "valid",
+          "covered_content_integrity": "intact for selected ranges",
+          "key_identity": "token + public key match each other by construction",
+          "publisher_trust": "not established by strong name",
+          "flag_alone_is_not_evidence": false,
+          "note": "A valid strong-name signature proves possession of the private key for the embedded public key and integrity of the hashed ranges. It does not establish a trusted publisher."
+        },
+        "external": {
+          "covered_bytes": 2292,
+          "hash_algorithm": "sha1",
+          "python_digest": "0c3a1838050d0d0797a1c5a9ab0c112a44d8181e",
+          "openssl_digest": "0c3a1838050d0d0797a1c5a9ab0c112a44d8181e",
+          "openssl_signature": {
+            "available": true,
+            "ok": true,
+            "detail": "Verified OK"
+          }
+        }
+      },
+      "authenticode": {
+        "certificate_entries": [],
+        "authenticode_digest": null,
+        "covered_ranges": [],
+        "signed_content_digest": null,
+        "digest_matches": null,
+        "signer_signature_valid": null,
+        "message_digest_attribute_matches": null,
+        "certificate_chain": null,
+        "verdict": {
+          "signature": "absent",
+          "trust": "not applicable",
+          "note": "No WIN_CERTIFICATE entry; the file has no Authenticode signature."
+        }
+      },
+      "notes": [
+        "签名有效，但 AssemblyFlags.PublicKey 未设置；公钥 blob 仍在"
+      ]
+    },
+    "sn_other_key_valid": {
+      "file": "strongname_lab/fixtures/generated/sn_other_key_valid.bin",
+      "sha256": "dc9f71dbe48886c86a48e05df8f9d68485d1b9493c5f60ab6dd8cbe0f2900821",
+      "size": 2560,
+      "executed": false,
+      "strong_name": {
+        "identity": {
+          "name": "Contoso.Utils",
+          "version": "1.0.0.0",
+          "culture": "",
+          "flags": 1,
+          "has_public_key": true,
+          "public_key_sha256": "82ec9f89f8f32e580bbd740ec1bd5c7da8eeb99a8d88759d2dcca58c10418663",
+          "public_key_token": "dee015d295aa2852",
+          "hash_algorithm_id": "0x00008004",
+          "hash_algorithm": "sha1"
+        },
+        "cli": {
+          "flags": 9,
+          "il_only": true,
+          "strong_name_signed_flag": true,
+          "strong_name_rva": 9732,
+          "strong_name_size": 256,
+          "signature_file_offset": 2052
+        },
+        "checks": {
+          "public_key_present": true,
+          "public_key_flag_matches_blob": true,
+          "signature_slot_present": true,
+          "strong_name_signed_flag_matches_valid_material": true,
+          "signature_slot_size_matches_key": true,
+          "signature_nonzero": true,
+          "digest_supported": true,
+          "embedded_digest_matches_content": true,
+          "rsa_signature_valid": true,
+          "rsa_verification_detail": "PKCS#1 v1.5 encoded message matches"
+        },
+        "digest": "4b995a460064c5c8c103d2203040cbd718111cb5",
+        "embedded_digest": "4b995a460064c5c8c103d2203040cbd718111cb5",
+        "covered_ranges": [
+          {
+            "start": 0,
+            "end": 216,
+            "label": "PE headers before checksum",
+            "length": 216
+          },
+          {
+            "start": 220,
+            "end": 280,
+            "label": "between checksum and certificate directory entry",
+            "length": 60
+          },
+          {
+            "start": 288,
+            "end": 512,
+            "label": "after certificate directory entry to SizeOfHeaders",
+            "length": 224
+          },
+          {
+            "start": 512,
+            "end": 2052,
+            "label": "section b'.text\\x00\\x00\\x00' before signature",
+            "length": 1540
+          },
+          {
+            "start": 2308,
+            "end": 2560,
+            "label": "section b'.text\\x00\\x00\\x00' after signature",
+            "length": 252
+          }
+        ],
+        "verdict": {
+          "signature_integrity": "valid",
+          "covered_content_integrity": "intact for selected ranges",
+          "key_identity": "token + public key match each other by construction",
+          "publisher_trust": "not established by strong name",
+          "flag_alone_is_not_evidence": false,
+          "note": "A valid strong-name signature proves possession of the private key for the embedded public key and integrity of the hashed ranges. It does not establish a trusted publisher."
+        },
+        "external": {
+          "covered_bytes": 2292,
+          "hash_algorithm": "sha1",
+          "python_digest": "4b995a460064c5c8c103d2203040cbd718111cb5",
+          "openssl_digest": "4b995a460064c5c8c103d2203040cbd718111cb5",
+          "openssl_signature": {
+            "available": true,
+            "ok": true,
+            "detail": "Verified OK"
+          }
+        }
+      },
+      "authenticode": {
+        "certificate_entries": [],
+        "authenticode_digest": null,
+        "covered_ranges": [],
+        "signed_content_digest": null,
+        "digest_matches": null,
+        "signer_signature_valid": null,
+        "message_digest_attribute_matches": null,
+        "certificate_chain": null,
+        "verdict": {
+          "signature": "absent",
+          "trust": "not applicable",
+          "note": "No WIN_CERTIFICATE entry; the file has no Authenticode signature."
+        }
+      },
+      "notes": [
+        "同样的名称/版本，另一密钥的完整有效签名（token 不同）"
+      ]
+    },
+    "sn_body_tampered": {
+      "file": "strongname_lab/fixtures/generated/sn_body_tampered.bin",
+      "sha256": "6b313d23b1560ee29b4e173d1ab6dc738a13c0a9c851d7456a700538f1d52835",
+      "size": 2560,
+      "executed": false,
+      "strong_name": {
+        "identity": {
+          "name": "Contoso.Utils",
+          "version": "1.0.0.0",
+          "culture": "",
+          "flags": 1,
+          "has_public_key": true,
+          "public_key_sha256": "b7e935ad7876fdf4ad329b90e745ffded149a12488fc587e3c99745771411612",
+          "public_key_token": "e20f9bf307719724",
+          "hash_algorithm_id": "0x00008004",
+          "hash_algorithm": "sha1"
+        },
+        "cli": {
+          "flags": 9,
+          "il_only": true,
+          "strong_name_signed_flag": true,
+          "strong_name_rva": 9732,
+          "strong_name_size": 256,
+          "signature_file_offset": 2052
+        },
+        "checks": {
+          "public_key_present": true,
+          "public_key_flag_matches_blob": true,
+          "signature_slot_present": true,
+          "strong_name_signed_flag_matches_valid_material": true,
+          "signature_slot_size_matches_key": true,
+          "signature_nonzero": true,
+          "digest_supported": true,
+          "embedded_digest_matches_content": false,
+          "rsa_signature_valid": false,
+          "rsa_verification_detail": "PKCS#1 v1.5 encoded message mismatch"
+        },
+        "digest": "9cc084e1218dd9ba3a31d4e41287aab32156f6fd",
+        "embedded_digest": "d08dc963c2a5c3d4e7ab9197a1edbb0ee3e135d4",
+        "covered_ranges": [
+          {
+            "start": 0,
+            "end": 216,
+            "label": "PE headers before checksum",
+            "length": 216
+          },
+          {
+            "start": 220,
+            "end": 280,
+            "label": "between checksum and certificate directory entry",
+            "length": 60
+          },
+          {
+            "start": 288,
+            "end": 512,
+            "label": "after certificate directory entry to SizeOfHeaders",
+            "length": 224
+          },
+          {
+            "start": 512,
+            "end": 2052,
+            "label": "section b'.text\\x00\\x00\\x00' before signature",
+            "length": 1540
+          },
+          {
+            "start": 2308,
+            "end": 2560,
+            "label": "section b'.text\\x00\\x00\\x00' after signature",
+            "length": 252
+          }
+        ],
+        "verdict": {
+          "signature_integrity": "invalid",
+          "covered_content_integrity": "not established",
+          "key_identity": "token + public key match each other by construction",
+          "publisher_trust": "not established by strong name",
+          "flag_alone_is_not_evidence": true,
+          "note": "A valid strong-name signature proves possession of the private key for the embedded public key and integrity of the hashed ranges. It does not establish a trusted publisher."
+        },
+        "external": {
+          "covered_bytes": 2292,
+          "hash_algorithm": "sha1",
+          "python_digest": "9cc084e1218dd9ba3a31d4e41287aab32156f6fd",
+          "openssl_digest": "9cc084e1218dd9ba3a31d4e41287aab32156f6fd",
+          "openssl_signature": {
+            "available": true,
+            "ok": false,
+            "detail": "Verification failure"
+          }
+        }
+      },
+      "authenticode": {
+        "certificate_entries": [],
+        "authenticode_digest": null,
+        "covered_ranges": [],
+        "signed_content_digest": null,
+        "digest_matches": null,
+        "signer_signature_valid": null,
+        "message_digest_attribute_matches": null,
+        "certificate_chain": null,
+        "verdict": {
+          "signature": "absent",
+          "trust": "not applicable",
+          "note": "No WIN_CERTIFICATE entry; the file has no Authenticode signature."
+        }
+      },
+      "notes": [
+        "签名后修改 IL 方法体一个字节"
+      ]
+    },
+    "sn_token_forgery": {
+      "file": "strongname_lab/fixtures/generated/sn_token_forgery.bin",
+      "sha256": "5e7fbd02e3dcaf56885f86009486fdcd95da370cae28371d3e2f99d293e5ce0f",
+      "size": 2560,
+      "executed": false,
+      "strong_name": {
+        "identity": {
+          "name": "Contoso.Utils",
+          "version": "1.0.0.0",
+          "culture": "",
+          "flags": 1,
+          "has_public_key": true,
+          "public_key_sha256": "b7e935ad7876fdf4ad329b90e745ffded149a12488fc587e3c99745771411612",
+          "public_key_token": "e20f9bf307719724",
+          "hash_algorithm_id": "0x00008004",
+          "hash_algorithm": "sha1"
+        },
+        "cli": {
+          "flags": 9,
+          "il_only": true,
+          "strong_name_signed_flag": true,
+          "strong_name_rva": 9732,
+          "strong_name_size": 256,
+          "signature_file_offset": 2052
+        },
+        "checks": {
+          "public_key_present": true,
+          "public_key_flag_matches_blob": true,
+          "signature_slot_present": true,
+          "strong_name_signed_flag_matches_valid_material": true,
+          "signature_slot_size_matches_key": true,
+          "signature_nonzero": true,
+          "digest_supported": true,
+          "embedded_digest_matches_content": false,
+          "rsa_signature_valid": false,
+          "rsa_verification_detail": "PKCS#1 v1.5 encoded message mismatch"
+        },
+        "digest": "d08dc963c2a5c3d4e7ab9197a1edbb0ee3e135d4",
+        "embedded_digest": null,
+        "covered_ranges": [
+          {
+            "start": 0,
+            "end": 216,
+            "label": "PE headers before checksum",
+            "length": 216
+          },
+          {
+            "start": 220,
+            "end": 280,
+            "label": "between checksum and certificate directory entry",
+            "length": 60
+          },
+          {
+            "start": 288,
+            "end": 512,
+            "label": "after certificate directory entry to SizeOfHeaders",
+            "length": 224
+          },
+          {
+            "start": 512,
+            "end": 2052,
+            "label": "section b'.text\\x00\\x00\\x00' before signature",
+            "length": 1540
+          },
+          {
+            "start": 2308,
+            "end": 2560,
+            "label": "section b'.text\\x00\\x00\\x00' after signature",
+            "length": 252
+          }
+        ],
+        "verdict": {
+          "signature_integrity": "invalid",
+          "covered_content_integrity": "not established",
+          "key_identity": "token + public key match each other by construction",
+          "publisher_trust": "not established by strong name",
+          "flag_alone_is_not_evidence": true,
+          "note": "A valid strong-name signature proves possession of the private key for the embedded public key and integrity of the hashed ranges. It does not establish a trusted publisher."
+        },
+        "external": {
+          "covered_bytes": 2292,
+          "hash_algorithm": "sha1",
+          "python_digest": "d08dc963c2a5c3d4e7ab9197a1edbb0ee3e135d4",
+          "openssl_digest": "d08dc963c2a5c3d4e7ab9197a1edbb0ee3e135d4",
+          "openssl_signature": {
+            "available": true,
+            "ok": false,
+            "detail": "Verification failure"
+          }
+        }
+      },
+      "authenticode": {
+        "certificate_entries": [],
+        "authenticode_digest": null,
+        "covered_ranges": [],
+        "signed_content_digest": null,
+        "digest_matches": null,
+        "signer_signature_valid": null,
+        "message_digest_attribute_matches": null,
+        "certificate_chain": null,
+        "verdict": {
+          "signature": "absent",
+          "trust": "not applicable",
+          "note": "No WIN_CERTIFICATE entry; the file has no Authenticode signature."
+        }
+      },
+      "notes": [
+        "换用另一私钥签名后把原公钥写回元数据；token 不变，签名不成立"
+      ]
+    },
+    "auth_full": {
+      "file": "strongname_lab/fixtures/generated/auth_full.bin",
+      "sha256": "defda88ea8db3fe922b63f12fd04989eb129ca01ab8ed922ff23c6b964b2be04",
+      "size": 4944,
+      "executed": false,
+      "strong_name": {
+        "identity": {
+          "name": "Contoso.Utils",
+          "version": "1.0.0.0",
+          "culture": "",
+          "flags": 1,
+          "has_public_key": true,
+          "public_key_sha256": "b7e935ad7876fdf4ad329b90e745ffded149a12488fc587e3c99745771411612",
+          "public_key_token": "e20f9bf307719724",
+          "hash_algorithm_id": "0x00008004",
+          "hash_algorithm": "sha1"
+        },
+        "cli": {
+          "flags": 9,
+          "il_only": true,
+          "strong_name_signed_flag": true,
+          "strong_name_rva": 9732,
+          "strong_name_size": 256,
+          "signature_file_offset": 2052
+        },
+        "checks": {
+          "public_key_present": true,
+          "public_key_flag_matches_blob": true,
+          "signature_slot_present": true,
+          "strong_name_signed_flag_matches_valid_material": true,
+          "signature_slot_size_matches_key": true,
+          "signature_nonzero": true,
+          "digest_supported": true,
+          "embedded_digest_matches_content": true,
+          "rsa_signature_valid": true,
+          "rsa_verification_detail": "PKCS#1 v1.5 encoded message matches"
+        },
+        "digest": "d08dc963c2a5c3d4e7ab9197a1edbb0ee3e135d4",
+        "embedded_digest": "d08dc963c2a5c3d4e7ab9197a1edbb0ee3e135d4",
+        "covered_ranges": [
+          {
+            "start": 0,
+            "end": 216,
+            "label": "PE headers before checksum",
+            "length": 216
+          },
+          {
+            "start": 220,
+            "end": 280,
+            "label": "between checksum and certificate directory entry",
+            "length": 60
+          },
+          {
+            "start": 288,
+            "end": 512,
+            "label": "after certificate directory entry to SizeOfHeaders",
+            "length": 224
+          },
+          {
+            "start": 512,
+            "end": 2052,
+            "label": "section b'.text\\x00\\x00\\x00' before signature",
+            "length": 1540
+          },
+          {
+            "start": 2308,
+            "end": 2560,
+            "label": "section b'.text\\x00\\x00\\x00' after signature",
+            "length": 252
+          }
+        ],
+        "verdict": {
+          "signature_integrity": "valid",
+          "covered_content_integrity": "intact for selected ranges",
+          "key_identity": "token + public key match each other by construction",
+          "publisher_trust": "not established by strong name",
+          "flag_alone_is_not_evidence": false,
+          "note": "A valid strong-name signature proves possession of the private key for the embedded public key and integrity of the hashed ranges. It does not establish a trusted publisher."
+        },
+        "external": {
+          "covered_bytes": 2292,
+          "hash_algorithm": "sha1",
+          "python_digest": "d08dc963c2a5c3d4e7ab9197a1edbb0ee3e135d4",
+          "openssl_digest": "d08dc963c2a5c3d4e7ab9197a1edbb0ee3e135d4",
+          "openssl_signature": {
+            "available": true,
+            "ok": true,
+            "detail": "Verified OK"
+          }
+        }
+      },
+      "authenticode": {
+        "certificate_entries": [
+          {
+            "offset": 2560,
+            "length": 2384,
+            "revision": 512,
+            "certificate_type": 2,
+            "pkcs7_length": 2376
+          }
+        ],
+        "authenticode_digest": "7755c66b2ca97a80bf85aff50c46fa6372171ac43f79fed5326767eb21d1fb8b",
+        "covered_ranges": [
+          {
+            "start": 0,
+            "end": 216,
+            "label": "headers before checksum",
+            "length": 216
+          },
+          {
+            "start": 220,
+            "end": 280,
+            "label": "between checksum and certificate directory entry",
+            "length": 60
+          },
+          {
+            "start": 288,
+            "end": 512,
+            "label": "after certificate directory entry to SizeOfHeaders",
+            "length": 224
+          },
+          {
+            "start": 512,
+            "end": 2560,
+            "label": "section b'.text\\x00\\x00\\x00'",
+            "length": 2048
+          }
+        ],
+        "signed_content_digest": "7755c66b2ca97a80bf85aff50c46fa6372171ac43f79fed5326767eb21d1fb8b",
+        "digest_matches": true,
+        "signer_signature_valid": true,
+        "message_digest_attribute_matches": true,
+        "certificate_chain": {
+          "chain_serials": [
+            8193,
+            4097
+          ],
+          "chain_subjects": [
+            "2.5.4.3=Contoso Example Publisher, 2.5.4.10=Offline Lab, 2.5.4.11=Code Signing",
+            "2.5.4.3=Strong-Name Lab Root, 2.5.4.10=Offline Lab"
+          ],
+          "signatures_verified": true,
+          "anchored_in_supplied_store": true,
+          "leaf_is_ca": false,
+          "problems": [],
+          "trusted": true
+        },
+        "verdict": {
+          "signature": "cryptographically valid",
+          "unauthenticated_trailing_bytes": 0,
+          "trust": "trusted by supplied anchors",
+          "published_by_trusted_publisher": true,
+          "publisher_identity": "certificate subject only, and only if the chain is trusted",
+          "note": "Authenticode covers the whole file except checksum, the certificate directory entry and the certificate table. A mathematical signature over an untrusted certificate does not make the publisher trustworthy."
+        },
+        "unauthenticated_trailing_bytes": 0,
+        "coverage_note": "Authenticode does not hash the certificate table nor bytes appended after it; those bytes are outside the signed content.",
+        "signer_signature_detail": "PKCS#1 v1.5 encoded message matches",
+        "signer": {
+          "subject": "2.5.4.3=Contoso Example Publisher, 2.5.4.10=Offline Lab, 2.5.4.11=Code Signing",
+          "issuer": "2.5.4.3=Strong-Name Lab Root, 2.5.4.10=Offline Lab",
+          "serial": 8193,
+          "not_before": "2024-01-01T00:00:00+00:00",
+          "not_after": "2028-01-01T00:00:00+00:00",
+          "eku": [
+            "1.3.6.1.5.5.7.3.3"
+          ],
+          "signature_algorithm": "1.2.840.113549.1.1.11"
+        },
+        "leaf_within_validity": true,
+        "leaf_has_code_signing_eku": true,
+        "timestamp_present": false,
+        "external": {
+          "covered_bytes": 2548,
+          "covered_sha256": "7755c66b2ca97a80bf85aff50c46fa6372171ac43f79fed5326767eb21d1fb8b",
+          "openssl_digest": "7755c66b2ca97a80bf85aff50c46fa6372171ac43f79fed5326767eb21d1fb8b",
+          "openssl_signed_attrs": {
+            "available": true,
+            "ok": true,
+            "detail": "Verified OK"
+          },
+          "openssl_chain": {
+            "available": true,
+            "ok": true,
+            "detail": "/tmp/claude-501/tmpazkenjmb/leaf.pem: OK"
+          }
+        }
+      },
+      "notes": [
+        "强名称 + Authenticode，链锚定到随附根证书"
+      ]
+    },
+    "auth_untrusted_root": {
+      "file": "strongname_lab/fixtures/generated/auth_untrusted_root.bin",
+      "sha256": "7e35fb2cd7a29f6c9687156abe2e5d378cdabc20eda537cc1008decff4ec3b15",
+      "size": 4816,
+      "executed": false,
+      "strong_name": {
+        "identity": {
+          "name": "Contoso.Utils",
+          "version": "1.0.0.0",
+          "culture": "",
+          "flags": 1,
+          "has_public_key": true,
+          "public_key_sha256": "b7e935ad7876fdf4ad329b90e745ffded149a12488fc587e3c99745771411612",
+          "public_key_token": "e20f9bf307719724",
+          "hash_algorithm_id": "0x00008004",
+          "hash_algorithm": "sha1"
+        },
+        "cli": {
+          "flags": 9,
+          "il_only": true,
+          "strong_name_signed_flag": true,
+          "strong_name_rva": 9732,
+          "strong_name_size": 256,
+          "signature_file_offset": 2052
+        },
+        "checks": {
+          "public_key_present": true,
+          "public_key_flag_matches_blob": true,
+          "signature_slot_present": true,
+          "strong_name_signed_flag_matches_valid_material": true,
+          "signature_slot_size_matches_key": true,
+          "signature_nonzero": true,
+          "digest_supported": true,
+          "embedded_digest_matches_content": true,
+          "rsa_signature_valid": true,
+          "rsa_verification_detail": "PKCS#1 v1.5 encoded message matches"
+        },
+        "digest": "d08dc963c2a5c3d4e7ab9197a1edbb0ee3e135d4",
+        "embedded_digest": "d08dc963c2a5c3d4e7ab9197a1edbb0ee3e135d4",
+        "covered_ranges": [
+          {
+            "start": 0,
+            "end": 216,
+            "label": "PE headers before checksum",
+            "length": 216
+          },
+          {
+            "start": 220,
+            "end": 280,
+            "label": "between checksum and certificate directory entry",
+            "length": 60
+          },
+          {
+            "start": 288,
+            "end": 512,
+            "label": "after certificate directory entry to SizeOfHeaders",
+            "length": 224
+          },
+          {
+            "start": 512,
+            "end": 2052,
+            "label": "section b'.text\\x00\\x00\\x00' before signature",
+            "length": 1540
+          },
+          {
+            "start": 2308,
+            "end": 2560,
+            "label": "section b'.text\\x00\\x00\\x00' after signature",
+            "length": 252
+          }
+        ],
+        "verdict": {
+          "signature_integrity": "valid",
+          "covered_content_integrity": "intact for selected ranges",
+          "key_identity": "token + public key match each other by construction",
+          "publisher_trust": "not established by strong name",
+          "flag_alone_is_not_evidence": false,
+          "note": "A valid strong-name signature proves possession of the private key for the embedded public key and integrity of the hashed ranges. It does not establish a trusted publisher."
+        },
+        "external": {
+          "covered_bytes": 2292,
+          "hash_algorithm": "sha1",
+          "python_digest": "d08dc963c2a5c3d4e7ab9197a1edbb0ee3e135d4",
+          "openssl_digest": "d08dc963c2a5c3d4e7ab9197a1edbb0ee3e135d4",
+          "openssl_signature": {
+            "available": true,
+            "ok": true,
+            "detail": "Verified OK"
+          }
+        }
+      },
+      "authenticode": {
+        "certificate_entries": [
+          {
+            "offset": 2560,
+            "length": 2252,
+            "revision": 512,
+            "certificate_type": 2,
+            "pkcs7_length": 2244
+          }
+        ],
+        "authenticode_digest": "7755c66b2ca97a80bf85aff50c46fa6372171ac43f79fed5326767eb21d1fb8b",
+        "covered_ranges": [
+          {
+            "start": 0,
+            "end": 216,
+            "label": "headers before checksum",
+            "length": 216
+          },
+          {
+            "start": 220,
+            "end": 280,
+            "label": "between checksum and certificate directory entry",
+            "length": 60
+          },
+          {
+            "start": 288,
+            "end": 512,
+            "label": "after certificate directory entry to SizeOfHeaders",
+            "length": 224
+          },
+          {
+            "start": 512,
+            "end": 2560,
+            "label": "section b'.text\\x00\\x00\\x00'",
+            "length": 2048
+          }
+        ],
+        "signed_content_digest": "7755c66b2ca97a80bf85aff50c46fa6372171ac43f79fed5326767eb21d1fb8b",
+        "digest_matches": true,
+        "signer_signature_valid": true,
+        "message_digest_attribute_matches": true,
+        "certificate_chain": {
+          "chain_serials": [
+            12290,
+            12289
+          ],
+          "chain_subjects": [
+            "2.5.4.3=Contoso Example Publisher, 2.5.4.10=Offline Lab",
+            "2.5.4.3=Other Root, 2.5.4.10=Elsewhere"
+          ],
+          "signatures_verified": true,
+          "anchored_in_supplied_store": false,
+          "leaf_is_ca": false,
+          "problems": [],
+          "trusted": false
+        },
+        "verdict": {
+          "signature": "cryptographically valid",
+          "unauthenticated_trailing_bytes": 0,
+          "trust": "not trusted",
+          "published_by_trusted_publisher": false,
+          "publisher_identity": "certificate subject only, and only if the chain is trusted",
+          "note": "Authenticode covers the whole file except checksum, the certificate directory entry and the certificate table. A mathematical signature over an untrusted certificate does not make the publisher trustworthy."
+        },
+        "unauthenticated_trailing_bytes": 0,
+        "coverage_note": "Authenticode does not hash the certificate table nor bytes appended after it; those bytes are outside the signed content.",
+        "signer_signature_detail": "PKCS#1 v1.5 encoded message matches",
+        "signer": {
+          "subject": "2.5.4.3=Contoso Example Publisher, 2.5.4.10=Offline Lab",
+          "issuer": "2.5.4.3=Other Root, 2.5.4.10=Elsewhere",
+          "serial": 12290,
+          "not_before": "2024-01-01T00:00:00+00:00",
+          "not_after": "2028-01-01T00:00:00+00:00",
+          "eku": [
+            "1.3.6.1.5.5.7.3.3"
+          ],
+          "signature_algorithm": "1.2.840.113549.1.1.11"
+        },
+        "leaf_within_validity": true,
+        "leaf_has_code_signing_eku": true,
+        "timestamp_present": false,
+        "external": {
+          "covered_bytes": 2548,
+          "covered_sha256": "7755c66b2ca97a80bf85aff50c46fa6372171ac43f79fed5326767eb21d1fb8b",
+          "openssl_digest": "7755c66b2ca97a80bf85aff50c46fa6372171ac43f79fed5326767eb21d1fb8b",
+          "openssl_signed_attrs": {
+            "available": true,
+            "ok": true,
+            "detail": "Verified OK"
+          },
+          "openssl_chain": {
+            "available": true,
+            "ok": true,
+            "detail": "/tmp/claude-501/tmpgbkskzvy/leaf.pem: OK"
+          }
+        }
+      },
+      "notes": [
+        "签名数学有效，但颁发者不在随附信任锚中"
+      ]
+    },
+    "auth_wrong_digest": {
+      "file": "strongname_lab/fixtures/generated/auth_wrong_digest.bin",
+      "sha256": "c8eeeda9c814e34c136a16388be7364bae3303cfde9eac86996ec4a4819a24be",
+      "size": 4944,
+      "executed": false,
+      "strong_name": {
+        "identity": {
+          "name": "Contoso.Utils",
+          "version": "1.0.0.0",
+          "culture": "",
+          "flags": 1,
+          "has_public_key": true,
+          "public_key_sha256": "b7e935ad7876fdf4ad329b90e745ffded149a12488fc587e3c99745771411612",
+          "public_key_token": "e20f9bf307719724",
+          "hash_algorithm_id": "0x00008004",
+          "hash_algorithm": "sha1"
+        },
+        "cli": {
+          "flags": 9,
+          "il_only": true,
+          "strong_name_signed_flag": true,
+          "strong_name_rva": 9732,
+          "strong_name_size": 256,
+          "signature_file_offset": 2052
+        },
+        "checks": {
+          "public_key_present": true,
+          "public_key_flag_matches_blob": true,
+          "signature_slot_present": true,
+          "strong_name_signed_flag_matches_valid_material": true,
+          "signature_slot_size_matches_key": true,
+          "signature_nonzero": true,
+          "digest_supported": true,
+          "embedded_digest_matches_content": true,
+          "rsa_signature_valid": true,
+          "rsa_verification_detail": "PKCS#1 v1.5 encoded message matches"
+        },
+        "digest": "d08dc963c2a5c3d4e7ab9197a1edbb0ee3e135d4",
+        "embedded_digest": "d08dc963c2a5c3d4e7ab9197a1edbb0ee3e135d4",
+        "covered_ranges": [
+          {
+            "start": 0,
+            "end": 216,
+            "label": "PE headers before checksum",
+            "length": 216
+          },
+          {
+            "start": 220,
+            "end": 280,
+            "label": "between checksum and certificate directory entry",
+            "length": 60
+          },
+          {
+            "start": 288,
+            "end": 512,
+            "label": "after certificate directory entry to SizeOfHeaders",
+            "length": 224
+          },
+          {
+            "start": 512,
+            "end": 2052,
+            "label": "section b'.text\\x00\\x00\\x00' before signature",
+            "length": 1540
+          },
+          {
+            "start": 2308,
+            "end": 2560,
+            "label": "section b'.text\\x00\\x00\\x00' after signature",
+            "length": 252
+          }
+        ],
+        "verdict": {
+          "signature_integrity": "valid",
+          "covered_content_integrity": "intact for selected ranges",
+          "key_identity": "token + public key match each other by construction",
+          "publisher_trust": "not established by strong name",
+          "flag_alone_is_not_evidence": false,
+          "note": "A valid strong-name signature proves possession of the private key for the embedded public key and integrity of the hashed ranges. It does not establish a trusted publisher."
+        },
+        "external": {
+          "covered_bytes": 2292,
+          "hash_algorithm": "sha1",
+          "python_digest": "d08dc963c2a5c3d4e7ab9197a1edbb0ee3e135d4",
+          "openssl_digest": "d08dc963c2a5c3d4e7ab9197a1edbb0ee3e135d4",
+          "openssl_signature": {
+            "available": true,
+            "ok": true,
+            "detail": "Verified OK"
+          }
+        }
+      },
+      "authenticode": {
+        "certificate_entries": [
+          {
+            "offset": 2560,
+            "length": 2384,
+            "revision": 512,
+            "certificate_type": 2,
+            "pkcs7_length": 2376
+          }
+        ],
+        "authenticode_digest": "7755c66b2ca97a80bf85aff50c46fa6372171ac43f79fed5326767eb21d1fb8b",
+        "covered_ranges": [
+          {
+            "start": 0,
+            "end": 216,
+            "label": "headers before checksum",
+            "length": 216
+          },
+          {
+            "start": 220,
+            "end": 280,
+            "label": "between checksum and certificate directory entry",
+            "length": 60
+          },
+          {
+            "start": 288,
+            "end": 512,
+            "label": "after certificate directory entry to SizeOfHeaders",
+            "length": 224
+          },
+          {
+            "start": 512,
+            "end": 2560,
+            "label": "section b'.text\\x00\\x00\\x00'",
+            "length": 2048
+          }
+        ],
+        "signed_content_digest": "8855c66b2ca97a80bf85aff50c46fa6372171ac43f79fed5326767eb21d1fb8b",
+        "digest_matches": false,
+        "signer_signature_valid": true,
+        "message_digest_attribute_matches": true,
+        "certificate_chain": {
+          "chain_serials": [
+            8193,
+            4097
+          ],
+          "chain_subjects": [
+            "2.5.4.3=Contoso Example Publisher, 2.5.4.10=Offline Lab, 2.5.4.11=Code Signing",
+            "2.5.4.3=Strong-Name Lab Root, 2.5.4.10=Offline Lab"
+          ],
+          "signatures_verified": true,
+          "anchored_in_supplied_store": true,
+          "leaf_is_ca": false,
+          "problems": [],
+          "trusted": true
+        },
+        "verdict": {
+          "signature": "invalid",
+          "unauthenticated_trailing_bytes": 0,
+          "trust": "trusted by supplied anchors",
+          "published_by_trusted_publisher": false,
+          "publisher_identity": "certificate subject only, and only if the chain is trusted",
+          "note": "Authenticode covers the whole file except checksum, the certificate directory entry and the certificate table. A mathematical signature over an untrusted certificate does not make the publisher trustworthy."
+        },
+        "unauthenticated_trailing_bytes": 0,
+        "coverage_note": "Authenticode does not hash the certificate table nor bytes appended after it; those bytes are outside the signed content.",
+        "signer_signature_detail": "PKCS#1 v1.5 encoded message matches",
+        "signer": {
+          "subject": "2.5.4.3=Contoso Example Publisher, 2.5.4.10=Offline Lab, 2.5.4.11=Code Signing",
+          "issuer": "2.5.4.3=Strong-Name Lab Root, 2.5.4.10=Offline Lab",
+          "serial": 8193,
+          "not_before": "2024-01-01T00:00:00+00:00",
+          "not_after": "2028-01-01T00:00:00+00:00",
+          "eku": [
+            "1.3.6.1.5.5.7.3.3"
+          ],
+          "signature_algorithm": "1.2.840.113549.1.1.11"
+        },
+        "leaf_within_validity": true,
+        "leaf_has_code_signing_eku": true,
+        "timestamp_present": false,
+        "external": {
+          "covered_bytes": 2548,
+          "covered_sha256": "7755c66b2ca97a80bf85aff50c46fa6372171ac43f79fed5326767eb21d1fb8b",
+          "openssl_digest": "7755c66b2ca97a80bf85aff50c46fa6372171ac43f79fed5326767eb21d1fb8b",
+          "openssl_signed_attrs": {
+            "available": true,
+            "ok": true,
+            "detail": "Verified OK"
+          },
+          "openssl_chain": {
+            "available": true,
+            "ok": true,
+            "detail": "/tmp/claude-501/tmpn7sj4ebb/leaf.pem: OK"
+          }
+        }
+      },
+      "notes": [
+        "PKCS#7 里封装的 PE 摘要被改坏"
+      ]
+    },
+    "auth_body_tampered": {
+      "file": "strongname_lab/fixtures/generated/auth_body_tampered.bin",
+      "sha256": "c2fea95a540f9c279066591ff379cc30d44f9af709023b4a79a87ef0edf60faf",
+      "size": 4944,
+      "executed": false,
+      "strong_name": {
+        "identity": {
+          "name": "Contoso.Utils",
+          "version": "1.0.0.0",
+          "culture": "",
+          "flags": 1,
+          "has_public_key": true,
+          "public_key_sha256": "b7e935ad7876fdf4ad329b90e745ffded149a12488fc587e3c99745771411612",
+          "public_key_token": "e20f9bf307719724",
+          "hash_algorithm_id": "0x00008004",
+          "hash_algorithm": "sha1"
+        },
+        "cli": {
+          "flags": 9,
+          "il_only": true,
+          "strong_name_signed_flag": true,
+          "strong_name_rva": 9732,
+          "strong_name_size": 256,
+          "signature_file_offset": 2052
+        },
+        "checks": {
+          "public_key_present": true,
+          "public_key_flag_matches_blob": true,
+          "signature_slot_present": true,
+          "strong_name_signed_flag_matches_valid_material": true,
+          "signature_slot_size_matches_key": true,
+          "signature_nonzero": true,
+          "digest_supported": true,
+          "embedded_digest_matches_content": false,
+          "rsa_signature_valid": false,
+          "rsa_verification_detail": "PKCS#1 v1.5 encoded message mismatch"
+        },
+        "digest": "9cc084e1218dd9ba3a31d4e41287aab32156f6fd",
+        "embedded_digest": "d08dc963c2a5c3d4e7ab9197a1edbb0ee3e135d4",
+        "covered_ranges": [
+          {
+            "start": 0,
+            "end": 216,
+            "label": "PE headers before checksum",
+            "length": 216
+          },
+          {
+            "start": 220,
+            "end": 280,
+            "label": "between checksum and certificate directory entry",
+            "length": 60
+          },
+          {
+            "start": 288,
+            "end": 512,
+            "label": "after certificate directory entry to SizeOfHeaders",
+            "length": 224
+          },
+          {
+            "start": 512,
+            "end": 2052,
+            "label": "section b'.text\\x00\\x00\\x00' before signature",
+            "length": 1540
+          },
+          {
+            "start": 2308,
+            "end": 2560,
+            "label": "section b'.text\\x00\\x00\\x00' after signature",
+            "length": 252
+          }
+        ],
+        "verdict": {
+          "signature_integrity": "invalid",
+          "covered_content_integrity": "not established",
+          "key_identity": "token + public key match each other by construction",
+          "publisher_trust": "not established by strong name",
+          "flag_alone_is_not_evidence": true,
+          "note": "A valid strong-name signature proves possession of the private key for the embedded public key and integrity of the hashed ranges. It does not establish a trusted publisher."
+        },
+        "external": {
+          "covered_bytes": 2292,
+          "hash_algorithm": "sha1",
+          "python_digest": "9cc084e1218dd9ba3a31d4e41287aab32156f6fd",
+          "openssl_digest": "9cc084e1218dd9ba3a31d4e41287aab32156f6fd",
+          "openssl_signature": {
+            "available": true,
+            "ok": false,
+            "detail": "Verification failure"
+          }
+        }
+      },
+      "authenticode": {
+        "certificate_entries": [
+          {
+            "offset": 2560,
+            "length": 2384,
+            "revision": 512,
+            "certificate_type": 2,
+            "pkcs7_length": 2376
+          }
+        ],
+        "authenticode_digest": "72e3edc26eb55c0d88163b143a773d463830bf5bafe7c248e0199e6158e2992d",
+        "covered_ranges": [
+          {
+            "start": 0,
+            "end": 216,
+            "label": "headers before checksum",
+            "length": 216
+          },
+          {
+            "start": 220,
+            "end": 280,
+            "label": "between checksum and certificate directory entry",
+            "length": 60
+          },
+          {
+            "start": 288,
+            "end": 512,
+            "label": "after certificate directory entry to SizeOfHeaders",
+            "length": 224
+          },
+          {
+            "start": 512,
+            "end": 2560,
+            "label": "section b'.text\\x00\\x00\\x00'",
+            "length": 2048
+          }
+        ],
+        "signed_content_digest": "7755c66b2ca97a80bf85aff50c46fa6372171ac43f79fed5326767eb21d1fb8b",
+        "digest_matches": false,
+        "signer_signature_valid": true,
+        "message_digest_attribute_matches": true,
+        "certificate_chain": {
+          "chain_serials": [
+            8193,
+            4097
+          ],
+          "chain_subjects": [
+            "2.5.4.3=Contoso Example Publisher, 2.5.4.10=Offline Lab, 2.5.4.11=Code Signing",
+            "2.5.4.3=Strong-Name Lab Root, 2.5.4.10=Offline Lab"
+          ],
+          "signatures_verified": true,
+          "anchored_in_supplied_store": true,
+          "leaf_is_ca": false,
+          "problems": [],
+          "trusted": true
+        },
+        "verdict": {
+          "signature": "invalid",
+          "unauthenticated_trailing_bytes": 0,
+          "trust": "trusted by supplied anchors",
+          "published_by_trusted_publisher": false,
+          "publisher_identity": "certificate subject only, and only if the chain is trusted",
+          "note": "Authenticode covers the whole file except checksum, the certificate directory entry and the certificate table. A mathematical signature over an untrusted certificate does not make the publisher trustworthy."
+        },
+        "unauthenticated_trailing_bytes": 0,
+        "coverage_note": "Authenticode does not hash the certificate table nor bytes appended after it; those bytes are outside the signed content.",
+        "signer_signature_detail": "PKCS#1 v1.5 encoded message matches",
+        "signer": {
+          "subject": "2.5.4.3=Contoso Example Publisher, 2.5.4.10=Offline Lab, 2.5.4.11=Code Signing",
+          "issuer": "2.5.4.3=Strong-Name Lab Root, 2.5.4.10=Offline Lab",
+          "serial": 8193,
+          "not_before": "2024-01-01T00:00:00+00:00",
+          "not_after": "2028-01-01T00:00:00+00:00",
+          "eku": [
+            "1.3.6.1.5.5.7.3.3"
+          ],
+          "signature_algorithm": "1.2.840.113549.1.1.11"
+        },
+        "leaf_within_validity": true,
+        "leaf_has_code_signing_eku": true,
+        "timestamp_present": false,
+        "external": {
+          "covered_bytes": 2548,
+          "covered_sha256": "72e3edc26eb55c0d88163b143a773d463830bf5bafe7c248e0199e6158e2992d",
+          "openssl_digest": "72e3edc26eb55c0d88163b143a773d463830bf5bafe7c248e0199e6158e2992d",
+          "openssl_signed_attrs": {
+            "available": true,
+            "ok": true,
+            "detail": "Verified OK"
+          },
+          "openssl_chain": {
+            "available": true,
+            "ok": true,
+            "detail": "/tmp/claude-501/tmp25ey1ice/leaf.pem: OK"
+          }
+        }
+      },
+      "notes": [
+        "Authenticode 签名后修改方法体"
+      ]
+    },
+    "dual_overlay": {
+      "file": "strongname_lab/fixtures/generated/dual_overlay.bin",
+      "sha256": "4614ba29ffa993d8c7e5da85af4786e2ab0a47786dd41b8b6f00374bb5ef7b34",
+      "size": 4976,
+      "executed": false,
+      "strong_name": {
+        "identity": {
+          "name": "Contoso.Utils",
+          "version": "1.0.0.0",
+          "culture": "",
+          "flags": 1,
+          "has_public_key": true,
+          "public_key_sha256": "b7e935ad7876fdf4ad329b90e745ffded149a12488fc587e3c99745771411612",
+          "public_key_token": "e20f9bf307719724",
+          "hash_algorithm_id": "0x00008004",
+          "hash_algorithm": "sha1"
+        },
+        "cli": {
+          "flags": 9,
+          "il_only": true,
+          "strong_name_signed_flag": true,
+          "strong_name_rva": 9732,
+          "strong_name_size": 256,
+          "signature_file_offset": 2052
+        },
+        "checks": {
+          "public_key_present": true,
+          "public_key_flag_matches_blob": true,
+          "signature_slot_present": true,
+          "strong_name_signed_flag_matches_valid_material": true,
+          "signature_slot_size_matches_key": true,
+          "signature_nonzero": true,
+          "digest_supported": true,
+          "embedded_digest_matches_content": true,
+          "rsa_signature_valid": true,
+          "rsa_verification_detail": "PKCS#1 v1.5 encoded message matches"
+        },
+        "digest": "d08dc963c2a5c3d4e7ab9197a1edbb0ee3e135d4",
+        "embedded_digest": "d08dc963c2a5c3d4e7ab9197a1edbb0ee3e135d4",
+        "covered_ranges": [
+          {
+            "start": 0,
+            "end": 216,
+            "label": "PE headers before checksum",
+            "length": 216
+          },
+          {
+            "start": 220,
+            "end": 280,
+            "label": "between checksum and certificate directory entry",
+            "length": 60
+          },
+          {
+            "start": 288,
+            "end": 512,
+            "label": "after certificate directory entry to SizeOfHeaders",
+            "length": 224
+          },
+          {
+            "start": 512,
+            "end": 2052,
+            "label": "section b'.text\\x00\\x00\\x00' before signature",
+            "length": 1540
+          },
+          {
+            "start": 2308,
+            "end": 2560,
+            "label": "section b'.text\\x00\\x00\\x00' after signature",
+            "length": 252
+          }
+        ],
+        "verdict": {
+          "signature_integrity": "valid",
+          "covered_content_integrity": "intact for selected ranges",
+          "key_identity": "token + public key match each other by construction",
+          "publisher_trust": "not established by strong name",
+          "flag_alone_is_not_evidence": false,
+          "note": "A valid strong-name signature proves possession of the private key for the embedded public key and integrity of the hashed ranges. It does not establish a trusted publisher."
+        },
+        "external": {
+          "covered_bytes": 2292,
+          "hash_algorithm": "sha1",
+          "python_digest": "d08dc963c2a5c3d4e7ab9197a1edbb0ee3e135d4",
+          "openssl_digest": "d08dc963c2a5c3d4e7ab9197a1edbb0ee3e135d4",
+          "openssl_signature": {
+            "available": true,
+            "ok": true,
+            "detail": "Verified OK"
+          }
+        }
+      },
+      "authenticode": {
+        "certificate_entries": [
+          {
+            "offset": 2592,
+            "length": 2384,
+            "revision": 512,
+            "certificate_type": 2,
+            "pkcs7_length": 2376
+          }
+        ],
+        "authenticode_digest": "3c6af622baa4ff99d78a5a37e7b867a9587eba73b31b4493f11f20cf7dfd817e",
+        "covered_ranges": [
+          {
+            "start": 0,
+            "end": 216,
+            "label": "headers before checksum",
+            "length": 216
+          },
+          {
+            "start": 220,
+            "end": 280,
+            "label": "between checksum and certificate directory entry",
+            "length": 60
+          },
+          {
+            "start": 288,
+            "end": 512,
+            "label": "after certificate directory entry to SizeOfHeaders",
+            "length": 224
+          },
+          {
+            "start": 512,
+            "end": 2560,
+            "label": "section b'.text\\x00\\x00\\x00'",
+            "length": 2048
+          },
+          {
+            "start": 2560,
+            "end": 2592,
+            "label": "extra data before certificate table",
+            "length": 32
+          }
+        ],
+        "signed_content_digest": "53b766c38b73b4d34c27c8f61c3d0da76dec24fcb4ddc870736f83a2b3a4c723",
+        "digest_matches": false,
+        "signer_signature_valid": true,
+        "message_digest_attribute_matches": true,
+        "certificate_chain": {
+          "chain_serials": [
+            8193,
+            4097
+          ],
+          "chain_subjects": [
+            "2.5.4.3=Contoso Example Publisher, 2.5.4.10=Offline Lab, 2.5.4.11=Code Signing",
+            "2.5.4.3=Strong-Name Lab Root, 2.5.4.10=Offline Lab"
+          ],
+          "signatures_verified": true,
+          "anchored_in_supplied_store": true,
+          "leaf_is_ca": false,
+          "problems": [],
+          "trusted": true
+        },
+        "verdict": {
+          "signature": "invalid",
+          "unauthenticated_trailing_bytes": 0,
+          "trust": "trusted by supplied anchors",
+          "published_by_trusted_publisher": false,
+          "publisher_identity": "certificate subject only, and only if the chain is trusted",
+          "note": "Authenticode covers the whole file except checksum, the certificate directory entry and the certificate table. A mathematical signature over an untrusted certificate does not make the publisher trustworthy."
+        },
+        "unauthenticated_trailing_bytes": 0,
+        "coverage_note": "Authenticode does not hash the certificate table nor bytes appended after it; those bytes are outside the signed content.",
+        "signer_signature_detail": "PKCS#1 v1.5 encoded message matches",
+        "signer": {
+          "subject": "2.5.4.3=Contoso Example Publisher, 2.5.4.10=Offline Lab, 2.5.4.11=Code Signing",
+          "issuer": "2.5.4.3=Strong-Name Lab Root, 2.5.4.10=Offline Lab",
+          "serial": 8193,
+          "not_before": "2024-01-01T00:00:00+00:00",
+          "not_after": "2028-01-01T00:00:00+00:00",
+          "eku": [
+            "1.3.6.1.5.5.7.3.3"
+          ],
+          "signature_algorithm": "1.2.840.113549.1.1.11"
+        },
+        "leaf_within_validity": true,
+        "leaf_has_code_signing_eku": true,
+        "timestamp_present": false,
+        "external": {
+          "covered_bytes": 2580,
+          "covered_sha256": "3c6af622baa4ff99d78a5a37e7b867a9587eba73b31b4493f11f20cf7dfd817e",
+          "openssl_digest": "3c6af622baa4ff99d78a5a37e7b867a9587eba73b31b4493f11f20cf7dfd817e",
+          "openssl_signed_attrs": {
+            "available": true,
+            "ok": true,
+            "detail": "Verified OK"
+          },
+          "openssl_chain": {
+            "available": true,
+            "ok": true,
+            "detail": "/tmp/claude-501/tmpu01g1xuc/leaf.pem: OK"
+          }
+        }
+      },
+      "notes": [
+        "签名后修改节与证书表之间的附加数据：强名称仍有效，Authenticode 失效"
+      ]
+    },
+    "dual_trailing": {
+      "file": "strongname_lab/fixtures/generated/dual_trailing.bin",
+      "sha256": "e93c6e38aca818b27b2a7540afc055f6d7ed24f4c3a1f76e115f6a4e10a45aac",
+      "size": 4976,
+      "executed": false,
+      "strong_name": {
+        "identity": {
+          "name": "Contoso.Utils",
+          "version": "1.0.0.0",
+          "culture": "",
+          "flags": 1,
+          "has_public_key": true,
+          "public_key_sha256": "b7e935ad7876fdf4ad329b90e745ffded149a12488fc587e3c99745771411612",
+          "public_key_token": "e20f9bf307719724",
+          "hash_algorithm_id": "0x00008004",
+          "hash_algorithm": "sha1"
+        },
+        "cli": {
+          "flags": 9,
+          "il_only": true,
+          "strong_name_signed_flag": true,
+          "strong_name_rva": 9732,
+          "strong_name_size": 256,
+          "signature_file_offset": 2052
+        },
+        "checks": {
+          "public_key_present": true,
+          "public_key_flag_matches_blob": true,
+          "signature_slot_present": true,
+          "strong_name_signed_flag_matches_valid_material": true,
+          "signature_slot_size_matches_key": true,
+          "signature_nonzero": true,
+          "digest_supported": true,
+          "embedded_digest_matches_content": true,
+          "rsa_signature_valid": true,
+          "rsa_verification_detail": "PKCS#1 v1.5 encoded message matches"
+        },
+        "digest": "d08dc963c2a5c3d4e7ab9197a1edbb0ee3e135d4",
+        "embedded_digest": "d08dc963c2a5c3d4e7ab9197a1edbb0ee3e135d4",
+        "covered_ranges": [
+          {
+            "start": 0,
+            "end": 216,
+            "label": "PE headers before checksum",
+            "length": 216
+          },
+          {
+            "start": 220,
+            "end": 280,
+            "label": "between checksum and certificate directory entry",
+            "length": 60
+          },
+          {
+            "start": 288,
+            "end": 512,
+            "label": "after certificate directory entry to SizeOfHeaders",
+            "length": 224
+          },
+          {
+            "start": 512,
+            "end": 2052,
+            "label": "section b'.text\\x00\\x00\\x00' before signature",
+            "length": 1540
+          },
+          {
+            "start": 2308,
+            "end": 2560,
+            "label": "section b'.text\\x00\\x00\\x00' after signature",
+            "length": 252
+          }
+        ],
+        "verdict": {
+          "signature_integrity": "valid",
+          "covered_content_integrity": "intact for selected ranges",
+          "key_identity": "token + public key match each other by construction",
+          "publisher_trust": "not established by strong name",
+          "flag_alone_is_not_evidence": false,
+          "note": "A valid strong-name signature proves possession of the private key for the embedded public key and integrity of the hashed ranges. It does not establish a trusted publisher."
+        },
+        "external": {
+          "covered_bytes": 2292,
+          "hash_algorithm": "sha1",
+          "python_digest": "d08dc963c2a5c3d4e7ab9197a1edbb0ee3e135d4",
+          "openssl_digest": "d08dc963c2a5c3d4e7ab9197a1edbb0ee3e135d4",
+          "openssl_signature": {
+            "available": true,
+            "ok": true,
+            "detail": "Verified OK"
+          }
+        }
+      },
+      "authenticode": {
+        "certificate_entries": [
+          {
+            "offset": 2560,
+            "length": 2384,
+            "revision": 512,
+            "certificate_type": 2,
+            "pkcs7_length": 2376
+          }
+        ],
+        "authenticode_digest": "7755c66b2ca97a80bf85aff50c46fa6372171ac43f79fed5326767eb21d1fb8b",
+        "covered_ranges": [
+          {
+            "start": 0,
+            "end": 216,
+            "label": "headers before checksum",
+            "length": 216
+          },
+          {
+            "start": 220,
+            "end": 280,
+            "label": "between checksum and certificate directory entry",
+            "length": 60
+          },
+          {
+            "start": 288,
+            "end": 512,
+            "label": "after certificate directory entry to SizeOfHeaders",
+            "length": 224
+          },
+          {
+            "start": 512,
+            "end": 2560,
+            "label": "section b'.text\\x00\\x00\\x00'",
+            "length": 2048
+          }
+        ],
+        "signed_content_digest": "7755c66b2ca97a80bf85aff50c46fa6372171ac43f79fed5326767eb21d1fb8b",
+        "digest_matches": true,
+        "signer_signature_valid": true,
+        "message_digest_attribute_matches": true,
+        "certificate_chain": {
+          "chain_serials": [
+            8193,
+            4097
+          ],
+          "chain_subjects": [
+            "2.5.4.3=Contoso Example Publisher, 2.5.4.10=Offline Lab, 2.5.4.11=Code Signing",
+            "2.5.4.3=Strong-Name Lab Root, 2.5.4.10=Offline Lab"
+          ],
+          "signatures_verified": true,
+          "anchored_in_supplied_store": true,
+          "leaf_is_ca": false,
+          "problems": [],
+          "trusted": true
+        },
+        "verdict": {
+          "signature": "cryptographically valid",
+          "unauthenticated_trailing_bytes": 32,
+          "trust": "trusted by supplied anchors",
+          "published_by_trusted_publisher": true,
+          "publisher_identity": "certificate subject only, and only if the chain is trusted",
+          "note": "Authenticode covers the whole file except checksum, the certificate directory entry and the certificate table. A mathematical signature over an untrusted certificate does not make the publisher trustworthy."
+        },
+        "unauthenticated_trailing_bytes": 32,
+        "coverage_note": "Authenticode does not hash the certificate table nor bytes appended after it; those bytes are outside the signed content.",
+        "signer_signature_detail": "PKCS#1 v1.5 encoded message matches",
+        "signer": {
+          "subject": "2.5.4.3=Contoso Example Publisher, 2.5.4.10=Offline Lab, 2.5.4.11=Code Signing",
+          "issuer": "2.5.4.3=Strong-Name Lab Root, 2.5.4.10=Offline Lab",
+          "serial": 8193,
+          "not_before": "2024-01-01T00:00:00+00:00",
+          "not_after": "2028-01-01T00:00:00+00:00",
+          "eku": [
+            "1.3.6.1.5.5.7.3.3"
+          ],
+          "signature_algorithm": "1.2.840.113549.1.1.11"
+        },
+        "leaf_within_validity": true,
+        "leaf_has_code_signing_eku": true,
+        "timestamp_present": false,
+        "external": {
+          "covered_bytes": 2548,
+          "covered_sha256": "7755c66b2ca97a80bf85aff50c46fa6372171ac43f79fed5326767eb21d1fb8b",
+          "openssl_digest": "7755c66b2ca97a80bf85aff50c46fa6372171ac43f79fed5326767eb21d1fb8b",
+          "openssl_signed_attrs": {
+            "available": true,
+            "ok": true,
+            "detail": "Verified OK"
+          },
+          "openssl_chain": {
+            "available": true,
+            "ok": true,
+            "detail": "/tmp/claude-501/tmpc1y7bbpi/leaf.pem: OK"
+          }
+        }
+      },
+      "notes": [
+        "签名后在证书表之后追加数据：两者都不覆盖，故都仍有效"
+      ]
+    },
+    "dual_checksum_edit": {
+      "file": "strongname_lab/fixtures/generated/dual_checksum_edit.bin",
+      "sha256": "f702d58639bda9bea52baa31a254ab16f4ca50193c7a487fc1055aae37e6ab33",
+      "size": 4944,
+      "executed": false,
+      "strong_name": {
+        "identity": {
+          "name": "Contoso.Utils",
+          "version": "1.0.0.0",
+          "culture": "",
+          "flags": 1,
+          "has_public_key": true,
+          "public_key_sha256": "b7e935ad7876fdf4ad329b90e745ffded149a12488fc587e3c99745771411612",
+          "public_key_token": "e20f9bf307719724",
+          "hash_algorithm_id": "0x00008004",
+          "hash_algorithm": "sha1"
+        },
+        "cli": {
+          "flags": 9,
+          "il_only": true,
+          "strong_name_signed_flag": true,
+          "strong_name_rva": 9732,
+          "strong_name_size": 256,
+          "signature_file_offset": 2052
+        },
+        "checks": {
+          "public_key_present": true,
+          "public_key_flag_matches_blob": true,
+          "signature_slot_present": true,
+          "strong_name_signed_flag_matches_valid_material": true,
+          "signature_slot_size_matches_key": true,
+          "signature_nonzero": true,
+          "digest_supported": true,
+          "embedded_digest_matches_content": true,
+          "rsa_signature_valid": true,
+          "rsa_verification_detail": "PKCS#1 v1.5 encoded message matches"
+        },
+        "digest": "d08dc963c2a5c3d4e7ab9197a1edbb0ee3e135d4",
+        "embedded_digest": "d08dc963c2a5c3d4e7ab9197a1edbb0ee3e135d4",
+        "covered_ranges": [
+          {
+            "start": 0,
+            "end": 216,
+            "label": "PE headers before checksum",
+            "length": 216
+          },
+          {
+            "start": 220,
+            "end": 280,
+            "label": "between checksum and certificate directory entry",
+            "length": 60
+          },
+          {
+            "start": 288,
+            "end": 512,
+            "label": "after certificate directory entry to SizeOfHeaders",
+            "length": 224
+          },
+          {
+            "start": 512,
+            "end": 2052,
+            "label": "section b'.text\\x00\\x00\\x00' before signature",
+            "length": 1540
+          },
+          {
+            "start": 2308,
+            "end": 2560,
+            "label": "section b'.text\\x00\\x00\\x00' after signature",
+            "length": 252
+          }
+        ],
+        "verdict": {
+          "signature_integrity": "valid",
+          "covered_content_integrity": "intact for selected ranges",
+          "key_identity": "token + public key match each other by construction",
+          "publisher_trust": "not established by strong name",
+          "flag_alone_is_not_evidence": false,
+          "note": "A valid strong-name signature proves possession of the private key for the embedded public key and integrity of the hashed ranges. It does not establish a trusted publisher."
+        },
+        "external": {
+          "covered_bytes": 2292,
+          "hash_algorithm": "sha1",
+          "python_digest": "d08dc963c2a5c3d4e7ab9197a1edbb0ee3e135d4",
+          "openssl_digest": "d08dc963c2a5c3d4e7ab9197a1edbb0ee3e135d4",
+          "openssl_signature": {
+            "available": true,
+            "ok": true,
+            "detail": "Verified OK"
+          }
+        }
+      },
+      "authenticode": {
+        "certificate_entries": [
+          {
+            "offset": 2560,
+            "length": 2384,
+            "revision": 512,
+            "certificate_type": 2,
+            "pkcs7_length": 2376
+          }
+        ],
+        "authenticode_digest": "7755c66b2ca97a80bf85aff50c46fa6372171ac43f79fed5326767eb21d1fb8b",
+        "covered_ranges": [
+          {
+            "start": 0,
+            "end": 216,
+            "label": "headers before checksum",
+            "length": 216
+          },
+          {
+            "start": 220,
+            "end": 280,
+            "label": "between checksum and certificate directory entry",
+            "length": 60
+          },
+          {
+            "start": 288,
+            "end": 512,
+            "label": "after certificate directory entry to SizeOfHeaders",
+            "length": 224
+          },
+          {
+            "start": 512,
+            "end": 2560,
+            "label": "section b'.text\\x00\\x00\\x00'",
+            "length": 2048
+          }
+        ],
+        "signed_content_digest": "7755c66b2ca97a80bf85aff50c46fa6372171ac43f79fed5326767eb21d1fb8b",
+        "digest_matches": true,
+        "signer_signature_valid": true,
+        "message_digest_attribute_matches": true,
+        "certificate_chain": {
+          "chain_serials": [
+            8193,
+            4097
+          ],
+          "chain_subjects": [
+            "2.5.4.3=Contoso Example Publisher, 2.5.4.10=Offline Lab, 2.5.4.11=Code Signing",
+            "2.5.4.3=Strong-Name Lab Root, 2.5.4.10=Offline Lab"
+          ],
+          "signatures_verified": true,
+          "anchored_in_supplied_store": true,
+          "leaf_is_ca": false,
+          "problems": [],
+          "trusted": true
+        },
+        "verdict": {
+          "signature": "cryptographically valid",
+          "unauthenticated_trailing_bytes": 0,
+          "trust": "trusted by supplied anchors",
+          "published_by_trusted_publisher": true,
+          "publisher_identity": "certificate subject only, and only if the chain is trusted",
+          "note": "Authenticode covers the whole file except checksum, the certificate directory entry and the certificate table. A mathematical signature over an untrusted certificate does not make the publisher trustworthy."
+        },
+        "unauthenticated_trailing_bytes": 0,
+        "coverage_note": "Authenticode does not hash the certificate table nor bytes appended after it; those bytes are outside the signed content.",
+        "signer_signature_detail": "PKCS#1 v1.5 encoded message matches",
+        "signer": {
+          "subject": "2.5.4.3=Contoso Example Publisher, 2.5.4.10=Offline Lab, 2.5.4.11=Code Signing",
+          "issuer": "2.5.4.3=Strong-Name Lab Root, 2.5.4.10=Offline Lab",
+          "serial": 8193,
+          "not_before": "2024-01-01T00:00:00+00:00",
+          "not_after": "2028-01-01T00:00:00+00:00",
+          "eku": [
+            "1.3.6.1.5.5.7.3.3"
+          ],
+          "signature_algorithm": "1.2.840.113549.1.1.11"
+        },
+        "leaf_within_validity": true,
+        "leaf_has_code_signing_eku": true,
+        "timestamp_present": false,
+        "external": {
+          "covered_bytes": 2548,
+          "covered_sha256": "7755c66b2ca97a80bf85aff50c46fa6372171ac43f79fed5326767eb21d1fb8b",
+          "openssl_digest": "7755c66b2ca97a80bf85aff50c46fa6372171ac43f79fed5326767eb21d1fb8b",
+          "openssl_signed_attrs": {
+            "available": true,
+            "ok": true,
+            "detail": "Verified OK"
+          },
+          "openssl_chain": {
+            "available": true,
+            "ok": true,
+            "detail": "/tmp/claude-501/tmpoyxjujnc/leaf.pem: OK"
+          }
+        }
+      },
+      "notes": [
+        "修改 PE 校验和字段：两者都排除校验和，仍有效"
+      ]
+    }
+  }
+}

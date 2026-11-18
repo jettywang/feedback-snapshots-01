@@ -1,0 +1,130 @@
+{
+  "sn_full": {
+    "path": "sn_full.bin",
+    "size": 2560,
+    "sha256": "9060d5e9dd515afb2f8c20208e891c314386ef6690500a678689762e9a145042",
+    "notes": [
+      "完整强名称：公钥存在、槽位存在、SHA-1 签名有效"
+    ]
+  },
+  "sn_delay": {
+    "path": "sn_delay.bin",
+    "size": 2560,
+    "sha256": "f33e98408e5c64aec40989e4d97a618838e3c8abbdca90235d246c72efeeb57f",
+    "notes": [
+      "延迟签名：分配了签名槽和公钥，但槽位为零"
+    ]
+  },
+  "sn_flag_only": {
+    "path": "sn_flag_only.bin",
+    "size": 2560,
+    "sha256": "9bbba8fc94e039e8d1dcb4b2f2084207dd738553e664b92984105c4c80430dd0",
+    "notes": [
+      "仅设置 COMIMAGE_FLAGS_STRONGNAMESIGNED，没有任何签名材料"
+    ]
+  },
+  "sn_no_material": {
+    "path": "sn_no_material.bin",
+    "size": 2560,
+    "sha256": "b8b7f666fad11f87e2ca46c2a4be53cacb4515ac20ef9dd3d5e3c181eb14f9c1",
+    "notes": [
+      "无公钥、无槽位、无标志的对照"
+    ]
+  },
+  "sn_sha256": {
+    "path": "sn_sha256.bin",
+    "size": 2560,
+    "sha256": "f2eff9c50e48e5e307d5c6e3b1495aba307849c32330a43016926e2ec7e717ed",
+    "notes": [
+      "Assembly.HashAlgId=SHA-256 的强名称签名"
+    ]
+  },
+  "sn_flag_without_public_key_flag": {
+    "path": "sn_flag_without_public_key_flag.bin",
+    "size": 2560,
+    "sha256": "bbd4b2d46705e4a7e7748716b7ebdf92528745040a2b5607bfc1d99e653b445d",
+    "notes": [
+      "签名有效，但 AssemblyFlags.PublicKey 未设置；公钥 blob 仍在"
+    ]
+  },
+  "sn_other_key_valid": {
+    "path": "sn_other_key_valid.bin",
+    "size": 2560,
+    "sha256": "dc9f71dbe48886c86a48e05df8f9d68485d1b9493c5f60ab6dd8cbe0f2900821",
+    "notes": [
+      "同样的名称/版本，另一密钥的完整有效签名（token 不同）"
+    ]
+  },
+  "sn_body_tampered": {
+    "path": "sn_body_tampered.bin",
+    "size": 2560,
+    "sha256": "6b313d23b1560ee29b4e173d1ab6dc738a13c0a9c851d7456a700538f1d52835",
+    "notes": [
+      "签名后修改 IL 方法体一个字节"
+    ]
+  },
+  "sn_token_forgery": {
+    "path": "sn_token_forgery.bin",
+    "size": 2560,
+    "sha256": "5e7fbd02e3dcaf56885f86009486fdcd95da370cae28371d3e2f99d293e5ce0f",
+    "notes": [
+      "换用另一私钥签名后把原公钥写回元数据；token 不变，签名不成立"
+    ]
+  },
+  "auth_full": {
+    "path": "auth_full.bin",
+    "size": 4944,
+    "sha256": "defda88ea8db3fe922b63f12fd04989eb129ca01ab8ed922ff23c6b964b2be04",
+    "notes": [
+      "强名称 + Authenticode，链锚定到随附根证书"
+    ]
+  },
+  "auth_untrusted_root": {
+    "path": "auth_untrusted_root.bin",
+    "size": 4816,
+    "sha256": "7e35fb2cd7a29f6c9687156abe2e5d378cdabc20eda537cc1008decff4ec3b15",
+    "notes": [
+      "签名数学有效，但颁发者不在随附信任锚中"
+    ]
+  },
+  "auth_wrong_digest": {
+    "path": "auth_wrong_digest.bin",
+    "size": 4944,
+    "sha256": "c8eeeda9c814e34c136a16388be7364bae3303cfde9eac86996ec4a4819a24be",
+    "notes": [
+      "PKCS#7 里封装的 PE 摘要被改坏"
+    ]
+  },
+  "auth_body_tampered": {
+    "path": "auth_body_tampered.bin",
+    "size": 4944,
+    "sha256": "c2fea95a540f9c279066591ff379cc30d44f9af709023b4a79a87ef0edf60faf",
+    "notes": [
+      "Authenticode 签名后修改方法体"
+    ]
+  },
+  "dual_overlay": {
+    "path": "dual_overlay.bin",
+    "size": 4976,
+    "sha256": "4614ba29ffa993d8c7e5da85af4786e2ab0a47786dd41b8b6f00374bb5ef7b34",
+    "notes": [
+      "签名后修改节与证书表之间的附加数据：强名称仍有效，Authenticode 失效"
+    ]
+  },
+  "dual_trailing": {
+    "path": "dual_trailing.bin",
+    "size": 4976,
+    "sha256": "e93c6e38aca818b27b2a7540afc055f6d7ed24f4c3a1f76e115f6a4e10a45aac",
+    "notes": [
+      "签名后在证书表之后追加数据：两者都不覆盖，故都仍有效"
+    ]
+  },
+  "dual_checksum_edit": {
+    "path": "dual_checksum_edit.bin",
+    "size": 4944,
+    "sha256": "f702d58639bda9bea52baa31a254ab16f4ca50193c7a487fc1055aae37e6ab33",
+    "notes": [
+      "修改 PE 校验和字段：两者都排除校验和，仍有效"
+    ]
+  }
+}
