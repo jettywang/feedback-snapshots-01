@@ -21,8 +21,12 @@ def make_pad_file(body):
 
 
 def make_large_file(body, file_type=0x01):
-    '''An FFS file with the large file header and its 64-bit ExtendedSize.'''
-    size = 32 + len(body)
+    '''An FFS3 file with the large file header and its 64-bit ExtendedSize.
+
+    The size is 16 MiB, the boundary at which the 24-bit size is replaced by
+    ExtendedSize; the file itself is cut short by the image.
+    '''
+    size = max(0x1000000, 32 + len(body))
     header = b"\x11" * 16 + struct.pack(
         "<HBB3sBQ", 0, file_type, 0x01, b"\x00" * 3, 0xf8, size)
     return header + body
@@ -68,21 +72,27 @@ class LargeFileTest(unittest.TestCase):
     def setUp(self):
         self.data = make_large_file(b"raw-data" * 4) + \
             make_pad_file(b"vendor-A" * 4)
-        self.ffs = FirmwareFileSystem(self.data)
+        self.ffs = FirmwareFileSystem(self.data, ffs_version=3)
         self.assertTrue(self.ffs.process())
 
     def test_size_is_read_from_extended_size(self):
-        # The 24-bit size is 0, which stopped parsing at the first file.
+        # The 24-bit size is 0, and must be read from ExtendedSize.
         self.assertEqual(len(self.ffs.files), 2)
         large_file = self.ffs.files[0]
-        self.assertEqual(large_file.size, 32 + 32)
+        self.assertEqual(large_file.size, 0x1000000)
+        self.assertEqual(large_file.header_size, 32)
+        self.assertTrue(large_file.large_file)
+        self.assertTrue(large_file.truncated)
+        # The truncated file ends where the next file begins.
         self.assertEqual(large_file.data, b"raw-data" * 4)
         self.assertEqual(self.ffs.files[1].data, b"vendor-A" * 4)
 
     def test_build_keeps_the_large_file_header(self):
+        # The size in the header still says 16 MiB, so rebuilding writes the
+        # input rather than the shorter body that was present.
         size, data = self.ffs.files[0].build()
-        self.assertEqual(size, 64)
-        self.assertEqual(data, self.data[:64])
+        self.assertEqual(size, 0x1000000)
+        self.assertEqual(data, self.data[:32 + 32])
         self.assertEqual(self.ffs.build(), self.data)
 
 

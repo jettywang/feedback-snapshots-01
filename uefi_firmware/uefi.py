@@ -113,6 +113,16 @@ def _get_file_type(file_type):
         "unknown", "unknown")
 
 
+def _is_file_type(file_type):
+    '''Whether file_type can name an FFS file, see PI spec table 3-3.
+
+    The specified types end at 0x0f, OEM types occupy 0xc0-0xdf, and 0xf0 is
+    a pad file. Anything else is not a file type, which helps reject a
+    header-shaped run of bytes while recovering from a bad header.
+    '''
+    return file_type <= 0x0f or 0xc0 <= file_type <= 0xdf or file_type == 0xf0
+
+
 def _get_section_type(section_type):
     if section_type in EFI_SECTION_TYPES:
         return EFI_SECTION_TYPES[section_type]
@@ -1146,31 +1156,108 @@ class FirmwareFile(FirmwareObject):
         UINT8: State
         UINT64: ExtendedSize (large files only)
     };
+
+    The 24-byte header is the only header of an FFS2 file. An FFS3 file of
+    16 MiB or more sets LARGE_FILE, stores 0 in Size and puts its size in a
+    64-bit ExtendedSize after the header. Size, the attribute and ExtendedSize
+    must agree before the 32-byte header is used: a large file attribute
+    alone, a non-zero 24-bit size or a missing or tiny ExtendedSize does not
+    turn a normal header into a large one.
     '''
     _HEADER_SIZE = 0x18
     _LARGE_HEADER_SIZE = 0x20
     _ATTRIB_LARGE_FILE = 0x01
+    _MIN_LARGE_SIZE = 0x1000000
 
-    def __init__(self, data):
-        header = data[:self._HEADER_SIZE]
+    @classmethod
+    def read_header(cls, data, ffs_version=None):
+        '''Read only the file header fields, without copying a file body.
 
+        FFS enumeration checks candidate offsets before it builds a file, so
+        it must be able to reject a header without slicing the rest of the
+        file system. Return the selected header width and declared size, and
+        whether the fields describe one file.
+        '''
+        guid, checksum, file_type, attributes, size24, state = \
+            struct.unpack("<16sHBB3sB", data[:cls._HEADER_SIZE])
+        size24 = struct.unpack("<I", size24 + b"\x00")[0]
+
+        info = {
+            "guid": guid,
+            "checksum": checksum,
+            "type": file_type,
+            "attributes": attributes,
+            "size24": size24,
+            "state": state,
+            "header_size": cls._HEADER_SIZE,
+            "large_file": False,
+            "extended_size": None,
+            "size": size24,
+            "valid_header": True,
+            "size_error": None,
+        }
+
+        large_attribute = bool(attributes & cls._ATTRIB_LARGE_FILE)
+        if large_attribute and size24 == 0:
+            if ffs_version is not None and ffs_version < 3:
+                info["valid_header"] = False
+                info["size_error"] = "large file header is not supported " \
+                    "by FFS%d" % ffs_version
+                return info
+
+            # The 32-byte header is selected by the attribute and a zero
+            # 24-bit size, together, and only then is ExtendedSize read.
+            info["header_size"] = cls._LARGE_HEADER_SIZE
+            if len(data) >= cls._LARGE_HEADER_SIZE:
+                info["extended_size"], = struct.unpack(
+                    "<Q", data[cls._HEADER_SIZE:cls._LARGE_HEADER_SIZE])
+            if info["extended_size"] is None:
+                info["valid_header"] = False
+                info["size_error"] = "large file header has no ExtendedSize"
+            elif info["extended_size"] == 0xFFFFFFFFFFFFFFFF:
+                # Erased bytes are not a size.
+                info["valid_header"] = False
+                info["size_error"] = "ExtendedSize is erased"
+            elif info["extended_size"] < cls._LARGE_HEADER_SIZE:
+                # Zero and erased bytes are also smaller than the header.
+                info["valid_header"] = False
+                info["size_error"] = "ExtendedSize 0x%x is smaller than the " \
+                    "large file header" % info["extended_size"]
+            elif info["extended_size"] < cls._MIN_LARGE_SIZE:
+                # A file below 16 MiB uses the 24-bit size; the two fields
+                # contradict one another.
+                info["valid_header"] = False
+                info["size_error"] = "ExtendedSize 0x%x is below 16 MiB" % (
+                    info["extended_size"])
+            else:
+                info["large_file"] = True
+                info["size"] = info["extended_size"]
+
+        elif large_attribute:
+            # A non-zero 24-bit size describes a normal header. The
+            # attribute alone cannot add an ExtendedSize field, or the
+            # first eight bytes of the body would be read as one. FFS2
+            # vendors set this stale attribute; Size stays authoritative.
+            pass
+        elif size24 == 0:
+            info["valid_header"] = False
+            info["size_error"] = "size is 0 without the large file attribute"
+        elif size24 < cls._HEADER_SIZE:
+            info["valid_header"] = False
+            info["size_error"] = "size %d is smaller than the file header" % (
+                size24)
+        return info
+
+    def __init__(self, data, ffs_version=None):
+        self.ffs_version = ffs_version
         try:
-            self.guid, self.checksum, self.type, self.attributes, \
-                self.size, self.state = struct.unpack("<16sHBB3sB", header)
-            self.size = struct.unpack("<I", self.size + b"\x00")[0]
+            info = self.read_header(data, ffs_version)
         except Exception as e:
             print_error("Error: invalid FirmwareFile header.")
             raise e
 
-        # A file of 16 MiB or more sets the large file attribute and a size
-        # of 0, and stores its size in a 64-bit ExtendedSize field.
-        self.header_size = self._HEADER_SIZE
-        self.large_file = bool(self.attributes & self._ATTRIB_LARGE_FILE) and \
-            self.size == 0 and len(data) >= self._LARGE_HEADER_SIZE
-        if self.large_file:
-            self.header_size = self._LARGE_HEADER_SIZE
-            self.size, = struct.unpack(
-                "<Q", data[self._HEADER_SIZE:self._LARGE_HEADER_SIZE])
+        for name, value in info.items():
+            setattr(self, name, value)
 
         self.attrs = {
             "size": self.size,
@@ -1184,6 +1271,7 @@ class FirmwareFile(FirmwareObject):
         # rest of the file system, so copy only this file.
         self._data = bytes(data[:self.size])
         self.data = self._data[self.header_size:]
+        self.truncated = False
         self.raw_blobs = []
         self.sections = []
 
@@ -1193,7 +1281,7 @@ class FirmwareFile(FirmwareObject):
 
     def regen(self, data):
         # Transitional method, should be adopted by other objects.
-        self.__init__(data)
+        self.__init__(data, getattr(self, "ffs_version", None))
 
     def process(self):
         '''Parse the file and file sections if appropriate.'''
@@ -1295,10 +1383,21 @@ class FirmwareFile(FirmwareObject):
         if len(self.raw_blobs) == 0 and len(self.sections) == 0:
             data = self.data
 
+        # A file rebuilt below 16 MiB cannot keep the large file header:
+        # the format requires the 24-bit Size there, so the attribute and
+        # the whole 32-byte header are dropped, keeping the type and body.
+        # Without new checksums the declared size is kept, so a truncated
+        # large file is written back as the input had it.
+        header_size = self.header_size
+        attributes = self.attributes
+        if generate_checksum and len(data) + header_size < self._MIN_LARGE_SIZE:
+            header_size = self._HEADER_SIZE
+            attributes &= ~self._ATTRIB_LARGE_FILE
+
         if generate_checksum:
-            self.size = len(data) + self.header_size
+            self.size = len(data) + header_size
             size = self.size
-            string_size = self._header_size_field(size)
+            string_size = self._header_size_field(size, header_size)
             if self.attributes & 0x40 == 0:
                 # Without a file checksum the byte is fixed: 0xAA in PI
                 # (FFS2) volumes and 0x5A in Framework (FFS1) volumes.
@@ -1308,14 +1407,14 @@ class FirmwareFile(FirmwareObject):
 
             header_data = struct.pack(
                 "<16sHBB3sB",
-                self.guid, 0, self.type, self.attributes,
+                self.guid, 0, self.type, attributes,
                 string_size[:3], 0
             ) + string_size[3:]
             header = calculate_checksum8(header_data)
             self.checksum = (header | (file << 8)) & 0xffff
         else:
             size = self.size
-            trailling_bytes = size - (len(data) + self.header_size)
+            trailling_bytes = size - (len(data) + header_size)
             if trailling_bytes < 0:
                 print ("%s adding %s-bytes to GUID: %s" % (
                     red("Warning"),
@@ -1324,18 +1423,20 @@ class FirmwareFile(FirmwareObject):
                 ))
                 size += (trailling_bytes * -1)
 
-            string_size = self._header_size_field(size)
+            string_size = self._header_size_field(size, header_size)
 
         header = struct.pack(
             "<16sHBB3sB",
-            self.guid, self.checksum, self.type, self.attributes,
+            self.guid, self.checksum, self.type, attributes,
             string_size[:3], self.state
         ) + string_size[3:]
         return size, header + data
 
-    def _header_size_field(self, size):
+    def _header_size_field(self, size, header_size=None):
         '''Return the 3-byte size, followed by the ExtendedSize if large.'''
-        if self.large_file:
+        if header_size is None:
+            header_size = self.header_size
+        if header_size == self._LARGE_HEADER_SIZE:
             return b"\x00" * 3 + struct.pack("<Q", size)
         return struct.pack("<I", size)[:3]
 
@@ -1413,12 +1514,19 @@ class FirmwareFile(FirmwareObject):
 class FirmwareFileSystem(FirmwareObject):
     '''A potential UEFI firmware filesystem (FFS) data stream.
 
-    The FFS is a specific GUID within the FirmwareVolume.
+    The FFS is a specific GUID within the FirmwareVolume. ffs_version is 1,
+    2 or 3 for a Framework or PI volume, and None when unknown; only FFS3
+    volumes define the large file header.
     '''
 
-    def __init__(self, data):
+    def __init__(self, data, ffs_version=None):
         self.files = []
         self._data = data
+        self.ffs_version = ffs_version
+
+        # Bytes skipped while recovering from a header that did not describe
+        # a file. They are kept so a rebuild does not lose input evidence.
+        self.skipped = []
 
         # Overflow data is non-file data within the filesystem
         self.overflow_data = b""
@@ -1426,6 +1534,50 @@ class FirmwareFileSystem(FirmwareObject):
     @property
     def objects(self):
         return self.files or []
+
+    def _header_at(self, view, offset):
+        '''Return the fields of a complete file header at offset, or None.
+
+        A candidate must describe a whole file of a specified type, which
+        rejects a header-shaped run of bytes while recovering.
+        '''
+        if len(view) - offset < FirmwareFile._HEADER_SIZE:
+            return None
+        # Most offsets in a corrupt region hold zeros or body bytes. Check
+        # the type and size bytes before decoding a header and building a
+        # dict for each of them.
+        if not _is_file_type(view[offset + 18]):
+            return None
+        size24 = view[offset + 20] | view[offset + 21] << 8 | \
+            view[offset + 22] << 16
+        if size24 == 0 and not view[offset + 19] & \
+                FirmwareFile._ATTRIB_LARGE_FILE:
+            return None
+        if size24 and size24 < FirmwareFile._HEADER_SIZE:
+            return None
+        try:
+            info = FirmwareFile.read_header(
+                view[offset:], self.ffs_version)
+        except Exception:
+            return None
+        if not info["valid_header"] or not _is_file_type(info["type"]):
+            return None
+        if not info["header_size"] <= info["size"] <= len(view) - offset:
+            return None
+        return info
+
+    def _find_next_header(self, view, start):
+        '''Return the next 8-byte aligned offset whose fields describe a
+        complete file, or None when the rest of the file system holds no
+        candidate.'''
+        offset = (start + 7) & (~7)
+        while len(view) - offset >= FirmwareFile._HEADER_SIZE:
+            if view[offset:offset + 24] == b"\xff" * 24:
+                return None
+            if self._header_at(view, offset) is not None:
+                return offset
+            offset += 8
+        return None
 
     def process(self):
         '''Search for a 24-byte header that does not contain all 0xFF.'''
@@ -1436,11 +1588,94 @@ class FirmwareFileSystem(FirmwareObject):
         status = True
         while len(self._data) - offset >= 24 and \
                 view[offset:offset + 24] != (b"\xff" * 24):
-            firmware_file = FirmwareFile(view[offset:])
+            # Read the fields before constructing a file. A header that
+            # does not describe one file, such as a large file attribute
+            # without a usable ExtendedSize, must not consume the bytes of
+            # the next file.
+            try:
+                info = FirmwareFile.read_header(
+                    view[offset:], self.ffs_version)
+            except Exception:
+                info = None
+            invalid = info is None or not info["valid_header"] or \
+                info["size"] < info["header_size"]
+            if invalid:
+                # The fields do not describe one file. Skip the bytes at
+                # 8-byte intervals (a file starts aligned) until a complete
+                # header follows, keeping the neighbours on either side.
+                if info is not None and info["header_size"] == \
+                        FirmwareFile._LARGE_HEADER_SIZE:
+                    # The 32-byte header was selected, so the bytes at 0x18
+                    # were read as ExtendedSize. If the next file starts
+                    # there, the large attribute came without one.
+                    scan = offset + FirmwareFile._HEADER_SIZE
+                    next_offset = self._find_next_header(view, scan)
+                    if next_offset == scan:
+                        reason = "large file attribute without an " \
+                            "ExtendedSize"
+                    else:
+                        reason = info["size_error"]
+                else:
+                    # Nothing can start inside a header, so scan after it.
+                    next_offset = self._find_next_header(
+                        view, offset + FirmwareFile._HEADER_SIZE)
+                    reason = info["size_error"] if info is not None else \
+                        "invalid header"
+                end = len(self._data) if next_offset is None \
+                    else next_offset
+                self.skipped.append({
+                    "offset": offset,
+                    "size": end - offset,
+                    "error": reason,
+                })
+                dlog(self, 'ffs', 'Skipped %d bytes at 0x%x: %s' % (
+                    end - offset, offset, reason))
+                if next_offset is None:
+                    offset = end
+                    break
+                offset = next_offset
+                continue
 
-            if firmware_file.size < firmware_file.header_size:
-                # This is a problem, the file was corrupted.
-                break
+            if info["large_file"] and \
+                    offset + info["size"] > len(self._data):
+                # The 32-byte header is only valid when an ExtendedSize
+                # follows the 24-byte header. If a complete file begins
+                # exactly there, those bytes are its header, not a size:
+                # the large attribute was set without an ExtendedSize.
+                if self._header_at(
+                        view, offset + FirmwareFile._HEADER_SIZE) is not None:
+                    self.skipped.append({
+                        "offset": offset,
+                        "size": FirmwareFile._HEADER_SIZE,
+                        "error": "large file attribute without an "
+                                 "ExtendedSize",
+                    })
+                    offset += FirmwareFile._HEADER_SIZE
+                    continue
+
+                # A large file may be cut short by the image. Keep it, but
+                # end it at the next header so a neighbour is not read as
+                # part of its missing body. Its header keeps the declared
+                # size, so a rebuild writes the input bytes.
+                next_offset = self._find_next_header(
+                    view, offset + info["header_size"])
+                end = len(self._data) if next_offset is None \
+                    else next_offset
+                firmware_file = FirmwareFile(
+                    view[offset:end], self.ffs_version)
+                firmware_file.truncated = True
+                firmware_file.parsed_extent = (
+                    offset, len(firmware_file._data))
+                ff_status = firmware_file.process()
+                if not ff_status:
+                    dlog(self, 'ffs', 'Could not parse FF')
+                    status = False
+                self.files.append(firmware_file)
+                offset = end
+                continue
+
+            firmware_file = FirmwareFile(view[offset:], self.ffs_version)
+
             firmware_file.parsed_extent = (offset, len(firmware_file._data))
             ff_status = firmware_file.process()
             if not ff_status:
@@ -1458,15 +1693,26 @@ class FirmwareFileSystem(FirmwareObject):
     def build(self, generate_checksum=False, debug=False):
 
         # Generate the file system data as an unstructed set of file data.
+        items = [(getattr(f, "parsed_extent", (None, None))[0], "file", f)
+                 for f in self.files]
+        items += [(s["offset"], "skipped", s) for s in self.skipped]
+        items = [item for item in items if item[0] is not None]
+        items.sort(key=lambda item: item[0])
+
         data = b""
-        for firmware_file in self.files:
+        for _, kind, item in items:
+            if kind == "skipped":
+                start = item["offset"]
+                data += self._data[start:start + item["size"]]
+                continue
+
             # A truncated file's header claims more than its data, so align
             # by the data.
-            _, file_data = firmware_file.build(generate_checksum)
+            _, file_data = item.build(generate_checksum)
             data += file_data
             padding = -len(file_data) % 8
             start, parsed_size = getattr(
-                firmware_file, "parsed_extent", (None, None))
+                item, "parsed_extent", (None, None))
             if start is not None and len(file_data) == parsed_size:
                 # Keep the padding the file had, which is shorter if the
                 # image ended inside it.
@@ -1669,11 +1915,23 @@ class FirmwareVolume(FirmwareObject):
             FIRMWARE_VOLUME_GUIDS["PFH1"],
             FIRMWARE_VOLUME_GUIDS["PFH2"],
         ]
+        ffs_versions = {
+            FIRMWARE_VOLUME_GUIDS["FFS1"]: 1,
+            FIRMWARE_VOLUME_GUIDS["FFS2"]: 2,
+            FIRMWARE_VOLUME_GUIDS["FFS3"]: 3,
+            # Lenovo Phoenix containers hold an FFS-like stream, not a
+            # specified FFS revision.
+            FIRMWARE_VOLUME_GUIDS["PFH1"]: None,
+            FIRMWARE_VOLUME_GUIDS["PFH2"]: None,
+        }
         # The block map describes the geometry of the whole volume, header
         # included. The body after the header is a single file system, see
         # the PI Specification 1.7 Errata A, volume 3, section 2.1.2.
         if sguid(self.guid) in ffs_guids:
-            firmware_filesystem = FirmwareFileSystem(self.data)
+            # Only the FFS3 volume GUID defines the large file header.
+            firmware_filesystem = FirmwareFileSystem(
+                self.data, ffs_versions[sguid(self.guid)])
+
             if not firmware_filesystem.process():
                 dlog(self, self.name, 'Could not parse FFS')
                 status = False

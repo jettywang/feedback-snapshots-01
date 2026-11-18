@@ -145,10 +145,37 @@ Supported formats:
 
 Other capabilities:
 
+- Large FFS3 files (16 MiB or more) with the `LARGE_FILE` attribute and a 64-bit
+  `ExtendedSize`, as well as the 24-bit size used by FFS2 and smaller files
 - Tiano/EFI and LZMA compression and decompression, implemented in a bundled C extension
 - JSON output of the parsed object hierarchy
 - FDF (flash description file) generation from parsed firmware volumes
 - Replacement of sections and files in a firmware volume by GUID
+
+## FFS file headers and large files
+
+A firmware file starts with a 24-byte header whose 3-byte (24-bit) size counts the
+header and the body. An FFS3 file of 16 MiB or more instead sets
+`EFI_FILE_HEADER_LARGE_FILE` (attribute bit 0), stores 0 in the 24-bit size and puts
+its real size in a 64-bit `ExtendedSize` directly after the header. The file then
+uses a 32-byte header, and its first section starts at 0x20.
+
+All three fields must agree before the 32-byte header is used:
+
+- the attribute is set and the 24-bit size is 0, and
+- the ExtendedSize is present and at least 16 MiB.
+
+A non-zero 24-bit size keeps the 24-byte header even if the attribute is set (some
+vendors leave the attribute stale). A missing or impossible ExtendedSize is a
+malformed header, not a large file. FFS2 volumes have no `ExtendedSize` field, so a
+large header in an FFS2 volume is malformed too.
+
+When enumerating a file system, a malformed header is recorded in
+`FirmwareFileSystem.skipped` and parsing resumes at the next aligned header, so the
+files before and after it are still parsed and a rebuild keeps the original bytes.
+A large file that claims more than the image holds is kept as a truncated file:
+`FirmwareFile.truncated` is `True`, its declared `size` is unchanged, and it ends
+where the next file begins.
 
 ## Helper scripts
 
