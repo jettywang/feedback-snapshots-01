@@ -22,6 +22,7 @@ from .compileunit import CompileUnit
 from .dwarf_util import _get_base_offset
 from .lineprogram import LineProgram
 from .locationlists import LocationLists, LocationListsPair
+from .macinfo import MacroInfo
 from .namelut import NameLUT
 from .ranges import RangeLists, RangeListsPair
 from .structs import DWARFStructs
@@ -100,6 +101,7 @@ class DWARFInfo:
         debug_sup_sec: DebugSectionDescriptor | None,
         gnu_debugaltlink_sec: DebugSectionDescriptor | None,
         debug_types_sec: DebugSectionDescriptor | None,
+        debug_macro_sec: DebugSectionDescriptor | None = None,
     ) -> None:
         """ config:
                 A DwarfConfig object
@@ -129,6 +131,7 @@ class DWARFInfo:
         self.debug_sup_sec = debug_sup_sec
         self.gnu_debugaltlink_sec = gnu_debugaltlink_sec
         self.debug_types_sec = debug_types_sec
+        self.debug_macro_sec = debug_macro_sec
 
         # Sets the supplementary_dwarfinfo to None. Client code can set this
         # to something else, typically a DWARFInfo file read from an ELFFile
@@ -319,6 +322,46 @@ class DWARFInfo:
                 stream=self.debug_abbrev_sec.stream,
                 offset=offset)
         return self._abbrevtable_cache[offset]
+
+    def has_macro_info(self) -> bool:
+        """ Return whether this DWARF info has a .debug_macro section.
+        """
+        return self.debug_macro_sec is not None
+
+    def get_macro_info(self, cu: CompileUnit | None = None) -> MacroInfo | None:
+        """Return a reader for the DWARFv5 macro information.
+
+            cu:
+                Optional compile unit whose top DIE supplies
+                DW_AT_str_offsets_base and whose line program resolves file
+                references. Passing the CU that owns the relevant
+                DW_AT_macros attribute is strongly recommended; without it
+                indexed strings and file names remain unresolved rather than
+                being guessed.
+
+        Return None when the file has no .debug_macro section. The reader is a
+        thin, read-only view: it never expands macro bodies.
+        """
+        if self.debug_macro_sec is None:
+            return None
+        return MacroInfo(
+            dwarfinfo=self,
+            stream=self.debug_macro_sec.stream,
+            size=self.debug_macro_sec.size,
+            cu=cu)
+
+    def get_macro_unit(self, cu: CompileUnit) -> MacroInfo | None:
+        """Return macro info bound to ``cu`` if it declares DW_AT_macros.
+
+        Returns None when the section or the attribute is absent. The attribute
+        is read from the CU's top DIE, so no second lookup by name is needed.
+        """
+        if self.debug_macro_sec is None:
+            return None
+        top = cu.get_top_DIE()
+        if 'DW_AT_macros' not in top.attributes:
+            return None
+        return self.get_macro_info(cu)
 
     def get_string_from_table(self, offset: int) -> bytes | None:
         """ Obtain a string from the string table section, given an offset

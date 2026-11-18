@@ -331,6 +331,7 @@ class ELFFile:
                          '.debug_str_offsets', '.debug_line_str',
                          '.debug_loclists', '.debug_rnglists',
                          '.debug_sup', '.gnu_debugaltlink', '.debug_types',
+                         '.debug_macro',
                          ]
 
         # As it is loaded in the process image, .eh_frame cannot be compressed
@@ -342,7 +343,7 @@ class ELFFile:
          debug_pubnames_name, debug_addr_name, debug_str_offsets_name,
          debug_line_str_name, debug_loclists_sec_name, debug_rnglists_sec_name,
          debug_sup_name, gnu_debugaltlink_name, debug_types_sec_name,
-         eh_frame_sec_name) = section_names
+         debug_macro_sec_name, eh_frame_sec_name) = section_names
 
         debug_sections: dict[str, DebugSectionDescriptor | None] = {}
         for secname in section_names:
@@ -390,7 +391,8 @@ class ELFFile:
                 debug_rnglists_sec=debug_sections[debug_rnglists_sec_name],
                 debug_sup_sec=debug_sections[debug_sup_name],
                 gnu_debugaltlink_sec=debug_sections[gnu_debugaltlink_name],
-                debug_types_sec=debug_sections[debug_types_sec_name]
+                debug_types_sec=debug_sections[debug_types_sec_name],
+                debug_macro_sec=debug_sections[debug_macro_sec_name],
                 )
         if follow_links:
             dwarfinfo.supplementary_dwarfinfo = self.get_supplementary_dwarfinfo(dwarfinfo)

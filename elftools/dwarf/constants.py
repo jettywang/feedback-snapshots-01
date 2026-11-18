@@ -266,6 +266,24 @@ class DW_UT(_IntEnum):
     hi_user = 0xff
 
 
+class DW_MACRO(_IntEnum):
+    """Macro information entry types. See DWARFv5 7.23."""
+    define = 0x01
+    undef = 0x02
+    start_file = 0x03
+    end_file = 0x04
+    define_strp = 0x05
+    undef_strp = 0x06
+    import_ = 0x07
+    define_sup = 0x08
+    undef_sup = 0x09
+    import_sup = 0x0a
+    define_strx = 0x0b
+    undef_strx = 0x0c
+    lo_user = 0xe0
+    hi_user = 0xff
+
+
 # Add back legacy names `DW_UT_type = DW_UT.type` for `from .constants import *`.
 # These are invisible to typing as the members are added dynamically by code!
 # Use __members__ to also add aliases like DW_CFA.{AARCH64_negate_ra_state,GNU_window_save}.

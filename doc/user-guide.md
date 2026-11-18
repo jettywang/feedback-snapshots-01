@@ -186,6 +186,26 @@ The [type references example](../examples/dwarf_type_references.py) demonstrates
 following these references through typedefs and other types, and displays both
 the stored values and the resolved DIE offsets.
 
+### Macro information
+
+DWARFv5 macro information (`.debug_macro`) is exposed through
+`DWARFInfo.get_macro_info(cu)`, or `DWARFInfo.get_macro_unit(cu)` when the
+attribute check should be implicit. The reader returns `MacroUnit` objects
+whose `events` list keeps directives in emission order, with the raw
+`.debug_macro` offset of each entry. `MacroUnit.definitions()` splits define
+and undef entries into name and body text without expanding anything.
+
+File references (`DW_MACRO_start_file`) are kept as raw indices together with
+the line program they belong to; an imported unit's indices are never resolved
+against the importing unit's file table. `DW_MACRO_import` entries are followed
+within the same section, with cycles bounded. Unrecognised opcodes and bytes
+that cannot be decoded are preserved in `MacroEvent.raw` and
+`MacroUnit.unparsed_by_unit` instead of being skipped.
+
+These events describe recorded preprocessor directives, not code coverage: do
+not infer that a machine-code range was compiled under a macro merely because a
+definition exists.
+
 Contrary to ELF with its structured set of sections and segments, DWARF
 information is quite ad hoc for the special needs it serves. Each DWARF
 section contains different information that has to be decoded and
