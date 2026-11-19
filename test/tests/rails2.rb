@@ -14,7 +14,7 @@ class Rails2Tests < Minitest::Test
       :controller => 1,
       :model => 4,
       :template => 47,
-      :generic => 61 }
+      :generic => 62 }
   end
 
   def report
@@ -1459,6 +1459,18 @@ class Rails2Tests < Minitest::Test
       :user_input => s(:call, s(:params), :[], s(:lit, :regex))
   end
 
+  def test_escaped_regex_still_flags_unbounded_cost
+    assert_warning :type => :warning,
+      :warning_code => 76,
+      :fingerprint => "6cae82a568cb75c0353bf67988efa0adc2863e3e0c5d8fc165fb61e26b9ce881",
+      :warning_type => "Denial of Service",
+      :line => 78,
+      :message => /cannot be injected.*escaping does not limit matching cost/,
+      :confidence => 2,
+      :relative_path => "app/controllers/other_controller.rb",
+      :user_input => s(:call, s(:params), :[], s(:lit, :regex))
+  end
+
   def test_unsafe_symbol_creation_from_param
     assert_warning :type => :warning,
       :warning_code => 59,
@@ -1548,7 +1560,7 @@ class Rails2WithOptionsTests < Minitest::Test
       :controller => 1,
       :model => 4,
       :template => 47,
-      :generic => 61 }
+      :generic => 62 }
   end
 
   def report
