@@ -72,6 +72,8 @@ module Net
 
             case message.type
             when USERAUTH_PK_OK
+              verify_pk_ok(message, identity, alg)
+
               buffer = build_request(identity, username, next_service, alg,
                                      true)
               sig_data = Net::SSH::Buffer.new
@@ -107,6 +109,23 @@ module Net
             else
               raise Net::SSH::Exception, "unexpected reply to USERAUTH_REQUEST: #{message.type} (#{message.inspect})"
             end
+          end
+
+          # Verifies that a USERAUTH_PK_OK reply echoes the algorithm and the
+          # key blob of the request it answers. A reply naming a different
+          # algorithm or key must never lead to a signature with the current
+          # identity, so the handshake is aborted instead.
+          def verify_pk_ok(message, identity, alg)
+            reply_alg = message.read_string
+            reply_blob = message.read_string
+            expected_blob = Net::SSH::Buffer.new
+            expected_blob.write_key(identity)
+
+            return if reply_alg == alg && reply_blob == expected_blob.to_s
+
+            raise Net::SSH::Exception,
+                  "USERAUTH_PK_OK does not match the publickey request " \
+                  "(expected #{alg} with #{fingerprint(identity)}, got #{reply_alg})"
           end
 
           # Attempts to perform public-key authentication for the given
