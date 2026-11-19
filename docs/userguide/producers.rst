@@ -140,6 +140,89 @@ commands in a non-transactional redis-py pipeline. This reduces network round
 trips without making publication atomic. Commands are added in publication
 order, preserving FIFO order within each Redis priority queue.
 
+Validating routes before sending
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A batch can check every route before it declares or publishes anything by
+passing a ``routing_policy``:
+
+.. code-block:: python
+
+    allowed = {'alerts.info', 'alerts.warning'}
+
+    with producer.batch(routing_policy=allowed):
+        producer.publish(
+            {'alert': 'disk'},
+            exchange=alerts_exchange,
+            routing_key='alerts.info',
+            declare=[info_queue],
+        )
+        producer.publish(
+            {'alert': 'login'},
+            exchange=alerts_exchange,
+            routing_key='alerts.warning',
+            declare=[warning_queue],
+        )
+        producer.publish(
+            {'alert': 'token'},
+            exchange=alerts_exchange,
+            routing_key='admin.secrets',
+            declare=[secret_queue],
+        )
+
+With that input the context raises
+:exc:`~kombu.exceptions.RoutingPolicyError` at exit. Its ``violations``
+attribute has one :class:`~kombu.messaging.RoutingViolation` per rejected
+entry, with the entry's ``index``, ``exchange``, ``routing_key``, ``reason``,
+and the staged ``entry`` itself. ``entries`` returns just the rejected batch
+entries. Nothing is declared or published: the two allowed alerts are not
+sent either.
+
+The policy may be:
+
+* a callable taking ``(exchange, routing_key)``, or a single
+  :class:`~kombu.messaging.BatchEntry`, and returning ``True`` for allowed,
+  ``False`` for rejected, or a string explaining the rejection;
+* a collection of allowed routing keys (an entry ending in ``.*`` matches a
+  routing-key prefix);
+* a mapping from routing key or ``(exchange, routing_key)`` to a decision or
+  a callable returning one; or
+* an object with an ``is_allowed``, ``allows``, or ``validate_route``
+  method.  A mapping may use the ``'allow'`` and ``'deny'`` keys instead of
+  individual routing keys.
+
+Validation happens when the outermost context exits or when
+``batch.flush()`` is called. Entries added after a successful flush are
+validated as a separate group. Allowed entries are declared and published in
+publication order.
+
+.. versionadded:: 5.7.1
+
+Knowing what was sent
+~~~~~~~~~~~~~~~~~~~~~
+
+When publication stops part-way through a validated batch, the raised
+exception gets three entry lists:
+
+* ``delivered``: entries the transport confirmed;
+* ``unknown``: entries that may or may not have reached the broker;
+* ``pending``: entries that were never attempted.
+
+:class:`~kombu.exceptions.BatchPublishError` always has these attributes.
+Other send errors raised by a batch are annotated with them when possible.
+Each :class:`~kombu.messaging.BatchEntry` also reports its own state through
+:meth:`~kombu.messaging.BatchEntry.delivery_state`, and the batch context
+exposes ``batch.entries`` and ``batch.delivery_states()``.
+
+Deferring declarations
+~~~~~~~~~~~~~~~~~~~~~~
+
+When a routing policy is in use, declarations supplied through
+``declare=[...]`` are deferred until the whole batch passes validation. A
+rejected batch therefore never creates or binds the queues it mentions. This
+is different from batches without a policy, where declarations are still
+performed as each message is published.
+
 The batch has the following lifecycle:
 
 * A successful outermost context exit flushes pending operations.

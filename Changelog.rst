@@ -5,6 +5,22 @@
 ================
 
 
+.. _version-5.7.1:
+
+5.7.1
+========
+:release-date: TBA
+
+What's Changed
+~~~~~~~~~~~~~~
+
+- Add ``routing_policy`` to :meth:`kombu.Producer.batch` so a batch can be
+  validated as a whole before any declaration or publication. Rejected
+  entries are reported individually through
+  :exc:`kombu.exceptions.RoutingPolicyError`.
+- Batch failures now report the ``delivered``, ``unknown``, and ``pending``
+  entries so callers can tell which messages still need attention.
+
 .. _version-5.7.0:
 
 5.7.0

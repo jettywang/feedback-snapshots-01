@@ -16,3 +16,4 @@
     .. autoexception:: ConnectionLimitExceeded
     .. autoexception:: ChannelLimitExceeded
     .. autoexception:: BatchPublishError
+    .. autoexception:: RoutingPolicyError

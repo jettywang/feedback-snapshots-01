@@ -164,6 +164,12 @@
         .. autoattribute:: connection
         .. autoattribute:: supports_batch_publish
 
+        .. autoclass:: BatchEntry
+            :noindex:
+
+        .. autoclass:: RoutingViolation
+            :noindex:
+
         .. automethod:: batch
         .. automethod:: declare
         .. automethod:: maybe_declare

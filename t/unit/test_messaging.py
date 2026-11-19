@@ -11,7 +11,12 @@ import pytest
 from amqp.exceptions import RecoverableConnectionError
 
 from kombu import Connection, Consumer, Exchange, Producer, Queue
-from kombu.exceptions import MessageStateError, OperationalError
+from kombu.exceptions import (
+    BatchPublishError,
+    MessageStateError,
+    OperationalError,
+    RoutingPolicyError,
+)
 from kombu.transport import memory, virtual
 from kombu.utils import json
 from kombu.utils.functional import ChannelPromise
@@ -1435,3 +1440,362 @@ class test_Consumer:
         p = self.connection.Consumer()
         p.channel = object()
         assert p.connection is None
+
+
+class test_ProducerBatchRoutingPolicy:
+
+    def setup_method(self):
+        self.connection = Connection(transport=Transport)
+        self.connection.connect()
+        self.exchange = Exchange('alerts', 'direct')
+        self.alerts = Queue(
+            'alerts-queue', self.exchange, routing_key='alerts.info',
+        )
+        self.audit = Queue(
+            'audit-queue', self.exchange, routing_key='alerts.audit',
+        )
+        self.denied = Queue(
+            'denied-queue', self.exchange, routing_key='admin.secrets',
+        )
+        self.policy = {'alerts.info', 'alerts.audit'}
+
+    def teardown_method(self):
+        self.connection.close()
+
+    def _producer(self, channel=None, batch_type=RecordingPublishBatch):
+        channel = channel or self.connection.channel()
+        session = batch_type(channel, 1000)
+        session.publish = Mock(wraps=session.publish)
+        session.flush = Mock(wraps=session.flush)
+        channel.create_publish_batch = Mock(return_value=session)
+        return Producer(channel, serializer='json'), session
+
+    def _publish_alerts(self, producer, include_denied=True, **kwargs):
+        producer.publish(
+            {'alert': 'disk'},
+            exchange=self.exchange,
+            routing_key='alerts.info',
+            declare=[self.alerts],
+            **kwargs,
+        )
+        producer.publish(
+            {'alert': 'login'},
+            exchange=self.exchange,
+            routing_key='alerts.audit',
+            declare=[self.audit],
+        )
+        if include_denied:
+            producer.publish(
+                {'alert': 'secret'},
+                exchange=self.exchange,
+                routing_key='admin.secrets',
+                declare=[self.denied],
+            )
+
+    def test_rejected_entry_is_reported_without_declaring_or_publishing(self):
+        producer, session = self._producer()
+
+        with pytest.raises(RoutingPolicyError) as caught:
+            with producer.batch(routing_policy=self.policy):
+                self._publish_alerts(producer)
+
+        error = caught.value
+        assert [violation.index for violation in error.violations] == [2]
+        assert [violation.routing_key for violation in error.violations] == [
+            'admin.secrets',
+        ]
+        assert [entry.routing_key for entry in error.entries] == [
+            'admin.secrets',
+        ]
+        assert error.delivered == []
+        assert error.unknown == []
+        session.publish.assert_not_called()
+        session.flush.assert_not_called()
+        assert 'exchange_declare' not in producer.channel
+        assert 'queue_declare' not in producer.channel
+        assert 'basic_publish' not in producer.channel
+
+    def test_policy_reports_every_rejected_entry(self):
+        producer, _ = self._producer()
+        policy = {'alerts.info'}
+
+        with pytest.raises(RoutingPolicyError) as caught:
+            with producer.batch(routing_policy=policy):
+                self._publish_alerts(producer)
+
+        rejected = [
+            violation.routing_key
+            for violation in caught.value.violations
+        ]
+        assert rejected == ['alerts.audit', 'admin.secrets']
+
+    def test_valid_batch_is_declared_and_sent_in_publication_order(self):
+        producer, session = self._producer()
+
+        with producer.batch(routing_policy=self.policy) as batch:
+            for index in range(2):
+                producer.publish(
+                    {'index': index},
+                    exchange=self.exchange,
+                    routing_key='alerts.info',
+                    declare=[self.alerts],
+                    priority=4,
+                )
+            assert session.publish.call_count == 0
+            assert 'queue_declare' not in producer.channel
+            batch.flush()
+            assert session.flush_count == 1
+
+        assert [
+            kwargs['routing_key'] for _, kwargs in session.published
+        ] == ['alerts.info', 'alerts.info']
+        assert [
+            json.loads(message['body'])['index']
+            for message, _ in session.published
+        ] == [0, 1]
+        assert 'queue_declare' in producer.channel
+
+    def test_policy_accepts_a_callable_taking_the_entry(self):
+        producer, _ = self._producer()
+
+        def allow_alerts(entry):
+            return entry.routing_key.startswith('alerts.')
+
+        with pytest.raises(RoutingPolicyError) as caught:
+            with producer.batch(routing_policy=allow_alerts):
+                self._publish_alerts(producer)
+
+        assert [
+            violation.routing_key
+            for violation in caught.value.violations
+        ] == ['admin.secrets']
+
+    def test_policy_reason_is_reported(self):
+        producer, _ = self._producer()
+
+        def deny_admin(exchange, routing_key):
+            if routing_key.startswith('admin.'):
+                return 'internal alerts may not target admin routes'
+            return True
+
+        with pytest.raises(RoutingPolicyError) as caught:
+            with producer.batch(routing_policy=deny_admin):
+                self._publish_alerts(producer)
+
+        assert caught.value.violations[0].reason == (
+            'internal alerts may not target admin routes'
+        )
+
+    @pytest.mark.parametrize('routing_policy', ['alerts.info', 42])
+    def test_policy_must_be_a_collection_or_callable(self, routing_policy):
+        producer = Producer(self.connection.channel())
+
+        with pytest.raises(TypeError, match='routing_policy'):
+            producer.batch(routing_policy=routing_policy)
+
+    def test_rejected_batch_does_not_declare_earlier_entries(self):
+        producer, _ = self._producer()
+        queue = Queue(
+            'should-not-exist', self.exchange, routing_key='alerts.info',
+        )
+
+        with pytest.raises(RoutingPolicyError):
+            with producer.batch(routing_policy=self.policy):
+                producer.publish(
+                    {'alert': 'disk'},
+                    exchange=self.exchange,
+                    routing_key='alerts.info',
+                    declare=[queue],
+                )
+                producer.publish(
+                    {'alert': 'secret'},
+                    exchange=self.exchange,
+                    routing_key='admin.secrets',
+                )
+
+        assert 'queue_declare' not in producer.channel
+        assert 'exchange_declare' not in producer.channel
+
+    def test_interrupted_send_distinguishes_delivered_and_unknown(self):
+        channel = self.connection.channel()
+        real_publish = channel.basic_publish
+        calls = []
+
+        def interrupt_second(message, **kwargs):
+            calls.append(kwargs['routing_key'])
+            if len(calls) == 2:
+                raise RuntimeError('socket closed')
+            return real_publish(message, **kwargs)
+
+        channel.basic_publish = interrupt_second
+        producer = Producer(channel, serializer='json')
+        batch = producer.batch(routing_policy=self.policy)
+
+        with pytest.raises(RuntimeError, match='socket closed') as caught:
+            with batch:
+                self._publish_alerts(producer, include_denied=False)
+
+        assert [entry.routing_key for entry in caught.value.delivered] == [
+            'alerts.info',
+        ]
+        assert [entry.routing_key for entry in caught.value.unknown] == [
+            'alerts.audit',
+        ]
+
+        entries = batch.state.entries
+        assert [entry.routing_key for entry in entries] == [
+            'alerts.info',
+            'alerts.audit',
+        ]
+        assert [entry.delivery_state() for entry in entries] == [
+            'delivered',
+            'unknown',
+        ]
+
+    def test_flush_failure_marks_delivered_entries_unknown(self):
+        producer, session = self._producer()
+
+        def lose_response():
+            session.flush_count += 1
+            raise BatchPublishError(
+                'Redis publish batch failed; delivery is uncertain',
+            )
+
+        session.flush = Mock(side_effect=lose_response)
+
+        with pytest.raises(BatchPublishError) as caught:
+            with producer.batch(routing_policy=self.policy):
+                self._publish_alerts(producer, include_denied=False)
+
+        assert session.publish.call_count == 2
+        assert session.flush_count == 1
+        assert len(caught.value.unknown) == 2
+        assert caught.value.delivered == []
+
+    def test_collection_policy_supports_prefix_wildcards(self):
+        producer, session = self._producer()
+
+        with producer.batch(routing_policy={'alerts.*'}):
+            self._publish_alerts(producer, include_denied=False)
+
+        assert session.publish.call_count == 2
+
+    def test_mapping_policy_reports_key_specific_reason(self):
+        producer, _ = self._producer()
+        policy = {
+            'alerts.info': True,
+            'alerts.audit': True,
+            'admin.secrets': 'admin routes are out of scope',
+        }
+
+        with pytest.raises(RoutingPolicyError) as caught:
+            with producer.batch(routing_policy=policy):
+                self._publish_alerts(producer)
+
+        assert caught.value.violations[0].reason == (
+            'admin routes are out of scope'
+        )
+        assert caught.value.rejected_routing_keys == ['admin.secrets']
+
+    def test_validate_alias_selects_the_policy(self):
+        producer, session = self._producer()
+
+        with pytest.raises(RoutingPolicyError):
+            with producer.batch(validate=self.policy):
+                self._publish_alerts(producer)
+
+        session.publish.assert_not_called()
+
+    def test_policy_and_validate_are_mutually_exclusive(self):
+        producer = Producer(self.connection.channel())
+
+        with pytest.raises(TypeError, match='only one'):
+            producer.batch(routing_policy=self.policy, validate=self.policy)
+
+    def test_flush_validates_only_entries_added_since_last_flush(self):
+        producer, session = self._producer()
+        batch = producer.batch(routing_policy=self.policy)
+
+        with pytest.raises(RoutingPolicyError):
+            with batch:
+                producer.publish(
+                    {'alert': 'disk'},
+                    exchange=self.exchange,
+                    routing_key='alerts.info',
+                )
+                batch.flush()
+                producer.publish(
+                    {'alert': 'secret'},
+                    exchange=self.exchange,
+                    routing_key='admin.secrets',
+                )
+
+        assert [kwargs['routing_key'] for _, kwargs in session.published] == [
+            'alerts.info',
+        ]
+
+    def test_allow_deny_policy_mapping(self):
+        producer, session = self._producer()
+
+        with producer.batch(routing_policy={
+            'deny': {'admin.*'},
+        }):
+            self._publish_alerts(producer, include_denied=False)
+
+        assert session.publish.call_count == 2
+
+        producer, session = self._producer()
+        with pytest.raises(RoutingPolicyError) as caught:
+            with producer.batch(routing_policy={
+                'allow': {'alerts.info'},
+                'deny': {'admin.*'},
+            }):
+                self._publish_alerts(producer)
+
+        assert [violation.routing_key for violation in caught.value.violations] == [
+            'alerts.audit',
+            'admin.secrets',
+        ]
+
+    def test_policy_object_is_supported(self):
+        producer, session = self._producer()
+
+        class Policy:
+            def is_allowed(self, exchange, routing_key):
+                return routing_key.startswith('alerts.')
+
+        with producer.batch(routing_policy=Policy()):
+            self._publish_alerts(producer, include_denied=False)
+
+        assert session.publish.call_count == 2
+
+    def test_batch_entries_report_delivery_state(self):
+        producer, session = self._producer()
+        batch = producer.batch(routing_policy=self.policy)
+
+        with batch:
+            producer.publish(
+                {'alert': 'disk'},
+                exchange=self.exchange,
+                routing_key='alerts.info',
+            )
+            assert batch.delivery_states() == ['pending']
+
+        assert batch.delivery_states() == ['delivered']
+        assert batch.entries[0].routing_key == 'alerts.info'
+        assert batch.entries[0].state == 'delivered'
+        assert session.publish.call_count == 1
+
+    def test_entry_states_move_from_pending_to_delivered(self):
+        producer, _ = self._producer()
+        batch = producer.batch(routing_policy=self.policy)
+
+        with batch:
+            self._publish_alerts(producer, include_denied=False)
+            assert [
+                entry.delivery_state() for entry in batch.state.entries
+            ] == ['pending', 'pending']
+
+        assert [
+            entry.delivery_state() for entry in batch.state.entries
+        ] == ['delivered', 'delivered']

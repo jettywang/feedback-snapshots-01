@@ -13,6 +13,9 @@ if TYPE_CHECKING:
 
 __all__ = (
     'reraise', 'KombuError', 'OperationalError', 'BatchPublishError',
+    'RoutingPolicyError', 'BatchRoutingError', 'BatchRoutingPolicyError',
+    'RoutingPolicyViolationError', 'BatchRoutingPolicyViolation',
+    'RoutingValidationError', 'BatchRoutingValidationError',
     'NotBoundError', 'MessageStateError', 'TimeoutError',
     'LimitExceeded', 'ConnectionLimitExceeded',
     'ChannelLimitExceeded', 'ConnectionError', 'ChannelError',
@@ -44,7 +47,104 @@ class OperationalError(KombuError):
 
 
 class BatchPublishError(KombuError):
-    """Batch publication failed with an uncertain delivery outcome."""
+    """Batch publication failed with an uncertain delivery outcome.
+
+    ``delivered`` lists the entries the transport confirmed before the
+    failure, ``unknown`` lists entries whose delivery could not be
+    determined, and ``pending`` lists entries that were never attempted.
+    """
+
+    def __init__(
+        self,
+        *args,
+        delivered=None,
+        unknown=None,
+        pending=None,
+    ) -> None:
+        super().__init__(*args)
+        self.delivered = list(delivered or ())
+        self.unknown = list(unknown or ())
+        self.pending = list(pending or ())
+
+    @property
+    def confirmed(self):
+        """Alias for :attr:`delivered`."""
+        return self.delivered
+
+    @property
+    def uncertain(self):
+        """Alias for :attr:`unknown`."""
+        return self.unknown
+
+    @property
+    def delivered_count(self):
+        """Return the number of confirmed entries."""
+        return len(self.delivered)
+
+    @property
+    def unknown_count(self):
+        """Return the number of entries with an uncertain outcome."""
+        return len(self.unknown)
+
+    @property
+    def pending_count(self):
+        """Return the number of entries that were not attempted."""
+        return len(self.pending)
+
+
+class RoutingPolicyError(BatchPublishError):
+    """One or more batch entries do not satisfy the routing policy.
+
+    No entry was sent and no entity was declared.  ``violations`` contains
+    one :class:`~kombu.messaging.RoutingViolation` per rejected entry, in
+    publication order.
+    """
+
+    def __init__(self, violations, message=None, **kwargs) -> None:
+        self.violations = list(violations)
+        if message is None:
+            count = len(self.violations)
+            verb = 'violates' if count == 1 else 'violate'
+            summary = (
+                f'{count} batch '
+                f'{"entry" if count == 1 else "entries"} '
+                f'{verb} the routing policy'
+            )
+            details = '; '.join(str(violation) for violation in self.violations)
+            message = f'{summary}: {details}' if details else summary
+        super().__init__(message, **kwargs)
+        self.invalid_pending = list(self.violations)
+        self.rejected_entries = [
+            violation.entry for violation in self.violations
+        ]
+        self.reasons = [violation.reason for violation in self.violations]
+        self.rejected_routing_keys = [
+            violation.routing_key for violation in self.violations
+        ]
+
+    @property
+    def entries(self):
+        """Return the rejected batch entries."""
+        return [violation.entry for violation in self.violations]
+
+    @property
+    def invalid_entries(self):
+        """Alias for :attr:`entries`."""
+        return self.entries
+
+    @property
+    def rejected(self):
+        """Alias for :attr:`violations`."""
+        return self.violations
+
+
+#: Aliases kept for callers that describe the failure as a batch error.
+BatchRoutingError = RoutingPolicyError
+BatchRoutingPolicyError = RoutingPolicyError
+RoutingPolicyViolationError = RoutingPolicyError
+BatchRoutingPolicyViolation = RoutingPolicyError
+RoutingValidationError = RoutingPolicyError
+BatchRoutingValidationError = RoutingPolicyError
 
 
 class SerializationError(KombuError):

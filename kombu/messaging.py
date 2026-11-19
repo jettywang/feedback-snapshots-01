@@ -2,34 +2,187 @@
 
 from __future__ import annotations
 
+import inspect
+from collections.abc import Collection, Mapping
+from dataclasses import dataclass, field
 from itertools import count
 from threading import local
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .common import maybe_declare
 from .compression import compress
 from .connection import PooledConnection, is_connection, maybe_channel
 from .entity import Exchange, Queue, maybe_delivery_mode
-from .exceptions import ContentDisallowed
+from .exceptions import (
+    BatchPublishError,
+    ContentDisallowed,
+    RoutingPolicyError,
+)
 from .serialization import dumps, prepare_accept_content
 from .utils.functional import ChannelPromise, maybe_list
 
 if TYPE_CHECKING:
     from types import TracebackType
 
-__all__ = ('Exchange', 'Queue', 'Producer', 'Consumer')
+__all__ = ('BatchEntry', 'Exchange', 'Queue', 'Producer', 'Consumer',
+           'RoutingPolicyViolation', 'RoutingViolation')
 
 DEFAULT_BATCH_SIZE = 1000
+
+
+@dataclass(frozen=True)
+class RoutingViolation:
+    """A batch entry rejected by the routing policy.
+
+    Attributes:
+    ----------
+        index (int): Zero-based position of the entry within the batch.
+        routing_key (str): Routing key requested by the entry.
+        exchange (str): Exchange requested by the entry.
+        entry (BatchEntry): The rejected entry.
+        reason (str): Explanation supplied by the policy.
+    """
+
+    index: int
+    routing_key: str
+    exchange: str
+    entry: BatchEntry
+    reason: str = 'routing key is not allowed by the routing policy'
+
+    @property
+    def message(self):
+        """Alias for :attr:`reason`."""
+        return self.reason
+
+    @property
+    def body(self):
+        """Return the rejected entry's prepared body."""
+        return self.entry.body
+
+    def __str__(self):
+        return (
+            f'batch entry {self.index} '
+            f'(exchange={self.exchange!r}, routing_key={self.routing_key!r}) '
+            f'{self.reason}'
+        )
+
+
+@dataclass
+class BatchEntry:
+    """One publication staged in a :meth:`Producer.batch`."""
+
+    index: int
+    body: Any
+    exchange: str
+    routing_key: str
+    declare: list
+    priority: int
+    content_type: str | None
+    content_encoding: str | None
+    headers: Mapping
+    properties: dict
+    mandatory: bool = False
+    immediate: bool = False
+    timeout: float | None = None
+    confirm_timeout: float | None = None
+    reply_to: Any = None
+    retry: bool = False
+    retry_policy: dict = field(default_factory=dict)
+    result: Any = None
+    _producer: Any = field(default=None, repr=False)
+    _channel: Any = field(default=None, repr=False)
+    _message: Any = field(default=None, repr=False)
+    _state: str = field(default='pending', repr=False)
+
+    @property
+    def message(self):
+        """Return the transport message for this entry, preparing it once."""
+        if self._message is None:
+            self.prepare()
+        return self._message
+
+    def prepare(self):
+        """Prepare the transport message."""
+        if isinstance(self.reply_to, Queue):
+            self.properties['reply_to'] = self.reply_to.name
+        if self._producer is not None:
+            self._channel = self._producer.channel
+        self._message = self._channel.prepare_message(
+            self.body,
+            self.priority,
+            self.content_type,
+            self.content_encoding,
+            self.headers,
+            self.properties,
+        )
+        return self._message
+
+    @property
+    def publish_kwargs(self):
+        """Return the keyword arguments used for the final publication."""
+        return {
+            'exchange': self.exchange,
+            'routing_key': self.routing_key,
+            'mandatory': self.mandatory,
+            'immediate': self.immediate,
+            'timeout': self.timeout,
+            'confirm_timeout': self.confirm_timeout,
+        }
+
+    def delivery_state(self):
+        """Return the entry's delivery state.
+
+        One of ``'pending'`` (not attempted), ``'buffered'`` (handed to a
+        transport batch but not confirmed), ``'delivered'``, or
+        ``'unknown'`` (the transport may or may not have received it).
+        """
+        return self._state
+
+    @property
+    def state(self):
+        """Alias for the current delivery state."""
+        return self._state
+
+    @property
+    def pending(self):
+        return self._state == 'pending'
+
+    @property
+    def buffered(self):
+        return self._state == 'buffered'
+
+    @property
+    def delivered(self):
+        return self._state == 'delivered'
+
+    @property
+    def unknown(self):
+        return self._state == 'unknown'
 
 
 class _ProducerBatchState:
     """State shared by nested batch contexts in one producer thread."""
 
-    def __init__(self, max_size):
+    def __init__(self, max_size, routing_policy=None,
+                 maybe_declare=None):
         self.max_size = max_size
+        self.routing_policy = routing_policy
+        self._maybe_declare = maybe_declare
         self.aborted = False
         self.session = None
         self.immediate = False
+        self.entries = []
+        self._validated_entries = 0
+        self._sent_entries = 0
+        self._session_channel = None
+        self._failure = None
+        self._accepted = []
+
+    @property
+    def staged(self):
+        """Return whether publications are validated before being sent."""
+        return self.routing_policy is not None
+
 
     def _get_session(self, channel):
         if self.immediate:
@@ -41,44 +194,316 @@ class _ProducerBatchState:
                 self.immediate = True
                 return None
             self.session = create_batch(max_size=self.max_size)
-        elif self.session.channel is not channel:
+            self._session_channel = channel
+        elif self._session_channel is not channel:
             raise RuntimeError(
                 'Producer channel changed while a publish batch was active',
             )
         return self.session
 
-    def publish(self, channel, message, **kwargs):
+    def _check_usable(self):
         if self.aborted:
             raise RuntimeError('Cannot publish through an aborted batch')
-        session = self._get_session(channel)
-        if session is None:
-            return channel.basic_publish(message, **kwargs)
-        return session.publish(message, **kwargs)
+        if self._failure is not None:
+            raise BatchPublishError(
+                'Publish batch cannot continue after a previous failure',
+                **_delivery_details(self.entries),
+            ) from self._failure
+
+    def record_publish_failure(self, exc, entry=None, sent=False):
+        """Mark the batch failed and annotate ``exc`` with entry states."""
+        self._failure = exc
+        if entry is not None:
+            entry._state = 'unknown' if sent or entry.unknown else (
+                'pending' if entry.pending else entry.state
+            )
+        _attach_delivery_details(exc, self.entries)
+
+    def stage(self, producer, **entry_args):
+        """Stage a publication until the whole batch has been validated."""
+        self._check_usable()
+        entry = BatchEntry(
+            index=len(self.entries), _producer=producer, **entry_args,
+        )
+        self.entries.append(entry)
+        return entry
+
+    def record(self, channel, **entry_args):
+        """Record an entry published immediately by the batch."""
+        entry = BatchEntry(
+            index=len(self.entries), _channel=channel, **entry_args,
+        )
+        self.entries.append(entry)
+        return entry
+
+    def publish(self, channel, message, entry=None, **kwargs):
+        """Publish one message through the transport or its batch session."""
+        self._check_usable()
+        session = None
+        try:
+            session = self._get_session(channel)
+            if session is None:
+                result = channel.basic_publish(message, **kwargs)
+            else:
+                result = session.publish(message, **kwargs)
+        except BaseException as exc:
+            self.record_publish_failure(exc, entry, sent=session is not None)
+            raise
+        if entry is not None:
+            if session is None:
+                entry._state = 'delivered'
+            else:
+                entry._state = 'buffered'
+                self._accepted.append(entry)
+        return result
 
     def flush(self):
         if self.aborted:
             raise RuntimeError('Cannot flush an aborted batch')
-        if self.session is not None:
+        if self._failure is not None:
+            raise BatchPublishError(
+                'Publish batch cannot continue after a previous failure',
+                **_delivery_details(self.entries),
+            ) from self._failure
+        if self.routing_policy is None:
+            self._flush_accepted()
+        else:
+            self._validate_pending()
+            self._flush_staged()
+
+    def _flush_accepted(self):
+        if self.session is None or not self._accepted:
+            return
+        accepted = list(self._accepted)
+        try:
             self.session.flush()
+        except BaseException as exc:
+            self._failure = exc
+            for entry in accepted:
+                entry._state = 'unknown'
+            self._accepted.clear()
+            _attach_delivery_details(exc, self.entries)
+            raise
+        for entry in accepted:
+            entry._state = 'delivered'
+        self._accepted.clear()
+
+    def _validate_pending(self):
+        while self._validated_entries < len(self.entries):
+            violations = []
+            for entry in self.entries[self._validated_entries:]:
+                reason = _routing_violation(self.routing_policy, entry)
+                if reason is not None:
+                    violations.append(RoutingViolation(
+                        index=entry.index,
+                        routing_key=entry.routing_key,
+                        exchange=entry.exchange,
+                        entry=entry,
+                        reason=reason,
+                    ))
+            if violations:
+                raise RoutingPolicyError(violations)
+            self._validated_entries = len(self.entries)
+
+    def _flush_staged(self):
+        if self._sent_entries >= len(self.entries):
+            return
+        pending = self.entries[self._sent_entries:]
+        accepted = []
+        current = None
+        attempting = False
+        try:
+            for entry in pending:
+                current = entry
+                attempting = False
+                entry._state = 'unknown'
+                self._declare_entry(entry)
+                entry.prepare()
+                session = self._get_session(entry._channel)
+                attempting = True
+                if session is None:
+                    entry.result = entry._channel.basic_publish(
+                        entry.message, **entry.publish_kwargs,
+                    )
+                    entry._state = 'delivered'
+                else:
+                    entry.result = session.publish(
+                        entry.message, **entry.publish_kwargs,
+                    )
+                    entry._state = 'buffered'
+                    accepted.append(entry)
+                self._sent_entries = entry.index + 1
+            if accepted:
+                try:
+                    self.session.flush()
+                except BaseException:
+                    for entry in accepted:
+                        entry._state = 'unknown'
+                    raise
+                for entry in accepted:
+                    entry._state = 'delivered'
+        except BaseException as exc:
+            self._failure = exc
+            if not attempting and current is not None:
+                current._state = 'pending'
+            for entry in accepted:
+                if entry._state != 'delivered':
+                    entry._state = 'unknown'
+            _attach_delivery_details(exc, self.entries)
+            raise
+
+    def _declare_entry(self, entry):
+        maybe_declare = self._maybe_declare
+        for entity in entry.declare:
+            maybe_declare(entity, retry=entry.retry, **entry.retry_policy)
 
     def abort(self):
         if self.aborted:
             return
         self.aborted = True
+        self._failure = self._failure or RuntimeError('batch aborted')
         if self.session is not None:
             self.session.discard()
+        for entry in self.entries:
+            if entry.delivered:
+                continue
+            if entry.buffered or entry.unknown:
+                entry._state = 'unknown'
+            else:
+                entry._state = 'pending'
 
     def close(self):
         if self.session is not None:
             self.session.close()
 
 
+def _delivery_details(entries):
+    delivered = [entry for entry in entries if entry.delivered]
+    unknown = [entry for entry in entries
+               if entry.unknown or entry.buffered]
+    pending = [entry for entry in entries if entry.pending]
+    return {
+        'delivered': delivered,
+        'unknown': unknown,
+        'pending': pending,
+    }
+
+
+def _attach_delivery_details(exc, entries):
+    if not entries:
+        return
+    details = _delivery_details(entries)
+    for name, value in details.items():
+        try:
+            setattr(exc, name, value)
+        except (AttributeError, TypeError):  # pragma: no cover
+            pass
+
+
+def _routing_violation(policy, entry):
+    """Return a reason string when ``entry`` violates ``policy``."""
+    decision = getattr(policy, 'is_allowed', None)
+    if decision is None:
+        decision = getattr(policy, 'validate_route', None)
+    if decision is None:
+        decision = getattr(policy, 'allows', None)
+    if decision is not None:
+        return _policy_rejection(_call_routing_policy(decision, entry))
+
+    if callable(policy):
+        allowed = _call_routing_policy(policy, entry)
+        return _policy_rejection(allowed)
+
+    if isinstance(policy, Mapping):
+        allow = policy.get('allow')
+        deny = policy.get('deny')
+        if allow is not None or deny is not None:
+            if deny is not None and _policy_allows(deny, entry):
+                return 'routing key is denied by the routing policy'
+            if allow is not None and not _policy_allows(allow, entry):
+                return 'routing key is not allowed by the routing policy'
+            return None
+        for key, value in policy.items():
+            if key == entry.routing_key or key == (entry.exchange,
+                                                   entry.routing_key):
+                allowed = (
+                    _call_routing_policy(value, entry)
+                    if callable(value) else value
+                )
+                return _policy_rejection(allowed)
+        wildcard = policy.get('*') or policy.get(('*', '*'))
+        if wildcard is not None:
+            allowed = (
+                _call_routing_policy(wildcard, entry)
+                if callable(wildcard) else wildcard
+            )
+            return _policy_rejection(allowed)
+        return 'routing key is not allowed by the routing policy'
+
+    if isinstance(policy, Collection) and not isinstance(policy, (str, bytes)):
+        if entry.routing_key in policy:
+            return None
+        if (entry.exchange, entry.routing_key) in policy:
+            return None
+        for allowed in policy:
+            if (isinstance(allowed, str) and allowed.endswith('.*') and
+                    entry.routing_key.startswith(allowed[:-1])):
+                return None
+        return 'routing key is not allowed by the routing policy'
+
+    raise TypeError(
+        'routing_policy must be a callable, collection, or mapping',
+    )
+
+
+def _policy_allows(policy, entry):
+    if callable(policy):
+        return _policy_rejection(_call_routing_policy(policy, entry)) is None
+    return _routing_violation(policy, entry) is None
+
+
+def _same_policy(left, right):
+    try:
+        return left is right or left == right
+    except Exception:  # pragma: no cover - defensive
+        return False
+
+
+def _policy_rejection(allowed):
+    if allowed is None or allowed is True:
+        return None
+    if isinstance(allowed, str):
+        return allowed
+    if allowed:
+        return None
+    return 'routing key is not allowed by the routing policy'
+
+
+def _call_routing_policy(policy, entry):
+    """Call a routing policy, accepting one- or two-argument signatures."""
+    try:
+        parameters = inspect.signature(policy).parameters.values()
+    except (TypeError, ValueError):
+        parameters = ()
+    positional = [
+        parameter for parameter in parameters
+        if parameter.kind in (
+            parameter.POSITIONAL_ONLY,
+            parameter.POSITIONAL_OR_KEYWORD,
+        )
+    ]
+    if len(positional) == 1:
+        return policy(entry)
+    return policy(entry.exchange, entry.routing_key)
+
+
 class _ProducerBatch:
     """Context manager returned by :meth:`Producer.batch`."""
 
-    def __init__(self, producer, max_size):
+    def __init__(self, producer, max_size, routing_policy=None):
         self.producer = producer
         self.max_size = max_size
+        self.routing_policy = routing_policy
         self.state = None
         self.is_outermost = False
         self.entered = False
@@ -92,9 +517,19 @@ class _ProducerBatch:
 
         state = getattr(self.producer._batch_local, 'current', None)
         if state is None:
-            state = _ProducerBatchState(self.max_size)
+            state = _ProducerBatchState(
+                self.max_size,
+                self.routing_policy,
+                self.producer.maybe_declare,
+            )
             self.producer._batch_local.current = state
             self.is_outermost = True
+        elif (self.routing_policy is not None and
+              state.routing_policy is not None and
+              not _same_policy(self.routing_policy, state.routing_policy)):
+            raise RuntimeError(
+                'Cannot change the routing policy inside a nested batch',
+            )
         self.state = state
         return self
 
@@ -137,6 +572,17 @@ class _ProducerBatch:
         if not self.active:
             raise RuntimeError('Publish batch context is not active')
         self.state.flush()
+
+    @property
+    def entries(self):
+        """Return the publications staged or sent by this batch."""
+        if self.state is None:
+            return []
+        return list(self.state.entries)
+
+    def delivery_states(self):
+        """Return each entry's current delivery state, in batch order."""
+        return [entry.delivery_state() for entry in self.entries]
 
 
 class Producer:
@@ -263,21 +709,73 @@ class Producer:
             )
         return bool(transport_support and configured_support)
 
-    def batch(self, max_size=DEFAULT_BATCH_SIZE):
-        """Group normal :meth:`publish` calls into transport-owned batches.
+    def batch(self, max_size=DEFAULT_BATCH_SIZE, routing_policy=None,
+              validate=None, policy=None):
+        """Group :meth:`publish` calls into transport-owned batches.
 
         Unsupported transports retain immediate publication.  A successful
         outermost context exit flushes pending messages; an exceptional exit
         discards messages that have not already been flushed.
 
+        When ``routing_policy`` is given, publications are staged instead of
+        sent as they are made.  Every staged entry is checked against the
+        policy before the outermost exit (or an explicit :meth:`flush`)
+        declares or sends anything.  If any entry is rejected, nothing is
+        declared or published and :exc:`~kombu.exceptions.RoutingPolicyError`
+        is raised with one
+        :class:`~kombu.messaging.RoutingViolation` per rejected entry.
+
+        A policy may also be an object with an ``is_allowed``, ``allows``, or
+        ``validate_route`` method, and a mapping may use the ``'allow'`` and
+        ``'deny'`` keys instead of individual routing keys.  Collection
+        entries ending in ``.*`` match a routing-key prefix.
+
+        ``routing_policy`` may be:
+
+        * a callable taking ``(exchange, routing_key)`` (or a single
+          :class:`~kombu.messaging.BatchEntry`) and returning ``True`` to
+          allow the entry, ``False`` to reject it, or a string describing
+          why it was rejected;
+        * a collection of allowed routing keys; or
+        * a mapping from a routing key (or ``(exchange, routing_key)``
+          tuple) to a decision or a callable returning one.
+
+        If sending fails, the raised error exposes ``delivered``,
+        ``unknown``, and ``pending`` entry lists so callers can tell which
+        entries were confirmed and which still have an uncertain outcome.
+
         :param max_size: Maximum transport operations to buffer before an
             automatic flush. Must be a positive integer.
         :type max_size: int
+        :param routing_policy: Optional routing policy used to preflight the
+            whole batch before anything is declared or sent.
+        :param validate: Alias for ``routing_policy``.
+        :param policy: Alias for ``routing_policy``.
         """
+        options = [
+            value for value in (routing_policy, validate, policy)
+            if value is not None
+        ]
+        if len(options) > 1:
+            raise TypeError('specify only one routing policy option')
+        if options:
+            routing_policy = options[0]
         if (isinstance(max_size, bool) or
                 not isinstance(max_size, int) or max_size <= 0):
             raise ValueError('max_size must be a positive integer')
-        return _ProducerBatch(self, max_size)
+        if isinstance(routing_policy, (str, bytes)) or (
+            routing_policy is not None and
+            not (callable(routing_policy) or
+                 isinstance(routing_policy, (Mapping, Collection)) or
+                 any(hasattr(routing_policy, name) for name in (
+                     'is_allowed', 'validate_route', 'allows',
+                 )))
+        ):
+            raise TypeError(
+                'routing_policy must be a callable, collection, mapping, '
+                'or policy object',
+            )
+        return _ProducerBatch(self, max_size, routing_policy)
 
     def _delivery_details(self, exchange, delivery_mode=None,
                           maybe_delivery_mode=maybe_delivery_mode,
@@ -370,6 +868,28 @@ class Producer:
                  headers, properties, routing_key, mandatory,
                  immediate, exchange, declare, timeout=None, confirm_timeout=None, retry=False, retry_policy=None):
         retry_policy = {} if retry_policy is None else retry_policy
+        batch = getattr(self._batch_local, 'current', None)
+        if batch is not None and batch.staged:
+            return batch.stage(
+                self,
+                body=body,
+                exchange=exchange,
+                routing_key=routing_key,
+                declare=declare,
+                priority=priority,
+                content_type=content_type,
+                content_encoding=content_encoding,
+                headers=headers,
+                properties=properties,
+                mandatory=mandatory,
+                immediate=immediate,
+                timeout=timeout,
+                confirm_timeout=confirm_timeout,
+                reply_to=properties.get('reply_to'),
+                retry=retry,
+                retry_policy=retry_policy,
+            )
+
         if declare:
             maybe_declare = self.maybe_declare
             for entity in declare:
@@ -393,9 +913,27 @@ class Producer:
             'timeout': timeout,
             'confirm_timeout': confirm_timeout,
         }
-        batch = getattr(self._batch_local, 'current', None)
         if batch is not None:
-            return batch.publish(channel, message, **publish_kwargs)
+            entry = batch.record(
+                channel,
+                body=body,
+                exchange=exchange,
+                routing_key=routing_key,
+                declare=declare,
+                priority=priority,
+                content_type=content_type,
+                content_encoding=content_encoding,
+                headers=headers,
+                properties=properties,
+                mandatory=mandatory,
+                immediate=immediate,
+                timeout=timeout,
+                confirm_timeout=confirm_timeout,
+                retry=retry,
+                retry_policy=retry_policy,
+            )
+            return batch.publish(channel, message, entry=entry,
+                                 **publish_kwargs)
         return channel.basic_publish(message, **publish_kwargs)
 
     def _get_channel(self):
