@@ -111,6 +111,10 @@ The following middleware classes are available, but not enabled by default.
    :members: get_current_message
    :member-order: bysource
 .. autoclass:: dramatiq.middleware.GroupCallbacks
+.. autoclass:: dramatiq.middleware.Quota
+.. autoclass:: dramatiq.middleware.QuotaBackend
+.. autoclass:: dramatiq.middleware.MemoryQuotaBackend
+.. autoclass:: dramatiq.middleware.QuotaLease
 .. autoclass:: dramatiq.middleware.prometheus.Prometheus
 
 .. py:class:: dramatiq.results.Results

@@ -24,6 +24,7 @@ from .current_message import CurrentMessage
 from .group_callbacks import GroupCallbacks
 from .middleware import Middleware, MiddlewareError, SkipMessage
 from .pipelines import Pipelines
+from .quota import MemoryQuotaBackend, Quota, QuotaBackend, QuotaLease
 from .retries import Retries
 from .shutdown import Shutdown, ShutdownNotifications
 from .threading import Interrupt, raise_thread_exception
@@ -44,6 +45,10 @@ __all__ = [
     "CurrentMessage",
     "GroupCallbacks",
     "Pipelines",
+    "MemoryQuotaBackend",
+    "Quota",
+    "QuotaBackend",
+    "QuotaLease",
     "Retries",
     "Shutdown",
     "ShutdownNotifications",

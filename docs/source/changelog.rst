@@ -8,6 +8,17 @@ All notable changes to this project will be documented in this file.
 `Unreleased`_
 -------------
 
+Added
+^^^^^
+
+* Added the :class:`dramatiq.middleware.Quota` middleware together with
+  :class:`dramatiq.middleware.QuotaBackend` and the in-memory
+  :class:`dramatiq.middleware.MemoryQuotaBackend`.  The middleware caps
+  how many messages may be processed concurrently per scope (e.g. per
+  customer) and globally, using TTL-based leases with fencing tokens so
+  that slots held by lost workers are reclaimed and stale releases
+  cannot free slots that were handed out again.
+
 Fixed
 ^^^^^
 
