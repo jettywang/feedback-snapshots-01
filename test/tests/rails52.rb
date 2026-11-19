@@ -13,7 +13,7 @@ class Rails52Tests < Minitest::Test
       :controller => 0,
       :model => 0,
       :template => 7,
-      :generic => 24
+      :generic => 23
     }
   end
 
@@ -575,13 +575,13 @@ class Rails52Tests < Minitest::Test
   end
 
   def test_remote_code_execution_cookie_serialization_config
-    assert_warning :type => :warning,
+    # `:hybrid` is overridden by `Custom::Serializer` later in the same
+    # initializer, so it is not the current state of the application
+    # and there is no basis for a warning
+    assert_no_warning :type => :warning,
       :warning_code => 110,
-      :fingerprint => "9ae68e59cfee3e5256c0540dadfeb74e6b72c91997fdb60411063a6e8518144a",
       :warning_type => "Remote Code Execution",
       :line => 5,
-      :message => /^Use\ of\ unsafe\ cookie\ serialization\ strat/,
-      :confidence => 1,
       :relative_path => "config/initializers/cookies_serializer.rb",
       :code => s(:attrasgn, s(:call, s(:call, s(:call, s(:const, :Rails), :application), :config), :action_dispatch), :cookies_serializer=, s(:lit, :hybrid)),
       :user_input => nil
