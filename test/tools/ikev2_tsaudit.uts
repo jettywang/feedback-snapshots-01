@@ -1,0 +1,344 @@
+% Regression tests for the offline IKEv2 traffic-selector audit
+#
+# $ test/run_tests -t test/tools/ikev2_tsaudit.uts
+
++ Parsing
+
+= Strict parser accepts a coherent CREATE_CHILD_SA request
+
+load_contrib("ikev2")
+
+from scapy.tools.ikev2_tsaudit import (
+    Ikev2TSAuditError, Ikev2TSAuditEvidence, Ikev2TSAuditRange,
+    Ikev2TSAuditSelector, ikev2_tsaudit_assess, ikev2_tsaudit_coverage,
+    ikev2_tsaudit_flow, ikev2_tsaudit_flow_matches, ikev2_tsaudit_narrow,
+    ikev2_tsaudit_parse_message, ikev2_tsaudit_render,
+)
+
+import ipaddress
+import struct
+import subprocess
+import sys
+
+def ts4(proto, start_port, end_port, start, end):
+    return IPv4TrafficSelector(
+        TS_type=7, IP_protocol_ID=proto, length=16,
+        start_port=start_port, end_port=end_port,
+        starting_address_v4=start, ending_address_v4=end)
+
+def child_bytes(message_id, flags, spi, tsi, tsr):
+    proposal = IKEv2_Proposal(
+        next_payload="TSi", proposal=1, proto="ESP", SPI=spi,
+        trans=IKEv2_Transform(next_payload="Transform", transform_type=1,
+                              transform_id=12) /
+              IKEv2_Transform(next_payload=0, transform_type=3,
+                              transform_id=12))
+    return raw(
+        IKEv2(init_SPI=b"\x01" * 8, resp_SPI=b"\x02" * 8,
+              next_payload="SA", exch_type="CREATE_CHILD_SA", flags=flags,
+              id=message_id) /
+        IKEv2_SA(next_payload="TSi", prop=proposal) /
+        IKEv2_TSi(next_payload="TSr", traffic_selector=tsi) /
+        IKEv2_TSr(next_payload=0, traffic_selector=tsr))
+
+request_bytes = child_bytes(
+    42, "Initiator", b"\x11" * 4,
+    [ts4(6, 1024, 65535, "10.0.0.0", "10.0.0.255"),
+     ts4(17, 53, 53, "10.0.1.0", "10.0.1.255")],
+    [ts4(6, 1, 65535, "192.168.1.0", "192.168.1.255")])
+response_bytes = child_bytes(
+    42, "Response", b"\x22" * 4,
+    [ts4(6, 20000, 40000, "10.0.0.64", "10.0.0.127"),
+     ts4(17, 53, 53, "10.0.1.10", "10.0.1.10")],
+    [ts4(6, 443, 443, "192.168.1.10", "192.168.1.10")])
+
+request = ikev2_tsaudit_parse_message(request_bytes)
+response = ikev2_tsaudit_parse_message(response_bytes)
+assert request.exchange_name() == "CREATE_CHILD_SA"
+assert not request.is_response and response.is_response
+assert request.message_id == response.message_id == 42
+assert request.proposals[0].spi == b"\x11" * 4
+assert response.proposals[0].spi == b"\x22" * 4
+assert len(request.selectors_for("tsi")) == 2
+
+= Header length is checked against the visible bytes
+
+broken = bytearray(request_bytes)
+broken[24:28] = struct.pack("!I", len(broken) + 4)
+try:
+    ikev2_tsaudit_parse_message(bytes(broken))
+    assert False
+except Ikev2TSAuditError as exc:
+    assert "IKE header length" in str(exc)
+
+= number_of_TSs is checked, not trusted
+
+broken = bytearray(request_bytes)
+# first TSi payload starts after the 28-byte header and the 32-byte SA
+# payload, so its count byte is at 28 + 32 + 4 = 64
+broken[64] = 3
+try:
+    ikev2_tsaudit_parse_message(bytes(broken))
+    assert False
+except Ikev2TSAuditError as exc:
+    assert "number_of_TSs=3" in str(exc)
+
+= Unsupported selector types stop the audit
+
+# Scapy decodes an unknown TS type as RawTrafficSelector; the audit refuses it.
+one_selector = raw(IKEv2_TSi(traffic_selector=[
+    ts4(6, 443, 443, "10.0.0.0", "10.0.0.255")]))
+unknown = bytearray(one_selector)
+assert unknown[8] == 7
+unknown[8] = 99
+message = (b"\x01" * 8 + b"\x02" * 8 +
+           bytes([44, 0x20, 35, 0x20]) +
+           struct.pack("!II", 1, 28 + len(unknown)) + bytes(unknown))
+assert isinstance(IKEv2_TSi(one_selector).traffic_selector[0],
+                  IPv4TrafficSelector)
+assert isinstance(IKEv2_TSi(bytes(unknown)).traffic_selector[0],
+                  RawTrafficSelector)
+try:
+    ikev2_tsaudit_parse_message(message)
+    assert False
+except Ikev2TSAuditError as exc:
+    assert "unsupported TS type 99" in str(exc)
+
++ Narrowing
+
+= TSi is narrowed with TSi and TSr with TSr
+
+narrowing = ikev2_tsaudit_narrow(request, response)
+assert [item.to_text() for item in narrowing.tsi] == [
+    "ipv4 tcp 10.0.0.64-10.0.0.127 20000-40000",
+    "ipv4 udp 10.0.1.10-10.0.1.10 53-53",
+]
+assert [item.to_text() for item in narrowing.tsr] == [
+    "ipv4 tcp 192.168.1.10-192.168.1.10 443-443",
+]
+assert len(narrowing.pairs) == 2
+
+= The request remainder keeps a concrete witness
+
+partial = narrowing.tsi_remainder[0]
+assert partial.witness is not None
+assert partial.witness.to_text() == "tcp 10.0.0.0:1024"
+assert narrowing.tsi_remainder[1].witness.to_text() == "udp 10.0.1.0:53"
+assert narrowing.tsr_remainder[0].witness.to_text() == "tcp 192.168.1.0:1"
+
+= A response cannot widen a request silently
+
+widened = child_bytes(
+    42, "Response", b"\x22" * 4,
+    [ts4(6, 1024, 65535, "10.0.0.0", "10.0.0.255")],
+    [ts4(6, 1, 65535, "192.168.1.0", "192.168.1.255")])
+widening = ikev2_tsaudit_narrow(
+    request, ikev2_tsaudit_parse_message(widened))
+assert widening.tsi_beyond_request[0].witness is None
+assert [item.to_text() for item in widening.tsi] == [
+    "ipv4 tcp 10.0.0.0-10.0.0.255 1024-65535"]
+
+= Requests and responses must share IKE SPIs and message id
+
+other = ikev2_tsaudit_parse_message(child_bytes(
+    43, "Response", b"\x22" * 4,
+    [ts4(6, 1024, 65535, "10.0.0.0", "10.0.0.255")],
+    [ts4(6, 1, 65535, "192.168.1.0", "192.168.1.255")]))
+try:
+    ikev2_tsaudit_narrow(request, other)
+    assert False
+except Ikev2TSAuditError as exc:
+    assert "do not share" in str(exc)
+
++ Flows
+
+= A flow inside one narrowed pair matches
+
+flow = ikev2_tsaudit_flow(6, "10.0.0.100", 33333, "192.168.1.10", 443)
+assert ikev2_tsaudit_flow_matches(narrowing, flow) == ["initiator-to-responder"]
+
+= A flow outside the narrowed ports does not match
+
+flow = ikev2_tsaudit_flow(6, "10.0.0.10", 443, "192.168.1.10", 443)
+assert ikev2_tsaudit_flow_matches(narrowing, flow) == []
+
+= Protocol 0 does not make a TCP flow match a UDP selector
+
+flow = ikev2_tsaudit_flow(17, "10.0.1.10", 53, "192.168.1.10", 443)
+assert ikev2_tsaudit_flow_matches(narrowing, flow) == []
+
+= Reversed direction is matched against swapped selectors
+
+reverse = ikev2_tsaudit_flow(6, "192.168.1.10", 443, "10.0.0.100", 33333)
+assert ikev2_tsaudit_flow_matches(narrowing, reverse) == [
+    "responder-to-initiator"]
+
++ Coverage
+
+= One CHILD_SA that echoes the request covers the target rectangle
+
+def selector(text_proto, start, end, start_port, end_port):
+    return Ikev2TSAuditSelector(
+        4, text_proto,
+        Ikev2TSAuditRange(int(ipaddress.IPv4Address(start)),
+                          int(ipaddress.IPv4Address(end))),
+        Ikev2TSAuditRange(start_port, end_port))
+
+target_source = selector(6, "10.0.0.0", "10.0.0.255", 1024, 65535)
+target_destination = selector(6, "192.168.1.0", "192.168.1.255", 443, 443)
+coverage = ikev2_tsaudit_coverage(narrowing, target_source, target_destination)
+assert coverage.status == "partial"
+assert coverage.single_child_sa is False
+assert coverage.source_witness.to_text() == "tcp 10.0.0.0:1024"
+
+= Two CHILD_SAs that split the range do not cover the cross product
+
+second = ikev2_tsaudit_narrow(
+    ikev2_tsaudit_parse_message(child_bytes(
+        43, "Initiator", b"\x33" * 4,
+        [ts4(6, 1024, 65535, "10.0.0.0", "10.0.0.255")],
+        [ts4(6, 1, 65535, "192.168.1.0", "192.168.1.255")])),
+    ikev2_tsaudit_parse_message(child_bytes(
+        43, "Response", b"\x44" * 4,
+        [ts4(6, 20001, 65535, "10.0.0.128", "10.0.0.255")],
+        [ts4(6, 1, 65535, "192.168.1.0", "192.168.1.255")])))
+merged = ikev2_tsaudit_narrow(
+    ikev2_tsaudit_parse_message(child_bytes(
+        44, "Initiator", b"\x33" * 4,
+        [ts4(6, 1024, 65535, "10.0.0.0", "10.0.0.255")],
+        [ts4(6, 1, 65535, "192.168.1.0", "192.168.1.255")])),
+    ikev2_tsaudit_parse_message(child_bytes(
+        44, "Response", b"\x44" * 4,
+        [ts4(6, 1024, 65535, "10.0.0.0", "10.0.0.127")],
+        [ts4(6, 1, 65535, "192.168.1.0", "192.168.1.255")])))
+merged.pairs = narrowing.pairs + second.pairs
+merged.tsi = narrowing.tsi + second.tsi
+merged.tsr = narrowing.tsr + second.tsr
+coverage = ikev2_tsaudit_coverage(merged, target_source,
+                                  target_destination)
+assert coverage.status == "partial"
+assert coverage.source_witness is not None
+assert ikev2_tsaudit_flow_matches(
+    merged, ikev2_tsaudit_flow(6, coverage.source_witness.address,
+                               coverage.source_witness.port,
+                               "192.168.1.10", 443)) == []
+
+= The whole prefix is not claimed when only one selector matches
+
+wide = selector(6, "10.0.0.0", "10.0.0.255", 0, 65535)
+coverage = ikev2_tsaudit_coverage(narrowing, wide, target_destination)
+assert coverage.status == "partial"
+assert coverage.source_witness is not None
+assert ikev2_tsaudit_flow_matches(
+    narrowing, ikev2_tsaudit_flow(6, coverage.source_witness.address,
+                                  coverage.source_witness.port,
+                                  "192.168.1.10", 443)) == []
+
++ Evidence
+
+= Cleartext selectors and ESP headers do not prove inner encryption
+
+evidence = Ikev2TSAuditEvidence(
+    cleartext_selectors=True,
+    esp_headers=[("10.0.0.100", "192.168.1.10", 0x22222222)])
+assessment = ikev2_tsaudit_assess(evidence, [narrowing])
+assert "cleartext TSi/TSr declarations are readable" in assessment["supported"]
+assert any("authenticated" in item for item in assessment["unsupported"])
+assert any("inner 5-tuple" in item for item in assessment["unsupported"])
+
+= An encrypted payload yields no selector at all
+
+encrypted = ikev2_tsaudit_parse_message(raw(
+    IKEv2(init_SPI=b"\x01" * 8, resp_SPI=b"\x02" * 8,
+          next_payload="Encrypted", exch_type="IKE_AUTH", flags="Response",
+          id=1) / IKEv2_Encrypted(load=b"\xaa" * 40)))
+assert encrypted.encrypted
+assert encrypted.selectors == {"tsi": [], "tsr": []}
+assert encrypted.payload_types == [46]
+
+= The report is stable line-oriented text
+
+text = ikev2_tsaudit_render(narrowing)
+assert "NARROWED TSi" in text
+assert "witness outside" in text
+assert "NARROWED TSi             ipv4 tcp 10.0.0.64-10.0.0.127 20000-40000" in text
+
++ Command line
+
+= The module prints usage and fails without inputs
+
+result = subprocess.Popen(
+    [sys.executable, "-m", "scapy.tools.ikev2_tsaudit"],
+    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+stdout, stderr = result.communicate()
+assert result.returncode == 2
+assert b"usage:" in stderr
+
+= Offline hex files produce a reproducible comparison
+
+import tempfile
+
+request_file = tempfile.NamedTemporaryFile(mode="w", suffix=".hex",
+                                           delete=False)
+request_file.write(request_bytes.hex())
+request_file.close()
+response_file = tempfile.NamedTemporaryFile(mode="w", suffix=".hex",
+                                            delete=False)
+response_file.write(response_bytes.hex())
+response_file.close()
+result = subprocess.Popen(
+    [sys.executable, "-m", "scapy.tools.ikev2_tsaudit",
+     request_file.name, response_file.name],
+    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+stdout, stderr = result.communicate()
+assert result.returncode == 0, stderr
+output = stdout.decode()
+assert "NARROWED TSi             ipv4 tcp 10.0.0.64-10.0.0.127 20000-40000" in output
+assert "witness outside        tcp 10.0.0.0:1024" in output
+
+= Inconsistent lengths are reported, not repaired
+
+broken_file = tempfile.NamedTemporaryFile(mode="w", suffix=".hex",
+                                          delete=False)
+broken_file.write(bytes(bytearray(request_bytes)).hex())
+broken_file.close()
+broken = bytearray(request_bytes)
+broken[24:28] = struct.pack("!I", len(broken) + 4)
+open(broken_file.name, "w").write(bytes(broken).hex())
+result = subprocess.Popen(
+    [sys.executable, "-m", "scapy.tools.ikev2_tsaudit",
+     broken_file.name, response_file.name],
+    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+stdout, stderr = result.communicate()
+assert result.returncode == 1
+assert b"IKE header length" in stderr
+
+import os
+for name in (request_file.name, response_file.name, broken_file.name):
+    os.unlink(name)
+
+= An encrypted exchange cannot be narrowed from visible bytes
+
+encrypted_request = ikev2_tsaudit_parse_message(raw(
+    IKEv2(init_SPI=b"\x01" * 8, resp_SPI=b"\x02" * 8,
+          next_payload="Encrypted", exch_type="CREATE_CHILD_SA",
+          flags="Initiator", id=42) / IKEv2_Encrypted(load=b"\xaa" * 20)))
+try:
+    ikev2_tsaudit_narrow(encrypted_request, response)
+    assert False
+except Ikev2TSAuditError as exc:
+    assert "encrypted" in str(exc)
+
+= A protocol 0 selector normalizes its ignored port range
+
+from scapy.tools.ikev2_tsaudit import _ikev2_tsaudit_parse_selector_body
+
+body = bytes([1, 0, 0, 0]) + bytes.fromhex(
+    "0700" "0010" "01bb" "01bb" "0a000000" "0a0000ff")
+normalized = _ikev2_tsaudit_parse_selector_body(body)[0]
+body = bytes([1, 0, 0, 0]) + bytes.fromhex(
+    "0700" "0010" "01bb" "01bb" "0a000000" "0a0000ff")
+any_proto = _ikev2_tsaudit_parse_selector_body(body)[0]
+assert any_proto.proto is None
+assert (any_proto.ports.start, any_proto.ports.end) == (0, 65535)
+assert any_proto.to_text() == "ipv4 any 10.0.0.0-10.0.0.255 ports=n/a"
