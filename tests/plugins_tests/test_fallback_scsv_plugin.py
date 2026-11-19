@@ -1,6 +1,8 @@
 from nassl.ssl_client import ClientCertificateRequested
 
 from sslyze.plugins.fallback_scsv_plugin import (
+    FallbackScsvConclusionEnum,
+    FallbackScsvHandshakeOutcomeEnum,
     FallbackScsvScanResult,
     FallbackScsvImplementation,
     FallbackScsvScanResultAsJson,
@@ -26,8 +28,15 @@ class TestFallbackScsvPlugin:
         # When testing for SCSV, it succeeds
         result: FallbackScsvScanResult = FallbackScsvImplementation.scan_server(server_info)
 
-        # And the server is reported as supporting SCSV
-        assert result.supports_fallback_scsv
+        # And the server is reported as supporting SCSV based on positive evidence
+        assert result.conclusion == FallbackScsvConclusionEnum.SUPPORTED
+        assert result.supports_fallback_scsv is True
+        assert result.inconclusive_reason is None
+
+        # And both handshakes were recorded with their version, SCSV setting and outcome
+        assert result.baseline_observation.scsv_enabled is False
+        assert result.downgrade_observation.scsv_enabled is True
+        assert result.downgrade_observation.outcome == FallbackScsvHandshakeOutcomeEnum.REJECTED_INAPPROPRIATE_FALLBACK
 
         # And a CLI output can be generated
         assert FallbackScsvImplementation.cli_connector_cls.result_to_console_output(result)
@@ -48,8 +57,11 @@ class TestFallbackScsvPlugin:
             # When testing for SCSV, it succeeds
             result: FallbackScsvScanResult = FallbackScsvImplementation.scan_server(server_info)
 
-        # And the server is reported as NOT supporting SCSV
-        assert not result.supports_fallback_scsv
+        # And the server is reported as NOT supporting SCSV, with the downgraded handshake having completed
+        assert result.conclusion == FallbackScsvConclusionEnum.NOT_SUPPORTED
+        assert result.supports_fallback_scsv is False
+        assert result.baseline_observation.outcome == FallbackScsvHandshakeOutcomeEnum.COMPLETED
+        assert result.downgrade_observation.outcome == FallbackScsvHandshakeOutcomeEnum.COMPLETED
 
     @can_only_run_on_linux_64
     def test_fails_when_client_auth_failed(self) -> None:
@@ -85,4 +97,5 @@ class TestFallbackScsvPlugin:
             result: FallbackScsvScanResult = FallbackScsvImplementation.scan_server(server_info)
 
         # And the server is reported as NOT supporting SCSV
-        assert not result.supports_fallback_scsv
+        assert result.conclusion == FallbackScsvConclusionEnum.NOT_SUPPORTED
+        assert result.supports_fallback_scsv is False

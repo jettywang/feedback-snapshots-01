@@ -444,6 +444,92 @@
       "title": "EmsExtensionScanResultAsJson",
       "type": "object"
     },
+    "FallbackScsvConclusionEnum": {
+      "description": "The conclusion of the TLS_FALLBACK_SCSV test, based only on evidence actually collected.\n\nAttributes:\n    SUPPORTED: Positive evidence proves the server implements TLS_FALLBACK_SCSV (RFC 7507).\n    NOT_SUPPORTED: Positive evidence proves the server does not implement TLS_FALLBACK_SCSV.\n    INCONCLUSIVE: The available evidence does not allow proving either outcome.",
+      "enum": [
+        "SUPPORTED",
+        "NOT_SUPPORTED",
+        "INCONCLUSIVE"
+      ],
+      "title": "FallbackScsvConclusionEnum",
+      "type": "string"
+    },
+    "FallbackScsvHandshakeObservationAsJson": {
+      "additionalProperties": false,
+      "properties": {
+        "tls_version_attempted": {
+          "title": "Tls Version Attempted",
+          "type": "string"
+        },
+        "scsv_enabled": {
+          "title": "Scsv Enabled",
+          "type": "boolean"
+        },
+        "outcome": {
+          "$ref": "#/$defs/FallbackScsvHandshakeOutcomeEnum"
+        },
+        "negotiated_tls_version": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Negotiated Tls Version"
+        },
+        "alert_or_error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Alert Or Error"
+        }
+      },
+      "required": [
+        "tls_version_attempted",
+        "scsv_enabled",
+        "outcome",
+        "negotiated_tls_version",
+        "alert_or_error"
+      ],
+      "title": "FallbackScsvHandshakeObservationAsJson",
+      "type": "object"
+    },
+    "FallbackScsvHandshakeOutcomeEnum": {
+      "description": "What happened during a single handshake performed for the TLS_FALLBACK_SCSV test.\n\nAttributes:\n    COMPLETED: The handshake completed and the negotiated protocol version is known.\n    REJECTED_INAPPROPRIATE_FALLBACK: The server returned the specific \"inappropriate fallback\" alert (RFC 7507).\n    REJECTED_OTHER_ALERT: The server rejected the handshake with an alert other than \"inappropriate fallback\".\n    TIMED_OUT: The TCP connection was established but the TLS handshake timed out.\n    CONNECTION_INTERRUPTED: The transport (TCP/TLS) connection failed or was closed by the peer.\n    NOT_ATTEMPTED: No handshake was attempted (for example no lower TLS version is available to test).",
+      "enum": [
+        "COMPLETED",
+        "REJECTED_INAPPROPRIATE_FALLBACK",
+        "REJECTED_OTHER_ALERT",
+        "TIMED_OUT",
+        "CONNECTION_INTERRUPTED",
+        "NOT_ATTEMPTED"
+      ],
+      "title": "FallbackScsvHandshakeOutcomeEnum",
+      "type": "string"
+    },
+    "FallbackScsvInconclusiveReasonEnum": {
+      "description": "Why a TLS_FALLBACK_SCSV test ended up being inconclusive.\n\nAttributes:\n    NO_LOWER_TLS_VERSION_AVAILABLE: The highest supported version has no lower version to downgrade to.\n    BASELINE_HANDSHAKE_TIMED_OUT: The baseline handshake at the downgrade version timed out.\n    BASELINE_CONNECTION_INTERRUPTED: The baseline connection failed before a TLS conclusion could be reached.\n    LOWER_VERSION_NOT_SUPPORTED: The server does not support the TLS version the downgrade attempt would use,\n        so the downgrade premise (a server that accepts an older version without SCSV) cannot be established.\n    DOWNGRADE_TIMED_OUT: The SCSV downgrade attempt timed out instead of returning an alert.\n    DOWNGRADE_CONNECTION_INTERRUPTED: The SCSV downgrade attempt's transport was interrupted without an alert.\n    DOWNGRADE_REJECTED_WITH_OTHER_ALERT: The SCSV downgrade attempt was rejected, but not with the specific\n        \"inappropriate fallback\" alert, so SCSV enforcement cannot be proven.\n    UNEXPECTED_BASELINE_OUTCOME: The baseline handshake produced an outcome that cannot be interpreted.",
+      "enum": [
+        "NO_LOWER_TLS_VERSION_AVAILABLE",
+        "BASELINE_HANDSHAKE_TIMED_OUT",
+        "BASELINE_CONNECTION_INTERRUPTED",
+        "LOWER_VERSION_NOT_SUPPORTED",
+        "BASELINE_REJECTED",
+        "DOWNGRADE_TIMED_OUT",
+        "DOWNGRADE_CONNECTION_INTERRUPTED",
+        "DOWNGRADE_REJECTED_WITH_OTHER_ALERT",
+        "UNEXPECTED_BASELINE_OUTCOME"
+      ],
+      "title": "FallbackScsvInconclusiveReasonEnum",
+      "type": "string"
+    },
     "FallbackScsvScanAttemptAsJson": {
       "additionalProperties": false,
       "properties": {
@@ -494,13 +580,43 @@
     "FallbackScsvScanResultAsJson": {
       "additionalProperties": false,
       "properties": {
+        "conclusion": {
+          "$ref": "#/$defs/FallbackScsvConclusionEnum"
+        },
         "supports_fallback_scsv": {
-          "title": "Supports Fallback Scsv",
-          "type": "boolean"
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Supports Fallback Scsv"
+        },
+        "inconclusive_reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FallbackScsvInconclusiveReasonEnum"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "baseline_observation": {
+          "$ref": "#/$defs/FallbackScsvHandshakeObservationAsJson"
+        },
+        "downgrade_observation": {
+          "$ref": "#/$defs/FallbackScsvHandshakeObservationAsJson"
         }
       },
       "required": [
-        "supports_fallback_scsv"
+        "conclusion",
+        "supports_fallback_scsv",
+        "inconclusive_reason",
+        "baseline_observation",
+        "downgrade_observation"
       ],
       "title": "FallbackScsvScanResultAsJson",
       "type": "object"
@@ -2208,7 +2324,7 @@
       "type": "string"
     },
     "sslyze_version": {
-      "default": "6.3.0",
+      "default": "6.3.1",
       "title": "Sslyze Version",
       "type": "string"
     },

@@ -19,6 +19,7 @@ from sslyze import (
     RobotScanResultEnum,
     SupportedEllipticCurvesScanResult,
 )
+from sslyze.plugins.fallback_scsv_plugin import FallbackScsvConclusionEnum
 from sslyze.plugins.http_headers_plugin import HttpHeadersScanResult
 
 
@@ -228,7 +229,10 @@ def _check_tls_vulnerabilities(scan_result: AllScanCommandsAttempts) -> Dict[str
         )
 
     assert scan_result.tls_fallback_scsv.result
-    if not scan_result.tls_fallback_scsv.result.supports_fallback_scsv:
+    fallback_scsv_result = scan_result.tls_fallback_scsv.result
+    # Only report the vulnerability when there is positive evidence that SCSV is not enforced; an inconclusive
+    # result (missing evidence) must not be turned into a definitive vulnerability finding
+    if fallback_scsv_result.conclusion == FallbackScsvConclusionEnum.NOT_SUPPORTED:
         issues_with_tls_vulns["tls_vulnerability_fallback_scsv"] = (
             "Server is vulnerable to TLS downgrade attacks because it does not support the TLS_FALLBACK_SCSV mechanism."
         )

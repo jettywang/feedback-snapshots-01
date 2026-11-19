@@ -71,7 +71,13 @@ from sslyze.plugins.session_resumption.implementation import (
 )
 from sslyze.plugins.compression_plugin import CompressionScanResult
 from sslyze.plugins.early_data_plugin import EarlyDataScanResult
-from sslyze.plugins.fallback_scsv_plugin import FallbackScsvScanResult
+from sslyze.plugins.fallback_scsv_plugin import (
+    FallbackScsvScanResult,
+    FallbackScsvConclusionEnum,
+    FallbackScsvInconclusiveReasonEnum,
+    FallbackScsvHandshakeOutcomeEnum,
+    FallbackScsvHandshakeObservation,
+)
 from sslyze.plugins.heartbleed_plugin import HeartbleedScanResult
 
 # HTTP Headers

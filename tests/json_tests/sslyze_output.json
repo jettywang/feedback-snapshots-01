@@ -9035,7 +9035,23 @@
           "error_reason": null,
           "error_trace": null,
           "result": {
-            "supports_fallback_scsv": true
+            "conclusion": "SUPPORTED",
+            "supports_fallback_scsv": true,
+            "inconclusive_reason": null,
+            "baseline_observation": {
+              "tls_version_attempted": "TLS_1_1",
+              "scsv_enabled": false,
+              "outcome": "COMPLETED",
+              "negotiated_tls_version": "TLS_1_1",
+              "alert_or_error": null
+            },
+            "downgrade_observation": {
+              "tls_version_attempted": "TLS_1_1",
+              "scsv_enabled": true,
+              "outcome": "REJECTED_INAPPROPRIATE_FALLBACK",
+              "negotiated_tls_version": null,
+              "alert_or_error": "tlsv1 alert inappropriate fallback"
+            }
           }
         },
         "heartbleed": {
@@ -17391,7 +17407,23 @@
           "error_reason": null,
           "error_trace": null,
           "result": {
-            "supports_fallback_scsv": true
+            "conclusion": "SUPPORTED",
+            "supports_fallback_scsv": true,
+            "inconclusive_reason": null,
+            "baseline_observation": {
+              "tls_version_attempted": "TLS_1_1",
+              "scsv_enabled": false,
+              "outcome": "COMPLETED",
+              "negotiated_tls_version": "TLS_1_1",
+              "alert_or_error": null
+            },
+            "downgrade_observation": {
+              "tls_version_attempted": "TLS_1_1",
+              "scsv_enabled": true,
+              "outcome": "REJECTED_INAPPROPRIATE_FALLBACK",
+              "negotiated_tls_version": null,
+              "alert_or_error": "tlsv1 alert inappropriate fallback"
+            }
           }
         },
         "heartbleed": {
