@@ -111,6 +111,11 @@ module Bundler
               say "remove or disable this gem until a patch is available!", [:red, :bold]
             end
 
+            if options.verbose?
+              say "Version decision:", :red
+              print_wrapped advisory.decision_for(gem.version,gem.name).explain, indent: 2
+            end
+
             say
           end
         end

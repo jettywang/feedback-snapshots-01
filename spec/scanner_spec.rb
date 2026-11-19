@@ -169,6 +169,34 @@ describe Scanner do
           expect(ids).not_to include('CVE-2013-0156')
         end
       end
+
+      context "when an advisory is ignored (exemption only changes disposition)" do
+        let(:ignored_id) { 'OSVDB-89025' }
+
+        let(:without_ignore) { subject.scan.to_a }
+        let(:with_ignore)    { subject.scan(ignore: [ignored_id]).to_a }
+
+        it "removes the finding from the report without rewriting the fact" do
+          expect(without_ignore.map { |r| r.advisory.id }).
+            to include(ignored_id)
+          expect(with_ignore.map { |r| r.advisory.id }).
+            not_to include(ignored_id)
+        end
+
+        it "still computes the same affected decision for the ignored advisory" do
+          ignored_result = without_ignore.find { |r| r.advisory.id == ignored_id }
+          advisory = ignored_result.advisory
+          version  = ignored_result.gem.version
+
+          # The advisory remains objectively vulnerable; ignoring only filters.
+          expect(advisory.vulnerable?(version)).to be(true)
+
+          decision = advisory.decision_for(version,ignored_result.gem.name)
+          expect(decision.vulnerable?).to be(true)
+          expect(decision.advisory_id).to eq(ignored_id)
+          expect(decision.advisory_path).to eq(advisory.path)
+        end
+      end
     end
 
     context "when auditing a bundle with insecure sources" do

@@ -18,6 +18,8 @@
 require 'date'
 require 'yaml'
 
+require 'bundler/audit/version_decision'
+
 module Bundler
   module Audit
     #
@@ -156,6 +158,27 @@ module Bundler
       end
 
       #
+      # Builds the single, reproducible {VersionDecision} that explains how the
+      # advisory classifies a locked version. All boolean predicates and all
+      # machine/human explanations are derived from this one object, so the
+      # boolean interface and the reports can never maintain separate,
+      # diverging range logic.
+      #
+      # @param [Gem::Version, String] version
+      #   The locked dependency version.
+      #
+      # @param [String] gem_name
+      #   The name of the dependency.
+      #
+      # @return [VersionDecision]
+      #
+      # @since 0.9.0
+      #
+      def decision_for(version,gem_name=nil)
+        VersionDecision.new(self,version,gem_name)
+      end
+
+      #
       # Checks whether the version is not affected by the advisory.
       #
       # @param [Gem::Version] version
@@ -167,9 +190,7 @@ module Bundler
       # @since 0.2.0
       #
       def unaffected?(version)
-        unaffected_versions.any? do |unaffected_version|
-          unaffected_version === version
-        end
+        decision_for(version).unaffected?
       end
 
       #
@@ -184,9 +205,7 @@ module Bundler
       # @since 0.2.0
       #
       def patched?(version)
-        patched_versions.any? do |patched_version|
-          patched_version === version
-        end
+        decision_for(version).patched?
       end
 
       #
@@ -199,7 +218,7 @@ module Bundler
       #   Specifies whether the version is vulnerable to the advisory or not.
       #
       def vulnerable?(version)
-        !patched?(version) && !unaffected?(version)
+        decision_for(version).vulnerable?
       end
 
       #

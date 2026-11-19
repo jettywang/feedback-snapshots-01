@@ -189,6 +189,45 @@ You can provide a path to a config file using the `--config` flag:
 $ bundle-audit check --config bundler-audit.custom.yaml
 ```
 
+Ignoring an advisory only changes its disposition: the finding is filtered out
+of the report, but the advisory still classifies the locked version as
+affected. The affected fact and its explanation are never rewritten.
+
+## Version Decision Explanations
+
+Every finding carries a reproducible explanation of *why* the locked version is
+or is not affected by a specific advisory. The boolean result and the
+explanation are produced by the same decision engine
+(`Bundler::Audit::VersionDecision`), so the JSON/text reports can never drift
+away from the boolean `Advisory#vulnerable?` check.
+
+For each advisory the engine:
+
+* normalizes the locked version once (RubyGems `Gem::Version`, prerelease flag);
+* evaluates every `unaffected_versions` and `patched_versions` range
+  independently and records whether it matched and why;
+* combines the checks with an explicit precedence:
+  1. a matching `unaffected_versions` range wins (`unaffected`);
+  2. otherwise a matching `patched_versions` range means `patched`;
+  3. otherwise the version is `vulnerable`;
+* reports `undetermined` for a locked prerelease that no published range can
+  classify, while still surfacing it for review (the boolean stays
+  vulnerable for backwards compatibility);
+* binds the explanation to the advisory source file path and the dependency
+  name/version so a reviewer can recompute the result by hand.
+
+The machine-readable decision is embedded in each `unpatched_gem` result of
+the JSON report under the `decision` key, and the human-readable form is
+printed by the text format when `--verbose` is used.
+
+```ruby
+advisory.vulnerable?(gem.version)                 # => true / false
+decision = advisory.decision_for(gem.version, gem.name)
+decision.verdict                                  # => :vulnerable
+decision.range_checks                             # per-range evidence
+puts decision.explain                             # reviewer-facing text
+```
+
 ## Requirements
 
 * [git]

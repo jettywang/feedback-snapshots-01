@@ -53,6 +53,27 @@ module Bundler
         end
 
         #
+        # The reproducible version decision explaining why this locked gem is
+        # reported as affected. It is computed by the same engine that drives
+        # the boolean {Advisory#vulnerable?} check, so the report and the
+        # boolean interface share one algorithm.
+        #
+        # @return [VersionDecision]
+        #
+        def decision
+          @decision ||= @advisory.decision_for(@gem.version,@gem.name)
+        end
+
+        #
+        # A reviewer-facing explanation of the decision.
+        #
+        # @return [String]
+        #
+        def explain
+          decision.explain
+        end
+
+        #
         # Compares the unpatched gem to another result.
         #
         # @param [Result] other
@@ -88,7 +109,8 @@ module Bundler
               name: @gem.name,
               version: @gem.version
             },
-            advisory: @advisory.to_h
+            advisory: @advisory.to_h,
+            decision: decision.to_h
           }
         end
 

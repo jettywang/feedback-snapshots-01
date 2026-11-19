@@ -289,6 +289,12 @@ describe Bundler::Audit::CLI::Formats::Text do
           it 'must print "Description:" and the advisory description' do
             expect(output_lines).to include("Description:","","  #{advisory.description.chomp}",'')
           end
+
+          it 'must print the reproducible version decision' do
+            expect(output).to include("Version decision:")
+            expect(output).to include("verdict: vulnerable")
+            expect(output).to include(advisory.path)
+          end
         end
 
         context "when :verbose is not enabled" do

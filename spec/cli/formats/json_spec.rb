@@ -101,6 +101,21 @@ describe Bundler::Audit::CLI::Formats::JSON do
           expect(output_json[:results][0][:advisory][:unaffected_versions]).to be == advisory.unaffected_versions.map(&:to_s)
           expect(output_json[:results][0][:advisory][:patched_versions]).to be == advisory.patched_versions.map(&:to_s)
         end
+
+        it 'must embed a reproducible version decision' do
+          decision = output_json[:results][0][:decision]
+
+          expect(decision).to be_kind_of(Hash)
+          expect(decision[:gem][:name]).to be == gem.name
+          expect(decision[:gem][:version]).to be == gem.version.to_s
+          expect(decision[:advisory][:id]).to be == advisory.id
+          expect(decision[:advisory][:path]).to be == advisory.path
+          expect(decision[:verdict]).to be == 'vulnerable'
+          expect(decision[:vulnerable]).to be == true
+          expect(decision[:range_checks]).to be_kind_of(Array)
+          expect(decision[:range_checks].size).to be ==
+            (advisory.unaffected_versions.size + advisory.patched_versions.size)
+        end
       end
     end
 

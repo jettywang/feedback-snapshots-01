@@ -9,8 +9,22 @@ describe Bundler::Audit::Results::UnpatchedGem do
     end
   end
 
+  let(:decision_hash) do
+    {
+      gem: {name: gem.name, version: gem.version.to_s},
+      verdict: 'vulnerable',
+      vulnerable: true
+    }
+  end
+
+  let(:decision) do
+    double('Bundler::Audit::VersionDecision', to_h: decision_hash)
+  end
+
   let(:advisory) do
-    double('Bundler::Audit::Advisory', id: 'CVE-3000-1234')
+    double('Bundler::Audit::Advisory',
+           id: 'CVE-3000-1234',
+           decision_for: decision)
   end
 
   subject { described_class.new(gem,advisory) }
@@ -112,6 +126,33 @@ describe Bundler::Audit::Results::UnpatchedGem do
 
     it "must include a :advisory key containing a Hash of the advisory" do
       expect(subject[:advisory]).to be == advisory_hash
+    end
+
+    it "must include a :decision key containing the engine's Hash" do
+      expect(subject[:decision]).to be == decision_hash
+    end
+  end
+
+  describe "#decision" do
+    it "must ask the advisory for a VersionDecision bound to the gem" do
+      expect(advisory).to receive(:decision_for).
+        with(gem.version,gem.name).and_return(decision)
+
+      expect(subject.decision).to be(decision)
+    end
+
+    it "must memoize the decision" do
+      expect(subject.decision).to be(subject.decision)
+    end
+  end
+
+  describe "#explain" do
+    let(:explanation) { "a reproducible explanation" }
+
+    before { expect(decision).to receive(:explain).and_return(explanation) }
+
+    it "must delegate to the decision" do
+      expect(subject.explain).to be == explanation
     end
   end
 
