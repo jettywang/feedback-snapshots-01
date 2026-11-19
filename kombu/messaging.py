@@ -11,7 +11,8 @@ from .compression import compress
 from .connection import PooledConnection, is_connection, maybe_channel
 from .entity import Exchange, Queue, maybe_delivery_mode
 from .exceptions import ContentDisallowed
-from .serialization import dumps, prepare_accept_content
+from .serialization import (dumps, get_connection_accept_content,
+                            snapshot_accept_content)
 from .utils.functional import ChannelPromise, maybe_list
 
 if TYPE_CHECKING:
@@ -552,13 +553,14 @@ class Consumer:
     #: that occurred while trying to decode it.
     on_decode_error = None
 
-    #: List of accepted content-types.
+    #: Accepted content-types.
     #:
     #: An exception will be raised if the consumer receives
     #: a message with an untrusted content type.
-    #: By default all content-types are accepted, but not if
-    #: :func:`kombu.disable_untrusted_serializers` was called,
-    #: in which case only json is allowed.
+    #: When not passed explicitly, this is inherited from the
+    #: connection (its ``accept`` argument) and kept across
+    #: :meth:`revive`.  If neither is set, the process-wide registry
+    #: rules apply, where only json is allowed by default.
     accept = None
 
     #: Initial prefetch count
@@ -588,7 +590,10 @@ class Consumer:
             self.auto_declare = auto_declare
         if on_decode_error is not None:
             self.on_decode_error = on_decode_error
-        self.accept = prepare_accept_content(accept)
+        self._accept_configured = accept is not None
+        self._accept = snapshot_accept_content(accept)
+        self._inherited_accept = None
+        self.accept = self._resolve_accept(self.channel)
         self.prefetch_count = prefetch_count
 
         if self.channel:
@@ -602,12 +607,26 @@ class Consumer:
     def queues(self, queues):
         self._queues = {q.name: q for q in queues}
 
+    def _resolve_accept(self, channel):
+        # Explicit accept wins.  Otherwise inherit the connection's
+        # policy and remember it, so that reviving on a channel whose
+        # connection carries no policy cannot widen the consumer back to
+        # the process-wide registry defaults.
+        if self._accept_configured:
+            return self._accept
+        accept = get_connection_accept_content(channel)
+        if accept is not None:
+            self._inherited_accept = accept
+            return accept
+        return self._inherited_accept
+
     def revive(self, channel):
         """Revive consumer after connection loss."""
         previous_no_ack = self._active_queue_no_ack.copy()
         self._active_tags.clear()
         self._active_queue_no_ack.clear()
         channel = self.channel = maybe_channel(channel)
+        self.accept = self._resolve_accept(channel)
         # modify dict size while iterating over it is not allowed
         for qname, queue in list(self._queues.items()):
             # name may have changed after declare
@@ -876,6 +895,8 @@ class Consumer:
                 message = m2p(message)
             if accept is not None:
                 message.accept = accept
+            elif message.accept is None:
+                message.accept = get_connection_accept_content(channel)
             if message.errors:
                 return message._reraise_error(self.on_decode_error)
             decoded = None if on_m else message.decode()

@@ -41,6 +41,10 @@
 
     .. autofunction:: register
     .. autofunction:: unregister
+    .. autofunction:: prepare_accept_content
+    .. autofunction:: snapshot_accept_content
+    .. autofunction:: get_connection_accept_content
+    .. autofunction:: resolve_accept_content
 
     .. autodata:: registry
 

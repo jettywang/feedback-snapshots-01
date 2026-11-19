@@ -460,6 +460,18 @@ class test_Connection:
         assert c.hostname == 'foo'
         assert c.transport_cls, ('librabbitmq', 'pyamqp' in 'amqp')
 
+    def test_switch_keeps_accept_policy(self):
+        c = Connection('amqp://foo', accept=['json'])
+        c._closed = True
+        c.switch('redis://example.com//3')
+        assert c.accept == frozenset({'application/json'})
+
+    def test_maybe_switch_next_keeps_accept_policy(self):
+        c = Connection('amqp://foo;redis://example.com//3',
+                       accept=['json'])
+        c.maybe_switch_next()
+        assert c.accept == frozenset({'application/json'})
+
     def test_switch_without_uri_identifier(self):
         c = Connection('amqp://foo')
         assert c.hostname == 'foo'
@@ -1466,3 +1478,56 @@ class test_ChannelPool(ResourceCase):
         conn = Connection('memory://')
         chan = conn.default_channel
         assert P.prepare(chan) is chan
+
+
+class test_Connection_accept_policy:
+
+    def test_accept_defaults_to_none(self):
+        assert Connection('memory://').accept is None
+
+    def test_accept_is_immutable_snapshot(self):
+        allowed = ['json', 'pickle']
+        conn = Connection('memory://', accept=allowed)
+        allowed.clear()
+        allowed.append('yaml')
+        assert conn.accept == frozenset({
+            'application/json', 'application/x-python-serialize',
+        })
+
+    def test_accept_accepts_mime_types(self):
+        conn = Connection('memory://', accept={'application/json'})
+        assert conn.accept == frozenset({'application/json'})
+
+    def test_accept_survives_clone_and_copy(self):
+        conn = Connection('memory://', accept=['json'])
+        assert conn.clone().accept == frozenset({'application/json'})
+        assert copy(conn).accept == frozenset({'application/json'})
+
+    def test_accept_preserved_by_pooled_connection(self):
+        from kombu.connection import ConnectionPool
+        conn = Connection('memory://', accept=['json'])
+        pool = ConnectionPool(conn)
+        acquired = pool.acquire()
+        try:
+            assert acquired.accept == frozenset({'application/json'})
+        finally:
+            acquired.release()
+
+    def test_accept_survives_pickle_roundtrip(self):
+        conn = Connection('memory://', accept=['json'])
+        restored = pickle.loads(pickle.dumps(conn))
+        assert restored.accept == frozenset({'application/json'})
+
+    def test_accept_included_in_info(self):
+        conn = Connection('memory://', accept=['json'])
+        assert conn.info()['accept'] == frozenset({'application/json'})
+
+    def test_accept_reassignment_is_snapshotted(self):
+        conn = Connection('memory://')
+        allowed = ['json', 'pickle']
+        conn.accept = allowed
+        allowed.append('yaml')
+        assert conn.accept == frozenset({
+            'application/json', 'application/x-python-serialize',
+        })
+        assert conn.clone().accept == conn.accept

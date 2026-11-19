@@ -24,6 +24,10 @@ drain events from all channels on that connection.
 
         >>> Consumer(conn, accept=['json', 'pickle', 'msgpack', 'yaml'])
 
+    The rules can also be set on the connection, so components in the same
+    process can run with different serialization policies without touching
+    the process-wide registry.  See :ref:`serialization-per-connection`.
+
 You can create a consumer using a Connection. This consumer is consuming from a single queue with name `'queue'`:
 
 .. code-block:: python

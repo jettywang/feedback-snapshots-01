@@ -15,6 +15,11 @@
 
 What's Changed
 ~~~~~~~~~~~~~~
+- feat(serialization): bind deserialization allowlists to a
+  :class:`~kombu.Connection` (``accept=``), so consumers in one process can
+  run with different serialization policies without changing the
+  process-wide registry.  ``Consumer`` and ``Queue.get`` inherit the
+  connection policy and keep it across ``revive()``.
 - fix(redis): keep an unacked message when its restore hits a connection error (#2767).
 - fix(sqs): avoid KeyError when a receive completes after basic_cancel (#2772).
 - fix(redis): pause pending BRPOP polling while QoS is full (#2776).

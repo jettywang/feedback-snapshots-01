@@ -288,6 +288,44 @@ class test_Queue:
         payload = message.decode()
         assert payload['complex']
 
+    def test_basic_get__inherits_connection_accept(self) -> None:
+        conn = Connection('memory://', accept=['json', 'pickle'])
+        q = Queue('foo', exchange=self.exchange)
+        Producer(conn).publish(
+            {'complex': object()},
+            declare=[q], exchange=self.exchange, serializer='pickle',
+        )
+
+        message = q(conn).get(no_ack=True)
+        assert message is not None
+        assert message.accept == frozenset({
+            'application/json', 'application/x-python-serialize',
+        })
+        assert message.decode()['complex']
+
+    def test_basic_get__explicit_accept_beats_connection(self) -> None:
+        conn = Connection('memory://', accept=['pickle'])
+        q = Queue('foo', exchange=self.exchange)
+        Producer(conn).publish(
+            {'complex': object()},
+            declare=[q], exchange=self.exchange, serializer='pickle',
+        )
+
+        message = q(conn).get(accept=['json'], no_ack=True)
+        assert message is not None
+        assert message.accept == frozenset({'application/json'})
+        with pytest.raises(q.ContentDisallowed):
+            message.decode()
+
+    def test_basic_get__connection_without_policy_uses_registry(self) -> None:
+        conn = Connection('memory://')
+        q = Queue('foo', exchange=self.exchange)
+        Producer(conn).publish({'x': 1}, declare=[q], exchange=self.exchange)
+        message = q(conn).get(no_ack=True)
+        assert message is not None
+        assert message.accept is None
+        assert message.decode() == {'x': 1}
+
     def test_when_bound_but_no_exchange(self) -> None:
         q = Queue('a')
         q.exchange = None

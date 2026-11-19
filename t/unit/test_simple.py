@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import json
 from unittest.mock import Mock
 
 import pytest
 
 from kombu import Connection, Exchange, Queue
-from kombu.exceptions import ContentDisallowed
+from kombu.exceptions import ContentDisallowed, SerializerNotInstalled
+from kombu.serialization import registry
 
 
 class SimpleBase:
@@ -204,3 +206,54 @@ class test_SimpleBuffer(SimpleBase):
         assert not q.queue.durable
         assert q.queue.auto_delete
         assert q.queue.exclusive
+
+
+class test_SimpleQueue_connection_accept:
+
+    def setup_method(self):
+        self.codecs = ('scope-corp', 'scope-partner')
+        registry.register(
+            'scope-corp', lambda o: ('C' + json.dumps(o)).encode(),
+            lambda b: json.loads(_without_prefix(b)),
+            content_type='application/x-scope-corp',
+            content_encoding='binary',
+        )
+        registry.register(
+            'scope-partner', lambda o: ('P' + json.dumps(o)).encode(),
+            lambda b: json.loads(_without_prefix(b)),
+            content_type='application/x-scope-partner',
+            content_encoding='binary',
+        )
+
+    def teardown_method(self):
+        for name in self.codecs:
+            try:
+                registry.unregister(name)
+            except SerializerNotInstalled:
+                pass
+
+    def test_get_nowait_uses_connection_policy(self):
+        conn = Connection('memory://', accept=['json', 'scope-corp'])
+        q = conn.SimpleQueue('simple.scope')
+        q.put({'hello': 'corp'}, serializer='scope-corp')
+        assert q.get_nowait().payload == {'hello': 'corp'}
+
+    def test_get_nowait_rejects_other_format(self):
+        conn = Connection('memory://', accept=['json'])
+        q = conn.SimpleQueue('simple.scope-json')
+        q.put({'hello': 'corp'}, serializer='scope-corp')
+        with pytest.raises(ContentDisallowed):
+            q.get_nowait().payload
+
+    def test_explicit_accept_still_wins(self):
+        conn = Connection('memory://', accept=['scope-corp'])
+        q = conn.SimpleQueue('simple.scope-explicit',
+                             accept=['json', 'scope-partner'])
+        q.put({'hello': 'partner'}, serializer='scope-partner')
+        assert q.get_nowait().payload == {'hello': 'partner'}
+
+
+def _without_prefix(data):
+    if isinstance(data, str):
+        data = data.encode()
+    return data[1:].decode()

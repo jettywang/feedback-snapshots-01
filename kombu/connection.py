@@ -24,6 +24,7 @@ from kombu import exceptions
 
 from .log import get_logger
 from .resource import Resource
+from .serialization import snapshot_accept_content
 from .transport import get_transport_cls, supports_librabbitmq
 from .utils.collections import HashedSeq
 from .utils.functional import dictfilter, lazy, retry_over_time, shufflecycle
@@ -130,6 +131,13 @@ class Connection:
             Note that if heartbeats are enabled then the
             :meth:`heartbeat_check` method must be called regularly,
             around once per second.
+        accept (Set[str]): Content types this connection and the consumers
+            created on it are allowed to deserialize.  Serializer names
+            (``'json'``) and MIME types are both accepted.  Unlike
+            :func:`kombu.disable_insecure_serializers`, this only affects
+            this connection, so components in the same process can run
+            with different serialization rules.  ``None`` (the default)
+            leaves the process-wide registry rules in effect.
 
     Note:
     ----
@@ -202,6 +210,11 @@ class Connection:
     #: Heartbeat value, currently only supported by the py-amqp transport.
     heartbeat = None
 
+    #: Content types this connection's consumers may deserialize.
+    #: Set with the ``accept`` keyword argument; kept as an immutable
+    #: snapshot so it cannot be mutated after the connection is created.
+    _accept = None
+
     resolve_aliases = resolve_aliases
     failover_strategies = failover_strategies
 
@@ -212,7 +225,8 @@ class Connection:
                  ssl=False, transport=None, connect_timeout=5,
                  transport_options=None, login_method=None, uri_prefix=None,
                  heartbeat=0, failover_strategy='round-robin',
-                 alternates=None, credential_provider=None, **kwargs):
+                 alternates=None, credential_provider=None, accept=None,
+                 **kwargs):
         alt = [] if alternates is None else alternates
         # have to spell the args out, just to get nice docstrings :(
         params = self._initial_params = {
@@ -285,7 +299,17 @@ class Connection:
         if uri_prefix:
             self.uri_prefix = uri_prefix
 
+        self.accept = snapshot_accept_content(accept)
         self.declared_entities = set()
+
+    @property
+    def accept(self):
+        """Content types this connection's consumers may deserialize."""
+        return self._accept
+
+    @accept.setter
+    def accept(self, content_types):
+        self._accept = snapshot_accept_content(content_types)
 
     def switch(self, conn_str):
         """Switch connection parameters to use a new URL or hostname.
@@ -784,6 +808,7 @@ class Connection:
             ('failover_strategy', self._failover_strategy),
             ('alternates', self.alt),
             ('credential_provider', self.credential_provider),
+            ('accept', self.accept),
         )
         return info
 
@@ -794,7 +819,7 @@ class Connection:
     def __eqhash__(self):
         return HashedSeq(self.transport_cls, self.hostname, self.userid,
                          self.password, self.virtual_host, self.port,
-                         repr(self.transport_options))
+                         repr(self.transport_options), self.accept)
 
     def as_uri(self, include_password=False, mask='**',
                getfields=itemgetter('port', 'userid', 'password',

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from base64 import b64decode
-from unittest.mock import call, patch
+from unittest.mock import Mock, call, patch
 
 import pytest
 
@@ -11,11 +11,13 @@ import t.skip
 from kombu.exceptions import ContentDisallowed, DecodeError, EncodeError
 from kombu.serialization import (SerializerNotInstalled,
                                  disable_insecure_serializers, dumps,
-                                 enable_insecure_serializers, loads, pickle,
+                                 enable_insecure_serializers,
+                                 get_connection_accept_content, loads, pickle,
                                  pickle_protocol, prepare_accept_content,
                                  raw_encode, register, register_msgpack,
                                  register_pickle, register_yaml, registry,
-                                 unregister)
+                                 resolve_accept_content,
+                                 snapshot_accept_content, unregister)
 from kombu.utils.encoding import str_to_bytes
 
 # For content_encoding tests
@@ -332,3 +334,135 @@ class test_Serialization:
     def test_prepare_accept_content_bad_serializer(self):
         with pytest.raises(SerializerNotInstalled):
             prepare_accept_content(['bad_serializer'])
+
+
+class test_accept_content_scope:
+
+    @pytest.fixture(autouse=True)
+    def register_codecs(self):
+        registry.register(
+            'scope-a', lambda o: b'A' + str(o).encode(),
+            lambda b: ('a', b[1:].decode()),
+            content_type='application/x-scope-a',
+            content_encoding='binary',
+        )
+        registry.register(
+            'scope-b', lambda o: b'B' + str(o).encode(),
+            lambda b: ('b', b[1:].decode()),
+            content_type='application/x-scope-b',
+            content_encoding='binary',
+        )
+        yield
+        for name in ('scope-a', 'scope-b'):
+            try:
+                registry.unregister(name)
+            except SerializerNotInstalled:
+                pass
+
+    def test_snapshot_is_immutable_and_validated(self):
+        source = ['json', 'scope-a']
+        accept = snapshot_accept_content(source)
+        source.append('scope-b')
+        assert accept == frozenset({
+            'application/json', 'application/x-scope-a',
+        })
+        assert isinstance(accept, frozenset)
+
+    def test_snapshot_preserves_none(self):
+        assert snapshot_accept_content(None) is None
+
+    def test_snapshot_resolves_aliases_in_frozenset(self):
+        assert snapshot_accept_content(frozenset({'json'})) == frozenset({
+            'application/json',
+        })
+        with pytest.raises(SerializerNotInstalled):
+            snapshot_accept_content(frozenset({'doomsday'}))
+
+    def test_snapshot_rejects_unknown_serializer(self):
+        with pytest.raises(SerializerNotInstalled):
+            snapshot_accept_content(['doomsday'])
+
+    def test_connection_accept_is_snapshotted(self):
+        from kombu import Connection
+        allowed = ['json', 'scope-a']
+        conn = Connection('memory://', accept=allowed)
+        allowed.append('scope-b')
+        assert conn.accept == frozenset({
+            'application/json', 'application/x-scope-a',
+        })
+        assert conn.clone().accept == conn.accept
+
+    def test_connection_accept_default_is_none(self):
+        from kombu import Connection
+        assert Connection('memory://').accept is None
+
+    def test_connection_accept_validated(self):
+        from kombu import Connection
+        with pytest.raises(SerializerNotInstalled):
+            Connection('memory://', accept=['doomsday'])
+
+    def test_connection_accept_participates_in_pool_key(self):
+        from kombu import Connection
+        from kombu.utils.collections import eqhash
+        base = Connection('memory://localhost:671')
+        alpha = Connection('memory://localhost:671', accept=['json'])
+        beta = Connection(
+            'memory://localhost:671', accept=['json', 'scope-a'])
+        assert eqhash(base) != eqhash(alpha)
+        assert eqhash(alpha) != eqhash(beta)
+
+
+class test_connection_policy_resolution:
+
+    @pytest.fixture(autouse=True)
+    def register_codecs(self):
+        registry.register(
+            'scope-a', lambda o: b'A' + str(o).encode(),
+            lambda b: ('a', b[1:].decode()),
+            content_type='application/x-scope-a',
+            content_encoding='binary',
+        )
+        registry.register(
+            'scope-b', lambda o: b'B' + str(o).encode(),
+            lambda b: ('b', b[1:].decode()),
+            content_type='application/x-scope-b',
+            content_encoding='binary',
+        )
+        yield
+        for name in ('scope-a', 'scope-b'):
+            try:
+                registry.unregister(name)
+            except SerializerNotInstalled:
+                pass
+
+    def test_explicit_accept_beats_connection(self):
+        from kombu import Connection
+        conn = Connection('memory://', accept=['json'])
+        assert resolve_accept_content(['scope-a'], conn) == frozenset({
+            'application/x-scope-a',
+        })
+
+    def test_connection_used_when_explicit_missing(self):
+        from kombu import Connection
+        conn = Connection('memory://', accept=['json'])
+        assert resolve_accept_content(None, conn) == frozenset({
+            'application/json',
+        })
+
+    def test_global_default_when_no_policy(self):
+        from kombu import Connection
+        conn = Connection('memory://')
+        assert resolve_accept_content(None, conn) is None
+
+    def test_resolves_through_channel(self):
+        from kombu import Connection
+        conn = Connection('memory://', accept=['json'])
+        conn.connect()
+        channel = conn.channel()
+        assert get_connection_accept_content(channel) == frozenset({
+            'application/json',
+        })
+
+    def test_none_and_unrelated_objects_resolve_to_none(self):
+        assert get_connection_accept_content(None) is None
+        assert get_connection_accept_content(Mock(name='unrelated')) is None

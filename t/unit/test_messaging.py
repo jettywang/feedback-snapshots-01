@@ -11,7 +11,9 @@ import pytest
 from amqp.exceptions import RecoverableConnectionError
 
 from kombu import Connection, Consumer, Exchange, Producer, Queue
-from kombu.exceptions import MessageStateError, OperationalError
+from kombu.exceptions import (ContentDisallowed, MessageStateError,
+                              OperationalError,
+                              SerializerNotInstalled)
 from kombu.transport import memory, virtual
 from kombu.utils import json
 from kombu.utils.functional import ChannelPromise
@@ -1010,6 +1012,60 @@ class test_Consumer:
         body, message = callback.call_args[0]
         assert body['complex']
 
+    def test_accept_inherited_from_connection(self):
+        conn = Connection('memory://', accept=['json', 'pickle'])
+        q = Queue('foo', exchange=self.exchange)
+        conn.Producer().publish(
+            {'complex': object()},
+            declare=[q], exchange=self.exchange, serializer='pickle',
+        )
+
+        callback = Mock(name='callback')
+        with conn.Consumer(queues=[q], callbacks=[callback]):
+            conn.drain_events(timeout=1)
+        callback.assert_called()
+
+    def test_explicit_accept_overrides_connection(self):
+        conn = Connection('memory://', accept=['pickle'])
+        q = Queue('foo', exchange=self.exchange)
+        conn.Producer().publish(
+            {'complex': object()},
+            declare=[q], exchange=self.exchange, serializer='pickle',
+        )
+
+        callback = Mock(name='callback')
+        with conn.Consumer(queues=[q], accept=['json'],
+                           callbacks=[callback]) as consumer:
+            with pytest.raises(consumer.ContentDisallowed):
+                conn.drain_events(timeout=1)
+        callback.assert_not_called()
+
+    def test_connection_accept_kept_after_revive(self):
+        conn = Connection('memory://', accept=['json', 'pickle'])
+        consumer = conn.Consumer(queues=[], callbacks=[Mock(name='cb')])
+        assert consumer.accept == frozenset({
+            'application/json', 'application/x-python-serialize',
+        })
+        consumer.revive(conn.channel())
+        assert consumer.accept == frozenset({
+            'application/json', 'application/x-python-serialize',
+        })
+
+    def test_revive_does_not_fall_back_to_global_default(self):
+        conn = Connection('memory://', accept=['json'])
+        consumer = conn.Consumer(queues=[], callbacks=[Mock(name='cb')])
+        # A channel whose connection carries no policy must not widen
+        # the consumer back to the process-wide defaults.
+        other = Connection('memory://')
+        other.connect()
+        consumer.revive(other.channel())
+        assert consumer.accept == frozenset({'application/json'})
+
+    def test_consumer_without_policy_keeps_global_default(self):
+        conn = Connection('memory://')
+        consumer = conn.Consumer(queues=[], callbacks=[Mock(name='cb')])
+        assert consumer.accept is None
+
     def test_set_no_channel(self):
         c = Consumer(None)
         assert c.channel is None
@@ -1435,3 +1491,195 @@ class test_Consumer:
         p = self.connection.Consumer()
         p.channel = object()
         assert p.connection is None
+
+
+def _harmless_codecs(registry):
+    """Register two inert serializers used only by the scope tests."""
+    registry.register(
+        'corp', lambda o: ('C' + json.dumps(o)).encode(),
+        lambda b: json.loads(_strip_prefix(b, 'C')),
+        content_type='application/x-corp', content_encoding='binary',
+    )
+    registry.register(
+        'partner', lambda o: ('P' + json.dumps(o)).encode(),
+        lambda b: json.loads(_strip_prefix(b, 'P')),
+        content_type='application/x-partner', content_encoding='binary',
+    )
+
+
+def _strip_prefix(data, prefix):
+    if isinstance(data, str):
+        data = data.encode()
+    return data[1:].decode()
+
+
+class test_per_connection_serialization_policy:
+
+    def setup_method(self):
+        from kombu.serialization import registry
+        _harmless_codecs(registry)
+        self.corp_conn = Connection('memory://', accept=['json', 'corp'])
+        self.json_conn = Connection('memory://', accept=['json'])
+        self.exchange = Exchange('scope', 'direct')
+
+    def teardown_method(self):
+        from kombu.serialization import registry
+        for name in ('corp', 'partner'):
+            try:
+                registry.unregister(name)
+            except SerializerNotInstalled:
+                pass
+        for conn in (self.corp_conn, self.json_conn):
+            conn.close()
+
+    def _queue(self, name, conn):
+        q = Queue(name, self.exchange, name)
+        return q(conn)
+
+    def _publish(self, conn, queue, serializer, body):
+        conn.Producer().publish(
+            body, declare=[queue], exchange=self.exchange,
+            routing_key=queue.name, serializer=serializer,
+        )
+
+    def _deliver(self, conn, queue, callback):
+        consumer = conn.Consumer(queues=[queue], callbacks=[callback])
+        consumer.consume()
+        conn.drain_events(timeout=1)
+        return consumer
+
+    def test_two_consumers_keep_independent_format_scopes(self):
+        corp_q = self._queue('corp.q', self.corp_conn)
+        json_q = self._queue('json.q', self.json_conn)
+        self._publish(self.corp_conn, corp_q, 'corp', {'n': 1})
+        self._publish(self.json_conn, json_q, 'json', {'n': 2})
+
+        corp_seen, json_seen = [], []
+        corp_consumer = self._deliver(
+            self.corp_conn, corp_q,
+            lambda body, message: corp_seen.append(body),
+        )
+        json_consumer = self._deliver(
+            self.json_conn, json_q,
+            lambda body, message: json_seen.append(body),
+        )
+
+        assert corp_seen == [{'n': 1}]
+        assert json_seen == [{'n': 2}]
+        assert corp_consumer.accept == frozenset({
+            'application/json', 'application/x-corp',
+        })
+        assert json_consumer.accept == frozenset({'application/json'})
+
+    def test_json_consumer_rejects_other_format(self):
+        json_q = self._queue('json.reject', self.json_conn)
+        self._publish(self.json_conn, json_q, 'corp', {'n': 3})
+        json_seen = []
+        with pytest.raises(ContentDisallowed):
+            self._deliver(
+                self.json_conn, json_q,
+                lambda body, message: json_seen.append(body),
+            )
+        assert json_seen == []
+
+    def test_closing_one_consumer_preserves_the_other_scope(self):
+        corp_q = self._queue('corp.close', self.corp_conn)
+        json_q = self._queue('json.close', self.json_conn)
+        self._publish(self.corp_conn, corp_q, 'corp', {'n': 4})
+        self._publish(self.json_conn, json_q, 'json', {'n': 5})
+
+        corp_seen, json_seen = [], []
+        corp_consumer = self._deliver(
+            self.corp_conn, corp_q,
+            lambda body, message: corp_seen.append(body),
+        )
+        json_consumer = self._deliver(
+            self.json_conn, json_q,
+            lambda body, message: json_seen.append(body),
+        )
+        corp_consumer.cancel()
+
+        assert corp_seen == [{'n': 4}]
+        assert json_seen == [{'n': 5}]
+        assert json_consumer.accept == frozenset({'application/json'})
+        assert self.corp_conn.accept == frozenset({
+            'application/json', 'application/x-corp',
+        })
+
+    def test_revived_consumer_keeps_its_scope(self):
+        corp_q = self._queue('corp.revive', self.corp_conn)
+        self._publish(self.corp_conn, corp_q, 'corp', {'n': 6})
+        corp_seen = []
+        consumer = self._deliver(
+            self.corp_conn, corp_q,
+            lambda body, message: corp_seen.append(body),
+        )
+
+        consumer.cancel()
+        consumer.revive(self.corp_conn.channel())
+        assert consumer.accept == frozenset({
+            'application/json', 'application/x-corp',
+        })
+
+        self._publish(self.corp_conn, corp_q, 'corp', {'n': 7})
+        consumer.consume()
+        self.corp_conn.drain_events(timeout=1)
+        assert corp_seen == [{'n': 6}, {'n': 7}]
+
+    def test_revive_does_not_reset_to_global_default(self):
+        from kombu.serialization import registry
+        json_consumer = self.json_conn.Consumer(
+            queues=[], callbacks=[Mock(name='cb')],
+        )
+        # Widen the process-wide rules, then revive on an unrelated
+        # connection without a policy.  The consumer must keep its own
+        # scope instead of adopting whatever the globals allow now.
+        previously_disabled = set(registry._disabled_content_types)
+        try:
+            registry._disabled_content_types.clear()
+            unrelated = Connection('memory://')
+            unrelated.connect()
+            json_consumer.revive(unrelated.channel())
+            assert json_consumer.accept == frozenset({'application/json'})
+        finally:
+            registry._disabled_content_types.clear()
+            registry._disabled_content_types.update(previously_disabled)
+
+    def test_readable_format_matrix_per_connection(self):
+        cases = (
+            (self.corp_conn, 'corp', {'json': True, 'corp': True,
+                                      'partner': False}),
+            (self.json_conn, 'json', {'json': True, 'corp': False,
+                                      'partner': False}),
+        )
+        for conn, label, expected in cases:
+            for serializer, readable in expected.items():
+                q = Queue(
+                    'matrix.{}.{}'.format(label, serializer),
+                    self.exchange,
+                    'matrix.{}.{}'.format(label, serializer),
+                )
+                bound = q(conn)
+                bound.declare()
+                self._publish(conn, bound, serializer, {'fmt': serializer})
+                message = bound.get(no_ack=True)
+                assert message is not None
+                if readable:
+                    assert message.decode() == {'fmt': serializer}
+                else:
+                    with pytest.raises(ContentDisallowed):
+                        message.decode()
+
+    def test_connection_policy_does_not_mutate_global_registry(self):
+        from kombu.serialization import registry
+        disabled = set(registry._disabled_content_types)
+        enabled_decoders = set(registry._decoders)
+        self.corp_conn.Consumer(queues=[], callbacks=[Mock(name='cb')])
+        Connection('memory://', accept=['json'])
+        assert registry._disabled_content_types == disabled
+        assert set(registry._decoders) == enabled_decoders
+        # the second connection's narrow policy did not leak either way
+        assert self.corp_conn.accept == frozenset({
+            'application/json', 'application/x-corp',
+        })
+        assert self.json_conn.accept == frozenset({'application/json'})

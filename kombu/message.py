@@ -6,7 +6,7 @@ import sys
 
 from .compression import decompress
 from .exceptions import MessageStateError, reraise
-from .serialization import loads
+from .serialization import get_connection_accept_content, loads
 from .utils.functional import dictfilter
 
 __all__ = ('Message',)
@@ -45,6 +45,11 @@ class Message:
         properties (Dict): Message properties.
 
         headers (Dict): Message headers.
+
+        accept (Set[str]): Content types this message may be deserialized
+            as.  When :const:`None`, the policy configured on the
+            receiving connection is used, falling back to the process-wide
+            registry rules.
     """
 
     MessageStateError = MessageStateError
@@ -202,8 +207,11 @@ class Message:
         return self._decoded_cache
 
     def _decode(self):
+        accept = self.accept
+        if accept is None:
+            accept = get_connection_accept_content(self.channel)
         return loads(self.body, self.content_type,
-                     self.content_encoding, accept=self.accept)
+                     self.content_encoding, accept=accept)
 
     @property
     def acknowledged(self):

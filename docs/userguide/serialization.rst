@@ -26,6 +26,42 @@ them in your consumer by using the ``accept`` argument:
 
 The accept argument can also include MIME-types.
 
+.. _serialization-per-connection:
+
+Per-connection serialization policy
+-----------------------------------
+
+``Consumer(..., accept=...)`` and ``Queue.get(..., accept=...)`` restrict a
+single consumer or pull.  When several components in one process need
+different rules, bind the rules to each component's :class:`~kombu.Connection`
+instead of calling the process-wide :func:`kombu.enable_insecure_serializers`
+or :func:`kombu.disable_insecure_serializers`:
+
+.. code-block:: python
+
+    trusted = Connection('amqp://', accept=['json', 'corp-format'])
+    legacy = Connection('amqp://', accept=['json'])
+
+    trusted_consumer = trusted.Consumer([queue_a], callbacks=[on_a])
+    legacy_consumer = legacy.Consumer([queue_b], callbacks=[on_b])
+
+Resolution order for a received message is:
+
+1. an explicit ``accept`` on the consumer or ``Queue.get``;
+2. the ``accept`` configured on the connection the consumer/channel uses
+   (also honored by :meth:`~kombu.Message.decode`);
+3. the process-wide registry rules maintained by
+   :func:`kombu.enable_insecure_serializers` /
+   :func:`kombu.disable_insecure_serializers`.
+
+An explicit ``accept`` is snapshotted when configured, and a consumer that
+inherited its rules from a connection keeps them across ``revive()``.  Closing
+one consumer therefore cannot change another consumer's accepted formats, and
+a revived consumer does not fall back to the global defaults.
+
+Connection-level ``accept`` is part of the connection's pool identity, so
+connections with different serialization policies never share a pool entry.
+
 .. _`JSON`: http://www.json.org/
 .. _`YAML`: http://yaml.org/
 .. _`msgpack`: https://msgpack.org/

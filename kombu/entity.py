@@ -6,7 +6,7 @@ import numbers
 
 from .abstract import MaybeChannelBound, Object
 from .exceptions import ContentDisallowed
-from .serialization import prepare_accept_content
+from .serialization import get_connection_accept_content, resolve_accept_content
 
 TRANSIENT_DELIVERY_MODE = 1
 PERSISTENT_DELIVERY_MODE = 2
@@ -705,6 +705,8 @@ class Queue(MaybeChannelBound):
             no_ack (bool): If enabled the broker will
                 automatically ack messages.
             accept (Set[str]): Custom list of accepted content types.
+                When omitted, the policy configured on this queue's
+                connection applies.
         """
         no_ack = self.no_ack if no_ack is None else no_ack
         message = self.channel.basic_get(queue=self.name, no_ack=no_ack)
@@ -714,7 +716,10 @@ class Queue(MaybeChannelBound):
                 message = m2p(message)
             if message.errors:
                 message._reraise_error()
-            message.accept = prepare_accept_content(accept)
+            if accept is not None:
+                message.accept = resolve_accept_content(accept)
+            elif message.accept is None:
+                message.accept = get_connection_accept_content(self.channel)
         return message
 
     def purge(self, nowait=False):

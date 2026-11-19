@@ -9,11 +9,15 @@ import sys
 from collections import namedtuple
 from contextlib import contextmanager
 from io import BytesIO
+from typing import TYPE_CHECKING
 
 from .exceptions import (ContentDisallowed, DecodeError, EncodeError,
                          SerializerNotInstalled, reraise)
 from .utils.compat import entrypoints
 from .utils.encoding import bytes_to_str, str_to_bytes
+
+if TYPE_CHECKING:
+    from .connection import Connection
 
 __all__ = ('pickle', 'loads', 'dumps', 'register', 'unregister')
 SKIP_DECODE = frozenset(['binary', 'ascii-8bit'])
@@ -478,3 +482,62 @@ def prepare_accept_content(content_types, name_to_type=None):
             raise SerializerNotInstalled(
                 f'No encoder/decoder installed for {e.args[0]}')
     return content_types
+
+
+def snapshot_accept_content(content_types, name_to_type=None):
+    """Return an immutable snapshot of an acceptance configuration.
+
+    Unlike :func:`prepare_accept_content`, the result is a
+    :class:`frozenset`, so a consumer or connection can keep using its
+    own acceptance rules after the caller's mutable list has changed.
+    :const:`None` is preserved to mean "no caller-specific allowlist",
+    in which case the process-wide disabled content types still apply.
+    """
+    if content_types is None:
+        return None
+    # Always resolve through the registry: aliases must be expanded and
+    # unknown names rejected even when the input is already a frozenset.
+    return frozenset(prepare_accept_content(content_types, name_to_type))
+
+
+def connection_from(obj) -> Connection | None:
+    """Return the :class:`~kombu.Connection` behind ``obj``, if any.
+
+    Accepts a connection, a channel, or an object exposing a
+    ``connection.client`` link to a kombu connection.  The import is
+    deferred because :mod:`kombu.connection` imports this module.
+    """
+    if obj is None:
+        return None
+    from .connection import is_connection
+    if is_connection(obj):
+        return obj
+    client = getattr(getattr(obj, 'connection', None), 'client', None)
+    return client if is_connection(client) else None
+
+
+def get_connection_accept_content(obj):
+    """Return acceptance configured on the Connection behind ``obj``.
+
+    Returns :const:`None` when ``obj`` is not tied to a kombu
+    connection, or when that connection has no acceptance configured.
+    """
+    connection = connection_from(obj)
+    if connection is None:
+        return None
+    accept = connection.accept
+    if accept is not None and not isinstance(accept, frozenset):
+        accept = snapshot_accept_content(accept)
+    return accept
+
+
+def resolve_accept_content(accept, obj=None):
+    """Resolve an explicit acceptance or inherit it from ``obj``.
+
+    An explicit ``accept`` always wins.  When it is :const:`None` the
+    connection bound to ``obj`` supplies the rules, and only if the
+    connection has none do the process-wide registry defaults apply.
+    """
+    if accept is not None:
+        return snapshot_accept_content(accept)
+    return get_connection_accept_content(obj)
