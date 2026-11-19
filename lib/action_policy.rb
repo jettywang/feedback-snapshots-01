@@ -36,6 +36,16 @@ module ActionPolicy
 
     attr_accessor :enforce_predicate_rules_naming
 
+    # Makes sensitive rule resolution fail fast when a sensitive action falls
+    # back to the default rule (or an alias chain is broken/circular).
+    #
+    # Disabled by default; when disabled, the existing resolution entry points
+    # keep working as before. Can also be enabled per policy class via
+    # `ActionPolicy::Policy::Contract` (e.g., `enforce_policy_contracts!`).
+    attr_accessor :enforce_policy_contracts
+    alias_method :policy_contract_check, :enforce_policy_contracts
+    alias_method :policy_contract_check=, :enforce_policy_contracts=
+
     # Find a policy class for a target
     def lookup(target, allow_nil: false, default: nil, **options)
       LookupChain.call(target, **options) ||

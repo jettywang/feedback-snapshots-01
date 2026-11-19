@@ -9,6 +9,7 @@ module ActionPolicy
     require "action_policy/policy/reasons"
     require "action_policy/policy/pre_check"
     require "action_policy/policy/aliases"
+    require "action_policy/policy/contract"
     require "action_policy/policy/scoping"
     require "action_policy/policy/cache"
     require "action_policy/policy/cached_apply"

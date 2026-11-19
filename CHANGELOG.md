@@ -2,6 +2,8 @@
 
 ## master
 
+- Add opt-in policy contracts (`ActionPolicy::Policy::Contract`) to audit rule alias chains, detect cycles, and enforce sensitive rules resolving to actual rules instead of falling back to the default rule.
+
 ## 0.7.8 (2026-11-03)
 
 - Improve policy caching (less key calculations, fixed collisions). ([@palkan][])

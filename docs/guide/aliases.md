@@ -123,3 +123,55 @@ Authorizing against the SubPolicy:
 * `edit?` will resolve to `edit?`
 * `index?` will resolve to `manage?`
 * `something?` will raise `ActionPolicy::UnknownRule`
+
+## Policy contracts
+
+While renaming actions, it's useful to know upfront where each action ends up: is it a real rule, an alias chain, or an unintended fallback to the default rule? Action Policy provides an opt-in contract check for that:
+
+```ruby
+class PostPolicy < ApplicationPolicy
+  include ActionPolicy::Policy::Contract
+
+  alias_rule :publish?, :unpublish?, to: :update?
+
+  # Sensitive actions must resolve to an actual rule; landing on the default
+  # rule is treated as a contract violation.
+  sensitive_rule :destroy?, :publish?
+end
+
+report = PostPolicy.contract
+report.valid?      #=> false
+report.aliases     #=> {publish?: :update?, unpublish?: :update?}
+report.resolve(:publish?)  #=> :update?
+report.resolve(:destroy?)  #=> :manage? (default fallback)
+
+report.violations.each { |violation| puts violation.message }
+# PostPolicy#destroy?: sensitive rule falls back to the default rule :manage? ...
+```
+
+Every entry in the report has the policy class, the original action, and the full resolution `chain`; violations expose the same data via `policy`, `policy_class`, `rule`, and `chain`. `PostPolicy.validate_contract!` raises `ActionPolicy::PolicyContractError` with the report included.
+
+The check reports five kinds of problems:
+
+- `:cycle` — aliases reference each other and never reach a rule;
+- `:chain_too_long` — an alias chain exceeds the safety limit (64 entries);
+- `:missing_alias_target` — an alias points to a rule that doesn't exist;
+- `:missing_sensitive_target` — a sensitive action doesn't resolve at all;
+- `:sensitive_default_fallback` — a sensitive action falls through to the default rule.
+
+You can also inspect a single action without building a full report:
+
+```ruby
+PostPolicy.resolve_rule_chain(:publish?) #=> [:publish?, :update?]
+PostPolicy.resolve_rule_contract(:destroy?) #=> #<... status=:default target=:manage?>
+```
+
+Contract checks are **opt-in**. Including the module does not change `resolve_rule`; if you want runtime enforcement, enable it globally or per policy:
+
+```ruby
+ActionPolicy.enforce_policy_contracts = true
+# or
+PostPolicy.enforce_contracts!
+```
+
+With enforcement enabled, resolving a sensitive action that falls back to the default rule raises `ActionPolicy::PolicyContractError`. Non-sensitive actions keep the regular fallback behavior, and all other policies are unaffected.
