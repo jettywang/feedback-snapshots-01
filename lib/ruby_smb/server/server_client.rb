@@ -166,6 +166,8 @@ module RubySMB
             break
           end
 
+          break if raw_request.nil?
+
           if @dialect.nil?
             handle_negotiate(raw_request)
             logger.info("Negotiated dialect: #{RubySMB::Dialect[@dialect].full_name}") unless @dialect.nil?
@@ -204,7 +206,13 @@ module RubySMB
 
         packet = @dispatcher.recv_packet
         if packet && packet.length >= 4 && packet[0...4].unpack1('L>') == RubySMB::SMB2::SMB2_PROTOCOL_ID
-          @in_packet_queue += split_smb2_chain(packet)
+          begin
+            @in_packet_queue += split_smb2_chain(packet)
+          rescue RubySMB::Error::InvalidPacket => e
+            logger.error("Discarding an invalid SMB2 compound chain (#{e.message})")
+            disconnect!
+            return nil
+          end
           packet = @in_packet_queue.shift
         end
 
@@ -458,7 +466,15 @@ module RubySMB
           return response
         end
 
-        chain = split_smb2_chain(smb3_decrypt(header, session))
+        chain = begin
+          split_smb2_chain(smb3_decrypt(header, session))
+        rescue RubySMB::Error::InvalidPacket => e
+          logger.error("Discarding an invalid SMB2 compound chain (#{e.message})")
+          response = SMB2::Packet::ErrorPacket.new
+          response.smb2_header.nt_status = WindowsError::NTStatus::STATUS_INVALID_PARAMETER
+          response.smb2_header.session_id = header.session_id
+          return response
+        end
         chain[0...-1].each do |pt_raw_request|
           pt_response = _handle_smb2(pt_raw_request)
           return if pt_response.nil?
@@ -472,19 +488,73 @@ module RubySMB
         smb3_encrypt(pt_response, session)
       end
 
+      # Size, in bytes, of the fixed SMB2 SYNC packet header (see MS-SMB2 2.2.1.2).
+      SMB2_HEADER_SIZE = 64
+      # The NextCommand field is an offset from the start of the current message and
+      # is always aligned to an 8-byte boundary.
+      SMB2_COMMAND_ALIGNMENT = 8
+
+      # Split a raw SMB2 buffer into its individual command messages using the
+      # NextCommand chain offsets. Every offset is interpreted relative to the start
+      # of the *current* message (not the whole buffer), must be 8-byte aligned, must
+      # leave room for a complete header, and every chained message must carry the SMB2
+      # protocol identifier. A malformed chain raises {RubySMB::Error::InvalidPacket}
+      # rather than attempting to recover by scanning for the next protocol signature.
+      #
+      # @param [String] buffer the raw SMB2 buffer containing one or more commands
+      # @return [Array<String>] the ordered, byte-exact command messages
+      # @raise [RubySMB::Error::InvalidPacket] if the chain structure is invalid
       def split_smb2_chain(buffer)
         chain = []
-        header = RubySMB::SMB2::SMB2Header.read(buffer)
-        unless header.next_command == 0
-          until header.next_command == 0
-            chain << buffer[0...header.next_command]
-            buffer = buffer[header.next_command..-1]
-            header = RubySMB::SMB2::SMB2Header.read(buffer)
-          end
-        end
+        remaining = buffer
 
-        chain << buffer
-        chain
+        loop do
+          if remaining.length < SMB2_HEADER_SIZE
+            raise RubySMB::Error::InvalidPacket.new(
+              "SMB2 command of #{remaining.length} byte(s) is smaller than the #{SMB2_HEADER_SIZE}-byte header"
+            )
+          end
+
+          unless remaining[0...4].unpack1('L>') == RubySMB::SMB2::SMB2_PROTOCOL_ID
+            raise RubySMB::Error::InvalidPacket.new('SMB2 command does not start with the SMB2 protocol identifier')
+          end
+
+          header = RubySMB::SMB2::SMB2Header.read(remaining)
+          next_command = header.next_command
+
+          if next_command == 0
+            # The final message owns every byte that remains, including any data area.
+            chain << remaining
+            return chain
+          end
+
+          if next_command < SMB2_HEADER_SIZE
+            raise RubySMB::Error::InvalidPacket.new(
+              "SMB2 NextCommand offset #{next_command} overlaps the current header"
+            )
+          end
+
+          unless (next_command % SMB2_COMMAND_ALIGNMENT).zero?
+            raise RubySMB::Error::InvalidPacket.new(
+              "SMB2 NextCommand offset #{next_command} is not #{SMB2_COMMAND_ALIGNMENT}-byte aligned"
+            )
+          end
+
+          if next_command >= remaining.length
+            raise RubySMB::Error::InvalidPacket.new(
+              "SMB2 NextCommand offset #{next_command} points beyond the #{remaining.length}-byte message"
+            )
+          end
+
+          if remaining.length - next_command < SMB2_HEADER_SIZE
+            raise RubySMB::Error::InvalidPacket.new(
+              "SMB2 NextCommand offset #{next_command} leaves no room for a complete chained header"
+            )
+          end
+
+          chain << remaining[0...next_command]
+          remaining = remaining[next_command..-1]
+        end
       end
     end
   end
