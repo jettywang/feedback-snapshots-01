@@ -699,6 +699,18 @@ class FAT(object):
 # [EXFAT 1.00] clearly states that UTC+00:15 is 1 and UTC-00:15 is -1.
 FileEntry = namedtuple('FileEntry', [ 'is_deleted', 'is_directory', 'name', 'atime', 'atz', 'mtime', 'mtz', 'ctime', 'ctz', 'size', 'valid_data_length', 'attributes', 'first_cluster', 'is_encrypted', 'no_fat_chain' ])
 
+# Status codes for data segments returned by the forensic view (see the read_file_data_forensic() method of the FileSystemParser class).
+SEGMENT_VALID = 'valid' # Initialized file data (within the valid data length) from a cluster marked as allocated.
+SEGMENT_UNINITIALIZED = 'uninitialized' # Within the data length, but beyond the valid data length: never initialized, must not be exposed as file content.
+SEGMENT_SLACK = 'slack' # Beyond the data length, within the allocated cluster(s): the allocation tail.
+SEGMENT_BAD_CLUSTER = 'bad_cluster' # A cluster marked as bad in the FAT, its data is unavailable (not zeroes).
+SEGMENT_UNALLOCATED_CLUSTER = 'unallocated_cluster' # A cluster not marked as allocated in the allocation bitmap, its data cannot be trusted (it can be reallocated at any time).
+SEGMENT_UNKNOWN_CLUSTER = 'unknown_cluster' # A cluster not covered by the (possibly corrupted) allocation bitmap, its allocation state is unknown.
+SEGMENT_MISSING_CLUSTER = 'missing_cluster' # A cluster that cannot be read (a truncated chain, an unreadable or missing cluster), its data is unavailable (not zeroes).
+
+# A data segment of a file (the forensic view). The 'data' member is None if the data is unavailable (its length is still given by the 'length' member).
+FileDataSegment = namedtuple('FileDataSegment', [ 'offset', 'length', 'status', 'data' ])
+
 OrphanEntry = namedtuple('OrphanEntry', [ 'name_partial' ])
 
 VolumeLabelEntry = namedtuple('VolumeLabelEntry', [ 'volume_label' ])
@@ -1028,7 +1040,9 @@ class Bitmap(object):
 		self.last_valid_cluster = last_valid_cluster
 
 	def is_allocated(self, cluster):
-		"""Check if a given cluster is marked as allocated."""
+		"""Check if a given cluster is marked as allocated.
+		Return None if the allocation state cannot be determined (an invalid cluster number or a truncated/corrupted bitmap).
+		"""
 
 		if cluster < 2: # The first two clusters are reserved.
 			return
@@ -1040,6 +1054,9 @@ class Bitmap(object):
 
 		byte_pos = cluster // 8
 		bit_pos = cluster % 8
+
+		if byte_pos >= len(self.bitmap_buf): # This bitmap is truncated (corrupted), the allocation state is unknown.
+			return
 
 		is_allocated = (self.bitmap_buf[byte_pos] >> bit_pos) & 1 > 0
 		return is_allocated
@@ -1135,34 +1152,59 @@ class FileSystemParser(object):
 		if self.bm is None:
 			raise FileSystemException('No matching allocation bitmap found')
 
+	def _resolve_clusters(self, first_cluster, file_size = None, no_fat_chain = False):
+		"""Resolve the cluster chain for the given first cluster, return it (as a list of cluster numbers).
+		For bad clusters, None is given (as an item in the chain).
+		"""
+
+		if not no_fat_chain: # Use FAT.
+			return self.fat.chain(first_cluster)
+
+		# Do not use FAT.
+		if file_size is None:
+			raise ValueError('File size is unknown')
+
+		clusters = []
+
+		if file_size > 0 and first_cluster >= 2:
+			curr_cluster = first_cluster
+			remaining_size = file_size
+
+			while remaining_size > 0:
+				# It is unclear from [EXFAT 1.00] if we should check such a cluster for the "bad" mark set in the FAT.
+				# The official implementation has no check for this case. So, we skip it too.
+
+				if curr_cluster > self.last_valid_cluster:
+					break
+
+				clusters.append(curr_cluster)
+
+				curr_cluster += 1
+				remaining_size -= self.cluster_size
+
+		return clusters
+
+	def _read_cluster(self, cluster):
+		"""Read and return a single cluster (as raw bytes)."""
+
+		cluster_offset = self.data_area_offset + (cluster - 2) * self.cluster_size # The first two FAT entries are reserved.
+
+		self.volume_object.seek(self.volume_offset + cluster_offset)
+		if self.volume_size is not None and cluster_offset + self.cluster_size > self.volume_size:
+			raise ValueError('Trying to read beyond the volume')
+
+		cluster_buf = self.volume_object.read(self.cluster_size)
+		if len(cluster_buf) != self.cluster_size:
+			raise ValueError('Truncated cluster data')
+
+		return cluster_buf
+
 	def read_chain(self, first_cluster, file_size = None, no_fat_chain = False):
 		"""Read clusters in a chain described by its first cluster, return them (as raw bytes).
 		Bad clusters are filled with null bytes.
 		"""
 
-		if not no_fat_chain: # Use FAT.
-			clusters = self.fat.chain(first_cluster)
-		else: # Do not use FAT.
-			if file_size is None:
-				raise ValueError('File size is unknown')
-
-			clusters = []
-
-			if file_size > 0 and first_cluster >= 2:
-				curr_cluster = first_cluster
-				remaining_size = file_size
-
-				while remaining_size > 0:
-					# It is unclear from [EXFAT 1.00] if we should check such a cluster for the "bad" mark set in the FAT.
-					# The official implementation has no check for this case. So, we skip it too.
-
-					if curr_cluster > self.last_valid_cluster:
-						break
-
-					clusters.append(curr_cluster)
-
-					curr_cluster += 1
-					remaining_size -= self.cluster_size
+		clusters = self._resolve_clusters(first_cluster, file_size, no_fat_chain)
 
 		if len(clusters) == 0: # No data.
 			return b''
@@ -1179,17 +1221,7 @@ class FileSystemParser(object):
 				read_bytes += self.cluster_size
 				continue
 
-			cluster -= 2 # The first two FAT entries are reserved.
-
-			cluster_offset = self.data_area_offset + cluster * self.cluster_size
-
-			self.volume_object.seek(self.volume_offset + cluster_offset)
-			if self.volume_size is not None and cluster_offset + self.cluster_size > self.volume_size:
-				raise ValueError('Trying to read beyond the volume')
-
-			cluster_buf = self.volume_object.read(self.cluster_size)
-			if len(cluster_buf) != self.cluster_size:
-				raise ValueError('Truncated cluster data')
+			cluster_buf = self._read_cluster(cluster)
 
 			bufs.append(cluster_buf)
 			read_bytes += self.cluster_size
@@ -1199,6 +1231,126 @@ class FileSystemParser(object):
 
 		# If the file size is known, truncate the resulting data.
 		return b''.join(bufs)[: file_size]
+
+	def _effective_valid_data_length(self, file_entry):
+		"""Get and return the effective valid data length for a file (never exceeding its data length)."""
+
+		valid_data_length = file_entry.valid_data_length
+		if valid_data_length is None or valid_data_length > file_entry.size: # A corrupted (or a very old) directory entry.
+			valid_data_length = file_entry.size
+
+		return valid_data_length
+
+	def read_file_data(self, file_entry):
+		"""Read and return the file data (the normal view, as raw bytes).
+		This view only exposes initialized data (within the valid data length) from clusters marked as allocated
+		in the allocation bitmap. The uninitialized tail of a file (data beyond the valid data length) and data from
+		bad, unallocated, or missing clusters are not exposed (the read stops before such a cluster).
+		"""
+
+		valid_data_length = self._effective_valid_data_length(file_entry)
+		if valid_data_length == 0:
+			return b''
+
+		clusters = self._resolve_clusters(file_entry.first_cluster, valid_data_length, file_entry.no_fat_chain)
+
+		bufs = []
+		read_bytes = 0
+
+		for cluster in clusters:
+			if read_bytes >= valid_data_length:
+				break
+
+			if cluster is None: # A bad cluster, the data cannot be trusted past this point.
+				break
+
+			if self.bm.is_allocated(cluster) is not True: # This cluster is not allocated (or its state is unknown), the data cannot be trusted.
+				break
+
+			cluster_buf = self._read_cluster(cluster)
+
+			bufs.append(cluster_buf)
+			read_bytes += self.cluster_size
+
+		return b''.join(bufs)[: valid_data_length]
+
+	def read_file_data_forensic(self, file_entry):
+		"""Read the whole allocated range of a file, return a list of FileDataSegment items (the forensic view).
+		Unlike the normal view (see the read_file_data() method), this view preserves the real extents of the
+		file data: the initialized data, the uninitialized tail (data beyond the valid data length), and the
+		allocation tail (slack) are returned as distinct segments. Data from bad, unallocated, unknown, and
+		missing clusters is explicitly flagged (and never reported as saved zeroes).
+		"""
+
+		size = file_entry.size
+		valid_data_length = self._effective_valid_data_length(file_entry)
+
+		clusters = self._resolve_clusters(file_entry.first_cluster, size, file_entry.no_fat_chain)
+
+		segments = []
+		offset = 0
+
+		def add_segment(segment_offset, segment_length, segment_status, segment_data):
+			if len(segments) > 0: # Merge adjacent segments with the same status.
+				prev_segment = segments[-1]
+				if prev_segment.status == segment_status and prev_segment.offset + prev_segment.length == segment_offset:
+					if prev_segment.data is None or segment_data is None:
+						merged_data = None
+					else:
+						merged_data = prev_segment.data + segment_data
+
+					segments[-1] = FileDataSegment(prev_segment.offset, prev_segment.length + segment_length, segment_status, merged_data)
+					return
+
+			segments.append(FileDataSegment(segment_offset, segment_length, segment_status, segment_data))
+
+		for cluster in clusters:
+			cluster_offset = offset
+			offset += self.cluster_size
+
+			if cluster is None: # A bad cluster, its data is unavailable.
+				add_segment(cluster_offset, self.cluster_size, SEGMENT_BAD_CLUSTER, None)
+				continue
+
+			allocated = self.bm.is_allocated(cluster)
+
+			try:
+				cluster_buf = self._read_cluster(cluster)
+			except ValueError: # This cluster cannot be read.
+				add_segment(cluster_offset, self.cluster_size, SEGMENT_MISSING_CLUSTER, None)
+				continue
+
+			if allocated is not True: # This cluster is not allocated (or its state is unknown), flag the whole cluster.
+				if allocated is False:
+					status = SEGMENT_UNALLOCATED_CLUSTER
+				else:
+					status = SEGMENT_UNKNOWN_CLUSTER
+
+				add_segment(cluster_offset, self.cluster_size, status, cluster_buf)
+				continue
+
+			# Split this cluster into the initialized data, the uninitialized tail, and the allocation tail (slack).
+			pos = 0
+			while pos < self.cluster_size:
+				abs_start = cluster_offset + pos
+
+				if abs_start < valid_data_length:
+					abs_end = min(cluster_offset + self.cluster_size, valid_data_length)
+					status = SEGMENT_VALID
+				elif abs_start < size:
+					abs_end = min(cluster_offset + self.cluster_size, size)
+					status = SEGMENT_UNINITIALIZED
+				else:
+					abs_end = cluster_offset + self.cluster_size
+					status = SEGMENT_SLACK
+
+				add_segment(abs_start, abs_end - abs_start, status, cluster_buf[pos : pos + abs_end - abs_start])
+				pos += abs_end - abs_start
+
+		if offset < size: # The chain is truncated, the remaining data is missing.
+			add_segment(offset, size - offset, SEGMENT_MISSING_CLUSTER, None)
+
+		return segments
 
 	def walk(self, scan_reallocated = False):
 		"""Walk over the file system, yield tuples (FileEntry, OrphanEntry and VolumeLabelEntry).

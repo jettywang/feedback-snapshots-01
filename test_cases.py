@@ -11,6 +11,7 @@ import uuid
 import re
 import io
 import gzip
+import struct
 import tarfile
 import pickle
 from dfir_ntfs import MFT, WSL, USN, Attributes, LogFile, BootSector, ShadowCopy, PartitionTable, MoveTable
@@ -4506,6 +4507,228 @@ def test_exfat_bitmap():
 			assert bm.is_allocated(i) is None
 		else:
 			assert not bm.is_allocated(i)
+
+	f.close()
+
+	# A truncated (corrupted) bitmap: the allocation state of clusters beyond its end is unknown (not a crash).
+	bm = exFAT.Bitmap(b'\xFF', 0x3EE0)
+
+	assert bm.is_allocated(2)
+	assert bm.is_allocated(9)
+	assert bm.is_allocated(10) is None
+	assert bm.is_allocated(0x3EE0) is None
+
+def build_exfat_data_view_image():
+	"""Build a minimal synthetic exFAT image (as a file-like object) for file extraction tests.
+	The image contains short files in which the initialized data, the uninitialized tail (between
+	the valid data length and the data length), and the allocation tail (slack) have distinct markers.
+	"""
+
+	SECTOR_SIZE = 512
+	VOLUME_SECTORS = 2048
+	FAT_OFFSET = 24
+	FAT_LENGTH = 8
+	HEAP_OFFSET = 32
+	CLUSTER_COUNT = 64
+	ROOT_CLUSTER = 2
+	BITMAP_CLUSTER = 3
+
+	img = bytearray(VOLUME_SECTORS * SECTOR_SIZE)
+
+	# The boot sector.
+	bs = bytearray(SECTOR_SIZE)
+	bs[0 : 3] = b'\xEB\x76\x90'
+	bs[3 : 11] = b'EXFAT   '
+	struct.pack_into('<Q', bs, 72, VOLUME_SECTORS)
+	struct.pack_into('<L', bs, 80, FAT_OFFSET)
+	struct.pack_into('<L', bs, 84, FAT_LENGTH)
+	struct.pack_into('<L', bs, 88, HEAP_OFFSET)
+	struct.pack_into('<L', bs, 92, CLUSTER_COUNT)
+	struct.pack_into('<L', bs, 96, ROOT_CLUSTER)
+	struct.pack_into('<L', bs, 100, 0x12345678)
+	bs[105] = 1 # The file system revision: 1.00.
+	bs[108] = 9 # Bytes per sector: 512.
+	bs[109] = 0 # Sectors per cluster: 1.
+	bs[110] = 1 # The number of FATs.
+	bs[510 : 512] = b'\x55\xAA'
+	img[0 : SECTOR_SIZE] = bs
+
+	for i in range(1, 9): # The extended boot sectors.
+		img[i * SECTOR_SIZE + 508 : i * SECTOR_SIZE + 512] = b'\x00\x00\x55\xAA'
+
+	# The boot region checksum (sector 11).
+	checksum = 0
+	for idx in range(11 * SECTOR_SIZE):
+		if idx in [ 106, 107, 112 ]:
+			continue
+
+		if checksum & 1 > 0:
+			checksum = 0x80000000 | (checksum >> 1)
+		else:
+			checksum = checksum >> 1
+
+		checksum = (checksum + img[idx]) & 0xFFFFFFFF
+
+	for i in range(SECTOR_SIZE // 4):
+		struct.pack_into('<L', img, 11 * SECTOR_SIZE + i * 4, checksum)
+
+	# The FAT.
+	def set_fat(cluster, value):
+		struct.pack_into('<L', img, FAT_OFFSET * SECTOR_SIZE + cluster * 4, value)
+
+	set_fat(0, 0xFFFFFFF8)
+	set_fat(1, exFAT.EXFAT_EOC)
+	set_fat(ROOT_CLUSTER, exFAT.EXFAT_EOC)
+	set_fat(BITMAP_CLUSTER, exFAT.EXFAT_EOC)
+	set_fat(6, 7) # A fragmented file: clusters 6 and 7.
+	set_fat(7, exFAT.EXFAT_EOC)
+	set_fat(8, exFAT.EXFAT_BAD) # A file with a bad cluster in its chain.
+	set_fat(12, exFAT.EXFAT_EOC) # A file with a truncated chain (its data length spans two clusters).
+
+	# The cluster data.
+	def cluster_pos(cluster):
+		return (HEAP_OFFSET + cluster - 2) * SECTOR_SIZE
+
+	def fill_cluster(cluster, buf):
+		assert len(buf) == SECTOR_SIZE
+		img[cluster_pos(cluster) : cluster_pos(cluster) + SECTOR_SIZE] = buf
+
+	# A contiguous file (clusters 4 and 5): 200 bytes of initialized data ('A'), then 400 bytes
+	# of an uninitialized tail ('U'), then 424 bytes of an allocation tail ('S').
+	fill_cluster(4, b'A' * 200 + b'U' * 312)
+	fill_cluster(5, b'U' * 88 + b'S' * 424)
+
+	# A fragmented file (clusters 6 and 7): 600 bytes of initialized data ('B') crossing the cluster
+	# boundary, then 100 bytes of an uninitialized tail ('U'), then 324 bytes of an allocation tail ('S').
+	fill_cluster(6, b'B' * 512)
+	fill_cluster(7, b'B' * 88 + b'U' * 100 + b'S' * 324)
+
+	# A file with a bad cluster in its chain (cluster 8, then a bad cluster).
+	fill_cluster(8, b'C' * 512)
+
+	# A file in a cluster not marked as allocated (cluster 10).
+	fill_cluster(10, b'D' * 512)
+
+	# A file with a truncated chain (cluster 12, its data length spans two clusters).
+	fill_cluster(12, b'E' * 512)
+
+	# A file in a cluster not covered by a truncated (corrupted) bitmap (cluster 20).
+	fill_cluster(20, b'F' * 512)
+
+	# The root directory: an allocation bitmap entry only.
+	root_dir = bytearray(SECTOR_SIZE)
+	root_dir[0] = 0x80 | exFAT.DE_ALLOCATION_BITMAP
+	struct.pack_into('<L', root_dir, 20, BITMAP_CLUSTER)
+	struct.pack_into('<Q', root_dir, 24, 8) # The bitmap covers all of the 64 clusters.
+	img[cluster_pos(ROOT_CLUSTER) : cluster_pos(ROOT_CLUSTER) + SECTOR_SIZE] = root_dir
+
+	# The allocation bitmap: clusters 2-8 and 12 are allocated, cluster 10 (and cluster 20) are not.
+	bitmap = bytearray(8)
+	bitmap[0] = 0x7F # Clusters 2-8.
+	bitmap[1] = 0x04 # Cluster 12.
+	img[cluster_pos(BITMAP_CLUSTER) : cluster_pos(BITMAP_CLUSTER) + 8] = bitmap
+
+	return io.BytesIO(bytes(img))
+
+def make_exfat_file_entry(name, size, valid_data_length, first_cluster, no_fat_chain):
+	"""Build a FileEntry object (as returned by the parser) for file extraction tests."""
+
+	return exFAT.FileEntry(False, False, name, None, None, None, None, None, None, size, valid_data_length, exFAT.ATTR_ARCHIVE, first_cluster, False, no_fat_chain)
+
+def test_exfat_file_data_views():
+	f = build_exfat_data_view_image()
+
+	fs = exFAT.FileSystemParser(f, 0, 2048 * 512)
+	assert not fs.backup_used
+
+	# A contiguous (no FAT chain) short file: the normal view exposes the initialized data only,
+	# the forensic view preserves the real extents (the initialized data, the uninitialized tail,
+	# and the allocation tail are distinct segments).
+	entry = make_exfat_file_entry('/contig.bin', 600, 200, 4, True)
+
+	assert fs.read_file_data(entry) == b'A' * 200
+
+	segments = fs.read_file_data_forensic(entry)
+	assert [ (s.offset, s.length, s.status) for s in segments ] == [
+		(0, 200, exFAT.SEGMENT_VALID),
+		(200, 400, exFAT.SEGMENT_UNINITIALIZED),
+		(600, 424, exFAT.SEGMENT_SLACK)
+	]
+	assert segments[0].data == b'A' * 200
+	assert segments[1].data == b'U' * 400
+	assert segments[2].data == b'S' * 424
+
+	# A fragmented (FAT chain) file with the valid data crossing a cluster boundary:
+	# the normal view crosses the boundary and stops at the valid data length.
+	entry = make_exfat_file_entry('/chain.bin', 700, 600, 6, False)
+
+	assert fs.read_file_data(entry) == b'B' * 600
+
+	segments = fs.read_file_data_forensic(entry)
+	assert [ (s.offset, s.length, s.status) for s in segments ] == [
+		(0, 600, exFAT.SEGMENT_VALID),
+		(600, 100, exFAT.SEGMENT_UNINITIALIZED),
+		(700, 324, exFAT.SEGMENT_SLACK)
+	]
+	assert segments[0].data == b'B' * 600
+	assert segments[1].data == b'U' * 100
+	assert segments[2].data == b'S' * 324
+
+	# A file with a bad cluster in its chain: the normal view stops before the bad cluster,
+	# the forensic view flags it (its data is unavailable, not saved zeroes).
+	entry = make_exfat_file_entry('/bad.bin', 600, 600, 8, False)
+
+	assert fs.read_file_data(entry) == b'C' * 512
+
+	segments = fs.read_file_data_forensic(entry)
+	assert [ (s.offset, s.length, s.status) for s in segments ] == [
+		(0, 512, exFAT.SEGMENT_VALID),
+		(512, 512, exFAT.SEGMENT_BAD_CLUSTER)
+	]
+	assert segments[0].data == b'C' * 512
+	assert segments[1].data is None
+
+	# A file in a cluster not marked as allocated: the normal view exposes nothing,
+	# the forensic view flags the cluster (its data cannot be trusted).
+	entry = make_exfat_file_entry('/unalloc.bin', 200, 200, 10, True)
+
+	assert fs.read_file_data(entry) == b''
+
+	segments = fs.read_file_data_forensic(entry)
+	assert [ (s.offset, s.length, s.status) for s in segments ] == [
+		(0, 512, exFAT.SEGMENT_UNALLOCATED_CLUSTER)
+	]
+	assert segments[0].data == b'D' * 512
+
+	# A file with a truncated chain: the normal view exposes what is available,
+	# the forensic view flags the missing tail (not saved zeroes).
+	entry = make_exfat_file_entry('/trunc.bin', 900, 900, 12, False)
+
+	assert fs.read_file_data(entry) == b'E' * 512
+
+	segments = fs.read_file_data_forensic(entry)
+	assert [ (s.offset, s.length, s.status) for s in segments ] == [
+		(0, 512, exFAT.SEGMENT_VALID),
+		(512, 388, exFAT.SEGMENT_MISSING_CLUSTER)
+	]
+	assert segments[0].data == b'E' * 512
+	assert segments[1].data is None
+
+	# A corrupted (truncated) allocation bitmap: the allocation state of a cluster beyond its end
+	# is unknown, so the normal view exposes nothing and the forensic view flags the cluster.
+	fs.bm = exFAT.Bitmap(b'\xFF', fs.last_valid_cluster) # Only clusters 2-9 are covered.
+
+	assert fs.bm.is_allocated(20) is None
+
+	entry = make_exfat_file_entry('/unknown.bin', 100, 100, 20, True)
+
+	assert fs.read_file_data(entry) == b''
+
+	segments = fs.read_file_data_forensic(entry)
+	assert [ (s.offset, s.length, s.status) for s in segments ] == [
+		(0, 512, exFAT.SEGMENT_UNKNOWN_CLUSTER)
+	]
+	assert segments[0].data == b'F' * 512
 
 	f.close()
 
