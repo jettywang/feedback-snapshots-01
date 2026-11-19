@@ -96,6 +96,27 @@ Action Policy provides `ActionPolicy::Behaviours::ThreadMemoized` module with th
 
 If you want to add this behavior to your custom authorization-aware class, you should care about cleaning up the thread store manually (by calling `ActionPolicy::PerThreadCache.clear_all`).
 
+#### Scoping the thread store
+
+`clear_all` wipes the whole thread store, which is awkward for a _long-lived_ worker thread that processes approval tasks for different users one after another. For those cases, wrap each task in an explicit authorization scope via `ActionPolicy::PerThreadCache.with_cache`:
+
+```ruby
+# A single worker thread serving many users
+def perform_task(user, record)
+  ActionPolicy::PerThreadCache.with_cache do
+    # policies built here are re-used within the task...
+    allowed_to?(:update?, record)
+    allowed_to?(:edit?, record)
+  end
+  # ...and discarded when the block returns, so the next user
+  # cannot reach the previous context
+end
+```
+
+The block runs with a fresh per-thread store. When it finishes — normally, via a raised exception, or from a nested call — the previous store is restored (or the store is removed at the top level). Reuse is therefore kept _inside_ the operation while the context is always reclaimed afterwards. Nested `with_cache` blocks are independent: the inner store is discarded on return and the outer store becomes visible again.
+
+When the cache is disabled, `with_cache` simply yields the block without touching the thread store.
+
 **NOTE:** per-thread cache is disabled by default in test environment (when either `RACK_ENV` or `RAILS_ENV` environment variable is equal to "test").
 You can turn it on (or off) by setting:
 

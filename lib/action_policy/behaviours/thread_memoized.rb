@@ -22,6 +22,29 @@ module ActionPolicy
       def clear_all
         Thread.current[CACHE_KEY] = {}
       end
+
+      # Runs the block with a fresh, isolated per-thread store and
+      # restores the previous one (or discards the store) when the block
+      # finishes, even if an exception is raised.
+      #
+      # Use it to bound an authorization context (e.g. a single background job
+      # or a nested call): policies built inside the block are re-used within
+      # it, but cannot leak to subsequent operations on the same long-lived
+      # thread.
+      #
+      # Returns the block's result.
+      def with_cache
+        return yield unless enabled?
+
+        previous_store = Thread.current[CACHE_KEY]
+        Thread.current[CACHE_KEY] = {}
+
+        begin
+          yield
+        ensure
+          Thread.current[CACHE_KEY] = previous_store
+        end
+      end
     end
 
     # Turn off by default in test env
@@ -33,7 +56,10 @@ module ActionPolicy
     #
     # Used by `policy_for` to re-use policy object for records.
     #
-    # NOTE: don't forget to clear thread cache with ActionPolicy::PerThreadCache.clear_all
+    # For long-lived objects (e.g. background worker threads) bound the
+    # memoization to an operation with `ActionPolicy::PerThreadCache.with_cache`
+    # so the store is reclaimed when the operation ends, or call
+    # `ActionPolicy::PerThreadCache.clear_all` to wipe the whole thread store.
     module ThreadMemoized
       class << self
         def prepended(base)

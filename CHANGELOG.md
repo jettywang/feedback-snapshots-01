@@ -2,6 +2,8 @@
 
 ## master
 
+- Add `ActionPolicy::PerThreadCache.with_cache` to bound the per-thread policy store to an explicit scope. The store is reclaimed when the block returns, raises, or a nested scope ends, keeping reuse within the operation while preventing context leakage between users on long-lived worker threads.
+
 ## 0.7.8 (2026-11-03)
 
 - Improve policy caching (less key calculations, fixed collisions). ([@palkan][])
