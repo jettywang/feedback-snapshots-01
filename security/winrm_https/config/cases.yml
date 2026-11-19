@@ -1,0 +1,131 @@
+---
+generated_by: security/winrm_https/config_matrix.rb
+fixture_notice: Fixture paths and fingerprints are per-run; regenerate before use.
+cases:
+  A_public_or_internal_ca:
+    why: Default verification. Chain, expiry and hostname all checked.
+    options:
+      endpoint: https://winrm.corp.example:5986/wsman
+      user: svc_winrm
+      password: REPLACE_ME
+      transport: ssl
+      cert_store: OpenSSL::X509::Store with internal root
+    resolves_to: BasicAuthSSL / HttpNegotiate over TLS
+    keeps:
+    - chain
+    - expiry
+    - hostname
+    built_transport_class: WinRM::HTTP::HttpNegotiate
+  B_ca_trust_path:
+    why: Same as A but the internal root comes from a PEM file.
+    options:
+      endpoint: https://winrm.corp.example:5986/wsman
+      user: svc_winrm
+      password: REPLACE_ME
+      transport: ssl
+      ca_trust_path: "/etc/winrm-fixtures/root.pem"
+    resolves_to: BasicAuthSSL / HttpNegotiate over TLS
+    keeps:
+    - chain
+    - expiry
+    - hostname
+    note: Replaces the bundled public CA store; it does not add to it.
+    built_transport_class: WinRM::HTTP::HttpNegotiate
+  C_fingerprint_sha1:
+    why: Pin a single self-signed leaf. No chain, expiry or hostname check.
+    options:
+      endpoint: https://winrm.corp.example:5986/wsman
+      user: svc_winrm
+      password: REPLACE_ME
+      transport: ssl
+      ssl_peer_fingerprint: <sha1-of-leaf-der>
+      ca_trust_path: "/etc/winrm-fixtures/root.pem"
+    resolves_to: BasicAuthSSL / HttpNegotiate over TLS
+    keeps:
+    - pin
+    drops:
+    - chain
+    - expiry
+    - hostname
+    note: SHA-1 lowercase hex of the leaf DER; the library cannot accept SHA-256.
+    built_transport_class: WinRM::HTTP::HttpNegotiate
+  D_self_signed_anchor:
+    why: Trust a self-signed leaf as an anchor; keeps expiry and hostname.
+    options:
+      endpoint: https://winrm.corp.example:5986/wsman
+      user: svc_winrm
+      password: REPLACE_ME
+      transport: ssl
+      ca_trust_path: "/etc/winrm-fixtures/self-signed.pem"
+    resolves_to: BasicAuthSSL / HttpNegotiate over TLS
+    keeps:
+    - pin
+    - expiry
+    - hostname
+    drops:
+    - chain
+    built_transport_class: WinRM::HTTP::HttpNegotiate
+  E_basic_auth_only:
+    why: Force Basic auth over TLS instead of Negotiate.
+    options:
+      endpoint: https://winrm.corp.example:5986/wsman
+      user: svc_winrm
+      password: REPLACE_ME
+      transport: ssl
+      basic_auth_only: true
+      ca_trust_path: "/etc/winrm-fixtures/root.pem"
+    resolves_to: BasicAuthSSL
+    keeps:
+    - chain
+    - expiry
+    - hostname
+    built_transport_class: WinRM::HTTP::BasicAuthSSL
+  F_client_certificate:
+    why: Mutual TLS; user/password replaced by a client certificate.
+    options:
+      endpoint: https://winrm.corp.example:5986/wsman
+      transport: ssl
+      client_cert: "/path/client.pem"
+      client_key: "/path/client.key"
+      ca_trust_path: "/etc/winrm-fixtures/root.pem"
+    resolves_to: ClientCertAuthSSL
+    keeps:
+    - chain
+    - expiry
+    - hostname
+    built_transport_class: WinRM::HTTP::ClientCertAuthSSL
+  G_no_peer_verification:
+    why: Compatibility escape hatch. Not recommended.
+    options:
+      endpoint: https://winrm.corp.example:5986/wsman
+      user: svc_winrm
+      password: REPLACE_ME
+      transport: ssl
+      no_ssl_peer_verification: true
+    resolves_to: BasicAuthSSL / HttpNegotiate over TLS
+    keeps: []
+    drops:
+    - chain
+    - expiry
+    - hostname
+    - pin
+    note: Any certificate is accepted; authentication still happens, but the server
+      is unauthenticated.
+    built_transport_class: WinRM::HTTP::HttpNegotiate
+  H_rotation_bundle:
+    why: Two self-signed leaves during a rollover, one PEM.
+    options:
+      endpoint: https://winrm.corp.example:5986/wsman
+      user: svc_winrm
+      password: REPLACE_ME
+      transport: ssl
+      ca_trust_path: "/etc/winrm-fixtures/rotation-bundle.pem"
+    resolves_to: BasicAuthSSL / HttpNegotiate over TLS
+    keeps:
+    - expiry
+    - hostname
+    drops:
+    - chain
+    note: Bundled leaves must have distinct subjects; same-subject entries collapse
+      to the first.
+    built_transport_class: WinRM::HTTP::HttpNegotiate
