@@ -143,6 +143,32 @@ Prevented by:
 
 * [`Rack::Protection::IPSpoofing`][ip-spoofing]
 
+`Rack::Protection::IPSpoofing` only honours forwarding headers from a trusted
+peer. Configure the proxies that may speak for a client:
+
+``` ruby
+use Rack::Protection::IPSpoofing,
+  trusted_proxies: ['10.0.0.1', '192.0.2.0/24', IPAddr.new('2001:db8::/32')]
+```
+
+When `:trusted_proxies` is omitted, Rack's `Rack::Request.ip_filter` is used.
+The chain is read the way Rack reads it: `Forwarded`'s `for` parameter before
+`X-Forwarded-For`, and trusted hops are skipped from the peer side. `X-Real-IP`
+and `Client-IP` must agree with the selected chain; they never select the
+address themselves.
+
+The adopted address and its provenance are exposed to downstream middleware
+and the application:
+
+``` ruby
+env['rack.protection.client_ip']   # => "192.0.2.10"
+env['rack.protection.ip_spoofing'] # => { peer: "10.0.0.1", peer_trusted: true, ... }
+```
+
+A peer outside the trusted set cannot gain trust by sending a private-address
+chain. Such a request is denied, and `REMOTE_ADDR` remains the adopted client
+address.
+
 ## Helps to protect against protocol downgrade attacks and cookie hijacking
 
 Prevented by:

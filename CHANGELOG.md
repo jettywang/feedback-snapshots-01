@@ -1,5 +1,10 @@
 ## Unreleased
 
+* Fix: `Rack::Protection::IPSpoofing` honours forwarding headers only from
+  trusted proxies configured with `:trusted_proxies`, follows Rack's
+  `Forwarded`/`X-Forwarded-For` precedence, and exposes the adopted client
+  address plus proxy-chain evidence in `env`.
+
 ## 4.2.1 / 2025-10-10
 
 * Fix: Revert "`PATH_INFO` can never be empty" ([#2124](https://github.com/sinatra/sinatra/pull/2124))
