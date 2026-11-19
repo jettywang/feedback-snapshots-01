@@ -37,6 +37,15 @@ conn.shell(:powershell) do |shell|
 end
 ```
 
+An exit code is only reported when the endpoint reaches the command's `Done`
+state. If the receive conversation ends without a terminal state (for example
+an EOF or a dropped connection), `shell.run` raises
+`WinRM::CommandResultUnknown` instead of returning exit code 0; the output
+collected up to that point remains available on `error.output`. The same
+applies to a response with no state and no output. Errors raised by your own
+output callback are re-raised unchanged and never cause the command to be sent
+again.
+
 ## Connection Options
 There are various connection options you can specify upon initializing a WinRM connection object:
 

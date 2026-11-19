@@ -167,6 +167,26 @@ describe DummyShell do
       end
     end
 
+    context 'when the output callback raises' do
+      it 'propagates the callback error without re-sending the command' do
+        callback_error = StandardError.new('consumer failed')
+        allow(reader).to receive(:read_output).with(output_message).and_raise(callback_error)
+        expect(subject).to receive(:send_command).once.and_return(command_id)
+
+        expect { subject.run(command, arguments) }.to raise_error(StandardError, 'consumer failed')
+      end
+
+      it 'is not retried even when the callback error mimics a resettable fault' do
+        reset_fault = WinRM::WinRMWSManFault.new('oops', WinRM::Shells::Base::TOO_MANY_COMMANDS)
+        reset_fault.extend(WinRM::OutputCallbackError)
+        allow(reader).to receive(:read_output).with(output_message).and_raise(reset_fault)
+        expect(subject).to receive(:send_command).once.and_return(command_id)
+        expect(DummyShell).not_to receive(:close_shell)
+
+        expect { subject.run(command, arguments) }.to raise_error(WinRM::WinRMWSManFault)
+      end
+    end
+
     context 'open_shell fails' do
       let(:retry_limit) { 2 }
       let(:output_message2) { double('message') }

@@ -56,15 +56,26 @@ module WinRM
       # @yieldreturn [WinRM::Output] The command output
       def read_output(wsmv_message)
         with_output do |output|
-          read_message(wsmv_message, true) do |message|
-            exit_code = find_exit_code(message)
-            output.exitcode = exit_code if exit_code
-            decoded_text = @output_decoder.decode(message)
-            next unless decoded_text
+          begin
+            read_message(wsmv_message, true) do |message|
+              exit_code = find_exit_code(message)
+              output.exitcode = exit_code if exit_code
+              decoded_text = @output_decoder.decode(message)
+              next unless decoded_text
 
-            out = { stream_type(message) => decoded_text }
-            output << out
-            yield [out[:stdout], out[:stderr]] if block_given?
+              out = { stream_type(message) => decoded_text }
+              output << out
+              next unless block_given?
+
+              deliver_output([out[:stdout], out[:stderr]]) { |handled| yield handled }
+            end
+            # PSRP only reports an exit code through SetShouldExit. Reaching the
+            # Done state without one still means the pipeline finished normally.
+            output.exitcode = 0 if output.exitcode.nil?
+            output
+          rescue StandardError => e
+            attach_output(e, output)
+            raise
           end
         end
       end

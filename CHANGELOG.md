@@ -1,6 +1,7 @@
 # Changelog
 
 ## [Unreleased]
+* Fix terminal-state handling when collecting command output. `ExitCode` is now read from the `Done` `CommandState` independently of the streams, so a `Done` response without output still reports its real exit code instead of defaulting to 0. A response that carries neither a terminal state nor output, an unrecognised command state, or an unexpected EOF/disconnect now raises `WinRM::CommandResultUnknown` (with the output already collected on the error) rather than looking like success. Errors raised by a user output callback are never retried and are re-raised unchanged.
 
 ## [2.4.2]
 * Replace erubi with the Ruby standard library ERB; the erubi runtime dependency is gone (#366)

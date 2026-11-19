@@ -25,6 +25,35 @@ module WinRM
   # Exitcode error
   class InvalidExitCode < WinRMError; end
 
+  # Marker mixed into exceptions raised by the caller's output callback. Shell
+  # retry logic checks this marker so a callback error is never mistaken for a
+  # transport fault and never causes the remote command to be sent again.
+  module OutputCallbackError; end
+
+  # Mixed into exceptions raised after command output was already collected so
+  # callers can still inspect everything that arrived before the failure.
+  module PartialOutput
+    attr_accessor :output
+  end
+
+  # Raised when the command result cannot be determined: the receive
+  # conversation ended without a terminal state (EOF, disconnect), the
+  # endpoint reported an unrecognised state, or the reported exit code cannot
+  # be interpreted. This is deliberately not a success, and carries whatever
+  # output was collected before the failure.
+  class CommandResultUnknown < WinRMError
+    include PartialOutput
+
+    # @return [Symbol] why the result is unknown (:connection_lost,
+    #   :missing_command_state, :unknown_command_state or :invalid_exit_code)
+    attr_reader :reason
+
+    def initialize(message, reason: nil)
+      @reason = reason
+      super(message)
+    end
+  end
+
   # Shell creation error
   class InvalidTransportError < WinRMError
     attr_reader :invalid_transport

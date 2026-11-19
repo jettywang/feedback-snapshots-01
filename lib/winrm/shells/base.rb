@@ -161,6 +161,11 @@ module WinRM
         command_id = send_command(command, arguments)
         logger.debug("[WinRM] creating command_id: #{command_id} on shell_id #{shell_id}")
         yield shell_id, command_id
+      rescue WinRM::OutputCallbackError
+        # An error raised by the caller's own output callback is not a
+        # transport failure. Re-sending the command would run it twice and
+        # swallow the original exception, so propagate it untouched.
+        raise
       rescue WinRMWSManFault => e
         raise unless FAULTS_FOR_RESET.include?(e.fault_code) && (tries -= 1) > 0
 
