@@ -14,6 +14,7 @@
 
 require 'httpclient'
 require_relative 'response_handler'
+require_relative '../wsmv/envelope'
 
 module WinRM
   module HTTP
@@ -25,6 +26,7 @@ module WinRM
 
       def initialize(endpoint, options)
         @endpoint = endpoint.is_a?(String) ? URI.parse(endpoint) : endpoint
+        @options = options
         @httpcli = HTTPClient.new
         @logger = options[:logger] ||
                   Logger.new($stdout, progname: 'WinRM', level: WinRM.default_log_level)
@@ -40,18 +42,12 @@ module WinRM
       def send_request(message)
         ssl_peer_fingerprint_verification!
         log_soap_message(message)
-        hdr = { 'Content-Type' => 'application/soap+xml;charset=UTF-8',
-                'Content-Length' => message.bytesize }
-        # We need to add this header if using Client Certificate authentication
-        unless @httpcli.ssl_config.client_cert.nil?
-          hdr['Authorization'] = 'http://schemas.dmtf.org/wbem/wsman/1/wsman/secprofile/https/mutual'
-        end
 
-        resp = @httpcli.post(@endpoint, message, hdr)
+        resp = @httpcli.post(@endpoint, message, request_headers(message))
         log_soap_message(resp.http_body.content)
         verify_ssl_fingerprint(resp.peer_cert)
         handler = WinRM::ResponseHandler.new(resp.http_body.content, resp.status)
-        handler.parse_to_xml
+        correlate(handler.parse_to_xml, message)
       end
 
       # We'll need this to force basic authentication if desired
@@ -109,6 +105,31 @@ module WinRM
       end
 
       protected
+
+      def request_headers(message)
+        hdr = { 'Content-Type' => 'application/soap+xml;charset=UTF-8',
+                'Content-Length' => message.bytesize }
+        # We need to add this header if using Client Certificate authentication
+        unless @httpcli.ssl_config.client_cert.nil?
+          hdr['Authorization'] = 'http://schemas.dmtf.org/wbem/wsman/1/wsman/secprofile/https/mutual'
+        end
+        hdr
+      end
+
+      # Associates the parsed response with the outstanding request using the
+      # WS-Addressing MessageID/RelatesTo pair. Mismatches are rejected before
+      # the response can drive any further remote operation.
+      def correlate(response_doc, request_message)
+        WinRM::WSMV::Envelope.correlate!(
+          response_doc,
+          WinRM::WSMV::Envelope.request_message_id(request_message),
+          strict: strict_correlation?
+        )
+      end
+
+      def strict_correlation?
+        @options.key?(:strict_response_correlation) && @options[:strict_response_correlation]
+      end
 
       def body(message, length, type = 'application/HTTP-SPNEGO-session-encrypted')
         [
@@ -186,7 +207,8 @@ module WinRM
           @retryable = true
           decrypted_body = winrm_decrypt(resp)
           log_soap_message(decrypted_body)
-          WinRM::ResponseHandler.new(decrypted_body, resp.status).parse_to_xml
+          response = WinRM::ResponseHandler.new(decrypted_body, resp.status).parse_to_xml
+          correlate(response, message)
         end
       end
 
@@ -321,7 +343,7 @@ module WinRM
         end
 
         handler = WinRM::ResponseHandler.new(winrm_decrypt(resp.http_body.content), resp.status)
-        handler.parse_to_xml
+        correlate(handler.parse_to_xml, message)
       end
 
       private

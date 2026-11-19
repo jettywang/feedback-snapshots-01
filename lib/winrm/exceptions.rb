@@ -85,4 +85,22 @@ module WinRM
       super(msg + " (#{status_code}).")
     end
   end
+
+  # A response whose WS-Addressing RelatesTo does not identify the request
+  # MessageID the client sent. The response cannot be safely associated with
+  # the outstanding remote operation.
+  class WinRMResponseCorrelationError < WinRMError
+    attr_reader :expected_message_id
+    attr_reader :received_relates_to
+
+    def initialize(expected_message_id, received_relates_to)
+      @expected_message_id = expected_message_id
+      @received_relates_to = received_relates_to
+      super(
+        "WinRM response is not correlated with the request: expected " \
+        "RelatesTo '#{expected_message_id}' but received " \
+        "'#{received_relates_to || '<missing>'}'."
+      )
+    end
+  end
 end

@@ -66,4 +66,43 @@ describe 'response handler', unit: true do
       end
     end
   end
+
+  describe 'spoofed fault content' do
+    # A non-SOAP-namespace Fault and a Fault nested inside an unrelated payload
+    # must not be treated as a protocol fault.
+    let(:shadow_fault) do
+      <<~XML
+        <s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
+                    xmlns:e="http://evil.example/not-winrm"
+                    xmlns:f="http://schemas.microsoft.com/wbem/wsman/1/wsmanfault">
+          <s:Body>
+            <e:Fault>
+              <f:WSManFault Code="999">spoofed</f:WSManFault>
+            </e:Fault>
+            <e:Payload>
+              <s:Fault>
+                <s:Reason><s:Text>nested shadow fault</s:Text></s:Reason>
+              </s:Fault>
+            </e:Payload>
+          </s:Body>
+        </s:Envelope>
+      XML
+    end
+
+    it 'ignores shadow faults and raises a generic transport error instead' do
+      handler = WinRM::ResponseHandler.new(shadow_fault, 500)
+      expect { handler.parse_to_xml }.to raise_error(WinRM::WinRMHTTPTransportError)
+    end
+
+    it 'never raises the spoofed WSManFault code' do
+      handler = WinRM::ResponseHandler.new(shadow_fault, 500)
+      begin
+        handler.parse_to_xml
+      rescue WinRM::WinRMWSManFault => e
+        expect(e.fault_code).not_to eq('999')
+      rescue WinRM::WinRMHTTPTransportError
+        # expected: shadow fault is not a real fault
+      end
+    end
+  end
 end

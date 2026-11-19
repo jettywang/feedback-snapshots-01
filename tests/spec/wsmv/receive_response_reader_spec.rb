@@ -121,4 +121,48 @@ describe WinRM::WSMV::ReceiveResponseReader do
       end
     end
   end
+
+  describe 'spoofed receive response nodes' do
+    let(:real_stdout) { Base64.encode64('real output') }
+    let(:shadow_stdout) { Base64.encode64('shadow output') }
+
+    let(:adversarial_response) do
+      <<~XML
+        <s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
+                    xmlns:rsp="http://schemas.microsoft.com/wbem/wsman/1/windows/shell"
+                    xmlns:evil="http://evil.example/not-winrm">
+          <s:Body>
+            <rsp:ReceiveResponse>
+              <evil:Stream Name="stdout">#{shadow_stdout}</evil:Stream>
+              <rsp:Stream Name="stdout">#{real_stdout}</rsp:Stream>
+              <evil:CommandState
+                State="http://schemas.microsoft.com/wbem/wsman/1/windows/shell/CommandState/Done">
+                <evil:ExitCode>123</evil:ExitCode>
+              </evil:CommandState>
+              <rsp:CommandState
+                State="http://schemas.microsoft.com/wbem/wsman/1/windows/shell/CommandState/Done">
+                <rsp:ExitCode>7</rsp:ExitCode>
+              </rsp:CommandState>
+            </rsp:ReceiveResponse>
+          </s:Body>
+        </s:Envelope>
+      XML
+    end
+
+    before do
+      allow(transport).to receive(:send_request)
+        .and_return(REXML::Document.new(adversarial_response))
+    end
+
+    it 'reads only shell-namespace streams and ignores the shadow stream' do
+      seen = []
+      subject.read_response(output_message, true) { |stream, _doc| seen << stream[:text] }
+      expect(seen).to eq([real_stdout])
+    end
+
+    it 'uses the genuine ExitCode and ignores the shadow value' do
+      output = subject.read_output(output_message)
+      expect(output.exitcode).to eq(7)
+    end
+  end
 end

@@ -50,18 +50,77 @@ describe WinRM::Shells::Powershell do
   let(:test_data_stdout1) { Base64.strict_encode64(fragment1.bytes.pack('C*')) }
   let(:test_data_stdout2) { Base64.strict_encode64(fragment2.bytes.pack('C*')) }
 
+  let(:create_shell_response) do
+    <<~XML
+      <s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
+                  xmlns:a="http://schemas.xmlsoap.org/ws/2004/08/addressing"
+                  xmlns:x="http://schemas.xmlsoap.org/ws/2004/09/transfer"
+                  xmlns:w="http://schemas.dmtf.org/wbem/wsman/1/wsman.xsd"
+                  xmlns:evil="http://evil.example/not-winrm">
+        <s:Header><a:Action>CreateResponse</a:Action></s:Header>
+        <s:Body>
+          <evil:SelectorSet><evil:Selector Name="ShellId">shadow-shell</evil:Selector></evil:SelectorSet>
+          <x:ResourceCreated>
+            <a:ReferenceParameters>
+              <w:SelectorSet>
+                <w:Selector Name="ShellId">#{shell_id}</w:Selector>
+              </w:SelectorSet>
+            </a:ReferenceParameters>
+          </x:ResourceCreated>
+        </s:Body>
+      </s:Envelope>
+    XML
+  end
+
+  # Configuration response. A shadow MaxEnvelopeSizekb in another namespace
+  # must not override the genuine config value.
+  config_response_xml = <<~XML
+    <s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
+                xmlns:cfg="http://schemas.microsoft.com/wbem/wsman/1/config"
+                xmlns:evil="http://evil.example/not-winrm">
+      <s:Body>
+        <x:PullResponse xmlns:x="http://schemas.xmlsoap.org/ws/2004/09/transfer">
+          <evil:Config><evil:MaxEnvelopeSizekb>1</evil:MaxEnvelopeSizekb></evil:Config>
+        </x:PullResponse>
+        <cfg:Config>
+          <cfg:MaxEnvelopeSizekb><%= max_envelope_size_kb %></cfg:MaxEnvelopeSizekb>
+        </cfg:Config>
+      </s:Body>
+    </s:Envelope>
+  XML
+
   {
     'powershell' => {
       keepalive_template_path: 'get_powershell_keepalive_response.xml.erb',
-      config: "<a xmlns:cfg='f'><cfg:MaxEnvelopeSizekb>" \
-        '<%= max_envelope_size_kb %></cfg:MaxEnvelopeSizekb></a>',
-      command: "<a xmlns:rsp='foo'><rsp:CommandId><%= command_id %></rsp:CommandId></a>"
+      config: config_response_xml,
+      command: <<~XML
+        <s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
+                    xmlns:rsp="http://schemas.microsoft.com/wbem/wsman/1/windows/shell"
+                    xmlns:evil="http://evil.example/not-winrm">
+          <s:Body>
+            <evil:CommandResponse><evil:CommandId>shadow-command</evil:CommandId></evil:CommandResponse>
+            <rsp:CommandResponse>
+              <rsp:CommandId><%= command_id %></rsp:CommandId>
+            </rsp:CommandResponse>
+          </s:Body>
+        </s:Envelope>
+      XML
     },
     'omi' => {
       keepalive_template_path: 'get_omi_powershell_keepalive_response.xml.erb',
       config: File.read('tests/spec/stubs/responses/get_omi_config_response.xml'),
-      command: "<p:CommandResponse xmlns:p='foo'><p:CommandId>" \
-        '<%= command_id %></p:CommandId></p:CommandResponse>'
+      command: <<~XML
+        <SOAP-ENV:Envelope xmlns:SOAP-ENV="http://www.w3.org/2003/05/soap-envelope"
+                           xmlns:p="http://schemas.microsoft.com/wbem/wsman/1/windows/shell"
+                           xmlns:evil="http://evil.example/not-winrm">
+          <SOAP-ENV:Body>
+            <evil:CommandResponse><evil:CommandId>shadow-command</evil:CommandId></evil:CommandResponse>
+            <p:CommandResponse>
+              <p:CommandId><%= command_id %></p:CommandId>
+            </p:CommandResponse>
+          </SOAP-ENV:Body>
+        </SOAP-ENV:Envelope>
+      XML
     }
   }.each_pair do |server_type, response|
     context "with server type #{server_type}" do
@@ -96,7 +155,7 @@ describe WinRM::Shells::Powershell do
         end
         allow(transport).to receive(:send_request)
           .with(create_shell_payload)
-          .and_return(REXML::Document.new("<blah Name='ShellId'>#{shell_id}</blah>"))
+          .and_return(REXML::Document.new(create_shell_response))
         allow(transport).to receive(:send_request)
           .with(command_payload)
           .and_return(REXML::Document.new(command_response))

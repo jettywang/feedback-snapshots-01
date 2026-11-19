@@ -50,8 +50,26 @@ There are various connection options you can specify upon initializing a WinRM c
 * `:retry_delay` - the amount of time to wait between retries and defaults to 10 seconds
 * `:user` - username used to authenticate over the `:transport`
 * `:password` - password used to authenticate over the `:transport`
+* `:strict_response_correlation` - when `true`, every response must carry a WS-Addressing `RelatesTo` that matches the request `MessageID`; a missing or mismatched value raises `WinRMResponseCorrelationError`. Defaults to `false`, which still rejects a present-but-wrong `RelatesTo` but tolerates a missing one for legacy/non-conforming endpoints.
 
 There are other options that may apply depending on the type of `:transport` used and are discussed below.
+
+## Response Validation
+
+SOAP responses are interpreted strictly according to the WinRM/WS-Management
+namespaces and the structural `Envelope`/`Header`/`Body` position of each node.
+A node that merely reuses a local-name such as `ShellId`, `CommandId`,
+`ExitCode` or `Fault` but lives in another namespace or is nested inside an
+unrelated payload cannot override the genuine result. Namespace prefixes are
+not significant, so an endpoint may rename its prefixes without affecting
+parsing.
+
+Each request is additionally associated with its response through the
+WS-Addressing `MessageID`/`RelatesTo` pair. A response whose `RelatesTo`
+identifies a different request is rejected with
+`WinRMResponseCorrelationError` before it can drive another remote operation.
+Endpoints that omit `RelatesTo` keep working by default; set
+`:strict_response_correlation` to `true` to require it.
 
 ## Transports
 

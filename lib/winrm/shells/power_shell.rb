@@ -21,6 +21,7 @@ require_relative '../wsmv/create_pipeline'
 require_relative '../wsmv/send_data'
 require_relative '../wsmv/init_runspace_pool'
 require_relative '../wsmv/keep_alive'
+require_relative '../wsmv/envelope'
 
 module WinRM
   module Shells
@@ -101,7 +102,8 @@ module WinRM
           command_args = [connection_opts, shell_id, command_id, fragment]
           if fragment.start_fragment
             resp_doc = transport.send_request(WinRM::WSMV::CreatePipeline.new(*command_args).build)
-            command_id = REXML::XPath.first(resp_doc, "//*[local-name() = 'CommandId']").text
+            command_id = WinRM::WSMV::Envelope.command_id(resp_doc)
+            raise_invalid_response('CommandId') if command_id.nil?
           else
             transport.send_request(WinRM::WSMV::SendData.new(*command_args).build)
           end
@@ -119,7 +121,8 @@ module WinRM
           open_shell_payload(@runspace_id)
         )
         resp_doc = transport.send_request(runspace_msg.build)
-        shell_id = REXML::XPath.first(resp_doc, "//*[@Name='ShellId']").text
+        shell_id = WinRM::WSMV::Envelope.shell_id(resp_doc)
+        raise_invalid_response('ShellId') if shell_id.nil?
         wait_for_running(shell_id)
         shell_id
       end
@@ -129,6 +132,12 @@ module WinRM
       end
 
       private
+
+      def raise_invalid_response(local_name)
+        raise WinRMHTTPTransportError.new(
+          "WinRM response did not contain a valid #{local_name}", nil
+        )
+      end
 
       def base64_deflated(inflated_length)
         inflated_length / 4 * 3
@@ -147,7 +156,9 @@ module WinRM
           config_msg = WinRM::WSMV::Configuration.new(connection_opts)
           msg = config_msg.build
           resp_doc = transport.send_request(msg)
-          REXML::XPath.first(resp_doc, "//*[local-name() = 'MaxEnvelopeSizekb']").text.to_i
+          size_kb = WinRM::WSMV::Envelope.max_envelope_size_kb(resp_doc)
+          raise_invalid_response('MaxEnvelopeSizekb') if size_kb.nil?
+          size_kb.to_i
         rescue REXML::ParseException
           logger.debug("[WinRM] Endpoint doesn't support config request for MaxEnvelopeSizekb")
           raise

@@ -13,7 +13,7 @@
 # limitations under the License.
 
 require 'rexml/document' unless defined?(REXML::Document)
-require_relative '../wsmv/soap'
+require_relative '../wsmv/envelope'
 
 module WinRM
   # Handles the raw WinRM HTTP response. Returns the body as an XML doc
@@ -59,62 +59,35 @@ module WinRM
       raise WinRMAuthorizationError if @status_code == 401
     end
 
-    def raise_if_wsman_fault
-      # NB: search the document, not the soap_errors nodeset. A leading `//`
-      # is document-absolute in REXML anyway, and REXML >= 3.4.4 dropped
-      # nodeset support in XPath.first (it warns on every fault response).
-      soap_errors = REXML::XPath.match(
-        response_xml,
-        "//*[local-name() = 'Envelope']/*[local-name() = 'Body']/*[local-name() = 'Fault']/*"
-      )
-      return if soap_errors.empty?
+    # Only a Fault in the SOAP envelope namespace located directly under
+    # Envelope/Body is a protocol fault. A shadow Fault element nested inside
+    # another namespace or an arbitrary payload is ignored.
+    def soap_fault?
+      !WinRM::WSMV::Envelope.fault_children(response_xml).empty?
+    end
 
-      fault = REXML::XPath.first(
-        response_xml,
-        "//*[local-name() = 'WSManFault']"
-      )
+    def raise_if_wsman_fault
+      return unless soap_fault?
+
+      fault = WinRM::WSMV::Envelope.wsman_fault(response_xml)
       raise WinRMWSManFault.new(fault.to_s, fault.attributes['Code']) unless fault.nil?
     end
 
     def raise_if_wmi_error
-      soap_errors = REXML::XPath.match(
-        response_xml,
-        "//*[local-name() = 'Envelope']/*[local-name() = 'Body']/*[local-name() = 'Fault']/*"
-      )
-      return if soap_errors.empty?
+      return unless soap_fault?
 
-      error = REXML::XPath.first(
-        response_xml,
-        "//*[local-name() = 'MSFT_WmiError']"
-      )
+      error = WinRM::WSMV::Envelope.wmi_error(response_xml)
       return if error.nil?
 
-      error_code = REXML::XPath.first(
-        error,
-        "//*[local-name() = 'error_Code']"
-      ).text
+      error_code = WinRM::WSMV::Envelope.wmi_error_code(error)
       raise WinRMWMIError.new(error.to_s, error_code)
     end
 
     def raise_if_soap_fault
-      soap_errors = REXML::XPath.match(
-        response_xml,
-        "//*[local-name() = 'Envelope']/*[local-name() = 'Body']/*[local-name() = 'Fault']/*"
-      )
-      return if soap_errors.empty?
+      return unless soap_fault?
 
-      code = REXML::XPath.first(
-        response_xml,
-        "//*[local-name() = 'Code']/*[local-name() = 'Value']/text()"
-      )
-      subcode = REXML::XPath.first(
-        response_xml,
-        "//*[local-name() = 'Subcode']/*[local-name() = 'Value']/text()"
-      )
-      reason = REXML::XPath.first(
-        response_xml,
-        "//*[local-name() = 'Reason']/*[local-name() = 'Text']/text()"
-      )
+      values = WinRM::WSMV::Envelope.soap_fault_values(response_xml)
+      code, subcode, reason = values.fetch_values(:code, :subcode, :reason)
 
       raise WinRMSoapFault.new(code, subcode, reason) unless
         code.nil? && subcode.nil? && reason.nil?

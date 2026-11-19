@@ -13,6 +13,7 @@
 # limitations under the License.
 
 require_relative 'base'
+require_relative '../wsmv/envelope'
 
 module WinRM
   module Shells
@@ -36,7 +37,8 @@ module WinRM
           arguments: arguments
         )
         resp_doc = transport.send_request(cmd_msg.build)
-        command_id = REXML::XPath.first(resp_doc, "//*[local-name() = 'CommandId']").text
+        command_id = WinRM::WSMV::Envelope.command_id(resp_doc)
+        raise_invalid_response('CommandId') if command_id.nil?
         logger.debug("[WinRM] Command created for #{command} with id: #{command_id}")
         command_id
       end
@@ -48,11 +50,21 @@ module WinRM
       def open_shell
         msg = WinRM::WSMV::CreateShell.new(connection_opts, shell_opts)
         resp_doc = transport.send_request(msg.build)
-        REXML::XPath.first(resp_doc, "//*[@Name='ShellId']").text
+        shell_id = WinRM::WSMV::Envelope.shell_id(resp_doc)
+        raise_invalid_response('ShellId') if shell_id.nil?
+        shell_id
       end
 
       def out_streams
         %w[stdout stderr]
+      end
+
+      private
+
+      def raise_invalid_response(local_name)
+        raise WinRMHTTPTransportError.new(
+          "WinRM response did not contain a valid #{local_name}", nil
+        )
       end
     end
   end

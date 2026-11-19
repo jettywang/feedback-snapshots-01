@@ -14,6 +14,7 @@
 
 require_relative 'soap'
 require_relative 'header'
+require_relative 'envelope'
 require_relative 'command_output_decoder'
 require_relative '../output'
 
@@ -83,8 +84,8 @@ module WinRM
 
         out = { stream[:type] => decoded_text }
         output << out
-        if (code = REXML::XPath.first(resp_doc, "//*[local-name() = 'ExitCode']"))
-          output.exitcode = code.text.to_i
+        if (code = WinRM::WSMV::Envelope.exit_code(resp_doc))
+          output.exitcode = code.to_i
         end
         [out[:stdout], out[:stderr]]
       end
@@ -107,17 +108,11 @@ module WinRM
         return false unless resp_doc
         return true unless wait_for_done_state
 
-        REXML::XPath.match(
-          resp_doc,
-          "//*[@State='http://schemas.microsoft.com/wbem/wsman/1/windows/shell/" \
-          "CommandState/Done']"
-        ).any?
+        WinRM::WSMV::Envelope.command_done?(resp_doc)
       end
 
       def read_streams(response_document)
-        body_path = "/*[local-name() = 'Envelope']/*[local-name() = 'Body']"
-        path = "#{body_path}/*[local-name() = 'ReceiveResponse']/*[local-name() = 'Stream']"
-        REXML::XPath.match(response_document, path).each do |stream|
+        WinRM::WSMV::Envelope.streams(response_document).each do |stream|
           next if stream.text.nil? || stream.text.empty?
 
           yield type: stream.attributes['Name'].to_sym, text: stream.text
