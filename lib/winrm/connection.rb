@@ -38,10 +38,14 @@ module WinRM
     def shell(shell_type, shell_opts = {})
       shell = shell_factory.create_shell(shell_type, shell_opts)
       if block_given?
+        primary_error = nil
         begin
           yield shell
+        rescue Exception => e # rubocop:disable Lint/RescueException
+          primary_error = e
+          raise
         ensure
-          shell.close
+          close_shell_in_block(shell, primary_error)
         end
       else
         shell
@@ -59,6 +63,20 @@ module WinRM
     end
 
     private
+
+    # Closing the shell in the block form must not hide the error raised by the
+    # caller's block. The cleanup failure is attached to the primary error when
+    # one is in flight and only raised on its own for a successful block.
+    def close_shell_in_block(shell, primary_error)
+      shell.close
+    rescue WinRM::CleanupError => e
+      if primary_error
+        WinRM::FailureDetails.attach(primary_error, cleanup_statuses: [e])
+        nil
+      else
+        raise
+      end
+    end
 
     def configure_connection_opts(connection_opts)
       @connection_opts = ConnectionOpts.create_with_defaults(connection_opts)

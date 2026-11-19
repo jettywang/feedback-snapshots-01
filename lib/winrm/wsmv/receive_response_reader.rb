@@ -15,6 +15,7 @@
 require_relative 'soap'
 require_relative 'header'
 require_relative 'command_output_decoder'
+require_relative '../exceptions'
 require_relative '../output'
 
 module WinRM
@@ -44,7 +45,16 @@ module WinRM
         with_output do |output|
           read_response(wsmv_message, true) do |stream, doc|
             handled_out = handle_stream(stream, output, doc)
-            yield handled_out if handled_out && block_given?
+            next unless handled_out && block_given?
+
+            begin
+              yield handled_out
+            rescue StandardError => e
+              # The caller's callback is not a transport failure; mark it so
+              # the shell cannot retry (and thereby re-run) the remote command.
+              FailureDetails.mark_output_callback(e)
+              raise
+            end
           end
         end
       end
@@ -70,7 +80,14 @@ module WinRM
 
       def with_output
         output = WinRM::Output.new
-        yield output
+        begin
+          yield output
+        rescue StandardError, Interrupt => e
+          # Keep whatever was already decoded inspectable from the raised
+          # error. The original exception is never replaced.
+          FailureDetails.attach_output(e, output)
+          raise
+        end
         output.exitcode ||= 0
         output
       end

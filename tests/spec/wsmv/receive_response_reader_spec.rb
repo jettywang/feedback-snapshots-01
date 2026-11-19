@@ -72,8 +72,7 @@ describe WinRM::WSMV::ReceiveResponseReader do
       end
     end
 
-    describe "#read_response for #{template}" do
-      context 'do not wait for done state' do
+    describe "#read_response for #{template}" do      context 'do not wait for done state' do
         let(:test_data_raw) { 'output text' }
         let(:test_error_raw) { 'error text' }
         let(:test_data_stdout) { Base64.encode64(test_data_raw) }
@@ -117,6 +116,33 @@ describe WinRM::WSMV::ReceiveResponseReader do
             expect(doc.to_s).to eq(REXML::Document.new(test_data_xml_done).to_s) if times > 2
             times += 1
           end
+        end
+      end
+
+      context 'failure after output was decoded' do
+        let(:test_data_raw) { 'partial output' }
+        let(:test_data_stderr) { '' }
+        let(:test_data_stdout) { Base64.encode64(test_data_raw) }
+        let(:test_data_xml_done) { ERB.new(stubbed_response(template)).result(binding) }
+
+        it 'attaches the collected output to the raised error' do
+          xml = REXML::Document.new(test_data_xml_done)
+          skip('response has no stdout') if REXML::XPath.match(
+            xml, "//*[local-name() = 'Stream' and @Name = 'stdout']"
+          ).empty?
+          allow(transport).to receive(:send_request).and_return(xml)
+          failure = Class.new(StandardError)
+
+          error = nil
+          begin
+            subject.read_output(output_message) { |_stdout, _stderr| raise failure, 'callback' }
+          rescue failure => e
+            error = e
+          end
+
+          expect(error).not_to be_nil
+          expect(error.output).to be_a(WinRM::Output)
+          expect(error.output.stdout).to eq(test_data_raw)
         end
       end
     end

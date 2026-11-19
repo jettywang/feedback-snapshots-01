@@ -1,6 +1,7 @@
 # Changelog
 
 ## [Unreleased]
+* Fix the command and shell cleanup lifecycle. Each command is terminated on the shell that created it (never a shell reopened in between), and each shell id is released at most once: `#close` and the GC finalizer now share a claim-once handle, so they cannot send duplicate Delete requests or delete a newly opened shell with a stale id. A failed cleanup no longer replaces the original execution error; the primary error keeps its class and message and exposes the collected output (`#output`) plus the cleanup outcome (`#cleanup_statuses`, `#cleanup_errors`). A cleanup failure with no other error in flight is raised as `WinRM::CleanupError`.
 
 ## [2.4.2]
 * Replace erubi with the Ruby standard library ERB; the erubi runtime dependency is gone (#366)

@@ -41,7 +41,14 @@ module WinRM
           next unless message
 
           if block_given?
-            yield message
+            begin
+              yield message
+            rescue StandardError => e
+              # A failure in the caller's callback must not look like a
+              # retryable transport fault that re-runs the remote command.
+              WinRM::FailureDetails.mark_output_callback(e)
+              raise
+            end
           else
             messages.push(message)
           end

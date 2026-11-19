@@ -129,6 +129,16 @@ As of the WinRM gem version 2, one creates a shell for executing commands by cal
 
 Both shells support the same public methods: `:open`, `:close`, and `run`. Note that when given a shell, it is opened automatically upon executing the first command via `:run`. Further, `close` is called automatically when a `shell` is garbage collected or when using a shell from a block. However, it is always a good idea to proactively `close` a shell.
 
+### Error handling and cleanup guarantees
+
+`run` always terminates the remote command on the shell that created it, even when the command fails or your output callback raises. Closing a shell is claimed exactly once, so an explicit `close` racing with the garbage-collector finalizer never sends a second destructive request, and a shell opened in between is never deleted with an older id.
+
+If cleanup itself fails, the original error is preserved rather than replaced. The raised exception (when cleanup fails with no other error in flight it is a `WinRM::CleanupError`) responds to:
+
+* `#output` - the `WinRM::Output` collected before the failure, if any.
+* `#cleanup_statuses` - one `WinRM::CleanupStatus` per Signal/Delete attempt (`:ok`, `:ignored`, `:failed` or `:skipped`), with its `shell_id`/`command_id` and error.
+* `#cleanup_errors` - the underlying cleanup exceptions carried by those statuses.
+
 ### Shell options supported by the `:cmd` shell
 
 ```
