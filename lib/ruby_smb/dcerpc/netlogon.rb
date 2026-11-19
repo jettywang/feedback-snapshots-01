@@ -83,7 +83,7 @@ module RubySMB
         hmac = OpenSSL::HMAC.new(shared_secret, OpenSSL::Digest::SHA256.new)
         hmac << client_challenge
         hmac << server_challenge
-        hmac.digest.first(16)
+        hmac.digest.byteslice(0, 16)
       end
 
       # Encrypt the input data using the specified session key. This is used for
