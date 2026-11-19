@@ -65,6 +65,7 @@ from scapy.config import conf
 from typing import (
     List,
     Optional,
+    Tuple,
     Union,
 )
 
@@ -383,6 +384,92 @@ del n
 del v
 del k
 
+# Option 52 "DHCP Option Overload" (RFC 2132 section 9.3)
+DHCP_OVERLOAD_FILE = 1
+DHCP_OVERLOAD_SNAME = 2
+DHCP_OVERLOAD_BOTH = 3
+DHCP_OVERLOAD_VALUES = (DHCP_OVERLOAD_FILE, DHCP_OVERLOAD_SNAME,
+                        DHCP_OVERLOAD_BOTH)
+
+# Sources of a DHCP option fragment. The numeric value also gives the order in
+# which the overloaded areas are interpreted after the main options area
+# (RFC 3396 section 4): the "file" field first, then the "sname" field.
+DHCP_OPTION_AREA_OPTIONS = "options"
+DHCP_OPTION_AREA_FILE = "file"
+DHCP_OPTION_AREA_SNAME = "sname"
+
+
+class DHCPOptionFragment(object):
+    """
+    A single option TLV as found in a DHCP message, kept together with the
+    area it was read from and its position inside that area.
+
+    Duplicate instances of an option are preserved as separate fragments so
+    that long values split across several TLVs (RFC 3396) can be concatenated
+    without hiding any piece of the original message.
+    """
+    __slots__ = ["option", "name", "value", "source", "position", "truncated"]
+
+    def __init__(self, option, name, value, source, position, truncated=False):
+        self.option = option
+        self.name = name
+        self.value = value
+        self.source = source
+        self.position = position
+        self.truncated = truncated
+
+    def __eq__(self, other):
+        if not isinstance(other, DHCPOptionFragment):
+            return NotImplemented
+        return (
+            self.option == other.option
+            and self.name == other.name
+            and self.value == other.value
+            and self.source == other.source
+            and self.position == other.position
+            and self.truncated == other.truncated
+        )
+
+    def __ne__(self, other):
+        ret = self.__eq__(other)
+        if ret is NotImplemented:
+            return ret
+        return not ret
+
+    def __repr__(self):
+        if self.truncated:
+            return "DHCPOptionFragment(%r, %r, source=%r, position=%d, truncated=True)" % (  # noqa: E501
+                self.option, self.value, self.source, self.position)
+        return "DHCPOptionFragment(%r, %r, %r, source=%r, position=%d)" % (
+            self.option, self.name, self.value, self.source, self.position)
+
+
+class DHCPOptionsAudit(object):
+    """
+    Result of :func:`dhcp_options_audit`.
+
+    :param fragments: every option TLV in the order defined by the protocol
+        (main options area, then "file", then "sname"), each tagged with its
+        source area and position.
+    :param values: concatenated value of each option code following RFC 3396.
+        Truncated fragments are excluded and reported in ``errors`` instead.
+    :param overload: the effective value of option 52, or ``None`` when the
+        message does not declare any overloaded area.
+    :param errors: human-readable descriptions of the malformed fragments.
+    """
+    __slots__ = ["fragments", "values", "overload", "errors"]
+
+    def __init__(self, fragments=None, values=None, overload=None,
+                 errors=None):
+        self.fragments = fragments or []
+        self.values = values or {}
+        self.overload = overload
+        self.errors = errors or []
+
+    def __repr__(self):
+        return "DHCPOptionsAudit(overload=%r, values=%r, errors=%r)" % (
+            self.overload, self.values, self.errors)
+
 
 class RandDHCPOptions(RandField):
     def __init__(self, size=None, rndstr=None):
@@ -532,6 +619,166 @@ class DHCPOptionsField(StrField):
         return RandDHCPOptions()
 
 
+def dhcp_option_name(option):
+    # type: (int) -> object
+    """
+    Return the symbolic name of a DHCP option code, or the numeric code
+    itself when it is not known.
+    """
+    field = DHCPOptions.get(option)
+    if isinstance(field, str):
+        return field
+    if field is not None:
+        return field.name
+    return option
+
+
+def dhcp_parse_option_area(data, source):
+    # type: (bytes, str) -> Tuple[List[DHCPOptionFragment], List[str]]
+    """
+    Parse one option area (the main options area or an overloaded "file" or
+    "sname" field) into option fragments.
+
+    Parsing stops at the first END option (code 255); data following it is
+    treated as padding and reported when it is not all PAD bytes (code 0).
+    A TLV whose declared length runs past the area is kept as a truncated
+    fragment and reported instead of being read across the area boundary.
+    """
+    fragments = []
+    errors = []
+    position = 0
+    end_seen = False
+    while data:
+        option = data[0]
+        if option == 255:
+            end_seen = True
+            data = data[1:]
+            position += 1
+            break
+        if option == 0:
+            data = data[1:]
+            position += 1
+            continue
+        if len(data) < 2 or len(data) < data[1] + 2:
+            declared = data[1] if len(data) >= 2 else 0
+            available = max(len(data) - 2, 0)
+            fragments.append(
+                DHCPOptionFragment(
+                    option, dhcp_option_name(option), data[2:], source,
+                    position, truncated=True))
+            errors.append(
+                "truncated option %s in %r area at position %d: "
+                "declared length %d, %d byte(s) available"
+                % (dhcp_option_name(option), source, position,
+                   declared, available))
+            break
+        length = data[1]
+        value = data[2:length + 2]
+        fragments.append(
+            DHCPOptionFragment(
+                option, dhcp_option_name(option), value, source, position))
+        data = data[length + 2:]
+        position += length + 2
+    if end_seen:
+        padding = data
+        if padding.strip(b"\x00"):
+            errors.append(
+                "data after END option in %r area: %r" % (source, padding))
+    elif fragments and not fragments[-1].truncated:
+        errors.append("missing END option in %r area" % source)
+    return fragments, errors
+
+
+def dhcp_options_audit(pkt):
+    # type: (DHCP) -> DHCPOptionsAudit
+    """
+    Audit the DHCP options of a dissected packet, including the options
+    carried in the BOOTP "file" and "sname" fields through option 52
+    (DHCP Option Overload, RFC 2132 section 9.3).
+
+    Every option TLV is returned as a separate :class:`DHCPOptionFragment`
+    tagged with its source area and position, so duplicate options stay
+    visible in the protocol order: main options area first, then "file",
+    then "sname" (RFC 3396 section 4). The fragments of each option code are
+    also concatenated (RFC 3396 section 3) in ``DHCPOptionsAudit.values``.
+
+    Areas are only read when option 52 declares them overloaded: without the
+    declaration, option-like bytes in "file" or "sname" are boot file or
+    server name data and are never interpreted as options.
+    """
+    fragments = []
+    errors = []
+
+    main_data = pkt.original
+    if not isinstance(main_data, bytes):
+        main_data = b""
+    main_fragments, main_errors = dhcp_parse_option_area(
+        main_data, DHCP_OPTION_AREA_OPTIONS)
+    fragments.extend(main_fragments)
+    errors.extend(main_errors)
+
+    overload = None
+    overload_conflict = False
+    overload_fragments = [
+        fragment for fragment in main_fragments if fragment.option == 52]
+    for fragment in overload_fragments:
+        if len(fragment.value) != 1:
+            errors.append(
+                "invalid dhcp-option-overload value: %r" % (fragment.value,))
+            continue
+        value = fragment.value[0]
+        if value not in DHCP_OVERLOAD_VALUES:
+            errors.append(
+                "invalid dhcp-option-overload value: %d" % value)
+            continue
+        if overload is None:
+            overload = value
+        elif overload != value:
+            overload_conflict = True
+            errors.append(
+                "conflicting dhcp-option-overload values: %d and %d"
+                % (overload, value))
+    if overload_conflict:
+        # Fall back to the widest valid declaration so that each overloaded
+        # area is still audited; the conflict remains visible in errors.
+        for fragment in overload_fragments:
+            if (len(fragment.value) == 1
+                    and fragment.value[0] in DHCP_OVERLOAD_VALUES):
+                overload |= fragment.value[0]
+
+    bootp = pkt.underlayer if isinstance(pkt.underlayer, BOOTP) else None
+    if overload is not None and bootp is None:
+        errors.append(
+            "dhcp-option-overload declared but no BOOTP layer is available")
+
+    if bootp is not None and overload is not None:
+        # RFC 3396 section 4: the "file" area is interpreted before "sname".
+        if overload in (DHCP_OVERLOAD_FILE, DHCP_OVERLOAD_BOTH):
+            area_fragments, area_errors = dhcp_parse_option_area(
+                bootp.file, DHCP_OPTION_AREA_FILE)
+            fragments.extend(area_fragments)
+            errors.extend(area_errors)
+        if overload in (DHCP_OVERLOAD_SNAME, DHCP_OVERLOAD_BOTH):
+            area_fragments, area_errors = dhcp_parse_option_area(
+                bootp.sname, DHCP_OPTION_AREA_SNAME)
+            fragments.extend(area_fragments)
+            errors.extend(area_errors)
+
+    values = {}
+    for fragment in fragments:
+        if fragment.truncated:
+            continue
+        name = fragment.name
+        if name in values:
+            values[name] += fragment.value
+        else:
+            values[name] = fragment.value
+
+    return DHCPOptionsAudit(
+        fragments=fragments, values=values, overload=overload,
+        errors=errors)
+
+
 class DHCP(Packet):
     name = "DHCP options"
     fields_desc = [DHCPOptionsField("options", b"")]
@@ -556,6 +803,15 @@ class DHCP(Packet):
             opts = []
         opts.insert(len(opts) - 1, (name, value))
         self.options = opts
+
+    def options_audit(self):
+        # type: () -> DHCPOptionsAudit
+        """
+        Audit every DHCP option TLV, including duplicate options and the
+        options carried in the overloaded BOOTP "file" and "sname" fields.
+        See :func:`dhcp_options_audit`.
+        """
+        return dhcp_options_audit(self)
 
 
 bind_layers(UDP, BOOTP, dport=67, sport=68)

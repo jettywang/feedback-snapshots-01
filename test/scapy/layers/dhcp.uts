@@ -114,6 +114,118 @@ assert raw(p) == b
 b = b"\x79\x09\x20\x01\x02\x03\x04\x05\x06\x07\x08\xff"
 assert DHCP(b).options == [("classless_static_routes", ["1.2.3.4/32:5.6.7.8"]), "end"]
 
+= DHCP options audit - overload and concatenation (RFC 2132 / RFC 3396)
+
+from scapy.layers.dhcp import (
+    DHCPOptionFragment,
+    DHCPOptionsAudit,
+    DHCP_OVERLOAD_BOTH,
+    DHCP_OPTION_AREA_FILE,
+    DHCP_OPTION_AREA_OPTIONS,
+    DHCP_OPTION_AREA_SNAME,
+    dhcp_options_audit,
+)
+
+# A long value (hostname, option 12) split over the main options area, the
+# overloaded "file" field and the overloaded "sname" field. The main area also
+# carries a truncated option 67 and a conflicting second option 52.
+main_opts = (
+    b"\x0c\x05AAAAA"           # hostname fragment A
+    b"\x34\x01\x03"            # dhcp-option-overload = 3 (file + sname)
+    b"\x34\x01\x01"            # conflicting dhcp-option-overload = 1
+    b"\x43\x0aXYZ"             # boot-file-name, truncated (len 10, 3 bytes)
+    b"\xff"
+)
+file_area = b"\x0c\x05BBBBB\xff"
+file_area = file_area + b"\x00" * (128 - len(file_area))
+sname_area = b"\x0c\x05CCCCC\xff"
+sname_area = sname_area + b"\x00" * (64 - len(sname_area))
+
+pkt = BOOTP(raw(BOOTP(
+    options=dhcpmagic + main_opts, file=file_area, sname=sname_area)))
+audit = pkt[DHCP].options_audit()
+
+assert isinstance(audit, DHCPOptionsAudit)
+assert audit.overload == DHCP_OVERLOAD_BOTH
+# RFC 3396: fragments concatenate in protocol order (options, file, sname)
+assert audit.values["hostname"] == b"AAAAABBBBBCCCCC"
+assert [(f.option, f.source, f.position) for f in audit.fragments
+        if f.option == 12] == [
+    (12, DHCP_OPTION_AREA_OPTIONS, 0),
+    (12, DHCP_OPTION_AREA_FILE, 0),
+    (12, DHCP_OPTION_AREA_SNAME, 0),
+]
+# every original fragment is retained with its source, including duplicates
+assert all(isinstance(f, DHCPOptionFragment) for f in audit.fragments)
+assert [f.source for f in audit.fragments].count(DHCP_OPTION_AREA_OPTIONS) == 4
+# the truncated fragment is located and kept out of the concatenated values
+truncated = [f for f in audit.fragments if f.truncated]
+assert len(truncated) == 1
+assert truncated[0].option == 67 and truncated[0].value.startswith(b"XYZ")
+assert "boot-file-name" not in audit.values
+assert any("truncated" in err for err in audit.errors)
+assert any("conflicting" in err for err in audit.errors)
+
+= DHCP options audit - no overload keeps file and sname opaque
+
+file_lookalike = b"\x35\x01\x01\xff" + b"\x00" * 124
+pkt = BOOTP(raw(BOOTP(options=dhcpmagic + b"\x35\x01\x01\xff",
+                      file=file_lookalike)))
+audit = pkt[DHCP].options_audit()
+assert audit.overload is None
+assert [f.source for f in audit.fragments] == [DHCP_OPTION_AREA_OPTIONS]
+assert len(audit.fragments) == 1 and audit.fragments[0].option == 53
+# option-like bytes in "file" are boot file data, never parsed as options
+assert pkt.file[:4] == b"\x35\x01\x01\xff"
+assert audit.errors == []
+
+# an invalid overload value does not authorize reading the overloaded fields
+pkt = BOOTP(raw(BOOTP(options=dhcpmagic + b"\x34\x01\x04\xff",
+                      file=file_lookalike)))
+audit = pkt[DHCP].options_audit()
+assert audit.overload is None
+assert any("invalid dhcp-option-overload" in err for err in audit.errors)
+assert all(f.source == DHCP_OPTION_AREA_OPTIONS for f in audit.fragments)
+assert pkt.file[:4] == b"\x35\x01\x01\xff"
+
+= DHCP options audit - boundaries and standalone use
+
+# data after END is padding; non-PAD trailing bytes are reported
+audit = BOOTP(raw(BOOTP(
+    options=dhcpmagic + b"\x35\x01\x01\xff\x41\x42")))[DHCP].options_audit()
+assert any("after END" in err for err in audit.errors)
+
+# a missing END option is reported
+audit = DHCP(b"\x35\x01\x01").options_audit()
+assert any("missing END" in err for err in audit.errors)
+
+# PAD bytes are skipped and do not alter positions of following options
+audit = DHCP(b"\x00\x00\x35\x01\x01\x00\xff").options_audit()
+assert [(f.option, f.position) for f in audit.fragments] == [(53, 2)]
+assert audit.errors == []
+
+# a TLV running past the area is truncated, not read across the boundary
+audit = DHCP(b"\x35\x01\x01\x63").options_audit()
+assert audit.fragments[-1].truncated and audit.fragments[-1].option == 99
+assert any("truncated" in err for err in audit.errors)
+
+# standalone DHCP layer without a BOOTP underlayer still audits main options
+audit = dhcp_options_audit(DHCP(b"\x35\x01\x01\xff"))
+assert [f.option for f in audit.fragments] == [53]
+assert audit.overload is None and audit.errors == []
+
+= DHCP options audit - build keeps explicit duplicate values
+
+wire = raw(DHCP(options=[("hostname", b"first"),
+                         ("hostname", b"second"), "end"]))
+assert wire == b"\x0c\x05first\x0c\x06second\xff"
+assert DHCP(wire).options == [
+    ("hostname", b"first"), ("hostname", b"second"), "end"]
+audit = DHCP(wire).options_audit()
+assert [f.value for f in audit.fragments if f.option == 12] == [
+    b"first", b"second"]
+assert audit.values["hostname"] == b"firstsecond"
+
 = DHCPOptions
 
 # Issue #2786
