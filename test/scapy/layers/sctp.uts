@@ -331,3 +331,202 @@ assert param1.random != param2.random
 p1 = IP(raw(IP(src=RandIP(), dst=RandIP()) / SCTP(sport=RandShort(), dport=RandShort())))
 p2 = IP(raw(IP(src=RandIP(), dst=p1[IP].src) / ICMP(type=3, code=1) / p1))
 assert p2.answers(p1)
+
+############
+############
++ SCTP user message reassembly
+
+= SCTP reassembly - interleaved DATA streams
+~ sctp
+sctp_data_pkt = lambda tsn, sid, ssn, b, e, payload, **kw: \
+    IP(src=kw.get("src", "10.0.0.1"), dst=kw.get("dst", "10.0.0.2")) / \
+    SCTP(sport=kw.get("sport", 5000), dport=kw.get("dport", 6000)) / \
+    SCTPChunkData(tsn=tsn, stream_id=sid, stream_seq=ssn, beginning=b,
+                  ending=e, unordered=kw.get("unordered", 0),
+                  proto_id=kw.get("ppid", 46), data=payload)
+pkts = [
+    sctp_data_pkt(100, 1, 5, 1, 0, b"Hel"),
+    sctp_data_pkt(103, 2, 1, 1, 0, b"foo"),
+    sctp_data_pkt(101, 1, 5, 0, 0, b"lo "),
+    sctp_data_pkt(104, 2, 1, 0, 1, b"bar"),
+    sctp_data_pkt(102, 1, 5, 0, 1, b"world"),
+]
+msgs = sctp_reassemble(pkts)
+assert len(msgs) == 2
+assert all(m.status == "complete" and m.reason is None for m in msgs)
+by_stream = {m.stream_id: m for m in msgs}
+assert by_stream[1].data == b"Hello world"
+assert by_stream[1].stream_seq == 5
+assert by_stream[1].tsns == (100, 101, 102)
+assert by_stream[1].ppid == 46
+assert by_stream[2].data == b"foobar"
+assert by_stream[2].stream_seq == 1
+
+= SCTP reassembly - TSN wraparound
+~ sctp
+sctp_data_pkt = lambda tsn, sid, ssn, b, e, payload: \
+    IP(src="10.0.0.1", dst="10.0.0.2") / SCTP(sport=5000, dport=6000) / \
+    SCTPChunkData(tsn=tsn, stream_id=sid, stream_seq=ssn, beginning=b,
+                  ending=e, proto_id=46, data=payload)
+pkts = [
+    sctp_data_pkt(0xFFFFFFFE, 1, 6, 1, 0, b"ab"),
+    sctp_data_pkt(0, 1, 6, 0, 1, b"ef"),
+    sctp_data_pkt(0xFFFFFFFF, 1, 6, 0, 0, b"cd"),
+]
+msgs = sctp_reassemble(pkts)
+assert len(msgs) == 1
+assert msgs[0].status == "complete"
+assert msgs[0].data == b"abcdef"
+assert msgs[0].tsns == (0xFFFFFFFE, 0xFFFFFFFF, 0)
+
+= SCTP reassembly - unordered message and retransmission
+~ sctp
+sctp_data_pkt = lambda tsn, ssn, b, e, payload: \
+    IP(src="10.0.0.1", dst="10.0.0.2") / SCTP(sport=5000, dport=6000) / \
+    SCTPChunkData(tsn=tsn, stream_id=1, stream_seq=ssn, beginning=b,
+                  ending=e, unordered=1, proto_id=46, data=payload)
+pkts = [
+    sctp_data_pkt(10, 1, 1, 0, b"ab"),
+    sctp_data_pkt(10, 1, 1, 0, b"ab"),
+    sctp_data_pkt(11, 1, 0, 0, b"cd"),
+    sctp_data_pkt(11, 1, 0, 0, b"cd"),
+    sctp_data_pkt(12, 1, 0, 1, b"ef"),
+]
+msgs = sctp_reassemble(pkts)
+assert len(msgs) == 1
+assert msgs[0].status == "complete"
+assert msgs[0].unordered == 1
+assert msgs[0].data == b"abcdef"
+assert msgs[0].duplicates == 2
+
+= SCTP reassembly - retransmission after completion
+~ sctp
+pkt = IP(src="10.0.0.1", dst="10.0.0.2") / SCTP(sport=5000, dport=6000) / \
+    SCTPChunkData(tsn=10, stream_id=1, stream_seq=1, beginning=1, ending=1,
+                  proto_id=46, data=b"one")
+msgs = sctp_reassemble([pkt, pkt.copy()])
+assert len(msgs) == 1
+assert msgs[0].status == "complete" and msgs[0].data == b"one"
+
+= SCTP reassembly - I-DATA fragments
+~ sctp
+sctp_idata_pkt = lambda tsn, mid, b, e, payload, ppid_fsn: \
+    IP(src="10.0.0.1", dst="10.0.0.2") / SCTP(sport=5000, dport=6000) / \
+    SCTPChunkIData(tsn=tsn, stream_id=0, message_id=mid, beginning=b,
+                   ending=e, ppid_fsn=ppid_fsn, data=payload)
+pkts = [
+    sctp_idata_pkt(10, 7, 1, 0, b"Web", 51),
+    sctp_idata_pkt(13, 8, 1, 1, b"once", 53),
+    sctp_idata_pkt(12, 7, 0, 1, b"RTC", 2),
+    sctp_idata_pkt(11, 7, 0, 0, b"-", 1),
+]
+msgs = sctp_reassemble(pkts)
+assert len(msgs) == 2
+by_mid = {m.message_id: m for m in msgs}
+assert by_mid[7].status == "complete"
+assert by_mid[7].data == b"Web-RTC"
+assert by_mid[7].ppid == 51
+assert by_mid[7].stream_seq is None
+assert by_mid[8].status == "complete"
+assert by_mid[8].data == b"once"
+assert by_mid[8].ppid == 53
+
+= SCTP reassembly - FORWARD-TSN abandonment
+~ sctp
+data = IP(src="10.0.0.1", dst="10.0.0.2") / SCTP(sport=5000, dport=6000) / \
+    SCTPChunkData(tsn=200, stream_id=1, stream_seq=7, beginning=1, ending=0,
+                  proto_id=46, data=b"abc")
+fwd = IP(src="10.0.0.1", dst="10.0.0.2") / SCTP(sport=5000, dport=6000) / \
+    SCTPChunkForwardTSN(new_tsn=205,
+                        skips=[SCTPForwardSkip(stream_id=1, stream_seq=7)])
+after = IP(src="10.0.0.1", dst="10.0.0.2") / SCTP(sport=5000, dport=6000) / \
+    SCTPChunkData(tsn=206, stream_id=1, stream_seq=8, beginning=1, ending=1,
+                  proto_id=46, data=b"after")
+msgs = sctp_reassemble([data, fwd, after])
+assert len(msgs) == 2
+skipped, kept = msgs
+assert skipped.status == "abandoned"
+assert skipped.data is None
+assert "FORWARD-TSN" in skipped.reason
+assert kept.status == "complete" and kept.data == b"after"
+
+= SCTP reassembly - I-FORWARD-TSN abandonment
+~ sctp
+data = IP(src="10.0.0.1", dst="10.0.0.2") / SCTP(sport=5000, dport=6000) / \
+    SCTPChunkIData(tsn=40, stream_id=0, message_id=7, beginning=1, ending=0,
+                   ppid_fsn=51, data=b"Web")
+ifwd = IP(src="10.0.0.1", dst="10.0.0.2") / SCTP(sport=5000, dport=6000) / \
+    SCTPChunkIForwardTSN(new_tsn=50,
+                         skips=[SCTPIForwardSkip(stream_id=0, unordered=0,
+                                                 message_id=7)])
+after = IP(src="10.0.0.1", dst="10.0.0.2") / SCTP(sport=5000, dport=6000) / \
+    SCTPChunkIData(tsn=51, stream_id=0, message_id=8, beginning=1, ending=1,
+                   ppid_fsn=51, data=b"next")
+msgs = sctp_reassemble([data, ifwd, after])
+assert len(msgs) == 2
+skipped, kept = msgs
+assert skipped.status == "abandoned"
+assert skipped.data is None
+assert "I-FORWARD-TSN" in skipped.reason
+assert kept.status == "complete" and kept.data == b"next"
+
+= SCTP reassembly - missing fragments are reported
+~ sctp
+sctp_data_pkt = lambda tsn, ssn, b, e, payload: \
+    IP(src="10.0.0.1", dst="10.0.0.2") / SCTP(sport=5000, dport=6000) / \
+    SCTPChunkData(tsn=tsn, stream_id=1, stream_seq=ssn, beginning=b,
+                  ending=e, proto_id=46, data=payload)
+pkts = [
+    sctp_data_pkt(300, 9, 1, 0, b"xx"),
+    sctp_data_pkt(302, 9, 0, 1, b"zz"),
+    sctp_data_pkt(400, 10, 0, 1, b"tail"),
+]
+msgs = sctp_reassemble(pkts)
+assert len(msgs) == 2
+by_ssn = {m.stream_seq: m for m in msgs}
+gap = by_ssn[9]
+assert gap.status == "incomplete"
+assert gap.data is None
+assert "0x0000012d" in gap.reason  # TSN 301
+tail = by_ssn[10]
+assert tail.status == "incomplete"
+assert "missing beginning fragment" in tail.reason
+
+= SCTP reassembly - directions are separated
+~ sctp
+sctp_data_pkt = lambda tsn, payload, **kw: \
+    IP(src=kw.get("src", "10.0.0.1"), dst=kw.get("dst", "10.0.0.2")) / \
+    SCTP(sport=kw.get("sport", 5000), dport=kw.get("dport", 6000)) / \
+    SCTPChunkData(tsn=tsn, stream_id=1, stream_seq=1, beginning=1, ending=1,
+                  proto_id=46, data=payload)
+pkts = [
+    sctp_data_pkt(1, b"fwd"),
+    sctp_data_pkt(7, b"back", src="10.0.0.2", dst="10.0.0.1",
+                  sport=6000, dport=5000),
+]
+msgs = sctp_reassemble(pkts)
+assert len(msgs) == 2
+assert sorted(m.data for m in msgs) == [b"back", b"fwd"]
+assert msgs[0].association == msgs[1].association
+assert msgs[0].direction != msgs[1].direction
+
+= SCTP reassembly - capture order shuffle
+~ sctp
+import itertools
+sctp_data_pkt = lambda tsn, sid, ssn, b, e, payload: \
+    IP(src="10.0.0.1", dst="10.0.0.2") / SCTP(sport=5000, dport=6000) / \
+    SCTPChunkData(tsn=tsn, stream_id=sid, stream_seq=ssn, beginning=b,
+                  ending=e, proto_id=46, data=payload)
+base = [
+    sctp_data_pkt(100, 1, 5, 1, 0, b"Hel"),
+    sctp_data_pkt(103, 2, 1, 1, 0, b"foo"),
+    sctp_data_pkt(101, 1, 5, 0, 0, b"lo "),
+    sctp_data_pkt(104, 2, 1, 0, 1, b"bar"),
+    sctp_data_pkt(102, 1, 5, 0, 1, b"world"),
+]
+expected = sorted((m.stream_id, m.stream_seq, m.status, m.data)
+                  for m in sctp_reassemble(base))
+for perm in itertools.permutations(base):
+    got = sorted((m.stream_id, m.stream_seq, m.status, m.data)
+                 for m in sctp_reassemble(list(perm)))
+    assert got == expected

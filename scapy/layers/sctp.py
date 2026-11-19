@@ -891,6 +891,324 @@ class SCTPChunkAddressConfAck(SCTPChunkAddressConf):
     type = 0x80
 
 
+# SCTP user message reassembly (offline analysis)
+
+_SCTP_TSN_MODULUS = 1 << 32
+_SCTP_TSN_HALF = 1 << 31
+
+
+def _sctp_tsn_after(tsn, ref):
+    # True if tsn is serially after ref (RFC 1982 arithmetic), so that
+    # 32 bits TSN wraparound is handled.
+    return 0 < (tsn - ref) % _SCTP_TSN_MODULUS < _SCTP_TSN_HALF
+
+
+class SCTPReassembledMessage(object):
+    """An SCTP user message reassembled from DATA or I-DATA chunks.
+
+    Attributes:
+        - association: both endpoints of the association, sorted, each as a
+          (host, port) tuple. host is None for packets without an IP layer.
+        - direction: ((src, sport), (dst, dport)) of the sender.
+        - stream_id: stream the message was received on.
+        - unordered: value of the U bit.
+        - ppid: payload protocol identifier (None if never seen).
+        - stream_seq: stream sequence number (DATA chunks only).
+        - message_id: message identifier (I-DATA chunks only).
+        - data: reassembled user data, or None if the message is not
+          complete. Skipped or missing fragments are never zero-filled.
+        - tsns: TSNs of the fragments used, in serial order.
+        - duplicates: number of retransmitted fragments that were ignored.
+        - status: "complete", "abandoned" or "incomplete".
+        - reason: for non-complete messages, why they could not be
+          reassembled.
+    """
+
+    def __init__(self, association, direction, stream_id, unordered, ppid,
+                 stream_seq=None, message_id=None, data=None, tsns=(),
+                 duplicates=0, status="incomplete", reason=None):
+        self.association = association
+        self.direction = direction
+        self.stream_id = stream_id
+        self.unordered = unordered
+        self.ppid = ppid
+        self.stream_seq = stream_seq
+        self.message_id = message_id
+        self.data = data
+        self.tsns = tsns
+        self.duplicates = duplicates
+        self.status = status
+        self.reason = reason
+
+    def __repr__(self):
+        ident = ("ssn=%d" % self.stream_seq if self.message_id is None
+                 else "mid=%d" % self.message_id)
+        length = "none" if self.data is None else str(len(self.data))
+        return "<SCTPReassembledMessage stream=%d %s status=%s len=%s>" % (
+            self.stream_id, ident, self.status, length)
+
+
+class _SCTPPartialMessage(object):
+    """Fragments of a single user message, keyed by TSN."""
+
+    def __init__(self, unordered):
+        self.unordered = unordered
+        self.ppid = None
+        self.fragments = {}  # tsn -> data
+        self.begin_tsn = None
+        self.end_tsn = None
+        self.duplicates = 0
+        self.order = 0
+
+    def add(self, tsn, data, beginning, ending):
+        if tsn in self.fragments:
+            # retransmission: keep the first copy
+            self.duplicates += 1
+            return
+        self.fragments[tsn] = data
+        if beginning:
+            self.begin_tsn = tsn
+        if ending:
+            self.end_tsn = tsn
+
+    def missing_tsns(self):
+        if self.begin_tsn is None or self.end_tsn is None:
+            return None
+        count = (self.end_tsn - self.begin_tsn) % _SCTP_TSN_MODULUS + 1
+        return [(self.begin_tsn + i) % _SCTP_TSN_MODULUS
+                for i in range(count)
+                if (self.begin_tsn + i) % _SCTP_TSN_MODULUS
+                not in self.fragments]
+
+    def is_complete(self):
+        missing = self.missing_tsns()
+        return missing is not None and not missing
+
+    def assemble(self):
+        count = (self.end_tsn - self.begin_tsn) % _SCTP_TSN_MODULUS + 1
+        return b"".join(
+            self.fragments[(self.begin_tsn + i) % _SCTP_TSN_MODULUS]
+            for i in range(count))
+
+    def sorted_tsns(self):
+        if self.begin_tsn is not None:
+            base = self.begin_tsn
+        else:
+            base = min(self.fragments)
+        return sorted(self.fragments,
+                      key=lambda t: (t - base) % _SCTP_TSN_MODULUS)
+
+    def incomplete_reason(self):
+        reasons = []
+        if self.begin_tsn is None:
+            reasons.append("missing beginning fragment")
+        if self.end_tsn is None:
+            reasons.append("missing ending fragment")
+        missing = self.missing_tsns()
+        if missing:
+            reasons.append("missing fragments with TSNs %s" % ", ".join(
+                "0x%08x" % t for t in missing))
+        return "; ".join(reasons)
+
+
+class SCTPReassembler(object):
+    """Reassemble SCTP user messages from offline traffic.
+
+    Feed packets read in memory (rdpcap(), PacketList, or any iterable of
+    packets); no network association is created. DATA and I-DATA chunks are
+    reassembled per association, direction, stream and message identity
+    (stream sequence number for DATA, message identifier for I-DATA), so
+    fragments of messages from two streams may be interleaved. TSN
+    wraparound, unordered messages, retransmissions and FORWARD-TSN /
+    I-FORWARD-TSN skips are handled; skipped fragments are never
+    zero-filled into a message published as complete.
+    """
+
+    def __init__(self):
+        self._partial = {}     # (direction, stream_id, ident) -> partial
+        self._finalized = []   # (creation order, SCTPReassembledMessage)
+        self._counter = 0      # creation order of partial messages
+        self._fwd_tsn = {}     # direction -> highest skipped TSN
+        self._skipped = set()  # (direction, stream_id, ident) skipped
+        self._done = {}        # key -> TSN ranges of completed messages
+
+    def feed(self, pkt):
+        """Process one packet; return messages finalized by it."""
+        sctp = pkt.getlayer(SCTP)
+        if sctp is None:
+            return []
+        src = dst = None
+        if IP in pkt:
+            src, dst = pkt[IP].src, pkt[IP].dst
+        elif IPv6 in pkt:
+            src, dst = pkt[IPv6].src, pkt[IPv6].dst
+        direction = ((src, sctp.sport), (dst, sctp.dport))
+        association = tuple(sorted(direction))
+        done = []
+        for chunk in sctp.iterpayloads():
+            if isinstance(chunk, SCTPChunkIData):
+                done += self._add_fragment(
+                    association, direction, chunk,
+                    ("idata", chunk.unordered, chunk.message_id))
+            elif isinstance(chunk, SCTPChunkData):
+                done += self._add_fragment(
+                    association, direction, chunk,
+                    ("data", chunk.stream_seq))
+            elif isinstance(chunk, SCTPChunkIForwardTSN):
+                done += self._forward(association, direction, chunk, True)
+            elif isinstance(chunk, SCTPChunkForwardTSN):
+                done += self._forward(association, direction, chunk, False)
+        return done
+
+    def process(self, pkt):
+        """Alias of feed(), for use as a scapy session helper."""
+        return self.feed(pkt)
+
+    def _add_fragment(self, association, direction, chunk, ident):
+        key = (direction, chunk.stream_id, ident)
+        if key in self._skipped:
+            # fragment of a message skipped by FORWARD-TSN
+            return []
+        fwd = self._fwd_tsn.get(direction)
+        if fwd is not None and not _sctp_tsn_after(chunk.tsn, fwd):
+            # retransmission of a fragment skipped by FORWARD-TSN
+            if key in self._partial:
+                return [self._finalize(
+                    key, association, "abandoned",
+                    "abandoned: TSN 0x%08x skipped by FORWARD-TSN "
+                    "(new cumulative TSN 0x%08x)" % (chunk.tsn, fwd))]
+            return []
+        for begin, end in self._done.get(key, []):
+            if ((chunk.tsn - begin) % _SCTP_TSN_MODULUS <=
+                    (end - begin) % _SCTP_TSN_MODULUS):
+                # retransmission of an already delivered message
+                return []
+        buf = self._partial.get(key)
+        done = []
+        if buf is None:
+            buf = _SCTPPartialMessage(chunk.unordered)
+            buf.order = self._counter
+            self._counter += 1
+            self._partial[key] = buf
+        elif (chunk.beginning and buf.begin_tsn is not None and
+                buf.begin_tsn != chunk.tsn):
+            # identity reused (e.g. unordered SSN reuse): the previous
+            # message can never complete
+            done.append(self._finalize(key, association, "incomplete",
+                                       buf.incomplete_reason()))
+            buf = _SCTPPartialMessage(chunk.unordered)
+            buf.order = self._counter
+            self._counter += 1
+            self._partial[key] = buf
+        if isinstance(chunk, SCTPChunkIData):
+            if chunk.beginning:
+                # ppid_fsn carries the PPID only in the first fragment
+                buf.ppid = chunk.ppid_fsn
+        else:
+            buf.ppid = chunk.proto_id
+        buf.add(chunk.tsn, raw(chunk.data), chunk.beginning, chunk.ending)
+        if buf.is_complete():
+            done.append(self._finalize(key, association, "complete", None))
+        return done
+
+    def _forward(self, association, direction, chunk, idata):
+        name = "I-FORWARD-TSN" if idata else "FORWARD-TSN"
+        new_tsn = chunk.new_tsn
+        prev = self._fwd_tsn.get(direction)
+        if prev is None or _sctp_tsn_after(new_tsn, prev):
+            self._fwd_tsn[direction] = new_tsn
+        raw_skips = b"".join(raw(skip) for skip in chunk.skips)
+        done = []
+        idents = []
+        if idata:
+            for off in range(0, len(raw_skips) - 7, 8):
+                stream_id, flags, mid = struct.unpack(
+                    ">HHI", raw_skips[off:off + 8])
+                idents.append((stream_id, ("idata", flags & 1, mid)))
+        else:
+            for off in range(0, len(raw_skips) - 3, 4):
+                stream_id, ssn = struct.unpack(
+                    ">HH", raw_skips[off:off + 4])
+                idents.append((stream_id, ("data", ssn)))
+        for stream_id, ident in idents:
+            key = (direction, stream_id, ident)
+            self._skipped.add(key)
+            if key in self._partial:
+                done.append(self._finalize(
+                    key, association, "abandoned",
+                    "abandoned: skipped by %s "
+                    "(new cumulative TSN 0x%08x)" % (name, new_tsn)))
+        # any other partial message fully covered by the skip can never
+        # complete either
+        for key in list(self._partial):
+            if key[0] != direction or key in self._skipped:
+                continue
+            buf = self._partial[key]
+            if buf.begin_tsn is not None:
+                skipped = not _sctp_tsn_after(buf.begin_tsn, new_tsn)
+            else:
+                skipped = all(not _sctp_tsn_after(tsn, new_tsn)
+                              for tsn in buf.fragments)
+            if skipped:
+                done.append(self._finalize(
+                    key, association, "abandoned",
+                    "abandoned: fragments skipped by %s "
+                    "(new cumulative TSN 0x%08x)" % (name, new_tsn)))
+        return done
+
+    def _finalize(self, key, association, status, reason):
+        direction, stream_id, ident = key
+        buf = self._partial.pop(key)
+        if ident[0] == "idata":
+            stream_seq, message_id = None, ident[2]
+        else:
+            stream_seq, message_id = ident[1], None
+        data = buf.assemble() if status == "complete" else None
+        if status == "complete":
+            self._done.setdefault(key, []).append(
+                (buf.begin_tsn, buf.end_tsn))
+        msg = SCTPReassembledMessage(
+            association, direction, stream_id, buf.unordered, buf.ppid,
+            stream_seq=stream_seq, message_id=message_id, data=data,
+            tsns=tuple(buf.sorted_tsns()), duplicates=buf.duplicates,
+            status=status, reason=reason)
+        self._finalized.append((buf.order, msg))
+        return msg
+
+    @property
+    def messages(self):
+        """Messages finalized so far, in first-fragment order."""
+        return [msg for _, msg in sorted(self._finalized,
+                                         key=lambda item: item[0])]
+
+    def flush(self):
+        """Finalize pending messages as incomplete and return all of them.
+
+        Messages that could not be reassembled are kept with the reason
+        (missing beginning/ending fragment, missing TSNs).
+        """
+        for key in sorted(self._partial,
+                          key=lambda k: self._partial[k].order):
+            direction = key[0]
+            association = tuple(sorted(direction))
+            buf = self._partial[key]
+            self._finalize(key, association, "incomplete",
+                           buf.incomplete_reason())
+        return self.messages
+
+
+def sctp_reassemble(pkts):
+    """Reassemble SCTP user messages from in-memory packets.
+
+    Returns the list of SCTPReassembledMessage (complete, abandoned and
+    incomplete) found in pkts.
+    """
+    reassembler = SCTPReassembler()
+    for pkt in pkts:
+        reassembler.feed(pkt)
+    return reassembler.flush()
+
+
 bind_layers(IP, SCTP, proto=IPPROTO_SCTP)
 bind_layers(IPerror, SCTPerror, proto=IPPROTO_SCTP)
 bind_layers(IPv6, SCTP, nh=IPPROTO_SCTP)
