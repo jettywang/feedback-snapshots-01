@@ -7,6 +7,7 @@ from typing import Optional
 from . import audit
 from . import baseline
 from . import filters
+from . import fingerprint
 from . import plugins
 from . import scan
 from ...settings import get_settings
@@ -83,6 +84,8 @@ class ParserBuilder:
 
         audit.add_audit_action(subparser)
         self._post_processors.append(audit.parse_args)
+
+        fingerprint.add_fingerprint_action(subparser)
         return self
 
     def add_pre_commit_arguments(self) -> 'ParserBuilder':

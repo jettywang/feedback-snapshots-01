@@ -14,8 +14,13 @@ from .core.scan import scan_line
 from .core.secrets_collection import SecretsCollection
 from .core.usage import ParserBuilder
 from .exceptions import InvalidBaselineError
+from .exceptions import UnableToReadBaselineError
 from .settings import get_plugins
 from .settings import get_settings
+from .util.fingerprint import FingerprintConfig
+from .util.fingerprint import FingerprintConfigError
+from .util.fingerprint import annotate_baseline
+from .util.fingerprint import verify_baseline
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -30,6 +35,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         handle_scan_action(args)
     elif args.action == 'audit':
         handle_audit_action(args)
+    elif args.action == 'fingerprint':
+        return handle_fingerprint_action(args)
 
     return 0
 
@@ -152,3 +159,35 @@ def handle_audit_action(args: argparse.Namespace) -> None:
                 audit.audit_baseline(args.filename[0])
     except InvalidBaselineError:
         pass
+
+
+def handle_fingerprint_action(args: argparse.Namespace) -> int:
+    try:
+        config = FingerprintConfig.from_file(args.config)
+        loaded_baseline = baseline.load_from_file(args.filename)
+    except (FingerprintConfigError, UnableToReadBaselineError) as e:
+        print(str(e), file=sys.stderr)
+        return 1
+
+    if args.verify:
+        matched, total, failures = verify_baseline(loaded_baseline, config)
+        print(f'verified {matched}/{total} outbound fingerprint(s)')
+        if failures:
+            print(json.dumps({'failures': failures}, indent=2), file=sys.stderr)
+            return 1
+        return 0
+
+    try:
+        annotated = annotate_baseline(loaded_baseline, config, scope=args.scope)
+    except FingerprintConfigError as e:
+        print(str(e), file=sys.stderr)
+        return 1
+
+    output = json.dumps(annotated, indent=2)
+    if args.output:
+        with open(args.output, 'w') as f:
+            f.write(output + '\n')
+    else:
+        print(output)
+
+    return 0

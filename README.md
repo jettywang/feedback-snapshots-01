@@ -625,6 +625,17 @@ $ detect-secrets scan --gibberish-model custom.model
 
 This is not a default plugin, given that this will ignore secrets such as `password`.
 
+### Outbound Fingerprints
+
+When multiple companies send findings to a shared aggregation system, the
+`fingerprint` subcommand adds tenant-scoped, keyed fingerprints
+(`outbound_fingerprint`) that correlate the same secret only within an approved
+scope, while leaving the local `hashed_secret` (and therefore audit
+compatibility) unchanged. Versioned keys support rolling the aggregation config
+without breaking verification of fingerprints minted during the transition.
+See [outbound fingerprints](docs/outbound-fingerprints.md) for the config format
+and rotation workflow.
+
 ## Caveats
 
 This is not meant to be a sure-fire solution to prevent secrets from entering the codebase. Only
