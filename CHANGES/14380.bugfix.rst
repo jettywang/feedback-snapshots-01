@@ -1,0 +1,6 @@
+Harden :class:`aiohttp.web.FileResponse` conditional-request and range
+handling so a failed precondition can never leak bytes of the protected
+file. Conditions and byte ranges are now decided by independent,
+explicitly-ordered evaluators against a single frozen representation,
+with strong/weak ETag, HTTP-date precision, If-Range, HEAD and compressed
+variants measured from the representation actually sent.
