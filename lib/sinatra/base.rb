@@ -23,6 +23,7 @@ require 'sinatra/indifferent_hash'
 require 'sinatra/show_exceptions'
 require 'sinatra/version'
 
+require_relative 'middleware/content_security_policy'
 require_relative 'middleware/logger'
 
 module Sinatra
