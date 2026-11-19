@@ -1,0 +1,82 @@
+[
+  {
+    "model": "auditlog.logentry",
+    "pk": 1,
+    "fields": {
+      "content_type": ["test_app", "simplemodel"],
+      "object_pk": "1",
+      "object_id": 1,
+      "object_repr": "Simple object 1",
+      "action": 0,
+      "changes_text": "",
+      "changes": null,
+      "timestamp": "2026-01-10T12:00:00Z"
+    }
+  },
+  {
+    "model": "auditlog.logentry",
+    "pk": 2,
+    "fields": {
+      "content_type": ["test_app", "simplemodel"],
+      "object_pk": "1",
+      "object_id": 1,
+      "object_repr": "Simple object 1",
+      "action": 1,
+      "changes_text": "",
+      "changes": null,
+      "timestamp": "2026-02-15T12:00:00Z"
+    }
+  },
+  {
+    "model": "auditlog.logentry",
+    "pk": 3,
+    "fields": {
+      "content_type": ["test_app", "simplemodel"],
+      "object_pk": "2",
+      "object_id": 2,
+      "object_repr": "Simple object 2",
+      "action": 0,
+      "changes_text": "",
+      "changes": null,
+      "timestamp": "2026-02-20T12:00:00Z"
+    }
+  },
+  {
+    "model": "auditlog.logentry",
+    "pk": 4,
+    "fields": {
+      "content_type": ["test_app", "simplemodel"],
+      "object_pk": "3",
+      "object_id": 3,
+      "object_repr": "Simple object 3",
+      "action": 2,
+      "changes_text": "",
+      "changes": null,
+      "timestamp": "2026-03-05T12:00:00Z"
+    }
+  },
+  {
+    "model": "auditlog.logentryhold",
+    "pk": 1,
+    "fields": {
+      "name": "Litigation hold ACME",
+      "reason": "Pending litigation, keep object 1 records.",
+      "content_type": ["test_app", "simplemodel"],
+      "object_pk": "1",
+      "created": "2026-01-05T00:00:00Z",
+      "expires_at": "2027-01-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "auditlog.logentryhold",
+    "pk": 2,
+    "fields": {
+      "name": "Tax review 2025",
+      "reason": "Overlapping tax review on object 1 records.",
+      "content_type": ["test_app", "simplemodel"],
+      "object_pk": "1",
+      "created": "2026-02-01T00:00:00Z",
+      "expires_at": "2026-02-25T00:00:00Z"
+    }
+  }
+]

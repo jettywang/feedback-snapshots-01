@@ -2,6 +2,10 @@
 
 ## Next Release
 
+#### Improvements
+
+- Add `LogEntryHold` legal holds and extend `auditlogflush` with a `--dry-run` preview, hold-aware deletion and `--batch-size` batched execution
+
 ## 3.4.2 (2026-11-08)
 
 #### Improvements

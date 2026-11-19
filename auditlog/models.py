@@ -574,6 +574,80 @@ class LogEntry(AbstractLogEntry):
         swappable = "AUDITLOG_LOGENTRY_MODEL"
 
 
+class LogEntryHoldManager(models.Manager):
+    """
+    Custom manager for the :py:class:`LogEntryHold` model.
+    """
+
+    def active(self, *, now=None) -> QuerySet:
+        """
+        Return the holds that are in effect at the given moment (defaults to now).
+        A hold is active until its expiry; holds without an expiry never lapse.
+        """
+        now = now or django_timezone.now()
+        return self.filter(Q(expires_at__isnull=True) | Q(expires_at__gt=now))
+
+    def protection_query(self, *, now=None) -> Q | None:
+        """
+        Build a :py:class:`Q` object matching the log entries protected by active
+        holds, or ``None`` when no hold is active. The query is evaluated against
+        the current database state every time it is used, so holds created after
+        a preview still protect their entries at deletion time.
+        """
+        combined = None
+        for hold in self.active(now=now).iterator():
+            condition = Q()
+            if hold.content_type_id is not None:
+                condition &= Q(content_type_id=hold.content_type_id)
+            if hold.object_pk:
+                condition &= Q(object_pk=hold.object_pk)
+            combined = condition if combined is None else combined | condition
+        return combined
+
+
+class LogEntryHold(models.Model):
+    """
+    Represents a legal hold that temporarily protects log entries from deletion.
+
+    A hold matches log entries by content type and/or object primary key. A hold
+    with neither set protects every log entry. Holds stay in effect until
+    ``expires_at``; a ``null`` expiry means the hold applies indefinitely.
+    """
+
+    name = models.CharField(max_length=255, verbose_name=_("name"))
+    reason = models.TextField(blank=True, verbose_name=_("reason"))
+    content_type = models.ForeignKey(
+        to="contenttypes.ContentType",
+        on_delete=models.CASCADE,
+        blank=True,
+        null=True,
+        related_name="+",
+        verbose_name=_("content type"),
+    )
+    object_pk = models.CharField(
+        blank=True,
+        db_index=True,
+        max_length=255,
+        null=True,
+        verbose_name=_("object pk"),
+    )
+    created = models.DateTimeField(
+        default=django_timezone.now, verbose_name=_("created")
+    )
+    expires_at = models.DateTimeField(
+        blank=True, null=True, verbose_name=_("expires at")
+    )
+
+    objects = LogEntryHoldManager()
+
+    class Meta:
+        verbose_name = _("log entry hold")
+        verbose_name_plural = _("log entry holds")
+
+    def __str__(self):
+        return self.name
+
+
 class AuditlogHistoryField(GenericRelation):
     """
     A subclass of py:class:`django.contrib.contenttypes.fields.GenericRelation` that sets some default

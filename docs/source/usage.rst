@@ -642,6 +642,30 @@ log entries prior to a given date. This may be used to implement time based rete
 
 .. versionadded:: 2.1.0
 
+Legal holds
+^^^^^^^^^^^
+
+Legal teams can temporarily preserve audit records by creating
+:py:class:`auditlog.models.LogEntryHold` records. A hold matches log entries by
+content type and/or object primary key (a hold with neither set protects every
+entry) and stays in effect until its ``expires_at`` timestamp; a hold without
+an expiry applies indefinitely.
+
+The ``auditlogflush`` command never deletes entries covered by an active hold,
+and ``--truncate`` is refused while any hold is active. Use ``--dry-run`` to
+preview the retention cutoff, the active holds with their effective expiry and
+the actually deletable entries without writing to the database::
+
+    python manage.py auditlogflush --before-date 2026-03-01 --dry-run
+
+Deletion re-checks the holds stored in the database at execution time, so a
+hold created after a preview is still honored and its entries are not deleted
+on the authority of that stale preview. With ``--batch-size`` the entries are
+deleted in batches and holds are re-evaluated before each batch. After each
+run the command reports how many objects were deleted and how many remain
+protected by active holds, so re-running it explains what was already
+processed and what is still protected.
+
 .. warning::
 
     Using the ``auditlogflush`` command deletes log entries permanently and irreversibly from the database.
