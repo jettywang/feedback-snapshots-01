@@ -6,6 +6,7 @@ from typing import Any
 from typing import Dict
 from typing import Generator
 from typing import List
+from typing import Optional
 from urllib.parse import urlparse
 
 from .exceptions import InvalidFile
@@ -51,6 +52,9 @@ def configure_settings_from_baseline(baseline: Dict[str, Any], filename: str = '
                 model_path=config.get('model'),
                 limit=config['limit'],
             )
+
+    if 'diff_input_limit' in baseline:
+        settings.configure_diff_input_limit(baseline['diff_input_limit'])
 
     if filename:
         settings.filters['detect_secrets.filters.common.is_baseline_file'] = {
@@ -154,9 +158,27 @@ class Settings:
             }
         }
 
+        # Maximum size (in bytes) of a diff input that will be scanned. ``None``
+        # means that no limit is applied.
+        self.diff_input_limit: Optional[int] = None
+
     def set(self, other: 'Settings') -> None:
         self.plugins = other.plugins
         self.filters = other.filters
+        self.diff_input_limit = other.diff_input_limit
+
+    def configure_diff_input_limit(self, limit: Optional[int]) -> 'Settings':
+        """
+        :param limit: maximum diff input size (in bytes) that will be scanned,
+            or ``None`` to remove the limit.
+        :raises: ValueError if the limit is not a positive integer
+        """
+        if limit is not None:
+            if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+                raise ValueError('diff_input_limit must be a positive integer')
+
+        self.diff_input_limit = limit
+        return self
 
     def configure_plugins(self, config: List[Dict[str, Any]]) -> 'Settings':
         """
@@ -239,7 +261,7 @@ class Settings:
                 **serialized_plugin,
             })
 
-        return {
+        output = {
             'plugins_used': sorted(
                 plugins_used,
                 key=lambda x: str(x['name'].lower()),
@@ -256,6 +278,10 @@ class Settings:
                 key=lambda x: str(x['path'].lower()),
             ),
         }
+        if self.diff_input_limit is not None:
+            output['diff_input_limit'] = self.diff_input_limit
+
+        return output
 
 
 @lru_cache(maxsize=1)

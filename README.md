@@ -205,6 +205,31 @@ with transient_settings({
     secrets.scan_file('test_data/config.ini')
 ```
 
+### Limiting diff input size
+
+Services that accept uploaded change diffs can cap how much diff input a single
+scan will consume, independently of regular multi-file scans. Configure
+`diff_input_limit` (in bytes) through the same settings/baseline format; omit it
+(or set it to `None`) to leave the input unlimited:
+
+```python
+with transient_settings({
+    'plugins_used': [{'name': 'HexHighEntropyString', 'limit': 3}],
+    'diff_input_limit': 1_048_576,
+}):
+    try:
+        secrets.scan_diff(diff)
+    except DiffInputLimitExceeded as error:
+        # Distinct from "no secrets found": the input could not be read in full.
+        # `error.scanned_files` maps each fully-covered file to its target line
+        # range, and `error.partial_file` names the file that was interrupted.
+        ...
+```
+
+When the limit is reached (or an underlying chunk cannot be read), secrets from
+already-completed files are still reported with their original line numbers, and
+`DiffInputLimitExceeded` carries the coverage of those completed fragments.
+
 ## Installation
 
 ```bash

@@ -5,6 +5,8 @@ from pathlib import Path
 import pytest
 
 from detect_secrets.core import scan
+from detect_secrets.exceptions import DiffInputLimitExceeded
+from detect_secrets.settings import get_settings
 from detect_secrets.settings import transient_settings
 from detect_secrets.util import git
 from detect_secrets.util.path import get_relative_path_if_in_cwd
@@ -95,6 +97,231 @@ class TestScanFile:
             f.seek(0)
 
             assert not list(scan.scan_file(f.name))
+
+
+SECRET_VALUE = '2b00042f7481c7b056c4b410d28f33cf'
+
+
+def _make_diff() -> str:
+    return textwrap.dedent(f"""
+        diff --git a/alpha.py b/alpha.py
+        index 1111111..2222222 100644
+        --- a/alpha.py
+        +++ b/alpha.py
+        @@ -1,3 +1,4 @@
+         line1
+         line2
+        +first_secret = "{SECRET_VALUE}"
+         line4
+        diff --git a/beta.py b/beta.py
+        index 3333333..4444444 100644
+        --- a/beta.py
+        +++ b/beta.py
+        @@ -1,3 +1,4 @@
+         one
+         two
+        +second_secret = "{SECRET_VALUE}"
+         four
+        @@ -10,3 +11,4 @@
+         ten
+         eleven
+        +third_secret = "{SECRET_VALUE}"
+         thirteen
+        """)[1:]
+
+
+class TestScanDiffInputLimit:
+    @pytest.fixture(autouse=True)
+    def configure_diff_scan(self, tmp_path, monkeypatch):
+        # The default `is_invalid_file` filter skips paths that don't exist on disk.
+        (tmp_path / 'alpha.py').touch()
+        (tmp_path / 'beta.py').touch()
+        monkeypatch.chdir(tmp_path)
+
+        with transient_settings({
+            'plugins_used': [
+                {
+                    'name': 'HexHighEntropyString',
+                    'limit': 3,
+                },
+            ],
+            'filters_used': [],
+        }):
+            yield
+
+    @staticmethod
+    def _write_diff(tmp_path, diff):
+        diff_file = tmp_path / 'change.diff'
+        diff_file.write_text(diff)
+        with open(diff_file) as handle:
+            return handle.read()
+
+    @staticmethod
+    def test_no_limit_scans_everything_with_original_line_numbers(tmp_path):
+        diff = TestScanDiffInputLimit._write_diff(tmp_path, _make_diff())
+
+        results = list(scan.scan_diff(diff))
+
+        assert sorted(
+            (secret.filename, secret.line_number)
+            for secret in results
+        ) == [
+            ('alpha.py', 3),
+            ('beta.py', 3),
+            ('beta.py', 13),
+        ]
+
+    @staticmethod
+    def test_limit_equal_to_input_size_succeeds(tmp_path):
+        raw_diff = _make_diff()
+        diff = TestScanDiffInputLimit._write_diff(tmp_path, raw_diff)
+        get_settings().configure_diff_input_limit(len(raw_diff.encode('utf-8')))
+
+        results = list(scan.scan_diff(diff))
+
+        assert len(results) == 3
+        assert all(secret.line_number for secret in results)
+
+    @staticmethod
+    def test_limit_one_byte_over_fails_without_being_confused_with_no_findings(tmp_path):
+        raw_diff = _make_diff()
+        diff = TestScanDiffInputLimit._write_diff(tmp_path, raw_diff)
+        get_settings().configure_diff_input_limit(len(raw_diff.encode('utf-8')) - 1)
+
+        with pytest.raises(DiffInputLimitExceeded) as exc_info:
+            list(scan.scan_diff(diff))
+
+        error = exc_info.value
+        assert error.reason == 'limit_exceeded'
+        assert error.bytes_read < len(raw_diff.encode('utf-8'))
+        # The complete first file is reported as covered; the second one is partial.
+        assert error.scanned_files == {'alpha.py': (1, 4)}
+        assert error.partial_file == 'beta.py'
+
+    @staticmethod
+    def test_secrets_from_completed_fragments_are_still_yielded(tmp_path):
+        diff = TestScanDiffInputLimit._write_diff(tmp_path, _make_diff())
+        # Stop inside the first hunk of beta.py: alpha.py must already be reported.
+        cutoff = diff.index('+second_secret')
+        get_settings().configure_diff_input_limit(cutoff)
+
+        results = []
+        with pytest.raises(DiffInputLimitExceeded) as exc_info:
+            for secret in scan.scan_diff(diff):
+                results.append(secret)
+
+        assert [(secret.filename, secret.line_number) for secret in results] == [
+            ('alpha.py', 3),
+        ]
+        assert exc_info.value.scanned_files == {'alpha.py': (1, 4)}
+        assert exc_info.value.partial_file == 'beta.py'
+
+    @staticmethod
+    def test_multiple_hunks_accumulate_against_the_budget(tmp_path):
+        diff = TestScanDiffInputLimit._write_diff(tmp_path, _make_diff())
+        # The limit is reached after beta.py's first hunk, but before its second one.
+        cutoff = diff.index('@@ -10,3')
+        get_settings().configure_diff_input_limit(cutoff)
+
+        results = []
+        with pytest.raises(DiffInputLimitExceeded) as exc_info:
+            for secret in scan.scan_diff(diff):
+                results.append(secret)
+
+        # alpha.py fully scanned, beta.py's first hunk fully scanned: two findings,
+        # each with its original line number.
+        assert sorted(
+            (secret.filename, secret.line_number)
+            for secret in results
+        ) == [
+            ('alpha.py', 3),
+            ('beta.py', 3),
+        ]
+        assert exc_info.value.scanned_files == {
+            'alpha.py': (1, 4),
+            'beta.py': (1, 4),
+        }
+
+    @staticmethod
+    def test_unreadable_chunk_is_reported_distinctly(tmp_path):
+        diff = _make_diff()
+        diff_file = tmp_path / 'change.diff'
+        diff_file.write_text(diff)
+
+        cutoff = diff.index('+second_secret')
+        lines = diff.splitlines(keepends=True)
+        fail_after = 0
+        consumed = 0
+        for line in lines:
+            if consumed >= cutoff:
+                break
+            consumed += len(line.encode('utf-8'))
+            fail_after += 1
+
+        class FailingLineIterator:
+            """Simulates a diff whose later chunk cannot be read from disk."""
+
+            def __init__(self, handle):
+                self._handle = handle
+                self.remaining = fail_after
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                if self.remaining == 0:
+                    raise OSError('chunk unreadable')
+                self.remaining -= 1
+                return next(self._handle)
+
+        with open(diff_file) as handle:
+            reader = scan._DiffInputReader(FailingLineIterator(handle), None)
+            results = []
+            with pytest.raises(DiffInputLimitExceeded) as exc_info:
+                for filename, file_lines in scan._iter_lines_from_diff(reader):
+                    results.append(filename)
+
+        assert results == ['alpha.py']
+        error = exc_info.value
+        assert error.reason == 'unreadable_input'
+        assert error.partial_file == 'beta.py'
+        assert isinstance(error.__cause__, OSError)
+
+    @staticmethod
+    def test_partial_file_is_reported_even_without_added_lines(tmp_path):
+        (tmp_path / 'only.py').touch()
+        diff = textwrap.dedent("""
+            diff --git a/only.py b/only.py
+            --- a/only.py
+            +++ b/only.py
+            @@ -1,2 +1,1 @@
+            -removed line
+             keep
+            """)[1:]
+        lines = diff.splitlines(keepends=True)
+        cutoff = sum(len(line.encode('utf-8')) for line in lines[:5]) + 5
+        get_settings().configure_diff_input_limit(cutoff)
+
+        with pytest.raises(DiffInputLimitExceeded) as exc_info:
+            list(scan.scan_diff(diff))
+
+        assert exc_info.value.partial_file == 'only.py'
+        assert exc_info.value.scanned_files == {}
+
+    @staticmethod
+    def test_limit_must_be_a_positive_integer(tmp_path):
+        for invalid_value in (0, -1, '100', 1.5, True):
+            with pytest.raises(ValueError):
+                get_settings().configure_diff_input_limit(invalid_value)
+
+    @staticmethod
+    def test_limit_is_serialized_in_settings(tmp_path):
+        get_settings().configure_diff_input_limit(1024)
+
+        assert get_settings().json()['diff_input_limit'] == 1024
+
+        get_settings().configure_diff_input_limit(None)
+        assert 'diff_input_limit' not in get_settings().json()
 
 
 @pytest.fixture(autouse=True)

@@ -261,6 +261,13 @@ as follows ([source](https://excalidraw.com/#json=5441829822529536,SgbuvKed2Xzhz
   out [`detect-secrets-server`](https://github.com/Yelp/detect-secrets-server) or call the API
   yourself (via `SecretsCollection.scan_diff`).
 
+Diff scanning supports an independent, configurable input cap (`diff_input_limit`,
+in bytes). When the cap is reached, or an input chunk cannot be read, the scan
+raises `DiffInputLimitExceeded` rather than silently treating the partial input as
+"no secrets found". Secrets from fully-consumed files are yielded first with their
+original line numbers, and the exception reports each completed file's covered
+target line range plus the interrupted file (if any).
+
 ## Audits
 
 `detect-secrets audit` refers to a collection of features that allow for easier manual

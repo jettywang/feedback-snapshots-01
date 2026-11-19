@@ -79,6 +79,10 @@ class SecretsCollection:
     def scan_diff(self, diff: str) -> None:
         """
         :raises: UnidiffParseError
+        :raises: DiffInputLimitExceeded if the configured ``diff_input_limit`` is
+            reached, or the diff cannot be read in full. Secrets from fully-consumed
+            files are already stored in the collection when this is raised; the
+            exception's ``scanned_files`` reports their coverage.
         """
         try:
             for secret in scan.scan_diff(diff):

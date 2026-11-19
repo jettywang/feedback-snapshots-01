@@ -1,9 +1,11 @@
+import textwrap
 from pathlib import Path
 from unittest import mock
 
 import pytest
 
 from detect_secrets.core.secrets_collection import SecretsCollection
+from detect_secrets.exceptions import DiffInputLimitExceeded
 from detect_secrets.settings import get_settings
 from detect_secrets.settings import transient_settings
 from testing.factories import potential_secret_factory
@@ -170,6 +172,76 @@ class TestScanDiff:
             'tests/core/secrets_collection_test.py',
             '.secrets.baseline',
         }
+
+    @staticmethod
+    def test_diff_input_limit_is_configurable_and_reported(tmp_path, monkeypatch):
+        secret = '2b00042f7481c7b056c4b410d28f33cf'
+        diff = textwrap.dedent(f"""
+            diff --git a/first.py b/first.py
+            --- a/first.py
+            +++ b/first.py
+            @@ -1,2 +1,3 @@
+             keep
+            +first = "{secret}"
+             end
+            diff --git a/second.py b/second.py
+            --- a/second.py
+            +++ b/second.py
+            @@ -1,2 +1,3 @@
+             keep
+            +second = "{secret}"
+             end
+            """)[1:]
+
+        (tmp_path / 'first.py').touch()
+        (tmp_path / 'second.py').touch()
+        monkeypatch.chdir(tmp_path)
+
+        with transient_settings({
+            'plugins_used': [{'name': 'HexHighEntropyString', 'limit': 3}],
+            'filters_used': [],
+            'diff_input_limit': len(diff.encode('utf-8')) - 1,
+        }):
+            diff_file = tmp_path / 'change.diff'
+            diff_file.write_text(diff)
+
+            collection = SecretsCollection()
+            with pytest.raises(DiffInputLimitExceeded) as exc_info:
+                with open(diff_file) as f:
+                    collection.scan_diff(f.read())
+
+            # The completed first file is kept, and distinct from "no findings".
+            assert collection.files == {'first.py'}
+            assert exc_info.value.partial_file == 'second.py'
+            assert exc_info.value.scanned_files == {'first.py': (1, 3)}
+
+    @staticmethod
+    def test_limit_at_exactly_the_diff_size_scans_everything(tmp_path, monkeypatch):
+        secret = '2b00042f7481c7b056c4b410d28f33cf'
+        diff = textwrap.dedent(f"""
+            diff --git a/only.py b/only.py
+            --- a/only.py
+            +++ b/only.py
+            @@ -1,2 +1,3 @@
+             keep
+            +value = "{secret}"
+             end
+            """)[1:]
+
+        (tmp_path / 'only.py').touch()
+        monkeypatch.chdir(tmp_path)
+
+        with transient_settings({
+            'plugins_used': [{'name': 'HexHighEntropyString', 'limit': 3}],
+            'filters_used': [],
+            'diff_input_limit': len(diff.encode('utf-8')),
+        }):
+            collection = SecretsCollection()
+            collection.scan_diff(diff)
+
+        assert collection.files == {'only.py'}
+        line_numbers = {item.line_number for item in collection['only.py']}
+        assert line_numbers == {2}
 
 
 def test_merge():

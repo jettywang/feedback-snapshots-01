@@ -2,13 +2,17 @@ import os
 import subprocess
 from typing import Any
 from typing import cast
+from typing import Dict
 from typing import Generator
 from typing import Iterable
+from typing import Iterator
 from typing import List
+from typing import Optional
 from typing import Set
 from typing import Tuple
 from typing import Union
 
+from ..exceptions import DiffInputLimitExceeded
 from ..filters.allowlist import is_line_allowlisted
 from ..settings import get_filters
 from ..settings import get_plugins
@@ -169,13 +173,20 @@ def scan_file(filename: str) -> Generator[PotentialSecret, None, None]:
 def scan_diff(diff: str) -> Generator[PotentialSecret, None, None]:
     """
     :raises: ImportError
+    :raises: DiffInputLimitExceeded if the configured diff input limit is reached,
+        or the diff cannot be read in full. Secrets yielded before the failure only
+        cover the fully-consumed files reported by the exception.
     """
     if not get_plugins():   # pragma: no cover
         log.error('No plugins to scan with!')
         return
 
-    for filename, lines in _get_lines_from_diff(diff):
-        yield from _process_line_based_plugins(lines, filename=filename)
+    reader = _DiffInputReader(iter(diff.splitlines(keepends=True)), get_settings().diff_input_limit)
+    try:
+        for filename, lines in _iter_lines_from_diff(reader):
+            yield from _process_line_based_plugins(lines, filename=filename)
+    finally:
+        reader.close()
 
 
 def scan_for_allowlisted_secrets_in_file(filename: str) -> Generator[PotentialSecret, None, None]:
@@ -213,8 +224,12 @@ def scan_for_allowlisted_secrets_in_diff(diff: str) -> Generator[PotentialSecret
         log.error('No plugins to scan with!')
         return
 
-    for filename, lines in _get_lines_from_diff(diff):
-        yield from _scan_for_allowlisted_secrets_in_lines(lines, filename)
+    reader = _DiffInputReader(iter(diff.splitlines(keepends=True)), get_settings().diff_input_limit)
+    try:
+        for filename, lines in _iter_lines_from_diff(reader):
+            yield from _scan_for_allowlisted_secrets_in_lines(lines, filename)
+    finally:
+        reader.close()
 
 
 def _scan_for_allowlisted_secrets_in_lines(
@@ -280,30 +295,251 @@ def _get_lines_from_file(filename: str) -> Generator[List[str], None, None]:
         yield lines
 
 
-def _get_lines_from_diff(diff: str) -> Generator[Tuple[str, List[Tuple[int, str]]], None, None]:
+def _iter_lines_from_diff(
+    reader: '_DiffInputReader',
+) -> Generator[Tuple[str, List[Tuple[int, str]]], None, None]:
     """
+    Consumes the diff one patched file at a time, so that secrets found in
+    earlier files are emitted before a later file trips the input limit (or
+    turns out to be unreadable).
+
     :raises: ImportError
+    :raises: DiffInputLimitExceeded
     """
     # Local imports, so that we don't need to require unidiff for versions of
     # detect-secrets that don't use it.
     from unidiff import PatchSet
+    from unidiff.errors import UnidiffParseError
 
-    patch_set = PatchSet.from_string(diff)
-    for patch_file in patch_set:
-        filename = patch_file.path
+    for filename, fragment in reader.iter_file_fragments():
         if _is_filtered_out(required_filter_parameters=['filename'], filename=filename):
+            continue
+
+        try:
+            patch_set = PatchSet.from_string(fragment)
+        except UnidiffParseError:
+            # The fragment ends in a hunk whose body was cut off: there is
+            # nothing scannable in it, and the interruption is already reported
+            # via DiffInputLimitExceeded by the reader.
             continue
 
         yield (
             filename,
             [
                 (line.target_line_no, line.value)
-                for chunk in patch_file
+                for patch_file in patch_set
+                for hunk in patch_file
                 # target_lines refers to incoming (new) changes
-                for line in chunk.target_lines()
+                for line in hunk.target_lines()
                 if line.is_added
             ],
         )
+
+
+class _DiffInputReader:
+    """
+    Iterable, text-mode view over a diff's lines, which enforces an independent,
+    configurable byte budget.
+
+    The reader streams the diff's lines while enforcing the byte budget, and
+    tracks diff file and hunk boundaries as it goes. When the input cannot be
+    fully consumed (the limit is reached, or an underlying read fails), it
+    reports which files were completely covered together with the target line
+    range each of them spans.
+
+    :param lines: iterator producing the diff's text lines (with line endings)
+    :param limit: maximum number of bytes to consume, or ``None`` for no limit
+    """
+
+    def __init__(self, lines: Iterator[str], limit: Optional[int]) -> None:
+        self._lines = lines
+        self.limit = limit
+        self.bytes_read = 0
+        self._current_file: Optional[str] = None
+        # Target line ranges of hunks whose bodies have been fully consumed.
+        self._completed_hunk_ranges: List[Tuple[int, int]] = []
+        # Target line range of the hunk currently being consumed.
+        self._hunk_target_start = 0
+        self._hunk_target_length = 0
+        # Remaining source/target lines declared by the current hunk's header.
+        self._hunk_source_remaining = 0
+        self._hunk_target_remaining = 0
+        self._hunk_in_progress = False
+        self._scanned_files: Dict[str, Tuple[int, int]] = {}
+        self._partial_file: Optional[str] = None
+        self._failure: Optional[DiffInputLimitExceeded] = None
+
+        # Local imports, so that unidiff remains an optional dependency.
+        from unidiff.constants import RE_DIFF_GIT_HEADER
+        from unidiff.constants import RE_HUNK_HEADER
+
+        self._diff_git_header = RE_DIFF_GIT_HEADER
+        self._hunk_header = RE_HUNK_HEADER
+
+    def __iter__(self) -> Iterator[str]:
+        return self
+
+    def __next__(self) -> str:
+        if self._failure is not None:
+            raise self._failure
+
+        try:
+            line = next(self._lines)
+        except StopIteration:
+            raise
+        except Exception as error:
+            self._fail('unreadable_input', error)
+
+        line_size = len(line.encode('utf-8'))
+        if self.limit is not None and self.bytes_read + line_size > self.limit:
+            self._fail('limit_exceeded')
+
+        self.bytes_read += line_size
+        self._track_boundary(line)
+        return line
+
+    def iter_file_fragments(self) -> Generator[Tuple[str, str], None, None]:
+        """
+        Yields each patched file's path and its standalone, parseable unified-diff
+        fragment, in input order.
+
+        :raises: DiffInputLimitExceeded if the input cannot be read in full; any
+            fragments already yielded cover the files reported by the exception.
+        """
+        fragment: List[str] = []
+        filename: Optional[str] = None
+
+        while True:
+            try:
+                line = next(self)
+            except StopIteration:
+                if filename is not None:
+                    self._finish_file(filename)
+                    yield filename, ''.join(fragment)
+                return
+            except DiffInputLimitExceeded as error:
+                if filename is not None and self._hunk_is_complete():
+                    # The current file's hunks were fully consumed before the
+                    # failure: emit it as a completed fragment.
+                    error.partial_file = None
+                    self._finish_file(filename)
+                    error.scanned_files = dict(self._scanned_files)
+                    yield filename, ''.join(fragment)
+                raise
+
+            fragment.append(line)
+            header = self._diff_git_header.match(line)
+            if not header:
+                continue
+
+            if filename is not None:
+                # The previous file ends right where this new one begins. Only
+                # emit it if its hunks were fully consumed; otherwise the earlier
+                # read failure already decided how to report it.
+                if self._hunk_is_complete():
+                    self._finish_file(filename)
+                    yield filename, ''.join(fragment[:-1])
+                fragment = [line]
+
+            filename = _strip_diff_path_prefix(header.group('target'))
+
+    def close(self) -> None:
+        close = getattr(self._lines, 'close', None)
+        if callable(close):
+            close()
+
+    def _hunk_is_complete(self) -> bool:
+        return not self._hunk_in_progress
+
+    def _finish_file(self, filename: str) -> None:
+        """Marks a file as fully consumed, recording its covered target range."""
+        if self._completed_hunk_ranges:
+            self._scanned_files[filename] = (
+                min(start for start, _ in self._completed_hunk_ranges),
+                max(end for _, end in self._completed_hunk_ranges),
+            )
+
+    def _track_boundary(self, line: str) -> None:
+        header = self._diff_git_header.match(line)
+        if header:
+            new_file = _strip_diff_path_prefix(header.group('target'))
+            if self._current_file is not None and self._current_file != new_file:
+                self._finish_file(self._current_file)
+            self._current_file = new_file
+            self._completed_hunk_ranges = []
+            self._hunk_source_remaining = 0
+            self._hunk_target_remaining = 0
+            self._hunk_in_progress = False
+            return
+
+        hunk = self._hunk_header.match(line)
+        if hunk:
+            self._hunk_target_start = int(hunk.group(3))
+            self._hunk_target_length = int(hunk.group(4) or 1)
+            self._hunk_source_remaining = int(hunk.group(2) or 1)
+            self._hunk_target_remaining = self._hunk_target_length
+            self._hunk_in_progress = True
+            return
+
+        if not self._hunk_in_progress:
+            return
+
+        if not line or line[0] == '\n':
+            line_type = ' '
+        else:
+            line_type = line[0]
+
+        if line_type not in ('+', '-', ' '):
+            # e.g. the ``\ No newline at end of file`` marker: not a hunk line.
+            return
+
+        if line_type == '+':
+            self._hunk_target_remaining -= 1
+        elif line_type == '-':
+            self._hunk_source_remaining -= 1
+        else:
+            self._hunk_source_remaining -= 1
+            self._hunk_target_remaining -= 1
+
+        if self._hunk_source_remaining == 0 and self._hunk_target_remaining == 0:
+            self._completed_hunk_ranges.append(
+                (
+                    self._hunk_target_start,
+                    self._hunk_target_start + self._hunk_target_length - 1,
+                ),
+            )
+            self._hunk_target_length = 0
+            self._hunk_in_progress = False
+
+    def _fail(self, reason: str, cause: Optional[Exception] = None) -> None:
+        if self._current_file is not None and self._hunk_in_progress:
+            # The current file was interrupted mid-hunk: it is not fully covered,
+            # so it must only appear as the partial file -- never in scanned_files.
+            self._partial_file = self._current_file
+            self._scanned_files.pop(self._current_file, None)
+        elif self._current_file is not None:
+            # The failure struck outside an active hunk (e.g. on the trailing
+            # line of an otherwise complete final file): record its coverage.
+            self._finish_file(self._current_file)
+
+        self._failure = DiffInputLimitExceeded(
+            reason=reason,
+            limit=self.limit,
+            bytes_read=self.bytes_read,
+            scanned_files=dict(self._scanned_files),
+            partial_file=self._partial_file,
+        )
+        if cause is not None:
+            self._failure.__cause__ = cause
+        raise self._failure
+
+
+def _strip_diff_path_prefix(path: Optional[str]) -> Optional[str]:
+    if path is None:
+        return None
+    if path.startswith(('a/', 'b/')):
+        return path[2:]
+    return path
 
 
 def _process_line_based_plugins(
