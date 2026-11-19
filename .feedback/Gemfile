@@ -1,0 +1,5 @@
+source "https://rubygems.org"
+gem "ruby-next-core"
+gem "minitest", "~>5.0"
+gem "i18n"
+gem "logger"
