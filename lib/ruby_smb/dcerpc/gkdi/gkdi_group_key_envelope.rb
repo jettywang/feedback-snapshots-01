@@ -14,7 +14,7 @@ module RubySMB
         uint32      :l2_index
         uuid        :root_key_identifier
         uint32      :cb_kdf_algorithm
-        uint32      :cb_kdf_parameters, initial_value: -> { kdf_parameters.length }
+        uint32      :cb_kdf_parameters
         uint32      :cb_secret_agreement_algorithm
         uint32      :cb_secret_agreement_parameters
         uint32      :private_key_length
@@ -24,18 +24,32 @@ module RubySMB
         uint32      :cb_domain_name
         uint32      :cb_forest_name
         stringz16   :kdf_algorithm
-        struct      :kdf_parameters, only_if: -> { cb_kdf_parameters > 0 } do
-          uint8_array :block0, initial_length: 8, initial_value: [ 0, 0, 0, 0, 1, 0, 0, 0 ]
-          uint32      :length_of_hash_name, initial_value: -> { hash_algorithm_name.length }
-          uint8_array :block1, initial_length: 4, initial_value: [ 0, 0, 0, 0 ]
-          stringz16   :hash_algorithm_name
-        end
+        uint8_array :kdf_parameters_raw, initial_length: -> { cb_kdf_parameters }
         stringz16   :secret_agreement_algorithm
-        uint8_array :secret_agreement_parameters, initial_length: :cb_secret_agreement_parameters
+        uint8_array :secret_agreement_parameters, initial_length: -> { cb_secret_agreement_parameters }
+        uint8_array :l1_key, initial_length: -> { cb_l1_key }
+        uint8_array :l2_key, initial_length: -> { l2_key_length }
         stringz16   :domain_name
         stringz16   :forest_name
-        uint8_array :l1_key, initial_length: 64, only_if: -> { cb_l1_key != 0 }
-        uint8_array :l2_key, initial_length: :l2_key_length, only_if: -> { cb_l2_key != 0 }
+
+        # Lazily parsed view of {#kdf_parameters_raw}. Returns nil when the
+        # envelope carries no KDF parameters block (cb_kdf_parameters == 0).
+        def kdf_parameters
+          return nil if cb_kdf_parameters.zero?
+
+          @kdf_parameters ||= GkdiKdfParameters.read(kdf_parameters_raw.snapshot.pack('C*'))
+        end
+
+        # Assign a structured KDF parameters block. The raw bytes and the
+        # accompanying length field are kept in sync so the envelope can be
+        # serialized back onto the wire.
+        def kdf_parameters=(parameters)
+          parameters = GkdiKdfParameters.new(parameters) unless parameters.is_a?(GkdiKdfParameters)
+          binary = parameters.to_binary_s
+          self.cb_kdf_parameters = binary.bytesize
+          self.kdf_parameters_raw = binary.bytes
+          @kdf_parameters = parameters
+        end
 
         private
 

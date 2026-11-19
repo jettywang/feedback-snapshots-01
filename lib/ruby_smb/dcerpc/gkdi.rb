@@ -14,7 +14,9 @@ module RubySMB
       require 'ruby_smb/dcerpc/gkdi/gkdi_get_key_response'
       require 'ruby_smb/dcerpc/gkdi/gkdi_ffc_dh_key'
       require 'ruby_smb/dcerpc/gkdi/gkdi_ffc_dh_parameters'
+      require 'ruby_smb/dcerpc/gkdi/gkdi_kdf_parameters'
       require 'ruby_smb/dcerpc/gkdi/gkdi_group_key_envelope'
+      require 'ruby_smb/dcerpc/gkdi/gkdi_offline_review'
 
       def gkdi_get_key(target_sd, root_key_id, l0_key_id, l1_key_id, l2_key_id)
         target_sd = target_sd.to_binary_s if target_sd.respond_to?(:to_binary_s)
