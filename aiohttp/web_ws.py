@@ -559,6 +559,13 @@ class WebSocketResponse(StreamResponse, Generic[_DecodeText]):
             if self._waiting:
                 assert self._loop is not None
                 assert self._close_wait is None
+                # Mark the closing state before yielding to the parked
+                # receive(). That receive may be cancelled instead of
+                # consuming the CLOSING message, in which case this close()
+                # call would drain its own queue and discard it; recording the
+                # state up front keeps the handshake from silently reverting
+                # to an abnormal close and leaves queued messages untouched.
+                self._set_closing(WSCloseCode.OK)
                 self._close_wait = self._loop.create_future()
                 reader.feed_data(WS_CLOSING_MESSAGE)
                 await self._close_wait

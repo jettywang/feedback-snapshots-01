@@ -1,0 +1,6 @@
+Fixed server-side WebSocket ``receive()`` cancellation during a concurrent
+``close()`` discarding the internal closing marker, which made the handshake
+fall back to an abnormal close (``1006``) instead of a clean one. The closing
+state is now recorded before yielding to the parked receiver, and messages
+already parsed but not yet delivered are retained for the next consumer rather
+than lost or consumed by the wrong task -- by :user:`bdraco`.

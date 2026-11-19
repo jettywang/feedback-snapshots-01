@@ -9,7 +9,8 @@ import pytest
 from multidict import CIMultiDict
 from pytest_mock import MockerFixture
 
-from aiohttp import WSMessageTypeError, WSMsgType, web
+from aiohttp import WSMessageTypeError, WSCloseCode, WSMsgType, web
+from aiohttp._websocket.models import WSMessageBinary, WSMessageText
 from aiohttp.http import WS_CLOSED_MESSAGE, WS_CLOSING_MESSAGE
 from aiohttp.http_websocket import WSMessageClose
 from aiohttp.streams import EofStream
@@ -682,6 +683,153 @@ async def test_concurrent_receive(make_request: _RequestMaker) -> None:
 
     with pytest.raises(RuntimeError):
         await ws.receive()
+
+
+async def _prepare_ws_with_stubbed_writer(
+    make_request: _RequestMaker,
+) -> web.WebSocketResponse:
+    req = make_request("GET", "/")
+    ws = web.WebSocketResponse(autoping=False, heartbeat=None)
+    await ws.prepare(req)
+    # Keep the whole handshake in memory: no transport writes or drains block.
+    assert ws._writer is not None
+    ws._writer.close = mock.AsyncMock()  # type: ignore[method-assign]
+    assert ws._payload_writer is not None
+    ws._payload_writer.drain = mock.AsyncMock()  # type: ignore[method-assign]
+    return ws
+
+
+async def test_cancelled_receive_during_close_keeps_handshake_clean(
+    make_request: _RequestMaker,
+) -> None:
+    # The parked receive() is cancelled at the same tick close() feeds its
+    # CLOSING marker. The marker must not be silently drained by close()'s own
+    # read loop: the connection still closes cleanly with the OK code and no
+    # waiter is left behind.
+    ws = await _prepare_ws_with_stubbed_writer(make_request)
+    req = ws._req
+    reader = ws._reader
+    assert reader is not None and req is not None and req.transport is not None
+
+    receive_task = asyncio.create_task(ws.receive())
+    await asyncio.sleep(0)  # receive() parks on the queue waiter
+
+    close_task = asyncio.create_task(ws.close())
+    await asyncio.sleep(0)  # close() feeds CLOSING and parks on close_wait
+    assert ws._close_wait is not None
+    assert [msg.type for msg in reader._buffer] == [WSMsgType.CLOSING]
+
+    receive_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await receive_task
+
+    assert await close_task is True
+    assert ws._closing is True
+    assert ws.close_code == WSCloseCode.OK
+    assert req.transport.close.call_count == 1  # type: ignore[attr-defined]
+    assert reader._waiter is None
+    assert ws._waiting is False
+
+
+async def test_cancelled_receive_preserves_queued_text_message(
+    make_request: _RequestMaker,
+) -> None:
+    # A message already parsed and queued when the waiter is cancelled must not
+    # be lost or handed to the wrong consumer: it stays queued and the next
+    # receive() delivers it exactly once.
+    ws = await _prepare_ws_with_stubbed_writer(make_request)
+    reader = ws._reader
+    assert reader is not None
+
+    receive_task = asyncio.create_task(ws.receive())
+    await asyncio.sleep(0)
+    reader.feed_data(WSMessageText("secret", size=6, extra=""))
+
+    receive_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await receive_task
+
+    assert [msg.data for msg in reader._buffer] == ["secret"]
+    assert reader._waiter is None
+
+    msg = await ws.receive()
+    assert msg.type is WSMsgType.TEXT
+    assert msg.data == "secret"
+    assert len(reader._buffer) == 0
+
+
+async def test_cancelled_receive_preserves_queued_binary_message(
+    make_request: _RequestMaker,
+) -> None:
+    ws = await _prepare_ws_with_stubbed_writer(make_request)
+    reader = ws._reader
+    assert reader is not None
+
+    receive_task = asyncio.create_task(ws.receive())
+    await asyncio.sleep(0)
+    reader.feed_data(WSMessageBinary(b"secret-bytes", size=12))
+
+    receive_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await receive_task
+
+    assert reader._waiter is None
+    msg = await ws.receive()
+    assert msg.type is WSMsgType.BINARY
+    assert msg.data == b"secret-bytes"
+    assert len(reader._buffer) == 0
+
+
+async def test_message_and_close_each_delivered_once_after_cancel(
+    make_request: _RequestMaker,
+) -> None:
+    # Frames already in the queue survive a cancelled receive; a data message
+    # and the closing event are each observable exactly once, never twice.
+    ws = await _prepare_ws_with_stubbed_writer(make_request)
+    reader = ws._reader
+    assert reader is not None
+
+    receive_task = asyncio.create_task(ws.receive())
+    await asyncio.sleep(0)
+    reader.feed_data(WSMessageBinary(b"bin", size=3))
+    reader.feed_data(WSMessageClose(data=WSCloseCode.OK, size=0, extra="bye"))
+
+    receive_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await receive_task
+
+    data_msg = await ws.receive()
+    assert data_msg.type is WSMsgType.BINARY
+    assert data_msg.data == b"bin"
+
+    close_msg = await ws.receive()  # autoclose handles the CLOSE frame
+    assert close_msg.type is WSMsgType.CLOSE
+    assert close_msg.data == WSCloseCode.OK
+    assert all(msg.type is not WSMsgType.CLOSE for msg in reader._buffer)
+
+    terminal = await ws.receive()
+    assert terminal.type in (WSMsgType.CLOSING, WSMsgType.CLOSED)
+    assert sum(msg.type is WSMsgType.CLOSE for msg in reader._buffer) == 0
+
+
+async def test_connection_lost_leaves_no_waiter(
+    make_request: _RequestMaker,
+) -> None:
+    ws = await _prepare_ws_with_stubbed_writer(make_request)
+    reader = ws._reader
+    assert reader is not None
+
+    receive_task = asyncio.create_task(ws.receive())
+    await asyncio.sleep(0)
+    assert reader._waiter is not None
+
+    ws._cancel(ConnectionResetError("Connection lost"))
+    await asyncio.gather(receive_task, return_exceptions=True)
+
+    assert reader._waiter is None
+    assert ws._waiting is False
+    terminal = await ws.receive()
+    assert terminal.type in (WSMsgType.CLOSING, WSMsgType.CLOSED)
 
 
 async def test_close_exc(make_request: _RequestMaker) -> None:
