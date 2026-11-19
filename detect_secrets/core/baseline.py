@@ -6,6 +6,7 @@ from typing import cast
 from typing import Dict
 from typing import List
 from typing import Optional
+from typing import TYPE_CHECKING
 from typing import Union
 
 from . import upgrades
@@ -17,6 +18,9 @@ from ..util.importlib import import_modules_from_package
 from ..util.semver import Version
 from .scan import get_files_to_scan
 from .secrets_collection import SecretsCollection
+
+if TYPE_CHECKING:
+    from ..util.path_display import PathDisplayPolicy
 
 
 def create(
@@ -64,7 +68,11 @@ def load_from_file(filename: str) -> Dict[str, Any]:
         raise UnableToReadBaselineError from e
 
 
-def format_for_output(secrets: SecretsCollection, is_slim_mode: bool = False) -> Dict[str, Any]:
+def format_for_output(
+    secrets: SecretsCollection,
+    is_slim_mode: bool = False,
+    path_policy: Optional['PathDisplayPolicy'] = None,
+) -> Dict[str, Any]:
     output = {
         'version': VERSION,
 
@@ -73,6 +81,11 @@ def format_for_output(secrets: SecretsCollection, is_slim_mode: bool = False) ->
 
         'results': secrets.json(),
     }
+
+    if path_policy is not None:
+        # Outbound baselines only carry project-relative display paths; the
+        # customer's machine-local directory layout never leaves the host.
+        output['results'] = path_policy.remap_results(output['results'])
 
     if not is_slim_mode:
         output['generated_at'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())

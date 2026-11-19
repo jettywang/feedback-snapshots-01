@@ -85,6 +85,18 @@ def _add_initialize_baseline_options(parser: argparse.ArgumentParser) -> None:
             'slim baselines will need to be remade to be audited.'
         ),
     )
+    group.add_argument(
+        '--safe-paths',
+        nargs='?',
+        const='',
+        default=None,
+        metavar='<alias>',
+        help=(
+            'Rewrite outbound paths to project-relative display paths of the form '
+            '`<alias>/<path>`, so that the local checkout directory is never disclosed. '
+            'Defaults the alias to the checkout root\'s directory name.'
+        ),
+    )
 
 
 def parse_args(args: argparse.Namespace) -> None:

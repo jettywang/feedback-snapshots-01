@@ -1,3 +1,4 @@
+import os
 import random
 import string
 import textwrap
@@ -14,6 +15,7 @@ from detect_secrets.plugins.aws import AWSKeyDetector
 from detect_secrets.plugins.basic_auth import BasicAuthDetector
 from detect_secrets.plugins.jwt import JwtTokenDetector
 from detect_secrets.settings import transient_settings
+from detect_secrets.util.path_display import PathDisplayPolicy
 from testing.mocks import mock_named_temporary_file
 
 
@@ -263,3 +265,42 @@ def baseline_file():
         baseline.save_to_file(secrets, baseline_file.name)
         baseline_file.seek(0)
         yield baseline_file.name
+
+
+def test_generate_report_with_path_policy_hides_local_paths(
+    baseline_file,
+    tmp_path,
+):
+    raw_report = generate_report(baseline_file)
+    original_filenames = {item['filename'] for item in raw_report['results']}
+
+    # The temp files live under the system temp directory; register their
+    # common parent as the sole checkout root.
+    common_root = os.path.commonpath(list(original_filenames))
+    policy = PathDisplayPolicy([(common_root, 'customer-repo')])
+
+    safe_report = generate_report(baseline_file, path_policy=policy)
+    safe_filenames = {item['filename'] for item in safe_report['results']}
+
+    # Every emitted filename is a display path: no absolute/local prefix leaks.
+    assert safe_filenames
+    for filename in safe_filenames:
+        assert not os.path.isabs(filename)
+        assert filename.startswith('customer-repo/')
+        assert common_root not in filename
+
+    # The same number of findings is reported, and local files remain
+    # re-openable through the local-only inverse mapping.
+    assert len(safe_report['results']) == len(raw_report['results'])
+    for filename in safe_filenames:
+        resolved = policy.resolve(filename)
+        assert resolved is not None
+        assert os.path.isfile(resolved)
+
+
+def test_generate_report_without_policy_keeps_existing_filenames(
+    baseline_file,
+):
+    # Backwards compatibility: omitting the policy changes nothing.
+    report = generate_report(baseline_file)
+    assert report == generate_report(baseline_file, path_policy=None)

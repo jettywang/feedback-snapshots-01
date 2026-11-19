@@ -25,6 +25,11 @@ If you love `detect-secrets`, please star our project on GitHub to show your sup
 [@xxxx]: https://github.com/xxxx
 -->
 
+### Unreleased
+
+#### :tada: New Features
+- Added an opt-in path display policy (`--safe-paths`) for `scan` and `audit --report`. Outbound baselines, machine reports and attached logs now carry stable, project-relative display paths (`<alias>/<path>`) instead of machine-local absolute paths. Files outside every registered checkout root are marked `out-of-scope`, and display paths resolve back to local files even after a checkout is moved and re-registered under the same alias.
+
 ### v1.5.0
 ##### May 6th, 2024
 

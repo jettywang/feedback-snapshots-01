@@ -138,3 +138,33 @@ def test_upgrade_succeeds():
 
     assert new_baseline     # assert *something* exists
     assert current_baseline != new_baseline
+
+
+class TestFormatForOutputPathPolicy:
+    @staticmethod
+    def test_rewrites_results_to_display_paths():
+        from detect_secrets.util.path_display import PathDisplayPolicy
+
+        secrets = baseline.create('test_data/files', should_scan_all_files=True)
+        policy = PathDisplayPolicy([(os.getcwd(), 'myrepo')])
+
+        output = baseline.format_for_output(secrets, path_policy=policy)
+
+        assert output['results']
+        for display_path, findings in output['results'].items():
+            assert display_path.startswith('myrepo/')
+            assert not os.path.isabs(display_path)
+            for finding in findings:
+                assert finding['filename'] == display_path
+
+        # Serialized outbound baseline must not carry the machine prefix.
+        assert os.getcwd() not in json.dumps(output)
+
+    @staticmethod
+    def test_without_policy_matches_legacy_output():
+        secrets = baseline.create('test_data/files', should_scan_all_files=True)
+
+        output = baseline.format_for_output(secrets)
+
+        for filename in output['results']:
+            assert not filename.startswith('myrepo/')

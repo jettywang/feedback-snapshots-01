@@ -82,6 +82,21 @@ def _add_report_module(parent: argparse.ArgumentParser) -> None:
         ),
     )
 
+    parser.add_argument(
+        '--safe-paths',
+        nargs='?',
+        const='',
+        default=None,
+        metavar='<root>=<alias>',
+        action='append',
+        help=(
+            'Rewrite outbound report paths to project-relative display paths of the form '
+            '`<alias>/<path>`, so local checkout directories are never disclosed. May be '
+            'repeated to register multiple checkouts. A bare `<root>` uses its directory '
+            'name as the alias. Files outside every root are marked `out-of-scope`.'
+        ),
+    )
+
 
 def _add_statistics_module(parent: argparse.ArgumentParser) -> None:
     parser = parent.add_argument_group(
