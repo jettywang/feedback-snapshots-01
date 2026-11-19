@@ -9,7 +9,7 @@ from .exceptions import MessageStateError, reraise
 from .serialization import loads
 from .utils.functional import dictfilter
 
-__all__ = ('Message',)
+__all__ = ('Message', 'MessageDiagnostics')
 
 ACK_STATES = {'ACK', 'REJECTED', 'REQUEUED'}
 IS_PYPY = hasattr(sys, 'pypy_version_info')
@@ -215,6 +215,18 @@ class Message:
         """The decoded message body."""
         return self._decoded_cache if self._decoded_cache else self.decode()
 
+    def as_diagnostics(self):
+        """Return a read-only diagnostic view of this message.
+
+        The returned :class:`MessageDiagnostics` only exposes public
+        metadata (delivery tag, message type, routing information), so
+        management tooling can inspect messages for troubleshooting
+        without gaining access to the payload, headers, or channel.
+        The message itself is not modified, and acknowledgement is
+        delegated to it.
+        """
+        return MessageDiagnostics(self)
+
     def __repr__(self):
         return '<{} object at {:#x} with details {!r}>'.format(
             type(self).__name__, id(self), dictfilter(
@@ -230,5 +242,101 @@ class Message:
                     exchange=self.delivery_info.get('exchange'),
                     routing_key=self.delivery_info.get('routing_key'),
                 ),
+            ),
+        )
+
+
+class MessageDiagnostics:
+    """Read-only diagnostic view of a :class:`Message`.
+
+    Gives management/operations tooling a high-level representation of
+    a received message for troubleshooting, exposing only public
+    metadata such as the delivery tag and message type.  The payload,
+    headers, properties, delivery info, and channel are not accessible
+    through this view, and the view itself cannot be modified.
+
+    Acknowledgement operations are delegated to the wrapped message,
+    which is never otherwise modified by this view.
+    """
+
+    __slots__ = ('_message',)
+
+    def __init__(self, message):
+        object.__setattr__(self, '_message', message)
+
+    def __setattr__(self, name, value):
+        raise AttributeError(
+            f'{type(self).__name__} instances are read-only')
+
+    def __delattr__(self, name):
+        raise AttributeError(
+            f'{type(self).__name__} instances are read-only')
+
+    @property
+    def delivery_tag(self):
+        """Delivery tag of the message."""
+        return self._message.delivery_tag
+
+    @property
+    def content_type(self):
+        """MIME content type of the message body."""
+        return self._message.content_type
+
+    @property
+    def content_encoding(self):
+        """Character set the message body is encoded in."""
+        return self._message.content_encoding
+
+    @property
+    def type(self):
+        """Message type, as declared by the sender."""
+        return self._message.properties.get('type')
+
+    @property
+    def correlation_id(self):
+        """Correlation id, as declared by the sender."""
+        return self._message.properties.get('correlation_id')
+
+    @property
+    def exchange(self):
+        """Exchange the message was published to."""
+        return self._message.delivery_info.get('exchange')
+
+    @property
+    def routing_key(self):
+        """Routing key the message was published with."""
+        return self._message.delivery_info.get('routing_key')
+
+    @property
+    def state(self):
+        """Current acknowledgement state of the message."""
+        return self._message._state
+
+    @property
+    def acknowledged(self):
+        """Set to true if the message has been acknowledged."""
+        return self._message.acknowledged
+
+    def ack(self, multiple=False):
+        """Acknowledge the wrapped message as being processed."""
+        return self._message.ack(multiple=multiple)
+
+    def reject(self, requeue=False):
+        """Reject the wrapped message."""
+        return self._message.reject(requeue=requeue)
+
+    def requeue(self):
+        """Reject the wrapped message and put it back on the queue."""
+        return self._message.requeue()
+
+    def __repr__(self):
+        return '<{} object at {:#x} with details {!r}>'.format(
+            type(self).__name__, id(self), dictfilter(
+                state=self.state,
+                content_type=self.content_type,
+                delivery_tag=self.delivery_tag,
+                type=self.type,
+                exchange=self.exchange,
+                routing_key=self.routing_key,
             ),
         )

@@ -39,7 +39,7 @@ if STATICA_HACK:  # pragma: no cover
     from kombu.common import eventloop, uuid  # noqa
     from kombu.connection import BrokerConnection, Connection  # noqa
     from kombu.entity import Exchange, Queue, binding  # noqa
-    from kombu.message import Message  # noqa
+    from kombu.message import Message, MessageDiagnostics  # noqa
     from kombu.messaging import Consumer, Producer  # noqa
     from kombu.pools import connections, producers  # noqa
     from kombu.serialization import disable_insecure_serializers  # noqa
@@ -53,7 +53,7 @@ from types import ModuleType  # noqa
 all_by_module = {
     'kombu.connection': ['Connection', 'BrokerConnection'],
     'kombu.entity': ['Exchange', 'Queue', 'binding'],
-    'kombu.message': ['Message'],
+    'kombu.message': ['Message', 'MessageDiagnostics'],
     'kombu.messaging': ['Consumer', 'Producer'],
     'kombu.pools': ['connections', 'producers'],
     'kombu.utils.url': ['parse_url'],
