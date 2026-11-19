@@ -8,6 +8,15 @@ All notable changes to this project will be documented in this file.
 `Unreleased`_
 -------------
 
+Added
+^^^^^
+
+* Added per-actor ``shutdown_policy`` options (``requeue``, ``finish``
+  and ``revoke``) to |ShutdownNotifications|, plus |ShutdownGuard| for
+  marking the point after which a task must not be handed to another
+  worker.  Interrupted tasks are cleaned up before being acknowledged,
+  and unstarted messages can be revoked instead of requeued.
+
 Fixed
 ^^^^^
 

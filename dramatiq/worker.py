@@ -22,7 +22,7 @@ import os
 import time
 from collections import defaultdict
 from functools import lru_cache
-from queue import Empty, PriorityQueue
+from queue import Empty, PriorityQueue, SimpleQueue
 from threading import Event, Thread
 from typing import TYPE_CHECKING, Iterable, Optional, Union
 
@@ -30,8 +30,15 @@ from .broker import Broker, Consumer, MessageProxy
 from .common import current_millis, iter_queue, join_all, q_name
 from .errors import ActorNotFound, BrokerConnectionError, RateLimitExceeded, Retry
 from .logging import get_logger
-from .middleware import Middleware, SkipMessage
+from .middleware import Middleware, ShutdownDisposition, SkipMessage
 from .results.middleware import Results
+
+#: Human-readable verbs for shutdown outcomes, used in logs.
+_SHUTDOWN_VERBS = {
+    ShutdownDisposition.REQUEUE: "requeued for another worker",
+    ShutdownDisposition.CLEANUP: "acknowledged after cleanup",
+    ShutdownDisposition.DROP: "discarded",
+}
 
 #: The number of milliseconds to wait before restarting consumers
 #: after a connection error.
@@ -99,6 +106,12 @@ class Worker:
 
         self.workers: list[WorkerThread] = []
         self.work_queue: PriorityQueue[_WorkQueueItem] = PriorityQueue()
+        # Messages that were in flight when shutdown interrupted them
+        # and whose policy allows another worker to run them.  They're
+        # requeued by stop() once the consumer threads have stopped, so
+        # the (non-thread-safe) Consumer is only used by one thread.
+        self._shutdown_requeues: SimpleQueue[MessageProxy] = SimpleQueue()
+        self._shutting_down = Event()
         self.worker_timeout = worker_timeout
         self.worker_threads = worker_threads
 
@@ -106,6 +119,7 @@ class Worker:
         """Initialize the worker boot sequence and start up all the
         worker threads.
         """
+        self._shutting_down.clear()
         self.broker.emit_before("worker_boot", self)
 
         worker_middleware = _WorkerMiddleware(self)
@@ -148,6 +162,7 @@ class Worker:
         """
         self.broker.emit_before("worker_shutdown", self)
         self.logger.info("Shutting down...")
+        self._shutting_down.set()
 
         thread: Union[WorkerThread, ConsumerThread]
 
@@ -170,6 +185,25 @@ class Worker:
         self.logger.debug("Requeueing in-memory messages...")
         messages_by_queue = defaultdict(list)
         for item in iter_queue(self.work_queue):
+            message = item.message
+            if message._requeued_on_shutdown:
+                # Already handed back to the consumer by the worker
+                # thread's shutdown policy.
+                self.work_queue.task_done()
+                continue
+
+            if not self._can_requeue_on_shutdown(message):
+                self.logger.warning(
+                    "Acking in-memory message %r for actor %r without requeueing it: "
+                    "its shutdown policy revoked it while it was still unstarted.",
+                    message.message_id,
+                    message.actor_name,
+                )
+                message._shutdown_disposition = "drop"
+                self.consumers[message.queue_name].post_process_message(message)
+                self.work_queue.task_done()
+                continue
+
             messages_by_queue[item.message.queue_name].append(item.message)
 
         for queue_name, messages in messages_by_queue.items():
@@ -178,6 +212,10 @@ class Worker:
             except BrokerConnectionError:
                 self.logger.warning("Failed to requeue messages on queue %r.", queue_name, exc_info=True)
         self.logger.debug("Done requeueing in-progress messages.")
+
+        self.logger.debug("Requeueing interrupted messages...")
+        self._requeue_interrupted_messages()
+        self.logger.debug("Done requeueing interrupted messages.")
 
         self.logger.debug("Closing consumers...")
         for consumer in self.consumers.values():
@@ -232,10 +270,46 @@ class Worker:
             broker=self.broker,
             consumers=self.consumers,
             work_queue=self.work_queue,
+            shutdown_requeues=self._shutdown_requeues,
+            shutting_down=self._shutting_down,
             worker_timeout=self.worker_timeout,
         )
         worker.start()
         self.workers.append(worker)
+
+    def _can_requeue_on_shutdown(self, message: MessageProxy) -> bool:
+        """Return whether a message that never started may be handed
+        back to the broker during shutdown.
+
+        The shutdown policy middleware decides; when it isn't
+        installed, messages are requeued as they always have been.
+        """
+        for middleware in self.broker.middleware:
+            can_requeue = getattr(middleware, "can_requeue_on_shutdown", None)
+            if can_requeue is not None:
+                return can_requeue(self.broker, message)
+        return True
+
+    def _requeue_interrupted_messages(self) -> None:
+        """Requeue messages whose actors were interrupted by shutdown
+        and whose policy allows a successor worker to run them.
+        """
+        while True:
+            try:
+                message = self._shutdown_requeues.get_nowait()
+            except Empty:
+                return
+
+            try:
+                self.consumers[message.queue_name].requeue_messages([message])
+            except BrokerConnectionError:
+                # The consumer is about to be closed, which returns the
+                # message to the broker anyway.
+                self.logger.warning(
+                    "Failed to requeue interrupted message on queue %r.",
+                    message.queue_name,
+                    exc_info=True,
+                )
 
 
 class _WorkerMiddleware(Middleware):
@@ -506,6 +580,8 @@ class WorkerThread(Thread):
         broker: Broker,
         consumers: dict[str, ConsumerThread],
         work_queue: PriorityQueue[_WorkQueueItem],
+        shutdown_requeues: SimpleQueue[MessageProxy],
+        shutting_down: Event,
         worker_timeout: int,
     ) -> None:
         super().__init__(daemon=True)
@@ -517,6 +593,8 @@ class WorkerThread(Thread):
         self.broker = broker
         self.consumers = consumers
         self.work_queue = work_queue
+        self.shutdown_requeues = shutdown_requeues
+        self.shutting_down = shutting_down
         self.timeout = worker_timeout / 1000
 
     def run(self) -> None:
@@ -532,12 +610,38 @@ class WorkerThread(Thread):
 
             try:
                 item = self.work_queue.get(timeout=self.timeout)
+                if self._should_drop_unstarted(item.message):
+                    self._drop_unstarted(item.message)
+                    continue
                 self.process_message(item.message)
             except Empty:
                 continue
 
         self.broker.emit_before("worker_thread_shutdown", self)
         self.logger.debug("Worker thread stopped.")
+
+    def _should_drop_unstarted(self, message: MessageProxy) -> bool:
+        """Return whether a message that hasn't started must not be
+        delivered to a successor worker once shutdown has begun.
+        """
+        if not self.shutting_down.is_set():
+            return False
+        for middleware in self.broker.middleware:
+            can_requeue = getattr(middleware, "can_requeue_on_shutdown", None)
+            if can_requeue is not None:
+                return not can_requeue(self.broker, message)
+        return False
+
+    def _drop_unstarted(self, message: MessageProxy) -> None:
+        self.logger.warning(
+            "Acknowledging unstarted message %r for actor %r without running it: "
+            "its shutdown policy revokes it.",
+            message.message_id,
+            message.actor_name,
+        )
+        message._shutdown_disposition = "drop"
+        self.consumers[message.queue_name].post_process_message(message)
+        self.work_queue.task_done()
 
     def process_message(self, message: MessageProxy) -> None:
         """Process a message pulled off of the work queue then push it
@@ -581,9 +685,19 @@ class WorkerThread(Thread):
         except BaseException as e:
             message.stuff_exception(e)
 
+            disposition = self._classify_shutdown_message(message, e)
+            if disposition is not None:
+                self._apply_shutdown_disposition(message, disposition)
+
             throws = message.options.get("throws") or (actor and actor.options.get("throws"))
             if isinstance(e, RateLimitExceeded):
                 self.logger.debug("Rate limit exceeded in message %s: %s.", message, e)
+            elif disposition is not None:
+                self.logger.info(
+                    "Message %s was interrupted by shutdown; it will be %s.",
+                    message.message_id,
+                    _SHUTDOWN_VERBS[disposition],
+                )
             elif throws and isinstance(e, throws):
                 self.logger.info(
                     "Failed to process message %s with expected exception %s.",
@@ -597,6 +711,11 @@ class WorkerThread(Thread):
                     exc_info=True,
                 )
 
+            # A message handled by its shutdown policy is either handed
+            # back to the broker or acknowledged after the actor's own
+            # cleanup.  Retries and Callbacks check the disposition
+            # marker so they don't enqueue or announce work that the
+            # shutdown policy has already decided.
             self.broker.emit_after("process_message", message, exception=e)
 
         finally:
@@ -604,13 +723,48 @@ class WorkerThread(Thread):
             # processed must have come off of a consumer.  Therefore,
             # there has to be a consumer for that message's queue so
             # this is safe.  Probably.
-            self.consumers[message.queue_name].post_process_message(message)
+            if not message._requeued_on_shutdown:
+                self.consumers[message.queue_name].post_process_message(message)
             self.work_queue.task_done()
 
             # See discussion #351.  Keeping a reference to the
             # exception can lead to memory bloat because it may be a
             # while before a GC triggers.
             message.clear_exception()
+
+    def _classify_shutdown_message(
+        self,
+        message: MessageProxy,
+        exception: BaseException,
+    ) -> Optional[ShutdownDisposition]:
+        """Ask the shutdown policy middleware how to handle a message
+        that raised an exception.  Returns None when no policy applies.
+        """
+        for middleware in self.broker.middleware:
+            classify = getattr(middleware, "classify_shutdown_exception", None)
+            if classify is None:
+                continue
+            disposition = classify(self.broker, message, exception)
+            if disposition is not None:
+                return disposition
+        return None
+
+    def _apply_shutdown_disposition(self, message: MessageProxy, disposition: ShutdownDisposition) -> None:
+        """Hand a shutdown-interrupted message back to the broker before
+        the actor's finally block completes.
+
+        REQUEUE is queued for the worker to deliver after consumers
+        stop, so a successor can process it.  CLEANUP leaves the message
+        to the regular ack path, after the actor's cleanup has run.
+        """
+        message._shutdown_disposition = disposition.value
+        if disposition is ShutdownDisposition.REQUEUE:
+            self.shutdown_requeues.put(message)
+            message._requeued_on_shutdown = True
+            self.logger.debug(
+                "Queued interrupted message %r for requeue on shutdown.",
+                message.message_id,
+            )
 
     def pause(self) -> None:
         """Pause this worker."""

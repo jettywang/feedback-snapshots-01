@@ -98,6 +98,12 @@ class Retries(Middleware):
         if exception is None:
             return
 
+        # The worker's shutdown policy owns interrupted messages: they
+        # are either requeued once or acknowledged after cleanup, and
+        # retrying them here would enqueue a duplicate.
+        if getattr(message, "_shutdown_disposition", None) is not None:
+            return
+
         actor = broker.get_actor(message.actor_name)
         throws = message.options.get("throws") or actor.options.get("throws")
         if throws and isinstance(exception, throws):

@@ -401,6 +401,11 @@ class MessageProxy:
         self.failed = False
         self._message = message
         self._exception: Optional[BaseException] = None
+        # Set by the worker shutdown policy middleware.  A requeued
+        # message has already been handed back for delivery to another
+        # worker, so the worker thread must not ack or nack it.
+        self._requeued_on_shutdown = False
+        self._shutdown_disposition: Optional[str] = None
 
     def stuff_exception(self, exception: BaseException) -> None:
         """Stuff an exception into this message."""

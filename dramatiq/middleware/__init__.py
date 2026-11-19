@@ -25,7 +25,7 @@ from .group_callbacks import GroupCallbacks
 from .middleware import Middleware, MiddlewareError, SkipMessage
 from .pipelines import Pipelines
 from .retries import Retries
-from .shutdown import Shutdown, ShutdownNotifications
+from .shutdown import Shutdown, ShutdownDisposition, ShutdownGuard, ShutdownNotifications, ShutdownPolicy
 from .threading import Interrupt, raise_thread_exception
 from .time_limit import TimeLimit, TimeLimitExceeded
 
@@ -46,7 +46,10 @@ __all__ = [
     "Pipelines",
     "Retries",
     "Shutdown",
+    "ShutdownDisposition",
+    "ShutdownGuard",
     "ShutdownNotifications",
+    "ShutdownPolicy",
     "TimeLimit",
     "TimeLimitExceeded",
 ]

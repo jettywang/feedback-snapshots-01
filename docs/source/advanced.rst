@@ -228,6 +228,73 @@ the message, raise an exception to indicate failure.
            raise
 
 
+.. _shutdown-policies:
+
+Shutdown Policies
+^^^^^^^^^^^^^^^^^
+
+By default, an interrupted message is treated as failed and goes
+through the normal retry and failure hooks, and messages that are
+still in worker memory are requeued onto the broker.  That is fine for
+ordinary work, but it is unsafe for tasks that handle one-shot
+credentials or other temporary secrets: a successor worker must not
+run a message after its actor has already been handed an authorization.
+
+Actors can declare a |ShutdownPolicy| with the ``shutdown_policy``
+option.  The policy has to be declared explicitly; when it isn't,
+Dramatiq keeps the legacy ``notify_shutdown`` behaviour.
+
+``REQUEUE``
+   Interrupt the actor on shutdown.  A task that has not yet reached
+   its sensitive phase may be handed to another worker.  Once the actor
+   marks itself sensitive, an interrupted task is cleaned up and
+   acknowledged instead of being requeued.
+
+``FINISH``
+   Never interrupt the actor; let it run to completion.  Tasks that
+   never started may still be requeued.
+
+``REVOKE``
+   Never hand a message for this actor to another worker.  Unstarted
+   messages are acknowledged without running, and interrupted messages
+   are cleaned up and acknowledged.  Use this when the message itself
+   carries one-shot credentials.
+
+The sensitive phase starts when the actor calls
+|ShutdownGuard|'s |enter_sensitive_phase| method.  Put the call immediately
+after the authorization has been obtained and before any work that
+uses it::
+
+  import dramatiq
+  from dramatiq.middleware import ShutdownGuard
+
+  @dramatiq.actor(shutdown_policy="revoke")
+  def redeem_token(token):
+      authorization = authorize(token)
+      ShutdownGuard.enter_sensitive_phase()
+      try:
+          use(authorization)
+      finally:
+          revoke(authorization)
+
+The call only records that the task may no longer be requeued.  If an
+authorization can arrive after shutdown began (for example, a network
+call during the task), check |is_shutting_down| right after acquiring
+it and raise |Shutdown| instead of using it; the ``REVOKE`` policy then
+cleans up and acknowledges the message.
+
+The worker applies the policy at three points:
+
+* Messages that are still in worker memory are requeued only when the
+  policy allows it; a revoked message is acknowledged without running.
+* An interrupted actor's ``finally`` blocks run first, then the message
+  is acknowledged (for ``REVOKE`` or a sensitive ``REQUEUE`` task) or
+  requeued exactly once (for a non-sensitive ``REQUEUE`` task).
+* ``Retries`` and ``Callbacks`` skip messages owned by a shutdown
+  policy, so an interrupted message is never enqueued twice or followed
+  by success/failure callbacks.
+
+
 Accessing Messages from Within Actors
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 

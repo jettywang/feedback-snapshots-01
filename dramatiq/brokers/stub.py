@@ -215,6 +215,16 @@ class _StubConsumer(Consumer):
         self.dead_letters.append(message)
         self.prefetch_semaphore.release()
 
+    def requeue(self, messages):
+        # Put the unacked messages back on the queue so another
+        # consumer (usually in a later test or worker) can run them.
+        # The original put is balanced here; the replacement put keeps
+        # the message unfinished until its new consumer acks it.
+        for message in messages:
+            self.queue.task_done()
+            self.queue.put(message.encode())
+            self.prefetch_semaphore.release()
+
     def __next__(self):
         # Reserve a prefetch 'slot' for the message being fetched.
         if not self.prefetch_semaphore.acquire(timeout=self.timeout / 1000):

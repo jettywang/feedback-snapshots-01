@@ -39,6 +39,11 @@ class Callbacks(Middleware):
         }
 
     def after_process_message(self, broker, message, *, result=None, exception=None):
+        # A message owned by the worker's shutdown policy didn't finish
+        # its work, so its callbacks must not run.
+        if getattr(message, "_shutdown_disposition", None) is not None:
+            return
+
         actor = broker.get_actor(message.actor_name)
         if exception is None:
             target_actor_name = message.options.get("on_success") or actor.options.get("on_success")

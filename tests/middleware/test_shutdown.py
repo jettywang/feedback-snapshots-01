@@ -7,6 +7,7 @@ from unittest import mock
 import pytest
 
 import dramatiq
+from dramatiq import Worker
 from dramatiq.brokers.stub import StubBroker
 from dramatiq.middleware import shutdown, threading
 
@@ -251,3 +252,156 @@ def test_shutdown_notifications_dont_notify_completed_threads(stub_broker, stub_
     # I expect only one success and one shutdown
     assert sum(shutdowns) == 1
     assert sum(successes) == 1
+
+
+def test_shutdown_policy_classifies_unstarted_sensitive_and_requeueable_messages(stub_broker):
+    # Given a broker with the shutdown middleware
+    middleware = shutdown.ShutdownNotifications()
+    stub_broker.add_middleware(middleware)
+
+    # And actors declared with each policy
+    @dramatiq.actor(shutdown_policy="requeue")
+    def requeue_actor():
+        pass
+
+    @dramatiq.actor(shutdown_policy="finish")
+    def finish_actor():
+        pass
+
+    @dramatiq.actor(shutdown_policy="revoke")
+    def revoke_actor():
+        pass
+
+    # Then an unstarted message may be requeued unless its actor revokes it
+    def disposition(actor, *, started, sensitive=False):
+        return middleware.classify(stub_broker, actor.message(), started=started, sensitive=sensitive)
+
+    assert disposition(requeue_actor, started=False) is shutdown.ShutdownDisposition.REQUEUE
+    assert disposition(finish_actor, started=False) is shutdown.ShutdownDisposition.REQUEUE
+    assert disposition(revoke_actor, started=False) is shutdown.ShutdownDisposition.DROP
+
+    # A started message is cleaned up once it is sensitive, but may
+    # otherwise be requeued.
+    assert disposition(requeue_actor, started=True, sensitive=True) is shutdown.ShutdownDisposition.CLEANUP
+    assert disposition(requeue_actor, started=True, sensitive=False) is shutdown.ShutdownDisposition.REQUEUE
+
+    # A finish policy never interrupts, and a revoke policy never lets
+    # started work leave the worker.
+    assert disposition(finish_actor, started=True, sensitive=True) is shutdown.ShutdownDisposition.REQUEUE
+    assert disposition(revoke_actor, started=True, sensitive=False) is shutdown.ShutdownDisposition.CLEANUP
+
+
+def test_shutdown_policy_finish_does_not_interrupt(stub_broker):
+    middleware = shutdown.ShutdownNotifications()
+
+    @dramatiq.actor(notify_shutdown=True, shutdown_policy="finish")
+    def do_work():
+        pass
+
+    # A finish policy suppresses the interrupt even when
+    # notify_shutdown was requested.
+    assert middleware.should_notify(do_work, do_work.message()) is False
+
+
+def test_shutdown_policy_rejects_unknown_values(stub_broker):
+    middleware = shutdown.ShutdownNotifications()
+
+    @dramatiq.actor(shutdown_policy="bogus")
+    def do_work():
+        pass
+
+    with pytest.raises(ValueError):
+        middleware.get_policy(do_work, do_work.message())
+
+
+@pytest.mark.skipif(not_supported, reason="Threading not supported on this platform.")
+def test_sensitive_task_cleans_up_and_is_acknowledged_on_shutdown(stub_broker):
+    # Given a task that marks itself sensitive right before it sleeps
+    cleaned_up, interrupted = [], []
+
+    @dramatiq.actor(max_retries=0, notify_shutdown=True, shutdown_policy="revoke")
+    def do_work():
+        try:
+            shutdown.ShutdownGuard.enter_sensitive_phase()
+            time.sleep(10)
+        except shutdown.Shutdown:
+            interrupted.append(1)
+            raise
+        finally:
+            cleaned_up.append(1)
+
+    worker = Worker(stub_broker, worker_threads=1, worker_timeout=50)
+    worker.start()
+    try:
+        # When I send a message and shut down while it is sensitive
+        do_work.send()
+        time.sleep(0.2)
+        worker.stop()
+    finally:
+        worker.stop()
+
+    # Then the actor's cleanup ran, the message was acknowledged to the
+    # broker, and it is not available to a successor worker.
+    assert interrupted == [1]
+    assert cleaned_up == [1]
+    assert stub_broker.queues[do_work.queue_name].qsize() == 0
+    assert stub_broker.queues[do_work.queue_name].unfinished_tasks == 0
+    assert len(stub_broker.dead_letters) == 0
+
+
+@pytest.mark.skipif(not_supported, reason="Threading not supported on this platform.")
+def test_only_safe_tasks_are_left_for_a_successor_worker(stub_broker):
+    # Given a sensitive task and two ordinary tasks
+    ran = []
+
+    @dramatiq.actor(max_retries=0, notify_shutdown=True, shutdown_policy="revoke")
+    def sensitive():
+        try:
+            ran.append("sensitive")
+            shutdown.ShutdownGuard.enter_sensitive_phase()
+            time.sleep(10)
+        except shutdown.Shutdown:
+            raise
+
+    @dramatiq.actor(max_retries=0, shutdown_policy="requeue")
+    def safe(n):
+        ran.append(n)
+
+    worker = Worker(stub_broker, worker_threads=1, worker_timeout=50)
+    worker.start()
+
+    # And the worker has prefetched the sensitive task, while the
+    # ordinary tasks are still waiting in its in-memory queue.
+    for thread in worker.workers:
+        thread.pause()
+        thread.paused_event.wait()
+
+    sensitive.send()
+    for n in [1, 2]:
+        safe.send(n)
+    time.sleep(0.2)
+    assert worker.work_queue.qsize() >= 2
+
+    # When the sensitive task starts and the worker is shut down
+    for thread in worker.workers:
+        thread.resume()
+    time.sleep(0.2)
+    worker.stop()
+
+    # Then only the sensitive task has run so far.
+    assert ran == ["sensitive"]
+
+    # And the two safe tasks are waiting on the broker, not lost.
+    assert stub_broker.queues[safe.queue_name].qsize() == 2
+
+    # When a successor worker starts, it legally processes both.
+    successor = Worker(stub_broker, worker_threads=2, worker_timeout=50)
+    successor.start()
+    try:
+        while stub_broker.queues[safe.queue_name].unfinished_tasks:
+            time.sleep(0.05)
+    finally:
+        successor.stop()
+
+    assert sorted(ran[1:]) == [1, 2]
+    assert stub_broker.queues[safe.queue_name].unfinished_tasks == 0
