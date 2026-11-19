@@ -49,3 +49,33 @@ Brakeman will raise a warning like
     Unescaped model attribute near line 3: User.first.name
 
 If you trust all your data (although you probably shouldn't), this can be disabled with `--ignore-model-output`.
+
+### JavaScript Contexts
+
+Values output inside `<script>` elements are not HTML nodes. Brakeman classifies the
+output position from the compiled template text and reports separately for:
+
+* a quoted JavaScript string (`var x = "<%= ... %>"`)
+* a JavaScript expression (`var x = <%= ... %>`)
+* JSON data (`<script type="application/json">`)
+
+The template engine's HTML escaping is enough to keep a value inside a quoted
+JavaScript string, but it is not enough in expression position, where characters
+such as `;` and `(` are unchanged. Values marked HTML-safe with `raw`, `html_safe`,
+or a helper returning a `SafeBuffer` bypass that escaping entirely.
+
+`j`/`escape_javascript` only escapes text that will become the contents of a
+JavaScript string. It is treated as safe in a quoted string (and in JSON string
+data), but not as a JavaScript expression:
+
+    var ok = "<%= j params[:name] %>";   # no warning
+    var bad = <%= j params[:name] %>;    # warning
+
+Serialized JSON (`to_json`) is safe in expression position when HTML entity
+escaping is enabled, which is the default in Rails 4 and later:
+
+    var data = <%= raw params[:data].to_json %>;  # no warning
+
+When the surrounding template text does not determine the context (for example
+when the tag name or a conditional branch is dynamic), Brakeman reports the
+value as unknown rather than assuming it is safe.

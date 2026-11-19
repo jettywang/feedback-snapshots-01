@@ -1,0 +1,15 @@
+<% if params[:cond] %>
+  <p><%= params[:conditional_html] %></p>
+<% end %>
+
+<script>
+  var before = "<%= params[:before] %>";
+  <% if params[:cond] %>
+    var inside = "<%= params[:conditional_js] %>";
+  <% end %>
+  var after = "<%= params[:after] %>";
+</script>
+
+<script>
+  var agreed = <% if params[:cond] %><%= params[:branch_a] %><% else %><%= params[:branch_b] %><% end %>;
+</script>

@@ -1,5 +1,6 @@
 # 8.1.0 - 2026-09-30
 
+* Distinguish HTML, JavaScript string, JavaScript expression, and JSON output contexts when checking for XSS
 * Better help and error message for `--ensure-latest`
 * Fix frozen string error (Shai Coleman)
 * Update Sonar report format (fangxing)

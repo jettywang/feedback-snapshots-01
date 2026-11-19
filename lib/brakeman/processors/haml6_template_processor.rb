@@ -59,10 +59,10 @@ class Brakeman::Haml6TemplateProcessor < Brakeman::HamlTemplateProcessor
   end
 
   def javascript_escaped? call
-    # TODO: Adding here to match existing behavior for HAML,
-    # but really this is not safe and needs to be revisited
-      call.method == :j or
-        call.method == :escape_javascript
+    # j/escape_javascript only escapes JavaScript string contents. It is not
+    # safe in expression position, so let the XSS check decide using the
+    # actual script context.
+    false
   end
 
   def html_escaped? call

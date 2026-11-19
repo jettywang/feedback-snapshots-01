@@ -1,0 +1,23 @@
+<div data-value="<%= params[:attr] %>">text</div>
+<div data-value='<%= raw params[:attr_raw] %>'>text</div>
+
+<script>
+  // Comment with <%= params[:comment_plain] %> should not break out
+  /* Block comment <%= raw params[:comment_raw] %> */
+  var single = '<%= params[:single] %>';
+  var singleJ = '<%= j params[:single_j] %>';
+  var template = `<%= params[:template] %>`;
+  var jsonInline = <%= params[:json_inline].to_json %>;
+  var doubleEscaped = "<%= j raw params[:double] %>";
+</script>
+
+<script type="application/json">
+  { "escaped": <%= params[:json_plain] %> }
+  { "serialized": <%= raw params[:json_serialized].to_json %> }
+  { "j_serialized": <%= j params[:json_j_serialized].to_json %> }
+  { "raw": <%= raw params[:json_raw] %> }
+</script>
+
+<script type="text/template">
+  <p><%= params[:template_html] %></p>
+</script>

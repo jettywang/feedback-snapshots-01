@@ -1,0 +1,23 @@
+<p><%= html_safe_wrapper(params[:html_helper]) %></p>
+
+<script>
+  var safeInString = "<%= j(html_safe_wrapper(params[:js_helper_j])) %>";
+  var unsafeInString = "<%= html_safe_wrapper(params[:js_helper_plain]) %>";
+  var safeExpression = <%= j(html_safe_wrapper(params[:expr_helper_j])) %>;
+  var rawExpression = <%= raw_wrapper(params[:expr_helper_raw]) %>;
+  var jsonExpression = <%= json_wrapper(params[:expr_helper_json_ok]) %>;
+  var jsonString = "<%= json_wrapper(params[:expr_helper_json_string]) %>";
+  var passthroughExpression = <%= passthrough(params[:expr_helper_pass]) %>;
+  var escapedByJ = <%= j(params[:expr_plain_j]) %>;
+  var escapedString = "<%= j(params[:string_plain_j]) %>";
+</script>
+
+<script>
+  var escapedHelperString = "<%= h(params[:string_h]) %>";
+  var escapedHelperExpression = <%= h(params[:expr_h]) %>;
+</script>
+
+<script>
+  var contentTagString = "<%= content_tag(:span, params[:string_tag]) %>";
+  var contentTagExpression = <%= content_tag(:span, params[:expr_tag]) %>;
+</script>

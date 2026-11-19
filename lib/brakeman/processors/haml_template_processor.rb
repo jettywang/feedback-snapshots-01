@@ -121,8 +121,12 @@ class Brakeman::HamlTemplateProcessor < Brakeman::TemplateProcessor
         get_pushed_value(exp.target, default)
       elsif is_escaped? exp
         get_pushed_value(exp.first_arg, :escaped_output)
-      elsif @javascript and (exp.method == :j or exp.method == :escape_javascript) # TODO: Remove - this is not safe
-        get_pushed_value(exp.first_arg, :escaped_output)
+      elsif @javascript and (exp.method == :j or exp.method == :escape_javascript)
+        # j/escape_javascript only escapes what would be string contents.
+        # Keep the call so the XSS check can evaluate it against the actual
+        # script context instead of treating every use in a JavaScript filter
+        # as safe.
+        add_output exp, :escaped_output
       elsif find_and_preserve? exp or fix_textareas? exp
         get_pushed_value(exp.first_arg, default)
       elsif raw? exp

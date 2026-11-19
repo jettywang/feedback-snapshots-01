@@ -2,6 +2,7 @@ require 'brakeman/checks/base_check'
 require 'brakeman/processors/lib/find_call'
 require 'brakeman/processors/lib/processor_helper'
 require 'brakeman/util'
+require 'brakeman/template_context'
 require 'set'
 
 #This check looks for unescaped output in templates which contains
@@ -22,6 +23,17 @@ class Brakeman::CheckCrossSiteScripting < Brakeman::BaseCheck
   MODEL_METHODS = Set[:all, :find, :first, :last, :new]
 
   IGNORE_LIKE = /^link_to_|(_path|_tag|_url)$/
+
+  # Methods that escape HTML characters in a plain String. They are enough
+  # to keep a value inside a quoted JavaScript string, but not enough in
+  # expression position.
+  HTML_ESCAPE_METHODS = Set[:escapeHTML, :escape_once, :h, :html_escape,
+                            :html_escape_without_haml_xss, :u, :url_encode]
+
+  # Methods that return an HTML-safe buffer (sanitized or otherwise). They
+  # bypass the template engine's escaping.
+  HTML_SAFE_METHODS = Set[:raw, :html_safe, :html_safe!, :sanitize,
+                          :strip_tags, :content_tag, :tag, :link_to, :safe_join]
 
   HAML_HELPERS = Sexp.new(:colon2, Sexp.new(:const, :Haml), :Helpers)
 
@@ -48,12 +60,421 @@ class Brakeman::CheckCrossSiteScripting < Brakeman::BaseCheck
       @current_template = template
 
       template.each_output do |out|
-        unless check_for_immediate_xss out
-          @matched = false
-          @mark = false
-          process out
+        context = out.respond_to?(:output_context) ? out.output_context : nil
+
+        if script_context? context
+          # For script contexts, evaluate HTML escaping and JavaScript
+          # escaping separately instead of reusing the HTML output rules.
+          check_script_output out, context
+        else
+          unless check_for_immediate_xss out
+            @matched = false
+            @mark = false
+            process out
+          end
         end
       end
+    end
+  end
+
+  def script_context? context
+    Brakeman::TemplateContext.script? context
+  end
+
+  # Analysis of a value being emitted into a script context.
+  #
+  # +chain+ records the conversions applied between the user input and the
+  # actual output location, for example [:helper(foo), :html_safe, :to_json].
+  ScriptAnalysis = Struct.new(:input, :chain, :js_escaped, :html_safe,
+                              :html_escaped, :json, :unknown, :engine_escaped)
+
+  # Check an output expression whose surrounding template text places it in
+  # a script (not HTML) context.
+  def check_script_output out, context
+    return if duplicate? out
+
+    analysis = analyze_script_value out.value
+
+    # Some template engines unwrap j/raw/html_safe before recording the
+    # output value. Merge the conversions observed at the insertion point.
+    apply_output_flags analysis, out
+
+    # Whether the template engine HTML-escaped this value for us. This is
+    # what makes ordinary output safe in an HTML node or a quoted string but
+    # not in a JavaScript expression.
+    analysis.engine_escaped = out.node_type == :escaped_output
+
+    unless analysis.input
+      return
+    end
+
+    return if script_safe? analysis, context
+
+    add_result out
+
+    message = script_warning_message(analysis, context)
+
+    warn :template => @current_template,
+      :warning_type => "Cross-Site Scripting",
+      :warning_code => :cross_site_scripting,
+      :message => message,
+      :code => out.value,
+      :user_input => analysis.input,
+      :confidence => script_confidence(analysis),
+      :link_path => "cross_site_scripting",
+      :cwe_id => [79]
+  end
+
+  def apply_output_flags analysis, out
+    flags = out.respond_to?(:output_flags) ? out.output_flags : nil
+    return unless flags and flags.any?
+
+    analysis.js_escaped ||= flags.include? :js_escaped
+    analysis.html_safe ||= flags.include? :html_safe
+    analysis.html_escaped ||= flags.include? :html_escaped
+    analysis.json ||= flags.include? :json
+  end
+
+  def content_tag_method? method
+    method == :content_tag or method == :tag or method == :link_to or method == :safe_join
+  end
+
+  def script_confidence analysis
+    # An unresolved call could return a plain String (escaped by the
+    # template engine) or a SafeBuffer, so only report it at medium when it
+    # appears in the conversion chain.
+    if analysis.unknown and analysis.chain.any?
+      :medium
+    else
+      :high
+    end
+  end
+
+  def script_warning_message analysis, context
+    context_name = case context
+                   when Brakeman::TemplateContext::SCRIPT_STRING
+                     "JavaScript string"
+                   when Brakeman::TemplateContext::SCRIPT_TEMPLATE
+                     "JavaScript template literal"
+                   when Brakeman::TemplateContext::SCRIPT_EXPRESSION
+                     "JavaScript expression"
+                   when Brakeman::TemplateContext::JSON, Brakeman::TemplateContext::JSON_STRING
+                     "JSON data"
+                   else
+                     "script context"
+                   end
+
+    message = msg("Unescaped ", msg_input(script_input_type(analysis.input)),
+                  " in ", context_name)
+
+    details = script_warning_details(analysis, context)
+    message << msg_plain(" (#{details})") unless details.empty?
+
+    message
+  end
+
+  # Describe the conversion chain from input to output so a finding points to
+  # the actual transformation that was insufficient.
+  def script_warning_details analysis, context
+    details = []
+
+    if analysis.chain.any?
+      chain = analysis.chain.map(&:to_s).join(" -> ")
+      details << "via #{chain}"
+    end
+
+    if analysis.chain.include?(:escape_javascript) and
+       (context == Brakeman::TemplateContext::SCRIPT_EXPRESSION or
+        context == Brakeman::TemplateContext::SCRIPT_TEMPLATE)
+      details << "`escape_javascript` only escapes JavaScript string contents"
+    elsif context == Brakeman::TemplateContext::SCRIPT_TEMPLATE
+      details << "template literals require escaping backticks and `${`"
+    elsif analysis.html_safe and not analysis.json
+      details << "HTML-safe output is not JavaScript-safe"
+    end
+
+    details.join("; ")
+  end
+
+  # The script check reports the value itself, not a @matched Match, so
+  # derive the same user-input wording used by the HTML check.
+  def script_input_type input
+    if params?(input)
+      Match.new(:params, input)
+    elsif cookies?(input)
+      Match.new(:cookies, input)
+    elsif request_headers?(input)
+      Match.new(:request, input)
+    else
+      Match.new(:model, input)
+    end
+  end
+
+  # Decide whether the value is safe at the insertion point.
+  #
+  # The template engine HTML-escapes ordinary output. Inside an HTML node or
+  # a quoted JavaScript string, that is enough to keep the value from
+  # changing the surrounding markup or ending the string. Inside a
+  # JavaScript expression it is not enough: characters such as `;`, `(` and
+  # letters are untouched by HTML escaping, so attacker-controlled text is
+  # still JavaScript source.
+  #
+  # Values marked HTML-safe (`raw`, `html_safe`, helpers returning SafeBuffer,
+  # and `j`, whose result is a SafeBuffer) bypass the engine's escaping, so
+  # only their own conversions count.
+  def script_safe? analysis, context
+    outer = outer_conversion analysis
+    json_ok = analysis.json and json_escaped?
+
+    case context
+    when Brakeman::TemplateContext::SCRIPT_STRING
+      # Inside a quoted JavaScript string the value must not be able to end
+      # the string. j escapes quotes, HTML-escaping helpers encode them, and
+      # JSON serialization escapes them too. Engine escaping covers ordinary
+      # output. HTML-safe output without any of those can end the string.
+      return true if outer == :escape_javascript
+      return true if analysis.html_escaped
+      return true if HTML_ESCAPE_METHODS.include? outer
+      return true if json_ok
+      return true if plain_engine_escaped? analysis
+
+      false
+
+    when Brakeman::TemplateContext::SCRIPT_TEMPLATE
+      # Template literals also require escaping backticks and `${`. None of
+      # the conversions tracked here do that.
+      false
+
+    when Brakeman::TemplateContext::SCRIPT_EXPRESSION
+      # Engine-escaped text and j-escaped string contents are still
+      # JavaScript source here. Serialized JSON is data and inert when its
+      # HTML entities are escaped. j must not be the outermost call because
+      # it turns JSON into string contents.
+      json_ok and outer != :escape_javascript
+
+    when Brakeman::TemplateContext::JSON
+      # JSON value position. Serialized JSON is inert; j-escaped values are
+      # string data. Engine-escaped plain output cannot close the script
+      # element, although it may not be valid JSON.
+      return true if json_ok and outer != :escape_javascript
+      return true if outer == :escape_javascript
+      return true if plain_engine_escaped? analysis
+
+      false
+
+    when Brakeman::TemplateContext::JSON_STRING
+      return true if json_ok and outer != :escape_javascript
+      return true if outer == :escape_javascript
+      return true if HTML_ESCAPE_METHODS.include? outer
+      return true if plain_engine_escaped? analysis
+
+      false
+
+    else
+      # The template does not determine the context. Do not claim the value
+      # is safe, but do not guess at a warning either.
+      true
+    end
+  end
+
+  # The outermost conversion that applies to the emitted value. The chain is
+  # ordered from the output expression inwards. Helper markers are not
+  # conversions; the conversion inside the helper is the outermost one from
+  # the caller's perspective. Marking a value HTML-safe does not change
+  # characters, although it does stop the engine escaping it.
+  def outer_conversion analysis
+    analysis.chain.find do |step|
+      name = step.to_s
+      !(name.start_with?("helper(") or name.start_with?("opaque_helper(") or
+        name.start_with?("unknown(") or
+        name == "html_safe")
+    end
+  end
+
+  # Ordinary output that the template engine itself HTML-escaped and that
+  # nothing marked HTML-safe afterwards.
+  def plain_engine_escaped? analysis
+    analysis.engine_escaped and not analysis.html_safe and not analysis.unknown
+  end
+
+  # Whether to_json output is HTML-entity escaped. Computed in #setup from
+  # the same configuration used for the existing to_json handling.
+  def json_escaped?
+    @json_escaped
+  end
+
+  # Walk the output expression and record the conversions applied to the
+  # value: j/escape_javascript, raw/html_safe, to_json, HTML escaping, and
+  # helper return values.
+  def analyze_script_value exp, seen = Set.new, depth = 0
+    analysis = ScriptAnalysis.new(nil, [], false, false, false, false, false, false)
+
+    analyze_script_expression exp, analysis, seen, depth
+
+    unless analysis.input
+      analysis.input = find_script_input(exp)
+    end
+
+    analysis.input = analysis.input.match if analysis.input.is_a? Match
+    analysis
+  end
+
+  # Find request/model input even when wrapped in calls whose meaning is not
+  # known, e.g. j(params[:x]) or a helper that simply returns its argument.
+  def find_script_input exp, depth = 0
+    return unless sexp? exp
+    return if depth > 12
+
+    input = has_immediate_user_input?(exp)
+    input ||= has_immediate_model?(exp) unless tracker.options[:ignore_model_output]
+    return input if input
+
+    case exp.node_type
+    when :call, :safe_call
+      found = find_script_input(exp.target, depth + 1)
+      return found if found
+
+      exp.each_arg do |arg|
+        found = find_script_input(arg, depth + 1)
+        return found if found
+      end
+      nil
+    when :dstr, :evstr, :if, :or, :and
+      exp.each do |child|
+        next unless sexp?(child)
+        found = find_script_input(child, depth + 1)
+        return found if found
+      end
+      nil
+    else
+      nil
+    end
+  end
+
+  def analyze_script_expression exp, analysis, seen, depth
+    return unless sexp? exp
+    return if depth > 8
+
+    case exp.node_type
+    when :call, :safe_call
+      method = exp.method
+      target = exp.target
+
+      if method == :j or method == :escape_javascript
+        analysis.chain << :escape_javascript
+        analysis.js_escaped = true
+        analyze_script_expression exp.first_arg, analysis, seen, depth + 1
+      elsif method == :raw
+        analysis.chain << :raw
+        analysis.html_safe = true
+        analyze_script_expression exp.first_arg, analysis, seen, depth + 1
+      elsif method == :html_safe or method == :html_safe!
+        analysis.chain << :html_safe
+        analysis.html_safe = true
+        analyze_script_expression target, analysis, seen, depth + 1
+      elsif method == :to_json or method == :encode
+        analysis.chain << :to_json
+        analysis.json = true
+        analyze_script_expression target, analysis, seen, depth + 1
+      elsif HTML_ESCAPE_METHODS.include? method
+        analysis.chain << method
+        analysis.html_escaped = true
+        analyze_script_expression(target || exp.first_arg, analysis, seen, depth + 1)
+      elsif method == :to_s or method == :strip or method == :freeze
+        analyze_script_expression target, analysis, seen, depth + 1
+      elsif content_tag_method? method
+        analysis.chain << method
+        analysis.html_escaped = true
+        analysis.html_safe = true
+      elsif HTML_SAFE_METHODS.include? method
+        analysis.chain << method
+        analysis.html_safe = true
+      elsif helper = find_helper_method(method) and not seen.include?(method)
+        seen = seen.dup.add(method)
+        value = helper_return_value(helper, exp)
+
+        analysis.chain << :"helper(#{method})"
+
+        unless sexp? value and analyze_helper_value(value, analysis, seen, depth + 1)
+          analysis.chain << :"opaque_helper(#{method})"
+          analysis.unknown = true
+        end
+      elsif request_value? exp or model_name?(target) or
+            (not tracker.options[:ignore_model_output] and has_immediate_model?(exp))
+        # The value itself, i.e. a request value or model attribute. Escaping
+        # is applied by the template engine unless a later conversion marks it
+        # HTML-safe.
+      elsif method == :[] or method == :fetch
+        # Indexing a hash does not transform the value.
+        analyze_script_expression target, analysis, seen, depth + 1
+      else
+        # Unknown call. It may sanitize, but it may also return the value
+        # unchanged or as a SafeBuffer, so remember the uncertainty.
+        analysis.unknown = true
+        analysis.chain << :"unknown(#{method})" if method
+      end
+    when :dstr, :evstr, :if, :or, :and
+      exp.each { |part| analyze_script_expression part, analysis, seen, depth + 1 if sexp?(part) }
+    else
+      # Literal or otherwise non-call value. It has no conversions of its own.
+    end
+  end
+
+  # Analyze the return value of a helper. Returns false if the helper's
+  # return value cannot be determined from the template or helper source.
+  def analyze_helper_value value, analysis, seen, depth
+    if value.nil?
+      return false
+    elsif sexp? value and value.node_type == :ignore
+      return false
+    else
+      analyze_script_expression value, analysis, seen, depth
+      true
+    end
+  end
+
+  def find_helper_method name
+    @helper_cache ||= {}
+
+    return @helper_cache[name] if @helper_cache.key? name
+
+    found = nil
+    tracker.libs.each do |_set_name, collection|
+      if method = collection.get_method(name)
+        found = method
+        break
+      end
+    end
+
+    @helper_cache[name] = found
+  end
+
+  def helper_return_value helper, call
+    value = Brakeman::FindReturnValue.return_value(helper.src.body_list)
+
+    formal = helper.src.formal_args
+    actual = call.args
+
+    substitutions = {}
+    formal.each_with_index do |arg, index|
+      next if index == 0
+      substitutions[arg] = actual[index - 1] if arg.is_a? Symbol and sexp?(actual[index - 1])
+    end
+
+    substitute_args value, substitutions
+  end
+
+  def substitute_args exp, substitutions
+    return exp unless sexp?(exp)
+
+    if exp.node_type == :lvar and substitutions.key?(exp.value)
+      substitutions[exp.value].deep_clone(exp.line)
+    else
+      exp = exp.deep_clone
+      exp.map! do |child|
+        sexp?(child) ? substitute_args(child, substitutions) : child
+      end
+      exp
     end
   end
 
@@ -330,9 +751,11 @@ class Brakeman::CheckCrossSiteScripting < Brakeman::BaseCheck
 
     if !json_escape_on or version_between? "0.0.0", "2.0.99"
       @known_dangerous << :to_json
+      @json_escaped = false
       Brakeman.debug("Automatic to_json escaping not enabled, consider to_json dangerous")
     else
       @safe_input_attributes << :to_json
+      @json_escaped = true
       Brakeman.debug("Automatic to_json escaping is enabled.")
     end
   end

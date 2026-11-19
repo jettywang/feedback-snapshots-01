@@ -1,0 +1,19 @@
+<p>HTML: <%= params[:html] %></p>
+<p>HTML raw: <%= raw params[:html_raw] %></p>
+<a href="<%= params[:href] %>">link</a>
+
+<script>
+  var plainString = "<%= params[:js_plain] %>";
+  var escapedString = "<%= j params[:js_escaped] %>";
+  var htmlSafeString = "<%= html_safe_wrapper(params[:js_helper]) %>";
+  var rawString = "<%= raw params[:js_raw] %>";
+  var plainExpression = <%= params[:expr_plain] %>;
+  var escapedExpression = <%= j params[:expr_escaped] %>;
+  var htmlSafeExpression = <%= html_safe_wrapper(params[:expr_helper]) %>;
+  var jsonValue = <%= raw params[:expr_json].to_json %>;
+  var jsonEscaped = <%= j params[:expr_json_escaped].to_json %>;
+</script>
+
+<script type="application/json">
+  { "value": <%= params[:json] %> }
+</script>

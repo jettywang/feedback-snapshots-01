@@ -4,6 +4,8 @@ require 'brakeman/tracker/template'
 #Base Processor for templates/views
 class Brakeman::TemplateProcessor < Brakeman::BaseProcessor
 
+  attr_reader :current_template
+
   #Initializes template information.
   def initialize tracker, template_name, called_from = nil, current_file = nil
     super(tracker)
