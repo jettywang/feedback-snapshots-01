@@ -263,3 +263,69 @@ $ detect-secrets audit --report --only-false .secret.baseline
     }
 ]
 ```
+
+## Redacted Review Packages
+
+Sharing a baseline with an external reviewer is often not possible: the baseline
+contains filenames and line numbers, and the audit flow normally reads the source
+file to display the matched line. The redacted review package workflow separates
+those two concerns.
+
+A review package contains only:
+
+- the finding category (e.g. `Basic Auth Credentials`),
+- the evidence location (`path`, `line`, and the occurrence number on that line),
+- an opaque finding ID,
+- the reviewer's decision.
+
+It does **not** contain the secret value, its hash, the source line, or any
+surrounding context. It can be reviewed on a machine that does not have the
+repository at all.
+
+### Export
+
+```bash
+$ detect-secrets audit .secrets.baseline --export-review review.json
+```
+
+The first export creates `.secrets.baseline.review-ledger.json` next to the
+baseline. Keep this file with the baseline: it holds a private per-record key
+used to derive finding IDs, and it tracks which packages have already been
+imported. Do not send the ledger to the reviewer.
+
+### Review
+
+```bash
+$ cd /path/to/empty/review-directory
+$ detect-secrets audit --review-package review.json
+```
+
+The reviewer is shown the category and evidence location only. When two findings
+share a line, they are distinguished by occurrence (`occurrence 1 of 2`,
+`occurrence 2 of 2`). The command writes `review.reviewed.json` in the current
+directory; use `--output` if you want a different path.
+
+The following errors are reported distinctly:
+
+| Situation | Exit code |
+| --- | --- |
+| Malformed, corrupted, or tampered package | 2 |
+| Package belongs to a different baseline record | 3 |
+| Package was already imported | 4 |
+| One or more findings no longer exist in the baseline | 5 |
+
+Before making any change, the importer re-derives every finding ID from the
+baseline using the private ledger key. A package whose findings were edited,
+or which was copied from another baseline, will not match and is rejected
+atomically.
+
+### Import
+
+```bash
+$ detect-secrets audit .secrets.baseline --import-review review.reviewed.json
+```
+
+The import is atomic: if any referenced finding no longer exists, no decisions
+are written, and the stale findings are listed. Re-exporting a baseline after
+the code has changed will produce new finding IDs for moved or removed findings,
+so use a fresh package rather than a stale one.

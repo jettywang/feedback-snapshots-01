@@ -14,7 +14,7 @@ def add_audit_action(parent: argparse._SubParsersAction) -> argparse.ArgumentPar
 
     parser.add_argument(
         'filename',
-        nargs='+',
+        nargs='*',
         help=(
             'Audit a given baseline file to distinguish the difference '
             'between false and true positives.'
@@ -22,6 +22,7 @@ def add_audit_action(parent: argparse._SubParsersAction) -> argparse.ArgumentPar
     )
 
     _add_mode_parser(parser)
+    _add_review_package_module(parser)
     _add_report_module(parser)
     _add_statistics_module(parser)
     return cast(argparse.ArgumentParser, parser)
@@ -52,6 +53,50 @@ def _add_mode_parser(parser: argparse.ArgumentParser) -> None:
         action='store_true',
         help=(
             'Displays a report with the secrets detected'
+        ),
+    )
+
+
+def _add_review_package_module(parent: argparse.ArgumentParser) -> None:
+    parser = parent.add_argument_group(
+        title='redacted review packages',
+        description=(
+            'Exchange audit decisions without sharing source files. Packages contain only '
+            'the finding category, evidence location, and an opaque finding id.'
+        ),
+    )
+
+    review_parser = parser.add_mutually_exclusive_group()
+    review_parser.add_argument(
+        '--export-review',
+        metavar='PACKAGE',
+        help=(
+            'Exports a redacted review package from the specified baseline. '
+            'e.g. `detect-secrets audit .secrets.baseline --export-review review.json`'
+        ),
+    )
+    review_parser.add_argument(
+        '--review-package',
+        metavar='PACKAGE',
+        help=(
+            'Interactively reviews a package without access to source files. '
+            'e.g. `detect-secrets audit --review-package review.json`'
+        ),
+    )
+    review_parser.add_argument(
+        '--import-review',
+        metavar='PACKAGE',
+        help=(
+            'Imports reviewed decisions into the specified baseline. '
+            'e.g. `detect-secrets audit .secrets.baseline --import-review review.reviewed.json`'
+        ),
+    )
+    parser.add_argument(
+        '--output',
+        metavar='PACKAGE',
+        help=(
+            'Where to write the reviewed package. Defaults to writing in the current '
+            'directory. Only used with --review-package.'
         ),
     )
 
@@ -101,6 +146,24 @@ def _add_statistics_module(parent: argparse.ArgumentParser) -> None:
 
 def parse_args(args: argparse.Namespace) -> None:
     if args.action != 'audit':
+        return
+
+    if args.review_package:
+        if args.filename:
+            raise argparse.ArgumentTypeError(
+                '--review-package does not require a baseline file.',
+            )
+        return
+    elif args.output:
+        raise argparse.ArgumentTypeError(
+            '--output can only be used with --review-package.',
+        )
+
+    if args.export_review or args.import_review:
+        if len(args.filename) != 1:
+            raise argparse.ArgumentTypeError(
+                '--export-review and --import-review require exactly one baseline file.',
+            )
         return
 
     if args.diff and len(args.filename) != 2:

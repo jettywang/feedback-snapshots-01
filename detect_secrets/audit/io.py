@@ -15,6 +15,11 @@ def print_message(message: str) -> None:
     print(message)
 
 
+def get_user_input(prompt: str) -> str:
+    """Kept separate so non-interactive workflows can inject their own input."""
+    return input(prompt)
+
+
 def print_error(message: str) -> None:
     print(message, file=sys.stderr)
 
@@ -98,7 +103,7 @@ def get_user_decision(
         if user_input:
             print('Invalid input.')     # type: ignore # Statement unreachable? Come on mypy...
 
-        user_input = input(str(prompter))
+        user_input = get_user_input(str(prompter))
         if user_input:
             user_input = user_input[0].upper()
 

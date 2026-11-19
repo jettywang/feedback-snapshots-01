@@ -427,7 +427,9 @@ $ detect-secrets audit --help
 usage: detect-secrets audit [-h] [--diff] [--stats]
                       [--report] [--only-real | --only-false]
                       [--json]
-                      filename [filename ...]
+                      [--export-review PACKAGE | --review-package PACKAGE
+                       | --import-review PACKAGE]
+                      [filename ...]
 
 Auditing a baseline allows analysts to label results, and optimize plugins for
 the highest signal-to-noise ratio for their environment.
@@ -444,6 +446,17 @@ optional arguments:
   --stats       Displays the results of an interactive auditing session which
                 have been saved to a baseline file.
   --report      Displays a report with the secrets detected
+
+redacted review packages:
+  Exchange audit decisions without sharing source files. Packages contain only
+  the finding category, evidence location, and an opaque finding id.
+
+  --export-review PACKAGE
+                Exports a redacted review package from the specified baseline.
+  --review-package PACKAGE
+                Interactively reviews a package without access to source files.
+  --import-review PACKAGE
+                Imports reviewed decisions into the specified baseline.
 
 reporting:
   Display a summary with all the findings and the made decisions. To be used with the report mode (--report).

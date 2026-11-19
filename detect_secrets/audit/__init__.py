@@ -1,4 +1,9 @@
 from . import analytics                 # noqa: F401
 from . import report                    # noqa: F401
+from . import review_package            # noqa: F401
 from .audit import audit_baseline       # noqa: F401
 from .compare import compare_baselines  # noqa: F401
+from .review_package import DuplicateReviewPackageError  # noqa: F401
+from .review_package import ReviewPackageError  # noqa: F401
+from .review_package import StaleReviewPackageError  # noqa: F401
+from .review_package import WrongReviewPackageError  # noqa: F401

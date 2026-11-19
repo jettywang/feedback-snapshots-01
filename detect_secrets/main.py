@@ -29,7 +29,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.action == 'scan':
         handle_scan_action(args)
     elif args.action == 'audit':
-        handle_audit_action(args)
+        return handle_audit_action(args)
 
     return 0
 
@@ -117,9 +117,25 @@ def scan_adhoc_string(line: str) -> str:
     ])
 
 
-def handle_audit_action(args: argparse.Namespace) -> None:
+def handle_audit_action(args: argparse.Namespace) -> int:
     try:
-        if args.stats:
+        if args.export_review:
+            audit.review_package.export_review_package(
+                args.filename[0],
+                args.export_review,
+            )
+            print('Exported redacted review package: {}'.format(args.export_review))
+        elif args.review_package:
+            audit.review_package.review_package(
+                args.review_package,
+                output_filename=args.output,
+            )
+        elif args.import_review:
+            audit.review_package.import_review_package(
+                args.import_review,
+                args.filename[0],
+            )
+        elif args.stats:
             stats = audit.analytics.calculate_statistics_for_baseline(args.filename[0])
             if args.diff:
                 # TODO
@@ -152,3 +168,8 @@ def handle_audit_action(args: argparse.Namespace) -> None:
                 audit.audit_baseline(args.filename[0])
     except InvalidBaselineError:
         pass
+    except audit.ReviewPackageError as e:
+        print(str(e), file=sys.stderr)
+        return e.exit_code
+
+    return 0
