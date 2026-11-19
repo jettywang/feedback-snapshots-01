@@ -37,9 +37,14 @@ module Net
         # appropriately. The new key is returned. If the key itself is
         # encrypted (requiring a passphrase to use), the user will be
         # prompted to enter their password unless passphrase works.
-        def load_private_key(filename, passphrase = nil, ask_passphrase = true, prompt = Prompt.default)
+        #
+        # Options:
+        # * :max_kdf_rounds - cap on bcrypt_pbkdf rounds for OpenSSH-format
+        #   keys. A key above the cap raises before any key derivation, so a
+        #   maliciously expensive file can never trigger the passphrase loop.
+        def load_private_key(filename, passphrase = nil, ask_passphrase = true, prompt = Prompt.default, **options)
           data = File.read(File.expand_path(filename))
-          load_data_private_key(data, passphrase, ask_passphrase, filename, prompt)
+          load_data_private_key(data, passphrase, ask_passphrase, filename, prompt, **options)
         end
 
         # Loads a private key. It will correctly determine
@@ -47,19 +52,23 @@ module Net
         # appropriately. The new key is returned. If the key itself is
         # encrypted (requiring a passphrase to use), the user will be
         # prompted to enter their password unless passphrase works.
-        def load_data_private_key(data, passphrase = nil, ask_passphrase = true, filename = "", prompt = Prompt.default)
+        def load_data_private_key(data, passphrase = nil, ask_passphrase = true, filename = "", prompt = Prompt.default,
+                                  max_kdf_rounds: Net::SSH::Authentication::ED25519::OpenSSHPrivateKeyLoader::DEFAULT_MAX_KDF_ROUNDS)
           key_type = classify_key(data, filename)
+          read_options = key_type.open_ssh_container? ? { max_kdf_rounds: max_kdf_rounds } : {}
 
-          encrypted_key = nil
           tries = 0
 
           prompter = nil
           result =
             begin
-              key_type.read(data, passphrase)
+              key_type.read(data, passphrase, **read_options)
             rescue *key_type.error_classes => e
-              encrypted_key = !!key_type.encrypted_key?(data, e) if encrypted_key.nil?
-              if encrypted_key && ask_passphrase
+              # Only a wrong/missing passphrase for an encrypted key is worth
+              # retrying. Unsupported formats, over-budget KDF rounds and
+              # structurally corrupt keys fail immediately instead of being
+              # mistaken for a bad passphrase and reprompted up to three times.
+              if key_type.retryable?(data, e) && ask_passphrase
                 tries += 1
                 if tries <= 3
                   prompter ||= prompt.start(type: 'private_key', filename: filename, sha: Digest::SHA256.digest(data))
@@ -112,12 +121,24 @@ module Net
 
         # rubocop:disable Style/Documentation, Lint/DuplicateMethods
         class KeyType
-          def self.read(key_data, passphrase)
+          # Whether this type parses the OpenSSH private key container, whose
+          # KDF budget is configurable. PEM-based OpenSSL types ignore it.
+          def self.open_ssh_container?
+            false
+          end
+
+          def self.read(key_data, passphrase, **_options)
             raise Exception, "TODO subclasses should implement read"
           end
 
           def self.error_classes
             raise Exception, "TODO subclasses should implement read"
+          end
+
+          # Whether the given error means another passphrase should be asked.
+          # Defaults to false; only encrypted-key decrypt failures retry.
+          def self.retryable?(key_data, error)
+            encrypted_key?(key_data, error)
           end
 
           def self.encrypted_key?(data, error)
@@ -126,16 +147,29 @@ module Net
         end
 
         class OpenSSHPrivateKeyType < KeyType
-          def self.read(key_data, passphrase)
-            Net::SSH::Authentication::ED25519::OpenSSHPrivateKeyLoader.read(key_data, passphrase)
+          LOADER = Net::SSH::Authentication::ED25519::OpenSSHPrivateKeyLoader
+
+          def self.open_ssh_container?
+            true
+          end
+
+          def self.read(key_data, passphrase, max_kdf_rounds: LOADER::DEFAULT_MAX_KDF_ROUNDS)
+            LOADER.read(key_data, passphrase, max_kdf_rounds: max_kdf_rounds)
           end
 
           def self.error_classes
-            [Net::SSH::Authentication::ED25519::OpenSSHPrivateKeyLoader::DecryptError]
+            [LOADER::KeyParseError, LOADER::DecryptError]
+          end
+
+          # The loader's structured errors decide themselves: only a wrong or
+          # missing passphrase on an encrypted key is retryable. Unsupported
+          # formats, KDF-budget and malformed-container errors never reprompt.
+          def self.retryable?(_key_data, error)
+            error.respond_to?(:retryable?) && error.retryable?
           end
 
           def self.encrypted_key?(key_data, decode_error)
-            decode_error.is_a?(Net::SSH::Authentication::ED25519::OpenSSHPrivateKeyLoader::DecryptError) && decode_error.encrypted_key?
+            decode_error.is_a?(LOADER::DecryptError) && decode_error.encrypted_key?
           end
         end
 
@@ -145,7 +179,7 @@ module Net
           end
 
           # A nil passphrase would make OpenSSL prompt on the terminal itself.
-          def self.read(key_data, passphrase)
+          def self.read(key_data, passphrase, **_options)
             open_ssl_class.new(key_data, passphrase || 'invalid')
           end
 
@@ -155,7 +189,7 @@ module Net
         end
 
         class OpenSSLPKeyType < OpenSSLKeyTypeBase
-          def self.read(key_data, passphrase)
+          def self.read(key_data, passphrase, **_options)
             open_ssl_class.read(key_data, passphrase || 'invalid')
           end
 

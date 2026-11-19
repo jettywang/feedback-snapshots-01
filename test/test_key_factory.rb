@@ -226,6 +226,42 @@ class TestKeyFactory < NetSSHTest
     assert_equal OpenSSL::PKey.read(anonymous_private_key).to_der, Net::SSH::KeyFactory.load_private_key(@key_file, "password").to_der
   end
 
+  def test_openssh_key_over_kdf_budget_raises_a_stable_category_without_prompting
+    skip "OpenSSH private key loader requires Ed25519 support" unless Net::SSH::Authentication::ED25519Loader::LOADED
+
+    # The encrypted RSA fixture uses 2 bcrypt rounds.
+    File.expects(:read).with(@key_file).returns(encrypted_rsa_key_openssh)
+    prompt = MockPrompt.new
+    prompt.expects(:start).never
+
+    error = assert_raises(Net::SSH::Authentication::ED25519::OpenSSHPrivateKeyLoader::KdfBudgetError) do
+      Net::SSH::KeyFactory.load_private_key(@key_file, "password", true, prompt, max_kdf_rounds: 1)
+    end
+    assert_equal 2, error.rounds
+    assert_equal 1, error.limit
+  end
+
+  def test_kdf_budget_option_is_ignored_for_pem_keys
+    skip "OpenSSH private key loader requires Ed25519 support" unless Net::SSH::Authentication::ED25519Loader::LOADED
+
+    # PEM keys have no bcrypt KDF; the option must simply pass through harmlessly.
+    File.expects(:read).with(@key_file).returns(rsa_key.export)
+    key = Net::SSH::KeyFactory.load_private_key(@key_file, nil, true, MockPrompt.new, max_kdf_rounds: 1)
+    assert_equal rsa_key.to_der, key.to_der
+  end
+
+  def test_malformed_openssh_container_is_not_mistaken_for_a_bad_passphrase
+    skip "OpenSSH private key loader requires Ed25519 support" unless Net::SSH::Authentication::ED25519Loader::LOADED
+
+    File.expects(:read).with(@key_file).returns(malformed_openssh_key)
+    prompt = MockPrompt.new
+    prompt.expects(:start).never
+
+    assert_raises(Net::SSH::Authentication::ED25519::OpenSSHPrivateKeyLoader::MalformedKeyError) do
+      Net::SSH::KeyFactory.load_private_key(@key_file, nil, true, prompt)
+    end
+  end
+
   private
 
   # The sk fingerprints asserted in the tests are `ssh-keygen -lf` output for these keys.
@@ -445,6 +481,15 @@ class TestKeyFactory < NetSSHTest
   def encrypted(key, password)
     cipher = OpenSSL::Cipher.new("des-ede3-cbc")
     key.export(cipher, password)
+  end
+
+  # A small, recognizably OpenSSH container whose decoded body is truncated
+  # after the cipher name, so the remaining fields cannot be parsed.
+  def malformed_openssh_key
+    @malformed_openssh_key ||=
+      "-----BEGIN OPENSSH PRIVATE KEY-----\n" +
+      [Net::SSH::Buffer.from(:raw, "openssh-key-v1\x00".b, :string, "aes256-ctr").to_s].pack("m") +
+      "-----END OPENSSH PRIVATE KEY-----\n"
   end
 
   def public(key, args = nil)

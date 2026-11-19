@@ -180,10 +180,211 @@ module Authentication
     def test_key_with_too_many_bcrypt_rounds_is_rejected_without_running_the_kdf
       Net::SSH::Authentication::ED25519::OpenSSHPrivateKeyLoader.expects(:bcrypt_pbkdf_key).never
 
-      error = assert_raises(ArgumentError) do
+      error = assert_raises(Net::SSH::Authentication::ED25519::OpenSSHPrivateKeyLoader::KdfBudgetError) do
         Net::SSH::Authentication::ED25519::PrivKey.read(private_key_max_rounds, 'pwd')
       end
+      assert_equal 4294967295, error.rounds
+      assert_equal Net::SSH::Authentication::ED25519::OpenSSHPrivateKeyLoader::DEFAULT_MAX_KDF_ROUNDS, error.limit
+      refute error.retryable?
       assert_match(/rounds 4294967295 exceeds/, error.message)
+    end
+
+    def test_configurable_kdf_budget_rejects_normal_rounds_without_derivation
+      # The encrypted fixture uses 16 rounds; a smaller configured budget must
+      # refuse it before bcrypt_pbkdf runs, even though it is under the default cap.
+      Net::SSH::Authentication::ED25519::OpenSSHPrivateKeyLoader.expects(:bcrypt_pbkdf_key).never
+
+      error = assert_raises(Net::SSH::Authentication::ED25519::OpenSSHPrivateKeyLoader::KdfBudgetError) do
+        Net::SSH::Authentication::ED25519::PrivKey.read(private_key_pwd, 'pwd', max_kdf_rounds: 15)
+      end
+      assert_equal 16, error.rounds
+      assert_equal 15, error.limit
+      refute error.retryable?
+    end
+
+    def test_kdf_budget_at_or_above_rounds_still_derives_the_key
+      counting_real_kdf_derivations do |counter|
+        key = Net::SSH::Authentication::ED25519::PrivKey.read(private_key_pwd, 'pwd', max_kdf_rounds: 16)
+        assert_equal "ssh-ed25519", key.ssh_type
+        assert_equal 1, counter[:calls]
+      end
+    end
+
+    def test_unsupported_cipher_is_classified_as_unsupported_format
+      error = assert_raises(Net::SSH::Authentication::ED25519::OpenSSHPrivateKeyLoader::UnsupportedFormatError) do
+        Net::SSH::Authentication::ED25519::PrivKey.read(openssh_key_with_cipher("aes999-cbc"), 'pwd')
+      end
+      refute error.retryable?
+      assert_match(/aes999-cbc.*not supported/, error.message)
+    end
+
+    def test_unsupported_kdf_is_classified_as_unsupported_format
+      error = assert_raises(Net::SSH::Authentication::ED25519::OpenSSHPrivateKeyLoader::UnsupportedFormatError) do
+        Net::SSH::Authentication::ED25519::PrivKey.read(openssh_key_with_kdf("pbkdf2"), 'pwd')
+      end
+      refute error.retryable?
+    end
+
+    def test_bad_magic_is_classified_as_malformed
+      raw = openssh_raw(private_key_pwd)
+      raw.setbyte(0, raw.getbyte(0) ^ 0xFF)
+      error = assert_raises(Net::SSH::Authentication::ED25519::OpenSSHPrivateKeyLoader::MalformedKeyError) do
+        Net::SSH::Authentication::ED25519::PrivKey.read(wrap_openssh_container(raw), 'pwd')
+      end
+      refute error.retryable?
+    end
+
+    def test_truncated_container_is_classified_as_malformed
+      truncated = wrap_openssh_container(openssh_raw(private_key_pwd).byteslice(0, 40))
+      error = assert_raises(Net::SSH::Authentication::ED25519::OpenSSHPrivateKeyLoader::MalformedKeyError) do
+        Net::SSH::Authentication::ED25519::PrivKey.read(truncated, 'pwd')
+      end
+      refute error.retryable?
+    end
+
+    def test_garbage_payload_is_classified_as_malformed
+      error = assert_raises(Net::SSH::Authentication::ED25519::OpenSSHPrivateKeyLoader::MalformedKeyError) do
+        Net::SSH::Authentication::ED25519::PrivKey.read(wrap_openssh_container("\x00\x01\x02"), 'pwd')
+      end
+      refute error.retryable?
+    end
+
+    def test_unsupported_inner_key_type_is_unsupported_format
+      inner = Net::SSH::Buffer.from(:long, 1, :long, 1, :string, "ssh-xyz-unsupported", :string, "x").to_s
+      public_section = Net::SSH::Buffer.from(:string, "ssh-xyz-unsupported", :string, "x").to_s
+      body = Net::SSH::Buffer.from(
+        :string, "none", :string, "none", :string, "".b, :long, 1, :string, public_section,
+        :long, inner.bytesize, :raw, inner
+      ).to_s
+      key_text = wrap_openssh_container("openssh-key-v1\x00".b + body)
+
+      error = assert_raises(Net::SSH::Authentication::ED25519::OpenSSHPrivateKeyLoader::UnsupportedFormatError) do
+        Net::SSH::Authentication::ED25519::PrivKey.read(key_text, nil)
+      end
+      refute error.retryable?
+      assert_match(/ssh-xyz-unsupported/, error.message)
+    end
+
+    def test_correct_passphrase_but_corrupt_inner_key_is_malformed_and_runs_the_kdf_once
+      counting_real_kdf_derivations do |counter|
+        error = assert_raises(Net::SSH::Authentication::ED25519::OpenSSHPrivateKeyLoader::MalformedKeyError) do
+          Net::SSH::Authentication::ED25519::PrivKey.read(corrupted_encrypted_private_key, 'pwd')
+        end
+        refute error.retryable?
+        assert_equal 1, counter[:calls]
+        # Error text must describe the structural problem without exposing key bytes.
+        refute_match(/BEGIN OPENSSH PRIVATE KEY/, error.message)
+      end
+    end
+
+    def test_structural_errors_are_not_reprompted_even_with_a_correct_passphrase
+      prompt = CountingPrompt.new('pwd')
+
+      # Supply the correct passphrase up front: the KDF runs and decryption
+      # succeeds, but the decoded inner key is corrupt. A missing-passphrase
+      # prompt must not be conflated with that structural failure, so no prompt
+      # should ever be shown.
+      assert_raises(Net::SSH::Authentication::ED25519::OpenSSHPrivateKeyLoader::MalformedKeyError) do
+        Net::SSH::KeyFactory.load_data_private_key(corrupted_encrypted_private_key, 'pwd', true, '', prompt)
+      end
+      assert_equal 0, prompt.asks
+    end
+
+    def test_structural_errors_stop_the_retry_loop_after_the_first_wrong_passphrase
+      prompt = CountingPrompt.new('pwd')
+
+      # The first attempt has no passphrase (one prompt), then the supplied
+      # passphrase decrypts successfully but reveals a corrupt key: the loop
+      # stops instead of burning the remaining two tries.
+      assert_raises(Net::SSH::Authentication::ED25519::OpenSSHPrivateKeyLoader::MalformedKeyError) do
+        Net::SSH::KeyFactory.load_data_private_key(corrupted_encrypted_private_key, nil, true, '', prompt)
+      end
+      assert_equal 1, prompt.asks
+    end
+
+    def test_unencrypted_corrupt_key_is_malformed_and_never_prompts
+      prompt = CountingPrompt.new('pwd')
+
+      assert_raises(Net::SSH::Authentication::ED25519::OpenSSHPrivateKeyLoader::MalformedKeyError) do
+        Net::SSH::KeyFactory.load_data_private_key(corrupted_unencrypted_private_key, nil, true, '', prompt)
+      end
+      assert_equal 0, prompt.asks
+    end
+
+    def test_wrong_passphrase_is_reprompted_three_times_and_then_raises
+      prompt = CountingPrompt.new('wrong')
+
+      error = assert_raises(Net::SSH::Authentication::ED25519::OpenSSHPrivateKeyLoader::DecryptError) do
+        Net::SSH::KeyFactory.load_data_private_key(private_key_pwd, nil, true, '', prompt)
+      end
+      assert error.retryable?
+      assert_equal 3, prompt.asks
+    end
+
+    def test_correct_passphrase_is_asked_once_and_succeeds
+      prompt = CountingPrompt.new('pwd')
+
+      key = Net::SSH::KeyFactory.load_data_private_key(private_key_pwd, nil, true, '', prompt)
+      assert_equal "ssh-ed25519", key.ssh_type
+      assert_equal 1, prompt.asks
+    end
+
+    def test_over_budget_key_is_rejected_without_any_prompt
+      prompt = CountingPrompt.new('pwd')
+
+      assert_raises(Net::SSH::Authentication::ED25519::OpenSSHPrivateKeyLoader::KdfBudgetError) do
+        Net::SSH::KeyFactory.load_data_private_key(private_key_pwd, nil, true, '', prompt, max_kdf_rounds: 15)
+      end
+      assert_equal 0, prompt.asks
+    end
+
+    def test_unsupported_format_is_rejected_without_any_prompt
+      prompt = CountingPrompt.new('pwd')
+
+      assert_raises(Net::SSH::Authentication::ED25519::OpenSSHPrivateKeyLoader::UnsupportedFormatError) do
+        Net::SSH::KeyFactory.load_data_private_key(openssh_key_with_cipher("aes999-cbc"), nil, true, '', prompt)
+      end
+      assert_equal 0, prompt.asks
+    end
+
+    def test_malformed_container_is_rejected_without_any_prompt
+      prompt = CountingPrompt.new('pwd')
+
+      assert_raises(Net::SSH::Authentication::ED25519::OpenSSHPrivateKeyLoader::MalformedKeyError) do
+        Net::SSH::KeyFactory.load_data_private_key(wrap_openssh_container("\x00\x01\x02"), nil, true, '', prompt)
+      end
+      assert_equal 0, prompt.asks
+    end
+
+    def test_rsa_and_ec_openssh_keys_share_the_same_budget_and_retry_categories
+      rsa_data = fixture_openssh_key("rsa_enc")
+      ec_data = fixture_openssh_key("ec_enc")
+
+      rsa_key = Net::SSH::Authentication::ED25519::OpenSSHPrivateKeyLoader.read(rsa_data, 'secret')
+      assert_kind_of OpenSSL::PKey::RSA, rsa_key
+      ec_key = Net::SSH::Authentication::ED25519::OpenSSHPrivateKeyLoader.read(ec_data, 'secret')
+      assert_kind_of OpenSSL::PKey::EC, ec_key
+
+      [rsa_data, ec_data].each do |data|
+        wrong = assert_raises(Net::SSH::Authentication::ED25519::OpenSSHPrivateKeyLoader::DecryptError) do
+          Net::SSH::Authentication::ED25519::OpenSSHPrivateKeyLoader.read(data, 'wrong')
+        end
+        assert wrong.retryable?
+
+        budget = assert_raises(Net::SSH::Authentication::ED25519::OpenSSHPrivateKeyLoader::KdfBudgetError) do
+          Net::SSH::Authentication::ED25519::OpenSSHPrivateKeyLoader.read(data, 'secret', max_kdf_rounds: 15)
+        end
+        refute budget.retryable?
+      end
+    end
+
+    def test_parse_error_messages_do_not_contain_private_key_material
+      corrupted = corrupted_encrypted_private_key
+      error = assert_raises(Net::SSH::Authentication::ED25519::OpenSSHPrivateKeyLoader::MalformedKeyError) do
+        Net::SSH::Authentication::ED25519::OpenSSHPrivateKeyLoader.read(corrupted, 'pwd')
+      end
+      refute_includes error.message, corrupted
+      refute_match(/[A-Za-z0-9+\/]{60,}/, error.message)
     end
 
     def test_encrypted_key_without_passphrase_does_not_run_the_kdf
@@ -208,6 +409,135 @@ module Authentication
       signed = priv_key.ssh_do_sign(shared_secret)
       self.assert_equal(true, pub_key.ssh_do_verify(signed, shared_secret))
       self.assert_equal(priv_key.public_key.fingerprint, pub_key.fingerprint)
+    end
+
+    # Records how often a passphrase is asked for so the retry budget can be
+    # asserted without touching a real terminal.
+    class CountingPrompt
+      attr_reader :asks
+
+      def initialize(answer)
+        @answer = answer
+        @asks = 0
+      end
+
+      def start(_info)
+        self
+      end
+
+      def ask(_message, _echo)
+        @asks += 1
+        @answer
+      end
+
+      def success; end
+    end
+
+    # Counts real bcrypt_pbkdf derivations while still running the original
+    # implementation (mocha 2.x cannot stub-and-call-through).
+    def counting_real_kdf_derivations
+      require 'bcrypt_pbkdf'
+      counter = { calls: 0 }
+      BCryptPbkdf.singleton_class.send(:alias_method, :key_without_counter, :key)
+      BCryptPbkdf.define_singleton_method(:key) do |*args|
+        counter[:calls] += 1
+        key_without_counter(*args)
+      end
+      yield counter
+    ensure
+      BCryptPbkdf.singleton_class.send(:alias_method, :key, :key_without_counter)
+      BCryptPbkdf.singleton_class.send(:remove_method, :key_without_counter)
+    end
+
+    OPENSSH_MAGIC = "openssh-key-v1\x00".b
+
+    # Decodes the base64 body of an OpenSSH private key text into raw bytes.
+    def openssh_raw(key_text)
+      Base64.decode64(key_text.gsub(/-----(BEGIN|END) OPENSSH PRIVATE KEY-----/, '').gsub(/\s+/, ''))
+    end
+
+    # Wraps raw container bytes back into the OpenSSH PEM-style text form.
+    def wrap_openssh_container(raw)
+      "-----BEGIN OPENSSH PRIVATE KEY-----\n" + [raw].pack('m') + "-----END OPENSSH PRIVATE KEY-----\n"
+    end
+
+    # Parses the top-level fields of an OpenSSH private key container so a
+    # single field can be swapped to craft small malformed inputs.
+    def rebuild_openssh_container(key_text)
+      buffer = Net::SSH::Buffer.new(openssh_raw(key_text)[OPENSSH_MAGIC.bytesize..-1])
+      fields = {
+        cipher: buffer.read_string,
+        kdf: buffer.read_string,
+        kdfopts: buffer.read_string,
+        num_keys: buffer.read_long,
+        pubkey: buffer.read_string,
+        length: buffer.read_long
+      }
+      fields[:encrypted] = buffer.read(fields[:length])
+      fields
+    end
+
+    def openssh_key_with_cipher(ciphername)
+      fields = rebuild_openssh_container(private_key_pwd)
+      wrap_openssh_container(OPENSSH_MAGIC + Net::SSH::Buffer.from(
+        :string, ciphername,
+        :string, fields[:kdf], :string, fields[:kdfopts],
+        :long, fields[:num_keys], :string, fields[:pubkey],
+        :long, fields[:length], :raw, fields[:encrypted]
+      ).to_s)
+    end
+
+    def openssh_key_with_kdf(kdfname)
+      fields = rebuild_openssh_container(private_key_pwd)
+      wrap_openssh_container(OPENSSH_MAGIC + Net::SSH::Buffer.from(
+        :string, fields[:cipher],
+        :string, kdfname, :string, fields[:kdfopts],
+        :long, fields[:num_keys], :string, fields[:pubkey],
+        :long, fields[:length], :raw, fields[:encrypted]
+      ).to_s)
+    end
+
+    # Flips a byte three CBC blocks into the encrypted section. The checkints in
+    # the first block survive, so with the correct passphrase decryption
+    # succeeds but the decoded inner key no longer parses: a structural failure
+    # rather than a bad passphrase.
+    def corrupted_encrypted_private_key
+      @corrupted_encrypted_private_key ||= begin
+        fields = rebuild_openssh_container(private_key_pwd)
+        corrupted = fields[:encrypted].dup
+        offset = 16 * 3
+        corrupted.setbyte(offset, corrupted.getbyte(offset) ^ 0xFF)
+        body = Net::SSH::Buffer.from(
+          :string, fields[:cipher],
+          :string, fields[:kdf], :string, fields[:kdfopts],
+          :long, fields[:num_keys], :string, fields[:pubkey],
+          :long, fields[:length], :raw, corrupted
+        ).to_s
+        wrap_openssh_container(OPENSSH_MAGIC + body)
+      end
+    end
+
+    # Flips a byte well inside an unencrypted ("none" KDF) private section, past
+    # the checkints and key type, so the decoded Ed25519 key fails validation.
+    def corrupted_unencrypted_private_key
+      @corrupted_unencrypted_private_key ||= begin
+        fields = rebuild_openssh_container(private_key_no_pwd)
+        corrupted = fields[:encrypted].dup
+        corrupted.setbyte(60, corrupted.getbyte(60) ^ 0xFF)
+        body = Net::SSH::Buffer.from(
+          :string, fields[:cipher],
+          :string, fields[:kdf], :string, fields[:kdfopts],
+          :long, fields[:num_keys], :string, fields[:pubkey],
+          :long, fields[:length], :raw, corrupted
+        ).to_s
+        wrap_openssh_container(OPENSSH_MAGIC + body)
+      end
+    end
+
+    # Fixed, throwaway OpenSSH-format keys generated solely for this suite with
+    # `ssh-keygen -a 16`; they are not used anywhere outside these tests.
+    def fixture_openssh_key(name)
+      File.read(File.expand_path("../fixtures/#{name}", __dir__))
     end
 
     def private_key_pwd
