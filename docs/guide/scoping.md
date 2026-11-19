@@ -225,6 +225,50 @@ end
 
 When `authorized_scope` is called without the explicit scope type, Action Policy uses matchers (in the order they're defined) to infer the type.
 
+## Verifiable scope contracts
+
+When scoped data leaves the authorization layer (e.g. a background export that is later
+paginated, sorted and rendered by plugins), you can wrap it into a _scope contract_—a
+verifiable container that records which authorized scope the current output was derived from:
+
+```ruby
+contract = authorized_scope(ExportRow.all, contract: true)
+
+contract.verified?    #=> true
+contract.derived_from #=> [#<Source authorized policy=ExportRowPolicy type=:relation name=:default>]
+```
+
+The contract provides in-memory transformation methods which preserve the provenance chain:
+allow-listed sorting, column selection and concatenation:
+
+```ruby
+page = contract
+  .sort_by(:created_at, allow: %i[created_at id]) # raises ArgumentError for keys outside the allow-list
+  .select_columns(:id, :title)
+
+page.verified? #=> true
+```
+
+Concatenation merges the provenance chains of both sources. If any of the sources was not
+authorized, the result can no longer be marked as verified—but it stays _traceable_, so the
+caller can tell "we only have traceable evidence" apart from "the data actually belongs to
+an authorized scope":
+
+```ruby
+merged = page.concat(ActionPolicy::ScopeContract.unverified(plugin_rows, label: :csv_import))
+
+merged.verified?  #=> false — one of the sources was not authorized
+merged.traceable? #=> true  — the evidence is still recorded
+merged.derived_from.size #=> 2
+```
+
+You can also build contracts explicitly (e.g. outside of a behaviour):
+
+```ruby
+ActionPolicy::ScopeContract.authorize(rows, policy: ExportRowPolicy, type: :data)
+ActionPolicy::ScopeContract.unverified(rows, label: :plugin)
+```
+
 ## Rails integration
 
 Action Policy provides a couple of _scope matchers_ out-of-the-box for Active Record relations and Action Controller parameters.

@@ -2,6 +2,13 @@
 
 ## master
 
+- Add `ActionPolicy::ScopeContract`—a verifiable scope contract recording which authorized scope the data was derived from. ([@palkan][])
+
+  Pass `contract: true` to `authorized_scope` to wrap the result. The contract supports in-memory
+  transformations (`sort_by` with an allow-list, `select_columns`, `concat`) which preserve the
+  provenance chain; concatenating with a source that was not authorized keeps the result traceable
+  but no longer verified (`verified?` vs `traceable?`).
+
 ## 0.7.8 (2026-11-03)
 
 - Improve policy caching (less key calculations, fixed collisions). ([@palkan][])
