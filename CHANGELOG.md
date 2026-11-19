@@ -1,6 +1,15 @@
 # Changelog
 
 ## [Unreleased]
+* Harden the Kerberos GSS IOV message-protection path. `gss_wrap_iov` and
+  `gss_unwrap_iov` return statuses are now checked (a non-zero major status
+  raises `WinRM::WinRMKerberosError` with the major/minor status), a successful
+  unwrap that did not establish confidentiality is rejected instead of
+  returning unauthenticated bytes, the token header length is always encoded
+  and decoded as little-endian rather than host byte order, and IOV buffers
+  allocated by the GSS mechanism are released deterministically. Offline
+  contract specs under `tests/spec/http/kerberos_iov_*_spec.rb` cover these
+  invariants without a Kerberos realm.
 
 ## [2.4.2]
 * Replace erubi with the Ruby standard library ERB; the erubi runtime dependency is gone (#366)

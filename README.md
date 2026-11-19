@@ -103,6 +103,21 @@ Uses `:kerberos` to authenticate with the endpoint. These additional connection 
 * `:service` - kerberos service used to authenticate with the endpoint. Defaults to `HTTP`.
 * `:realm` - Kerberos realm to authenticate against.
 
+Message protection uses GSSAPI IOV: a header, the SOAP payload, and padding.
+The transport checks the `gss_wrap_iov`/`gss_unwrap_iov` status, requires the
+unwrap result to be confidential before returning it, and encodes the token
+header length as a little-endian 32-bit value. A `WinRM::WinRMKerberosError`
+is raised if any of those checks fails.
+
+The FFI contract is covered offline by `tests/spec/http/kerberos_iov_*_spec.rb`.
+Those specs substitute a controlled GSSAPI stand-in, so they need no Kerberos
+realm and no system GSSAPI installation:
+
+```sh
+bundle exec rspec tests/spec/http/kerberos_iov_request_contract_spec.rb \
+  tests/spec/http/kerberos_iov_failure_contract_spec.rb
+```
+
 ### `:plaintext`
 Note: It is strongly recommended that you use `:negotiate` instead of `:plaintext`. As the name infers, the `:plaintext` transport includes authentication credentials in plain text.
 ```ruby

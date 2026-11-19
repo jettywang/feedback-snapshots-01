@@ -1,17 +1,14 @@
 require 'winrm/exceptions'
 require 'winrm/http/transport_factory'
 
-module WinRM
-  module HTTP
-    # Remove the gssapi stuff in kerberos init for tests
-    class HttpGSSAPI < HttpTransport
-      def initialize(endpoint, realm, opts, service = nil) end
-    end
-  end
-end
-
 describe WinRM::HTTP::TransportFactory do
   describe '#create_transport' do
+    before do
+      # Stub construction only for this spec; redefining the class globally
+      # would replace the real implementation for the whole test process.
+      allow(WinRM::HTTP::HttpGSSAPI).to receive(:new).and_return(instance_double(WinRM::HTTP::HttpGSSAPI))
+    end
+
     let(:transport) { :negotiate }
     let(:options) do
       {
@@ -50,7 +47,11 @@ describe WinRM::HTTP::TransportFactory do
 
     it 'creates a kerberos transport' do
       options[:transport] = :kerberos
-      expect(subject.create_transport(options)).to be_a(WinRM::HTTP::HttpGSSAPI)
+      options[:realm] = 'EXAMPLE.TEST'
+      expect(WinRM::HTTP::HttpGSSAPI).to receive(:new).with(
+        options[:endpoint], options[:realm], options, nil
+      )
+      subject.create_transport(options)
     end
 
     it 'creates a transport from a stringified transport' do

@@ -85,4 +85,16 @@ module WinRM
       super(msg + " (#{status_code}).")
     end
   end
+
+  # GSSAPI message protection failure on the Kerberos transport.
+  class WinRMKerberosError < WinRMError
+    attr_reader :major_status
+    attr_reader :minor_status
+
+    def initialize(msg, major_status = nil, minor_status = nil)
+      @major_status = major_status
+      @minor_status = minor_status
+      super(msg)
+    end
+  end
 end
