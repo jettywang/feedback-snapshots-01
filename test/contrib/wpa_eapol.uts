@@ -1,0 +1,199 @@
+% WPA/EAPOL-Key four-way handshake passive association tests
+#
+# Type the following command to launch start the tests:
+# $ test/run_tests -P "load_contrib('wpa_eapol')" -t test/contrib/wpa_eapol.uts
+
++ Passive handshake association
+
+= Setup
+
+from scapy.contrib.wpa_eapol import (
+    WPA_EAPOL_AP_TO_STA,
+    WPA_EAPOL_STA_TO_AP,
+    WpaEapolKeyObservation,
+    wpa_eapol_associate,
+    wpa_eapol_endpoints,
+    wpa_eapol_observations,
+)
+from scapy.layers.dot11 import Dot11
+from scapy.layers.eap import EAPOL, EAPOL_KEY
+from scapy.layers.l2 import Ether, LLC, SNAP
+
+AP = "02:00:00:00:00:01"
+STA = "02:00:00:00:00:02"
+
+
+def _key_frame(msg, replay, nonce, t, retry=False):
+    kwargs = dict(
+        key_descriptor_type=2,
+        key_type=1,
+        key_descriptor_type_version=2,
+        key_replay_counter=replay,
+        key_nonce=nonce,
+        key_mic=b"\xab" * 16,
+        key_data=b"",
+        key_data_length=0,
+        key_length=16,
+    )
+    if msg == 1:
+        kwargs.update(key_ack=1, has_key_mic=0, secure=0, install=0)
+        kwargs["key_mic"] = b"\x00" * 16
+    elif msg == 2:
+        kwargs.update(key_ack=0, has_key_mic=1, secure=0, install=0)
+    elif msg == 3:
+        kwargs.update(key_ack=1, has_key_mic=1, secure=1, install=1)
+    else:
+        kwargs.update(key_ack=0, has_key_mic=1, secure=1, install=0)
+    eapol = EAPOL(version=2, type=3) / EAPOL_KEY(**kwargs)
+    if msg in (1, 3):
+        fc, addr1, addr2 = 0x2, STA, AP  # from_DS: AP -> STA
+    else:
+        fc, addr1, addr2 = 0x1, AP, STA  # to_DS: STA -> AP
+    if retry:
+        fc |= 0x8
+    pkt = Dot11(type=2, FCfield=fc, addr1=addr1, addr2=addr2, addr3=AP)
+    pkt = pkt / LLC(dsap=0xAA, ssap=0xAA, ctrl=3) / SNAP(code=0x888E) / eapol
+    pkt.time = t
+    assert pkt[EAPOL_KEY].guess_key_number() == msg
+    return pkt
+
+
+def _ether_key(msg, replay, nonce, src, dst):
+    kwargs = dict(
+        key_descriptor_type=2,
+        key_type=1,
+        key_descriptor_type_version=2,
+        key_replay_counter=replay,
+        key_nonce=nonce,
+        key_mic=b"\x11" * 16,
+        key_data=b"",
+        key_data_length=0,
+        key_length=16,
+    )
+    if msg == 2:
+        kwargs.update(key_ack=0, has_key_mic=1, secure=0, install=0)
+    else:
+        kwargs.update(key_ack=1, has_key_mic=1, secure=1, install=1)
+    return Ether(src=src, dst=dst) / EAPOL(version=2, type=3) / EAPOL_KEY(**kwargs)
+
+= Endpoint and direction inference
+
+p1 = _key_frame(1, 10, b"A" * 32, 1.0)
+p2 = _key_frame(2, 10, b"S" * 32, 1.1)
+assert wpa_eapol_endpoints(p1) == (AP, STA, WPA_EAPOL_AP_TO_STA)
+assert wpa_eapol_endpoints(p2) == (AP, STA, WPA_EAPOL_STA_TO_AP)
+
+e2 = _ether_key(2, 7, b"S" * 32, STA, AP)
+e3 = _ether_key(3, 8, b"A" * 32, AP, STA)
+assert wpa_eapol_endpoints(e2) == (AP, STA, WPA_EAPOL_STA_TO_AP)
+assert wpa_eapol_endpoints(e3) == (AP, STA, WPA_EAPOL_AP_TO_STA)
+
+= Complete handshake with out-of-order retransmissions
+
+pkts = [
+    _key_frame(1, 10, b"A" * 32, 1.0),
+    _key_frame(1, 10, b"A" * 32, 1.1, retry=True),
+    _key_frame(2, 10, b"S" * 32, 1.2),
+    _key_frame(3, 11, b"A" * 32, 1.3),
+    _key_frame(3, 11, b"A" * 32, 1.4, retry=True),
+    _key_frame(4, 11, b"S" * 32, 1.5),
+]
+report = wpa_eapol_associate(pkts)
+assert len(report.candidates) == 1
+cand = report.candidates[0]
+assert cand.is_complete
+assert cand.gaps == []
+assert cand.messages == [1, 2, 3, 4]
+assert [obs.index for obs in cand.retransmissions] == [1, 4]
+assert cand.observations[1].duplicate_of == 0
+assert cand.observations[4].duplicate_of == 3
+# M1/M2 use replay r and M3/M4 use r+1 without a mismatch note
+assert all(
+    "does not follow" not in note
+    for obs in cand.observations for note in obs.notes
+)
+# MIC presence is reported as an observable fact, never as verified
+m1 = cand.observations[0]
+assert m1.mic_present is False and m1.mic_zero is True
+m2 = cand.observations[2]
+assert m2.mic_present is True and m2.mic_zero is False
+
+= Two reconnects from the same MAC pair stay separate
+
+pkts = [
+    _key_frame(1, 5, b"B" * 32, 2.0),
+    _key_frame(2, 5, b"T" * 32, 2.1),
+    _key_frame(1, 6, b"C" * 32, 2.2),
+    _key_frame(2, 6, b"U" * 32, 2.3),
+    _key_frame(3, 7, b"C" * 32, 2.4),
+    _key_frame(4, 7, b"U" * 32, 2.5),
+]
+report = wpa_eapol_associate(pkts)
+assert len(report.candidates) == 2
+first, second = report.candidates
+# The first attempt must not borrow M3/M4 from the reconnect
+assert first.messages == [1, 2] and first.gaps == [3, 4]
+assert not first.is_complete
+assert second.messages == [1, 2, 3, 4] and second.gaps == []
+assert second.is_complete
+assert first.ap_mac == second.ap_mac == AP
+assert first.sta_mac == second.sta_mac == STA
+
+= Handshake missing one message reports the gap
+
+pkts = [
+    _key_frame(1, 20, b"D" * 32, 3.0),
+    _key_frame(2, 20, b"V" * 32, 3.1),
+    _key_frame(4, 21, b"V" * 32, 3.2),
+]
+report = wpa_eapol_associate(pkts)
+assert len(report.candidates) == 1
+cand = report.candidates[0]
+assert not cand.is_complete
+assert cand.gaps == [3]
+assert cand.messages == [1, 2, 4]
+
+= Frames without a message 1 are kept unpaired, not grafted
+
+e2 = _ether_key(2, 7, b"S" * 32, STA, AP)
+e2.time = 0.5
+e3 = _ether_key(3, 8, b"A" * 32, AP, STA)
+e3.time = 0.6
+group = Ether(src=AP, dst=STA) / EAPOL(version=2, type=3) / EAPOL_KEY(
+    key_type=0, key_ack=1, key_replay_counter=1, key_nonce=b"G" * 32,
+    key_mic=b"\x00" * 16, key_data=b"", key_data_length=0)
+eap_frame = Ether(src=AP, dst=STA) / EAPOL(version=2, type=0)
+report = wpa_eapol_associate([e2, e3, group, eap_frame])
+assert len(report.candidates) == 1
+cand = report.candidates[0]
+assert not cand.started_with_m1
+assert cand.messages == [2, 3] and cand.gaps == [1, 4]
+assert cand.ap_mac == AP and cand.sta_mac == STA
+# Group/SMK key and non-Key EAPOL frames are excluded
+assert report.ignored_eapol_frames == 2
+assert wpa_eapol_observations([group, eap_frame]) == []
+
+= Retransmission with a changed nonce is flagged
+
+pkts = [
+    _key_frame(1, 9, b"A" * 32, 4.0),
+    _key_frame(1, 9, b"Z" * 32, 4.1, retry=True),
+    _key_frame(2, 9, b"S" * 32, 4.2),
+]
+report = wpa_eapol_associate(pkts)
+cand = report.candidates[0]
+assert [obs.index for obs in cand.retransmissions] == [1]
+assert any("different nonce" in note for note in cand.observations[1].notes)
+
+= Empty capture and text rendering
+
+assert wpa_eapol_associate([]).candidates == []
+pkt = _key_frame(1, 1, b"A" * 32, 0.0)
+report = wpa_eapol_associate([pkt])
+text = report.render_text()
+assert "WPA/EAPOL-Key four-way handshake passive report" in text
+assert "MICs are not verified" in text
+assert "no frame was sent" in text
+obs = WpaEapolKeyObservation(0, pkt, pkt[EAPOL_KEY])
+assert obs.key_info["key_ack"] == 1 and obs.key_info["has_key_mic"] == 0
+assert obs.direction == WPA_EAPOL_AP_TO_STA
