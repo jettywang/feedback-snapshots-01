@@ -55,6 +55,17 @@ module RubySMB
     # The default maximum size of a SMB message that the Server accepts (in bytes)
     SERVER_MAX_BUFFER_SIZE = 4356
 
+    # SMB2 commands that are safe to replay after a STATUS_NETWORK_SESSION_EXPIRED
+    # because they are read-only/idempotent: re-sending them cannot duplicate a
+    # side effect on the server. Any command not listed here must not be retried
+    # automatically once it may already have been executed.
+    IDEMPOTENT_SMB2_COMMANDS = [
+      RubySMB::SMB2::Commands::ECHO,
+      RubySMB::SMB2::Commands::READ,
+      RubySMB::SMB2::Commands::QUERY_DIRECTORY,
+      RubySMB::SMB2::Commands::QUERY_INFO
+    ].freeze
+
     # The application key. After authenticating to the remote server, this value is the session key for dialects less
     # than version 3 and a unique value for v3 dialects. See:
     # https://docs.microsoft.com/en-us/openspecs/windows_protocols/ms-smb2/901ae284-31d3-4ea1-ae8a-766fc8bfe00e
@@ -479,8 +490,14 @@ module RubySMB
     # @param encrypt [Boolean] true if encryption has to be enabled for this transaction
     #   (note that if @session_encrypt_data is set, encryption will be enabled
     #   regardless of this parameter value)
+    # @param _reauthentication_attempted [Boolean] internal guard ensuring that at most
+    #   one re-authentication and one retry are performed per call. It must not be set by
+    #   callers.
+    # @param _skip_message_id_allocation [Boolean] internal flag used when the packet's
+    #   SMB2 message id has already been allocated by the caller. It must not be set by
+    #   callers.
     # @return [String] the raw response data received
-    def send_recv(packet, encrypt: false)
+    def send_recv(packet, encrypt: false, _reauthentication_attempted: false, _skip_message_id_allocation: false)
       version = packet.packet_smb_version
       case version
       when 'SMB1'
@@ -488,7 +505,7 @@ module RubySMB
         packet.smb_header.pid_low = self.pid if self.pid
         packet = smb1_sign(packet) if signing_required && !session_key.empty?
       when 'SMB2'
-        packet = increment_smb_message_id(packet)
+        increment_smb_message_id(packet) unless _skip_message_id_allocation
         packet.smb2_header.session_id = session_id
         unless packet.is_a?(RubySMB::SMB2::Packet::SessionSetupRequest) || session_key.empty?
           if self.smb2 && signing_required
@@ -529,19 +546,141 @@ module RubySMB
       # Handle STATUS_NETWORK_SESSION_EXPIRED. The 'net use' client upon receiving this error will automatically attempt
       # to re-authenticate, which makes relaying ntlm authentication to multiple targets possible. This block ensures
       # ruby_smb behaves in the same manner as 'net use'.
-      if smb2_header && smb2_header.nt_status == WindowsError::NTStatus::STATUS_NETWORK_SESSION_EXPIRED && !@mech_type.nil?
-        if @mech_type == :ntlm || @mech_type == :anonymous
-          session_setup(self.username, self.password, self.domain, local_workstation: self.local_workstation, ntlm_flags: NTLM::DEFAULT_CLIENT_FLAGS)
-          raw_response = send_recv(packet, encrypt: encrypt) # Retry the request after re-authentication
-        elsif  @mech_type == :kerberos
-          raise RubySMB::Error::RubySMBError, 'WindowsError::NTStatus::STATUS_NETWORK_SESSION_EXPIRED received, but kerberos authentication is being used, so automatic re-authentication cannot be attempted.'
-        end
+      if session_expired?(smb2_header)
+        # The guard makes the re-authentication path strictly bounded: a server that keeps
+        # answering with STATUS_NETWORK_SESSION_EXPIRED cannot cause unbounded recursion.
+        raw_response = handle_session_expired(packet, smb2_header, raw_response, encrypt_data, _reauthentication_attempted)
+        smb2_header = RubySMB::SMB2::SMB2Header.read(raw_response) unless raw_response.nil?
       end
 
       self.sequence_counter += 1 if signing_required && !session_key.empty?
       # update the SMB2 message ID according to the received Credit Charged
       self.smb2_message_id += smb2_header.credit_charge - 1 if smb2_header && self.server_supports_multi_credit
       raw_response
+    end
+
+    # Whether the given response header reports STATUS_NETWORK_SESSION_EXPIRED.
+    #
+    # @param smb2_header [RubySMB::SMB2::SMB2Header, nil] the parsed response header
+    # @return [Boolean] true if the session has expired
+    def session_expired?(smb2_header)
+      !smb2_header.nil? && smb2_header.nt_status == WindowsError::NTStatus::STATUS_NETWORK_SESSION_EXPIRED
+    end
+
+    # Reacts to a STATUS_NETWORK_SESSION_EXPIRED response. The session security state is
+    # always rebuilt through a fresh authentication; only idempotent requests are then
+    # replayed once, everything else is reported as an unknown outcome.
+    #
+    # @param packet [RubySMB::GenericPacket] the request that received the expiry error
+    # @param smb2_header [RubySMB::SMB2::SMB2Header] the parsed expiry response header
+    # @param raw_response [String] the raw bytes of the expiry response
+    # @param encrypt_data [Boolean] whether the original exchange was encrypted
+    # @param reauthentication_attempted [Boolean] guard ensuring a single retry per call
+    # @return [String] the raw response of the single retried request, or the untouched
+    #   expiry response when no automatic re-authentication is possible
+    # @raise [RubySMB::Error::RequestOutcomeUnknown] if the request may have executed and
+    #   cannot be safely replayed, or if the session expired again after re-authentication
+    # @raise [RubySMB::Error::ReauthenticationFailure] if the re-authentication itself fails
+    def handle_session_expired(packet, smb2_header, raw_response, encrypt_data, reauthentication_attempted)
+      if reauthentication_attempted
+        # The freshly authenticated session was rejected immediately. Retrying again would
+        # loop forever against a server that keeps returning the same error.
+        raise RubySMB::Error::RequestOutcomeUnknown.new(
+          "The server returned STATUS_NETWORK_SESSION_EXPIRED again after re-authentication; " \
+          "the result of the request is unknown.",
+          status_code: status_code_of(smb2_header),
+          command: packet.smb2_header.command
+        )
+      end
+
+      if @mech_type == :kerberos
+        raise RubySMB::Error::RubySMBError, 'WindowsError::NTStatus::STATUS_NETWORK_SESSION_EXPIRED received, but kerberos authentication is being used, so automatic re-authentication cannot be attempted.'
+      end
+
+      unless @mech_type == :ntlm || @mech_type == :anonymous
+        # No authenticated mechanism is known (e.g. the session was never fully set up):
+        # there is nothing to re-run, surface the raw expiry response to the caller.
+        return raw_response
+      end
+
+      reauthenticate!
+
+      unless retryable_request?(packet)
+        # The request may already have been executed on the server. Re-sending a
+        # non-idempotent command could duplicate the operation, so its outcome can only be
+        # reported as unknown instead of claiming a success that was never observed.
+        raise RubySMB::Error::RequestOutcomeUnknown.new(
+          "Re-authentication succeeded after STATUS_NETWORK_SESSION_EXPIRED, but the " \
+          "#{RubySMB::SMB2::Commands.name(packet.smb2_header.command) || packet.smb2_header.command} " \
+          "request may already have been executed and cannot safely be retried; its result is unknown.",
+          status_code: status_code_of(smb2_header),
+          command: packet.smb2_header.command
+        )
+      end
+
+      # The packet still carries the message id of the failed request. Allocate the next
+      # connection-wide id from the live counter (the session setup exchange already
+      # consumed ids after the failed one) and skip the nested send_recv allocation so it
+      # does not move the counter twice.
+      new_message_id = smb2_message_id
+      self.smb2_message_id = new_message_id + 1
+      packet.smb2_header.message_id = new_message_id
+      send_recv(packet, encrypt: encrypt_data, _reauthentication_attempted: true, _skip_message_id_allocation: true)
+    end
+
+    # Whether the request is safe to replay automatically after the session is rebuilt.
+    #
+    # @param packet [RubySMB::GenericPacket] the request to evaluate
+    # @return [Boolean] true if the command is idempotent/read-only
+    def retryable_request?(packet)
+      return false unless packet.packet_smb_version == 'SMB2'
+      IDEMPOTENT_SMB2_COMMANDS.include?(packet.smb2_header.command)
+    end
+
+    # Rebuilds the session after STATUS_NETWORK_SESSION_EXPIRED. All keying material,
+    # signing sequence state and pre-authentication context derived from the expired
+    # session is wiped first so nothing from the old generation can leak into the new one.
+    #
+    # @return [void]
+    # @raise [RubySMB::Error::ReauthenticationFailure] if the new authentication does not succeed
+    def reauthenticate!
+      reset_session_security_state!
+      begin
+        session_setup(
+          self.username,
+          self.password,
+          self.domain,
+          local_workstation: self.local_workstation,
+          ntlm_flags: NTLM::DEFAULT_CLIENT_FLAGS
+        )
+      rescue RubySMB::Error::RubySMBError => e
+        raise RubySMB::Error::ReauthenticationFailure,
+              "Automatic re-authentication after STATUS_NETWORK_SESSION_EXPIRED failed: #{e.message}"
+      end
+    end
+
+    # Clears every piece of state bound to an authentication generation so that a new
+    # session setup starts from a clean slate. Connection-wide negotiation results
+    # (dialect, negotiated sizes, message id space) are deliberately preserved.
+    #
+    # @return [void]
+    def reset_session_security_state!
+      self.session_id       = 0x00
+      self.user_id          = 0x00
+      self.application_key  = ''
+      self.session_key      = ''
+      self.session_is_guest = false
+      self.sequence_counter = 0
+      self.client_encryption_key = nil
+      self.server_encryption_key = nil
+      # SMB 3.1.1 derives signing and encryption keys from the preauthentication integrity
+      # hash. It must be restarted for the new generation, otherwise old-session exchange
+      # bytes would pollute the derived keys of the new session.
+      @preauth_integrity_hash_value = "\x00" * 64 if @dialect == '0x0311'
+    end
+
+    def status_code_of(smb2_header)
+      WindowsError::NTStatus.find_by_retval(smb2_header.nt_status.value).first
     end
 
     # Check if the response is an asynchronous operation with STATUS_PENDING

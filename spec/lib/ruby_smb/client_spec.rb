@@ -351,6 +351,194 @@ RSpec.describe RubySMB::Client do
       allow(RubySMB::SMB2::SMB2Header).to receive(:read).and_raise(IOError)
       expect { smb2_client.send_recv(smb2_request) }.to_not raise_error
     end
+
+    context 'when the response is STATUS_NETWORK_SESSION_EXPIRED' do
+      let(:expired_status) { WindowsError::NTStatus::STATUS_NETWORK_SESSION_EXPIRED }
+      let(:expired_header) do
+        header = RubySMB::SMB2::SMB2Header.new
+        header.nt_status = expired_status.value
+        header
+      end
+      let(:expired_raw) { 'expired-response' }
+
+      before do
+        allow(smb2_client).to receive(:is_status_pending?).and_return(false)
+        allow(dispatcher).to receive(:send_packet).and_return(nil)
+        allow(dispatcher).to receive(:recv_packet).and_return(expired_raw)
+        allow(RubySMB::SMB2::SMB2Header).to receive(:read).and_return(expired_header)
+        smb2_client.instance_variable_set(:@mech_type, :ntlm)
+      end
+
+      it 'delegates to #handle_session_expired with the recursion guard' do
+        expect(smb2_client).to receive(:handle_session_expired)
+          .with(smb2_request, expired_header, expired_raw, false, false)
+          .and_return(expired_raw)
+        smb2_client.send_recv(smb2_request)
+      end
+
+      it 'passes the guard flag through on the recursive retry call' do
+        read_request = RubySMB::SMB2::Packet::ReadRequest.new
+        success_header = RubySMB::SMB2::SMB2Header.new
+        allow(RubySMB::SMB2::SMB2Header).to receive(:read).and_return(expired_header, success_header)
+        allow(smb2_client).to receive(:reauthenticate!)
+        received_calls = []
+        allow(smb2_client).to receive(:send_recv).and_wrap_original do |original, packet, **kwargs|
+          received_calls << [packet, kwargs]
+          original.call(packet, **kwargs)
+        end
+        smb2_client.send_recv(read_request)
+        retry_call = received_calls.find { |_packet, call_kwargs| call_kwargs[:_reauthentication_attempted] }
+        expect(retry_call).to_not be_nil
+        expect(retry_call.first).to be(read_request)
+        expect(retry_call.last[:_skip_message_id_allocation]).to be true
+      end
+    end
+  end
+  describe '#session_expired?' do
+    let(:header) { RubySMB::SMB2::SMB2Header.new }
+
+    it 'returns true for STATUS_NETWORK_SESSION_EXPIRED' do
+      header.nt_status = WindowsError::NTStatus::STATUS_NETWORK_SESSION_EXPIRED.value
+      expect(smb2_client.session_expired?(header)).to be true
+    end
+
+    it 'returns false for another status code' do
+      header.nt_status = WindowsError::NTStatus::STATUS_SUCCESS.value
+      expect(smb2_client.session_expired?(header)).to be false
+    end
+
+    it 'returns false for a nil header' do
+      expect(smb2_client.session_expired?(nil)).to be false
+    end
+  end
+
+  describe '#retryable_request?' do
+    it 'accepts read-only SMB2 commands' do
+      expect(smb2_client.retryable_request?(RubySMB::SMB2::Packet::ReadRequest.new)).to be true
+      expect(smb2_client.retryable_request?(RubySMB::SMB2::Packet::EchoRequest.new)).to be true
+    end
+
+    it 'rejects commands that can mutate server state' do
+      expect(smb2_client.retryable_request?(RubySMB::SMB2::Packet::WriteRequest.new)).to be false
+      expect(smb2_client.retryable_request?(RubySMB::SMB2::Packet::CreateRequest.new)).to be false
+      expect(smb2_client.retryable_request?(RubySMB::SMB2::Packet::SetInfoRequest.new)).to be false
+    end
+
+    it 'rejects SMB1 packets' do
+      expect(smb2_client.retryable_request?(RubySMB::SMB1::Packet::EmptyPacket.new)).to be false
+    end
+  end
+
+  describe '#reauthenticate!' do
+    it 'resets the session security state before running session setup' do
+      allow(smb2_client).to receive(:session_setup)
+      expect(smb2_client).to receive(:reset_session_security_state!).ordered
+      expect(smb2_client).to receive(:session_setup).ordered
+      smb2_client.reauthenticate!
+    end
+
+    it 'wraps authentication errors in ReauthenticationFailure' do
+      allow(smb2_client).to receive(:reset_session_security_state!)
+      allow(smb2_client).to receive(:session_setup).and_raise(RubySMB::Error::UnexpectedStatusCode.new(
+        WindowsError::NTStatus::STATUS_LOGON_FAILURE
+      ))
+      expect { smb2_client.reauthenticate! }.to raise_error(RubySMB::Error::ReauthenticationFailure)
+    end
+  end
+
+  describe '#reset_session_security_state!' do
+    before do
+      smb2_client.session_id = 1234
+      smb2_client.application_key = 'app'
+      smb2_client.session_key = 'session'
+      smb2_client.session_is_guest = true
+      smb2_client.sequence_counter = 7
+      smb2_client.client_encryption_key = 'client-enc'
+      smb2_client.server_encryption_key = 'server-enc'
+    end
+
+    it 'clears the keying material and signing sequence state' do
+      smb2_client.reset_session_security_state!
+      expect(smb2_client.session_id).to eq(0)
+      expect(smb2_client.application_key).to eq('')
+      expect(smb2_client.session_key).to eq('')
+      expect(smb2_client.session_is_guest).to be false
+      expect(smb2_client.sequence_counter).to eq(0)
+      expect(smb2_client.client_encryption_key).to be_nil
+      expect(smb2_client.server_encryption_key).to be_nil
+    end
+
+    it 'does not reset the connection-wide SMB2 message id space' do
+      smb2_client.smb2_message_id = 42
+      smb2_client.reset_session_security_state!
+      expect(smb2_client.smb2_message_id).to eq(42)
+    end
+
+    it 'restarts the preauthentication hash only for the 0x0311 dialect' do
+      smb2_client.dialect = '0x0311'
+      smb2_client.preauth_integrity_hash_value = 'stale'
+      smb2_client.reset_session_security_state!
+      expect(smb2_client.preauth_integrity_hash_value).to eq("\x00" * 64)
+
+      smb2_client.preauth_integrity_hash_value = 'stale'
+      smb2_client.dialect = '0x0302'
+      smb2_client.reset_session_security_state!
+      expect(smb2_client.preauth_integrity_hash_value).to eq('stale')
+    end
+  end
+
+  describe '#handle_session_expired' do
+    let(:read_request) { RubySMB::SMB2::Packet::ReadRequest.new }
+    let(:header) do
+      header = RubySMB::SMB2::SMB2Header.new
+      header.nt_status = WindowsError::NTStatus::STATUS_NETWORK_SESSION_EXPIRED.value
+      header.command = RubySMB::SMB2::Commands::READ
+      header
+    end
+
+    it 'raises RequestOutcomeUnknown when a retry already happened' do
+      expect do
+        smb2_client.handle_session_expired(read_request, header, 'raw', false, true)
+      end.to raise_error(RubySMB::Error::RequestOutcomeUnknown)
+    end
+
+    it 'raises for Kerberos sessions without attempting re-authentication' do
+      smb2_client.instance_variable_set(:@mech_type, :kerberos)
+      expect(smb2_client).to_not receive(:reauthenticate!)
+      expect do
+        smb2_client.handle_session_expired(read_request, header, 'raw', false, false)
+      end.to raise_error(RubySMB::Error::RubySMBError, /kerberos/i)
+    end
+
+    it 'returns the raw response when no mechanism is available' do
+      smb2_client.instance_variable_set(:@mech_type, nil)
+      expect(smb2_client.handle_session_expired(read_request, header, 'raw', false, false)).to eq('raw')
+    end
+
+    it 'rebuilds the session but raises instead of replaying a non-idempotent request' do
+      smb2_client.instance_variable_set(:@mech_type, :ntlm)
+      write_request = RubySMB::SMB2::Packet::WriteRequest.new
+      expect(smb2_client).to receive(:reauthenticate!)
+      expect(smb2_client).to_not receive(:send_recv)
+      expect do
+        smb2_client.handle_session_expired(write_request, header, 'raw', false, false)
+      end.to raise_error(RubySMB::Error::RequestOutcomeUnknown) do |error|
+        expect(error.command).to eq(RubySMB::SMB2::Commands::WRITE)
+      end
+    end
+
+    it 'replays an idempotent request exactly once with a fresh message id' do
+      smb2_client.instance_variable_set(:@mech_type, :ntlm)
+      allow(smb2_client).to receive(:reauthenticate!)
+      smb2_client.smb2_message_id = 9
+      expect(smb2_client).to receive(:send_recv)
+        .with(read_request, hash_including(_reauthentication_attempted: true, _skip_message_id_allocation: true))
+        .and_return('retried')
+      result = smb2_client.handle_session_expired(read_request, header, 'raw', false, false)
+      expect(result).to eq('retried')
+      expect(read_request.smb2_header.message_id).to eq(9)
+      expect(smb2_client.smb2_message_id).to eq(10)
+    end
   end
 
   describe '#is_status_pending?' do

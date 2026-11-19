@@ -136,5 +136,29 @@ module RubySMB
 
     # Raised when an signing operation fails
     class SigningError < RubySMBError; end
+
+    # Raised when an automatic re-authentication attempt (triggered by
+    # STATUS_NETWORK_SESSION_EXPIRED) fails. The original request is not
+    # retried because no usable session exists anymore.
+    class ReauthenticationFailure < RubySMBError; end
+
+    # Raised when a request that may already have been executed on the server
+    # cannot be safely retried after the session expired. The result of the
+    # original operation is unknown and must not be reported as a success.
+    class RequestOutcomeUnknown < RubySMBError
+      # The NTStatus code that triggered the ambiguity
+      # @return [WindowsError::ErrorCode]
+      attr_reader :status_code
+
+      # The command number of the request whose outcome is unknown
+      # @return [Integer]
+      attr_reader :command
+
+      def initialize(message = nil, status_code: nil, command: nil)
+        @status_code = status_code
+        @command = command
+        super(message)
+      end
+    end
   end
 end
