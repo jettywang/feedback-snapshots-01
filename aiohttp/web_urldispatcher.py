@@ -222,6 +222,26 @@ class UrlMappingMatchInfo(dict[str, str], AbstractMatchInfo):
         self._current_app: Application | None = None
         self._frozen = False
 
+    def __copy__(self) -> "UrlMappingMatchInfo":
+        """Return a match state that a cloned request can own.
+
+        ``_apps`` is mutated while a request travels through applications
+        (``add_app``) and ``_current_app`` is swapped by middleware, so a
+        clone must not share either with the request it was derived from.
+        The route and matched values are kept: a clone describes the same
+        routing result, just in its own generation.
+        """
+        clone = type(self).__new__(type(self))
+        dict.update(clone, self)
+        clone._route = self._route
+        clone._apps = list(self._apps)
+        clone._current_app = self._current_app
+        clone._frozen = self._frozen
+        if isinstance(self, MatchInfoError):
+            # ``MatchInfoError`` keeps the exception in a subclass slot.
+            clone._exception = self._exception
+        return clone
+
     @property
     def handler(self) -> Handler:
         return self._route.handler

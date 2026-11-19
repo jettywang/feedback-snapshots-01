@@ -1,0 +1,5 @@
+Fixed :meth:`~aiohttp.web.BaseRequest.clone` losing trusted ``scheme``,
+``host`` and ``remote`` overrides on subsequent clones, and an
+absolute-form target falling back to the peer-supplied *Host* header when
+only its path was replaced. Clones now own their header and route state,
+and cannot be taken after the request body has been consumed.

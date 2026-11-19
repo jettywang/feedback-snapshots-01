@@ -2832,7 +2832,11 @@ async def test_request_clone(aiohttp_client: AiohttpClient) -> None:
     async def handler(request: web.Request) -> web.Response:
         r2 = request.clone(method="POST")
         assert r2.method == "POST"
-        assert r2.match_info is request.match_info
+        # The clone keeps the routing result but owns its copy, so handling
+        # the clone cannot rewrite the original request's route state.
+        assert r2.match_info == request.match_info
+        assert r2.match_info is not request.match_info
+        assert r2.app is request.app
         return web.Response()
 
     app = web.Application()

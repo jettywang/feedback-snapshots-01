@@ -418,6 +418,32 @@ and :ref:`aiohttp-web-signals` handlers.
       are given, an exact copy is returned. If a parameter is not passed, it
       will reuse the one from the current request object.
 
+      The clone always owns its mutable state: it has an independent header
+      mapping and route match state, and all derived properties
+      (:attr:`~BaseRequest.url`, :attr:`~BaseRequest.host`,
+      :attr:`~BaseRequest.scheme`, :attr:`~BaseRequest.secure`,
+      :attr:`~BaseRequest.path`, :attr:`~BaseRequest.query`, ...) are
+      computed for the clone. The original request is never modified, and
+      accessing the clone's derived properties does not change what the
+      original reports.
+
+      Trusted values set by :meth:`clone` -- ``scheme``, ``host`` and
+      ``remote`` -- are inherited by later clones, so a chain of
+      ``clone()`` calls cannot silently fall back to peer-controlled
+      headers or to the transport. Passing an absolute ``rel_url``
+      (``scheme://host/...`` or ``//host/...``) replaces the authority,
+      while a path-only ``rel_url`` keeps the request's effective authority:
+      for an absolute-form target the authority of the request-target is
+      used, never the ignored *Host* header.
+
+      .. note::
+
+         The request body is a shared, single-consumer stream. Once it has
+         been read in full (:meth:`~BaseRequest.read`, including an empty
+         body) or handed to a streaming consumer (:meth:`~BaseRequest.post`,
+         :meth:`~BaseRequest.multipart`), :meth:`clone` raises
+         :exc:`RuntimeError`.
+
       :param str method: http method
 
       :param rel_url: url to use, :class:`str` or :class:`~yarl.URL`
@@ -426,6 +452,14 @@ and :ref:`aiohttp-web-signals` handlers.
                       headers container.
 
       :return: a cloned :class:`Request` instance.
+
+      .. versionchanged:: 4.0
+
+         Clones no longer share header or route state with the source
+         request, and trusted ``scheme``/``host``/``remote`` overrides are
+         inherited by subsequent clones. An absolute-form target keeps its
+         own authority when only its path is replaced. No :meth:`clone` is
+         possible after the body has been consumed.
 
    .. method:: get_extra_info(name, default=None)
 
@@ -568,6 +602,12 @@ and :ref:`aiohttp-web-signals` handlers.
          Exact type of property depends on used router.  If
          ``app.router`` is :class:`UrlDispatcher` the property contains
          :class:`UrlMappingMatchInfo` instance.
+
+      .. versionchanged:: 4.0
+
+         A cloned request owns an independent copy of the match info, so
+         resolving or handling the clone cannot change the original
+         request's :attr:`~Request.match_info` or :attr:`~Request.app`.
 
    .. attribute:: app
 

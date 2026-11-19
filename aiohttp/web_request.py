@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import datetime
 import re
 import string
@@ -74,9 +75,9 @@ _T = TypeVar("_T")
 
 
 class _CloneKwargs(TypedDict, total=False):
-    scheme: str
-    host: str
-    remote: str
+    scheme: str | None
+    host: str | None
+    remote: str | None
 
 
 # Multipart file parts are buffered in memory and only spilled to a temporary
@@ -123,6 +124,32 @@ def _too_many_fields(max_fields: int) -> HTTPRequestEntityTooLarge:
     )
 
 
+def _with_authority(url: URL, authority: str) -> URL:
+    """Replace *url*'s authority, keeping its path, query, userinfo and fragment.
+
+    The new authority is parsed (``host:port``, bracketed IPv6, punycode) and
+    normalised for *url*'s scheme, so a default port is elided exactly as it
+    would be in a URL built from the same components.
+    """
+    parsed = URL.build(scheme=url.scheme, authority=authority)
+    rewritten = url.with_host(parsed.raw_host)
+    return rewritten.with_port(parsed.explicit_port)
+
+
+def _copy_headers(headers: LooseHeaders | HeadersDictProxy) -> HeadersDictProxy:
+    """Return an independent header mapping.
+
+    ``HeadersDictProxy`` is a read-only view over a mutable ``CIMultiDict``;
+    a clone must not let its own header handling observe or change the
+    original request's mapping.  Copying the underlying multidict keeps
+    repeated headers (``Cookie``, ``Forwarded``, ...) separate, which
+    rebuilding through the mapping interface would merge.
+    """
+    if isinstance(headers, HeadersDictProxy):
+        return HeadersDictProxy(CIMultiDict(headers._md))
+    return HeadersDictProxy(CIMultiDict(headers))
+
+
 class BaseRequest(MutableMapping[str | RequestKey[Any], Any], HeadersMixin):
     POST_METHODS = {
         hdrs.METH_PATCH,
@@ -134,7 +161,18 @@ class BaseRequest(MutableMapping[str | RequestKey[Any], Any], HeadersMixin):
 
     _post: MultiDictProxy[str | bytes | FileField] | None = None
     _read_bytes: bytes | None = None
+    # True once the body stream has been drained or handed to a consumer
+    # (``read()``, ``post()``, ``multipart()``): a clone then cannot promise
+    # the recipient the same body, so it is refused.
+    _body_consumed: bool = False
     _pre_handler_error: HTTPBadRequest | None = None
+    # Trusted values supplied by the code that created this request (the
+    # protocol, or an explicit clone(scheme=/host=/remote=...)).  They are
+    # kept apart from the reified ``_cache`` so a derived clone can carry them
+    # into a fresh generation instead of falling back to transport/headers.
+    _scheme_override: str | None = None
+    _host_override: str | None = None
+    _remote_override: str | None = None
 
     def __init__(
         self,
@@ -175,7 +213,7 @@ class BaseRequest(MutableMapping[str | RequestKey[Any], Any], HeadersMixin):
                 url = url.with_scheme(scheme)
                 self._cache["scheme"] = scheme
             if host is not None:
-                url = url.with_host(host)
+                url = _with_authority(url, host)
             # absolute URL is given,
             # override auto-calculating url, host, and scheme
             # all other properties should be good
@@ -199,7 +237,10 @@ class BaseRequest(MutableMapping[str | RequestKey[Any], Any], HeadersMixin):
         self._transport_peername = protocol.peername
         self._transport_sockname = protocol.sockname
 
+        self._scheme_override = scheme
+        self._host_override = host
         if remote is not None:
+            self._remote_override = remote
             self._cache["remote"] = remote
 
     def clone(
@@ -219,21 +260,46 @@ class BaseRequest(MutableMapping[str | RequestKey[Any], Any], HeadersMixin):
         Creates and returns a new instance of Request object. If no parameters
         are given, an exact copy is returned. If a parameter is not passed, it
         will reuse the one from the current request object.
+
+        Derived properties (``url``, ``host``, ``scheme``, ``secure``,
+        ``path``, ``query``, ...) are recomputed for the clone; the original
+        request keeps its own state.  Trusted ``scheme``/``host``/``remote``
+        overrides are inherited by the clone, so chaining ``clone()`` calls
+        cannot fall back to peer-controlled headers or the transport.
         """
-        if self._read_bytes:
+        if self._body_consumed:
             raise RuntimeError("Cannot clone request after reading its content")
 
         dct: dict[str, Any] = {}
         if method is not sentinel:
             dct["method"] = method
+        # Whether the caller supplied a target that carries its own authority
+        # (scheme://host or //host).  Such a target wins over any inherited
+        # trusted override, while a plain path must keep the request's
+        # effective authority.
+        explicit_target = False
+        new_url: URL | None = None
         if rel_url is not sentinel:
-            new_url: URL = URL(rel_url)
+            new_url = URL(rel_url)
+            explicit_target = new_url.absolute
+            if not explicit_target and self._message.url.absolute:
+                # An absolute-form (or CONNECT authority-form) target carries
+                # the authority the client addressed; the Host header is
+                # ignored for it.  Joining keeps that authority so the clone
+                # cannot combine a peer-controlled Host header with the new
+                # path and fabricate a request that was never sent.
+                new_url = self._message.url.join(new_url)
             dct["url"] = new_url
             dct["path"] = str(new_url)
+
+        # Always give the clone an independent header structure.  Even without
+        # an explicit replacement its header-backed properties (Host, Cookie,
+        # Content-Type, ...) must not observe mutations of the original.
+        new_headers = _copy_headers(
+            headers if headers is not sentinel else self._message.headers
+        )
+        dct["headers"] = new_headers
         if headers is not sentinel:
-            # a copy semantic
-            new_headers = HeadersDictProxy(CIMultiDict(headers))
-            dct["headers"] = new_headers
             dct["raw_headers"] = tuple(
                 (k.encode("utf-8"), v.encode("utf-8"))
                 for k, v in new_headers._md.items()
@@ -244,16 +310,27 @@ class BaseRequest(MutableMapping[str | RequestKey[Any], Any], HeadersMixin):
         kwargs: _CloneKwargs = {}
         if scheme is not sentinel:
             kwargs["scheme"] = scheme
+        elif explicit_target and new_url is not None and new_url.scheme:
+            # The replacement target names its own scheme and authority; it
+            # wins over an inherited trusted override.
+            kwargs["scheme"] = new_url.scheme
+        else:
+            kwargs["scheme"] = self._scheme_override
         if host is not sentinel:
             kwargs["host"] = host
-        if remote is not sentinel:
-            kwargs["remote"] = remote
+        elif explicit_target:
+            kwargs["host"] = None
+        else:
+            kwargs["host"] = self._host_override
+        kwargs["remote"] = (
+            remote if remote is not sentinel else self._remote_override
+        )
         if client_max_size is sentinel:
             client_max_size = self._client_max_size
         if client_max_fields is sentinel:
             client_max_fields = self._client_max_fields
 
-        return self.__class__(
+        clone = self.__class__(
             message,
             self._payload,
             self._protocol,  # type: ignore[arg-type]
@@ -266,6 +343,13 @@ class BaseRequest(MutableMapping[str | RequestKey[Any], Any], HeadersMixin):
             pre_handler_error=self._pre_handler_error,
             **kwargs,
         )
+        # ``post()`` can resolve to an empty, immutable mapping without
+        # touching the stream (e.g. a GET or a non-form content type).  That
+        # derived result is safe to reuse; any path that actually consumes
+        # the body marks it consumed and is refused above.
+        if self._post is not None:
+            clone._post = self._post
+        return clone
 
     @property
     def task(self) -> "asyncio.Task[None]":
@@ -700,6 +784,7 @@ class BaseRequest(MutableMapping[str | RequestKey[Any], Any], HeadersMixin):
         Returns bytes object with full request content.
         """
         if self._read_bytes is None:
+            self._body_consumed = True
             # Raise the buffer limits so compressed payloads decompress in
             # larger chunks instead of many small pause/resume cycles.
             if self._client_max_size:
@@ -747,6 +832,7 @@ class BaseRequest(MutableMapping[str | RequestKey[Any], Any], HeadersMixin):
 
     async def multipart(self) -> MultipartReader:
         """Return async iterator to process BODY as multipart."""
+        self._body_consumed = True
         return MultipartReader(
             self._headers,
             self._payload,
@@ -955,7 +1041,12 @@ class Request(BaseRequest):
             client_max_fields=client_max_fields,
         )
         new_ret = cast(Request, ret)
-        new_ret._match_info = self._match_info
+        match_info = self._match_info
+        # A clone gets its own route state generation.  ``_apps`` and
+        # ``current_app`` are mutated while a request is handled, so sharing
+        # the object would let proxy handling of the clone (or its route
+        # resolution) rewrite the original request's routing.
+        new_ret._match_info = None if match_info is None else copy.copy(match_info)
         return new_ret
 
     @reify

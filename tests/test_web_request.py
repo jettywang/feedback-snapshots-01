@@ -1483,6 +1483,162 @@ def test_clone_remote() -> None:
     assert req2.remote == "11.11.11.11"
 
 
+def test_clone_inherits_trusted_overrides() -> None:
+    """A plain clone must not drop a trusted proxy scheme/host override."""
+    req = make_mocked_request(
+        "GET", "/path", headers={"Host": "internal.example"}
+    )
+    proxied = req.clone(scheme="https", host="public.example", remote="10.0.0.1")
+
+    plain = proxied.clone()
+    assert plain.scheme == "https"
+    assert plain.host == "public.example"
+    assert plain.remote == "10.0.0.1"
+    assert plain.url == URL("https://public.example/path")
+
+    # ...and the trusted context survives an additional target rewrite.
+    moved = proxied.clone(rel_url="/moved")
+    assert moved.scheme == "https"
+    assert moved.host == "public.example"
+    assert moved.url == URL("https://public.example/moved")
+    assert proxied.url == URL("https://public.example/path")
+
+
+def test_clone_does_not_mutate_original() -> None:
+    req = make_mocked_request("GET", "/path", headers={"Host": "example.com"})
+    clone = req.clone(scheme="https", host="proxy.example", rel_url="/other")
+
+    assert clone.url == URL("https://proxy.example/other")
+    assert req.url == URL("http://example.com/path")
+    assert req.host == "example.com"
+    assert req.scheme == "http"
+    assert req.rel_url == URL("/path")
+    assert req.path == "/path"
+
+
+def test_clone_without_override_keeps_absolute_form_target_host() -> None:
+    """A path rewrite of an absolute-form target must keep the target's host.
+
+    The Host header is ignored for absolute-form targets; re-deriving the
+    authority from it would fabricate a request the client never sent.
+    """
+    req = make_mocked_request(
+        "GET", "http://target.example/old", headers={"Host": "attacker.example"}
+    )
+    clone = req.clone(rel_url="/new")
+
+    assert clone.host == "target.example"
+    assert clone.url == URL("http://target.example/new")
+    assert req.host == "target.example"
+    assert req.url == URL("http://target.example/old")
+
+
+def test_clone_absolute_target_replaces_authority() -> None:
+    req = make_mocked_request("GET", "http://target.example/old")
+    clone = req.clone(rel_url="http://other.example/new")
+
+    assert clone.url == URL("http://other.example/new")
+    assert clone.host == "other.example"
+    assert req.url == URL("http://target.example/old")
+
+
+def test_clone_host_with_port_and_ipv6() -> None:
+    req = make_mocked_request("GET", "/old")
+    assert req.clone(host="example.com:8080").url == URL(
+        "http://example.com:8080/old"
+    )
+    assert req.clone(host="[::1]:8080").url == URL("http://[::1]:8080/old")
+    # A port from the previous authority must not survive the override.
+    req = make_mocked_request("GET", "/old", headers={"Host": "example.com:8080"})
+    assert req.clone(host="other.example").url == URL("http://other.example/old")
+
+
+def test_clone_headers_are_independent() -> None:
+    headers = CIMultiDict([("A", "B"), ("A", "C")])
+    req = make_mocked_request("GET", "/path", headers={"X": "Y"})
+    clone = req.clone(headers=headers)
+
+    # Repeated headers are preserved, not collapsed through the mapping view.
+    assert clone.raw_headers == ((b"A", b"B"), (b"A", b"C"))
+    assert clone.headers.getall("A") == ("B", "C")
+    assert clone.headers["A"] == "B, C"
+    # The clone owns its mapping: growing the source does not leak in.
+    headers.add("D", "E")
+    assert "D" not in clone.headers
+    assert req.headers.getall("A") == ()
+
+
+def test_clone_without_headers_argument_has_own_header_state() -> None:
+    req = make_mocked_request("GET", "/path", headers={"Host": "example.com"})
+    clone = req.clone()
+    assert clone.headers is not req.headers
+    assert clone.raw_headers == req.raw_headers
+
+
+def test_clone_match_info_is_independent() -> None:
+    req = make_mocked_request("GET", "/", match_info={"name": "value"})
+    clone = req.clone()
+
+    assert clone.match_info == req.match_info
+    assert clone.match_info is not req.match_info
+    clone.match_info["name"] = "changed"
+    assert req.match_info["name"] == "value"
+    assert clone.app is req.app
+
+
+def test_clone_match_info_current_app_is_independent() -> None:
+    req = make_mocked_request("GET", "/")
+    clone = req.clone()
+    original = req.match_info.current_app
+
+    clone.match_info.current_app = mock.Mock()
+    assert req.match_info.current_app is original
+
+
+async def test_clone_refused_after_empty_body_read(protocol: BaseProtocol) -> None:
+    payload = StreamReader(
+        protocol, DEFAULT_CHUNK_SIZE, loop=asyncio.get_running_loop()
+    )
+    payload.feed_eof()
+    req = make_mocked_request("POST", "/path", payload=payload)
+    assert await req.read() == b""
+    with pytest.raises(RuntimeError, match="reading its content"):
+        req.clone()
+
+
+async def test_clone_refused_after_post(protocol: BaseProtocol) -> None:
+    payload = StreamReader(
+        protocol, DEFAULT_CHUNK_SIZE, loop=asyncio.get_running_loop()
+    )
+    payload.feed_data(b"a=1")
+    payload.feed_eof()
+    req = make_mocked_request(
+        "POST",
+        "/path",
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        payload=payload,
+    )
+    assert (await req.post())["a"] == "1"
+    with pytest.raises(RuntimeError, match="reading its content"):
+        req.clone()
+
+
+async def test_clone_refused_after_multipart(protocol: BaseProtocol) -> None:
+    payload = StreamReader(
+        protocol, DEFAULT_CHUNK_SIZE, loop=asyncio.get_running_loop()
+    )
+    payload.feed_eof()
+    req = make_mocked_request(
+        "POST",
+        "/path",
+        headers={"Content-Type": "multipart/form-data; boundary=x"},
+        payload=payload,
+    )
+    await req.multipart()
+    with pytest.raises(RuntimeError, match="reading its content"):
+        req.clone()
+
+
 def test_remote_with_closed_transport() -> None:
     transp = mock.Mock()
     transp.get_extra_info.return_value = ("10.10.10.10", 1234)
