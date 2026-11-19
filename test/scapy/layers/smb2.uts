@@ -665,3 +665,283 @@ s.Dialect = 0x0311
 
 pkt = SMB2_Header(bytes(SMB2_Header(Command="SMB2_NEGOTIATE")))
 assert SMB2_Header in s.in_pkt(pkt)
+
++ SMB2 compression transform
+
+= An unknown algorithm is never reported as decompressed
+~ smb2
+
+transform = SMB2_Compression_Transform_Header(
+    OriginalCompressedSegmentSize=4,
+    CompressionAlgorithm=0x40,
+)
+wire = bytes(NBTSession() / transform / Raw(load=b"\x00\x01\x02\x03"))
+hdr = NBTSession(wire)[SMB2_Compression_Transform_Header]
+assert bytes(hdr.segments[0].CompressedData) == b"\x00\x01\x02\x03"
+assert hdr.decompression_error is None
+
+
+def _try_unknown(hdr):
+    try:
+        hdr.decompress()
+        return None
+    except SMB2CompressionError as exc:
+        return exc
+
+
+error = _try_unknown(hdr)
+assert error is not None and "0x0040" in str(error)
+assert hdr.segments[0].decompressed is None
+
+= A compressed size larger than the packet stops at the payload
+~ smb2
+
+transform = SMB2_Compression_Transform_Header(
+    OriginalCompressedSegmentSize=100,
+    CompressionAlgorithm=1,
+    Offset_or_Length=100,
+)
+wire = bytes(NBTSession() / transform / Raw(load=b"short"))
+pkt = NBTSession(wire)
+hdr = pkt[SMB2_Compression_Transform_Header]
+assert hdr.parse_error is not None
+assert hdr.segments == []
+assert hdr.residue == b"short"
+assert SMB2_Header not in pkt
+assert Raw in pkt
+
+= Single uncompressed segment dissects and round-trips
+~ smb2
+
+from scapy.layers.smb2 import (
+    SMB2CompressionError,
+    SMB2_Compression_Segment,
+    SMB2_Compression_Transform_Header,
+)
+from scapy.packet import Raw
+
+transform = SMB2_Compression_Transform_Header(
+    OriginalCompressedSegmentSize=11,
+    CompressionAlgorithm=0,
+    Offset_or_Length=0,
+)
+wire = bytes(NBTSession() / transform / Raw(load=b"hello world"))
+pkt = NBTSession(wire)
+hdr = pkt[SMB2_Compression_Transform_Header]
+assert hdr.segments and len(hdr.segments) == 1
+assert isinstance(hdr.segments[0], SMB2_Compression_Segment)
+assert bytes(hdr.segments[0].CompressedData) == b"hello world"
+assert hdr.consumed == 11
+assert hdr.residue == b""
+assert hdr.decompress() == b"hello world"
+assert bytes(pkt) == wire
+
+= Single uncompressed segment with an offset keeps its padding
+~ smb2
+
+transform = SMB2_Compression_Transform_Header(
+    OriginalCompressedSegmentSize=5,
+    CompressionAlgorithm=0,
+    Offset_or_Length=4,
+)
+wire = bytes(NBTSession() / transform / Raw(load=b"PAD!hello"))
+hdr = NBTSession(wire)[SMB2_Compression_Transform_Header]
+assert hdr.consumed == 9
+assert hdr.residue == b""
+assert bytes(hdr.segments[0].CompressedData) == b"hello"
+assert hdr.decompress() == b"hello"
+assert bytes(NBTSession(wire)) == wire
+
+= Chained layout walks every element and concatenates
+~ smb2
+
+from scapy.layers.smb2 import SMB2_Compression_Chained_Payload
+
+first = SMB2_Compression_Chained_Payload(
+    CompressionAlgorithm=0, CompressedData=b"abc")
+second = SMB2_Compression_Chained_Payload(
+    CompressionAlgorithm=0, CompressedData=b"defgh")
+transform = SMB2_Compression_Transform_Header(
+    OriginalCompressedSegmentSize=8,
+    CompressionAlgorithm=0,
+    Flags="SMB2_COMPRESSION_FLAG_CHAINED",
+)
+wire = bytes(NBTSession() / transform / first / second)
+hdr = NBTSession(wire)[SMB2_Compression_Transform_Header]
+assert len(hdr.segments) == 2
+assert hdr.decompress() == b"abcdefgh"
+assert bytes(NBTSession(wire)) == wire
+
+= Bytes after the declared segments stay as Raw and block decoding
+~ smb2
+
+transform = SMB2_Compression_Transform_Header(
+    OriginalCompressedSegmentSize=8,
+    CompressionAlgorithm=0,
+    Flags="SMB2_COMPRESSION_FLAG_CHAINED",
+    Offset_or_Length=24,
+)
+wire = bytes(NBTSession() / transform / Raw(load=(
+    b"\x00\x00\x00\x00\x03\x00\x00\x00abc"
+    b"\x00\x00\x00\x00\x05\x00\x00\x00defgh"
+    b"JUNK\xfeSMB")))
+pkt = NBTSession(wire)
+hdr = pkt[SMB2_Compression_Transform_Header]
+assert hdr.residue == b"JUNK\xfeSMB"
+assert SMB2_Header not in pkt
+assert Raw in pkt
+try:
+    hdr.decompress()
+    assert False, "unexplained trailing bytes were silently dropped"
+except SMB2CompressionError:
+    pass
+
+= Unknown algorithm keeps its raw evidence and never claims success
+~ smb2
+
+transform = SMB2_Compression_Transform_Header(
+    OriginalCompressedSegmentSize=4,
+    CompressionAlgorithm=2,
+    Offset_or_Length=4,
+)
+wire = bytes(NBTSession() / transform / Raw(load=b"\x01\x02\x03\x04"))
+hdr = NBTSession(wire)[SMB2_Compression_Transform_Header]
+assert bytes(hdr.segments[0].CompressedData) == b"\x01\x02\x03\x04"
+
+
+def _try_decompress(hdr):
+    try:
+        hdr.decompress()
+        return None
+    except SMB2CompressionError as exc:
+        return exc
+
+
+error = _try_decompress(hdr)
+assert error is not None and "0x0002" in str(error)
+assert hdr.segments[0].decompressed is None
+
+= A forged huge declared size is rejected without allocation
+~ smb2
+
+transform = SMB2_Compression_Transform_Header(
+    OriginalCompressedSegmentSize=0xFFFFFFFF,
+    CompressionAlgorithm=0,
+    Offset_or_Length=0,
+)
+wire = bytes(NBTSession() / transform / Raw(load=b"x"))
+hdr = NBTSession(wire)[SMB2_Compression_Transform_Header]
+try:
+    hdr.decompress()
+    assert False, "huge declared size was accepted"
+except SMB2CompressionError as exc:
+    assert "decompression limit" in str(exc)
+
+= A truncated middle chained segment has a deterministic stop boundary
+~ smb2
+
+transform = SMB2_Compression_Transform_Header(
+    OriginalCompressedSegmentSize=8,
+    CompressionAlgorithm=0,
+    Flags="SMB2_COMPRESSION_FLAG_CHAINED",
+    Offset_or_Length=20,
+)
+region = (b"\x00\x00\x00\x00\x03\x00\x00\x00abc"
+          b"\x00\x00\x00\x00\x64\x00\x00\x00zz")
+wire = bytes(NBTSession() / transform / Raw(load=region))
+pkt = NBTSession(wire)
+hdr = pkt[SMB2_Compression_Transform_Header]
+assert hdr.parse_error is not None
+assert len(hdr.segments) == 1
+assert hdr.residue == region[11:]
+assert SMB2_Header not in pkt
+try:
+    hdr.decompress()
+    assert False, "truncated chain was reported as decompressed"
+except SMB2CompressionError:
+    pass
+
+= A truncated transform header is not an SMB2 message
+~ smb2
+
+pkt = NBTSession(b"\x00\x00\x00\x18\xfcSMB\x04\x00\x00\x00\x00\x00\x00\x00\x00")
+assert SMB2_Compression_Transform_Header not in pkt
+assert SMB2_Header not in pkt
+assert Raw in pkt
+
+= LZNT1 inflation is bounded and rejects corrupted data
+~ smb2
+
+import struct
+from scapy.layers.smb2 import smb2_lznt1_decompress
+
+plain = struct.pack("<H", 0x3000 | (12 - 1)) + b"ABCDEFGHIJKL"
+assert smb2_lznt1_decompress(plain, 1024) == b"ABCDEFGHIJKL"
+bad = struct.pack("<H", 0xB000 | 2) + b"\x01\x00\x00"
+try:
+    smb2_lznt1_decompress(plain, 4)
+    assert False, "decompression limit was not enforced"
+except SMB2CompressionError:
+    try:
+        smb2_lznt1_decompress(bad, 1024)
+        assert False, "invalid back-reference was accepted"
+    except SMB2CompressionError:
+        pass
+
+= Compression transform through the full dispatch chain reaches the inner header
+~ smb2
+
+import socket
+
+inner = bytes(SMB2_Header(Command="SMB2_ECHO") / SMB2_Echo_Request())
+transform = SMB2_Compression_Transform_Header(
+    OriginalCompressedSegmentSize=len(inner),
+    CompressionAlgorithm=0,
+    Offset_or_Length=0,
+)
+wire = bytes(NBTSession() / transform / Raw(load=inner))
+client, peer = socket.socketpair()
+try:
+    sock = SMBStreamSocket(client, NBTSession)
+    peer.sendall(wire)
+    pkt = sock.recv()
+    assert SMB2_Header in pkt
+    assert SMB2_Echo_Request in pkt
+    sock.close()
+finally:
+    client.close()
+    peer.close()
+
+= A corrupt compression transform is rejected by the session
+~ smb2
+
+from scapy.layers.smb2 import SMBSession
+
+transform = SMB2_Compression_Transform_Header(
+    OriginalCompressedSegmentSize=64,
+    CompressionAlgorithm=2,
+    Offset_or_Length=64,
+)
+wire = bytes(NBTSession() / transform / Raw(load=b"\xfeSMB" + b"\x00" * 60))
+pkt = NBTSession(wire)
+try:
+    SMBSession().in_pkt(pkt)
+    assert False, "unknown algorithm was accepted as a session message"
+except ValueError:
+    pass
+
+= A plain message is not accepted where a transform is announced
+~ smb2
+
+transform = SMB2_Compression_Transform_Header(
+    OriginalCompressedSegmentSize=4,
+    CompressionAlgorithm=0,
+    Offset_or_Length=0,
+)
+wire = bytes(NBTSession() / transform / Raw(load=b"EVIL"))
+pkt = NBTSession(wire)
+try:
+    SMBSession().in_pkt(pkt)
+    assert False, "non-SMB2 decompressed data was accepted"
+except ValueError:
+    pass

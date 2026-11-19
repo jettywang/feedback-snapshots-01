@@ -19,8 +19,8 @@ import struct
 
 from scapy.automaton import select_objects
 from scapy.config import conf, crypto_validator
-from scapy.error import log_runtime
-from scapy.packet import Packet, bind_layers, bind_top_down
+from scapy.error import log_runtime, Scapy_Exception
+from scapy.packet import NoPayload, Packet, bind_layers, bind_top_down
 from scapy.fields import (
     ByteEnumField,
     ByteField,
@@ -46,6 +46,7 @@ from scapy.fields import (
     ScalingField,
     ShortEnumField,
     ShortField,
+    StrField,
     StrFieldUtf16,
     StrFixedLenField,
     StrLenField,
@@ -3544,6 +3545,152 @@ bind_layers(SMB2_Transform_Header, conf.raw_layer)
 # sect 2.2.42.1
 
 
+SMB2_COMPRESSION_ALGORITHM_NONE = 0x0000
+SMB2_COMPRESSION_ALGORITHM_LZNT1 = 0x0001
+SMB2_COMPRESSION_FLAG_CHAINED = 0x0001
+
+#: Decompressed data is never allocated past this cap, regardless of the
+#: OriginalCompressedSegmentSize announced by the peer. It can be tuned with
+#: ``conf.contribs["smb2"]["max_decompression"]``.
+SMB2_DEFAULT_MAX_DECOMPRESSION = 16 * 1024 * 1024
+
+if "smb2" not in conf.contribs:
+    conf.contribs["smb2"] = {}
+conf.contribs["smb2"].setdefault("max_decompression", SMB2_DEFAULT_MAX_DECOMPRESSION)
+
+
+class SMB2CompressionError(Scapy_Exception):
+    """
+    Raised when a compression transform cannot be parsed or inflated safely.
+    """
+
+
+def smb2_lznt1_decompress(data, max_size):
+    """
+    Decompress an LZNT1 blob ([MS-XCA] sect 2.5).
+
+    The output is bounded by ``max_size`` bytes. The size announced by the
+    peer is never used to pre-allocate memory. A truncated or invalid stream
+    raises :class:`SMB2CompressionError`.
+    """
+    if max_size < 0:
+        raise SMB2CompressionError("invalid decompression limit")
+    out = bytearray()
+    pos = 0
+    length = len(data)
+    while pos < length:
+        if pos + 2 > length:
+            raise SMB2CompressionError("truncated LZNT1 chunk header")
+        chunk_header = struct.unpack_from("<H", data, pos)[0]
+        pos += 2
+        if chunk_header & 0x3000 != 0x3000:
+            raise SMB2CompressionError("invalid LZNT1 chunk signature")
+        chunk_length = (chunk_header & 0x0FFF) + 1
+        if pos + chunk_length > length:
+            raise SMB2CompressionError("truncated LZNT1 chunk")
+        chunk = data[pos:pos + chunk_length]
+        pos += chunk_length
+        chunk_start = len(out)
+        if not chunk_header & 0x8000:
+            if chunk_start + chunk_length > max_size:
+                raise SMB2CompressionError("decompression limit reached")
+            out += chunk
+            continue
+        i = 0
+        while i < len(chunk):
+            flags = chunk[i]
+            i += 1
+            for bit in range(8):
+                if i >= len(chunk):
+                    break
+                if flags & (1 << bit):
+                    if i + 2 > len(chunk):
+                        raise SMB2CompressionError("truncated LZNT1 pointer")
+                    pointer = struct.unpack_from("<H", chunk, i)[0]
+                    i += 2
+                    # The displacement depends on the bytes already produced in
+                    # the current chunk ([MS-XCA] sect 2.5.1).
+                    displacement = 0
+                    offset = len(out) - chunk_start - 1
+                    while offset >= 0x10:
+                        offset >>= 1
+                        displacement += 1
+                    ref_length = (pointer >> (12 - displacement)) + 3
+                    ref_offset = (pointer & (0xFFF >> displacement)) + 1
+                    if ref_offset > len(out) - chunk_start:
+                        raise SMB2CompressionError(
+                            "LZNT1 back-reference before chunk start"
+                        )
+                    if len(out) + ref_length > max_size:
+                        raise SMB2CompressionError("decompression limit reached")
+                    for _ in range(ref_length):
+                        out.append(out[-ref_offset])
+                else:
+                    if len(out) + 1 > max_size:
+                        raise SMB2CompressionError("decompression limit reached")
+                    out.append(chunk[i])
+                    i += 1
+    return bytes(out)
+
+
+# [MS-SMB2] sect 2.2.42.2
+
+
+class SMB2_Compression_Chained_Payload(Packet):
+    """
+    One element of a compressed payload chain ([MS-SMB2] sect 2.2.42.2).
+
+    ``CompressedData`` always keeps the bytes found on the wire, so unknown
+    algorithms and corrupted segments retain their original evidence. The
+    next element of the chain, if any, is this layer's payload.
+    ``decompressed`` is only set when inflation actually succeeded.
+    """
+
+    name = "SMB2 Compression Chained Payload"
+    fields_desc = [
+        LEShortEnumField("CompressionAlgorithm", 0, SMB2_COMPRESSION_ALGORITHMS),
+        LEShortField("Reserved", 0),
+        FieldLenField("Length", None, fmt="<I", length_of="CompressedData"),
+        StrLenField("CompressedData", b"", length_from=lambda pkt: pkt.Length),
+    ]
+    __slots__ = ["decompressed", "error"]
+
+    def __init__(self, *args, **kwargs):
+        self.decompressed = None
+        self.error = None
+        super(SMB2_Compression_Chained_Payload, self).__init__(*args, **kwargs)
+
+    @property
+    def algorithm(self):
+        return int(self.CompressionAlgorithm)
+
+    def decompress(self, max_size):
+        """Inflate this chained element, capped at ``max_size`` bytes."""
+        self.decompressed = None
+        self.error = None
+        data = bytes(self.CompressedData)
+        if self.Length is not None and len(data) != self.Length:
+            self.error = "truncated chained segment"
+            raise SMB2CompressionError(self.error)
+        if self.algorithm == SMB2_COMPRESSION_ALGORITHM_NONE:
+            if len(data) > max_size:
+                self.error = "decompression limit reached"
+                raise SMB2CompressionError(self.error)
+            self.decompressed = data
+        elif self.algorithm == SMB2_COMPRESSION_ALGORITHM_LZNT1:
+            try:
+                self.decompressed = smb2_lznt1_decompress(data, max_size)
+            except SMB2CompressionError as exc:
+                self.error = str(exc)
+                raise
+        else:
+            self.error = (
+                "unsupported compression algorithm 0x%04x" % self.algorithm
+            )
+            raise SMB2CompressionError(self.error)
+        return self.decompressed
+
+
 class SMB2_Compression_Transform_Header(Packet):
     name = "SMB2 Compression Transform Header"
     fields_desc = [
@@ -3560,6 +3707,281 @@ class SMB2_Compression_Transform_Header(Packet):
         ),
         XLEIntField("Offset_or_Length", 0),
     ]
+    __slots__ = [
+        "_segments",
+        "transform_bytes",
+        "residue",
+        "parse_error",
+        "decompression_error",
+        "decompressed",
+    ]
+
+    def __init__(self, *args, **kwargs):
+        self._segments = []
+        self.transform_bytes = b""
+        self.residue = b""
+        self.parse_error = None
+        self.decompression_error = None
+        self.decompressed = None
+        super(SMB2_Compression_Transform_Header, self).__init__(*args, **kwargs)
+
+    @property
+    def segments(self):
+        """The compression segments of the transform, in wire order."""
+        if self._segments:
+            return list(self._segments)
+        # ``copy()`` does not carry subclass slots, and freshly stacked packets
+        # were never dissected: fall back to the layers, then to a dissection
+        # of the bytes that would be emitted.
+        lyr = self.payload
+        while not isinstance(lyr, NoPayload):
+            if isinstance(
+                lyr, (SMB2_Compression_Segment, SMB2_Compression_Chained_Payload)
+            ):
+                self._segments.append(lyr)
+            lyr = lyr.payload
+        if (
+            not self._segments
+            and not isinstance(self.payload, NoPayload)
+            and not self.original
+        ):
+            # Never dissected (freshly built): dissect the bytes that would be
+            # emitted. Dissected packets always carry ``original``.
+            reparsed = SMB2_Compression_Transform_Header(bytes(self))
+            self._segments.extend(reparsed.segments)
+        return list(self._segments)
+
+    @property
+    def consumed(self):
+        """Number of payload bytes explained by the transform."""
+        if self.transform_bytes:
+            return len(self.transform_bytes)
+        # Freshly built packets are not dissected: derive the value from the
+        # layers that were explicitly stacked.
+        if isinstance(self.payload, NoPayload):
+            return 0
+        return len(bytes(self.payload)) - len(self.residue)
+
+    def _stop(self, message):
+        self.parse_error = message
+        log_runtime.warning("SMB2 compression transform: %s", message)
+
+    def do_dissect(self, s):
+        # Parse the 16-byte transform header, then split its payload here so
+        # that no leftover byte can be mistaken for a plain SMB2 message by
+        # the generic payload dispatch.
+        payload = super(SMB2_Compression_Transform_Header, self).do_dissect(s)
+        self._segments = []
+        self.transform_bytes = b""
+        self.residue = b""
+        self.parse_error = None
+        if self.Flags & SMB2_COMPRESSION_FLAG_CHAINED:
+            consumed = self._dissect_chained(payload)
+        else:
+            consumed = self._dissect_single(payload)
+        self.transform_bytes = payload[:consumed]
+        self.residue = payload[consumed:]
+        if self.residue:
+            # Unexplained trailing bytes are kept verbatim, never parsed as
+            # another SMB message.
+            last = self.lastlayer()
+            last.add_payload(conf.raw_layer(self.residue))
+        return b""
+
+    def _dissect_single(self, payload):
+        algorithm = int(self.CompressionAlgorithm)
+        if algorithm == SMB2_COMPRESSION_ALGORITHM_NONE:
+            # Offset_or_Length is the offset from the end of the transform
+            # header to the uncompressed data ([MS-SMB2] sect 2.2.42.1).
+            offset = self.Offset_or_Length
+            declared = self.OriginalCompressedSegmentSize
+            if offset > len(payload):
+                self._stop("uncompressed data offset outside the payload")
+                return 0
+            if offset + declared > len(payload):
+                self._stop("declared uncompressed segment is truncated")
+                return 0
+            if offset:
+                # Padding between the transform header and the data belongs
+                # to the transform and is kept for byte-exact rebuilding.
+                self.add_payload(conf.raw_layer(payload[:offset]))
+            segment = SMB2_Compression_Segment(
+                payload[offset:offset + declared], _algorithm=algorithm
+            )
+            self._segments.append(segment)
+            self.add_payload(segment)
+            return offset + declared
+        length = self.Offset_or_Length
+        if length > len(payload):
+            self._stop("declared compressed segment is truncated")
+            return 0
+        segment = SMB2_Compression_Segment(
+            payload[:length], _algorithm=algorithm
+        )
+        self._segments.append(segment)
+        self.add_payload(segment)
+        return length
+
+    def _dissect_chained(self, payload):
+        declared_length = self.Offset_or_Length
+        if declared_length > len(payload):
+            self._stop("declared chained payload is truncated")
+            return 0
+        pos = 0
+        current = None
+        while pos < declared_length:
+            if pos + 8 > declared_length:
+                self._stop("truncated chained payload header")
+                break
+            if len(self._segments) >= conf.max_list_count:
+                self._stop("chained payload element limit reached")
+                break
+            length = struct.unpack_from("<I", payload, pos + 4)[0]
+            algorithm = struct.unpack_from("<H", payload, pos)[0]
+            if length > declared_length - pos - 8:
+                self._stop("truncated chained segment")
+                break
+            element = SMB2_Compression_Chained_Payload(
+                payload[pos:pos + 8 + length],
+                _internal=1,
+                CompressionAlgorithm=algorithm,
+                Length=length,
+            )
+            pos += 8 + length
+            self._segments.append(element)
+            if current is None:
+                self.add_payload(element)
+            else:
+                current.add_payload(element)
+            current = element
+        return pos
+
+    def post_build(self, pkt, pay):
+        # Fill Offset_or_Length when it was not set explicitly: it always
+        # describes the payload that is actually on the wire. The declared
+        # OriginalCompressedSegmentSize is the *uncompressed* size and is only
+        # derived for the uncompressed layout. Any field passed explicitly,
+        # including a malformed value, is left untouched.
+        explicit = self.fields
+        algorithm = int(self.CompressionAlgorithm)
+        if "Offset_or_Length" not in explicit:
+            if self.Flags & SMB2_COMPRESSION_FLAG_CHAINED:
+                offset_or_length = len(pay)
+            elif algorithm == SMB2_COMPRESSION_ALGORITHM_NONE:
+                offset_or_length = 0
+            else:
+                offset_or_length = len(pay)
+            pkt = pkt[:12] + struct.pack("<I", offset_or_length) + pkt[16:]
+            self.fields["Offset_or_Length"] = offset_or_length
+        if (
+            "OriginalCompressedSegmentSize" not in explicit
+            and not self.Flags & SMB2_COMPRESSION_FLAG_CHAINED
+            and algorithm == SMB2_COMPRESSION_ALGORITHM_NONE
+        ):
+            pkt = pkt[:4] + struct.pack("<I", len(pay)) + pkt[8:]
+            self.fields["OriginalCompressedSegmentSize"] = len(pay)
+        return pkt + pay
+
+    def decompress(self, max_size=None):
+        """
+        Inflate every segment and return the concatenated original message.
+
+        Unknown algorithms, truncated segments and inflated sizes that differ
+        from OriginalCompressedSegmentSize raise
+        :class:`SMB2CompressionError`. The raw segment bytes remain available
+        through :attr:`segments`, so no successful decompression is reported
+        for data that was not actually inflated. ``max_size`` defaults to
+        ``conf.contribs["smb2"]["max_decompression"]`` and is the only bound
+        used to allocate memory: the declared size is merely compared with
+        the actual output.
+        """
+        if max_size is None:
+            max_size = conf.contribs["smb2"]["max_decompression"]
+        self.decompressed = None
+        self.decompression_error = None
+        declared = self.OriginalCompressedSegmentSize
+        if "OriginalCompressedSegmentSize" not in self.fields:
+            # Not built yet: use the value that will actually be emitted.
+            declared = SMB2_Compression_Transform_Header(
+                bytes(self)
+            ).OriginalCompressedSegmentSize
+        if declared > max_size:
+            self.decompression_error = (
+                "declared size %d exceeds the decompression limit" % declared
+            )
+            raise SMB2CompressionError(self.decompression_error)
+        if self.parse_error:
+            self.decompression_error = self.parse_error
+            raise SMB2CompressionError(self.decompression_error)
+        if self.residue:
+            # Bytes that no segment explains: the transform is not understood
+            # as a whole, so it cannot be reported as successfully decoded.
+            self.decompression_error = "unexplained bytes after the segments"
+            raise SMB2CompressionError(self.decompression_error)
+        segments = self.segments
+        if not segments:
+            self.decompression_error = "no segment to decompress"
+            raise SMB2CompressionError(self.decompression_error)
+        parts = []
+        total = 0
+        for segment in segments:
+            data = segment.decompress(max_size - total)
+            if total + len(data) > max_size:
+                self.decompression_error = "decompression limit reached"
+                raise SMB2CompressionError(self.decompression_error)
+            parts.append(data)
+            total += len(data)
+        if total != declared:
+            self.decompression_error = (
+                "decompressed size %d does not match declared size %d"
+                % (total, declared)
+            )
+            raise SMB2CompressionError(self.decompression_error)
+        self.decompressed = b"".join(parts)
+        return self.decompressed
+
+
+class SMB2_Compression_Segment(Packet):
+    """
+    A single-segment SMB2 compression transform payload.
+
+    ``CompressedData`` always keeps the bytes found on the wire, so unknown
+    algorithms and corrupted segments retain their original evidence.
+    ``decompressed`` is only set when inflation actually succeeded.
+    """
+
+    name = "SMB2 Compression Segment"
+    fields_desc = [StrField("CompressedData", b"")]
+    __slots__ = ["algorithm", "decompressed", "error"]
+
+    def __init__(self, *args, **kwargs):
+        self.algorithm = int(kwargs.pop("_algorithm", 0))
+        self.decompressed = None
+        self.error = None
+        super(SMB2_Compression_Segment, self).__init__(*args, **kwargs)
+
+    def decompress(self, max_size):
+        """Inflate this segment, capped at ``max_size`` bytes."""
+        self.decompressed = None
+        self.error = None
+        data = bytes(self.CompressedData)
+        if self.algorithm == SMB2_COMPRESSION_ALGORITHM_NONE:
+            if len(data) > max_size:
+                self.error = "decompression limit reached"
+                raise SMB2CompressionError(self.error)
+            self.decompressed = data
+        elif self.algorithm == SMB2_COMPRESSION_ALGORITHM_LZNT1:
+            try:
+                self.decompressed = smb2_lznt1_decompress(data, max_size)
+            except SMB2CompressionError as exc:
+                self.error = str(exc)
+                raise
+        else:
+            self.error = (
+                "unsupported compression algorithm 0x%04x" % self.algorithm
+            )
+            raise SMB2CompressionError(self.error)
+        return self.decompressed
 
 
 # [MS-DFSC] sect 2.2
@@ -3826,7 +4248,11 @@ class SMBStreamSocket(StreamSocket):
             or SMB2_Compression_Transform_Header in pkt
         ):
             pkt = self.session.in_pkt(pkt)
-            smbh = pkt[SMB2_Header]
+            # A compression transform is not a plain SMB2 message: its
+            # segments must never be dissected as compounded SMB2_Header.
+            smbh = pkt.getlayer(SMB2_Header)
+            if smbh is None:
+                return pkt
             pay = smbh.payload
             while SMB2_Header in pay:
                 pay = pay[SMB2_Header]
@@ -4041,7 +4467,28 @@ class SMBSession(DefaultSession):
         """
         Incoming SMB packet
         """
-        if SMB2_Transform_Header in pkt:
+        if SMB2_Compression_Transform_Header in pkt:
+            if self.EncryptData or self.TreeEncryptData:
+                # A compression transform does not replace encryption: when
+                # encryption is negotiated, an unencrypted transform is
+                # discarded just like any other unencrypted message.
+                raise ValueError("SMB encryption is required")
+            # A compression transform must be decoded explicitly. Unknown
+            # algorithms and corrupted segments are a decoding failure: they
+            # must never be handled as if they were a plain SMB2 message.
+            transform = pkt[SMB2_Compression_Transform_Header]
+            try:
+                data = transform.decompress()
+            except SMB2CompressionError as exc:
+                raise ValueError(
+                    "SMB2 compression transform cannot be decoded: %s" % exc
+                )
+            if len(data) < 64 or data[:4] != b"\xfeSMB":
+                raise ValueError(
+                    "SMB2 compression transform does not contain a SMB2 message"
+                )
+            pkt = SMB2_Header(data)
+        elif SMB2_Transform_Header in pkt:
             # Packet is encrypted
             pkt = pkt[SMB2_Transform_Header].decrypt(
                 self.Dialect,
@@ -4134,6 +4581,8 @@ class SMBSession(DefaultSession):
     def process(self, pkt: Packet):
         # Called when passively sniffing
         pkt = super(SMBSession, self).process(pkt)
-        if pkt is not None and SMB2_Header in pkt:
+        if pkt is not None and (
+            SMB2_Header in pkt or SMB2_Compression_Transform_Header in pkt
+        ):
             return self.in_pkt(pkt)
         return pkt
