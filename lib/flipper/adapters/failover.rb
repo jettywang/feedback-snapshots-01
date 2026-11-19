@@ -31,6 +31,31 @@ module Flipper
         @primary.read_only? || (@dual_write && @secondary.read_only?)
       end
 
+      # Expiration belongs to the adapter serving reads, so a failover to the
+      # secondary does not lose or invent expiry metadata.
+      def actor_expiration?
+        @primary.actor_expiration? || (@dual_write && @secondary.actor_expiration?)
+      end
+
+      def actor_expirations(feature)
+        @primary.actor_expirations(feature)
+      rescue *@errors
+        @secondary.actor_expirations(feature)
+      end
+
+      def reap_expired_actors(now: nil, feature: nil)
+        now ||= @primary.now
+        @primary.reap_expired_actors(now: now, feature: feature).tap do
+          @secondary.reap_expired_actors(now: now, feature: feature) if @dual_write
+        end
+      end
+
+      def now
+        @primary.now
+      rescue *@errors
+        @secondary.now
+      end
+
       def features
         @primary.features
       rescue *@errors

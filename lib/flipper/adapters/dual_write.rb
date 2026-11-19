@@ -23,6 +23,25 @@ module Flipper
         @remote.read_only? || @local.read_only?
       end
 
+      def actor_expiration?
+        @local.actor_expiration? && @remote.actor_expiration?
+      end
+
+      def actor_expirations(feature)
+        @local.actor_expirations(feature)
+      end
+
+      def reap_expired_actors(now: nil, feature: nil)
+        now ||= @local.now
+        removed = @remote.reap_expired_actors(now: now, feature: feature)
+        @local.reap_expired_actors(now: now, feature: feature)
+        removed
+      end
+
+      def now
+        @local.now
+      end
+
       def features
         @local.features
       end

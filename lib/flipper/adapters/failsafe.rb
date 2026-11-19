@@ -18,6 +18,30 @@ module Flipper
         @adapter.read_only?
       end
 
+      def actor_expiration?
+        @adapter.actor_expiration?
+      rescue *@errors
+        false
+      end
+
+      def actor_expirations(feature)
+        @adapter.actor_expirations(feature)
+      rescue *@errors
+        {}
+      end
+
+      def reap_expired_actors(now: nil, feature: nil)
+        @adapter.reap_expired_actors(now: now || @adapter.now, feature: feature)
+      rescue *@errors
+        []
+      end
+
+      def now
+        @adapter.now
+      rescue *@errors
+        Time.now
+      end
+
       def features
         @adapter.features
       rescue *@errors

@@ -73,6 +73,22 @@ module Flipper
         synced_adapter.disable(feature, gate, thing)
       end
 
+      def actor_expiration?
+        synced_adapter.actor_expiration?
+      end
+
+      def actor_expirations(feature)
+        synced_adapter.actor_expirations(feature)
+      end
+
+      def reap_expired_actors(now: nil, feature: nil)
+        synced_adapter.reap_expired_actors(now: now, feature: feature)
+      end
+
+      def now
+        synced_adapter.now
+      end
+
       private
 
       def synced_adapter

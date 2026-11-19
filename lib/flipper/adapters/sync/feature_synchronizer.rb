@@ -12,6 +12,7 @@ module Flipper
         def_delegator :@local_gate_values, :expression, :local_expression
         def_delegator :@local_gate_values, :boolean, :local_boolean
         def_delegator :@local_gate_values, :actors, :local_actors
+        def_delegator :@local_gate_values, :actor_expirations, :local_actor_expirations
         def_delegator :@local_gate_values, :groups, :local_groups
         def_delegator :@local_gate_values, :percentage_of_actors,
                       :local_percentage_of_actors
@@ -21,6 +22,7 @@ module Flipper
         def_delegator :@remote_gate_values, :expression, :remote_expression
         def_delegator :@remote_gate_values, :boolean, :remote_boolean
         def_delegator :@remote_gate_values, :actors, :remote_actors
+        def_delegator :@remote_gate_values, :actor_expirations, :remote_actor_expirations
         def_delegator :@remote_gate_values, :groups, :remote_groups
         def_delegator :@remote_gate_values, :percentage_of_actors,
                       :remote_percentage_of_actors
@@ -67,12 +69,37 @@ module Flipper
         def sync_actors
           remote_actors_added = remote_actors - local_actors
           remote_actors_added.each do |flipper_id|
-            @feature.enable_actor Actor.new(flipper_id)
+            expires_at = remote_actor_expirations[flipper_id]
+            if expires_at
+              @feature.enable_actor Actor.new(flipper_id), expires_at: expires_at
+            else
+              @feature.enable_actor Actor.new(flipper_id)
+            end
           end
 
           remote_actors_removed = local_actors - remote_actors
           remote_actors_removed.each do |flipper_id|
             @feature.disable_actor Actor.new(flipper_id)
+          end
+
+          sync_actor_expirations
+        end
+
+        # Update expirations for actors that stay enabled on both sides. An
+        # actor only present in remote metadata is not enough: metadata for an
+        # actor removed remotely must not re-enable it.
+        def sync_actor_expirations
+          return unless @feature.adapter.actor_expiration?
+          return if remote_actor_expirations == local_actor_expirations
+
+          actors = local_actors & remote_actors
+          actors.each do |flipper_id|
+            local_expires_at = local_actor_expirations[flipper_id]
+            remote_expires_at = remote_actor_expirations[flipper_id]
+            next if local_expires_at == remote_expires_at
+            next unless remote_expires_at
+
+            @feature.enable_actor Actor.new(flipper_id), expires_at: remote_expires_at
           end
         end
 

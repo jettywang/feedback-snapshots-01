@@ -4,7 +4,7 @@ module Flipper
   module Adapters
     # Public: Adapter that wraps another adapter and raises for any writes.
     class ReadOnly < Wrapper
-      WRITE_METHODS = %i[import add remove clear enable disable sync_version=]
+      WRITE_METHODS = %i[import add remove clear enable disable sync_version= reap_expired_actors]
 
       class WriteAttempted < Error
         def initialize(message = nil)
@@ -14,6 +14,10 @@ module Flipper
 
       def read_only?
         true
+      end
+
+      def reap_expired_actors(now: nil, feature: nil)
+        raise WriteAttempted
       end
 
       private

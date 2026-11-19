@@ -45,6 +45,24 @@ module Flipper
         @adapter.read_only?
       end
 
+      # Public: Wrappers that are not about expiration must not hide support
+      # for it from the adapter they wrap.
+      def actor_expiration?
+        @adapter.actor_expiration?
+      end
+
+      def actor_expirations(feature)
+        @adapter.actor_expirations(feature)
+      end
+
+      def reap_expired_actors(now: nil, feature: nil)
+        @adapter.reap_expired_actors(now: now || @adapter.now, feature: feature)
+      end
+
+      def now
+        @adapter.now
+      end
+
       # Override this method to customize the behavior of all delegated methods, and just yield to
       # the block to call the wrapped adapter.
       if RUBY_VERSION >= '3.0'

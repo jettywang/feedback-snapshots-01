@@ -1,4 +1,5 @@
 require 'set'
+require 'time'
 require "flipper/serializers/json"
 require "flipper/serializers/gzip"
 
@@ -57,6 +58,29 @@ module Flipper
       raise ArgumentError, "#{value.inspect} cannot be converted to a number"
     end
     singleton_class.send(:alias_method, :to_percentage, :to_number)
+
+    # Internal: Convert value to a UTC Time.
+    #
+    # Accepts Time, epoch seconds and ISO8601 strings so expiration metadata
+    # survives adapters and JSON round trips. Returns nil for nil.
+    def self.to_time(value)
+      case value
+      when nil
+        nil
+      when Time
+        value.utc
+      when Numeric
+        Time.at(value).utc
+      when String
+        Time.parse(value).utc
+      else
+        if value.respond_to?(:to_time)
+          value.to_time.utc
+        else
+          raise ArgumentError, "#{value.inspect} cannot be converted to a time"
+        end
+      end
+    end
 
     # Internal: Convert value to a set.
     #

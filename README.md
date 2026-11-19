@@ -90,6 +90,32 @@ Flipper.enable_group :search, :admin
 Flipper.enable_percentage_of_actors :search, 2
 ```
 
+### Expiring Actor Grants
+
+For a pilot where each approved actor should be revoked on its own schedule, use
+`Flipper::Managed`. Only actor grants expire; global, group, percentage, and
+expression gates keep working as usual.
+
+```ruby
+flipper = Flipper::Managed.new(Flipper::Adapters::Memory.new)
+
+flipper.enable_actor :sensitive_pilot, employee, expires_in: 3600
+flipper.enable_actor :sensitive_pilot, reviewer, expires_at: Time.utc(2026, 12, 1)
+
+# Extend one approval without changing who is approved.
+flipper.extend_actor :sensitive_pilot, reviewer, expires_in: 86_400
+
+# Run from a scheduler. Expired grants already stop opening the gate; this
+# removes the stored grants and returns the [feature, actor] pairs removed.
+flipper.reap_expired_actors(:sensitive_pilot)
+```
+
+Expired grants stay in the adapter, and remain visible through
+`actor_expirations`, until they are reaped. A grant extended after a reaper
+starts is never removed by that reap. See
+[examples/actor_expiration.rb](examples/actor_expiration.rb) for a runnable
+example with a fake clock.
+
 Read more about [getting started with Flipper](https://flippercloud.io/docs?utm_source=oss&utm_medium=readme&utm_campaign=getting_started) and [enabling features](https://flippercloud.io/docs/features?utm_source=oss&utm_medium=readme&utm_campaign=enabling_features).
 
 ## Flipper Cloud

@@ -31,4 +31,14 @@ module Flipper
       super(message || default)
     end
   end
+
+  # Raised when an actor grant asks for an expiry but the configured adapter
+  # cannot enforce it. Failing loudly is safer than silently granting access
+  # forever.
+  class ActorExpirationNotSupported < Error
+    def initialize(message = nil)
+      default = "Actor expiration is not supported by this adapter. Wrap it with Flipper::Adapters::ActorExpiration or use Flipper::Managed."
+      super(message || default)
+    end
+  end
 end

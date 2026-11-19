@@ -68,7 +68,9 @@ module Flipper
                  :enabled?, :enable, :disable,
                  :enable_expression, :disable_expression,
                  :expression, :add_expression, :remove_expression,
-                 :enable_actor, :disable_actor,
+                 :enable_actor, :disable_actor, :extend_actor,
+                 :reap_expired_actors, :actor_expires_at, :actor_expirations,
+                 :actor_enabled?,
                  :enable_group, :disable_group,
                  :enable_percentage_of_actors, :disable_percentage_of_actors,
                  :enable_percentage_of_time, :disable_percentage_of_time,
@@ -205,6 +207,7 @@ require 'flipper/actor'
 require 'flipper/adapter'
 require 'flipper/adapters/wrapper'
 require 'flipper/adapters/actor_limit'
+require 'flipper/adapters/actor_expiration'
 require 'flipper/adapters/instrumented'
 require 'flipper/adapters/memoizable'
 require 'flipper/adapters/memory'
@@ -233,6 +236,7 @@ require 'flipper/types/percentage_of_actors'
 require 'flipper/types/percentage_of_time'
 require 'flipper/typecast'
 require 'flipper/version'
+require 'flipper/managed'
 
 # Eagerly initialize memoized module state while loading is still
 # single-threaded (require/autoload hold a per-feature lock). This avoids a

@@ -163,10 +163,65 @@ module Flipper
     #
     # actor - a Flipper::Types::Actor instance or an object that responds
     #         to flipper_id.
+    # expires_at - Optional Time after which this grant no longer opens the
+    #              actor gate. Requires an adapter that supports actor
+    #              expiration (see Flipper::Managed).
+    # expires_in - Optional number of seconds from now until the grant expires.
     #
     # Returns result of enable.
-    def enable_actor(actor)
-      enable Types::Actor.wrap(actor)
+    def enable_actor(actor, expires_at: nil, expires_in: nil)
+      expiry_actor = actor_with_expiration(actor, expires_at, expires_in)
+      if expiry_actor.expiration?
+        unless adapter.actor_expiration?
+          raise ActorExpirationNotSupported
+        end
+      end
+      enable expiry_actor
+    end
+
+    # Public: Extends an actor grant to a new expiration time without changing
+    # which actor is approved. Extending an existing approval past a reaper's
+    # snapshot must keep it: the reap only removes the expiration it observed.
+    #
+    # actor - a Flipper::Types::Actor instance or an object that responds
+    #         to flipper_id.
+    # expires_at - The new Time at which the grant expires.
+    # expires_in - Optional number of seconds from now until the grant expires.
+    #
+    # Returns result of enable.
+    def extend_actor(actor, expires_at: nil, expires_in: nil)
+      if expires_at.nil? && expires_in.nil?
+        raise ArgumentError, 'pass expires_at or expires_in to extend an actor grant'
+      end
+      enable_actor(actor, expires_at: expires_at, expires_in: expires_in)
+    end
+
+    # Public: The Time at which this feature is granted to the actor, if the
+    # adapter records an expiration for it.
+    #
+    # Returns a Time or nil.
+    def actor_expires_at(actor)
+      actor_expirations[actor_id(actor)]
+    end
+
+    # Public: Does this actor's grant still open the actor gate at the
+    # adapter's current time? Returns false when there is no grant.
+    def actor_enabled?(actor)
+      id = actor_id(actor)
+      return false unless actors_value.include?(id)
+
+      expires_at = actor_expirations[id]
+      expires_at.nil? || expires_at > actor_expiration_now
+    end
+
+    # Public: Expiration metadata for this feature's actor grants, keyed by
+    # flipper_id. Returns an empty Hash when no grant expires.
+    def actor_expirations
+      if adapter.respond_to?(:actor_expirations)
+        adapter.actor_expirations(self)
+      else
+        {}
+      end
     end
 
     # Public: Enables a feature for a group.
@@ -307,7 +362,17 @@ module Flipper
     # Public: Returns the raw gate values stored by the adapter.
     def gate_values
       adapter_values = adapter.get(self)
-      GateValues.new(adapter_values)
+      expirations = adapter_actor_expirations(adapter_values)
+      # Fast path: no actor grants can expire, so skip Time.now allocation.
+      if expirations.nil? || expirations.empty?
+        GateValues.new(adapter_values)
+      else
+        GateValues.new(
+          adapter_values,
+          actor_expirations: expirations,
+          actor_expiration_now: adapter_actor_expiration_now
+        )
+      end
     end
 
     # Public: Get groups enabled for this feature.
@@ -450,6 +515,43 @@ module Flipper
     end
 
     private
+
+    # Internal: The expiration metadata for a feature's actor grants. Adapters
+    # may keep it apart from gate values; nil means no expiration metadata.
+    def adapter_actor_expirations(adapter_values)
+      return adapter_values[:actor_expirations] if adapter_values.key?(:actor_expirations)
+
+      if adapter.respond_to?(:actor_expirations)
+        adapter.actor_expirations(self)
+      end
+    end
+
+    # Internal: The adapter's notion of now, when it exposes an injectable
+    # clock. Expiration checks must use the same clock as the reaper.
+    def adapter_actor_expiration_now
+      adapter.now if adapter.respond_to?(:now)
+    end
+    alias_method :actor_expiration_now, :adapter_actor_expiration_now
+
+    def actor_id(actor)
+      if actor.is_a?(Types::Actor)
+        actor.value
+      elsif actor.is_a?(String) || actor.is_a?(Symbol)
+        actor.to_s
+      else
+        Types::Actor.wrap(actor).value
+      end
+    end
+
+    def actor_with_expiration(actor, expires_at, expires_in)
+      if actor.is_a?(Types::Actor)
+        return actor if !expires_at && !expires_in
+
+        Types::Actor.new(actor.actor, expires_at: expires_at, expires_in: expires_in)
+      else
+        Types::Actor.new(actor, expires_at: expires_at, expires_in: expires_in)
+      end
+    end
 
     # Internal: Mirrors a trusted remote expression during adapter sync,
     # including legacy expressions that predate empty-group validation.

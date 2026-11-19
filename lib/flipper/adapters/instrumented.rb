@@ -30,6 +30,32 @@ module Flipper
         @adapter.read_only?
       end
 
+      def actor_expiration?
+        @adapter.actor_expiration?
+      end
+
+      def actor_expirations(feature)
+        @adapter.actor_expirations(feature)
+      end
+
+      def reap_expired_actors(now: nil, feature: nil)
+        now ||= @adapter.now
+        default_payload = {
+          operation: :reap_expired_actors,
+          adapter_name: @adapter.name,
+          now: now,
+          feature_name: feature && feature.name,
+        }
+
+        @instrumenter.instrument(InstrumentationName, default_payload) do |payload|
+          payload[:result] = @adapter.reap_expired_actors(now: now, feature: feature)
+        end
+      end
+
+      def now
+        @adapter.now
+      end
+
       # Public
       def features
         default_payload = {

@@ -39,6 +39,33 @@ module Flipper
         @adapter.read_only?
       end
 
+      # Expiration is enforced by the underlying adapter. The cached gate
+      # values stay authoritative for grants, while expiry metadata is read
+      # through to avoid caching something that changes with the clock.
+      def actor_expiration?
+        @adapter.actor_expiration?
+      end
+
+      def actor_expirations(feature)
+        @adapter.actor_expirations(feature)
+      end
+
+      def reap_expired_actors(now: nil, feature: nil)
+        result = @adapter.reap_expired_actors(now: now || @adapter.now, feature: feature)
+        if result.any?
+          if feature
+            expire_feature_cache(feature.key)
+          else
+            expire_features_cache
+          end
+        end
+        result
+      end
+
+      def now
+        @adapter.now
+      end
+
       # Public: Expire the cache for the set of all features with gates.
       def expire_get_all_cache
         cache_delete @get_all_cache_key

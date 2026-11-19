@@ -25,11 +25,34 @@ module Flipper
         def features
           @features ||= begin
             features = Typecast.from_json(contents).fetch("features")
-            Typecast.features_hash(features)
+            expirations = extract_actor_expirations(features)
+            features = Typecast.features_hash(features)
+            expirations.each do |feature_key, values|
+              next unless features.key?(feature_key)
+
+              features[feature_key][:actor_expirations] = values
+            end
+            features
           rescue JSON::ParserError
             raise JsonError
           rescue
             raise InvalidError
+          end
+        end
+
+        private
+
+        # Typecast.features_hash expects gate values, not expiration metadata.
+        # Pull it out first, parse the times so adapters can compare them to
+        # their clock, and add it back after normalization.
+        def extract_actor_expirations(features)
+          features.each_with_object({}) do |(feature_key, gates), result|
+            expirations = gates.delete("actor_expirations") || gates.delete(:actor_expirations)
+            next unless expirations.is_a?(Hash)
+
+            result[feature_key] = expirations.transform_values do |value|
+              Typecast.to_time(value)
+            end
           end
         end
       end

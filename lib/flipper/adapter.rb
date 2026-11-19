@@ -28,6 +28,39 @@ module Flipper
       false
     end
 
+    # Public: Does this adapter enforce expiration for actor grants? Most
+    # storage adapters do not; Flipper::Adapters::ActorExpiration and adapters
+    # that wrap it return true.
+    def actor_expiration?
+      false
+    end
+
+    # Public: Expiration metadata for actor grants, keyed by flipper_id, for
+    # one feature. Returns an empty Hash when the adapter has none.
+    def actor_expirations(feature)
+      {}
+    end
+
+    # Public: Remove actor grants whose expiration has passed and return the
+    # [feature_key, actor_id] pairs removed. Adapters that do not support
+    # expiration raise, so a typo or unwrapped adapter cannot silently leave
+    # expired access in place.
+    def reap_expired_actors(now: nil, feature: nil)
+      raise ActorExpirationNotSupported
+    end
+
+    # Public: The adapter's current time. Adapters with an injectable clock
+    # override this so expiration checks and reaping use the same time.
+    def now
+      Time.now
+    end
+
+    # Public: The current time according to this adapter. Adapters that do
+    # not have an injectable clock use wall clock time.
+    def now
+      Time.now
+    end
+
     # Public: Get all features and gate values in one call. Defaults to one call
     # to features and another to get_multi. Feel free to override per adapter to
     # make this more efficient.

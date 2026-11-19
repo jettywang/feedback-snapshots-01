@@ -74,10 +74,72 @@ module Flipper
     # name - The String or Symbol name of the feature.
     # actor - a Flipper::Types::Actor instance or an object that responds
     #         to flipper_id.
+    # expires_at - Optional Time after which the grant no longer opens the
+    #              feature. Requires Flipper::Managed or an ActorExpiration
+    #              adapter.
+    # expires_in - Optional number of seconds until the grant expires.
     #
     # Returns result of Feature#enable.
-    def enable_actor(name, actor)
-      feature(name).enable_actor(actor)
+    def enable_actor(name, actor, expires_at: nil, expires_in: nil)
+      feature(name).enable_actor(actor, expires_at: expires_at, expires_in: expires_in)
+    end
+
+    # Public: Extend an actor grant to a later expiration. Does not change who
+    # is approved.
+    #
+    # name - The String or Symbol name of the feature.
+    # actor - a Flipper::Types::Actor instance or an object that responds
+    #         to flipper_id.
+    # expires_at - The new Time at which the grant expires.
+    # expires_in - Optional number of seconds until the grant expires.
+    #
+    # Returns result of Feature#enable.
+    def extend_actor(name, actor, expires_at: nil, expires_in: nil)
+      feature(name).extend_actor(actor, expires_at: expires_at, expires_in: expires_in)
+    end
+
+    # Public: Reap actor grants whose expiration has passed at the adapter's
+    # clock. Only grants whose expiration is still the one observed are
+    # removed, so an approval extended during the reap is kept.
+    #
+    # names - Optional String, Symbol or Array of feature names to limit the
+    #         reap to. When omitted, every feature in the adapter is
+    #         considered.
+    #
+    # Returns an Array of [feature_key, actor_id] pairs removed.
+    def reap_expired_actors(*names)
+      unless adapter.actor_expiration?
+        raise ActorExpirationNotSupported
+      end
+
+      names = names.flatten
+      if names.empty?
+        adapter.reap_expired_actors(feature: nil)
+      else
+        names.flat_map do |name|
+          adapter.reap_expired_actors(feature: feature(name))
+        end
+      end
+    end
+
+    # Public: The Time at which a feature is granted to an actor, if the
+    # adapter records an expiration for it.
+    #
+    # Returns a Time or nil.
+    def actor_expires_at(name, actor)
+      feature(name).actor_expires_at(actor)
+    end
+
+    # Public: All actor expirations for a feature, keyed by flipper_id.
+    def actor_expirations(name)
+      feature(name).actor_expirations
+    end
+
+    # Public: Is the actor's grant still effective? Unlike #enabled?, this
+    # ignores global, group, percentage, and expression gates and reports
+    # only whether this actor's own grant is present and unexpired.
+    def actor_enabled?(name, actor)
+      feature(name).actor_enabled?(actor)
     end
 
     # Public: Enable a feature for a group.

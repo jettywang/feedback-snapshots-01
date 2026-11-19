@@ -128,6 +128,31 @@ module Flipper
         @adapter.read_only?
       end
 
+      def actor_expiration?
+        @adapter.actor_expiration?
+      end
+
+      def actor_expirations(feature)
+        @adapter.actor_expirations(feature)
+      end
+
+      def reap_expired_actors(now: nil, feature: nil)
+        @adapter.reap_expired_actors(now: now || @adapter.now, feature: feature).tap do
+          if feature
+            expire_feature(feature)
+          else
+            # Without a feature the wrapped adapter reaps across features; clear
+            # every memoized gate value but keep the known feature list.
+            cache.delete_if { |key, _| !key.equal?(@features_key) && !key.equal?(@get_all_key) }
+            cache.delete(@get_all_key)
+          end
+        end
+      end
+
+      def now
+        @adapter.now
+      end
+
       def import(source)
         @adapter.import(source).tap { cache.clear if memoizing? }
       end

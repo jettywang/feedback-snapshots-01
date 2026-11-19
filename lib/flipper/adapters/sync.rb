@@ -57,6 +57,24 @@ module Flipper
         @local.get_all(**kwargs)
       end
 
+      # Expiration is enforced by the local adapter. Remote sync writes plain
+      # actor IDs, so metadata must not depend on the remote.
+      def actor_expiration?
+        @local.actor_expiration?
+      end
+
+      def actor_expirations(feature)
+        @local.actor_expirations(feature)
+      end
+
+      def reap_expired_actors(now: nil, feature: nil)
+        @local.reap_expired_actors(now: now || @local.now, feature: feature)
+      end
+
+      def now
+        @local.now
+      end
+
       def sync_version
         @local.sync_version
       end
