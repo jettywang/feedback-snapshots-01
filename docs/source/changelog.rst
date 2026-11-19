@@ -8,6 +8,18 @@ All notable changes to this project will be documented in this file.
 `Unreleased`_
 -------------
 
+Added
+^^^^^
+
+* Added an optional ``dramatiq.audit`` package containing the
+  ``AuditReceipts`` middleware, an ``AuditBackend`` interface and an
+  in-memory backend.  Each receipt records the actor call, result
+  storage and broker acknowledgement of every delivery, so a lost
+  acknowledgement is never reported as confirmed and redeliveries are
+  correlated under the same message id.
+* Added an ``after_result_stored`` middleware hook, emitted by the
+  Results middleware after a result or exception is stored.
+
 Fixed
 ^^^^^
 

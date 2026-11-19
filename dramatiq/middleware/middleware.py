@@ -122,6 +122,19 @@ class Middleware:
         has been skipped.
         """
 
+    def after_result_stored(
+        self,
+        broker: Broker,
+        message: MessageProxy,
+        *,
+        exception: Optional[BaseException] = None,
+    ) -> None:
+        """Called after a message's result or exception has been
+        stored by the Results middleware.  The ``exception`` keyword is
+        set when the stored value was the actor's exception rather than
+        its return value.
+        """
+
     def after_process_boot(self, broker: Broker) -> None:
         """Called immediately after subprocess start up."""
 

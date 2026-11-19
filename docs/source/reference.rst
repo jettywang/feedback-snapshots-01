@@ -113,6 +113,12 @@ The following middleware classes are available, but not enabled by default.
 .. autoclass:: dramatiq.middleware.GroupCallbacks
 .. autoclass:: dramatiq.middleware.prometheus.Prometheus
 
+.. py:class:: dramatiq.audit.AuditReceipts
+   :no-index:
+
+   Middleware that records an audit receipt for every processed
+   message.  See :class:`dramatiq.audit.AuditReceipts` for details.
+
 .. py:class:: dramatiq.results.Results
    :no-index:
 
@@ -172,6 +178,39 @@ Results Backends
    :show-inheritance:
 .. autoclass:: dramatiq.results.backends.StubBackend
    :show-inheritance:
+
+
+Audit Receipts
+--------------
+
+The audit receipts middleware is an optional component that records
+what actually happened to each message as it moved through a worker.
+Each receipt distinguishes the actor call, result storage and broker
+acknowledgement, so a message whose work finished but whose
+acknowledgement was lost is never reported as confirmed and a
+redelivery shows up as a second delivery under the same message id.
+It is not enabled by default.
+
+Audit Middleware
+^^^^^^^^^^^^^^^^
+
+.. autoclass:: dramatiq.audit.AuditReceipts
+
+Audit Backends
+^^^^^^^^^^^^^^
+
+.. autoclass:: dramatiq.audit.AuditBackend
+   :members:
+.. autoclass:: dramatiq.audit.InMemoryAuditBackend
+   :members:
+
+Audit Receipts
+^^^^^^^^^^^^^^
+
+.. autoclass:: dramatiq.audit.AuditReceipt
+   :members:
+.. autoclass:: dramatiq.audit.DeliveryReceipt
+   :members:
 
 
 Rate Limiters

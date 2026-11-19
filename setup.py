@@ -79,6 +79,7 @@ setup(
     long_description_content_type="text/markdown",
     packages=[
         "dramatiq",
+        "dramatiq.audit",
         "dramatiq.brokers",
         "dramatiq.middleware",
         "dramatiq.rate_limits",

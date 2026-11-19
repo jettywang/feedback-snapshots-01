@@ -95,6 +95,7 @@ class Results(Middleware):
         store_results, result_ttl = self._lookup_options(broker, message)
         if store_results and exception is None:
             self.backend.store_result(message, result, result_ttl)
+            broker.emit_after("result_stored", message)
         if not store_results and result is not None and message.options.get("pipe_target") is None:
             self.logger.warning(
                 "Actor '%s' returned a value that is not None, but you "
@@ -109,9 +110,11 @@ class Results(Middleware):
         store_results, result_ttl = self._lookup_options(broker, message)
         if store_results and not message.failed:
             self.backend.store_result(message, None, result_ttl)
+            broker.emit_after("result_stored", message)
 
     def after_nack(self, broker, message):
         store_results, result_ttl = self._lookup_options(broker, message)
         if store_results and message.failed:
             exception = message._exception or Exception("unknown")
             self.backend.store_exception(message, exception, result_ttl)
+            broker.emit_after("result_stored", message, exception=exception)
