@@ -526,6 +526,11 @@ module RubySMB
         break
       end unless version == 'SMB1'
 
+      # The response must be verified before it is handed back to the caller
+      # or used to update any session state (re-authentication, message ID
+      # and sequence counter tracking below).
+      verify_response_signature!(raw_response, packet, encrypt: encrypt_data)
+
       # Handle STATUS_NETWORK_SESSION_EXPIRED. The 'net use' client upon receiving this error will automatically attempt
       # to re-authenticate, which makes relaying ntlm authentication to multiple targets possible. This block ensures
       # ruby_smb behaves in the same manner as 'net use'.
@@ -544,13 +549,79 @@ module RubySMB
       raw_response
     end
 
+    # Verifies the signature of an incoming response when the session
+    # requires signing. The check is skipped for messages protected by SMB3
+    # encryption (the transform header already guarantees authenticity and
+    # integrity) and for the handshake responses that are permitted to be
+    # unsigned (negotiate and session setup). Any other response that is
+    # unsigned, addressed to a different session or incorrectly signed is
+    # rejected before it can be processed.
+    #
+    # @param raw_response [String] the raw response received from the server
+    # @param request_packet [RubySMB::GenericPacket] the request packet this
+    #   response corresponds to
+    # @param encrypt [Boolean] true if the response was received encrypted
+    # @return [true] if the response is authentic or does not require
+    #   verification
+    # @raise [RubySMB::Error::SigningError] if the response fails verification
+    def verify_response_signature!(raw_response, request_packet, encrypt: false)
+      return true if encrypt
+      return true unless signing_required && !session_key.empty?
+
+      case request_packet.packet_smb_version
+      when 'SMB1'
+        smb1_header = begin
+          RubySMB::SMB1::SMBHeader.read(raw_response)
+        rescue IOError
+          raise RubySMB::Error::SigningError, 'The SMB1 response cannot be verified because it is malformed'
+        end
+
+        if user_id && user_id != 0 && smb1_header.uid != user_id
+          raise RubySMB::Error::SigningError,
+            "The SMB1 response UID #{smb1_header.uid} does not match the current session UID #{user_id}"
+        end
+        unless RubySMB::Signing.smb1_verify(raw_response, session_key, sequence_counter)
+          raise RubySMB::Error::SigningError, 'The SMB1 response signature is invalid'
+        end
+      when 'SMB2'
+        # Negotiate and SessionSetup responses are allowed to be unsigned
+        # while the session is being established
+        return true if request_packet.is_a?(RubySMB::SMB2::Packet::NegotiateRequest) ||
+                       request_packet.is_a?(RubySMB::SMB2::Packet::SessionSetupRequest)
+
+        smb2_header = begin
+          RubySMB::SMB2::SMB2Header.read(raw_response)
+        rescue IOError
+          raise RubySMB::Error::SigningError, 'The SMB2 response cannot be verified because it is malformed'
+        end
+
+        if session_id != 0 && smb2_header.session_id != session_id
+          raise RubySMB::Error::SigningError,
+            "The SMB2 response session ID #{smb2_header.session_id} does not match the current session ID #{session_id}"
+        end
+        unless smb2_header.flags.signed == 1
+          raise RubySMB::Error::SigningError, 'The SMB2 response is not signed'
+        end
+
+        valid = if smb3
+          RubySMB::Signing.smb3_verify(raw_response, session_key, dialect, preauth_integrity_hash_value)
+        else
+          RubySMB::Signing.smb2_verify(raw_response, session_key)
+        end
+        unless valid
+          raise RubySMB::Error::SigningError, 'The SMB2 response signature is invalid'
+        end
+      end
+
+      true
+    end
+
     # Check if the response is an asynchronous operation with STATUS_PENDING
     # status code.
     #
     # @param smb2_header [String] the response packet SMB2 header
     # @return [Boolean] true if it is a status pending operation, false otherwise
-    def is_status_pending?(smb2_header)
-      value = smb2_header.nt_status.value
+    def is_status_pending?(smb2_header)      value = smb2_header.nt_status.value
       status_code = WindowsError::NTStatus.find_by_retval(value).first
       status_code == WindowsError::NTStatus::STATUS_PENDING &&
         smb2_header.flags.async_command == 1

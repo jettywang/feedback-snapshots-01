@@ -208,8 +208,12 @@ RSpec.describe RubySMB::Client do
 
     context 'when signing' do
       it 'calls #smb1_sign if it is an SMB1 packet' do
+        session_key = Random.new.bytes(16)
         allow(client).to receive(:signing_required).and_return(true)
-        allow(client).to receive(:session_key).and_return(Random.new.bytes(16))
+        allow(client).to receive(:session_key).and_return(session_key)
+        response = RubySMB::SMB1::Packet::TreeConnectResponse.new
+        RubySMB::Signing.smb1_sign(response, session_key, 1)
+        allow(dispatcher).to receive(:recv_packet).and_return(response.to_binary_s)
         expect(client).to receive(:smb1_sign).with(smb1_request).and_call_original
         client.send_recv(smb1_request)
       end
@@ -223,9 +227,14 @@ RSpec.describe RubySMB::Client do
         end
 
         it 'calls #smb2_sign if it is an SMB2 client' do
+          session_key = Random.new.bytes(16)
           allow(smb2_client).to receive(:is_status_pending?).and_return(false)
           allow(smb2_client).to receive(:signing_required).and_return(true)
-          allow(smb2_client).to receive(:session_key).and_return(Random.new.bytes(16))
+          allow(smb2_client).to receive(:session_key).and_return(session_key)
+          allow(RubySMB::SMB2::SMB2Header).to receive(:read).and_call_original
+          response = RubySMB::SMB2::Packet::TreeConnectResponse.new
+          RubySMB::Signing.smb2_sign(response, session_key)
+          allow(dispatcher).to receive(:recv_packet).and_return(response.to_binary_s)
           expect(smb2_client).to receive(:smb2_sign).with(smb2_request).and_call_original
           smb2_client.send_recv(smb2_request)
         end
@@ -322,6 +331,10 @@ RSpec.describe RubySMB::Client do
 
     it 'increments the sequence counter if signing is required and the session key exist' do
       allow(smb2_client).to receive(:is_status_pending?).and_return(false)
+      allow(RubySMB::SMB2::SMB2Header).to receive(:read).and_call_original
+      response = RubySMB::SMB2::Packet::TreeConnectResponse.new
+      RubySMB::Signing.smb2_sign(response, 'key')
+      allow(dispatcher).to receive(:recv_packet).and_return(response.to_binary_s)
       smb2_client.signing_required = true
       smb2_client.session_key = 'key'
       smb2_client.sequence_counter = 0
