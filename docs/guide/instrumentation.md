@@ -64,6 +64,21 @@ The event contains the following information:
 This event is useful if you want to track the number of initialized policies per _action_ (for example, when you want to ensure that
 the [memoization](caching.md) works as expected).
 
+### `action_policy.lookup`
+
+This event is triggered every time a policy class is resolved through `ActionPolicy.lookup`
+(including the implicit lookups performed by `authorize!`, `allowed_to?` and `policy_for`).
+
+The event contains the following information:
+
+- `:target` – the record (or Symbol) the policy is looked up for
+- `:namespace` – the namespace option passed to the lookup (if any)
+- `:strict_namespace` – whether the [strict namespace lookup](lookup_chain.md) was enabled
+- `:policy` – the policy class finally adopted by the lookup (`nil` when no policy was found, e.g. with `allow_nil: true`).
+
+This event is useful to verify which policy class actually wins when multiple same-named policies exist,
+or to detect lookups that silently fall back to a top-level policy.
+
 ## Turn off instrumentation
 
 Instrumentation is enabled by default. To turn it off add to your configuration:
@@ -87,4 +102,8 @@ ActionPolicy::Base.include ActionPolicy::Policy::Rails::Instrumentation
 # Enabled `authorize` event by extending the authorizer class
 require "action_policy/rails/authorizer"
 ActionPolicy::Authorizer.singleton_class.prepend ActionPolicy::Rails::Authorizer
+
+# Enable `lookup` event by extending the Action Policy module itself
+require "action_policy/rails/lookup_chain"
+ActionPolicy.singleton_class.prepend ActionPolicy::Rails::LookupChain
 ```

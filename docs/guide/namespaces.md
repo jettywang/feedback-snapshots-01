@@ -68,6 +68,19 @@ end
 
 **NOTE**: namespace support is an extension for `ActionPolicy::Behaviour` and could be included with `ActionPolicy::Behaviours::Namespaced` (included into Rails controllers and channel integrations by default).
 
+## Strict namespace
+
+By default a lookup cascades through the module nesting and finally falls back to the top-level (public/tenant) policy. When an audit or component call must use an explicitly namespaced policy, pass `strict_namespace: true` (or override `authorization_strict_namespace`):
+
+```ruby
+# Resolves only to Audit::DocumentPolicy; never to the top-level DocumentPolicy
+ActionPolicy.lookup(record, namespace: Audit, strict_namespace: true)
+```
+
+In strict mode the lookup returns `nil` (or raises `ActionPolicy::NotFound`) when the policy is absent from the given namespace instead of cascading outside it. The raised error names the strict namespace and the expected policy class and exposes them through `error.namespace`, `error.strict_namespace` and `error.policy_name`, so the misconfiguration is easy to locate.
+
+An explicit `with:` option still takes precedence and can be used to delegate a particular call to a public policy. Calls that do not enable strict mode keep the original cascade fallback.
+
 ## Namespace resolution cache
 
 We cache namespaced policy resolution for better performance (it could affect performance when we look up a policy from a deeply nested module context, see the [benchmark](https://github.com/palkan/action_policy/blob/master/benchmarks/namespaced_lookup_cache.rb)).

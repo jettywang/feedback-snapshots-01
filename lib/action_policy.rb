@@ -14,14 +14,41 @@ module ActionPolicy
 
   # Raised when Action Policy fails to find a policy class for a record.
   class NotFound < Error
-    attr_reader :target, :message
+    attr_reader :target, :message, :namespace, :strict_namespace, :policy_name
 
-    def initialize(target, message = nil)
+    def initialize(
+      target,
+      message = nil,
+      namespace: nil,
+      strict_namespace: false,
+      policy_name: nil
+    )
       @target = target
+      @namespace = namespace
+      @strict_namespace = strict_namespace
+      @policy_name = policy_name
       @message =
         message ||
+        default_message
+    end
+
+    private
+
+    def default_message
+      base =
         "Couldn't find policy class for #{target.inspect}" \
         "#{" (#{target.class})" unless target.is_a?(Module)}"
+
+      return base unless strict_namespace
+
+      "#{base} within the strict namespace #{namespace_name}" \
+        "#{" (expected #{policy_name})" if policy_name}. " \
+        "Define the policy inside this namespace or perform the lookup " \
+        "without `strict_namespace: true`."
+    end
+
+    def namespace_name
+      namespace.respond_to?(:name) ? namespace.name : namespace.inspect
     end
   end
 
@@ -40,7 +67,17 @@ module ActionPolicy
     def lookup(target, allow_nil: false, default: nil, **options)
       LookupChain.call(target, **options) ||
         default ||
-        (allow_nil ? nil : raise(NotFound, target))
+        if allow_nil
+          nil
+        else
+          raise NotFound.new(
+            target,
+            nil,
+            namespace: options[:namespace],
+            strict_namespace: options[:strict_namespace] == true,
+            policy_name: LookupChain.policy_name_for(target)
+          )
+        end
     end
   end
 

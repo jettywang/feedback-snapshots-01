@@ -62,6 +62,14 @@ module ActionPolicy
         nil
       end
 
+      # Returns the policy class name that would be looked up for the record
+      # (without resolving the constant). Useful for building diagnostic errors.
+      def policy_name_for(record)
+        return "#{record.camelize}Policy" if record.is_a?(Symbol)
+
+        policy_class_name_for(record)
+      end
+
       private
 
       def lookup_within_namespace(policy_name, namespace, strict: false)

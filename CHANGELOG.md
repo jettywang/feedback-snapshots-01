@@ -2,6 +2,10 @@
 
 ## master
 
+- Add a locatable `ActionPolicy::NotFound` message for strict namespace lookups (exposing `namespace`, `strict_namespace` and `policy_name`). ([@palkan][])
+
+- Add `action_policy.lookup` instrumentation event recording the finally adopted policy class. ([@palkan][])
+
 ## 0.7.8 (2026-11-03)
 
 - Improve policy caching (less key calculations, fixed collisions). ([@palkan][])

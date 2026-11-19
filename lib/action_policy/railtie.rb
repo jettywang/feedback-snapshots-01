@@ -65,9 +65,11 @@ module ActionPolicy # :nodoc:
       if app.config.action_policy.instrumentation_enabled
         require "action_policy/rails/policy/instrumentation"
         require "action_policy/rails/authorizer"
+        require "action_policy/rails/lookup_chain"
 
         ActionPolicy::Base.prepend ActionPolicy::Policy::Rails::Instrumentation
         ActionPolicy::Authorizer.singleton_class.prepend ActionPolicy::Rails::Authorizer
+        ActionPolicy.singleton_class.prepend ActionPolicy::Rails::LookupChain
       end
 
       ActionPolicy::LookupChain.namespace_cache_enabled =
