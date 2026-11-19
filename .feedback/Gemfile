@@ -1,0 +1,5 @@
+source "https://rubygems.org"
+gem "rack"
+gem "base64"
+gem "minitest", "~>5.0"
+gem "minitest-global_expectations"
