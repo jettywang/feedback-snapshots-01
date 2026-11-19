@@ -129,6 +129,13 @@ class Actor(Generic[P, R]):
             elif not isinstance(callback, (type(None), str)):
                 raise TypeError(name + " value must be an Actor")
 
+        # Carry the actor's result scope on the message so producers and
+        # consumers agree on which result partition to use.
+        if "result_scope" not in options:
+            option_scope = self.options.get("result_scope", self.options.get("scope"))
+            if option_scope is not None:
+                options["result_scope"] = option_scope
+
         return Message(
             queue_name=self.queue_name,
             actor_name=self.actor_name,

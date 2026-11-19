@@ -31,10 +31,19 @@ class MemcachedBackend(ResultBackend):
       encoder(Encoder): The encoder to use when storing and retrieving
         result data.  Defaults to :class:`.JSONEncoder`.
       use_namespace_prefix_keys(bool): When True, the keys used to store results
-        use the format ``<namespace>:<queue>:<actor>:<message_id>`` so that the
-        keys are human-readable and can be scanned or expired by namespace in the backend.
+        use the format ``<namespace>:<scope>:<queue>:<actor>:<message_id>``
+        for scoped results and ``<namespace>:<queue>:<actor>:<message_id>``
+        for unscoped results, so that the keys are human-readable and can be
+        scanned or expired by namespace in the backend.
         When False (the default) the keys are MD5 hashes of the format described above,
         so the namespace is not visible in the stored keys.
+      allow_legacy_results(bool): Whether scoped callers may fall back to
+        results written without a scope.  Defaults to False.
+      allow_legacy(bool): Alias for ``allow_legacy_results``.
+      default_scope(str): The scope to use when neither the call nor the
+        message provides one.
+      scope(str): Alias for ``default_scope``.
+      result_scope(str): Alias for ``default_scope``.
       pool(ClientPool): An optional pylibmc client pool to use.  If
         this is passed, all other connection params are ignored.
       pool_size(int): The size of the connection pool to use.
@@ -48,11 +57,25 @@ class MemcachedBackend(ResultBackend):
         namespace="dramatiq-results",
         encoder=None,
         use_namespace_prefix_keys=False,
+        allow_legacy_results=False,
+        allow_legacy=False,
+        default_scope=None,
+        scope=None,
+        result_scope=None,
         pool=None,
         pool_size=8,
         **parameters,
     ):
-        super().__init__(namespace=namespace, encoder=encoder, use_namespace_prefix_keys=use_namespace_prefix_keys)
+        super().__init__(
+            namespace=namespace,
+            encoder=encoder,
+            use_namespace_prefix_keys=use_namespace_prefix_keys,
+            allow_legacy_results=allow_legacy_results,
+            allow_legacy=allow_legacy,
+            default_scope=default_scope,
+            scope=scope,
+            result_scope=result_scope,
+        )
         self.pool = pool or ClientPool(Client(**parameters), pool_size)
 
     def _get(self, message_key):

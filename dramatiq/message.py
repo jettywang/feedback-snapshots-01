@@ -133,6 +133,7 @@ class Message(Generic[R]):
         backend: Optional[ResultBackend] = None,
         block: bool = False,
         timeout: Optional[int] = None,
+        scope: Optional[str] = None,
     ) -> R:
         """Get the result associated with this message from a result
         backend.
@@ -150,6 +151,9 @@ class Message(Generic[R]):
             result.
           timeout(int): The maximum amount of time, in ms, to block
             while waiting for a result.  Defaults to 10 seconds.
+          scope(str): The scope to read the result from.  When omitted,
+            the scope the message was produced with, then the
+            backend's default scope are used.
 
         Raises:
           RuntimeError: If there is no result backend on the default
@@ -164,7 +168,7 @@ class Message(Generic[R]):
             broker = get_broker()
             backend = broker.get_results_backend()
 
-        return backend.get_result(self, block=block, timeout=timeout)
+        return backend.get_result(self, block=block, timeout=timeout, scope=scope)
 
     def __str__(self) -> str:
         params = ", ".join(repr(arg) for arg in self.args)

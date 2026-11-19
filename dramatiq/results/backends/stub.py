@@ -31,10 +31,16 @@ class StubBackend(ResultBackend):
       encoder(Encoder): The encoder to use when storing and retrieving
         result data.  Defaults to :class:`.JSONEncoder`.
       use_namespace_prefix_keys(bool): When True, the keys used to store results
-        use the format ``<namespace>:<queue>:<actor>:<message_id>`` so that the
-        keys are human-readable and can be scanned or expired by namespace in the backend.
+        use the format ``<namespace>:<scope>:<queue>:<actor>:<message_id>``
+        for scoped results and ``<namespace>:<queue>:<actor>:<message_id>``
+        for unscoped results, so that the keys are human-readable and can be
+        scanned or expired by namespace in the backend.
         When False (the default) the keys are MD5 hashes of the format described above,
         so the namespace is not visible in the stored keys.
+      allow_legacy_results(bool): Whether scoped callers may fall back to
+        results written without a scope.  Defaults to False.
+      default_scope(str): The scope to use when neither the call nor the
+        message provides one.
     """
 
     results: dict[str, tuple[Optional[str], Optional[float]]] = {}

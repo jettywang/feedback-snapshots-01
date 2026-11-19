@@ -19,6 +19,7 @@ from __future__ import annotations
 from ..errors import ActorNotFound
 from ..logging import get_logger
 from ..middleware import Middleware
+from .backend import RESULT_SCOPE_OPTION, get_message_scope, normalize_scope
 
 #: The maximum amount of milliseconds results are allowed to exist in
 #: the backend.
@@ -62,6 +63,9 @@ class Results(Middleware):
       result_ttl(int): The maximum number of milliseconds results are
         allowed to exist in the backend.  Defaults to 10 minutes and
         can be set on a per-actor basis.
+      default_scope(str): The scope results are stored under and read
+        from.  Defaults to the backend's configured scope.
+      scope(str): Alias for ``default_scope``.
 
     Warning:
       If you have retries turned on for an actor that stores results,
@@ -69,17 +73,26 @@ class Results(Middleware):
       run out!
     """
 
-    def __init__(self, *, backend, store_results=False, result_ttl=None):
+    def __init__(self, *, backend, store_results=False, result_ttl=None, default_scope=None, scope=None):
         self.logger = get_logger(__name__, type(self))
         self.backend = backend
         self.store_results = store_results
         self.result_ttl = result_ttl or DEFAULT_RESULT_TTL
+
+        if scope is not None and default_scope is not None and scope != default_scope:
+            raise ValueError("scope and default_scope disagree")
+
+        self.default_scope = normalize_scope(default_scope if scope is None else scope)
+        if self.default_scope is not None:
+            backend.default_scope = backend.scope = self.default_scope
 
     @property
     def actor_options(self):
         return {
             "store_results",
             "result_ttl",
+            RESULT_SCOPE_OPTION,
+            "scope",
         }
 
     def _lookup_options(self, broker, message):
@@ -87,14 +100,30 @@ class Results(Middleware):
             actor = broker.get_actor(message.actor_name)
             store_results = message.options.get("store_results", actor.options.get("store_results", self.store_results))
             result_ttl = message.options.get("result_ttl", actor.options.get("result_ttl", self.result_ttl))
-            return store_results, result_ttl
+            scope = self._lookup_scope(actor, message)
+            return store_results, result_ttl, scope
         except ActorNotFound:
-            return False, 0
+            return False, 0, None
+
+    def _lookup_scope(self, actor, message):
+        if self.default_scope is not None:
+            return self.default_scope
+
+        scope = get_message_scope(message)
+        if scope is None:
+            scope = actor.options.get(RESULT_SCOPE_OPTION, actor.options.get("scope"))
+        return normalize_scope(scope)
+
+    def _store_result(self, message, result, ttl, scope):
+        self.backend.store_result(message, result, ttl, scope=scope)
+
+    def _store_exception(self, message, exception, ttl, scope):
+        self.backend.store_exception(message, exception, ttl, scope=scope)
 
     def after_process_message(self, broker, message, *, result=None, exception=None):
-        store_results, result_ttl = self._lookup_options(broker, message)
+        store_results, result_ttl, scope = self._lookup_options(broker, message)
         if store_results and exception is None:
-            self.backend.store_result(message, result, result_ttl)
+            self._store_result(message, result, result_ttl, scope)
         if not store_results and result is not None and message.options.get("pipe_target") is None:
             self.logger.warning(
                 "Actor '%s' returned a value that is not None, but you "
@@ -106,12 +135,12 @@ class Results(Middleware):
         """If the message was skipped but not failed, then store None.
         Let after_nack handle the case where the message was skipped and failed.
         """
-        store_results, result_ttl = self._lookup_options(broker, message)
+        store_results, result_ttl, scope = self._lookup_options(broker, message)
         if store_results and not message.failed:
-            self.backend.store_result(message, None, result_ttl)
+            self._store_result(message, None, result_ttl, scope)
 
     def after_nack(self, broker, message):
-        store_results, result_ttl = self._lookup_options(broker, message)
+        store_results, result_ttl, scope = self._lookup_options(broker, message)
         if store_results and message.failed:
             exception = message._exception or Exception("unknown")
-            self.backend.store_exception(message, exception, result_ttl)
+            self._store_exception(message, exception, result_ttl, scope)

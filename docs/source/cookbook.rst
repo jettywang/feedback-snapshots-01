@@ -448,6 +448,55 @@ The result expiration can be also set per an actor:
        return x + y
 
 
+.. _result-scopes:
+
+Scoping Results by Caller
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Several teams can share one result backend while only being able to
+read their own results, even when message ids collide.  Give each
+caller its own scope:
+
+.. code-block:: python
+
+   backend = RedisBackend(use_namespace_prefix_keys=True, scope="team-a")
+   broker.add_middleware(Results(backend=backend))
+
+   @dramatiq.actor(store_results=True)
+   def do_work():
+       return "only team-a may read this"
+
+   message = do_work.send()
+   message.get_result(block=True)                 # readable by team-a
+   message.get_result(scope="team-b")             # raises ResultMissing
+
+Scopes also apply when a single worker serves several teams: set
+``scope`` on the actor or pass ``RESULT_SCOPE_OPTION``
+(``"result_scope"``) as a message option.  Pipeline and group queries
+accept a ``scope`` as well:
+
+.. code-block:: python
+
+   pipe = pipeline([add.message(1, 2), add.message(3)], scope="team-a")
+   pipe.get_result(block=True)
+   list(pipe.get_results(scope="team-a"))
+
+   grp = group([add.message(1, 2), add.message(3, 4)], scope="team-a")
+   list(grp.get_results(block=True))
+
+A scope configured on the backend instance or on |Results| takes
+precedence over message metadata, so a message can't redirect a
+caller into another team's partition.  Per-call ``scope=`` arguments
+are always honored.
+
+Results written by older Dramatiq versions have no scope.  Those old
+records are not visible to scoped callers unless you opt in with
+``allow_legacy_results=True`` (or its alias ``allow_legacy=True``).
+Unscoped callers, which are the default, always keep reading them.
+When a scoped read misses, the resulting |ResultMissing| and
+|ResultTimeout| errors describe only the queue, actor, message id and
+scope; message arguments and options are never included.
+
 .. _result-key-format:
 
 Result Key Format
@@ -457,6 +506,11 @@ The ``use_namespace_prefix_keys`` option of the |ResultBackends| controls
 the format of the keys used to store results in the backed.
 Specifically, it toggles between keys using a structured format,
 or keys being plain MD5 hashes.
+
+Scoped keys insert the scope after the namespace, for example
+``<namespace>:<scope>:<queue>:<actor>:<message_id>``.  Unscoped
+(legacy) keys keep their original format so old records remain
+readable.
 
 .. caution::
 

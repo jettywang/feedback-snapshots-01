@@ -432,3 +432,198 @@ def test_custom_skipped_messages_with_no_fail_stores_none(stub_broker, stub_work
 
     # Then the result should still be None.
     assert result_backend.get_result(sent_message) is None
+
+
+def test_same_message_id_can_hold_results_for_different_scopes(stub_broker):
+    # Given a backend that can hold results for several teams
+    backend = StubBackend(use_namespace_prefix_keys=True)
+    backend.results.clear()
+
+    # And two messages that share an id but belong to different teams
+    message_a = Message(
+        queue_name="default",
+        actor_name="do_work",
+        args=("secret",),
+        kwargs={"token": "hunter2"},
+        options={"result_scope": "team-a"},
+        message_id="shared-id",
+    )
+    message_b = message_a.copy(options={"result_scope": "team-b"})
+
+    # When each team stores a result for that id
+    backend.store_result(message_a, "for-a", 60000)
+    backend.store_result(message_b, "for-b", 60000)
+
+    # Then each caller can read only its own value
+    assert backend.get_result(message_a) == "for-a"
+    assert backend.get_result(message_b) == "for-b"
+
+
+def test_scoped_callers_can_read_and_wait_for_their_own_results(stub_broker):
+    # Given a backend with a default scope
+    backend = StubBackend(use_namespace_prefix_keys=True, scope="team-a")
+    backend.results.clear()
+
+    # And a message whose id is also used by another team
+    message = Message(queue_name="default", actor_name="do_work", args=(), kwargs={}, options={}, message_id="shared-id")
+    backend.store_result(message, "for-a", 60000, scope="team-a")
+
+    # Then the configured caller can read and block for the result
+    assert backend.get_result(message) == "for-a"
+    assert backend.get_result(message, block=True, timeout=100) == "for-a"
+
+    # But another team sees neither value nor ownership information
+    with pytest.raises(ResultMissing) as e:
+        backend.get_result(message, scope="team-b")
+
+    assert "hunter2" not in str(e.value)
+    assert e.value.scope == "team-b"
+    assert e.value.message_id == "shared-id"
+
+    with pytest.raises(ResultTimeout) as e:
+        backend.get_result(message, block=True, timeout=100, scope="team-b")
+
+    assert e.value.scope == "team-b"
+
+
+def test_legacy_results_are_only_visible_when_configured(stub_broker):
+    # Given a result written without a scope by an older Dramatiq
+    message = Message(queue_name="default", actor_name="do_work", args=(), kwargs={}, options={})
+    legacy_key = StubBackend(use_namespace_prefix_keys=True).build_legacy_message_key(message)
+
+    # When legacy results are disabled
+    backend = StubBackend(use_namespace_prefix_keys=True, allow_legacy_results=False)
+    backend._store(legacy_key, 42, 60000)
+
+    # Then a scoped caller cannot see it
+    with pytest.raises(ResultMissing):
+        backend.get_result(message, scope="team-a")
+
+    # But unscoped callers can
+    assert backend.get_result(message) == 42
+
+    # When legacy results are explicitly allowed
+    backend = StubBackend(use_namespace_prefix_keys=True, allow_legacy_results=True)
+    backend._store(legacy_key, 42, 60000)
+
+    # Then scoped callers can fall back to it
+    assert backend.get_result(message, scope="team-a") == 42
+
+
+def test_result_errors_only_contain_task_identity(stub_broker):
+    message = Message(
+        queue_name="default",
+        actor_name="do_work",
+        args=("customer-secret",),
+        kwargs={"password": "correct-horse"},
+        options={"result_scope": "team-a"},
+    )
+    backend = StubBackend(use_namespace_prefix_keys=True)
+    backend.store_result(message, "done", 60000, scope="team-a")
+
+    with pytest.raises(ResultMissing) as e:
+        backend.get_result(message, scope="team-b")
+
+    error = str(e.value)
+    assert "do_work" in error
+    assert "team-b" in error
+    assert "customer-secret" not in error
+    assert "correct-horse" not in error
+
+
+def test_pipeline_and_group_queries_are_scoped(stub_broker, stub_worker):
+    backend = StubBackend(use_namespace_prefix_keys=True)
+    stub_broker.add_middleware(Results(backend=backend))
+
+    @dramatiq.actor(store_results=True)
+    def add(x, y):
+        return x + y
+
+    pipe = dramatiq.pipeline([add.message(1, 2), add.message(3)], scope="team-a")
+    pipe.run()
+    stub_broker.join(add.queue_name)
+    stub_worker.join()
+
+    assert pipe.get_result(block=True) == 6
+    assert list(pipe.get_results()) == [3, 6]
+    with pytest.raises(ResultMissing):
+        pipe.get_result(scope="team-b")
+
+    group = dramatiq.group([add.message(4, 5), add.message(6, 7)], scope="team-a")
+    group.run()
+    stub_broker.join(add.queue_name)
+    stub_worker.join()
+
+    assert list(group.get_results(block=True)) == [9, 13]
+    with pytest.raises(ResultMissing):
+        list(group.get_results(scope="team-b"))
+
+
+def test_actor_scope_applies_to_stored_results(stub_broker, stub_worker):
+    backend = StubBackend(use_namespace_prefix_keys=True)
+    stub_broker.add_middleware(Results(backend=backend))
+
+    @dramatiq.actor(store_results=True, scope="team-a")
+    def do_work():
+        return "secret-value"
+
+    message = do_work.send()
+    stub_broker.join(do_work.queue_name)
+    stub_worker.join()
+
+    assert message.options["result_scope"] == "team-a"
+    assert backend.get_result(message) == "secret-value"
+
+    with pytest.raises(ResultMissing):
+        backend.get_result(message, scope="team-b")
+
+
+def test_middleware_scope_isolates_two_callers(stub_broker, stub_worker):
+    backend = StubBackend(use_namespace_prefix_keys=True)
+    stub_broker.add_middleware(Results(backend=backend, scope="team-a"))
+
+    @dramatiq.actor(store_results=True)
+    def do_work():
+        return 42
+
+    message = do_work.send()
+    stub_broker.join(do_work.queue_name)
+    stub_worker.join()
+
+    assert backend.get_result(message) == 42
+    with pytest.raises(ResultMissing):
+        backend.get_result(message, scope="team-b")
+
+
+def test_two_callers_share_storage_but_not_scope(stub_broker):
+    # Simulate two callers that share one store but configure their own
+    # scope.  Only the scope differs; namespace and key format match.
+    messages = []
+
+    def caller(scope, value):
+        backend = StubBackend(use_namespace_prefix_keys=True, scope=scope)
+        message = Message(
+            queue_name="default",
+            actor_name="do_work",
+            args=(),
+            kwargs={},
+            options={},
+            message_id="same-id",
+        )
+        backend.store_result(message, value, 60000)
+        messages.append((backend, message))
+        return backend, message
+
+    backend_a, message_a = caller("team-a", "a")
+    backend_b, message_b = caller("team-b", "b")
+
+    # Each caller reads and waits for only its own value.
+    assert backend_a.get_result(message_a) == "a"
+    assert backend_a.get_result(message_a, block=True, timeout=100) == "a"
+    assert backend_b.get_result(message_b) == "b"
+    assert backend_b.get_result(message_b, block=True, timeout=100) == "b"
+
+    # And the two results live under distinct keys.
+    assert backend_a.build_message_key(message_a, scope="team-a") != backend_b.build_message_key(
+        message_b, scope="team-b"
+    )
