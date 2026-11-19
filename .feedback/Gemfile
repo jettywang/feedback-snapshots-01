@@ -1,0 +1,6 @@
+source "https://rubygems.org"
+gem "net-protocol"
+gem "uri"
+gem "test-unit"
+gem "test-unit-ruby-core"
+gem "webrick"
