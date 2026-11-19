@@ -56,6 +56,44 @@ end
 
 **NOTE:** To un-register a context (e.g., if you want to remove `:user` from the Base policy class), you can manipulate the contexts map directly: `authorization_targets.delete(:user)`.
 
+## Trusted Context
+
+Some context keys identify _who_ is acting, so they must come from the trusted ingress (a controller, channel, job, etc.) and must not be made up by a policy. Mark such keys with `trusted: true`:
+
+```ruby
+class CommitPolicy < ApplicationPolicy
+  # The initiator and the approver are identities supplied by the ingress.
+  authorize :initiator, trusted: true
+  authorize :approver, trusted: true
+
+  # A workflow may have at most one optional auto-committer.
+  authorize :committer, trusted: true, optional: true
+
+  def commit? = initiator != approver
+end
+```
+
+The trusted check applies to _derived_ calls, i.e., policies resolved from within a rule (e.g., via `allowed_to?`):
+
+- A trusted key may only be forwarded with the exact value provided by the ingress for the current authorization; replacing it raises `ActionPolicy::UntrustedAuthorizationContext`.
+- A required trusted key that is absent fails with `ActionPolicy::AuthorizationContextMissing` instead of being inherited from the current context, a previous authorization, or a memoized policy. Mark it `optional: true` if an absent identity is meaningful.
+- `nil` can't be used to drop or revive a real identity. Combine `trusted: true` with `allow_nil: true` only if a `nil` identity is explicitly valid.
+
+```ruby
+class WorkflowPolicy < ApplicationPolicy
+  authorize :initiator, :approver, trusted: true
+
+  def approve?
+    # Forwarding the ingress identity is fine.
+    allowed_to?(:commit?, record, with: CommitPolicy)
+  end
+end
+```
+
+An ingress (e.g., a controller or a job) doesn't need extra configuration for policies it uses directly; it just has to be the place that supplies `initiator` and `approver` (e.g., via `authorize ... through:`). Only the derived calls are restricted.
+
+Trusted context values are also part of policy and rule cache keys, along with context key names and key presence, so a decision made for one identity is never reused for another batch.
+
 ## Nested Policies vs Contexts
 
 See also: [action_policy#36](https://github.com/palkan/action_policy/issues/36) and [action_policy#37](https://github.com/palkan/action_policy/pull/37)

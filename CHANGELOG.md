@@ -2,6 +2,14 @@
 
 ## master
 
+- Add `trusted: true` option to `authorize` to require an identity to be provided
+  by the trusted ingress. Derived (nested) policy calls can only forward the
+  ingress value; a missing trusted identity fails closed and is never inherited
+  from a previous authorization or memoized policy.
+
+- Include context keys and key presence in policy and rule cache keys, so
+  contexts differing only by a missing/`nil` key or key names don't collide.
+
 ## 0.7.8 (2026-11-03)
 
 - Improve policy caching (less key calculations, fixed collisions). ([@palkan][])

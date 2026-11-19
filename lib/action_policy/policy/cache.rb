@@ -9,6 +9,7 @@ module ActionPolicy # :nodoc:
   CACHE_NAMESPACE = "acp:#{ActionPolicy::VERSION.split(".").take(2).join(".")}"
 
   require "action_policy/ext/policy_cache_key"
+  require "action_policy/utils/context_cache_key"
 
   using ActionPolicy::Ext::PolicyCacheKey
 
@@ -42,7 +43,7 @@ module ActionPolicy # :nodoc:
       end
 
       def context_cache_key
-        authorization_context.map { _2._policy_cache_key.to_s }.join("/")
+        ActionPolicy::Utils::ContextCacheKey.call(authorization_context)
       end
 
       def apply_with_cache(rule)

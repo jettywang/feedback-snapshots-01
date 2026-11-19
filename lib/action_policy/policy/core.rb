@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "action_policy/behaviours/policy_for"
+require "action_policy/trusted_context"
 require "action_policy/policy/execution_result"
 require "action_policy/utils/suggest_message"
 require "action_policy/utils/pretty_print"
@@ -95,7 +96,7 @@ module ActionPolicy
       def apply_r(rule) # :nodoc:
         with_result(rule) do |result|
           catch :policy_fulfilled do
-            result.load __apply__(resolve_rule(rule))
+            result.load ActionPolicy::TrustedContext.with_policy_context(self) { __apply__(resolve_rule(rule)) }
           end
 
           result

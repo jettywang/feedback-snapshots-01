@@ -1,5 +1,8 @@
 # frozen_string_literal: true
 
+require "action_policy/trusted_context"
+require "action_policy/utils/context_cache_key"
+
 module ActionPolicy
   module Behaviours
     # Adds `policy_for` method
@@ -61,9 +64,13 @@ module ActionPolicy
 
       def policy_for_cache_key(record:, context:, with: nil, namespace: authorization_namespace, **opts)
         record_key = record._policy_cache_key(use_object_id: true)
-        context_key = context.map { |k, v| "#{k}:#{v._policy_cache_key(use_object_id: true)}" }.join(".")
+        context_key = ActionPolicy::Utils::ContextCacheKey.call(context)
+        # Derived resolutions are scoped to the trusted context of the
+        # authorization in progress, so a missing identity can't hit a policy
+        # memoized for another batch.
+        trusted_key = ActionPolicy::TrustedContext.scope
 
-        "#{namespace}/#{with}/#{context_key}/#{record_key}"
+        "#{namespace}/#{with}/#{context_key}/#{record_key}/#{trusted_key}"
       end
 
       def policy_for_context(context)

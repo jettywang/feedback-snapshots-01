@@ -1,6 +1,7 @@
 # frozen_string_literal: true
 
 require "action_policy/behaviours/scoping"
+require "action_policy/trusted_context"
 
 require "action_policy/utils/suggest_message"
 
@@ -97,7 +98,10 @@ module ActionPolicy
           self.class.scoping_handlers[type].key?(name)
 
         mid = :"__scoping__#{type}__#{name}"
-        scope_options ? send(mid, target, **scope_options) : send(mid, target)
+
+        ActionPolicy::TrustedContext.with_policy_context(self) do
+          scope_options ? send(mid, target, **scope_options) : send(mid, target)
+        end
       end
 
       def resolve_scope_type(target)
