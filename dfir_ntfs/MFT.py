@@ -3,7 +3,7 @@
 #
 # This module implements an interface to work with file record segments and file records in an $MFT file, also with volumes and memory images.
 
-from . import Attributes, BootSector
+from . import Attributes, BootSector, WSL
 import struct
 from collections import namedtuple
 
@@ -434,7 +434,7 @@ class FileRecordSegment(object):
 					raise AttributeException('Invalid values of allocated length, file size, valid data length within the attribute header: {}, {}, {}'.format(allocated_length, file_size, valid_data_length))
 
 				mapping_pairs = self.frs_data[pos + mapping_pairs_offset : pos + record_length]
-				yield AttributeRecordNonresident(type_code, attribute_name, mapping_pairs, lowest_vcn, highest_vcn, file_size)
+				yield AttributeRecordNonresident(type_code, attribute_name, mapping_pairs, lowest_vcn, highest_vcn, file_size, record_offset = pos)
 
 			elif form_code == FORM_CODE_RESIDENT:
 				attribute_record_remaining_header = self.frs_data[pos + 16: pos + 24]
@@ -452,7 +452,7 @@ class FileRecordSegment(object):
 				if len(attribute_value) != value_length:
 					raise AttributeException('Unexpected end of the attribute value')
 
-				yield AttributeRecordResident(type_code, attribute_name, attribute_value)
+				yield AttributeRecordResident(type_code, attribute_name, attribute_value, record_offset = pos, value_offset = pos + value_offset)
 			else:
 				raise AttributeException('Invalid form code within the attribute header: {}'.format(form_code))
 
@@ -494,10 +494,18 @@ class AttributeRecordResident(object):
 	value = None
 	"""A value (raw bytes) of this attribute record."""
 
-	def __init__(self, type_code, name, value):
+	record_offset = None
+	"""A relative offset of this attribute record (its first header byte) inside the file record segment (FRS)."""
+
+	value_offset = None
+	"""A relative offset of the value (its first byte) inside the file record segment (FRS)."""
+
+	def __init__(self, type_code, name, value, record_offset = None, value_offset = None):
 		self.type_code = type_code
 		self.name = name
 		self.value = value
+		self.record_offset = record_offset
+		self.value_offset = value_offset
 
 	def type_str(self):
 		"""Resolve a type code to a string and return it."""
@@ -546,12 +554,16 @@ class AttributeRecordNonresident(object):
 	file_size = None
 	"""A file (data) size."""
 
-	def __init__(self, type_code, name, mapping_pairs, lowest_vcn, highest_vcn, file_size, is_merged_attribute_record = False):
+	record_offset = None
+	"""A relative offset of this attribute record (its first header byte) inside the file record segment (FRS)."""
+
+	def __init__(self, type_code, name, mapping_pairs, lowest_vcn, highest_vcn, file_size, is_merged_attribute_record = False, record_offset = None):
 		self.type_code = type_code
 		self.name = name
 		self.lowest_vcn = lowest_vcn
 		self.highest_vcn = highest_vcn
 		self.file_size = file_size
+		self.record_offset = record_offset
 
 		if not is_merged_attribute_record: # Decode data runs if this attribute record is not merged.
 			self.mapping_pairs = mapping_pairs
@@ -805,7 +817,7 @@ class FileRecord(object):
 					for attr_extension in attr_extensions:
 						merged_data_runs.extend(DecodeMappingPairs(attr_extension.mapping_pairs))
 
-					attr_merged = AttributeRecordNonresident(base_attr_type_code, base_attr_name, None, 0, merged_highest_vcn, base_attr_file_size, True)
+					attr_merged = AttributeRecordNonresident(base_attr_type_code, base_attr_name, None, 0, merged_highest_vcn, base_attr_file_size, True, record_offset = attr_base.record_offset)
 					attr_merged.data_runs = merged_data_runs
 					yield attr_merged
 
@@ -908,6 +920,11 @@ class FileRecord(object):
 		"""Get an $MFT number for a base file record segment (FRS) and return it."""
 
 		return self.base_frs.get_master_file_table_number()
+
+	def get_wsl_metadata_view(self):
+		"""Build and return a traceable WSL metadata view (WSL.WSLMetadataView) for this file record."""
+
+		return WSL.WSLMetadataView(self)
 
 	def __str__(self):
 		return 'FileRecord, 1 base file record segment, {} child file record segment(s)'.format(len(self.child_frs_list))

@@ -25,6 +25,19 @@ The MACE notation is used:
 In the WSL set of timestamps (and FAT):
 - inode changed (CH).
 
+A traceable WSL metadata view is available via `WSL.WSLMetadataView` (or
+`MFT.FileRecord.get_wsl_metadata_view()`). It keeps the effective Linux
+fields, every competing candidate, duplicate EA/xattr names, unknown
+versions, and truncated payloads tied to exact file record segment (FRS)
+byte offsets. Effective fields are selected per field from the first
+interpretable LXATTRB in record order; a missing field remains unavailable
+and is never reported as zero. NTFS $STANDARD_INFORMATION timestamps are
+retained separately and compared at nanosecond granularity with the Linux
+timestamps, with a signed delta rather than one set replacing the other.
+The CSV output of `ntfs_parser --mft` includes WSL UID/GID/mode, effective
+field offsets, conflicts, uninterpretable spans, missing evidence, and
+timestamp deltas.
+
 4. License
 
 This project is made available under the terms of the GNU GPL, version 3.

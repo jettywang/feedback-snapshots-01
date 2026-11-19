@@ -4,6 +4,7 @@
 # (c) Maxim Suhanov
 
 import pytest
+import struct
 import os
 import hashlib
 import datetime
@@ -331,6 +332,247 @@ def test_wsl_in_frs():
 				assert False
 
 		assert c == 2
+
+def _build_ea_entry(name, value, next_entry_offset = 0):
+	assert name.endswith(b'\x00')
+
+	entry = bytearray()
+	entry += struct.pack('<LBBH', next_entry_offset, 0, len(name) - 1, len(value))
+	entry += name
+	entry += value
+	return bytes(entry)
+
+def _build_lxattrb(mode, uid, gid, rdev, atime_s, atime_ns, mtime_s, mtime_ns, chtime_s, chtime_ns, version = 1, format_ = 0):
+	buf = bytearray(56)
+	struct.pack_into('<HH', buf, 0, format_, version)
+	struct.pack_into('<L', buf, 4, mode)
+	struct.pack_into('<L', buf, 8, uid)
+	struct.pack_into('<L', buf, 12, gid)
+	struct.pack_into('<L', buf, 16, rdev)
+	struct.pack_into('<L', buf, 20, atime_ns)
+	struct.pack_into('<L', buf, 24, mtime_ns)
+	struct.pack_into('<L', buf, 28, chtime_ns)
+	struct.pack_into('<Q', buf, 32, atime_s)
+	struct.pack_into('<Q', buf, 40, mtime_s)
+	struct.pack_into('<Q', buf, 48, chtime_s)
+
+	return bytes(buf)
+
+def _build_ea_entries(entries, truncate_last_value = False):
+	buf = bytearray()
+	for i, (name, value) in enumerate(entries):
+		entry = bytearray(_build_ea_entry(name, value, 0))
+
+		if i != len(entries) - 1:
+			struct.pack_into('<L', entry, 0, len(entry))
+
+		buf += entry
+
+	if truncate_last_value:
+		last_offset = len(buf) - len(entries[-1][1]) - 8 - len(entries[-1][0]) + 1
+		declared_length = struct.unpack('<H', buf[last_offset + 4 : last_offset + 6])[0]
+		struct.pack_into('<H', buf, last_offset + 6, declared_length + 10)
+
+	return bytes(buf)
+
+def _build_lxxattr(pairs):
+	buf = bytearray()
+	buf += struct.pack('<HH', 0, 1)
+
+	for i, (name, value) in enumerate(pairs):
+		block = bytearray(struct.pack('<LHB', 0, len(value), len(name)) + name + value)
+		aligned_length = (len(block) + 3) & ~3
+		block += b'\x00' * (aligned_length - len(block))
+
+		if i != len(pairs) - 1:
+			struct.pack_into('<L', block, 0, len(block))
+
+		buf += block
+
+	return bytes(buf)
+
+def _build_frs_with_ea(attributes):
+	buf = bytearray(1024)
+	buf[0 : 4] = b'FILE'
+	struct.pack_into('<HH', buf, 4, 48, 3)
+	struct.pack_into('<Q', buf, 8, 1)
+	struct.pack_into('<H', buf, 16, 1)
+	struct.pack_into('<H', buf, 18, 1)
+	struct.pack_into('<H', buf, 20, 56)
+	struct.pack_into('<H', buf, 22, 1)
+	struct.pack_into('<L', buf, 28, 1024)
+	struct.pack_into('<Q', buf, 32, 0)
+	struct.pack_into('<H', buf, 40, len(attributes) + 1)
+	struct.pack_into('<HL', buf, 42, 0, 9001)
+	struct.pack_into('<H', buf, 48, 0x0001)
+	struct.pack_into('<H', buf, 50, 0)
+	struct.pack_into('<H', buf, 52, 0)
+	struct.pack_into('<H', buf, 54, 0)
+
+	pos = 56
+	for type_code, value in attributes:
+		value_offset = 24
+		record_length = (24 + len(value) + 7) & ~7
+
+		struct.pack_into('<LLBBHHH', buf, pos, type_code, record_length, 0, 0, 0, 0, 0)
+		struct.pack_into('<LHBB', buf, pos + 16, len(value), value_offset, 0, 0)
+		buf[pos + value_offset : pos + value_offset + len(value)] = value
+		pos += record_length
+
+	struct.pack_into('<L', buf, pos, 0xFFFFFFFF)
+	struct.pack_into('<L', buf, 24, pos + 4)
+
+	# Apply the update sequence array (USA) to the sector boundaries.
+	sequence_number = b'\xAA\xAA'
+	buf[48 : 50] = sequence_number
+	buf[510 : 512] = sequence_number
+	buf[1022 : 1024] = sequence_number
+
+	return bytes(buf)
+
+def test_wsl_metadata_view_conflicts_and_truncation():
+	# Two conflicting LXATTRB payloads, a truncated LXATTRB payload, duplicate LXXATTR names, and unknown versions.
+	lxattrb_1 = _build_lxattrb(0o100644, 1000, 1000, 0, 1548100872, 56442800, 1548100872, 56442800, 1548103955, 776983900)
+	lxattrb_2 = _build_lxattrb(0o100600, 1001, 1002, 0, 1548100873, 56442801, 1548100873, 56442802, 1548103956, 776983901)
+
+	lxxattr = _build_lxxattr([ (b'user.dupe', b'first'), (b'user.dupe', b'second'), (b'user.only', b'value') ])
+
+	lxattrb_truncated = _build_lxattrb(0o100777, 2000, 2000, 0, 1548100874, 1, 1548100874, 2, 1548103957, 3)
+	lxattrb_truncated = lxattrb_truncated[:36]
+
+	# The last entry declares more value bytes than are present; its 36-byte LXATTRB prefix remains readable.
+	ea = bytearray(_build_ea_entries([ (b'LXATTRB\x00', lxattrb_1), (b'LXATTRB\x00', lxattrb_2), (b'LXATTRB\x00', lxattrb_truncated) ]))
+	last_entry_offset = len(ea) - len(lxattrb_truncated) - 8 - 8
+	struct.pack_into('<L', ea, last_entry_offset, len(lxattrb_truncated) + 8 + 8)
+	struct.pack_into('<H', ea, last_entry_offset + 6, len(lxattrb_truncated) + 10)
+	ea = bytes(ea)
+
+	unknown_lxattrb = _build_lxattrb(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, version = 2)
+	unknown_ea = _build_ea_entries([ (b'LXXATTR\x00', unknown_lxattrb) ])
+
+	standard_information = bytearray(72)
+	# NTFS FILETIME: 2019-01-21 20:01:12.056442 (100 ns ticks).
+	ticks = 131925744720564428
+	struct.pack_into('<Q', standard_information, 0, ticks)
+	struct.pack_into('<Q', standard_information, 8, ticks + 1)
+	struct.pack_into('<Q', standard_information, 16, ticks + 2)
+	struct.pack_into('<Q', standard_information, 24, ticks + 3)
+
+	unknown_ea = _build_ea_entries([ (b'LXXATTR\x00', unknown_lxattrb) ])
+	eaudio = _build_ea_entries([ (b'LXXATTR\x00', lxxattr) ])
+	frs_raw = _build_frs_with_ea([ (0x10, bytes(standard_information)), (0xE0, eaudio), (0xE0, ea), (0xE0, unknown_ea) ])
+	frs = MFT.FileRecordSegment(frs_raw)
+	view = WSL.WSLMetadataView(frs)
+
+	# The first LXATTRB is effective, but the second one remains a candidate and a conflict.
+	assert view.get_uid() == 1000 and view.get_gid() == 1000
+	assert view.get_mode() == 0o100644
+	uid_candidates = view.get_field_candidates('uid')
+	assert [ candidate.value for candidate in uid_candidates ] == [ 1000, 1001, 2000 ]
+
+	conflict_fields = [ conflict.field for conflict in view.conflicts ]
+	assert 'uid' in conflict_fields and 'gid' in conflict_fields and 'mode' in conflict_fields
+	assert b'user.dupe' in view.duplicate_xattr_names
+
+	# The effective UID points to the exact LXATTRB byte range in the FRS.
+	uid_evidence = view.get_evidence_for('uid')
+	assert uid_evidence is not None
+	assert frs_raw[uid_evidence.field_offset : uid_evidence.field_offset + 4] == struct.pack('<L', 1000)
+	assert uid_evidence.payload_offset < uid_evidence.field_offset
+	assert uid_evidence.ea_entry_index == 0
+
+	# The second LXATTRB's UID is a different candidate at a different absolute offset.
+	uid_2 = uid_candidates[1]
+	assert frs_raw[uid_2.absolute_offset : uid_2.absolute_offset + 4] == struct.pack('<L', 1001)
+	assert uid_2.absolute_offset != uid_evidence.field_offset
+
+	# The truncated EA entry is reported, but its complete fields remain interpretable.
+	assert any('Truncated entry value' in issue.reason for issue in view.issues)
+	truncated_lxattrb = view.lxattrb_records[-1]
+	assert not truncated_lxattrb.is_complete
+	assert truncated_lxattrb.get_uid() == 2000
+	assert truncated_lxattrb.get_mtime() is None
+	assert any(issue.field == 'mtime' for issue in truncated_lxattrb.issues)
+
+	# An unknown LXATTRB version is retained as uninterpretable evidence, not silently dropped or treated as zero.
+	assert any('Unknown LXXATTR version/format: 2/0' in issue.reason for issue in view.issues)
+	assert view.get_uid() == 1000
+
+	# Linux and NTFS timestamps are kept separately; the comparison reports nanosecond-level divergence.
+	assert view.get_mtime().microsecond == 56442
+	comparison = [ item for item in view.time_comparisons if item.linux_field == 'atime' and item.ntfs_field == 'atime' and item.linux_timestamp.seconds == 1548100872 ]
+	assert len(comparison) == 1
+	assert comparison[0].ntfs_ticks == ticks + 3
+	assert comparison[0].diverged
+	assert comparison[0].delta_nanoseconds != 0
+
+	# Every effective field has a source span; missing values have no fabricated zero.
+	assert view.get_evidence_for('uid') is not None
+	assert view.get_evidence_for('mtime') is not None
+
+	as_dict = view.to_dict()
+	assert len(as_dict['conflicts']) > 0
+	assert len(as_dict['issues']) > 0
+
+def test_wsl_metadata_view_missing_lxattrb():
+	lxxattr = _build_lxxattr([ (b'user.only', b'value') ])
+	ea = _build_ea_entries([ (b'LXXATTR\x00', lxxattr) ])
+	frs_raw = _build_frs_with_ea([ (0xE0, ea) ])
+	frs = MFT.FileRecordSegment(frs_raw)
+
+	view = WSL.WSLMetadataView(frs)
+	assert view.get_uid() is None and view.get_mode() is None
+	assert view.get_evidence_for('uid') is None
+	assert 'LXATTRB' in view.missing
+	assert view.get_xattrs(b'user.only')[0].value == b'value'
+
+def test_wsl_metadata_view_real_frs_offsets():
+	with open(FRS_EA_WSL, 'rb') as f:
+		frs_raw = f.read()
+
+	frs = MFT.FileRecordSegment(frs_raw)
+	view = WSL.WSLMetadataView(frs)
+
+	assert view.get_mode() == 0o100644
+	assert view.get_uid() == 0 and view.get_gid() == 0
+
+	# Exact FRS byte spans for the effective fields (the fixture is 1024 bytes, no child FRS).
+	mode_source = view.get_evidence_for('mode')
+	assert mode_source.attribute_offset == 312 and mode_source.value_offset == 336
+	assert mode_source.ea_entry_index == 1 and mode_source.ea_entry_offset == 92
+	assert mode_source.payload_offset == 444 and mode_source.field_offset == 448
+	assert frs_raw[mode_source.field_offset : mode_source.field_offset + 4] == struct.pack('<L', 0o100644)
+
+	mtime_candidate = view.get_effective_field('mtime')
+	assert mtime_candidate.value.nanoseconds == 56442800
+	assert mtime_candidate.value.to_nanoseconds() == 1548100872056442800
+	assert mtime_candidate.raw_ranges[0][0] == 468
+	assert mtime_candidate.raw_ranges[1][0] == 484
+	assert frs_raw[468 : 472] == struct.pack('<L', 56442800)
+	assert frs_raw[484 : 492] == struct.pack('<Q', 1548100872)
+
+	assert view.get_chtime().year == 2019 and view.get_chtime().month == 1 and view.get_chtime().day == 21
+	assert view.get_chtime().microsecond == 776983
+
+	# NTFS timestamps remain separate and are compared, not overwritten.
+	assert len(view.ntfs_timestamps) == 4
+	atime_comparison = [ item for item in view.time_comparisons if item.linux_field == 'atime' and item.ntfs_field == 'atime' ]
+	assert len(atime_comparison) == 1
+	assert atime_comparison[0].ntfs_ticks == 131925744720564428
+	assert not atime_comparison[0].diverged
+
+	chtime_comparison = [ item for item in view.time_comparisons if item.linux_field == 'chtime' and item.ntfs_field == 'etime' ]
+	assert len(chtime_comparison) == 1
+	assert chtime_comparison[0].diverged
+	assert chtime_comparison[0].delta_nanoseconds == 2874033368800
+
+	# Extended attributes preserve their original block offsets and padding.
+	xattrs = view.get_xattrs()
+	assert [ entry.name for entry in xattrs ] == [ b'user.1', b'user.2', b'user.3', b'user.4444' ]
+	assert xattrs[0].source.payload_offset == 352 + 4
+	assert xattrs[0].block_offset == 4 and xattrs[0].name_offset == 7 and xattrs[0].value_offset == 13
+	assert xattrs[0].padding == b'\x00'
+	assert view.to_dict()['effective_fields']['uid']['absolute_offset'] == 452
 
 def test_rp_in_frs():
 	with open(FRS_RP, 'rb') as f:

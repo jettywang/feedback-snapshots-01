@@ -1,6 +1,9 @@
 Version: 1.1.20
 
 Improve handling of unusual FAT volumes.
+Add a traceable WSL metadata view linking $EA entries, LXATTRB, LXXATTR, and NTFS timestamps to exact FRS offsets.
+Report duplicate names, unknown versions, truncated EA values, and NTFS/Linux timestamp divergence without merging them.
+Minor changes.
 
 ---
 

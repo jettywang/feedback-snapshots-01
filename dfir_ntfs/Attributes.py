@@ -1022,46 +1022,185 @@ class EAInformation(GenericAttribute):
 		print(' Need EA count: {}'.format(self.get_need_ea_count()))
 		print(' Unpacked EA size: {}'.format(self.get_unpacked_ea_size()))
 
+class EAEntry(object):
+	"""One FILE_FULL_EA_INFORMATION entry inside a $EA attribute."""
+
+	def __init__(self, index, name, flags, value, entry_offset, value_offset, next_entry_offset, declared_value_length, actual_value_length, raw, is_valid = True, error = None):
+		self.index = index
+		"""A zero-based index of this entry inside the $EA attribute."""
+
+		self.name = name
+		"""A raw name (including the terminating null character), if available."""
+
+		self.flags = flags
+		"""Entry flags."""
+
+		self.value = value
+		"""A raw value (possibly truncated)."""
+
+		self.entry_offset = entry_offset
+		"""A relative offset of this entry inside the $EA attribute value."""
+
+		self.value_offset = value_offset
+		"""A relative offset of the value inside the $EA attribute value."""
+
+		self.next_entry_offset = next_entry_offset
+		"""A relative offset of the next entry (zero for the last entry)."""
+
+		self.declared_value_length = declared_value_length
+		"""A value length declared in the entry header."""
+
+		self.actual_value_length = actual_value_length
+		"""A number of value bytes actually available."""
+
+		self.raw = raw
+		"""Raw bytes occupied by this entry (including padding, when possible)."""
+
+		self.is_valid = is_valid
+		"""Whether this entry can be interpreted without ambiguity."""
+
+		self.error = error
+		"""A reason why this entry is not valid, or None."""
+
+	@property
+	def name_without_null(self):
+		"""Return the raw name without a terminating null character."""
+
+		if self.name is None:
+			return
+
+		if self.name.endswith(b'\x00'):
+			return self.name[:-1]
+
+		return self.name
+
+	def __str__(self):
+		if self.name is None:
+			name_str = '<missing>'
+		else:
+			name_str = self.name_without_null.decode('utf-8', errors = 'replace')
+
+		return 'EAEntry, index: {}, name: {}, offset: {}, valid: {}'.format(self.index, name_str, self.entry_offset, self.is_valid)
+
 class EA(GenericAttribute):
 	"""$EA."""
 
-	def data_parsed(self):
-		"""Attempt to parse the extended attribute and yield (name, flags, value) tuples."""
+	def _ParseEntryAt(self, buf, pos_entry, index):
+		"""Parse one entry at a known position, return (entry, next_entry_pos)."""
+
+		remaining = len(buf) - pos_entry
+
+		if remaining < 8:
+			if any(buf[pos_entry : ]): # Non-zero trailing bytes are not a valid terminator.
+				raw = buf[pos_entry : ]
+				return (EAEntry(index, None, None, b'', pos_entry, pos_entry + 8, 0, 0, 0, raw, False, 'Truncated entry header: {} byte(s) available, 8 required'.format(remaining)), len(buf))
+
+			return (None, len(buf))
+
+		next_entry_offset, flags, ea_name_length, ea_value_length = struct.unpack('<LBBH', buf[pos_entry : pos_entry + 8])
+
+		if next_entry_offset == 0 and flags == 0 and ea_name_length == 0 and ea_value_length == 0:
+			# A zero-filled terminator (or padding after the last entry).
+			return (None, len(buf))
+
+		name_end = pos_entry + 8 + ea_name_length + 1 # Include the null character.
+		if name_end > len(buf):
+			raw = buf[pos_entry : ]
+			return (EAEntry(index, None, flags, b'', pos_entry, name_end, next_entry_offset, ea_value_length, 0, raw, False, 'Truncated entry name: declared name length {}, {} byte(s) available'.format(ea_name_length, len(buf) - (pos_entry + 8))), len(buf))
+
+		name = buf[pos_entry + 8 : name_end]
+
+		if len(name) == 0 or name[-1] != 0: # The name is invalid.
+			raw = buf[pos_entry : name_end]
+			return (EAEntry(index, bytes(name), flags, b'', pos_entry, name_end, next_entry_offset, ea_value_length, 0, raw, False, 'Entry name is not null-terminated'), len(buf))
+
+		value_start = name_end
+		value_end = value_start + ea_value_length
+		actual_value_length = max(0, min(ea_value_length, len(buf) - value_start))
+		value = buf[value_start : value_start + actual_value_length]
+
+		if value_end > len(buf): # The value is truncated.
+			raw = buf[pos_entry : ]
+			entry = EAEntry(index, bytes(name), flags, bytes(value), pos_entry, value_start, next_entry_offset, ea_value_length, actual_value_length, raw, False, 'Truncated entry value: declared length {}, {} byte(s) available'.format(ea_value_length, actual_value_length))
+			return (entry, len(buf))
+
+		if next_entry_offset == 0:
+			entry_raw = buf[pos_entry : value_end]
+			return (EAEntry(index, bytes(name), flags, bytes(value), pos_entry, value_start, 0, ea_value_length, actual_value_length, entry_raw), len(buf))
+
+		next_entry_pos = pos_entry + next_entry_offset
+		if next_entry_offset < 8 or next_entry_pos > len(buf) or next_entry_pos < value_end:
+			raw = buf[pos_entry : value_end]
+			return (EAEntry(index, bytes(name), flags, bytes(value), pos_entry, value_start, next_entry_offset, ea_value_length, actual_value_length, raw, False, 'Invalid next entry offset: {}'.format(next_entry_offset)), len(buf))
+
+		entry_raw = buf[pos_entry : next_entry_pos]
+		return (EAEntry(index, bytes(name), flags, bytes(value), pos_entry, value_start, next_entry_offset, ea_value_length, actual_value_length, entry_raw), next_entry_pos)
+
+	def entries(self):
+		"""Parse the extended attribute and yield EAEntry objects, including malformed or truncated entries.
+		Parsing stops at the first entry that cannot be delimited reliably.
+		"""
 
 		buf = self.value[:]
-		while True:
-			if len(buf) <= 8:
+		pos_entry = 0
+		index = 0
+
+		while pos_entry < len(buf):
+			entry, next_entry_pos = self._ParseEntryAt(buf, pos_entry, index)
+			if entry is None:
 				break
 
-			next_entry_offset, flags, ea_name_length, ea_value_length = struct.unpack('<LBBH', buf[: 8])
+			yield entry
 
-			# 1. According to Microsoft, the 'NextEntryOffset' field contains "the offset of the next FILE_FULL_EA_INFORMATION-type entry".
-			# However, this offset is relative from the current entry.
-			# 2. Also, according to Microsoft, "this member is zero if no other entries follow this one".
-			# This is not always the case.
-			# 3. Finally, according to Microsoft, "the value(s) associated with each entry follows the EaName array".
-			# However, according to the implementation of the IoCheckEaBufferValidity() routine, only one value is allowed.
-			# ---
-			# URL: https://docs.microsoft.com/en-us/windows-hardware/drivers/ddi/content/wdm/ns-wdm-_file_full_ea_information
-
-			if 9 + ea_name_length + ea_value_length > len(buf) or next_entry_offset > len(buf): # The extended attribute is invalid.
+			if next_entry_pos <= pos_entry or not entry.is_valid:
 				break
 
-			name = buf[8 : 8 + ea_name_length + 1] # Include the null character.
-			value = buf[8 + ea_name_length + 1 : 8 + ea_name_length + 1 + ea_value_length]
+			pos_entry = next_entry_pos
+			index += 1
 
-			if name[-1] != 0: # The name is invalid.
+	def entries_all(self):
+		"""Yield EAEntry objects and continue scanning after a truncated value, when the next entry offset is usable.
+		This is intended for forensic views which must not hide later evidence behind one damaged entry.
+		"""
+
+		buf = self.value[:]
+		pos_entry = 0
+		index = 0
+
+		while pos_entry < len(buf):
+			entry, next_entry_pos = self._ParseEntryAt(buf, pos_entry, index)
+			if entry is None:
 				break
 
-			if len(value) != ea_value_length: # The value is invalid.
+			yield entry
+
+			if entry.is_valid:
+				if next_entry_pos <= pos_entry:
+					break
+
+				pos_entry = next_entry_pos
+			else:
+				# Only a truncated value can be skipped using the next entry offset: the entry header and name
+				# are intact, while the declared value extends past the available data. Other malformed entries
+				# do not provide a trustworthy next position.
+				if entry.error is None or not entry.error.startswith('Truncated entry value'):
+					break
+
+				if entry.next_entry_offset is None or entry.next_entry_offset < 8 or pos_entry + entry.next_entry_offset >= len(buf):
+					break
+
+				pos_entry += entry.next_entry_offset
+
+			index += 1
+
+	def data_parsed(self):
+		"""Attempt to parse the extended attribute and yield (name, flags, value) tuples for valid entries."""
+
+		for entry in self.entries():
+			if not entry.is_valid:
 				break
 
-			yield (bytes(name), flags, value)
-
-			if next_entry_offset == 0: # The end.
-				break
-
-			buf = buf[next_entry_offset : ]
+			yield (entry.name, entry.flags, entry.value)
 
 	def print_information(self):
 		"""Print all information in a human-readable form."""
@@ -1070,10 +1209,19 @@ class EA(GenericAttribute):
 		print(' Length (bytes): {}'.format(len(self.value)))
 
 		i = 1
-		for name, flags, value in self.data_parsed():
-			print(' EA #{} name: {}'.format(i, name.decode('utf-8', errors = 'replace')))
-			print(' EA #{} flags: {}'.format(i, hex(flags)))
-			print(' EA #{} value length (bytes): {}'.format(i, len(value)))
+		for entry in self.entries():
+			if entry.name is None:
+				name_str = '<missing>'
+			else:
+				name_str = entry.name.decode('utf-8', errors = 'replace')
+
+			print(' EA #{} name: {}'.format(i, name_str))
+			print(' EA #{} flags: {}'.format(i, hex(entry.flags) if entry.flags is not None else '?'))
+			print(' EA #{} value length (bytes): {}{}'.format(i, len(entry.value), ' (truncated)' if not entry.is_valid else ''))
+
+			if not entry.is_valid:
+				print(' EA #{} error: {}'.format(i, entry.error))
+				break
 
 			i += 1
 

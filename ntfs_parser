@@ -13,6 +13,15 @@ def format_timestamp(timestamp):
 
 	return timestamp.strftime('%Y-%m-%d %H:%M:%S.%f')
 
+def format_wsl_timestamp(timestamp):
+	if timestamp is None:
+		return 'N/A'
+
+	return '{}.{:09d}'.format(timestamp.datetime.strftime('%Y-%m-%d %H:%M:%S'), timestamp.nanoseconds)
+
+def format_wsl_candidate(candidate):
+	return '{}@{}+{}'.format(candidate.value, candidate.absolute_offset, candidate.relative_length)
+
 def hexdump(buf):
 	def int2hex(i):
 		return '{:02X}'.format(i)
@@ -82,7 +91,7 @@ def process_mft(source_tag = None):
 	mft = MFT.MasterFileTableParser(input_file)
 
 	if print_header:
-		csv_writer.writerow(['Source', 'MFT reference number', 'Is in use', 'Is directory', 'Log file sequence number', 'Path', '$SI M timestamp', '$SI A timestamp', '$SI C timestamp', '$SI E timestamp', '$SI USN value', '$FN M timestamp', '$FN A timestamp', '$FN C timestamp', '$FN E timestamp', '$OBJID timestamp', 'File size', 'ADS list', 'WSL M timestamp', 'WSL A timestamp', 'WSL CH timestamp'])
+		csv_writer.writerow(['Source', 'MFT reference number', 'Is in use', 'Is directory', 'Log file sequence number', 'Path', '$SI M timestamp', '$SI A timestamp', '$SI C timestamp', '$SI E timestamp', '$SI USN value', '$FN M timestamp', '$FN A timestamp', '$FN C timestamp', '$FN E timestamp', '$OBJID timestamp', 'File size', 'ADS list', 'WSL M timestamp', 'WSL A timestamp', 'WSL CH timestamp', 'WSL UID', 'WSL GID', 'WSL mode', 'WSL effective source', 'WSL conflicts', 'WSL uninterpretable', 'WSL missing', 'WSL timestamp deltas (ns)'])
 		print_header = False
 
 	for file_record in mft.file_records():
@@ -103,6 +112,14 @@ def process_mft(source_tag = None):
 		wsl_mtime = ''
 		wsl_atime = ''
 		wsl_chtime = ''
+		wsl_uid = ''
+		wsl_gid = ''
+		wsl_mode = ''
+		wsl_effective_source = ''
+		wsl_conflicts = ''
+		wsl_uninterpretable = ''
+		wsl_missing = ''
+		wsl_timestamp_deltas = ''
 
 		for attribute in file_record.attributes():
 			if type(attribute) is MFT.AttributeRecordResident:
@@ -115,21 +132,6 @@ def process_mft(source_tag = None):
 				if type(attribute_value) is Attributes.ObjectID:
 					if objid_time is None:
 						objid_time = attribute_value.get_timestamp()
-
-				if type(attribute_value) is Attributes.EA:
-					if not wsl_found:
-						for ea_name, ea_flags, ea_value in attribute_value.data_parsed():
-							if ea_name == b'LXATTRB\x00':
-								try:
-									lxattrb = WSL.LXATTRB(ea_value)
-								except ValueError:
-									pass
-								else:
-									wsl_found = True
-
-									wsl_atime = format_timestamp(lxattrb.get_atime())
-									wsl_mtime = format_timestamp(lxattrb.get_mtime())
-									wsl_chtime = format_timestamp(lxattrb.get_chtime())
 
 				if attribute.type_code == Attributes.ATTR_TYPE_DATA and attribute.name is None:
 					if file_size is None:
@@ -147,6 +149,45 @@ def process_mft(source_tag = None):
 
 		if file_size is None:
 			file_size = '?'
+
+		# Build a traceable WSL view. This keeps conflicting/truncated evidence visible next to the chosen values.
+		try:
+			wsl_view = WSL.WSLMetadataView(file_record)
+		except Exception:
+			wsl_view = None
+
+		if wsl_view is not None:
+			if wsl_view.get_effective_field('atime') is not None:
+				wsl_found = True
+				wsl_atime = format_wsl_timestamp(wsl_view.get_effective_field('atime').value)
+			if wsl_view.get_effective_field('mtime') is not None:
+				wsl_found = True
+				wsl_mtime = format_wsl_timestamp(wsl_view.get_effective_field('mtime').value)
+			if wsl_view.get_effective_field('chtime') is not None:
+				wsl_found = True
+				wsl_chtime = format_wsl_timestamp(wsl_view.get_effective_field('chtime').value)
+
+			uid_candidate = wsl_view.get_effective_field('uid')
+			gid_candidate = wsl_view.get_effective_field('gid')
+			mode_candidate = wsl_view.get_effective_field('mode')
+			if uid_candidate is not None:
+				wsl_uid = str(uid_candidate.value)
+			if gid_candidate is not None:
+				wsl_gid = str(gid_candidate.value)
+			if mode_candidate is not None:
+				wsl_mode = oct(mode_candidate.value)
+
+			effective_sources = []
+			for field in [ 'mode', 'uid', 'gid', 'rdev', 'atime', 'mtime', 'chtime' ]:
+				candidate = wsl_view.get_effective_field(field)
+				if candidate is not None and candidate.source is not None:
+					effective_sources.append('{}@{}+{}'.format(field, candidate.absolute_offset, candidate.relative_length))
+
+			wsl_effective_source = ' '.join(effective_sources)
+			wsl_conflicts = '; '.join('{}[{}]'.format(conflict.field.decode('utf-8', errors = 'replace') if type(conflict.field) is bytes else conflict.field, ' '.join(format_wsl_candidate(candidate) if hasattr(candidate, 'absolute_offset') else '{}@{}'.format(candidate.name_text, candidate.value_absolute_offset) for candidate in conflict.candidates)) for conflict in wsl_view.conflicts)
+			wsl_uninterpretable = '; '.join('{}{}@{}: {}'.format(issue.kind, ' [{}]'.format(issue.field) if issue.field is not None else '', issue.source.payload_offset if issue.source is not None else '?', issue.reason) for issue in wsl_view.issues)
+			wsl_missing = ' '.join(wsl_view.missing)
+			wsl_timestamp_deltas = ' '.join('{}/{}={}ns'.format(comparison.linux_field, comparison.ntfs_field, comparison.delta_nanoseconds) for comparison in wsl_view.time_comparisons)
 
 		if len(ads_set) > 0:
 			ads_list = ' '.join(sorted(ads_set))
@@ -192,9 +233,9 @@ def process_mft(source_tag = None):
 				fn_ctime = format_timestamp(attr_file_name.get_ctime())
 				fn_etime = format_timestamp(attr_file_name.get_etime())
 
-				csv_writer.writerow([format_source('File record', source_tag), fr_number, fr_in_use, fr_directory, fr_lsn, file_path, si_mtime, si_atime, si_ctime, si_etime, si_usn, fn_mtime, fn_atime, fn_ctime, fn_etime, objid_time, file_size, ads_list, wsl_mtime, wsl_atime, wsl_chtime])
+				csv_writer.writerow([format_source('File record', source_tag), fr_number, fr_in_use, fr_directory, fr_lsn, file_path, si_mtime, si_atime, si_ctime, si_etime, si_usn, fn_mtime, fn_atime, fn_ctime, fn_etime, objid_time, file_size, ads_list, wsl_mtime, wsl_atime, wsl_chtime, wsl_uid, wsl_gid, wsl_mode, wsl_effective_source, wsl_conflicts, wsl_uninterpretable, wsl_missing, wsl_timestamp_deltas])
 		else:
-			csv_writer.writerow([format_source('File record', source_tag), fr_number, fr_in_use, fr_directory, fr_lsn, '', si_mtime, si_atime, si_ctime, si_etime, si_usn, '', '', '', '', objid_time, file_size, ads_list, wsl_mtime, wsl_atime, wsl_chtime])
+			csv_writer.writerow([format_source('File record', source_tag), fr_number, fr_in_use, fr_directory, fr_lsn, '', si_mtime, si_atime, si_ctime, si_etime, si_usn, '', '', '', '', objid_time, file_size, ads_list, wsl_mtime, wsl_atime, wsl_chtime, wsl_uid, wsl_gid, wsl_mode, wsl_effective_source, wsl_conflicts, wsl_uninterpretable, wsl_missing, wsl_timestamp_deltas])
 
 		# Parse a file name index in this file record (if present).
 
