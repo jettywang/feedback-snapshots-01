@@ -527,6 +527,45 @@ manager::
 .. versionadded:: 2.1.0
 
 
+Acting on behalf of another user
+********************************
+
+When an authenticated operator performs an action on behalf of another user (for example an on-duty staff member
+filing a ticket for a customer), both identities must be preserved. The ``set_on_behalf_of`` context manager records
+the operator as the ``actor`` and the represented user separately as ``on_behalf_of``, including an email snapshot of
+each identity::
+
+    from auditlog.context import set_on_behalf_of
+
+    def file_ticket_for_customer(operator, customer):
+        with set_on_behalf_of(customer, actor=operator):
+            # Log entries created here keep both identities.
+            ...
+
+Context managers nest properly: an ``on_behalf_of`` context opened inside a request or another context only affects
+log entries created while it is active, and the previous context is restored when it exits.
+
+The stored entries can be queried through either identity layer, while the existing ``actor`` lookups keep working::
+
+    # Everything performed by this operator (directly or as a representative)
+    LogEntry.objects.filter(actor=operator)
+    LogEntry.objects.get_for_actor(operator)
+    LogEntry.objects.get_for_actor("operator@example.com")
+
+    # Everything performed on behalf of this customer
+    LogEntry.objects.get_for_on_behalf_of(customer)
+
+    # Any entry related to the user in either layer
+    LogEntry.objects.get_for_user(customer)
+
+Because the email addresses are snapshotted on the log entry, compliance investigations still work after the
+referenced user accounts are deleted. Rows written before this feature existed carry no evidence for either layer;
+use ``LogEntry.identity_evidence`` and ``LogEntry.missing_identity_reasons()`` to get an explicit explanation of which
+identity layer is missing and why.
+
+.. versionadded:: 3.5.0
+
+
 Disable auditlog
 ****************
 

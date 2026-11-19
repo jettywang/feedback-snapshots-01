@@ -46,6 +46,20 @@ class LogEntryAdminMixin:
 
         return "system"
 
+    @admin.display(description=_("On behalf of"))
+    def on_behalf_of_url(self, obj):
+        if obj.on_behalf_of:
+            app_label, model = settings.AUTH_USER_MODEL.split(".")
+            viewname = f"admin:{app_label}_{model.lower()}_change"
+            try:
+                link = urlresolvers.reverse(viewname, args=[obj.on_behalf_of.pk])
+            except NoReverseMatch:
+                return "%s" % (obj.on_behalf_of)
+            return format_html('<a href="{}">{}</a>', link, obj.on_behalf_of)
+        if obj.on_behalf_of_email:
+            return obj.on_behalf_of_email
+        return "-"
+
     @admin.display(description=_("Resource"))
     def resource_url(self, obj):
         app_label, model = obj.content_type.app_label, obj.content_type.model

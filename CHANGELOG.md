@@ -2,6 +2,14 @@
 
 ## Next Release
 
+#### Improvements
+
+- Record actions performed on behalf of another user through the new `set_on_behalf_of` context manager. Log entries
+  now store the represented user in `on_behalf_of` (with an `on_behalf_of_email` snapshot) alongside the existing
+  `actor`, support nested contexts that restore the outer context on exit, and expose `get_for_actor`,
+  `get_for_on_behalf_of` and `get_for_user` manager queries plus an `identity_evidence` API that explains missing
+  identity evidence on historical rows.
+
 ## 3.4.2 (2026-11-08)
 
 #### Improvements

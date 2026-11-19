@@ -31,3 +31,21 @@ class CIDFilter(SimpleListFilter):
         if self.value() is None:
             return queryset
         return queryset.filter(cid=self.value())
+
+
+class OnBehalfOfFilter(SimpleListFilter):
+    title = _("On behalf of")
+    parameter_name = "on_behalf_of"
+
+    def lookups(self, request, model_admin):
+        return (
+            ("yes", _("Performed on behalf of another user")),
+            ("no", _("Performed directly")),
+        )
+
+    def queryset(self, request, queryset):
+        if self.value() == "yes":
+            return queryset.exclude(on_behalf_of__isnull=True)
+        if self.value() == "no":
+            return queryset.filter(on_behalf_of__isnull=True)
+        return queryset

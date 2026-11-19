@@ -4,7 +4,7 @@ import json
 from collections.abc import Callable
 from copy import deepcopy
 from datetime import timezone
-from typing import Any
+from typing import Any, NamedTuple
 
 from dateutil import parser
 from dateutil.tz import gettz
@@ -28,6 +28,19 @@ from auditlog import get_logentry_model
 from auditlog.diff import get_mask_function
 
 DEFAULT_OBJECT_REPR = "<error forming object repr>"
+
+
+class IdentityLayer(NamedTuple):
+    """Evidence available for one identity layer of a log entry."""
+
+    label: str
+    user: models.Model | None
+    email: str | None
+    missing_reason: str | None
+
+    @property
+    def has_evidence(self):
+        return self.user is not None or bool(self.email)
 
 
 class LogEntryManager(models.Manager):
@@ -207,6 +220,62 @@ class LogEntryManager(models.Manager):
 
         return self.filter(content_type=content_type)
 
+    def _identity_lookup(self, user_or_email, fk_field, email_field):
+        if isinstance(user_or_email, models.Model):
+            return models.Q(**{fk_field: user_or_email})
+        return models.Q(**{email_field: user_or_email})
+
+    def get_for_actor(self, user_or_email):
+        """
+        Get log entries performed by the given operator (``actor``).
+
+        :param user_or_email: A user model instance or an actor email address.
+        :type user_or_email: Model or str
+        :return: QuerySet of log entries with the given operator.
+        :rtype: QuerySet
+        """
+        return self.filter(
+            self._identity_lookup(user_or_email, "actor", "actor_email")
+        )
+
+    def get_for_on_behalf_of(self, user_or_email):
+        """
+        Get log entries performed on behalf of the given represented user.
+
+        :param user_or_email: A user model instance or a represented user's
+            email address.
+        :type user_or_email: Model or str
+        :return: QuerySet of log entries carrying the represented user.
+        :rtype: QuerySet
+        """
+        return self.filter(
+            self._identity_lookup(
+                user_or_email, "on_behalf_of", "on_behalf_of_email"
+            )
+        )
+
+    def get_for_user(self, user_or_email):
+        """
+        Get log entries related to the given user in either identity layer.
+
+        Entries are returned when the user is the operator (``actor``) or the
+        represented user (``on_behalf_of``).
+
+        :param user_or_email: A user model instance or an email address.
+        :type user_or_email: Model or str
+        :return: QuerySet of log entries related to the given user.
+        :rtype: QuerySet
+        """
+        if isinstance(user_or_email, models.Model):
+            return self.filter(
+                models.Q(actor=user_or_email)
+                | models.Q(on_behalf_of=user_or_email)
+            )
+        return self.filter(
+            models.Q(actor_email=user_or_email)
+            | models.Q(on_behalf_of_email=user_or_email)
+        )
+
     def _get_pk_value(self, instance):
         """
         Get the primary key field value for a model instance.
@@ -363,6 +432,18 @@ class AbstractLogEntry(models.Model):
         related_name="+",
         verbose_name=_("actor"),
     )
+    on_behalf_of = models.ForeignKey(
+        to=settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        blank=True,
+        null=True,
+        related_name="+",
+        verbose_name=_("on behalf of"),
+        help_text=_(
+            "The user on whose behalf the action was performed, when the actor "
+            "was acting as their representative."
+        ),
+    )
     cid = models.CharField(
         max_length=255,
         db_index=True,
@@ -387,6 +468,12 @@ class AbstractLogEntry(models.Model):
     actor_email = models.CharField(
         blank=True, null=True, max_length=254, verbose_name=_("actor email")
     )
+    on_behalf_of_email = models.CharField(
+        blank=True,
+        null=True,
+        max_length=254,
+        verbose_name=_("on behalf of email"),
+    )
 
     objects = LogEntryManager()
 
@@ -408,6 +495,76 @@ class AbstractLogEntry(models.Model):
             fstring = _("Logged {repr:s}")
 
         return fstring.format(repr=self.object_repr)
+
+    @property
+    def is_delegated(self):
+        """:return: Whether this entry records an action performed on behalf of another user."""
+        return self.on_behalf_of_id is not None or bool(self.on_behalf_of_email)
+
+    @property
+    def identity_evidence(self):
+        """
+        Explain the identity evidence captured for this log entry.
+
+        Two layers are reported:
+
+        - ``actor``: the authenticated user who actually performed the action
+          (the operator, e.g. an on-duty staff member).
+        - ``on_behalf_of``: the represented user on whose behalf the action was
+          performed (e.g. the customer). This layer is only present for
+          delegated actions.
+
+        Each layer maps to an :py:class:`IdentityLayer` describing the user
+        reference, the email snapshot and, when evidence is missing, the
+        reason. Rows written before delegated-identity support was introduced
+        therefore explicitly state which layer cannot be reconstructed.
+
+        :rtype: dict[str, IdentityLayer]
+        """
+        return {
+            "actor": IdentityLayer(
+                label="actor",
+                user=self.actor,
+                email=self.actor_email,
+                missing_reason=self._actor_missing_reason(),
+            ),
+            "on_behalf_of": IdentityLayer(
+                label="on_behalf_of",
+                user=self.on_behalf_of,
+                email=self.on_behalf_of_email,
+                missing_reason=self._on_behalf_of_missing_reason(),
+            ),
+        }
+
+    def _actor_missing_reason(self):
+        if self.actor_id is not None or self.actor_email:
+            return None
+        return _(
+            "No actor evidence was recorded for this entry. Rows created "
+            "outside of an auditlog actor context (for example background "
+            "writes or historical rows) cannot be attributed to an operator."
+        )
+
+    def _on_behalf_of_missing_reason(self):
+        if self.on_behalf_of_id is not None or self.on_behalf_of_email:
+            return None
+        return _(
+            "No on-behalf-of evidence was recorded for this entry. The entry "
+            "was not made inside an on-behalf-of context, or it predates "
+            "delegated-identity support, so whether a represented user was "
+            "involved cannot be reconstructed."
+        )
+
+    def missing_identity_reasons(self):
+        """
+        :return: Human-readable explanations for every identity layer lacking evidence.
+        :rtype: list[str]
+        """
+        return [
+            str(layer.missing_reason)
+            for layer in self.identity_evidence.values()
+            if layer.missing_reason
+        ]
 
     @property
     def changes_dict(self):

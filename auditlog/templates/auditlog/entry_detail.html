@@ -5,6 +5,11 @@
     <div class="entry-meta">
       <span class="entry-timestamp">{{ entry.timestamp|date:"DATETIME_FORMAT" }}</span>
       <span class="entry-user">{% if entry.actor %}{{ entry.actor }}{% else %}{% trans 'system' %}{% endif %}</span>
+      {% if entry.on_behalf_of %}
+        <span class="entry-on-behalf-of">{% trans 'on behalf of' %} {{ entry.on_behalf_of }}</span>
+      {% elif entry.on_behalf_of_email %}
+        <span class="entry-on-behalf-of">{% trans 'on behalf of' %} {{ entry.on_behalf_of_email }}</span>
+      {% endif %}
       <span class="entry-action">{{ entry.get_action_display }}</span>
     </div>
   </div>

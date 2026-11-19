@@ -5,7 +5,7 @@ from django.contrib.auth import get_user_model
 from django.utils.translation import gettext_lazy as _
 
 from auditlog import get_logentry_model
-from auditlog.filters import CIDFilter, ResourceTypeFilter
+from auditlog.filters import CIDFilter, OnBehalfOfFilter, ResourceTypeFilter
 from auditlog.mixins import LogEntryAdminMixin
 
 LogEntry = get_logentry_model()
@@ -14,13 +14,14 @@ LogEntry = get_logentry_model()
 @admin.register(LogEntry)
 class LogEntryAdmin(admin.ModelAdmin, LogEntryAdminMixin):
     date_hierarchy = "timestamp"
-    list_select_related = ["content_type", "actor"]
+    list_select_related = ["content_type", "actor", "on_behalf_of"]
     list_display = [
         "created",
         "resource_url",
         "action",
         "msg_short",
         "user_url",
+        "on_behalf_of_url",
         "cid_url",
     ]
     search_fields = [
@@ -30,11 +31,34 @@ class LogEntryAdmin(admin.ModelAdmin, LogEntryAdminMixin):
         "actor__first_name",
         "actor__last_name",
         f"actor__{get_user_model().USERNAME_FIELD}",
+        "actor_email",
+        "on_behalf_of__first_name",
+        "on_behalf_of__last_name",
+        f"on_behalf_of__{get_user_model().USERNAME_FIELD}",
+        "on_behalf_of_email",
     ]
-    list_filter = ["action", ResourceTypeFilter, CIDFilter]
-    readonly_fields = ["created", "resource_url", "action", "user_url", "msg"]
+    list_filter = ["action", ResourceTypeFilter, OnBehalfOfFilter, CIDFilter]
+    readonly_fields = [
+        "created",
+        "resource_url",
+        "action",
+        "user_url",
+        "on_behalf_of_url",
+        "msg",
+    ]
     fieldsets = [
-        (None, {"fields": ["created", "user_url", "resource_url", "cid"]}),
+        (
+            None,
+            {
+                "fields": [
+                    "created",
+                    "user_url",
+                    "on_behalf_of_url",
+                    "resource_url",
+                    "cid",
+                ]
+            },
+        ),
         (_("Changes"), {"fields": ["action", "msg"]}),
     ]
 
