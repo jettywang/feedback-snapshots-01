@@ -149,6 +149,10 @@ def handle_audit_action(args: argparse.Namespace) -> None:
                 audit.compare_baselines(args.filename[0], args.filename[1])
             else:
                 # Label secrets
-                audit.audit_baseline(args.filename[0])
+                audit.audit_baseline(
+                    args.filename[0],
+                    journal_filename=args.journal,
+                    reviewer=args.reviewer,
+                )
     except InvalidBaselineError:
         pass

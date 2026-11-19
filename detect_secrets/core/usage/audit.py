@@ -55,6 +55,26 @@ def _add_mode_parser(parser: argparse.ArgumentParser) -> None:
         ),
     )
 
+    parser.add_argument(
+        '--journal',
+        metavar='JOURNAL_FILE',
+        help=(
+            'Records every labelling decision (including the reviewer) into an append-only '
+            'decision journal, anchored to the supplied baseline. Reusing an existing journal '
+            'reconciles its history against the baseline before auditing. Without this flag, '
+            'only the latest labels are saved to the baseline, as before.'
+        ),
+    )
+
+    parser.add_argument(
+        '--reviewer',
+        metavar='REVIEWER',
+        help=(
+            'Identifies the reviewer whose decisions are recorded. Required when --journal '
+            'is used.'
+        ),
+    )
+
 
 def _add_report_module(parent: argparse.ArgumentParser) -> None:
     parser = parent.add_argument_group(
@@ -111,3 +131,13 @@ def parse_args(args: argparse.Namespace) -> None:
         raise argparse.ArgumentTypeError(
             'Can only specify one baseline at a time.',
         )
+
+    if args.journal:
+        if args.diff or args.stats or args.report:
+            raise argparse.ArgumentTypeError(
+                '--journal can only be used with the interactive labelling mode.',
+            )
+        if not args.reviewer:
+            raise argparse.ArgumentTypeError(
+                '--reviewer must be supplied when recording to a --journal.',
+            )

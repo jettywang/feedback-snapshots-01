@@ -6,21 +6,28 @@ from . import io
 from ..core.secrets_collection import SecretsCollection
 
 
-def get_secret_iterator(baseline: SecretsCollection) -> 'BidirectionalIterator':
+def get_secret_iterator(
+    baseline: SecretsCollection,
+    include_labelled: bool = False,
+) -> 'BidirectionalIterator':
     """
+    :param include_labelled: if True, also surfaces findings that already carry a label.
+        This is used by decision-journal sessions, where a second reviewer re-audits a
+        finding a colleague already labelled.
+
     :returns: (index, filename, secret)
     """
-    unlabelled_secrets = [
+    secrets_to_audit = [
         secret
         for _, secret in baseline
-        if secret.is_secret is None
+        if include_labelled or secret.is_secret is None
     ]
 
-    if not unlabelled_secrets:
+    if not secrets_to_audit:
         io.print_message('Nothing to audit!')
         return BidirectionalIterator([])
 
-    return BidirectionalIterator(unlabelled_secrets)
+    return BidirectionalIterator(secrets_to_audit)
 
 
 class BidirectionalIterator(Iterator):

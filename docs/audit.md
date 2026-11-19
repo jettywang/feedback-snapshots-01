@@ -48,6 +48,71 @@ labelled.
   with only a specific plugin enabled. Check out
   [how to disable plugins here](plugins.md#Disabling-Plugins).
 
+### Recording a Decision Journal
+
+A plain audit only persists the *latest* label of each finding back to the baseline. For a
+post-incident review, however, you often need to know *who* made the first call on a finding and
+*who reviewed it again* later. The optional `--journal` flag keeps an append-only, ordered stream
+of every decision, alongside the reviewer who made it.
+
+```bash
+$ detect-secrets scan test_data > .secrets.baseline
+$ detect-secrets audit .secrets.baseline --journal audit.journal.json --reviewer alice
+```
+
+Each entry records the reviewer, the finding (file, secret type and hash), the decision
+(`is_secret`: `true`, `false`, or omitted for a skip) and a timestamp. Re-running with the same
+journal file but a different reviewer lets a second auditor re-label the same finding, and both
+decisions remain in the history:
+
+```bash
+$ detect-secrets audit .secrets.baseline --journal audit.journal.json --reviewer bob
+```
+
+```json
+{
+  "version": "1.0",
+  "baseline_hash": "8f1c...",
+  "decisions": [
+    {
+      "entry_id": "2f91...",
+      "reviewer": "alice",
+      "filename": "test_data/config.env",
+      "hashed_secret": "513e0a36...",
+      "type": "Base64 High Entropy String",
+      "is_secret": true,
+      "timestamp": "2026-11-20T10:15:00Z"
+    },
+    {
+      "entry_id": "7ad4...",
+      "reviewer": "bob",
+      "filename": "test_data/config.env",
+      "hashed_secret": "513e0a36...",
+      "type": "Base64 High Entropy String",
+      "is_secret": false,
+      "timestamp": "2026-11-20T11:02:30Z"
+    }
+  ]
+}
+```
+
+How the journal keeps history trustworthy:
+
+- **Anchored to an agreed baseline.** The journal stores a hash of the baseline's finding
+  inventory (which findings exist, ignoring their labels). On every run the current baseline is
+  reconciled against this anchor; if the baseline changed out-of-band, the audit refuses to
+  continue rather than mixing decisions from different baselines.
+- **History vs. current label.** Every decision is appended, so the full reviewer trail is kept.
+  The baseline label follows the most recent decision for each finding (last-writer-wins), and the
+  two are reconciled on start-up so the saved labels always match the recorded history.
+- **No duplicate submissions.** Each entry carries a unique `entry_id`. Submitting the same entry
+  twice raises a `DuplicateDecisionError` instead of recording it again.
+- **Clear state on write failure.** The journal is written atomically (and before the baseline).
+  A failed write leaves the previous journal and the baseline untouched, so there is never a
+  half-written or inconsistent state; the next run simply reconciles again.
+- **Fully optional.** Without `--journal`, auditing behaves exactly as before and only the latest
+  labels are saved to the baseline.
+
 ### Handling Developer Secrets
 
 A special side-note should be added to discuss the handling of developer "test" secrets.
