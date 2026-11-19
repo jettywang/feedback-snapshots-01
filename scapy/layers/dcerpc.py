@@ -34,7 +34,7 @@ from scapy.base_classes import Packet_metaclass
 
 from scapy.config import conf
 from scapy.compat import bytes_encode, plain_str
-from scapy.error import log_runtime
+from scapy.error import Scapy_Exception, log_runtime
 from scapy.layers.dns import DNSStrField
 from scapy.layers.ntlm import (
     NTLM_Header,
@@ -1388,7 +1388,13 @@ def _e(ndrendian):
 
 
 class _NDRPacket(Packet):
-    __slots__ = ["ndr64", "ndrendian", "deferred_pointers", "request_packet"]
+    __slots__ = [
+        "ndr64",
+        "ndrendian",
+        "deferred_pointers",
+        "referent_map",
+        "request_packet",
+    ]
 
     def __init__(self, *args, **kwargs):
         self.ndr64 = kwargs.pop("ndr64", conf.ndr64)
@@ -1397,7 +1403,37 @@ class _NDRPacket(Packet):
         # can resolve union arms if the case parameter is in the request.
         self.request_packet = kwargs.pop("request_packet", None)
         self.deferred_pointers = []
+        # Referents decoded so far, keyed by referent_id. This is shared by
+        # every NDR packet of the same stream, see _ndr_referents().
+        self.referent_map = {}
         super(_NDRPacket, self).__init__(*args, **kwargs)
+
+    def _ndr_root(self):
+        pkt = self
+        seen = set()
+        while True:
+            up = pkt.parent or pkt.underlayer
+            if up is not None and isinstance(up, _NDRPacket) and id(up) not in seen:
+                seen.add(id(up))
+                pkt = up
+            else:
+                return pkt
+
+    def _ndr_referents(self):
+        return self._ndr_root().referent_map
+
+    def register_referent(self, ptr):
+        # A referent id of 0 is the NULL pointer and has no referent.
+        if not ptr.referent_id:
+            return
+        # Keep the last referent seen for a given id. Scapy has no way to know
+        # whether a repeated id on the wire is a genuine alias or Windows
+        # reusing 0x20000 for unrelated pointers: only an explicit alias
+        # pointer consumes no content and shares this object graph.
+        self._ndr_referents()[ptr.referent_id] = ptr
+
+    def resolve_referent(self, referent_id):
+        return self._ndr_referents().get(referent_id)
 
     def do_dissect(self, s):
         _up = self.parent or self.underlayer
@@ -1406,10 +1442,22 @@ class _NDRPacket(Packet):
             self.ndrendian = _up.ndrendian
         else:
             # See comment above NDRConstructedType
-            return NDRConstructedType([]).read_deferred_pointers(
-                self, super(_NDRPacket, self).do_dissect(s)
-            )
-        return super(_NDRPacket, self).do_dissect(s)
+            try:
+                return NDRConstructedType([]).read_deferred_pointers(
+                    self, super(_NDRPacket, self).do_dissect(s)
+                )
+            except struct.error as ex:
+                raise Scapy_Exception(
+                    "truncated NDR data while dissecting %s: %s"
+                    % (self.__class__.__name__, ex)
+                ) from ex
+        try:
+            return super(_NDRPacket, self).do_dissect(s)
+        except struct.error as ex:
+            raise Scapy_Exception(
+                "truncated NDR data while dissecting %s: %s"
+                % (self.__class__.__name__, ex)
+            ) from ex
 
     def post_dissect(self, s):
         if self.deferred_pointers:
@@ -1436,6 +1484,7 @@ class _NDRPacket(Packet):
         # We need to copy deferred_pointers to not break pointer deferral
         # on build.
         pkt.deferred_pointers = self.deferred_pointers
+        pkt.referent_map = self.referent_map
         pkt.ndr64 = self.ndr64
         pkt.ndrendian = self.ndrendian
         return pkt
@@ -1443,6 +1492,7 @@ class _NDRPacket(Packet):
     def copy(self):
         pkt = super(_NDRPacket, self).copy()
         pkt.deferred_pointers = self.deferred_pointers
+        pkt.referent_map = self.referent_map
         pkt.ndr64 = self.ndr64
         pkt.ndrendian = self.ndrendian
         return pkt
@@ -1500,6 +1550,21 @@ class NDRAlign(_NDRAlign, ReversePadField):
 
     def __init__(self, fld, align, padwith=None):
         super(NDRAlign, self).__init__(fld, align=align, padwith=padwith)
+
+    def getfield(self, pkt, s):
+        # Do not let a truncated stream be masked by its own alignment: when
+        # the padding itself is missing, struct.error must surface rather than
+        # handing an empty buffer to the inner field.
+        padlen = 0
+        if hasattr(pkt, "ndr64"):
+            padlen = self.padlen(self.original_length(pkt) - len(s), pkt)
+        if len(s) < padlen:
+            raise struct.error(
+                "unpack_from requires a buffer of at least %d bytes for "
+                "unpacking %d bytes at offset 0 (actual buffer size is %d)"
+                % (padlen, padlen, len(s))
+            )
+        return self.fld.getfield(pkt, s[padlen:])
 
 
 class _VirtualField(Field):
@@ -1700,6 +1765,23 @@ class NDRSignedInt3264Field(NDRInt3264Field):
 # Pointer types
 
 
+class _NDRAliasResolver(object):
+    """
+    Sentinel resolver used for alias pointers in the deferral queue.
+
+    The referent content was already (or will be) read by the pointer that
+    owns it, so an alias pointer must not consume any content.
+    """
+
+    __slots__ = []
+
+    def __repr__(self):
+        return "<NDR alias resolver>"
+
+
+NDR_ALIAS = _NDRAliasResolver()
+
+
 class NDRPointer(_NDRPacket):
     fields_desc = [
         MultipleTypeField(
@@ -1717,6 +1799,12 @@ class NDRFullPointerField(_FieldContainer):
     :param EMBEDDED: This pointer is embedded. This means that it's representation
                      will not appear after the pointer (pointer deferral applies).
                      See [C706] 14.3.12.3 - Algorithm for Deferral of Referents
+    :param ref: This pointer references an already decoded referent. Its
+                referent content appears only once on the wire, so it consumes
+                no content and shares the object graph of the referent it
+                points to. This must be declared explicitly: Windows reuses
+                referent ids (typically ``0x20000``) for unrelated pointers,
+                so a repeated id cannot be inferred to be an alias.
     """
 
     EMBEDDED = False
@@ -1737,6 +1825,27 @@ class NDRFullPointerField(_FieldContainer):
         if referent_id == 0 and not self.EMBEDDED_REF:
             return remain, None
 
+        if self.ref:
+            # A reference pointer aliases an already decoded referent and
+            # carries no content of its own: it must not consume the
+            # following RPC field.
+            ptr = NDRPointer(
+                ndr64=pkt.ndr64, ndrendian=pkt.ndrendian, referent_id=referent_id
+            )
+            target = pkt.resolve_referent(referent_id)
+            if target is None:
+                raise Scapy_Exception(
+                    "NDR reference pointer %s points to unknown referent 0x%x"
+                    % (self.name, referent_id)
+                )
+            ptr.value = target.value
+            if target.value is None:
+                # The referent is still deferred. Bind once its content has
+                # been read by the deferral queue.
+                ptr._alias_target = target
+                pkt.deferred_pointers.append((ptr, NDR_ALIAS))
+            return remain, ptr
+
         # With value
         if self.EMBEDDED:
             # deferred
@@ -1744,12 +1853,15 @@ class NDRFullPointerField(_FieldContainer):
                 ndr64=pkt.ndr64, ndrendian=pkt.ndrendian, referent_id=referent_id
             )
             pkt.deferred_pointers.append((ptr, partial(self.fld.getfield, pkt)))
+            pkt.register_referent(ptr)
             return remain, ptr
 
         remain, val = self.fld.getfield(pkt, remain)
-        return remain, NDRPointer(
+        ptr = NDRPointer(
             ndr64=pkt.ndr64, ndrendian=pkt.ndrendian, referent_id=referent_id, value=val
         )
+        pkt.register_referent(ptr)
+        return remain, ptr
 
     def addfield(self, pkt, s, val):
         if val is not None and not isinstance(val, NDRPointer):
@@ -1762,6 +1874,10 @@ class NDRFullPointerField(_FieldContainer):
         # No value
         if val is None and not self.EMBEDDED_REF:
             return fld.addfield(pkt, s, 0)
+
+        if self.ref:
+            # The referent content is written once by the pointer owning it.
+            return fld.addfield(pkt, s, val.referent_id)
 
         # With value
         _set_ctx_on(val.value, pkt)
@@ -1888,15 +2004,35 @@ class NDRConstructedType(object):
         q = collections.deque()
         q.extend(pkt.deferred_pointers)
         del pkt.deferred_pointers[:]
+        aliases = collections.deque()
         while q:
             # Recursively resolve pointers that were deferred
             ptr, getfld = q.popleft()
-            s, val = getfld(s)
+            if getfld is NDR_ALIAS:
+                # Alias pointers are bound after every referent has been read.
+                aliases.append(ptr)
+                continue
+            try:
+                s, val = getfld(s)
+            except struct.error as ex:
+                raise Scapy_Exception(
+                    "truncated NDR deferred referent 0x%x: %s"
+                    % (ptr.referent_id, ex)
+                ) from ex
             ptr.value = val
             if isinstance(val, _NDRPacket):
                 # Pointer resolves to a packet.. that may have deferred pointers?
                 q.extend(val.deferred_pointers)
                 del val.deferred_pointers[:]
+        while aliases:
+            ptr = aliases.popleft()
+            target = ptr._alias_target
+            if target.value is not None:
+                ptr.value = target.value
+            else:
+                # The referent belongs to an outer deferral scope that has not
+                # been drained yet: leave the alias for that scope.
+                pkt.deferred_pointers.append((ptr, NDR_ALIAS))
         return s
 
     def addfield(self, pkt, s, val):
@@ -2265,6 +2401,19 @@ class _NDRConfField:
             pkt, s
         )
         remain, val = super(_NDRConfField, self).getfield(pkt, remain)
+        if isinstance(val, NDRVaryingArray):
+            # [C706] 14.3.7 - The varying part is a window into the
+            # conformant array: offset + actual_count cannot exceed max_count.
+            if (
+                val.offset is not None
+                and val.actual_count is not None
+                and val.offset + val.actual_count > max_count
+            ):
+                raise Scapy_Exception(
+                    "conflicting NDR counts in %s: offset %d + actual_count %d "
+                    "> max_count %d"
+                    % (self.name, val.offset, val.actual_count, max_count)
+                )
         return remain, (
             NDRConformantString if self.CONFORMANT_STRING else NDRConformantArray
         )(ndr64=pkt.ndr64, ndrendian=pkt.ndrendian, max_count=max_count, value=val)

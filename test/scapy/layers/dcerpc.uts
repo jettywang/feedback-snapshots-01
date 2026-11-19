@@ -554,6 +554,247 @@ PID: 960 - 18/09/2023 12:33:50.151428 (1695040430)
 result
 assert result.strip() == EXPECTED.strip()
 
++ DCE/RPC 5 NDR: Pointer object graph
+
+* Object-graph regression for NDR32 and NDR64 full pointers. Every vector below
+* is an independently hand-laid wire format (not bytes produced by Scapy) so
+* that alignment, counts, object identity and the consumed range are checked
+* against the encoding itself.
+
+= DCE/RPC 5 NDR: Full pointer object graph helpers
+
+class NDRGraphNode(NDRPacket):
+    ALIGNMENT = (4, 8)
+    fields_desc = [NDRIntField("value", 0)]
+
+
+class NDRGraphShared(NDRPacket):
+    ALIGNMENT = (4, 8)
+    fields_desc = [
+        NDRFullEmbPointerField(NDRPacketField("left", None, NDRGraphNode)),
+        NDRFullEmbPointerField(NDRPacketField("right", None, NDRGraphNode), ref=True),
+        NDRIntField("status", 0),
+    ]
+
+
+class NDRGraphDistinct(NDRPacket):
+    ALIGNMENT = (4, 8)
+    fields_desc = [
+        NDRFullEmbPointerField(NDRPacketField("left", None, NDRGraphNode)),
+        NDRFullEmbPointerField(NDRPacketField("right", None, NDRGraphNode)),
+        NDRIntField("status", 0),
+    ]
+
+
+class NDRGraphArray(NDRPacket):
+    ALIGNMENT = (4, 8)
+    fields_desc = [
+        NDRConfPacketListField(
+            "nodes", [], NDRGraphNode, size_is=lambda pkt: 3, ptr_lvl=1
+        ),
+        NDRIntField("tail", 0),
+    ]
+
+
+class NDRGraphConf(NDRPacket):
+    ALIGNMENT = (4, 8)
+    fields_desc = [
+        NDRConfVarFieldListField(
+            "items", [], NDRIntField("", 0), size_is=lambda pkt: 0
+        ),
+    ]
+
+
+def ndr_graph_error(cls, wire, ndr64):
+    # Return the dissection error message, or "" if dissection succeeded.
+    try:
+        cls(wire, ndr64=ndr64)
+    except Scapy_Exception as exc:
+        return str(exc)
+    return ""
+
+
+True
+
+= DCE/RPC 5 NDR: Shared referent is decoded once (NDR32)
+
+# left pointer 0x20000, right pointer 0x20000 (alias), status, referent value.
+WIRE = hex_bytes("00000200" "00000200" "ddccbbaa" "44332211")
+pkt = NDRGraphShared(WIRE, ndr64=False)
+
+assert pkt.left.referent_id == 0x20000
+assert pkt.right.referent_id == 0x20000
+# The two fields must designate the same referent, not two copies.
+assert pkt.left.value is pkt.right.value
+assert pkt.left.value.value == 0x11223344
+# The referent is not duplicated: valueof returns the same object twice.
+assert pkt.valueof("left") is pkt.valueof("right")
+# The trailing RPC field must not be consumed by the alias pointer.
+assert pkt.status == 0xAABBCCDD
+# No bytes are left over after the declared fields.
+assert isinstance(pkt.payload, NoPayload)
+
+= DCE/RPC 5 NDR: Shared referent is decoded once (NDR64)
+
+# Same graph in NDR64: 8-byte referent ids, 8-byte alignment.
+WIRE = hex_bytes(
+    "0000020000000000" "0000020000000000"
+    "ddccbbaa00000000" "4433221100000000"
+)
+pkt = NDRGraphShared(WIRE, ndr64=True)
+
+assert pkt.left.referent_id == 0x20000
+assert pkt.right.referent_id == 0x20000
+assert pkt.left.value is pkt.right.value
+assert pkt.left.value.value == 0x11223344
+assert pkt.valueof("left") is pkt.valueof("right")
+assert pkt.status == 0xAABBCCDD
+assert isinstance(pkt.payload, NoPayload)
+
+= DCE/RPC 5 NDR: Shared referent rebuilds to the same wire (NDR32/NDR64)
+
+for wire, ndr64 in (
+    (hex_bytes("00000200" "00000200" "ddccbbaa" "44332211"), False),
+    (hex_bytes(
+        "0000020000000000" "0000020000000000"
+        "ddccbbaa00000000" "4433221100000000"
+    ), True),
+):
+    decoded = NDRGraphShared(wire, ndr64=ndr64)
+    assert bytes(decoded) == wire
+    # Building from an object graph also produces a single referent.
+    built = NDRGraphShared(
+        left=NDRPointer(referent_id=0x20000, value=NDRGraphNode(value=0x11223344)),
+        right=NDRPointer(referent_id=0x20000),
+        status=0xAABBCCDD,
+        ndr64=ndr64,
+    )
+    assert bytes(built) == wire
+
+= DCE/RPC 5 NDR: Two identical referents with distinct identities
+
+# left 0x20000 and right 0x20001 each own a referent with the same value.
+WIRE32 = hex_bytes(
+    "00000200" "01000200" "ddccbbaa" "44332211" "44332211"
+)
+WIRE64 = hex_bytes(
+    "0000020000000000" "0100020000000000"
+    "ddccbbaa00000000" "4433221100000000" "4433221100000000"
+)
+
+for wire, ndr64 in ((WIRE32, False), (WIRE64, True)):
+    pkt = NDRGraphDistinct(wire, ndr64=ndr64)
+    assert pkt.left.referent_id == 0x20000
+    assert pkt.right.referent_id == 0x20001
+    # Equal content must not be merged into a single object.
+    assert pkt.left.value is not pkt.right.value
+    assert pkt.left.value.value == pkt.right.value.value == 0x11223344
+    assert pkt.status == 0xAABBCCDD
+    assert bytes(pkt) == wire
+
+= DCE/RPC 5 NDR: Null pointers inside a nested conformant array (NDR32)
+
+# max_count 3, pointers [NULL, 0x20000, NULL], one referent, then the
+# trailing RPC field. Offsets come from hand-counting the wire bytes:
+# max_count @0, p0 @4, p1 @8, p2 @12, referent @16, tail @20.
+WIRE = hex_bytes(
+    "03000000"
+    "00000000" "00000200" "00000000"
+    "44332211"
+    "efbeadde"
+)
+pkt = NDRGraphArray(WIRE, ndr64=False)
+
+array = pkt.nodes
+assert array.max_count == 3
+assert len(array.value) == 3
+# Null pointers are represented by NDRNone, and resolve to None.
+assert isinstance(array.value[0], NDRNone)
+assert isinstance(array.value[2], NDRNone)
+assert array.value[1].referent_id == 0x20000
+assert array.value[1].value.value == 0x11223344
+assert pkt.tail == 0xDEADBEEF
+assert pkt.valueof("nodes") == [None, array.value[1].value, None]
+assert bytes(pkt) == WIRE
+
+= DCE/RPC 5 NDR: Null pointers inside a nested conformant array (NDR64)
+
+# Same graph in NDR64: max_count @0, p0 @8, p1 @16, p2 @24, referent @32,
+# tail @40. NDR64 8-byte pointers and alignment.
+WIRE = hex_bytes(
+    "0300000000000000"
+    "0000000000000000" "0000020000000000" "0000000000000000"
+    "4433221100000000"
+    "efbeadde00000000"
+)
+pkt = NDRGraphArray(WIRE, ndr64=True)
+
+array = pkt.nodes
+assert array.max_count == 3
+assert len(array.value) == 3
+assert isinstance(array.value[0], NDRNone)
+assert isinstance(array.value[2], NDRNone)
+assert array.value[1].referent_id == 0x20000
+assert array.value[1].value.value == 0x11223344
+assert pkt.tail == 0xDEADBEEF
+assert pkt.valueof("nodes") == [None, array.value[1].value, None]
+assert bytes(pkt) == WIRE
+
+= DCE/RPC 5 NDR: Malformed referent stops at an explainable boundary
+
+# An alias pointer that names a referent never decoded before must not be
+# silently turned into an empty referent.
+error = ndr_graph_error(
+    NDRGraphShared, hex_bytes("00000200" "03000200" "ddccbbaa"), False
+)
+assert "unknown referent 0x20003" in error
+
+= DCE/RPC 5 NDR: Truncated deferred referent stops at an explainable boundary
+
+# Referent id 0x20000 is announced but its content is cut short. The alignment
+# padding must not hide the missing bytes.
+error = ndr_graph_error(
+    NDRGraphShared, hex_bytes("00000200" "00000200" "ddccbbaa" "4433"), False
+)
+assert "truncated NDR" in error
+error = ndr_graph_error(
+    NDRGraphShared,
+    hex_bytes("0000020000000000" "0000020000000000" "ddccbbaa" "4433"),
+    True,
+)
+assert "truncated NDR" in error
+
+# A pointer id that is itself truncated.
+error = ndr_graph_error(NDRGraphShared, hex_bytes("00000200" "0000"), False)
+assert "truncated NDR" in error
+
+= DCE/RPC 5 NDR: Conflicting conformant/varying counts stop at a boundary
+
+# max_count = 4 but offset 2 + actual_count 4 requires 6 elements.
+WIRE = (
+    b"\x04\x00\x00\x00"
+    b"\x02\x00\x00\x00"
+    b"\x04\x00\x00\x00"
+    + b"".join(i.to_bytes(4, "little") for i in range(4))
+)
+error = ndr_graph_error(NDRGraphConf, WIRE, False)
+assert "conflicting NDR counts" in error
+
+# The same counts that fit inside max_count are valid.
+WIRE = (
+    b"\x06\x00\x00\x00"
+    b"\x02\x00\x00\x00"
+    b"\x04\x00\x00\x00"
+    + b"".join(i.to_bytes(4, "little") for i in range(4))
+)
+pkt = NDRGraphConf(WIRE, ndr64=False)
+assert pkt.items.max_count == 6
+assert len(pkt.items.value) == 1
+assert pkt.items.value[0].offset == 2
+assert pkt.items.value[0].actual_count == 4
+assert pkt.items.value[0].value == [0, 1, 2, 3]
+assert bytes(pkt) == WIRE
+
 + [PASSIVE] Passive sniffing
 ~ passive
 
