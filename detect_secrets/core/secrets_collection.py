@@ -10,6 +10,7 @@ from typing import Set
 from typing import Tuple
 
 from . import scan
+from ..exceptions import PluginExecutionError
 from ..util.path import convert_local_os_path
 from .potential_secret import PotentialSecret
 from detect_secrets.settings import configure_settings_from_baseline
@@ -70,6 +71,10 @@ class SecretsCollection:
                 [os.path.join(self.root, filename) for filename in filenames],
             ):
                 for secret in secrets:
+                    # The plaintext value lives only inside the worker that performed the
+                    # detection. Workers hand back sanitized secrets (see
+                    # `_scan_file_and_serialize`), so nothing sensitive crosses the
+                    # inter-process boundary; the parent keeps the hash for the baseline.
                     self[os.path.relpath(secret.filename, self.root)].add(secret)
 
     def scan_file(self, filename: str) -> None:
@@ -315,4 +320,25 @@ class SecretsCollection:
 
 def _scan_file_and_serialize(filename: str) -> List[PotentialSecret]:
     """Used for multiprocessing, since lambdas can't be serialized."""
-    return list(scan.scan_file(filename))
+    try:
+        secrets = list(scan.scan_file(filename))
+    except PluginExecutionError as e:
+        # Re-raise a brand-new instance rather than letting the original exception (and its
+        # traceback) propagate. Otherwise, multiprocessing's RemoteTraceback would carry the
+        # worker's internal traceback, which can include the plugin's own exception message --
+        # and therefore the scanned line's plaintext -- across to the parent process.
+        raise PluginExecutionError(
+            plugin_name=e.plugin_name,
+            filename=e.filename,
+            line_number=e.line_number,
+            cause_type=e.cause_type,
+        ) from None
+
+    # This is the inter-process boundary: the returned objects are pickled and sent from
+    # the worker back to the parent process. The plaintext `secret_value` must remain inside
+    # the worker that needed it for detection, so strip it before anything leaves the worker.
+    # The parent only requires the hash (and locating metadata) to build the baseline.
+    for secret in secrets:
+        secret.secret_value = None
+
+    return secrets

@@ -9,6 +9,7 @@ from typing import Set
 from typing import Tuple
 from typing import Union
 
+from ..exceptions import PluginExecutionError
 from ..filters.allowlist import is_line_allowlisted
 from ..settings import get_filters
 from ..settings import get_plugins
@@ -362,14 +363,33 @@ def _scan_line(
 ) -> Generator[PotentialSecret, None, None]:
     # NOTE: We don't apply filter functions here yet, because we don't have any filters
     # that operate on (filename, line, plugin) without `secret`
-    secrets = call_function_with_arguments(
-        plugin.analyze_line,
-        filename=filename,
-        line=line,
-        line_number=line_number,
-        context=context,
-        **kwargs,
-    )
+    try:
+        secrets = call_function_with_arguments(
+            plugin.analyze_line,
+            filename=filename,
+            line=line,
+            line_number=line_number,
+            context=context,
+            **kwargs,
+        )
+    except PluginExecutionError:
+        # Already sanitized (e.g. a nested re-entry); don't wrap it again.
+        raise
+    except Exception as e:
+        # A plugin may embed the scanned line (and any plaintext secret on it) in its
+        # exception message or traceback. We replace it with an exception that only
+        # carries locating metadata, so that the failure never leaks plaintext -- even
+        # when it propagates from a multiprocessing worker back to the parent process.
+        #
+        # `from None` is deliberate: chaining (`from e`) would keep the original
+        # traceback -- and therefore the plugin's plaintext-bearing message -- reachable
+        # from the raised exception and re-printed by the interpreter / parent process.
+        raise PluginExecutionError(
+            plugin_name=plugin.__class__.__name__,
+            filename=filename,
+            line_number=line_number,
+            cause=e,
+        ) from None
     if not secrets:
         return
 
