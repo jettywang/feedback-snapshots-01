@@ -23,6 +23,7 @@ from ._decoders import (
 )
 from ._exceptions import (
     CookieConflict,
+    DecodingError,
     HTTPStatusError,
     RequestNotRead,
     ResponseNotRead,
@@ -708,9 +709,14 @@ class Response:
                 value = value.strip().lower()
                 try:
                     decoder_cls = SUPPORTED_DECODERS[value]
-                    decoders.append(decoder_cls())
                 except KeyError:
-                    continue
+                    # An encoding we cannot decode must not be silently
+                    # treated as identity, which would hand raw compressed
+                    # bytes to the caller as if they were the response body.
+                    raise DecodingError(
+                        f"Unsupported content encoding: {value!r}"
+                    ) from None
+                decoders.append(decoder_cls())
 
             if len(decoders) == 1:
                 self._decoder = decoders[0]
@@ -901,6 +907,10 @@ class Response:
                 decoded = decoder.flush()
                 for chunk in chunker.decode(decoded):
                     yield chunk  # pragma: no cover
+                # Independent end-of-stream criterion: every encoding layer
+                # must confirm a complete, well-formed stream before the
+                # response can be treated as fully read.
+                decoder.check_finished()
                 for chunk in chunker.flush():
                     yield chunk
 
@@ -1001,6 +1011,10 @@ class Response:
                 decoded = decoder.flush()
                 for chunk in chunker.decode(decoded):
                     yield chunk  # pragma: no cover
+                # Independent end-of-stream criterion: every encoding layer
+                # must confirm a complete, well-formed stream before the
+                # response can be treated as fully read.
+                decoder.check_finished()
                 for chunk in chunker.flush():
                     yield chunk
 

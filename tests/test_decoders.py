@@ -4,9 +4,22 @@ import io
 import typing
 import zlib
 
-import chardet
 import pytest
-import zstandard as zstd
+
+try:
+    import chardet
+except ImportError:  # pragma: no cover
+    chardet = None
+
+try:
+    import brotli
+except ImportError:  # pragma: no cover
+    brotli = None
+
+try:
+    import zstandard as zstd
+except ImportError:  # pragma: no cover
+    zstd = None
 
 import httpx
 
@@ -62,6 +75,7 @@ def test_gzip():
     assert response.content == body
 
 
+@pytest.mark.skipif(brotli is None, reason="brotli is not installed")
 def test_brotli():
     body = b"test 123"
     compressed_body = b"\x8b\x03\x80test 123\x03"
@@ -75,6 +89,7 @@ def test_brotli():
     assert response.content == body
 
 
+@pytest.mark.skipif(zstd is None, reason="zstandard is not installed")
 def test_zstd():
     body = b"test 123"
     compressed_body = zstd.compress(body)
@@ -88,6 +103,7 @@ def test_zstd():
     assert response.content == body
 
 
+@pytest.mark.skipif(zstd is None, reason="zstandard is not installed")
 def test_zstd_decoding_error():
     compressed_body = "this_is_not_zstd_compressed_data"
 
@@ -100,12 +116,14 @@ def test_zstd_decoding_error():
         )
 
 
+@pytest.mark.skipif(zstd is None, reason="zstandard is not installed")
 def test_zstd_empty():
     headers = [(b"Content-Encoding", b"zstd")]
     response = httpx.Response(200, headers=headers, content=b"")
     assert response.content == b""
 
 
+@pytest.mark.skipif(zstd is None, reason="zstandard is not installed")
 def test_zstd_truncated():
     body = b"test 123"
     compressed_body = zstd.compress(body)
@@ -119,6 +137,7 @@ def test_zstd_truncated():
         )
 
 
+@pytest.mark.skipif(zstd is None, reason="zstandard is not installed")
 def test_zstd_multiframe():
     # test inspired by urllib3 test suite
     data = (
@@ -161,6 +180,7 @@ def test_multi():
     assert response.content == body
 
 
+@pytest.mark.skipif(brotli is None, reason="brotli is not installed")
 def test_multi_with_identity():
     body = b"test 123"
     compressed_body = b"\x8b\x03\x80test 123\x03"
@@ -203,6 +223,8 @@ async def test_streaming():
 
 @pytest.mark.parametrize("header_value", (b"deflate", b"gzip", b"br", b"identity"))
 def test_empty_content(header_value):
+    if header_value == b"br" and brotli is None:
+        pytest.skip("brotli is not installed")
     headers = [(b"Content-Encoding", header_value)]
     response = httpx.Response(
         200,
@@ -214,6 +236,8 @@ def test_empty_content(header_value):
 
 @pytest.mark.parametrize("header_value", (b"deflate", b"gzip", b"br", b"identity"))
 def test_decoders_empty_cases(header_value):
+    if header_value == b"br" and brotli is None:
+        pytest.skip("brotli is not installed")
     headers = [(b"Content-Encoding", header_value)]
     response = httpx.Response(content=b"", status_code=200, headers=headers)
     assert response.read() == b""
@@ -221,6 +245,8 @@ def test_decoders_empty_cases(header_value):
 
 @pytest.mark.parametrize("header_value", (b"deflate", b"gzip", b"br"))
 def test_decoding_errors(header_value):
+    if header_value == b"br" and brotli is None:
+        pytest.skip("brotli is not installed")
     headers = [(b"Content-Encoding", header_value)]
     compressed_body = b"invalid"
     with pytest.raises(httpx.DecodingError):
@@ -240,6 +266,7 @@ def test_decoding_errors(header_value):
         ((b"Accented: \xd6sterreich abcdefghijklmnopqrstuvwxyz", b""), "iso-8859-1"),
     ],
 )
+@pytest.mark.skipif(chardet is None, reason="chardet is not installed")
 @pytest.mark.anyio
 async def test_text_decoder_with_autodetect(data, encoding):
     async def iterator() -> typing.AsyncIterator[bytes]:
@@ -347,9 +374,21 @@ def test_invalid_content_encoding_header():
     headers = [(b"Content-Encoding", b"invalid-header")]
     body = b"test 123"
 
-    response = httpx.Response(
-        200,
-        headers=headers,
-        content=body,
-    )
-    assert response.content == body
+    # An encoding httpx cannot decode must be reported explicitly. Silently
+    # treating it as identity would return raw (compressed) bytes as if they
+    # were the response body. Bytes-backed responses decode eagerly.
+    with pytest.raises(httpx.DecodingError):
+        httpx.Response(200, headers=headers, content=body)
+
+    # The same holds when the unknown encoding is mixed into a chain.
+    with pytest.raises(httpx.DecodingError):
+        httpx.Response(
+            200,
+            headers=[(b"Content-Encoding", b"gzip, invalid-header")],
+            content=body,
+        )
+
+    # Streaming bodies defer the error until the stream is actually read.
+    response = httpx.Response(200, headers=headers, content=iter([body]))
+    with pytest.raises(httpx.DecodingError):
+        response.read()
