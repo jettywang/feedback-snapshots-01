@@ -13,7 +13,8 @@ import io
 import gzip
 import tarfile
 import pickle
-from dfir_ntfs import MFT, WSL, USN, Attributes, LogFile, BootSector, ShadowCopy, PartitionTable, MoveTable
+import json
+from dfir_ntfs import MFT, WSL, USN, Attributes, LogFile, BootSector, ShadowCopy, PartitionTable, MoveTable, MoveTableHistory
 from dfir_ntfs.addons import FAT, exFAT
 
 TEST_DATA_DIR = 'test_data'
@@ -5261,3 +5262,81 @@ def test_fat_64bit_sector_count():
 	assert warn_cnt == 1
 
 	FAT.WARN_FUNC = warn_old
+
+TRACKING_MIGRATION_SMALL = os.path.join(TEST_DATA_DIR, 'tracking_migration_small.log')
+
+def test_movetable_history_small():
+	f = open(TRACKING_MIGRATION_SMALL, 'rb')
+
+	report = MoveTableHistory.AnalyzeMoveTable(f)
+
+	assert report['summary']['machine_count'] == 2
+	assert [ machine['machine_id'] for machine in report['summary']['machines'] ] == [ 'LAB-A', 'LAB-B' ]
+
+	assert report['summary']['accepted_records'] == 4
+	assert report['summary']['duplicate_notifications'] == 1
+	assert report['summary']['excluded_records'] == 1
+	assert report['summary']['observed_edges'] == 4
+	assert report['summary']['wrap_events'] == 1
+	assert report['summary']['recycled_sectors'] == 1
+	assert report['summary']['chain_breaks'] >= 1
+
+	# The duplicate is collapsed by full content, first physical source retained.
+	duplicates = [ issue for issue in report['issues'] if issue['kind'] == 'duplicate-notification' ]
+	assert len(duplicates) == 1
+	assert duplicates[0]['sources'] == [ 1536, 2048 ]
+
+	# The gap is explicit and forms an inferred, not observed, continuation.
+	gaps = [ issue for issue in report['issues'] if issue['kind'] == 'index-gap' ]
+	assert len(gaps) == 1 and gaps[0]['from_index'] == 1 and gaps[0]['to_index'] == 3
+
+	# Index 0 after the reset is a distinct identity, not a reuse of generation 0.
+	generations = { (edge['generation'], edge['from']['record_index']) for edge in report['observed_edges'] }
+	assert (0, 0) in generations and (1, 0) in generations
+	assert report['wrap_events'][0]['from_generation'] == 0
+	assert report['wrap_events'][0]['to_generation'] == 1
+
+	# The stale slot exists in the file but never enters accepted edges or records.
+	stale_offsets = [ record['location']['entry_offset'] for record in report['excluded_records'] ]
+	assert stale_offsets == [ 3072 ]
+	for edge in report['observed_edges']:
+		assert edge['evidence_offset'] != 3072
+	for record in report['accepted_records']:
+		assert record['location']['entry_offset'] != 3072
+
+	# Record time and embedded GUID time are kept in separate fields; they are not conflated.
+	first = report['records'][0]
+	assert first['record_time']['lowest'] is not None
+	assert first['guid_times']['object_id'] is not None
+	assert first['record_time']['lowest'] != first['guid_times']['object_id']
+	assert first['record_time']['clock'] != first['guid_times']['clock']
+
+	# Every accepted edge traces to a concrete raw slot and digest.
+	for edge in report['observed_edges']:
+		record = next(record for record in report['records'] if record['location']['entry_offset'] == edge['evidence_offset'])
+		assert len(record['source']['sha256']) == 64
+		assert record['index'] == edge['from']['record_index']
+
+	# A shared object ID alone never creates an observed edge across the gap.
+	candidates = [ candidate for candidate in report['inferred_candidates'] if candidate['kind'] == 'chain-continuation' ]
+	assert candidates
+	assert all(candidate['status'] == 'inferred' for candidate in candidates)
+
+	f.close()
+
+def test_movetable_history_json_and_text():
+	f = open(TRACKING_MIGRATION_SMALL, 'rb')
+	report = MoveTableHistory.AnalyzeMoveTable(f)
+	f.close()
+
+	output = io.StringIO()
+	MoveTableHistory.WriteJson(report, output)
+	parsed = json.loads(output.getvalue())
+	assert parsed['summary']['machine_count'] == 2
+
+	text = MoveTableHistory.RenderText(report)
+	assert 'Observed edges' in text
+	assert 'Inferred candidates' in text
+	assert 'Excluded stale slots' in text
+	assert 'offset 3072' in text
+	assert 'GUID times (separate clock)' in text

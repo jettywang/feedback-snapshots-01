@@ -41,3 +41,15 @@ This code is not covered by the GNU GPL, version 3.
 
 ---
 (c) Maxim Suhanov
+
+5. MoveTable (tracking.log) migration evidence
+
+Use the "--move-history" mode to produce a traceable cross-volume migration report:
+
+  ntfs_parser --move-history <input file (tracking.log)> <output file (TXT or JSON)>
+
+Each notification is reported as one observed edge (birth DROID -> current DROID).
+Links between notifications are kept as inferred candidates; they are never promoted to
+observed moves. Each record cites its sector, slot, byte offset, GUID raw bytes, record
+time range, and GUID time fields separately. Notifications outside their own sector
+footer window are listed as excluded stale slots and never enter current history.
