@@ -1,5 +1,7 @@
 RSpec.describe RubySMB::Server::ServerClient do
-  let(:server) { RubySMB::Server.new(server_sock: ::TCPServer.new(0)) }
+  # The tests exercise dispatch over in-memory dispatchers; no listening socket
+  # is needed or opened.
+  let(:server) { RubySMB::Server.new(server_sock: Object.new) }
   let(:sock) { double('Socket', peeraddr: '192.168.1.5') }
   let(:dispatcher) { RubySMB::Dispatcher::Socket.new(sock) }
   subject(:server_client) { described_class.new(server, dispatcher) }
@@ -120,6 +122,20 @@ RSpec.describe RubySMB::Server::ServerClient do
           end
         end
 
+        context 'and the session is a guest' do
+          before(:each) do
+            server_client.session_table[session_id].user_id = 'WORKGROUP\guest'
+            server_client.session_table[session_id].is_guest = true
+            server_client.session_table[session_id].key = Random.new.bytes(16)
+          end
+
+          it 'does not sign packets' do
+            expect(RubySMB::Signing).to_not receive(:smb2_sign)
+            expect(RubySMB::Signing).to_not receive(:smb3_sign)
+            server_client.send_packet(packet)
+          end
+        end
+
         context 'and the identity is not anonymous' do
           before(:each) do
             server_client.session_table[session_id].user_id = 'WORKGROUP\RubySMB'
@@ -151,4 +167,65 @@ RSpec.describe RubySMB::Server::ServerClient do
       )
     end
   end
+
+  describe '#verify_smb2_request_signature' do
+    let(:dialect) { '0x0210' }
+    let(:session_key) { Random.new.bytes(16) }
+    let(:session) { RubySMB::Server::Session.new(0x1111, key: session_key, owner: server_client, user_id: 'WORKGROUP\\user') }
+    let(:request) { RubySMB::SMB2::Packet::TreeConnectRequest.new(smb2_header: { session_id: 0x1111 }) }
+
+    before(:each) do
+      server_client.instance_eval { @dialect = '0x0210' }
+      server_client.session_table[0x1111] = session
+    end
+
+    it 'reports an unsigned request as unsigned' do
+      expect(server_client.send(:verify_smb2_request_signature, request.to_binary_s, request.smb2_header, session)).to eq :unsigned
+    end
+
+    it 'accepts a correctly signed request' do
+      signed = RubySMB::Signing.smb2_sign(request, session_key)
+      expect(server_client.send(:verify_smb2_request_signature, signed.to_binary_s, signed.smb2_header, session)).to eq :valid
+    end
+
+    it 'rejects a request signed with another key' do
+      signed = RubySMB::Signing.smb2_sign(request, Random.new.bytes(16))
+      expect(server_client.send(:verify_smb2_request_signature, signed.to_binary_s, signed.smb2_header, session)).to eq :invalid
+    end
+
+    context 'when the session is a guest' do
+      let(:session) do
+        RubySMB::Server::Session.new(0x1111, key: "\x00".b * 16, owner: server_client, user_id: 'WORKGROUP\\guest').tap do |guest_session|
+          guest_session.is_guest = true
+        end
+      end
+
+      it 'treats an unsigned request as unsigned' do
+        expect(server_client.send(:verify_smb2_request_signature, request.to_binary_s, request.smb2_header, session)).to eq :unsigned
+      end
+
+      it 'rejects a signed request because the guest key is null' do
+        signed = RubySMB::Signing.smb2_sign(request, session.key)
+        expect(server_client.send(:verify_smb2_request_signature, signed.to_binary_s, signed.smb2_header, session)).to eq :invalid
+      end
+    end
+  end
+
+  describe '#disconnect!' do
+    it 'discards the sessions, their trees, and open handles' do
+      session = RubySMB::Server::Session.new(0x1111, owner: server_client)
+      share_processor = double('ShareProcessor', disconnect!: nil)
+      session.tree_connect_table[0x2222] = share_processor
+      server_client.session_table[0x1111] = session
+      allow(dispatcher.tcp_socket).to receive(:closed?).and_return(false)
+      allow(dispatcher.tcp_socket).to receive(:close)
+
+      server_client.disconnect!
+
+      expect(share_processor).to have_received(:disconnect!)
+      expect(session.state).to eq :expired
+      expect(server_client.session_table).to be_empty
+    end
+  end
+
 end

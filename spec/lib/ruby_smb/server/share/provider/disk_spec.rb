@@ -36,10 +36,52 @@ end
 
 RSpec.describe RubySMB::Server::Share::Provider::Disk::Processor do
   let(:session) { RubySMB::Server::Session.new(rand(0xffffffff)) }
+  let(:server_client) { double('ServerClient') }
   let(:share_provider) { RubySMB::Server::Share::Provider::Disk.new('share', Dir.getwd) }
-  subject(:share_processor) { described_class.new(share_provider, nil, session) }
+  subject(:share_processor) { described_class.new(share_provider, server_client, session) }
 
   it { is_expected.to respond_to :provider }
+
+  describe '#owned_by?' do
+    it 'is true for the connection and session that created it' do
+      expect(share_processor.owned_by?(server_client, session)).to be true
+    end
+
+    it 'is false for another connection' do
+      expect(share_processor.owned_by?(double('OtherServerClient'), session)).to be false
+    end
+
+    it 'is false for another session' do
+      expect(share_processor.owned_by?(server_client, RubySMB::Server::Session.new(rand(0xffffffff)))).to be false
+    end
+  end
+
+  describe '#disconnect!' do
+    it 'closes every open handle and clears the table' do
+      handle = RubySMB::Server::Share::Provider::Disk::Processor::Handle.new('a', Pathname.new(Dir.getwd), false, StringIO.new('a'))
+      handles = share_processor.instance_variable_get(:@handles)
+      handles[1] = handle
+
+      share_processor.disconnect!
+
+      expect(handle.file).to be_closed
+      expect(handles).to be_empty
+    end
+
+    it 'keeps clearing handles when one close raises' do
+      good = StringIO.new('good')
+      bad = StringIO.new('bad')
+      allow(bad).to receive(:close).and_raise(IOError)
+      handles = share_processor.instance_variable_get(:@handles)
+      handles[1] = RubySMB::Server::Share::Provider::Disk::Processor::Handle.new('bad', Pathname.new(Dir.getwd), false, bad)
+      handles[2] = RubySMB::Server::Share::Provider::Disk::Processor::Handle.new('good', Pathname.new(Dir.getwd), false, good)
+
+      share_processor.disconnect!
+
+      expect(good).to be_closed
+      expect(handles).to be_empty
+    end
+  end
 
   describe '#maximal_access' do
     # no path specified should be the root of the share

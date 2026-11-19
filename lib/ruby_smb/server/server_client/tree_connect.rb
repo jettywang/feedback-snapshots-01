@@ -5,6 +5,12 @@ module RubySMB
       module TreeConnect
         def do_tree_connect_smb1(request, session)
           # see: https://docs.microsoft.com/en-us/openspecs/windows_protocols/ms-cifs/b062f3e3-1b65-4a9a-854a-0ee432499d8f
+          unless session.owned_by?(self)
+            response = SMB1::Packet::EmptyPacket.new
+            response.smb_header.nt_status = SMBError::STATUS_SMB_BAD_UID
+            return response
+          end
+
           response = RubySMB::SMB1::Packet::TreeConnectResponse.new
 
           share_name = request.data_block.path.split('\\', 4).last
@@ -27,8 +33,10 @@ module RubySMB
         end
 
         def do_tree_disconnect_smb1(request, session)
+          return unless session.owned_by?(self)
+
           share_processor = session.tree_connect_table.delete(request.smb_header.tid)
-          if share_processor.nil?
+          if share_processor.nil? || !share_processor.owned_by?(self, session)
             response = RubySMB::SMB1::Packet::EmptyPacket.new
             response.smb_header.nt_status = WindowsError::NTStatus::STATUS_NETWORK_NAME_DELETED
             return response
@@ -45,15 +53,18 @@ module RubySMB
 
           response = RubySMB::SMB2::Packet::TreeConnectResponse.new
           response.smb2_header.credits = 1
+          unless session.owned_by?(self)
+            response.smb2_header.nt_status = WindowsError::NTStatus::STATUS_USER_SESSION_DELETED
+            return response
+          end
           if session.tree_connect_table.length >= MAX_TREE_CONNECTIONS
             logger.warn('Connection has reached the maximum number of tree connections')
             response.smb2_header.nt_status = WindowsError::NTStatus::STATUS_INSUFFICIENT_RESOURCES
             return response
           end
 
-          share_name = request.path.encode.split('\\', 4).last
+          share_name = request.path.encode('UTF-8').split('\\', 4).last
           share_provider = @server.shares.transform_keys(&:downcase)[share_name.downcase]
-
           if share_provider.nil?
             logger.warn("Received TREE_CONNECT request for non-existent share: #{share_name}")
             response.smb2_header.nt_status = WindowsError::NTStatus::STATUS_BAD_NETWORK_NAME
@@ -83,8 +94,10 @@ module RubySMB
         end
 
         def do_tree_disconnect_smb2(request, session)
+          return unless session.owned_by?(self)
+
           share_processor = session.tree_connect_table.delete(request.smb2_header.tree_id)
-          if share_processor.nil?
+          if share_processor.nil? || !share_processor.owned_by?(self, session)
             response = SMB2::Packet::ErrorPacket.new
             response.smb2_header.nt_status = WindowsError::NTStatus::STATUS_NETWORK_NAME_DELETED
             return response

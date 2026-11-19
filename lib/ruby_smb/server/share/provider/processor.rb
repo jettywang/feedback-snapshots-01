@@ -12,6 +12,18 @@ module RubySMB
               @session = session
             end
 
+            # Whether or not this processor belongs to the specified connection
+            # and session. Numeric tree and file identifiers are scoped to the
+            # processor that issued them, so ownership must be checked instead
+            # of relying on a key simply existing in a table.
+            #
+            # @param [RubySMB::Server::ServerClient] server_client the connection to check
+            # @param [RubySMB::Server::Session] session the session to check
+            # @return [Boolean]
+            def owned_by?(server_client, session)
+              @server_client.equal?(server_client) && @session.equal?(session)
+            end
+
             # Get the maximum access that can be obtained for the specified
             # path. If no path is specified, the maximum access for the share as
             # a whole is returned.

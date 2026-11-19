@@ -279,6 +279,10 @@ module RubySMB
         raw = smb2_ntlmssp_authenticate(type3_message, @session_id)
         response = smb2_ntlmssp_final_packet(raw)
         @session_is_guest = response.session_flags.guest == 1
+        # A guest session has a null session key, so it can neither sign nor
+        # verify signed traffic. Do not attempt to sign on its behalf even if
+        # the server advertised signing as required.
+        self.signing_required = false if @session_is_guest
 
         if @smb3
           if response.session_flags.encrypt_data == 1

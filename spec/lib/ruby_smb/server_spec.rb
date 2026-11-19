@@ -1,6 +1,8 @@
 RSpec.describe RubySMB::Server do
+  let(:server_socket) { double('TCPServer') }
+
   before(:each) do
-    allow(::TCPServer).to receive(:new).and_return(::TCPServer.new(0))
+    allow(::TCPServer).to receive(:new).and_return(server_socket)
   end
 
   it { is_expected.to respond_to :dialects }
@@ -9,7 +11,7 @@ RSpec.describe RubySMB::Server do
 
   describe '#initialize' do
     it 'should bind to TCP port 445 by default' do
-      expect(::TCPServer).to receive(:new).with(445).and_return(::TCPServer.new(0))
+      expect(::TCPServer).to receive(:new).with(445).and_return(server_socket)
       described_class.new
     end
 

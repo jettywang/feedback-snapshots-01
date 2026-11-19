@@ -183,6 +183,13 @@ module RubySMB
       # Disconnect the remote client.
       #
       def disconnect!
+        @session_table.each_value do |session|
+          session.logoff!
+          session.state = :expired
+        end
+        @session_table.clear
+        @smb2_related_operations_state.clear
+        @in_packet_queue.clear
         @dialect = nil
         @dispatcher.tcp_socket.close unless @dispatcher.tcp_socket.closed?
       end
@@ -230,7 +237,7 @@ module RubySMB
         end
         session = @session_table[session_id]
 
-        unless session.nil? || session.is_anonymous || session.key.nil? || packet.is_a?(RubySMB::SMB2::Packet::TransformHeader)
+        unless session.nil? || session.is_anonymous || session.is_guest || session.key.nil? || packet.is_a?(RubySMB::SMB2::Packet::TransformHeader)
           case metadialect&.family
           when Dialect::FAMILY_SMB1
             packet = Signing::smb1_sign(packet, session.key, @sequence_counter)
@@ -343,7 +350,7 @@ module RubySMB
           @smb2_related_operations_state[:session_id] = header.session_id
         else
           # see: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-smb2/46dd4182-62d3-4e30-9fe5-e2ec124edca1
-          if @smb2_related_operations_state.fetch(:session_id) == 0 && session_required
+          if @smb2_related_operations_state.fetch(:session_id, 0) == 0 && session_required
             response = SMB2::Packet::ErrorPacket.new
             response.smb2_header.nt_status = WindowsError::NTStatus::STATUS_INVALID_PARAMETER
             return response
@@ -360,6 +367,21 @@ module RubySMB
           response = SMB2::Packet::ErrorPacket.new
           response.smb2_header.nt_status = WindowsError::NTStatus::STATUS_NETWORK_SESSION_EXPIRED
           return response
+        end
+
+        unless session.nil? || header.command == SMB2::Commands::SESSION_SETUP
+          case verify_smb2_request_signature(raw_request, header, session)
+          when :unsigned
+            if session.signing_required
+              response = SMB2::Packet::ErrorPacket.new
+              response.smb2_header.nt_status = WindowsError::NTStatus::STATUS_ACCESS_DENIED
+              return response
+            end
+          when :invalid
+            response = SMB2::Packet::ErrorPacket.new
+            response.smb2_header.nt_status = WindowsError::NTStatus::STATUS_INVALID_SIGNATURE
+            return response
+          end
         end
 
         case header.command
@@ -450,6 +472,53 @@ module RubySMB
         response
       end
 
+      #
+      # Verify the signature on an SMB2 request against the session it claims
+      # to belong to. Requests that are not signed are reported as unsigned so
+      # the caller can enforce the session's signing requirement.
+      #
+      # @param [String] raw_request the raw request bytes
+      # @param [RubySMB::SMB2::SMB2Header] header the parsed request header
+      # @param [RubySMB::Server::Session] session the session the request was routed to
+      # @return [Symbol] :valid, :invalid or :unsigned
+      def verify_smb2_request_signature(raw_request, header, session)
+        # Guest and anonymous sessions have a null session key. A signature on
+        # their traffic can not be authenticated, so it is not accepted as
+        # proof of ownership, and their access remains governed by the guest
+        # identity.
+        if session.is_anonymous || session.is_guest
+          return header.flags.signed == 0 ? :unsigned : :invalid
+        end
+
+        return :unsigned if header.flags.signed == 0
+        return :invalid if session.key.nil? || session.key.empty?
+
+        signature = header.signature.to_s
+        zeroed = raw_request.dup
+        zeroed[RubySMB::SMB2::SMB2_HEADER_SIGNATURE_OFFSET, 16] = "\x00" * 16
+        data = zeroed
+        other = case metadialect&.family
+        when Dialect::FAMILY_SMB2
+          OpenSSL::HMAC.digest(OpenSSL::Digest.new('SHA256'), session.key, data)[0, 16]
+        when Dialect::FAMILY_SMB3
+          case @dialect
+          when '0x0300', '0x0302'
+            signing_key = Crypto::KDF.counter_mode(session.key, "SMB2AESCMAC\x00", "SmbSign\x00")
+            OpenSSL::CMAC.digest('AES', signing_key, data)[0, 16]
+          when '0x0311'
+            return :invalid if @preauth_integrity_hash_value.nil?
+            signing_key = Crypto::KDF.counter_mode(session.key, "SMBSigningKey\x00", @preauth_integrity_hash_value)
+            OpenSSL::CMAC.digest('AES', signing_key, data)[0, 16]
+          else
+            return :invalid
+          end
+        else
+          return :invalid
+        end
+
+        OpenSSL.secure_compare(signature, other) ? :valid : :invalid
+      end
+
       def handle_smb3_transform(raw_request, header)
         session = @session_table[header.session_id]
         if session.nil?
@@ -457,7 +526,6 @@ module RubySMB
           response.smb2_header.nt_status = WindowsError::NTStatus::STATUS_USER_SESSION_DELETED
           return response
         end
-
         chain = split_smb2_chain(smb3_decrypt(header, session))
         chain[0...-1].each do |pt_raw_request|
           pt_response = _handle_smb2(pt_raw_request)

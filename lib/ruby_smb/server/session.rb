@@ -7,10 +7,12 @@ module RubySMB
       # @param [String] key This session's key.
       # @param [Symbol] state The state that this session is in.
       # @param user_id The identity of the user associated with this session.
-      def initialize(id, key: nil, state: :in_progress, user_id: nil)
+      # @param owner The server client connection that created this session.
+      def initialize(id, key: nil, state: :in_progress, user_id: nil, owner: nil)
         @id = id
         @key = key
         @user_id = user_id
+        @owner = owner
         @state = state
         @signing_required = false
         @metadata = {}
@@ -33,6 +35,21 @@ module RubySMB
         @tree_connect_table.values.each { |share_processor| share_processor.disconnect! }
         @tree_connect_table.clear
       end
+
+      # Whether or not this session is owned by the specified server client.
+      # Numeric session identifiers are only meaningful to the connection that
+      # created them.
+      #
+      # @param [RubySMB::Server::ServerClient] server_client the connection to check
+      # @return [Boolean]
+      def owned_by?(server_client)
+        @owner.equal?(server_client)
+      end
+
+      # The server client connection that created and owns this session.
+      # @!attribute [r] owner
+      # @return [RubySMB::Server::ServerClient, nil]
+      attr_reader :owner
 
       # This session's unique identifier.
       # @!attribute [rw] id

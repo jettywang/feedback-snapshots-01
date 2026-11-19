@@ -4,7 +4,7 @@ module RubySMB
       module ShareIO
         def proxy_share_io_smb1(request, session)
           share_processor = session.tree_connect_table[request.smb_header.tid]
-          if share_processor.nil?
+          if share_processor.nil? || !share_processor.owned_by?(self, session)
             response = SMB1::Packet::EmptyPacket.new
             response.smb_header.nt_status = WindowsError::NTStatus::STATUS_NETWORK_NAME_DELETED
             return response
@@ -26,7 +26,7 @@ module RubySMB
             @smb2_related_operations_state[:tree_id] = request.smb2_header.tree_id
           else
             # see: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-smb2/46dd4182-62d3-4e30-9fe5-e2ec124edca1
-            if @smb2_related_operations_state.fetch(:tree_id) == 0
+            if @smb2_related_operations_state.fetch(:tree_id, 0) == 0
               response = SMB2::Packet::ErrorPacket.new
               response.smb2_header.nt_status = WindowsError::NTStatus::STATUS_INVALID_PARAMETER
               return response
@@ -34,7 +34,7 @@ module RubySMB
             share_processor = session.tree_connect_table[@smb2_related_operations_state[:tree_id]]
           end
 
-          if share_processor.nil?
+          if share_processor.nil? || !share_processor.owned_by?(self, session)
             response = SMB2::Packet::ErrorPacket.new
             response.smb2_header.nt_status = WindowsError::NTStatus::STATUS_NETWORK_NAME_DELETED
             return response

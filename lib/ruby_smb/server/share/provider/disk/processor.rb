@@ -24,6 +24,22 @@ module RubySMB
               @query_directory_context = {}
             end
 
+            # Close any files that are still open when the tree connection is
+            # torn down. Handles are owned by this processor (a single client
+            # connection and session), so they must not outlive it.
+            def disconnect!
+              @handles.each_value do |handle|
+                begin
+                  handle.file.close if handle.file && !handle.file.closed?
+                rescue IOError, SystemCallError
+                  # the handle is being discarded regardless, do not let cleanup
+                  # of one file prevent the rest from being released
+                end
+              end
+              @handles.clear
+              @query_directory_context.clear
+            end
+
             def maximal_access(path=nil)
               RubySMB::SMB2::BitField::FileAccessMask.new(
                 read_attr: 1,
@@ -157,7 +173,7 @@ module RubySMB
               when Field::Smb2Fileid
                 local_path = @handles[path.to_binary_s]&.local_path
               when ::String
-                path = path.encode.gsub(/\/|\\/, File::SEPARATOR)
+                path = path.encode('UTF-8').gsub(/\/|\\/, File::SEPARATOR)
                 path = path.delete_prefix(File::SEPARATOR)
                 local_path = (provider.path + path.encode).cleanpath
                 unless local_path == provider.path || local_path.to_s.start_with?(provider.path.to_s.delete_suffix(File::SEPARATOR) + File::SEPARATOR)

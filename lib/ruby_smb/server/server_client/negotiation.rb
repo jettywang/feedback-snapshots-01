@@ -86,6 +86,7 @@ module RubySMB
           response.smb2_header.credits = 1
           response.smb2_header.message_id = request.smb2_header.message_id
           response.security_mode.signing_enabled = 1
+          response.security_mode.signing_required = 1
           response.server_guid = @server.guid
           response.max_transact_size = 0x800000
           response.max_read_size = 0x800000

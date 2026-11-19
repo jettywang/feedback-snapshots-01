@@ -7,6 +7,7 @@ RSpec.describe RubySMB::Server::Session do
   it { is_expected.to respond_to :signing_required }
   it { is_expected.to respond_to :tree_connect_table }
   it { is_expected.to respond_to :creation_time }
+  it { is_expected.to respond_to :owner }
 
   describe '#initialize' do
     it 'starts with no signing required' do
@@ -32,6 +33,22 @@ RSpec.describe RubySMB::Server::Session do
 
       it 'is true' do
         expect(session.is_anonymous).to be_truthy
+      end
+    end
+  end
+
+  describe '#owned_by?' do
+    it 'is false when no owner is set' do
+      expect(session.owned_by?(Object.new)).to be false
+    end
+
+    context 'when an owner is set' do
+      let(:owner) { Object.new }
+      subject(:session) { described_class.new(rand(0xffffffff), user_id: user_id, owner: owner) }
+
+      it 'is true only for the owning connection' do
+        expect(session.owned_by?(owner)).to be true
+        expect(session.owned_by?(Object.new)).to be false
       end
     end
   end
