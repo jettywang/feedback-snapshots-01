@@ -437,6 +437,63 @@ class BodyPartReader:
             self._at_eof = True
         return chunk
 
+    def _is_boundary_line(self, line: bytes) -> bool:
+        """Return True if *line* is exactly a delimiter line."""
+        return line.rstrip(b" \t\r\n") in (self._boundary, self._boundary + b"--")
+
+    def _classify_boundary_at(
+        self, window: bytes, idx: int, *, at_eof: bool
+    ) -> bool | None:
+        """Check whether window[idx:] starts a complete delimiter line.
+
+        A delimiter is the boundary, optionally followed by ``--``, transport
+        padding and a line terminator. ``None`` means the bytes read so far
+        stop inside that line, so the caller has to decide on a later read.
+        """
+        pos = idx + self._boundary_len
+        suffix = window[pos:]
+        offset = 0
+        if suffix[:1] == b"-":
+            if len(suffix) == 1:
+                return False if at_eof else None
+            if suffix[1:2] != b"-":
+                return False
+            offset = 2
+        while offset < len(suffix) and suffix[offset] in b" \t":
+            offset += 1
+        if offset == len(suffix):
+            return True if at_eof else None
+        terminator = suffix[offset : offset + 1]
+        if terminator == b"\n":
+            return True
+        if terminator == b"\r":
+            if offset + 1 == len(suffix):
+                return True if at_eof else None
+            return suffix[offset + 1 : offset + 2] == b"\n"
+        return False
+
+    def _find_boundary(
+        self, window: bytes, start: int, *, at_eof: bool
+    ) -> tuple[int, bool]:
+        """Return the next delimiter position and whether it needs more data."""
+        sub = b"\r\n" + self._boundary
+        while True:
+            idx = window.find(sub, start)
+            if idx < 0:
+                return -1, False
+            verdict = self._classify_boundary_at(window, idx, at_eof=at_eof)
+            if verdict is True:
+                return idx, False
+            if verdict is None:
+                return idx, True
+            # Only a prefix of the boundary matched, keep looking.
+            start = idx + 1
+
+    def _unread_content(self, data: bytes) -> None:
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=DeprecationWarning)
+            self._content.unread_data(data)
+
     async def _read_chunk_from_stream(self, size: int) -> bytes:
         # Reads content chunk of body part with unknown length.
         # The Content-Length header for body part is not necessary.
@@ -452,32 +509,57 @@ class BodyPartReader:
         # content.read() may return less than size, so we need to loop to ensure
         # we have enough data to detect the boundary.
         while len(chunk) < self._boundary_len:
-            chunk += await self._content.read(size)
+            fresh = await self._content.read(size)
+            chunk += fresh
             self._content_eof += int(self._content.at_eof())
             if self._content_eof > 2:
                 raise ValueError("Reading after EOF")
-            if self._content_eof:
+            if self._content_eof or not fresh:
                 break
-        if len(chunk) > size:
-            self._content.unread_data(chunk[size:])
-            chunk = chunk[:size]
 
         assert self._prev_chunk is not None
-        window = self._prev_chunk + chunk
         sub = b"\r\n" + self._boundary
-        if first_chunk:
-            idx = window.find(sub)
-        else:
-            idx = window.find(sub, max(0, len(self._prev_chunk) - len(sub)))
+        start = 0 if first_chunk else max(0, len(self._prev_chunk) - len(sub))
+        idx, pending = self._find_boundary(
+            self._prev_chunk + chunk, start, at_eof=self._content.at_eof()
+        )
+        # A delimiter that stops in the middle of its line may still turn out
+        # to be body text (for example "\r\n--boundaryx"). Read on until the
+        # line is complete, but only while the delimiter would fall inside the
+        # data this call is about to hand back.
+        while pending and self._content_eof == 0:
+            if idx > len(self._prev_chunk) + size:
+                break
+            fresh = await self._content.read(size)
+            if not fresh:
+                self._content_eof += 1
+                idx, pending = self._find_boundary(
+                    self._prev_chunk + chunk, start, at_eof=True
+                )
+                break
+            chunk += fresh
+            self._content_eof += int(self._content.at_eof())
+            if self._content_eof > 2:
+                raise ValueError("Reading after EOF")
+            idx, pending = self._find_boundary(
+                self._prev_chunk + chunk, start, at_eof=self._content.at_eof()
+            )
+
+        window = self._prev_chunk + chunk
         if idx >= 0:
-            # pushing boundary back to content
-            with warnings.catch_warnings():
-                warnings.filterwarnings("ignore", category=DeprecationWarning)
-                self._content.unread_data(window[idx:])
+            # Keep every byte from the delimiter onwards for the reader above.
+            # Lookahead is capped at `size`, so the delimiter must stay inside
+            # that window or be pushed back with the bytes before it.
+            keep = min(idx, len(self._prev_chunk) + size)
+            self._unread_content(window[keep:])
+            chunk = window[len(self._prev_chunk) : keep]
             self._prev_chunk = self._prev_chunk[:idx]
-            chunk = window[len(self._prev_chunk) : idx]
             if not chunk:
                 self._at_eof = True
+        else:
+            if len(chunk) > size:
+                self._unread_content(chunk[size:])
+                chunk = chunk[:size]
         result = self._prev_chunk[2 if first_chunk else 0 :]  # Strip initial CRLF
         self._prev_chunk = chunk
         return result
@@ -492,23 +574,18 @@ class BodyPartReader:
         else:
             line = await self._content.readline()
 
-        if line.startswith(self._boundary):
-            # the very last boundary may not come with \r\n,
-            # so set single rules for everyone
-            sline = line.rstrip(b"\r\n")
-            boundary = self._boundary
-            last_boundary = self._boundary + b"--"
-            # ensure that we read exactly the boundary, not something alike
-            if sline == boundary or sline == last_boundary:
-                self._at_eof = True
-                self._unread.append(line)
-                return b""
-        else:
-            next_line = await self._content.readline()
-            if next_line.startswith(self._boundary):
-                line = line[:-2]  # strip CRLF but only once
-            self._unread.append(next_line)
+        if self._is_boundary_line(line):
+            # A delimiter line is the boundary (optionally followed by the
+            # closing "--") and nothing else; a line that merely starts with
+            # the same bytes is body content.
+            self._at_eof = True
+            self._unread.append(line)
+            return b""
 
+        next_line = await self._content.readline()
+        if self._is_boundary_line(next_line):
+            line = line[:-2]  # strip CRLF but only once
+        self._unread.append(next_line)
         return line
 
     async def release(self) -> None:

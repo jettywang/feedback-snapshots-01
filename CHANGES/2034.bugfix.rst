@@ -1,0 +1,4 @@
+Fixed :class:`~aiohttp.BodyPartReader` treating a line that merely starts with
+the boundary bytes (``\r\n--boundaryx``) as a delimiter, which handed the rest
+of a part to the wrong reader. Delimiters are now validated as a whole line,
+and bytes following a delimiter are pushed back unchanged.

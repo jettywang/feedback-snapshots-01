@@ -2010,3 +2010,378 @@ async def test_multipart_writer_consumed_follows_body_part_reader() -> None:
 
         assert part.consumed is True
         assert writer.consumed is True
+
+
+
+
+# --- Boundary-aware mutation tests -----------------------------------------
+#
+# Layouts below are assembled from raw bytes rather than MultipartWriter, so the
+# expected partition into parts is fixed before the reader runs: part identity
+# and body bytes are stated up front, not recovered from the reader. Every valid
+# rendering of a layout must produce the same answer, no matter how the input is
+# sliced or how a part is consumed.
+
+_CRLF = b"\r\n"
+
+
+def _render_part(
+    boundary: bytes,
+    headers: list[tuple[str, str]],
+    body: bytes,
+) -> bytes:
+    """Serialise a part starting at its delimiter and ending after *body*."""
+    out = [b"--", boundary, _CRLF]
+    for name, value in headers:
+        out += [name.encode("ascii"), b": ", value.encode("ascii"), _CRLF]
+    out += [_CRLF, body, _CRLF]
+    return b"".join(out)
+
+
+def _render_multipart(
+    boundary: bytes,
+    parts: list[tuple[list[tuple[str, str]], bytes]],
+    *,
+    close_padding: bytes = b"",
+    preface: bytes = b"",
+    epilogue: bytes = b"",
+) -> bytes:
+    """Serialise a whole body: each part, then the closing delimiter."""
+    out = [preface]
+    for headers, body in parts:
+        out.append(_render_part(boundary, headers, body))
+    out += [b"--", boundary, b"--", close_padding, _CRLF, epilogue]
+    return b"".join(out)
+
+
+def _slices(data: bytes, sizes: tuple[int, ...]) -> list[bytes]:
+    """Cut *data* into a repeating pattern of slice sizes."""
+    out = []
+    pos = 0
+    i = 0
+    while pos < len(data):
+        n = sizes[i % len(sizes)]
+        out.append(data[pos : pos + n])
+        pos += n
+        i += 1
+    return out
+
+
+class SliceStream(Stream):
+    """Stream fed as a list of byte slices, capped by the requested size."""
+
+    def __init__(self, slices: list[bytes]) -> None:
+        super().__init__(b"".join(slices))
+        self._slices = [s for s in slices if s]
+
+    async def read(self, size: int | None = None) -> bytes:
+        if not self._slices:
+            return b""
+        data = self._slices.pop(0)
+        if size is not None and len(data) > size:
+            self._slices.insert(0, data[size:])
+            data = data[:size]
+        return data
+
+    async def readline(self, *, max_line_length: int | None = None) -> bytes:
+        line = b""
+        while self._slices and b"\n" not in line:
+            head = self._slices.pop(0)
+            newline = head.find(b"\n")
+            if newline >= 0:
+                line += head[: newline + 1]
+                if head[newline + 1 :]:
+                    self._slices.insert(0, head[newline + 1 :])
+            else:
+                line += head
+        return line
+
+    def unread_data(self, data: bytes) -> None:
+        if data:
+            self._slices.insert(0, data)
+
+    def at_eof(self) -> bool:
+        return not self._slices
+
+    def remaining(self) -> bytes:
+        return b"".join(self._slices)
+
+
+async def _walk(reader: MultipartReader, size: int | None) -> list:
+    """Consume a reader tree, recording identity, headers and body bytes."""
+
+    async def take(part: BodyPartReader) -> bytes:
+        if size is None:
+            return bytes(await part.read())
+        out = bytearray()
+        while True:
+            chunk = await part.read_chunk(size)
+            out += chunk
+            if part.at_eof():
+                return bytes(out)
+            assert chunk, "reader made no progress"
+
+    result = []
+    while True:
+        part = await reader.next()
+        if part is None:
+            break
+        if isinstance(part, MultipartReader):
+            result.append(("nested", await _walk(part, size)))
+        else:
+            result.append(
+                (
+                    "part",
+                    part.headers.get(CONTENT_TYPE),
+                    part.headers.get(CONTENT_DISPOSITION),
+                    await take(part),
+                )
+            )
+    return result
+
+
+def _entry(headers: list[tuple[str, str]], body: bytes) -> tuple:
+    return (
+        "part",
+        dict(headers).get(CONTENT_TYPE),
+        dict(headers).get(CONTENT_DISPOSITION),
+        body,
+    )
+
+
+_INNER = b"boundary-inner"
+_OUTER = b"boundary"
+
+_INNER_PARTS: list[tuple[list[tuple[str, str]], bytes]] = [
+    (
+        [
+            ("Content-Type", "text/plain"),
+            ("Content-Disposition", 'attachment; filename="a.txt"'),
+        ],
+        b"alpha\r\n--boundary-innerx stays text\r\n--boundaryx stays text",
+    ),
+    (
+        [
+            ("Content-Type", "text/plain"),
+            ("Content-Disposition", 'attachment; filename="b.txt"'),
+        ],
+        b"beta\r\n--boundary-inner--not-a-close\r\n--boundary--not-a-close",
+    ),
+]
+
+_OUTER_THIRD = (
+    [
+        ("Content-Type", "text/plain"),
+        ("Content-Disposition", 'attachment; filename="c.txt"'),
+    ],
+    b"tail\r\n--boundaryx still text\r\n--boundary-innerx unrelated",
+)
+
+
+def _outer_parts() -> list[tuple[list[tuple[str, str]], bytes]]:
+    return [
+        (
+            [("Content-Type", f"multipart/related; boundary={_INNER.decode()}")],
+            _render_multipart(_INNER, _INNER_PARTS, preface=b"inner preface\r\n"),
+        ),
+        _OUTER_THIRD,
+        (
+            [
+                ("Content-Type", "text/plain"),
+                ("Content-Disposition", 'attachment; filename="d.txt"'),
+            ],
+            b"end\r\n\r\n--boundary-innerx unrelated",
+        ),
+    ]
+
+
+def _outer_bytes(**kwargs) -> bytes:
+    return _render_multipart(_OUTER, _outer_parts(), **kwargs)
+
+
+def _expected_tree() -> list:
+    return [
+        ("nested", [_entry(headers, body) for headers, body in _INNER_PARTS]),
+        _entry(*_OUTER_THIRD),
+        _entry(*_outer_parts()[2]),
+    ]
+
+
+@pytest.mark.parametrize(
+    "sizes",
+    [(1,), (2, 3), (5,), (7, 1, 11), (64,), None],
+)
+@pytest.mark.parametrize("body_chunk", [None, 20, 32])
+async def test_boundary_layout_partition_is_slice_invariant(
+    sizes: tuple[int, ...] | None, body_chunk: int | None
+) -> None:
+    data = _outer_bytes(preface=b"outer preface\r\n", epilogue=b"outer epilogue\r\n")
+    slices = [data] if sizes is None else _slices(data, sizes)
+    stream = SliceStream(slices)
+    reader = MultipartReader(
+        {CONTENT_TYPE: f'multipart/mixed; boundary="{_OUTER.decode()}"'}, stream
+    )
+    assert await _walk(reader, body_chunk) == _expected_tree()
+    assert reader.at_eof()
+    assert stream.remaining() == b""
+
+
+async def test_boundary_layout_alternate_valid_paddings() -> None:
+    data = _outer_bytes(close_padding=b" \t", epilogue=b"")
+    reference = _outer_bytes(close_padding=b"", epilogue=b"discarded\r\n")
+    stream = SliceStream(_slices(data, (3,)))
+    reader = MultipartReader(
+        {CONTENT_TYPE: f'multipart/mixed; boundary="{_OUTER.decode()}"'}, stream
+    )
+    assert await _walk(reader, None) == _expected_tree()
+    # A padded close still ends the stream exactly where the unpadded one does.
+    assert stream.remaining() == b""
+    other = SliceStream(_slices(reference, (4,)))
+    reader = MultipartReader(
+        {CONTENT_TYPE: f'multipart/mixed; boundary="{_OUTER.decode()}"'}, other
+    )
+    assert await _walk(reader, None) == _expected_tree()
+    assert other.remaining() == b""
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        b"x",
+        b"-",
+        b"---",
+        b"--tail",
+        b" not a delimiter",
+        b"\tx",
+        b"x\r\n\r\n--boundary-inner",
+    ],
+)
+async def test_boundary_prefix_in_body_stays_in_body(suffix: bytes) -> None:
+    body = (
+        b"head\r\n--boundary"
+        + suffix
+        + b"\r\nmid\r\n--boundary"
+        + suffix
+        + b"\r\n\r\n--boundary-innerx"
+    )
+    data = _render_multipart(
+        _OUTER,
+        [
+            ([("Content-Type", "text/plain")], body),
+            ([("Content-Type", "text/plain")], b"next"),
+        ],
+    )
+    for sizes in ((1,), (3, 4), None):
+        stream = SliceStream([data] if sizes is None else _slices(data, sizes))
+        reader = MultipartReader(
+            {CONTENT_TYPE: f'multipart/mixed; boundary="{_OUTER.decode()}"'}, stream
+        )
+        first = await reader.next()
+        assert isinstance(first, BodyPartReader)
+        assert await first.read() == body
+        second = await reader.next()
+        assert isinstance(second, BodyPartReader)
+        assert await second.read() == b"next"
+        assert await reader.next() is None
+
+
+@pytest.mark.parametrize("closing", [b"--", b"--\r\n", b"-- \t\r\n"])
+async def test_closing_boundary_variants(closing: bytes) -> None:
+    data = (
+        b"--boundary\r\nContent-Type: text/plain\r\n\r\nbody\r\n--boundary"
+        + closing
+    )
+    stream = SliceStream(_slices(data, (2, 5, 1)))
+    reader = MultipartReader(
+        {CONTENT_TYPE: 'multipart/mixed; boundary="boundary"'}, stream
+    )
+    part = await reader.next()
+    assert isinstance(part, BodyPartReader)
+    assert await part.read() == b"body"
+    assert await reader.next() is None
+    assert reader.at_eof()
+    assert stream.remaining() == b""
+
+
+@pytest.mark.parametrize(
+    "layout",
+    [
+        b"--:\r\nContent-Type: text/plain\r\n\r\nab\r\n--:",
+        b"--:\r\nContent-Type: text/plain\r\n\r\nab\r\n"
+        b"--:\r\nContent-Type: text/plain\r\n\r\n",
+    ],
+)
+async def test_truncated_boundary_is_not_a_delimiter(layout: bytes) -> None:
+    stream = SliceStream(_slices(layout, (1, 2)))
+    reader = MultipartReader({CONTENT_TYPE: 'multipart/mixed; boundary=":"'}, stream)
+    with pytest.raises(ValueError):
+        while await reader.next() is not None:
+            pass
+
+
+@pytest.mark.parametrize("body_chunk", [None, 20])
+async def test_nested_lookahead_stays_within_inner_part(body_chunk: int | None) -> None:
+    data = _outer_bytes()
+    stream = SliceStream(_slices(data, (1, 4, 2, 7)))
+    reader = MultipartReader(
+        {CONTENT_TYPE: f'multipart/mixed; boundary="{_OUTER.decode()}"'}, stream
+    )
+    nested = await reader.next()
+    assert isinstance(nested, MultipartReader)
+    first = await nested.next()
+    assert isinstance(first, BodyPartReader)
+    # Stop mid-part: only the inner reader may consume the inner remainder.
+    seen = b""
+    while len(seen) < 20:
+        chunk = await first.read_chunk(20)
+        assert chunk
+        seen += chunk
+    assert seen == _INNER_PARTS[0][1][: len(seen)]
+    second = await nested.next()
+    assert isinstance(second, BodyPartReader)
+    assert await second.read() == _INNER_PARTS[1][1]
+    assert await nested.next() is None
+    third = await reader.next()
+    assert isinstance(third, BodyPartReader)
+    assert await third.read() == _OUTER_THIRD[1]
+    last = await reader.next()
+    assert isinstance(last, BodyPartReader)
+    assert await last.read() == _outer_parts()[2][1]
+    assert await reader.next() is None
+
+
+async def test_prefix_only_match_is_not_a_delimiter() -> None:
+    """Negative control: a matcher treating a prefix as the boundary fails."""
+    boundary = b"x"
+    body = b"body\r\n--xx"
+    data = _render_multipart(
+        boundary,
+        [
+            ([("Content-Type", "text/plain")], body),
+            ([("Content-Type", "text/plain")], b"next"),
+        ],
+    )
+    stream = SliceStream(_slices(data, (2, 3)))
+    reader = MultipartReader({CONTENT_TYPE: 'multipart/mixed; boundary="x"'}, stream)
+    first = await reader.next()
+    assert isinstance(first, BodyPartReader)
+    assert await first.read() == body
+    assert isinstance(await reader.next(), BodyPartReader)
+
+
+@pytest.mark.parametrize(
+    "sizes",
+    [(1,), (3,), (5,), (13, 2), None],
+)
+async def test_release_leaves_nothing_for_the_parent(
+    sizes: tuple[int, ...] | None,
+) -> None:
+    data = _outer_bytes()
+    stream = SliceStream([data] if sizes is None else _slices(data, sizes))
+    reader = MultipartReader(
+        {CONTENT_TYPE: f'multipart/mixed; boundary="{_OUTER.decode()}"'}, stream
+    )
+    await reader.release()
+    assert reader.at_eof()
+    assert stream.remaining() == b""
+    assert await reader.next() is None
