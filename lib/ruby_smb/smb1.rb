@@ -15,6 +15,7 @@ module RubySMB
     require 'ruby_smb/smb1/data_block'
     require 'ruby_smb/smb1/dialect'
     require 'ruby_smb/smb1/packet'
+    require 'ruby_smb/smb1/transaction_reassembler'
     require 'ruby_smb/smb1/tree'
     require 'ruby_smb/smb1/file'
     require 'ruby_smb/smb1/pipe'
