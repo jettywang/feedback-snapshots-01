@@ -1399,7 +1399,7 @@ class RegisterModelSettingsTest(TestCase):
 
         self.assertTrue(self.test_auditlog.contains(SimpleExcludeModel))
         self.assertTrue(self.test_auditlog.contains(ChoicesFieldModel))
-        self.assertEqual(len(self.test_auditlog.get_models()), 36)
+        self.assertEqual(len(self.test_auditlog.get_models()), 37)
 
     def test_register_models_register_model_with_attrs(self):
         self.test_auditlog._register_models(

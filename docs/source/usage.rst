@@ -167,6 +167,50 @@ the first half of the string with asterisks.
 
     Masking fields
 
+**Masking JSON values by path**
+
+``mask_fields`` masks a whole field. When a field stores a JSON document with
+only a few sensitive values inside it, use ``mask_json_paths`` to mask those
+values without hiding the rest of the document. Ordinary keys keep their
+original values and types in ``LogEntry.changes`` and ``LogEntry.serialized_data``.
+
+.. code-block:: python
+
+    auditlog.register(
+        VendorConfig,
+        mask_json_paths={
+            "payload": [
+                "vendor.access_token",
+                "vendors[*].access_token",
+            ],
+        },
+    )
+
+``mask_json_paths`` maps the name of a registered ``JSONField`` to one path or
+a list of paths. As an alternative, an iterable of ``field.path`` references
+may be passed, for example ``["payload.vendors[*].access_token"]``. Paths are
+relative to the JSON value of that field. Supported components are object keys
+(``vendor``), list indexes (``vendors[0]``), list wildcards
+(``vendors[*]``) and quoted keys for names containing dots
+(``credentials["api.key"]``). A leading ``$`` is optional.
+
+Every matched value is replaced with ``***``. Values changed by an update are
+stored as ``*** [changed]`` on the new side, so an investigator can tell that a
+credential changed without seeing it. Adding or removing a matching key or list
+item remains visible in the diff. The masking is applied when the log entry is
+created, so secrets are not present in the database, in the optional
+``serialized_data`` snapshot, or in ``changes_display_dict`` and the admin
+rendering. ``AUDITLOG_STORE_JSON_CHANGES`` controls whether the stored change
+is structured JSON (retaining Python types) or a string.
+
+``mask_json_paths`` is validated during registration: the field must exist and
+be a ``JSONField``, and every path must parse. Invalid declarations raise
+``AuditLogRegistrationError`` immediately.
+
+.. versionadded:: 3.5.0
+
+    Masking JSON values by path
+
 **Many-to-many fields**
 
 Changes to many-to-many fields are not tracked by default. If you want to enable tracking of a many-to-many field on a model, pass ``m2m_fields`` to the ``register`` method:
@@ -322,6 +366,9 @@ It must be a list or tuple. Each item in this setting can be a:
                 "field1": "FIELD",
             },
             "mask_fields": ["field5", "field6"],
+            "mask_json_paths": {
+                "field9": ["nested.secret", "items[*].token"],
+            },
             "m2m_fields": ["field7", "field8"],
             "serialize_data": True,
             "serialize_auditlog_fields_only": False,

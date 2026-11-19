@@ -10,6 +10,7 @@ from django.utils.encoding import smart_str
 from django.utils.module_loading import import_string
 
 from auditlog import get_logentry_model
+from auditlog.json_paths import mask_json_value_pair
 
 
 def track_field(field):
@@ -122,6 +123,48 @@ def get_field_value(obj, field, use_json_for_changes=False):
         return get_default_value()
 
     return value
+
+
+def _json_dumps_masked(value, field, has_instance):
+    """Serialize a masked JSON value exactly like get_field_value does.
+
+    ``has_instance`` is false for the side that does not exist (create or
+    delete).  A default of ``None`` is then rendered as ``"None"`` by
+    ``smart_str``, while an explicitly stored JSON ``null`` becomes ``"null"``.
+    """
+    if value is None:
+        return "null" if has_instance else "None"
+    try:
+        return json.dumps(value, sort_keys=True, cls=field.encoder)
+    except TypeError:
+        return smart_str(value)
+
+
+def _mask_json_field_values(field, old, new, paths, use_json_for_changes):
+    """Return a diff tuple for a JSONField with path-level masking applied.
+
+    Returns ``None`` for non-document values (``None`` or unevaluated
+    expressions such as ``Value(None)``): there are no nested paths to mask in
+    them, so the caller should use the regular representation instead.
+    """
+    raw_old = get_field_value(old, field, use_json_for_changes=True)
+    raw_new = get_field_value(new, field, use_json_for_changes=True)
+
+    if not isinstance(raw_old, (dict, list, tuple)) and not isinstance(
+        raw_new, (dict, list, tuple)
+    ):
+        return None
+
+    masked_old, masked_new = mask_json_value_pair(raw_old, raw_new, paths)
+
+    if use_json_for_changes:
+        return masked_old, masked_new
+
+    # Keep the historical representation for a missing model side (create
+    # and delete log entries).
+    old_display = _json_dumps_masked(masked_old, field, old is not None)
+    new_display = _json_dumps_masked(masked_new, field, new is not None)
+    return old_display, new_display
 
 
 def is_primitive(obj) -> bool:
@@ -256,7 +299,22 @@ def model_instance_diff(
         new_value = get_field_value(new, field, use_json_for_changes)
 
         if old_value != new_value:
-            if model_fields and field.name in model_fields["mask_fields"]:
+            json_mask_paths = (
+                model_fields.get("mask_json_paths", {}) if model_fields else {}
+            )
+            masked_json_values = None
+            if json_mask_paths and field.name in json_mask_paths:
+                masked_json_values = _mask_json_field_values(
+                    field,
+                    old,
+                    new,
+                    json_mask_paths[field.name],
+                    use_json_for_changes,
+                )
+
+            if masked_json_values is not None:
+                diff[field.name] = masked_json_values
+            elif model_fields and field.name in model_fields["mask_fields"]:
                 mask_func = get_mask_function(model_fields.get("mask_callable"))
 
                 diff[field.name] = (

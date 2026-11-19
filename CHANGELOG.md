@@ -2,6 +2,13 @@
 
 ## Next Release
 
+#### Improvements
+
+- feat: Add `mask_json_paths` to model registration to mask values inside
+  `JSONField` documents by JSON path. Ordinary values keep their types, while
+  masked secrets are never persisted in `changes`, `serialized_data` or the
+  display representation.
+
 ## 3.4.2 (2026-11-08)
 
 #### Improvements

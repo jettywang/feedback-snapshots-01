@@ -26,6 +26,7 @@ from django.utils.translation import gettext_lazy as _
 
 from auditlog import get_logentry_model
 from auditlog.diff import get_mask_function
+from auditlog.json_paths import mask_json_value
 
 DEFAULT_OBJECT_REPR = "<error forming object repr>"
 
@@ -248,8 +249,11 @@ class LogEntryManager(models.Manager):
         )
 
         mask_fields = model_fields["mask_fields"]
-        if mask_fields:
-            data = self._mask_serialized_fields(data, mask_fields, model_fields)
+        mask_json_paths = model_fields.get("mask_json_paths") or {}
+        if mask_fields or mask_json_paths:
+            data = self._mask_serialized_fields(
+                data, mask_fields, model_fields, mask_json_paths
+            )
 
         return data
 
@@ -289,14 +293,23 @@ class LogEntryManager(models.Manager):
         return list(set(include_fields or all_field_names).difference(exclude_fields))
 
     def _mask_serialized_fields(
-        self, data: dict[str, Any], mask_fields: list[str], model_fields: dict[str, Any]
+        self,
+        data: dict[str, Any],
+        mask_fields: list[str],
+        model_fields: dict[str, Any],
+        mask_json_paths: dict[str, list[str]] | None = None,
     ) -> dict[str, Any]:
         all_field_data = data.pop("fields")
         mask_func = get_mask_function(model_fields.get("mask_callable"))
+        mask_json_paths = mask_json_paths or {}
 
         masked_field_data = {}
         for key, value in all_field_data.items():
-            if isinstance(value, str) and key in mask_fields:
+            if key in mask_json_paths and isinstance(value, (dict, list)):
+                masked_field_data[key] = mask_json_value(
+                    value, mask_json_paths[key]
+                )
+            elif isinstance(value, str) and key in mask_fields:
                 masked_field_data[key] = mask_func(value)
             else:
                 masked_field_data[key] = value
@@ -416,6 +429,41 @@ class AbstractLogEntry(models.Model):
         """
         return changes_func(self)
 
+    def get_json_masked_display_value(self, field_name, value):
+        """Return the display representation of one side of a field change.
+
+        Values of registered ``JSONField`` paths masked through
+        ``mask_json_paths`` are rendered as structured JSON so ordinary sibling
+        keys keep their type and a masked secret stays recognizable. The other
+        values keep the historical ``str``-based representation.
+        """
+        from auditlog.registry import auditlog
+
+        if not settings.AUDITLOG_STORE_JSON_CHANGES:
+            return value
+
+        model = self.content_type.model_class()
+        if model is None or not auditlog.contains(model._meta.model):
+            return str(value)
+
+        model_fields = auditlog.get_model_fields(model._meta.model)
+        if field_name not in (model_fields.get("mask_json_paths") or {}):
+            return str(value)
+
+        if value is None:
+            return str(value)
+
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except (TypeError, ValueError):
+                return value
+
+        try:
+            return json.dumps(value, sort_keys=True, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return str(value)
+
     @property
     def changes_str(self, colon=": ", arrow=" \u2192 ", separator="; "):
         """
@@ -460,16 +508,21 @@ class AbstractLogEntry(models.Model):
         # Get the model and model_fields, but gracefully handle the case where the model no longer exists
         model = self.content_type.model_class()
         model_fields = None
-        if auditlog.contains(model._meta.model):
+        if model is not None and auditlog.contains(model._meta.model):
             model_fields = auditlog.get_model_fields(model._meta.model)
 
         if settings.AUDITLOG_STORE_JSON_CHANGES:
             changes_dict = {}
             for field_name, values in self.changes_dict.items():
-                values_as_strings = [str(v) for v in values]
+                values_as_strings = [
+                    self.get_json_masked_display_value(field_name, v)
+                    for v in values
+                ]
                 changes_dict[field_name] = values_as_strings
         else:
             changes_dict = self.changes_dict
+
+        masked_json_fields = (model_fields or {}).get("mask_json_paths") or {}
 
         changes_display_dict = {}
         # grab the changes_dict and iterate through
@@ -527,7 +580,13 @@ class AbstractLogEntry(models.Model):
                         value = self._get_changes_display_for_fk_field(field, value)
 
                     truncate_at = settings.AUDITLOG_CHANGE_DISPLAY_TRUNCATE_LENGTH
-                    if 0 <= truncate_at < len(value):
+                    # Masked JSON is structured evidence; truncating it would
+                    # produce invalid JSON and hide which path changed.
+                    if (
+                        field_name not in masked_json_fields
+                        and isinstance(value, str)
+                        and 0 <= truncate_at < len(value)
+                    ):
                         value = value[:truncate_at] + ("..." if truncate_at > 0 else "")
 
                     values_display.append(value)

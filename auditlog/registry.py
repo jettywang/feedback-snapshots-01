@@ -4,7 +4,8 @@ from collections.abc import Callable, Collection, Iterable
 from typing import Any
 
 from django.apps import apps
-from django.db.models import ManyToManyField, Model
+from django.core.exceptions import FieldDoesNotExist
+from django.db.models import JSONField, ManyToManyField, Model
 from django.db.models.base import ModelBase
 from django.db.models.signals import (
     ModelSignal,
@@ -15,6 +16,11 @@ from django.db.models.signals import (
 )
 
 from auditlog.conf import settings
+from auditlog.json_paths import (
+    JSONPathError,
+    normalize_mask_json_paths,
+    parse_json_path,
+)
 from auditlog.signals import accessed
 
 DispatchUID = tuple[int, int, int]
@@ -67,6 +73,7 @@ class AuditlogModelRegistry:
         mapping_fields: dict[str, str] | None = None,
         mask_fields: list[str] | None = None,
         mask_callable: str | None = None,
+        mask_json_paths: dict[str, list[str]] | str | Iterable[str] | None = None,
         m2m_fields: Collection[str] | None = None,
         serialize_data: bool = False,
         serialize_kwargs: dict[str, Any] | None = None,
@@ -82,6 +89,10 @@ class AuditlogModelRegistry:
         :param mask_fields: The fields to mask for sensitive info.
         :param mask_callable: The dotted path to a callable that will be used for masking. If not provided,
                               the default mask_callable will be used.
+        :param mask_json_paths: JSON paths within ``JSONField`` values whose values must be masked.
+                                Accepts a mapping of field names to paths (for example
+                                ``{"payload": ["vendors[*].token"]}``) or an iterable of
+                                ``field.path`` references.
         :param m2m_fields: The fields to handle as many to many.
         :param serialize_data: Option to include a dictionary of the objects state in the auditlog.
         :param serialize_kwargs: Optional kwargs to pass to Django serializer
@@ -96,6 +107,7 @@ class AuditlogModelRegistry:
             mapping_fields = {}
         if mask_fields is None:
             mask_fields = []
+        mask_json_paths = normalize_mask_json_paths(mask_json_paths)
         if m2m_fields is None:
             m2m_fields = set()
         if serialize_kwargs is None:
@@ -118,12 +130,15 @@ class AuditlogModelRegistry:
             if not issubclass(cls, Model):
                 raise TypeError("Supplied model is not a valid model.")
 
+            self._validate_mask_json_paths(cls, mask_json_paths)
+
             self._registry[cls] = {
                 "include_fields": include_fields,
                 "exclude_fields": exclude_fields,
                 "mapping_fields": mapping_fields,
                 "mask_fields": mask_fields,
                 "mask_callable": mask_callable,
+                "mask_json_paths": mask_json_paths,
                 "m2m_fields": m2m_fields,
                 "serialize_data": serialize_data,
                 "serialize_kwargs": serialize_kwargs,
@@ -177,6 +192,10 @@ class AuditlogModelRegistry:
             "mapping_fields": dict(self._registry[model]["mapping_fields"]),
             "mask_fields": list(self._registry[model]["mask_fields"]),
             "mask_callable": self._registry[model]["mask_callable"],
+            "mask_json_paths": {
+                field: list(paths)
+                for field, paths in self._registry[model]["mask_json_paths"].items()
+            },
         }
 
     def get_serialize_options(self, model: ModelBase):
@@ -187,6 +206,34 @@ class AuditlogModelRegistry:
                 self._registry[model]["serialize_auditlog_fields_only"]
             ),
         }
+
+    def _validate_mask_json_paths(
+        self, model: ModelBase, mask_json_paths: dict[str, list[str]]
+    ) -> None:
+        """Validate JSON mask declarations while the model is registered."""
+        for field_name, paths in mask_json_paths.items():
+            try:
+                field = model._meta.get_field(field_name)
+            except FieldDoesNotExist as exc:
+                raise AuditLogRegistrationError(
+                    f"Cannot mask JSON paths on model '{model._meta.label}': "
+                    f"field '{field_name}' does not exist."
+                ) from exc
+
+            if not isinstance(field, JSONField):
+                raise AuditLogRegistrationError(
+                    f"Cannot mask JSON paths on model '{model._meta.label}': "
+                    f"field '{field_name}' is not a JSONField."
+                )
+
+            for path in paths:
+                try:
+                    parse_json_path(path)
+                except JSONPathError as exc:
+                    raise AuditLogRegistrationError(
+                        f"Invalid JSON mask path '{path}' for field "
+                        f"'{model._meta.label}.{field_name}': {exc}"
+                    ) from exc
 
     def _connect_signals(self, model):
         """

@@ -361,6 +361,15 @@ class NullableJSONModel(models.Model):
     history = AuditlogHistoryField(delete_related=False)
 
 
+class MaskedJSONModel(models.Model):
+    """A model whose nested JSON credentials must never be stored in the log."""
+
+    label = models.CharField(max_length=100)
+    payload = models.JSONField(default=dict)
+
+    history = AuditlogHistoryField(delete_related=False)
+
+
 class SerializeThisModel(models.Model):
     label = models.CharField(max_length=24, unique=True)
     timestamp = models.DateTimeField()
@@ -507,6 +516,16 @@ if settings.TEST_DB_BACKEND == "postgresql":
 auditlog.register(NoDeleteHistoryModel)
 auditlog.register(JSONModel)
 auditlog.register(NullableJSONModel)
+auditlog.register(
+    MaskedJSONModel,
+    serialize_data=True,
+    mask_json_paths={
+        "payload": [
+            "vendor.access_token",
+            "vendors[*].access_token",
+        ],
+    },
+)
 auditlog.register(
     SerializeThisModel,
     serialize_data=True,
