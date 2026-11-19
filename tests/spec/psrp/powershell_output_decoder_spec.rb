@@ -95,4 +95,27 @@ describe WinRM::PSRP::PowershellOutputDecoder do
       expect(subject).to match(/#{error_message}/)
     end
   end
+
+  describe '#clixml_view' do
+    let(:message_type) { WinRM::PSRP::Message::MESSAGE_TYPES[:pipeline_output] }
+    let(:data) do
+      '<Obj RefId="0"><MS>' \
+        '<S N="title">hello</S><I32 N="count">42</I32>' \
+        '<Obj N="shared" RefId="1"><MS><S N="k">v</S></MS></Obj>' \
+        '<Obj N="alias"><Obj RefId="1"/></Obj>' \
+      '</MS></Obj>'
+    end
+
+    let(:view) { described_class.new.clixml_view(message) }
+
+    it 'preserves primitive value types' do
+      expect(view[:members]['title'][:value]).to eq('hello')
+      expect(view[:members]['count'][:value]).to eq(42)
+    end
+
+    it 'preserves object identity through references' do
+      expect(view[:members]['alias'][:members]['Obj']).to eq(kind: 'reference', ref_id: 1)
+      expect(view[:members]['shared'][:ref_id]).to eq(1)
+    end
+  end
 end

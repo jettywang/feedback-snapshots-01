@@ -13,6 +13,7 @@
 # limitations under the License.
 
 require 'rexml/document' unless defined?(REXML::Document)
+require_relative '../clixml_parser'
 
 module WinRM
   module PSRP
@@ -21,6 +22,19 @@ module WinRM
       class PipelineOutput < Base
         def output
           extract_out_string(remove_bom(raw.force_encoding('utf-8')))
+        end
+
+        # Structured, evidence-preserving view of the CLIXML payload. Unlike
+        # #output this does not flatten values to strings: primitive values keep
+        # their Ruby type and object identity, type references and collection
+        # structure are retained for inspecting what the remote endpoint sent.
+        #
+        # @param max_depth [Integer] maximum nesting depth before truncation
+        # @param max_nodes [Integer] maximum number of nodes before truncation
+        # @return [Hash] the structured CLIXML representation
+        def clixml_view(max_depth: ClixmlParser::DEFAULT_MAX_DEPTH,
+                        max_nodes: ClixmlParser::DEFAULT_MAX_NODES)
+          ClixmlParser.new(max_depth: max_depth, max_nodes: max_nodes).parse(raw)
         end
 
         private

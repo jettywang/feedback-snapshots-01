@@ -13,6 +13,7 @@
 # limitations under the License.
 
 require 'nori'
+require_relative 'clixml_parser'
 require_relative 'powershell_output_decoder'
 require_relative 'message_defragmenter'
 
@@ -69,7 +70,64 @@ module WinRM
         end
       end
 
+      # Reads streams and returns structured CLIXML views alongside the decoded
+      # text output. The text output is identical to #read_output; each PSRP
+      # message that carries CLIXML additionally contributes a structured view
+      # preserving object identity, type information and primitive values.
+      #
+      # @param wsmv_message [WinRM::WSMV::Base] A wsmv message to send to endpoint
+      # @param max_depth [Integer] maximum CLIXML nesting depth before truncation
+      # @param max_nodes [Integer] maximum CLIXML nodes before truncation
+      # @yieldparam [String] standard out response text
+      # @yieldparam [String] standard error response text
+      # @return [Array<WinRM::Output, Array<Hash>>] text output and CLIXML views
+      def read_structured_output(
+        wsmv_message,
+        max_depth: ClixmlParser::DEFAULT_MAX_DEPTH,
+        max_nodes: ClixmlParser::DEFAULT_MAX_NODES
+      )
+        views = []
+        output = with_output do |out|
+          read_message(wsmv_message, true) do |message|
+            exit_code = find_exit_code(message)
+            out.exitcode = exit_code if exit_code
+
+            decoded_text = @output_decoder.decode(message)
+            if decoded_text
+              stream = { stream_type(message) => decoded_text }
+              out << stream
+              yield [stream[:stdout], stream[:stderr]] if block_given?
+            end
+
+            views << structured_view(message, max_depth, max_nodes) if clixml_message?(message)
+          end
+        end
+        [output, views]
+      end
+
       private
+
+      def clixml_message?(message)
+        [
+          WinRM::PSRP::Message::MESSAGE_TYPES[:pipeline_output],
+          WinRM::PSRP::Message::MESSAGE_TYPES[:error_record],
+          WinRM::PSRP::Message::MESSAGE_TYPES[:pipeline_host_call],
+          WinRM::PSRP::Message::MESSAGE_TYPES[:runspacepool_host_call],
+          WinRM::PSRP::Message::MESSAGE_TYPES[:pipeline_state]
+        ].include?(message.type)
+      end
+
+      def structured_view(message, max_depth, max_nodes)
+        {
+          message_type: WinRM::PSRP::Message::MESSAGE_TYPES.key(message.type),
+          stream: stream_type(message),
+          clixml: @output_decoder.clixml_view(
+            message,
+            max_depth: max_depth,
+            max_nodes: max_nodes
+          )
+        }
+      end
 
       def stream_type(message)
         type = :stdout

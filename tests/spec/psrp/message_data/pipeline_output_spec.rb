@@ -27,4 +27,23 @@ describe WinRM::PSRP::MessageData::PipelineOutput do
       expect(subject.output).to eq("some\r\ndata\r\n")
     end
   end
+
+  describe '#clixml_view' do
+    let(:raw_data) { "\xEF\xBB\xBF<obj><S>some data</S><I32 N='count'>3</I32></obj>" }
+
+    it 'returns a structured view without flattening primitive values' do
+      view = subject.clixml_view
+      expect(view[:kind]).to eq('object')
+      expect(view[:members]['S'][:value]).to eq('some data')
+      expect(view[:members]['count'][:value]).to eq(3)
+      expect(view[:members]['count'][:value]).to be_a(Integer)
+    end
+
+    it 'honors caller supplied depth and node bounds' do
+      expect(
+        described_class.new('<Obj><MS><Obj N="a"><MS><Obj N="b"><S>x</S></Obj></MS></Obj></MS></Obj>')
+                       .clixml_view(max_depth: 1)
+      ).to include(kind: 'object')
+    end
+  end
 end

@@ -122,6 +122,35 @@ describe WinRM::PSRP::ReceiveResponseReader do
     end
   end
 
+  describe '#read_structured_output' do
+    let(:message_type) { WinRM::PSRP::Message::MESSAGE_TYPES[:pipeline_output] }
+    let(:test_data) do
+      '<Obj RefId="0"><MS>' \
+        '<S N="title">some data</S><I32 N="count">42</I32>' \
+        '<Obj N="shared" RefId="1"><MS><I32 N="k">7</I32></MS></Obj>' \
+        '<Obj N="alias"><Obj RefId="1"/></Obj>' \
+      '</MS></Obj>'
+    end
+
+    it 'keeps the decoded text output unchanged' do
+      output, = subject.read_structured_output(output_message)
+      expect(output.stdout).to eq("some data\r\n")
+    end
+
+    it 'returns structured clixml views preserving type and identity' do
+      _, views = subject.read_structured_output(output_message)
+      expect(views.length).to eq(1)
+      view = views.first
+      expect(view[:message_type]).to eq(:pipeline_output)
+      expect(view[:stream]).to eq(:stdout)
+      expect(view[:clixml][:members]['count'][:value]).to eq(42)
+      expect(view[:clixml][:members]['shared'][:members]['k'][:value]).to eq(7)
+      expect(view[:clixml][:members]['alias'][:members]['Obj']).to eq(
+        kind: 'reference', ref_id: 1
+      )
+    end
+  end
+
   describe '#read_message' do
     context 'do not wait for done state' do
       let(:message_type) { WinRM::PSRP::Message::MESSAGE_TYPES[:pipeline_output] }

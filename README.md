@@ -129,6 +129,40 @@ As of the WinRM gem version 2, one creates a shell for executing commands by cal
 
 Both shells support the same public methods: `:open`, `:close`, and `run`. Note that when given a shell, it is opened automatically upon executing the first command via `:run`. Further, `close` is called automatically when a `shell` is garbage collected or when using a shell from a block. However, it is always a good idea to proactively `close` a shell.
 
+### Structured CLIXML output (PowerShell)
+
+The PowerShell shell normally flattens results into the `stdout`/`stderr` text on `WinRM::Output`. For investigation work that needs to verify exactly what the remote endpoint returned, the PSRP layer can additionally expose the structured [CLIXML](https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-psrp) payload. The structured view is optional and never replaces the text output.
+
+Given a PSRP message (for example one handed to the block passed to `send_pipeline_command`, or collected from the response reader), build a view directly:
+
+```ruby
+# From a raw PSRP message
+view = WinRM::PSRP::PowershellOutputDecoder.new.clixml_view(message)
+
+# From pipeline output message data
+view = message.parsed_data.clixml_view
+```
+
+To collect the views for every CLIXML-bearing message in a receive response alongside the unchanged text output, use the PSRP response reader:
+
+```ruby
+reader = WinRM::PSRP::ReceiveResponseReader.new(transport, conn.logger)
+output, views = reader.read_structured_output(command_output_message)
+puts output.stdout        # identical to read_output
+views.each { |v| p v[:clixml] }
+```
+
+The returned value is plain Ruby data (hashes, arrays, `nil`, and supported primitives) — no classes named in the remote payload are instantiated. Each node records:
+
+* `kind` — `object`, `primitive`, `null`, `reference`, `cycle`, `unresolved_reference`, `type_reference`, `unknown`, or `truncated`.
+* `ref_id` and `type_names` — object identity and the .NET type-name hierarchy as evidence.
+* `value`, `value_type`, and `raw` — the coerced primitive (Integer, Float, true/false, String), its CLIXML tag, and the original text.
+* `members`, `elements`, or `entries` — named properties, ordered collections, and dictionary key/value pairs.
+
+Reference semantics are scoped to a single message and are not carried across messages. A shared object is emitted once with its `ref_id` and referenced elsewhere as `{ kind: 'reference', ref_id: }`; two content-equal objects remain distinct identities. Back-references into an object still being expanded are reported as `cycle`, and a `ref_id` that is never defined in the message is reported as `unresolved_reference`. Unrecognized element tags are kept as `unknown` nodes carrying the raw evidence rather than mapped to a Ruby class.
+
+Parsing is bounded to avoid unbounded graphs. The defaults are `max_depth: 32` and `max_nodes: 5000`, overridable on `ClixmlParser`, `PowershellOutputDecoder#clixml_view`, `PipelineOutput#clixml_view`, and `ReceiveResponseReader#read_structured_output`. When a limit is hit the node is replaced with `{ kind: 'truncated', reason: 'depth_limit' | 'node_limit', ... }` instead of raising.
+
 ### Shell options supported by the `:cmd` shell
 
 ```

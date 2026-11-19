@@ -14,6 +14,7 @@
 
 require 'base64' unless defined?(Base64)
 require_relative 'message'
+require_relative 'clixml_parser'
 require_relative 'message_data/pipeline_state'
 
 module WinRM
@@ -42,6 +43,21 @@ module WinRM
         end
       end
       # rubocop:enable Metrics/CyclomaticComplexity
+
+      # Builds a structured CLIXML view of a message payload. This is an
+      # alternative to #decode for callers that need object identity, type
+      # information and the original primitive values rather than flattened
+      # text. Only messages that carry CLIXML are supported.
+      #
+      # @param message [WinRM::PSRP::Message] the message to inspect
+      # @param max_depth [Integer] maximum nesting depth before truncation
+      # @param max_nodes [Integer] maximum number of nodes before truncation
+      # @return [Hash] the structured CLIXML representation
+      def clixml_view(message,
+                      max_depth: ClixmlParser::DEFAULT_MAX_DEPTH,
+                      max_nodes: ClixmlParser::DEFAULT_MAX_NODES)
+        ClixmlParser.new(max_depth: max_depth, max_nodes: max_nodes).parse(message.data)
+      end
 
       protected
 
