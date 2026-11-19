@@ -153,3 +153,200 @@ packed_data = b"\x00\x002\xe4\x07\x00"
 assert TimeSignedField("", 0).i2m("", 853804800) == packed_data
 assert TimeSignedField("", 0).m2i("", packed_data) == 853804800
 assert TimeSignedField("", 0).i2repr("", 853804800) == "Tue Jan 21 00:00:00 1997"
+
++ DNSSEC canonical signature input
+
+= Fixed A RRset matches independently built bytes
+# Expected value built from RFC 4034 3.1.8.1 with a separate script:
+# RRSIG_RDATA (18 bytes) | canonical RRset, sorted by RDATA.
+sig = DNSRRRSIG(rrname=b"example.com.", type=46, rclass=1, ttl=300,
+                typecovered=1, algorithm=8, labels=2, originalttl=300,
+                expiration=1893456000, inception=1577836800, keytag=1234,
+                signersname=b"example.com.", signature=b"AAAA")
+p = DNS(an=[DNSRR(rrname=b"example.com.", ttl=300, rdata="192.0.2.2"),
+            DNSRR(rrname=b"example.com.", ttl=300, rdata="192.0.2.1"),
+            sig])
+v = dns_signature_input(p)
+expected = bytes.fromhex(
+    "000108020000012c70dbd8805e0be10004d2"
+    "076578616d706c6503636f6d00"
+    "076578616d706c6503636f6d00000100010000012c0004c0000201"
+    "076578616d706c6503636f6d00000100010000012c0004c0000202")
+bytes(v) == expected and b"".join(s.data for s in v.segments) == expected
+
+= Original TTL and RR order do not affect the input
+sig = DNSRRRSIG(rrname=b"example.com.", typecovered=1, algorithm=8,
+                labels=2, originalttl=300, expiration=1893456000,
+                inception=1577836800, keytag=1234,
+                signersname=b"example.com.", signature=b"AAAA")
+a = DNS(an=[DNSRR(rrname=b"example.com.", ttl=1, rdata="192.0.2.1"),
+            DNSRR(rrname=b"example.com.", ttl=2, rdata="192.0.2.2"), sig])
+b = DNS(an=[DNSRR(rrname=b"example.com.", ttl=99, rdata="192.0.2.2"),
+            DNSRR(rrname=b"EXAMPLE.COM.", ttl=7, rdata="192.0.2.1"), sig])
+bytes(dns_signature_input(a)) == bytes(dns_signature_input(b))
+
+= Owner case and packet compression do not affect the input
+sig = DNSRRRSIG(rrname=b"example.com.", typecovered=1, algorithm=8,
+                labels=2, originalttl=300, expiration=1893456000,
+                inception=1577836800, keytag=1234,
+                signersname=b"example.com.", signature=b"AAAA")
+rr = DNSRR(rrname=b"Example.COM.", ttl=300, rdata="192.0.2.1")
+plain = DNS(qd=[DNSQR(qname=b"example.com.")], an=[rr, sig])
+compressed = DNS(raw(dns_compress(plain)))
+b"\xc0" in raw(dns_compress(plain)) and \
+    bytes(dns_signature_input(plain)) == bytes(dns_signature_input(compressed))
+
+= Changing a signed field changes the input
+sig = DNSRRRSIG(rrname=b"example.com.", typecovered=1, algorithm=8,
+                labels=2, originalttl=300, expiration=1893456000,
+                inception=1577836800, keytag=1234,
+                signersname=b"example.com.", signature=b"AAAA")
+p = DNS(an=[DNSRR(rrname=b"example.com.", ttl=300, rdata="192.0.2.1"), sig])
+before = bytes(dns_signature_input(p))
+p.an[0].rdata = "192.0.2.9"
+after = bytes(dns_signature_input(p))
+p.an[0].ttl = 1
+before != after and after == bytes(dns_signature_input(p))
+
+= Wildcard expansion follows the RRSIG labels
+# The expected bytes were produced by an independent validator for the same
+# RRSIG and a www.example.com A record with labels=2.
+sig = DNSRRRSIG(rrname=b"www.example.com.", typecovered=1, algorithm=8,
+                labels=2, originalttl=300, expiration=1893456000,
+                inception=1577836800, keytag=42,
+                signersname=b"example.com.", signature=b"A")
+p = DNS(an=[DNSRR(rrname=b"www.example.com.", ttl=300, rdata="192.0.2.1"), sig])
+v = dns_signature_input(p)
+v.owner == b"*.example.com." and bytes(v).hex() == (
+    "000108020000012c70dbd8805e0be100002a076578616d706c6503636f6d00"
+    "012a076578616d706c6503636f6d00000100010000012c0004c0000201")
+
+= Wildcard owner keeps its own labels
+sig = DNSRRRSIG(rrname=b"*.example.com.", typecovered=1, algorithm=8,
+                labels=2, originalttl=300, expiration=1893456000,
+                inception=1577836800, keytag=1234,
+                signersname=b"example.com.", signature=b"AAAA")
+p = DNS(an=[DNSRR(rrname=b"*.example.com.", ttl=1, rdata="192.0.2.1"), sig])
+dns_signature_input(p).owner == b"*.example.com."
+
+= Unknown algorithm still produces canonical bytes
+# Algorithm 200 is unassigned: the bytes are still built, and only the
+# verification capability flag is false.
+sig = DNSRRRSIG(rrname=b"example.com.", typecovered=1, algorithm=200,
+                labels=2, originalttl=300, expiration=1893456000,
+                inception=1577836800, keytag=42,
+                signersname=b"example.com.", signature=b"A")
+p = DNS(an=[DNSRR(rrname=b"example.com.", ttl=300, rdata="192.0.2.1"), sig])
+v = dns_signature_input(p)
+v.algorithm_known == False and v.algorithm_name == "200" and bytes(v).hex() == (
+    "0001c8020000012c70dbd8805e0be100002a076578616d706c6503636f6d00"
+    "076578616d706c6503636f6d00000100010000012c0004c0000201")
+
+= NSEC next name is not downcased (RFC 6840 5.1)
+sig = DNSRRRSIG(rrname=b"example.com.", typecovered=47, algorithm=8,
+                labels=2, originalttl=300, expiration=1893456000,
+                inception=1577836800, keytag=1234,
+                signersname=b"example.com.", signature=b"AAAA")
+a = DNS(an=[DNSRRNSEC(rrname=b"example.com.", ttl=1,
+                      nextname=b"B.Example.COM.",
+                      typebitmaps=RRlist2bitmap([1, 46, 47])), sig])
+b = DNS(an=[DNSRRNSEC(rrname=b"example.com.", ttl=1,
+                      nextname=b"b.example.com.",
+                      typebitmaps=RRlist2bitmap([1, 46, 47])), sig])
+bytes(dns_signature_input(a)) != bytes(dns_signature_input(b))
+
+= RRSIG signer name is downcased
+a = DNSRRRSIG(rrname=b"example.com.", typecovered=1, algorithm=8,
+              labels=2, originalttl=300, expiration=1893456000,
+              inception=1577836800, keytag=1234,
+              signersname=b"Signer.Example.COM.", signature=b"AAAA")
+b = DNSRRRSIG(rrname=b"example.com.", typecovered=1, algorithm=8,
+              labels=2, originalttl=300, expiration=1893456000,
+              inception=1577836800, keytag=1234,
+              signersname=b"signer.example.com.", signature=b"AAAA")
+rr = DNSRR(rrname=b"example.com.", ttl=1, rdata="192.0.2.1")
+bytes(dns_signature_input(DNS(an=[rr, a]), rrsig=a)) == \
+    bytes(dns_signature_input(DNS(an=[rr, b]), rrsig=b))
+
+= Segment provenance identifies each RR
+sig = DNSRRRSIG(rrname=b"example.com.", typecovered=1, algorithm=8,
+                labels=2, originalttl=300, expiration=1893456000,
+                inception=1577836800, keytag=1234,
+                signersname=b"example.com.", signature=b"AAAA")
+p = DNS(an=[DNSRR(rrname=b"example.com.", ttl=1, rdata="192.0.2.1"),
+            DNSRR(rrname=b"example.com.", ttl=1, rdata="192.0.2.2"), sig])
+v = dns_signature_input(p)
+len(v.segments) == 3 and v.segments[0].rrs == (sig,) and \
+    all(s.rrs and s.rdtype == 1 for s in v.segments[1:]) and \
+    all(s.offset + len(s.data) <= len(bytes(v)) for s in v.segments) and \
+    v.segments[1].fields[0].name == "rdata"
+
+= Mismatched RRset owner is rejected
+sig = DNSRRRSIG(rrname=b"example.com.", typecovered=1, algorithm=8,
+                labels=2, originalttl=300, expiration=1893456000,
+                inception=1577836800, keytag=1234,
+                signersname=b"example.com.", signature=b"AAAA")
+p = DNS(an=[DNSRR(rrname=b"example.com.", ttl=1, rdata="192.0.2.1"), sig])
+wrong = DNSRR(rrname=b"other.example.com.", rdata="192.0.2.1")
+try:
+    dns_signature_input(p, rrsig=sig, rrset=[wrong])
+    assert False, "owner mismatch was accepted"
+except ValueError:
+    pass
+
+= Missing RRSIG is rejected
+try:
+    dns_signature_input(DNS(an=[DNSRR(rrname=b"example.com.",
+                                      rdata="192.0.2.1")]))
+    assert False, "missing RRSIG was accepted"
+except ValueError:
+    pass
+
+= Legacy RDATA names are decompressed and downcased
+# MINFO (14) is not dissected by Scapy: its RDATA still holds two
+# compression pointers. The view must decode both names.
+wire = (b"\x00\x01\x00\x00\x00\x01\x00\x01\x00\x00\x00\x00"
+        b"\x07example\x03com\x00\x00\x0e\x00\x01"
+        b"\xc0\x0c\x00\x0e\x00\x01\x00\x00\x00\x01\x00\x04"
+        b"\xc0\x0c\xc0\x0c")
+p = DNS(wire)
+sig = DNSRRRSIG(rrname=b"example.com.", typecovered=14, algorithm=8,
+                labels=2, originalttl=300, expiration=1893456000,
+                inception=1577836800, keytag=1,
+                signersname=b"example.com.", signature=b"A")
+v = dns_signature_input(p, rrsig=sig)
+v.canonical_rrs[0].rdata == dns_encode(b"example.com.") * 2
+
+= Legacy RDATA preserves fixed fields around a name
+# SIG (24) carries fixed integers and a signer name; the name is decoded
+# and the fixed bytes are kept in place.
+wire = (b"\x00\x01\x00\x00\x00\x01\x00\x01\x00\x00\x00\x00"
+        b"\x07example\x03com\x00\x00\x18\x00\x01"
+        b"\xc0\x0c\x00\x18\x00\x01\x00\x00\x00\x01\x00\x14"
+        b"\x00\x01\x08\x02\x00\x00\x01\x2c\x00\x00\x00\x01"
+        b"\x00\x00\x00\x01\x00\x01\xc0\x0c")
+p = DNS(wire)
+sig = DNSRRRSIG(rrname=b"example.com.", typecovered=24, algorithm=8,
+                labels=2, originalttl=300, expiration=1893456000,
+                inception=1577836800, keytag=1,
+                signersname=b"example.com.", signature=b"A")
+v = dns_signature_input(p, rrsig=sig)
+v.canonical_rrs[0].rdata == (
+    b"\x00\x01\x08\x02\x00\x00\x01\x2c"
+    b"\x00\x00\x00\x01\x00\x00\x00\x01\x00\x01" +
+    dns_encode(b"example.com."))
+
+= In-memory compressed messages are canonicalized
+# dns_compress() leaves pointer bytes in the fields until built.
+sig = DNSRRRSIG(rrname=b"example.com.", typecovered=33, algorithm=8,
+                labels=2, originalttl=300, expiration=1893456000,
+                inception=1577836800, keytag=42,
+                signersname=b"example.com.", signature=b"A")
+p = DNS(qd=[DNSQR(qname=b"example.com.")],
+        an=[DNSRRSRV(rrname=b"example.com.", ttl=300, priority=1,
+                     weight=2, port=3, target=b"example.com."), sig])
+compressed = dns_compress(p)
+assert compressed.an[0].getfieldval("target")[:1] == b"\xc0"
+plain = dns_signature_input(p)
+memory = dns_signature_input(compressed)
+bytes(plain) == bytes(memory) and b"\xc0" not in bytes(memory)

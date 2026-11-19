@@ -20,6 +20,8 @@ import struct
 import time
 import warnings
 
+from dataclasses import dataclass
+
 from scapy.arch import (
     get_if_addr,
     get_if_addr6,
@@ -71,6 +73,7 @@ from typing import (
     Any,
     List,
     Optional,
+    Sequence,
     Tuple,
     Type,
     Union,
@@ -1398,6 +1401,365 @@ class DNSTCP(DNS):
     FORCE_TCP = True
     match_subclass = True
 
+
+# RFC 4034 - DNSSEC signature input (canonical RRset)
+
+@dataclass(frozen=True)
+class DNSSECSignatureField:
+    """One RR field used to build canonical RDATA, with its wire bytes."""
+
+    rr: Packet
+    name: str
+    machine: bytes
+    is_name: bool
+
+
+@dataclass(frozen=True)
+class DNSSECSignatureSegment:
+    """A byte range of a signature input, and the RR bytes it came from."""
+
+    offset: int
+    data: bytes
+    rrs: Tuple[Packet, ...]
+    owner: bytes
+    rdtype: int
+    fields: Tuple[DNSSECSignatureField, ...] = ()
+
+
+@dataclass(frozen=True)
+class DNSSECSignatureRR:
+    """Canonical form of one RR in the signed RRset."""
+
+    rr: Packet
+    rdata: bytes
+    fields: Tuple[DNSSECSignatureField, ...]
+    wire: bytes
+
+    def __bytes__(self):
+        # type: () -> bytes
+        return self.wire
+
+
+@dataclass(frozen=True)
+class DNSSECSignatureInput:
+    """Read-only canonical wire form of the RRset covered by an RRSIG.
+
+    This is the data an external validator would sign or hash. Building it
+    does not check the signature, the key, or the trust chain, and an
+    unknown algorithm is still reported here as an unknown algorithm.
+    """
+
+    rrsig: DNSRRRSIG
+    owner: bytes
+    typecovered: int
+    originalttl: int
+    labels: int
+    sigdata: bytes
+    segments: Tuple[DNSSECSignatureSegment, ...]
+    rrs: Tuple[Packet, ...]
+    canonical_rrs: Tuple[DNSSECSignatureRR, ...]
+
+    @property
+    def algorithm(self):
+        # type: () -> int
+        return self.rrsig.algorithm
+
+    @property
+    def algorithm_name(self):
+        # type: () -> str
+        return dns_signature_algorithmname(self.rrsig.algorithm)
+
+    @property
+    def algorithm_known(self):
+        # type: () -> bool
+        """Whether the algorithm number is assigned a DNSSEC signature algorithm.
+
+        This only reports the identifier. Scapy does not verify signatures or
+        build trust chains from this view.
+        """
+        return self.rrsig.algorithm in DNS_SIGNATURE_KNOWN_ALGORITHMS
+
+    @property
+    def typecovered_name(self):
+        # type: () -> str
+        return dns_signature_typename(self.rrsig.typecovered)
+
+    def __bytes__(self):
+        # type: () -> bytes
+        return self.sigdata
+
+
+# RFC 4034 6.2 as corrected by RFC 6840 5.1: names in the RDATA of these
+# types are downcased in canonical form. NSEC (47) is deliberately absent.
+DNS_SIGNATURE_LOWERCASE_TYPES = frozenset((
+    2, 3, 4, 5, 6, 7, 8, 9, 12, 14, 15, 17, 18, 21, 24, 26, 30, 33, 35,
+    36, 39, 46,
+))
+
+# RR types whose single "rdata" field of a plain DNSRR is a domain name.
+DNS_SIGNATURE_NAME_RDATA_TYPES = frozenset((2, 3, 4, 5, 12, 39))
+
+# Legacy RR types that Scapy does not dissect, but whose RDATA holds domain
+# names that must be decompressed and canonicalized. The value is the RDATA
+# layout: fixed-size integers, domain names, and the remaining bytes.
+DNS_SIGNATURE_LEGACY_RDATA = {
+    7: ("name",),                         # MB
+    8: ("name",),                         # MG
+    9: ("name",),                         # MR
+    14: ("name", "name"),                 # MINFO
+    17: ("name", "name"),                 # RP
+    18: ("u16", "name"),                  # AFSDB
+    21: ("u16", "name"),                  # RT
+    23: ("name",),                        # NSAP-PTR
+    24: ("u16", "u8", "u8", "u32", "u32", "u32", "u16", "name", "rest"),
+                                          # SIG
+    26: ("u16", "name", "name"),          # PX
+    30: ("name", "rest"),                 # NXT
+    36: ("u16", "name"),                  # KX
+}
+
+# Values that name a usable DNSSEC signing algorithm, not a reserved slot.
+DNS_SIGNATURE_KNOWN_ALGORITHMS = frozenset((
+    1, 3, 5, 6, 7, 8, 10, 12, 13, 14, 15, 16,
+))
+
+
+def dns_signature_decode_name(name, full=b""):
+    # type: (bytes, bytes) -> bytes
+    """Return an uncompressed absolute name, resolving a leading pointer."""
+    value = bytes_encode(name or b".")
+    if value[:1] in (b"\xc0", b"\xff"):
+        if not full:
+            raise ValueError("DNS name is compressed and no packet is given")
+        value, _ = dns_get_str(value, full=full)
+    if not value.endswith(b"."):
+        value += b"."
+    return value
+
+
+def dns_signature_name(name, labels, full=b""):
+    # type: (bytes, int, bytes) -> bytes
+    """Rebuild the owner name a validator signs, including wildcard expansion.
+
+    RFC 4034 3.1.3: ``labels`` is the number of labels in the owner name,
+    not counting the root and not counting a leading wildcard. RFC 4035
+    5.3.2 then replaces the leading labels with ``*`` when the RRSIG
+    labels count is smaller than the owner name. Applying the same
+    arithmetic here lets the view explain why a captured RRset does not
+    match a validator's digest.
+    """
+    decoded = dns_signature_decode_name(name, full)
+    for label in decoded.rstrip(b".").split(b"."):
+        if len(label) > 63:
+            raise ValueError("owner name has a label longer than 63 bytes")
+    if decoded == b".":
+        if labels:
+            raise ValueError("labels is greater than the owner name length")
+        return b"."
+    if len(decoded) - 1 > 255:
+        raise ValueError("owner name is longer than 255 bytes")
+    parts = decoded.rstrip(b".").split(b".")
+    if labels == 0:
+        return b"*."
+    if parts[0] == b"*" and labels != len(parts) - 1:
+        raise ValueError("wild owner name has an inconsistent labels value")
+    if len(parts) < labels:
+        raise ValueError("labels is greater than the owner name length")
+    if len(parts) == labels:
+        return decoded
+    return b".".join([b"*"] + parts[-labels:]) + b"."
+
+
+def dns_signature_rdata(rr, full=b""):
+    # type: (Packet, bytes) -> Tuple[bytes, Tuple[DNSSECSignatureField, ...]]
+    """Rebuild RDATA from fields, never from cached packet bytes.
+
+    ``full`` is the complete DNS message, used to resolve compression
+    pointers in legacy RDATA that Scapy leaves undecoded.
+    """
+    fields = []  # type: List[DNSSECSignatureField]
+    for fld in rr.fields_desc:
+        if fld.name in ("rrname", "type", "cacheflush", "rclass", "ttl",
+                        "rdlen"):
+            continue
+        inner = getattr(fld, "fld", fld)
+        is_name = isinstance(inner, DNSStrField) or (
+            fld.name == "rdata" and rr.type in DNS_SIGNATURE_NAME_RDATA_TYPES
+        )
+        if fld.isconditional and rr.getfieldval(fld.name) is None:
+            continue
+        val = rr.getfieldval(fld.name)
+        if is_name:
+            val = dns_signature_decode_name(val, full)
+            if rr.type in DNS_SIGNATURE_LOWERCASE_TYPES:
+                val = val.lower()
+            machine = dns_encode(val)
+        elif fld.name == "rdata" and rr.type in DNS_SIGNATURE_LEGACY_RDATA:
+            machine = b""
+            remaining = bytes_encode(val or b"")
+            try:
+                for part in DNS_SIGNATURE_LEGACY_RDATA[rr.type]:
+                    if part == "name":
+                        name, remaining = dns_get_str(
+                            remaining, full=full or None)
+                        if rr.type in DNS_SIGNATURE_LOWERCASE_TYPES:
+                            name = name.lower()
+                        machine += dns_encode(name)
+                    elif part == "rest":
+                        machine += remaining
+                        remaining = b""
+                    else:
+                        size = 2 if part == "u16" else (
+                            4 if part == "u32" else 1)
+                        machine += remaining[:size]
+                        remaining = remaining[size:]
+            except (Scapy_Exception, IndexError) as ex:
+                raise ValueError(
+                    "cannot canonicalize undecoded RDATA of type %s: %s"
+                    % (dns_signature_typename(rr.type), ex))
+            if remaining:
+                raise ValueError(
+                    "undecoded RDATA of type %s has trailing bytes"
+                    % dns_signature_typename(rr.type))
+        else:
+            machine = fld.addfield(rr, b"", val)
+        fields.append(DNSSECSignatureField(rr, fld.name, machine, is_name))
+    return b"".join(f.machine for f in fields), tuple(fields)
+
+
+def dns_signature_typename(rrtype):
+    # type: (int) -> str
+    """Return the mnemonic of an RR type, or its number when unknown."""
+    return dnstypes.get(rrtype, str(rrtype))
+
+
+def dns_signature_algorithmname(algorithm):
+    # type: (int) -> str
+    """Return the mnemonic of a DNSSEC algorithm, or its number when unknown."""
+    return dnssecalgotypes.get(algorithm, str(algorithm))
+
+
+def dns_signature_rrsig(msg, rrsig=None, rrset=None):
+    # type: (Optional[DNS], Optional[DNSRRRSIG],
+    #        Optional[Sequence[Packet]]) -> DNSSECSignatureInput
+    """Build the canonical input covered by an RRSIG (RFC 4034 3.1.8.1).
+
+    ``msg`` is the DNS message holding the records; ``rrsig`` defaults to the
+    first RRSIG in that message and ``rrset`` to the matching records found
+    beside it. The returned object is a read-only description of the bytes
+    that an external validator would hash, not a validation result.
+
+    :raises ValueError: for an inconsistent owner, type, or label count.
+    :raises TypeError: if the records are not DNS resource records.
+    """
+    full = msg.get_full() if isinstance(msg, DNS) else b""
+    if rrsig is None:
+        if not isinstance(msg, DNS):
+            raise TypeError("a DNS message is required")
+        rrsig = msg.getlayer(DNSRRRSIG)
+    # In-memory compressed messages need bytes; build them once if needed.
+    if not full and isinstance(msg, DNS):
+        full = bytes_encode(msg)
+    if rrsig is None:
+        raise ValueError("no RRSIG record found")
+    if not isinstance(rrsig, DNSRRRSIG):
+        raise TypeError("rrsig must be a DNSRRRSIG")
+    if rrset is None:
+        sections = (msg.an, msg.ns, msg.ar) if isinstance(msg, DNS) else ()
+        rrset = [
+            rr
+            for section in sections
+            for rr in section
+            if isinstance(rr, (DNSRR, _DNSRRdummy)) and
+            rr.type == rrsig.typecovered and
+            dns_signature_decode_name(rr.rrname, full).lower() ==
+            dns_signature_decode_name(rrsig.rrname, full).lower()
+        ]
+    rrset = tuple(rrset)
+    if not rrset:
+        raise ValueError("the RRset covered by this RRSIG is empty")
+    for rr in rrset:
+        if not isinstance(rr, (DNSRR, _DNSRRdummy)):
+            raise TypeError("RRset entries must be DNS resource records")
+        if rr.type != rrsig.typecovered:
+            raise ValueError("an RRset record has another type than typecovered")
+        if dns_signature_decode_name(rr.rrname, full).lower() != \
+                dns_signature_decode_name(rrsig.rrname, full).lower():
+            raise ValueError("an RRset record has another owner name")
+    owner = dns_signature_name(rrsig.rrname, rrsig.labels, full).lower()
+    canonical = []
+    for rr in rrset:
+        rdata, fields = dns_signature_rdata(rr, full)
+        canonical.append(DNSSECSignatureRR(
+            rr,
+            rdata,
+            fields,
+            dns_encode(owner) +
+            struct.pack("!HHI", rr.type, rr.rclass, rrsig.originalttl) +
+            struct.pack("!H", len(rdata)) +
+            rdata,
+        ))
+    # Sort by canonical RDATA. Only identical wire observations collapse;
+    # distinct observations that share RDATA stay visible in ``rrs``.
+    canonical.sort(key=lambda c: (c.rdata, c.wire))
+    unique = []
+    for entry in canonical:
+        if unique and unique[-1].wire == entry.wire:
+            continue
+        unique.append(entry)
+    canonical = unique
+    header = struct.pack(
+        "!HBBIIIH",
+        rrsig.typecovered,
+        rrsig.algorithm,
+        rrsig.labels,
+        rrsig.originalttl,
+        int(rrsig.expiration),
+        int(rrsig.inception),
+        rrsig.keytag,
+    ) + dns_encode(
+        dns_signature_decode_name(rrsig.signersname, full).lower())
+    segments = [DNSSECSignatureSegment(
+        0, header, (rrsig,), owner, rrsig.typecovered,
+    )]
+    offset = len(header)
+    for rrsig_rr in canonical:
+        segments.append(DNSSECSignatureSegment(
+            offset, rrsig_rr.wire, (rrsig_rr.rr,), owner, rrsig.typecovered,
+            rrsig_rr.fields,
+        ))
+        offset += len(rrsig_rr.wire)
+    return DNSSECSignatureInput(
+        rrsig=rrsig,
+        owner=owner,
+        typecovered=rrsig.typecovered,
+        originalttl=rrsig.originalttl,
+        labels=rrsig.labels,
+        sigdata=header + b"".join(c.wire for c in canonical),
+        segments=tuple(segments),
+        rrs=rrset,
+        canonical_rrs=tuple(canonical),
+    )
+
+
+def dns_signature_input(pkt, rrsig=None, rrset=None):
+    # type: (Packet, Optional[DNSRRRSIG],
+    #        Optional[Sequence[Packet]]) -> DNSSECSignatureInput
+    """Return the read-only canonical signature input of a capture.
+
+    ``pkt`` may be a DNS message or an RRSIG record. Passing a bare RRSIG
+    requires an explicit ``rrset``.
+    """
+    if isinstance(pkt, DNSRRRSIG):
+        rrsig = pkt if rrsig is None else rrsig
+        msg = None  # type: Optional[DNS]
+    elif isinstance(pkt, Packet):
+        msg = pkt.getlayer(DNS)
+        if msg is None:
+            raise ValueError("not a DNS packet")
+    else:
+        msg = pkt
+    return dns_signature_rrsig(msg, rrsig=rrsig, rrset=rrset)
 
 bind_layers(UDP, DNS, dport=5353)
 bind_layers(UDP, DNS, sport=5353)
