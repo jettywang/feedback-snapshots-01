@@ -136,6 +136,11 @@ class BaseRequest(MutableMapping[str | RequestKey[Any], Any], HeadersMixin):
     _read_bytes: bytes | None = None
     _pre_handler_error: HTTPBadRequest | None = None
 
+    @property
+    def _body_stream_consumed(self) -> bool:
+        # getattr because mocked payloads may not provide the counter.
+        return getattr(self._payload, "_consumed_bytes", 0) > 0
+
     def __init__(
         self,
         message: RawRequestMessage,
@@ -220,7 +225,7 @@ class BaseRequest(MutableMapping[str | RequestKey[Any], Any], HeadersMixin):
         are given, an exact copy is returned. If a parameter is not passed, it
         will reuse the one from the current request object.
         """
-        if self._read_bytes:
+        if self._read_bytes is not None or self._body_stream_consumed:
             raise RuntimeError("Cannot clone request after reading its content")
 
         dct: dict[str, Any] = {}
@@ -700,6 +705,11 @@ class BaseRequest(MutableMapping[str | RequestKey[Any], Any], HeadersMixin):
         Returns bytes object with full request content.
         """
         if self._read_bytes is None:
+            if self._body_stream_consumed and self._payload.exception() is None:
+                raise RuntimeError(
+                    "Cannot read request body: it was already consumed "
+                    "by another reader"
+                )
             # Raise the buffer limits so compressed payloads decompress in
             # larger chunks instead of many small pause/resume cycles.
             if self._client_max_size:
@@ -747,9 +757,26 @@ class BaseRequest(MutableMapping[str | RequestKey[Any], Any], HeadersMixin):
 
     async def multipart(self) -> MultipartReader:
         """Return async iterator to process BODY as multipart."""
+        if self._read_bytes is not None:
+            # The body is already buffered; parse the cached copy so every
+            # consumer works with the same content.
+            payload = StreamReader(
+                self._protocol,
+                max(len(self._read_bytes) + 1, DEFAULT_CHUNK_SIZE),
+                loop=self._loop,
+            )
+            payload.feed_data(self._read_bytes)
+            payload.feed_eof()
+        else:
+            if self._body_stream_consumed and self._payload.exception() is None:
+                raise RuntimeError(
+                    "Cannot read request body: it was already consumed "
+                    "by another reader"
+                )
+            payload = self._payload
         return MultipartReader(
             self._headers,
-            self._payload,
+            payload,
             client_max_size=self._client_max_size,
             max_field_size=self._protocol.max_field_size,
             max_headers=self._protocol.max_headers,

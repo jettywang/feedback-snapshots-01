@@ -102,6 +102,7 @@ class StreamReader:
         "_eof_callbacks",
         "_eof_counter",
         "_on_chunk_received",
+        "_consumed_bytes",
         "total_bytes",
         "total_compressed_bytes",
     )
@@ -138,6 +139,7 @@ class StreamReader:
         self._on_chunk_received: (
             Callable[[bytes], Coroutine[None, None, None]] | None
         ) = None
+        self._consumed_bytes = 0
         self.total_bytes = 0
         self.total_compressed_bytes: int | None = None
 
@@ -279,6 +281,7 @@ class StreamReader:
             self._buffer_offset = 0
         self._size += len(data)
         self._cursor -= len(data)
+        self._consumed_bytes -= len(data)
         self._buffer.appendleft(data)
         self._eof_counter = 0
 
@@ -570,6 +573,7 @@ class StreamReader:
         data_len = len(data)
         self._size -= data_len
         self._cursor += data_len
+        self._consumed_bytes += data_len
 
         chunk_splits = self._http_chunk_splits
         # Prevent memory leak: drop useless chunk splits
@@ -612,6 +616,7 @@ class EmptyStreamReader(StreamReader):  # lgtm [py/missing-call-to-init]
 
     def __init__(self) -> None:
         self._read_eof_chunk = False
+        self._consumed_bytes = 0
         self.total_bytes = 0
 
     # Shadow the inherited slot with a property so the EMPTY_PAYLOAD singleton

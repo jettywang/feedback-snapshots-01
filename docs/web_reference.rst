@@ -427,6 +427,14 @@ and :ref:`aiohttp-web-signals` handlers.
 
       :return: a cloned :class:`Request` instance.
 
+      .. note::
+
+         The clone shares the body stream with the original request, so
+         cloning is only possible before the body is consumed. Once any
+         consumer (direct :attr:`content` reads, :meth:`read`,
+         :meth:`post` or :meth:`multipart`) has started reading the
+         body, :exc:`RuntimeError` is raised.
+
    .. method:: get_extra_info(name, default=None)
 
       Reads extra information from the protocol's transport.
@@ -450,6 +458,12 @@ and :ref:`aiohttp-web-signals` handlers.
 
          The method **does** store read data internally, subsequent
          :meth:`~aiohttp.web.BaseRequest.read` call will return the same value.
+
+         The body stream can only be consumed once: if another consumer
+         (direct :attr:`content` reads, :meth:`multipart`, or
+         :meth:`post` for *multipart/form-data*) has already read any
+         part of the body, :exc:`RuntimeError` is raised instead of
+         silently returning an incomplete or empty body.
 
    .. method:: text()
       :async:
@@ -504,6 +518,12 @@ and :ref:`aiohttp-web-signals` handlers.
          The method **does not** store read data internally. That means once
          you exhausts multipart reader, you cannot get the request payload one
          more time.
+
+         If the body was already buffered by :meth:`read`, :meth:`text`,
+         :meth:`json` or :meth:`post`, the reader is served from that
+         cached copy so every consumer sees the same content. If another
+         reader has partially consumed the body stream without buffering
+         it, :exc:`RuntimeError` is raised.
 
       .. seealso:: :ref:`aiohttp-multipart`
 
