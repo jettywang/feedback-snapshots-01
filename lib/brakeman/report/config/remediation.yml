@@ -69,3 +69,4 @@ mass_assign_without_protection: 600000
 CVE_2015_3227: 4000000
 CVE_2013_0156: 4000000
 weak_hash_digest: 800000
+ssrf: 2000000

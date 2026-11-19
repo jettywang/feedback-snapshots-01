@@ -8,6 +8,7 @@ Can detect:
 -Missing call to protect_from_forgery in ApplicationController (CSRF protection)
 -Default routes, per-controller and globally
 -Redirects based on params (probably too broad currently)
+-User-controlled URLs in HTTP and open-uri calls, distinguishing fixed-authority path input from scheme/host control (Server-Side Request Forgery)
 -Validation regexes not using \A and \z
 -Calls to render with dynamic paths
 
