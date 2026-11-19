@@ -3,7 +3,7 @@ from sslyze.mozilla_tls_profile.tls_config_checker import (
     TlsConfigurationAsJson,
     _MozillaCiphersAsJson,
     check_server_against_tls_configuration,
-    ServerNotCompliantWithTlsConfiguration,
+    TlsConfigurationCheckStatusEnum,
 )
 
 
@@ -65,13 +65,9 @@ class TestCustomTlsConfigurationChecker:
         scanner.queue_scans([ServerScanRequest(server_location=ServerNetworkLocation(hostname="www.mozilla.com"))])
         server_scan_result = next(scanner.get_results())
 
-        # Then the compliance check runs successfully but raises an exception
-        was_exception_raised = False
-        try:
-            check_server_against_tls_configuration(
-                server_scan_result=server_scan_result, tls_config_to_check_against=lenient_config
-            )
-        except ServerNotCompliantWithTlsConfiguration:
-            was_exception_raised = True
-
-        assert was_exception_raised
+        # Then the compliance check runs successfully and reports the server as not compliant
+        check_result = check_server_against_tls_configuration(
+            server_scan_result=server_scan_result, tls_config_to_check_against=lenient_config
+        )
+        assert check_result.overall_status == TlsConfigurationCheckStatusEnum.NOT_COMPLIANT
+        assert check_result.issues

@@ -1,6 +1,7 @@
 import sys
 from datetime import datetime, timezone
-from typing import Optional, TextIO
+from typing import Optional, TextIO, Dict
+from uuid import UUID
 
 from sslyze.cli.console_output import ObserverToGenerateConsoleOutput
 from sslyze.__version__ import __version__
@@ -14,9 +15,12 @@ from sslyze import (
     ServerConnectivityStatusEnum,
 )
 from sslyze.json.json_output import InvalidServerStringAsJson
+from sslyze.mozilla_tls_profile.console_output import tls_configuration_check_result_as_console_output
+from sslyze.mozilla_tls_profile.json_output import TlsConfigurationCheckResultAsJson
 from sslyze.mozilla_tls_profile.tls_config_checker import (
     check_server_against_tls_configuration,
-    ServerNotCompliantWithTlsConfiguration,
+    TlsConfigurationCheckResult,
+    TlsConfigurationCheckStatusEnum,
     ServerScanResultIncomplete,
     TlsConfigurationEnum,
 )
@@ -68,6 +72,27 @@ def main() -> None:
             # Results are actually displayed by the observer; here we just store them
             all_server_scan_results.append(result)
 
+    # Check the results against the TLS config if needed; the outcome is attached to the JSON output and printed to
+    # the console so both surfaces stay consistent
+    tls_configuration_checks: Dict[UUID, Optional[TlsConfigurationCheckResult]] = {}
+    are_all_servers_compliant = True
+    if parsed_command_line.tls_config_to_check_against_as_enum:
+        assert parsed_command_line.tls_config_to_check_against, "Should always be set"
+        for server_scan_result in all_server_scan_results:
+            try:
+                tls_configuration_checks[server_scan_result.uuid] = check_server_against_tls_configuration(
+                    server_scan_result=server_scan_result,
+                    tls_config_to_check_against=parsed_command_line.tls_config_to_check_against,
+                )
+            except ServerScanResultIncomplete:
+                # The scan itself failed (e.g. no connectivity); nothing could be evaluated for this server
+                tls_configuration_checks[server_scan_result.uuid] = None
+
+            check_result = tls_configuration_checks[server_scan_result.uuid]
+            if check_result is None or check_result.overall_status != TlsConfigurationCheckStatusEnum.COMPLIANT:
+                # A non-compliant server, an indeterminate check or a scan that could not run at all are all failures
+                are_all_servers_compliant = False
+
     # Write results to a JSON file if needed
     json_file_out: Optional[TextIO] = None
     if parsed_command_line.should_print_json_to_console:
@@ -76,8 +101,18 @@ def main() -> None:
         json_file_out = parsed_command_line.json_path_out.open("wt", encoding="utf-8")
 
     if json_file_out:
+        server_scan_results_as_json = []
+        for result in all_server_scan_results:
+            result_as_json = ServerScanResultAsJson.model_validate(result)
+            check_result = tls_configuration_checks.get(result.uuid)
+            if check_result is not None:
+                result_as_json.tls_configuration_check = TlsConfigurationCheckResultAsJson.model_validate(
+                    check_result
+                )
+            server_scan_results_as_json.append(result_as_json)
+
         json_output = SslyzeOutputAsJson(
-            server_scan_results=[ServerScanResultAsJson.model_validate(result) for result in all_server_scan_results],
+            server_scan_results=server_scan_results_as_json,
             invalid_server_strings=[
                 InvalidServerStringAsJson.model_validate(bad_server)
                 for bad_server in parsed_command_line.invalid_servers
@@ -88,16 +123,16 @@ def main() -> None:
         json_output_as_str = json_output.model_dump_json(indent=2)
         json_file_out.write(json_output_as_str)
 
-    # If we printed the JSON results to the console, don't run the TLS compliance check so we return valid JSON
+    # If we printed the JSON results to the console, don't print the human-readable compliance section so the output
+    # remains valid JSON; the compliance outcome is still available through the exit code and the JSON output
     if parsed_command_line.should_print_json_to_console:
-        sys.exit(0)
+        sys.exit(0 if are_all_servers_compliant else 1)
 
     if {res.connectivity_status for res in all_server_scan_results} in [set(), {ServerConnectivityStatusEnum.ERROR}]:
         # There are no results to present: all supplied server strings were invalid?
         sys.exit(0)
 
-    # Check the results against the TLS config if needed
-    are_all_servers_compliant = True
+    # Print the compliance section to the console if needed
     # TODO(AD): Expose format_title method
     title = ObserverToGenerateConsoleOutput._format_title("Compliance against TLS configuration")
     print()
@@ -107,8 +142,6 @@ def main() -> None:
             "    Disabled; use --mozilla_config={old, intermediate, modern} or --custom_tls_config=path/to/profile.json.\n"
         )
     else:
-        assert parsed_command_line.tls_config_to_check_against, "Should always be set"
-
         if parsed_command_line.tls_config_to_check_against_as_enum == TlsConfigurationEnum.CUSTOM:
             print("    Checking results against custom TLS configuration.\n")
         else:
@@ -119,26 +152,19 @@ def main() -> None:
             )
 
         for server_scan_result in all_server_scan_results:
-            try:
-                check_server_against_tls_configuration(
-                    server_scan_result=server_scan_result,
-                    tls_config_to_check_against=parsed_command_line.tls_config_to_check_against,
-                )
-                print(f"    {server_scan_result.server_location.display_string}: OK - Compliant.\n")
-
-            except ServerNotCompliantWithTlsConfiguration as e:
-                are_all_servers_compliant = False
-                print(f"    {server_scan_result.server_location.display_string}: FAILED - Not compliant.")
-                for criteria, error_description in e.issues.items():
-                    print(f"        * {criteria}: {error_description}")
-                print()
-
-            except ServerScanResultIncomplete:
-                are_all_servers_compliant = False
+            check_result = tls_configuration_checks[server_scan_result.uuid]
+            if check_result is None:
                 print(
                     f"    {server_scan_result.server_location.display_string}: ERROR - Scan did not run successfully;"
-                    f" review the scan logs above."
+                    f" review the scan logs above.\n"
                 )
+                continue
+
+            for line in tls_configuration_check_result_as_console_output(
+                server_display_string=server_scan_result.server_location.display_string,
+                check_result=check_result,
+            ):
+                print(line)
 
     if not are_all_servers_compliant:
         # Return a non-zero error code to signal failure (for example to fail a CI/CD pipeline)

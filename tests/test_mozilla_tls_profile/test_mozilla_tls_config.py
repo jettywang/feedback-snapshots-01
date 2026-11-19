@@ -5,8 +5,7 @@ from sslyze.mozilla_tls_profile.tls_config_checker import (
     check_server_against_tls_configuration,
     MozillaTlsConfiguration,
     TlsConfigurationEnum,
-    ServerNotCompliantWithTlsConfiguration,
-    ServerScanResultIncomplete,
+    TlsConfigurationCheckStatusEnum,
 )
 
 from tests.factories import ServerScanResultFactory
@@ -41,10 +40,10 @@ class TestMozillaTlsConfigurationChecker:
         # And the server is returned as NOT compliant for the other Mozilla configs
         for mozilla_config_enum in [TlsConfigurationEnum.MOZILLA_INTERMEDIATE, TlsConfigurationEnum.MOZILLA_MODERN]:
             tls_config = MozillaTlsConfiguration.get(mozilla_config_enum)
-            with pytest.raises(ServerNotCompliantWithTlsConfiguration):
-                check_server_against_tls_configuration(
-                    server_scan_result=server_scan_result, tls_config_to_check_against=tls_config
-                )
+            check_result = check_server_against_tls_configuration(
+                server_scan_result=server_scan_result, tls_config_to_check_against=tls_config
+            )
+            assert check_result.overall_status == TlsConfigurationCheckStatusEnum.NOT_COMPLIANT
 
     @pytest.mark.skip("Server needs to be updated; check https://github.com/chromium/badssl.com/issues/483")
     def test_badssl_compliant_with_intermediate(self):
@@ -65,10 +64,10 @@ class TestMozillaTlsConfigurationChecker:
         # And the server is returned as NOT compliant for the other Mozilla configs
         for mozilla_config in [TlsConfigurationEnum.MOZILLA_OLD, TlsConfigurationEnum.MOZILLA_MODERN]:
             tls_config = MozillaTlsConfiguration.get(mozilla_config)
-            with pytest.raises(ServerNotCompliantWithTlsConfiguration):
-                check_server_against_tls_configuration(
-                    server_scan_result=server_scan_result, tls_config_to_check_against=tls_config
-                )
+            check_result = check_server_against_tls_configuration(
+                server_scan_result=server_scan_result, tls_config_to_check_against=tls_config
+            )
+            assert check_result.overall_status == TlsConfigurationCheckStatusEnum.NOT_COMPLIANT
 
     @pytest.mark.skip("Server needs to be updated; check https://github.com/chromium/badssl.com/issues/483")
     def test_badssl_compliant_with_modern(self):
@@ -89,10 +88,10 @@ class TestMozillaTlsConfigurationChecker:
         # And the server is returned as NOT compliant for the other Mozilla configs
         for mozilla_config in [TlsConfigurationEnum.MOZILLA_OLD, TlsConfigurationEnum.MOZILLA_INTERMEDIATE]:
             tls_config = MozillaTlsConfiguration.get(mozilla_config)
-            with pytest.raises(ServerNotCompliantWithTlsConfiguration):
-                check_server_against_tls_configuration(
-                    server_scan_result=server_scan_result, tls_config_to_check_against=tls_config
-                )
+            check_result = check_server_against_tls_configuration(
+                server_scan_result=server_scan_result, tls_config_to_check_against=tls_config
+            )
+            assert check_result.overall_status == TlsConfigurationCheckStatusEnum.NOT_COMPLIANT
 
     def test_solo_cert_deployment_compliant_with_old(self):
         # Given the scan results for a server that is compliant with the "old" Mozilla config
@@ -117,10 +116,10 @@ class TestMozillaTlsConfigurationChecker:
         tls_config = MozillaTlsConfiguration.get(TlsConfigurationEnum.MOZILLA_INTERMEDIATE)
 
         # It succeeds and the server is returned as NOT compliant
-        with pytest.raises(ServerNotCompliantWithTlsConfiguration):
-            check_server_against_tls_configuration(
-                server_scan_result=server_scan_result_for_google, tls_config_to_check_against=tls_config
-            )
+        check_result = check_server_against_tls_configuration(
+            server_scan_result=server_scan_result_for_google, tls_config_to_check_against=tls_config
+        )
+        assert check_result.overall_status == TlsConfigurationCheckStatusEnum.NOT_COMPLIANT
 
     def test_multi_certs_deployment_not_compliant_with_modern(self, server_scan_result_for_google):
         # Give the scan results for google.com which has multiple leaf certificates
@@ -128,19 +127,24 @@ class TestMozillaTlsConfigurationChecker:
         tls_config = MozillaTlsConfiguration.get(TlsConfigurationEnum.MOZILLA_MODERN)
 
         # It succeeds and the server is returned as NOT compliant
-        with pytest.raises(ServerNotCompliantWithTlsConfiguration):
-            check_server_against_tls_configuration(
-                server_scan_result=server_scan_result_for_google, tls_config_to_check_against=tls_config
-            )
+        check_result = check_server_against_tls_configuration(
+            server_scan_result=server_scan_result_for_google, tls_config_to_check_against=tls_config
+        )
+        assert check_result.overall_status == TlsConfigurationCheckStatusEnum.NOT_COMPLIANT
 
     def test_incomplete_scan_result(self):
         # Given a scan result that does not contain all the information needed by the Mozilla checker
         server_scan_result = ServerScanResultFactory.create()
 
-        # When checking the server is compliant
+        # When checking the server is compliant, the check can run but cannot be decided because most required
+        # scan commands were not scheduled
         tls_config = MozillaTlsConfiguration.get(TlsConfigurationEnum.MOZILLA_MODERN)
-        # It fails
-        with pytest.raises(ServerScanResultIncomplete):
-            check_server_against_tls_configuration(
-                server_scan_result=server_scan_result, tls_config_to_check_against=tls_config
-            )
+        check_result = check_server_against_tls_configuration(
+            server_scan_result=server_scan_result, tls_config_to_check_against=tls_config
+        )
+        assert check_result.overall_status in (
+            TlsConfigurationCheckStatusEnum.NOT_RUN,
+            TlsConfigurationCheckStatusEnum.ERROR,
+        )
+        assert check_result.indeterminate_criteria
+        assert check_result.is_compliant is False

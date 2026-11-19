@@ -1,7 +1,8 @@
 import json
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Annotated, Optional, Set, Dict
+from typing import Annotated, Optional, Set, Dict, List, Callable
 
 import pydantic
 from cryptography.hazmat.primitives.asymmetric.ec import EllipticCurvePublicKey
@@ -87,21 +88,90 @@ class TlsConfigurationEnum(str, Enum):
     CUSTOM = "custom"
 
 
-class ServerNotCompliantWithTlsConfiguration(Exception):
-    def __init__(
-        self,
-        tls_configuration: TlsConfigurationAsJson,
-        issues: Dict[str, str],
-    ):
-        self.tls_configuration = tls_configuration
-        self.issues = issues
+class TlsConfigurationCheckStatusEnum(str, Enum):
+    """The status of a single compliance criterion, or of the compliance check as a whole.
 
-    def __str__(self) -> str:
-        return f"Server is not compliant with the supplied TLS configuration due to: {self.issues}"
+    COMPLIANT: the criterion was evaluated and no issue was detected.
+    NOT_COMPLIANT: the criterion was evaluated and an issue was detected; the issue description is available in
+        ``TlsConfigurationCriterionCheckResult.issue_description``.
+    NOT_RUN: the scan command(s) the criterion depends on were not scheduled or did not run, so the criterion could
+        not be evaluated. This must never be treated as "compliant": an empty cipher suite list or a default boolean
+        value coming from a missing scan result is not evidence of compliance.
+    ERROR: the scan command(s) the criterion depends on returned an error, so the criterion could not be evaluated.
+    """
+
+    COMPLIANT = "COMPLIANT"
+    NOT_COMPLIANT = "NOT_COMPLIANT"
+    NOT_RUN = "NOT_RUN"
+    ERROR = "ERROR"
+
+
+# The statuses that mean the criterion could not actually be evaluated
+INDETERMINATE_CRITERION_STATUSES = {
+    TlsConfigurationCheckStatusEnum.NOT_RUN,
+    TlsConfigurationCheckStatusEnum.ERROR,
+}
+
+
+@dataclass(frozen=True)
+class TlsConfigurationCriterionCheckResult:
+    """The result of checking the server against a single criterion of the TLS configuration.
+
+    Attributes:
+        criterion_name: The criterion that was checked; matches the issue keys historically returned by the checker
+            (``tls_versions``, ``ciphers``, ``certificate_path_validation``, etc.).
+        status: Whether the criterion is compliant, not compliant, or could not be evaluated.
+        issue_description: A human-readable description of the detected issue; ``None`` if no issue was detected or if
+            the criterion could not be evaluated.
+        dependencies: The scan commands the criterion depends on and the status of each one of them. The distinction
+            between NOT_SCHEDULED ("not run") and ERROR is preserved.
+    """
+
+    criterion_name: str
+    status: TlsConfigurationCheckStatusEnum
+    issue_description: Optional[str]
+    dependencies: Dict[ScanCommand, ScanCommandAttemptStatusEnum]
+
+
+@dataclass(frozen=True)
+class TlsConfigurationCheckResult:
+    """The result of checking a server against a TLS configuration.
+
+    Confirmed violations are always surfaced through the criteria whose dependencies completed successfully, even when
+    the check as a whole cannot be decided. ``overall_status`` is therefore independent of the individual criteria:
+    it is COMPLIANT or NOT_COMPLIANT only when every criterion could be evaluated, and NOT_RUN/ERROR otherwise.
+
+    Attributes:
+        overall_status: Whether the server can be deemed compliant, not compliant, or whether the check is
+            indeterminate because some required scan commands did not run or returned an error.
+        criteria: The result of each criterion of the TLS configuration, including the scan commands it depends on.
+    """
+
+    overall_status: TlsConfigurationCheckStatusEnum
+    criteria: List[TlsConfigurationCriterionCheckResult]
+
+    @property
+    def is_compliant(self) -> bool:
+        """True only if the check is fully decided and every criterion is compliant."""
+        return self.overall_status == TlsConfigurationCheckStatusEnum.COMPLIANT
+
+    @property
+    def indeterminate_criteria(self) -> List[TlsConfigurationCriterionCheckResult]:
+        """The criteria that could not be evaluated because their dependencies did not run or returned an error."""
+        return [criterion for criterion in self.criteria if criterion.status in INDETERMINATE_CRITERION_STATUSES]
+
+    @property
+    def issues(self) -> Dict[str, str]:
+        """The criteria that were actually evaluated and found not compliant, keyed by criterion name."""
+        return {
+            criterion.criterion_name: criterion.issue_description
+            for criterion in self.criteria
+            if criterion.status == TlsConfigurationCheckStatusEnum.NOT_COMPLIANT and criterion.issue_description
+        }
 
 
 class ServerScanResultIncomplete(Exception):
-    """The server scan result does not have enough information to check it against Mozilla's configuration."""
+    """Raised when the server scan itself was not completed and the compliance check cannot run at all."""
 
 
 SCAN_COMMANDS_NEEDED_BY_MOZILLA_CHECKER: Set[ScanCommand] = {
@@ -124,6 +194,51 @@ SCAN_COMMANDS_NEEDED_BY_MOZILLA_CHECKER: Set[ScanCommand] = {
 }
 
 
+# The scan commands each criterion depends on. Every criterion declares at least one dependency so that a missing
+# scan command can never silently look like a successful check (e.g. an empty accepted cipher suite list, or a
+# boolean defaulting to False).
+_CRITERION_DEPENDENCIES: Dict[str, Set[ScanCommand]] = {
+    "certificate_path_validation": {ScanCommand.CERTIFICATE_INFO},
+    "certificate_curves": {ScanCommand.CERTIFICATE_INFO},
+    "rsa_key_size": {ScanCommand.CERTIFICATE_INFO},
+    "certificate_types": {ScanCommand.CERTIFICATE_INFO},
+    "certificate_signatures": {ScanCommand.CERTIFICATE_INFO},
+    "maximum_certificate_lifespan": {ScanCommand.CERTIFICATE_INFO},
+    "tls_versions": {
+        ScanCommand.SSL_2_0_CIPHER_SUITES,
+        ScanCommand.SSL_3_0_CIPHER_SUITES,
+        ScanCommand.TLS_1_0_CIPHER_SUITES,
+        ScanCommand.TLS_1_1_CIPHER_SUITES,
+        ScanCommand.TLS_1_2_CIPHER_SUITES,
+        ScanCommand.TLS_1_3_CIPHER_SUITES,
+    },
+    "ciphersuites": {ScanCommand.TLS_1_3_CIPHER_SUITES},
+    "ciphers": {
+        ScanCommand.SSL_2_0_CIPHER_SUITES,
+        ScanCommand.SSL_3_0_CIPHER_SUITES,
+        ScanCommand.TLS_1_0_CIPHER_SUITES,
+        ScanCommand.TLS_1_1_CIPHER_SUITES,
+        ScanCommand.TLS_1_2_CIPHER_SUITES,
+    },
+    "ecdh_param_size": {
+        ScanCommand.TLS_1_2_CIPHER_SUITES,
+        ScanCommand.TLS_1_3_CIPHER_SUITES,
+    },
+    "dh_param_size": {
+        ScanCommand.TLS_1_2_CIPHER_SUITES,
+        ScanCommand.TLS_1_3_CIPHER_SUITES,
+    },
+    "tls_curves": {ScanCommand.ELLIPTIC_CURVES},
+    "tls_vulnerability_compression": {ScanCommand.TLS_COMPRESSION},
+    "tls_vulnerability_ccs_injection": {ScanCommand.OPENSSL_CCS_INJECTION},
+    "tls_vulnerability_fallback_scsv": {ScanCommand.TLS_FALLBACK_SCSV},
+    "tls_vulnerability_heartbleed": {ScanCommand.HEARTBLEED},
+    "tls_vulnerability_robot": {ScanCommand.ROBOT},
+    "tls_vulnerability_renegotiation": {ScanCommand.SESSION_RENEGOTIATION},
+    "tls_vulnerability_extended_master_secret": {ScanCommand.TLS_EXTENDED_MASTER_SECRET},
+}
+
+
 class MozillaTlsConfiguration:
     _JSON_PROFILE_PATH = Path(__file__).parent.absolute() / "5.7.json"
 
@@ -138,129 +253,98 @@ class MozillaTlsConfiguration:
 def check_server_against_tls_configuration(
     server_scan_result: ServerScanResult,
     tls_config_to_check_against: TlsConfigurationAsJson,
-) -> None:
-    # Ensure the scan was successful
+) -> TlsConfigurationCheckResult:
+    """Check a server scan result against a TLS configuration and return the outcome as a structured result.
+
+    The check never raises to signal a compliance outcome anymore. Instead:
+
+    * criteria whose dependencies completed are evaluated and reported as COMPLIANT or NOT_COMPLIANT; confirmed
+      violations are always surfaced, even if the overall check ends up being indeterminate;
+    * criteria whose dependencies did not run (NOT_SCHEDULED) or returned an error are reported as NOT_RUN or ERROR
+      respectively, along with the status of each dependency, instead of being mistaken for a passing check;
+    * ``overall_status`` is COMPLIANT/NOT_COMPLIANT only when every criterion could be evaluated, and NOT_RUN/ERROR
+      otherwise.
+    """
+    # The scan itself has to be completed; without this there is nothing to check
     if server_scan_result.scan_status != ServerScanStatusEnum.COMPLETED:
         raise ServerScanResultIncomplete("The server scan was not completed.")
+    assert server_scan_result.scan_result
 
-    # Ensure all the scan command we need were run successfully
+    # Collect the status of every scan command the checker needs, preserving the difference between "not run"
+    # (NOT_SCHEDULED) and "error"
+    dependencies_status: Dict[ScanCommand, ScanCommandAttemptStatusEnum] = {}
     for scan_command in SCAN_COMMANDS_NEEDED_BY_MOZILLA_CHECKER:
         scan_cmd_attempt = getattr(server_scan_result.scan_result, scan_command.value)
-        if scan_cmd_attempt.status != ScanCommandAttemptStatusEnum.COMPLETED:
-            raise ServerScanResultIncomplete(f"The {scan_command.value} result is missing.")
+        dependencies_status[scan_command] = scan_cmd_attempt.status
 
-    # Now look for issues
-    all_issues: Dict[str, str] = {}
+    # Evaluate every criterion independently; a missing dependency only skips that criterion, it does not abort the
+    # whole check nor get interpreted as compliance
+    criteria_results: List[TlsConfigurationCriterionCheckResult] = []
+    for criterion_name, criterion_dependencies in _CRITERION_DEPENDENCIES.items():
+        criterion_dependencies_status = {
+            scan_command: dependencies_status[scan_command] for scan_command in criterion_dependencies
+        }
+        criterion_status = _criterion_status_from_dependencies(criterion_dependencies_status)
+        issue_description: Optional[str] = None
 
-    # Checks on the certificate
-    assert server_scan_result.scan_result
-    assert server_scan_result.scan_result.certificate_info
-    assert server_scan_result.scan_result.certificate_info.result
-    issues_with_certificates = _check_certificates(
-        cert_info_result=server_scan_result.scan_result.certificate_info.result,
-        tls_config=tls_config_to_check_against,
-    )
-    all_issues.update(issues_with_certificates)
+        if criterion_status == TlsConfigurationCheckStatusEnum.COMPLIANT:
+            issue_description = _CRITERION_CHECKERS[criterion_name](
+                server_scan_result.scan_result, tls_config_to_check_against
+            )
+            if issue_description:
+                criterion_status = TlsConfigurationCheckStatusEnum.NOT_COMPLIANT
 
-    # Checks on the TLS versions and cipher suites
-    assert server_scan_result.scan_result
-    issues_with_tls_ciphers = _check_tls_versions_and_ciphers(
-        server_scan_result.scan_result, tls_config_to_check_against
-    )
-    all_issues.update(issues_with_tls_ciphers)
-
-    # Checks on the TLS curves
-    assert server_scan_result.scan_result.elliptic_curves.result
-    issues_with_tls_curves = _check_tls_curves(
-        server_scan_result.scan_result.elliptic_curves.result,
-        tls_config_to_check_against,
-    )
-    all_issues.update(issues_with_tls_curves)
-
-    # Checks on TLS vulnerabilities
-    issues_with_tls_vulns = _check_tls_vulnerabilities(server_scan_result.scan_result)
-    all_issues.update(issues_with_tls_vulns)
-
-    # TODO(AD): Re-enable this check. Right now nobody follows the recommendation of the Mozilla profile
-    # to have an HSTS max-age of 63072000 seconds (2 years).
-    # Check the HSTS header
-    # assert server_scan_result.scan_result.http_headers
-    # assert server_scan_result.scan_result.http_headers.result
-    # issue_with_hsts = _check_http_headers(server_scan_result.scan_result.http_headers.result, mozilla_config)
-    # all_issues.update(issue_with_hsts)
-
-    if all_issues:
-        raise ServerNotCompliantWithTlsConfiguration(
-            tls_configuration=tls_config_to_check_against,
-            issues=all_issues,
+        criteria_results.append(
+            TlsConfigurationCriterionCheckResult(
+                criterion_name=criterion_name,
+                status=criterion_status,
+                issue_description=issue_description,
+                dependencies=criterion_dependencies_status,
+            )
         )
 
-
-def _check_tls_curves(
-    tls_curves_result: SupportedEllipticCurvesScanResult,
-    tls_config: TlsConfigurationAsJson,
-) -> Dict[str, str]:
-    issues_with_tls_curves = {}
-    if tls_curves_result.supported_curves:
-        supported_curves = {curve.name for curve in tls_curves_result.supported_curves}
-    else:
-        supported_curves = set()
-
-    tls_curves_difference = supported_curves - tls_config.tls_curves
-    if tls_curves_difference:
-        issues_with_tls_curves["tls_curves"] = (
-            f"TLS curves {tls_curves_difference} are supported, but should be rejected."
-        )
-
-    return issues_with_tls_curves
+    overall_status = _compute_overall_status(criteria_results)
+    return TlsConfigurationCheckResult(overall_status=overall_status, criteria=criteria_results)
 
 
-def _check_tls_vulnerabilities(scan_result: AllScanCommandsAttempts) -> Dict[str, str]:
-    issues_with_tls_vulns = {}
-    assert scan_result.tls_compression.result
-    if scan_result.tls_compression.result.supports_compression:
-        issues_with_tls_vulns["tls_vulnerability_compression"] = "Server is vulnerable to TLS compression attacks."
-
-    assert scan_result.openssl_ccs_injection.result
-    if scan_result.openssl_ccs_injection.result.is_vulnerable_to_ccs_injection:
-        issues_with_tls_vulns["tls_vulnerability_ccs_injection"] = (
-            "Server is vulnerable to the OpenSSL CCS injection attack."
-        )
-
-    assert scan_result.tls_fallback_scsv.result
-    if not scan_result.tls_fallback_scsv.result.supports_fallback_scsv:
-        issues_with_tls_vulns["tls_vulnerability_fallback_scsv"] = (
-            "Server is vulnerable to TLS downgrade attacks because it does not support the TLS_FALLBACK_SCSV mechanism."
-        )
-
-    assert scan_result.heartbleed.result
-    if scan_result.heartbleed.result.is_vulnerable_to_heartbleed:
-        issues_with_tls_vulns["tls_vulnerability_heartbleed"] = "Server is vulnerable to the OpenSSL Heartbleed attack."
-
-    assert scan_result.robot.result
-    if scan_result.robot.result.robot_result == RobotScanResultEnum.VULNERABLE_STRONG_ORACLE:
-        issues_with_tls_vulns["tls_vulnerability_robot"] = "Server is vulnerable to the ROBOT attack."
-
-    assert scan_result.session_renegotiation.result
-    if not scan_result.session_renegotiation.result.supports_secure_renegotiation:
-        issues_with_tls_vulns["tls_vulnerability_renegotiation"] = (
-            "Server is vulnerable to the insecure renegotiation attack."
-        )
-
-    assert scan_result.tls_extended_master_secret.result
-    if not scan_result.tls_extended_master_secret.result.supports_ems_extension:
-        issues_with_tls_vulns["tls_vulnerability_extended_master_secret"] = (
-            "Server does not support the Extended Master Secret TLS extension."
-        )
-
-    return issues_with_tls_vulns
+def _criterion_status_from_dependencies(
+    dependencies_status: Dict[ScanCommand, ScanCommandAttemptStatusEnum],
+) -> TlsConfigurationCheckStatusEnum:
+    # An error on any dependency takes precedence: the criterion could not be evaluated because a plugin failed
+    if ScanCommandAttemptStatusEnum.ERROR in dependencies_status.values():
+        return TlsConfigurationCheckStatusEnum.ERROR
+    # The criterion can only be evaluated if every dependency actually completed
+    if all(status == ScanCommandAttemptStatusEnum.COMPLETED for status in dependencies_status.values()):
+        return TlsConfigurationCheckStatusEnum.COMPLIANT
+    # Some dependencies were never scheduled ("not run")
+    return TlsConfigurationCheckStatusEnum.NOT_RUN
 
 
-def _check_tls_versions_and_ciphers(
-    scan_result: AllScanCommandsAttempts,
-    tls_config: TlsConfigurationAsJson,
-) -> Dict[str, str]:
-    # First parse the results related to TLS versions and ciphers
+def _compute_overall_status(
+    criteria_results: List[TlsConfigurationCriterionCheckResult],
+) -> TlsConfigurationCheckStatusEnum:
+    # The overall outcome is independent of the individual criteria: it is decidable only when every criterion could
+    # be evaluated. Unknowns are neither counted as compliant nor as not compliant.
+    if any(criterion.status == TlsConfigurationCheckStatusEnum.ERROR for criterion in criteria_results):
+        return TlsConfigurationCheckStatusEnum.ERROR
+    if any(criterion.status == TlsConfigurationCheckStatusEnum.NOT_RUN for criterion in criteria_results):
+        return TlsConfigurationCheckStatusEnum.NOT_RUN
+    if any(criterion.status == TlsConfigurationCheckStatusEnum.NOT_COMPLIANT for criterion in criteria_results):
+        return TlsConfigurationCheckStatusEnum.NOT_COMPLIANT
+    return TlsConfigurationCheckStatusEnum.COMPLIANT
+
+
+@dataclass(frozen=True)
+class _ParsedTlsVersionsAndCiphers:
+    tls_versions_supported: Set[str]
+    cipher_suites_supported: Set[str]
+    tls_1_3_cipher_suites_supported: Set[str]
+    curves_supported: Set[str]
+    smallest_ecdh_param_size: int
+    smallest_dh_param_size: int
+
+
+def _parse_tls_versions_and_ciphers(scan_result: AllScanCommandsAttempts) -> _ParsedTlsVersionsAndCiphers:
     tls_versions_supported = set()
     cipher_suites_supported = set()
     tls_1_3_cipher_suites_supported = set()
@@ -293,117 +377,289 @@ def _check_tls_versions_and_ciphers(
                 elif isinstance(ephemeral_key, DhEphemeralKeyInfo):
                     smallest_dh_param_size = min([smallest_dh_param_size, ephemeral_key.size])
 
-    # Then check the results
-    issues_with_tls_ciphers = {}
-    tls_versions_difference = tls_versions_supported - tls_config.tls_versions
-    if tls_versions_difference:
-        issues_with_tls_ciphers["tls_versions"] = (
-            f"TLS versions {tls_versions_difference} are supported, but should be rejected."
-        )
+    return _ParsedTlsVersionsAndCiphers(
+        tls_versions_supported=tls_versions_supported,
+        cipher_suites_supported=cipher_suites_supported,
+        tls_1_3_cipher_suites_supported=tls_1_3_cipher_suites_supported,
+        curves_supported=curves_supported,
+        smallest_ecdh_param_size=smallest_ecdh_param_size,
+        smallest_dh_param_size=smallest_dh_param_size,
+    )
 
-    tls_1_3_cipher_suites_difference = tls_1_3_cipher_suites_supported - tls_config.ciphersuites
+
+def _check_tls_versions(
+    scan_result: AllScanCommandsAttempts,
+    tls_config: TlsConfigurationAsJson,
+) -> Optional[str]:
+    parsed_results = _parse_tls_versions_and_ciphers(scan_result)
+    tls_versions_difference = parsed_results.tls_versions_supported - tls_config.tls_versions
+    if tls_versions_difference:
+        return f"TLS versions {tls_versions_difference} are supported, but should be rejected."
+    return None
+
+
+def _check_tls_1_3_cipher_suites(
+    scan_result: AllScanCommandsAttempts,
+    tls_config: TlsConfigurationAsJson,
+) -> Optional[str]:
+    parsed_results = _parse_tls_versions_and_ciphers(scan_result)
+    tls_1_3_cipher_suites_difference = parsed_results.tls_1_3_cipher_suites_supported - tls_config.ciphersuites
     if tls_1_3_cipher_suites_difference:
-        issues_with_tls_ciphers["ciphersuites"] = (
+        return (
             f"TLS 1.3 cipher suites {tls_1_3_cipher_suites_difference} are supported, but should be rejected."
         )
+    return None
 
-    cipher_suites_difference = cipher_suites_supported - tls_config.ciphers.iana
+
+def _check_cipher_suites(
+    scan_result: AllScanCommandsAttempts,
+    tls_config: TlsConfigurationAsJson,
+) -> Optional[str]:
+    parsed_results = _parse_tls_versions_and_ciphers(scan_result)
+    cipher_suites_difference = parsed_results.cipher_suites_supported - tls_config.ciphers.iana
     if cipher_suites_difference:
-        issues_with_tls_ciphers["ciphers"] = (
-            f"Cipher suites {cipher_suites_difference} are supported, but should be rejected."
-        )
+        return f"Cipher suites {cipher_suites_difference} are supported, but should be rejected."
+    return None
 
-    if tls_config.ecdh_param_size and smallest_ecdh_param_size < tls_config.ecdh_param_size:
-        issues_with_tls_ciphers["ecdh_param_size"] = (
-            f"ECDH parameter size is {smallest_ecdh_param_size},"
+
+def _check_ecdh_param_size(
+    scan_result: AllScanCommandsAttempts,
+    tls_config: TlsConfigurationAsJson,
+) -> Optional[str]:
+    parsed_results = _parse_tls_versions_and_ciphers(scan_result)
+    if tls_config.ecdh_param_size and parsed_results.smallest_ecdh_param_size < tls_config.ecdh_param_size:
+        return (
+            f"ECDH parameter size is {parsed_results.smallest_ecdh_param_size},"
             f" should be superior or equal to {tls_config.ecdh_param_size}."
         )
+    return None
 
-    if tls_config.dh_param_size and smallest_dh_param_size < tls_config.dh_param_size:
-        issues_with_tls_ciphers["dh_param_size"] = (
-            f"DH parameter size is {smallest_dh_param_size},"
+
+def _check_dh_param_size(
+    scan_result: AllScanCommandsAttempts,
+    tls_config: TlsConfigurationAsJson,
+) -> Optional[str]:
+    parsed_results = _parse_tls_versions_and_ciphers(scan_result)
+    if tls_config.dh_param_size and parsed_results.smallest_dh_param_size < tls_config.dh_param_size:
+        return (
+            f"DH parameter size is {parsed_results.smallest_dh_param_size},"
             f" should be superior or equal to {tls_config.dh_param_size}."
         )
+    return None
 
-    return issues_with_tls_ciphers
 
-
-def _check_certificates(
-    cert_info_result: CertificateInfoScanResult,
+def _check_tls_curves(
+    scan_result: AllScanCommandsAttempts,
     tls_config: TlsConfigurationAsJson,
-) -> Dict[str, str]:
-    issues_with_certificates = {}
-    deployed_key_algorithms = set()
-    deployed_signature_algorithms = set()
+) -> Optional[str]:
+    tls_curves_result: SupportedEllipticCurvesScanResult = scan_result.elliptic_curves.result
+    if tls_curves_result.supported_curves:
+        supported_curves = {curve.name for curve in tls_curves_result.supported_curves}
+    else:
+        supported_curves = set()
+
+    tls_curves_difference = supported_curves - tls_config.tls_curves
+    if tls_curves_difference:
+        return f"TLS curves {tls_curves_difference} are supported, but should be rejected."
+    return None
+
+
+def _check_tls_vulnerability_compression(
+    scan_result: AllScanCommandsAttempts,
+    tls_config: TlsConfigurationAsJson,
+) -> Optional[str]:
+    if scan_result.tls_compression.result.supports_compression:
+        return "Server is vulnerable to TLS compression attacks."
+    return None
+
+
+def _check_tls_vulnerability_ccs_injection(
+    scan_result: AllScanCommandsAttempts,
+    tls_config: TlsConfigurationAsJson,
+) -> Optional[str]:
+    if scan_result.openssl_ccs_injection.result.is_vulnerable_to_ccs_injection:
+        return "Server is vulnerable to the OpenSSL CCS injection attack."
+    return None
+
+
+def _check_tls_vulnerability_fallback_scsv(
+    scan_result: AllScanCommandsAttempts,
+    tls_config: TlsConfigurationAsJson,
+) -> Optional[str]:
+    if not scan_result.tls_fallback_scsv.result.supports_fallback_scsv:
+        return (
+            "Server is vulnerable to TLS downgrade attacks because it does not support the TLS_FALLBACK_SCSV mechanism."
+        )
+    return None
+
+
+def _check_tls_vulnerability_heartbleed(
+    scan_result: AllScanCommandsAttempts,
+    tls_config: TlsConfigurationAsJson,
+) -> Optional[str]:
+    if scan_result.heartbleed.result.is_vulnerable_to_heartbleed:
+        return "Server is vulnerable to the OpenSSL Heartbleed attack."
+    return None
+
+
+def _check_tls_vulnerability_robot(
+    scan_result: AllScanCommandsAttempts,
+    tls_config: TlsConfigurationAsJson,
+) -> Optional[str]:
+    if scan_result.robot.result.robot_result == RobotScanResultEnum.VULNERABLE_STRONG_ORACLE:
+        return "Server is vulnerable to the ROBOT attack."
+    return None
+
+
+def _check_tls_vulnerability_renegotiation(
+    scan_result: AllScanCommandsAttempts,
+    tls_config: TlsConfigurationAsJson,
+) -> Optional[str]:
+    if not scan_result.session_renegotiation.result.supports_secure_renegotiation:
+        return "Server is vulnerable to the insecure renegotiation attack."
+    return None
+
+
+def _check_tls_vulnerability_extended_master_secret(
+    scan_result: AllScanCommandsAttempts,
+    tls_config: TlsConfigurationAsJson,
+) -> Optional[str]:
+    if not scan_result.tls_extended_master_secret.result.supports_ems_extension:
+        return "Server does not support the Extended Master Secret TLS extension."
+    return None
+
+
+def _check_certificate_path_validation(
+    scan_result: AllScanCommandsAttempts,
+    tls_config: TlsConfigurationAsJson,
+) -> Optional[str]:
+    cert_info_result: CertificateInfoScanResult = scan_result.certificate_info.result
     for cert_deployment in cert_info_result.certificate_deployments:
-        # Validate certificate trust
         leaf_cert = cert_deployment.received_certificate_chain[0]
         if not cert_deployment.verified_certificate_chain:
-            issues_with_certificates["certificate_path_validation"] = (
-                f"Certificate path validation failed for {leaf_cert.subject.rfc4514_string()}."
-            )
+            return f"Certificate path validation failed for {leaf_cert.subject.rfc4514_string()}."
+    return None
 
-        # Validate the public key
+
+def _check_certificate_curves(
+    scan_result: AllScanCommandsAttempts,
+    tls_config: TlsConfigurationAsJson,
+) -> Optional[str]:
+    cert_info_result = scan_result.certificate_info.result
+    for cert_deployment in cert_info_result.certificate_deployments:
+        leaf_cert = cert_deployment.received_certificate_chain[0]
+        public_key = leaf_cert.public_key()
+        if (
+            isinstance(public_key, EllipticCurvePublicKey)
+            and public_key.curve.name not in tls_config.certificate_curves
+        ):
+            return (
+                f"Certificate curve is {public_key.curve.name},"
+                f" should be one of {tls_config.certificate_curves}."
+            )
+    return None
+
+
+def _check_rsa_key_size(
+    scan_result: AllScanCommandsAttempts,
+    tls_config: TlsConfigurationAsJson,
+) -> Optional[str]:
+    cert_info_result = scan_result.certificate_info.result
+    for cert_deployment in cert_info_result.certificate_deployments:
+        leaf_cert = cert_deployment.received_certificate_chain[0]
+        public_key = leaf_cert.public_key()
+        if isinstance(public_key, RSAPublicKey):
+            if tls_config.rsa_key_size and public_key.key_size < tls_config.rsa_key_size:
+                return (
+                    f"RSA key size is {public_key.key_size},"
+                    f" minimum allowed is {tls_config.rsa_key_size}."
+                )
+    return None
+
+
+def _check_certificate_types(
+    scan_result: AllScanCommandsAttempts,
+    tls_config: TlsConfigurationAsJson,
+) -> Optional[str]:
+    cert_info_result = scan_result.certificate_info.result
+    deployed_key_algorithms = set()
+    for cert_deployment in cert_info_result.certificate_deployments:
+        leaf_cert = cert_deployment.received_certificate_chain[0]
         public_key = leaf_cert.public_key()
         if isinstance(public_key, EllipticCurvePublicKey):
             deployed_key_algorithms.add("ecdsa")
-            if public_key.curve.name not in tls_config.certificate_curves:
-                issues_with_certificates["certificate_curves"] = (
-                    f"Certificate curve is {public_key.curve.name},"
-                    f" should be one of {tls_config.certificate_curves}."
-                )
-
         elif isinstance(public_key, RSAPublicKey):
             deployed_key_algorithms.add("rsa")
-            if tls_config.rsa_key_size and public_key.key_size < tls_config.rsa_key_size:
-                issues_with_certificates["rsa_key_size"] = (
-                    f"RSA key size is {public_key.key_size}, minimum allowed is {tls_config.rsa_key_size}."
-                )
-
         else:
             deployed_key_algorithms.add(public_key.__class__.__name__)
 
-        deployed_signature_algorithms.add(leaf_cert.signature_algorithm_oid._name)  # type: ignore
-
-        # Validate the cert's lifespan
-        leaf_cert_lifespan = leaf_cert.not_valid_after_utc - leaf_cert.not_valid_before_utc
-        if leaf_cert_lifespan.days > tls_config.maximum_certificate_lifespan:
-            issues_with_certificates["maximum_certificate_lifespan"] = (
-                f"Certificate life span is {leaf_cert_lifespan.days} days,"
-                f" should be less than {tls_config.maximum_certificate_lifespan}."
-            )
-
-    # TODO(AD): It's unclear whether the Mozilla profile/configs takes into accounts servers with multiple leaf certs
-    #  What follows is my personal guess as to how it should work for multi-certs deployments...
-
-    # Validate the public key algorithms
     # At least one of the Mozilla cert types should have been detected in the server's cert deployments
-    found_cert_type = False
-    for key_algorithm in tls_config.certificate_types:
-        if key_algorithm in deployed_key_algorithms:
-            found_cert_type = True
-            break
-    if not found_cert_type:
-        issues_with_certificates["certificate_types"] = (
+    if not any(key_algorithm in deployed_key_algorithms for key_algorithm in tls_config.certificate_types):
+        return (
             f"Deployed certificate types are {deployed_key_algorithms},"
             f" should have at least one of {tls_config.certificate_types}."
         )
+    return None
 
-    # Validate the signature algorithms
-    found_sig_algorithm = False
-    for sig_algorithm in tls_config.certificate_signatures:
-        if sig_algorithm in deployed_signature_algorithms:
-            found_sig_algorithm = True
-            break
-    if not found_sig_algorithm:
-        issues_with_certificates["certificate_signatures"] = (
+
+def _check_certificate_signatures(
+    scan_result: AllScanCommandsAttempts,
+    tls_config: TlsConfigurationAsJson,
+) -> Optional[str]:
+    cert_info_result = scan_result.certificate_info.result
+    deployed_signature_algorithms = set()
+    for cert_deployment in cert_info_result.certificate_deployments:
+        leaf_cert = cert_deployment.received_certificate_chain[0]
+        deployed_signature_algorithms.add(leaf_cert.signature_algorithm_oid._name)  # type: ignore
+
+    if not any(sig_algorithm in deployed_signature_algorithms for sig_algorithm in tls_config.certificate_signatures):
+        return (
             f"Deployed certificate signatures are {deployed_signature_algorithms},"
             f" should have at least one of {tls_config.certificate_signatures}."
         )
+    return None
 
-    # TODO(AD): Maybe add check for ocsp_staple but that one seems optional in https://ssl-config.mozilla.org/
 
-    return issues_with_certificates
+def _check_maximum_certificate_lifespan(
+    scan_result: AllScanCommandsAttempts,
+    tls_config: TlsConfigurationAsJson,
+) -> Optional[str]:
+    cert_info_result = scan_result.certificate_info.result
+    for cert_deployment in cert_info_result.certificate_deployments:
+        leaf_cert = cert_deployment.received_certificate_chain[0]
+        leaf_cert_lifespan = leaf_cert.not_valid_after_utc - leaf_cert.not_valid_before_utc
+        if leaf_cert_lifespan.days > tls_config.maximum_certificate_lifespan:
+            return (
+                f"Certificate life span is {leaf_cert_lifespan.days} days,"
+                f" should be less than {tls_config.maximum_certificate_lifespan}."
+            )
+    return None
+
+
+# Maps each criterion name to the function able to evaluate it. Every function returns the issue description as a
+# string, or None when the criterion is compliant. The functions are only called when all their dependencies
+# completed, so their scan command results are guaranteed to be set.
+_CRITERION_CHECKERS: Dict[str, Callable[[AllScanCommandsAttempts, TlsConfigurationAsJson], Optional[str]]] = {
+    "certificate_path_validation": _check_certificate_path_validation,
+    "certificate_curves": _check_certificate_curves,
+    "rsa_key_size": _check_rsa_key_size,
+    "certificate_types": _check_certificate_types,
+    "certificate_signatures": _check_certificate_signatures,
+    "maximum_certificate_lifespan": _check_maximum_certificate_lifespan,
+    "tls_versions": _check_tls_versions,
+    "ciphersuites": _check_tls_1_3_cipher_suites,
+    "ciphers": _check_cipher_suites,
+    "ecdh_param_size": _check_ecdh_param_size,
+    "dh_param_size": _check_dh_param_size,
+    "tls_curves": _check_tls_curves,
+    "tls_vulnerability_compression": _check_tls_vulnerability_compression,
+    "tls_vulnerability_ccs_injection": _check_tls_vulnerability_ccs_injection,
+    "tls_vulnerability_fallback_scsv": _check_tls_vulnerability_fallback_scsv,
+    "tls_vulnerability_heartbleed": _check_tls_vulnerability_heartbleed,
+    "tls_vulnerability_robot": _check_tls_vulnerability_robot,
+    "tls_vulnerability_renegotiation": _check_tls_vulnerability_renegotiation,
+    "tls_vulnerability_extended_master_secret": _check_tls_vulnerability_extended_master_secret,
+}
 
 
 def _check_http_headers(

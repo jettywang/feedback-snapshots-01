@@ -38,6 +38,7 @@ from sslyze import (
     ServerScanResult,
     ServerTlsProbingResult,
 )
+from sslyze.mozilla_tls_profile.json_output import TlsConfigurationCheckResultAsJson
 from sslyze.scanner.models import AllScanCommandsAttempts
 from sslyze.server_setting import ConnectionTypeEnum, ServerNetworkLocation
 
@@ -165,6 +166,9 @@ class ServerScanResultAsJson(BaseModelWithOrmModeAndForbid):
 
     scan_status: ServerScanStatusEnum
     scan_result: Optional[AllScanCommandsAttemptsAsJson]
+
+    # Set only if the scan was checked against a TLS configuration (--mozilla_config or --custom_tls_config)
+    tls_configuration_check: Optional[TlsConfigurationCheckResultAsJson] = None
 
     @model_validator(mode="before")
     @classmethod

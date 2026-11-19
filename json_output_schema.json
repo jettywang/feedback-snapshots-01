@@ -831,6 +831,30 @@
       "title": "RobotScanResultEnum",
       "type": "string"
     },
+    "ScanCommand": {
+      "enum": [
+        "certificate_info",
+        "session_resumption",
+        "ssl_2_0_cipher_suites",
+        "ssl_3_0_cipher_suites",
+        "tls_1_0_cipher_suites",
+        "tls_1_1_cipher_suites",
+        "tls_1_2_cipher_suites",
+        "tls_1_3_cipher_suites",
+        "tls_compression",
+        "tls_1_3_early_data",
+        "openssl_ccs_injection",
+        "tls_fallback_scsv",
+        "heartbleed",
+        "robot",
+        "session_renegotiation",
+        "http_headers",
+        "elliptic_curves",
+        "tls_extended_master_secret"
+      ],
+      "title": "ScanCommand",
+      "type": "string"
+    },
     "ScanCommandAttemptStatusEnum": {
       "enum": [
         "ERROR",
@@ -909,6 +933,17 @@
               "type": "null"
             }
           ]
+        },
+        "tls_configuration_check": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TlsConfigurationCheckResultAsJson"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       },
       "required": [
@@ -1177,6 +1212,92 @@
         "rejected_curves"
       ],
       "title": "SupportedEllipticCurvesScanResultAsJson",
+      "type": "object"
+    },
+    "TlsConfigurationCheckResultAsJson": {
+      "additionalProperties": false,
+      "properties": {
+        "overall_status": {
+          "$ref": "#/$defs/TlsConfigurationCheckStatusEnum"
+        },
+        "is_compliant": {
+          "title": "Is Compliant",
+          "type": "boolean"
+        },
+        "issues": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Issues",
+          "type": "object"
+        },
+        "criteria": {
+          "items": {
+            "$ref": "#/$defs/TlsConfigurationCriterionCheckResultAsJson"
+          },
+          "title": "Criteria",
+          "type": "array"
+        }
+      },
+      "required": [
+        "overall_status",
+        "is_compliant",
+        "issues",
+        "criteria"
+      ],
+      "title": "TlsConfigurationCheckResultAsJson",
+      "type": "object"
+    },
+    "TlsConfigurationCheckStatusEnum": {
+      "description": "The status of a single compliance criterion, or of the compliance check as a whole.\n\nCOMPLIANT: the criterion was evaluated and no issue was detected.\nNOT_COMPLIANT: the criterion was evaluated and an issue was detected; the issue description is available in\n    ``TlsConfigurationCriterionCheckResult.issue_description``.\nNOT_RUN: the scan command(s) the criterion depends on were not scheduled or did not run, so the criterion could\n    not be evaluated. This must never be treated as \"compliant\": an empty cipher suite list or a default boolean\n    value coming from a missing scan result is not evidence of compliance.\nERROR: the scan command(s) the criterion depends on returned an error, so the criterion could not be evaluated.",
+      "enum": [
+        "COMPLIANT",
+        "NOT_COMPLIANT",
+        "NOT_RUN",
+        "ERROR"
+      ],
+      "title": "TlsConfigurationCheckStatusEnum",
+      "type": "string"
+    },
+    "TlsConfigurationCriterionCheckResultAsJson": {
+      "additionalProperties": false,
+      "properties": {
+        "criterion_name": {
+          "title": "Criterion Name",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/TlsConfigurationCheckStatusEnum"
+        },
+        "issue_description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Issue Description"
+        },
+        "dependencies": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ScanCommandAttemptStatusEnum"
+          },
+          "propertyNames": {
+            "$ref": "#/$defs/ScanCommand"
+          },
+          "title": "Dependencies",
+          "type": "object"
+        }
+      },
+      "required": [
+        "criterion_name",
+        "status",
+        "issue_description",
+        "dependencies"
+      ],
+      "title": "TlsConfigurationCriterionCheckResultAsJson",
       "type": "object"
     },
     "TlsResumptionSupportEnum": {
@@ -2208,7 +2329,7 @@
       "type": "string"
     },
     "sslyze_version": {
-      "default": "6.3.0",
+      "default": "6.3.1",
       "title": "Sslyze Version",
       "type": "string"
     },
