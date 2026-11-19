@@ -1,0 +1,8 @@
+Fixed TLS connection pool keying so requests with different verification
+contexts or certificate fingerprints cannot reuse a connection established
+under looser validation. :class:`aiohttp.Fingerprint` now compares by digest
+value, so equivalent pins share a pooled connection while distinct pins stay
+segregated; distinct :class:`ssl.SSLContext` objects always get separate
+pool entries. The connector documents that in-place mutation of a native
+``SSLContext`` is the caller's responsibility and is not observable through
+pool keying -- by :user:`sec17-208`.

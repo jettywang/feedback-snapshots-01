@@ -32,3 +32,23 @@ def test_fingerprint_check_no_ssl() -> None:
     transport = mock.Mock()
     transport.get_extra_info.return_value = None
     fp.check(transport)
+
+
+def test_fingerprint_equality_by_digest() -> None:
+    digest = hashlib.sha256(b"12345678" * 64).digest()
+    fp1 = aiohttp.Fingerprint(digest)
+    fp2 = aiohttp.Fingerprint(digest)
+    other = aiohttp.Fingerprint(hashlib.sha256(b"other").digest())
+
+    assert fp1 == fp2
+    assert hash(fp1) == hash(fp2)
+    assert fp1 != other
+    assert fp1 != digest
+    assert fp1 != object()
+
+
+def test_fingerprint_usable_in_sets_and_mapping_keys() -> None:
+    digest = hashlib.sha256(b"12345678" * 64).digest()
+    assert {aiohttp.Fingerprint(digest), aiohttp.Fingerprint(digest)} == {
+        aiohttp.Fingerprint(digest)
+    }

@@ -184,6 +184,19 @@ The client session supports the context manager protocol for self closing.
 
       A per-request ``ssl`` argument overrides this value.
 
+      The connector's keep-alive pool is keyed by the effective TLS
+      validation setting, so requests with different ``ssl`` values never
+      share a connection: a request with strict validation cannot reuse a
+      connection established with validation disabled or under a different
+      :class:`aiohttp.Fingerprint`. Two fingerprints with the same digest are
+      equivalent and may share a connection; two distinct
+      :class:`ssl.SSLContext` objects always get separate connections even if
+      their configuration is identical. An ``SSLContext`` is treated as an
+      opaque token, so mutating one in place after connections have been
+      established is the caller's responsibility — the connector cannot
+      observe changes inside the native object and does not re-key or discard
+      pooled connections in response to them.
+
       .. versionadded:: 3.15
 
    :param bool trust_env: Trust environment settings for proxy configuration if the parameter

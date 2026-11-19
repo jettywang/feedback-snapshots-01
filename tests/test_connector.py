@@ -34,7 +34,7 @@ from aiohttp import (
 from aiohttp.abc import AbstractResolver, ResolveResult
 from aiohttp.client_exceptions import InvalidUrlClientError
 from aiohttp.client_proto import ResponseHandler
-from aiohttp.client_reqrep import ClientRequestArgs, ConnectionKey
+from aiohttp.client_reqrep import ClientRequestArgs, ClientRequestBase, ConnectionKey
 from aiohttp.connector import (
     _SSL_CONTEXT_UNVERIFIED,
     _SSL_CONTEXT_VERIFIED,
@@ -2758,6 +2758,269 @@ async def test_ssl_context_once() -> None:
     assert conn1._get_ssl_context(req) is _SSL_CONTEXT_VERIFIED
     assert conn2._get_ssl_context(req) is _SSL_CONTEXT_VERIFIED
     assert conn3._get_ssl_context(req) is _SSL_CONTEXT_VERIFIED
+
+
+class _RecordingConnector(aiohttp.BaseConnector):
+    """Connector whose connection factory records every new connection."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.created: list[tuple[ConnectionKey, ResponseHandler]] = []
+
+    async def _create_connection(
+        self, req: ClientRequest, traces: list[Trace], timeout: ClientTimeout
+    ) -> ResponseHandler:
+        proto = create_mocked_conn(asyncio.get_running_loop(), should_close=False)
+        proto.is_connected.return_value = True
+        self.created.append((req.connection_key, proto))
+        return proto
+
+    @property
+    def created_count(self) -> int:
+        return len(self.created)
+
+
+async def test_pool_reuses_connection_for_equivalent_tls_settings(
+    make_client_request: _RequestMaker,
+) -> None:
+    """Two requests with the same ssl value reuse one pooled connection."""
+    loop = asyncio.get_running_loop()
+    connector = _RecordingConnector()
+    req1 = make_client_request("GET", URL("https://example.com"), ssl=True, loop=loop)
+    req2 = make_client_request("GET", URL("https://example.com"), ssl=True, loop=loop)
+    assert req1.connection_key == req2.connection_key
+
+    conn1 = await connector.connect(req1, [], ClientTimeout())
+    conn1.release()
+    conn2 = await connector.connect(req2, [], ClientTimeout())
+
+    assert connector.created_count == 1
+    assert conn2.protocol is connector.created[0][1]
+    conn2.release()
+    await connector.close()
+
+
+async def test_pool_separates_strict_and_loose_tls_requests(
+    make_client_request: _RequestMaker,
+) -> None:
+    """A strict request must not reuse a connection built with verification off."""
+    loop = asyncio.get_running_loop()
+    connector = _RecordingConnector()
+    loose_req = make_client_request(
+        "GET", URL("https://example.com"), ssl=False, loop=loop
+    )
+    strict_req = make_client_request(
+        "GET", URL("https://example.com"), ssl=True, loop=loop
+    )
+    assert loose_req.connection_key != strict_req.connection_key
+
+    loose_conn = await connector.connect(loose_req, [], ClientTimeout())
+    loose_conn.release()
+    # The loose connection is pooled under the loose key; the strict request
+    # must not be handed that protocol.
+    strict_conn = await connector.connect(strict_req, [], ClientTimeout())
+
+    assert connector.created_count == 2
+    assert strict_conn.protocol is not connector.created[0][1]
+    assert strict_conn.protocol is connector.created[1][1]
+    # The original loose connection remains pooled under its own key.
+    assert loose_req.connection_key in connector._conns
+    strict_conn.release()
+
+    # A second loose request reuses the original loose connection instead of
+    # opening a third one.
+    loose_conn_again = await connector.connect(loose_req, [], ClientTimeout())
+    assert connector.created_count == 2
+    assert loose_conn_again.protocol is connector.created[0][1]
+    loose_conn_again.release()
+    await connector.close()
+
+
+async def test_pool_separates_different_fingerprint_pins(
+    make_client_request: _RequestMaker,
+) -> None:
+    """Different certificate pins always get distinct pool entries."""
+    loop = asyncio.get_running_loop()
+    connector = _RecordingConnector()
+    pin_a = aiohttp.Fingerprint(b"a" * 32)
+    pin_b = aiohttp.Fingerprint(b"b" * 32)
+    req_a = make_client_request(
+        "GET", URL("https://example.com"), ssl=pin_a, loop=loop
+    )
+    req_b = make_client_request(
+        "GET", URL("https://example.com"), ssl=pin_b, loop=loop
+    )
+    assert req_a.connection_key != req_b.connection_key
+
+    conn_a = await connector.connect(req_a, [], ClientTimeout())
+    conn_a.release()
+    conn_b = await connector.connect(req_b, [], ClientTimeout())
+
+    assert connector.created_count == 2
+    assert conn_b.protocol is connector.created[1][1]
+    conn_b.release()
+    await connector.close()
+
+
+async def test_pool_reuses_connection_for_equal_fingerprint_values(
+    make_client_request: _RequestMaker,
+) -> None:
+    """Fingerprint instances with the same digest are equivalent pool keys."""
+    loop = asyncio.get_running_loop()
+    connector = _RecordingConnector()
+    digest = b"c" * 32
+    req1 = make_client_request(
+        "GET",
+        URL("https://example.com"),
+        ssl=aiohttp.Fingerprint(digest),
+        loop=loop,
+    )
+    req2 = make_client_request(
+        "GET",
+        URL("https://example.com"),
+        ssl=aiohttp.Fingerprint(digest),
+        loop=loop,
+    )
+    assert req1.connection_key == req2.connection_key
+
+    conn1 = await connector.connect(req1, [], ClientTimeout())
+    conn1.release()
+    conn2 = await connector.connect(req2, [], ClientTimeout())
+
+    assert connector.created_count == 1
+    assert conn2.protocol is connector.created[0][1]
+    conn2.release()
+    await connector.close()
+
+
+async def test_pool_separates_distinct_ssl_context_objects(
+    make_client_request: _RequestMaker,
+) -> None:
+    """SSLContext objects are identity tokens in the pool key."""
+    loop = asyncio.get_running_loop()
+    connector = _RecordingConnector()
+    ctx1 = ssl.create_default_context()
+    ctx2 = ssl.create_default_context()
+    req1 = make_client_request("GET", URL("https://example.com"), ssl=ctx1, loop=loop)
+    req2 = make_client_request("GET", URL("https://example.com"), ssl=ctx2, loop=loop)
+    assert req1.connection_key != req2.connection_key
+
+    conn1 = await connector.connect(req1, [], ClientTimeout())
+    conn1.release()
+    conn2 = await connector.connect(req2, [], ClientTimeout())
+
+    assert connector.created_count == 2
+    assert conn2.protocol is connector.created[1][1]
+    conn2.release()
+
+    # Handing back the same context object reuses the original connection.
+    conn1_again = await connector.connect(req1, [], ClientTimeout())
+    assert connector.created_count == 2
+    assert conn1_again.protocol is connector.created[0][1]
+    conn1_again.release()
+    await connector.close()
+
+
+async def test_tcp_connector_resolves_effective_tls_params_per_request(
+    make_client_request: _RequestMaker,
+) -> None:
+    """Effective context and fingerprint are resolved per request from its ssl value."""
+    loop = asyncio.get_running_loop()
+    connector = aiohttp.TCPConnector()
+    pin = aiohttp.Fingerprint(b"d" * 32)
+    custom_ctx = ssl.create_default_context()
+    strict_req = make_client_request(
+        "GET", URL("https://example.com"), ssl=True, loop=loop
+    )
+    loose_req = make_client_request(
+        "GET", URL("https://example.com"), ssl=False, loop=loop
+    )
+    pinned_req = make_client_request(
+        "GET", URL("https://example.com"), ssl=pin, loop=loop
+    )
+    ctx_req = make_client_request(
+        "GET", URL("https://example.com"), ssl=custom_ctx, loop=loop
+    )
+
+    seen: list[tuple[object, object]] = []
+    for req in (strict_req, loose_req, pinned_req, ctx_req):
+        seen.append(
+            (connector._get_ssl_context(req), connector._get_fingerprint(req))
+        )
+
+    assert seen == [
+        (_SSL_CONTEXT_VERIFIED, None),
+        (_SSL_CONTEXT_UNVERIFIED, None),
+        (_SSL_CONTEXT_UNVERIFIED, pin),
+        (custom_ctx, None),
+    ]
+    await connector.close()
+
+
+async def test_tcp_connector_factory_double_records_effective_context(
+    make_client_request: _RequestMaker,
+) -> None:
+    """A connection factory double observes the context each request is built with."""
+    loop = asyncio.get_running_loop()
+    connector = aiohttp.TCPConnector()
+    requests = [
+        make_client_request("GET", URL("https://example.com"), ssl=True, loop=loop),
+        make_client_request("GET", URL("https://example.com"), ssl=False, loop=loop),
+    ]
+    seen_contexts: list[object] = []
+
+    async def fake_create_direct(
+        req: ClientRequestBase,
+        traces: list[Trace],
+        timeout: ClientTimeout,
+        *,
+        client_error: type[Exception] = aiohttp.ClientConnectorError,
+    ) -> tuple[ResponseHandler, ResponseHandler]:
+        seen_contexts.append(connector._get_ssl_context(req))
+        proto = create_mocked_conn(loop)
+        return proto.transport, proto
+
+    with mock.patch.object(
+        connector, "_create_direct_connection", side_effect=fake_create_direct
+    ):
+        for req in requests:
+            conn = await connector.connect(req, [], ClientTimeout())
+            conn.close()
+
+    assert seen_contexts == [_SSL_CONTEXT_VERIFIED, _SSL_CONTEXT_UNVERIFIED]
+    await connector.close()
+
+
+async def test_cancelled_waiter_does_not_leak_pool_slot(
+    make_client_request: _RequestMaker,
+) -> None:
+    """Cancelling a queued connect keeps no acquired slot or waiter behind."""
+    loop = asyncio.get_running_loop()
+    connector = _RecordingConnector(limit=1)
+    req = make_client_request("GET", URL("https://example.com"), ssl=True, loop=loop)
+    key = req.connection_key
+
+    held = await connector.connect(req, [], ClientTimeout())
+    assert len(connector._acquired) == 1
+
+    task = asyncio.create_task(connector.connect(req, [], ClientTimeout()))
+    await asyncio.sleep(0)
+    assert key in connector._waiters
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert not connector._waiters
+    assert len(connector._acquired) == 1
+    held.close()
+    assert not connector._acquired
+
+    # The freed slot is usable again without any leftover quota consumption.
+    replacement = await connector.connect(req, [], ClientTimeout())
+    assert len(connector._acquired) == 1
+    assert connector.created_count == 2
+    replacement.close()
+    await connector.close()
 
 
 async def test_close_twice(key: ConnectionKey) -> None:

@@ -178,6 +178,16 @@ class RequestInfo(_RequestInfo):
 
 
 class Fingerprint:
+    """A certificate pin.
+
+    Fingerprints are immutable and compared by their digest value, so two
+    ``Fingerprint`` objects built from the same bytes pin the same certificate
+    and are interchangeable as :data:`ConnectionKey` components: requests using
+    them may share a pooled connection. Two different digests never compare
+    equal, which keeps a strictly pinned request from reusing a connection
+    established under a different pin.
+    """
+
     HASHFUNC_BY_DIGESTLEN = {
         16: md5,
         20: sha1,
@@ -197,6 +207,14 @@ class Fingerprint:
     @property
     def fingerprint(self) -> bytes:
         return self._fingerprint
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Fingerprint):
+            return NotImplemented
+        return self._fingerprint == other._fingerprint
+
+    def __hash__(self) -> int:
+        return hash((Fingerprint, self._fingerprint))
 
     def check(self, transport: asyncio.Transport) -> None:
         if not transport.get_extra_info("sslcontext"):
@@ -222,6 +240,20 @@ _SSL_SCHEMES = frozenset(("https", "wss"))
 # ConnectionKey is a NamedTuple because it is used as a key in a dict
 # and a set in the connector. Since a NamedTuple is a tuple it uses
 # the fast native tuple __hash__ and __eq__ implementation in CPython.
+#
+# Security invariant: every TLS setting that changes which connections are
+# acceptable to a request must be part of the key, so a request can only
+# reuse a connection whose TLS validation was established under equivalent
+# requirements. ``ssl`` carries the request-level override (or the
+# connector's own setting when no override is given): booleans select the
+# shared verified/unverified default contexts, SSLContext objects are
+# identity tokens (see TCPConnector._get_ssl_context), and Fingerprints
+# compare by digest. A stricter request therefore never receives a
+# connection built under looser validation. The invariant covers settings
+# as observed at connect time; it cannot be strengthened retroactively by
+# mutating an already-pooled connection's parameters, and in-place mutation
+# of a native SSLContext is the caller's responsibility and is not
+# observable through this key.
 class ConnectionKey(NamedTuple):
     # the key should contain an information about used proxy / TLS
     # to prevent reusing wrong connections from a pool

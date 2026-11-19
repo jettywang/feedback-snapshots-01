@@ -1275,18 +1275,32 @@ class TCPConnector(BaseConnector):
         return proto
 
     def _get_ssl_context(self, req: ClientRequestBase) -> SSLContext | None:
-        """Logic to get the correct SSL context
+        """Resolve the effective SSL context for *req*.
+
+        Resolution order:
 
         0. if req.ssl is false, return None
 
-        1. if ssl_context is specified in req, use it
-        2. if _ssl_context is specified in self, use it
+        1. if an SSLContext is specified in req, use it
+        2. if an SSLContext is specified on the connector, use it
         3. otherwise:
-            1. if verify_ssl is not specified in req, use self.ssl_context
-               (will generate a default context according to self.verify_ssl)
+            1. if verify_ssl is not specified in req, use the connector's
+               setting (a default context is generated according to it)
             2. if verify_ssl is True in req, generate a default SSL context
             3. if verify_ssl is False in req, generate a SSL context that
                won't verify
+
+        The pool key only distinguishes the ssl value carried by the request
+        (or the connector's own setting when the request carries none), so an
+        SSLContext is treated as an opaque, identity-based token: two distinct
+        SSLContext objects never share a pool entry even if they happen to be
+        configured identically, and the same object always maps to the same
+        entry. A caller that mutates an SSLContext in place after connections
+        have been established is responsible for that change; the connector
+        cannot observe mutations inside the native object and therefore does
+        not re-key or invalidate pooled connections when they happen. Pass a
+        different SSLContext instance (or ``ssl=False``/``ssl=True``) to get
+        connections built under different validation settings.
         """
         if not req.is_ssl():
             return None
@@ -1308,6 +1322,14 @@ class TCPConnector(BaseConnector):
         return _SSL_CONTEXT_VERIFIED
 
     def _get_fingerprint(self, req: ClientRequestBase) -> "Fingerprint | None":
+        """Resolve the certificate pin for *req*.
+
+        A fingerprint carried by the request wins over the connector's
+        deprecated default. Fingerprints compare by digest value, so equal
+        pins share a pool entry while different pins always get distinct
+        entries; a request pinned to one certificate can never reuse a
+        connection that was pinned to another.
+        """
         ret = req.ssl
         if isinstance(ret, Fingerprint):
             return ret
