@@ -5261,3 +5261,241 @@ def test_fat_64bit_sector_count():
 	assert warn_cnt == 1
 
 	FAT.WARN_FUNC = warn_old
+
+class ReadOnlyBytesIO(io.BytesIO):
+	def write(self, *args, **kwargs):
+		raise AssertionError('A write to the volume was attempted')
+
+def build_exfat_dual_image(active_fat = 0, second_bitmap = True, duplicate_bitmap_id = False, volume_dirty = False, number_of_fats = 2):
+	import struct
+
+	SECTOR = 512
+	SECTORS = 2048 # 1 MiB.
+	FAT_OFFSET = 24 # In sectors.
+	FAT_LENGTH = 1 # In sectors (for each FAT).
+	HEAP_OFFSET = 26 # In sectors.
+	CLUSTER_COUNT = 64
+	CLUSTER_SIZE = 512
+
+	img = bytearray(SECTOR * SECTORS)
+
+	# The boot sector.
+	img[0 : 3] = b'\xEB\x76\x90'
+	img[3 : 11] = b'EXFAT   '
+	struct.pack_into('<Q', img, 64, 0) # The partition offset.
+	struct.pack_into('<Q', img, 72, SECTORS) # The volume length.
+	struct.pack_into('<L', img, 80, FAT_OFFSET)
+	struct.pack_into('<L', img, 84, FAT_LENGTH)
+	struct.pack_into('<L', img, 88, HEAP_OFFSET)
+	struct.pack_into('<L', img, 92, CLUSTER_COUNT)
+	struct.pack_into('<L', img, 96, 2) # The first cluster of the root directory.
+	struct.pack_into('<L', img, 100, 0x12345678) # The volume serial number.
+	img[104] = 0
+	img[105] = 1 # The file system revision: 1.00.
+	volume_flags = active_fat & 1
+	if volume_dirty:
+		volume_flags |= 2
+	struct.pack_into('<H', img, 106, volume_flags)
+	img[108] = 9 # 512 bytes per sector.
+	img[109] = 0 # 1 sector per cluster.
+	img[110] = number_of_fats
+	img[510] = 0x55
+	img[511] = 0xAA
+
+	# The boot region checksum.
+	checksum = 0
+	for idx in range(11 * SECTOR):
+		if idx in [ 106, 107, 112 ]:
+			continue
+
+		if checksum & 1 > 0:
+			checksum = 0x80000000 | (checksum >> 1)
+		else:
+			checksum = checksum >> 1
+
+		checksum = (checksum + img[idx]) & 0xFFFFFFFF
+
+	for i in range(SECTOR // 4):
+		struct.pack_into('<L', img, 11 * SECTOR + i * 4, checksum)
+
+	# Two FATs. Both describe the root directory (cluster 2) and the bitmaps (clusters 3 and 4) in the same way.
+	# The file data chain differs: FAT #0 has 5 -> 6, FAT #1 has 5 -> 7.
+	for fat_number in range(2):
+		fat_base = (FAT_OFFSET + fat_number * FAT_LENGTH) * SECTOR
+		struct.pack_into('<L', img, fat_base + 0, 0xFFFFFFF8)
+		struct.pack_into('<L', img, fat_base + 4, 0xFFFFFFFF)
+		struct.pack_into('<L', img, fat_base + 2 * 4, 0xFFFFFFFF)
+		struct.pack_into('<L', img, fat_base + 3 * 4, 0xFFFFFFFF)
+		struct.pack_into('<L', img, fat_base + 4 * 4, 0xFFFFFFFF)
+		if fat_number == 0:
+			struct.pack_into('<L', img, fat_base + 5 * 4, 6)
+		else:
+			struct.pack_into('<L', img, fat_base + 5 * 4, 7)
+		struct.pack_into('<L', img, fat_base + 6 * 4, 0xFFFFFFFF)
+		struct.pack_into('<L', img, fat_base + 7 * 4, 0xFFFFFFFF)
+
+	def cluster_offset(cluster):
+		return (HEAP_OFFSET + cluster - 2) * SECTOR
+
+	# The root directory (cluster 2).
+	root = bytearray(CLUSTER_SIZE)
+
+	# The allocation bitmap #0 (cluster 3).
+	root[0] = 0x81
+	root[1] = 0 # The bitmap identifier: 0.
+	struct.pack_into('<L', root, 20, 3)
+	struct.pack_into('<Q', root, 24, 8)
+
+	# The allocation bitmap #1 (cluster 4).
+	if second_bitmap:
+		root[32] = 0x81
+		root[33] = 0 if duplicate_bitmap_id else 1 # The bitmap identifier: 1 (or a duplicate of 0).
+		struct.pack_into('<L', root, 32 + 20, 4)
+		struct.pack_into('<Q', root, 32 + 24, 8)
+
+	# A file entry set for 'A.TXT' (first cluster: 5, data length: 1024, a FAT chain is used).
+	file_set = bytearray(96)
+	file_set[0] = 0x85
+	file_set[1] = 2 # Two secondary entries.
+	struct.pack_into('<H', file_set, 4, 0x20) # Attributes: archive.
+
+	file_set[32] = 0xC0
+	file_set[33] = 0x01 # Allocation possible, a FAT chain is used.
+	file_set[32 + 3] = 5 # The name length.
+	struct.pack_into('<Q', file_set, 32 + 8, 1024) # The valid data length.
+	struct.pack_into('<L', file_set, 32 + 20, 5) # The first cluster.
+	struct.pack_into('<Q', file_set, 32 + 24, 1024) # The data length.
+
+	file_set[64] = 0xC1
+	file_set[64 + 2 : 64 + 2 + 10] = 'A.TXT'.encode('utf-16le')
+
+	set_checksum = exFAT.EntrySetChecksum(bytes(file_set))
+	struct.pack_into('<H', file_set, 2, set_checksum)
+
+	root[64 : 64 + 96] = file_set
+
+	img[cluster_offset(2) : cluster_offset(2) + CLUSTER_SIZE] = root
+
+	# The allocation bitmaps. Bitmap #0 marks clusters 2-6 as allocated, bitmap #1 marks clusters 2-5 and 7.
+	img[cluster_offset(3)] = 0x1F
+	img[cluster_offset(4)] = 0x2F
+
+	# The file data.
+	img[cluster_offset(5) : cluster_offset(5) + CLUSTER_SIZE] = b'A' * CLUSTER_SIZE
+	img[cluster_offset(6) : cluster_offset(6) + CLUSTER_SIZE] = b'B' * CLUSTER_SIZE
+	img[cluster_offset(7) : cluster_offset(7) + CLUSTER_SIZE] = b'C' * CLUSTER_SIZE
+
+	return bytes(img)
+
+def test_exfat_dual_allocation_diag():
+	img = build_exfat_dual_image(active_fat = 0)
+
+	# The diagnostics must not modify the volume.
+	f = ReadOnlyBytesIO(img)
+	diag = exFAT.DualAllocationDiagnostics(f, 0, len(img))
+
+	assert diag.number_of_fats == 2
+	assert diag.active_fat == 0
+	assert not diag.backup_used
+
+	assert len(diag.views) == 2
+	assert diag.views[0].available and diag.views[0].is_active
+	assert diag.views[1].available and not diag.views[1].is_active
+	assert 'candidate residual' in diag.views[1].role()
+
+	assert len(diag.pairing_issues) == 0
+
+	# The same directory entry points to different (valid) data in the two views.
+	assert len(diag.conflicts) == 1
+	conflict = diag.conflicts[0]
+	assert conflict.path == '/A.TXT'
+	assert conflict.ranges[0].clusters == [ 5, 6 ]
+	assert conflict.ranges[1].clusters == [ 5, 7 ]
+	assert conflict.ranges[0].allocation == [ True, True ]
+	assert conflict.ranges[1].allocation == [ True, True ]
+	assert len(conflict.basis) > 0
+
+	assert diag.last_committed_fat == 0
+
+	report = diag.format_report()
+	assert 'Last committed state: FAT #0' in report
+	assert '/A.TXT' in report
+
+	# The default (normal) reads obey the active state selected by the boot flags.
+	f.seek(0)
+	fs = exFAT.FileSystemParser(f, 0, len(img))
+	assert fs.fat_index == 0
+	assert fs.read_chain(5, 1024) == b'A' * 512 + b'B' * 512
+
+	f.close()
+
+def test_exfat_dual_allocation_active_second():
+	img = build_exfat_dual_image(active_fat = 1)
+
+	f = ReadOnlyBytesIO(img)
+	diag = exFAT.DualAllocationDiagnostics(f, 0, len(img))
+
+	assert diag.active_fat == 1
+	assert diag.views[1].is_active
+	assert not diag.views[0].is_active
+	assert 'candidate residual' in diag.views[0].role()
+
+	assert len(diag.conflicts) == 1
+	conflict = diag.conflicts[0]
+	assert conflict.ranges[0].clusters == [ 5, 6 ]
+	assert conflict.ranges[1].clusters == [ 5, 7 ]
+
+	assert diag.last_committed_fat == 1
+
+	# The default (normal) reads obey the active state selected by the boot flags.
+	f.seek(0)
+	fs = exFAT.FileSystemParser(f, 0, len(img))
+	assert fs.fat_index == 1
+	assert fs.read_chain(5, 1024) == b'A' * 512 + b'C' * 512
+
+	f.close()
+
+def test_exfat_dual_allocation_missing_bitmap():
+	img = build_exfat_dual_image(active_fat = 0, second_bitmap = False)
+
+	f = ReadOnlyBytesIO(img)
+	diag = exFAT.DualAllocationDiagnostics(f, 0, len(img))
+
+	assert diag.views[0].available
+	assert not diag.views[1].available
+
+	# The missing pairing is reported and no conflicts can be computed.
+	assert any('identifier 1' in issue for issue in diag.pairing_issues)
+	assert len(diag.conflicts) == 0
+
+	# No claim about the last committed state is possible.
+	assert diag.last_committed_fat is None
+	assert 'undetermined' in diag.format_report()
+
+	f.close()
+
+def test_exfat_dual_allocation_contradictory_pairing():
+	img = build_exfat_dual_image(active_fat = 0, duplicate_bitmap_id = True)
+
+	f = ReadOnlyBytesIO(img)
+	diag = exFAT.DualAllocationDiagnostics(f, 0, len(img))
+
+	assert any('more than one allocation bitmap with identifier 0' in issue for issue in diag.pairing_issues)
+	assert diag.last_committed_fat is None
+
+	f.close()
+
+def test_exfat_dual_allocation_dirty_volume():
+	img = build_exfat_dual_image(active_fat = 0, volume_dirty = True)
+
+	f = ReadOnlyBytesIO(img)
+	diag = exFAT.DualAllocationDiagnostics(f, 0, len(img))
+
+	# The volume is dirty: no claim about the last committed state is possible.
+	assert diag.last_committed_fat is None
+	assert any('dirty' in reason for reason in diag.last_committed_basis)
+
+	# The candidate views are still computed and reported.
+	assert len(diag.conflicts) == 1
+
+	f.close()

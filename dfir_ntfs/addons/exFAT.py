@@ -1080,7 +1080,10 @@ class FileSystemParser(object):
 	backup_used = None
 	"""True if a backup boot region has been used to parse this volume."""
 
-	def __init__(self, volume_object, volume_offset = 0, volume_size = None):
+	fat_index = None
+	"""An index of the FAT selected for this volume (paired with the allocation bitmap having the same identifier)."""
+
+	def __init__(self, volume_object, volume_offset = 0, volume_size = None, fat_index = None):
 		def try_br(br_offset):
 			self.volume_object.seek(self.volume_offset + br_offset)
 			br_buf = self.volume_object.read(12 * 4096)
@@ -1117,7 +1120,17 @@ class FileSystemParser(object):
 		fat_size = self.br.get_fatlength() * sector_size
 
 		active_fat, __, __, __ = self.br.get_volumeflags()
-		if active_fat == 1: # Select the second FAT.
+		if fat_index is None: # Select the FAT according to the boot flags (the default behavior).
+			fat_index = int(active_fat)
+
+		if fat_index not in [ 0, 1 ]:
+			raise FileAllocationTableException('Invalid FAT index: {}'.format(fat_index))
+
+		if fat_index == 1 and self.br.get_numberoffats() != 2:
+			raise FileAllocationTableException('FAT #1 requested, but the volume has a single FAT')
+
+		self.fat_index = fat_index
+		if fat_index == 1: # Select the second FAT.
 			fat_offset += fat_size
 
 		self.last_valid_cluster = self.br.get_clustercount() + 1
@@ -1128,7 +1141,7 @@ class FileSystemParser(object):
 
 		self.bm = None
 		for entry in root_dir.entries():
-			if type(entry) is AllocationBitmapEntry and entry.bitmap_id == active_fat:
+			if type(entry) is AllocationBitmapEntry and entry.bitmap_id == fat_index:
 				self.bm = Bitmap(self.read_chain(entry.first_cluster), self.last_valid_cluster)
 				break
 
@@ -1299,3 +1312,319 @@ class FileSystemParser(object):
 
 	def __str__(self):
 		return 'FileSystemParser (exFAT)'
+
+# A file (or a directory) as seen in a candidate view: the cluster chain is taken from the FAT of this view,
+# the allocation status of each cluster is taken from the allocation bitmap paired with this FAT (matched by the bitmap identifier).
+# The two sources are never crossed: a chain from one FAT is never checked against a bitmap paired with another FAT.
+FileRangeView = namedtuple('FileRangeView', [ 'path', 'is_directory', 'is_deleted', 'size', 'first_cluster', 'no_fat_chain', 'clusters', 'allocation' ])
+
+# A conflict between two candidate views. The 'ranges' member maps a FAT index to a FileRangeView object (or None, if the path is absent in that view).
+ViewConflict = namedtuple('ViewConflict', [ 'path', 'ranges', 'basis' ])
+
+class CandidateView(object):
+	"""A candidate view of a volume, built from one FAT paired with the allocation bitmap having the same identifier.
+	An inactive view is a candidate residual state only: it must not be called the last committed state of the volume.
+	"""
+
+	fat_index = None
+	"""An index of the FAT used by this view."""
+
+	is_active = None
+	"""True if this view is selected by the boot flags."""
+
+	available = None
+	"""True if this view could be built (the FAT and the paired allocation bitmap are present)."""
+
+	unavailable_reason = None
+	"""A reason for this view to be unavailable (if any)."""
+
+	files = None
+	"""A dictionary mapping a path to a FileRangeView object."""
+
+	scan_error = None
+	"""An error encountered when scanning this view (if any, partial results are kept)."""
+
+	def __init__(self, fat_index, is_active):
+		self.fat_index = fat_index
+		self.is_active = is_active
+		self.available = False
+		self.unavailable_reason = None
+		self.files = dict()
+		self.scan_error = None
+
+	def role(self):
+		"""Get and return a human-readable role of this view."""
+
+		if self.is_active:
+			return 'active (selected by the boot flags)'
+
+		return 'candidate residual (inactive), not the committed state'
+
+	def __str__(self):
+		return 'CandidateView (FAT #{})'.format(self.fat_index)
+
+class DualAllocationDiagnostics(object):
+	"""This class implements read-only diagnostics of the dual-allocation state of an exFAT volume (two FATs and two allocation bitmaps).
+
+	Each candidate view is computed from one FAT paired with the allocation bitmap having the same identifier (as selected by the boot flags
+	and the bitmap directory entries). The two candidate views are computed independently: a cluster chain from one FAT is never checked
+	against a bitmap paired with another FAT.
+
+	An inactive view is reported as a candidate residual state only. If the boot region is unreliable (a backup copy had to be used,
+	the volume is dirty, or a media failure is flagged) or a pairing is missing or contradictory, no view is claimed to be the last
+	committed state of the volume.
+
+	This class never modifies the volume: only read and seek operations are performed on the volume object.
+	Normal (default) reads through the FileSystemParser class still obey the active state explicitly selected by the boot flags.
+	"""
+
+	volume_object = None
+	volume_offset = None
+	volume_size = None
+
+	br = None
+	backup_used = None
+
+	number_of_fats = None
+	active_fat = None
+	volume_dirty = None
+	media_failure = None
+
+	views = None
+	"""A list of CandidateView objects (one per FAT)."""
+
+	pairing_issues = None
+	"""A list of strings describing missing and contradictory FAT/bitmap pairings."""
+
+	conflicts = None
+	"""A list of ViewConflict objects."""
+
+	last_committed_fat = None
+	"""An index of the FAT holding the last committed state, or None if it cannot be determined."""
+
+	last_committed_basis = None
+	"""A list of strings explaining the 'last_committed_fat' member."""
+
+	def __init__(self, volume_object, volume_offset = 0, volume_size = None):
+		self.volume_object = volume_object
+		self.volume_offset = volume_offset
+		self.volume_size = volume_size
+
+		# Build the default (active) parser first. If the boot region is bad, this raises an exception:
+		# in this case, no claim about any allocation state can be made at all.
+		active_parser = FileSystemParser(self.volume_object, self.volume_offset, self.volume_size)
+
+		self.br = active_parser.br
+		self.backup_used = active_parser.backup_used
+
+		active_fat, volume_dirty, media_failure, __ = self.br.get_volumeflags()
+		self.active_fat = int(active_fat)
+		self.volume_dirty = volume_dirty
+		self.media_failure = media_failure
+		self.number_of_fats = self.br.get_numberoffats()
+
+		self.views = []
+		for fat_index in range(self.number_of_fats):
+			self.views.append(self._build_view(fat_index))
+
+		self.pairing_issues = self._find_pairing_issues(active_parser)
+		self.conflicts = self._find_conflicts()
+		self.last_committed_fat, self.last_committed_basis = self._determine_last_committed()
+
+	def _build_view(self, fat_index):
+		"""Build a candidate view for a given FAT index (paired with the allocation bitmap having the same identifier)."""
+
+		view = CandidateView(fat_index, fat_index == self.active_fat)
+
+		try:
+			parser = FileSystemParser(self.volume_object, self.volume_offset, self.volume_size, fat_index = fat_index)
+		except FileSystemException as e:
+			view.unavailable_reason = str(e)
+			return view
+
+		view.available = True
+
+		try:
+			for entry in parser.walk():
+				if type(entry) is not FileEntry:
+					continue
+
+				if entry.first_cluster < 2: # No data clusters.
+					continue
+
+				view.files[entry.name] = self._resolve_file_range(parser, entry)
+		except (FileSystemException, ValueError) as e:
+			view.scan_error = str(e)
+
+		return view
+
+	def _resolve_file_range(self, parser, entry):
+		"""Resolve the cluster chain of a file using the FAT of a given view,
+		then check the allocation status of each cluster against the bitmap paired with this FAT.
+		"""
+
+		if entry.no_fat_chain: # Contiguous clusters, the FAT is not used.
+			cluster_count = (entry.size + parser.cluster_size - 1) // parser.cluster_size
+			clusters = []
+			for i in range(cluster_count):
+				cluster = entry.first_cluster + i
+				if cluster > parser.last_valid_cluster:
+					break
+				clusters.append(cluster)
+		else:
+			try:
+				clusters = parser.fat.chain(entry.first_cluster)
+			except FileAllocationTableException:
+				clusters = []
+
+		allocation = []
+		for cluster in clusters:
+			if cluster is None: # A bad cluster.
+				allocation.append(None)
+			else:
+				allocation.append(parser.bm.is_allocated(cluster))
+
+		return FileRangeView(entry.name, entry.is_directory, entry.is_deleted, entry.size, entry.first_cluster, entry.no_fat_chain, clusters, allocation)
+
+	def _find_pairing_issues(self, active_parser):
+		"""Find missing and contradictory FAT/bitmap pairings (using the root directory as seen through the active FAT)."""
+
+		issues = []
+
+		try:
+			root_dir_buf = active_parser.read_chain(self.br.get_firstclusterofrootdirectory())
+			bitmap_ids = []
+			for entry in DirectoryEntries(root_dir_buf, True).entries():
+				if type(entry) is AllocationBitmapEntry:
+					bitmap_ids.append(entry.bitmap_id)
+		except (FileSystemException, ValueError) as e:
+			return [ 'cannot enumerate allocation bitmaps: {}'.format(e) ]
+
+		for bitmap_id in set(bitmap_ids):
+			if bitmap_ids.count(bitmap_id) > 1:
+				issues.append('contradictory pairing: more than one allocation bitmap with identifier {}'.format(bitmap_id))
+
+			if bitmap_id >= self.number_of_fats:
+				issues.append('contradictory pairing: an allocation bitmap with identifier {} has no paired FAT'.format(bitmap_id))
+
+		for fat_index in range(self.number_of_fats):
+			if fat_index not in bitmap_ids:
+				issues.append('missing pairing: no allocation bitmap with identifier {} for FAT #{}'.format(fat_index, fat_index))
+
+		return issues
+
+	def _find_conflicts(self):
+		"""Compare the available candidate views, return a list of conflicts (each side keeps its own file ranges)."""
+
+		conflicts = []
+
+		available_views = [ view for view in self.views if view.available ]
+		if len(available_views) < 2:
+			return conflicts
+
+		view_a, view_b = available_views[0], available_views[1]
+
+		all_paths = set(view_a.files.keys()) | set(view_b.files.keys())
+		for path in sorted(all_paths):
+			range_a = view_a.files.get(path)
+			range_b = view_b.files.get(path)
+
+			if range_a is not None and range_b is not None:
+				if range_a.clusters != range_b.clusters:
+					basis = 'the same directory entry resolves to different cluster chains under FAT #{} and FAT #{} (each chain is paired with its own allocation bitmap)'.format(view_a.fat_index, view_b.fat_index)
+					conflicts.append(ViewConflict(path, { view_a.fat_index: range_a, view_b.fat_index: range_b }, basis))
+				elif range_a.allocation != range_b.allocation:
+					basis = 'the allocation bitmaps paired with FAT #{} and FAT #{} disagree on the allocation status of the cluster chain'.format(view_a.fat_index, view_b.fat_index)
+					conflicts.append(ViewConflict(path, { view_a.fat_index: range_a, view_b.fat_index: range_b }, basis))
+			else:
+				present_view = view_a if range_a is not None else view_b
+				basis = 'the path is present only in the candidate view for FAT #{}'.format(present_view.fat_index)
+				conflicts.append(ViewConflict(path, { view_a.fat_index: range_a, view_b.fat_index: range_b }, basis))
+
+		return conflicts
+
+	def _determine_last_committed(self):
+		"""Determine which FAT holds the last committed state (if this can be determined at all)."""
+
+		reasons = []
+
+		if self.backup_used:
+			reasons.append('the main boot region is invalid, the boot flags were taken from a backup copy')
+
+		if self.volume_dirty:
+			reasons.append('the volume dirty flag is set')
+
+		if self.media_failure:
+			reasons.append('the media failure flag is set')
+
+		for view in self.views:
+			if not view.available:
+				reasons.append('the candidate view for FAT #{} is unavailable ({})'.format(view.fat_index, view.unavailable_reason))
+
+		reasons.extend(self.pairing_issues)
+
+		if len(reasons) > 0:
+			return (None, reasons)
+
+		return (self.active_fat, [ 'the boot flags select FAT #{} and all FAT/bitmap pairings are present and consistent'.format(self.active_fat) ])
+
+	def format_report(self):
+		"""Format and return a human-readable report (as a string)."""
+
+		lines = []
+
+		lines.append('exFAT dual-allocation diagnostics (read-only, the volume is not modified)')
+		lines.append('')
+
+		lines.append('Number of FATs: {}'.format(self.number_of_fats))
+		lines.append('Active FAT (per the boot flags): #{}'.format(self.active_fat))
+		lines.append('Boot region: {}'.format('a backup copy used (the main one is invalid)' if self.backup_used else 'main'))
+		lines.append('Volume dirty flag: {}'.format('set' if self.volume_dirty else 'not set'))
+		lines.append('Media failure flag: {}'.format('set' if self.media_failure else 'not set'))
+		lines.append('')
+
+		if self.last_committed_fat is not None:
+			lines.append('Last committed state: FAT #{}'.format(self.last_committed_fat))
+		else:
+			lines.append('Last committed state: undetermined (no candidate view can be claimed as such)')
+
+		for reason in self.last_committed_basis:
+			lines.append('  - {}'.format(reason))
+
+		lines.append('')
+
+		for view in self.views:
+			lines.append('Candidate view for FAT #{} [{}]:'.format(view.fat_index, view.role()))
+			if not view.available:
+				lines.append('  unavailable: {}'.format(view.unavailable_reason))
+			else:
+				lines.append('  files with data: {}'.format(len(view.files)))
+				if view.scan_error is not None:
+					lines.append('  scan error (partial results kept): {}'.format(view.scan_error))
+
+		if len(self.pairing_issues) > 0:
+			lines.append('')
+			lines.append('Pairing issues:')
+			for issue in self.pairing_issues:
+				lines.append('  - {}'.format(issue))
+
+		lines.append('')
+		if len(self.conflicts) == 0:
+			lines.append('Conflicts between the candidate views: none')
+		else:
+			lines.append('Conflicts between the candidate views: {}'.format(len(self.conflicts)))
+			for conflict in self.conflicts:
+				lines.append('  {}'.format(conflict.path))
+				for fat_index in sorted(conflict.ranges.keys()):
+					file_range = conflict.ranges[fat_index]
+					if file_range is None:
+						lines.append('    FAT #{} view: (absent)'.format(fat_index))
+					else:
+						allocation_str = ', '.join([ '?' if a is None else ('Y' if a else 'N') for a in file_range.allocation ])
+						lines.append('    FAT #{} view: clusters {}, allocated [{}], size {}, deleted: {}'.format(fat_index, file_range.clusters, allocation_str, file_range.size, 'Y' if file_range.is_deleted else 'N'))
+				lines.append('    basis: {}'.format(conflict.basis))
+
+		return '\n'.join(lines)
+
+	def __str__(self):
+		return 'DualAllocationDiagnostics (exFAT)'

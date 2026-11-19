@@ -1,0 +1,40 @@
+#!/usr/bin/env python3
+
+# dfir_ntfs: an NTFS/FAT parser for digital forensics & incident response
+# (c) Maxim Suhanov
+
+import sys
+from dfir_ntfs.addons import exFAT
+
+def print_usage():
+	print('Report the dual-allocation state of an exFAT volume (read-only diagnostics)')
+	print('')
+	print('Usage:')
+	print(' exfat_dual_diag <input file (raw image)> <volume offset (in bytes)>')
+	print('')
+	print('Note:')
+	print(' Each candidate view is computed from one FAT paired with the allocation bitmap')
+	print(' having the same identifier. An inactive view is reported as a candidate residual')
+	print(' state only. The volume is never modified.')
+
+if len(sys.argv) != 3:
+	print_usage()
+	sys.exit(0)
+
+input_file = open(sys.argv[1], 'rb')
+try:
+	input_offset = int(sys.argv[2])
+except ValueError:
+	print_usage()
+	sys.exit(0)
+
+try:
+	diag = exFAT.DualAllocationDiagnostics(input_file, input_offset)
+except exFAT.FileSystemException as e:
+	print('Cannot parse the volume: {}'.format(e))
+	input_file.close()
+	sys.exit(1)
+
+print(diag.format_report())
+
+input_file.close()
