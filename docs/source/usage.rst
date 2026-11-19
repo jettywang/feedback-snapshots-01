@@ -266,6 +266,70 @@ It will be considered when ``AUDITLOG_DISABLE_REMOTE_ADDR`` is `True`.
 
 .. versionadded:: 3.0.0
 
+**AUDITLOG_EXTRA_FIELDS**
+
+Controls which context metadata may be stored on log entries, per event
+category. Values are registered through the middleware, through
+:func:`auditlog.context.set_extra_data`, or through
+:func:`auditlog.context.set_actor`.
+
+The setting is a mapping of action names (``"create"``, ``"update"``,
+``"delete"``, ``"access"``) or action codes to lists of dotted field paths. The
+``"*"`` key applies to all actions. Nested values are selected with dots, e.g.
+``"business.ticket_id"``.
+
+Access events are strict by default. Without an explicit ``"access"`` entry,
+only ``ticket_id`` is stored; every other context field is dropped instead of
+being converted to a string. An explicit ``"access"`` entry replaces that
+default. Create, update and delete events keep their existing rules unless the
+action is listed explicitly.
+
+.. code-block:: python
+
+    AUDITLOG_EXTRA_FIELDS = {
+        "access": ["ticket_id", "business.region"],
+        "update": ["business.case_id"],
+    }
+
+The ticket value is read from ``X-Auditlog-Ticket`` (or ``X-Ticket-Id``) and is
+also searchable in the Django admin. Override the accepted header names with
+``AUDITLOG_TICKET_HEADERS`` if your gateway uses a different header. Proxy
+headers such as ``X-Forwarded-For`` are never accepted as ticket sources.
+
+Custom middleware can extend the access allowlist without changing project
+settings; entries returned here are merged with ``AUDITLOG_EXTRA_FIELDS``:
+
+.. code-block:: python
+
+    from auditlog.middleware import AuditlogMiddleware
+
+    class BusinessAuditlogMiddleware(AuditlogMiddleware):
+        access_extra_fields = ("ticket_id", "business.region")
+
+        def get_extra_data(self, request):
+            data = super().get_extra_data(request)
+            data["business"] = {"region": "emea", "note": "not stored"}
+            return data
+
+Alternatively, override ``get_extra_fields(request)`` when the allowlist must
+be computed per request.
+
+Background tasks can pass the same extension to
+:func:`auditlog.context.set_extra_data`:
+
+.. code-block:: python
+
+    from auditlog.context import set_extra_data
+
+    with set_extra_data({"ticket_id": "T-42"}, extra_fields=["business.region"]):
+        accessed.send(MyModel, instance=obj)
+
+Non-JSON values (arbitrary objects, bytes, non-finite numbers) are dropped
+rather than converted to strings. Nested values not listed in the allowlist
+never reach the stored ``additional_data``.
+
+.. versionadded:: 3.5.0
+
 **AUDITLOG_MASK_TRACKING_FIELDS**
 
 You can use this setting to mask specific field values in all tracked models

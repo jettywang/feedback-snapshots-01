@@ -4,12 +4,27 @@ from django.contrib.auth import get_user_model
 from auditlog.cid import set_cid
 from auditlog.context import set_extra_data
 
+# Request headers that may carry the business ticket identifier.  Only these
+# values are considered trusted enough to be persisted on access events.
+DEFAULT_TICKET_HEADERS = ("x-auditlog-ticket", "x-ticket-id")
+
+# Never accept a ticket id from a proxy-controlled header such as
+# ``X-Forwarded-*``; those values are not business input.
+_RESERVED_TICKET_HEADERS = frozenset({"x-forwarded-for", "x-forwarded-port"})
+
 
 class AuditlogMiddleware:
     """
     Middleware to couple the request's user to log items. This is accomplished by currying the
     signal receiver with the user from the request (or None if the user is not authenticated).
     """
+
+    # Extra context fields that this middleware may store on access events.
+    # ``None`` means "use the project policy only".  Custom middleware can set
+    # a tuple here or override :meth:`get_extra_fields` to extend the allowlist.
+    access_extra_fields = None
+
+    ticket_headers = DEFAULT_TICKET_HEADERS
 
     def __init__(self, get_response=None):
         self.get_response = get_response
@@ -54,6 +69,35 @@ class AuditlogMiddleware:
             return user
         return None
 
+    def _get_ticket_id(self, request):
+        """Return a trusted ticket identifier from an allowlisted header.
+
+        Values injected through other channels (query strings, arbitrary
+        headers, request body) are intentionally ignored.  Ticket headers may
+        be overridden per middleware instance or through
+        ``AUDITLOG_TICKET_HEADERS``.
+        """
+        headers = getattr(settings, "AUDITLOG_TICKET_HEADERS", None)
+        if headers is None:
+            single_header = getattr(settings, "AUDITLOG_TICKET_HEADER", None)
+            headers = (single_header,) if single_header else self.ticket_headers
+        for header in headers or ():
+            if not isinstance(header, str):
+                continue
+            header = header.strip()
+            if not header or header.lower() in _RESERVED_TICKET_HEADERS:
+                continue
+            value = request.headers.get(header)
+            if value is None and header.upper().startswith("HTTP_"):
+                value = request.META.get(header)
+                if value is None:
+                    value = request.META.get(header.upper())
+            if isinstance(value, str):
+                value = value.strip()
+                if value:
+                    return value
+        return None
+
     def get_extra_data(self, request):
         context_data = {}
         context_data["remote_addr"] = self._get_remote_addr(request)
@@ -61,10 +105,39 @@ class AuditlogMiddleware:
 
         context_data["actor"] = self._get_actor(request)
 
+        ticket_id = self._get_ticket_id(request)
+        if ticket_id is not None:
+            context_data["ticket_id"] = ticket_id
+
         return context_data
+
+    def get_extra_fields(self, request):
+        """Return allowlist entries for context fields stored on access events.
+
+        Subclasses may extend this tuple to persist additional plugin data.
+        """
+        fields = self.access_extra_fields
+        if fields is None:
+            fields = getattr(self, "allowed_extra_fields", None)
+        if fields is None:
+            fields = getattr(self, "extra_fields", None)
+        if not fields:
+            return ()
+        return tuple(fields)
+
+    def get_allowed_extra_fields(self, request):
+        """Alias for :meth:`get_extra_fields` for custom middleware."""
+        return self.get_extra_fields(request)
+
+    def get_extra_allowlist(self, request):
+        """Alias for :meth:`get_extra_fields` for custom middleware."""
+        return self.get_extra_fields(request)
 
     def __call__(self, request):
         set_cid(request)
 
-        with set_extra_data(context_data=self.get_extra_data(request)):
+        with set_extra_data(
+            context_data=self.get_extra_data(request),
+            extra_fields=self.get_extra_fields(request),
+        ):
             return self.get_response(request)

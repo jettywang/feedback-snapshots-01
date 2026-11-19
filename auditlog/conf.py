@@ -51,6 +51,17 @@ settings.AUDITLOG_DISABLE_REMOTE_ADDR = getattr(
     settings, "AUDITLOG_DISABLE_REMOTE_ADDR", False
 )
 
+# Allow context metadata to be persisted per event category.
+# ``AUDITLOG_EXTRA_FIELDS`` maps action names to allowed dotted paths.
+# Access-only aliases are merged with this setting.
+settings.AUDITLOG_EXTRA_FIELDS = getattr(settings, "AUDITLOG_EXTRA_FIELDS", {})
+
+# Request header(s) accepted as business ticket identifiers.
+settings.AUDITLOG_TICKET_HEADERS = getattr(
+    settings, "AUDITLOG_TICKET_HEADERS", None
+)
+settings.AUDITLOG_TICKET_HEADER = getattr(settings, "AUDITLOG_TICKET_HEADER", None)
+
 # Number of characters at which changes_display_dict property should be shown
 settings.AUDITLOG_CHANGE_DISPLAY_TRUNCATE_LENGTH = getattr(
     settings, "AUDITLOG_CHANGE_DISPLAY_TRUNCATE_LENGTH", 140

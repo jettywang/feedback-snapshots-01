@@ -26,6 +26,7 @@ from django.utils.translation import gettext_lazy as _
 
 from auditlog import get_logentry_model
 from auditlog.diff import get_mask_function
+from auditlog.extra import resolve_extra_policy, sanitize_extra_data
 
 DEFAULT_OBJECT_REPR = "<error forming object repr>"
 
@@ -73,6 +74,15 @@ class LogEntryManager(models.Manager):
             get_additional_data = getattr(instance, "get_additional_data", None)
             if callable(get_additional_data):
                 kwargs.setdefault("additional_data", get_additional_data())
+
+            # Restricted event categories (access by default) must not retain
+            # arbitrary additional data, even when no request/task context is
+            # active to filter it.
+            restricted, allowed = resolve_extra_policy(kwargs.get("action"))
+            if restricted and "additional_data" in kwargs:
+                kwargs["additional_data"] = (
+                    sanitize_extra_data(kwargs["additional_data"], allowed) or None
+                )
 
             # set correlation id
             kwargs.setdefault("cid", get_cid())

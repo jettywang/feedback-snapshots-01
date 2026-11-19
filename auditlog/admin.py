@@ -27,6 +27,7 @@ class LogEntryAdmin(admin.ModelAdmin, LogEntryAdminMixin):
         "timestamp",
         "object_repr",
         "changes",
+        "additional_data__ticket_id",
         "actor__first_name",
         "actor__last_name",
         f"actor__{get_user_model().USERNAME_FIELD}",

@@ -19,6 +19,12 @@ Middleware
 .. automodule:: auditlog.middleware
     :members: AuditlogMiddleware
 
+Extra field policy
+------------------
+
+.. automodule:: auditlog.extra
+    :members: resolve_extra_policy, sanitize_extra_data
+
 Correlation ID
 --------------
 

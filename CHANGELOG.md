@@ -2,6 +2,14 @@
 
 ## Next Release
 
+#### Improvements
+
+- Add per-action `AUDITLOG_EXTRA_FIELDS` to control which context metadata is stored on audit events. Access events keep only allowlisted fields (ticket ids by default) and drop non-JSON values without stringifying them; custom middleware can extend the allowlist.
+
+#### Fixes
+
+- Expose trusted ticket ids in the Django admin log entry search.
+
 ## 3.4.2 (2026-11-08)
 
 #### Improvements
