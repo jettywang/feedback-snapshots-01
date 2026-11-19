@@ -40,6 +40,7 @@ from .generic import GenericActor
 from .logging import get_logger
 from .message import Message, get_encoder, set_encoder
 from .middleware import Middleware
+from .scheduling import ReservationPolicy, ReservedWorkQueue
 from .worker import ConsumerThread, Worker, WorkerThread
 
 __all__ = [
@@ -80,6 +81,9 @@ __all__ = [
     "set_encoder",
     # Middlware
     "Middleware",
+    # Scheduling
+    "ReservationPolicy",
+    "ReservedWorkQueue",
     # Workers
     "Worker",
     "ConsumerThread",

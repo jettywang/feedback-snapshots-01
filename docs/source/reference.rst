@@ -306,3 +306,6 @@ These are the environment variables that dramatiq reads
    * - ``dramatiq_worker_timeout``
      - 1000
      - The number of milliseconds workers should wake up after if the queue is idle.
+   * - ``dramatiq_reservation_max_age_ms``
+     - 30000 (30 seconds)
+     - The maximum number of milliseconds a non-reserved message waits before its worker slot reservation is waived, guaranteeing ordinary tasks are never starved forever.

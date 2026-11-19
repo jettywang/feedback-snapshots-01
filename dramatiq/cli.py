@@ -164,6 +164,27 @@ def worker_fork_timeout_type(value: str) -> float:
     return ms
 
 
+def reserved_slots_type(value: str) -> tuple[str, int]:
+    """Parse an ``actor=count`` reservation passed on the command line."""
+    if "=" not in value:
+        raise argparse.ArgumentTypeError("reserved slots must be specified as 'actor_name=slot_count'.")
+
+    actor_name, _, raw_count = value.partition("=")
+    actor_name = actor_name.strip()
+    if not actor_name:
+        raise argparse.ArgumentTypeError("reserved slot entries must name an actor.")
+
+    try:
+        slot_count = int(raw_count)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError("reserved slot counts must be integers.") from e
+
+    if slot_count <= 0:
+        raise argparse.ArgumentTypeError("reserved slot counts must be positive integers.")
+
+    return actor_name, slot_count
+
+
 def make_argument_parser():
     parser = argparse.ArgumentParser(
         prog="dramatiq",
@@ -194,6 +215,19 @@ def make_argument_parser():
         default=8,
         type=int,
         help="the number of worker threads per process (default: 8)",
+    )
+    parser.add_argument(
+        "--reserved-slots",
+        "-r",
+        action="append",
+        default=[],
+        type=reserved_slots_type,
+        metavar="ACTOR=SLOTS",
+        help=(
+            "reserve worker threads for an actor so its messages are always "
+            "processed, even when the work queue is full; may be given multiple "
+            "times (eg. -r emergency_shutdown=1)"
+        ),
     )
     parser.add_argument(
         "--path",
@@ -456,7 +490,12 @@ def worker_process(args, worker_id, logging_pipe, canteen, event):
                         canteen_add(canteen, fork_path)
 
         logger.debug("Starting worker threads...")
-        worker = Worker(broker, queues=args.queues, worker_threads=args.threads)
+        worker = Worker(
+            broker,
+            queues=args.queues,
+            worker_threads=args.threads,
+            reserved_slots=dict(args.reserved_slots),
+        )
         worker.start()
     except ImportError:
         logger.exception("Failed to import module.")

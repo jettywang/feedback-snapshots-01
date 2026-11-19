@@ -8,6 +8,15 @@ All notable changes to this project will be documented in this file.
 `Unreleased`_
 -------------
 
+Added
+^^^^^
+
+* Workers can reserve a number of threads for selected actors via the
+  new ``reserved_slots`` argument on |Worker| and the ``--reserved-slots``
+  command line option.  Reserved threads stay available for their actors
+  even when a bulk job fills the work queue, while ordinary tasks keep
+  their per-actor FIFO order and are never starved indefinitely.
+
 Fixed
 ^^^^^
 

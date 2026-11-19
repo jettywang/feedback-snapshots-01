@@ -393,6 +393,49 @@ To make this work best, all the actors for a queue should have the same actor ``
    with the ``broker_priority`` option.
 
 
+Reserving Worker Slots
+----------------------
+
+Actor priority controls *which* message runs first, but it does not
+guarantee that a high-priority actor can run at all.  When a bulk job
+floods the in-memory work queue, every worker thread can end up busy
+with ordinary messages, leaving an emergency notification (for example,
+an urgent shutdown alert) waiting its turn.
+
+Reserved worker slots solve this by keeping a configurable number of
+threads available for selected actors.  Out of ``N`` worker threads,
+the slots you reserve are never handed to ordinary work while the
+reserved actor has a message waiting, so its messages can always be
+dispatched immediately.
+
+Reservations are configured when constructing a |Worker|::
+
+  import dramatiq
+  from dramatiq import Worker
+
+  # Keep one of the eight threads available for emergency work.
+  worker = Worker(broker, worker_threads=8, reserved_slots={"emergency_shutdown": 1})
+
+From the command line, pass ``--reserved-slots`` (repeatable)::
+
+  dramatiq some_module --threads 8 --reserved-slots emergency_shutdown=1
+
+The remaining, non-reserved threads form a shared pool of *general*
+slots.  If the reserved actors have no work, their threads simply stay
+idle and ready; ordinary messages are never placed on a reserved slot
+while general capacity exists.  Ordering is preserved within an actor:
+messages for the same actor still leave the work queue in FIFO order.
+
+To make sure ordinary tasks are never blocked indefinitely, a message
+that has waited longer than the reservation window (30 seconds by
+default, configurable via the ``dramatiq_reservation_max_age_ms``
+environment variable) is admitted to any free slot.
+
+Delayed messages are unaffected.  They remain on the delay queue until
+their eta arrives and never occupy a worker slot beforehand, so a
+backlog of far-future messages cannot interfere with reservations.
+
+
 Message Brokers
 ---------------
 

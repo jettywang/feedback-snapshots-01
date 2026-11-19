@@ -24,7 +24,7 @@ from collections import defaultdict
 from functools import lru_cache
 from queue import Empty, PriorityQueue
 from threading import Event, Thread
-from typing import TYPE_CHECKING, Iterable, Optional, Union
+from typing import TYPE_CHECKING, Iterable, Mapping, Optional, Union
 
 from .broker import Broker, Consumer, MessageProxy
 from .common import current_millis, iter_queue, join_all, q_name
@@ -32,6 +32,7 @@ from .errors import ActorNotFound, BrokerConnectionError, RateLimitExceeded, Ret
 from .logging import get_logger
 from .middleware import Middleware, SkipMessage
 from .results.middleware import Results
+from .scheduling import ReservationPolicy, ReservedWorkQueue
 
 #: The number of milliseconds to wait before restarting consumers
 #: after a connection error.
@@ -83,6 +84,7 @@ class Worker:
         queues: Optional[set[str]] = None,
         worker_timeout: int = WORKER_TIMEOUT,
         worker_threads: int = 8,
+        reserved_slots: Optional[Mapping[str, int]] = None,
     ) -> None:
         self.logger = get_logger(__name__, type(self))
         self.broker = broker
@@ -98,7 +100,8 @@ class Worker:
         self.delay_prefetch = DELAY_QUEUE_PREFETCH or min(worker_threads * 1000, 65535)
 
         self.workers: list[WorkerThread] = []
-        self.work_queue: PriorityQueue[_WorkQueueItem] = PriorityQueue()
+        self.reservation_policy = ReservationPolicy(worker_threads, reserved_slots)
+        self.work_queue = ReservedWorkQueue(self.reservation_policy)
         self.worker_timeout = worker_timeout
         self.worker_threads = worker_threads
 
@@ -169,7 +172,7 @@ class Worker:
 
         self.logger.debug("Requeueing in-memory messages...")
         messages_by_queue = defaultdict(list)
-        for item in iter_queue(self.work_queue):
+        for item in self.work_queue.drain():
             messages_by_queue[item.message.queue_name].append(item.message)
 
         for queue_name, messages in messages_by_queue.items():
@@ -267,6 +270,9 @@ class _WorkQueueItem:
     priority: int
     message: MessageProxy = dataclasses.field(compare=False)
     _queued_time: int = dataclasses.field(default_factory=time.monotonic_ns)
+    # The monotonic time the message entered the work queue, used by the
+    # reservation policy to waive reservations for aged-out messages.
+    enqueued_at: int = dataclasses.field(default_factory=time.monotonic_ns, compare=False)
 
 
 class ConsumerThread(Thread):
@@ -276,7 +282,7 @@ class ConsumerThread(Thread):
         broker: Broker,
         queue_name: str,
         prefetch: int,
-        work_queue: PriorityQueue[_WorkQueueItem],
+        work_queue: ReservedWorkQueue,
         worker_timeout: int,
     ) -> None:
         super().__init__(daemon=True)
@@ -496,7 +502,7 @@ class WorkerThread(Thread):
     Parameters:
       broker(Broker)
       consumers(dict[str, ConsumerThread])
-      work_queue(PriorityQueue[_WorkQueueItem])
+      work_queue(ReservedWorkQueue)
       worker_timeout(int)
     """
 
@@ -505,7 +511,7 @@ class WorkerThread(Thread):
         *,
         broker: Broker,
         consumers: dict[str, ConsumerThread],
-        work_queue: PriorityQueue[_WorkQueueItem],
+        work_queue: ReservedWorkQueue,
         worker_timeout: int,
     ) -> None:
         super().__init__(daemon=True)
@@ -605,7 +611,7 @@ class WorkerThread(Thread):
             # there has to be a consumer for that message's queue so
             # this is safe.  Probably.
             self.consumers[message.queue_name].post_process_message(message)
-            self.work_queue.task_done()
+            self.work_queue.task_done(message.actor_name)
 
             # See discussion #351.  Keeping a reference to the
             # exception can lead to memory bloat because it may be a
