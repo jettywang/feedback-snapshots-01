@@ -398,6 +398,324 @@ assert pkt.Payloads[6].Signature == b'd\xb0qv\xf8\xd3X\x0b\x7f4\xfe\xda'
 assert pkt.Payloads[7].SignatureType == 16
 assert pkt.Payloads[7].Signature == b'\x835J\xa7\x80\xb1S\xcez\x8b\xd2\xc2'
 
++ MSPAC cross-layer layout tests
+
+= MSPAC - Layout constants and expected fields
+
+# The hand-crafted wire format above and the expected layout below are kept as
+# independent facts: offsets and counts are not derived from the parser output.
+import struct
+
+from scapy.packet import Padding
+
+PAC_WIRE = data
+
+# PAC_INFO_BUFFER directory: 8 byte PACTYPE header, 16 byte entries
+PAC_HEADER_LEN = 8
+PAC_ENTRY_LEN = 16
+PAC_BUFFER_COUNT = 8
+
+# Buffer indices in the directory of PAC_WIRE
+PAC_LOGON_INDEX = 0
+PAC_CLIENT_INDEX = 1
+PAC_SRV_SIG_INDEX = 6
+PAC_KDC_SIG_INDEX = 7
+
+# Outer (directory level) facts
+PAC_LOGON_OFFSET = 136
+PAC_LOGON_SIZE = 464
+PAC_CLIENT_OFFSET = 600
+PAC_SRV_SIG_OFFSET = 1024
+PAC_KDC_SIG_OFFSET = 1040
+
+# Expected fields of the nested KERB_VALIDATION_INFO
+PAC_USER_ID = 1104
+PAC_GROUP_RID = 515
+PAC_DOMAIN_NAME = b"DOM1"
+
+# KERB_VALIDATION_INFO inner wire offsets, relative to the logon buffer start
+PAC_GROUP_COUNT_REL = 128
+PAC_SID_COUNT_REL = 216
+PAC_DOMAIN_NAME_LEN_REL = 164
+PAC_GROUP_ARRAY_REL = 124
+
+
+def pac_dir_slot(index):
+    return PAC_HEADER_LEN + index * PAC_ENTRY_LEN
+
+
+def pac_mutate(blob, offset, value, fmt):
+    raw = bytearray(blob)
+    struct.pack_into(fmt, raw, offset, value)
+    return bytes(raw)
+
+
+layout = PACTYPE(PAC_WIRE)
+
+assert len(layout.Buffers) == PAC_BUFFER_COUNT
+assert len(layout.Payloads) == PAC_BUFFER_COUNT
+
+logon_buffer = layout.Buffers[PAC_LOGON_INDEX]
+assert (logon_buffer.ulType, logon_buffer.cbBufferSize, logon_buffer.Offset) == (
+    1,
+    PAC_LOGON_SIZE,
+    PAC_LOGON_OFFSET,
+)
+
+# Every directory entry stays inside the packet
+for entry in layout.Buffers:
+    assert entry.Offset + entry.cbBufferSize <= len(PAC_WIRE)
+
+= MSPAC - NDR logon info stays inside its own buffer
+
+logon = layout.Payloads[PAC_LOGON_INDEX].value
+
+assert isinstance(layout.Payloads[PAC_LOGON_INDEX], NDRSerialization1Header)
+assert logon.UserId == PAC_USER_ID
+assert logon.GroupCount == 1
+assert [group.RelativeId for group in logon.GroupIds.value.value] == [PAC_GROUP_RID]
+assert logon.valueof("LogonDomainName.Buffer") == PAC_DOMAIN_NAME
+assert logon.SidCount == 2
+assert len(logon.ExtraSids.value.value) == 2
+
+= MSPAC - Hand-built wire format with non-trivial alignment
+
+# Fully independent wire bytes: struct.pack instead of the Scapy builder.
+# The 20 byte PAC_CLIENT_INFO is padded so the next payload starts 8 aligned.
+hand_client = (
+    struct.pack("<Q", 1300000000)
+    + struct.pack("<H", 10)
+    + "alice".encode("utf-16-le")
+)
+assert len(hand_client) == 20
+hand_client_padded = hand_client + b"\x00" * ((-len(hand_client)) % 8)
+hand_signature = struct.pack("<I", 16) + b"\x11" * 12
+
+hand_base = PAC_HEADER_LEN + PAC_ENTRY_LEN * 2
+hand_wire = (
+    struct.pack("<II", 2, 0)
+    + struct.pack("<IIQ", 10, len(hand_client), hand_base)
+    + struct.pack(
+        "<IIQ",
+        6,
+        len(hand_signature),
+        hand_base + len(hand_client_padded),
+    )
+    + hand_client_padded
+    + hand_signature
+)
+
+hand_pkt = PACTYPE(hand_wire)
+
+assert [entry.Offset % 8 for entry in hand_pkt.Buffers] == [0, 0]
+assert hand_pkt.Buffers[0].cbBufferSize == 20
+assert isinstance(hand_pkt.Payloads[0], PAC_CLIENT_INFO)
+assert hand_pkt.Payloads[0].Name == "alice"
+assert isinstance(hand_pkt.Payloads[1], PAC_SIGNATURE_DATA)
+assert bytes(hand_pkt.Payloads[1].Signature) == b"\x11" * 12
+assert bytes(hand_pkt) == hand_wire
+
+= MSPAC - Builder keeps non-trivial payload alignment
+
+built_pkt = PACTYPE(
+    Buffers=[PAC_INFO_BUFFER(ulType=10), PAC_INFO_BUFFER(ulType=6)],
+    Payloads=[
+        PAC_CLIENT_INFO(ClientId=1300000000, Name="A"),
+        PAC_SIGNATURE_DATA(SignatureType=16, Signature=b"B" * 12),
+    ],
+)
+built_pkt = PACTYPE(bytes(built_pkt))
+
+assert all(entry.Offset % 8 == 0 for entry in built_pkt.Buffers)
+assert (
+    built_pkt.Buffers[0].Offset + built_pkt.Buffers[0].cbBufferSize
+    <= built_pkt.Buffers[1].Offset
+)
+assert built_pkt.Payloads[0].Name == "A"
+assert bytes(built_pkt.Payloads[1].Signature) == b"B" * 12
+
+= MSPAC - Empty buffer is an empty padding payload
+
+empty_wire = pac_mutate(
+    PAC_WIRE,
+    pac_dir_slot(PAC_CLIENT_INDEX) + 4,
+    0,
+    "<I",
+)
+empty_pkt = PACTYPE(empty_wire)
+
+assert isinstance(empty_pkt.Payloads[PAC_CLIENT_INDEX], Padding)
+assert empty_pkt.Payloads[PAC_CLIENT_INDEX].load == b""
+assert isinstance(empty_pkt.Payloads[PAC_LOGON_INDEX], NDRSerialization1Header)
+
+= MSPAC - Legal shared buffers are dissected independently
+
+# Two directory entries of the same type reference exactly the same range.
+shared_wire = bytearray(PAC_WIRE)
+shared_wire[pac_dir_slot(1):pac_dir_slot(2)] = bytes(
+    shared_wire[pac_dir_slot(0):pac_dir_slot(1)]
+)
+shared_pkt = PACTYPE(bytes(shared_wire))
+
+assert shared_pkt.Buffers[0].Offset == shared_pkt.Buffers[1].Offset
+assert shared_pkt.Buffers[0].cbBufferSize == shared_pkt.Buffers[1].cbBufferSize
+assert isinstance(shared_pkt.Payloads[0], NDRSerialization1Header)
+assert isinstance(shared_pkt.Payloads[1], NDRSerialization1Header)
+assert shared_pkt.Payloads[0].value.UserId == PAC_USER_ID
+assert shared_pkt.Payloads[1].value.UserId == PAC_USER_ID
+
+# The same range can also be read through a different declared type without
+# either entry consuming the other one's directory slot.
+cross_wire = bytearray(PAC_WIRE)
+cross_entry = struct.unpack_from(
+    "<IIQ", cross_wire, pac_dir_slot(PAC_LOGON_INDEX)
+)
+struct.pack_into(
+    "<IIQ",
+    cross_wire,
+    pac_dir_slot(PAC_CLIENT_INDEX),
+    10,
+    cross_entry[1],
+    cross_entry[2],
+)
+cross_pkt = PACTYPE(bytes(cross_wire))
+
+assert cross_pkt.Buffers[PAC_CLIENT_INDEX].Offset == PAC_LOGON_OFFSET
+assert isinstance(cross_pkt.Payloads[PAC_CLIENT_INDEX], PAC_CLIENT_INFO)
+assert isinstance(cross_pkt.Payloads[PAC_LOGON_INDEX], NDRSerialization1Header)
+
+= MSPAC - Unknown buffer type keeps raw bytes in its own range
+
+unknown_wire = pac_mutate(
+    PAC_WIRE,
+    pac_dir_slot(PAC_KDC_SIG_INDEX),
+    0x77777777,
+    "<I",
+)
+unknown_pkt = PACTYPE(unknown_wire)
+
+assert isinstance(unknown_pkt.Payloads[PAC_KDC_SIG_INDEX], Padding)
+assert unknown_pkt.Payloads[PAC_KDC_SIG_INDEX].load == PAC_WIRE[
+    PAC_KDC_SIG_OFFSET:
+]
+assert isinstance(unknown_pkt.Payloads[PAC_SRV_SIG_INDEX], PAC_SIGNATURE_DATA)
+
+= MSPAC - Corrupted inner GroupCount cannot read the next buffer
+
+# Outer offset and size are untouched; only the NDR count is corrupted.
+group_wire = pac_mutate(
+    PAC_WIRE,
+    PAC_LOGON_OFFSET + PAC_GROUP_COUNT_REL,
+    5,
+    "<I",
+)
+group_pkt = PACTYPE(group_wire)
+corrupt_logon = group_pkt.Payloads[PAC_LOGON_INDEX].value
+
+assert len(corrupt_logon.GroupIds.value.value) == 5
+# Five 8 byte GROUP_MEMBERSHIP elements still fit inside the logon buffer
+assert PAC_GROUP_ARRAY_REL + 5 * 8 <= PAC_LOGON_SIZE
+# The neighbor buffer is still dissected from its own directory entry
+assert isinstance(group_pkt.Payloads[PAC_CLIENT_INDEX], PAC_CLIENT_INFO)
+assert group_pkt.Payloads[PAC_CLIENT_INDEX].Name == "SRV$"
+
+= MSPAC - Excessive group count is contained by the outer buffer
+
+# A huge inner count can only exhaust the 464 byte logon slice. Every byte
+# after that slice is destroyed to prove the parser cannot reach them.
+excess_wire = bytearray(
+    pac_mutate(
+        PAC_WIRE,
+        PAC_LOGON_OFFSET + PAC_GROUP_COUNT_REL,
+        0x40000000,
+        "<I",
+    )
+)
+for index in range(PAC_CLIENT_OFFSET, len(excess_wire)):
+    excess_wire[index] = 0
+
+try:
+    PACTYPE(bytes(excess_wire))
+    raise AssertionError("corrupted logon info must not dissect cleanly")
+except Exception as exc:
+    assert not isinstance(exc, AssertionError)
+
+= MSPAC - Excessive SidCount is contained by the outer buffer
+
+sid_wire = bytearray(
+    pac_mutate(
+        PAC_WIRE,
+        PAC_LOGON_OFFSET + PAC_SID_COUNT_REL,
+        0x40000000,
+        "<I",
+    )
+)
+
+try:
+    PACTYPE(bytes(sid_wire))
+    raise AssertionError("corrupted ExtraSids count must not dissect cleanly")
+except Exception as exc:
+    assert not isinstance(exc, AssertionError)
+
+= MSPAC - Corrupted nested string Length is contained by the outer buffer
+
+string_wire = pac_mutate(
+    PAC_WIRE,
+    PAC_LOGON_OFFSET + PAC_DOMAIN_NAME_LEN_REL,
+    0xFFFF,
+    "<H",
+)
+
+try:
+    PACTYPE(string_wire)
+    raise AssertionError("corrupted string length must not dissect cleanly")
+except Exception as exc:
+    assert not isinstance(exc, AssertionError)
+
+= MSPAC - Relative offset base point relocates without out-of-bounds read
+
+# Offsets are absolute in the PAC but applied relative to the payload area
+# (offset minus 16 * cBuffers minus 8). A shifted entry only gets a new slice.
+shifted_offset = PAC_LOGON_OFFSET + 8
+shifted_wire = pac_mutate(
+    PAC_WIRE,
+    pac_dir_slot(PAC_LOGON_INDEX) + 8,
+    shifted_offset,
+    "<Q",
+)
+shifted_pkt = PACTYPE(shifted_wire)
+
+assert shifted_offset + PAC_LOGON_SIZE <= len(PAC_WIRE)
+assert isinstance(shifted_pkt.Payloads[PAC_LOGON_INDEX], Padding)
+
+= MSPAC - Signature bytes are opaque data, not a trust decision
+
+# Tampering signature bytes leaves dissection unchanged: parsing never verifies
+# the ticket, it only presents the bytes under their PAC_SIGNATURE_DATA role.
+tampered_wire = bytearray(PAC_WIRE)
+tampered_wire[PAC_SRV_SIG_OFFSET + 4:PAC_SRV_SIG_OFFSET + 16] = b"\xcc" * 12
+tampered_pkt = PACTYPE(bytes(tampered_wire))
+
+assert isinstance(
+    tampered_pkt.Payloads[PAC_SRV_SIG_INDEX], PAC_SIGNATURE_DATA
+)
+assert bytes(tampered_pkt.Payloads[PAC_SRV_SIG_INDEX].Signature) == b"\xcc" * 12
+assert tampered_pkt.Payloads[PAC_LOGON_INDEX].value.UserId == PAC_USER_ID
+
+# An unknown SignatureType leaves the trailing bytes in RODCIdentifier
+unknown_sig_wire = pac_mutate(
+    PAC_WIRE,
+    PAC_SRV_SIG_OFFSET,
+    0x7FFFFFFF,
+    "<I",
+)
+unknown_sig_pkt = PACTYPE(unknown_sig_wire)
+
+assert unknown_sig_pkt.Payloads[PAC_SRV_SIG_INDEX].Signature == b""
+assert (
+    len(bytes(unknown_sig_pkt.Payloads[PAC_SRV_SIG_INDEX].RODCIdentifier)) == 12
+)
+
 = MSPAC - Parse WIN2K-PAC (MS-PAC sect 3)
 
 # Example data from [MS-PAC] sect 3 - Structural example
