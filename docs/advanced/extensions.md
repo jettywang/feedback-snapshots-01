@@ -122,7 +122,9 @@ response = client.get(
 
 A dictionary of `str: Optional[float]` timeout values.
 
-May include values for `'connect'`, `'read'`, `'write'`, or `'pool'`.
+May include values for `'connect'`, `'read'`, `'write'`, or `'pool'`. It may
+also include an optional `'deadline'` value, holding the overall budget for
+the whole request exchange.
 
 For example:
 
@@ -137,6 +139,13 @@ response = client.get(
 ```
 
 This extension is how the `httpx` timeouts are implemented, ensuring that the timeout values are associated with the request instance and passed throughout the stack. You shouldn't typically be working with this extension directly, but use the higher level `timeout` API instead.
+
+The `'deadline'` key holds the total deadline configured via
+`httpx.Timeout(..., deadline=...)`. The client consumes it directly to bound
+the entire exchange — including authentication interactions and redirects —
+and strips it before handing the request to the underlying `httpcore`
+connection pool, which only understands the per-operation `'connect'`,
+`'read'`, `'write'` and `'pool'` values.
 
 ### `"target"`
 

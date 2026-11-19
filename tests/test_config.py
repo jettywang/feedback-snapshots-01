@@ -158,7 +158,14 @@ def test_timeout_repr():
     assert repr(timeout) == "Timeout(timeout=5.0)"
 
     timeout = httpx.Timeout(None, read=5.0)
-    assert repr(timeout) == "Timeout(connect=None, read=5.0, write=None, pool=None)"
+    assert repr(timeout) == (
+        "Timeout(connect=None, read=5.0, write=None, pool=None, deadline=None)"
+    )
+
+    timeout = httpx.Timeout(5.0, deadline=30.0)
+    assert repr(timeout) == (
+        "Timeout(connect=5.0, read=5.0, write=5.0, pool=5.0, deadline=30.0)"
+    )
 
 
 def test_proxy_from_url():

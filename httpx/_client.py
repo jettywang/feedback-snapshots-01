@@ -19,6 +19,13 @@ from ._config import (
     Proxy,
     Timeout,
 )
+from ._deadline import (
+    CLOCK_EXTENSION,
+    DEADLINE_EXTENSION,
+    Deadline,
+    DeadlineAsyncStream,
+    DeadlineSyncStream,
+)
 from ._decoders import SUPPORTED_DECODERS
 from ._exceptions import (
     InvalidURL,
@@ -590,6 +597,19 @@ class BaseClient:
             )
             request.extensions = dict(**request.extensions, timeout=timeout.as_dict())
 
+    def _build_deadline(self, request: Request) -> Deadline:
+        """
+        Create the single monotonic deadline used for the whole exchange.
+
+        The deadline is created once per top-level `send()`, so authentication
+        retries and redirect hops share the same absolute cutoff rather than
+        each restarting the budget.
+        """
+        timeouts = request.extensions.get("timeout", {})
+        budget = timeouts.get(DEADLINE_EXTENSION)
+        clock = request.extensions.get(CLOCK_EXTENSION, time.monotonic)
+        return Deadline(budget, clock=clock)
+
 
 class Client(BaseClient):
     """
@@ -910,15 +930,18 @@ class Client(BaseClient):
         self._set_timeout(request)
 
         auth = self._build_request_auth(request, auth)
+        deadline = self._build_deadline(request)
 
         response = self._send_handling_auth(
             request,
             auth=auth,
             follow_redirects=follow_redirects,
             history=[],
+            deadline=deadline,
         )
         try:
             if not stream:
+                deadline.raise_if_expired(request)
                 response.read()
 
             return response
@@ -933,6 +956,7 @@ class Client(BaseClient):
         auth: Auth,
         follow_redirects: bool,
         history: list[Response],
+        deadline: Deadline,
     ) -> Response:
         auth_flow = auth.sync_auth_flow(request)
         try:
@@ -943,6 +967,7 @@ class Client(BaseClient):
                     request,
                     follow_redirects=follow_redirects,
                     history=history,
+                    deadline=deadline,
                 )
                 try:
                     try:
@@ -954,6 +979,10 @@ class Client(BaseClient):
                     response.read()
                     request = next_request
                     history.append(response)
+                    # An authentication retry must not be issued once the total
+                    # deadline has been consumed. The response above is already
+                    # closed by `read()`, so only the pending request remains.
+                    deadline.raise_if_expired(request)
 
                 except BaseException as exc:
                     response.close()
@@ -966,6 +995,7 @@ class Client(BaseClient):
         request: Request,
         follow_redirects: bool,
         history: list[Response],
+        deadline: Deadline,
     ) -> Response:
         while True:
             if len(history) > self.max_redirects:
@@ -976,7 +1006,7 @@ class Client(BaseClient):
             for hook in self._event_hooks["request"]:
                 hook(request)
 
-            response = self._send_single_request(request)
+            response = self._send_single_request(request, deadline)
             try:
                 for hook in self._event_hooks["response"]:
                     hook(response)
@@ -990,6 +1020,10 @@ class Client(BaseClient):
 
                 if follow_redirects:
                     response.read()
+                    # The redirect response is fully consumed and closed here.
+                    # Guard the next hop so an expired deadline prevents any
+                    # further request from being sent.
+                    deadline.raise_if_expired(request)
                 else:
                     response.next_request = request
                     return response
@@ -998,10 +1032,15 @@ class Client(BaseClient):
                 response.close()
                 raise exc
 
-    def _send_single_request(self, request: Request) -> Response:
+    def _send_single_request(self, request: Request, deadline: Deadline) -> Response:
         """
         Sends a single request, without handling any redirections.
         """
+        # Refuse to put another request on the wire once the total deadline is
+        # exhausted, even though every per-operation timeout would still allow
+        # the individual hop to proceed.
+        deadline.raise_if_expired(request)
+
         transport = self._transport_for_url(request.url)
         start = time.perf_counter()
 
@@ -1010,15 +1049,31 @@ class Client(BaseClient):
                 "Attempted to send an async request with a sync Client instance."
             )
 
-        with request_context(request=request):
-            response = transport.handle_request(request)
+        # Intersect the per-operation timeouts with the remaining deadline
+        # budget, without mutating the request's base timeout configuration.
+        base_timeouts = request.extensions.get("timeout", {})
+        request.extensions = dict(
+            request.extensions,
+            timeout=deadline.effective_timeouts(base_timeouts),
+        )
+
+        try:
+            with request_context(request=request):
+                response = transport.handle_request(request)
+        finally:
+            # Restore the original timeout configuration so later hops
+            # recompute their effective timeouts from the shared deadline.
+            request.extensions = dict(request.extensions, timeout=base_timeouts)
 
         assert isinstance(response.stream, SyncByteStream)
 
         response.request = request
-        response.stream = BoundSyncStream(
+        stream: SyncByteStream = BoundSyncStream(
             response.stream, response=response, start=start
         )
+        if deadline.enabled:
+            stream = DeadlineSyncStream(stream, deadline)
+        response.stream = stream
         self.cookies.extract_cookies(response)
         response.default_encoding = self._default_encoding
 
@@ -1625,15 +1680,18 @@ class AsyncClient(BaseClient):
         self._set_timeout(request)
 
         auth = self._build_request_auth(request, auth)
+        deadline = self._build_deadline(request)
 
         response = await self._send_handling_auth(
             request,
             auth=auth,
             follow_redirects=follow_redirects,
             history=[],
+            deadline=deadline,
         )
         try:
             if not stream:
+                deadline.raise_if_expired(request)
                 await response.aread()
 
             return response
@@ -1648,6 +1706,7 @@ class AsyncClient(BaseClient):
         auth: Auth,
         follow_redirects: bool,
         history: list[Response],
+        deadline: Deadline,
     ) -> Response:
         auth_flow = auth.async_auth_flow(request)
         try:
@@ -1658,6 +1717,7 @@ class AsyncClient(BaseClient):
                     request,
                     follow_redirects=follow_redirects,
                     history=history,
+                    deadline=deadline,
                 )
                 try:
                     try:
@@ -1669,6 +1729,10 @@ class AsyncClient(BaseClient):
                     await response.aread()
                     request = next_request
                     history.append(response)
+                    # An authentication retry must not be issued once the total
+                    # deadline has been consumed. The response above is already
+                    # closed by `aread()`, so only the pending request remains.
+                    deadline.raise_if_expired(request)
 
                 except BaseException as exc:
                     await response.aclose()
@@ -1681,6 +1745,7 @@ class AsyncClient(BaseClient):
         request: Request,
         follow_redirects: bool,
         history: list[Response],
+        deadline: Deadline,
     ) -> Response:
         while True:
             if len(history) > self.max_redirects:
@@ -1691,7 +1756,7 @@ class AsyncClient(BaseClient):
             for hook in self._event_hooks["request"]:
                 await hook(request)
 
-            response = await self._send_single_request(request)
+            response = await self._send_single_request(request, deadline)
             try:
                 for hook in self._event_hooks["response"]:
                     await hook(response)
@@ -1706,6 +1771,10 @@ class AsyncClient(BaseClient):
 
                 if follow_redirects:
                     await response.aread()
+                    # The redirect response is fully consumed and closed here.
+                    # Guard the next hop so an expired deadline prevents any
+                    # further request from being sent.
+                    deadline.raise_if_expired(request)
                 else:
                     response.next_request = request
                     return response
@@ -1714,10 +1783,17 @@ class AsyncClient(BaseClient):
                 await response.aclose()
                 raise exc
 
-    async def _send_single_request(self, request: Request) -> Response:
+    async def _send_single_request(
+        self, request: Request, deadline: Deadline
+    ) -> Response:
         """
         Sends a single request, without handling any redirections.
         """
+        # Refuse to put another request on the wire once the total deadline is
+        # exhausted, even though every per-operation timeout would still allow
+        # the individual hop to proceed.
+        deadline.raise_if_expired(request)
+
         transport = self._transport_for_url(request.url)
         start = time.perf_counter()
 
@@ -1726,14 +1802,30 @@ class AsyncClient(BaseClient):
                 "Attempted to send a sync request with an AsyncClient instance."
             )
 
-        with request_context(request=request):
-            response = await transport.handle_async_request(request)
+        # Intersect the per-operation timeouts with the remaining deadline
+        # budget, without mutating the request's base timeout configuration.
+        base_timeouts = request.extensions.get("timeout", {})
+        request.extensions = dict(
+            request.extensions,
+            timeout=deadline.effective_timeouts(base_timeouts),
+        )
+
+        try:
+            with request_context(request=request):
+                response = await transport.handle_async_request(request)
+        finally:
+            # Restore the original timeout configuration so later hops
+            # recompute their effective timeouts from the shared deadline.
+            request.extensions = dict(request.extensions, timeout=base_timeouts)
 
         assert isinstance(response.stream, AsyncByteStream)
         response.request = request
-        response.stream = BoundAsyncStream(
+        stream: AsyncByteStream = BoundAsyncStream(
             response.stream, response=response, start=start
         )
+        if deadline.enabled:
+            stream = DeadlineAsyncStream(stream, deadline)
+        response.stream = stream
         self.cookies.extract_cookies(response)
         response.default_encoding = self._default_encoding
 

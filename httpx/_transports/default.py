@@ -36,6 +36,7 @@ if typing.TYPE_CHECKING:
     import httpx  # pragma: no cover
 
 from .._config import DEFAULT_LIMITS, Limits, Proxy, create_ssl_context
+from .._deadline import CLOCK_EXTENSION, DEADLINE_EXTENSION
 from .._exceptions import (
     ConnectError,
     ConnectTimeout,
@@ -69,6 +70,23 @@ SOCKET_OPTION = typing.Union[
 __all__ = ["AsyncHTTPTransport", "HTTPTransport"]
 
 HTTPCORE_EXC_MAP: dict[type[Exception], type[httpx.HTTPError]] = {}
+
+
+def _httpcore_extensions(
+    extensions: dict[str, typing.Any],
+) -> dict[str, typing.Any]:
+    """
+    Return the request extensions with any httpx-only entries removed.
+
+    The total deadline configuration and its test clock are consumed by the
+    client itself; httpcore only understands the per-operation timeout values.
+    """
+    httpcore_extensions = dict(extensions)
+    httpcore_extensions.pop(CLOCK_EXTENSION, None)
+    timeouts = dict(httpcore_extensions.get("timeout", {}))
+    timeouts.pop(DEADLINE_EXTENSION, None)
+    httpcore_extensions["timeout"] = timeouts
+    return httpcore_extensions
 
 
 def _load_httpcore_exceptions() -> dict[type[Exception], type[httpx.HTTPError]]:
@@ -244,7 +262,7 @@ class HTTPTransport(BaseTransport):
             ),
             headers=request.headers.raw,
             content=request.stream,
-            extensions=request.extensions,
+            extensions=_httpcore_extensions(request.extensions),
         )
         with map_httpcore_exceptions():
             resp = self._pool.handle_request(req)
@@ -388,7 +406,7 @@ class AsyncHTTPTransport(AsyncBaseTransport):
             ),
             headers=request.headers.raw,
             content=request.stream,
-            extensions=request.extensions,
+            extensions=_httpcore_extensions(request.extensions),
         )
         with map_httpcore_exceptions():
             resp = await self._pool.handle_async_request(req)

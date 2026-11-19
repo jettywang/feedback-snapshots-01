@@ -9,6 +9,7 @@ Our exception hierarchy:
         · ReadTimeout
         · WriteTimeout
         · PoolTimeout
+        · TotalDeadlineExceeded
       - NetworkError
         · ConnectError
         · ReadError
@@ -63,6 +64,7 @@ __all__ = [
     "StreamConsumed",
     "StreamError",
     "TimeoutException",
+    "TotalDeadlineExceeded",
     "TooManyRedirects",
     "TransportError",
     "UnsupportedProtocol",
@@ -158,6 +160,16 @@ class WriteTimeout(TimeoutException):
 class PoolTimeout(TimeoutException):
     """
     Timed out waiting to acquire a connection from the pool.
+    """
+
+
+class TotalDeadlineExceeded(TimeoutException):
+    """
+    The overall deadline for the request exchange was exceeded.
+
+    Unlike the per-operation connect/read/write/pool timeouts, the deadline
+    spans the entire exchange, including authentication interactions, redirect
+    hops and, when enabled, consumption of the response body.
     """
 
 

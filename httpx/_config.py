@@ -81,6 +81,13 @@ class Timeout:
     Timeout(5.0, connect=10.0)  # 10s timeout on connect. 5s timeout elsewhere.
     Timeout(5.0, pool=None)     # No timeout on acquiring connection from pool.
                                 # 5s timeout elsewhere.
+
+    A `deadline` may also be set, as an overall budget for the entire request
+    exchange, including authentication interactions and redirects. It is
+    disabled by default:
+
+    Timeout(5.0, deadline=30.0)  # 30s total deadline, 5s per operation.
+    Timeout(5.0, deadline=None)  # No overall deadline (the default).
     """
 
     def __init__(
@@ -91,6 +98,7 @@ class Timeout:
         read: None | float | UnsetType = UNSET,
         write: None | float | UnsetType = UNSET,
         pool: None | float | UnsetType = UNSET,
+        deadline: None | float | UnsetType = UNSET,
     ) -> None:
         if isinstance(timeout, Timeout):
             # Passed as a single explicit Timeout.
@@ -98,16 +106,19 @@ class Timeout:
             assert read is UNSET
             assert write is UNSET
             assert pool is UNSET
+            assert deadline is UNSET
             self.connect = timeout.connect  # type: typing.Optional[float]
             self.read = timeout.read  # type: typing.Optional[float]
             self.write = timeout.write  # type: typing.Optional[float]
             self.pool = timeout.pool  # type: typing.Optional[float]
+            self.deadline = timeout.deadline  # type: typing.Optional[float]
         elif isinstance(timeout, tuple):
             # Passed as a tuple.
             self.connect = timeout[0]
             self.read = timeout[1]
             self.write = None if len(timeout) < 3 else timeout[2]
             self.pool = None if len(timeout) < 4 else timeout[3]
+            self.deadline = None if isinstance(deadline, UnsetType) else deadline
         elif not (
             isinstance(connect, UnsetType)
             or isinstance(read, UnsetType)
@@ -118,6 +129,7 @@ class Timeout:
             self.read = read
             self.write = write
             self.pool = pool
+            self.deadline = None if isinstance(deadline, UnsetType) else deadline
         else:
             if isinstance(timeout, UnsetType):
                 raise ValueError(
@@ -128,6 +140,7 @@ class Timeout:
             self.read = timeout if isinstance(read, UnsetType) else read
             self.write = timeout if isinstance(write, UnsetType) else write
             self.pool = timeout if isinstance(pool, UnsetType) else pool
+            self.deadline = None if isinstance(deadline, UnsetType) else deadline
 
     def as_dict(self) -> dict[str, float | None]:
         return {
@@ -135,6 +148,7 @@ class Timeout:
             "read": self.read,
             "write": self.write,
             "pool": self.pool,
+            "deadline": self.deadline,
         }
 
     def __eq__(self, other: typing.Any) -> bool:
@@ -144,15 +158,20 @@ class Timeout:
             and self.read == other.read
             and self.write == other.write
             and self.pool == other.pool
+            and self.deadline == other.deadline
         )
 
     def __repr__(self) -> str:
         class_name = self.__class__.__name__
-        if len({self.connect, self.read, self.write, self.pool}) == 1:
+        if (
+            len({self.connect, self.read, self.write, self.pool}) == 1
+            and self.deadline is None
+        ):
             return f"{class_name}(timeout={self.connect})"
         return (
             f"{class_name}(connect={self.connect}, "
-            f"read={self.read}, write={self.write}, pool={self.pool})"
+            f"read={self.read}, write={self.write}, pool={self.pool}, "
+            f"deadline={self.deadline})"
         )
 
 
