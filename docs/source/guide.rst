@@ -270,6 +270,54 @@ automatically dropped from the message broker.  From here, you can
 manually inspect the message and decide whether or not it should be
 put back on the queue.
 
+.. _failure-envelopes:
+
+Failure Envelopes
+^^^^^^^^^^^^^^^^^
+
+Dead-lettered messages still contain their full payload, which may
+include customer credentials or other sensitive data.  If you need to
+show failures to operations staff, add the |FailureEnvelopes|
+middleware.  It records a separate envelope for every failure, after
+the retry decision has been made::
+
+  from dramatiq.middleware import FailureEnvelopes
+
+  envelopes = FailureEnvelopes()
+  broker.add_middleware(envelopes)
+
+Each envelope only contains routing metadata, the retry stage and a
+coarse error category; it never includes the message's arguments,
+keyword arguments, options, exception message or traceback.  For
+example::
+
+  FailureEnvelope(
+      queue_name='default',
+      actor_name='charge_card',
+      message_id='...',
+      message_timestamp=...,
+      failed_at=...,
+      stage='retry_scheduled',
+      attempts=2,
+      reason='exception',
+      error_type='TimeoutError',
+      error_category='actor',
+      max_retries=3,
+      retry_delay=30000,
+  )
+
+``stage`` is one of ``retry_scheduled``, ``retries_exhausted`` or
+``rejected`` (the latter for messages rejected by ``throws`` or
+``retry_when``).  ``error_category`` is one of ``actor``, ``broker``,
+``interrupt``, ``rate_limit``, ``retry`` or ``system``.  The original
+message and its payload continue to be retried and dead-lettered as
+before.
+
+Pass ``on_failure`` to :class:`FailureEnvelopes<dramatiq.middleware.FailureEnvelopes>`
+to forward envelopes to your alerting or ticketing system.  The most
+recent envelopes are also available from
+:meth:`get_envelopes<dramatiq.middleware.FailureEnvelopes.get_envelopes>`.
+
 .. _message-time-limits:
 
 Message Time Limits

@@ -122,6 +122,27 @@ class Middleware:
         has been skipped.
         """
 
+    def after_message_failure(
+        self,
+        broker: Broker,
+        message: MessageProxy,
+        *,
+        exception: BaseException,
+        stage: str,
+        reason: str,
+        attempts: int,
+        max_retries: Optional[int],
+        retry_delay: Optional[int] = None,
+    ) -> None:
+        """Called after the |Retries| middleware has decided what
+        should happen to a failed message.
+
+        The ``stage`` argument is one of ``"retry_scheduled"``,
+        ``"retries_exhausted"`` or ``"rejected"``.  Implementations
+        should treat the message payload and exception message as
+        sensitive.
+        """
+
     def after_process_boot(self, broker: Broker) -> None:
         """Called immediately after subprocess start up."""
 

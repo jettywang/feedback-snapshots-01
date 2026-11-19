@@ -98,7 +98,6 @@ The following middleware classes are all enabled by default, with their default 
 .. autoclass:: dramatiq.middleware.Retries
 .. autoclass:: dramatiq.middleware.ShutdownNotifications
 .. autoclass:: dramatiq.middleware.TimeLimit
-
 .. _optional-middleware:
 
 Optional Middleware
@@ -109,6 +108,12 @@ The following middleware classes are available, but not enabled by default.
 .. autoclass:: dramatiq.middleware.AsyncIO
 .. autoclass:: dramatiq.middleware.CurrentMessage
    :members: get_current_message
+   :member-order: bysource
+.. autoclass:: dramatiq.middleware.FailureEnvelopes
+   :members: get_envelopes, after_message_failure
+   :member-order: bysource
+.. autoclass:: dramatiq.middleware.FailureEnvelope
+   :members: asdict
    :member-order: bysource
 .. autoclass:: dramatiq.middleware.GroupCallbacks
 .. autoclass:: dramatiq.middleware.prometheus.Prometheus

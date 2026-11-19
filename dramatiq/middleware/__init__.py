@@ -21,6 +21,7 @@ from .age_limit import AgeLimit
 from .asyncio import AsyncIO
 from .callbacks import Callbacks
 from .current_message import CurrentMessage
+from .failures import FailureEnvelope, FailureEnvelopes, classify_error
 from .group_callbacks import GroupCallbacks
 from .middleware import Middleware, MiddlewareError, SkipMessage
 from .pipelines import Pipelines
@@ -42,6 +43,9 @@ __all__ = [
     "AsyncIO",
     "Callbacks",
     "CurrentMessage",
+    "FailureEnvelope",
+    "FailureEnvelopes",
+    "classify_error",
     "GroupCallbacks",
     "Pipelines",
     "Retries",

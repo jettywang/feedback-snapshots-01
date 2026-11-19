@@ -8,6 +8,14 @@ All notable changes to this project will be documented in this file.
 `Unreleased`_
 -------------
 
+Added
+^^^^^
+
+* Added the |FailureEnvelopes| middleware, which records
+  operator-readable failure envelopes that contain the queue, retry
+  stage, attempt count and a coarse error category, but never the
+  message payload, exception message or traceback.
+
 Fixed
 ^^^^^
 

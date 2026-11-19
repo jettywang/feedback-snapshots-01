@@ -24,6 +24,7 @@ from typing import Callable, Optional
 from ..common import compute_backoff
 from ..errors import Retry
 from ..logging import get_logger
+from .failures import STAGE_REJECTED, STAGE_RETRIES_EXHAUSTED, STAGE_RETRY_SCHEDULED
 from .middleware import Middleware
 
 #: The default minimum amount of backoff to apply to retried tasks.
@@ -103,6 +104,15 @@ class Retries(Middleware):
         if throws and isinstance(exception, throws):
             self.logger.info("Aborting message %r.", message.message_id)
             message.fail()
+            broker.emit_after(
+                "message_failure",
+                message,
+                exception=exception,
+                stage=STAGE_REJECTED,
+                reason="throws",
+                attempts=message.options.get("retries", 0) + 1,
+                max_retries=message.options.get("max_retries", actor.options.get("max_retries", self.max_retries)),
+            )
             return
 
         retries = message.options.setdefault("retries", 0)
@@ -113,15 +123,31 @@ class Retries(Middleware):
 
         max_retries = message.options.get("max_retries", actor.options.get("max_retries", self.max_retries))
         retry_when = actor.options.get("retry_when", self.retry_when)
-        if (
-            retry_when is not None
-            and not retry_when(retries, exception)
-            or retry_when is None
-            and max_retries is not None
-            and retries >= max_retries
-        ):
-            self.logger.warning("Retries exceeded for message %r.", message.message_id)
+        should_retry = (
+            retry_when(retries, exception)
+            if retry_when is not None
+            else max_retries is None or retries < max_retries
+        )
+        if not should_retry:
+            if retry_when is not None:
+                self.logger.warning("Retry predicate rejected message %r.", message.message_id)
+                stage = STAGE_REJECTED
+                reason = "retry_when"
+            else:
+                self.logger.warning("Retries exceeded for message %r.", message.message_id)
+                stage = STAGE_RETRIES_EXHAUSTED
+                reason = "max_retries"
+
             message.fail()
+            broker.emit_after(
+                "message_failure",
+                message,
+                exception=exception,
+                stage=stage,
+                reason=reason,
+                attempts=retries + 1,
+                max_retries=max_retries,
+            )
 
             target_actor_name = message.options.get("on_retry_exhausted") or actor.options.get("on_retry_exhausted")
             if target_actor_name:
@@ -146,3 +172,13 @@ class Retries(Middleware):
 
         self.logger.info("Retrying message %r in %d milliseconds.", message.message_id, delay)
         broker.enqueue(message, delay=delay)
+        broker.emit_after(
+            "message_failure",
+            message,
+            exception=exception,
+            stage=STAGE_RETRY_SCHEDULED,
+            reason="retry_requested" if isinstance(exception, Retry) else "exception",
+            attempts=retries + 1,
+            max_retries=max_retries,
+            retry_delay=delay,
+        )

@@ -9,6 +9,8 @@
 .. |CurrentMessage| replace:: :class:`CurrentMessage<dramatiq.middleware.CurrentMessage>`
 .. |DramatiqError| replace:: :class:`DramatiqError<dramatiq.DramatiqError>`
 .. |Encoders| replace:: :class:`Encoders<dramatiq.Encoder>`
+.. |FailureEnvelope| replace:: :class:`FailureEnvelope<dramatiq.middleware.FailureEnvelope>`
+.. |FailureEnvelopes| replace:: :class:`FailureEnvelopes<dramatiq.middleware.FailureEnvelopes>`
 .. |GenericActors| replace:: :class:`class-based actors<dramatiq.GenericActor>`
 .. |Groups| replace:: :func:`Groups<dramatiq.group>`
 .. |GroupCallbacks| replace:: :class:`GroupCallbacks<dramatiq.middleware.GroupCallbacks>`
