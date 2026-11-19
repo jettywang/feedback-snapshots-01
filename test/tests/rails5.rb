@@ -750,7 +750,7 @@ class Rails5Tests < Minitest::Test
       :fingerprint => "fba898ebe85a030856f8553a3329c184ad6f9e16b1ecc8eb862d75f8b48d8189",
       :warning_type => "Template Injection",
       :line => 3,
-      :message => /^Parameter\ value\ used\ directly\ in\ `ERB`\ t/,
+      :message => /^Parameter\ value\ used\ as\ dynamic\ template\ source\ and\ executed/,
       :confidence => 0,
       :relative_path => "app/models/user.rb",
       :code => s(:call, s(:const, :ERB), :new, s(:params)),

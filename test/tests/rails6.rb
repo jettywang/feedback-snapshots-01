@@ -787,11 +787,11 @@ class Rails6Tests < Minitest::Test
   def test_template_injection_1
     assert_warning :type => :warning,
       :warning_code => 117,
-      :fingerprint => "fba898ebe85a030856f8553a3329c184ad6f9e16b1ecc8eb862d75f8b48d8189",
+      :fingerprint => "2f091592be7ec324475dad84fdab01f7cd3fc9960c2d29072b5e8ab106ff9d11",
       :warning_type => "Template Injection",
       :line => 15,
-      :message => /^Parameter\ value\ used\ directly\ in\ `ERB`\ t/,
-      :confidence => 0,
+      :message => /^Parameter\ value\ used\ as\ dynamic\ template\ source,\ but\ no\ execution/,
+      :confidence => 1,
       :relative_path => "app/models/user.rb",
       :code => s(:call, s(:const, :ERB), :new, s(:params)),
       :user_input => s(:params)
