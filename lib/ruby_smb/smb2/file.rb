@@ -117,10 +117,7 @@ module RubySMB
         max_read = tree.client.server_max_read_size
         max_read = 65536 unless tree.client.server_supports_multi_credit
         atomic_read_size = [bytes, max_read].min
-        credit_charge = 0
-        if tree.client.server_supports_multi_credit
-          credit_charge = (atomic_read_size - 1) / 65536 + 1
-        end
+        credit_charge = credit_charge_for(atomic_read_size)
 
         read_request = read_packet(read_length: atomic_read_size, offset: offset, credit_charge: credit_charge)
         raw_response = tree.client.send_recv(read_request, encrypt: @tree_connect_encrypt_data)
@@ -143,6 +140,7 @@ module RubySMB
         while remaining_bytes > 0
           offset += atomic_read_size
           atomic_read_size = remaining_bytes if remaining_bytes < max_read
+          credit_charge = credit_charge_for(atomic_read_size)
 
           read_request = read_packet(read_length: atomic_read_size, offset: offset, credit_charge: credit_charge)
           raw_response = tree.client.send_recv(read_request, encrypt: @tree_connect_encrypt_data)
@@ -162,6 +160,18 @@ module RubySMB
           remaining_bytes -= atomic_read_size
         end
         data
+      end
+
+      # Computes the credit charge for a request of the given size, based
+      # on the locally expected response size. It is always 0 when the
+      # server does not support multi-credit operations.
+      #
+      # @param size [Integer] the size of the request payload in bytes
+      # @return [Integer] the number of credits the request consumes
+      def credit_charge_for(size)
+        return 0 unless tree.client.server_supports_multi_credit
+
+        (size - 1) / 65536 + 1
       end
 
       # Crafts the ReadRequest packet to be sent for read operations.
@@ -244,13 +254,10 @@ module RubySMB
         buffer            = data.dup
         bytes             = data.length
         atomic_write_size = [bytes, max_write].min
-        credit_charge = 0
-        if tree.client.server_supports_multi_credit
-          credit_charge = (atomic_write_size - 1) / 65536 + 1
-        end
 
         while buffer.length > 0 do
-          write_request = write_packet(data: buffer.slice!(0, atomic_write_size), offset: offset, credit_charge: credit_charge)
+          chunk = buffer.slice!(0, atomic_write_size)
+          write_request = write_packet(data: chunk, offset: offset, credit_charge: credit_charge_for(chunk.length))
           raw_response  = tree.client.send_recv(write_request, encrypt: @tree_connect_encrypt_data)
           response      = RubySMB::SMB2::Packet::WriteResponse.read(raw_response)
           unless response.valid?

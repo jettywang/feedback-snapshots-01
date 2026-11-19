@@ -34,6 +34,7 @@ RSpec.describe RubySMB::Client do
   it { is_expected.to respond_to :smb2 }
   it { is_expected.to respond_to :smb3 }
   it { is_expected.to respond_to :smb2_message_id }
+  it { is_expected.to respond_to :smb2_credits }
   it { is_expected.to respond_to :username }
   it { is_expected.to respond_to :user_id }
   it { is_expected.to respond_to :max_buffer_size }
@@ -329,22 +330,29 @@ RSpec.describe RubySMB::Client do
       expect(smb2_client.sequence_counter).to eq(1)
     end
 
-    it 'updates #smb2_message_id with SMB2 header #credit_charge if the server supports multi credits' do
+    it 'does not update #smb2_message_id with the SMB2 header #credit_charge from the response' do
       allow(smb2_client).to receive(:is_status_pending?).and_return(false)
       smb2_client.smb2_message_id = 0
       smb2_client.server_supports_multi_credit = true
       smb2_header.credit_charge = 5
       smb2_client.send_recv(smb2_request)
-      expect(smb2_client.smb2_message_id).to eq(5)
+      expect(smb2_client.smb2_message_id).to eq(1)
     end
 
-    it 'does not update #msb2_message_id with SMB2 header #credit_charge if the server does not support multi credits' do
+    it 'does not update #smb2_message_id with the SMB2 header #credit_charge from the response when the server does not support multi credits' do
       allow(smb2_client).to receive(:is_status_pending?).and_return(false)
       smb2_client.smb2_message_id = 0
       smb2_client.server_supports_multi_credit = false
       smb2_header.credit_charge = 5
       smb2_client.send_recv(smb2_request)
       expect(smb2_client.smb2_message_id).to eq(1)
+    end
+
+    it 'replenishes #smb2_credits with the credits granted in the SMB2 response' do
+      allow(smb2_client).to receive(:is_status_pending?).and_return(false)
+      smb2_client.smb2_credits = 1
+      smb2_header.credits = 10
+      expect { smb2_client.send_recv(smb2_request) }.to change { smb2_client.smb2_credits }.from(1).to(10)
     end
 
     it 'ignores errors thrown when parsing the SMB2 header' do
@@ -2337,6 +2345,228 @@ RSpec.describe RubySMB::Client do
     it 'increments the client message id' do
       client.smb2_message_id = 1
       expect { client.increment_smb_message_id(request_packet) }.to change { client.smb2_message_id }.by(1)
+    end
+
+    it 'deducts the charge from the credit budget' do
+      client.smb2_credits = 1
+      expect { client.increment_smb_message_id(request_packet) }.to change { client.smb2_credits }.from(1).to(0)
+    end
+
+    it 'raises an InsufficientCredits error when the charge exceeds the credit budget' do
+      client.smb2_credits = 0
+      expect { client.increment_smb_message_id(request_packet) }.to raise_error(RubySMB::Error::InsufficientCredits)
+    end
+
+    context 'when the server supports multi credits' do
+      before :example do
+        client.server_supports_multi_credit = true
+        client.smb2_credits = 10
+      end
+
+      it 'advances the message id by the request credit charge' do
+        request_packet.smb2_header.credit_charge = 4
+        client.smb2_message_id = 3
+        expect { client.increment_smb_message_id(request_packet) }.to change { client.smb2_message_id }.from(3).to(7)
+      end
+
+      it 'treats a zero request credit charge as a single credit' do
+        request_packet.smb2_header.credit_charge = 0
+        expect { client.increment_smb_message_id(request_packet) }.to change { client.smb2_message_id }.by(1)
+      end
+
+      it 'deducts the request credit charge from the credit budget' do
+        request_packet.smb2_header.credit_charge = 4
+        expect { client.increment_smb_message_id(request_packet) }.to change { client.smb2_credits }.from(10).to(6)
+      end
+
+      it 'raises an InsufficientCredits error when the charge exceeds the credit budget' do
+        request_packet.smb2_header.credit_charge = 11
+        expect { client.increment_smb_message_id(request_packet) }.to raise_error(RubySMB::Error::InsufficientCredits)
+      end
+    end
+
+    context 'when the server does not support multi credits' do
+      it 'only consumes a single credit even if the packet has a credit charge set' do
+        client.server_supports_multi_credit = false
+        request_packet.smb2_header.credit_charge = 16
+        expect { client.increment_smb_message_id(request_packet) }.to change { client.smb2_message_id }.by(1)
+      end
+    end
+  end
+
+  describe 'SMB2 multi-credit request budgeting' do
+    # A minimal metering dispatcher that records the message id and credit
+    # charge of every packet sent and replays a queue of canned responses,
+    # so credit budgeting can be verified without a server or large buffers.
+    let(:metering_dispatcher) do
+      Class.new(RubySMB::Dispatcher::Base) do
+        attr_reader :sent_requests
+
+        def initialize
+          @sent_requests = []
+          @responses = []
+        end
+
+        def queue_response(packet)
+          @responses << packet.to_binary_s
+        end
+
+        def send_packet(packet, *_args)
+          @sent_requests << {
+            message_id: packet.smb2_header.message_id.to_i,
+            credit_charge: packet.smb2_header.credit_charge.to_i
+          }
+        end
+
+        def recv_packet(*_args)
+          @responses.shift
+        end
+      end.new
+    end
+
+    let(:client) do
+      described_class.new(metering_dispatcher, smb1: false, smb3: false, username: username, password: password)
+    end
+
+    let(:sent_message_ids) { metering_dispatcher.sent_requests.map { |req| req[:message_id] } }
+    let(:sent_credit_charges) { metering_dispatcher.sent_requests.map { |req| req[:credit_charge] } }
+
+    let(:connect_response) do
+      packet = RubySMB::SMB2::Packet::TreeConnectResponse.new
+      packet.smb2_header.tree_id = 2049
+      packet.maximal_access.read("\xff\x01\x1f\x00")
+      packet.share_type = 0x01
+      packet
+    end
+    let(:tree) { RubySMB::SMB2::Tree.new(client: client, share: '\\192.168.1.1\example', response: connect_response) }
+    let(:create_response) do
+      RubySMB::SMB2::Packet::CreateResponse.new(
+        file_id: RubySMB::Field::Smb2Fileid.new,
+        end_of_file: 3 * 65536,
+        allocation_size: 3 * 65536,
+        last_access: DateTime.now,
+        last_change: DateTime.now,
+        last_write: DateTime.now
+      )
+    end
+    let(:file) { RubySMB::SMB2::File.new(name: 'test.txt', response: create_response, tree: tree) }
+
+    def read_response_packet(credits: 10, credit_charge: 1, data: '')
+      response = RubySMB::SMB2::Packet::ReadResponse.new(data_length: data.length, buffer: data)
+      response.smb2_header.command = RubySMB::SMB2::Commands::READ
+      response.smb2_header.credits = credits
+      response.smb2_header.credit_charge = credit_charge
+      response
+    end
+
+    def write_response_packet(credits: 10, credit_charge: 1)
+      response = RubySMB::SMB2::Packet::WriteResponse.new
+      response.smb2_header.command = RubySMB::SMB2::Commands::WRITE
+      response.smb2_header.credits = credits
+      response.smb2_header.credit_charge = credit_charge
+      response
+    end
+
+    context 'when reading across a credit charge boundary' do
+      before :example do
+        client.server_supports_multi_credit = true
+        client.server_max_read_size = 2 * 65536
+        client.smb2_credits = 10
+      end
+
+      it 'advances the message id by the local charge of each request' do
+        2.times { metering_dispatcher.queue_response(read_response_packet(data: 'A' * 16)) }
+        file.read(bytes: 2 * 65536 + 1)
+        expect(sent_credit_charges).to eq([2, 1])
+        expect(sent_message_ids).to eq([0, 2])
+        expect(client.smb2_message_id).to eq(3)
+      end
+    end
+
+    context 'when writing across a credit charge boundary' do
+      before :example do
+        client.server_supports_multi_credit = true
+        client.server_max_write_size = 2 * 65536
+        client.smb2_credits = 10
+      end
+
+      it 'advances the message id by the local charge of each request' do
+        2.times { metering_dispatcher.queue_response(write_response_packet) }
+        file.write(data: 'A' * (2 * 65536 + 1))
+        expect(sent_credit_charges).to eq([2, 1])
+        expect(sent_message_ids).to eq([0, 2])
+        expect(client.smb2_message_id).to eq(3)
+      end
+    end
+
+    context 'when the server grants zero credits' do
+      it 'raises an InsufficientCredits error instead of sending the next request' do
+        metering_dispatcher.queue_response(read_response_packet(credits: 0))
+        client.send_recv(RubySMB::SMB2::Packet::TreeConnectRequest.new)
+        expect(client.smb2_credits).to eq(0)
+        expect do
+          client.send_recv(RubySMB::SMB2::Packet::TreeConnectRequest.new)
+        end.to raise_error(RubySMB::Error::InsufficientCredits)
+        expect(metering_dispatcher.sent_requests.size).to eq(1)
+      end
+    end
+
+    context 'when the request charge exceeds the granted budget' do
+      it 'raises an InsufficientCredits error and does not send the request' do
+        client.server_supports_multi_credit = true
+        client.smb2_credits = 2
+        request = RubySMB::SMB2::Packet::ReadRequest.new
+        request.smb2_header.credit_charge = 3
+        expect { client.send_recv(request) }.to raise_error(RubySMB::Error::InsufficientCredits)
+        expect(metering_dispatcher.sent_requests).to be_empty
+      end
+    end
+
+    context 'when responses report an abnormal credit charge' do
+      before :example do
+        client.server_supports_multi_credit = true
+      end
+
+      it 'does not let a huge response credit charge skip message ids' do
+        2.times { metering_dispatcher.queue_response(read_response_packet(credits: 1, credit_charge: 0xFFFF)) }
+        2.times { client.send_recv(RubySMB::SMB2::Packet::TreeConnectRequest.new) }
+        expect(sent_message_ids).to eq([0, 1])
+        expect(client.smb2_message_id).to eq(2)
+      end
+
+      it 'does not let a zero response credit charge reuse message ids' do
+        2.times { metering_dispatcher.queue_response(read_response_packet(credits: 1, credit_charge: 0)) }
+        2.times { client.send_recv(RubySMB::SMB2::Packet::TreeConnectRequest.new) }
+        expect(sent_message_ids).to eq([0, 1])
+        expect(client.smb2_message_id).to eq(2)
+      end
+    end
+
+    context 'when retrying a request after re-authentication' do
+      it 'consumes a new message id for the retried request' do
+        client.instance_variable_set(:@mech_type, :ntlm)
+        allow(client).to receive(:session_setup)
+        expired = RubySMB::SMB2::Packet::ErrorPacket.new
+        expired.smb2_header.nt_status = WindowsError::NTStatus::STATUS_NETWORK_SESSION_EXPIRED.value
+        expired.smb2_header.credits = 1
+        metering_dispatcher.queue_response(expired)
+        metering_dispatcher.queue_response(read_response_packet(credits: 1))
+        client.send_recv(RubySMB::SMB2::Packet::TreeConnectRequest.new)
+        expect(sent_message_ids).to eq([0, 1])
+        expect(client.smb2_message_id).to eq(2)
+      end
+    end
+
+    context 'when the server does not support multi credits' do
+      it 'keeps every request within a single credit and message id' do
+        client.server_supports_multi_credit = false
+        2.times { metering_dispatcher.queue_response(read_response_packet(credits: 1)) }
+        request = RubySMB::SMB2::Packet::ReadRequest.new
+        request.smb2_header.credit_charge = 16
+        2.times { client.send_recv(request) }
+        expect(sent_message_ids).to eq([0, 1])
+        expect(client.smb2_message_id).to eq(2)
+      end
     end
   end
 

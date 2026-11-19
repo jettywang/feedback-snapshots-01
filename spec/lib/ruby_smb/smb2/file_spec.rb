@@ -217,9 +217,10 @@ RSpec.describe RubySMB::SMB2::File do
       context 'when the server supports multi credits' do
         it 'reads a number of bytes equal to #server_max_read_size, with the expected credit charge' do
           credit_charge = (90000 - 1) / 65536 + 1
+          remaining_charge = (described_class::MAX_PACKET_SIZE * 4 - 90000 - 1) / 65536 + 1
           client.server_max_read_size = 90000
           expect(file).to receive(:read_packet).once.with(read_length: 90000, offset: 0, credit_charge: credit_charge).and_return(big_read)
-          expect(file).to receive(:read_packet).once.with(read_length: (described_class::MAX_PACKET_SIZE * 4 - 90000), offset: 90000, credit_charge: credit_charge).and_return(big_read)
+          expect(file).to receive(:read_packet).once.with(read_length: (described_class::MAX_PACKET_SIZE * 4 - 90000), offset: 90000, credit_charge: remaining_charge).and_return(big_read)
           file.read(bytes: (described_class::MAX_PACKET_SIZE * 4))
         end
       end

@@ -119,6 +119,10 @@ module RubySMB
     # Raised when an error occurs with the underlying socket.
     class CommunicationError < RubySMBError; end
 
+    # Raised when an SMB2 request cannot be sent because the server has not
+    # granted enough credits to cover the request's credit charge.
+    class InsufficientCredits < RubySMBError; end
+
     # Raised when Protocol Negotiation fails, possibly due to an
     # unsupported protocol.
     class NegotiationFailure < RubySMBError; end

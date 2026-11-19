@@ -183,6 +183,14 @@ module RubySMB
     #   @return [Integer]
     attr_accessor :smb2_message_id
 
+    # The number of SMB2 credits the server has granted and that are still
+    # available to send new requests. Every request consumes at least one
+    # credit (its credit charge) and every response replenishes this budget
+    # with the credits the server grants back.
+    # @!attribute [rw] smb2_credits
+    #   @return [Integer]
+    attr_accessor :smb2_credits
+
     # The username to authenticate with
     # @!attribute [rw] username
     #   @return [String]
@@ -369,6 +377,9 @@ module RubySMB
       @open_files = {}
 
       @smb2_message_id = 0
+      # The connection starts with an initial sequence window of a single
+      # credit (see MS-SMB2 3.2.4.1.1)
+      @smb2_credits    = 1
     end
 
     # Logs off any currently open session on the server
@@ -401,14 +412,38 @@ module RubySMB
 
     # Sets the message id field in an SMB2 packet's
     # header to the one tracked by the client. It then increments
-    # the counter on the client.
+    # the counter on the client by the number of sequence numbers the
+    # request consumes (its credit charge), and deducts that charge from
+    # the credit budget granted by the server.
     #
     # @param packet [RubySMB::GenericPacket] the packet to set the message id for
     # @return [RubySMB::GenericPacket] the modified packet
+    # @raise [RubySMB::Error::InsufficientCredits] if the server has not
+    #   granted enough credits to cover the request's credit charge
     def increment_smb_message_id(packet)
+      charge = smb2_request_credit_charge(packet)
+      if charge > self.smb2_credits
+        raise RubySMB::Error::InsufficientCredits,
+              "SMB2 request requires #{charge} credit(s) but the server only granted #{self.smb2_credits}"
+      end
       packet.smb2_header.message_id = self.smb2_message_id
-      self.smb2_message_id += 1
+      self.smb2_message_id += charge
+      self.smb2_credits    -= charge
       packet
+    end
+
+    # The number of sequence numbers (credits) an SMB2 request consumes.
+    # This is derived locally from the request's own Credit Charge when the
+    # server supports multi-credit operations, and is always 1 otherwise.
+    # The Credit Charge of a response must never be used for this.
+    #
+    # @param packet [RubySMB::GenericPacket] the request packet
+    # @return [Integer] the credit charge, always >= 1
+    def smb2_request_credit_charge(packet)
+      return 1 unless self.server_supports_multi_credit
+
+      charge = packet.smb2_header.credit_charge.to_i
+      charge < 1 ? 1 : charge
     end
 
     # Performs protocol negotiation and session setup. It defaults to using
@@ -526,6 +561,13 @@ module RubySMB
         break
       end unless version == 'SMB1'
 
+      # Replenish the credit budget with the credits granted by the server.
+      # The message ID is only advanced locally, based on the request's own
+      # credit charge (see #increment_smb_message_id): the Credit Charge
+      # reported by a response is unverified and must never be used to
+      # compute the next message ID.
+      self.smb2_credits += smb2_header.credits.to_i if smb2_header && version == 'SMB2'
+
       # Handle STATUS_NETWORK_SESSION_EXPIRED. The 'net use' client upon receiving this error will automatically attempt
       # to re-authenticate, which makes relaying ntlm authentication to multiple targets possible. This block ensures
       # ruby_smb behaves in the same manner as 'net use'.
@@ -539,8 +581,6 @@ module RubySMB
       end
 
       self.sequence_counter += 1 if signing_required && !session_key.empty?
-      # update the SMB2 message ID according to the received Credit Charged
-      self.smb2_message_id += smb2_header.credit_charge - 1 if smb2_header && self.server_supports_multi_credit
       raw_response
     end
 
@@ -661,6 +701,7 @@ module RubySMB
       self.session_is_guest = false
       self.sequence_counter = 0
       self.smb2_message_id  = 0
+      self.smb2_credits     = 1
       self.client_encryption_key = nil
       self.server_encryption_key = nil
       self.server_supports_multi_credit = false
