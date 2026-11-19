@@ -34,6 +34,7 @@ class Brakeman::Report::Table < Brakeman::Report::Base
 
     output_table("+Obsolete Ignore Entries+", generate_obsolete, out)
     output_table("+Errors+", generate_errors, out)
+    output_table("+Scan Coverage+", generate_coverage, out)
     output_table("+SECURITY WARNINGS+", generate_warnings, out)
     output_table("Controller Warnings:", generate_controller_warnings, out)
     output_table("Model Warnings:", generate_model_warnings, out)
@@ -58,8 +59,20 @@ class Brakeman::Report::Table < Brakeman::Report::Base
       t.add_row ['Templates', number_of_templates(@tracker)]
       t.add_row ['Errors', tracker.errors.length]
       t.add_row ['Security Warnings', "#{num_warnings} (#{warnings_summary[:high_confidence]})"]
+      t.add_row ['Scan Coverage', coverage_complete? ? 'complete' : 'incomplete']
       t.add_row ['Ignored Warnings', ignored_warnings.length] unless ignored_warnings.empty?
     end
+  end
+
+  # Generate the coverage table or return nil when the scan is complete.
+  # Shares the completeness contract with every other report format.
+  def generate_coverage
+    return if coverage_complete?
+
+    render_array('coverage_overview',
+      ['Reason', 'Location', 'Detail'],
+      coverage_limit_rows,
+      {:tracker => tracker})
   end
 
   #Generate table of how many warnings of each warning type were reported

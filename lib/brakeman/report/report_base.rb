@@ -188,4 +188,39 @@ class Brakeman::Report::Base
       nil
     end
   end
+
+  # Same completeness contract used by the JSON/hash reports and the exit
+  # code. Text and table reports call this so "No warnings found" is never
+  # presented as a clean bill of health when parts of the app were skipped.
+  def coverage
+    @tracker.coverage
+  end
+
+  def coverage_complete?
+    coverage.complete?
+  end
+
+  # Flat rows describing every coverage limitation. Returns an empty array
+  # when every in-scope input was fully analyzed.
+  def coverage_limit_rows
+    rows = []
+
+    coverage.errors.each do |entry|
+      rows << [entry[:reason].to_s, entry[:file] || "(unknown)", entry[:error]]
+    end
+
+    coverage.excluded_paths.each do |entry|
+      rows << [entry[:reason].to_s, entry[:path], entry[:detail]]
+    end
+
+    coverage.unsupported_templates.each do |entry|
+      rows << [entry[:reason].to_s, entry[:path], entry[:handler]]
+    end
+
+    coverage.disabled_checks.each do |entry|
+      rows << [entry[:reason].to_s, entry[:check], entry[:detail]]
+    end
+
+    rows
+  end
 end

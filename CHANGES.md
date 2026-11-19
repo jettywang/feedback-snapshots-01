@@ -1,3 +1,10 @@
+# Unreleased
+
+* Add scan coverage contract: reports and the JSON `coverage` object distinguish a fully checked, warning-free scan from one where some input was never analyzed
+* Track parse/processing errors, excluded paths, unsupported template handlers, and disabled checks against the actual scan inputs and effective options
+* Add `--[no-]exit-on-incomplete` (default on): a zero-warning scan exits non-zero (code 10) when coverage is incomplete
+* Keep confirmed findings when other files fail; analysis errors are never reported as low confidence warnings
+
 # 8.1.0 - 2026-09-30
 
 * Better help and error message for `--ensure-latest`

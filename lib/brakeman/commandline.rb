@@ -155,6 +155,13 @@ module Brakeman
           quit Brakeman::Errors_Found_Exit_Code
         end
 
+        if tracker.options[:exit_on_incomplete] and tracker.coverage.incomplete?
+          warn '[Notice] Scan coverage is incomplete. No warnings were found, ' \
+               'but some in-scope input was not fully analyzed. See the Scan ' \
+               'Coverage section of the report.'
+          quit Brakeman::Incomplete_Scan_Exit_Code
+        end
+
         if tracker.options[:ensure_no_obsolete_ignore_entries] && tracker.unused_fingerprints.any?
           warn '[Error] Obsolete ignore entries were found, exiting with an error code.'
           quit Brakeman::Obsolete_Ignore_Entries_Exit_Code

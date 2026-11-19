@@ -29,6 +29,11 @@ module Brakeman
   # and `--ensure-no-obsolete-ignore-entries` is set.
   Obsolete_Ignore_Entries_Exit_Code = 9
 
+  # Exit code returned when scan coverage is incomplete (some in-scope input
+  # was never fully analyzed) but no warnings were found. A zero warning scan
+  # is only "clean" when coverage is complete.
+  Incomplete_Scan_Exit_Code = 10
+
   @debug = false
   @quiet = false
   @loaded_dependencies = []
@@ -229,6 +234,7 @@ module Brakeman
       :combine_locations => true,
       :engine_paths => ["engines/*"],
       :exit_on_error => true,
+      :exit_on_incomplete => true,
       :exit_on_warn => true,
       :highlight_user_input => true,
       :html_style => "#{File.expand_path(File.dirname(__FILE__))}/brakeman/format/style.css",

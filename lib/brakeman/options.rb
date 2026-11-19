@@ -63,6 +63,10 @@ module Brakeman::Options
           options[:exit_on_error] = exit_on_error
         end
 
+        opts.on "--[no-]exit-on-incomplete", "Exit code is non-zero if coverage is incomplete even when no warnings are found (Default)" do |exit_on_incomplete|
+          options[:exit_on_incomplete] = exit_on_incomplete
+        end
+
         opts.on "--ensure-latest [DAYS]", Integer, "Fail when Brakeman is outdated. Optionally set minimum age in days (1-15)." do |days|
           if days and not (1..15).include? days
             raise OptionParser::InvalidArgument, "Minimum age must be 1-15 days."

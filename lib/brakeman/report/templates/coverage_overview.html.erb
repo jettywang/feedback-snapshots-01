@@ -1,0 +1,25 @@
+<div onClick="toggle('coverage_table');">
+  <h2>Scan coverage is incomplete (click to see what was not analyzed)</h2>
+</div>
+<div>
+  <div id='coverage_table' style='display:none'>
+    <table>
+      <thead>
+        <tr>
+          <th>Reason</th>
+          <th>Location</th>
+          <th>Detail</th>
+        </tr>
+      </thead>
+      <tbody>
+      <% coverage_limit_rows.each do |reason, location, detail| %>
+        <tr>
+          <td><%= CGI.escapeHTML reason.to_s %></td>
+          <td><%= CGI.escapeHTML location.to_s %></td>
+          <td><%= CGI.escapeHTML detail.to_s %></td>
+        </tr>
+      <% end %>
+      </tbody>
+    </table>
+  </div>
+</div>

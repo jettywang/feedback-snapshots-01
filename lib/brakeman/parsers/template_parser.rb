@@ -13,7 +13,18 @@ module Brakeman
     end
 
     def parse_template path, text
-      type = path.relative.match(KNOWN_TEMPLATE_EXTENSIONS)[1].to_sym
+      extension_match = path.relative.match(KNOWN_TEMPLATE_EXTENSIONS)
+
+      unless extension_match
+        # The file looks like a template (it lives in the template paths),
+        # but Brakeman has no handler for its extension. Record the coverage
+        # gap instead of crashing or pretending the file was analyzed.
+        handler = path.relative[/\.([^.\/]+)\z/, 1] || "unknown"
+        report_unsupported_template path, handler.to_sym
+        return nil
+      end
+
+      type = extension_match[1].to_sym
       type = :erb if type == :rhtml
       name = template_path_to_name path
       Brakeman.debug "Parsing #{path}"
@@ -29,19 +40,34 @@ module Brakeman
               when :slim
                 parse_slim path, text
               else
-                tracker.error "Unknown template type in #{path}"
+                report_unsupported_template path, type
                 nil
               end
 
         if src and ast = @file_parser.parse_ruby(src, path)
           @file_parser.file_list << TemplateFile.new(path, ast, name, type)
         end
+      rescue LoadError => e
+        # The template handler (Haml/Slim/...) is not installed, so this
+        # template was never analyzed. Record it as a coverage gap, not as a
+        # low confidence finding or a generic parse error.
+        report_unsupported_template path, type, e.message
       rescue Racc::ParseError => e
         tracker.error e, "Could not parse #{path}"
-      rescue StandardError, LoadError => e
+      rescue StandardError => e
         tracker.error e.exception(e.message + "\nWhile processing #{path}"), e.backtrace
       end
 
+      nil
+    end
+
+    def report_unsupported_template path, type, message = nil
+      reason = message ?
+        "No template handler available for #{type} (#{message})" :
+        "No template handler available for #{type}"
+
+      tracker.coverage.record_unsupported_template path, reason
+      Brakeman.debug "#{reason}: #{path.relative}"
       nil
     end
 

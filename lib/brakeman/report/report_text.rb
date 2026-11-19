@@ -20,6 +20,7 @@ class Brakeman::Report::Text < Brakeman::Report::Base
     add_chunk generate_templates if tracker.options[:debug]
     add_chunk generate_obsolete
     add_chunk generate_errors
+    add_chunk generate_coverage
     add_chunk generate_warnings
     add_chunk generate_show_ignored_overview if tracker.options[:show_ignored] && ignored_warnings.any?
 
@@ -71,7 +72,8 @@ class Brakeman::Report::Text < Brakeman::Report::Base
       label('Models', tracker.models.length - 1),
       label('Templates', number_of_templates(@tracker)),
       label('Errors', tracker.errors.length),
-      label('Security Warnings', all_warnings.length)
+      label('Security Warnings', all_warnings.length),
+      label('Scan Coverage', coverage_complete? ? 'complete' : 'incomplete')
     ]
 
     unless ignored_warnings.empty?
@@ -92,7 +94,11 @@ class Brakeman::Report::Text < Brakeman::Report::Base
 
   def generate_warnings
     if tracker.filtered_warnings.empty?
-      HighLine.color("No warnings found", :bold, :green)
+      if coverage_complete?
+        HighLine.color("No warnings found", :bold, :green)
+      else
+        HighLine.color("No warnings found, but scan coverage is incomplete - see Scan Coverage", :bold, :yellow)
+      end
     else
       warnings = tracker.filtered_warnings.sort_by do |w|
         [w.confidence, w.warning_type, w.file, w.line || 0, w.fingerprint]
@@ -102,6 +108,20 @@ class Brakeman::Report::Text < Brakeman::Report::Base
 
       double_space "Warnings", warnings
     end
+  end
+
+  def generate_coverage
+    return if coverage_complete?
+
+    rows = coverage_limit_rows.map do |reason, location, detail|
+      [
+        label("Reason", reason),
+        label("Location", location),
+        label("Detail", detail)
+      ]
+    end
+
+    double_space "Scan Coverage (incomplete)", rows
   end
 
   def generate_show_ignored_overview

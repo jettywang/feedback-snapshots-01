@@ -27,6 +27,10 @@
       <td>Security Warnings</td>
       <td><%= warnings %> <span class='high-confidence'>(<%= warnings_summary[:high_confidence] %>)</span></td>
     </tr>
+    <tr>
+      <td>Scan Coverage</td>
+      <td><%= coverage_complete ? 'complete' : 'incomplete' %></td>
+    </tr>
   <% if warnings_summary['Ignored Warnings'] %>
     <tr>
       <td>Ignored Warnings</td>

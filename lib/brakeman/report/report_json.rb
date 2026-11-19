@@ -1,6 +1,6 @@
 class Brakeman::Report::JSON < Brakeman::Report::Base
   def generate_report
-    errors = tracker.errors.map{|e| { :error => e[:error], :location => e[:backtrace][0] }}
+    errors = tracker.errors.map{|e| { :error => e[:error], :location => e[:backtrace][0], :file => e[:file], :reason => e[:reason] }}
 
     obsolete = tracker.unused_fingerprints
 
@@ -21,7 +21,8 @@ class Brakeman::Report::JSON < Brakeman::Report::Base
       :number_of_models => tracker.models.length - 1,
       :number_of_templates => number_of_templates(@tracker),
       :ruby_version => RUBY_VERSION,
-      :brakeman_version => Brakeman::Version
+      :brakeman_version => Brakeman::Version,
+      :coverage => coverage_report
     }
 
     report_info = {
@@ -29,10 +30,19 @@ class Brakeman::Report::JSON < Brakeman::Report::Base
       :warnings => warnings,
       :ignored_warnings => ignored,
       :errors => errors,
-      :obsolete => obsolete
+      :obsolete => obsolete,
+      :coverage => coverage_report
     }
 
     JSON.pretty_generate report_info
+  end
+
+  # Machine readable form of the completeness contract. Consumers can tell a
+  # fully checked, warning-free scan (`complete` is true) apart from one where
+  # some input was never analyzed (`complete` is false and `limitations`
+  # explains why).
+  def coverage_report
+    @coverage_report ||= tracker.coverage.to_h
   end
 
   def convert_to_hashes warnings

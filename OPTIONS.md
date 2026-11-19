@@ -28,6 +28,10 @@ By default, Brakeman will return a non-zero exit code if any security warnings a
 
     brakeman --no-exit-on-warn --no-exit-on-error
 
+A scan can produce zero warnings either because every in-scope file was checked and nothing was found, or because some input was never analyzed (a file failed to parse, a path was excluded, a template handler is missing, or a check was turned off). The report's Scan Coverage section and the JSON `coverage` object distinguish the two. By default a zero-warning scan with incomplete coverage still exits non-zero (code 10). Disable just that behavior with:
+
+    brakeman --no-exit-on-incomplete
+
 To force Brakeman into Rails 3 mode:
 
     brakeman -3

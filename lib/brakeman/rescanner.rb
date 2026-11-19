@@ -64,6 +64,8 @@ class Brakeman::Rescanner < Brakeman::Scanner
     else
       @changes = true
       process(ruby_paths:, template_paths:)
+      tracker.sync_coverage_errors
+      @paths.each { |path| tracker.coverage.clear_path(path.relative) }
     end
 
     self

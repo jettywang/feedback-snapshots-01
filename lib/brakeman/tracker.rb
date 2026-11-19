@@ -2,6 +2,7 @@ require 'set'
 require 'brakeman/call_index'
 require 'brakeman/checks'
 require 'brakeman/report'
+require 'brakeman/scan_coverage'
 require 'brakeman/processors/lib/find_call'
 require 'brakeman/processors/lib/find_all_calls'
 require 'brakeman/tracker/config'
@@ -12,7 +13,8 @@ class Brakeman::Tracker
   attr_accessor :controllers, :constants, :templates, :models, :errors,
     :checks, :initializers, :config, :routes, :processor, :libs,
     :template_cache, :options, :filter_cache, :start_time, :end_time,
-    :duration, :ignored_filter, :app_tree, :file_cache, :pristine_file_cache
+    :duration, :ignored_filter, :app_tree, :file_cache, :pristine_file_cache,
+    :coverage
 
   #Place holder when there should be a model, but it is not
   #clear what model it will be.
@@ -57,6 +59,7 @@ class Brakeman::Tracker
     @start_time = Time.now
     @end_time = nil
     @duration = nil
+    @coverage ||= Brakeman::ScanCoverage.new(@options)
   end
 
   def save_file_cache!
@@ -65,7 +68,16 @@ class Brakeman::Tracker
 
   #Add an error to the list. If no backtrace is given,
   #the one from the exception will be used.
+  #
+  #The error is also mirrored on the scan coverage so a failed file is not
+  #silently counted as "checked and clean". A parse failure is never turned
+  #into a warning: callers keep a hard distinction between analysis errors
+  #and low confidence findings.
   def error exception, backtrace = nil
+    if exception.is_a? String
+      exception = RuntimeError.new(exception)
+    end
+
     backtrace ||= exception.backtrace
     unless backtrace.is_a? Array
       backtrace = [ backtrace ]
@@ -74,17 +86,69 @@ class Brakeman::Tracker
     Brakeman.debug exception
     Brakeman.debug backtrace
 
-    @errors << {
+    entry = {
       :exception => exception,
       :error => exception.to_s.gsub("\n", " "),
       :backtrace => backtrace
     }
+
+    entry[:file] = extract_error_file(entry)
+    entry[:reason] = parse_error?(exception) ?
+      Brakeman::ScanCoverage::PARSE_ERROR :
+      Brakeman::ScanCoverage::PROCESSING_ERROR
+
+    @errors << entry
+    @coverage.record_error entry
+    entry
+  end
+
+  # Parser failures surface as either Racc::ParseError or
+  # RubyParser::SyntaxError (the Prism translation path rewraps them).
+  # Match both so a file that could not be parsed is never labeled as a
+  # generic processing failure or downgraded into a finding.
+  def parse_error? exception
+    exception.is_a?(Racc::ParseError) ||
+      exception.class.name.to_s.include?("SyntaxError") ||
+      exception.message.to_s =~ /\A[^\n]+:\d+ :::?\s*parse error/
   end
 
   def add_errors exceptions
     exceptions.each do |e|
       error(e)
     end
+  end
+
+  # Make the coverage collector mirror this tracker's authoritative error
+  # list. A rescanner reuses one coverage object across fresh trackers whose
+  # error arrays start empty, so without this sync stale errors would survive
+  # even after the offending file was fixed.
+  def sync_coverage_errors
+    @coverage.replace_errors(@errors)
+    @coverage
+  end
+
+  # Best effort extraction of the project relative file an error refers to.
+  # Parser errors embed the path in their message; processing errors usually
+  # put it at the top of the backtrace.
+  def extract_error_file entry
+    message = entry[:error].to_s
+    extension = /(?:rb|erb|erubi|haml|slim|rhtml|liquid)/
+
+    if match = message.match(/(?:While processing|while processing|Could not parse|Parsing)\s+([^\s]+)/)
+      path = match[1].chomp(".")
+    elsif match = message.match(/Unknown template type in ([^\s]+)/)
+      path = match[1]
+    elsif match = message.match(/\A([\w\/.-]+\.#{extension}):\d+/)
+      # ruby_parser style "path/file.rb:4 :: parse error ..."
+      path = match[1]
+    elsif (frame = entry[:backtrace].first) and match = frame.to_s.match(/([\w.-]+\.#{extension})/)
+      path = match[1]
+    end
+
+    return nil if path.nil?
+
+    path = path.sub(/\A#{Regexp.escape(@app_tree.root.to_s)}\/?/, '') if @app_tree && @app_tree.root
+    path
   end
 
   #Run a set of checks on the current information. Results will be stored

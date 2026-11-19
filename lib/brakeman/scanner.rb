@@ -21,7 +21,14 @@ class Brakeman::Scanner
   #Pass in path to the root of the Rails application
   def initialize options, processor = nil
     @options = options
-    @app_tree = Brakeman::AppTree.from_options(options)
+
+    # Share one coverage collector between the tracker and the app tree so
+    # parse failures (tracker) and path exclusions (app tree) describe the
+    # same scan.
+    @coverage = options[:coverage] || Brakeman::ScanCoverage.new(options)
+    @options[:coverage] = @coverage
+
+    @app_tree = Brakeman::AppTree.from_options(@options)
 
     if (!@app_tree.root || !@app_tree.exists?("app")) && !options[:force_scan]
       message = "Please supply the path to a Rails application (looking in #{@app_tree.root}).\n" <<
@@ -30,7 +37,8 @@ class Brakeman::Scanner
       raise Brakeman::NoApplication, message
     end
 
-    @processor = processor || Brakeman::Processor.new(@app_tree, options)
+    @processor = processor || Brakeman::Processor.new(@app_tree, @options)
+    @processor.tracked_events.coverage = @coverage
   end
 
   #Returns the Tracker generated from the scan
@@ -72,6 +80,8 @@ class Brakeman::Scanner
     process_step 'Finding files' do
       ruby_paths ||= tracker.app_tree.ruby_file_paths
       template_paths ||= tracker.app_tree.template_paths
+
+      tracker.coverage.record_scan_inputs(ruby_paths, template_paths)
     end
 
     process_step 'Parsing files' do

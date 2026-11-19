@@ -48,6 +48,7 @@ class Brakeman::Report::Markdown < Brakeman::Report::Table
     end
 
     output_table("Errors", generate_errors, out)
+    output_table("Scan Coverage", generate_coverage, out)
     output_table("SECURITY WARNINGS", generate_warnings, out)
     output_table("Controller Warnings:", generate_controller_warnings, out)
     output_table("Model Warnings:", generate_model_warnings, out)

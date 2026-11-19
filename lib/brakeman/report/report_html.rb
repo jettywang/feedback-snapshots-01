@@ -23,6 +23,7 @@ class Brakeman::Report::HTML < Brakeman::Report::Table
     out << generate_controllers.to_s if tracker.options[:report_routes] or tracker.options[:debug]
     out << generate_templates.to_s if tracker.options[:debug]
     out << generate_errors.to_s
+    out << generate_coverage.to_s
     out << generate_warnings.to_s
     out << generate_controller_warnings.to_s
     out << generate_model_warnings.to_s
@@ -37,7 +38,8 @@ class Brakeman::Report::HTML < Brakeman::Report::Table
         :warnings => all_warnings.length,
         :warnings_summary => warnings_summary,
         :number_of_templates => number_of_templates(@tracker),
-        :ignored_warnings => ignored_warnings.length
+        :ignored_warnings => ignored_warnings.length,
+        :coverage_complete => coverage_complete?
         }
 
       Brakeman::Report::Renderer.new('overview', :locals => locals).render
@@ -62,6 +64,12 @@ class Brakeman::Report::HTML < Brakeman::Report::Table
 
   def render_array template, headings, value_array, locals
     return if value_array.empty?
+
+    # ERB templates only see the locals passed to the renderer, so make sure
+    # the coverage template can reach its rows without calling report methods.
+    if template == 'coverage_overview'
+      locals = locals.merge(:coverage_limit_rows => coverage_limit_rows)
+    end
 
     Brakeman::Report::Renderer.new(template, :locals => locals).render
   end

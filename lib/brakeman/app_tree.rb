@@ -3,9 +3,13 @@ require 'brakeman/file_path'
 
 module Brakeman
   class AppTree
+    # Extensions Brakeman has a template handler for. Anything else matched by
+    # template_paths is still collected so the coverage report can flag that
+    # the template was skipped instead of silently ignoring it.
     VIEW_EXTENSIONS = %w[html.erb html.haml rhtml js.erb html.slim].join(",")
+    TEMPLATE_GLOB_EXTENSIONS = %w[erb haml rhtml slim liquid].freeze
 
-    attr_reader :root
+    attr_reader :root, :coverage
 
     def self.from_options(options)
       root = File.expand_path options[:app_path]
@@ -23,6 +27,7 @@ module Brakeman
       init_options[:engine_paths] = options[:engine_paths]
       init_options[:skip_vendor] = options[:skip_vendor]
       init_options[:follow_symlinks] = options[:follow_symlinks]
+      init_options[:coverage] = options[:coverage]
 
       new(root, init_options)
     end
@@ -70,6 +75,7 @@ module Brakeman
       @relative_engine_paths = @engine_paths - @absolute_engine_paths
       @skip_vendor = init_options[:skip_vendor]
       @follow_symlinks = init_options[:follow_symlinks]
+      @coverage = init_options[:coverage]
       @gemspec = nil
       @root_search_pattern = nil
     end
@@ -121,8 +127,13 @@ module Brakeman
     end
 
     def template_paths
-      @template_paths ||= find_paths(".", "*.{#{VIEW_EXTENSIONS}}") +
-        find_paths(".", "*.{erb,haml,slim}").reject { |path| File.basename(path).count(".") > 1 }
+      @template_paths ||= (find_paths(".", "*.{#{VIEW_EXTENSIONS}}") +
+        find_paths(".", "*.{#{TEMPLATE_GLOB_EXTENSIONS.join(",")}}").reject { |path|
+          # The extension glob can match an intermediate segment of a
+          # differently-named file (e.g. "*.erb" matching "foo.erb.bak").
+          # Keep only files whose real final extension is a template extension.
+          not TEMPLATE_GLOB_EXTENSIONS.include?(File.basename(path).split(".").last)
+        }).uniq
     end
 
     def layout_exists?(name)
@@ -227,19 +238,23 @@ module Brakeman
     def select_only_files(paths)
       return paths unless @only_files
 
-      paths.select do |path|
+      paths.partition do |path|
         Brakeman.logger.spin
         match_path @only_files, path
-      end
+      end.tap do |kept, rejected|
+        record_excluded rejected, "outside --only-files"
+      end.first
     end
 
     def reject_skipped_files(paths)
       return paths unless @skip_files
 
-      paths.reject do |path|
+      paths.partition do |path|
         Brakeman.logger.spin
-        match_path @skip_files, path
-      end
+        !match_path(@skip_files, path)
+      end.tap do |kept, rejected|
+        record_excluded rejected, "excluded by --skip-files"
+      end.first
     end
 
     EXCLUDED_PATHS = regex_for_paths %w[
@@ -253,17 +268,33 @@ module Brakeman
     ]
 
     def reject_global_excludes(paths)
-      paths.reject do |path|
+      paths.partition do |path|
         relative_path = path.relative
 
         if @skip_vendor and
             (relative_path == 'vendor' || relative_path.include?('vendor/')) and
             !in_engine_paths?(path) and
             !in_add_libs_paths?(path)
-          true
+          record_excluded [path], "vendor directory skipped (--skip-vendor)"
+          false
+        elsif match_path EXCLUDED_PATHS, path
+          record_excluded [path], "default excluded path"
+          false
         else
-          match_path EXCLUDED_PATHS, path
+          true
         end
+      end.first
+    end
+
+    # Send paths dropped before analysis to the coverage collector with the
+    # option that caused the exclusion. Silently skipped input would otherwise
+    # look identical to input that was checked and found clean.
+    def record_excluded(paths, reason)
+      return unless @coverage
+
+      paths.each do |path|
+        path = file_path(path) unless path.is_a? Brakeman::FilePath
+        @coverage.record_excluded_path(path, reason)
       end
     end
 

@@ -193,12 +193,20 @@ class Brakeman::Checks
     skipped = tracker.options[:skip_checks]
     explicit = tracker.options[:run_checks]
     enabled = tracker.options[:enable_checks] || []
+    coverage = tracker.coverage
 
     checks.reject do |c|
       check_name = self.get_check_name(c)
 
-      skipped.include? check_name or
-        (explicit and not explicit.include? check_name and not enabled.include? check_name)
+      if skipped.include? check_name
+        coverage.record_disabled_check check_name, "excluded with --except/-x"
+        true
+      elsif explicit and not explicit.include? check_name and not enabled.include? check_name
+        coverage.record_disabled_check check_name, "not selected by --test/-t"
+        true
+      else
+        false
+      end
     end
   end
 
