@@ -30,22 +30,38 @@ module WinRM
       def initialize(transport, logger)
         @transport = transport
         @logger = logger
-        @output_decoder = CommandOutputDecoder.new
       end
 
       attr_reader :logger
 
-      # Reads streams and returns decoded output
+      # Reads streams and returns decoded output.
+      #
+      # Decoder state is scoped to this call, which is one command. Each
+      # stream (stdout, stderr, ...) gets its own decoder so interleaved
+      # chunks cannot corrupt each other. If the command fails mid-stream,
+      # the decoders are discarded and the fault is raised unchanged; their
+      # buffered bytes are never carried into the next command.
+      #
       # @param wsmv_message [WinRM::WSMV::Base] A wsmv message to send to endpoint
       # @yieldparam [string] standard out response text
       # @yieldparam [string] standard error response text
       # @yieldreturn [WinRM::Output] The command output
       def read_output(wsmv_message)
+        stream_decoders = {}
         with_output do |output|
           read_response(wsmv_message, true) do |stream, doc|
-            handled_out = handle_stream(stream, output, doc)
+            handled_out = handle_stream(stream, output, doc, stream_decoders)
             yield handled_out if handled_out && block_given?
           end
+          flush_streams(output, stream_decoders) do |handled_out|
+            yield handled_out if block_given?
+          end
+        rescue StandardError => e
+          logger.debug(
+            "[WinRM] discarding #{stream_decoders.size} pending output stream(s) " \
+            "after #{e.class}"
+          )
+          raise
         end
       end
 
@@ -77,16 +93,33 @@ module WinRM
 
       private
 
-      def handle_stream(stream, output, resp_doc)
-        decoded_text = @output_decoder.decode(stream[:text])
-        return unless decoded_text
+      def handle_stream(stream, output, resp_doc, stream_decoders)
+        set_exit_code(output, resp_doc)
+        decoder = (stream_decoders[stream[:type]] ||= CommandOutputDecoder.new)
+        decoded_text = decoder.decode(stream[:text])
+        record_decoded_text(output, stream[:type], decoded_text)
+      end
 
-        out = { stream[:type] => decoded_text }
-        output << out
-        if (code = REXML::XPath.first(resp_doc, "//*[local-name() = 'ExitCode']"))
-          output.exitcode = code.text.to_i
+      def flush_streams(output, stream_decoders)
+        until stream_decoders.empty?
+          type, decoder = stream_decoders.shift
+          decoded_text = decoder.finish
+          handled_out = record_decoded_text(output, type, decoded_text)
+          yield handled_out if handled_out && block_given?
         end
+      end
+
+      def record_decoded_text(output, type, decoded_text)
+        return nil if decoded_text.nil? || decoded_text.empty?
+
+        out = { type => decoded_text }
+        output << out
         [out[:stdout], out[:stderr]]
+      end
+
+      def set_exit_code(output, resp_doc)
+        code = REXML::XPath.first(resp_doc, "//*[local-name() = 'ExitCode']")
+        output.exitcode = code.text.to_i if code
       end
 
       def send_get_output_message(message)

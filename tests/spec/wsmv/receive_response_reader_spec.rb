@@ -121,4 +121,139 @@ describe WinRM::WSMV::ReceiveResponseReader do
       end
     end
   end
+
+  let(:output_message) { double('output_message', build: 'output_message') }
+  let(:transport) { double('transport') }
+  let(:logger) { Logger.new(IO::NULL) }
+
+  subject { described_class.new(transport, logger) }
+
+  # Builds a ReceiveResponse document. When `chunks` is a hash, each stream's
+  # values are emitted grouped. When it is an array, entries must be
+  # [name, chunk] pairs and are emitted in that exact order, which allows
+  # stdout and stderr chunks to interleave.
+  def response_xml(chunks, done: true, exitcode: 0)
+    chunks = chunks.flat_map { |name, values| values.map { |value| [name, value] } } if chunks.is_a?(Hash)
+    body = chunks.map do |name, value|
+      "<rsp:Stream CommandId='#{command_id}' Name='#{name}'>#{value}</rsp:Stream>"
+    end.join("\n")
+    state_uri = 'http://schemas.microsoft.com/wbem/wsman/1/windows/shell/CommandState'
+    state = if done
+              "<rsp:CommandState CommandId='#{command_id}' State='#{state_uri}/Done'>" \
+                "<rsp:ExitCode>#{exitcode}</rsp:ExitCode></rsp:CommandState>"
+            else
+              "<rsp:CommandState CommandId='#{command_id}' State='#{state_uri}/Running'/>"
+            end
+    <<~XML
+      <s:Envelope xmlns:s='http://www.w3.org/2003/05/soap-envelope'
+                  xmlns:rsp='http://schemas.microsoft.com/wbem/wsman/1/windows/shell'>
+        <s:Body>
+          <rsp:ReceiveResponse>
+            #{body}
+            #{state}
+          </rsp:ReceiveResponse>
+        </s:Body>
+      </s:Envelope>
+    XML
+  end
+
+  def doc(chunks, **opts)
+    REXML::Document.new(response_xml(chunks, **opts))
+  end
+
+  def b64(text)
+    Base64.strict_encode64(text.b)
+  end
+
+  context 'when stream chunks split UTF-8 characters' do
+    it 'returns complete text and matching callback increments' do
+      stdout = "✓1234-äöü\r\n"
+      stderr = "警告: €\r\n"
+      # One decoded byte per chunk; stdout and stderr chunks alternate inside
+      # the same response, and the second response continues both streams.
+      stdout_chunks = stdout.b.bytes.map { |byte| b64(byte.chr) }
+      stderr_chunks = stderr.b.bytes.map { |byte| b64(byte.chr) }
+      interleaved = stdout_chunks.zip(stderr_chunks).flat_map do |out, err|
+        [['stdout', out], ['stderr', err]]
+      end.compact
+      first = doc(interleaved[0, 8], done: false)
+      second = doc(interleaved[8..-1], done: true)
+      allow(transport).to receive(:send_request).and_return(first, second)
+
+      increments = []
+      output = subject.read_output(output_message) do |out, err|
+        increments << [out, err]
+      end
+
+      expect(output.stdout).to eq(stdout)
+      expect(output.stderr).to eq(stderr)
+      expect(increments.map(&:first).compact.join).to eq(stdout)
+      expect(increments.map(&:last).compact.join).to eq(stderr)
+      increments.each do |out, err|
+        [out, err].compact.each do |increment|
+          expect(increment).to be_valid_encoding
+          expect(increment).not_to include("�")
+        end
+      end
+    end
+  end
+
+  context 'when a command ends with an incomplete character' do
+    it 'scrubs only that stream and does not affect a following command' do
+      allow(transport).to receive(:send_request).and_return(
+        doc({ 'stdout' => [b64("\xE2\x9C".b)] }),
+        doc({ 'stdout' => [b64("\x93")] })
+      )
+
+      first = subject.read_output(output_message)
+      second = subject.read_output(output_message)
+
+      expect(first.stdout).to eq("�")
+      expect(second.stdout).to eq("�")
+    end
+  end
+
+  context 'when each stream starts with a BOM' do
+    it 'strips a BOM at the start of stdout and stderr independently' do
+      bom = "\xEF\xBB\xBF".b
+      allow(transport).to receive(:send_request).and_return(
+        doc({ 'stdout' => [b64(bom + 'out')], 'stderr' => [b64(bom + 'err')] })
+      )
+
+      output = subject.read_output(output_message)
+
+      expect(output.stdout).to eq('out')
+      expect(output.stderr).to eq('err')
+    end
+
+    it 'keeps a BOM that is not at the start of a stream' do
+      bom = "\xEF\xBB\xBF".b
+      allow(transport).to receive(:send_request).and_return(
+        doc({ 'stdout' => [b64('a'), b64(bom + 'b')] })
+      )
+
+      expect(subject.read_output(output_message).stdout).to eq("a﻿b")
+    end
+  end
+
+  context 'when Base64 is invalid' do
+    it 'raises an explicit error' do
+      allow(transport).to receive(:send_request).and_return(doc({ 'stdout' => ['!!!!'] }))
+
+      expect { subject.read_output(output_message) }.to raise_error(ArgumentError, /invalid Base64/)
+    end
+  end
+
+  context 'when a fault occurs mid-command' do
+    it 'raises the fault and leaves no state for the next command' do
+      pending_chunk = doc({ 'stdout' => [b64("\xE2\x9C".b)] }, done: false)
+      fault = WinRM::WinRMWSManFault.new('boom', '12345')
+      allow(transport).to receive(:send_request).and_return(pending_chunk).and_raise(fault)
+
+      expect { subject.read_output(output_message) }.to raise_error(WinRM::WinRMWSManFault)
+
+      allow(transport).to receive(:send_request).and_return(doc({ 'stdout' => [b64("\x93")] }))
+      expect(subject.read_output(output_message).stdout).to eq("�")
+    end
+  end
 end

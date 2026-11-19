@@ -1,6 +1,7 @@
 # Changelog
 
 ## [Unreleased]
+* Decode WSMV stdout/stderr incrementally so UTF-8 characters split across stream chunks are not replaced with garbage. Base64 unwrapping and character boundaries are handled separately, each stream keeps its own decoder per command, and a BOM is only special at the start of its stream. An incomplete character at the end of a stream becomes U+FFFD, a truncated Base64 value raises, and a fault discards pending stream state instead of reusing it for the next command.
 
 ## [2.4.2]
 * Replace erubi with the Ruby standard library ERB; the erubi runtime dependency is gone (#366)
