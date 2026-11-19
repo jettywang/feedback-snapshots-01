@@ -52,6 +52,7 @@ Kombu Transports
     kombu.transport.etcd
     kombu.transport.zookeeper
     kombu.transport.filesystem
+    kombu.transport.filesystem_evidence
     kombu.transport.sqlalchemy
     kombu.transport.pgmq
     kombu.transport.SQS
