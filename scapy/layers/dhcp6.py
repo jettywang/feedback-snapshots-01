@@ -14,6 +14,9 @@ import socket
 import struct
 import time
 
+from dataclasses import dataclass, field
+from typing import List, Optional, Tuple
+
 from scapy.ansmachine import AnsweringMachine
 from scapy.arch import get_if_hwaddr, in6_getifaddr
 from scapy.config import conf
@@ -1472,6 +1475,325 @@ class DHCP6_AddrRegReply(DHCP6):
 
 bind_bottom_up(UDP, _dhcp6_dispatcher, {"dport": 547})
 bind_bottom_up(UDP, _dhcp6_dispatcher, {"dport": 546})
+
+
+#####################################################################
+# Passive relay evidence view
+#
+# The helpers below only inspect packet bytes (typically packets read
+# from a pcap through rdpcap() or sniff(offline=...)); they never emit
+# DHCPv6 messages. A lease reply is associated with the client
+# identified in the innermost relayed message, not with the outermost
+# relay agent. Every relay hop keeps its own evidence (link/peer
+# addresses, interface-id options, relay-message option) so that
+# multi-hop relay chains, transaction-id collisions between clients,
+# duplicated options and missing inner messages stay attributed to the
+# exact layer where they were observed.
+
+# Message types emitted by clients (RFC 8415 sect 7.3 and RFC 9686)
+DHCP6_CLIENT_MSGTYPES = (1, 3, 4, 5, 6, 8, 9, 11, 36)
+# Message types emitted by servers (RFC 8415 sect 7.3 and RFC 9686)
+DHCP6_SERVER_MSGTYPES = (2, 7, 10, 37)
+
+#: Reminder attached to every lease association: observing a lease in
+#: a capture only proves that some server emitted it on the wire. It
+#: does not prove that the DHCPv6 service is trustworthy.
+DHCP6_EVIDENCE_CAVEAT = (
+    "observing a lease does not prove the DHCPv6 service is trustworthy")
+
+
+@dataclass
+class DHCP6RelayHop:
+    """Evidence observed at a single relay layer of a DHCPv6 message.
+
+    ifaceids keeps every interface-id option of the layer, duplicates
+    included, in wire order. relay_msg_count counts the relay-message
+    options of the layer (only the first one is followed) and
+    inner_present tells whether a decodable message was found inside.
+    """
+
+    depth: int
+    msgtype: int
+    hopcount: int
+    linkaddr: str
+    peeraddr: str
+    ifaceids: Tuple[bytes, ...] = ()
+    relay_msg_count: int = 0
+    inner_present: bool = False
+
+
+@dataclass
+class DHCP6InnerEvidence:
+    """Evidence extracted from the innermost relayed DHCPv6 message.
+
+    client_duids and server_duids keep every identifier option
+    occurrence in wire order; iaids holds the (option code, IAID) pair
+    of every IA_NA, IA_TA and IA_PD option.
+    """
+
+    present: bool = False
+    msgtype: Optional[int] = None
+    trid: Optional[int] = None
+    client_duids: Tuple[bytes, ...] = ()
+    server_duids: Tuple[bytes, ...] = ()
+    iaids: Tuple[Tuple[int, int], ...] = ()
+
+
+@dataclass
+class DHCP6RelayEvidence:
+    """Per-layer relay evidence of a single captured DHCPv6 packet."""
+
+    hops: Tuple[DHCP6RelayHop, ...] = ()
+    inner: DHCP6InnerEvidence = field(default_factory=DHCP6InnerEvidence)
+    index: int = -1
+    time: Optional[float] = None
+
+    @property
+    def client_duid(self):
+        """First client DUID of the innermost message, if any."""
+        if self.inner.client_duids:
+            return self.inner.client_duids[0]
+        return None
+
+    def show(self):
+        """Return the per-layer relay evidence view as a string."""
+        lines = []
+        for hop in self.hops:
+            kind = dhcp6types.get(hop.msgtype, str(hop.msgtype))
+            suffix = "" if hop.inner_present else " [inner missing]"
+            lines.append(
+                "hop %d %s: link=%s peer=%s ifaceids=[%s] "
+                "relay-msg=%d%s" % (
+                    hop.depth, kind, hop.linkaddr, hop.peeraddr,
+                    ", ".join(i.hex() for i in hop.ifaceids) or "-",
+                    hop.relay_msg_count, suffix))
+        inner = self.inner
+        if inner.present:
+            kind = dhcp6types.get(inner.msgtype, str(inner.msgtype))
+            lines.append(
+                "inner %s: trid=%s client-duid=%s server-duid=%s "
+                "iaids=[%s]" % (
+                    kind,
+                    "0x%06x" % inner.trid if inner.trid is not None
+                    else "-",
+                    inner.client_duids[0].hex() if inner.client_duids
+                    else "-",
+                    inner.server_duids[0].hex() if inner.server_duids
+                    else "-",
+                    ", ".join(
+                        "%s:0x%x" % (dhcp6opts.get(code, code), iaid)
+                        for code, iaid in inner.iaids) or "-"))
+        else:
+            lines.append("inner: missing (no decodable relayed message)")
+        return "\n".join(lines)
+
+
+@dataclass
+class DHCP6LeaseAssociation:
+    """Correlation between the client messages and the lease replies
+    of a single DHCPv6 flow.
+
+    certainty is one of:
+
+    - "confirmed": each reply carries the client DUID of an observed
+      client message with the same transaction id,
+    - "degraded": associated on partial evidence only (for instance a
+      missing client-id option, inferred from the transaction id
+      alone), or no client message was observed,
+    - "ambiguous": several client flows match; the lease is left
+      unattributed rather than borrowed from another flow,
+    - "unattributed": no client flow matches,
+    - "no-lease": only client messages were observed.
+    """
+
+    trid: Optional[int] = None
+    client_duid: Optional[bytes] = None
+    requests: List[DHCP6RelayEvidence] = field(default_factory=list)
+    replies: List[DHCP6RelayEvidence] = field(default_factory=list)
+    certainty: str = "no-lease"
+    notes: List[str] = field(default_factory=list)
+
+    def show(self):
+        """Return the association and its per-layer evidence."""
+        lines = ["flow trid=%s client-duid=%s certainty=%s" % (
+            "0x%06x" % self.trid if self.trid is not None else "-",
+            self.client_duid.hex() if self.client_duid else "-",
+            self.certainty)]
+        for label, evidences in (("request", self.requests),
+                                 ("reply", self.replies)):
+            for evidence in evidences:
+                lines.append("  %s packet #%d:" % (label, evidence.index))
+                lines.extend("    " + line
+                             for line in evidence.show().splitlines())
+        for note in self.notes:
+            lines.append("  note: " + note)
+        return "\n".join(lines)
+
+
+def _dhcp6_options(msg):
+    opt = msg.payload
+    while isinstance(opt, _DHCP6OptGuessPayload):
+        yield opt
+        opt = opt.payload
+
+
+def dhcp6_relay_evidence(pkt):
+    """Extract the per-layer relay evidence of a captured DHCPv6 packet.
+
+    Returns a DHCP6RelayEvidence, or None if the packet carries no
+    DHCPv6 message. Only packet bytes are inspected.
+    """
+    msg = pkt.getlayer(DHCP6_RelayForward, _subclass=True)
+    if msg is None:
+        msg = pkt.getlayer(DHCP6, _subclass=True)
+    if msg is None:
+        return None
+    hops = []
+    depth = 0
+    while isinstance(msg, DHCP6_RelayForward):
+        ifaceids = []
+        relay_msgs = []
+        for opt in _dhcp6_options(msg):
+            if isinstance(opt, DHCP6OptIfaceId):
+                ifaceid = opt.ifaceid
+                ifaceids.append(ifaceid if isinstance(ifaceid, bytes)
+                                else ifaceid.encode())
+            elif isinstance(opt, DHCP6OptRelayMsg):
+                relay_msgs.append(opt)
+        inner = relay_msgs[0].message if relay_msgs else None
+        inner_present = isinstance(inner, (DHCP6, DHCP6_RelayForward))
+        hops.append(DHCP6RelayHop(
+            depth=depth, msgtype=msg.msgtype, hopcount=msg.hopcount,
+            linkaddr=msg.linkaddr, peeraddr=msg.peeraddr,
+            ifaceids=tuple(ifaceids), relay_msg_count=len(relay_msgs),
+            inner_present=inner_present))
+        if not inner_present:
+            msg = None
+            break
+        msg = inner
+        depth += 1
+    inner = DHCP6InnerEvidence()
+    if isinstance(msg, DHCP6):
+        client_duids = []
+        server_duids = []
+        iaids = []
+        for opt in _dhcp6_options(msg):
+            if isinstance(opt, DHCP6OptServerId):
+                server_duids.append(raw(opt.duid) if opt.duid else b"")
+            elif isinstance(opt, DHCP6OptClientId):
+                client_duids.append(raw(opt.duid) if opt.duid else b"")
+            elif isinstance(opt, (DHCP6OptIA_NA, DHCP6OptIA_TA,
+                                  DHCP6OptIA_PD)):
+                iaids.append((opt.optcode, opt.iaid))
+        inner = DHCP6InnerEvidence(
+            present=True, msgtype=msg.msgtype, trid=msg.trid,
+            client_duids=tuple(client_duids),
+            server_duids=tuple(server_duids), iaids=tuple(iaids))
+    return DHCP6RelayEvidence(hops=tuple(hops), inner=inner)
+
+
+def dhcp6_lease_associations(pkts):
+    """Associate the lease replies of a DHCPv6 capture with clients.
+
+    pkts is an iterable of captured packets (e.g. from rdpcap()). Each
+    lease reply is associated with the client identified in the
+    innermost relayed message of its flow -- never with the outermost
+    relay agent -- and every association keeps the per-layer evidence
+    it was built from. Identity is never borrowed from another flow:
+    when the identity of a message is missing, the certainty of its
+    association is only lowered. Returns a list of
+    DHCP6LeaseAssociation. Only packet bytes are inspected.
+    """
+    assocs = []
+    flows = {}
+    replies = []
+    for index, pkt in enumerate(pkts):
+        evidence = dhcp6_relay_evidence(pkt)
+        if evidence is None:
+            continue
+        evidence.index = index
+        evidence.time = pkt.time
+        if not evidence.inner.present:
+            # A relay message without a decodable inner message keeps
+            # its own hop evidence but cannot join any client flow.
+            assocs.append(DHCP6LeaseAssociation(
+                requests=[evidence],
+                certainty="unattributed",
+                notes=["relay message carries no decodable inner "
+                       "message; it cannot be attributed to a client "
+                       "flow"]))
+            continue
+        key = (evidence.inner.trid, evidence.client_duid)
+        if evidence.inner.msgtype in DHCP6_SERVER_MSGTYPES:
+            replies.append(evidence)
+            continue
+        assoc = flows.get(key)
+        if assoc is None:
+            assoc = DHCP6LeaseAssociation(trid=key[0], client_duid=key[1])
+            flows[key] = assoc
+            assocs.append(assoc)
+        assoc.requests.append(evidence)
+    for evidence in replies:
+        trid = evidence.inner.trid
+        duid = evidence.client_duid
+        assoc = flows.get((trid, duid)) if duid is not None else None
+        if assoc is not None:
+            # exact transaction id + client DUID match
+            assoc.replies.append(evidence)
+            if assoc.certainty == "no-lease":
+                assoc.certainty = "confirmed"
+            continue
+        candidates = [flow for (flow_trid, flow_duid), flow in
+                      flows.items()
+                      if flow_trid == trid and
+                      (duid is None or flow_duid is None)]
+        if len(candidates) == 1:
+            # identity missing on one side: associate through the
+            # transaction id alone and lower the certainty
+            assoc = candidates[0]
+            assoc.replies.append(evidence)
+            assoc.certainty = "degraded"
+            assoc.notes.append(
+                "lease associated through transaction id %s alone; "
+                "client identity is missing on one side" % (
+                    "0x%06x" % trid if trid is not None else "-"))
+            continue
+        # never borrow an identity from another flow
+        assoc = DHCP6LeaseAssociation(trid=trid, client_duid=duid,
+                                      replies=[evidence])
+        if len(candidates) > 1:
+            assoc.certainty = "ambiguous"
+            assoc.notes.append(
+                "%d client flows share transaction id %s; the lease is "
+                "left unattributed rather than borrowed from another "
+                "flow" % (len(candidates),
+                          "0x%06x" % trid if trid is not None else "-"))
+        elif duid is None:
+            assoc.certainty = "unattributed"
+            assoc.notes.append(
+                "no client message with transaction id %s was observed"
+                % ("0x%06x" % trid if trid is not None else "-"))
+        else:
+            assoc.certainty = "degraded"
+            assoc.notes.append(
+                "no client message observed for this lease; client "
+                "identity comes from the reply alone")
+        assocs.append(assoc)
+    for assoc in assocs:
+        evidences = assoc.requests + assoc.replies
+        if any(len(evidence.inner.client_duids) > 1
+               for evidence in evidences):
+            assoc.notes.append(
+                "duplicate client-id options observed; the first "
+                "occurrence is used for attribution")
+        if any(hop.relay_msg_count > 1 for evidence in evidences
+               for hop in evidence.hops):
+            assoc.notes.append(
+                "multiple relay-message options at a relay hop; the "
+                "first one is followed")
+        if assoc.replies:
+            assoc.notes.append(DHCP6_EVIDENCE_CAVEAT)
+    return assocs
 
 
 class DHCPv6_am(AnsweringMachine):

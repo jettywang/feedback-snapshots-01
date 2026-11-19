@@ -1586,6 +1586,82 @@ a.msgtype == 13 and a.hopcount == 0 and a.linkaddr == "::" and a.peeraddr == "::
 
 ############
 ############
++ Test DHCP6 relay evidence view
+
+= Relay evidence - multi-hop chain keeps per-layer attribution
+duid_c = DUID_LL(lladdr="00:00:00:00:00:0c")
+sol = DHCP6_Solicit(trid=0xabc001)/DHCP6OptClientId(duid=duid_c)/DHCP6OptIA_NA(iaid=0x42)
+hop1 = DHCP6_RelayForward(hopcount=1, linkaddr="2001:db8::2", peeraddr="fe80::2")/DHCP6OptIfaceId(ifaceid=b"if-in")/DHCP6OptRelayMsg(message=sol)
+hop0 = DHCP6_RelayForward(hopcount=0, linkaddr="2001:db8::1", peeraddr="fe80::1")/DHCP6OptIfaceId(ifaceid=b"if-out")/DHCP6OptRelayMsg(message=hop1)
+ev = dhcp6_relay_evidence(DHCP6_RelayForward(raw(hop0)))
+len(ev.hops) == 2 and ev.hops[0].linkaddr == "2001:db8::1" and ev.hops[0].ifaceids == (b"if-out",) and ev.hops[1].peeraddr == "fe80::2" and ev.inner.trid == 0xabc001 and ev.client_duid == raw(duid_c) and ev.inner.iaids == ((3, 0x42),)
+
+= Relay evidence - duplicated options stay attributed to their layer
+duid_c = DUID_LL(lladdr="00:00:00:00:00:0c")
+duid_c2 = DUID_LL(lladdr="00:00:00:00:00:0d")
+sol = DHCP6_Solicit(trid=2)/DHCP6OptClientId(duid=duid_c)/DHCP6OptClientId(duid=duid_c2)
+fwd = DHCP6_RelayForward(hopcount=0, linkaddr="2001:db8::1", peeraddr="fe80::1")/DHCP6OptIfaceId(ifaceid=b"a")/DHCP6OptIfaceId(ifaceid=b"b")/DHCP6OptRelayMsg(message=sol)
+ev = dhcp6_relay_evidence(DHCP6_RelayForward(raw(fwd)))
+ev.hops[0].ifaceids == (b"a", b"b") and len(ev.inner.client_duids) == 2 and ev.client_duid == raw(duid_c)
+
+= Relay evidence - missing inner message
+fwd = DHCP6_RelayForward(hopcount=0, linkaddr="2001:db8::1", peeraddr="fe80::1")/DHCP6OptIfaceId(ifaceid=b"x")
+ev = dhcp6_relay_evidence(DHCP6_RelayForward(raw(fwd)))
+not ev.inner.present and not ev.hops[0].inner_present and ev.hops[0].relay_msg_count == 0
+
+= Relay evidence - non DHCPv6 packets are ignored
+dhcp6_relay_evidence(IPv6()/UDP()) is None
+
+= Relay evidence - show renders the per-layer view
+duid_c = DUID_LL(lladdr="00:00:00:00:00:0c")
+sol = DHCP6_Solicit(trid=0x200)/DHCP6OptClientId(duid=duid_c)
+fwd = DHCP6_RelayForward(hopcount=0, linkaddr="2001:db8::1", peeraddr="fe80::1")/DHCP6OptIfaceId(ifaceid=b"eth0")/DHCP6OptRelayMsg(message=sol)
+s = dhcp6_relay_evidence(DHCP6_RelayForward(raw(fwd))).show()
+"hop 0 RELAY-FORW" in s and "fe80::1" in s and "SOLICIT" in s and "0x000200" in s
+
+= Lease association - confirmed lease attributed to innermost client
+duid_c = DUID_LL(lladdr="00:00:00:00:00:0c")
+duid_s = DUID_LL(lladdr="00:00:00:00:00:5e")
+sol = DHCP6_Solicit(trid=0x100)/DHCP6OptClientId(duid=duid_c)/DHCP6OptIA_NA(iaid=7)
+fwd = DHCP6_RelayForward(hopcount=0, linkaddr="2001:db8::1", peeraddr="fe80::1")/DHCP6OptIfaceId(ifaceid=b"eth0")/DHCP6OptRelayMsg(message=sol)
+rep = DHCP6_Reply(trid=0x100)/DHCP6OptServerId(duid=duid_s)/DHCP6OptClientId(duid=duid_c)/DHCP6OptIA_NA(iaid=7)
+rrep = DHCP6_RelayReply(hopcount=0, linkaddr="2001:db8::1", peeraddr="fe80::1")/DHCP6OptIfaceId(ifaceid=b"eth0")/DHCP6OptRelayMsg(message=rep)
+assocs = dhcp6_lease_associations([DHCP6_RelayForward(raw(fwd)), DHCP6_RelayReply(raw(rrep))])
+len(assocs) == 1 and assocs[0].certainty == "confirmed" and assocs[0].client_duid == raw(duid_c) and len(assocs[0].replies) == 1 and DHCP6_EVIDENCE_CAVEAT in assocs[0].notes
+
+= Lease association - interleaved clients through the same relay
+duid_a = DUID_LL(lladdr="00:00:00:00:00:0a")
+duid_b = DUID_LL(lladdr="00:00:00:00:00:0b")
+duid_s = DUID_LL(lladdr="00:00:00:00:00:5e")
+relayed = lambda cls, msg: cls(raw(cls(hopcount=0, linkaddr="2001:db8::1", peeraddr="fe80::1")/DHCP6OptIfaceId(ifaceid=b"eth0")/DHCP6OptRelayMsg(message=msg)))
+sol_a = DHCP6_Solicit(trid=0x200)/DHCP6OptClientId(duid=duid_a)
+sol_b = DHCP6_Solicit(trid=0x200)/DHCP6OptClientId(duid=duid_b)
+rep_a = DHCP6_Reply(trid=0x200)/DHCP6OptServerId(duid=duid_s)/DHCP6OptClientId(duid=duid_a)
+rep_b = DHCP6_Reply(trid=0x200)/DHCP6OptServerId(duid=duid_s)/DHCP6OptClientId(duid=duid_b)
+pkts = [relayed(DHCP6_RelayForward, sol_a), relayed(DHCP6_RelayForward, sol_b), relayed(DHCP6_RelayReply, rep_b), relayed(DHCP6_RelayReply, rep_a)]
+assocs = dhcp6_lease_associations(pkts)
+len(assocs) == 2 and set(a.certainty for a in assocs) == {"confirmed"} and set(a.client_duid for a in assocs) == {raw(duid_a), raw(duid_b)} and all(len(a.requests) == 1 and len(a.replies) == 1 for a in assocs)
+
+= Lease association - deleted identity degrades without borrowing
+rep_noid = DHCP6_Reply(trid=0x200)/DHCP6OptServerId(duid=duid_s)
+pkts = [relayed(DHCP6_RelayForward, sol_a), relayed(DHCP6_RelayForward, sol_b), relayed(DHCP6_RelayReply, rep_b), relayed(DHCP6_RelayReply, rep_noid)]
+assocs = dhcp6_lease_associations(pkts)
+flow_a = [a for a in assocs if a.client_duid == raw(duid_a)][0]
+orphan = [a for a in assocs if a.client_duid is None][0]
+len(assocs) == 3 and not flow_a.replies and flow_a.certainty == "no-lease" and orphan.certainty == "ambiguous" and len(orphan.replies) == 1
+
+= Lease association - single-flow inference is degraded
+pkts = [relayed(DHCP6_RelayForward, sol_a), relayed(DHCP6_RelayReply, rep_noid)]
+assocs = dhcp6_lease_associations(pkts)
+len(assocs) == 1 and assocs[0].certainty == "degraded" and len(assocs[0].replies) == 1
+
+= Lease association - missing inner message is unattributed
+fwd = DHCP6_RelayForward(raw(DHCP6_RelayForward(hopcount=0, linkaddr="2001:db8::1", peeraddr="fe80::1")/DHCP6OptIfaceId(ifaceid=b"eth0")))
+assocs = dhcp6_lease_associations([IPv6()/UDP(), fwd])
+len(assocs) == 1 and assocs[0].certainty == "unattributed" and assocs[0].client_duid is None and not assocs[0].replies
+
+############
+############
 + Test DHCP6 Messages - DHCP6_AddrRegInform
 
 = DHCP6_AddrRegInform - Basic Instantiation
