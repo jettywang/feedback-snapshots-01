@@ -1,3 +1,4 @@
 # This lists fuzzers which should be executed a second time with AIOHTTP_NO_EXTENSIONS
 
 http_parser.py
+websocket_frames.py

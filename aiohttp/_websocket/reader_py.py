@@ -70,6 +70,31 @@ TUPLE_NEW = tuple.__new__
 # unreasonable amounts of memory.
 MSG_SIZE_OVERHEAD = 128
 
+# A compressed message is limited by the size of its decompressed payload, as
+# documented for max_msg_size. Deflate can make the wire form slightly larger
+# than its output (stored blocks cost 5 bytes per 65535 bytes), so the
+# pre-decompression cap needs headroom. The 1/64 (1.5625%) allowance is far
+# above that expansion, while still bounding buffered input linearly: without
+# it, a peer could declare a huge compressed frame and make the reader buffer
+# it before the decompressed-size check has a chance to run.
+COMPRESSED_OVERHEAD_MIN = 1024
+COMPRESSED_OVERHEAD_DIVISOR = 64
+
+# `_max_msg_size` is stored in an unsigned int by the compiled reader.
+MAX_MSG_SIZE_LIMIT = 2**32 - 1
+
+
+def _compressed_size_limit(max_msg_size: int) -> int:
+    """Upper bound for the wire size of one compressed message."""
+    # Stay below 2**32: the compiled reader stores _max_msg_size (and the queue
+    # stores its accounting) in unsigned ints.
+    return min(
+        MAX_MSG_SIZE_LIMIT,
+        max_msg_size
+        + max(COMPRESSED_OVERHEAD_MIN, max_msg_size // COMPRESSED_OVERHEAD_DIVISOR),
+    )
+
+
 STALLED_READER_COLLECTED = (
     "WebSocketReader was garbage collected while stalled; "
     "callers of set_parser() must hold a strong reference"
@@ -221,6 +246,11 @@ class WebSocketReader:
         self._compressed: int = COMPRESSED_NOT_SET
         self._decompressobj: ZLibDecompressor | None = None
         self._compress = compress
+        # Whether feed_eof() has been seen; EOF is terminal for the stream.
+        self._eof = False
+        # EOF arrived while received-but-unparsed bytes were stashed behind
+        # backpressure; completeness is decided once the stash is drained.
+        self._eof_pending = False
         self.set_max_msg_size(max_msg_size)
 
     def set_max_msg_size(self, max_msg_size: int) -> None:
@@ -241,16 +271,71 @@ class WebSocketReader:
         msg_size = (
             self._frame_payload_len + self._payload_bytes_to_read + len(self._partial)
         )
-        if msg_size >= max_msg_size:
+        if self._compressed == COMPRESSED_TRUE:
+            limit = _compressed_size_limit(max_msg_size)
+            exceeds = msg_size > limit
+        else:
+            limit = max_msg_size
+            exceeds = msg_size >= limit
+        if exceeds:
             self._exc = WebSocketError(
                 WSCloseCode.MESSAGE_TOO_BIG,
-                f"Message size {msg_size} exceeds limit {max_msg_size}",
+                f"Message size {msg_size} exceeds limit {limit}",
             )
             set_exception(self.queue, self._exc)
             self._payload_fragments.clear()
             self._payload_buffer = bytearray()
 
+    def _incomplete_message(self) -> bool:
+        """Whether EOF landed inside a frame or an unfinished data message."""
+        return (
+            self._state != READ_HEADER
+            or self._opcode != OP_CODE_NOT_SET
+            or bool(self._tail)
+            or bool(self._partial)
+        )
+
+    def _raise_incomplete_message(self) -> None:
+        # Never publish what was buffered as a shorter message; surface the
+        # truncation after the messages already completed are read.
+        self._partial.clear()
+        self._payload_fragments.clear()
+        self._payload_buffer = bytearray()
+        exc = WebSocketError(
+            WSCloseCode.PROTOCOL_ERROR,
+            "WebSocket message is not completed",
+        )
+        self._exc = exc
+        set_exception(self.queue, exc)
+
+    def _finish_eof(self) -> None:
+        """Apply a pending EOF once the stashed bytes have been parsed."""
+        self._eof_pending = False
+        self._eof = True
+        if self._incomplete_message():
+            self._raise_incomplete_message()
+        else:
+            self.queue.feed_eof()
+
     def feed_eof(self) -> None:
+        if self._exc is not None:
+            # Keep the protocol error already recorded instead of replacing it
+            # with EofStream from the queue.
+            return
+        if self._eof_pending:
+            return
+        if self.queue._stalled_reader is not None:
+            # Parsing is paused with received bytes stashed. Let the queue
+            # drain and re-drive the parser first. A stash that is complete
+            # frames ends cleanly; only a partial frame left in `_tail` is a
+            # truncation.
+            self._eof = True
+            self._eof_pending = True
+            return
+        if self._incomplete_message():
+            self._raise_incomplete_message()
+            return
+        self._eof = True
         self.queue.feed_eof()
 
     # data can be bytearray on Windows because proactor event loop uses bytearray
@@ -260,6 +345,11 @@ class WebSocketReader:
         if type(data) is not bytes:
             data = bytes(data)
 
+        if self._eof and (data or not self._eof_pending):
+            # EOF is terminal: bytes arriving after it are outside the frame
+            # stream and must not complete a truncated message. An empty read
+            # may still re-drive the stash already received before EOF.
+            return True, b""
         if self._exc is not None:
             return True, data
 
@@ -307,9 +397,11 @@ class WebSocketReader:
             if opcode == OP_CODE_CONTINUATION:
                 opcode = self._opcode
                 self._opcode = OP_CODE_NOT_SET
-            # previous frame was non finished
-            # we should get continuation opcode
-            elif has_partial:
+            # A fresh data frame while a fragmented message is open is a
+            # protocol violation. Checking `_opcode`, not just `_partial`,
+            # also rejects a zero-length first fragment followed by a fresh
+            # data frame.
+            elif self._opcode != OP_CODE_NOT_SET or has_partial:
                 raise WebSocketError(
                     WSCloseCode.PROTOCOL_ERROR,
                     "The opcode in non-fin frame is expected "
@@ -569,14 +661,32 @@ class WebSocketReader:
                     OP_CODE_BINARY,
                     OP_CODE_CONTINUATION,
                 }:
-                    # partial_len declared in reader_c.pxd to keep it in C.
-                    partial_len = len(self._partial)
-                    # payload_bytes_to_read is a signed Py_ssize_t C value,
-                    # use subtraction here to avoid an integer overflow.
-                    if self._payload_bytes_to_read >= self._max_msg_size - partial_len:
+                    # The cap is on the complete message, so include the
+                    # fragments already assembled. For a compressed message
+                    # `_partial` holds wire bytes, but the limit that matters
+                    # is the decompressed size; only bound the wire form
+                    # linearly so a huge declared frame cannot be buffered
+                    # before the post-decompress check runs. The bound is
+                    # cumulative: many small compressed fragments must not
+                    # reset it per frame.
+                    wire_size = int(self._payload_bytes_to_read) + len(self._partial)
+                    if self._compressed == COMPRESSED_TRUE:
+                        limit = _compressed_size_limit(self._max_msg_size)
+                        if wire_size > limit:
+                            raise WebSocketError(
+                                WSCloseCode.MESSAGE_TOO_BIG,
+                                f"Compressed message size {wire_size} "
+                                f"exceeds limit {limit}",
+                            )
+                    # payload_bytes_to_read is a signed Py_ssize_t C value, so
+                    # use subtraction to avoid an integer overflow.
+                    elif (
+                        self._payload_bytes_to_read
+                        >= self._max_msg_size - len(self._partial)
+                    ):
                         raise WebSocketError(
                             WSCloseCode.MESSAGE_TOO_BIG,
-                            f"Message size {int(self._payload_bytes_to_read) + partial_len} "
+                            f"Message size {wire_size} "
                             f"exceeds limit {self._max_msg_size}",
                         )
 
@@ -656,3 +766,6 @@ class WebSocketReader:
 
         # XXX: Cython needs slices to be bounded, so we can't omit the slice end here.
         self._tail = data_cstr[start_pos:data_len] if start_pos < data_len else b""
+        if self._eof_pending and self.queue._stalled_reader is None:
+            # No more data will arrive and parsing is no longer paused.
+            self._finish_eof()

@@ -868,6 +868,290 @@ def test_msg_too_large_across_fragments(out: WebSocketDataQueue) -> None:
     assert ctx.value.code == WSCloseCode.MESSAGE_TOO_BIG
 
 
+def test_msg_just_below_limit_is_published(out: WebSocketDataQueue) -> None:
+    # max_msg_size is an exclusive bound, matching the header check and
+    # set_max_msg_size(); the complete message just below it is delivered.
+    max_msg_size = 256
+    parser = WebSocketReader(out, max_msg_size, compress=False, decode_text=True)
+    payload = b"a" * (max_msg_size - 1)
+
+    parser._feed_data(build_frame(payload, WSMsgType.TEXT))
+
+    assert out.exception() is None
+    assert out._buffer[0] == WSMessageText(
+        data=payload.decode(), size=max_msg_size - 1, extra=""
+    )
+
+
+def test_msg_across_fragments_just_below_limit(out: WebSocketDataQueue) -> None:
+    # The complete message, not each frame, is judged against the limit.
+    max_msg_size = 256
+    parser = WebSocketReader(out, max_msg_size, compress=False, decode_text=True)
+
+    parser._feed_data(build_frame(b"a" * 100, WSMsgType.TEXT, is_fin=False))
+    parser._feed_data(build_frame(b"b" * 100, WSMsgType.CONTINUATION, is_fin=False))
+    parser._feed_data(build_frame(b"c" * 55, WSMsgType.CONTINUATION))
+
+    assert out.exception() is None
+    assert out._buffer[0].data == "a" * 100 + "b" * 100 + "c" * 55
+
+
+def test_compressed_wire_larger_than_limit_is_published(
+    out: WebSocketDataQueue,
+) -> None:
+    # max_msg_size bounds the decompressed message. Incompressible data makes
+    # the deflated wire form larger than the limit, and that message must
+    # still be accepted: only the decompressed size decides.
+    limit = 100
+    parser = WebSocketReader(out, limit, compress=True, decode_text=False)
+    payload = random.Random(0).randbytes(95)
+    data = build_frame(payload, WSMsgType.BINARY, ZLibBackend=ZLibBackend)
+    assert len(data) > limit  # the wire form alone exceeds the limit
+
+    parser._feed_data(data)
+
+    assert out.exception() is None
+    assert out._buffer[0] == WSMessageBinary(
+        data=payload, size=len(payload), extra=""
+    )
+
+
+def test_compressed_decoded_at_limit_is_published(
+    out: WebSocketDataQueue,
+) -> None:
+    # The decompressed-size check rejects only what is larger than the limit,
+    # so a message that inflates to exactly max_msg_size is delivered.
+    limit = 100
+    parser = WebSocketReader(out, limit, compress=True, decode_text=False)
+    payload = b"A" * limit
+
+    parser._feed_data(build_frame(payload, WSMsgType.BINARY, ZLibBackend=ZLibBackend))
+
+    assert out.exception() is None
+    assert out._buffer[0] == WSMessageBinary(data=payload, size=limit, extra="")
+
+
+def test_compressed_msg_over_decompressed_limit_across_fragments(
+    out: WebSocketDataQueue,
+) -> None:
+    # Every compressed fragment is small on the wire; only the reassembled
+    # message decompresses past the limit, so the reader must keep the
+    # accumulated size rather than reset per frame.
+    limit = 64
+    parser = WebSocketReader(out, limit, compress=True, decode_text=False)
+    payload = random.Random(1).randbytes(96)
+    compressor = zlib.compressobj(wbits=-15)
+    message = compressor.compress(payload) + compressor.flush(zlib.Z_SYNC_FLUSH)
+    message = message.removesuffix(WS_DEFLATE_TRAILING)
+    step = 8
+    assert len(message) // step > 1  # split across several tiny fragments
+    frames = [
+        build_frame(
+            message[i : i + step],
+            WSMsgType.BINARY if i == 0 else WSMsgType.CONTINUATION,
+            is_fin=i + step >= len(message),
+        )
+        for i in range(0, len(message), step)
+    ]
+    # The first fragment carries RSV1, continuations do not.
+    frames[0] = PACK_LEN1(0x40 | WSMsgType.BINARY, len(message[:step])) + message[:step]
+    for frame in frames:
+        parser.feed_data(frame)
+
+    exc = out.exception()
+    assert isinstance(exc, WebSocketError)
+    assert exc.code == WSCloseCode.MESSAGE_TOO_BIG
+    assert not out._buffer
+
+
+def test_eof_missing_final_fragment_is_rejected(out: WebSocketDataQueue) -> None:
+    # A fragmented message without its FIN fragment is truncated, never a
+    # shorter complete message.
+    parser = WebSocketReader(out, 256, compress=False, decode_text=True)
+    parser.feed_data(build_frame(b"a", WSMsgType.TEXT, is_fin=False))
+
+    parser.feed_eof()
+
+    assert not out._buffer
+    exc = out.exception()
+    assert isinstance(exc, WebSocketError)
+    assert exc.code == WSCloseCode.PROTOCOL_ERROR
+
+
+def test_eof_zero_length_first_fragment_is_rejected(
+    out: WebSocketDataQueue,
+) -> None:
+    # An empty first fragment still opens a message, so EOF without a FIN
+    # fragment is a truncation even though nothing was buffered.
+    parser = WebSocketReader(out, 256, compress=False, decode_text=True)
+    parser.feed_data(build_frame(b"", WSMsgType.TEXT, is_fin=False))
+
+    parser.feed_eof()
+
+    assert not out._buffer
+    assert isinstance(out.exception(), WebSocketError)
+
+
+def test_eof_mid_frame_is_rejected(out: WebSocketDataQueue) -> None:
+    parser = WebSocketReader(out, 256, compress=False, decode_text=True)
+    parser.feed_data(PACK_LEN2(0x80 | WSMsgType.TEXT, 126, 10) + b"abc")
+
+    parser.feed_eof()
+
+    assert not out._buffer
+    assert isinstance(out.exception(), WebSocketError)
+
+
+@pytest.mark.parametrize(
+    "tail",
+    (b"\x81", PACK_LEN1(0x80 | WSMsgType.TEXT, 3) + b"\x01\x02"),
+    ids=("header", "mask"),
+)
+def test_eof_truncated_frame_after_message_keeps_message(
+    out: WebSocketDataQueue, tail: bytes
+) -> None:
+    # A complete message before the truncation is still delivered, then the
+    # truncation is surfaced; it is not silently accepted as a clean EOF.
+    parser = WebSocketReader(out, 256, compress=False, decode_text=True)
+    parser.feed_data(PACK_LEN1(0x80 | WSMsgType.TEXT, 3) + b"abc" + tail)
+
+    parser.feed_eof()
+
+    assert out._buffer[0] == WSMessageText(data="abc", size=3, extra="")
+    assert isinstance(out.exception(), WebSocketError)
+
+
+def test_data_after_eof_cannot_complete_truncated_message(
+    out: WebSocketDataQueue,
+) -> None:
+    # The truncated tail is rejected when EOF arrives; bytes delivered after
+    # it are outside the stream and must not turn it into a complete message.
+    parser = WebSocketReader(out, 256, compress=False, decode_text=True)
+    parser.feed_data(PACK_LEN1(WSMsgType.TEXT, 1) + b"a")
+
+    parser.feed_eof()
+    error, _ = parser.feed_data(PACK_LEN1(0x80 | WSMsgType.CONTINUATION, 1) + b"b")
+
+    assert error is True
+    assert not out._buffer
+    exc = out.exception()
+    assert isinstance(exc, WebSocketError)
+    assert exc.code == WSCloseCode.PROTOCOL_ERROR
+
+
+def test_data_after_clean_eof_is_discarded(out: WebSocketDataQueue) -> None:
+    parser = WebSocketReader(out, 256, compress=False, decode_text=True)
+    parser.feed_data(PACK_LEN1(0x80 | WSMsgType.TEXT, 3) + b"abc")
+
+    parser.feed_eof()
+    assert parser.feed_data(PACK_LEN1(0x80 | WSMsgType.TEXT, 3) + b"def") == (True, b"")
+
+    assert out._buffer[0] == WSMessageText(data="abc", size=3, extra="")
+    assert out.exception() is None
+
+
+def test_fresh_data_frame_after_zero_length_fragment_is_rejected(
+    out: WebSocketDataQueue,
+) -> None:
+    # `_partial` is empty for a zero-length first fragment, so the opcode
+    # state must still flag the open message.
+    parser = WebSocketReader(out, 256, compress=False, decode_text=True)
+    parser.feed_data(build_frame(b"", WSMsgType.TEXT, is_fin=False))
+
+    error, _ = parser.feed_data(build_frame(b"new", WSMsgType.TEXT))
+
+    assert error is True
+    assert not out._buffer
+    assert isinstance(out.exception(), WebSocketError)
+
+
+@pytest.mark.parametrize("opcode", (WSMsgType.PING, WSMsgType.PONG))
+def test_control_frame_published_before_later_error(
+    out: WebSocketDataQueue, opcode: WSMsgType
+) -> None:
+    # A control frame that was complete when read is not lost because a later
+    # frame in the same read is malformed.
+    parser = WebSocketReader(out, 256, compress=True, decode_text=True)
+    parser.feed_data(build_frame(b"", opcode))
+
+    parser.feed_data(PACK_LEN1(0xC0 | WSMsgType.PING, 0))  # RSV1 on control
+
+    assert out._buffer[0].type is opcode
+    assert isinstance(out.exception(), WebSocketError)
+
+
+def test_unknown_extension_state_rejects_rsv1(out: WebSocketDataQueue) -> None:
+    # `compress=False` means PMCE was never negotiated; RSV1 is then an
+    # unknown extension state and fails before any payload is published.
+    parser = WebSocketReader(out, 256, compress=False, decode_text=True)
+    parser.feed_data(PACK_LEN1(0x40 | WSMsgType.BINARY, 5) + b"hello")
+
+    assert not out._buffer
+    exc = out.exception()
+    assert isinstance(exc, WebSocketError)
+    assert exc.code == WSCloseCode.PROTOCOL_ERROR
+
+
+def test_msg_too_large_across_fragments_fixed_seed(
+    out: WebSocketDataQueue,
+) -> None:
+    # Deterministic shrink case: seeded fragments stay small individually but
+    # their cumulative size crosses the limit, and the reader reports the
+    # exact accumulated total rather than a per-frame size.
+    rng = random.Random(20261116)
+    limit = 130
+    sizes = [rng.randint(20, 30) for _ in range(6)]
+    assert sum(sizes) > limit
+    assert sum(sizes[:-1]) <= limit
+    assert all(size < limit for size in sizes)
+
+    parser = WebSocketReader(out, limit, compress=False, decode_text=True)
+    payloads = [bytes([index]) * size for index, size in enumerate(sizes)]
+    parser.feed_data(build_frame(payloads[0], WSMsgType.BINARY, is_fin=False))
+    for payload in payloads[1:-1]:
+        parser.feed_data(build_frame(payload, WSMsgType.CONTINUATION, is_fin=False))
+    parser.feed_data(build_frame(payloads[-1], WSMsgType.CONTINUATION))
+
+    exc = out.exception()
+    assert isinstance(exc, WebSocketError)
+    assert exc.code == WSCloseCode.MESSAGE_TOO_BIG
+    assert f"limit {limit}" in str(exc)
+    assert not out._buffer
+
+
+def test_compressed_fragment_sequence_fixed_seed(out: WebSocketDataQueue) -> None:
+    # Independent compressed fragment sequence: a compressible message whose
+    # wire form is small, cut into tiny frames. The limit applies to the
+    # decompressed message, so it is the accumulation that trips it.
+    limit = 16
+    payload = b"compress me " * 4
+    compressor = zlib.compressobj(wbits=-15)
+    message = compressor.compress(payload) + compressor.flush(zlib.Z_SYNC_FLUSH)
+    message = message.removesuffix(WS_DEFLATE_TRAILING)
+    assert len(message) < limit + 16
+    assert len(payload) > limit
+
+    parser = WebSocketReader(out, limit, compress=True, decode_text=False)
+    step = 3
+    for offset in range(0, len(message), step):
+        piece = message[offset : offset + step]
+        last = offset + step >= len(message)
+        if offset == 0:
+            parser.feed_data(PACK_LEN1(0x40 | WSMsgType.BINARY, len(piece)) + piece)
+        else:
+            parser.feed_data(
+                PACK_LEN1(
+                    (0x80 if last else 0) | WSMsgType.CONTINUATION, len(piece)
+                )
+                + piece
+            )
+
+    exc = out.exception()
+    assert isinstance(exc, WebSocketError)
+    assert exc.code == WSCloseCode.MESSAGE_TOO_BIG
+    assert not out._buffer
+
+
 def test_set_max_msg_size_lowers_limit(out: WebSocketDataQueue) -> None:
     parser = WebSocketReader(out, 4 * 1024 * 1024, compress=False, decode_text=True)
     parser.set_max_msg_size(256)

@@ -1,0 +1,7 @@
+Fixed the pure-Python WebSocket reader rejecting a permessage-deflate
+message whose compressed wire size is larger than ``max_msg_size`` while
+its decompressed payload is not. The limit is now applied to the
+assembled message and its decompressed size, so many small fragments
+can no longer reset it. A fragmented message or frame cut off by EOF is
+rejected instead of being published as a shorter message, and bytes
+arriving after EOF can no longer complete it -- by :user:`aio-libs`.

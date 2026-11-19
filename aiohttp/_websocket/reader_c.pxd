@@ -99,6 +99,8 @@ cdef class WebSocketReader:
     cdef int _compressed
     cdef object _decompressobj
     cdef bint _compress
+    cdef bint _eof
+    cdef bint _eof_pending
 
     cpdef tuple feed_data(self, object data)
 
