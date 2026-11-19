@@ -3,9 +3,12 @@ require 'parallel'
 module Brakeman
   ASTFile = Struct.new(:path, :ast)
 
+  # A parse failure associated with the file that caused it
+  ParseError = Struct.new(:path, :exception)
+
   # This class handles reading and parsing files.
   class FileParser
-    attr_reader :file_list, :errors
+    attr_reader :file_list
 
     def initialize app_tree, timeout, parallel = true, use_prism = false
       @use_prism = use_prism
@@ -55,13 +58,13 @@ module Brakeman
             ASTFile.new(file_name, ast)
           end
         rescue Exception => e
-          e
+          ParseError.new(file_path, e)
         end
       end.compact.partition do |result|
         result.is_a? ASTFile
       end
 
-      errors.concat new_errors
+      @errors.concat new_errors
     end
 
     def read_files list
@@ -75,9 +78,19 @@ module Brakeman
             @file_list << result
           end
         rescue Exception => e
-          @errors << e
+          @errors << ParseError.new(file, e)
         end
       end
+    end
+
+    # Exceptions raised while parsing, without file information
+    def errors
+      @errors.map(&:exception)
+    end
+
+    # ParseError structs pairing the file path with the exception
+    def parse_errors
+      @errors
     end
 
     # _path_ can be a string or a Brakeman::FilePath

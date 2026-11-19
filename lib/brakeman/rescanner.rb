@@ -13,7 +13,7 @@ class Brakeman::Rescanner < Brakeman::Scanner
 
     @old_tracker = processor.tracked_events
 
-    @paths = changed_files.map {|f| tracker.app_tree.file_path(f) }
+    @paths = changed_files.map {|f| tracker.app_tree.file_path(f) }.uniq
     @old_results = @old_tracker.filtered_warnings.dup  #Old warnings from previous scan
     @changes = nil                 #True if files had to be rescanned
     @reindex = Set.new
@@ -38,7 +38,12 @@ class Brakeman::Rescanner < Brakeman::Scanner
   def rescan
     raise "Cannot rescan: set `support_rescanning: true`" unless @old_tracker.options[:support_rescanning]
 
-    tracker.file_cache = @old_tracker.pristine_file_cache
+    # Use a copy of the pristine cache so this rescan does not
+    # modify the original tracker's cache. Otherwise, deleting
+    # or re-parsing files here would corrupt the cached state
+    # and any later rescan from the same tracker would use
+    # stale (or missing) files.
+    tracker.file_cache = @old_tracker.pristine_file_cache.dup
 
     template_paths = []
     ruby_paths = []

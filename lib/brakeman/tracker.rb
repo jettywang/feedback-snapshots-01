@@ -66,25 +66,49 @@ class Brakeman::Tracker
   #Add an error to the list. If no backtrace is given,
   #the one from the exception will be used.
   def error exception, backtrace = nil
-    backtrace ||= exception.backtrace
-    unless backtrace.is_a? Array
-      backtrace = [ backtrace ]
-    end
+    error = error_hash(exception, backtrace)
 
     Brakeman.debug exception
-    Brakeman.debug backtrace
+    Brakeman.debug error[:backtrace]
 
-    @errors << {
-      :exception => exception,
-      :error => exception.to_s.gsub("\n", " "),
-      :backtrace => backtrace
-    }
+    @errors << error
   end
 
   def add_errors exceptions
     exceptions.each do |e|
       error(e)
     end
+  end
+
+  #Record a parse error for a specific file.
+  #
+  #The error is stored in the file cache (instead of the
+  #tracker directly) so it can be replayed when the file
+  #is not re-parsed (e.g. when rescanning) and invalidated
+  #when the file changes. Use `collect_cached_errors` to
+  #add the cached errors to this tracker.
+  def add_parse_error path, exception, backtrace = nil
+    file_cache.add_error path, error_hash(exception, backtrace)
+  end
+
+  #Add parse errors stored in the file cache to this tracker
+  def collect_cached_errors
+    @errors.concat file_cache.errors
+  end
+
+  #Build an error hash for an exception. If no backtrace is given,
+  #the one from the exception will be used.
+  def error_hash exception, backtrace = nil
+    backtrace ||= exception.backtrace if exception.respond_to? :backtrace
+    unless backtrace.is_a? Array
+      backtrace = [ backtrace ]
+    end
+
+    {
+      :exception => exception,
+      :error => exception.to_s.gsub("\n", " "),
+      :backtrace => backtrace
+    }
   end
 
   #Run a set of checks on the current information. Results will be stored

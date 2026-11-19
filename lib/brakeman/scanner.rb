@@ -136,8 +136,17 @@ class Brakeman::Scanner
       template_parser.parse_template(path, contents)
     end
 
-    # Collect errors raised during parsing
-    tracker.add_errors(fp.errors)
+    # Collect errors raised during parsing, storing them
+    # in the file cache so they can be replayed when the
+    # file is not re-parsed (e.g. when rescanning)
+    fp.parse_errors.each do |parse_error|
+      tracker.add_parse_error parse_error.path, parse_error.exception
+    end
+
+    # Add cached parse errors to the tracker,
+    # including errors for files that were not
+    # re-parsed this time
+    tracker.collect_cached_errors
 
     fp.file_list
   end

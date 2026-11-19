@@ -29,7 +29,7 @@ module Brakeman
               when :slim
                 parse_slim path, text
               else
-                tracker.error "Unknown template type in #{path}"
+                tracker.add_parse_error path, "Unknown template type in #{path}"
                 nil
               end
 
@@ -37,9 +37,9 @@ module Brakeman
           @file_parser.file_list << TemplateFile.new(path, ast, name, type)
         end
       rescue Racc::ParseError => e
-        tracker.error e, "Could not parse #{path}"
+        tracker.add_parse_error path, e, "Could not parse #{path}"
       rescue StandardError, LoadError => e
-        tracker.error e.exception(e.message + "\nWhile processing #{path}"), e.backtrace
+        tracker.add_parse_error path, e.exception(e.message + "\nWhile processing #{path}"), e.backtrace
       end
 
       nil
@@ -94,7 +94,7 @@ module Brakeman
                         ).precompiled.gsub(/([^\\])\\n/, '\1')
       end
     rescue Haml::Error => e
-      tracker.error e, ["While compiling HAML in #{path}"] << e.backtrace
+      tracker.add_parse_error path, e, ["While compiling HAML in #{path}"] << e.backtrace
       nil
     end
 

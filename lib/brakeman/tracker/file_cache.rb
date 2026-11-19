@@ -1,6 +1,6 @@
 module Brakeman
   class FileCache
-    def initialize(file_list = nil)
+    def initialize(file_list = nil, errors = nil)
       @file_list = file_list || {
         controller: {},
         initializer: {},
@@ -8,6 +8,11 @@ module Brakeman
         model: {},
         template: {},
       }
+
+      # Parse errors stored by file path, so they can be
+      # replayed when a file is not re-parsed (e.g. rescanning)
+      # and invalidated when the file changes.
+      @errors = errors || {}
     end
 
     def controllers
@@ -45,10 +50,22 @@ module Brakeman
       end
     end
 
+    # Record a parse error (a Tracker error hash) for a file
+    def add_error path, error
+      (@errors[path] ||= []) << error
+    end
+
+    # All cached parse errors
+    def errors
+      @errors.values.flatten(1)
+    end
+
     def delete path
       @file_list.each do |name, list|
         list.delete path
       end
+
+      @errors.delete path
     end
 
     def diff other
@@ -77,7 +94,15 @@ module Brakeman
         [name, copy_list]
       end.to_h
 
-      FileCache.new(copy_file_list)
+      copy_errors = @errors.map do |path, error_list|
+        copy_error_list = error_list.map do |error|
+          error.merge(backtrace: error[:backtrace].dup)
+        end
+
+        [path, copy_error_list]
+      end.to_h
+
+      FileCache.new(copy_file_list, copy_errors)
     end
   end
 end
