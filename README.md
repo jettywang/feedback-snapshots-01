@@ -207,6 +207,25 @@ gem install bcrypt_pbkdf
 `sk-ecdsa-sha2-nistp256@openssh.com` and `sk-ssh-ed25519@openssh.com` keys work when held in `ssh-agent`.
 Loading `sk-*` private key files from disk is not supported.
 
+The client keeps only the public key: its type, the P-256 point or Ed25519
+public key, and the FIDO `application` string (normally `ssh:`). All signing,
+the touch (user presence, UP) and any PIN/biometric check (user verification,
+UV) happen in the agent and the hardware token. Net::SSH parses the agent's
+signature, checks its algorithm and structure, and forwards the same bytes;
+the server verifies the signature and enforces its own UP/UV policy (for
+example `verify-required` in `authorized_keys`). An `sk-*` key type therefore
+does not by itself prove that a user was present or verified: the UP/UV flags
+are claims from the token/agent, and a successful login is only established
+when the server accepts the signature.
+
+The `application` string is part of the key identity. Two keys with identical
+public key bytes but different applications produce different key blobs and
+fingerprints. An `sk-*` public key must be standalone (no trailing fields),
+its application must start with `ssh:`, and an `sk-*` signature must use the
+same `sk-*` algorithm with the FIDO flags/counter trailer; a plain
+`ssh-ed25519` or `ecdsa-sha2-*` signature is rejected for an `sk-*` identity.
+A malformed signature makes Net::SSH skip that identity and try the next key.
+
 ## RUBY SUPPORT
 
 * See [net-ssh.gemspec](https://github.com/net-ssh/net-ssh/blob/master/net-ssh.gemspec) for current versions ruby requirements

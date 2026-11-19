@@ -313,6 +313,88 @@ module Authentication
         assert_includes log.string, "trying publickey (#{key.fingerprint('SHA256')})"
       end
 
+      def test_authenticate_with_sk_ed25519_sends_the_full_sk_signature_unchanged
+        sk_signature = Net::SSH::Buffer.from(
+          :string, "sk-ssh-ed25519@openssh.com", :string, "s" * 64,
+          :byte, 0x05, :long, 7
+        ).to_s
+        key_manager(keys: [sk_ed25519_key]).expects(:sign)
+          .with(&signature_parameters(sk_ed25519_key)).returns(sk_signature)
+
+        transport(pubkey_algorithms: composed_pubkey_algorithms).expect do |t, packet|
+          assert verify_userauth_request_packet(packet, sk_ed25519_key, false)
+          t.return(USERAUTH_PK_OK, :string, "sk-ssh-ed25519@openssh.com",
+                   :string, Net::SSH::Buffer.from(:key, sk_ed25519_key))
+
+          t.expect do |t2, packet2|
+            assert verify_userauth_request_packet(packet2, sk_ed25519_key, true)
+            assert_equal sk_signature, packet2.read_string
+            t2.return(USERAUTH_SUCCESS)
+          end
+        end
+
+        assert subject(keys: [sk_ed25519_key]).authenticate("ssh-connection", "jamis")
+      end
+
+      def test_authenticate_skips_a_key_whose_agent_returns_a_plain_signature
+        key_manager(keys: [sk_ed25519_key, keys.first]).expects(:sign)
+          .with(&signature_parameters_with_alg(sk_ed25519_key, "sk-ssh-ed25519@openssh.com", nil))
+          .raises(Net::SSH::Authentication::SecurityKey::SignatureError, "unexpected signature algorithm")
+        key_manager(keys: [sk_ed25519_key, keys.first]).expects(:sign)
+          .with(&signature_parameters_with_alg(keys.first, "rsa-sha2-512", "rsa-sha2-512")).returns("sig-two")
+
+        transport(pubkey_algorithms: composed_pubkey_algorithms,
+                  server_sig_algs: %w[rsa-sha2-512]).expect do |t, packet|
+          assert verify_userauth_request_packet(packet, sk_ed25519_key, false)
+          t.return(USERAUTH_PK_OK, :string, "sk-ssh-ed25519@openssh.com",
+                   :string, Net::SSH::Buffer.from(:key, sk_ed25519_key))
+
+          t.expect do |t2, packet2|
+            assert verify_userauth_request_packet(packet2, keys.first, false, "rsa-sha2-512")
+            t2.return(USERAUTH_PK_OK, :string, "rsa-sha2-512",
+                      :string, Net::SSH::Buffer.from(:key, keys.first))
+
+            t2.expect do |t3, packet3|
+              assert verify_userauth_request_packet(packet3, keys.first, true, "rsa-sha2-512")
+              assert_equal "sig-two", packet3.read_string
+              t3.return(USERAUTH_SUCCESS)
+            end
+          end
+        end
+
+        assert subject(keys: [sk_ed25519_key, keys.first]).authenticate("ssh-connection", "jamis")
+      end
+
+      def test_sk_signature_up_and_uv_are_reported_but_do_not_complete_authentication_alone
+        # The client can only report what the token/agent asserted. A signature
+        # with UP and UV set is still just an offered credential; the server
+        # decides whether to accept it.
+        sk_signature = Net::SSH::Buffer.from(
+          :string, "sk-ssh-ed25519@openssh.com", :string, "s" * 64,
+          :byte, 0x05, :long, 1
+        ).to_s
+        key_manager(keys: [sk_ed25519_key]).expects(:sign)
+          .with(&signature_parameters(sk_ed25519_key)).returns(sk_signature)
+
+        transport(pubkey_algorithms: composed_pubkey_algorithms).expect do |t, packet|
+          assert verify_userauth_request_packet(packet, sk_ed25519_key, false)
+          t.return(USERAUTH_PK_OK, :string, "sk-ssh-ed25519@openssh.com",
+                   :string, Net::SSH::Buffer.from(:key, sk_ed25519_key))
+
+          t.expect do |t2, packet2|
+            assert verify_userauth_request_packet(packet2, sk_ed25519_key, true)
+            sent = packet2.read_string
+            parsed = sk_ed25519_key.parse_agent_signature(sent)
+            assert parsed.user_presence?
+            assert parsed.user_verification?
+            # A server-side refusal is still a failure for the client.
+            t2.return(USERAUTH_FAILURE, :string, "publickey")
+          end
+        end
+
+        refute subject(keys: [sk_ed25519_key]).authenticate("ssh-connection", "jamis")
+      end
+
       private
 
       def signature_parameters(key)

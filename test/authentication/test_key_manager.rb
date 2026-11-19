@@ -396,6 +396,32 @@ module Authentication
       assert_equal "abcxyz123", manager.sign(rsa_pk, "hello, world")
     end
 
+    def test_sign_with_agent_originated_sk_key_should_require_the_sk_signature_structure
+      sk_key = sk_agent_key
+      signature = Net::SSH::Buffer.from(:string, "sk-ssh-ed25519@openssh.com",
+                                        :string, "s" * 64, :byte, 0x01, :long, 4).to_s
+      manager.stubs(:agent).returns(stub("agent", identities: [sk_key]))
+      manager.each_identity { |identity| }
+
+      agent = manager.agent
+      agent.expects(:sign).with(sk_key, "hello, world").returns(signature)
+      assert_equal signature, manager.sign(sk_key, "hello, world")
+    end
+
+    def test_sign_with_agent_originated_sk_key_should_reject_a_plain_ed25519_signature
+      sk_key = sk_agent_key
+      signature = Net::SSH::Buffer.from(:string, "ssh-ed25519",
+                                        :string, "s" * 64).to_s
+      manager.stubs(:agent).returns(stub("agent", identities: [sk_key]))
+      manager.each_identity { |identity| }
+
+      agent = manager.agent
+      agent.expects(:sign).with(sk_key, "hello, world").returns(signature)
+      assert_raises(Net::SSH::Authentication::SecurityKey::SignatureError) do
+        manager.sign(sk_key, "hello, world")
+      end
+    end
+
     def test_sign_with_agent_originated_rsa_key_should_pass_rsa_sha2_flags
       manager.stubs(:agent).returns(agent)
       manager.each_identity { |identity| } # preload the known_identities
@@ -595,6 +621,12 @@ module Authentication
 
     def ecdsa_sha2_nistp521_pk
       @ecdsa_sha2_nistp521_pk ||= ec_public_key(ecdsa_sha2_nistp521)
+    end
+
+    def sk_agent_key
+      @sk_agent_key ||= Net::SSH::Buffer.new(
+        "AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIB3EAkD0aWTMZBn0rMaYZO7wh/2h9yPe7dXShspyBI0WAAAABHNzaDo=".unpack1("m")
+      ).read_key
     end
 
     def agent

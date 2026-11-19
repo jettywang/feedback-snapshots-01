@@ -174,7 +174,11 @@ module Net
           raise AgentError, "agent could not sign data with requested identity" if agent_failed(type)
           raise AgentError, "bad authentication response #{type}" if type != SSH2_AGENT_SIGN_RESPONSE
 
-          return reply.read_string
+          signature = reply.read_string
+          # For sk-* keys the agent must return the sk-* signature structure, not a
+          # plain Ed25519/ECDSA signature. Check it before it can be forwarded.
+          key.parse_agent_signature(signature) if key.respond_to?(:parse_agent_signature)
+          signature
         end
 
         # Adds the private key with comment to the agent.

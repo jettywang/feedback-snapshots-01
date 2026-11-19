@@ -247,7 +247,15 @@ module Net
       # type that was read.
       def read_key
         type = read_string
-        return (type ? read_keyblob(type) : nil)
+        return nil unless type
+
+        key = read_keyblob(type)
+        if Net::SSH::Authentication::SecurityKey.understands?(type) && !eof?
+          raise Net::SSH::Authentication::SecurityKey::InvalidPublicKey,
+                "trailing data after #{type} public key"
+        end
+
+        key
       end
 
       def read_private_keyblob(type)

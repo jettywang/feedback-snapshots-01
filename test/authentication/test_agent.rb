@@ -310,6 +310,51 @@ module Authentication
       assert_equal "abcxyz123", agent.sign(key, "hello world")
     end
 
+    def test_sign_with_sk_key_should_forward_the_agent_sk_signature_structure
+      sk_key = sk_ed25519_key
+      sk_signature = Net::SSH::Buffer.from(:string, "sk-ssh-ed25519@openssh.com",
+                                           :string, "s" * 64, :byte, 0x01,
+                                           :long, 9).to_s
+      socket.expect do |s, type, buffer|
+        assert_equal SSH2_AGENT_SIGN_REQUEST, type
+        assert_equal sk_key.to_blob, buffer.read_string
+        assert_equal "hello world", buffer.read_string
+        assert_equal 0, buffer.read_long
+
+        s.return(SSH2_AGENT_SIGN_RESPONSE, :string, sk_signature)
+      end
+
+      assert_equal sk_signature, agent.sign(sk_key, "hello world")
+    end
+
+    def test_sign_with_sk_key_should_reject_a_plain_ed25519_signature
+      sk_key = sk_ed25519_key
+      plain_signature = Net::SSH::Buffer.from(:string, "ssh-ed25519",
+                                              :string, "s" * 64).to_s
+      socket.expect do |s, _type, _buffer|
+        s.return(SSH2_AGENT_SIGN_RESPONSE, :string, plain_signature)
+      end
+
+      error = assert_raises(Net::SSH::Authentication::SecurityKey::SignatureError) do
+        agent.sign(sk_key, "hello world")
+      end
+      assert_equal "unexpected signature algorithm `\"ssh-ed25519\"'", error.message
+    end
+
+    def test_sign_with_sk_key_should_reject_an_sk_signature_for_another_sk_algorithm
+      sk_key = sk_ed25519_key
+      ecdsa_signature = Net::SSH::Buffer.from(:string, "sk-ecdsa-sha2-nistp256@openssh.com",
+                                              :string, "\0\0\0\1a\0\0\0\1b".b,
+                                              :byte, 0x01, :long, 0).to_s
+      socket.expect do |s, _type, _buffer|
+        s.return(SSH2_AGENT_SIGN_RESPONSE, :string, ecdsa_signature)
+      end
+
+      assert_raises(Net::SSH::Authentication::SecurityKey::SignatureError) do
+        agent.sign(sk_key, "hello world")
+      end
+    end
+
     def test_add_rsa_identity_with_constraints
       rsa = OpenSSL::PKey::RSA.new(512)
       socket.expect do |s, type, buffer|
@@ -550,6 +595,12 @@ module Authentication
 
     def key
       @key ||= OpenSSL::PKey::RSA.new(512)
+    end
+
+    def sk_ed25519_key
+      @sk_ed25519_key ||= Net::SSH::Buffer.new(
+        "AAAAGnNrLXNzaC1lZDI1NTE5QG9wZW5zc2guY29tAAAAIB3EAkD0aWTMZBn0rMaYZO7wh/2h9yPe7dXShspyBI0WAAAABHNzaDo=".unpack1("m")
+      ).read_key
     end
 
     def socket

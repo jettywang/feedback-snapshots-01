@@ -120,6 +120,12 @@ module Net
             end
 
             authenticate_with_alg(identity, next_service, username, alg, RSA_SIGNATURE_ALGORITHMS.dig(identity.ssh_type, alg))
+          rescue Net::SSH::Authentication::SecurityKey::SignatureError => e
+            # A malformed sk-* signature (or a plain Ed25519/ECDSA signature for
+            # an sk-* identity) must not authenticate. Treat it as a failed
+            # identity and try the next one.
+            debug { "skipping publickey (#{identity.fingerprint}): #{e.message}" }
+            false
           end
 
           # Picks the single algorithm to offer for the identity, following
