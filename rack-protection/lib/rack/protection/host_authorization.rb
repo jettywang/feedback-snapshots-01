@@ -12,9 +12,15 @@ module Rack
     #                      * https://portswigger.net/web-security/host-header
     #
     # Blocks HTTP requests with an unrecognized hostname in any of the following
-    # HTTP headers: Host, X-Forwarded-Host, Forwarded, based on
-    # {<tt>Request#forwarded_authority</tt>}[https://rubydoc.info/github/rack/rack/Rack/Request/Helpers#forwarded_authority-instance_method] and
-    # {<tt>Request#host_authority</tt>}[https://rubydoc.info/github/rack/rack/Rack%2FRequest%2FHelpers:host_authority].
+    # HTTP headers: Host, X-Forwarded-Host, Forwarded.
+    #
+    # The Host header is always checked and a permitted value in a forwarding
+    # header never masks a disallowed Host. Every host value carried by
+    # X-Forwarded-Host and Forwarded is checked: when several (possibly
+    # conflicting) values are present, all of them must be permitted -- no
+    # single value is picked to speak for the others. A Forwarded header that
+    # cannot be parsed is treated as hostile and the request is denied
+    # (fail closed); it is never silently ignored.
     #
     # == Options
     #
@@ -22,7 +28,10 @@ module Rack
     #                             [<tt>String</tt> not starting with a dot] a hostname that must be a case-insensitive
     #                                                                       match to allow the request.
     #                             [<tt>String</tt> starting with a dot] allow matches from the entire domain, including
-    #                                                                   any subdomain.
+    #                                                                   any subdomain. A subdomain only matches at a
+    #                                                                   dot boundary, so <tt>.example.org</tt> allows
+    #                                                                   <tt>foo.example.org</tt> but not
+    #                                                                   <tt>notexample.org</tt>.
     #                             [<tt>IPAddr</tt>] Specific IP or IP Range to allow (based on <tt>#include?</tt>).
     #                                               Note that no DNS lookup is done - this is just based on the 
     #                                               value of the HTTP header.
@@ -30,6 +39,8 @@ module Rack
     # [<tt>:allow_if</tt>] a Proc that, if it returns true, allows the request regardless of the
     #                      value of <tt>:permitted_hosts</tt>. Default value is <tt>nil</tt>, meaning
     #                      <tt>:permitted_hosts</tt> is respected and there are no exceptions.
+    #                      This is an explicit escape hatch only: unparseable or conflicting
+    #                      headers deny the request, they never trigger this exemption.
     # [Rack::Protection::Base options] options supported by Rack::Protection::Base may affect this middleware.
     #
     #
@@ -70,7 +81,7 @@ module Rack
             if host.start_with?(DOT)
               domain = host[1..-1]
               @permitted_hosts << domain.downcase
-              @domain_hosts << /\A#{SUBDOMAINS}#{Regexp.escape(domain)}\z/i
+              @domain_hosts << /\A#{SUBDOMAINS}\.#{Regexp.escape(domain)}\z/i
             else
               @permitted_hosts << host.downcase
             end
@@ -85,7 +96,7 @@ module Rack
 
         request = Request.new(env)
         origin_host = extract_host(request.host_authority)
-        forwarded_host = extract_host(request.forwarded_authority)
+        forwarded_hosts = forwarded_hosts(request)
 
         debug env, "#{self.class} " \
                    "@all_permitted_hosts=#{@all_permitted_hosts.inspect} " \
@@ -93,23 +104,60 @@ module Rack
                    "@domain_hosts=#{@domain_hosts.inspect} " \
                    "@ip_hosts=#{@ip_hosts.inspect} " \
                    "origin_host=#{origin_host.inspect} " \
-                   "forwarded_host=#{forwarded_host.inspect}"
+                   "forwarded_hosts=#{forwarded_hosts.inspect}"
 
-        if host_permitted?(origin_host)
-          if forwarded_host.nil?
-            true
-          else
-            host_permitted?(forwarded_host)
-          end
-        else
-          false
-        end
+        # A permitted forwarding header never masks a disallowed Host header.
+        return false unless host_permitted?(origin_host)
+        # A Forwarded header that fails to parse denies the request.
+        return false if forwarded_hosts.nil?
+        # Every claimed forwarded host must be permitted; no single value
+        # from conflicting headers or lists is picked to speak for the rest.
+        forwarded_hosts.all? { |forwarded_host| host_permitted?(forwarded_host) }
       end
 
       private
 
+      # Collects every host claimed by the Forwarded and X-Forwarded-Host
+      # headers. Both headers are inspected when both are present. Returns
+      # nil when a Forwarded header is present but cannot be parsed, so the
+      # caller fails closed instead of trusting a partial parse.
+      def forwarded_hosts(request)
+        hosts = []
+
+        if (forwarded = request.get_header('HTTP_FORWARDED'))
+          values = Rack::Utils.forwarded_values(forwarded)
+          return nil if values.nil?
+
+          hosts.concat(values[:host]) if values[:host]
+        end
+
+        if (x_forwarded_host = request.get_header('HTTP_X_FORWARDED_HOST'))
+          hosts.concat(x_forwarded_host.strip.split(/[, \t]+/).map { |host| wrap_ipv6(host) })
+        end
+
+        hosts.map { |authority| extract_host(authority) }
+      end
+
       def extract_host(authority)
-        authority.to_s.split(PORT_REGEXP).first&.downcase
+        authority = authority.to_s
+        host = if authority.start_with?('[')
+                 # Bracketed IPv6 literal, optionally followed by a port.
+                 closing = authority.index(']')
+                 closing ? authority[0..closing] : authority
+               else
+                 authority.split(PORT_REGEXP).first
+               end
+        host&.downcase
+      end
+
+      # Compatibility shim mirroring Rack::Request: legacy headers sometimes
+      # carry bare IPv6 literals without the square brackets.
+      def wrap_ipv6(host)
+        if !host.start_with?('[') && host.count(':') > 1
+          "[#{host}]"
+        else
+          host
+        end
       end
 
       def host_permitted?(host)

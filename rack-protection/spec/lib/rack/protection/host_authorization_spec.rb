@@ -105,11 +105,7 @@ RSpec.describe Rack::Protection::HostAuthorization do
         { 'HTTP_HOST' => '127.0.0.1:3000' },
         { 'HTTP_HOST' => '127.0.0.1', 'HTTP_X_FORWARDED_HOST' => '127.0.0.1' },
         { 'HTTP_HOST' => '127.0.0.1:3000', 'HTTP_X_FORWARDED_HOST' => '127.0.0.1:3000' },
-        { 'HTTP_HOST' => '127.0.0.1', 'HTTP_X_FORWARDED_HOST' => 'example.com, 127.0.0.1' },
-        { 'HTTP_HOST' => '127.0.0.1:3000', 'HTTP_X_FORWARDED_HOST' => 'example.com, 127.0.0.1:3000' },
-        { 'HTTP_HOST' => '127.0.0.1', 'HTTP_FORWARDED' => 'host=127.0.0.1' },
-        { 'HTTP_HOST' => '127.0.0.1', 'HTTP_FORWARDED' => 'host=example.com; host=127.0.0.1' },
-        { 'HTTP_HOST' => '127.0.0.1:3000', 'HTTP_FORWARDED' => 'host=example.com; host=127.0.0.1:3000' }
+        { 'HTTP_HOST' => '127.0.0.1', 'HTTP_FORWARDED' => 'host=127.0.0.1' }
       ]
     end
 
@@ -126,6 +122,29 @@ RSpec.describe Rack::Protection::HostAuthorization do
         assert_response(outcome: :allowed, headers: headers, last_response: last_response)
       end
     end
+
+    bad_requests = lambda do
+      [
+        { 'HTTP_HOST' => '127.0.0.1', 'HTTP_X_FORWARDED_HOST' => 'example.com, 127.0.0.1' },
+        { 'HTTP_HOST' => '127.0.0.1:3000', 'HTTP_X_FORWARDED_HOST' => 'example.com, 127.0.0.1:3000' },
+        { 'HTTP_HOST' => '127.0.0.1', 'HTTP_FORWARDED' => 'host=example.com; host=127.0.0.1' },
+        { 'HTTP_HOST' => '127.0.0.1:3000', 'HTTP_FORWARDED' => 'host=example.com; host=127.0.0.1:3000' }
+      ]
+    end
+
+    bad_requests.call.each do |headers|
+      it "stops the request with headers '#{headers}'" do
+        permitted_hosts = [IPAddr.new('0.0.0.0/0')]
+        mock_app do
+          use Rack::Protection::HostAuthorization, permitted_hosts: permitted_hosts
+          run DummyApp
+        end
+
+        get('/', {}, headers)
+
+        assert_response(outcome: :stopped, headers: headers, last_response: last_response)
+      end
+    end
   end
 
   describe 'when permitted hosts include IPAddr instance for ::/0' do
@@ -136,11 +155,7 @@ RSpec.describe Rack::Protection::HostAuthorization do
         { 'HTTP_HOST' => '[::1]', 'HTTP_X_FORWARDED_HOST' => '::1' },
         { 'HTTP_HOST' => '[::1]', 'HTTP_X_FORWARDED_HOST' => '[::1]' },
         { 'HTTP_HOST' => '[::1]:3000', 'HTTP_X_FORWARDED_HOST' => '[::1]:3000' },
-        { 'HTTP_HOST' => '[::1]', 'HTTP_X_FORWARDED_HOST' => 'example.com, [::1]' },
-        { 'HTTP_HOST' => '[::1]:3000', 'HTTP_X_FORWARDED_HOST' => 'example.com, [::1]:3000' },
-        { 'HTTP_HOST' => '[::1]', 'HTTP_FORWARDED' => 'host=[::1]' },
-        { 'HTTP_HOST' => '[::1]', 'HTTP_FORWARDED' => 'host=example.com; host=[::1]' },
-        { 'HTTP_HOST' => '[::1]:3000', 'HTTP_FORWARDED' => 'host=example.com; host=[::1]:3000' }
+        { 'HTTP_HOST' => '[::1]', 'HTTP_FORWARDED' => 'host=[::1]' }
       ]
     end
 
@@ -155,6 +170,29 @@ RSpec.describe Rack::Protection::HostAuthorization do
         get('/', {}, headers)
 
         assert_response(outcome: :allowed, headers: headers, last_response: last_response)
+      end
+    end
+
+    bad_requests = lambda do
+      [
+        { 'HTTP_HOST' => '[::1]', 'HTTP_X_FORWARDED_HOST' => 'example.com, [::1]' },
+        { 'HTTP_HOST' => '[::1]:3000', 'HTTP_X_FORWARDED_HOST' => 'example.com, [::1]:3000' },
+        { 'HTTP_HOST' => '[::1]', 'HTTP_FORWARDED' => 'host=example.com; host=[::1]' },
+        { 'HTTP_HOST' => '[::1]:3000', 'HTTP_FORWARDED' => 'host=example.com; host=[::1]:3000' }
+      ]
+    end
+
+    bad_requests.call.each do |headers|
+      it "stops the request with headers '#{headers}'" do
+        permitted_hosts = [IPAddr.new('::/0')]
+        mock_app do
+          use Rack::Protection::HostAuthorization, permitted_hosts: permitted_hosts
+          run DummyApp
+        end
+
+        get('/', {}, headers)
+
+        assert_response(outcome: :stopped, headers: headers, last_response: last_response)
       end
     end
   end
@@ -198,9 +236,7 @@ RSpec.describe Rack::Protection::HostAuthorization do
         { 'HTTP_HOST' => allowed_host },
         { 'HTTP_HOST' => "#{allowed_host}:3000" },
         { 'HTTP_HOST' => allowed_host, 'HTTP_X_FORWARDED_HOST' => allowed_host },
-        { 'HTTP_HOST' => allowed_host, 'HTTP_X_FORWARDED_HOST' => "example.com, #{allowed_host}" },
-        { 'HTTP_HOST' => allowed_host, 'HTTP_FORWARDED' => "host=#{allowed_host}" },
-        { 'HTTP_HOST' => allowed_host, 'HTTP_FORWARDED' => "host=example.com; host=#{allowed_host}" }
+        { 'HTTP_HOST' => allowed_host, 'HTTP_FORWARDED' => "host=#{allowed_host}" }
       ]
     end
 
@@ -224,14 +260,25 @@ RSpec.describe Rack::Protection::HostAuthorization do
         [{ 'HTTP_HOST' => "#{bad_host}##{allowed_host}" }, false],
         [{ 'HTTP_HOST' => allowed_host, 'HTTP_X_FORWARDED_HOST' => bad_host }, true],
         [{ 'HTTP_HOST' => allowed_host, 'HTTP_X_FORWARDED_HOST' => "#{allowed_host}, #{bad_host}" }, true],
+        [{ 'HTTP_HOST' => allowed_host, 'HTTP_X_FORWARDED_HOST' => "#{bad_host}, #{allowed_host}" }, true],
+        [{ 'HTTP_HOST' => allowed_host, 'HTTP_X_FORWARDED_HOST' => "example.com, #{allowed_host}" }, true],
         [{ 'HTTP_HOST' => allowed_host, 'HTTP_FORWARDED' => "host=#{bad_host}" }, true],
         [{ 'HTTP_HOST' => allowed_host, 'HTTP_FORWARDED' => "host=#{allowed_host}; host=#{bad_host}" }, true],
+        [{ 'HTTP_HOST' => allowed_host, 'HTTP_FORWARDED' => "host=#{bad_host}; host=#{allowed_host}" }, true],
+        [{ 'HTTP_HOST' => allowed_host, 'HTTP_FORWARDED' => "host=example.com; host=#{allowed_host}" }, true],
         [{ 'HTTP_HOST' => allowed_host, 'HTTP_X_FORWARDED_HOST' => bad_host }, true],
         [{ 'HTTP_HOST' => allowed_host, 'HTTP_FORWARDED' => "host=#{bad_host}" }, true],
         [{ 'HTTP_HOST' => allowed_host, 'HTTP_FORWARDED' => %(host=".#{allowed_host}") }, true],
         [{ 'HTTP_HOST' => allowed_host, 'HTTP_FORWARDED' => %(host="foo.#{allowed_host}") }, true],
         [{ 'HTTP_HOST' => bad_host, 'HTTP_X_FORWARDED_HOST' => allowed_host }, true],
         [{ 'HTTP_HOST' => bad_host, 'HTTP_FORWARDED' => "host=#{allowed_host}" }, true],
+        # conflicting forwarding headers: neither header may be ignored
+        [{ 'HTTP_HOST' => allowed_host, 'HTTP_FORWARDED' => "host=#{allowed_host}",
+           'HTTP_X_FORWARDED_HOST' => bad_host }, true],
+        [{ 'HTTP_HOST' => allowed_host, 'HTTP_FORWARDED' => "host=#{bad_host}",
+           'HTTP_X_FORWARDED_HOST' => allowed_host }, true],
+        [{ 'HTTP_HOST' => bad_host, 'HTTP_FORWARDED' => "host=#{allowed_host}",
+           'HTTP_X_FORWARDED_HOST' => allowed_host }, true]
       ]
     end
 
@@ -356,6 +403,177 @@ RSpec.describe Rack::Protection::HostAuthorization do
 
         expect(last_response).to be_ok
       end
+    end
+  end
+
+  describe 'subdomain boundary for domain entries like .example.com' do
+    good_requests = lambda do
+      [
+        { 'HTTP_HOST' => 'example.com' },
+        { 'HTTP_HOST' => 'foo.example.com' },
+        { 'HTTP_HOST' => 'a.b.example.com' },
+        { 'HTTP_HOST' => 'foo.example.com', 'HTTP_X_FORWARDED_HOST' => 'bar.example.com' },
+        { 'HTTP_HOST' => 'foo.example.com', 'HTTP_FORWARDED' => 'host=bar.example.com' }
+      ]
+    end
+
+    good_requests.call.each do |headers|
+      it "allows the request with headers '#{headers}'" do
+        mock_app do
+          use Rack::Protection::HostAuthorization, permitted_hosts: ['.example.com']
+          run DummyApp
+        end
+
+        get('/', {}, headers)
+
+        assert_response(outcome: :allowed, headers: headers, last_response: last_response)
+      end
+    end
+
+    # look-alike suffixes must not be treated as subdomains
+    bad_requests = lambda do
+      [
+        { 'HTTP_HOST' => 'notexample.com' },
+        { 'HTTP_HOST' => 'evilexample.com' },
+        { 'HTTP_HOST' => 'example.com.evil.org' },
+        { 'HTTP_HOST' => 'foo.example.com.evil.org' },
+        { 'HTTP_HOST' => 'foo.example.com', 'HTTP_X_FORWARDED_HOST' => 'notexample.com' },
+        { 'HTTP_HOST' => 'foo.example.com', 'HTTP_FORWARDED' => 'host=example.com.evil.org' }
+      ]
+    end
+
+    bad_requests.call.each do |headers|
+      it "stops the request with headers '#{headers}'" do
+        mock_app do
+          use Rack::Protection::HostAuthorization, permitted_hosts: ['.example.com']
+          run DummyApp
+        end
+
+        get('/', {}, headers)
+
+        assert_response(outcome: :stopped, headers: headers, last_response: last_response)
+      end
+    end
+  end
+
+  describe 'when the Forwarded header cannot be parsed' do
+    it 'stops the request even when Host and X-Forwarded-Host are permitted' do
+      mock_app(lint: false) do
+        use Rack::Protection::HostAuthorization, permitted_hosts: ['allowed.org']
+        run DummyApp
+      end
+
+      headers = {
+        'HTTP_HOST' => 'allowed.org',
+        'HTTP_X_FORWARDED_HOST' => 'allowed.org',
+        'HTTP_FORWARDED' => 'bogus=1; host=allowed.org'
+      }
+      get('/', {}, headers)
+
+      expect(last_response.status).to eq(403)
+      expect(last_response.body).to eq('Host not permitted')
+    end
+
+    it 'does not trigger allow_if implicitly, but an explicit allow_if still applies' do
+      mock_app(lint: false) do
+        use Rack::Protection::HostAuthorization, allow_if: ->(_env) { true },
+                                                 permitted_hosts: ['allowed.org']
+        run DummyApp
+      end
+
+      get('/', {}, 'HTTP_HOST' => 'bad.org', 'HTTP_FORWARDED' => 'bogus=1')
+
+      expect(last_response).to be_ok
+    end
+  end
+
+  describe 'with Rack::MockRequest driving a multi-layer middleware stack' do
+    def build_stack(permitted_hosts, **options)
+      tagging_middleware = Class.new do
+        def initialize(app)
+          @app = app
+        end
+
+        def call(env)
+          env['stack.outer_ran'] = true
+          @app.call(env)
+        end
+      end
+
+      Rack::Builder.new do
+        use Rack::Head
+        use tagging_middleware
+        use Rack::Protection::HostAuthorization, { permitted_hosts: permitted_hosts }.merge(options)
+        run DummyApp
+      end.to_app
+    end
+
+    def app_called?
+      !Thread.current[:last_env].nil?
+    end
+
+    before { Thread.current[:last_env] = nil }
+
+    it 'calls the business app for a permitted direct request without forwarding headers' do
+      response = Rack::MockRequest.new(build_stack(['allowed.org'])).get('/', 'HTTP_HOST' => 'allowed.org')
+
+      expect(response.status).to eq(200)
+      expect(response.body).to eq('ok')
+      expect(app_called?).to be(true)
+      expect(Thread.current[:last_env]['stack.outer_ran']).to be(true)
+    end
+
+    it 'calls the business app for a permitted subdomain request' do
+      response = Rack::MockRequest.new(build_stack(['.example.com'])).get('/', 'HTTP_HOST' => 'foo.example.com')
+
+      expect(response.status).to eq(200)
+      expect(app_called?).to be(true)
+    end
+
+    it 'does not call the business app for a look-alike suffix' do
+      response = Rack::MockRequest.new(build_stack(['.example.com'])).get('/', 'HTTP_HOST' => 'notexample.com')
+
+      expect(response.status).to eq(403)
+      expect(response.body).to eq('Host not permitted')
+      expect(app_called?).to be(false)
+    end
+
+    it 'does not call the business app when a permitted forwarded host masks a bad Host' do
+      response = Rack::MockRequest.new(build_stack(['allowed.org'])).get(
+        '/', 'HTTP_HOST' => 'bad.org', 'HTTP_X_FORWARDED_HOST' => 'allowed.org'
+      )
+
+      expect(response.status).to eq(403)
+      expect(app_called?).to be(false)
+    end
+
+    it 'does not call the business app when forwarded values conflict' do
+      response = Rack::MockRequest.new(build_stack(['allowed.org'])).get(
+        '/', 'HTTP_HOST' => 'allowed.org',
+             'HTTP_FORWARDED' => 'host=allowed.org',
+             'HTTP_X_FORWARDED_HOST' => 'allowed.org, evil.org'
+      )
+
+      expect(response.status).to eq(403)
+      expect(app_called?).to be(false)
+    end
+
+    it 'does not call the business app for an unparseable Forwarded header' do
+      response = Rack::MockRequest.new(build_stack(['allowed.org'])).get(
+        '/', 'HTTP_HOST' => 'allowed.org', 'HTTP_FORWARDED' => 'bogus=1'
+      )
+
+      expect(response.status).to eq(403)
+      expect(app_called?).to be(false)
+    end
+
+    it 'calls the business app for permitted IPv6 requests with ports' do
+      response = Rack::MockRequest.new(build_stack([IPAddr.new('::/0')])).get(
+        '/', 'HTTP_HOST' => '[::1]:3000', 'HTTP_X_FORWARDED_HOST' => '[::2]:8080'
+      )
+
+      expect(response.status).to eq(200)
+      expect(app_called?).to be(true)
     end
   end
 end
