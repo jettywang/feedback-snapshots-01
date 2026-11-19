@@ -3,9 +3,20 @@ from typing import Any
 from typing import cast
 from typing import Dict
 from typing import Iterable
+from typing import List
+from typing import Tuple
 
 from ...exceptions import InvalidFile
+from .. import plugins
 from ..plugins.util import get_plugins_from_file
+
+
+# Plugins that were renamed before the v1.0.0 release. The detection semantics (including the
+# `secret_type` written into each result) did not change, so audited findings can be carried over
+# untouched once the plugin reference is rewritten.
+RENAMED_PLUGINS: Dict[str, str] = {
+    'BasicOAuthDetector': 'SquareOAuthDetector',
+}
 
 
 def upgrade(baseline: Dict[str, Any]) -> None:
@@ -13,8 +24,78 @@ def upgrade(baseline: Dict[str, Any]) -> None:
         _migrate_filters,
         _rename_high_entropy_string_arguments,
         _migrate_custom_plugins,
+        _rename_plugins,
     ]:
         function(baseline)
+
+
+def _rename_plugins(baseline: Dict[str, Any]) -> None:
+    """
+    Some plugins were renamed in the lead-up to v1.0.0. A straightforward rename is only safe
+    when the current library can initialize the replacement with the exact configuration carried
+    over from the old baseline. Otherwise, the entry is kept for manual review, and a structured
+    report of every renamed entry is attached to the baseline so that ambiguous configurations can
+    be handed back to the original reviewer.
+    """
+    report = {
+        'renamed': [],
+        'needs_review': [],
+        'unloadable': [],
+    }
+    baseline.pop('plugin_upgrades', None)
+
+    for plugin in cast(List[Dict[str, Any]], baseline.get('plugins_used', [])):
+        old_name = plugin.get('name')
+        new_name = RENAMED_PLUGINS.get(old_name)
+        if not new_name:
+            continue
+
+        entry = {
+            'old_name': old_name,
+            'new_name': new_name,
+            'config': {
+                key: value
+                for key, value in plugin.items()
+                if key != 'name'
+            },
+        }
+
+        status, detail = _classify_renamed_plugin(new_name, entry['config'])
+        if status == 'renamed':
+            plugin['name'] = new_name
+            report['renamed'].append(entry)
+        elif status == 'needs_review':
+            entry['reason'] = detail
+            report['needs_review'].append(entry)
+        else:
+            entry['reason'] = detail
+            report['unloadable'].append(entry)
+
+    if any(report.values()):
+        baseline['plugin_upgrades'] = report
+
+
+def _classify_renamed_plugin(
+    new_name: str,
+    config: Dict[str, Any],
+) -> Tuple[str, str]:
+    try:
+        plugin = plugins.initialize.from_plugin_classname(new_name)
+    except TypeError:
+        return (
+            'unloadable',
+            f'No such `{new_name}` plugin exists in this detect-secrets version.',
+        )
+
+    try:
+        plugin.__class__(**config)
+    except TypeError as error:
+        return (
+            'needs_review',
+            f'Configuration is not accepted by `{new_name}`: {error}',
+        )
+
+    return 'renamed', ''
 
 
 def _migrate_filters(baseline: Dict[str, Any]) -> None:
