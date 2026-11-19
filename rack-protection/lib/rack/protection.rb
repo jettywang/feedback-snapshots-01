@@ -17,6 +17,7 @@ module Rack
     autoload :IPSpoofing,            'rack/protection/ip_spoofing'
     autoload :JsonCsrf,              'rack/protection/json_csrf'
     autoload :PathTraversal,         'rack/protection/path_traversal'
+    autoload :ProfileSelector,       'rack/protection/profile_selector'
     autoload :ReferrerPolicy,        'rack/protection/referrer_policy'
     autoload :RemoteReferrer,        'rack/protection/remote_referrer'
     autoload :RemoteToken,           'rack/protection/remote_token'
@@ -25,6 +26,10 @@ module Rack
     autoload :XSSHeader,             'rack/protection/xss_header'
 
     def self.new(app, options = {})
+      if (profiles = options[:profiles])
+        return ProfileSelector.new(app, options, profiles)
+      end
+
       except = Array options[:except]
       use_these = Array options[:use]
 

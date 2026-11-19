@@ -87,6 +87,47 @@ use Rack::Protection,
 run MyApp
 ```
 
+Apply different protection profiles to different routes, e.g. keep the
+full browser protections for pages while relaxing browser-specific
+checks for non-browser webhook endpoints:
+
+``` ruby
+# config.ru
+require 'rack/protection'
+
+use Rack::Protection,
+  # default profile: applied to every request that matches no rule
+  except: [:path_traversal],
+  profiles: {
+    webhooks: {
+      paths:   %w[/webhooks/stripe /webhooks/github], # exact paths
+      methods: %w[POST],                              # optional method list
+      options: { except: %i[http_origin remote_token json_csrf] }
+    }
+  }
+
+run MyApp
+```
+
+Profile rules are matched against the literal `PATH_INFO` and
+`REQUEST_METHOD` of the request, exactly as the downstream router sees
+them at this point of the middleware stack:
+
+* When the app is mounted under a prefix with `map`, declare paths
+  relative to the mount point (the prefix is already stripped).
+* No decoding or normalization is applied, so percent-encoded variants
+  never match a declared path and fall through to the default profile.
+* When `Rack::MethodOverride` sits upstream, the effective (overridden)
+  method is matched, just like the router does.
+* The first matching profile wins; its `options` are merged over the
+  top-level options. Requests matching no rule use the default profile
+  built from the top-level options alone.
+
+All profile stacks are built once when the middleware is created and
+cannot be changed afterwards. Note that profiles only choose which
+protections apply -- they are not authentication. Webhook endpoints must
+still verify their callers themselves (e.g. by checking a signature).
+
 
 # Prevented Attacks
 
