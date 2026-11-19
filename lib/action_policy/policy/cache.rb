@@ -42,7 +42,13 @@ module ActionPolicy # :nodoc:
       end
 
       def context_cache_key
-        authorization_context.map { _2._policy_cache_key.to_s }.join("/")
+        authorization_context.map do |id, object|
+          begin
+            object._policy_cache_key.to_s
+          rescue ArgumentError
+            raise ArgumentError, "authorization context #{id.inspect} is not cacheable (#{object.class})"
+          end
+        end.join("/")
       end
 
       def apply_with_cache(rule)

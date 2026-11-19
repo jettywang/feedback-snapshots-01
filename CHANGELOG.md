@@ -2,6 +2,8 @@
 
 ## master
 
+- Include the authorization context name in the "not cacheable" error raised when building a rule cache key. ([@palkan][])
+
 ## 0.7.8 (2026-11-03)
 
 - Improve policy caching (less key calculations, fixed collisions). ([@palkan][])

@@ -176,7 +176,7 @@ By default, Action Policy builds a cache key using the following scheme (defined
 
 Where `cache_namespace` is equal to `"acp:#{MAJOR_GEM_VERSION}.#{MINOR_GEM_VERSION}"`, and `context_cache_key` is a concatenation of all authorization contexts cache keys (in the same order as they are defined in the policy class).
 
-If any object does not respond to `#policy_cache_key`, we fallback to `#cache_key` (or `#cache_key_with_version` for modern Rails versions). If `#cache_key` is not defined, an `ArgumentError` is raised.
+If any object does not respond to `#policy_cache_key`, we fallback to `#cache_key` (or `#cache_key_with_version` for modern Rails versions). If `#cache_key` is not defined, an `ArgumentError` is raised. For authorization context objects, the error message includes the name of the offending context (e.g., `authorization context :approval is not cacheable (Object)`), so you can tell exactly which object is missing a cache key.
 
 **NOTE:** if your `#cache_key` method is performance-heavy (e.g. like the `ActiveRecord::Relation`'s one), we recommend to explicitly define the `#policy_cache_key` method on the corresponding class to avoid unnecessary load. See also [action_policy#55](https://github.com/palkan/action_policy/issues/55).
 
@@ -230,6 +230,31 @@ class Resource
   end
 end
 ```
+
+**Case \#1.1**: invalidation driven by the authorization context state.
+
+Sometimes the permission-affecting state lives outside the record—for example, an operator's temporary approval that could be revoked at any moment. Touching every record's timestamp on each such change is impractical. Instead, put the state into the [authorization context](authorization_context.md) and make its `#policy_cache_key` reflect the current state:
+
+```ruby
+class Approval
+  def policy_cache_key
+    "approval/#{state}" # e.g. "approval/approved" or "approval/revoked"
+  end
+end
+
+class DocumentPolicy < ApplicationPolicy
+  authorize :operator
+  authorize :approval
+
+  cache :manage?
+
+  def manage?
+    approval.approved? || operator.admin?
+  end
+end
+```
+
+Since `context_cache_key` is a part of the rule cache key, revoking the approval (i.e. changing the context state) produces a different cache key, and the rule is re-evaluated—even though the record itself is completely unchanged. As long as the context state stays the same, the cached result is reused.
 
 **Case \#2**: discarding all cache at once.
 
