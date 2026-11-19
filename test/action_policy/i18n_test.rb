@@ -272,3 +272,123 @@ class TestI18nNestedPolicies < Minitest::Test
       "I deny you: guest"
   end
 end
+
+class PublicMessagesChildPolicy < ActionPolicy::Base
+  self.identifier = :public_messages_child
+
+  def show?
+    details[:secret] = "child-secret-#{user.name}"
+    false
+  end
+end
+
+class PublicMessagesParentPolicy < ActionPolicy::Base
+  self.identifier = :public_messages_parent
+
+  def show?
+    details[:secret] = "parent-secret-#{user.name}"
+    allowed_to?(:local_rule?) ||
+      allowed_to?(:show?, record, with: PublicMessagesChildPolicy)
+  end
+
+  def local_rule?
+    details[:secret] = "local-secret-#{user.name}"
+    false
+  end
+end
+
+class TestPublicMessagesProjection < Minitest::Test
+  User = Struct.new(:name)
+
+  def setup
+    @previous_available_locales = I18n.available_locales
+    I18n.available_locales = [:en, :fr]
+
+    I18n.backend.store_translations(
+      :en,
+      action_policy: {
+        unauthorized: "This action is not allowed",
+        policy: {
+          public_messages_parent: {local_rule?: "Local rule rejected"},
+          # Only an interpolation template exists for the child rule: the secret is
+          # required to build the (internal) detailed message.
+          public_messages_child: {show?: "Child rule rejected: %{secret}"}
+        }
+      }
+    )
+    I18n.backend.store_translations(
+      :fr,
+      action_policy: {
+        unauthorized: "Cette action n'est pas autorisée",
+        policy: {
+          public_messages_parent: {local_rule?: "Règle locale refusée"},
+          public_messages_child: {show?: "Règle enfant refusée : %{secret}"}
+        }
+      }
+    )
+
+    @policy = PublicMessagesParentPolicy.new(Object.new, user: User.new("boss"))
+    refute @policy.apply(:show?)
+    @reasons = @policy.result.reasons
+  end
+
+  def teardown
+    I18n.backend.reload!
+    I18n.available_locales = @previous_available_locales
+  end
+
+  def test_public_messages_use_translatable_categories
+    assert_equal(
+      ["Local rule rejected", "This action is not allowed"],
+      @reasons.public_messages
+    )
+  end
+
+  def test_public_messages_can_be_localized
+    assert_equal(
+      ["Règle locale refusée", "Cette action n'est pas autorisée"],
+      @reasons.public_messages(locale: :fr)
+    )
+  end
+
+  def test_public_messages_never_leak_business_data
+    rendered = (@reasons.public_messages + @reasons.public_messages(locale: :fr)).join(" ")
+
+    refute_includes rendered, "secret"
+    refute_includes rendered, "boss"
+    refute_includes rendered, "%{"
+  end
+
+  def test_full_messages_still_expose_the_original_detailed_reasons
+    assert_includes @reasons.full_messages, "Child rule rejected: child-secret-boss"
+  end
+
+  def test_internal_reasons_remain_available_for_the_internal_audience
+    assert_equal(
+      {
+        public_messages_parent: [{local_rule?: {secret: "local-secret-boss"}}],
+        public_messages_child: [{show?: {secret: "child-secret-boss"}}]
+      },
+      @reasons.details
+    )
+  end
+
+  def test_query_order_does_not_affect_either_audience
+    public_en = @reasons.public_messages
+    public_fr = @reasons.public_messages(locale: :fr)
+    internal = @reasons.details
+
+    assert_equal public_en, @reasons.public_messages
+    assert_equal public_fr, @reasons.public_messages(locale: :fr)
+    assert_equal internal, @reasons.details
+    assert_includes @reasons.details.inspect, "child-secret-boss"
+  end
+
+  def test_public_messages_without_failures
+    policy = I18nDefaultPolicy.new(user: ::User.new("admin"))
+    assert policy.apply(:edit?)
+    assert policy.result.reasons.empty?
+
+    assert_equal [], policy.result.reasons.public_messages
+  end
+end

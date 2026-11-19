@@ -29,6 +29,30 @@ module ActionPolicy
 
       alias_method :to_h, :details
 
+      # Returns a public-safe projection of the failure reasons: only translatable
+      # error categories (policy identifiers and rule names), without any business
+      # data stored in the detailed reasons.
+      #
+      # Unlike `details`, this method never exposes the `details[:...]` values, which
+      # may contain sensitive business state and are meant for internal use only.
+      #
+      # For example, given the internal reasons:
+      #
+      #   { stage: [{ show?: { title: "Onboarding" } }] }
+      #
+      # the public projection is:
+      #
+      #   { stage: [:show?] }
+      #
+      # The result is built from the internal store without mutating it, repeated
+      # categories are deduplicated while preserving their original order, and the
+      # projection does not depend on the order in which it is queried.
+      def public_reasons
+        reasons.each_with_object({}) do |(policy_class, rules), projection|
+          projection[policy_class.identifier] = public_rules(rules)
+        end
+      end
+
       def empty?() = reasons.empty?
 
       def present?() = !empty?
@@ -48,6 +72,16 @@ module ActionPolicy
       end
 
       private
+
+      def public_rules(rules)
+        rules.each_with_object([]) do |rule, public_rules|
+          if rule.is_a?(::Hash)
+            rule.each_key { |rule_name| public_rules << rule_name unless public_rules.include?(rule_name) }
+          else
+            public_rules << rule unless public_rules.include?(rule)
+          end
+        end
+      end
 
       def add_non_detailed_reason(store, rule)
         index =

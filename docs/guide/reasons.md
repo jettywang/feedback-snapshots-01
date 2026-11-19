@@ -169,7 +169,46 @@ rescue_from ActionPolicy::Unauthorized do |ex|
 end
 ```
 
+## Public-safe reasons
+
+Detailed reasons may contain sensitive business state (record attributes, internal identifiers, etc.).
+That data is useful for server-side logic and logging, but must never be exposed to public clients.
+
+For those cases, Action Policy provides a *public projection* of the failure reasons, which contains
+only the translatable error categories — policy identifiers and rule names — without any of the
+`details[:...]` values:
+
+```ruby
+rescue_from ActionPolicy::Unauthorized do |ex|
+  # Internal audience: full reasons, including the detailed business data
+  ex.result.reasons.details     #=> { stage: [{ show?: { title: "Onboarding" } }] }
+  ex.result.all_details         #=> { title: "Onboarding" }
+
+  # Public audience: safe categories only, no business data
+  ex.result.reasons.public_reasons #=> { stage: [:show?] }
+end
+```
+
+The projection works for both local rules and the rules that call other policies (including
+`inline_reasons: true`). It is computed from the internal store without mutating it, so the order in
+which you query the public and internal views does not affect either audience. Repeated categories
+appear only once, preserving their original order.
+
+When I18n is available, you can also build localized public messages. The detailed data is never passed
+to the translations (so it cannot leak through interpolation), and the language can be chosen per request:
+
+```ruby
+ex.result.reasons.public_messages                 #=> ["You do not have access to the stage"]
+ex.result.reasons.public_messages(locale: :fr)    #=> ["Vous n'avez pas accès à l'étape"]
+```
+
+If the only matching translation for a category requires interpolation (i.e. it contains `%{...}`
+placeholders that would normally be filled from the details), the generic `action_policy.unauthorized`
+message is used instead of rendering the raw template. The detailed `full_messages` method keeps its
+current behaviour for the internal audience.
+
 ----
+
 
 **P.S. What is the point of failure reasons?**
 

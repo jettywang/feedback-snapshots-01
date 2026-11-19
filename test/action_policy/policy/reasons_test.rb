@@ -254,3 +254,107 @@ class TestFailuresWithDetailsPolicy < Minitest::Test
     assert_equal({name: "gusto", superhero: "spiderman"}, details)
   end
 end
+
+class PublicProjectionChildPolicy < ActionPolicy::Base
+  self.identifier = :projection_child
+
+  def show?
+    details[:child_business_data] = "child-secret-#{user.name}"
+    false
+  end
+end
+
+class PublicProjectionParentPolicy < ActionPolicy::Base
+  self.identifier = :projection_parent
+
+  def show?
+    details[:parent_business_data] = "parent-secret-#{user.name}"
+    allowed_to?(:local_rule?) ||
+      allowed_to?(:show?, record, with: PublicProjectionChildPolicy)
+  end
+
+  def local_rule?
+    details[:local_business_data] = "local-secret-#{user.name}"
+    false
+  end
+
+  # Re-evaluates the same checks to make sure duplicate categories are projected once.
+  def repeat?
+    allowed_to?(:local_rule?) || allowed_to?(:local_rule?)
+  end
+end
+
+class TestPublicFailureReasonsProjection < Minitest::Test
+  User = Struct.new(:name)
+
+  def setup
+    @policy = PublicProjectionParentPolicy.new(Object.new, user: User.new("boss"))
+    refute @policy.apply(:show?)
+    @reasons = @policy.result.reasons
+  end
+
+  def test_internal_reasons_keep_the_full_business_details
+    assert_equal(
+      {
+        projection_parent: [{local_rule?: {local_business_data: "local-secret-boss"}}],
+        projection_child: [{show?: {child_business_data: "child-secret-boss"}}]
+      },
+      @reasons.details
+    )
+
+    assert_equal(
+      {local_business_data: "local-secret-boss", child_business_data: "child-secret-boss"},
+      @policy.result.all_details
+    )
+  end
+
+  def test_public_reasons_expose_only_translatable_categories
+    assert_equal(
+      {projection_parent: [:local_rule?], projection_child: [:show?]},
+      @reasons.public_reasons
+    )
+  end
+
+  def test_public_reasons_never_contain_business_data
+    rendered = @reasons.public_reasons.inspect
+
+    refute_includes rendered, "secret"
+    refute_includes rendered, "boss"
+  end
+
+  def test_public_reasons_deduplicate_categories
+    policy = PublicProjectionParentPolicy.new(Object.new, user: User.new("boss"))
+    refute policy.apply(:repeat?)
+
+    assert_equal({projection_parent: [:local_rule?]}, policy.result.reasons.public_reasons)
+  end
+
+  def test_public_reasons_do_not_mutate_the_internal_store
+    before = Marshal.load(Marshal.dump(@reasons.details))
+
+    @reasons.public_reasons
+    @reasons.public_reasons
+
+    assert_equal before, @reasons.details
+    assert_includes @reasons.details.inspect, "local-secret-boss"
+  end
+
+  def test_query_order_does_not_affect_either_audience
+    assert_equal @reasons.public_reasons, @reasons.public_reasons
+    assert_equal @reasons.details, @reasons.details
+
+    public_first = @reasons.public_reasons
+    internal_after_public = @reasons.details
+    public_again = @reasons.public_reasons
+
+    assert_equal public_first, public_again
+    assert_includes internal_after_public.inspect, "child-secret-boss"
+  end
+
+  def test_public_reasons_for_a_policy_without_failures
+    policy = FailuresTestPolicy.new
+    assert policy.apply(:index?)
+
+    assert_equal({}, policy.result.reasons.public_reasons)
+  end
+end

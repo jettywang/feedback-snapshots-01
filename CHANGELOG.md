@@ -2,6 +2,8 @@
 
 ## master
 
+- Add public-safe failure reasons projection: `reasons.public_reasons` exposes only translatable error categories (policy identifiers and rule names) without the detailed business data, and `reasons.public_messages(locale:)` builds localized public messages without leaking details. The internal `reasons.details`/`full_messages` keep the full data, and the projection never mutates the internal store.
+
 ## 0.7.8 (2026-11-03)
 
 - Improve policy caching (less key calculations, fixed collisions). ([@palkan][])
