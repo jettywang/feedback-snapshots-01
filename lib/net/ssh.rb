@@ -203,12 +203,12 @@ module Net
     #   "alias", similarly to adding an entry in /etc/hosts but without needing
     #   to modify /etc/hosts.
     # * :keepalive => set to +true+ to send a keepalive packet to the SSH server
-    #   when there's no traffic between the SSH server and Net::SSH client for
-    #   the keepalive_interval seconds. Defaults to +false+.
+    #   every keepalive_interval seconds, and to consider the session dead when
+    #   the server stops answering them. Defaults to +false+.
     # * :keepalive_interval => the interval seconds for keepalive.
     #   Defaults to +300+ seconds.
-    # * :keepalive_maxcount => the maximun number of keepalive packet miss allowed.
-    #   Defaults to 3
+    # * :keepalive_maxcount => the maximum number of keepalive packets that may
+    #   be unanswered before the session is considered dead. Defaults to 3
     # * :kex => the key exchange algorithm (or algorithms) to use. Like
     #   KexAlgorithms, entries starting with +, - or ^ modify the default list.
     #   diffie-hellman-group14-sha1 is supported but not offered unless listed

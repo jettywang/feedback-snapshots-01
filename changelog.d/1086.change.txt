@@ -1,0 +1,1 @@
+Fixed keepalive liveness detection: probes are sent every `keepalive_interval` on a monotonic clock regardless of other traffic, replies are matched to probes in send order so a late reply only excuses the oldest outstanding probe, and the session times out once `keepalive_maxcount` probes are unanswered; probing is deferred while a rekey is pending or the session is closed

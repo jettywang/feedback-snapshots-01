@@ -53,6 +53,9 @@ module Net
         # The list of callbacks for pending requests. See #send_global_request.
         attr_reader :pending_requests # :nodoc:
 
+        # The keepalive manager for this session. See Keepalive.
+        attr_reader :keepalive # :nodoc:
+
         # A "session" channel opened ahead of time by :preopen_channels, and
         # the server's confirmation for it once that has arrived.
         SpareChannel = Struct.new(:local_id, :remote_id, :window_size, :packet_size) # :nodoc:

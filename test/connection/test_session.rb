@@ -542,35 +542,45 @@ module Connection
       timeout = Net::SSH::Connection::Session::DEFAULT_IO_SELECT_TIMEOUT
       options = { keepalive: true, keepalive_interval: 300, keepalive_maxcount: 3 }
       expected_packet = P(:byte, Net::SSH::Packet::GLOBAL_REQUEST, :string, "keepalive@openssh.com", :bool, true)
-      [1, 2, 3].each do |i|
-        Time.stubs(:now).returns(Time.at(i * 300))
-        IO.stubs(:select).with([socket], [], nil, timeout).returns(nil)
-        transport.expects(:enqueue_message).with { |msg| msg.content == expected_packet.content }
+      now = 0
+      IO.stubs(:select).with([socket], [], nil, timeout).returns(nil)
+      # exactly keepalive_maxcount probes go out; the next due slot raises
+      # instead of sending another one
+      transport.expects(:enqueue_message).with { |msg| msg.content == expected_packet.content }.times(3)
+      session(options).keepalive.clock = -> { now }
+
+      3.times do
         session(options).process
+        now += 300
       end
 
-      Time.stubs(:now).returns(Time.at(4 * 300))
-      IO.stubs(:select).with([socket], [], nil, timeout).returns(nil)
-      transport.expects(:enqueue_message).with { |msg| msg.content == expected_packet.content }
       assert_raises(Net::SSH::Timeout) { session(options).process }
     end
 
-    def test_process_should_not_call_enqueue_message_unless_io_select_timed_out
+    def test_process_should_send_keepalive_even_if_io_select_did_not_time_out
       timeout = Net::SSH::Connection::Session::DEFAULT_IO_SELECT_TIMEOUT
       options = { keepalive: true }
+      expected_packet = P(:byte, Net::SSH::Packet::GLOBAL_REQUEST, :string, "keepalive@openssh.com", :bool, true)
       IO.stubs(:select).with([socket], [], nil, timeout).returns([[socket], [], []])
       socket.stubs(:recv).returns("x")
-      transport.expects(:enqueue_message).never
+      # business events must not suppress probing: only keepalive replies
+      # prove the peer is alive
+      transport.expects(:enqueue_message).with { |msg| msg.content == expected_packet.content }
       session(options).process
     end
 
     def test_process_should_not_call_enqueue_message_unless_keepalive_interval_not_go_on
       timeout = 10
       options = { keepalive: true, keepalive_interval: timeout }
-      Time.stubs(:now).returns(Time.at(0), Time.at(9), Time.at(timeout))
+      now = 0
       IO.stubs(:select).with([socket], [], nil, timeout).returns(nil)
       transport.expects(:enqueue_message).times(2)
-      3.times { session(options).process }
+      session(options).keepalive.clock = -> { now }
+
+      [0, 9, timeout].each do |at|
+        now = at
+        session(options).process
+      end
     end
 
     def test_process_should_call_io_select_with_nil_as_last_arg_if_keepalive_disabled
