@@ -1,6 +1,7 @@
 # Changelog
 
 ## [Unreleased]
+* Harden NTLM WinRM response handling: validate the encrypted multipart boundary, encryption protocol, `OriginalContent` length and NTLM signature before XML parsing or output callbacks. Plaintext responses are only accepted for the documented OMI HTTPS case, and failed authentication or integrity checks discard the NTLM session.
 
 ## [2.4.2]
 * Replace erubi with the Ruby standard library ERB; the erubi runtime dependency is gone (#366)

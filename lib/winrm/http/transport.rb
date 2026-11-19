@@ -14,6 +14,7 @@
 
 require 'httpclient'
 require_relative 'response_handler'
+require_relative 'encrypted_response'
 
 module WinRM
   module HTTP
@@ -171,26 +172,24 @@ module WinRM
         init_auth if @ntlmcli.session.nil?
         log_soap_message(message)
 
-        hdr = {
-          'Content-Type' => 'multipart/encrypted;'\
-            'protocol="application/HTTP-SPNEGO-session-encrypted";boundary="Encrypted Boundary"'
-        }
-
-        resp = @httpcli.post(@endpoint, body(seal(message), message.bytesize), hdr)
+        resp = @httpcli.post(@endpoint, body(seal(message), message.bytesize), encrypted_headers)
         verify_ssl_fingerprint(resp.peer_cert)
-        if resp.status == 401 && @retryable
-          @retryable = false
-          init_auth
-          send_request(message)
-        else
-          @retryable = true
-          decrypted_body = winrm_decrypt(resp)
-          log_soap_message(decrypted_body)
-          WinRM::ResponseHandler.new(decrypted_body, resp.status).parse_to_xml
-        end
+        return handle_unauthorized(message) if resp.status == 401
+
+        @retryable = true
+        decrypted_body = winrm_decrypt(resp)
+        log_soap_message(decrypted_body)
+        WinRM::ResponseHandler.new(decrypted_body, resp.status).parse_to_xml
       end
 
       private
+
+      def encrypted_headers
+        {
+          'Content-Type' => 'multipart/encrypted;'\
+            'protocol="application/HTTP-SPNEGO-session-encrypted";boundary="Encrypted Boundary"'
+        }
+      end
 
       def seal(message)
         emessage = @ntlmcli.session.seal_message message
@@ -198,19 +197,93 @@ module WinRM
         "\x10\x00\x00\x00#{signature}#{emessage}"
       end
 
+      # A 401 means the NTLM session can no longer be trusted. Discard it so
+      # the next request performs a complete handshake, and retry exactly once
+      # with a freshly negotiated session.
+      def handle_unauthorized(message)
+        reset_ntlm_session
+        if @retryable
+          @retryable = false
+          begin
+            init_auth
+            return send_request(message)
+          ensure
+            @retryable = true
+          end
+        end
+
+        @retryable = true
+        raise WinRMAuthorizationError, 'NTLM authentication failed (401).'
+      end
+
+      def reset_ntlm_session
+        @ntlmcli.init_context(nil)
+      rescue StandardError => e
+        @logger.debug("Failed to reset NTLM session: #{e.message}")
+      end
+
       def winrm_decrypt(resp)
-        # OMI server doesn't always respond to encrypted messages with encrypted responses over SSL
-        return resp.body if resp.header['Content-Type'].first =~ %r{\Aapplication\/soap\+xml}i
         return '' if resp.body.empty?
 
-        str = resp.body.force_encoding('BINARY')
-        str.sub!(%r{^.*Content-Type: application\/octet-stream\r\n(.*)--Encrypted.*$}m, '\1')
+        content_type = response_content_type(resp)
+        return resp.body if plaintext_soap_response?(resp, content_type)
 
-        signature = str[4..19]
-        message = @ntlmcli.session.unseal_message str[20..-1]
-        return message if @ntlmcli.session.verify_signature(signature, message)
+        encrypted = WinRM::HTTP::EncryptedResponse.new(resp.body, content_type)
+        decrypt_verified(encrypted, resp.status)
+      rescue WinRM::HTTP::EncryptedResponse::ParseError => e
+        reset_ntlm_session
+        raise WinRMHTTPTransportError.new("Invalid NTLM encrypted response: #{e.message}", resp.status)
+      end
 
-        raise WinRMHTTPTransportError, 'Could not decrypt NTLM message.'
+      # The OMI server may answer an encrypted request with a plain SOAP body
+      # when the connection is already protected by TLS. Only that documented
+      # HTTPS case is accepted as plaintext; otherwise an XML body with an
+      # unexpected Content-Type must never bypass integrity verification.
+      def plaintext_soap_response?(resp, content_type)
+        return false unless https_endpoint?
+        return false unless WinRM::HTTP::EncryptedResponse.media_type(content_type) == 'application/soap+xml'
+
+        soap_document?(resp.body)
+      end
+
+      def soap_document?(body)
+        binary = body.to_s.dup
+        binary.force_encoding(Encoding::BINARY)
+        binary = binary.byteslice(3, binary.bytesize - 3) if binary.start_with?("\xEF\xBB\xBF".b)
+        binary.lstrip.start_with?('<')
+      end
+
+      def https_endpoint?
+        @endpoint.scheme.to_s.casecmp('https').zero?
+      end
+
+      def response_content_type(resp)
+        return nil if resp.header.nil?
+
+        Array(resp.header['Content-Type']).first
+      end
+
+      def decrypt_verified(encrypted, status)
+        message = @ntlmcli.session.unseal_message(encrypted.sealed_message)
+        unless @ntlmcli.session.verify_signature(encrypted.signature, message)
+          integrity_failure!('Could not verify NTLM response message integrity.', status)
+        end
+        unless message.bytesize == encrypted.original_content_length
+          integrity_failure!('NTLM response length does not match OriginalContent length.', status)
+        end
+        message
+      rescue WinRMHTTPTransportError
+        raise
+      rescue StandardError => e
+        reset_ntlm_session
+        raise WinRMHTTPTransportError.new("Could not decrypt NTLM response: #{e.message}", status)
+      end
+
+      # A response that cannot be authenticated may have desynchronized the
+      # stateful NTLM cipher, so do not reuse this session for later requests.
+      def integrity_failure!(message, status)
+        reset_ntlm_session
+        raise WinRMHTTPTransportError.new(message, status)
       end
 
       def issue_challenge_response(negotiate)

@@ -69,6 +69,8 @@ WinRM::Connection.new(
 
 The `:negotiate` transport uses the [rubyntlm gem](https://github.com/WinRb/rubyntlm) to authenticate with the endpoint using the NTLM protocol. This uses an HTTP based connection but the SOAP message payloads are encrypted. If using HTTP (as opposed to HTTPS) this is the recommended transport. This is also the default transport used if none is specified in the connection options.
 
+Encrypted responses are validated before their SOAP payload is exposed: the multipart boundary, encryption protocol, `OriginalContent` length, NTLM signature length and message signature must all match the response body. A response that fails any of these checks raises `WinRM::WinRMHTTPTransportError` and is never passed to the XML parser or shell callbacks. The one plaintext exception is the OMI server behavior on HTTPS, where a response may arrive as `application/soap+xml` without NTLM encryption; a plaintext response over HTTP is rejected.
+
 ### `:ssl`
 ```ruby
 WinRM::Connection.new( 
