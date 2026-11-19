@@ -380,7 +380,11 @@ class KTKeyBlock(Packet):
     ]
 
     def toKey(self):
-        return Key(self.keytype, key=self.keyvalue)
+        parent = self.parent
+        kvno = None
+        if isinstance(parent, KeytabEntry):
+            kvno = parent.versionNumber
+        return Key(self.keytype, key=self.keyvalue, kvno=kvno)
 
     def guess_payload_class(self, payload):
         return conf.padding_layer

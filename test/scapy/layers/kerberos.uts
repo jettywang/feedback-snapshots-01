@@ -1481,6 +1481,439 @@ ts = enc.decrypt(k)
 assert ts.patimestamp == "20220715171847Z"
 ts.pausec == 0x9a4db
 
++ EncryptedData enctype, kvno and key usage isolation
+
+= EncryptedData - AES profiles decrypt a known vector
+
+# Fixed, synthetic keys and plaintexts. None of these are credentials.
+#
+# The ciphertexts below were produced by an independent RFC 3961/3962/4757
+# implementation (n-fold checked against the RFC 3961 appendix A vectors) and
+# are not computed through scapy's own encryptor, so a symmetric mistake in
+# scapy cannot validate itself.
+
+from scapy.libs.rfc3961 import EncryptionType, InvalidChecksum, Key, UnknownEnctype
+from scapy.asn1.asn1 import ASN1_STRING
+from scapy.asn1.ber import BER_Decoding_Error
+from scapy.layers.kerberos import EncASRepPart, EncTGSRepPart
+from scapy.layers.kerberos import EncryptedData, EncryptionKey, HostAddress
+from scapy.layers.kerberos import KRB_AP_REQ, KRB_AS_REP, KRB_PRIV, PrincipalName
+
+AES256_KEY = bytes.fromhex(
+    "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+)
+AES128_KEY = bytes.fromhex("101112131415161718191a1b1c1d1e1f")
+AES256_SHA2_KEY = bytes.fromhex(
+    "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f"
+)
+RC4_KEY = bytes.fromhex("202122232425262728292a2b2c2d2e2f")
+
+AUTHENTICATOR = bytes.fromhex(
+    "624c304aa003020105a1101b0e49534f4c4154494f4e2e54455354a2123010a003020100a1093"
+    "0071b05616c696365a405020301e240a511180f32303236303130313030303030305aa7030201"
+    "00"
+)
+ENCRYPTED_AUTHENTICATOR_AES256 = bytes.fromhex(
+    "1916a0e03adca5bbe570bb822c110e0ab3081260d60b89e0ce57c42a60513b4d94e352ef005a6a"
+    "f33a9d247b2f1a729d2c6aee149e0343f84616125f490e3aad6c6394da38caa7fd302dd5e8a2f"
+    "64539f7dfcb7bba70ad896d5a334de00ae0b1489b3be57aab390b7976"
+)
+ENCRYPTED_AUTHENTICATOR_AES128 = bytes.fromhex(
+    "da02bf87d52a4de082db1ed3ee6c6c982b2079925f8cc837b4ed1006d2beb3b75948188ef197f"
+    "7b1c0e9254e4750648f8e2ad75cbd40e5ccfaa6b3d6529d842188fdccdb65c57787f2f36ee8d2"
+    "11eb5474582f2698314bed47bb18ec025cd1f7a0c8e6b1ad718c4e8bd9"
+)
+ENCRYPTED_AUTHENTICATOR_AES256_SHA2 = bytes.fromhex(
+    "eb12258fa38833275f68334debda60f0aefa6f13a54301f20b16678c5b34ab15c47f3178cb004f"
+    "ffc31bfe885ff4272222c2711efc6a605b7146e4f61cab33d434120293b209b958e297cc629e3c"
+    "6fe9240dc41e0a1ed762277a66f6617c8935adb10766225c3698f658dd27b99f30ba41b6dac04d"
+    "b8"
+)
+ENCRYPTED_AUTHENTICATOR_RC4 = bytes.fromhex(
+    "1c94b4fdb369c6fc2ca70dee526dd6e1749f8a453378a6933adb7775f2c30a2eea2306ef77f5b"
+    "96ff76057072e9ec0f1dfe32d9030b29f27a4467fbd5d80c277dc60f05cd6e19ebb0d2535e0cd"
+    "da157e049413a94209d702bae09c6cc068bb78365271b1eab1"
+)
+
+ENCRYPTED_HALF_AUTHENTICATOR_AES256 = bytes.fromhex(
+    "1916a0e03adca5bbe570bb822c110e0ab3081260d60b89e0ce57c42a60513b4d5b8a50ee7c48a0"
+    "29b48d8d9ef66f3d8194e352ef005a6aea6c85ef4f972f9ca801a9df"
+)
+
+ENCRYPTED_PRIVATE_PAYLOAD_AES256 = bytes.fromhex(
+    "2edfefba1055c975c9b93f4c2972ed6ed7bf935c5ec4cf921c55a947c2046bce9fbbc47bf61138"
+    "59d38381a64913dbef6d26ca324f9ee6d8eef990d0f0325273e78a751d"
+)
+ENCRYPTED_PRIVATE_PAYLOAD_RC4 = bytes.fromhex(
+    "20243577bacf159a6c43480f5ba4626a59ec982ad6f7a9dca14d8c929025db55b89ce5ae7034e"
+    "59f868d6b8435efe47b85ff20ce4f1c15ae8b6de443e21b897d"
+)
+
+# aes256-cts-hmac-sha1-96 and aes128-cts-hmac-sha1-96, key usage 11
+# (AP-REQ authenticator).
+enc = EncryptedData(
+    etype=EncryptionType.AES256_CTS_HMAC_SHA1_96,
+    cipher=ASN1_STRING(ENCRYPTED_AUTHENTICATOR_AES256),
+)
+enc.add_underlayer(KRB_AP_REQ())
+auth = enc.decrypt(Key(EncryptionType.AES256_CTS_HMAC_SHA1_96, key=AES256_KEY))
+assert bytes(auth) == AUTHENTICATOR
+assert auth.cname.nameString[0] == b"alice"
+
+enc = EncryptedData(
+    etype=EncryptionType.AES128_CTS_HMAC_SHA1_96,
+    cipher=ASN1_STRING(ENCRYPTED_AUTHENTICATOR_AES128),
+)
+enc.add_underlayer(KRB_AP_REQ())
+auth = enc.decrypt(Key(EncryptionType.AES128_CTS_HMAC_SHA1_96, key=AES128_KEY))
+assert auth.crealm == b"ISOLATION.TEST"
+assert auth.cusec == 123456
+
+= EncryptedData - RFC 8009 profile decrypts a known vector
+
+# aes256-cts-hmac-sha384-192, key usage 11 (AP-REQ authenticator).
+enc = EncryptedData(
+    etype=EncryptionType.AES256_CTS_HMAC_SHA384_192,
+    cipher=ASN1_STRING(ENCRYPTED_AUTHENTICATOR_AES256_SHA2),
+)
+enc.add_underlayer(KRB_AP_REQ())
+auth = enc.decrypt(
+    Key(EncryptionType.AES256_CTS_HMAC_SHA384_192, key=AES256_SHA2_KEY)
+)
+assert auth.ctime == "20260101000000Z"
+assert auth.cname.nameString[0] == b"alice"
+
+= EncryptedData - RC4 profile decrypts a known vector
+
+# rc4-hmac, key usage 11 (AP-REQ authenticator).
+enc = EncryptedData(
+    etype=EncryptionType.RC4_HMAC,
+    cipher=ASN1_STRING(ENCRYPTED_AUTHENTICATOR_RC4),
+)
+enc.add_underlayer(KRB_AP_REQ())
+auth = enc.decrypt(Key(EncryptionType.RC4_HMAC, key=RC4_KEY))
+assert bytes(auth) == AUTHENTICATOR
+
+= EncryptedData - wrong key usage is rejected
+
+# The same ciphertext verified with the key usage of a different protocol
+# message must not be published as an authenticator.
+key = Key(EncryptionType.AES256_CTS_HMAC_SHA1_96, key=AES256_KEY)
+for usage in (1, 3, 7, 12, 13, 14):
+    enc = EncryptedData(
+        etype=EncryptionType.AES256_CTS_HMAC_SHA1_96,
+        cipher=ASN1_STRING(ENCRYPTED_AUTHENTICATOR_AES256),
+    )
+    enc.add_underlayer(KRB_AP_REQ())
+    try:
+        enc.decrypt(key, key_usage_number=usage)
+        assert False, "usage %s was accepted" % usage
+    except InvalidChecksum:
+        pass
+
+# Same for RC4-HMAC.
+key = Key(EncryptionType.RC4_HMAC, key=RC4_KEY)
+for usage in (1, 3, 7, 12, 13, 14):
+    enc = EncryptedData(
+        etype=EncryptionType.RC4_HMAC,
+        cipher=ASN1_STRING(ENCRYPTED_AUTHENTICATOR_RC4),
+    )
+    enc.add_underlayer(KRB_AP_REQ())
+    try:
+        enc.decrypt(key, key_usage_number=usage)
+        assert False, "usage %s was accepted" % usage
+    except InvalidChecksum:
+        pass
+
+= EncryptedData - a KRB-PRIV ciphertext is not an authenticator
+
+# Both structures sit at a different protocol position, hence a different key
+# usage, even though the same key is involved.
+enc = EncryptedData(
+    etype=EncryptionType.AES256_CTS_HMAC_SHA1_96,
+    cipher=ASN1_STRING(ENCRYPTED_PRIVATE_PAYLOAD_AES256),
+)
+enc.add_underlayer(KRB_PRIV())
+key = Key(EncryptionType.AES256_CTS_HMAC_SHA1_96, key=AES256_KEY)
+priv = enc.decrypt(key)
+assert priv.userData == b"private-payload"
+
+# Re-label the very same bytes as an AP-REQ authenticator (usage 11).
+enc = EncryptedData(
+    etype=EncryptionType.AES256_CTS_HMAC_SHA1_96,
+    cipher=ASN1_STRING(ENCRYPTED_PRIVATE_PAYLOAD_AES256),
+)
+enc.add_underlayer(KRB_AP_REQ())
+try:
+    enc.decrypt(key)
+    assert False, "KRB-PRIV content was accepted as an authenticator"
+except InvalidChecksum:
+    pass
+
+# And the RC4 variant.
+key = Key(EncryptionType.RC4_HMAC, key=RC4_KEY)
+enc = EncryptedData(
+    etype=EncryptionType.RC4_HMAC,
+    cipher=ASN1_STRING(ENCRYPTED_PRIVATE_PAYLOAD_RC4),
+)
+enc.add_underlayer(KRB_PRIV())
+assert enc.decrypt(key).userData == b"private-payload"
+
+enc = EncryptedData(
+    etype=EncryptionType.RC4_HMAC,
+    cipher=ASN1_STRING(ENCRYPTED_PRIVATE_PAYLOAD_RC4),
+)
+enc.add_underlayer(KRB_AP_REQ())
+try:
+    enc.decrypt(key)
+    assert False, "KRB-PRIV content was accepted as an authenticator"
+except InvalidChecksum:
+    pass
+
+= EncryptedData - tampered integrity data is rejected
+
+key = Key(EncryptionType.AES256_CTS_HMAC_SHA1_96, key=AES256_KEY)
+for ctext in (
+    ENCRYPTED_AUTHENTICATOR_AES256[:-1]
+    + bytes([ENCRYPTED_AUTHENTICATOR_AES256[-1] ^ 0x01]),
+    ENCRYPTED_AUTHENTICATOR_AES256[:16]
+    + bytes([ENCRYPTED_AUTHENTICATOR_AES256[16] ^ 0x80])
+    + ENCRYPTED_AUTHENTICATOR_AES256[17:],
+):
+    enc = EncryptedData(
+        etype=EncryptionType.AES256_CTS_HMAC_SHA1_96, cipher=ASN1_STRING(ctext)
+    )
+    enc.add_underlayer(KRB_AP_REQ())
+    try:
+        enc.decrypt(key)
+        assert False, "tampered ciphertext was accepted"
+    except InvalidChecksum:
+        pass
+
+= EncryptedData - truncated ciphertext is rejected
+
+key = Key(EncryptionType.AES256_CTS_HMAC_SHA1_96, key=AES256_KEY)
+for ctext in (
+    ENCRYPTED_AUTHENTICATOR_AES256[:-1],
+    ENCRYPTED_AUTHENTICATOR_AES256[:28],
+    ENCRYPTED_AUTHENTICATOR_AES256[:12],
+    b"",
+):
+    enc = EncryptedData(
+        etype=EncryptionType.AES256_CTS_HMAC_SHA1_96, cipher=ASN1_STRING(ctext)
+    )
+    enc.add_underlayer(KRB_AP_REQ())
+    try:
+        enc.decrypt(key)
+        assert False, "truncated ciphertext was accepted"
+    except InvalidChecksum:
+        pass
+    except ValueError as ex:
+        # The enctype profile rejects the length before any MAC comparison.
+        assert "too short" in str(ex), str(ex)
+
+= EncryptedData - valid integrity over a truncated structure publishes nothing
+
+# The MAC is valid but the plaintext stops in the middle of an Authenticator.
+key = Key(EncryptionType.AES256_CTS_HMAC_SHA1_96, key=AES256_KEY)
+enc = EncryptedData(
+    etype=EncryptionType.AES256_CTS_HMAC_SHA1_96,
+    cipher=ASN1_STRING(ENCRYPTED_HALF_AUTHENTICATOR_AES256),
+)
+enc.add_underlayer(KRB_AP_REQ())
+try:
+    enc.decrypt(key)
+    assert False, "a partial authenticator was published"
+except (BER_Decoding_Error, ValueError):
+    pass
+
+= EncryptedData - trailing bytes after the structure are rejected
+
+# A valid MAC over an Authenticator followed by extra bytes: the extra data is
+# not part of the authenticated structure and must not be published as Raw.
+trailing = bytes.fromhex(
+    "5b002aec8d5cd777c402fc2ab02b9b98748c8d144cd04dab9e55813d50a2ee0b0c7435928eb0d2"
+    "eb461d09f5288cfe9382102c66d92677253040b22067320c9409753f41384ef9ce03771ab5074f8"
+    "0be09da299ac00b790c9449a5f6be6a237f69f1888b7fab9f72199e"
+)
+key = Key(EncryptionType.RC4_HMAC, key=RC4_KEY)
+enc = EncryptedData(etype=EncryptionType.RC4_HMAC, cipher=ASN1_STRING(trailing))
+enc.add_underlayer(KRB_AP_REQ())
+try:
+    enc.decrypt(key)
+    assert False, "trailing bytes were published"
+except ValueError as ex:
+    assert "trailing bytes" in str(ex)
+
+# RC4-HMAC has no block padding, so even zero bytes after the structure are
+# not part of it and must be rejected too.
+zero_padded = bytes.fromhex(
+    "f186347eae4f4c5248863bb446fbaf760b3b6af8584bcf105e5c0f2c05b0c01984aa5bf54210"
+    "8bc0036ba483f3e6d72273f24a67503be7eabfae66f2f7fd14e5b8bc30ea2c2b550dff74997e3"
+    "30a59d15a6c6004b7f8704db205c3599dfb7d21d251b57d8411800b4f"
+)
+enc = EncryptedData(
+    etype=EncryptionType.RC4_HMAC, cipher=ASN1_STRING(zero_padded)
+)
+enc.add_underlayer(KRB_AP_REQ())
+try:
+    enc.decrypt(key)
+    assert False, "zero padding was accepted outside a padded profile"
+except ValueError as ex:
+    assert "trailing bytes" in str(ex)
+
+= EncryptedData - declared enctype must match the key enctype
+
+# A key of the right length for another AES profile must not decrypt.
+for key_etype, other_etype in (
+    (EncryptionType.AES128_CTS_HMAC_SHA1_96, EncryptionType.AES256_CTS_HMAC_SHA1_96),
+    (EncryptionType.AES256_CTS_HMAC_SHA1_96, EncryptionType.AES128_CTS_HMAC_SHA1_96),
+):
+    enc = EncryptedData(
+        etype=other_etype, cipher=ASN1_STRING(ENCRYPTED_AUTHENTICATOR_AES256)
+    )
+    enc.add_underlayer(KRB_AP_REQ())
+    try:
+        enc.decrypt(Key(key_etype, key=AES256_KEY))
+        assert False, "enctype mismatch was accepted"
+    except ValueError:
+        pass
+
+# An AES ciphertext must not be reinterpreted through an RC4 key either.
+enc = EncryptedData(
+    etype=EncryptionType.RC4_HMAC,
+    cipher=ASN1_STRING(ENCRYPTED_AUTHENTICATOR_AES256),
+)
+enc.add_underlayer(KRB_AP_REQ())
+try:
+    enc.decrypt(Key(EncryptionType.RC4_HMAC, key=RC4_KEY))
+    assert False, "enctype mismatch was accepted"
+except ValueError:
+    pass
+
+= EncryptedData - unknown and unimplemented enctypes are distinguished
+
+# 99 is not an assigned enctype.
+enc = EncryptedData(
+    etype=99, cipher=ASN1_STRING(ENCRYPTED_AUTHENTICATOR_AES256)
+)
+enc.add_underlayer(KRB_AP_REQ())
+try:
+    enc.decrypt(Key(EncryptionType.AES256_CTS_HMAC_SHA1_96, key=AES256_KEY))
+    assert False, "unknown enctype was accepted"
+except UnknownEnctype:
+    pass
+
+# 1 (des-cbc-crc) is assigned but not implemented.
+enc = EncryptedData(
+    etype=1, cipher=ASN1_STRING(ENCRYPTED_AUTHENTICATOR_AES256)
+)
+enc.add_underlayer(KRB_AP_REQ())
+try:
+    enc.decrypt(Key(EncryptionType.AES256_CTS_HMAC_SHA1_96, key=AES256_KEY))
+    assert False, "unimplemented enctype was accepted"
+except UnknownEnctype:
+    pass
+
+# Unknown enctypes are rejected even before a key usage could be guessed.
+enc = EncryptedData(
+    etype=99, cipher=ASN1_STRING(ENCRYPTED_AUTHENTICATOR_AES256)
+)
+try:
+    enc.decrypt(Key(EncryptionType.AES256_CTS_HMAC_SHA1_96, key=AES256_KEY))
+    assert False, "unknown enctype without protocol position was accepted"
+except UnknownEnctype:
+    pass
+
+= EncryptedData - kvno mismatch is rejected
+
+key = Key(EncryptionType.AES256_CTS_HMAC_SHA1_96, key=AES256_KEY, kvno=7)
+enc = EncryptedData(
+    etype=EncryptionType.AES256_CTS_HMAC_SHA1_96,
+    kvno=6,
+    cipher=ASN1_STRING(ENCRYPTED_AUTHENTICATOR_AES256),
+)
+enc.add_underlayer(KRB_AP_REQ())
+try:
+    enc.decrypt(key)
+    assert False, "stale kvno was accepted"
+except ValueError:
+    pass
+
+# A matching kvno and an unversioned key both keep working.
+enc = EncryptedData(
+    etype=EncryptionType.AES256_CTS_HMAC_SHA1_96,
+    kvno=7,
+    cipher=ASN1_STRING(ENCRYPTED_AUTHENTICATOR_AES256),
+)
+enc.add_underlayer(KRB_AP_REQ())
+assert bytes(enc.decrypt(key)) == AUTHENTICATOR
+
+enc = EncryptedData(
+    etype=EncryptionType.AES256_CTS_HMAC_SHA1_96,
+    kvno=7,
+    cipher=ASN1_STRING(ENCRYPTED_AUTHENTICATOR_AES256),
+)
+enc.add_underlayer(KRB_AP_REQ())
+assert bytes(
+    enc.decrypt(Key(EncryptionType.AES256_CTS_HMAC_SHA1_96, key=AES256_KEY))
+) == AUTHENTICATOR
+
+= EncryptedData - kvno 0 means unknown
+
+# A keytab entry with vno 0 carries no version information, so it must still
+# decrypt a structure that declares a concrete kvno.
+key = Key(EncryptionType.AES256_CTS_HMAC_SHA1_96, key=AES256_KEY, kvno=0)
+assert key.kvno is None
+enc = EncryptedData(
+    etype=EncryptionType.AES256_CTS_HMAC_SHA1_96,
+    kvno=3,
+    cipher=ASN1_STRING(ENCRYPTED_AUTHENTICATOR_AES256),
+)
+enc.add_underlayer(KRB_AP_REQ())
+assert bytes(enc.decrypt(key)) == AUTHENTICATOR
+
+= EncryptedData - AS-REP and TGS-REP contents are not interchangeable
+
+# For RC4-HMAC the key usage of AS-REP (3) and TGS-REP (8) map to the same
+# RFC 4757 value, so the only separation left is the enclosing application tag.
+TGS_REP_BODY = bytes(EncTGSRepPart(
+    key=EncryptionKey(keytype=23, keyvalue=b"\x01" * 16),
+    lastReq=[],
+    nonce=0x1234,
+    flags="",
+    authtime="20260101000000Z",
+    endtime="20260101010000Z",
+    srealm="R",
+    sname=PrincipalName(nameString=["krbtgt", "R"]),
+))
+key = Key(EncryptionType.RC4_HMAC, key=RC4_KEY)
+
+# Encrypt a TGS-REP part with the TGS-REP usage, then present it in an AS-REP.
+tgs_enc = EncryptedData(etype=EncryptionType.RC4_HMAC)
+tgs_enc.encrypt(key, TGS_REP_BODY, confounder=b"\x00" * 8, key_usage_number=8)
+as_rep = KRB_AS_REP(encPart=EncryptedData(
+    etype=EncryptionType.RC4_HMAC,
+    cipher=ASN1_STRING(tgs_enc.cipher.val),
+))
+try:
+    as_rep.encPart.decrypt(key)
+    assert False, "TGS-REP content was published as an AS-REP part"
+except BER_Decoding_Error:
+    pass
+
+# Relaxing the tag check must stay an explicit, opt-in decision.
+relaxed = as_rep.encPart.decrypt(key, cls=EncASRepPart, allow_tag_mismatch=True)
+assert isinstance(relaxed, EncTGSRepPart)
+
+= EncryptedData - shared n-fold/DK path still round-trips
+
+# Sanity check that the isolation checks do not break normal use of a Key.
+key = Key(EncryptionType.AES256_CTS_HMAC_SHA1_96, key=AES256_KEY)
+enc = EncryptedData(etype=EncryptionType.AES256_CTS_HMAC_SHA1_96)
+enc.encrypt(key, b"payload", confounder=b"\x00" * 16, key_usage_number=11)
+assert enc.decrypt(key, 11) == b"payload"
+
 + [MS-KILE] test vectors
 ~ mock
 

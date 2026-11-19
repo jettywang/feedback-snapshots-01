@@ -189,9 +189,11 @@ try:
         decrepit_algorithms,
         EncryptionType,
         Hmac_MD5,
+        is_supported_enctype,
         Key,
         KRB_FX_CF2,
         octetstring2key,
+        UnknownEnctype,
     )
 except ImportError:
     pass
@@ -436,24 +438,70 @@ class EncryptedData(ASN1_Packet):
             "Could not guess key usage number. Please specify key_usage_number"
         )
 
-    def decrypt(self, key, key_usage_number=None, cls=None):
+    def decrypt(
+        self,
+        key,
+        key_usage_number=None,
+        cls=None,
+        allow_tag_mismatch=False,
+    ):
         """
         Decrypt and return the data contained in cipher.
+
+        The declared ``etype`` and ``kvno`` of this structure must be
+        consistent with ``key``. This prevents a key that merely happens to
+        have the right length from turning an unrelated ciphertext into an
+        authenticator or ticket, and prevents silently using a stale key
+        version. An unknown/unsupported declared enctype is rejected before
+        any decryption; an integrity failure raises
+        :class:`~scapy.libs.rfc3961.InvalidChecksum`.
 
         :param key: the key to use for decryption
         :param key_usage_number: (optional) specify the key usage number.
                                  Guessed otherwise
         :param cls: (optional) the class of the decrypted payload
                                Guessed otherwise (or bytes)
+        :param allow_tag_mismatch: (optional) accept an EncTGSRepPart in an
+                                   AS-REP encrypted part. Disabled by default
+                                   because it also accepts a ciphertext taken
+                                   from a TGS-REP, which some enctypes cannot
+                                   otherwise distinguish.
         """
+        declared = self.etype
+        declared = getattr(declared, "val", declared)
+        if declared is not None:
+            declared = int(declared)
+        if declared is not None and not is_supported_enctype(declared):
+            raise UnknownEnctype(
+                "Unknown or unsupported enctype in EncryptedData: %s" % declared
+            )
         if key_usage_number is None:
             key_usage_number, cls = self.get_usage()
+        if declared is not None and key.etype != declared:
+            raise ValueError(
+                "EncryptedData enctype (%s) does not match the key enctype (%s)"
+                % (declared, key.etype)
+            )
+        declared_kvno = self.kvno
+        declared_kvno = getattr(declared_kvno, "val", declared_kvno)
+        if declared_kvno is not None:
+            declared_kvno = int(declared_kvno)
+        key_kvno = getattr(key, "kvno", None)
+        if (
+            declared_kvno is not None
+            and key_kvno is not None
+            and declared_kvno != key_kvno
+        ):
+            raise ValueError(
+                "EncryptedData kvno (%s) does not match the key kvno (%s)"
+                % (declared_kvno, key_kvno)
+            )
         d = key.decrypt(key_usage_number, self.cipher.val)
         if cls:
             try:
-                return cls(d)
+                res = cls(d)
             except BER_Decoding_Error:
-                if cls == EncASRepPart:
+                if cls == EncASRepPart and allow_tag_mismatch:
                     # https://datatracker.ietf.org/doc/html/rfc4120#section-5.4.2
                     # "Compatibility note: Some implementations unconditionally send an
                     # encrypted EncTGSRepPart (application tag number 26) in this field
@@ -472,6 +520,18 @@ class EncryptedData(ASN1_Packet):
                     except BER_Decoding_Error:
                         pass
                 raise
+            # Do not publish a structure that did not consume the whole
+            # authenticated plaintext. Only the block-padded profiles (DES)
+            # legitimately leave zero bytes behind; anything else would be
+            # attached as an unverified Raw payload.
+            trailing = bytes(res.payload) if res.payload is not None else b""
+            padsize = getattr(key.ep, "padsize", None) or 1
+            if trailing and (padsize <= 1 or trailing.strip(b"\x00")):
+                raise ValueError(
+                    "Decrypted %s has %s trailing bytes"
+                    % (cls.__name__, len(trailing))
+                )
+            return res
         return d
 
     def encrypt(self, key, text, confounder=None, key_usage_number=None):

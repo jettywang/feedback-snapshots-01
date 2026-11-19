@@ -25,9 +25,11 @@ __all__ = [
     "ChecksumType",
     "EncryptionType",
     "InvalidChecksum",
+    "is_supported_enctype",
     "KRB_FX_CF2",
     "Key",
     "SP800108_KDFCTR",
+    "UnknownEnctype",
     "_rfc1964pad",
 ]
 
@@ -174,6 +176,14 @@ class ChecksumType(enum.IntEnum):
 
 
 class InvalidChecksum(ValueError):
+    pass
+
+
+class UnknownEnctype(ValueError):
+    """
+    Raised when an enctype is unknown or has no implemented crypto profile.
+    """
+
     pass
 
 
@@ -579,7 +589,7 @@ class _SimplifiedEncryptionProfile(_EncryptionAlgorithmProfile):
             hmac = Hmac(ki, cls.hashmod).digest(signtext)
             expmac = hmac[: cls.macsize]
             if not _mac_equal(mac, expmac):
-                raise ValueError("ciphertext integrity failure")
+                raise InvalidChecksum("ciphertext integrity failure")
         else:
             # RFC 8009
             signtext = b"\0" * 16 + basic_ctext  # XXX IV
@@ -593,7 +603,7 @@ class _SimplifiedEncryptionProfile(_EncryptionAlgorithmProfile):
             hmac = Hmac(ki, cls.hashmod).digest(signtext)
             expmac = hmac[: cls.macsize]
             if not _mac_equal(mac, expmac):
-                raise ValueError("ciphertext integrity failure")
+                raise InvalidChecksum("ciphertext integrity failure")
             basic_plaintext = cls.basic_decrypt(ke, basic_ctext)
         # Discard the confounder.
         return bytes(basic_plaintext[cls.blocksize :])
@@ -1227,6 +1237,18 @@ _enctypes = {
 }
 
 
+def is_supported_enctype(etype: Union[EncryptionType, int, None]) -> bool:
+    """
+    Return whether an enctype has an implemented encryption profile.
+
+    :param etype: the enctype to test
+    """
+    try:
+        return EncryptionType(etype) in _enctypes
+    except (TypeError, ValueError):
+        return False
+
+
 _checksums = {
     ChecksumType.CRC32: _CRC32,
     # RSA_MD4 - UNIMPLEMENTED
@@ -1253,6 +1275,7 @@ class Key(object):
         etype: Union[EncryptionType, int, None] = None,
         key: bytes = b"",
         cksumtype: Union[ChecksumType, int, None] = None,
+        kvno: Optional[int] = None,
     ) -> None:
         """
         Kerberos Key object.
@@ -1260,6 +1283,8 @@ class Key(object):
         :param etype: the EncryptionType
         :param cksumtype: the ChecksumType
         :param key: the bytes containing the key bytes for this Key.
+        :param kvno: (optional) the key version number this key belongs to.
+                     0 means "unknown", as used by keytab entries.
         """
         assert etype or cksumtype, "Provide an etype or a cksumtype !"
         assert key, "Provide a key !"
@@ -1268,11 +1293,12 @@ class Key(object):
         if isinstance(cksumtype, int):
             cksumtype = ChecksumType(cksumtype)
         self.etype = etype
+        self.kvno = kvno or None
         if etype is not None:
             try:
                 self.ep = _enctypes[etype]
-            except ValueError:
-                raise ValueError("UNKNOWN/UNIMPLEMENTED etype '%s'" % etype)
+            except KeyError:
+                raise UnknownEnctype("UNKNOWN/UNIMPLEMENTED etype '%s'" % etype)
             if len(key) != self.ep.keysize:
                 raise ValueError(
                     "Wrong key length. Got %s. Expected %s"
@@ -1382,8 +1408,8 @@ class Key(object):
         """
         try:
             ep = _enctypes[etype]
-        except ValueError:
-            raise ValueError("Unknown etype '%s'" % etype)
+        except KeyError:
+            raise UnknownEnctype("Unknown etype '%s'" % etype)
         if len(seed) != ep.seedsize:
             raise ValueError("Wrong crypto seed length")
         return ep.random_to_key(seed)
@@ -1396,8 +1422,8 @@ class Key(object):
         """
         try:
             ep = _enctypes[etype]
-        except ValueError:
-            raise ValueError("Unknown etype '%s'" % etype)
+        except KeyError:
+            raise UnknownEnctype("Unknown etype '%s'" % etype)
         return cls.random_to_key(etype, os.urandom(ep.seedsize))
 
     @classmethod
@@ -1410,8 +1436,8 @@ class Key(object):
         """
         try:
             ep = _enctypes[etype]
-        except ValueError:
-            raise ValueError("Unknown etype '%s'" % etype)
+        except KeyError:
+            raise UnknownEnctype("Unknown etype '%s'" % etype)
         return ep.string_to_key(string, salt, params)
 
 
