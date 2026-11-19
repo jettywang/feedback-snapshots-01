@@ -3477,16 +3477,24 @@ class VBA_Parser(object):
             self.is_encrypted = crypto.is_encrypted(self.ole_file)
         return self.is_encrypted
 
-    def decrypt_file(self, passwords_list=None, decrypted_dir=None):
+    def decrypt_file(self, passwords_list=None, decrypted_dir=None,
+                     decryption_context=None):
         decrypted_file = None
         correct_password = None
         if self.detect_is_encrypted():
-            passwords = crypto.DEFAULT_PASSWORDS
-            if passwords_list and isinstance(passwords_list, list):
-                passwords.extend(passwords_list)
-            decrypted_file, correct_password = crypto.decrypt(self.filename, passwords, decrypted_dir)
-            if correct_password:
-                log.info(f"The correct password is: {correct_password}")
+            if decryption_context is None:
+                decryption_context = crypto.DecryptionContext()
+            passwords = list(passwords_list or []) + list(crypto.DEFAULT_PASSWORDS)
+            decrypted_file, correct_password = crypto.decrypt(
+                self.filename, passwords, decrypted_dir,
+                context=decryption_context)
+            if correct_password is not None:
+                layer = crypto.layer_for(decryption_context,
+                                         decryption_context.active_depth,
+                                         self.filename)
+                log.info('Decrypted layer %d with password candidate %d',
+                         decryption_context.active_depth,
+                         layer.password_index if layer else -1)
 
         return decrypted_file, correct_password
 
@@ -4384,6 +4392,14 @@ def parse_args(cmd_line_args=None):
     parser.add_argument("--decrypted_dir", dest='decrypted_dir', type=str,
                         default=None,
                         help='store the decrypted file to this folder.')
+    parser.add_argument("--decrypt-max-depth", dest='decrypt_max_depth',
+                        type=int, default=crypto.MAX_NESTING_DEPTH,
+                        help='maximum number of nested decryption layers '
+                             '(default: %(default)s)')
+    parser.add_argument("--decrypt-max-attempts", dest='decrypt_max_attempts',
+                        type=int, default=crypto.MAX_DECRYPT_ATTEMPTS,
+                        help='maximum number of password attempts per document '
+                             '(default: %(default)s)')
     parser.add_argument("-p", "--password", type=str, action='append',
                         default=[],
                         help='if encrypted office files are encountered, try '
@@ -4467,7 +4483,8 @@ def parse_args(cmd_line_args=None):
     return options
 
 
-def process_file(filename, data, container, options, crypto_nesting=0):
+def process_file(filename, data, container, options, crypto_nesting=0,
+                 decryption_context=None):
     """
     Part of main function that processes a single file.
     This is meant to be used only for the command-line interface of olevba
@@ -4476,6 +4493,9 @@ def process_file(filename, data, container, options, crypto_nesting=0):
 
     Returns a single code summarizing the status of processing of this file
     """
+    if decryption_context is None:
+        decryption_context = crypto.DecryptionContext()
+    decryption_context.active_depth = crypto_nesting
     try:
         vba_parser = None
 
@@ -4558,31 +4578,98 @@ def process_file(filename, data, container, options, crypto_nesting=0):
 
     # we reach this point only if file is encrypted
     # check if this is an encrypted file in an encrypted file in an ...
-    if crypto_nesting >= crypto.MAX_NESTING_DEPTH:
-        raise crypto.MaxCryptoNestingReached(crypto_nesting, filename)
+    if crypto_nesting >= decryption_context.report.max_nesting:
+        exc = crypto.MaxCryptoNestingReached(crypto_nesting, filename)
+        exc.attach_report(decryption_context.report,
+                          outcome=crypto.OUTCOME_NESTING_LIMIT)
+        decryption_context.stop(crypto_nesting, crypto.OUTCOME_NESTING_LIMIT,
+                                'nesting limit reached')
+        return RETURN_ENCRYPTED
 
     decrypted_file = None
     try:
-        log.debug('Checking encryption passwords {}'.format(options.password))
-        passwords = options.password + crypto.DEFAULT_PASSWORDS
         log.debug('Checking decrypted filepath {}'.format(options.decrypted_dir))
+        passwords = list(options.password) + list(crypto.DEFAULT_PASSWORDS)
 
-        decrypted_file, correct_password = crypto.decrypt(filename, passwords, options.decrypted_dir)
+        try:
+            decrypted_file, correct_password = crypto.decrypt(
+                filename, passwords, options.decrypted_dir,
+                context=decryption_context, depth=crypto_nesting)
+        except (crypto.MaxCryptoNestingReached,
+                crypto.MaxDecryptionAttemptsReached) as exc:
+            # Keep whatever was already analyzed; the report names the layer
+            # whose budget was exhausted.
+            log.warning('Decryption budget exhausted: %s', exc)
+            if getattr(exc, 'report', None) is None:
+                exc.attach_report(decryption_context.report)
+            return RETURN_ENCRYPTED
         if not decrypted_file:
             log.error('Decrypt failed, run with debug output to get details')
-            raise crypto.WrongEncryptionPassword(filename)
-        log.info(f'The correct password is: {correct_password}')
+            layer = crypto.layer_for(decryption_context, crypto_nesting,
+                                     filename)
+            outcome = layer.outcome if layer is not None else \
+                crypto.OUTCOME_WRONG_PASSWORD
+            if crypto_nesting == 0:
+                exc_cls = crypto.WrongEncryptionPassword
+                if outcome == crypto.OUTCOME_UNSUPPORTED:
+                    exc_cls = crypto.UnsupportedEncryptionError
+                elif outcome == crypto.OUTCOME_CORRUPT:
+                    exc_cls = crypto.CorruptedEncryptionError
+                exc = exc_cls(filename)
+                exc.attach_report(decryption_context.report, layer,
+                                  outcome=outcome)
+                raise exc
+            # Deeper layers must not discard the outer analysis results.
+            return RETURN_ENCRYPTED
+        if correct_password is not None:
+            layer = crypto.layer_for(decryption_context, crypto_nesting,
+                                     filename)
+            log.info('Decrypted layer %d with password candidate %d',
+                     crypto_nesting,
+                     layer.password_index if layer else -1)
         log.info('Working on decrypted file')
-        return process_file(decrypted_file, data, container or filename,
-                            options, crypto_nesting+1)
+        result = process_file(decrypted_file, data, container or filename,
+                              options, crypto_nesting+1,
+                              decryption_context=decryption_context)
+        crypto.mark_layer_analyzed(
+            decryption_context, crypto_nesting,
+            complete=(result == RETURN_OK),
+            identity=crypto.identify(filename))
+        return result
     finally:     # clean up
         try:
             log.debug('Removing crypt temp file {}'.format(decrypted_file))
             os.unlink(decrypted_file)
         except Exception:   # e.g. file does not exist or is None
             pass
+        decryption_context.forget_temp_file(decrypted_file)
     # no idea what to return now
     raise Exception('Programming error -- should never have reached this!')
+
+
+def _print_decryption_report(report, options):
+    """Report decryption layers without emitting passwords or plaintext."""
+    if report is None or not report.layers:
+        return
+    if options.output_mode == 'json':
+        print_json(type='decryption', complete=report.complete,
+                   success=report.success, attempts=report.attempts,
+                   layers=[layer.to_dict() for layer in report.layers],
+                   stopped_at=report.stopped_at,
+                   stopped_reason=report.stopped_reason)
+        return
+    if options.output_mode == 'triage':
+        # Keep triage output to one line per file.
+        if report.complete:
+            return
+        log.warning('Decryption incomplete: stopped at layer %s (%s)',
+                    report.stopped_at, report.stopped_reason)
+        return
+    for layer in report.layers:
+        if layer.outcome == crypto.OUTCOME_NOT_ENCRYPTED:
+            continue
+        log.info('Decryption layer %d (container %s): %s',
+                 layer.depth, layer.container, layer.outcome)
 
 
 def main(cmd_line_args=None):
@@ -4679,9 +4766,16 @@ def main(cmd_line_args=None):
                         print('\nFiles in %s:' % container)
                     previous_container = container
 
-            # process the file, handling errors and encryption
-            curr_return_code = process_file(filename, data, container, options)
+            # process the file, handling errors and encryption.  A fresh
+            # context per input document guarantees no state leaks between
+            # documents.
+            decryption_context = crypto.DecryptionContext(
+                max_nesting=options.decrypt_max_depth,
+                max_attempts=options.decrypt_max_attempts)
+            curr_return_code = process_file(filename, data, container, options,
+                                            decryption_context=decryption_context)
             count += 1
+            _print_decryption_report(decryption_context.report, options)
 
             # adjust overall return code
             if curr_return_code == RETURN_OK:

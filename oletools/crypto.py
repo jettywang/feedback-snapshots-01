@@ -55,6 +55,19 @@ just assume that it works on unencrypted data and fail with an exception if
 encrypted data makes its work impossible. No need to check `if is_encrypted()`
 at the start of functions.
 
+Nested decryption is tracked by a :class:`DecryptionContext`, which must be
+created once per top-level document and passed to every recursive layer.  It
+records a :class:`DecryptionReport` with one :class:`DecryptionLayer` per
+container and enforces both a nesting and a password-attempt budget.  Layers
+are identified by the SHA-256 digest of their actual content, never by file
+name.  Passwords are only referenced by candidate index, and decrypted bytes
+are never stored in the report, so the report remains safe for logs::
+
+    with crypto.decryption_context() as ctx:
+        decrypted, password = crypto.decrypt(path, passwords, context=ctx)
+        ...
+        print(ctx.report.to_dict())
+
 .. seealso:: [MS-OFFCRYPTO]
 .. seealso:: https://github.com/nolze/msoffcrypto-tool
 
@@ -103,7 +116,10 @@ import sys
 import struct
 import os
 import shutil
-from os.path import splitext, isfile
+import hashlib
+import logging
+from contextlib import contextmanager
+from os.path import splitext, isfile, basename
 from tempfile import mkstemp
 import zipfile
 
@@ -125,13 +141,19 @@ if _parent_dir not in sys.path:
     sys.path.insert(0, _parent_dir)
 
 from oletools.common.errors import CryptoErrorBase, WrongEncryptionPassword, \
-    UnsupportedEncryptionError, MaxCryptoNestingReached, CryptoLibNotImported
+    UnsupportedEncryptionError, MaxCryptoNestingReached, CryptoLibNotImported, \
+    CorruptedEncryptionError, MaxDecryptionAttemptsReached
 from oletools.common.log_helper import log_helper
 
 
 #: if there is an encrypted file embedded in an encrypted file,
 #: how deep down do we go
 MAX_NESTING_DEPTH = 10
+
+#: how many password attempts may be spent while decrypting one document
+#: (all layers together).  This is deliberately independent of the number of
+#: nesting levels: callers can cap work even for highly nested documents.
+MAX_DECRYPT_ATTEMPTS = 100
 
 # === LOGGING =================================================================
 
@@ -190,6 +212,10 @@ def is_encrypted(some_file):
                 file_handle = some_file.fp
                 file_pos = file_handle.tell()
                 file_handle.seek(0)
+            elif hasattr(some_file, 'read') and hasattr(some_file, 'seek'):
+                file_handle = some_file
+                file_pos = file_handle.tell()
+                file_handle.seek(0)
             else:
                 file_handle = open(some_file, 'rb')
 
@@ -205,7 +231,7 @@ def is_encrypted(some_file):
 
         finally:
             try:
-                if file_pos is not None:   # input was OleFileIO
+                if file_pos is not None:   # input was OleFileIO or file-like
                     file_handle.seek(file_pos)
                 else:                      # input was file name
                     file_handle.close()
@@ -304,6 +330,362 @@ DEFAULT_PASSWORDS = [EXCEL_TRANSPARENT_PASSWORD, POWERPOINT_TRANSPARENT_PASSWORD
                      '123', '1234', '12345', '123456', '4321']
 
 
+# === DECRYPTION REPORT =======================================================
+
+# Outcomes used in :class:`DecryptionLayer`
+OUTCOME_ANALYZED = 'analyzed'
+OUTCOME_DECRYPTED = 'decrypted'            # decrypted, but not possible to analyze here
+OUTCOME_WRONG_PASSWORD = 'wrong_password'
+OUTCOME_UNSUPPORTED = 'unsupported_algorithm'
+OUTCOME_CORRUPT = 'corrupt'
+OUTCOME_NESTING_LIMIT = 'nesting_limit'
+OUTCOME_ATTEMPT_LIMIT = 'attempt_limit'
+OUTCOME_NOT_ENCRYPTED = 'not_encrypted'
+OUTCOME_UNKNOWN = 'unknown_error'
+
+
+def _digest(data):
+    """Return a short, stable content digest for in-memory container data."""
+    if data is None:
+        return None
+    if isinstance(data, str):
+        data = data.encode('utf-8', errors='replace')
+    try:
+        return hashlib.sha256(data).hexdigest()
+    except TypeError:
+        return None
+
+
+def _file_digest(filename):
+    """Return the content digest of a file on disk, or None if unreadable."""
+    digest = hashlib.sha256()
+    try:
+        with open(filename, 'rb') as reader:
+            for block in iter(lambda: reader.read(65536), b''):
+                digest.update(block)
+        return digest.hexdigest()
+    except (IOError, OSError, TypeError):
+        return None
+
+
+def _classify_exception(exc):
+    """Map a decrypting-library failure to one of the ``OUTCOME_*`` values.
+
+    Only the exception type and a normalized message are considered; the
+    returned outcome never contains a password or payload bytes.
+    """
+    if exc is None:
+        return OUTCOME_UNKNOWN
+    if isinstance(exc, MaxCryptoNestingReached):
+        return OUTCOME_NESTING_LIMIT
+    if isinstance(exc, MaxDecryptionAttemptsReached):
+        return OUTCOME_ATTEMPT_LIMIT
+    if isinstance(exc, UnsupportedEncryptionError):
+        return OUTCOME_UNSUPPORTED
+    if isinstance(exc, CorruptedEncryptionError):
+        return OUTCOME_CORRUPT
+    if isinstance(exc, WrongEncryptionPassword):
+        return OUTCOME_WRONG_PASSWORD
+    if isinstance(exc, CryptoLibNotImported):
+        return OUTCOME_UNSUPPORTED
+
+    name = type(exc).__name__.lower()
+    message = str(exc).lower()
+    if 'invalidkey' in name or 'invalid key' in message:
+        return OUTCOME_WRONG_PASSWORD
+    if 'unsupported encryption' in message or 'extensible' in message \
+            or 'not yet supported' in message:
+        return OUTCOME_UNSUPPORTED
+    if 'unrecognized file format' in message or \
+            'unsupported file format' in message:
+        # The bytes are not a readable Office container; for a file that
+        # claimed to be encrypted this is a structural problem.
+        return OUTCOME_CORRUPT
+    if 'parse' in name or 'fileformat' in name or 'corrupt' in message \
+            or 'malformed' in message or 'truncated' in message \
+            or 'cannot be parsed' in message or 'incomplete' in message \
+            or 'unsupported file format' in message:
+        if 'unsupported encryption' in message:
+            return OUTCOME_UNSUPPORTED
+        return OUTCOME_CORRUPT
+    if 'decryptionerror' in name:
+        return OUTCOME_CORRUPT
+    return OUTCOME_UNKNOWN
+
+
+def _short_exception(exc):
+    """Return a sanitized one-line description of a decryption failure."""
+    text = str(exc or '')
+    # Keep the report useful without echoing arbitrary library output.
+    text = ' '.join(text.split())
+    if len(text) > 160:
+        text = text[:157] + '...'
+    return text
+
+
+def _container_kind(filename=None, data=None):
+    """Best-effort container name for the report (never includes a password)."""
+    source = data
+    if source is None and filename:
+        try:
+            with open(filename, 'rb') as reader:
+                source = reader.read(8)
+        except (IOError, OSError, TypeError):
+            source = None
+    if source:
+        head = source[:8]
+        if head.startswith(b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1'):
+            return 'ole'
+        if head.startswith(b'PK\x03\x04'):
+            return 'zip'
+        if head.startswith(b'{\\rtf'):
+            return 'rtf'
+    if filename:
+        ext = splitext(filename)[1].lower()
+        if ext:
+            return ext.lstrip('.')
+    return 'unknown'
+
+
+class DecryptionLayer(object):
+    """One layer of a (possibly nested) decryption attempt.
+
+    All fields are safe for diagnostic output: they contain no password and no
+    decrypted bytes, only identities and status.
+    """
+
+    def __init__(self, depth, container=None, identity=None, source=None,
+                 encrypted=None):
+        self.depth = depth
+        self.container = container or 'unknown'
+        self.identity = identity
+        self.source = source
+        self.encrypted = encrypted
+        self.outcome = OUTCOME_UNKNOWN
+        self.password_index = None
+        self.attempts = 0
+        self.detail = None
+        self.analysis_complete = None
+
+    @property
+    def decrypted(self):
+        return self.outcome in (OUTCOME_ANALYZED, OUTCOME_DECRYPTED)
+
+    @property
+    def analyzable(self):
+        return self.outcome == OUTCOME_ANALYZED and self.analysis_complete is not False
+
+    @property
+    def stopped(self):
+        return self.outcome not in (OUTCOME_ANALYZED, OUTCOME_DECRYPTED,
+                                    OUTCOME_NOT_ENCRYPTED)
+
+    def to_dict(self):
+        result = {
+            'depth': self.depth,
+            'container': self.container,
+            'identity': self.identity,
+            'encrypted': self.encrypted,
+            'outcome': self.outcome,
+            'decrypted': self.decrypted,
+            'analyzable': self.analyzable,
+            'attempts': self.attempts,
+        }
+        if self.source:
+            # Display name only; identity above is what actually distinguishes
+            # same-named containers.
+            result['source'] = self.source
+        if self.password_index is not None:
+            # Only the candidate's position is exposed, never its value.
+            result['password_index'] = self.password_index
+        if self.detail:
+            result['detail'] = self.detail
+        if self.analysis_complete is not None:
+            result['analysis_complete'] = self.analysis_complete
+        return result
+
+    def __repr__(self):
+        return '<DecryptionLayer depth={0.depth} container={0.container!r} ' \
+               'outcome={0.outcome!r}>'.format(self)
+
+
+class DecryptionReport(object):
+    """Per-invocation record of nested decryption.
+
+    A new report must be created for every top-level document.  It intentionally
+    holds no module-level cache, so a repeated call can never inherit state from
+    a previous document.
+    """
+
+    def __init__(self, max_nesting=MAX_NESTING_DEPTH,
+                 max_attempts=MAX_DECRYPT_ATTEMPTS):
+        self.max_nesting = max_nesting
+        self.max_attempts = max_attempts
+        self.layers = []
+        self.attempts = 0
+        self.attempted_keys = set()
+        self.stopped_at = None
+        self.stopped_reason = None
+        self.complete = True
+
+    # -- bookkeeping -----------------------------------------------------
+    def add_layer(self, layer):
+        self.layers.append(layer)
+        return layer
+
+    def note_attempt(self, identity, password_index):
+        """Count one password attempt; return False if the budget is exhausted."""
+        if self.attempts >= self.max_attempts:
+            return False
+        self.attempts += 1
+        if identity is not None:
+            self.attempted_keys.add((identity, password_index))
+        return True
+
+    def already_attempted(self, identity, password_index):
+        """True if this identity/candidate pair was tried in this invocation.
+
+        Without a content identity we cannot safely deduplicate: two documents
+        with the same name may contain different bytes, so an attempt for one
+        must not suppress the other.
+        """
+        if identity is None:
+            return False
+        return (identity, password_index) in self.attempted_keys
+
+    def stop(self, depth, reason, detail=None, layer=None):
+        """Record the layer where processing stopped and mark the run partial."""
+        self.complete = False
+        if self.stopped_at is None:
+            self.stopped_at = depth
+            self.stopped_reason = reason
+            self.stopped_detail = detail
+        if layer is None:
+            # Fall back to depth matching; callers that know the exact
+            # container should pass it so same-depth layers stay distinct.
+            for candidate in reversed(self.layers):
+                if candidate.depth == depth:
+                    layer = candidate
+                    break
+        if layer is not None and detail:
+            layer.detail = detail
+        return layer
+
+    def mark_stopped_from_exception(self, exc):
+        outcome = getattr(exc, 'outcome', None) or _classify_exception(exc)
+        layer = getattr(exc, 'layer', None)
+        depth = layer.depth if layer is not None else (len(self.layers) - 1)
+        self.stop(depth, outcome, getattr(exc, 'detail', None), layer=layer)
+
+    # -- summaries -------------------------------------------------------
+    @property
+    def success(self):
+        return self.complete and all(layer.outcome in
+                                     (OUTCOME_ANALYZED, OUTCOME_NOT_ENCRYPTED)
+                                     for layer in self.layers)
+
+    def to_dict(self):
+        result = {
+            'complete': self.complete,
+            'success': self.success,
+            'max_depth': self.max_nesting,
+            'max_attempts': self.max_attempts,
+            'attempts': self.attempts,
+            'layer_count': len(self.layers),
+            'layers': [layer.to_dict() for layer in self.layers],
+        }
+        if self.stopped_at is not None:
+            result['stopped_at'] = self.stopped_at
+            result['stopped_reason'] = self.stopped_reason
+            if getattr(self, 'stopped_detail', None):
+                result['stopped_detail'] = self.stopped_detail
+        return result
+
+    def __repr__(self):
+        return '<DecryptionReport layers={0} attempts={1} complete={2}>' \
+            .format(len(self.layers), self.attempts, self.complete)
+
+
+# === DECRYPTION CONTEXT ======================================================
+
+
+class DecryptionContext(object):
+    """State shared by all layers of one top-level analysis.
+
+    Pass the same context through recursive ``process_maybe_encrypted`` /
+    ``process_file`` calls.  It bounds depth and password attempts, and owns
+    the report that describes which layer was decrypted and which was not.
+    """
+
+    def __init__(self, report=None, max_nesting=None, max_attempts=None):
+        if report is None:
+            report = DecryptionReport(
+                max_nesting=max_nesting or MAX_NESTING_DEPTH,
+                max_attempts=max_attempts or MAX_DECRYPT_ATTEMPTS)
+        self.report = report
+        self.active_depth = 0
+        self._temp_files = []
+
+    # -- temp file hygiene -----------------------------------------------
+    def register_temp_file(self, path):
+        if path:
+            self._temp_files.append(path)
+        return path
+
+    def forget_temp_file(self, path):
+        """Stop tracking a temp file (e.g. after the caller removed it)."""
+        try:
+            self._temp_files.remove(path)
+        except (ValueError, AttributeError):
+            pass
+
+    def cleanup_temp_files(self):
+        """Remove any plaintext temp files still tracked by this context."""
+        for path in list(self._temp_files):
+            try:
+                if path and isfile(path):
+                    os.unlink(path)
+            except OSError:
+                log.debug('Could not remove temp file', exc_info=True)
+            finally:
+                try:
+                    self._temp_files.remove(path)
+                except ValueError:
+                    pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.cleanup_temp_files()
+        return False
+
+    # -- reporting -------------------------------------------------------
+    def stop(self, depth, reason, detail=None, layer=None):
+        """Record where processing stopped and mark the whole run partial."""
+        self.report.stop(depth, reason, detail, layer=layer)
+
+    def attempt_password(self, identity, password_index, filename=None):
+        """Consume one attempt; raise when the attempt budget is exceeded."""
+        if not self.report.note_attempt(identity, password_index):
+            exc = MaxDecryptionAttemptsReached(self.report.max_attempts,
+                                               filename)
+            exc.attach_report(self.report, outcome=OUTCOME_ATTEMPT_LIMIT)
+            raise exc
+        return True
+
+
+@contextmanager
+def decryption_context(report=None, max_nesting=None, max_attempts=None):
+    """Context manager creating and cleaning up a :class:`DecryptionContext`."""
+    context = DecryptionContext(report=report, max_nesting=max_nesting,
+                                max_attempts=max_attempts)
+    try:
+        yield context
+    finally:
+        context.cleanup_temp_files()
+
+
 def _check_msoffcrypto():
     """Raise a :py:class:`CryptoLibNotImported` if msoffcrypto not imported."""
     if msoffcrypto is None:
@@ -315,7 +697,136 @@ def check_msoffcrypto():
     return msoffcrypto is not None
 
 
-def decrypt(filename, passwords=None, decrypted_dir=None, **temp_file_args):
+class _PasswordRedactionFilter(logging.Filter):
+    """Drop password material from third-party log records during decryption."""
+
+    def __init__(self, secrets):
+        super(_PasswordRedactionFilter, self).__init__()
+        self.secrets = tuple(secret for secret in secrets
+                             if isinstance(secret, str) and secret)
+
+    def filter(self, record):
+        if not self.secrets:
+            return True
+        try:
+            message = record.getMessage()
+        except Exception:
+            return True
+        for secret in self.secrets:
+            if secret in message:
+                record.msg = '[redacted log message containing a password]'
+                record.args = ()
+                break
+        return True
+
+
+def _normalize_passwords(passwords):
+    """Return a list of password candidates without modifying the input."""
+    if isinstance(passwords, str):
+        return [passwords]
+    if not passwords:
+        return list(DEFAULT_PASSWORDS)
+    return list(passwords)
+
+
+def _open_crypto_file(reader, filename):
+    """Create an msoffcrypto file object, mapping format failures to our errors."""
+    try:
+        return msoffcrypto.OfficeFile(reader)
+    except Exception as exc:
+        outcome = _classify_exception(exc)
+        if outcome == OUTCOME_UNSUPPORTED:
+            log.debug('Unsupported encryption while opening file')
+            raise UnsupportedEncryptionError(filename, _short_exception(exc))
+        if outcome == OUTCOME_CORRUPT:
+            log.debug('Corrupt container while opening file')
+            raise CorruptedEncryptionError(filename, _short_exception(exc))
+        raise
+
+
+#: magic signatures a successfully decrypted Office payload may start with
+_CONTAINER_MAGIC = (
+    b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1',   # OLE / nested encrypted container
+    b'PK\x03\x04',                               # OOXML / zip
+    b'{\\rtf',                                   # RTF
+)
+
+
+def _looks_like_document(data):
+    """True if data begins with a recognizable Office container header."""
+    if not data:
+        return False
+    return any(data.startswith(magic) for magic in _CONTAINER_MAGIC)
+
+
+def _decrypt_ooxml_payload(crypto_file, verified_password):
+    """Decrypt an OOXML payload, returning the plaintext bytes.
+
+    ``msoffcrypto``'s own OOXML decryptor rejects payloads that are not zip
+    files.  A nested encrypted container is, however, a valid payload: it is
+    an OLE file that must be decrypted again.  Therefore the low-level cipher
+    is used here.
+
+    If the password verifier could be checked, the output is trusted to be the
+    real plaintext.  If the document has a broken verifier (some transparently
+    encrypted files do), the output must at least look like an Office
+    container before it is accepted.
+    """
+    if crypto_file.type == 'agile':
+        from msoffcrypto.method.ecma376_agile import ECMA376Agile
+        with crypto_file.file.openstream('EncryptedPackage') as stream:
+            plaintext = ECMA376Agile.decrypt(
+                crypto_file.secret_key,
+                crypto_file.info['keyDataSalt'],
+                crypto_file.info['keyDataHashAlgorithm'],
+                stream)
+    elif crypto_file.type == 'standard':
+        from msoffcrypto.method.ecma376_standard import ECMA376Standard
+        with crypto_file.file.openstream('EncryptedPackage') as stream:
+            plaintext = ECMA376Standard.decrypt(crypto_file.secret_key, stream)
+    else:
+        raise UnsupportedEncryptionError(detail='encryption type {!r}'
+                                         .format(crypto_file.type))
+
+    if not verified_password and not _looks_like_document(plaintext):
+        raise WrongEncryptionPassword('The file could not be decrypted with '
+                                      'this password')
+    return plaintext
+
+
+def _decrypt_with_password(crypto_file, password, write_handle):
+    """Load a key and write decrypted bytes; raises on failure."""
+    verified_password = False
+    try:
+        crypto_file.load_key(password=password, verify_password=True)
+        verified_password = True
+    except TypeError as exc:
+        # Older msoffcrypto format handlers verify the password inside
+        # load_key and do not accept `verify_password`.
+        if 'verify_password' not in str(exc):
+            raise
+        crypto_file.load_key(password=password)
+        verified_password = True
+    except CorruptedEncryptionError:
+        raise
+    except Exception as exc:
+        # Some valid documents (notably transparently encrypted ones) have
+        # an unusable verifier. Fall back to the legacy behaviour and decide
+        # correctness from the decrypted payload instead.
+        if _classify_exception(exc) != OUTCOME_WRONG_PASSWORD:
+            raise
+        crypto_file.load_key(password=password)
+
+    if type(crypto_file).__name__ == 'OOXMLFile':
+        plaintext = _decrypt_ooxml_payload(crypto_file, verified_password)
+        write_handle.write(plaintext)
+    else:
+        crypto_file.decrypt(write_handle)
+
+
+def decrypt(filename, passwords=None, decrypted_dir=None, context=None,
+            report=None, depth=None, identity=None, container=None,
+            **temp_file_args):
     """
     Try to decrypt an encrypted file
 
@@ -323,6 +834,12 @@ def decrypt(filename, passwords=None, decrypted_dir=None, **temp_file_args):
     passwords. If no password is given, tries the standard password for write
     protection. Creates a file with decrypted data whose file name is returned.
     If the decryption fails, None is returned.
+
+    All attempts for a (possibly nested) document are bounded by an optional
+    :class:`DecryptionContext`.  Pass the same context to every layer; it
+    records which containers were decrypted and which could not be analyzed.
+    Password candidates are identified by index only, and neither passwords
+    nor decrypted bytes are logged.
 
     :param str filename: path to an ole file on disc
     :param passwords: list/set/tuple/... of passwords or a single password or
@@ -334,6 +851,13 @@ def decrypt(filename, passwords=None, decrypted_dir=None, **temp_file_args):
                            `oletools-decrypt-`; `text` will be ignored
     :param decrypted_dir: folder to store the decrypted file in case you want
                             to preserve it
+    :param context: optional :class:`DecryptionContext` shared across layers.
+                    Created implicitly (and discarded) when omitted.
+    :param report: optional :class:`DecryptionReport` shorthand for `context`.
+    :param depth: nesting depth used in the report (default: context depth).
+    :param identity: optional pre-computed content digest; must identify the
+                     actual bytes, not just a filename.
+    :param container: optional container type hint for the report.
     :returns: a tuple with the name of the decrypted temporary file (type str) or `None`
               and the correct password or 'None'
     :raises: :py:class:`ImportError` if :py:mod:`msoffcrypto-tools` not found
@@ -341,79 +865,267 @@ def decrypt(filename, passwords=None, decrypted_dir=None, **temp_file_args):
     """
     _check_msoffcrypto()
 
-    # normalize password so we always have a list/tuple
-    if isinstance(passwords, str):
-        passwords = (passwords, )
-    elif not passwords:
-        passwords = DEFAULT_PASSWORDS
+    if context is None:
+        context = DecryptionContext(report=report)
+
+    if depth is None:
+        depth = context.active_depth
+    if identity is None:
+        identity = identify(filename)
+
+    layer = _layer_for(context, depth, filename, identity, container)
+    if layer is not None and layer.outcome in (None, OUTCOME_UNKNOWN):
+        # Only reset bookkeeping for a layer that has not been concluded yet;
+        # otherwise this is a repeat call for the same container.
+        layer.attempts = 0
+
+    passwords = _normalize_passwords(passwords)
 
     # check temp file args
     if 'prefix' not in temp_file_args:
         temp_file_args['prefix'] = 'oletools-decrypt-'
     if 'suffix' not in temp_file_args:
-        temp_file_args['suffix'] = splitext(filename)[1]
+        temp_file_args['suffix'] = splitext(filename)[1] \
+            if isinstance(filename, str) else ''
     temp_file_args['text'] = False
 
-    decrypt_file = None
-    with open(filename, 'rb') as reader:
-        try:
-            crypto_file = msoffcrypto.OfficeFile(reader)
-        except Exception as exc:   # e.g. ppt, not yet supported by msoffcrypto
-            if 'Unrecognized file format' in str(exc):
-                log.debug('Caught exception', exc_info=True)
+    redaction = _PasswordRedactionFilter(passwords)
+    msoffcrypto_logger = logging.getLogger('msoffcrypto')
+    msoffcrypto_logger.addFilter(redaction)
+    oletools_logger = logging.getLogger('oletools')
+    oletools_logger.addFilter(redaction)
 
-                # raise different exception without stack trace of original exc
-                if sys.version_info.major == 2:
-                    raise UnsupportedEncryptionError(filename)
-                else:
-                    # this is a syntax error in python 2, so wrap it in exec()
-                    exec('raise UnsupportedEncryptionError(filename) from None')
-            else:
-                raise
-        if not crypto_file.is_encrypted():
+    decrypt_file = None
+    correct_password = None
+    unsupported_error = None
+    corrupt_error = None
+    try:
+        reader = open(filename, 'rb')
+    except (IOError, OSError) as exc:
+        context.cleanup_temp_files()
+        raise CorruptedEncryptionError(filename, type(exc).__name__)
+
+    try:
+        try:
+            crypto_file = _open_crypto_file(reader, filename)
+        except CryptoErrorBase as exc:
+            if layer is not None:
+                layer.outcome = _classify_exception(exc)
+                layer.detail = _short_exception(exc)
+            exc.attach_report(context.report, layer,
+                              outcome=_classify_exception(exc))
+            raise
+        except Exception as exc:
+            if layer is not None:
+                layer.outcome = OUTCOME_CORRUPT
+                layer.detail = _short_exception(exc)
+            error = CorruptedEncryptionError(filename, type(exc).__name__)
+            error.attach_report(context.report, layer, outcome=OUTCOME_CORRUPT)
+            raise error
+
+        try:
+            is_encrypted = crypto_file.is_encrypted()
+        except Exception as exc:
+            is_encrypted = False
+            if layer is not None:
+                layer.outcome = OUTCOME_CORRUPT
+                layer.detail = _short_exception(exc)
+
+        if layer is not None:
+            layer.encrypted = bool(is_encrypted)
+        if not is_encrypted:
+            if layer is not None:
+                layer.outcome = OUTCOME_NOT_ENCRYPTED
             raise ValueError('Given input file {} is not encrypted!'
                              .format(filename))
 
-        correct_password = None
-        for password in passwords:
-            log.debug('Trying to decrypt with password {!r}'.format(password))
+        for password_index, password in enumerate(passwords):
+            if context.report.already_attempted(identity, password_index):
+                log.debug('Skipping previously attempted password %d for '
+                          'container %s', password_index, identity)
+                continue
+
+            # Raising here preserves the attempt budget; no temp file exists.
+            context.attempt_password(identity, password_index, filename)
+            if layer is not None:
+                layer.attempts += 1
+
+            log.debug('Trying password candidate %d for container %s',
+                      password_index, identity)
             write_descriptor = None
             write_handle = None
-            decrypt_file = None
+            candidate_file = None
             try:
-                crypto_file.load_key(password=password)
-
-                # create temp file
-                write_descriptor, decrypt_file = mkstemp(**temp_file_args)
+                write_descriptor, candidate_file = mkstemp(**temp_file_args)
+                context.register_temp_file(candidate_file)
                 write_handle = os.fdopen(write_descriptor, 'wb')
-                write_descriptor = None      # is now handled via write_handle
-                crypto_file.decrypt(write_handle)
+                write_descriptor = None
 
-                # decryption was successfull; clean up and return
+                _decrypt_with_password(crypto_file, password, write_handle)
+
                 write_handle.close()
                 write_handle = None
+                decrypt_file = candidate_file
                 correct_password = password
+                if layer is not None:
+                    layer.outcome = OUTCOME_DECRYPTED
+                    layer.password_index = password_index
+                    layer.detail = None
                 break
-            except Exception:
-                log.debug('Failed to decrypt', exc_info=True)
+            except MaxDecryptionAttemptsReached:
+                raise
+            except Exception as exc:
+                log.debug('Password candidate %d failed for container %s (%s)',
+                          password_index, identity, _classify_exception(exc))
 
-                # error-clean up: close everything and del temp file
                 if write_handle:
                     write_handle.close()
-                elif write_descriptor:
+                    write_handle = None
+                elif write_descriptor is not None:
                     os.close(write_descriptor)
-                if decrypt_file and isfile(decrypt_file):
-                    os.unlink(decrypt_file)
-                decrypt_file = None
-                correct_password = None
+                    write_descriptor = None
+                if candidate_file and isfile(candidate_file):
+                    try:
+                        os.unlink(candidate_file)
+                    except OSError:
+                        log.debug('Could not remove failed temp file',
+                                  exc_info=True)
+                context.forget_temp_file(candidate_file)
+
+                outcome = _classify_exception(exc)
+                if outcome == OUTCOME_UNSUPPORTED:
+                    unsupported_error = exc
+                    break
+                if outcome == OUTCOME_CORRUPT and \
+                        'could not be decrypted' not in str(exc).lower():
+                    corrupt_error = exc
+                    break
+                # A wrong password is the expected failure for a candidate.
+    finally:
+        try:
+            reader.close()
+        except Exception:
+            pass
+        msoffcrypto_logger.removeFilter(redaction)
+        oletools_logger.removeFilter(redaction)
+        if decrypt_file is None:
+            # Failure or budget exception: never leave plaintext behind.
+            context.cleanup_temp_files()
 
     if decrypt_file and correct_password:
-        log.debug(f'Successfully decrypted the file with password: {correct_password}')
+        log.debug('Decrypted container %s using password candidate %d',
+                  identity, layer.password_index if layer else -1)
         if decrypted_dir:
             if os.path.isdir(decrypted_dir) and os.access(decrypted_dir, os.W_OK):
-                log.info(f"Saving decrypted file in: {decrypted_dir}")
+                log.info('Saving decrypted file in: %s', decrypted_dir)
                 shutil.copy(decrypt_file, decrypted_dir)
     else:
-        log.info('All passwords failed')
+        if unsupported_error is not None:
+            outcome = OUTCOME_UNSUPPORTED
+            detail = _short_exception(unsupported_error)
+        elif corrupt_error is not None:
+            outcome = OUTCOME_CORRUPT
+            detail = _short_exception(corrupt_error)
+        else:
+            outcome = OUTCOME_WRONG_PASSWORD
+            detail = 'no password candidate matched'
+        if layer is not None:
+            layer.outcome = outcome
+            layer.detail = detail
+        context.stop(depth, outcome, detail)
+        log.info('All password candidates failed for container %s', identity)
 
     return decrypt_file, correct_password
+
+
+def mark_layer_analyzed(context, depth, complete=True, identity=None):
+    """Mark a decrypted layer as fully analyzed.
+
+    Called by tools once they have processed the decrypted payload (possibly
+    after recursively peeling more layers).
+    """
+    if context is None:
+        return None
+    layer = get_layer(context, depth, identity=identity)
+    layer.analysis_complete = bool(complete)
+    if complete:
+        layer.outcome = OUTCOME_ANALYZED
+    else:
+        # The payload was decrypted, but processing stopped in a deeper
+        # layer; report it as decrypted-only so callers do not mistake it
+        # for fully analyzed content.
+        layer.outcome = OUTCOME_DECRYPTED
+        context.report.complete = False
+    return layer
+
+
+def identify(filename):
+    """Return the content identity (SHA-256) of a file or file-like object."""
+    try:
+        if hasattr(filename, 'read') and hasattr(filename, 'seek'):
+            position = filename.tell()
+            filename.seek(0)
+            identity = _digest(filename.read())
+            filename.seek(position)
+            return identity
+        return _file_digest(filename)
+    except Exception:
+        return None
+
+
+def layer_for(context, depth, filename):
+    """Return the report layer bound to this actual file content."""
+    if context is None:
+        return None
+    identity = identify(filename)
+    if identity is None:
+        return get_layer(context, depth)
+    for layer in reversed(context.report.layers):
+        if layer.depth == depth and layer.identity == identity:
+            return layer
+    return None
+
+
+def _layer_for(context, depth, filename, identity, container):
+    """Find or create the report layer for the current container.
+
+    Layers are matched by depth *and* content identity.  Two different inner
+    containers that happen to share a display name therefore never share a
+    layer (or its attempt bookkeeping).
+    """
+    if context is None:
+        return None
+    for layer in reversed(context.report.layers):
+        if layer.depth == depth and layer.identity == identity:
+            return layer
+    source = None
+    if isinstance(filename, str):
+        name = basename(filename)
+        # Do not report random temp-file names created by an outer decryption
+        # step; they would look like meaningful document names.
+        if not name.startswith('oletools-decrypt-'):
+            source = name
+    return context.report.add_layer(DecryptionLayer(
+        depth=depth,
+        container=container or _container_kind(filename),
+        identity=identity,
+        source=source,
+        encrypted=True))
+
+
+def get_layer(context, depth, identity=None):
+    """Return the report layer for `depth` (and optional identity).
+
+    When identity is given, only a layer bound to the same actual container is
+    returned; same-named documents with different content are kept apart.
+    """
+    if context is None:
+        return None
+    for layer in reversed(context.report.layers):
+        if layer.depth == depth and (identity is None or
+                                     layer.identity == identity):
+            return layer
+    return context.report.add_layer(DecryptionLayer(depth=depth))
+
+
+

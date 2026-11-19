@@ -274,6 +274,14 @@ def process_args(cmd_line_args=None):
     parser.add_argument("--decrypted_dir", dest='decrypted_dir', type=str,
                         default=None,
                         help='store the decrypted file to this folder.')
+    parser.add_argument("--decrypt-max-depth", dest='decrypt_max_depth',
+                        type=int, default=crypto.MAX_NESTING_DEPTH,
+                        help='maximum number of nested decryption layers '
+                             '(default: %(default)s)')
+    parser.add_argument("--decrypt-max-attempts", dest='decrypt_max_attempts',
+                        type=int, default=crypto.MAX_DECRYPT_ATTEMPTS,
+                        help='maximum number of password attempts per document '
+                             '(default: %(default)s)')
     filter_group = parser.add_argument_group(
         title='Filter which OpenXML field commands are returned',
         description='Only applies to OpenXML (e.g. docx) and rtf, not to OLE '
@@ -917,8 +925,51 @@ def process_file(filepath, field_filter_mode=None):
 # === MAIN =================================================================
 
 
-def process_maybe_encrypted(filepath, passwords=None, decrypted_dir=None, crypto_nesting=0,
-                            **kwargs):
+class DdeResult(str):
+    """String of DDE links that also carries the decryption report.
+
+    Subclassing ``str`` keeps the historical return value of
+    :py:func:`process_maybe_encrypted` usable, while callers that need to know
+    about decryption layers can read the attributes below.
+    """
+
+    def __new__(cls, dde_links, report, stopped=False, stopped_at=None):
+        instance = super(DdeResult, cls).__new__(cls, dde_links or u'')
+        instance.dde_links = dde_links or u''
+        instance.decryption = report
+        instance.stopped = bool(stopped)
+        instance.stopped_at = stopped_at
+        return instance
+
+
+def _result(dde_links, report, stopped=False, stopped_at=None):
+    """Package DDE links plus a decryption report for a processing call."""
+    return DdeResult(dde_links, report, stopped=stopped,
+                     stopped_at=stopped_at)
+
+
+def _looks_like_structured_container(filepath):
+    """True if the bytes start with an OLE or zip container signature."""
+    try:
+        with open(filepath, 'rb') as reader:
+            head = reader.read(8)
+    except (IOError, OSError, TypeError):
+        return False
+    return head.startswith(b'\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1') \
+        or head.startswith(b'PK\x03\x04')
+
+
+def _exception_for_outcome(outcome, filepath, detail=None):
+    """Create the crypto exception matching a reported outcome."""
+    if outcome == crypto.OUTCOME_UNSUPPORTED:
+        return crypto.UnsupportedEncryptionError(filepath, detail)
+    if outcome == crypto.OUTCOME_CORRUPT:
+        return crypto.CorruptedEncryptionError(filepath, detail)
+    return crypto.WrongEncryptionPassword(filepath)
+
+
+def process_maybe_encrypted(filepath, passwords=None, decrypted_dir=None,
+                            crypto_nesting=0, context=None, **kwargs):
     """
     Process a file that might be encrypted.
 
@@ -926,54 +977,135 @@ def process_maybe_encrypted(filepath, passwords=None, decrypted_dir=None, crypto
     process the result. Based on recommendation in module doc string of
     :py:mod:`oletools.crypto`.
 
+    Partial results are preserved: if a deeper layer cannot be decrypted (or
+    a budget is exhausted), the links found so far are returned together with
+    a :class:`decryption report <oletools.crypto.DecryptionReport>` describing
+    the layer where processing stopped.
+
     :param str filepath: path to file on disc.
     :param passwords: list of passwords (str) to try for decryption or None
     :param decrypted_dir: folder to store the decrypted file in case you want
                                to preserve it
     :param int crypto_nesting: How many decryption layers were already used to
                                get the given file.
+    :param context: optional :class:`oletools.crypto.DecryptionContext` shared
+                    by all layers of one invocation.
     :param kwargs: same as :py:func:`process_file`
-    :returns: same as :py:func:`process_file`
+    :returns: a :class:`DdeResult` (a ``str`` subclass) with attributes
+              `dde_links`, `decryption`, `stopped` and `stopped_at`
     """
-    # TODO: here filepath may also be a file in memory, it's not necessarily on disk
+    if context is None:
+        context = crypto.DecryptionContext()
+
+    depth = crypto_nesting
+    context.active_depth = depth
+
     result = u''
     try:
         result = process_file(filepath, **kwargs)
         if not crypto.is_encrypted(filepath):
-            return result
-    except Exception:
+            return _result(result, context.report)
+    except Exception as exc:
         logger.debug('Ignoring exception:', exc_info=True)
+        if isinstance(exc, crypto.CryptoErrorBase):
+            raise
         if not crypto.is_encrypted(filepath):
+            if _looks_like_structured_container(filepath):
+                # The bytes claim to be an Office container but cannot be
+                # parsed at all.  Keep the original exception type, but leave
+                # a report that identifies the damaged layer.
+                layer = crypto._layer_for(
+                    context, depth, filepath, crypto.identify(filepath), None)
+                layer.outcome = crypto.OUTCOME_CORRUPT
+                layer.detail = type(exc).__name__
+                context.stop(depth, crypto.OUTCOME_CORRUPT,
+                             type(exc).__name__, layer=layer)
+                try:
+                    exc.report = context.report
+                    exc.layer = layer
+                    exc.outcome = crypto.OUTCOME_CORRUPT
+                except (AttributeError, TypeError):
+                    # Some third-party exceptions refuse extra attributes;
+                    # the report on the context is still authoritative.
+                    pass
+            # Not encrypted: this is a genuine parsing problem, not a
+            # decryption problem.
             raise
 
     # we reach this point only if file is encrypted
-    # check if this is an encrypted file in an encrypted file in an ...
-    if crypto_nesting >= crypto.MAX_NESTING_DEPTH:
-        raise crypto.MaxCryptoNestingReached(crypto_nesting, filepath)
+    if depth >= context.report.max_nesting:
+        exc = crypto.MaxCryptoNestingReached(depth, filepath)
+        exc.attach_report(context.report, outcome=crypto.OUTCOME_NESTING_LIMIT)
+        context.stop(depth, crypto.OUTCOME_NESTING_LIMIT,
+                     'nesting limit reached')
+        return _result(result, context.report, stopped=True, stopped_at=depth)
+
+    if passwords is None:
+        passwords = list(crypto.DEFAULT_PASSWORDS)
+    else:
+        passwords = list(passwords) + list(crypto.DEFAULT_PASSWORDS)
 
     decrypted_file = None
-    if passwords is None:
-        passwords = crypto.DEFAULT_PASSWORDS
-    else:
-        passwords = list(passwords) + crypto.DEFAULT_PASSWORDS
     try:
         logger.debug('Trying to decrypt file')
-        decrypted_file, correct_password = crypto.decrypt(filepath, passwords, decrypted_dir)
-        if correct_password:
-            logger.info(f"The correct password is: {correct_password}")
+        try:
+            decrypted_file, correct_password = crypto.decrypt(
+                filepath, passwords, decrypted_dir, context=context,
+                depth=depth)
+        except (crypto.MaxCryptoNestingReached,
+                crypto.MaxDecryptionAttemptsReached) as exc:
+            # A budget limit must not throw away links found so far.  The
+            # report still names the layer that stopped processing.
+            logger.warning('Decryption budget exhausted at layer %d (%s)',
+                           depth, type(exc).__name__)
+            if getattr(exc, 'report', None) is None:
+                exc.attach_report(context.report)
+            return _result(result, context.report, stopped=True,
+                           stopped_at=depth)
+        if correct_password is not None:
+            # Only the candidate index is reported; the password itself must
+            # never reach the logs.
+            layer = crypto.layer_for(context, depth, filepath)
+            logger.info('Decrypted layer %d with password candidate %d',
+                        depth, layer.password_index if layer else -1)
         if not decrypted_file:
             logger.error('Decrypt failed, run with debug output to get details')
-            raise crypto.WrongEncryptionPassword(filepath)
+            layer = crypto.layer_for(context, depth, filepath)
+            outcome = layer.outcome if layer is not None else \
+                crypto.OUTCOME_WRONG_PASSWORD
+            if depth == 0:
+                # Preserve the historical top-level contract: callers expect
+                # an exception for an undecryptable input document.  Use the
+                # specific type matching the actual outcome.
+                exc = _exception_for_outcome(outcome, filepath,
+                                             getattr(layer, 'detail', None))
+                exc.attach_report(context.report, layer, outcome=outcome)
+                exc.partial_result = _result(result, context.report,
+                                             stopped=True, stopped_at=depth)
+                raise exc
+            return _result(result, context.report, stopped=True,
+                           stopped_at=depth)
+
         logger.info('Analyze decrypted file')
-        result = process_maybe_encrypted(decrypted_file, passwords, decrypted_dir,
-                                         crypto_nesting+1, **kwargs)
+        child = process_maybe_encrypted(
+            decrypted_file, passwords, decrypted_dir, depth + 1,
+            context=context, **kwargs)
+        crypto.mark_layer_analyzed(
+            context, depth, complete=not child.stopped,
+            identity=crypto.identify(filepath))
+        # merge nested links with whatever was found before decryption
+        nested = child.dde_links
+        if nested:
+            result = u'\n'.join(part for part in (result, nested) if part)
+        return _result(result, context.report, stopped=child.stopped,
+                       stopped_at=child.stopped_at)
     finally:     # clean up
         try:     # (maybe file was not yet created)
             os.unlink(decrypted_file)
         except Exception:
             logger.debug('Ignoring exception closing decrypted file:',
                          exc_info=True)
-    return result
+        context.forget_temp_file(decrypted_file)
 
 
 def main(cmd_line_args=None):
@@ -999,17 +1131,54 @@ def main(cmd_line_args=None):
 
     text = ''
     return_code = 1
+    report = None
     try:
-        text = process_maybe_encrypted(
+        context = crypto.DecryptionContext(
+            max_nesting=args.decrypt_max_depth,
+            max_attempts=args.decrypt_max_attempts)
+        outcome = process_maybe_encrypted(
             args.filepath, args.password, args.decrypted_dir,
-            field_filter_mode=args.field_filter_mode)
-        return_code = 0
+            context=context, field_filter_mode=args.field_filter_mode)
+        text = outcome.dde_links
+        report = outcome.decryption
+        return_code = 0 if not outcome.stopped else 1
     except Exception as exc:
         logger.exception(str(exc))
+        report = getattr(exc, 'report', None)
+        if report is None:
+            partial = getattr(exc, 'partial_result', None)
+            if partial is not None:
+                report = partial.decryption
+        partial = getattr(exc, 'partial_result', None)
+        if partial is not None:
+            text = partial.dde_links
 
     logger.print_str('DDE Links:')
     for link in text.splitlines():
-        logger.print_str(text, type='dde-link')
+        logger.print_str(link, type='dde-link')
+
+    if report is not None:
+        if args.json:
+            # The log helper wraps every line in a JSON object; keep the
+            # report compact so it stays a single readable entry.
+            logger.print_str(
+                'decryption complete={0} success={1} attempts={2} '
+                'stopped_at={3} stopped_reason={4} layers={5}'
+                .format(report.complete, report.success, report.attempts,
+                        report.stopped_at, report.stopped_reason,
+                        [layer.to_dict() for layer in report.layers]),
+                type='decryption')
+        else:
+            for layer in report.layers:
+                logger.print_str(
+                    'Decryption layer {0} (container {1}): {2}'
+                    .format(layer.depth, layer.container, layer.outcome),
+                    type='decryption')
+            if report.stopped_at is not None:
+                logger.print_str(
+                    'Decryption stopped at layer {0}: {1}'
+                    .format(report.stopped_at, report.stopped_reason),
+                    type='decryption')
 
     log_helper.end_logging()
 

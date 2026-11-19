@@ -109,6 +109,16 @@ Options:
 
 **New in v0.54:** the -p option can now be used to decrypt encrypted documents using the provided password(s).
 
+Nested encrypted documents are decrypted layer by layer. With `-j`, the JSON
+output contains an entry of type `decryption` that lists every layer with its
+depth, container type, content identity (SHA-256), outcome (`analyzed`,
+`wrong_password`, `unsupported_algorithm`, `corrupt`, `nesting_limit` or
+`attempt_limit`) and whether analysis was complete. Passwords are never
+included; a successful layer only records the index of the matching password
+candidate. Use `--decrypt-max-depth` and `--decrypt-max-attempts` to bound the
+work. When a limit is reached, results from already analyzed layers are kept,
+but the report is marked incomplete.
+
 ### Examples
 
 Scan a single file:

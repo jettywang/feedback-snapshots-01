@@ -33,6 +33,16 @@ Note: python-oletools is not related to OLETools published by BeCubed Software.
 News
 ----
 
+- **Unreleased**:
+    - crypto/msodde/olevba: nested decryption now returns a per-document
+      report that names each layer, its actual container identity and whether
+      it was decrypted and analyzed. Wrong password, unsupported algorithm and
+      corrupt structure are reported separately. Password candidates are
+      identified by index only, so passwords and decrypted content never enter
+      diagnostic logs. Depth and password-attempt budgets are per invocation;
+      exhausting them keeps already analyzed results but marks the report
+      incomplete. New options `--decrypt-max-depth` and
+      `--decrypt-max-attempts` are available in olevba and msodde.
 - **2025-05-22 v0.60.3**:
     - olevba: 
       - fixed a security issue in the CLI display when ANSI escape codes are present (PR #873)
