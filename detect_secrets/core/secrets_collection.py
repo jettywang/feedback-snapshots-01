@@ -12,6 +12,7 @@ from typing import Tuple
 from . import scan
 from ..util.path import convert_local_os_path
 from .potential_secret import PotentialSecret
+from detect_secrets import managed
 from detect_secrets.settings import configure_settings_from_baseline
 from detect_secrets.settings import get_settings
 
@@ -62,8 +63,8 @@ class SecretsCollection:
 
         with mp.Pool(
             processes=num_processors,
-            initializer=configure_settings_from_baseline,
-            initargs=(child_process_settings,),
+            initializer=_initialize_child_process,
+            initargs=(child_process_settings, managed.get_policy()),
         ) as p:
             for secrets in p.imap_unordered(
                 _scan_file_and_serialize,
@@ -311,6 +312,15 @@ class SecretsCollection:
     def __len__(self) -> int:
         """Returns the total number of secrets in the collection."""
         return sum(len(secrets) for secrets in self.data.values())
+
+
+def _initialize_child_process(settings: Dict[str, Any], managed_policy: Dict[str, Any]) -> None:
+    """Used for multiprocessing, so that child processes share the parent's configuration."""
+    # Child processes don't inherit the parent's in-memory state (depending on the start
+    # method), so the managed mode policy is restored before loading any settings. This
+    # ensures third-party extensions are vetted in child processes as well.
+    managed.restore_policy(managed_policy)
+    configure_settings_from_baseline(settings)
 
 
 def _scan_file_and_serialize(filename: str) -> List[PotentialSecret]:

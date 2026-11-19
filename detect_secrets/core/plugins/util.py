@@ -9,6 +9,7 @@ from typing import Generator
 from typing import Type
 from typing import TypeVar
 
+from ... import managed
 from ... import plugins
 from ...plugins.base import BasePlugin
 from ...settings import get_settings
@@ -36,6 +37,11 @@ def get_mapping_from_secret_type_to_class() -> Dict[str, Type[Plugin]]:
     # `import_file_as_module`.
     for classname, config in get_settings().plugins.items():
         if 'path' not in config:
+            continue
+
+        if managed.check_plugin(classname, config['path']):
+            # Defense in depth: never import third-party code that isn't allowlisted,
+            # even if it was registered outside of the policy loading flow.
             continue
 
         # Only supporting file schema right now.

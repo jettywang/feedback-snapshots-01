@@ -8,6 +8,7 @@ from typing import Generator
 from typing import List
 from urllib.parse import urlparse
 
+from . import managed
 from .exceptions import InvalidFile
 from .util.importlib import import_file_as_module
 
@@ -169,6 +170,15 @@ class Settings:
         for plugin in config:
             plugin = {**plugin}
             name = plugin.pop('name')
+
+            # Third-party plugins declare a `path` to load their code from. In managed
+            # mode, only allowlisted ones may be loaded from a policy.
+            if 'path' in plugin:
+                denial_reason = managed.check_plugin(name, plugin['path'])
+                if denial_reason:
+                    managed.record_denial(denial_reason)
+                    continue
+
             self.plugins[name] = plugin
 
         get_plugins.cache_clear()
@@ -204,6 +214,14 @@ class Settings:
         filter_configs = deepcopy(config)
         for filter_config in filter_configs:
             path = filter_config['path']
+
+            # In managed mode, only built-in or allowlisted filters may be loaded
+            # from a policy.
+            denial_reason = managed.check_filter(path)
+            if denial_reason:
+                managed.record_denial(denial_reason)
+                continue
+
             self.filters[path] = filter_config
 
         get_filters.cache_clear()
@@ -276,6 +294,11 @@ def get_filters() -> List:
 
     output = []
     for path, config in get_settings().filters.items():
+        if managed.check_filter(path):
+            # Defense in depth: never import third-party code that isn't allowlisted,
+            # even if it was registered outside of the policy loading flow.
+            continue
+
         parts = urlparse(path)
         if not parts.scheme:
             module_path, function_name = path.rsplit('.', 1)
