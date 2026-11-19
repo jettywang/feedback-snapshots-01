@@ -18,9 +18,24 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 import aiohappyeyeballs
 from aiohappyeyeballs import AddrInfoType, SocketFactoryType
 from multidict import CIMultiDict
+from yarl import URL
 
 from . import hdrs, helpers
 from .abc import AbstractResolver, ResolveResult
+from .address_admission import (
+    AddressAdmission,
+    AddressAdmissionError,
+    AllCandidatesRejectedError,
+    ConnectionTarget,
+    PeerAddress,
+    PeerRejectedError,
+    SocketFactoryPeerNotObservableError,
+    await_if_needed,
+    candidate_from_peer,
+    factory_observes_peer,
+    peer_matches_candidates,
+    select_candidates,
+)
 from .client_exceptions import (
     ClientConnectionError,
     ClientConnectorCertificateError,
@@ -90,6 +105,12 @@ __all__ = (
     "NamedPipeConnector",
     "AddrInfoType",
     "SocketFactoryType",
+    "AddressAdmission",
+    "AddressAdmissionError",
+    "AllCandidatesRejectedError",
+    "ConnectionTarget",
+    "PeerRejectedError",
+    "SocketFactoryPeerNotObservableError",
 )
 
 
@@ -311,6 +332,9 @@ class BaseConnector:
     _cleanup_closed_period = 2.0
 
     allowed_protocol_schema_set = HIGH_LEVEL_SCHEMA_SET
+
+    # No admission is performed unless a subclass installs a policy.
+    _address_admission: AddressAdmission | None = None
 
     def __init__(
         self,
@@ -648,7 +672,7 @@ class BaseConnector:
     ) -> Connection:
         """Get from pool or create new connection."""
         key = req.connection_key
-        if (conn := await self._get(key, traces)) is not None:
+        if (conn := await self._get_for_request(key, traces, req)) is not None:
             # If we do not have to wait and we can get a connection from the pool
             # we can avoid the timeout ceil logic and directly return the connection
             if req.proxy:
@@ -658,7 +682,7 @@ class BaseConnector:
         async with ceil_timeout(timeout.connect, timeout.ceil_threshold):
             if self._available_connections(key) <= 0:
                 await self._wait_for_available_connection(key, traces)
-                if (conn := await self._get(key, traces)) is not None:
+                if (conn := await self._get_for_request(key, traces, req)) is not None:
                     if req.proxy:
                         self._update_proxy_auth_header_and_build_proxy_req(req)
                     return conn
@@ -787,6 +811,44 @@ class BaseConnector:
         # No more connections: drop the key
         del self._conns[key]
         return None
+
+    async def _get_for_request(
+        self,
+        key: "ConnectionKey",
+        traces: list["Trace"],
+        req: ClientRequestBase,
+    ) -> Connection | None:
+        """Get an admitted reusable connection for this request.
+
+        Base connectors have no admission policy, so this is exactly
+        :meth:`_get`. Connectors that add a policy override
+        :meth:`_admit_pooled_connection`; a connection it rejects is
+        closed here and the pool is consulted again.
+        """
+        if self._address_admission is None:
+            return await self._get(key, traces)
+
+        while (conn := await self._get(key, traces)) is not None:
+            proto = conn.protocol
+            assert proto is not None
+            try:
+                admitted = await self._admit_pooled_connection(key, proto, req)
+            except BaseException:
+                conn.close()
+                raise
+            if admitted:
+                return conn
+            conn.close()
+        return None
+
+    async def _admit_pooled_connection(
+        self,
+        key: "ConnectionKey",
+        proto: ResponseHandler,
+        req: ClientRequestBase,
+    ) -> bool:
+        """Return whether a pooled connection still satisfies admission."""
+        return True
 
     def _release_waiter(self) -> None:
         """
@@ -977,6 +1039,13 @@ class TCPConnector(BaseConnector):
     socket_factory - A SocketFactoryType function that, if supplied,
                      will be used to create sockets given an
                      AddrInfoType.
+    address_admission - Optional AddressAdmission policy that authorizes
+                        the concrete addresses resolved for a target and
+                        the peer each socket actually connects to. It is
+                        applied to every fresh connection, every redirect
+                        target, DNS-cache results and pooled connections
+                        before reuse. ``addr_admission`` is accepted as an
+                        alias.
     ssl_shutdown_timeout - DEPRECATED. Will be removed in aiohttp 4.0.
                            Grace period for SSL shutdown handshake on TLS
                            connections. Default is 0 seconds (immediate abort).
@@ -1006,6 +1075,8 @@ class TCPConnector(BaseConnector):
         happy_eyeballs_delay: float | None = 0.25,
         interleave: int | None = None,
         socket_factory: SocketFactoryType | None = None,
+        address_admission: AddressAdmission | None = None,
+        addr_admission: AddressAdmission | None = None,
         ssl_shutdown_timeout: _SENTINEL | None | float = sentinel,
     ):
         super().__init__(
@@ -1056,6 +1127,22 @@ class TCPConnector(BaseConnector):
         self._interleave = interleave
         self._resolve_host_tasks: set[asyncio.Task[list[ResolveResult]]] = set()
         self._socket_factory = socket_factory
+
+        if address_admission is not None and addr_admission is not None:
+            raise ValueError(
+                "address_admission and addr_admission are aliases; "
+                "pass only one of them"
+            )
+        self._address_admission = (
+            address_admission if address_admission is not None else addr_admission
+        )
+        # ``addr_admission`` is an alias; keep the private spelling that
+        # early adopters of this API read for compatibility.
+        self._addr_admission = self._address_admission
+        if self._address_admission is not None and not factory_observes_peer(
+            socket_factory
+        ):
+            raise SocketFactoryPeerNotObservableError(socket_factory)
         self._ssl_shutdown_timeout: float | None
 
         if ssl_shutdown_timeout is sentinel:
@@ -1105,6 +1192,11 @@ class TCPConnector(BaseConnector):
         """True if local DNS caching is enabled."""
         return self._use_dns_cache
 
+    @property
+    def address_admission(self) -> AddressAdmission | None:
+        """The configured address admission policy, if any."""
+        return self._address_admission
+
     def clear_dns_cache(self, host: str | None = None, port: int | None = None) -> None:
         """Remove specified host/port or clear all dns local cache."""
         if host is not None and port is not None:
@@ -1113,6 +1205,152 @@ class TCPConnector(BaseConnector):
             raise ValueError("either both host and port or none of them are allowed")
         else:
             self._cached_hosts.clear()
+
+    def _admission_target(
+        self,
+        req: ClientRequestBase,
+        *,
+        dialed_url: URL | None = None,
+    ) -> ConnectionTarget:
+        """Describe the TCP endpoint this connection actually dials.
+
+        For a proxied request this is the proxy, not the logical origin:
+        that is the peer the connector can observe and admit. The
+        ``proxy`` field identifies the logical destination in that case.
+        """
+        url = dialed_url if dialed_url is not None else req.url
+        host = url.raw_host
+        assert host is not None
+        port = url.port
+        assert port is not None
+        proxy_url = req.proxy
+        return ConnectionTarget(
+            host=host,
+            port=port,
+            is_ssl=url.scheme in ("https", "wss"),
+            server_hostname=req.server_hostname,
+            proxy=str(proxy_url) if proxy_url is not None else None,
+        )
+
+    async def _admit_candidates(
+        self,
+        target: ConnectionTarget,
+        candidates: Sequence[ResolveResult],
+    ) -> list[ResolveResult]:
+        """Ask the policy which of *candidates* may be dialed.
+
+        The answer is intersected with the exact resolution result the
+        policy was shown, so it cannot introduce an address that was never
+        checked. An empty answer fails the attempt instead of falling back
+        to any unchecked address.
+        """
+        admission = self._address_admission
+        if admission is None:
+            return list(candidates)
+
+        callback = getattr(admission, "admit_candidates", None)
+        if callback is None and callable(admission):
+            callback = admission
+        if callback is None:
+            return list(candidates)
+        admitted = await await_if_needed(callback(target, candidates))
+        selected = select_candidates(candidates, admitted)
+        if not selected:
+            raise AllCandidatesRejectedError(target, candidates)
+        return selected
+
+    async def _admit_peer(
+        self, target: ConnectionTarget, peer: PeerAddress
+    ) -> None:
+        """Confirm a connected socket's concrete peer with the policy."""
+        admission = self._address_admission
+        if admission is None:
+            return
+
+        callback = getattr(admission, "admit_peer", None)
+        if callback is None:
+            return
+        admitted = await await_if_needed(callback(target, peer))
+        if admitted is False:
+            raise PeerRejectedError(target, peer)
+
+    async def _admit_pooled_connection(
+        self,
+        key: "ConnectionKey",
+        proto: ResponseHandler,
+        req: ClientRequestBase,
+    ) -> bool:
+        """Re-authorize a pooled connection for the current request.
+
+        Admission is scoped to the current target, so a connection opened
+        under an earlier policy or for a different destination must be
+        checked again before it can serve this request.
+        """
+        admission = self._address_admission
+        if admission is None:
+            return True
+
+        target = self._admission_target(
+            req,
+            dialed_url=req.proxy if req.proxy is not None else None,
+        )
+        peer = self._peer_of_protocol(proto)
+        if peer is None:
+            return False
+
+        try:
+            # Admission is scoped to the current target and the concrete
+            # peer. Reusing performs no resolution, so treat the peer as the
+            # one-entry resolution result for this request, then confirm the
+            # final socket with the peer check.
+            candidate = candidate_from_peer(target, peer)
+            await self._admit_candidates(target, [candidate])
+            await self._admit_peer(target, peer)
+        except (OSError, AddressAdmissionError):
+            return False
+        return True
+
+    async def _verify_connected_peer(
+        self,
+        sock: Any,
+        target: ConnectionTarget,
+        candidates: Sequence[ResolveResult],
+    ) -> None:
+        """Check the peer of a winning socket against the admitted set.
+
+        Happy Eyeballs may have connected to any of the passed addresses.
+        The peer must be one of the candidates the policy actually saw,
+        and it must pass ``admit_peer`` before any TLS or HTTP traffic is
+        allowed.
+        """
+        try:
+            peer = sock.getpeername()
+        except (AttributeError, OSError) as exc:
+            raise SocketFactoryPeerNotObservableError(
+                self._socket_factory
+            ) from exc
+        if not isinstance(peer, tuple) or not peer:
+            raise SocketFactoryPeerNotObservableError(self._socket_factory)
+
+        if not peer_matches_candidates(peer, candidates):
+            raise PeerRejectedError(target, peer, "peer was not an admitted candidate")
+        await self._admit_peer(target, peer)
+
+    @staticmethod
+    def _peer_of_protocol(proto: ResponseHandler) -> PeerAddress | None:
+        transport = proto.transport
+        if transport is None:
+            return None
+        sock = transport.get_extra_info("socket")
+        if sock is None:
+            return None
+        try:
+            peer = sock.getpeername()
+        except OSError:
+            return None
+        if not isinstance(peer, tuple) or not peer:
+            return None
+        return peer
 
     async def _resolve_host(
         self, host: str, port: int, traces: Sequence["Trace"] | None = None
@@ -1323,6 +1561,8 @@ class TCPConnector(BaseConnector):
         req: ClientRequestBase,
         timeout: "ClientTimeout",
         client_error: type[Exception] = ClientConnectorError,
+        admission_target: ConnectionTarget | None = None,
+        admission_candidates: Sequence[ResolveResult] | None = None,
         **kwargs: Any,
     ) -> tuple[asyncio.Transport, ResponseHandler]:
         try:
@@ -1337,6 +1577,16 @@ class TCPConnector(BaseConnector):
                     loop=self._loop,
                     socket_factory=self._socket_factory,
                 )
+                if admission_target is not None:
+                    try:
+                        await self._verify_connected_peer(
+                            sock,
+                            admission_target,
+                            admission_candidates or (),
+                        )
+                    except BaseException:
+                        sock.close()
+                        raise
                 if kwargs.get("ssl") and self._ssl_shutdown_timeout:
                     kwargs["ssl_shutdown_timeout"] = self._ssl_shutdown_timeout
                 return await create_connection(self._loop, *args, **kwargs, sock=sock)
@@ -1464,6 +1714,7 @@ class TCPConnector(BaseConnector):
         timeout: "ClientTimeout",
         *,
         client_error: type[Exception] = ClientConnectorError,
+        admission_target: ConnectionTarget | None = None,
     ) -> tuple[asyncio.Transport, ResponseHandler]:
         sslcontext = self._get_ssl_context(req)
         fingerprint = self._get_fingerprint(req)
@@ -1489,6 +1740,14 @@ class TCPConnector(BaseConnector):
             # it is problem of resolving proxy ip itself
             raise ClientConnectorDNSError(req.connection_key, exc) from exc
 
+        # Admission is scoped to this target and this concrete resolution
+        # result, including addresses served from the DNS cache. Rejected
+        # candidates are removed before any socket is opened.
+        if self._address_admission is not None and admission_target is None:
+            admission_target = self._admission_target(req)
+        if admission_target is not None:
+            hosts = await self._admit_candidates(admission_target, hosts)
+
         last_exc: Exception | None = None
         addr_infos = self._convert_hosts_to_addr_infos(hosts)
         while addr_infos:
@@ -1507,7 +1766,23 @@ class TCPConnector(BaseConnector):
                     server_hostname=server_hostname,
                     req=req,
                     client_error=client_error,
+                    admission_target=admission_target,
+                    admission_candidates=hosts,
                 )
+            except PeerRejectedError as exc:
+                # The peer the socket actually reached was not admitted.
+                # Drop that address and retry only the remaining admitted
+                # candidates; never fall back to an unchecked address.
+                last_exc = exc
+                try:
+                    aiohappyeyeballs.remove_addr_infos(addr_infos, exc.peer)
+                except ValueError:
+                    aiohappyeyeballs.pop_addr_infos_interleave(
+                        addr_infos, self._interleave
+                    )
+                if not addr_infos:
+                    raise
+                continue
             except (ClientConnectorError, TimeoutError) as exc:
                 last_exc = exc
                 aiohappyeyeballs.pop_addr_infos_interleave(addr_infos, self._interleave)
@@ -1536,9 +1811,19 @@ class TCPConnector(BaseConnector):
     ) -> tuple[asyncio.BaseTransport, ResponseHandler]:
         proxy_req = self._update_proxy_auth_header_and_build_proxy_req(req)
 
+        # Admission applies to the proxy endpoint actually dialed, not to
+        # the logical origin the proxy will reach on our behalf.
+        admission_target = None
+        if self._address_admission is not None:
+            admission_target = self._admission_target(req, dialed_url=req.proxy)
+
         # create connection to proxy server
         transport, proto = await self._create_direct_connection(
-            proxy_req, [], timeout, client_error=ClientProxyConnectionError
+            proxy_req,
+            [],
+            timeout,
+            client_error=ClientProxyConnectionError,
+            admission_target=admission_target,
         )
 
         if req.is_ssl():

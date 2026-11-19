@@ -596,6 +596,74 @@ interface on supported platforms::
   conn = aiohttp.TCPConnector(socket_factory=socket_factory)
 
 
+Address admission
+^^^^^^^^^^^^^^^^^
+
+Checking only the host name in a URL does not tell which IP a request is
+sent to. DNS may return several addresses, Happy Eyeballs races between
+them, redirects change the target, and the connection pool may hand back a
+socket opened for an earlier request. An
+:class:`~aiohttp.AddressAdmission` policy on
+:class:`~aiohttp.TCPConnector` lets an application authorize the concrete
+resolved addresses and the final connected peer instead::
+
+  import ipaddress
+
+  class PublicAddressAdmission:
+      def admit_candidates(self, target, candidates):
+          # Only dial public addresses, whatever the URL host resolves to.
+          return [
+              result
+              for result in candidates
+              if not ipaddress.ip_address(result["host"]).is_private
+          ]
+
+      def admit_peer(self, target, peer):
+          # Confirm the socket's actual peer before any request is sent.
+          if ipaddress.ip_address(peer[0]).is_private:
+              raise aiohttp.PeerRejectedError(target, peer)
+
+  conn = aiohttp.TCPConnector(address_admission=PublicAddressAdmission())
+
+``admit_candidates`` receives the :class:`~aiohttp.ConnectionTarget` and
+every resolved :class:`~aiohttp.abc.ResolveResult` for this attempt; this
+includes results served from the DNS cache and every re-resolution, so a
+cache change is checked again. Its answer is intersected with exactly those
+candidates, which prevents a policy from injecting an address that was
+never resolved. An empty answer raises
+:class:`~aiohttp.AllCandidatesRejectedError`; the connector never retries an
+address the policy did not approve. ``admit_peer`` runs on the socket that
+won Happy Eyeballs, before TLS or HTTP work, and a rejected peer is closed
+so only the remaining admitted candidates can be tried. Both callbacks may
+be coroutines.
+
+Each redirect is a new connection attempt with its own target and
+resolution result, so admission applies again. Pooled connections are
+re-checked before every reuse: a connection whose peer no longer satisfies
+the policy (for example after the policy tightens) is closed instead of
+being served, and a fresh connection is created only from admitted
+candidates.
+
+If a custom ``socket_factory`` is supplied together with a policy, it must
+return real sockets whose peer is available through
+``getpeername()`` and must declare that capability::
+
+  def socket_factory(addr_info):
+      ...
+
+  socket_factory.observes_peer = True
+  conn = aiohttp.TCPConnector(
+      socket_factory=socket_factory,
+      address_admission=PublicAddressAdmission(),
+  )
+
+A factory that cannot promise an observable final peer makes enforcement
+impossible, so the connector raises
+:class:`~aiohttp.SocketFactoryPeerNotObservableError` at construction time
+instead of silently weakening the policy. Without an admission policy a
+``socket_factory`` is used unchanged.
+
+
 Named pipes in Windows
 ^^^^^^^^^^^^^^^^^^^^^^
 

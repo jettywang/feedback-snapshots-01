@@ -3,6 +3,14 @@ __version__ = "4.0.0a2.dev0"
 from typing import TYPE_CHECKING
 
 from . import hdrs
+from .address_admission import (
+    AddressAdmission,
+    AddressAdmissionError,
+    AllCandidatesRejectedError,
+    ConnectionTarget,
+    PeerRejectedError,
+    SocketFactoryPeerNotObservableError,
+)
 from .client import (
     BaseConnector,
     ClientConnectionError,
@@ -119,6 +127,9 @@ __all__: tuple[str, ...] = (
     "hdrs",
     # client
     "AddrInfoType",
+    "AddressAdmission",
+    "AddressAdmissionError",
+    "AllCandidatesRejectedError",
     "BaseConnector",
     "ClientConnectionError",
     "ClientConnectionResetError",
@@ -139,6 +150,7 @@ __all__: tuple[str, ...] = (
     "ClientTimeout",
     "ClientWebSocketResponse",
     "ClientWSTimeout",
+    "ConnectionTarget",
     "ConnectionTimeoutError",
     "ContentTypeError",
     "Fingerprint",
@@ -147,12 +159,14 @@ __all__: tuple[str, ...] = (
     "InvalidUrlRedirectClientError",
     "NonHttpUrlClientError",
     "NonHttpUrlRedirectClientError",
+    "PeerRejectedError",
     "RedirectClientError",
     "RequestInfo",
     "ServerConnectionError",
     "ServerDisconnectedError",
     "ServerFingerprintMismatch",
     "ServerTimeoutError",
+    "SocketFactoryPeerNotObservableError",
     "SocketFactoryType",
     "SocketTimeoutError",
     "TCPConnector",

@@ -1217,6 +1217,77 @@ is controlled by *force_close* constructor's parameter).
    future.
 
 
+.. class:: ConnectionTarget(host, port, is_ssl, server_hostname=None, proxy=None)
+   :canonical: aiohttp.address_admission.ConnectionTarget
+
+   Immutable description of the TCP endpoint a connection attempt is
+   authorized for: the host and port actually dialed, whether the socket
+   is wrapped in TLS, the SNI override and the proxy URL, if any. For a
+   proxied request ``host`` and ``port`` describe the proxy, while
+   ``proxy`` records the logical destination.
+
+
+.. class:: AddressAdmission
+   :canonical: aiohttp.address_admission.AddressAdmission
+
+   Application policy authorizing outbound addresses. Both methods may be
+   synchronous or return awaitables. A plain callable is accepted as a
+   shortcut for ``admit_candidates``; ``admit_peer`` is then skipped.
+
+   .. method:: admit_candidates(target, candidates)
+
+      Receive the :class:`ConnectionTarget` and every
+      :class:`~aiohttp.abc.ResolveResult` produced by the resolver for this
+      attempt (including results served from the DNS cache), and return the
+      subset the policy allows. A sequence of mappings or IP strings is
+      accepted; entries that were not part of ``candidates`` are ignored so
+      an unchecked address cannot be injected. Return ``False`` to deny the
+      whole result, or ``True``/``None`` to admit every candidate.
+      Returning an empty result raises :class:`AllCandidatesRejectedError`.
+
+   .. method:: admit_peer(target, peer)
+
+      Confirm the concrete peer, as returned by
+      :py:meth:`socket.socket.getpeername`, of a freshly connected socket
+      before TLS or HTTP work starts. Return ``False`` or raise to deny it.
+      The connector closes the socket and retries only the remaining
+      admitted candidates; it never falls back to an address the policy did
+      not see.
+
+   .. note::
+
+      On every pooled-connection reuse both callbacks are consulted again
+      for the current target. A connection whose peer no longer satisfies
+      the policy is closed instead of being served.
+
+
+.. class:: AddressAdmissionError
+   :canonical: aiohttp.address_admission.AddressAdmissionError
+
+   Base class for admission failures.
+
+
+.. class:: AllCandidatesRejectedError
+   :canonical: aiohttp.address_admission.AllCandidatesRejectedError
+
+   Raised when a policy rejects every resolved candidate. Exposes
+   ``target`` and the original ``candidates``.
+
+
+.. class:: PeerRejectedError
+   :canonical: aiohttp.address_admission.PeerRejectedError
+
+   Raised when a policy rejects a connected peer. Exposes ``target``,
+   ``peer`` and an optional ``reason``.
+
+
+.. class:: SocketFactoryPeerNotObservableError
+   :canonical: aiohttp.address_admission.SocketFactoryPeerNotObservableError
+
+   Raised when a custom *socket_factory* cannot expose the connected peer
+   and is therefore incompatible with an admission policy.
+
+
 .. class:: TCPConnector(*, ssl=True, verify_ssl=True, fingerprint=None, \
                  use_dns_cache=True, ttl_dns_cache=10, \
                  family=0, ssl_context=None, local_addr=None, \
@@ -1357,6 +1428,21 @@ is controlled by *force_close* constructor's parameter).
       :py:func:`socket.socket` when creating TCP connections.
 
         .. versionadded:: 3.12
+
+   :param AddressAdmission address_admission: Optional policy authorizing
+      the concrete addresses produced by DNS resolution and the peer a
+      socket actually connects to, instead of only the host name string in
+      the URL. It is applied to every fresh connection, every redirect
+      target, DNS-cache results and every pooled connection before reuse.
+      Rejected candidates are never dialed; when all are rejected the
+      connector raises :class:`AllCandidatesRejectedError` rather than
+      falling back to an unchecked address. A custom *socket_factory* used
+      with a policy must return real sockets and declare
+      ``observes_peer = True``, otherwise
+      :class:`SocketFactoryPeerNotObservableError` is raised. The
+      ``addr_admission`` spelling is accepted as an alias.
+
+        .. versionadded:: 4.0
 
    :param float ssl_shutdown_timeout: **(DEPRECATED)** This parameter is deprecated
       and will be removed in aiohttp 4.0. Grace period for SSL shutdown on TLS

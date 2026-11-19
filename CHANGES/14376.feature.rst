@@ -1,0 +1,9 @@
+Added an optional ``address_admission`` policy to :class:`aiohttp.TCPConnector`
+(also accepted as ``addr_admission``) so applications can authorize the
+concrete IP addresses produced by DNS resolution and the peer a socket
+actually connects to, rather than only the host name in the URL. The policy
+is applied to DNS-cache results, multiple and Happy Eyeballs candidates,
+redirect targets and pooled connections before reuse. Rejected candidates
+are never dialed, and a custom ``socket_factory`` must declare
+``observes_peer = True`` or the connector raises
+:class:`aiohttp.SocketFactoryPeerNotObservableError` -- by :user:`aio-libs`.
