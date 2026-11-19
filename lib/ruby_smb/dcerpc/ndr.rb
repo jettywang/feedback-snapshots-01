@@ -206,6 +206,97 @@ module RubySMB::Dcerpc::Ndr
       align ? (align - (offset % align)) % align : 0
     end
 
+    # Lower bound on the number of bytes one element occupies in the stream.
+    # A count larger than what the remaining input can hold is rejected before
+    # any element is instantiated, which keeps a hostile count from amplifying
+    # into a large allocation.
+    #
+    # Only fixed-width primitives are measured exactly. A varying string always
+    # carries an offset/actual_count pair. Constructed types fall back to one
+    # byte: their prototype cannot be measured faithfully without a parent
+    # (size words may be hoisted or omitted), and underestimating only weakens
+    # this guard, while overestimating could reject a legal stream.
+    def minimum_element_bytes
+      prototype = instance_variable_get(:@element_prototype)
+      return 1 unless prototype
+
+      obj = prototype.instantiate(nil, nil)
+      return 4 if obj.is_a?(PointerPlugin)
+      return 8 if obj.is_a?(VarStringPlugin)
+      return 1 unless obj.is_a?(BinData::BasePrimitive)
+
+      nbytes = obj.do_num_bytes
+      nbytes = nbytes.ceil if nbytes.is_a?(Numeric) && !nbytes.is_a?(Integer)
+      nbytes.is_a?(Integer) && nbytes > 0 ? nbytes : 1
+    rescue StandardError
+      # A prototype that cannot be evaluated in isolation must not prevent
+      # parsing; fall back to the smallest possible element width.
+      1
+    end
+
+    # A conformant varying array must never encode size information that
+    # describes elements outside the conformant bound. The offset indexes the
+    # conformant array, so the transmitted window is
+    # ``offset ... offset + actual_count``. For conformant arrays the element
+    # list must also fit inside the declared maximum.
+    def validate_size_information_for_write!
+      if is_a?(VarPlugin)
+        if @actual_count != length
+          raise IOError,
+            "NDR array #{debug_name}: actual_count (#{@actual_count}) does "\
+            "not match the #{length} element(s) to encode"
+        end
+        if is_a?(ConfPlugin) && @offset + @actual_count > @max_count
+          raise IOError,
+            "NDR array #{debug_name}: offset (#{@offset}) + actual_count "\
+            "(#{@actual_count}) exceeds max_count (#{@max_count})"
+        end
+      elsif is_a?(ConfPlugin) && length > @max_count
+        raise IOError,
+          "NDR array #{debug_name}: #{length} element(s) exceed "\
+          "max_count (#{@max_count})"
+      end
+    end
+
+    # Validate the size information before reading any element. For varying
+    # arrays the transmitted elements are ``offset ... offset + actual_count``,
+    # so the conformity bound must cover the sum. The count that will actually
+    # be read is also checked against the remaining stream so a hostile count
+    # cannot force a large allocation (or a long read loop) from a tiny input.
+    def validate_size_information!(io)
+      if is_a?(VarPlugin)
+        count = @actual_count
+        if is_a?(ConfPlugin) && @offset + @actual_count > @max_count
+          raise IOError,
+            "NDR array #{debug_name}: offset (#{@offset}) + actual_count "\
+            "(#{@actual_count}) exceeds max_count (#{@max_count})"
+        end
+      elsif is_a?(ConfPlugin)
+        count = @max_count
+      else
+        return
+      end
+
+      return unless count > 0
+
+      remaining = begin
+        io.num_bytes_remaining
+      rescue IOError
+        nil
+      end
+      return if remaining.nil?
+
+      element_size = minimum_element_bytes
+      return if element_size.nil? || element_size <= 0
+
+      max_elements = remaining / element_size
+      if count > max_elements
+        raise IOError,
+          "NDR array #{debug_name}: count (#{count}) cannot fit in the "\
+          "#{remaining} remaining byte(s) with #{element_size}-byte elements"
+      end
+    end
+
     def should_process_max_count?
       # :max_count has already been processed if the parent structure is an
       # NdrStruct, but this is not the case if we are dealing with a pointer
@@ -213,6 +304,8 @@ module RubySMB::Dcerpc::Ndr
     end
 
     def do_write(io)
+      validate_size_information_for_write!
+
       if is_a?(ConfPlugin) && should_process_max_count?
         io.writebytes([@max_count].pack('L<'))
       end
@@ -268,6 +361,8 @@ module RubySMB::Dcerpc::Ndr
           tracer.trace_obj("#{debug_name}.actual_count", @actual_count.to_s)
         end
       end
+
+      validate_size_information!(io)
 
       if has_elements_to_read?
         io.seekbytes(align_element_size(io.offset))
@@ -755,7 +850,10 @@ module RubySMB::Dcerpc::Ndr
 
     def retrieve_max_count
       obj = self[field_names.last]
-      return obj.length if obj.is_a?(ConfPlugin)
+      # Use the count carried by the array itself. When the array has been
+      # parsed, this is the wire value; rewriting it as the current element
+      # count would silently drop a legal non-zero offset window.
+      return obj.max_count if obj.is_a?(ConfPlugin)
       return obj.get_max_count(obj) if obj.is_a?(ConfStringPlugin)
       if obj.is_a?(NdrStruct)
         return obj.retrieve_max_count
