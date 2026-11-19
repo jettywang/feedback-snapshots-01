@@ -58,6 +58,15 @@ from sslyze.plugins.openssl_cipher_suites.implementation import CipherSuitesScan
 from sslyze.plugins.openssl_cipher_suites._test_cipher_suite import (
     CipherSuiteAcceptedByServer,
     CipherSuiteRejectedByServer,
+    CipherSuiteTransportError,
+    CipherSuiteNotCapable,
+    CipherSuiteScanStatusEnum,
+    OpenSslBackendEnum,
+)
+from sslyze.plugins.openssl_cipher_suites._scan_coordinator import (
+    CipherSuiteAttemptKey,
+    CipherSuiteScanCell,
+    CipherSuiteScanCoordinator,
 )
 from nassl.ephemeral_key_info import EphemeralKeyInfo
 from sslyze.plugins.openssl_cipher_suites.cipher_suites import CipherSuite

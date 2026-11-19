@@ -5,9 +5,14 @@ from nassl.ephemeral_key_info import EphemeralKeyInfo, EcDhEphemeralKeyInfo, Nis
 from pydantic import model_validator
 from sslyze.json.pydantic_utils import BaseModelWithOrmMode, StrFromEnumValueName
 from sslyze.json.scan_attempt_json import ScanCommandAttemptAsJson
+from sslyze.plugins.openssl_cipher_suites._test_cipher_suite import (
+    CipherSuiteTransportError,
+    CipherSuiteNotCapable,
+)
 from sslyze.plugins.openssl_cipher_suites.implementation import (
     CipherSuitesScanResult,
     CipherSuiteAcceptedByServer,
+    CipherSuiteRejectedByServer,
 )
 
 
@@ -87,12 +92,38 @@ class _CipherSuiteRejectedByServerAsJson(BaseModelWithOrmMode):
     error_message: str
 
 
+assert CipherSuiteRejectedByServer.__doc__
+_CipherSuiteRejectedByServerAsJson.__doc__ = CipherSuiteRejectedByServer.__doc__
+
+
+class _CipherSuiteTransportErrorAsJson(BaseModelWithOrmMode):
+    cipher_suite: _CipherSuiteAsJson
+    error_message: str
+
+
+assert CipherSuiteTransportError.__doc__
+_CipherSuiteTransportErrorAsJson.__doc__ = CipherSuiteTransportError.__doc__
+
+
+class _CipherSuiteNotCapableAsJson(BaseModelWithOrmMode):
+    cipher_suite: _CipherSuiteAsJson
+    reason: str
+
+
+assert CipherSuiteNotCapable.__doc__
+_CipherSuiteNotCapableAsJson.__doc__ = CipherSuiteNotCapable.__doc__
+
+
 class CipherSuitesScanResultAsJson(BaseModelWithOrmMode):
     tls_version_used: StrFromEnumValueName
     is_tls_version_supported: bool
+    is_complete: bool
 
     accepted_cipher_suites: List[_CipherSuiteAcceptedByServerAsJson]
     rejected_cipher_suites: List[_CipherSuiteRejectedByServerAsJson]
+    errored_cipher_suites: List[_CipherSuiteTransportErrorAsJson]
+    not_capable_cipher_suites: List[_CipherSuiteNotCapableAsJson]
+    total_connection_attempts: int
 
 
 assert CipherSuitesScanResult.__doc__

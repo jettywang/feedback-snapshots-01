@@ -209,7 +209,7 @@
       "type": "object"
     },
     "CipherSuitesScanResultAsJson": {
-      "description": "The result of testing a server for cipher suites with a specific version of SSL/TLS.\n\nAttributes:\n    tls_version_used: The SSL/TLS version used to connect to the server.\n    accepted_ciphers: The list of cipher suites supported supported by both SSLyze and the server.\n    rejected_ciphers: The list of cipher suites supported by SSLyze that were rejected by the server.",
+      "description": "The result of testing a server for cipher suites with a specific version of SSL/TLS.\n\nAttributes:\n    tls_version_used: The SSL/TLS version used to connect to the server.\n    accepted_cipher_suites: Cipher suites the server negotiated successfully.\n    rejected_cipher_suites: Cipher suites the server explicitly refused to negotiate.\n    errored_cipher_suites: Cipher suites whose probe could not complete because of a transport failure (timeout,\n        reset, ...). These cells are NOT rejections: the server never gave a clear answer and the matrix is\n        incomplete as long as this list is not empty.\n    not_capable_cipher_suites: Cipher suites SSLyze/OpenSSL cannot attempt for this TLS version; no connection\n        was made for them.\n    total_connection_attempts: The number of TCP/TLS connections actually opened to the server to produce this\n        result. Retries only add connections for the affected cells, so this is usually well below the number of\n        cells when no retry was needed.",
       "properties": {
         "tls_version_used": {
           "title": "Tls Version Used",
@@ -217,6 +217,10 @@
         },
         "is_tls_version_supported": {
           "title": "Is Tls Version Supported",
+          "type": "boolean"
+        },
+        "is_complete": {
+          "title": "Is Complete",
           "type": "boolean"
         },
         "accepted_cipher_suites": {
@@ -232,13 +236,35 @@
           },
           "title": "Rejected Cipher Suites",
           "type": "array"
+        },
+        "errored_cipher_suites": {
+          "items": {
+            "$ref": "#/$defs/_CipherSuiteTransportErrorAsJson"
+          },
+          "title": "Errored Cipher Suites",
+          "type": "array"
+        },
+        "not_capable_cipher_suites": {
+          "items": {
+            "$ref": "#/$defs/_CipherSuiteNotCapableAsJson"
+          },
+          "title": "Not Capable Cipher Suites",
+          "type": "array"
+        },
+        "total_connection_attempts": {
+          "title": "Total Connection Attempts",
+          "type": "integer"
         }
       },
       "required": [
         "tls_version_used",
         "is_tls_version_supported",
+        "is_complete",
         "accepted_cipher_suites",
-        "rejected_cipher_suites"
+        "rejected_cipher_suites",
+        "errored_cipher_suites",
+        "not_capable_cipher_suites",
+        "total_connection_attempts"
       ],
       "title": "CipherSuitesScanResultAsJson",
       "type": "object"
@@ -1465,7 +1491,26 @@
       "title": "_CipherSuiteAsJson",
       "type": "object"
     },
+    "_CipherSuiteNotCapableAsJson": {
+      "description": "SSLyze/OpenSSL cannot attempt this cipher suite with the requested TLS version/backend.\n\nNo network connection was ever made for this cell.",
+      "properties": {
+        "cipher_suite": {
+          "$ref": "#/$defs/_CipherSuiteAsJson"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cipher_suite",
+        "reason"
+      ],
+      "title": "_CipherSuiteNotCapableAsJson",
+      "type": "object"
+    },
     "_CipherSuiteRejectedByServerAsJson": {
+      "description": "CipherSuiteRejectedByServer(cipher_suite: sslyze.plugins.openssl_cipher_suites.cipher_suites.CipherSuite, error_message: str)",
       "properties": {
         "cipher_suite": {
           "$ref": "#/$defs/_CipherSuiteAsJson"
@@ -1480,6 +1525,24 @@
         "error_message"
       ],
       "title": "_CipherSuiteRejectedByServerAsJson",
+      "type": "object"
+    },
+    "_CipherSuiteTransportErrorAsJson": {
+      "description": "The connection for this cipher suite failed before the server could accept or reject it.\n\nThis is not a rejection: the cell stays untested and can be retried.",
+      "properties": {
+        "cipher_suite": {
+          "$ref": "#/$defs/_CipherSuiteAsJson"
+        },
+        "error_message": {
+          "title": "Error Message",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cipher_suite",
+        "error_message"
+      ],
+      "title": "_CipherSuiteTransportErrorAsJson",
       "type": "object"
     },
     "_ClientAuthenticationCredentialsAsJson": {
@@ -2208,7 +2271,7 @@
       "type": "string"
     },
     "sslyze_version": {
-      "default": "6.3.0",
+      "default": "6.3.1",
       "title": "Sslyze Version",
       "type": "string"
     },

@@ -17,18 +17,49 @@ class _CipherSuitesCliConnector(ScanCommandCliConnector["CipherSuitesScanResult"
     def result_to_console_output(cls, result: "CipherSuitesScanResult") -> List[str]:
         result_as_txt = [cls._format_title(cls._title_in_output)]
 
-        cipher_suites_count = len(result.accepted_cipher_suites) + len(result.rejected_cipher_suites)
+        # Only the cells that actually produced an accepted/rejected answer can be presented as a complete matrix;
+        # transport errors are reported separately as untested cells
+        definitive_cipher_suites_count = len(result.accepted_cipher_suites) + len(result.rejected_cipher_suites)
+
+        # Surface the cells that could not be tested instead of silently presenting a complete-looking list
+        if result.errored_cipher_suites:
+            result_as_txt.append(
+                cls._format_subtitle(
+                    f"WARNING: {len(result.errored_cipher_suites)} cipher suite(s) could not be tested because the"
+                    f" connection failed (timeout/reset); the results below are incomplete for these cells."
+                )
+            )
+            for errored_cipher in result.errored_cipher_suites:
+                result_as_txt.append(
+                    cls._format_field(errored_cipher.cipher_suite.name, f"UNTESTED - {errored_cipher.error_message}")
+                )
+            result_as_txt.append("")
+
         if not result.accepted_cipher_suites:
             result_as_txt.append(
                 cls._format_subtitle(
-                    f"Attempted to connect using {cipher_suites_count} cipher suites;"
+                    f"Attempted to connect using {definitive_cipher_suites_count} cipher suites;"
                     f" the server rejected all cipher suites."
                 )
             )
+            if result.errored_cipher_suites:
+                result_as_txt.append(
+                    cls._format_subtitle(
+                        f"Another {len(result.errored_cipher_suites)} cipher suite(s) remain untested"
+                        f" (see warnings above); no conclusion can be drawn for them."
+                    )
+                )
             return result_as_txt
 
         # Display all cipher suites that were accepted
-        result_as_txt.append(cls._format_subtitle(f"Attempted to connect using {cipher_suites_count} cipher suites."))
+        result_as_txt.append(
+            cls._format_subtitle(f"Attempted to connect using {definitive_cipher_suites_count} cipher suites.")
+        )
+        result_as_txt.append(
+            cls._format_subtitle(
+                f"Total number of connections opened to the server: {result.total_connection_attempts}."
+            )
+        )
         result_as_txt.append("")
         result_as_txt.append(
             cls._format_subtitle(
