@@ -54,8 +54,11 @@ module WinRM
       # @yield [Message] PSRP Message in response
       # @yieldreturn [Array<Message>] All messages in response
       def send_pipeline_command(command, &block)
-        with_command_shell(command) do |shell, cmd|
-          response_reader.read_message(command_output_message(shell, cmd), true, &block)
+        retry_policy = build_retry_policy
+        with_command_shell(command, [], retry_policy) do |shell, cmd|
+          response_reader.read_message(
+            command_output_message(shell, cmd), true, retry_policy: retry_policy, &block
+          )
         end
       end
 
@@ -90,7 +93,9 @@ module WinRM
       protected
 
       def response_reader
-        @response_reader ||= WinRM::PSRP::ReceiveResponseReader.new(transport, logger)
+        @response_reader ||= WinRM::PSRP::ReceiveResponseReader.new(
+          transport, logger, connection_opts
+        )
       end
 
       def send_command(command, _arguments)

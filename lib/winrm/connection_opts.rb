@@ -24,6 +24,10 @@ module WinRM
     DEFAULT_RETRY_DELAY = 10
     DEFAULT_RETRY_LIMIT = 3
     DEFAULT_USER_AGENT = 'Ruby WinRM Client'.freeze
+    # Total seconds a Receive loop may keep waiting for output when the
+    # server answers with WSMan OperationTimeout faults. nil means wait
+    # forever, which preserves the historical default behavior.
+    DEFAULT_RECEIVE_WAIT_LIMIT = nil
 
     class << self
       def create_with_defaults(overrides)
@@ -52,6 +56,7 @@ module WinRM
         config[:receive_timeout] = DEFAULT_RECEIVE_TIMEOUT
         config[:retry_delay] = DEFAULT_RETRY_DELAY
         config[:retry_limit] = DEFAULT_RETRY_LIMIT
+        config[:receive_wait_limit] = DEFAULT_RECEIVE_WAIT_LIMIT
         config[:user_agent] = DEFAULT_USER_AGENT
         config
       end
@@ -88,6 +93,14 @@ module WinRM
       validate_integer(:max_envelope_size)
       validate_integer(:operation_timeout)
       validate_integer(:receive_timeout, self[:operation_timeout])
+      validate_optional_integer(:receive_wait_limit)
+    end
+
+    def validate_optional_integer(key, min = 0)
+      value = self[key]
+      return if value.nil?
+
+      validate_integer(key, min)
     end
 
     def validate_integer(key, min = 0)

@@ -88,7 +88,7 @@ describe WinRM::Shells::Powershell do
         allow_any_instance_of(WinRM::WSMV::KeepAlive).to receive(:build)
           .and_return(keepalive_payload)
         allow_any_instance_of(WinRM::PSRP::ReceiveResponseReader).to receive(:read_output)
-          .with(output_message).and_return(output)
+          .with(output_message, any_args).and_return(output)
         allow(transport).to receive(:send_request).with(configuration_payload) do |_|
           # parse real XML with ResponseHandler to raise WinRMSoapFault
           WinRM::ResponseHandler.new(config_response, 500).parse_to_xml if server_type == 'omi'

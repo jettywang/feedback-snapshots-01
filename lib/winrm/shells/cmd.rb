@@ -42,7 +42,9 @@ module WinRM
       end
 
       def response_reader
-        @response_reader ||= WinRM::WSMV::ReceiveResponseReader.new(transport, logger)
+        @response_reader ||= WinRM::WSMV::ReceiveResponseReader.new(
+          transport, logger, connection_opts
+        )
       end
 
       def open_shell

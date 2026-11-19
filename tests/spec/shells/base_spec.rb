@@ -48,7 +48,7 @@ describe DummyShell do
     allow(subject).to receive(:command_output_message)
       .with(shell_id, command_id)
       .and_return(output_message)
-    allow(reader).to receive(:read_output).with(output_message).and_return(output)
+    allow(reader).to receive(:read_output).with(output_message, any_args).and_return(output)
     allow(transport).to receive(:send_request)
   end
 
@@ -172,8 +172,10 @@ describe DummyShell do
       let(:output_message2) { double('message') }
 
       it 'retries and raises failure if it never succeeds' do
+        # retry_limit now bounds the number of retries after the initial
+        # attempt, shared by every layer of a single run
         expect(subject).to receive(:open_shell)
-          .and_raise(Errno::ECONNREFUSED).exactly(retry_limit).times
+          .and_raise(Errno::ECONNREFUSED).exactly(retry_limit + 1).times
         expect { subject.run(command) }.to raise_error(Errno::ECONNREFUSED)
       end
 
@@ -183,7 +185,7 @@ describe DummyShell do
           .with('shell_id 2', command_id)
           .and_return(output_message2)
         allow(reader).to receive(:read_output)
-          .with(output_message2).and_return(output)
+          .with(output_message2, any_args).and_return(output)
         allow(subject).to receive(:open_shell) do
           @times += 1
           raise(Errno::ECONNREFUSED) if @times == 1

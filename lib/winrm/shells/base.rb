@@ -13,6 +13,8 @@
 # limitations under the License.
 
 require_relative 'retryable'
+require_relative '../connection_opts'
+require_relative '../retry_policy'
 require_relative '../http/transport'
 require_relative '../wsmv/cleanup_command'
 require_relative '../wsmv/close_shell'
@@ -76,8 +78,11 @@ module WinRM
       # @yieldparam [string] standard error response text
       # @yieldreturn [WinRM::Output] The command output
       def run(command, arguments = [], &block)
-        with_command_shell(command, arguments) do |shell, cmd|
-          response_reader.read_output(command_output_message(shell, cmd), &block)
+        retry_policy = build_retry_policy
+        with_command_shell(command, arguments, retry_policy) do |shell, cmd|
+          response_reader.read_output(
+            command_output_message(shell, cmd), retry_policy: retry_policy, &block
+          )
         end
       end
 
@@ -154,20 +159,37 @@ module WinRM
         WinRM::WSMV::CommandOutput.new(connection_opts, cmd_out_opts)
       end
 
-      def with_command_shell(command, arguments = [])
-        tries ||= 2
-
-        open unless shell_id
-        command_id = send_command(command, arguments)
+      def with_command_shell(command, arguments = [], retry_policy = build_retry_policy)
+        open(retry_policy) unless shell_id
+        command_id = send_command_with_delivery_boundary(command, arguments, retry_policy)
         logger.debug("[WinRM] creating command_id: #{command_id} on shell_id #{shell_id}")
         yield shell_id, command_id
       rescue WinRMWSManFault => e
-        raise unless FAULTS_FOR_RESET.include?(e.fault_code) && (tries -= 1) > 0
+        raise unless FAULTS_FOR_RESET.include?(e.fault_code) && retry_policy.retry?
 
+        retry_policy.consume_retry
         reset_on_error(e)
         retry
       ensure
         cleanup_command(command_id) if command_id
+      end
+
+      # Sends the command exactly once unless the failure proves the request
+      # never left the client. Failures after the request may have been sent
+      # raise WinRMCommandDeliveryUnknownError instead of being retried, so
+      # a non-idempotent remote command is never replayed automatically.
+      def send_command_with_delivery_boundary(command, arguments, retry_policy)
+        send_command(command, arguments)
+      rescue *RetryPolicy::PRE_SEND_EXCEPTIONS => e
+        raise unless retry_policy.retry?
+
+        logger.debug(
+          "[WinRM] command send failed before reaching the endpoint (#{e.class}); retrying"
+        )
+        retry_policy.wait_for_retry
+        retry
+      rescue *RetryPolicy::AMBIGUOUS_EXCEPTIONS
+        raise WinRMCommandDeliveryUnknownError.new(command, shell_id)
       end
 
       private
@@ -195,14 +217,34 @@ module WinRM
         logger.info("[WinRM] #{t.status_code} returned in cleanup with error: #{t.message}")
       end
 
-      def open
+      def open(retry_policy = build_retry_policy)
         close
-        retryable(connection_opts[:retry_limit], connection_opts[:retry_delay]) do
+        begin
           logger.debug("[WinRM] opening remote shell on #{connection_opts[:endpoint]}")
           @shell_id = open_shell
+        rescue *RetryPolicy::RETRYABLE_EXCEPTIONS => e
+          raise unless retry_policy.retry?
+
+          logger.debug("[WinRM] shell open failed with #{e.class}; retrying")
+          retry_policy.wait_for_retry
+          retry
         end
         logger.debug("[WinRM] remote shell created with shell_id: #{shell_id}")
         add_finalizer
+      end
+
+      # Builds the retry budget shared by every layer (shell open, WSMan
+      # fault resets, command send and output receive) of a single run so
+      # retries cannot multiply across layers. The clock and sleeper are
+      # injectable via connection_opts[:retry_clock] and
+      # connection_opts[:retry_sleeper] for deterministic tests.
+      def build_retry_policy
+        WinRM::RetryPolicy.new(
+          limit: connection_opts[:retry_limit] || ConnectionOpts::DEFAULT_RETRY_LIMIT,
+          delay: connection_opts[:retry_delay] || ConnectionOpts::DEFAULT_RETRY_DELAY,
+          clock: connection_opts[:retry_clock] || WinRM::RetryPolicy::DEFAULT_CLOCK,
+          sleeper: connection_opts[:retry_sleeper] || WinRM::RetryPolicy::DEFAULT_SLEEPER
+        )
       end
 
       def add_finalizer

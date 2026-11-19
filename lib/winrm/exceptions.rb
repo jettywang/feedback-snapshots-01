@@ -85,4 +85,38 @@ module WinRM
       super(msg + " (#{status_code}).")
     end
   end
+
+  # Raised when a command request may have reached the remote host but the
+  # response was lost (e.g. the connection dropped or the read timed out
+  # after the request was sent). The remote command may or may not have
+  # executed, so the gem does NOT replay it automatically: remote execution
+  # is not idempotent. Callers can rescue this specific error to detect the
+  # ambiguous state and reconcile manually (e.g. poll for side effects).
+  class WinRMCommandDeliveryUnknownError < WinRMError
+    attr_reader :command, :shell_id
+
+    def initialize(command, shell_id)
+      @command = command
+      @shell_id = shell_id
+      super(
+        'The command may or may not have been executed on the remote host: ' \
+        'the connection failed after the request was sent. The command was ' \
+        'not retried because remote execution is not idempotent. ' \
+        "Command: #{command}, shell_id: #{shell_id}"
+      )
+    end
+  end
+
+  # Raised when a Receive loop cannot finish within the configured bounds
+  # (the shared retry budget is exhausted or the receive wait limit is
+  # exceeded). Any output received before the failure is preserved on
+  # #output so callers do not lose partial results.
+  class WinRMReceiveRetriesExhausted < WinRMError
+    attr_accessor :output
+
+    def initialize(message, output: nil)
+      @output = output
+      super(message)
+    end
+  end
 end

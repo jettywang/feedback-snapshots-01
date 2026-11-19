@@ -45,13 +45,30 @@ There are various connection options you can specify upon initializing a WinRM c
 * `:max_envelope_size` - mazimum number of bytes expected for WinRM responses. This defaults to 153600
 * `:operation_timeout` - The maximum amount of time to wait for a response from the endpoint. This defaults to 60 seconds. Note that this will not "timeout" commands that exceed this amount of time to process, it just requires the endpoint to report the status of the command before the given amount of time passes.
 * `:receive_timeout` - The amount of time given to the underlying HTTP connection to respond before timing out. The defaults to 10 seconds longer than the `:operation_timeout`.
-* `:retry_limit` - the maximum number of times to retry opening a shell after failure. This defaults to 3.
+* `:retry_limit` - the maximum number of retries after a failed attempt. This defaults to 3. It is a single budget shared by every layer of one `shell.run` call (shell open, WSMan fault resets, command send and output receive), so retries cannot multiply across layers. Previously each layer had its own counter (up to 2 x `retry_limit` shell opens, plus unbounded receive timeouts).
 * `:user_agent` - the user-agent used in the http connection, default to 'Ruby WinRM Client'
 * `:retry_delay` - the amount of time to wait between retries and defaults to 10 seconds
+* `:receive_wait_limit` - the total number of seconds a `Receive` loop may keep waiting for output when the endpoint keeps answering with WSMan `OperationTimeout` faults. Defaults to `nil` (wait forever, the historical behavior). Set this for unattended callers that need a hard bound; when the limit is exceeded a `WinRM::WinRMReceiveRetriesExhausted` error is raised and any output received so far is available on `error.output`.
 * `:user` - username used to authenticate over the `:transport`
 * `:password` - password used to authenticate over the `:transport`
 
 There are other options that may apply depending on the type of `:transport` used and are discussed below.
+
+## Retry and delivery semantics
+
+Unattended callers get explicit retry boundaries instead of unbounded or multiplied retries:
+
+* One `WinRM::RetryPolicy` budget is created per `shell.run` and shared by the HTTP, WSMan fault and shell layers, so the total number of retries of a single run is bounded by `:retry_limit` no matter where failures occur.
+* `Receive` is an idempotent read: WSMan `OperationTimeout` faults are legitimate waiting and are bounded by `:receive_wait_limit` (unlimited by default); transport errors during `Receive` are retried within the shared budget.
+* Sending a command is **not** idempotent. Failures that prove the request never left the client (e.g. `HTTPClient::ConnectTimeoutError`, `Errno::ECONNREFUSED`) are retried within the shared budget. Failures after the request may have been sent (e.g. `HTTPClient::ReceiveTimeoutError`, `HTTPClient::KeepAliveDisconnected`, `Errno::ECONNRESET`) raise `WinRM::WinRMCommandDeliveryUnknownError` and the command is **not** replayed automatically. Rescue that error to detect the ambiguous state and reconcile manually.
+* When receive bounds are exhausted, `WinRM::WinRMReceiveRetriesExhausted` is raised with the partial `WinRM::Output` attached as `error.output`, so already received output is never lost.
+
+### Compatibility notes
+
+* `retry_limit` previously bounded each layer independently (shell open alone could use all of it, the shell-reset loop had its own 2 tries, and `OperationTimeout` waits were unbounded). A single run now performs *fewer* remote attempts by default. To approximate the old tolerance, raise `:retry_limit`.
+* `retry_limit` now counts retries after the initial attempt; shell open may perform one more attempt than before for the same value.
+* Command sends that fail with a lost response previously raised the raw transport error (e.g. `HTTPClient::KeepAliveDisconnected`); they now raise `WinRM::WinRMCommandDeliveryUnknownError`. The original error is preserved on `error.cause`.
+* `ReceiveResponseReader#read_output`, `#read_response` and `#read_message` accept an optional `retry_policy:` keyword; existing callers that do not pass it keep the previous behavior (no transport retries, unbounded `OperationTimeout` waits unless `:receive_wait_limit` is set).
 
 ## Transports
 

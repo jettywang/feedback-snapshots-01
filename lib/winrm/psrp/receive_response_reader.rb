@@ -23,7 +23,8 @@ module WinRM
       # Creates a new ReceiveResponseReader
       # @param transport [HttpTransport] The WinRM SOAP transport
       # @param logger [Logger] The logger to log diagnostic messages to
-      def initialize(transport, logger)
+      # @param options [Hash] Optional receive bounds, see WSMV::ReceiveResponseReader
+      def initialize(transport, logger, options = {})
         super
         @output_decoder = PowershellOutputDecoder.new
       end
@@ -31,12 +32,13 @@ module WinRM
       # Reads PSRP messages sent in one or more receive response messages
       # @param wsmv_message [WinRM::WSMV::Base] A wsmv message to send to endpoint
       # @param wait_for_done_state whether to poll for a CommandState of Done
+      # @param retry_policy [WinRM::RetryPolicy] Shared retry budget for this run
       # @yield [Message] PSRP Message in response
       # @yieldreturn [Array<Message>] All messages in response
-      def read_message(wsmv_message, wait_for_done_state = false)
+      def read_message(wsmv_message, wait_for_done_state = false, retry_policy: nil)
         messages = []
         defragmenter = MessageDefragmenter.new
-        read_response(wsmv_message, wait_for_done_state) do |stream|
+        read_response(wsmv_message, wait_for_done_state, retry_policy: retry_policy) do |stream|
           message = defragmenter.defragment(stream[:text])
           next unless message
 
@@ -51,20 +53,28 @@ module WinRM
 
       # Reads streams and returns decoded output
       # @param wsmv_message [WinRM::WSMV::Base] A wsmv message to send to endpoint
+      # @param retry_policy [WinRM::RetryPolicy] Shared retry budget for this run
       # @yieldparam [string] standard out response text
       # @yieldparam [string] standard error response text
       # @yieldreturn [WinRM::Output] The command output
-      def read_output(wsmv_message)
+      def read_output(wsmv_message, retry_policy: nil)
         with_output do |output|
-          read_message(wsmv_message, true) do |message|
-            exit_code = find_exit_code(message)
-            output.exitcode = exit_code if exit_code
-            decoded_text = @output_decoder.decode(message)
-            next unless decoded_text
+          begin
+            read_message(wsmv_message, true, retry_policy: retry_policy) do |message|
+              exit_code = find_exit_code(message)
+              output.exitcode = exit_code if exit_code
+              decoded_text = @output_decoder.decode(message)
+              next unless decoded_text
 
-            out = { stream_type(message) => decoded_text }
-            output << out
-            yield [out[:stdout], out[:stderr]] if block_given?
+              out = { stream_type(message) => decoded_text }
+              output << out
+              yield [out[:stdout], out[:stderr]] if block_given?
+            end
+          rescue WinRMReceiveRetriesExhausted => e
+            # Do not lose output that was already received when the
+            # receive bounds are exhausted; attach it for the caller.
+            e.output ||= output
+            raise
           end
         end
       end

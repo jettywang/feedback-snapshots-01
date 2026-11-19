@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+* Add explicit retry boundaries for unattended callers: one `WinRM::RetryPolicy` budget (from `:retry_limit`/`:retry_delay`) is now shared by the HTTP, WSMan fault and shell layers of a single `shell.run`, so retries no longer multiply across layers
+* Distinguish command delivery failures: pre-send failures are retried within the shared budget, while post-send failures (response lost) raise `WinRM::WinRMCommandDeliveryUnknownError` and the command is not replayed automatically
+* Add `:receive_wait_limit` connection option bounding the total time a `Receive` loop waits through WSMan `OperationTimeout` faults (defaults to unlimited, the historical behavior)
+* Raise `WinRM::WinRMReceiveRetriesExhausted` with partial output attached (`error.output`) when receive bounds are exhausted, so already received output is not lost
 
 ## [2.4.2]
 * Replace erubi with the Ruby standard library ERB; the erubi runtime dependency is gone (#366)
