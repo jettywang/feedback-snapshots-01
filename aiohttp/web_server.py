@@ -7,6 +7,7 @@ from typing import Any, Generic, TypeVar, Unpack, overload
 
 from .abc import AbstractStreamWriter
 from .http_parser import RawRequestMessage
+from .log import server_logger
 from .streams import StreamReader
 from .web_exceptions import HTTPBadRequest
 from .web_protocol import (
@@ -14,6 +15,7 @@ from .web_protocol import (
     _AnyAbstractAccessLogger,
     _HandlerKwargs,
     _RequestHandlerKwargs,
+    shutdown_deadline,
 )
 from .web_request import BaseRequest
 from .web_response import StreamResponse
@@ -128,12 +130,43 @@ class Server(Generic[_Request]):
         )
 
     def pre_shutdown(self) -> None:
-        for conn in self._connections:
-            conn.close()
+        for conn in list(self._connections):
+            try:
+                conn.close()
+            except Exception:
+                # One connection failing to close must not leave the rest of
+                # the batch serving; cleanup continues and the error is logged.
+                server_logger.exception("Error closing connection")
 
     async def shutdown(self, timeout: float | None = None) -> None:
-        coros = (conn.shutdown(timeout) for conn in self._connections)
-        await asyncio.gather(*coros)
+        # A single absolute deadline for the whole batch: every connection
+        # counts down from the same instant, so N slow bodies cannot each
+        # extend shutdown by a full timeout. ``None`` and non-positive values
+        # keep the historical "no bound" behaviour of RequestHandler.shutdown.
+        loop = self._loop
+        # Mirror RequestHandler's parsing of the threshold so a bad value
+        # falls back to the same default instead of breaking shutdown.
+        try:
+            ceil_threshold = float(self._kwargs.get("timeout_ceil_threshold", 5))
+        except (TypeError, ValueError):
+            ceil_threshold = 5.0
+        deadline = shutdown_deadline(timeout, loop, ceil_threshold)
+        results = await asyncio.gather(
+            *(
+                # Pass timeout too: a None deadline means "no bound" here and
+                # must not be re-derived from RequestHandler's own default.
+                conn.shutdown(timeout, deadline=deadline)
+                for conn in list(self._connections)
+            ),
+            return_exceptions=True,
+        )
+        for result in results:
+            # CancelledError is a BaseException; re-raise so a cancelled
+            # shutdown still propagates instead of being recorded and eaten.
+            if isinstance(result, asyncio.CancelledError):
+                raise result
+            if isinstance(result, BaseException):
+                server_logger.error("Error during connection shutdown", exc_info=result)
         self._connections.clear()
 
     def __call__(self) -> RequestHandler[_Request]:

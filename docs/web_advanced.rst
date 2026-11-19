@@ -1107,6 +1107,17 @@ step 7).
    :ref:`handler cancellation<web-handler-cancellation>` or aiojobs_ for examples).
 7. Cancel any remaining tasks and wait on them to complete.
 
+Steps 4 and 5 are bounded by a single deadline shared by every connection, not
+by one timeout per connection: a batch of slow connections winds down within
+one overall budget. Connections whose response was already sent only need to
+finish reading an unread request body ("lingering close"); those reads are
+cancelled right away instead of consuming that budget, so they cannot hold up
+shutdown or delay the responses that were ready to complete. Requests that were
+already parsed or rejected before shutdown started are not dispatched.
+
+If a connection fails while shutting down, the error is logged and the
+remaining connections are still cleaned up.
+
 Websocket shutdown
 ^^^^^^^^^^^^^^^^^^
 

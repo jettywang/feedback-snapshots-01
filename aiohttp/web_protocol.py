@@ -9,6 +9,7 @@ from contextlib import suppress
 from html import escape as html_escape
 from http import HTTPStatus
 from logging import Logger
+from math import ceil
 from typing import TYPE_CHECKING, Any, Generic, TypedDict, TypeVar, cast
 
 import yarl
@@ -45,6 +46,27 @@ __all__ = ("RequestHandler", "RequestPayloadError", "PayloadAccessError")
 # reading is paused. Bounds memory a client can pin by keeping one handler busy
 # and pipelining behind it; reading resumes as the queue drains.
 MAX_MSG_QUEUE_SIZE = 32
+
+
+def shutdown_deadline(
+    timeout: float | None,
+    loop: asyncio.AbstractEventLoop,
+    ceil_threshold: float = 5,
+) -> float | None:
+    """Convert a shutdown timeout into one absolute loop time.
+
+    A server passes the result to every connection it shuts down, so the whole
+    batch counts down from the same instant instead of each connection
+    restarting the timeout. Non-positive timeouts mean "no bound", and values
+    above ``ceil_threshold`` are ceiled exactly like :func:`ceil_timeout`.
+    """
+    if timeout is None or timeout <= 0:
+        return None
+    when = loop.time() + timeout
+    if timeout > ceil_threshold:
+        when = ceil(when)
+    return when
+
 
 if TYPE_CHECKING:
     import ssl
@@ -213,6 +235,7 @@ class RequestHandler(BaseProtocol, Generic[_Request]):
         "_current_request",
         "_timeout_ceil_threshold",
         "_request_in_progress",
+        "_lingering",
         "_logging_enabled",
         "_cache",
     )
@@ -315,6 +338,10 @@ class RequestHandler(BaseProtocol, Generic[_Request]):
         self._close = False
         self._force_close = False
         self._request_in_progress = False
+        # True while an already answered request is reading and discarding
+        # the rest of its body (lingering close). The response is complete in
+        # this state, so it is not worth spending a handler grace period on.
+        self._lingering = False
         self._cache: dict[str, Any] = {}
 
     def __repr__(self) -> str:
@@ -358,47 +385,90 @@ class RequestHandler(BaseProtocol, Generic[_Request]):
     def keepalive_timeout(self) -> float:
         return self._keepalive_timeout
 
-    async def shutdown(self, timeout: float | None = 15.0) -> None:
+    async def shutdown(
+        self,
+        timeout: float | None = 15.0,
+        *,
+        deadline: float | None = None,
+    ) -> None:
         """Do worker process exit preparations.
 
         We need to clean up everything and stop accepting requests.
         It is especially important for keep-alive connections.
+
+        ``deadline`` is an absolute loop time shared by all connections of a
+        server. Both phases below are bounded by it, so a batch of slow
+        connections drains within one overall budget instead of each phase
+        restarting a full timeout. When omitted, ``timeout`` is converted to
+        such a deadline once.
         """
         self._force_close = True
 
         if self._keepalive_handle is not None:
             self._keepalive_handle.cancel()
 
-        # Wait for graceful handler completion
-        if self._request_in_progress:
+        # Wake a connection idle between requests so start() re-checks
+        # _force_close and exits cleanly, instead of parking here until the
+        # deadline expires.
+        waiter = self._waiter
+        if waiter is not None and not waiter.done():
+            waiter.set_result(None)
+
+        if deadline is None and timeout is not None:
+            deadline = shutdown_deadline(
+                timeout, self._loop, self._timeout_ceil_threshold
+            )
+
+        # Phase 1: give an in-flight handler time to finish and deliver its
+        # response. A lingering connection already answered, so it skips this
+        # grace window and is wound down immediately below.
+        if self._request_in_progress and not self._lingering:
             # The future is only created when we are shutting
             # down while the handler is still processing a request
             # to avoid creating a future for every request.
-            self._handler_waiter = self._loop.create_future()
+            waiter = self._loop.create_future()
+            self._handler_waiter = waiter
             try:
-                async with ceil_timeout(timeout):
-                    await self._handler_waiter
+                async with self._shutdown_timeout(deadline):
+                    await waiter
             except (asyncio.CancelledError, TimeoutError):
-                self._handler_waiter = None
+                if self._handler_waiter is waiter:
+                    self._handler_waiter = None
                 if (task := asyncio.current_task()) and task.cancelling():
                     raise
-        # Then cancel handler and wait
-        try:
-            async with ceil_timeout(timeout):
-                if self._current_request is not None:
-                    self._current_request._cancel(asyncio.CancelledError())
 
-                if self._task_handler is not None and not self._task_handler.done():
-                    await asyncio.shield(self._task_handler)
+        # Phase 2: cancel what is still active and wait for the connection
+        # task, bounded by the same deadline rather than a fresh timeout.
+        # Done in two steps so a cancellation raised by the connection task
+        # (or by our own caller) is never mistaken for the deadline expiring.
+        task_handler = self._task_handler
+        if task_handler is not None and not task_handler.done():
+            if self._lingering:
+                # The response is already on the wire; cancel the lingering
+                # body read instead of letting a body that never completes
+                # consume the shared budget.
+                task_handler.cancel()
+            elif self._current_request is not None:
+                self._current_request._cancel(asyncio.CancelledError())
+        try:
+            async with self._shutdown_timeout(deadline):
+                if task_handler is not None and not task_handler.done():
+                    await asyncio.shield(task_handler)
         except (asyncio.CancelledError, TimeoutError):
             if (task := asyncio.current_task()) and task.cancelling():
                 raise
 
-        # force-close non-idle handler
-        if self._task_handler is not None:
-            self._task_handler.cancel()
+        # Phase 3: force-close anything that did not wind down in time.
+        if task_handler is not None:
+            task_handler.cancel()
 
         self.force_close()
+
+    @staticmethod
+    def _shutdown_timeout(deadline: float | None) -> asyncio.Timeout:
+        if deadline is None:
+            return asyncio.timeout(None)
+        return asyncio.timeout_at(deadline)
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
         super().connection_made(transport)
@@ -749,6 +819,16 @@ class RequestHandler(BaseProtocol, Generic[_Request]):
                     await self._waiter
                 finally:
                     self._waiter = None
+                if not self._messages:
+                    # Woken without a message: shutdown is draining the
+                    # connection rather than handing it more work.
+                    break
+
+            # Once closing, already parsed messages must not enter the
+            # application: shutdown rejected them, and dispatching them here
+            # would restart business work the shutdown is waiting to drain.
+            if self._close or self._force_close:
+                break
 
             message, payload = self._messages.popleft()
 
@@ -827,9 +907,16 @@ class RequestHandler(BaseProtocol, Generic[_Request]):
 
                         now = loop.time()
                         end_t = now + lingering_time
-
+                        # Mark before the first await so a shutdown racing in
+                        # now sees that the response is already complete and
+                        # cancels the read instead of granting handler grace.
+                        self._lingering = True
                         try:
-                            while not payload.is_eof() and now < end_t:
+                            while (
+                                not payload.is_eof()
+                                and now < end_t
+                                and not self._force_close
+                            ):
                                 async with ceil_timeout(end_t - now):
                                     # read and ignore
                                     await payload.readany()
@@ -837,6 +924,8 @@ class RequestHandler(BaseProtocol, Generic[_Request]):
                         except (asyncio.CancelledError, TimeoutError):
                             if (t := asyncio.current_task()) and t.cancelling():
                                 raise
+                        finally:
+                            self._lingering = False
 
                     # if payload still uncompleted
                     if not payload.is_eof() and not self._force_close:

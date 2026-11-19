@@ -1848,6 +1848,17 @@ Application and Router
       A :ref:`coroutine<coroutine>` that should be called to close all opened
       connections.
 
+      ``timeout`` is the overall budget for the batch, not a per-connection
+      timeout: every connection counts down from the same deadline, so many
+      slow connections cannot add up to a longer shutdown.
+
+      .. versionchanged:: 4.0
+
+         All connections share one deadline, a connection whose response was
+         already sent stops draining an unread body immediately, an error in
+         one connection is logged instead of aborting the rest, and requests
+         that were already parsed or rejected are not dispatched.
+
 
 .. class:: UrlDispatcher()
    :canonical: aiohttp.web_urldispatcher.UrlDispatcher

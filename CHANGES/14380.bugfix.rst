@@ -1,0 +1,6 @@
+Fixed server shutdown stalling on slow request bodies: all connections now
+share a single shutdown deadline instead of each restarting its own, responses
+that are already complete are flushed without waiting for an unread body to
+finish (the lingering read is cancelled instead), an error in one connection no
+longer leaves the rest of the batch uncleaned, and requests that were queued or
+rejected before shutdown started are no longer dispatched to the application.
