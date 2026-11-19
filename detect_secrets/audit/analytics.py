@@ -6,7 +6,9 @@ from collections import defaultdict
 from typing import Any
 from typing import cast
 from typing import Dict
+from typing import List
 
+from ..core import baseline
 from ..core.plugins.util import get_mapping_from_secret_type_to_class
 from ..core.potential_secret import PotentialSecret
 from .common import get_baseline_from_file
@@ -26,8 +28,21 @@ def calculate_statistics_for_baseline(
         # TODO: gather real secrets?
         # TODO: do we need repo_info?
         aggregator.record_secret(secret)
+    aggregator.record_merge_status(_get_merge_status_from_file(filename))
 
     return aggregator
+
+
+def _get_merge_status_from_file(filename: str) -> Dict[str, Any]:
+    """
+    Reads the merge metadata written by `audit --merge`.
+
+    Older baselines (and baselines that were never merged) have no such
+    metadata. Their statistics keep their original format, with no inferred
+    signature status.
+    """
+    data = baseline.load_from_file(filename)
+    return cast(Dict[str, Any], data.get('audit_merge') or {})
 
 
 class StatisticsAggregator:
@@ -42,6 +57,19 @@ class StatisticsAggregator:
                 for key, value in framework.items()
             },
         )
+        self.conflicts: List[Dict[str, Any]] = []
+        self.merge_metadata_present = False
+
+    def record_merge_status(self, metadata: Dict[str, Any]) -> None:
+        if not metadata:
+            return
+
+        self.merge_metadata_present = True
+        self.conflicts = cast(List[Dict[str, Any]], metadata.get('conflicts') or [])
+
+    @property
+    def is_signed_off(self) -> bool:
+        return not self.conflicts
 
     def record_secret(self, secret: PotentialSecret) -> None:
         # NOTE: We don't do anything with verified secrets, because this function
@@ -60,6 +88,9 @@ class StatisticsAggregator:
     def __str__(self) -> str:
         output = ''
 
+        if not self.is_signed_off:
+            output += self._unsigned_warning() + '\n\n'
+
         for secret_type, framework in self.data.items():
             output += f'Plugin: {get_mapping_from_secret_type_to_class()[secret_type].__name__}\n'
             for value in framework.values():
@@ -75,7 +106,20 @@ class StatisticsAggregator:
                 for key, value in framework.items()
             }
 
+        # Only merged baselines carry a signature status. For those, always
+        # emit it explicitly, so consumers never have to infer it from a
+        # missing key.
+        if self.merge_metadata_present:
+            output['signed_off'] = self.is_signed_off
+            output['conflicts'] = self.conflicts
         return output
+
+    def _unsigned_warning(self) -> str:
+        return (
+            'WARNING: This baseline is NOT SIGNED OFF. '
+            f'{len(self.conflicts)} unresolved conflict(s) from the merge require a third '
+            'reviewer. The statistics below exclude those unresolved conclusions.'
+        )
 
 
 class StatisticsCounter:

@@ -129,6 +129,15 @@ def handle_audit_action(args: argparse.Namespace) -> None:
                 print(json.dumps(stats.json(), indent=2))
             else:
                 print(str(stats))
+        elif args.merge:
+            from .audit.merge import merge_command
+
+            merge_command(
+                args.filename[0],
+                args.filename[1],
+                args.filename[2],
+                args.output,
+            )
         elif args.report:
             class_to_print = None
             if args.only_real:

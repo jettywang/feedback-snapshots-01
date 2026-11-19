@@ -109,6 +109,50 @@ Base64HighEntropyString: True  (4.089)
 ...
 ```
 
+## Merging Reviewed Copies
+
+When two reviewers audit the same baseline independently, give each of them a copy of the
+same original file (the common base). After they are done, merge their labelled copies with:
+
+```bash
+$ detect-secrets audit .secrets.baseline alice.baseline bob.baseline --merge -o merged.baseline
+```
+
+The first filename is the common base; the next two are the reviewers' copies. The merge
+preserves each reviewer's conclusions using these rules:
+
+| Situation | Merged result |
+| --- | --- |
+| Only one reviewer labelled the secret | that reviewer's conclusion |
+| Both reviewers agree | the agreed conclusion |
+| Reviewers disagree | unlabelled, listed as a conflict |
+| Both copies have withdrawn the scan result | removed from the merged baseline |
+| Only one copy contains the scan result | unlabelled, listed as a conflict |
+
+Unresolved conflicts are written with no `is_secret` value, so a third reviewer can run
+`detect-secrets audit merged.baseline` and resolve them through the normal audit flow.
+The `audit_merge` section of the merged file records the conflicts, their differing
+conclusions, and any withdrawn entries.
+
+The merge is order-independent: swapping the two reviewer copies produces the same merged
+file, including the conflict list. While conflicts remain, the baseline is **not signed off**,
+and `detect-secrets audit --stats` reports that explicitly:
+
+```json
+{
+    "BasicAuthDetector": {
+        "stats": { "...": "..." }
+    },
+    "signed_off": false,
+    "conflicts": [
+        { "filename": "app.py", "line_number": 12, "reason": "conflicting-conclusions" }
+    ]
+}
+```
+
+`--stats` is intentionally still available so the unresolved work can be measured, but its
+numbers must not be published as a signed-off result until `signed_off` is `true`.
+
 ## Aggregating Statistics
 
 Often, when developing plugins, you may want to calculate a variety of statistics on the labelled

@@ -17,7 +17,18 @@ def add_audit_action(parent: argparse._SubParsersAction) -> argparse.ArgumentPar
         nargs='+',
         help=(
             'Audit a given baseline file to distinguish the difference '
-            'between false and true positives.'
+            'between false and true positives. In --diff mode, this takes two '
+            'baselines; in --merge mode, this takes the common base followed '
+            'by the two reviewed copies.'
+        ),
+    )
+    parser.add_argument(
+        '-o',
+        '--output',
+        metavar='<path>',
+        help=(
+            'Write the merged baseline to <path> instead of stdout. '
+            'Only valid with --merge.'
         ),
     )
 
@@ -35,6 +46,15 @@ def _add_mode_parser(parser: argparse.ArgumentParser) -> None:
             'Allows the comparison of two baseline files, in order to '
             'effectively distinguish the difference between various '
             'plugin configurations.'
+        ),
+    )
+
+    parser.add_argument(
+        '--merge',
+        action='store_true',
+        help=(
+            'Three-way merges two reviewed copies of a common baseline. '
+            'Conflicting conclusions are left unlabelled for a third reviewer.'
         ),
     )
 
@@ -103,11 +123,34 @@ def parse_args(args: argparse.Namespace) -> None:
     if args.action != 'audit':
         return
 
-    if args.diff and len(args.filename) != 2:
+    modes = [mode for mode in (args.diff, args.merge) if mode]
+    if len(modes) > 1:
         raise argparse.ArgumentTypeError(
-            '--diff mode requires two files to compare with each other.',
+            '--diff and --merge cannot be used together.',
         )
-    elif not args.diff and len(args.filename) != 1:
+
+    if args.output and not args.merge:
+        raise argparse.ArgumentTypeError(
+            '--output can only be used with --merge.',
+        )
+
+    if args.merge and (args.stats or args.report):
+        raise argparse.ArgumentTypeError(
+            '--merge cannot be combined with --stats or --report.',
+        )
+
+    if args.merge:
+        if len(args.filename) != 3:
+            raise argparse.ArgumentTypeError(
+                '--merge mode requires three files: the common base, followed by two '
+                'reviewed copies.',
+            )
+    elif args.diff:
+        if len(args.filename) != 2:
+            raise argparse.ArgumentTypeError(
+                '--diff mode requires two files to compare with each other.',
+            )
+    elif len(args.filename) != 1:
         raise argparse.ArgumentTypeError(
             'Can only specify one baseline at a time.',
         )

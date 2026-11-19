@@ -3,6 +3,7 @@ The audit module allows analysts to easily scan the baseline, and verify whether
 the secrets flagged are actually secrets.
 """
 from . import io
+from .merge import refresh_merge_metadata
 from ..core import baseline
 from ..exceptions import NoLineNumberError
 from ..exceptions import SecretNotFoundOnSpecifiedLineError
@@ -20,11 +21,13 @@ def audit_baseline(filename: str) -> None:
     :raises: InvalidBaselineError
     """
     secrets = get_baseline_from_file(filename)
+    original_data = baseline.load_from_file(filename)
 
     secrets.trim()
     if _classify_secrets(get_secret_iterator(secrets)):
         io.print_message('Saving progress...')
-        baseline.save_to_file(secrets, filename)
+        data = refresh_merge_metadata(original_data, secrets)
+        baseline.save_to_file(data, filename)
 
 
 def _classify_secrets(iterator: BidirectionalIterator) -> bool:
