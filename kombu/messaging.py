@@ -6,11 +6,14 @@ from itertools import count
 from threading import local
 from typing import TYPE_CHECKING
 
+from amqp.exceptions import AccessRefused
+
 from .common import maybe_declare
 from .compression import compress
 from .connection import PooledConnection, is_connection, maybe_channel
 from .entity import Exchange, Queue, maybe_delivery_mode
 from .exceptions import ContentDisallowed
+from .log import get_logger
 from .serialization import dumps, prepare_accept_content
 from .utils.functional import ChannelPromise, maybe_list
 
@@ -18,6 +21,8 @@ if TYPE_CHECKING:
     from types import TracebackType
 
 __all__ = ('Exchange', 'Queue', 'Producer', 'Consumer')
+
+logger = get_logger(__name__)
 
 DEFAULT_BATCH_SIZE = 1000
 
@@ -497,9 +502,28 @@ class Consumer:
         on_message (Callable): See :attr:`on_message`
         on_decode_error (Callable): see :attr:`on_decode_error`.
         prefetch_count (int): see :attr:`prefetch_count`.
+        queue_checker (Callable): see :attr:`queue_checker`.
     """
 
     ContentDisallowed = ContentDisallowed
+
+    #: Exceptions raised while declaring or consuming a single queue that
+    #: are treated as a refusal of that queue only.
+    #:
+    #: This relies on the transport reporting the refusal without
+    #: invalidating the channel.  An AMQP broker closes the channel on
+    #: ``ACCESS_REFUSED``, so there the usual connection-level recovery
+    #: re-runs :meth:`revive`; :meth:`check_queue_before_revive` lets the
+    #: queue be skipped before it is even attempted.
+    queue_declaration_errors = (AccessRefused,)
+
+    #: Optional callable ``queue_checker(queue, channel)`` returning
+    #: whether a queue may be consumed from.  It is consulted by
+    #: :meth:`check_queue_before_revive`; subclasses usually override
+    #: that method instead.  A plain function passed to the constructor
+    #: (or assigned to the attribute) is called with ``(queue, channel)``;
+    #: if set on a subclass as a regular method it is bound as usual.
+    queue_checker = None
 
     #: The connection/channel to use for this consumer.
     channel = None
@@ -574,7 +598,8 @@ class Consumer:
 
     def __init__(self, channel, queues=None, no_ack=None, auto_declare=None,
                  callbacks=None, on_decode_error=None, on_message=None,
-                 accept=None, prefetch_count=None, tag_prefix=None):
+                 accept=None, prefetch_count=None, tag_prefix=None,
+                 queue_checker=None):
         self.channel = channel
         self.queues = maybe_list(queues or [])
         self.no_ack = self.no_ack if no_ack is None else no_ack
@@ -582,8 +607,14 @@ class Consumer:
                           else callbacks)
         self.on_message = on_message
         self.tag_prefix = tag_prefix
+        if queue_checker is not None:
+            self.queue_checker = queue_checker
         self._active_tags = {}
         self._active_queue_no_ack = {}
+        #: Queues that were being consumed before they were blocked, with
+        #: their effective ``no_ack``; lets a later reconnect retry them.
+        self._blocked_intent = {}
+        self._blocked_queues = {}
         if auto_declare is not None:
             self.auto_declare = auto_declare
         if on_decode_error is not None:
@@ -604,7 +635,9 @@ class Consumer:
 
     def revive(self, channel):
         """Revive consumer after connection loss."""
-        previous_no_ack = self._active_queue_no_ack.copy()
+        previous_no_ack = {
+            **self._active_queue_no_ack, **self._blocked_intent,
+        }
         self._active_tags.clear()
         self._active_queue_no_ack.clear()
         channel = self.channel = maybe_channel(channel)
@@ -615,8 +648,20 @@ class Consumer:
             queue = self._queues[queue.name] = queue(self.channel)
             queue.revive(channel)
 
+        # A queue the hook refuses, or whose declaration is refused, must
+        # not be re-declared or re-consumed: the server may have narrowed
+        # this service's read access while we were disconnected.  This is
+        # checked on every bind as well, since workers often build a fresh
+        # consumer for every connection.
+        self._check_queues_before_revive(channel, previous_no_ack)
+
         if self.auto_declare:
-            self.declare()
+            for queue in self._queues.values():
+                if not self._is_blocked(queue.name):
+                    self._declare_queue(
+                        queue, channel=channel,
+                        no_ack=previous_no_ack.get(queue.name),
+                    )
 
         if self.prefetch_count is not None:
             self.qos(prefetch_count=self.prefetch_count)
@@ -625,8 +670,97 @@ class Consumer:
         # actually being consumed from before (not merely registered).
         self._consume_previously_active(previous_no_ack)
 
+    def _check_queues_before_revive(self, channel, previous_no_ack):
+        """Ask :meth:`check_queue_before_revive` about every queue.
+
+        Queues rejected by the hook are recorded as blocked, so that
+        :meth:`declare` and the consume paths skip them while still
+        recovering the permitted queues.  A queue that the hook accepts
+        again is unblocked here.
+        """
+        for queue in self._queues.values():
+            no_ack = previous_no_ack.get(queue.name)
+            try:
+                allowed = self.check_queue_before_revive(queue, channel)
+            except self.queue_declaration_errors as exc:
+                self._block_queue(queue, exc, no_ack=no_ack)
+            else:
+                if allowed:
+                    self.clear_blocked(queue.name)
+                else:
+                    self._block_queue(
+                        queue, PermissionError(
+                            'queue {0.name!r} was not accepted by '
+                            'check_queue_before_revive'.format(queue)),
+                        no_ack=no_ack,
+                    )
+
+    def _block_queue(self, queue, reason, no_ack=None):
+        self._blocked_queues[queue.name] = reason
+        no_ack = self._active_queue_no_ack.pop(queue.name, no_ack)
+        if no_ack is not None:
+            self._blocked_intent[queue.name] = no_ack
+        self._active_tags.pop(queue.name, None)
+        logger.warning('Not consuming from queue %r: %s', queue.name, reason)
+
+    def _is_blocked(self, qname):
+        return qname in self._blocked_queues
+
+    @property
+    def blocked_queues(self):
+        """Mapping of blocked queue names to the reason they are blocked."""
+        return dict(self._blocked_queues)
+
+    def clear_blocked(self, queue=None):
+        """Allow a queue (or every queue) to be restored again.
+
+        Use this after an operator has re-granted read access, so the
+        next :meth:`consume` may attach the queue again.  A blocked queue
+        is also retried automatically on the next :meth:`revive`.
+        """
+        if queue is None:
+            self._blocked_queues.clear()
+            self._blocked_intent.clear()
+        else:
+            name = queue.name if isinstance(queue, Queue) else queue
+            self._blocked_queues.pop(name, None)
+            self._blocked_intent.pop(name, None)
+
+    def check_queue_before_revive(self, queue, channel):
+        """Return whether to restore consuming from ``queue``.
+
+        Called for every queue just before :meth:`revive` re-declares the
+        queues, both when the consumer is first bound and whenever it is
+        revived after a reconnect.  This is the entry point for honouring
+        operators that narrowed the set of queues this service may read
+        from while it was disconnected.
+
+        Raising :class:`amqp.exceptions.AccessRefused`, or returning a
+        false value, blocks only that queue: permitted queues are still
+        declared and consumed from.
+
+        The default implementation delegates to :attr:`queue_checker`,
+        and otherwise permits every queue.
+
+        Arguments:
+        ---------
+            queue (kombu.Queue): The queue about to be declared/consumed.
+            channel (ChannelT): The channel the queue is bound to.
+
+        Returns
+        -------
+            bool: :const:`True` if the queue may be restored.
+        """
+        check = self.queue_checker
+        if check is None:
+            return True
+        return bool(check(queue, channel))
+
     def declare(self):
         """Declare queues, exchanges and bindings.
+
+        Blocked queues are skipped: declaring them again could resurrect a
+        binding whose read access was revoked during the outage.
 
         Note:
         ----
@@ -634,7 +768,24 @@ class Consumer:
             when :attr:`auto_declare` is set.
         """
         for queue in self._queues.values():
-            queue.declare()
+            if not self._is_blocked(queue.name):
+                self._declare_queue(queue)
+
+    def _declare_queue(self, queue, channel=None, no_ack=None):
+        """Declare one queue, isolating local authorization refusals.
+
+        A refused queue is blocked and skipped from here on, while the
+        remaining queues are still declared.
+        """
+        try:
+            if channel is None:
+                queue.declare()
+            else:
+                queue.declare(channel=channel)
+        except self.queue_declaration_errors as exc:
+            self._block_queue(queue, exc, no_ack=no_ack)
+            return False
+        return True
 
     def register_callback(self, callback):
         """Register a new callback to be called when a message is received.
@@ -674,8 +825,11 @@ class Consumer:
             for that you will have to call :meth:`consume` after.
         """
         queue = queue(self.channel)
+        # explicitly re-registering a queue lifts an earlier refusal; the
+        # declaration below still isolates a repeated authorization error.
+        self.clear_blocked(queue.name)
         if self.auto_declare:
-            queue.declare()
+            self._declare_queue(queue)
         self._queues[queue.name] = queue
         return queue
 
@@ -715,7 +869,8 @@ class Consumer:
 
     def _consume_queues(self, no_ack_by_queue):
         queues = [
-            q for q in self._queues.values() if q.name in no_ack_by_queue
+            q for q in self._queues.values()
+            if q.name in no_ack_by_queue and not self._is_blocked(q.name)
         ]
         if not queues:
             return
@@ -741,6 +896,7 @@ class Consumer:
             cancel(tag)
         self._active_tags.clear()
         self._active_queue_no_ack.clear()
+        self._blocked_intent.clear()
 
     close = cancel
 
@@ -748,6 +904,8 @@ class Consumer:
         """Cancel consumer by queue name."""
         qname = queue.name if isinstance(queue, Queue) else queue
         self._active_queue_no_ack.pop(qname, None)
+        self._blocked_queues.pop(qname, None)
+        self._blocked_intent.pop(qname, None)
         try:
             tag = self._active_tags.pop(qname)
         except KeyError:
@@ -857,8 +1015,15 @@ class Consumer:
             no_ack = queue.no_ack if no_ack is None else no_ack
             tag = self._add_tag(queue, consumer_tag)
             self._active_queue_no_ack[queue.name] = no_ack
-            queue.consume(tag, self._receive_callback,
-                          no_ack=no_ack, nowait=nowait)
+            try:
+                queue.consume(tag, self._receive_callback,
+                              no_ack=no_ack, nowait=nowait)
+            except self.queue_declaration_errors as exc:
+                # a refused queue is dropped so the others keep their tags
+                self._block_queue(queue, exc, no_ack=no_ack)
+                self._active_tags.pop(queue.name, None)
+                self._active_queue_no_ack.pop(queue.name, None)
+                return None
         return tag
 
     def _add_tag(self, queue, consumer_tag=None):

@@ -203,6 +203,43 @@ replies, streaming results):
     :file:`examples/rpc-tut6/` in the Github repository.
 
 
+Checking queues before a reconnect
+==================================
+
+.. versionadded:: 5.8
+
+A consumer re-declares its queues and restarts consuming from them every
+time the connection is recovered.  Operations may have narrowed this
+service's read access in the meantime, and a queue that is no longer
+readable must not be declared or consumed from again.
+
+Override :meth:`~kombu.Consumer.check_queue_before_revive` (or pass a
+``queue_checker`` callable) to check every queue that is about to be
+restored.  It is called once per queue, before the queue is re-declared,
+with the queue and the channel it will be bound to, both for the first
+bind and for each recovery.  Returning a false value, or raising
+:class:`amqp.exceptions.AccessRefused`, blocks only that queue: the
+permitted queues are still declared and consumed from.
+
+.. code-block:: python
+
+    from kombu import Connection, Consumer, Queue
+
+    def may_read(queue, channel):
+        return queue.name in current_read_grants()
+
+    consumer = Consumer(connection, [Queue('orders'), Queue('audit')],
+                        callbacks=[on_message],
+                        queue_checker=may_read)
+
+A queue that is refused is recorded in
+:attr:`~kombu.Consumer.blocked_queues` together with the reason, and the
+consumer keeps working with the remaining queues.  It is not declared
+again, so its messages stay in the queue until access is restored.  Once
+an operator re-grants read access, call
+:meth:`~kombu.Consumer.clear_blocked` and :meth:`~kombu.Consumer.consume`
+to attach the queue again without waiting for a reconnect.
+
 Advanced Topics
 ===============
 

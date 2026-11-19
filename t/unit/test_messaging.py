@@ -8,7 +8,7 @@ from unittest.mock import ANY, Mock, patch
 
 import amqp
 import pytest
-from amqp.exceptions import RecoverableConnectionError
+from amqp.exceptions import AccessRefused, RecoverableConnectionError
 
 from kombu import Connection, Consumer, Exchange, Producer, Queue
 from kombu.exceptions import MessageStateError, OperationalError
@@ -1435,3 +1435,312 @@ class test_Consumer:
         p = self.connection.Consumer()
         p.channel = object()
         assert p.connection is None
+
+
+class RecordingChannel:
+    """Wrap a channel and record what the server actually receives."""
+
+    def __init__(self, channel, refuse_declare=(), refuse_consume=()):
+        self.channel = channel
+        self.refuse_declare = set(refuse_declare)
+        self.refuse_consume = set(refuse_consume)
+        self.declares = []
+        self.consumes = []
+
+    def queue_declare(self, queue=None, **kwargs):
+        if queue in self.refuse_declare:
+            raise AccessRefused(
+                403, 'ACCESS_REFUSED - queue {!r} denied'.format(queue))
+        self.declares.append(queue)
+        return self.channel.queue_declare(queue=queue, **kwargs)
+
+    def basic_consume(self, queue=None, consumer_tag=None,
+                      callback=None, **kwargs):
+        if queue in self.refuse_consume:
+            raise AccessRefused(
+                403, 'ACCESS_REFUSED - queue {!r} denied'.format(queue))
+        self.consumes.append(queue)
+        return self.channel.basic_consume(
+            queue=queue, consumer_tag=consumer_tag,
+            callback=callback, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self.channel, name)
+
+
+class test_ConsumerReviveAuthorization:
+
+    def setup_method(self):
+        self.connection = Connection('memory://')
+        self.exchange = Exchange('perm', 'direct')
+        self.allowed = Queue('svc.allowed', self.exchange, 'allowed')
+        self.revoked = Queue('svc.revoked', self.exchange, 'revoked')
+        self.producer = self.connection.Producer()
+        memory.Channel.queues.clear()
+        # declare both queues and bindings up front, so that recovery only
+        # has to re-declare them (which is what the hook is guarding).
+        for queue in (self.allowed, self.revoked):
+            self.producer.publish(
+                {'seed': queue.name}, declare=[queue],
+                exchange=self.exchange, routing_key=queue.routing_key,
+            )
+        for name in ('svc.allowed', 'svc.revoked'):
+            queue = memory.Channel.queues[name]
+            while not queue.empty():
+                queue.get()
+
+    def _consumer(self, queues=None, **kwargs):
+        return Consumer(
+            self.connection,
+            queues if queues is not None else [self.allowed, self.revoked],
+            callbacks=[self.on_message],
+            **kwargs,
+        )
+
+    def on_message(self, body, message):
+        message.ack()
+
+    def _switching_checker(self, denied=()):
+        denied = set(denied)
+
+        def check(queue, channel):
+            return queue.name not in denied
+
+        return check, denied
+
+    def test_check_hook_runs_on_initial_bind_and_each_revive(self):
+        seen = []
+
+        def check(queue, channel):
+            seen.append(queue.name)
+            return True
+
+        consumer = self._consumer(queue_checker=check)
+        assert seen == ['svc.allowed', 'svc.revoked']
+        before = list(consumer._active_tags)
+
+        consumer.revive(self.connection.channel())
+
+        assert seen == ['svc.allowed', 'svc.revoked'] * 2
+        assert list(consumer._active_tags) == before
+
+    def test_initial_bind_honours_the_checker(self):
+        check, _ = self._switching_checker(denied={'svc.revoked'})
+
+        channel = RecordingChannel(self.connection.channel())
+        consumer = Consumer(
+            channel, [self.allowed, self.revoked],
+            callbacks=[self.on_message], queue_checker=check,
+        )
+
+        assert channel.declares == ['svc.allowed']
+        assert consumer.blocked_queues.keys() == {'svc.revoked'}
+
+    def test_revoked_queue_is_not_redeclared_but_allowed_one_is(self):
+        check, denied = self._switching_checker()
+        consumer = self._consumer(queue_checker=check)
+        consumer.consume()
+        assert consumer._active_tags.keys() == {
+            'svc.allowed', 'svc.revoked',
+        }
+
+        # operations revokes the queue while the worker was disconnected
+        denied.add('svc.revoked')
+        channel = RecordingChannel(self.connection.channel())
+        consumer.revive(channel)
+
+        assert channel.declares == ['svc.allowed']
+        assert channel.consumes == ['svc.allowed']
+        assert 'svc.revoked' not in consumer._active_tags
+        blocked = consumer.blocked_queues['svc.revoked']
+        assert isinstance(blocked, PermissionError)
+
+    def test_checker_may_raise_access_refused(self):
+        def check(queue, channel):
+            if queue.name == 'svc.revoked':
+                raise AccessRefused(403, 'ACCESS_REFUSED - revoked')
+            return True
+
+        consumer = self._consumer(queue_checker=check, auto_declare=False)
+        consumer.consume()
+        channel = RecordingChannel(self.connection.channel())
+        consumer.revive(channel)
+
+        assert channel.consumes == ['svc.allowed']
+        blocked = consumer.blocked_queues['svc.revoked']
+        assert isinstance(blocked, AccessRefused)
+        assert blocked.reply_code == 403
+
+    def test_declare_refusal_does_not_stop_the_other_queue(self):
+        consumer = self._consumer()
+        consumer.consume()
+        channel = RecordingChannel(
+            self.connection.channel(), refuse_declare={'svc.revoked'},
+        )
+
+        consumer.revive(channel)
+
+        # the refused queue is isolated; the permitted one is restored
+        assert channel.declares == ['svc.allowed']
+        assert channel.consumes == ['svc.allowed']
+        assert consumer.consuming_from('svc.allowed')
+        assert not consumer.consuming_from('svc.revoked')
+
+    def test_declared_refusal_keeps_intent_for_next_reconnect(self):
+        consumer = self._consumer()
+        consumer.consume()
+        channel = RecordingChannel(
+            self.connection.channel(), refuse_declare={'svc.revoked'},
+        )
+        consumer.revive(channel)
+        assert channel.consumes == ['svc.allowed']
+        assert 'svc.revoked' in consumer.blocked_queues
+
+        channel.refuse_declare.clear()
+        channel.consumes.clear()
+        channel.declares.clear()
+        consumer.revive(channel)
+
+        assert channel.declares == ['svc.allowed', 'svc.revoked']
+        assert channel.consumes == ['svc.allowed', 'svc.revoked']
+        assert consumer.blocked_queues == {}
+
+    def test_blocked_queue_is_not_redeclared_on_manual_declare(self):
+        consumer = self._consumer()
+        consumer.consume()
+        channel = RecordingChannel(
+            self.connection.channel(), refuse_declare={'svc.allowed'},
+        )
+        consumer.revive(channel)
+        assert consumer.blocked_queues.keys() == {'svc.allowed'}
+
+        channel.declares.clear()
+        consumer.declare()
+
+        assert channel.declares == ['svc.revoked']
+
+    def test_consume_refusal_from_server_blocks_only_that_queue(self):
+        consumer = self._consumer(auto_declare=False)
+        consumer.consume()
+        channel = RecordingChannel(
+            self.connection.channel(), refuse_consume={'svc.revoked'},
+        )
+
+        consumer.revive(channel)
+
+        assert channel.consumes == ['svc.allowed']
+        assert consumer.consuming_from('svc.allowed')
+        assert not consumer.consuming_from('svc.revoked')
+        assert consumer.blocked_queues.keys() == {'svc.revoked'}
+
+    def test_revoked_queue_receives_no_business_data(self):
+        check, denied = self._switching_checker()
+        consumer = self._consumer(queue_checker=check)
+        consumer.consume()
+        received = []
+        consumer.callbacks = [
+            lambda body, message: (received.append(body), message.ack()),
+        ]
+        # the consumer was consuming from both queues before the outage
+        assert consumer._active_tags.keys() == {
+            'svc.allowed', 'svc.revoked',
+        }
+
+        # business data is published to both queues while disconnected
+        for queue in (self.allowed, self.revoked):
+            self.producer.publish(
+                {'task': queue.name}, declare=[queue],
+                exchange=self.exchange, routing_key=queue.routing_key,
+            )
+
+        # operations revoked read access to the second queue meanwhile
+        denied.add('svc.revoked')
+        channel = RecordingChannel(self.connection.channel())
+        consumer.revive(channel)
+        self.connection.drain_events(timeout=1)
+
+        # only the permitted queue is re-attached to this consumer
+        assert channel.consumes == ['svc.allowed']
+        assert received == [{'task': 'svc.allowed'}]
+        assert not memory.Channel.queues['svc.revoked'].empty()
+
+    def test_operator_regrant_then_explicit_consume_revives_queue(self):
+        check, denied = self._switching_checker()
+        consumer = self._consumer(queue_checker=check)
+        consumer.consume()
+        denied.add('svc.revoked')
+        channel = RecordingChannel(self.connection.channel())
+        consumer.revive(channel)
+        assert 'svc.revoked' in consumer.blocked_queues
+
+        # operator re-grants the queue and asks the consumer to attach it
+        # again without waiting for a reconnect
+        denied.clear()
+        channel.consumes.clear()
+        consumer.clear_blocked('svc.revoked')
+        consumer.consume()
+
+        assert channel.consumes == ['svc.revoked']
+        assert not consumer.blocked_queues
+
+    def test_next_reconnect_retries_previously_active_queue(self):
+        check, denied = self._switching_checker()
+        consumer = self._consumer(queue_checker=check)
+        consumer.consume(no_ack=True)
+        denied.add('svc.revoked')
+        consumer.revive(RecordingChannel(self.connection.channel()))
+        assert consumer.blocked_queues.keys() == {'svc.revoked'}
+
+        # a later reconnect finds the queue readable again, and the queue
+        # keeps the no_ack it was consumed with before the outage
+        denied.clear()
+        channel = RecordingChannel(self.connection.channel())
+        consumer.revive(channel)
+
+        assert channel.consumes == ['svc.allowed', 'svc.revoked']
+        assert consumer._active_queue_no_ack == {
+            'svc.allowed': True, 'svc.revoked': True,
+        }
+        assert consumer.blocked_queues == {}
+
+    def test_add_queue_clears_an_earlier_block(self):
+        consumer = self._consumer()
+        consumer._blocked_queues['svc.revoked'] = AccessRefused(
+            403, 'ACCESS_REFUSED - revoked')
+
+        consumer.add_queue(self.revoked)
+
+        assert 'svc.revoked' not in consumer.blocked_queues
+
+    def test_clear_blocked_without_argument_lifts_every_block(self):
+        consumer = self._consumer()
+        consumer._blocked_queues['svc.allowed'] = AccessRefused(
+            403, 'ACCESS_REFUSED - a')
+        consumer._blocked_queues['svc.revoked'] = AccessRefused(
+            403, 'ACCESS_REFUSED - b')
+
+        consumer.clear_blocked()
+
+        assert consumer.blocked_queues == {}
+
+    def test_default_hook_restores_every_queue(self):
+        consumer = self._consumer()
+
+        assert consumer.check_queue_before_revive(self.allowed, Mock())
+        assert consumer.blocked_queues == {}
+
+    def test_queue_checker_as_subclass_staticmethod(self):
+        class GuardedConsumer(Consumer):
+            queue_checker = staticmethod(
+                lambda queue, channel: queue.name != 'svc.revoked')
+
+        consumer = GuardedConsumer(
+            self.connection, [self.allowed, self.revoked],
+            callbacks=[self.on_message],
+        )
+        consumer.consume()
+        channel = RecordingChannel(self.connection.channel())
+        consumer.revive(channel)
+
+        assert channel.consumes == ['svc.allowed']
+        assert consumer.blocked_queues.keys() == {'svc.revoked'}

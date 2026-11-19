@@ -183,7 +183,12 @@
         .. autoattribute:: on_message
         .. autoattribute:: on_decode_error
         .. autoattribute:: connection
+        .. autoattribute:: queue_declaration_errors
+        .. autoattribute:: queue_checker
+        .. autoattribute:: blocked_queues
 
+        .. automethod:: check_queue_before_revive
+        .. automethod:: clear_blocked
         .. automethod:: declare
         .. automethod:: register_callback
         .. automethod:: add_queue
