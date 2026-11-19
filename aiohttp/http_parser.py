@@ -894,6 +894,13 @@ class HttpResponseParser(HttpParser[RawResponseMessage]):
             chunked,
         ) = self.parse_headers(lines[1:])
 
+        # https://www.rfc-editor.org/rfc/rfc9110#name-101-switching-protocols
+        # Upgrade/Connection: upgrade only switch the protocol on a 101
+        # response; on any other status they are purely informational.
+        # This mirrors llhttp's llhttp__before_headers_complete().
+        if status_i != 101:
+            upgrade = False
+
         if close is None:
             if version_o <= HttpVersion10:
                 close = True

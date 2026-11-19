@@ -1,0 +1,5 @@
+Fixed the pure-Python HTTP parser treating ``Upgrade`` and
+``Connection: upgrade`` headers on a non-101 response as a protocol
+switch -- a client connection now only hands subsequent bytes to the
+upgraded protocol after a ``101 Switching Protocols`` response,
+matching llhttp -- by :user:`contributor-gh-handle`.

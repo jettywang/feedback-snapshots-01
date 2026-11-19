@@ -1050,6 +1050,28 @@ def test_response_upgrade_token_in_connection_list(
     assert upgrade == expected
 
 
+@pytest.mark.parametrize("status", [200, 400, 500])
+def test_response_upgrade_headers_ignored_without_101(
+    response: HttpResponseParser, status: int
+) -> None:
+    # RFC 9110 §7.8: Upgrade/Connection: upgrade only switch the protocol on
+    # a 101 response; on any other status they are purely informational.
+    # llhttp gates parser->upgrade on the 101 the same way, so both parser
+    # backends must agree here.
+    text = (
+        f"HTTP/1.1 {status} Reason\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: upgrade\r\n"
+        "Content-Length: 0\r\n\r\n"
+    ).encode()
+    messages, upgrade, tail = response.feed_data(text)
+    msg = messages[0][0]
+    assert msg.code == status
+    assert not msg.upgrade
+    assert not upgrade
+    assert not tail
+
+
 def test_request_te_chunked_with_content_length(parser: HttpRequestParser) -> None:
     text = (
         b"GET /test HTTP/1.1\r\n"
