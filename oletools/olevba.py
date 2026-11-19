@@ -345,6 +345,7 @@ from oletools import crypto
 from oletools.common.io_encoding import ensure_stdout_handles_unicode
 from oletools.common import codepages
 from oletools import ftguess
+from oletools import vba_constfold
 from oletools.common.log_helper import log_helper
 
 # === PYTHON 2+3 SUPPORT ======================================================
@@ -4099,6 +4100,32 @@ class VBA_Parser_CLI(VBA_Parser):
         return [dict(type=kw_type, keyword=keyword, description=description)
                 for kw_type, keyword, description in self.analyze_macros(show_decoded_strings, deobfuscate)]
 
+    def print_constfold(self, include_stops=False):
+        """
+        Run the traceable static constant-expression folder on every VBA
+        module and print each result together with its recomputable derivation
+        steps. Results stay bound to their module name and exact source span;
+        no VBA is executed and no global bulk decoding is performed.
+
+        :param include_stops: bool, also show expressions where folding had to
+            stop and the reason why (unknown variable, object call, overflow).
+        """
+        if not self.detect_macros():
+            return
+        printed_header = False
+        for (_, _, vba_filename, vba_code) in self.extract_all_macros():
+            results = vba_constfold.evaluate_module(
+                vba_filename, vba_code, include_stops=include_stops)
+            if not results:
+                continue
+            if not printed_header:
+                print('-' * 79)
+                print('TRACEABLE CONSTANT EXPRESSIONS (static, not executed):')
+                printed_header = True
+            print('')
+            print('Module: %s' % vba_filename)
+            print(vba_constfold.format_trace(results))
+
     def colorize_keywords(self, vba_code):
         """
         Colorize keywords found during the VBA code analysis
@@ -4125,7 +4152,8 @@ class VBA_Parser_CLI(VBA_Parser):
     def process_file(self, show_decoded_strings=False,
                      display_code=True, hide_attributes=True,
                      vba_code_only=False, show_deobfuscated_code=False,
-                     deobfuscate=False, show_pcode=False, no_xlm=False):
+                     deobfuscate=False, show_pcode=False, no_xlm=False,
+                     const_fold=False, const_fold_stops=False):
         """
         Process a single file
 
@@ -4233,6 +4261,8 @@ class VBA_Parser_CLI(VBA_Parser):
                 if show_deobfuscated_code:
                     print('MACRO SOURCE CODE WITH DEOBFUSCATED VBA STRINGS (EXPERIMENTAL):\n\n')
                     print(self.reveal())
+                if const_fold:
+                    self.print_constfold(include_stops=const_fold_stops)
             else:
                 print('No VBA or XLM macros found.')
         except OlevbaBaseException:
@@ -4436,6 +4466,18 @@ def parse_args(cmd_line_args=None):
     parser.add_argument('--deobf', dest="deobfuscate", action="store_true",
                         default=False,
                         help="Attempt to deobfuscate VBA expressions (slow)")
+    parser.add_argument('--const-fold', dest="const_fold", action="store_true",
+                        default=False,
+                        help="Traceably fold constant VBA expressions: show "
+                             "each decoded value, its source span and "
+                             "recomputable derivation steps (static, no "
+                             "execution). Add --const-fold-stops to also list "
+                             "expressions that could not be folded and why.")
+    parser.add_argument('--const-fold-stops', dest="const_fold_stops",
+                        action="store_true", default=False,
+                        help="With --const-fold, also report expressions where "
+                             "folding had to stop (unknown variable, object "
+                             "call, overflow, ...) and the reason.")
     # TODO: --relaxed is enabled temporarily until a solution to issue #593 is found
     parser.add_argument('--relaxed', dest="relaxed", action="store_true",
                         default=True,
@@ -4491,7 +4533,9 @@ def process_file(filename, data, container, options, crypto_nesting=0):
                          hide_attributes=options.hide_attributes, vba_code_only=options.vba_code_only,
                          show_deobfuscated_code=options.show_deobfuscated_code,
                          deobfuscate=options.deobfuscate, show_pcode=options.show_pcode,
-                                    no_xlm=options.no_xlm)
+                                    no_xlm=options.no_xlm,
+                                    const_fold=options.const_fold,
+                                    const_fold_stops=options.const_fold_stops)
         elif options.output_mode == 'triage':
             # summarized output for triage:
             vba_parser.process_file_triage(show_decoded_strings=options.show_decoded_strings,

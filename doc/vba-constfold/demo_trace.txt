@@ -1,0 +1,69 @@
+[FULL] module=demo_constfold line=10 span=455:528
+  expression: Chr(119) & Chr(115) & Chr(99) & Chr(114) & Chr(105) & Chr(112) & Chr(116)
+  result:     'wscript' (String)
+     1. integer literal        '119'                          => 119 (Integer)
+     2. Chr                    'Chr(119)'                     => 'w' (String)
+     3. integer literal        '115'                          => 115 (Integer)
+     4. Chr                    'Chr(115)'                     => 's' (String)
+     5. string concatenation   'Chr(119) & Chr(115)'          => 'ws' (String)
+     6. integer literal        '99'                           => 99 (Integer)
+     7. Chr                    'Chr(99)'                      => 'c' (String)
+     8. string concatenation   'Chr(119) & Chr(115) & Chr...' => 'wsc' (String)
+     9. integer literal        '114'                          => 114 (Integer)
+    10. Chr                    'Chr(114)'                     => 'r' (String)
+    11. string concatenation   'Chr(119) & Chr(115) & Chr...' => 'wscr' (String)
+    12. integer literal        '105'                          => 105 (Integer)
+    13. Chr                    'Chr(105)'                     => 'i' (String)
+    14. string concatenation   'Chr(119) & Chr(115) & Chr...' => 'wscri' (String)
+    15. integer literal        '112'                          => 112 (Integer)
+    16. Chr                    'Chr(112)'                     => 'p' (String)
+    17. string concatenation   'Chr(119) & Chr(115) & Chr...' => 'wscrip' (String)
+    18. integer literal        '116'                          => 116 (Integer)
+    19. Chr                    'Chr(116)'                     => 't' (String)
+    20. string concatenation   'Chr(119) & Chr(115) & Chr...' => 'wscript' (String)
+[FULL] module=demo_constfold line=11 span=537:551
+  expression: "wscrip" & "t"
+  result:     'wscript' (String)
+     1. string literal         '"wscrip"'                     => 'wscrip' (String)
+     2. string literal         '"t"'                          => 't' (String)
+     3. string concatenation   '"wscrip" & "t"'               => 'wscript' (String)
+[FULL] module=demo_constfold line=12 span=560:581
+  expression: StrReverse("tpircsw")
+  result:     'wscript' (String)
+     1. string literal         '"tpircsw"'                    => 'tpircsw' (String)
+     2. StrReverse             'StrReverse("tpircsw")'        => 'wscript' (String)
+[FULL] module=demo_constfold line=16 span=681:740
+  expression: Chr((40 + 3) * 2) & _
+        UCase(Mid("shellcode", 1, 1))
+  result:     'VS' (String)
+     1. integer literal        '40'                           => 40 (Integer)
+     2. integer literal        '3'                            => 3 (Integer)
+     3. +                      '(40 + 3)'                     => 43 (Integer)
+     4. integer literal        '2'                            => 2 (Integer)
+     5. *                      '(40 + 3) * 2'                 => 86 (Integer)
+     6. Chr                    'Chr((40 + 3) * 2)'            => 'V' (String)
+     7. string literal         '"shellcode"'                  => 'shellcode' (String)
+     8. integer literal        '1'                            => 1 (Integer)
+     9. integer literal        '1'                            => 1 (Integer)
+    10. Mid                    'Mid("shellcode", 1, 1)'       => 's' (String)
+    11. UCase                  'UCase(Mid("shellcode", 1,...' => 'S' (String)
+    12. string concatenation   'Chr((40 + 3) * 2) & _\n   ...' => 'VS' (String)
+[STOPPED] module=demo_constfold line=23 span=997:1016
+  expression: "Shell" & UserInput
+     1. string literal         '"Shell"'                      => 'Shell' (String)
+  stopped:    unknown variable or identifier 'UserInput' (no constant value available)
+[PARTIAL] module=demo_constfold line=29 span=1258:1292
+  expression: Chr(100) & Application.Environment
+     1. integer literal        '100'                          => 100 (Integer)
+     2. Chr                    'Chr(100)'                     => 'd' (String)
+  stopped:    object/member access is not supported
+[STOPPED] module=demo_constfold line=33 span=1396:1407
+  expression: 32767% + 1%
+     1. integer literal        '32767%'                       => 32767 (Integer)
+     2. integer literal        '1%'                           => 1 (Integer)
+  stopped:    overflow: value 32768 does not fit Integer
+[PARTIAL] module=demo_constfold line=38 span=1565:1593
+  expression: Chr(72) & DecodePayload(1.5)
+     1. integer literal        '72'                           => 72 (Integer)
+     2. Chr                    'Chr(72)'                      => 'H' (String)
+  stopped:    floating-point literal '1.5' is not supported
