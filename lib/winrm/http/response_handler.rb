@@ -14,6 +14,7 @@
 
 require 'rexml/document' unless defined?(REXML::Document)
 require_relative '../wsmv/soap'
+require_relative '../log_redactor'
 
 module WinRM
   # Handles the raw WinRM HTTP response. Returns the body as an XML doc
@@ -41,7 +42,7 @@ module WinRM
       @response_xml ||= REXML::Document.new(@response_body)
     rescue REXML::ParseException => e
       raise WinRMHTTPTransportError.new(
-        "Unable to parse WinRM response: #{e.message}", @status_code
+        "Unable to parse WinRM response: #{WinRM::LogRedactor.error_summary(e)}", @status_code
       )
     end
 
@@ -121,8 +122,9 @@ module WinRM
     end
 
     def raise_transport_error
+      summary = WinRM::LogRedactor.content_summary('body', @response_body)
       raise WinRMHTTPTransportError.new(
-        "Bad HTTP response returned from server. Body(if present):#{@response_body}",
+        "Bad HTTP response returned from server. Body(if present): #{summary}",
         @status_code
       )
     end

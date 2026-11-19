@@ -14,6 +14,7 @@
 
 require 'logger'
 require_relative 'winrm/compat_logger'
+require_relative 'winrm/log_redactor'
 require_relative 'winrm/version'
 require_relative 'winrm/connection'
 require_relative 'winrm/exceptions'

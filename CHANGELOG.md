@@ -1,6 +1,7 @@
 # Changelog
 
 ## [Unreleased]
+* Redact WinRM debug logging: SOAP requests, responses, sealed and decrypted GSS payloads, PSRP polling data, shell commands, endpoints, and transport error bodies are now logged as correlation ids, lengths, and stable digests instead of raw content. Wire payloads are unchanged.
 
 ## [2.4.2]
 * Replace erubi with the Ruby standard library ERB; the erubi runtime dependency is gone (#366)

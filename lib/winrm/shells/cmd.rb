@@ -13,6 +13,7 @@
 # limitations under the License.
 
 require_relative 'base'
+require_relative '../log_redactor'
 
 module WinRM
   module Shells
@@ -37,7 +38,10 @@ module WinRM
         )
         resp_doc = transport.send_request(cmd_msg.build)
         command_id = REXML::XPath.first(resp_doc, "//*[local-name() = 'CommandId']").text
-        logger.debug("[WinRM] Command created for #{command} with id: #{command_id}")
+        logger.debug(
+          "[WinRM] Command created #{WinRM::LogRedactor.content_summary('command', command)} " \
+          "with id: #{command_id}"
+        )
         command_id
       end
 

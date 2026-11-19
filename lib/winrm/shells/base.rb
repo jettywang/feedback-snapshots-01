@@ -14,6 +14,7 @@
 
 require_relative 'retryable'
 require_relative '../http/transport'
+require_relative '../log_redactor'
 require_relative '../wsmv/cleanup_command'
 require_relative '../wsmv/close_shell'
 require_relative '../wsmv/command'
@@ -119,7 +120,10 @@ module WinRM
                 close_shell(connection_opts, transport, shell_id)
               rescue StandardError => cleanup_error
                 # Warn about cleanup failures in deferred context only
-                warn "[WinRM] Deferred shell cleanup failed: #{cleanup_error.class}: #{cleanup_error.message}"
+                warn(
+                  "[WinRM] Deferred shell cleanup failed: " \
+                  "#{WinRM::LogRedactor.error_summary(cleanup_error)}"
+                )
               end
             end
           end
@@ -192,13 +196,18 @@ module WinRM
         raise unless [ERROR_OPERATION_ABORTED, SHELL_NOT_FOUND].include?(e.fault_code)
       rescue WinRMHTTPTransportError => t
         # dont let the cleanup raise so we dont lose any errors from the command
-        logger.info("[WinRM] #{t.status_code} returned in cleanup with error: #{t.message}")
+        logger.info(
+          "[WinRM] #{t.status_code} returned in cleanup with error: " \
+          "#{WinRM::LogRedactor.error_summary(t)}"
+        )
       end
 
       def open
         close
         retryable(connection_opts[:retry_limit], connection_opts[:retry_delay]) do
-          logger.debug("[WinRM] opening remote shell on #{connection_opts[:endpoint]}")
+          logger.debug(
+            "[WinRM] opening remote shell on #{WinRM::LogRedactor.endpoint(connection_opts[:endpoint])}"
+          )
           @shell_id = open_shell
         end
         logger.debug("[WinRM] remote shell created with shell_id: #{shell_id}")

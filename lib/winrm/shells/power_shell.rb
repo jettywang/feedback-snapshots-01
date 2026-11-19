@@ -16,6 +16,7 @@ require 'securerandom' unless defined?(SecureRandom)
 require_relative 'base'
 require_relative '../psrp/message_fragmenter'
 require_relative '../psrp/receive_response_reader'
+require_relative '../log_redactor'
 require_relative '../wsmv/configuration'
 require_relative '../wsmv/create_pipeline'
 require_relative '../wsmv/send_data'
@@ -107,7 +108,10 @@ module WinRM
           end
         end
 
-        logger.debug("[WinRM] Command created for #{command} with id: #{command_id}")
+        logger.debug(
+          "[WinRM] Command created #{WinRM::LogRedactor.content_summary('command', command)} " \
+          "with id: #{command_id}"
+        )
         command_id
       end
 
@@ -171,7 +175,9 @@ module WinRM
         # seems to hang
         until state == WinRM::PSRP::MessageData::RunspacepoolState::OPENED
           response_reader.read_message(keepalive_msg) do |message|
-            logger.debug("[WinRM] polling for pipeline state. message: #{message.inspect}")
+            logger.debug(
+              "[WinRM] polling for pipeline state. #{WinRM::LogRedactor.psrp_message(message)}"
+            )
             parsed = message.parsed_data
             case parsed
             when WinRM::PSRP::MessageData::RunspacepoolState

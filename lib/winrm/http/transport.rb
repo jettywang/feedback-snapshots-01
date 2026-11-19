@@ -14,6 +14,7 @@
 
 require 'httpclient'
 require_relative 'response_handler'
+require_relative '../log_redactor'
 
 module WinRM
   module HTTP
@@ -39,7 +40,7 @@ module WinRM
       # @returns [REXML::Document] The parsed response body
       def send_request(message)
         ssl_peer_fingerprint_verification!
-        log_soap_message(message)
+        log_soap_message(message, 'request')
         hdr = { 'Content-Type' => 'application/soap+xml;charset=UTF-8',
                 'Content-Length' => message.bytesize }
         # We need to add this header if using Client Certificate authentication
@@ -48,7 +49,7 @@ module WinRM
         end
 
         resp = @httpcli.post(@endpoint, message, hdr)
-        log_soap_message(resp.http_body.content)
+        log_soap_message(resp.http_body.content, 'response')
         verify_ssl_fingerprint(resp.peer_cert)
         handler = WinRM::ResponseHandler.new(resp.http_body.content, resp.status)
         handler.parse_to_xml
@@ -121,16 +122,14 @@ module WinRM
         ].join("\r\n").concat("\r\n")
       end
 
-      def log_soap_message(message)
+      def log_soap_message(message, direction = 'soap')
         return unless @logger.debug?
 
-        xml_msg = REXML::Document.new(message)
-        formatter = REXML::Formatters::Pretty.new(2)
-        formatter.compact = true
-        formatter.write(xml_msg, @logger)
-        @logger.debug("\n")
+        description = WinRM::LogRedactor.describe(message, operation: direction)
+        @logger.debug("[WinRM] SOAP #{description[:summary]}")
+        @logger.debug(description[:redacted]) if description[:redacted]
       rescue StandardError => e
-        @logger.debug("Couldn't log SOAP request/response: #{e.message} - #{message}")
+        @logger.debug("[WinRM] SOAP logging failed: #{WinRM::LogRedactor.error_summary(e)}")
       end
     end
 
@@ -169,7 +168,7 @@ module WinRM
       def send_request(message)
         ssl_peer_fingerprint_verification!
         init_auth if @ntlmcli.session.nil?
-        log_soap_message(message)
+        log_soap_message(message, 'request')
 
         hdr = {
           'Content-Type' => 'multipart/encrypted;'\
@@ -185,7 +184,7 @@ module WinRM
         else
           @retryable = true
           decrypted_body = winrm_decrypt(resp)
-          log_soap_message(decrypted_body)
+          log_soap_message(decrypted_body, 'response-decrypted')
           WinRM::ResponseHandler.new(decrypted_body, resp.status).parse_to_xml
         end
       end
@@ -229,7 +228,7 @@ module WinRM
       end
 
       def init_auth
-        @logger.debug "Initializing Negotiate for #{@endpoint}"
+        @logger.debug "Initializing Negotiate for #{WinRM::LogRedactor.endpoint(@endpoint)}"
         auth1 = @ntlmcli.init_context
         hdr = {
           'Authorization' => "Negotiate #{auth1.encode64}",
@@ -240,7 +239,9 @@ module WinRM
         verify_ssl_fingerprint(r.peer_cert)
         auth_header = r.header['WWW-Authenticate'].pop
         unless auth_header
-          msg = "Unable to parse authorization header. Headers: #{r.headers}\r\nBody: #{r.body}"
+          msg = 'Unable to parse authorization header. ' \
+                "Headers: #{WinRM::LogRedactor.header_names(r.headers)} " \
+                "Body: #{WinRM::LogRedactor.content_summary('body', r.body)}"
           raise WinRMHTTPTransportError.new(msg, r.status_code)
         end
         itok = auth_header.split.last
@@ -332,7 +333,7 @@ module WinRM
       # @param [String] The XML SOAP message
       # @returns [Object] The HTTP response object
       def send_kerberos_request(message)
-        log_soap_message(message)
+        log_soap_message(message, 'request')
         original_length = message.bytesize
         pad_len, emsg = winrm_encrypt(message)
         req_length = original_length + pad_len
@@ -347,12 +348,13 @@ module WinRM
           body(emsg, req_length, 'application/HTTP-Kerberos-session-encrypted'),
           hdr
         )
-        log_soap_message(resp.http_body.content)
+        log_soap_message(resp.http_body.content, 'response-encrypted')
         resp
       end
 
       def init_krb
-        @logger.debug "Initializing Kerberos for #{@service}"
+        @logger.debug "Initializing Kerberos for #{WinRM::LogRedactor.endpoint(@endpoint)} " \
+          "service=#{WinRM::LogRedactor.scalar(@service)}"
         @gsscli = GSSAPI::Simple.new(@endpoint.host, @service)
         token = @gsscli.init_context
         auth = Base64.strict_encode64 token
@@ -364,7 +366,13 @@ module WinRM
         }
         @logger.debug 'Sending HTTP POST for Kerberos Authentication'
         r = @httpcli.post(@endpoint, '', hdr)
-        itok = r.header['WWW-Authenticate'].pop
+        itok = Array(r.header['WWW-Authenticate']).pop
+        unless itok
+          msg = 'Unable to parse Kerberos authorization header. ' \
+                "Headers: #{WinRM::LogRedactor.header_names(r.headers)} " \
+                "Body: #{WinRM::LogRedactor.content_summary('body', r.body)}"
+          raise WinRMHTTPTransportError.new(msg, r.status_code)
+        end
         itok = itok.split.last
         itok = Base64.strict_decode64(itok)
         @gsscli.init_context(itok)
@@ -375,7 +383,8 @@ module WinRM
 
       # @return [String] the encrypted request string
       def winrm_encrypt(str)
-        @logger.debug "Encrypting SOAP message:\n#{str}"
+        @logger.debug "[WinRM] sealing SOAP message " \
+          "#{WinRM::LogRedactor.content_summary('plaintext', str)}"
         iov_cnt = 3
         iov = FFI::MemoryPointer.new(GSSAPI::LibGSSAPI::GssIOVBufferDesc.size * iov_cnt)
 
@@ -418,7 +427,8 @@ module WinRM
 
       # @return [String] the unencrypted response string
       def winrm_decrypt(str)
-        @logger.debug "Decrypting SOAP message:\n#{str}"
+        @logger.debug "[WinRM] decrypting SOAP message " \
+          "#{WinRM::LogRedactor.content_summary('ciphertext', str)}"
         iov_cnt = 3
         iov = FFI::MemoryPointer.new(GSSAPI::LibGSSAPI::GssIOVBufferDesc.size * iov_cnt)
 
@@ -454,13 +464,22 @@ module WinRM
           min_stat, @gsscli.context, conf_state, qop_state, iov, iov_cnt
         )
 
-        @logger.debug "SOAP message decrypted (MAJ: #{maj_stat}, " \
-          "MIN: #{min_stat.read_int}):\n#{iov1[:buffer].value}"
-
-        iov1[:buffer].value
+        plaintext = iov1[:buffer].value
+        @logger.debug "[WinRM] SOAP message decrypted (MAJ: #{status(maj_stat)}, " \
+          "MIN: #{status(min_stat.read_int)})"
+        log_soap_message(plaintext, 'response-decrypted')
+        plaintext
       end
       # rubocop:enable Metrics/MethodLength
       # rubocop:enable Metrics/AbcSize
+
+      # GSS status codes are integers; never interpolate arbitrary return values
+      # into diagnostics, since a misbehaving binding could return payload data.
+      def status(value)
+        Integer(value)
+      rescue ArgumentError, TypeError
+        'unknown'
+      end
     end
   end
 end

@@ -235,6 +235,15 @@ conn.logger = my_logger
 
 Upgrading from the `logging` gem: the one `logging`-specific call that used to work, `conn.logger.add_appenders(...)`, is still accepted but logs a deprecation warning and has no effect. Configure the stdlib logger directly (or inject your own) instead.
 
+### Debug log redaction
+At `:debug` level WinRM logs protocol diagnostics: correlation ids, the SOAP body operation, element counts, and byte lengths. These fields stay readable, but sensitive content is never written to the log:
+
+* Commands, arguments, stdin/stdout streams, PSRP `creationXml`, credential-bearing URL parts, and password/token-like attributes are replaced by a stable `[REDACTED ... sha256:<digest>]` marker.
+* Scripts and sealed/encrypted payloads are logged only as a byte length and SHA-256 digest before sealing and after decryption.
+* Payloads that are not valid XML, and arbitrary exception text, are reduced to class, length, digest, and — for XML parse failures — line and position.
+
+Redaction is applied to a copy made for logging; the bytes sent to the endpoint are unchanged. At the default `:warn` level these diagnostics are silent. Note that the digest is a fast, unsalted hash intended only for correlation: it does not make a logged secret recoverable, but it is also not a password hash.
+
 ## Troubleshooting
 You may have some errors like ```WinRM::WinRMAuthorizationError```. See [this post](http://www.hurryupandwait.io/blog/understanding-and-troubleshooting-winrm-connection-and-authentication-a-thrill-seekers-guide-to-adventure) for tips and troubleshooting steps related to winrm connection and authentication issues.
 
