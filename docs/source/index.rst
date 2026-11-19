@@ -21,6 +21,7 @@ Contents
 
    installation
    usage
+   remote-identity
    upgrade
    internals
 
