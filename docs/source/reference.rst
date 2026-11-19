@@ -49,6 +49,28 @@ Encoders are used to serialize and deserialize messages over the wire.
 .. autoclass:: PickleEncoder
 
 
+Envelope Migration
+^^^^^^^^^^^^^^^^^^
+
+An :class:`EnvelopeMigrator` provides a bounded entry point when a
+queue temporarily holds more than one JSON task format.  Only the
+envelope versions explicitly registered with the migrator are
+accepted; records carrying any other version raise
+:class:`UnknownEnvelopeError` so a broker (such as the
+:class:`~dramatiq.brokers.stub.StubBroker`) can quarantine them
+instead of letting them poison the consumer.  Records without an
+``envelope_version`` marker are treated as the current, unversioned
+format and pass through untouched.
+
+.. autoclass:: EnvelopeMigrator
+   :members:
+.. autoclass:: QuarantinedMessage
+   :members:
+.. autoclass:: UnknownEnvelopeError
+.. autoclass:: EnvelopeMigrationError
+.. autodata:: ENVELOPE_VERSION_FIELD
+
+
 Brokers
 -------
 

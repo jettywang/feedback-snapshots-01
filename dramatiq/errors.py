@@ -40,6 +40,36 @@ class DecodeError(DramatiqError):
         self.error = error
 
 
+class EnvelopeError(DramatiqError):
+    """Base class for message-envelope migration errors."""
+
+
+class UnknownEnvelopeError(EnvelopeError):
+    """Raised when an envelope uses a version that no registered
+    migration can handle.
+
+    Brokers may catch this error to isolate the offending record
+    instead of letting it poison the consumer.
+    """
+
+    def __init__(self, message, data, version):  # noqa: B042
+        super().__init__(message)
+        self.data = data
+        self.version = version
+
+
+class EnvelopeMigrationError(EnvelopeError):
+    """Raised when a registered migration fails to convert an
+    envelope to the current message format.
+    """
+
+    def __init__(self, message, data, version, error):  # noqa: B042
+        super().__init__(message)
+        self.data = data
+        self.version = version
+        self.error = error
+
+
 class BrokerError(DramatiqError):
     """Base class for broker-related errors."""
 

@@ -23,6 +23,7 @@ from .actor import Actor, actor
 from .broker import Broker, Consumer, MessageProxy, get_broker, set_broker
 from .composition import group, pipeline
 from .encoder import Encoder, JSONEncoder, PickleEncoder
+from .envelope import ENVELOPE_VERSION_FIELD, EnvelopeMigrator, QuarantinedMessage
 from .errors import (
     ActorNotFound,
     BrokerConnectionError,
@@ -31,10 +32,13 @@ from .errors import (
     ConnectionFailed,
     DecodeError,
     DramatiqError,
+    EnvelopeError,
+    EnvelopeMigrationError,
     QueueJoinTimeout,
     QueueNotFound,
     RateLimitExceeded,
     Retry,
+    UnknownEnvelopeError,
 )
 from .generic import GenericActor
 from .logging import get_logger
@@ -60,10 +64,17 @@ __all__ = [
     "Encoder",
     "JSONEncoder",
     "PickleEncoder",
+    # Envelopes
+    "ENVELOPE_VERSION_FIELD",
+    "EnvelopeMigrator",
+    "QuarantinedMessage",
     # Errors
     "DramatiqError",
     "BrokerError",
     "DecodeError",
+    "EnvelopeError",
+    "UnknownEnvelopeError",
+    "EnvelopeMigrationError",
     "ActorNotFound",
     "QueueNotFound",
     "QueueJoinTimeout",

@@ -26,7 +26,8 @@ from typing import Optional
 
 from ..broker import Broker, Consumer, MessageProxy
 from ..common import current_millis, dq_name, iter_queue, join_queue
-from ..errors import QueueNotFound
+from ..envelope import EnvelopeMigrator, QuarantinedMessage
+from ..errors import QueueNotFound, UnknownEnvelopeError
 from ..message import Message
 from ..middleware import Middleware
 
@@ -38,18 +39,36 @@ class StubBroker(Broker):
       middleware: See :class:`Broker<dramatiq.Broker>`.
       fail_fast_default: Specifies the default value for the ``fail_fast``
         argument of :meth:`join<dramatiq.brokers.stub.StubBroker.join>`.
+      envelope_migrator: An optional :class:`EnvelopeMigrator
+        <dramatiq.EnvelopeMigrator>` that accepts the envelope
+        versions workers are allowed to consume.  When provided,
+        records carrying an unregistered envelope version are moved
+        to :attr:`quarantine` instead of crashing the consumer.
     """
 
-    def __init__(self, middleware: Optional[list[Middleware]] = None, *, fail_fast_default: bool = True):
+    def __init__(
+        self,
+        middleware: Optional[list[Middleware]] = None,
+        *,
+        fail_fast_default: bool = True,
+        envelope_migrator: Optional[EnvelopeMigrator] = None,
+    ):
         super().__init__(middleware)
 
         self.dead_letters_by_queue: defaultdict[str, list[MessageProxy]] = defaultdict(list)
+        self.quarantine_by_queue: defaultdict[str, list[QuarantinedMessage]] = defaultdict(list)
+        self.envelope_migrator: Optional[EnvelopeMigrator] = envelope_migrator
         self.fail_fast_default: bool = fail_fast_default
 
     @property
     def dead_letters(self) -> list[MessageProxy]:
         """The dead-lettered messages for all defined queues."""
         return [message for messages in self.dead_letters_by_queue.values() for message in messages]
+
+    @property
+    def quarantine(self) -> list[QuarantinedMessage]:
+        """The records isolated for carrying an unknown envelope version."""
+        return [record for records in self.quarantine_by_queue.values() for record in records]
 
     def consume(self, queue_name: str, prefetch: int = 1, timeout: int = 100) -> Consumer:
         """Create a new consumer for a queue.
@@ -71,6 +90,10 @@ class StubBroker(Broker):
                 self.dead_letters_by_queue[queue_name],
                 prefetch,
                 timeout,
+                queue_name=queue_name,
+                envelope_migrator=self.envelope_migrator,
+                quarantine=self.quarantine_by_queue[queue_name],
+                logger=self.logger,
             )
         except KeyError:
             raise QueueNotFound(queue_name) from None
@@ -143,6 +166,11 @@ class StubBroker(Broker):
         for dlq in self.dead_letters_by_queue.values():
             dlq.clear()
 
+        # The quarantine holds raw records rather than proxied messages,
+        # so there are no live consumer references to protect.
+        for records in self.quarantine_by_queue.values():
+            records.clear()
+
     def join(self, queue_name: str, *, timeout: Optional[int] = None, fail_fast: Optional[bool] = None) -> None:
         """Wait for all the messages on the given queue to be
         processed.  This method is only meant to be used in tests
@@ -197,11 +225,26 @@ class StubBroker(Broker):
 
 
 class _StubConsumer(Consumer):
-    def __init__(self, queue, dead_letters, prefetch, timeout):
+    def __init__(
+        self,
+        queue,
+        dead_letters,
+        prefetch,
+        timeout,
+        *,
+        queue_name,
+        envelope_migrator=None,
+        quarantine=None,
+        logger=None,
+    ):
         self.queue = queue
         self.dead_letters = dead_letters
         self.prefetch = prefetch
         self.timeout = timeout
+        self.queue_name = queue_name
+        self.envelope_migrator = envelope_migrator
+        self.quarantine = quarantine
+        self.logger = logger
 
         # Use a Semaphore to manage 'slots' for prefetched messages.
         self.prefetch_semaphore = threading.Semaphore(value=prefetch)
@@ -215,6 +258,21 @@ class _StubConsumer(Consumer):
         self.dead_letters.append(message)
         self.prefetch_semaphore.release()
 
+    def _quarantine(self, data, error):
+        record = QuarantinedMessage(
+            queue_name=self.queue_name,
+            version=error.version,
+            reason=str(error),
+            data=data,
+        )
+        self.quarantine.append(record)
+        if self.logger is not None:
+            self.logger.warning("Quarantined message on queue %r: %s", self.queue_name, record.reason)
+        # The record has been inspected and removed from the queue, so
+        # mark its outstanding task as done to keep join() unblocked.
+        self.queue.task_done()
+        self.prefetch_semaphore.release()
+
     def __next__(self):
         # Reserve a prefetch 'slot' for the message being fetched.
         if not self.prefetch_semaphore.acquire(timeout=self.timeout / 1000):
@@ -222,12 +280,22 @@ class _StubConsumer(Consumer):
 
         try:
             data = self.queue.get(timeout=self.timeout / 1000)
-            message = Message.decode(data)
-            return _StubMessageProxy(message)
         except Empty:
             # No message available, release 'slot' that was reserved.
             self.prefetch_semaphore.release()
             return None
+
+        if self.envelope_migrator is not None:
+            try:
+                fields = self.envelope_migrator.decode(data)
+            except UnknownEnvelopeError as e:
+                self._quarantine(data, e)
+                return None
+            message = Message(**fields)
+        else:
+            message = Message.decode(data)
+
+        return _StubMessageProxy(message)
 
 
 class _StubMessageProxy(MessageProxy):
