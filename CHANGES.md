@@ -1,5 +1,6 @@
 # 8.1.0 - 2026-09-30
 
+* Analyze actual Ransack allow-list return values, inheritance, and branches instead of trusting method names
 * Better help and error message for `--ensure-latest`
 * Fix frozen string error (Shai Coleman)
 * Update Sonar report format (fangxing)

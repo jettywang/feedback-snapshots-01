@@ -16,7 +16,7 @@ class Rails7Tests < Minitest::Test
       :controller => 0,
       :model => 0,
       :template => 0,
-      :warning => 26
+      :warning => 32
     }
   end
 
@@ -460,6 +460,100 @@ class Rails7Tests < Minitest::Test
       confidence: 2,
       relative_path: "app/controllers/users_controller.rb",
       code: s(:call, s(:call, s(:call, nil, :some_book), :things), :ransack, s(:call, s(:params), :[], s(:lit, :q))),
+      user_input: s(:call, s(:params), :[], s(:lit, :q))
+  end
+
+  def test_ransack_finite_attribute_and_association_lists_are_safe
+    assert_no_warning check_name: "Ransack",
+      type: :warning,
+      warning_code: 129,
+      warning_type: "Missing Authorization",
+      line: 3,
+      relative_path: "app/controllers/ransack_controller.rb"
+
+    assert_no_warning check_name: "Ransack",
+      type: :warning,
+      warning_code: 129,
+      warning_type: "Missing Authorization",
+      line: 4,
+      relative_path: "app/controllers/ransack_controller.rb"
+  end
+
+  def test_ransack_inherited_unrestricted_association_list_warns
+    assert_warning check_name: "Ransack",
+      type: :warning,
+      warning_code: 129,
+      warning_type: "Missing Authorization",
+      line: 5,
+      message: /ransackable_associations allows all associations/,
+      confidence: 0,
+      relative_path: "app/controllers/ransack_controller.rb",
+      code: s(:call, s(:const, :NarrowChild), :ransack, s(:call, s(:params), :[], s(:lit, :q))),
+      user_input: s(:call, s(:params), :[], s(:lit, :q))
+  end
+
+  def test_ransack_attribute_fallback_warns
+    assert_warning check_name: "Ransack",
+      type: :warning,
+      warning_code: 129,
+      warning_type: "Missing Authorization",
+      line: 6,
+      message: /ransackable_attributes allows all attributes via column_names/,
+      confidence: 0,
+      relative_path: "app/controllers/ransack_controller.rb",
+      code: s(:call, s(:const, :FallbackAllowList), :ransack, s(:call, s(:params), :[], s(:lit, :q))),
+      user_input: s(:call, s(:params), :[], s(:lit, :q))
+  end
+
+  def test_ransack_unprovable_return_keeps_medium_confidence
+    assert_warning check_name: "Ransack",
+      type: :warning,
+      warning_code: 129,
+      warning_type: "Missing Authorization",
+      line: 7,
+      message: /ransackable_attributes .*unknown expression.*cannot be proven finite/,
+      confidence: 1,
+      relative_path: "app/controllers/ransack_controller.rb",
+      code: s(:call, s(:const, :DynamicAllowList), :ransack, s(:call, s(:params), :[], s(:lit, :q))),
+      user_input: s(:call, s(:params), :[], s(:lit, :q))
+  end
+
+  def test_ransack_recombined_request_input_warns
+    assert_warning check_name: "Ransack",
+      type: :warning,
+      warning_code: 129,
+      warning_type: "Missing Authorization",
+      line: 8,
+      message: /allow list is built from request input params\[:column\]/,
+      confidence: 0,
+      relative_path: "app/controllers/ransack_controller.rb",
+      code: s(:call, s(:const, :ConcatenatedAllowList), :ransack, s(:call, s(:params), :[], s(:lit, :q))),
+      user_input: s(:call, s(:params), :[], s(:lit, :q))
+  end
+
+  def test_ransack_inherited_association_fallback_warns
+    assert_warning check_name: "Ransack",
+      type: :warning,
+      warning_code: 129,
+      warning_type: "Missing Authorization",
+      line: 9,
+      message: /ransackable_associations allows all associations via reflect_on_all_associations/,
+      confidence: 0,
+      relative_path: "app/controllers/ransack_controller.rb",
+      code: s(:call, s(:const, :AllAssociations), :ransack, s(:call, s(:params), :[], s(:lit, :q))),
+      user_input: s(:call, s(:params), :[], s(:lit, :q))
+  end
+
+  def test_ransack_conditional_fallback_warns
+    assert_warning check_name: "Ransack",
+      type: :warning,
+      warning_code: 129,
+      warning_type: "Missing Authorization",
+      line: 10,
+      message: /ransackable_attributes allows all attributes via column_names \(conditional branch\)/,
+      confidence: 0,
+      relative_path: "app/controllers/ransack_controller.rb",
+      code: s(:call, s(:const, :ConditionalFallback), :ransack, s(:call, s(:params), :[], s(:lit, :q))),
       user_input: s(:call, s(:params), :[], s(:lit, :q))
   end
 end
