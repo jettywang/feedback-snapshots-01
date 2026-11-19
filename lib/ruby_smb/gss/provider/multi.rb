@@ -47,26 +47,32 @@ module RubySMB
           @providers.find { |provider| provider.supports_mech_type?(mech_type) }
         end
 
-        def allow_anonymous
-          @providers.any?(&:allow_anonymous)
-        end
-
-        def allow_guests
-          @providers.any?(&:allow_guests)
-        end
+        # Anonymous and guest access are intentionally not aggregated across the providers. Each sub-provider owns its
+        # own policy and applies it only to the mechanism it handles, so a provider that allows guests or anonymous
+        # logons must never let an authentication against a stricter provider be downgraded. The Base accessors
+        # ({Base#allow_anonymous} and {Base#allow_guests}) remain available on the Multi provider itself.
 
         class Authenticator < Authenticator::Base
           def initialize(provider, server_client)
             # built lazily, so a provider that is advertised but never selected is never instantiated
             @authenticators = {}
             @selected = nil
+            @selected_provider = nil
             super
           end
 
+          #
+          # Tear the whole negotiation down: every sub-authenticator is discarded along with the selected mechanism,
+          # leaving a clean slate on which a later NegTokenInit starts a fresh exchange. Sub-authenticators are dropped
+          # rather than reused so no partial state (a stale NTLM challenge, a half-finished Kerberos exchange, an old
+          # session key) can survive into the next negotiation.
+          #
           def reset!
             super
             @authenticators&.each_value(&:reset!)
+            @authenticators.clear
             @selected = nil
+            @selected_provider = nil
           end
 
           def process(request_buffer=nil)
@@ -81,24 +87,14 @@ module RubySMB
             end
 
             if negotiation_init?(gss_api)
-              # a NegTokenInit names the mechanism the client chose, so this is where routing is decided
-              mech_type = Gss.asn1dig(gss_api, 1, 0, 0, 0, 0)
-              authenticator = authenticator_for(mech_type)
-              if authenticator.nil?
-                logger.warn("Client selected an unsupported GSS mechanism (#{mech_type&.oid || 'unknown'})")
-                return
-              end
-
-              @selected = authenticator
-            elsif @selected.nil?
-              # a NegTokenResp carries no mechanism OID, so it can only be interpreted as a continuation of a
-              # negotiation that has already selected one
-              logger.warn('Received a GSS continuation token before any mechanism was selected')
-              return
+              select_mechanism(gss_api, request_buffer)
+            else
+              route_continuation(request_buffer)
             end
-
-            @selected.process(request_buffer)
           end
+
+          # @return [Provider::Base, nil] the provider whose mechanism the client selected, or nil before a selection.
+          attr_reader :selected_provider
 
           # The session key belongs to whichever mechanism actually authenticated the client.
           def session_key
@@ -116,10 +112,43 @@ module RubySMB
             gss_api&.tag == 0 && gss_api&.tag_class == :APPLICATION
           end
 
-          def authenticator_for(mech_type)
+          #
+          # Handle a NegTokenInit, the only token that names a mechanism and therefore the only point at which the
+          # routing decision can change.
+          #
+          # A second NegTokenInit means the client is starting a new exchange (for example after a failed attempt). The
+          # previous exchange is reset first, so switching mechanisms can never leave one mechanism's partial state
+          # reachable through another. A continuation token can never trigger this path.
+          #
+          def select_mechanism(gss_api, request_buffer)
+            mech_type = Gss.asn1dig(gss_api, 1, 0, 0, 0, 0)
             provider = @provider.provider_for(mech_type)
-            return nil if provider.nil?
+            if provider.nil?
+              logger.warn("Client selected an unsupported GSS mechanism (#{mech_type&.oid || 'unknown'})")
+              return
+            end
 
+            reset! unless @selected_provider.nil?
+            @selected_provider = provider
+            @selected = authenticator_for(provider)
+            @selected.process(request_buffer)
+          end
+
+          #
+          # Route a NegTokenResp continuation. Such a token carries no mechanism OID, so it is always delivered to the
+          # mechanism already selected by an earlier NegTokenInit - it is never retried against every provider and its
+          # contents cannot change the routing. Before any mechanism has been selected there is nothing to route to.
+          #
+          def route_continuation(request_buffer)
+            if @selected.nil?
+              logger.warn('Received a GSS continuation token before any mechanism was selected')
+              return
+            end
+
+            @selected.process(request_buffer)
+          end
+
+          def authenticator_for(provider)
             @authenticators[provider] ||= provider.new_authenticator(@server_client)
           end
         end
