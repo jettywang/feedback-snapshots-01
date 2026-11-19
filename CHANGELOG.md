@@ -1,6 +1,7 @@
 # Changelog
 
 ## [Unreleased]
+* Fix CLIXML `_xHHHH_` decoding so valid UTF-16 surrogate pairs are reassembled, unpaired surrogates become U+FFFD instead of raising, and literal `_x0041_`/escaped underscores round-trip with a single left-to-right pass. Pipeline output, host call text, and error records now share one decoder, separate from XML entity decoding.
 
 ## [2.4.2]
 * Replace erubi with the Ruby standard library ERB; the erubi runtime dependency is gone (#366)

@@ -13,6 +13,7 @@
 # limitations under the License.
 
 require 'rexml/document' unless defined?(REXML::Document)
+require_relative '../clixml'
 
 module WinRM
   module PSRP
@@ -29,12 +30,7 @@ module WinRM
           doc = REXML::Document.new(text)
           doc.root.get_elements('//S').map do |node|
             text = ''
-            if node.text
-              text << node.text.gsub(/(_x\h\h\h\h_)+/) do |match|
-                match.scan(/_x(\h\h\h\h)_/).flatten.map(&:hex)
-                     .pack('S*').force_encoding('utf-16le').encode('utf-8')
-              end.chomp
-            end
+            text << Clixml.decode(node.text).chomp if node.text
             text << "\r\n"
           end.join
         end

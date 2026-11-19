@@ -13,6 +13,7 @@
 # limitations under the License.
 
 require 'base64' unless defined?(Base64)
+require_relative 'clixml'
 require_relative 'message'
 require_relative 'message_data/pipeline_state'
 
@@ -65,7 +66,7 @@ module WinRM
           end
         end
 
-        hex_decode(text)
+        Clixml.decode(text)
       end
 
       def decode_error_record(message)
@@ -87,7 +88,7 @@ module WinRM
           end
         end
 
-        hex_decode(text)
+        Clixml.decode(text)
       end
 
       def render_write_error_exception(parsed)
@@ -121,21 +122,6 @@ EOH
     + CategoryInfo          : #{parsed.error_category_message}
     + FullyQualifiedErrorId : #{parsed.fully_qualified_error_id}
 EOH
-      end
-
-      private
-
-      def hex_decode(text)
-        return unless text
-
-        text.gsub(/_x(\h\h\h\h)_/) do
-          decoded_text = Regexp.last_match[1].hex.chr.force_encoding('utf-8')
-          if decoded_text.respond_to?(:scrub)
-            decoded_text.scrub
-          else
-            decoded_text.encode('utf-16', invalid: :replace, undef: :replace).encode('utf-8')
-          end
-        end
       end
     end
   end
