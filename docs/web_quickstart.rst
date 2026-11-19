@@ -490,9 +490,18 @@ To access form data with ``"POST"`` method use
 ``'application/x-www-form-urlencoded'`` and ``'multipart/form-data'``
 form's data encoding (e.g. ``<form enctype="multipart/form-data">``).
 It stores files data in temporary directory. If the body exceeds
-`client_max_size` or the form has more than `client_max_fields` fields
-(1000 by default, `0` disables the cap), `post` raises
-:exc:`~aiohttp.web.HTTPRequestEntityTooLarge`.
+`client_max_size`, the form has more than `client_max_fields` fields
+(1000 by default, `0` disables the cap) or more than `client_max_files`
+file parts (100 by default, `0` disables the cap), `post` raises
+:exc:`~aiohttp.web.HTTPRequestEntityTooLarge`. The three limits share one
+request-wide budget: ordinary fields, file parts and decoded content all
+draw from counters that accumulate across the whole request instead of
+restarting per part, and the byte budget counts the raw received wire
+bytes (framing included), not the decoded content. The raised exception
+exposes `limit_kind`, `limit` and `observed` attributes so middleware can
+identify which budget tripped; on rejection or cancellation every
+temporary file created for the upload is closed, and an unread body means
+the connection cannot be kept alive.
 For efficiency use :meth:`aiohttp.web.BaseRequest.multipart`, It is especially effective
 for uploading large files (:ref:`aiohttp-web-file-upload`).
 

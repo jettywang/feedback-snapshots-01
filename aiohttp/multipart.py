@@ -1,13 +1,14 @@
 import base64
 import binascii
 import builtins
+import enum
 import json
 import re
 import sys
 import uuid
 import warnings
 from collections import deque
-from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping, Sequence
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Self, cast
 from urllib.parse import parse_qsl, unquote, urlencode
@@ -49,6 +50,9 @@ __all__ = (
     "MultipartReader",
     "MultipartWriter",
     "BodyPartReader",
+    "MultipartBudget",
+    "MultipartLimitExceeded",
+    "MultipartLimitKind",
     "BadContentDispositionHeader",
     "BadContentDispositionParam",
     "parse_content_disposition",
@@ -73,6 +77,157 @@ class BadContentDispositionHeader(RuntimeWarning):
 
 class BadContentDispositionParam(RuntimeWarning):
     pass
+
+
+class MultipartLimitKind(enum.Enum):
+    """Which shared budget a :class:`MultipartLimitExceeded` tripped."""
+
+    FIELDS = "fields"
+    FILES = "files"
+    BYTES = "bytes"
+
+
+class MultipartLimitExceeded(Exception):
+    """Raised when a request-wide multipart resource budget is exceeded.
+
+    The same :class:`MultipartBudget` is shared by every part of one request,
+    so the counters never reset between parts. Middleware can distinguish the
+    three budgets through :attr:`limit_kind` and read both the configured
+    limit and the observed usage off the exception instead of parsing its
+    message.
+
+    A :class:`MultipartBudget` configured with ``error_cls`` raises an
+    instance of that type instead; the instance carries the same
+    :attr:`limit_kind`, :attr:`limit` and :attr:`observed` attributes, so the
+    identifying contract is independent of the concrete exception class.
+    """
+
+    def __init__(
+        self,
+        limit_kind: MultipartLimitKind,
+        limit: int,
+        observed: int,
+    ) -> None:
+        self.limit_kind = limit_kind
+        self.limit = limit
+        self.observed = observed
+        super().__init__(
+            f"multipart {limit_kind.value} budget {limit} exceeded; "
+            f"{observed} observed"
+        )
+
+
+class MultipartBudget:
+    """Resource budget shared by every part of a single multipart request.
+
+    The counters accumulate across all ordinary fields, file parts and nested
+    multiparts; a new part never restarts them. ``max_fields``, ``max_files``
+    and ``max_bytes`` are the three independent limits. A limit of ``0`` or a
+    negative value disables that budget, matching the historical meaning of
+    ``client_max_size=0`` and ``client_max_fields=0``.
+
+    Bytes are counted from the underlying stream's ``total_bytes``, i.e. the
+    raw wire bytes actually received, including framing and per-part headers,
+    not the (possibly smaller or larger) decoded content.
+    """
+
+    __slots__ = (
+        "max_fields",
+        "max_files",
+        "max_bytes",
+        "fields",
+        "files",
+        "_total_bytes",
+        "_error_cls",
+    )
+
+    def __init__(
+        self,
+        *,
+        max_fields: int = 0,
+        max_files: int = 0,
+        max_bytes: int = 0,
+        error_cls: type[Exception] | None = None,
+    ) -> None:
+        self.max_fields = max_fields
+        self.max_files = max_files
+        self.max_bytes = max_bytes
+        self.fields = 0
+        self.files = 0
+        self._total_bytes: Callable[[], int] | None = None
+        self._error_cls = error_cls
+
+    def bind(self, content: StreamReader) -> None:
+        """Bind the byte counter to the request's shared stream.
+
+        Nested readers call this with the same stream, so the byte accounting
+        stays request-wide instead of restarting per part. Streams without a
+        ``total_bytes`` counter (test doubles) are treated as uncounted.
+        """
+        get_total = getattr(content, "total_bytes", None)
+        if isinstance(get_total, int):
+            def _read_total_bytes() -> int:
+                return cast(int, getattr(content, "total_bytes"))
+
+            self._total_bytes = _read_total_bytes
+        elif callable(get_total):
+            self._total_bytes = cast(Callable[[], int], get_total)
+        else:
+            self._total_bytes = None
+
+    def _exceeded(self, kind: MultipartLimitKind, limit: int, observed: int) -> None:
+        if self._error_cls is None or self._error_cls is MultipartLimitExceeded:
+            raise MultipartLimitExceeded(kind, limit, observed)
+        if kind is MultipartLimitKind.FIELDS:
+            # Preserve the historical Request.post() wording.
+            message = f"Maximum number of form fields {limit} exceeded."
+        elif kind is MultipartLimitKind.BYTES:
+            # Preserve the historical request body size wording.
+            message = f"Maximum request body size {limit} exceeded."
+        else:
+            message = (
+                f"Maximum multipart {kind.value} budget {limit} exceeded; "
+                f"{observed} observed."
+            )
+        try:
+            # The configured class is typically an HTTP exception that
+            # accepts (max_size, text=...); fall back for plain Exception
+            # types such as the reader's default ValueError.
+            error = self._error_cls(limit, text=message)  # type: ignore[call-arg]
+        except TypeError:
+            error = self._error_cls(message)
+        error.limit_kind = kind  # type: ignore[attr-defined]
+        error.limit = limit  # type: ignore[attr-defined]
+        error.observed = observed  # type: ignore[attr-defined]
+        raise error
+
+    def add_field(self) -> None:
+        """Account for one ordinary form field, honoring ``max_fields``."""
+        self.fields += 1
+        if 0 < self.max_fields < self.fields:
+            self._exceeded(MultipartLimitKind.FIELDS, self.max_fields, self.fields)
+
+    def add_file(self) -> None:
+        """Account for one uploaded file part, honoring ``max_files``."""
+        self.files += 1
+        if 0 < self.max_files < self.files:
+            self._exceeded(MultipartLimitKind.FILES, self.max_files, self.files)
+
+    def check_bytes(self, observed: int | None = None) -> None:
+        """Raise if the shared received-byte budget is exceeded."""
+        if observed is None:
+            if self._total_bytes is None:
+                return
+            observed = self._total_bytes()
+        if 0 < self.max_bytes < observed:
+            self._exceeded(MultipartLimitKind.BYTES, self.max_bytes, observed)
+
+    @property
+    def bytes(self) -> int:
+        """Raw wire bytes received from the bound stream so far."""
+        if self._total_bytes is None:
+            return 0
+        return self._total_bytes()
 
 
 def parse_content_disposition(
@@ -302,6 +457,7 @@ class BodyPartReader:
         max_decompress_size: int = DEFAULT_CHUNK_SIZE,
         client_max_size: int = sys.maxsize,
         max_size_error_cls: type[Exception] = ValueError,
+        budget: MultipartBudget | None = None,
     ) -> None:
         self.headers = headers
         self._boundary = boundary
@@ -327,6 +483,9 @@ class BodyPartReader:
         self._max_decompress_size = max_decompress_size
         self._client_max_size = client_max_size
         self._max_size_error_cls = max_size_error_cls
+        # The request-wide budget is shared between parts; without one the
+        # reader keeps its historical per-part limits only.
+        self._budget = budget
 
     def __aiter__(self) -> Self:
         return self
@@ -385,6 +544,10 @@ class BodyPartReader:
             fresh = await self._read_chunk_from_stream(want)
         chunk = carry + fresh
         self._read_bytes += len(fresh)
+        if self._budget is not None:
+            # Request-wide accounting on raw received bytes; the counter is
+            # shared with every other part, so it never restarts here.
+            self._budget.check_bytes()
 
         # base64 decodes in quartets and every chunk is decoded on its own, so
         # a chunk should not end mid-quartet.
@@ -724,6 +887,7 @@ class MultipartReader:
         max_field_size: int = 8190,
         max_headers: int = 128,
         max_size_error_cls: type[Exception] = ValueError,
+        budget: MultipartBudget | None = None,
     ) -> None:
         self._mimetype = parse_mimetype(headers[CONTENT_TYPE])
         assert self._mimetype.type == "multipart", "multipart/* content type expected"
@@ -741,6 +905,14 @@ class MultipartReader:
         self._max_field_size = max_field_size
         self._max_headers = max_headers
         self._max_size_error_cls = max_size_error_cls
+        if budget is None:
+            budget = MultipartBudget(
+                max_bytes=client_max_size, error_cls=max_size_error_cls
+            )
+        self._budget = budget
+        # Nested readers pass the same budget; binding is idempotent and keeps
+        # the byte counter pointing at the one underlying request stream.
+        budget.bind(content)
         self._at_eof = False
         self._at_bof = True
         self._unread: list[bytes] = []
@@ -774,6 +946,11 @@ class MultipartReader:
         """Returns True if the final boundary was reached, false otherwise."""
         return self._at_eof
 
+    @property
+    def budget(self) -> MultipartBudget:
+        """The request-wide resource budget shared by every part."""
+        return self._budget
+
     async def next(
         self,
     ) -> "MultipartReader | BodyPartReader | None":
@@ -787,6 +964,8 @@ class MultipartReader:
             self._at_bof = False
         else:
             await self._read_boundary()
+        # Framing and per-part headers also consume the request byte budget.
+        self._budget.check_bytes()
         if self._at_eof:  # we just read the last boundary, nothing to do there
             # https://github.com/python/mypy/issues/17537
             return None  # type: ignore[unreachable]
@@ -817,12 +996,14 @@ class MultipartReader:
             if item is None:
                 break
             await item.release()
+            self._budget.check_bytes()
 
     async def fetch_next_part(
         self,
     ) -> "MultipartReader | BodyPartReader":
         """Returns the next body part reader."""
         headers = await self._read_headers()
+        self._budget.check_bytes()
         return self._get_part_reader(headers)
 
     def _get_part_reader(
@@ -847,6 +1028,7 @@ class MultipartReader:
                     max_field_size=self._max_field_size,
                     max_headers=self._max_headers,
                     max_size_error_cls=self._max_size_error_cls,
+                    budget=self._budget,
                 )
             return self.multipart_reader_cls(
                 headers,
@@ -855,6 +1037,7 @@ class MultipartReader:
                 max_field_size=self._max_field_size,
                 max_headers=self._max_headers,
                 max_size_error_cls=self._max_size_error_cls,
+                budget=self._budget,
             )
         else:
             return self.part_reader_cls(
@@ -865,6 +1048,7 @@ class MultipartReader:
                 default_charset=self._default_charset,
                 client_max_size=self._client_max_size,
                 max_size_error_cls=self._max_size_error_cls,
+                budget=self._budget,
             )
 
     def _get_boundary(self) -> str:

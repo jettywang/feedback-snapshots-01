@@ -89,6 +89,7 @@ class Application(MutableMapping[str | AppKey[Any], Any]):
         "_on_cleanup",
         "_client_max_size",
         "_client_max_fields",
+        "_client_max_files",
         "_cleanup_ctx",
     )
 
@@ -100,6 +101,7 @@ class Application(MutableMapping[str | AppKey[Any], Any]):
         handler_args: Mapping[str, Any] | None = None,
         client_max_size: int = 1024**2,
         client_max_fields: int = 1000,
+        client_max_files: int = 100,
         debug: Any = ...,  # mypy doesn't support ellipsis
     ) -> None:
         if debug is not ...:
@@ -133,6 +135,7 @@ class Application(MutableMapping[str | AppKey[Any], Any]):
         self._on_cleanup.append(self._cleanup_ctx._on_cleanup)
         self._client_max_size = client_max_size
         self._client_max_fields = client_max_fields
+        self._client_max_files = client_max_files
 
     def __init_subclass__(cls: type["Application"]) -> None:
         raise TypeError(

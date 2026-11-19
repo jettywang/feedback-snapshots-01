@@ -508,6 +508,7 @@ class AppRunner(BaseRunner[Request]):
             loop,
             client_max_size=self.app._client_max_size,
             client_max_fields=self.app._client_max_fields,
+            client_max_files=self.app._client_max_files,
             pre_handler_error=pre_handler_error,
         )
 

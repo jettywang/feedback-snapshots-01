@@ -693,10 +693,10 @@ boundary at which user-supplied strings can become wire bytes.
 | # | Threat | Existing | Recommended |
 | :--- | :--- | :--- | :--- |
 | 4.1 | Boundary parameter | 70-char cap; missing-boundary raises; HTTP header layer ([§5.1](#51-http1-parser)) catches CR/LF/NUL. | None. |
-| 4.2 | Many small parts | `client_max_size` caps total bytes. `Request.post()` additionally caps the number of form fields at `client_max_fields` (default `1000`, `0` disables) since PR #13738: multipart parts are counted before each part is read, and urlencoded bodies are rejected by `yarl.query_to_pairs` before any pair is materialised. Both paths raise `HTTPRequestEntityTooLarge`. | The cap only covers `Request.post()`. Direct `MultipartReader` / `Request.multipart()` users still get an unbounded part count; a `max_parts` parameter on `MultipartReader` would close that path. **User**: operators sensitive to live-object count should reduce `client_max_fields` and `client_max_size`. |
+| 4.2 | Many small parts | `client_max_size` caps total bytes. `Request.post()` additionally caps the number of form fields at `client_max_fields` (default `1000`, `0` disables) since PR #13738: multipart parts are counted before each part is read, and urlencoded bodies are rejected by `yarl.query_to_pairs` before any pair is materialised. Both paths raise `HTTPRequestEntityTooLarge`. Since the request-wide `MultipartBudget` work, the field, file (`client_max_files`, default `100`, `0` disables) and byte counters live on one budget object shared by every part and nested reader, so they accumulate request-wide rather than restarting per part; over-limit exceptions carry `limit_kind` / `limit` / `observed` attributes for middleware. | The count caps still only cover `Request.post()`; direct `MultipartReader` / `Request.multipart()` users get the byte budget but no field/file accounting unless they configure one. **User**: operators sensitive to live-object count should reduce `client_max_fields`, `client_max_files` and `client_max_size`. |
 | 4.3 | Nested-multipart recursion | `Request.post()` rejects any nested multipart with `ValueError` ("To decode nested multipart you need to use custom reader") (`web_request.py:BaseRequest.post`). | **Direct `MultipartReader` users get unlimited recursion. Add a `max_nesting_depth` parameter (default e.g. 10) to fail cleanly before `RecursionError`.** |
 | 4.4 | Per-part headers bounded | `max_field_size` / `max_headers` plumbed since 5fe9dfb64 (Mar 2026). | None. |
-| 4.5 | Per-part body bounded | Per-iteration size check since 9cc4b917c (Mar 2026). | None. |
+| 4.5 | Per-part body bounded | Per-iteration size check since 9cc4b917c (Mar 2026). The shared `MultipartBudget` now also enforces the cumulative received-byte limit inside `BodyPartReader.read_chunk` (and on every boundary/header read), counting the stream's raw wire bytes rather than decoded content, so a part cannot exhaust the budget through base64/transfer-encoding expansion. | None. |
 | 4.6 | Filename path traversal | None; verbatim return is the documented behaviour. | **User**: sanitise `BodyPartReader.filename` before opening / saving / reflecting (strip path components, control bytes, known-bad sequences). |
 | 4.7 | Field-name pass-through | None. | **User**: `request.post()` keys come from attacker-controlled `name` parameters; do not feed them directly to filesystem / DB / template paths. |
 | 4.8 | `_charset_` magic field | Behaviour follows the HTML5 spec for multipart form charset selection. | **Document the surprising behaviour: an attacker who can post any field can change how subsequent fields are decoded.** **User**: if your form-handling code makes decisions based on string content, be aware that the decode charset is attacker-influenceable. |
@@ -705,7 +705,7 @@ boundary at which user-supplied strings can become wire bytes.
 | 4.11 | Outbound boundary collision | UUID4-hex default; HMAC-grade entropy means collision with random body bytes is statistically negligible. | **User**: callers supplying their own boundary must use a random, sufficiently long value. |
 | 4.12 | `FormData` argument injection | `add_field` runs `name`, `filename`, and `content_type` through `_safe_header` (`http_writer.py:_safe_header`), rejecting `\r` / `\n` / `\x00`. `name` / `filename` are additionally percent-encoded by `content_disposition_header` (`helpers.py:content_disposition_header`) when `quote_fields=True` (default), so the `add_field` check is what closes the `quote_fields=False` opt-out path. | None. |
 | 4.13 | Per-part header injection | `Payload._binary_headers` (`payload.py:_binary_headers`) now applies `_safe_header` to every name and value, raising `ValueError` if CR / LF / NUL is present before any byte reaches the wire. Covers all paths that mutate the headers dict (constructor, direct assignment, `set_content_disposition`). | None. |
-| 4.14 | Temp-file lifetime | `tempfile.TemporaryFile()` is unlinked at creation on POSIX; closing the FD (whether explicit or via GC) reclaims the disk. | **User**: explicitly close `FileField`s you don't intend to consume to release the temp file promptly under high load. |
+| 4.14 | Temp-file lifetime | `tempfile.TemporaryFile()` is unlinked at creation on POSIX; closing the FD (whether explicit or via GC) reclaims the disk. `Request.post()` tracks every spool it creates and closes them all from a `BaseException` handler, so a budget rejection, decode error or cancellation never leaves a temp file (including a rolled-over disk file) behind; on the success path `Request._finish()` retains ownership and closes them after the response. | **User**: explicitly close `FileField`s you don't intend to consume to release the temp file promptly under high load. |
 
 **Past advisories / hardening (recap).**
 
@@ -747,5 +747,12 @@ boundary at which user-supplied strings can become wire bytes.
 - **PR #13738** (3.14.4) — `Request.post()` caps the number of form fields
   at `client_max_fields` (default `1000`) for both multipart and
   urlencoded bodies (threat 4.2).
+- **Multipart resource budget** (4.0) — `MultipartBudget` unifies the
+  field, file and cumulative received-byte limits on one request-wide
+  object shared by every part and nested reader (raw wire bytes, framing
+  included), with `MultipartLimitExceeded` / `limit_kind` for middleware
+  identification, a new `client_max_files` cap (default `100`), and
+  guaranteed temp-file closure on rejection and cancellation (threats
+  4.2, 4.5, 4.14).
 
 These are all currently in place; this section assumes no regression.

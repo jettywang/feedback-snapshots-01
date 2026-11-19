@@ -1,0 +1,11 @@
+Added a request-wide multipart resource budget (``aiohttp.MultipartBudget``)
+with independent limits for ordinary fields, uploaded file parts and
+cumulative received bytes. The counters are shared by every part of a
+request instead of restarting per part, the byte budget counts raw
+received wire bytes including framing and per-part headers, and over-limit
+errors (``aiohttp.MultipartLimitExceeded``) carry ``limit_kind``,
+``limit`` and ``observed`` attributes so middleware can identify which
+budget tripped. Added ``client_max_files`` (default 100) to
+``Application`` and ``BaseRequest``; temporary files are closed on
+rejection and cancellation, and an empty file part no longer counts as a
+missing field.

@@ -579,6 +579,7 @@ def make_mocked_request(
     sslcontext: SSLContext | None = None,
     client_max_size: int = 1024**2,
     client_max_fields: int = 1000,
+    client_max_files: int = 100,
     loop: Any = ...,
 ) -> Request:
     """Creates mocked web.Request testing purposes.
@@ -671,6 +672,7 @@ def make_mocked_request(
         loop,
         client_max_size=client_max_size,
         client_max_fields=client_max_fields,
+        client_max_files=client_max_files,
     )
 
     match_info = UrlMappingMatchInfo(

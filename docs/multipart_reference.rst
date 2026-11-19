@@ -169,6 +169,79 @@ Multipart reference
       Readonly :class:`str` property.
 
 
+.. class:: MultipartBudget(*, max_fields=0, max_files=0, max_bytes=0, error_cls=None)
+   :canonical: aiohttp.multipart.MultipartBudget
+
+   Resource budget shared by every part of a single multipart request.
+
+   The three limits are independent and the counters accumulate across all
+   ordinary fields, file parts and nested multiparts; a new part never
+   restarts them. A limit of ``0`` or a negative value disables that budget.
+
+   Bytes are counted from the underlying stream's received wire bytes
+   (including framing and per-part headers), not the decoded content.
+
+   .. attribute:: max_fields
+                  max_files
+                  max_bytes
+
+      The configured limits (:class:`int`); non-positive values disable the
+      corresponding budget.
+
+   .. attribute:: fields
+                  files
+
+      Number of ordinary fields and file parts accounted for so far.
+
+   .. attribute:: bytes
+
+      Raw wire bytes received from the bound stream so far (:class:`int`).
+
+   .. method:: add_field()
+
+      Account for one ordinary form field, raising when ``max_fields`` is
+      exceeded.
+
+   .. method:: add_file()
+
+      Account for one uploaded file part, raising when ``max_files`` is
+      exceeded.
+
+   .. method:: check_bytes(observed=None)
+
+      Raise if the shared received-byte budget is exceeded. Without an
+      argument the bound stream's counter is used.
+
+   When ``error_cls`` is supplied, an over-limit call raises an instance of
+   that class (for example :class:`~aiohttp.web.HTTPRequestEntityTooLarge`)
+   carrying ``limit_kind``, ``limit`` and ``observed`` attributes; otherwise
+   :class:`MultipartLimitExceeded` is raised.
+
+.. class:: MultipartLimitExceeded
+   :canonical: aiohttp.multipart.MultipartLimitExceeded
+
+   Raised when a request-wide multipart budget is exceeded.
+
+   .. attribute:: limit_kind
+
+      One of the :class:`MultipartLimitKind` members (``FIELDS``, ``FILES``
+      or ``BYTES``), identifying which budget tripped. Middleware can branch
+      on this instead of parsing the error message.
+
+   .. attribute:: limit
+
+      The configured limit that was exceeded (:class:`int`).
+
+   .. attribute:: observed
+
+      The counter value observed when the limit tripped (:class:`int`).
+
+.. class:: MultipartLimitKind
+   :canonical: aiohttp.multipart.MultipartLimitKind
+
+   Enum identifying a multipart budget: ``FIELDS``, ``FILES`` and ``BYTES``.
+
+
 .. class:: MultipartReader(headers, content)
    :canonical: aiohttp.multipart.MultipartReader
 
@@ -179,6 +252,12 @@ Multipart reference
       Constructs reader instance from HTTP response.
 
       :param response: :class:`~aiohttp.ClientResponse` instance
+
+   .. attribute:: budget
+
+      The :class:`MultipartBudget` shared by every part emitted by this
+      reader and its nested readers. A reader created without an explicit
+      budget builds one from ``client_max_size``.
 
    .. method:: at_eof()
 

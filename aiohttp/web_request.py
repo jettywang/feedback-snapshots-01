@@ -45,7 +45,8 @@ from .helpers import (
 )
 from .http_parser import RawRequestMessage
 from .http_writer import HttpVersion
-from .multipart import BodyPartReader, MultipartReader
+from .log import internal_logger
+from .multipart import BodyPartReader, MultipartBudget, MultipartReader
 from .streams import EmptyStreamReader, StreamReader
 from .typedefs import (
     DEFAULT_JSON_DECODER,
@@ -147,6 +148,7 @@ class BaseRequest(MutableMapping[str | RequestKey[Any], Any], HeadersMixin):
         *,
         client_max_size: int = 1024**2,
         client_max_fields: int = 1000,
+        client_max_files: int = 100,
         state: dict[RequestKey[Any] | str, Any] | None = None,
         scheme: str | None = None,
         host: str | None = None,
@@ -193,6 +195,7 @@ class BaseRequest(MutableMapping[str | RequestKey[Any], Any], HeadersMixin):
         self._task = task
         self._client_max_size = client_max_size
         self._client_max_fields = client_max_fields
+        self._client_max_files = client_max_files
         self._loop = loop
 
         self._transport_sslcontext = protocol.ssl_context
@@ -213,6 +216,7 @@ class BaseRequest(MutableMapping[str | RequestKey[Any], Any], HeadersMixin):
         remote: str | _SENTINEL = sentinel,
         client_max_size: int | _SENTINEL = sentinel,
         client_max_fields: int | _SENTINEL = sentinel,
+        client_max_files: int | _SENTINEL = sentinel,
     ) -> "BaseRequest":
         """Clone itself with replacement some attributes.
 
@@ -252,6 +256,8 @@ class BaseRequest(MutableMapping[str | RequestKey[Any], Any], HeadersMixin):
             client_max_size = self._client_max_size
         if client_max_fields is sentinel:
             client_max_fields = self._client_max_fields
+        if client_max_files is sentinel:
+            client_max_files = self._client_max_files
 
         return self.__class__(
             message,
@@ -262,6 +268,7 @@ class BaseRequest(MutableMapping[str | RequestKey[Any], Any], HeadersMixin):
             self._loop,
             client_max_size=client_max_size,
             client_max_fields=client_max_fields,
+            client_max_files=client_max_files,
             state=self._state.copy(),
             pre_handler_error=self._pre_handler_error,
             **kwargs,
@@ -290,6 +297,10 @@ class BaseRequest(MutableMapping[str | RequestKey[Any], Any], HeadersMixin):
     @property
     def client_max_fields(self) -> int:
         return self._client_max_fields
+
+    @property
+    def client_max_files(self) -> int:
+        return self._client_max_files
 
     @property
     def pre_handler_error(self) -> HTTPBadRequest | None:
@@ -754,7 +765,31 @@ class BaseRequest(MutableMapping[str | RequestKey[Any], Any], HeadersMixin):
             max_field_size=self._protocol.max_field_size,
             max_headers=self._protocol.max_headers,
             max_size_error_cls=HTTPRequestEntityTooLarge,
+            budget=self._make_multipart_budget(),
         )
+
+    def _make_multipart_budget(self) -> MultipartBudget:
+        # Byte and part-count overflows stay 413 responses and carry the
+        # limit_kind/limit/observed attributes middleware can inspect.
+        return MultipartBudget(
+            max_bytes=self._client_max_size,
+            max_fields=self._client_max_fields,
+            max_files=self._client_max_files,
+            error_cls=HTTPRequestEntityTooLarge,
+        )
+
+    @staticmethod
+    def _close_temp_files(
+        temp_files: "list[SpooledTemporaryFile[bytes]]",
+    ) -> None:
+        while temp_files:
+            tmp = temp_files.pop()
+            try:
+                tmp.close()
+            except Exception:
+                internal_logger.debug(
+                    "Failed to close multipart temp file", exc_info=True
+                )
 
     async def post(self) -> "MultiDictProxy[str | bytes | FileField]":
         """Return POST parameters."""
@@ -778,96 +813,110 @@ class BaseRequest(MutableMapping[str | RequestKey[Any], Any], HeadersMixin):
         if content_type == "multipart/form-data":
             out = MultiDict()
             multipart = await self.multipart()
-            max_size = self._client_max_size
-            max_fields = self._client_max_fields
-
+            # One budget spans the whole request: the counters below and the
+            # reader's byte counter share it, so ordinary fields, files and
+            # decoded content all draw from the same limits instead of each
+            # part starting over.
+            budget = multipart.budget
             payload = self._payload
-            while (field := await multipart.next()) is not None:
-                # This check is needed for empty payloads, which still add
-                # overhead without entering the loop and the check below.
-                if 0 < max_size < payload.total_bytes:
-                    raise HTTPRequestEntityTooLarge(max_size)
-                if 0 < max_fields <= len(out):
-                    raise _too_many_fields(max_fields)
+            # Every temp file created for this request; any failure (budget
+            # rejection, decode error or cancellation) closes them again so a
+            # 413 never leaves spooled data behind, including files already
+            # attached to FileFields that will never reach a response.
+            temp_files: list[SpooledTemporaryFile[bytes]] = []
+            try:
+                while (field := await multipart.next()) is not None:
+                    # This check is needed for empty payloads, which still add
+                    # overhead without entering the loop and the check below.
+                    budget.check_bytes(payload.total_bytes)
 
-                field_ct = field.headers.get(hdrs.CONTENT_TYPE)
+                    field_ct = field.headers.get(hdrs.CONTENT_TYPE)
 
-                if isinstance(field, BodyPartReader):
-                    if field.name is None:
-                        raise ValueError("Multipart field missing name.")
+                    if isinstance(field, BodyPartReader):
+                        if field.name is None:
+                            raise ValueError("Multipart field missing name.")
 
-                    # Note that according to RFC 7578, the Content-Type header
-                    # is optional, even for files, so we can't assume it's
-                    # present.
-                    # https://tools.ietf.org/html/rfc7578#section-4.4
-                    if field.filename:
-                        tmp = SpooledTemporaryFile(_FILE_SPOOL_MAX_SIZE)
-                        # rolled means the temp file now uses the disk, at
-                        # which point we want to run in the executor.
-                        rolled = False
-                        while chunk := await field.read_chunk(size=DEFAULT_CHUNK_SIZE):
-                            # Bounds one part, mid-read.
-                            if 0 < max_size < payload.total_bytes:
-                                if rolled:
-                                    await self._loop.run_in_executor(None, tmp.close)
-                                else:
-                                    tmp.close()
-                                raise HTTPRequestEntityTooLarge(max_size)
-                            async for decoded_chunk in field.decode_iter(chunk):
-                                # Update before writing, so we know if next
-                                # write is going to hit the disk.
-                                rolled = rolled or (
-                                    tmp.tell() + len(decoded_chunk)
-                                    > _FILE_SPOOL_MAX_SIZE
-                                )
-                                if rolled:
-                                    await self._loop.run_in_executor(
-                                        None, tmp.write, decoded_chunk
+                        # Note that according to RFC 7578, the Content-Type header
+                        # is optional, even for files, so we can't assume it's
+                        # present.
+                        # https://tools.ietf.org/html/rfc7578#section-4.4
+                        if field.filename:
+                            budget.add_file()
+                            tmp = SpooledTemporaryFile(_FILE_SPOOL_MAX_SIZE)
+                            temp_files.append(tmp)
+                            # rolled means the temp file now uses the disk, at
+                            # which point we want to run in the executor.
+                            rolled = False
+                            while chunk := await field.read_chunk(
+                                size=DEFAULT_CHUNK_SIZE
+                            ):
+                                # Bounds the request cumulatively, mid-read; the
+                                # reader enforces the same budget on every chunk.
+                                budget.check_bytes(payload.total_bytes)
+                                async for decoded_chunk in field.decode_iter(chunk):
+                                    # Update before writing, so we know if next
+                                    # write is going to hit the disk.
+                                    rolled = rolled or (
+                                        tmp.tell() + len(decoded_chunk)
+                                        > _FILE_SPOOL_MAX_SIZE
                                     )
-                                else:
-                                    tmp.write(decoded_chunk)
-                        if rolled:
-                            await self._loop.run_in_executor(None, tmp.seek, 0)
+                                    if rolled:
+                                        await self._loop.run_in_executor(
+                                            None, tmp.write, decoded_chunk
+                                        )
+                                    else:
+                                        tmp.write(decoded_chunk)
+                            if rolled:
+                                await self._loop.run_in_executor(None, tmp.seek, 0)
+                            else:
+                                tmp.seek(0)
+
+                            if field_ct is None:
+                                field_ct = "application/octet-stream"
+
+                            ff = FileField(
+                                field.name,
+                                field.filename,
+                                tmp,
+                                field_ct,
+                                field.headers,
+                            )
+                            out.add(field.name, ff)
                         else:
-                            tmp.seek(0)
+                            # deal with ordinary data
+                            # A part with an empty body is still a present
+                            # field, so it counts against the field budget.
+                            budget.add_field()
+                            raw_data = bytearray()
+                            while chunk := await field.read_chunk():
+                                budget.check_bytes(payload.total_bytes)
+                                raw_data.extend(chunk)
 
-                        if field_ct is None:
-                            field_ct = "application/octet-stream"
+                            value = bytearray()
+                            # form-data doesn't support compression, so don't need to check size again.
+                            async for d in field.decode_iter(raw_data):  # type: ignore[arg-type]
+                                value.extend(d)
 
-                        ff = FileField(
-                            field.name,
-                            field.filename,
-                            tmp,
-                            field_ct,
-                            field.headers,
-                        )
-                        out.add(field.name, ff)
+                            if field_ct is None or field_ct.startswith("text/"):
+                                charset = field.get_charset(default="utf-8")
+                                try:
+                                    decoded = value.decode(charset)
+                                except (LookupError, UnicodeDecodeError):
+                                    raise HTTPUnsupportedMediaType()
+                                out.add(field.name, decoded)
+                            else:
+                                out.add(field.name, value)  # type: ignore[arg-type]
                     else:
-                        # deal with ordinary data
-                        raw_data = bytearray()
-                        while chunk := await field.read_chunk():
-                            if 0 < max_size < payload.total_bytes:
-                                raise HTTPRequestEntityTooLarge(max_size)
-                            raw_data.extend(chunk)
-
-                        value = bytearray()
-                        # form-data doesn't support compression, so don't need to check size again.
-                        async for d in field.decode_iter(raw_data):  # type: ignore[arg-type]
-                            value.extend(d)
-
-                        if field_ct is None or field_ct.startswith("text/"):
-                            charset = field.get_charset(default="utf-8")
-                            try:
-                                decoded = value.decode(charset)
-                            except (LookupError, UnicodeDecodeError):
-                                raise HTTPUnsupportedMediaType()
-                            out.add(field.name, decoded)
-                        else:
-                            out.add(field.name, value)  # type: ignore[arg-type]
-                else:
-                    raise ValueError(
-                        "To decode nested multipart you need to use custom reader",
-                    )
+                        raise ValueError(
+                            "To decode nested multipart you need to use custom reader",
+                        )
+            except BaseException:
+                # Close every temp file created during parsing: budget
+                # rejections, decode failures and cancellation all land here.
+                # On the success path _finish() owns the same files; closing a
+                # spool twice is harmless.
+                self._close_temp_files(temp_files)
+                raise
         elif not (data := await self.read()):
             out = MultiDict()
         else:
@@ -943,6 +992,7 @@ class Request(BaseRequest):
         remote: str | _SENTINEL = sentinel,
         client_max_size: int | _SENTINEL = sentinel,
         client_max_fields: int | _SENTINEL = sentinel,
+        client_max_files: int | _SENTINEL = sentinel,
     ) -> "Request":
         ret = super().clone(
             method=method,
@@ -953,6 +1003,7 @@ class Request(BaseRequest):
             remote=remote,
             client_max_size=client_max_size,
             client_max_fields=client_max_fields,
+            client_max_files=client_max_files,
         )
         new_ret = cast(Request, ret)
         new_ret._match_info = self._match_info

@@ -189,6 +189,23 @@ and :ref:`aiohttp-web-signals` handlers.
 
       .. versionadded:: 3.14.4
 
+   .. attribute:: client_max_files
+
+      The maximum number of uploaded file parts accepted by
+      :meth:`~BaseRequest.post`, ``0`` disables the limit. An empty file part
+      still counts as one file.
+
+      Together with :attr:`client_max_fields` and
+      :attr:`client_max_size` this forms the request-wide multipart resource
+      budget; the counters accumulate across the whole request instead of
+      restarting per part.
+
+      The value could be overridden by :meth:`~BaseRequest.clone`.
+
+      Read-only :class:`int` property.
+
+      .. versionadded:: 4.0
+
    .. attribute:: pre_handler_error
 
       An :exc:`HTTPBadRequest` set by the protocol when the parser
@@ -526,8 +543,15 @@ and :ref:`aiohttp-web-signals` handlers.
       returns empty multidict.
 
       Raises :exc:`HTTPRequestEntityTooLarge` if the body exceeds
-      :attr:`client_max_size` or the form has more than
-      :attr:`client_max_fields` fields.
+      :attr:`client_max_size`, the form has more than
+      :attr:`client_max_fields` fields or more than
+      :attr:`client_max_files` file parts.  The three limits form one
+      request-wide resource budget whose counters never restart between
+      parts.  The raised exception carries ``limit_kind`` (one of
+      ``fields``, ``files`` or ``bytes``), ``limit`` and ``observed``
+      attributes so middleware can tell which budget tripped.  When
+      parsing is rejected or cancelled, every temporary file created for
+      the upload is closed before the exception propagates.
 
       .. note::
 
@@ -1536,7 +1560,7 @@ Application and Router
 
 .. class:: Application(*, logger=<default>, middlewares=(), \
                        handler_args=None, client_max_size=1024**2, \
-                       client_max_fields=1000, debug=...)
+                       client_max_fields=1000, client_max_files=100, debug=...)
    :canonical: aiohttp.web_app.Application
 
    Application is a synonym for web-server.
@@ -1592,6 +1616,22 @@ Application and Router
                              ``0`` disables the limit.  Default is ``1000``.
 
                              .. versionadded:: 3.14.4
+
+   :param client_max_files: maximum number of uploaded file parts accepted
+                            by :meth:`BaseRequest.post` for
+                            ``multipart/form-data`` requests.  Ordinary
+                            fields are bounded by ``client_max_fields`` and
+                            the cumulative received bytes by
+                            ``client_max_size``; all three share one
+                            request-wide budget.  An empty file part still
+                            counts as one file.  If a POST request exceeds
+                            this value, it raises an
+                            `HTTPRequestEntityTooLarge` exception whose
+                            ``limit_kind`` attribute identifies the budget
+                            that tripped.  ``0`` disables the limit.
+                            Default is ``100``.
+
+                            .. versionadded:: 4.0
 
    :param debug: Switches debug mode.
 
