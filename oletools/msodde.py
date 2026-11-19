@@ -54,6 +54,7 @@ import os
 import sys
 import re
 import csv
+from collections import namedtuple
 
 import olefile
 
@@ -101,6 +102,12 @@ from oletools.common.log_helper import log_helper
 # 2018-10-25       CH: - detect encryption and raise error if detected
 # 2019-03-25       CH: - added decryption of password-protected files
 # 2019-07-17 v0.55 CH: - fixed issue #267, unicode error on Python 2
+# 2026-11-19           - parse Word fields with a state stack: instructions
+#                        split over several runs are reassembled, field
+#                        results and nested fields are never mixed into the
+#                        enclosing instruction, and fields without an end
+#                        marker are reported as incomplete instead of being
+#                        extended with following text
 
 
 __version__ = '0.60.2'
@@ -120,8 +127,7 @@ __version__ = '0.60.2'
 
 # === PYTHON 2+3 SUPPORT ======================================================
 
-if sys.version_info[0] >= 3:
-    unichr = chr
+# (nothing needed here at the moment; kept for consistency with other modules)
 
 # === CONSTANTS ==============================================================
 
@@ -135,6 +141,7 @@ TAG_W_FLDSIMPLE = ['{%s}fldSimple' % ns for ns in (NS_WORD, NS_WORD_2003)]
 TAG_W_FLDCHAR = ['{%s}fldChar' % ns for ns in (NS_WORD, NS_WORD_2003)]
 TAG_W_P = ["{%s}p" % ns for ns in (NS_WORD, NS_WORD_2003)]
 TAG_W_R = ["{%s}r" % ns for ns in (NS_WORD, NS_WORD_2003)]
+TAG_W_T = ["{%s}t" % ns for ns in (NS_WORD, NS_WORD_2003)]
 ATTR_W_INSTR = ['{%s}instr' % ns for ns in (NS_WORD, NS_WORD_2003)]
 ATTR_W_FLDCHARTYPE = ['{%s}fldCharType' % ns for ns in (NS_WORD, NS_WORD_2003)]
 LOCATIONS = ('word/document.xml', 'word/endnotes.xml', 'word/footnotes.xml',
@@ -215,6 +222,41 @@ FIELD_BLACKLIST = (
 )
 
 FIELD_DDE_REGEX = re.compile(r'^\s*dde(auto)?\s+', re.I)
+
+#: field kinds as reported by :py:class:`FieldInfo`
+FIELD_KIND_COMPLEX = 'complex'
+FIELD_KIND_SIMPLE = 'simple'
+FIELD_KIND_OLE = 'ole'
+
+#: A piece of a field instruction. ``position`` is the position of the XML
+#: element (or the byte offset in an OLE stream) that carried the text.
+FieldFragment = namedtuple('FieldFragment', 'position text')
+
+#: Description of a single field found in a document.
+#:
+#: ``part`` is the package part containing the field (e.g. ``word/document.xml``
+#: or ``word/header1.xml``), ``position`` is the position of the field begin in
+#: that part, ``parent`` is the position of the enclosing field if the field is
+#: nested, and ``depth`` is the nesting depth (0 for a top-level field).
+#: ``fragments`` preserves the individual instruction pieces in document order.
+#: ``separate_position`` and ``end_position`` locate the separator and end
+#: markers (either XML element positions or OLE stream offsets). ``complete``
+#: is false if the end marker was missing.
+_FieldInfoBase = namedtuple(
+    'FieldInfo',
+    'part position parent depth kind instruction result fragments complete '
+    'separate_position end_position')
+
+
+class FieldInfo(_FieldInfoBase):
+    """ A Word field including its provenance. See FieldInfo namedtuple. """
+    __slots__ = ()
+
+    @property
+    def is_dde(self):
+        """ Whether this field's instruction is a DDE/DDEAUTO command. """
+        return bool(FIELD_DDE_REGEX.match(self.instruction))
+
 
 # filter modes
 FIELD_FILTER_DDE = 'only dde'
@@ -330,85 +372,390 @@ OLE_FIELD_START = 0x13
 OLE_FIELD_SEP = 0x14
 OLE_FIELD_END = 0x15
 OLE_FIELD_MAX_SIZE = 1000   # max field size to analyze, rest is ignored
+FIELD_RESULT_MAX_SIZE = 1000  # max amount of field result text kept per field
+
+
+class _MutableField(object):
+    """ A field while it is still being parsed.
+
+    The public representation is :py:class:`FieldInfo`; this class only exists
+    because fields are parsed in several steps (begin, instruction fragments,
+    separator, result, end) and need to be filled while the parse advances.
+
+    Instruction and result text are kept as positioned fragments. Positions are
+    element numbers (XML) or stream offsets (OLE). This also allows truncating
+    an unterminated field at its last paragraph boundary: text from following
+    paragraphs must not be attributed to it.
+    """
+
+    def __init__(self, part, position, parent, depth, kind, as_bytes=False,
+                 unquote_instruction=False):
+        self.part = part
+        self.position = position
+        self.parent = parent
+        self.depth = depth
+        self.kind = kind
+        self.separate_position = None
+        self.utf16 = False
+        self._as_bytes = as_bytes
+        self._unquote = unquote_instruction
+        # fragments are [position, text]; adjacent OLE bytes are merged
+        self._instruction_fragments = []
+        self._result_fragments = []
+        self._in_result = kind in (FIELD_KIND_SIMPLE, )
+        self._instruction_closed = False
+        self._instruction_too_big = False
+        self._instruction_length = 0
+        self._result_length = 0
+        self._boundary = None
+
+    def _decoded(self, data):
+        """ decode collected OLE bytes; text parts are already unicode """
+        if isinstance(data, (bytes, bytearray)):
+            return decode_field_instruction(bytes(data), self.utf16)
+        return u''.join(data)
+
+    def _append(self, fragments, position, text):
+        """ append to a fragment list, merging adjacent OLE bytes """
+        if self._as_bytes and fragments and \
+                fragments[-1][0] + len(fragments[-1][1]) == position:
+            fragments[-1][1] += text
+        else:
+            fragments.append([position, text])
+
+    def add_instruction(self, position, text):
+        """ add one instruction fragment (XML element or attribute) """
+        if not text or self._instruction_closed:
+            return
+        self._append(self._instruction_fragments, position, text)
+        self._instruction_length += len(text)
+
+    def close_instruction(self):
+        """ stop collecting instruction text (e.g. at a paragraph mark) """
+        self._instruction_closed = True
+
+    def note_boundary(self, position):
+        """ remember the first paragraph boundary inside this field """
+        if self._boundary is None:
+            self._boundary = position
+
+    def add_instruction_char(self, position, char):
+        """ add a single character of instruction text (OLE stream) """
+        if self._in_result:
+            self.add_result_char(position, char)
+            return
+        if self._instruction_closed or self._instruction_too_big:
+            return
+        if self._instruction_length >= OLE_FIELD_MAX_SIZE:
+            logger.debug('field exceeds max size of {0}. Ignore rest'
+                         .format(OLE_FIELD_MAX_SIZE))
+            self._instruction_too_big = True
+            return
+        self._append(self._instruction_fragments, position, char)
+        self._instruction_length += len(char)
+
+    def add_result_char(self, position, char):
+        """ keep a bounded amount of the field result for reporting """
+        if self._result_length < FIELD_RESULT_MAX_SIZE:
+            self._append(self._result_fragments, position, char)
+            self._result_length += len(char)
+
+    def add_result(self, position, text):
+        """ add (a piece of) the field result text """
+        if not text or self._as_bytes:
+            return
+        room = FIELD_RESULT_MAX_SIZE - self._result_length
+        if room > 0:
+            self._append(self._result_fragments, position, text[:room])
+            self._result_length += min(room, len(text))
+
+    def set_separator(self, position):
+        """ mark the begin of the field result """
+        self.separate_position = position
+        self._in_result = True
+        self._instruction_closed = True
+
+    @property
+    def in_result(self):
+        """ whether following text belongs to the field result """
+        return self._in_result
+
+    def finish(self, end_position, complete):
+        """ convert this field to its public, immutable representation """
+        instruction_fragments = self._instruction_fragments
+        result_fragments = self._result_fragments
+        if not complete and self._boundary is not None:
+            # Unterminated: only keep what was collected before the first
+            # paragraph boundary. Later paragraphs are unrelated text.
+            instruction_fragments = [fragment for fragment in
+                                     instruction_fragments
+                                     if fragment[0] < self._boundary]
+            result_fragments = [fragment for fragment in result_fragments
+                                if fragment[0] < self._boundary]
+            if self.separate_position is not None and \
+                    self.separate_position >= self._boundary:
+                self.separate_position = None
+        fragments = tuple(FieldFragment(position, self._decoded(text))
+                          for position, text in instruction_fragments)
+        instruction = self._decoded(
+            u''.join(text for _, text in instruction_fragments)
+            if not self._as_bytes else
+            b''.join(text for _, text in instruction_fragments))
+        if self._unquote:
+            # QUOTE fields encode their text as character codes. Unquoting
+            # must see the complete instruction, not individual fragments.
+            instruction = unquote(instruction)
+        result = self._decoded(
+            u''.join(text for _, text in result_fragments)
+            if not self._as_bytes else
+            b''.join(text for _, text in result_fragments))
+        return FieldInfo(part=self.part,
+                         position=self.position,
+                         parent=self.parent,
+                         depth=self.depth,
+                         kind=self.kind,
+                         instruction=instruction,
+                         result=result,
+                         fragments=fragments,
+                         complete=complete,
+                         separate_position=self.separate_position,
+                         end_position=end_position)
+
+
+class _OleFieldCollector(object):
+    """ Stack-based parser for the field characters in a Word OLE stream.
+
+    The stream is parsed byte-wise, so field positions are offsets into the
+    original stream. Word may store text as UTF-16LE; in that case the field
+    characters are followed by a NUL byte, which is skipped. Whether the
+    collected bytes are UTF-16LE or 8-bit text is decided when they are
+    decoded, so unrelated binary stream data is never decoded as text.
+    """
+
+    def __init__(self, part=None):
+        self.part = part
+        self.fields = []
+        self._stack = []
+
+    def _start_field(self, position, utf16):
+        parent = self._stack[-1].position if self._stack else None
+        field = _MutableField(self.part, position, parent, len(self._stack),
+                              FIELD_KIND_OLE, as_bytes=True)
+        # Per field, the collected bytes may still turn out to be 8-bit text
+        # (a document can mix both encodings). ``utf16`` is only a hint.
+        field.utf16 = utf16
+        self._stack.append(field)
+
+    def _end_field(self, position):
+        # UTF-16LE field markers are followed by a NUL byte; the end marker
+        # is still taken from the position of the 0x15 byte itself.
+        if not self._stack:
+            logger.debug('found field end at position {0} without begin'
+                         .format(position))
+            return
+        field = self._stack.pop()
+        self.fields.append(field.finish(position, True))
+
+    def parse(self, data):
+        """ parse OLE stream bytes, return list of FieldInfo
+
+        The stream is always parsed byte-wise so that positions refer to the
+        original stream. Word may store text as UTF-16LE, and one document may
+        even mix 8-bit and UTF-16LE text. A NUL byte after a field character
+        belongs to the field character, not to the text; likewise, the NULs
+        between the characters of UTF-16LE text are not part of the text. Both
+        are skipped, so the collected bytes are the actual characters.
+        """
+        if isinstance(data, str):
+            data = data.encode('latin-1', 'replace')
+        data = bytearray(data)
+        # A UTF-16LE stream continues with NUL after every character. Detect
+        # it from the stream; the actual encoding is confirmed per field when
+        # the instruction is decoded.
+        utf16 = data.count(b'\x00') * 2 >= len(data) or \
+            b'\x13\x00' in bytes(data)
+        skip_nul = False
+        for position, char in enumerate(data):
+            if skip_nul:
+                skip_nul = False
+                if char == 0:
+                    continue
+            if char == OLE_FIELD_START:
+                self._start_field(position, utf16)
+                skip_nul = utf16
+            elif char == OLE_FIELD_SEP:
+                if not self._stack:
+                    logger.debug('found field separator at position {0} '
+                                 'without begin'.format(position))
+                elif self._stack[-1].in_result:
+                    logger.debug('unexpected field: has multiple separators!')
+                else:
+                    self._stack[-1].set_separator(position)
+                skip_nul = utf16
+            elif char == OLE_FIELD_END:
+                self._end_field(position)
+                skip_nul = utf16
+            elif self._stack:
+                field = self._stack[-1]
+                if char in (10, 13):
+                    # Remember the first paragraph boundary; an unterminated
+                    # field is truncated there in finish(). Text from a
+                    # following paragraph is never appended, even if it is
+                    # collected before the field gets closed.
+                    field.note_boundary(position)
+                    if not field.in_result:
+                        field.close_instruction()
+                    continue
+                if field.in_result:
+                    field.add_result_char(position, bytes((char, )))
+                else:
+                    field.add_instruction_char(position, bytes((char, )))
+
+        # Fields that never got an end marker are reported as incomplete. Do
+        # not append anything that follows them: their instruction is exactly
+        # the text collected between begin and (missing) end.
+        while self._stack:
+            field = self._stack.pop()
+            finished = field.finish(None, False)
+            if _looks_like_field_instruction(finished.instruction):
+                logger.warning('Incomplete field in stream %r starting at '
+                               'position %d: missing field end',
+                               self.part, field.position)
+            self.fields.append(finished)
+
+        self.fields.sort(key=lambda item: item.position)
+        # OLE streams contain binary data besides the text; some byte pairs
+        # look like field characters. Drop implausible fields and derive the
+        # nesting from the remaining markers only.
+        plausible = [field for field in self.fields
+                     if _looks_like_field_instruction(field.instruction)]
+        for dropped in set(id(field) for field in self.fields) - \
+                set(id(field) for field in plausible):
+            logger.debug('Ignoring implausible field in stream %r', self.part)
+        return _recompute_nesting(plausible)
+
+
+def _looks_like_field_instruction(instruction):
+    """ heuristic: a real field instruction is printable text
+
+    Used for OLE streams, which mix document text with binary data. A field
+    instruction starts with a command word (letters) or an '=' formula, which
+    distinguishes it from stray bytes that happen to look like field
+    characters. The check is otherwise permissive so unusual but genuine
+    fields survive.
+    """
+    text = instruction.strip()
+    if not text:
+        return False
+    if not (text[0].isalpha() or text[0] == u'='):
+        return False
+    printable = sum(1 for char in text
+                    if char.isprintable() or char in u'\t\r\n ')
+    return printable * 10 >= len(text) * 9
+
+
+def _recompute_nesting(fields):
+    """ derive ``parent`` and ``depth`` from begin/end markers
+
+    ``fields`` must be sorted by begin position. An unterminated field does not
+    enclose later fields: without an end marker its extent is unknown, so it
+    remains at depth 0 and the markers after it form top-level fields.
+    """
+    stack = []
+    result = []
+    for field in fields:
+        while stack and stack[-1].end_position is not None and \
+                stack[-1].end_position <= field.position:
+            stack.pop()
+        parent = stack[-1].position if stack else None
+        result.append(field._replace(parent=parent, depth=len(stack)))
+        if field.complete:
+            stack.append(field)
+    return result
+
+
+def decode_field_instruction(data, utf16=False):
+    """ decode raw instruction bytes from a Word OLE stream
+
+    Word stores text either as UTF-16LE or as 8-bit characters, depending on
+    the document, and one document may even mix both. Only the text collected
+    from a field region is decoded here, so unrelated binary stream data
+    neither influences the detection nor the output.
+
+    :param bytes data: collected instruction or result bytes
+    :param bool utf16: prefer UTF-16LE; the data is inspected to confirm it
+    """
+    if not data:
+        return u''
+    if utf16 and len(data) % 2 == 0:
+        # If the text was 8-bit after all, it would not contain a NUL after
+        # most characters. Only trust the hint when the bytes support it.
+        if data.count(b'\x00') * 2 >= len(data):
+            return data.decode('utf-16le', 'replace')
+    if not utf16 and len(data) % 2 == 0 and data[:1] != b'\x00' and \
+            data.count(b'\x00') * 2 >= len(data):
+        return data.decode('utf-16le', 'replace')
+    return data.decode('latin-1')
+
+
+def process_doc_stream_fields(stream, part=None):
+    """ find all fields in a single Word OLE stream
+
+    Returns a list of :py:class:`FieldInfo` in document order. Fields that
+    are not terminated are returned with ``complete=False`` and without the
+    text of any following paragraph.
+
+    :param stream: file-like object opened in binary mode
+    :param part: name of the stream, stored in the FieldInfo for reference
+    """
+    return _OleFieldCollector(part).parse(stream.read())
 
 
 def process_doc_stream(stream):
     """ find dde links in single word ole stream
 
     since word ole file stream are subclasses of io.BytesIO, they are buffered,
-    so reading char-wise is not that bad performanc-wise """
+    so reading char-wise is not that bad performance-wise """
 
-    have_start = False
-    have_sep = False
-    field_contents = None
+    fields = process_doc_stream_fields(stream)
     result_parts = []
-    max_size_exceeded = False
-    idx = -1
-    while True:
-        idx += 1
-        char = stream.read(1)    # loop over every single byte
-        if len(char) == 0:                   # pylint: disable=len-as-condition
-            break
-        else:
-            char = ord(char)
+    for field in fields:
+        new_result = process_doc_field(field.instruction)
+        if new_result:
+            result_parts.append(new_result)
 
-        if char == OLE_FIELD_START:
-            if have_start and max_size_exceeded:
-                logger.debug('big field was not a field after all')
-            have_start = True
-            have_sep = False
-            max_size_exceeded = False
-            field_contents = u''
-            continue
-        elif not have_start:
-            continue
-
-        # now we are after start char but not at end yet
-        if char == OLE_FIELD_SEP:
-            if have_sep:
-                logger.debug('unexpected field: has multiple separators!')
-            have_sep = True
-        elif char == OLE_FIELD_END:
-            # have complete field now, process it
-            new_result = process_doc_field(field_contents)
-            if new_result:
-                result_parts.append(new_result)
-
-            # re-set variables for next field
-            have_start = False
-            have_sep = False
-            field_contents = None
-        elif not have_sep:
-            # we are only interested in the part from start to separator
-            # check that array does not get too long by accident
-            if max_size_exceeded:
-                pass
-            elif len(field_contents) > OLE_FIELD_MAX_SIZE:
-                logger.debug('field exceeds max size of {0}. Ignore rest'
-                             .format(OLE_FIELD_MAX_SIZE))
-                max_size_exceeded = True
-
-            # appending a raw byte to a unicode string here. Not clean but
-            # all we do later is check for the ascii-sequence 'DDE' later...
-            elif char == 0:        # may be a high-byte of a 2-byte codec
-                # pylint: disable-next=possibly-used-before-assignment
-                field_contents += unichr(char)
-            elif char in (10, 13):
-                field_contents += u'\n'
-            elif char < 32:
-                field_contents += u'?'
-            elif char < 128:
-                field_contents += unichr(char)
-            else:
-                field_contents += u'?'
-
-    if max_size_exceeded:
-        logger.debug('big field was not a field after all')
-
-    logger.debug('Checked {0} characters, found {1} fields'
-                 .format(idx, len(result_parts)))
-
+    logger.debug('Checked stream, found {0} fields ({1} dde links)'
+                 .format(len(fields), len(result_parts)))
     return result_parts
+
+
+def process_doc_fields(ole):
+    """ find all fields in a Word 97-2003 OLE file
+
+    Returns a list of :py:class:`FieldInfo` in stream order. The stream name
+    is used as ``part`` so that extraction results can be traced back to the
+    original stream.
+    """
+    all_fields = []
+    for sid, direntry in enumerate(ole.direntries):
+        is_orphan = direntry is None
+        if is_orphan:
+            # this direntry is not part of the tree --> unused or orphan
+            direntry = ole._load_direntry(sid)
+        is_stream = direntry.entry_type == olefile.STGTY_STREAM
+        logger.debug('direntry {:2d} {}: {}'
+                     .format(sid, '[orphan]' if is_orphan else direntry.name,
+                             'is stream of size {}'.format(direntry.size)
+                             if is_stream else
+                             'no stream ({})'.format(direntry.entry_type)))
+        if is_stream:
+            new_fields = process_doc_stream_fields(
+                ole._open(direntry.isectStart, direntry.size),
+                part=direntry.name)
+            if new_fields:
+                logger.debug("stream %r: %r" % (direntry.name, new_fields))
+            all_fields.extend(new_fields)
+    return all_fields
 
 
 def process_doc(ole):
@@ -424,23 +771,10 @@ def process_doc(ole):
     """
     logger.debug('process_doc')
     links = []
-    for sid, direntry in enumerate(ole.direntries):
-        is_orphan = direntry is None
-        if is_orphan:
-            # this direntry is not part of the tree --> unused or orphan
-            direntry = ole._load_direntry(sid)
-        is_stream = direntry.entry_type == olefile.STGTY_STREAM
-        logger.debug('direntry {:2d} {}: {}'
-                     .format(sid, '[orphan]' if is_orphan else direntry.name,
-                             'is stream of size {}'.format(direntry.size)
-                             if is_stream else
-                             'no stream ({})'.format(direntry.entry_type)))
-        if is_stream:
-            new_parts = process_doc_stream(
-                ole._open(direntry.isectStart, direntry.size))
-            if new_parts:
-                logger.debug("stream %r: %r" % (direntry.name, new_parts))
-            links.extend(new_parts)
+    for field in process_doc_fields(ole):
+        new_result = process_doc_field(field.instruction)
+        if new_result:
+            links.append(new_result)
 
     # mimic behaviour of process_docx: combine links to single text string
     return u'\n'.join(links)
@@ -469,79 +803,213 @@ def process_xls(filepath):
             xls_file.close()
 
 
-def process_docx(filepath, field_filter_mode=None):
-    """ find dde-links (and other fields) in Word 2007+ files """
+class _DocxFieldCollector(object):
+    """ Stack-based parser for WordprocessingML complex and simple fields.
+
+    WordprocessingML splits a field over several runs: a ``w:fldChar`` begin
+    marker, one or more ``w:instrText`` elements with the instruction, an
+    optional ``w:fldChar`` separator, the display result, and a ``w:fldChar``
+    end marker. Fields may be nested. Only ``w:instrText`` contributes to the
+    instruction; text in the result region (``w:t``) or in another field's
+    instruction can never end up in the instruction of the enclosing field.
+    """
+
+    def __init__(self, part):
+        self.part = part
+        self.fields = []
+        self._stack = []
+        self._position = 0
+
+    def next_position(self):
+        """ return the position of the next element in the current part """
+        self._position += 1
+        return self._position
+
+    def _start_field(self, position, kind):
+        parent = self._stack[-1].position if self._stack else None
+        field = _MutableField(self.part, position, parent, len(self._stack),
+                              kind, unquote_instruction=True)
+        self._stack.append(field)
+        return field
+
+    def _append_field(self, field, end_position, complete):
+        if not complete:
+            logger.warning('Incomplete field in part %r at position %d: '
+                           'missing field end', self.part, field.position)
+        self.fields.append(field.finish(end_position, complete))
+
+    def begin(self, position):
+        """ handle a w:fldChar begin marker """
+        self._start_field(position, FIELD_KIND_COMPLEX)
+
+    def separate(self, position):
+        """ handle a w:fldChar separate marker """
+        if not self._stack:
+            logger.warning('Field separator without field begin in part %r '
+                           'at position %d', self.part, position)
+        elif self._stack[-1].in_result:
+            logger.warning('Field has multiple separators in part %r at '
+                           'position %d', self.part, position)
+        else:
+            self._stack[-1].set_separator(position)
+
+    def end(self, position):
+        """ handle a w:fldChar end marker """
+        if not self._stack:
+            logger.warning('Field end without field begin in part %r at '
+                           'position %d', self.part, position)
+            return
+        self._append_field(self._stack.pop(), position, True)
+
+    def instruction(self, position, text):
+        """ add an instruction fragment to the innermost open field """
+        if self._stack and text:
+            self._stack[-1].add_instruction(position, text)
+
+    def result_text(self, position, text):
+        """ add display text to the result of the innermost open field
+
+        Text between begin and separator is part of the instruction region, not
+        a field result; some producers omit the separator for fields without a
+        result. Such text is ignored so it cannot be mistaken for an
+        instruction fragment either.
+        """
+        if not self._stack:
+            return
+        field = self._stack[-1]
+        if field.in_result:
+            field.add_result(position, text)
+
+    def paragraph_boundary(self, position):
+        """ note a paragraph end for all open fields """
+        for field in self._stack:
+            field.note_boundary(position)
+
+    def simple_begin(self, position, instruction):
+        """ handle the start of a w:fldSimple element """
+        field = self._start_field(position, FIELD_KIND_SIMPLE)
+        if instruction is not None:
+            field.add_instruction(position, instruction)
+        # the instruction attribute is complete; children are the result
+        field.set_separator(position)
+
+    def simple_end(self, position):
+        """ handle the end of a w:fldSimple element """
+        self._append_field(self._stack.pop(), position, True)
+
+    def finish(self):
+        """ close fields left open at the end of a part, mark them incomplete
+
+        Text that follows an unterminated field is deliberately not appended:
+        without an end marker there is no way to tell where the field would
+        have ended, so the reported instruction is exactly what was collected.
+        """
+        while self._stack:
+            self._append_field(self._stack.pop(), None, False)
+        # nested fields are closed before their parents; present them in
+        # document order, which is the order of their begin markers
+        self.fields.sort(key=lambda item: item.position)
+        return self.fields
+
+
+def process_docx_fields(filepath):
+    """ find all fields (DDE and others) in a Word 2007+ file
+
+    Returns a list of :py:class:`FieldInfo` in document order. Each item keeps
+    the package part, the element position, the enclosing field position, the
+    nesting depth and the completeness of the field. Instruction fragments
+    split over several runs are concatenated; field results and nested-field
+    instructions are never mixed into the enclosing instruction.
+    """
     parser = ooxml.XmlParser(filepath)
     all_fields = []
-    level = 0
-    ddetext = u''
-    for _, subs, depth in parser.iter_xml(tags=TAG_W_P + TAG_W_FLDSIMPLE):
-        if depth == 0:   # at end of subfile:
-            level = 0    # reset
-        if subs.tag in TAG_W_FLDSIMPLE:
-            # concatenate the attribute of the field, if present:
-            attrib_instr = subs.attrib.get(ATTR_W_INSTR[0]) or \
-                           subs.attrib.get(ATTR_W_INSTR[1])
-            if attrib_instr is not None:
-                all_fields.append(unquote(attrib_instr))
-            continue
+    for part, handle in parser.iter_files():
+        collector = _DocxFieldCollector(part)
+        # positions of all currently open elements, so that end events can
+        # refer to the element's start position; works with any XML backend
+        open_positions = []
+        try:
+            for event, elem in ooxml.ET.iterparse(handle,
+                                                  events=('start', 'end')):
+                if event == 'start':
+                    position = collector.next_position()
+                    open_positions.append(position)
+                    if elem.tag in TAG_W_FLDCHAR:
+                        fld_type = elem.attrib.get(ATTR_W_FLDCHARTYPE[0]) or \
+                                   elem.attrib.get(ATTR_W_FLDCHARTYPE[1])
+                        if fld_type == 'begin':
+                            collector.begin(position)
+                        elif fld_type == 'separate':
+                            collector.separate(position)
+                        elif fld_type == 'end':
+                            collector.end(position)
+                        else:
+                            logger.debug('Ignoring unknown fldCharType %r',
+                                         fld_type)
+                    elif elem.tag in TAG_W_FLDSIMPLE:
+                        instr = elem.attrib.get(ATTR_W_INSTR[0]) or \
+                                elem.attrib.get(ATTR_W_INSTR[1])
+                        collector.simple_begin(position, instr)
+                    continue
 
-        # have a TAG_W_P
-        for curr_elem in subs:
-            # check if w:r; parse children to pull out first FLDCHAR/INSTRTEXT
-            elem = None
-            if curr_elem.tag in TAG_W_R:
-                for child in curr_elem:
-                    if child.tag in TAG_W_FLDCHAR or \
-                            child.tag in TAG_W_INSTRTEXT:
-                        elem = child
-                        break
-                if elem is None:
-                    continue   # no fldchar or instrtext in this w:r
-            else:
-                elem = curr_elem
-            if elem is None:
-                raise ooxml.BadOOXML(filepath,
-                                     'Got "None"-Element from iter_xml')
+                # end event: children are complete, so text can be read
+                position = open_positions.pop()
+                if elem.tag in TAG_W_INSTRTEXT:
+                    collector.instruction(position, elem.text)
+                elif elem.tag in TAG_W_T:
+                    collector.result_text(position, elem.text)
+                elif elem.tag in TAG_W_FLDSIMPLE:
+                    collector.simple_end(position)
+                elif elem.tag in TAG_W_P:
+                    # the boundary is after all paragraph children, so field
+                    # content inside this paragraph is before it
+                    collector.paragraph_boundary(collector.next_position())
+                # keep memory usage low for large documents
+                elem.clear()
+        except ooxml.ET.ParseError as err:
+            parser.subfiles_no_xml.add(part)
+            log = logger.warning if part is None or part.endswith('.xml') \
+                else logger.debug
+            log('  xml-parsing for {0} failed ({1}).'.format(part, err))
 
-            # check if FLDCHARTYPE and whether "begin" or "end" tag
-            attrib_type = elem.attrib.get(ATTR_W_FLDCHARTYPE[0]) or \
-                          elem.attrib.get(ATTR_W_FLDCHARTYPE[1])
-            if attrib_type is not None:
-                if attrib_type == "begin":
-                    level += 1
-                if attrib_type == "end":
-                    level -= 1
-                    if level in (0, -1):  # edge-case; level gets -1
-                        all_fields.append(ddetext)
-                        ddetext = u''
-                        level = 0  # reset edge-case
+        all_fields.extend(collector.finish())
+    return all_fields
 
-            # concatenate the text of the field, if present:
-            if elem.tag in TAG_W_INSTRTEXT and elem.text is not None:
-                # expand field code if QUOTED
-                ddetext += unquote(elem.text)
 
-    # apply field command filter
+def process_docx(filepath, field_filter_mode=None):
+    """ find dde-links (and other fields) in Word 2007+ files """
+    return filter_field_instructions(process_docx_fields(filepath),
+                                     field_filter_mode)
+
+
+def filter_field_instructions(fields, field_filter_mode):
+    """ apply the command-line field filter to a list of FieldInfo """
     logger.debug('filtering with mode "{0}"'.format(field_filter_mode))
     if field_filter_mode in (FIELD_FILTER_ALL, None):
-        clean_fields = all_fields
+        clean_fields = list(fields)
     elif field_filter_mode == FIELD_FILTER_DDE:
-        clean_fields = [field for field in all_fields
-                        if FIELD_DDE_REGEX.match(field)]
+        clean_fields = [field for field in fields if field.is_dde]
     elif field_filter_mode == FIELD_FILTER_BLACKLIST:
         # check if fields are acceptable and should not be returned
-        clean_fields = [field for field in all_fields
-                        if not field_is_blacklisted(field.strip())]
+        clean_fields = [field for field in fields
+                        if not field_is_blacklisted(
+                            field.instruction.strip())]
     else:
         raise ValueError('Unexpected field_filter_mode: "{0}"'
                          .format(field_filter_mode))
 
-    return u'\n'.join(clean_fields)
+    return u'\n'.join(field.instruction for field in clean_fields)
 
 
 def unquote(field):
-    """TODO: document what exactly is happening here..."""
+    """ remove the QUOTE field wrapper, expanding numeric character codes
+
+    ``QUOTE`` fields contain the displayed text as arguments; e.g.
+    ``QUOTE 65 66`` displays ``AB``. Only the first word (the field command)
+    is removed, the rest is concatenated. Non-numeric words are kept as they
+    are. This is intentionally lenient: msodde reports fields, it does not
+    validate them.
+    """
     if "QUOTE" not in field or NO_QUOTES:
         return field
     # split into components
