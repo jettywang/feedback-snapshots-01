@@ -193,6 +193,7 @@ module RubySMB
       # @param opts [Hash] the authenticaiton options: `:auth_type` and `:auth_level`
       # @raise [Error::CommunicationError] if socket-related error occurs
       def dcerpc_request(stub_packet, auth_level: nil, auth_type: nil)
+        validate_request_context!
         stub_class = stub_packet.class.name.split('::')
         #opts.merge!(endpoint: stub_class[-2])
         values = {

@@ -339,6 +339,109 @@ RSpec.describe RubySMB::Dcerpc::Client do
         end
       end
     end
+
+    it 'stores a per-context negotiation table keyed by p_cont_id' do
+      client.bind
+      table = client.instance_variable_get(:@context_negotiations)
+      expect(table).to be_a(Hash)
+      expect(table.keys).to eq([0])
+      expect(table[0]).to be_a(RubySMB::Dcerpc::NegotiatedContext)
+      expect(table[0]).to be_usable
+    end
+
+    it 'selects the accepted context p_cont_id for subsequent requests' do
+      client.bind
+      expect(client.instance_variable_get(:@ctx_id)).to eq(0)
+    end
+
+    context 'with several presentation contexts' do
+      let(:secondary_uuid) { 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' }
+      let(:multi_bind_req) do
+        bind_req = RubySMB::Dcerpc::Bind.new(endpoint: endpoint)
+        bind_req.p_context_list.n_context_elem = 2
+        second = bind_req.p_context_list.p_cont_elem[1]
+        second.p_cont_id = 2
+        second.abstract_syntax.if_uuid = secondary_uuid
+        bind_req
+      end
+      let(:mixed_ack) do
+        ack = RubySMB::Dcerpc::BindAck.new
+        ack.p_result_list.n_results = 2
+        ack.p_result_list.p_results[0].result = RubySMB::Dcerpc::BindAck::ACCEPTANCE
+        ack.p_result_list.p_results[1].result = RubySMB::Dcerpc::BindAck::PROVIDER_REJECTION
+        ack.p_result_list.p_results[1].reason = RubySMB::Dcerpc::BindAck::ABSTRACT_SYNTAX_NOT_SUPPORTED
+        ack
+      end
+
+      before :example do
+        allow(RubySMB::Dcerpc::Bind).to receive(:new).and_return(multi_bind_req)
+        allow(client).to receive(:recv_struct).and_return(mixed_ack)
+      end
+
+      it 'binds every result to the context proposed at the same position' do
+        client.bind
+        table = client.instance_variable_get(:@context_negotiations)
+        expect(table.keys).to contain_exactly(0, 2)
+        expect(table[0].abstract_syntax.if_uuid).to eq(endpoint::UUID)
+        expect(table[2].abstract_syntax.if_uuid).to eq(secondary_uuid)
+        expect(table[2].reason).to eq(RubySMB::Dcerpc::BindAck::ABSTRACT_SYNTAX_NOT_SUPPORTED)
+      end
+
+      it 'does not let a rejected sibling context fail the whole bind' do
+        expect { client.bind }.to_not raise_error
+        expect(client.instance_variable_get(:@ctx_id)).to eq(0)
+      end
+
+      it 'raises a BindError when the result count does not match the context count' do
+        mixed_ack.p_result_list.n_results = 1
+        expect { client.bind }.to raise_error(RubySMB::Dcerpc::Error::BindError, /expected 2 .* got 1/)
+      end
+    end
+  end
+
+  describe '#process_presentation_context_results' do
+    let(:bind_req) { RubySMB::Dcerpc::Bind.new(endpoint: endpoint) }
+
+    it 'pairs each proposed context with its positionally matching result' do
+      ack = RubySMB::Dcerpc::BindAck.new
+      ack.p_result_list.n_results = 1
+      table = client.process_presentation_context_results(bind_req, ack.p_result_list)
+      expect(table.keys).to eq([0])
+      expect(table[0]).to be_a(RubySMB::Dcerpc::NegotiatedContext)
+    end
+
+    it 'raises a BindError when a result is missing' do
+      bind_req.p_context_list.n_context_elem = 2
+      ack = RubySMB::Dcerpc::BindAck.new
+      expect { client.process_presentation_context_results(bind_req, ack.p_result_list) }
+        .to raise_error(RubySMB::Dcerpc::Error::BindError)
+    end
+  end
+
+  describe '#validate_request_context!' do
+    let(:accepted) do
+      RubySMB::Dcerpc::NegotiatedContext.new(
+        RubySMB::Dcerpc::Bind.new(endpoint: endpoint).p_context_list.p_cont_elem[0],
+        RubySMB::Dcerpc::PResultT.new.tap { |r| r.result = RubySMB::Dcerpc::BindAck::ACCEPTANCE }
+      )
+    end
+
+    it 'does nothing when no bind negotiation has happened yet' do
+      expect { client.validate_request_context! }.to_not raise_error
+    end
+
+    it 'passes for an accepted context' do
+      client.instance_variable_set(:@context_negotiations, { 0 => accepted })
+      client.instance_variable_set(:@ctx_id, 0)
+      expect { client.validate_request_context! }.to_not raise_error
+    end
+
+    it 'raises a BindError for an unknown p_cont_id' do
+      client.instance_variable_set(:@context_negotiations, { 0 => accepted })
+      client.instance_variable_set(:@ctx_id, 42)
+      expect { client.validate_request_context! }
+        .to raise_error(RubySMB::Dcerpc::Error::BindError, /not accepted during bind/)
+    end
   end
 
   describe '#store_target_info' do

@@ -59,6 +59,7 @@ module RubySMB
     require 'ruby_smb/dcerpc/p_cont_list_t'
     require 'ruby_smb/dcerpc/p_result_t'
     require 'ruby_smb/dcerpc/p_result_list_t'
+    require 'ruby_smb/dcerpc/negotiated_context'
     require 'ruby_smb/dcerpc/alter_context'
     require 'ruby_smb/dcerpc/bind'
     require 'ruby_smb/dcerpc/bind_ack'
@@ -193,6 +194,9 @@ module RubySMB
     def bind(options={})
       options = options.merge(endpoint: @endpoint) if !options[:endpoint] && defined?(:@endpoint) && @endpoint
 
+      # A new negotiation replaces any state inherited from a previous bind so
+      # that an old (and possibly stale) presentation context can never be reused.
+      @context_negotiations = nil
       @call_id ||= 1
       bind_req = Bind.new(options)
       bind_req.pdu_header.call_id = @call_id
@@ -217,11 +221,15 @@ module RubySMB
       # TODO: see if BindNack response should be handled too
 
       res_list = dcerpc_response.p_result_list
-      if res_list.n_results == 0 ||
-         res_list.p_results[0].result != BindAck::ACCEPTANCE
-        raise Error::BindError,
-          "Bind Failed (Result: #{res_list.p_results[0].result}, Reason: #{res_list.p_results[0].reason})"
+      @context_negotiations = process_presentation_context_results(bind_req, res_list)
+
+      selected_context = select_usable_context(@context_negotiations)
+      if selected_context.nil?
+        raise Error::BindError, bind_failure_message(@context_negotiations)
       end
+      # Every later Request must carry the p_cont_id of the context that was
+      # actually accepted for this endpoint, never a hard-coded default.
+      @ctx_id = selected_context.p_cont_id
       self.max_buffer_size = dcerpc_response.max_xmit_frag
       @call_id = dcerpc_response.pdu_header.call_id
 
@@ -233,6 +241,71 @@ module RubySMB
       end
 
       dcerpc_response
+    end
+
+    # Build the per-context negotiation table by pairing each proposed
+    # presentation context with its positionally matching result. The number
+    # of results must equal the number of proposed contexts; otherwise the
+    # response cannot be trusted and is rejected as a whole.
+    #
+    # @param bind_req [Bind] the Bind request containing the proposed contexts
+    # @param res_list [PResultListT] the result list returned by the server
+    # @raise [Error::BindError] if the result count does not match the context count
+    # @return [Hash{Integer => NegotiatedContext}] the negotiation table keyed by p_cont_id
+    def process_presentation_context_results(bind_req, res_list)
+      contexts = bind_req.p_context_list.p_cont_elem
+      results = res_list.p_results
+      if res_list.n_results.to_i != contexts.size || results.size != contexts.size
+        raise Error::BindError,
+          "Bind Failed: expected #{contexts.size} presentation context result(s) but got #{res_list.n_results}"
+      end
+
+      contexts.each_with_index.each_with_object({}) do |(context, index), table|
+        table[context.p_cont_id.to_i] = NegotiatedContext.new(context, results[index])
+      end
+    end
+
+    # Select the presentation context to use for subsequent requests. The
+    # context must match this endpoint abstract syntax and be usable, meaning
+    # it was accepted with a transfer syntax the client actually proposed.
+    #
+    # @param negotiations [Hash{Integer => NegotiatedContext}] the negotiation table
+    # @return [NegotiatedContext, nil] the selected context, or nil if none is usable
+    def select_usable_context(negotiations)
+      endpoint = defined?(:@endpoint) ? @endpoint : nil
+      matching = negotiations.values.select do |negotiated|
+        endpoint.nil? || negotiated.for_endpoint?(endpoint)
+      end
+      matching.find(&:usable?)
+    end
+
+    # Build a human readable message describing why no presentation context
+    # could be selected.
+    #
+    # @param negotiations [Hash{Integer => NegotiatedContext}] the negotiation table
+    # @return [String]
+    def bind_failure_message(negotiations)
+      endpoint_name = defined?(:@endpoint) && @endpoint ? @endpoint : 'the endpoint'
+      details = negotiations.values.map do |negotiated|
+        "p_cont_id=#{negotiated.p_cont_id} (Result: #{negotiated.result}, Reason: #{negotiated.reason})"
+      end.join(', ')
+      "Bind Failed: no usable presentation context for #{endpoint_name} [#{details}]"
+    end
+
+    # Make sure a Request is sent on a presentation context that was actually
+    # negotiated and accepted. An unknown or rejected context must never fall
+    # back to the default NDR decoding path.
+    #
+    # @raise [Error::BindError] if the current p_cont_id does not map to an accepted context
+    # @return [void]
+    def validate_request_context!
+      return if @context_negotiations.nil?
+
+      negotiated = @context_negotiations[@ctx_id.to_i]
+      if negotiated.nil? || !negotiated.usable?
+        raise Error::BindError,
+          "Cannot send a request on presentation context #{@ctx_id}: it was not accepted during bind"
+      end
     end
 
     def max_buffer_size=(value)
