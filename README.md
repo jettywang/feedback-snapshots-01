@@ -182,6 +182,22 @@ command_line: C:\Windows\System32\svchost.exe -k termsvcs
 
 `run_wql` takes an optional second parameter in case you need to use a custom namespace. `root/cimv2/*` is the default.
 
+The result is a `WinRM::WSMV::WqlResult` (a `Hash` subclass), so existing code that treats the return value as a hash keeps working. It additionally reports whether the enumeration actually finished:
+
+```ruby
+result = conn.run_wql('select * from Win32_Process')
+result.complete?      # => true only after a legal EndOfSequence
+result.termination    # => :end_of_sequence, :fault, :stalled, ...
+result.pull_targets   # => endpoint/resource URI/namespace/token of each Pull sent
+result.row_count
+```
+
+Each WQL query owns one enumeration context bound to the connection endpoint, the WMI resource URI and the namespace. Continuation tokens are scoped to that context: while a query is running its token cannot be redeemed by another query on the same endpoint, responses are correlated with the request that produced them, and a Pull is only sent to the endpoint/namespace the token came from.
+
+Pages that repeat a token but deliver new rows are followed normally. A token that stops advancing, an exact replay of an already-consumed page, or a page that arrives without `EndOfSequence` will end the enumeration instead of looping or claiming success.
+
+If an enumeration cannot reach a legal end, `run_wql` raises a `WinRM::WqlEnumerationError` subclass such as `WinRM::WqlEnumerationIncompleteError`, `WinRM::WqlEnumerationStalledError`, `WinRM::WqlContextMismatchError` or `WinRM::WqlEnumerationFailedError`. Rows received before the failure remain available through `error.result`, but that result reports `complete? == false` and must not be treated as the full result set.
+
 ## Create a self signed cert for WinRM
 You may want to create a self signed certificate for servicing https WinRM connections. You can use the following PowerShell script to create a cert and enable the WinRM HTTPS listener. Unless you are running windows server 2012 R2 or later, you must install makecert.exe from the Windows SDK, otherwise use `New-SelfSignedCertificate`.
 

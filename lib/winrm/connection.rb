@@ -48,11 +48,22 @@ module WinRM
       end
     end
 
-    # Executes a WQL query against the WinRM connection
+    # Executes a WQL query against the WinRM connection.
+    #
+    # The enumeration is bound to this connection's endpoint and to the
+    # requested namespace/resource URI. Each Pull is correlated with the
+    # request that caused it, and while the query is live its continuation
+    # token cannot be redeemed by another query on the same endpoint.
+    #
     # @param wql [String] The wql query
     # @param namespace [String] namespace for query - default is root/cimv2/*
-    # @return [Hash] Hash representation of wql query response (Hash is empty if a block is given)
-    # @yeild [type, item] Yields the time name and item for every item
+    # @return [WinRM::WSMV::WqlResult] Hash-like rows plus completeness and
+    #   termination evidence. When a block is given it still returns the
+    #   (empty) result object so callers can inspect #complete?.
+    # @raise [WinRM::WqlEnumerationError] when the enumeration cannot reach a
+    #   legal end. The raised error exposes #result with the rows received so
+    #   far; those rows are retained but never reported as complete.
+    # @yield [type, item] Yields the type name and item for every item
     def run_wql(wql, namespace = 'root/cimv2/*', &block)
       query = WinRM::WSMV::WqlQuery.new(transport, @connection_opts, wql, namespace)
       query.process_response(transport.send_request(query.build), &block)

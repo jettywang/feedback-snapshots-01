@@ -86,3 +86,37 @@ module WinRM
     end
   end
 end
+
+module WinRM
+  # Base class for WQL enumeration failures. Even when an enumeration fails,
+  # #result exposes the rows that were already received together with
+  # completeness/termination evidence.
+  class WqlEnumerationError < WinRMError
+    attr_accessor :result
+
+    def initialize(message, result: nil)
+      @result = result
+      super(message)
+    end
+  end
+
+  # A continuation token or response belonged to a different query, endpoint,
+  # resource URI or namespace. The token was not followed.
+  class WqlContextMismatchError < WqlEnumerationError; end
+
+  # The enumeration ended without a legal EndOfSequence marker, so the rows
+  # received so far cannot be presented as a complete result.
+  class WqlEnumerationIncompleteError < WqlEnumerationError; end
+
+  # Pull pages stopped advancing (the same continuation token kept coming
+  # back) and the bounded retry budget was exhausted.
+  class WqlEnumerationStalledError < WqlEnumerationError; end
+
+  # A fault interrupted an enumeration in progress. Rows received before the
+  # fault remain available through #result and #cause holds the original fault.
+  class WqlEnumerationFailedError < WqlEnumerationError; end
+
+  # The hard ceiling on Pull requests was reached without a legal
+  # EndOfSequence. This bounds servers that keep handing out new contexts.
+  class WqlEnumerationLimitError < WqlEnumerationError; end
+end

@@ -39,7 +39,10 @@ module WinRM
         hdr
       end
 
-      def shared_headers(session_opts)
+      # Optional +message_id+ lets a request pin its MessageID so the
+      # matching response can be correlated via RelatesTo instead of guessing
+      # from ordering.
+      def shared_headers(session_opts, message_id: nil)
         {
           "#{SOAP::NS_ADDRESSING}:To" => session_opts[:endpoint],
           "#{SOAP::NS_ADDRESSING}:ReplyTo" => {
@@ -52,7 +55,8 @@ module WinRM
             }
           },
           "#{SOAP::NS_WSMAN_DMTF}:MaxEnvelopeSize" => session_opts[:max_envelope_size],
-          "#{SOAP::NS_ADDRESSING}:MessageID" => "uuid:#{SecureRandom.uuid.to_s.upcase}",
+          "#{SOAP::NS_ADDRESSING}:MessageID" =>
+            message_id.nil? ? "uuid:#{SecureRandom.uuid.to_s.upcase}" : "uuid:#{message_id}",
           "#{SOAP::NS_WSMAN_MSFT}:SessionId" => "uuid:#{session_opts[:session_id]}",
           "#{SOAP::NS_WSMAN_DMTF}:Locale/" => '',
           "#{SOAP::NS_WSMAN_MSFT}:DataLocale/" => '',

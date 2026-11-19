@@ -1,24 +1,31 @@
-require 'nori'
+require 'securerandom'
 require_relative 'base'
+require_relative 'wql_enumeration'
 
 module WinRM
   module WSMV
     # WSMV message to 'pull' rest of enumeration results from Windows via WQL
+    #
+    # A Pull is always issued for one specific WqlEnumerationContext. The
+    # session endpoint and the context namespace/resource URI must match, so a
+    # pull cannot accidentally target a different connection or WMI class.
     class WqlPull < Base
-      def initialize(session_opts, namespace, enumeration_context)
+      attr_reader :context, :message_id, :session_opts, :enumeration_context
+
+      def initialize(session_opts, namespace, enumeration_context, context: nil)
         @session_opts = session_opts
-        @namespace = namespace
+        @context = context
+        @namespace = context ? context.namespace : namespace
+        @requested_namespace = namespace
         @enumeration_context = enumeration_context
+        @message_id = SecureRandom.uuid.to_s.upcase
+        validate_context!
       end
 
+      # Parses a Pull response and returns its body hash. Correlation checks
+      # happen in WqlQuery, which keeps the full parsed envelope.
       def process_response(response)
-        parser = Nori.new(
-          parser: :rexml,
-          advanced_typecasting: false,
-          convert_tags_to: ->(tag) { Nori::StringUtils.snakecase(tag).to_sym },
-          strip_namespaces: true
-        )
-        parser.parse(response.to_s)[:envelope][:body]
+        WqlResponse.new(response).body
       end
 
       protected
@@ -33,9 +40,28 @@ module WinRM
 
       private
 
+      def validate_context!
+        return if @context.nil?
+
+        if @context.endpoint != WqlEnumerationContext.normalize_endpoint(@session_opts[:endpoint])
+          raise WqlContextMismatchError,
+                "pull for query #{@context.query_id} cannot be sent to endpoint " \
+                "#{@session_opts[:endpoint].inspect}; the context belongs to #{@context.endpoint.inspect}"
+        end
+        unless @context.namespace == @requested_namespace
+          raise WqlContextMismatchError,
+                "pull for query #{@context.query_id} targets namespace #{@requested_namespace.inspect}, " \
+                "but the context is bound to #{@context.namespace.inspect}"
+        end
+
+        return if @enumeration_context.nil?
+
+        @context.assert_current_token!(@enumeration_context)
+      end
+
       def wql_header
         merge_headers(
-          shared_headers(@session_opts),
+          shared_headers(@session_opts, message_id: @message_id),
           resource_uri_wmi(@namespace),
           action_enumerate_pull
         )

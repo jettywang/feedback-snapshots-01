@@ -1,6 +1,7 @@
 # Changelog
 
 ## [Unreleased]
+* Bind WQL Enumerate/Pull to an explicit enumeration context (endpoint, WMI resource URI, namespace and query instance). Continuation tokens are no longer treated as standalone reusable credentials, Pull responses are correlated by `RelatesTo`, and `run_wql` now returns a hash-compatible `WqlResult` that reports `complete?`, `termination`, `row_count` and the actual `pull_targets`. Enumeration failures raise `WinRM::WqlEnumerationError` subclasses that retain already-received rows via `#result` without claiming the query completed. Empty pages and final pages with data are handled, repeated/duplicate pages and non-advancing loops are bounded, and mid-enumeration faults preserve rows while marking the result incomplete.
 
 ## [2.4.2]
 * Replace erubi with the Ruby standard library ERB; the erubi runtime dependency is gone (#366)
