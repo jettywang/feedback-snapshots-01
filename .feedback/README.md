@@ -3,7 +3,7 @@
 From the repository root, install the pinned dependencies and run the focused upstream baseline.
 
 ```sh
-.feedback/bundle-env install --frozen --quiet
+BUNDLE_FROZEN=true .feedback/bundle-env install --quiet
 .feedback/bundle-env exec ruby -Ilib -Itest test/sanitizer_test.rb
 ```
 
