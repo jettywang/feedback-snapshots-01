@@ -422,4 +422,84 @@ describe "GraphQL::Subscriptions::ActionCableSubscriptions" do
       assert_equal [expected_msg_2], mock_channel_2.mock_broadcasted_messages
     end
   end
+
+  describe "pre-update authorization" do
+    class UpdateAuthorizationSchema < GraphQL::Schema
+      class Report < GraphQL::Schema::Object
+        field :title, String, null: false
+      end
+
+      class ReportSubscription < GraphQL::Schema::Subscription
+        field :title, String, null: false
+      end
+
+      class Subscription < GraphQL::Schema::Object
+        field :report, subscription: ReportSubscription
+      end
+
+      query(ActionCableTestSchema::Query)
+      subscription(Subscription)
+
+      use GraphQL::Subscriptions::ActionCableSubscriptions,
+        action_cable: GraphQL::Testing::MockActionCable,
+        action_cable_coder: JSON,
+        broadcast: true,
+        default_broadcastable: true,
+        authorize_update: ->(context:, **) do
+          case context[:report_permission]
+          when :allowed then GraphQL::Subscriptions::AUTHORIZED
+          when :revoked then GraphQL::Subscriptions::REVOKED
+          else GraphQL::Subscriptions::DEFERRED
+          end
+        end
+    end
+
+    let(:subscriptions) { UpdateAuthorizationSchema.subscriptions }
+
+    def subscribe(permission)
+      channel = GraphQL::Testing::MockActionCable.get_mock_channel
+      result = UpdateAuthorizationSchema.execute(
+        "subscription { report { title } }",
+        context: { channel: channel, report_permission: permission },
+      )
+      [channel, result]
+    end
+
+    def allowed_messages
+      [subscription_update("report" => { "title" => "Q3 earnings" })]
+    end
+
+    it "doesn't broadcast shared payloads to subscribers that fail the check" do
+      allowed_channel, allowed_result = subscribe(:allowed)
+      revoked_channel, revoked_result = subscribe(:revoked)
+      deferred_channel, deferred_result = subscribe(:unavailable)
+
+      # All three share a broadcast topic:
+      events_by_topic = subscriptions.instance_variable_get(:@events)
+      assert_equal 1, events_by_topic.size
+      # But each has its own fingerprint, so no subscriber's payload is reused for another:
+      assert_equal 3, events_by_topic.values.first.size
+
+      subscriptions.trigger(:report, {}, { title: "Q3 earnings" })
+
+      assert_equal allowed_messages, allowed_channel.mock_broadcasted_messages
+      # Deleting a subscription tells that client it's over:
+      assert_equal [{ more: false }], revoked_channel.mock_broadcasted_messages
+      assert_equal [], deferred_channel.mock_broadcasted_messages
+
+      # Revocation stops delivery and removes that subscription; deferral only pauses delivery:
+      remaining_ids = subscriptions.instance_variable_get(:@subscriptions).keys
+      assert_includes remaining_ids, allowed_result.context[:subscription_id]
+      assert_includes remaining_ids, deferred_result.context[:subscription_id]
+      refute_includes remaining_ids, revoked_result.context[:subscription_id]
+
+      # Restore permission for the deferred subscriber and it receives later updates:
+      deferred_result.context[:report_permission] = :allowed
+      subscriptions.trigger(:report, {}, { title: "Q3 earnings" })
+
+      assert_equal allowed_messages * 2, allowed_channel.mock_broadcasted_messages
+      assert_equal allowed_messages, deferred_channel.mock_broadcasted_messages
+      assert_equal [{ more: false }], revoked_channel.mock_broadcasted_messages
+    end
+  end
 end

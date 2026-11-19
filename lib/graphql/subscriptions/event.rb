@@ -71,7 +71,12 @@ module GraphQL
           # use a generalized, stable fingerprint so that
           # duplicate subscriptions can be evaluated and distributed in bulk.
           # (`@topic` includes field, args, and subscription scope already.)
-          if @context.namespace(:subscriptions)[:subscription_broadcastable]
+          #
+          # But, when updates are re-authorized per subscriber, different subscribers
+          # may have different permissions, so keep each subscription separate to avoid
+          # sending one subscriber's payload to another.
+          if @context.namespace(:subscriptions)[:subscription_broadcastable] &&
+              !@context.schema.subscriptions&.authorize_update_enabled?
             "#{@topic}/#{@context.query.fingerprint}"
           else
             # not broadcastable, build a unique ID for this event

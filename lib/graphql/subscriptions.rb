@@ -23,6 +23,17 @@ module GraphQL
     class SubscriptionScopeMissingError < GraphQL::Error
     end
 
+    # The pre-update authorization check allowed this update. This is the default.
+    AUTHORIZED = :authorized
+
+    # The pre-update authorization check couldn't confirm permission right now.
+    # The update isn't delivered, but the subscription is kept so a later update can recover.
+    DEFERRED = :deferred
+
+    # The pre-update authorization check confirmed that the subscriber may no longer receive updates.
+    # The update isn't delivered and the subscription is removed.
+    REVOKED = :revoked
+
     # See [GraphQL::Subscriptions](rdoc-ref:GraphQL::Subscriptions) for the base options; concrete implementations may add options.
     def self.use(defn, options = {})
       schema = defn.is_a?(Class) ? defn : defn.target
@@ -41,16 +52,18 @@ module GraphQL
     #
     # - `schema` (`Class`) — the GraphQL schema this manager belongs to
     # - `validate_update` (`Boolean`) — If false, then validation is skipped when executing updates
+    # - `authorize_update` (`Boolean, Symbol, #call`) — Opt in to [authorize_update?](rdoc-ref:#authorize_update?), or provide a callable (or method name) to use instead
     #
     # :call-seq:
-    #   initialize(Class schema:, bool validate_update:, broadcast:, default_broadcastable:, **rest)
-    def initialize(schema:, validate_update: true, broadcast: false, default_broadcastable: false, **rest)
+    #   initialize(Class schema:, bool validate_update:, broadcast:, default_broadcastable:, bool | Symbol | #call authorize_update:, **rest)
+    def initialize(schema:, validate_update: true, broadcast: false, default_broadcastable: false, authorize_update: nil, **rest)
       if broadcast
         schema.query_analyzer(Subscriptions::BroadcastAnalyzer)
       end
       @default_broadcastable = default_broadcastable
       @schema = schema
       @validate_update = validate_update
+      @authorize_update = authorize_update
     end
 
     # **Returns**
@@ -152,6 +165,17 @@ module GraphQL
        # merge event's and query's context together
       context.merge!(event.context) unless event.context.nil? || context.nil?
 
+      case authorize_update_for(subscription_id, event, execute_options)
+      when REVOKED
+        # The check completed and confirmed that this subscriber may no longer receive updates:
+        delete_subscription(subscription_id)
+        return nil
+      when DEFERRED
+        # The check couldn't be completed right now. Don't send anything, but keep the
+        # subscription so that a later update can try again.
+        return nil
+      end
+
       execute_options[:validate] = validate_update?(**execute_options)
       result = @schema.execute(**execute_options)
       subscriptions_context = result.context.namespace(:subscriptions)
@@ -180,6 +204,70 @@ module GraphQL
     #   validate_update?(query:, context:, root_value:, subscription_topic:, operation_name:, variables:) -> bool
     def validate_update?(query:, context:, root_value:, subscription_topic:, operation_name:, variables:)
       @validate_update
+    end
+
+    # Define this method to re-check permissions before each update is executed.
+    # It is only called when `authorize_update:` is passed to `use(...)` (or when this
+    # method is overridden in a `GraphQL::Subscriptions` subclass), so existing
+    # applications keep their current behavior by default.
+    #
+    # This is useful for long-lived subscriptions, where a viewer's permissions may
+    # change after the initial subscription was accepted. The check runs before the
+    # update query is executed, so no application data is fetched or delivered for
+    # a subscriber that fails it.
+    #
+    # Return one of:
+    #
+    # - `AUTHORIZED` (or `true`) — deliver the update and keep the subscription.
+    # - `DEFERRED` (or `nil`) — don't deliver this update, but keep the subscription.
+    #   Use this when permission can't be confirmed right now (for example, an
+    #   authorization service is temporarily unavailable); a later update may succeed.
+    # - `REVOKED` (or `false`) — don't deliver this update and delete the subscription.
+    #   Use this only when permission was definitively removed.
+    #
+    # Any other return value is treated as `DEFERRED`, so an unhandled value never
+    # sends data to a subscriber whose permission wasn't confirmed.
+    #
+    # **Parameters**
+    #
+    # - `subscription_id` (`String`) — the subscription being updated
+    # - `event` (`GraphQL::Subscriptions::Event`) — the event which was triggered
+    # - `query` (`String`) — the original subscription query string
+    # - `context` (`Hash`) — the saved context, merged with the event's context
+    # - `variables` (`Hash`)
+    # - `operation_name` (`String, nil`)
+    # - `root_value` (`Object`) — the value passed to `.trigger(...)`
+    # - `subscription_topic` (`String`)
+    #
+    # **Returns**
+    #
+    # - `Symbol, Boolean, nil` — `AUTHORIZED`, `DEFERRED`, or `REVOKED`
+    #
+    # :call-seq:
+    #   authorize_update?(String subscription_id:, GraphQL::Subscriptions::Event event:, String query:, Hash context:, Hash variables:, String | nil operation_name:, Object root_value:, String subscription_topic:) -> Symbol | bool | nil
+    def authorize_update?(subscription_id:, event:, query:, context:, variables:, operation_name:, root_value:, subscription_topic:)
+      AUTHORIZED
+    end
+
+    # **Returns**
+    #
+    # - `Boolean` — whether [authorize_update?](rdoc-ref:#authorize_update?) is configured
+    #
+    # :call-seq:
+    #   authorize_update_enabled?() -> bool
+    def authorize_update_enabled?
+      if !defined?(@authorize_update_enabled)
+        @authorize_update_enabled =
+          case @authorize_update
+          when nil
+            authorize_update_overridden?
+          when false
+            false
+          else
+            true
+          end
+      end
+      @authorize_update_enabled
     end
 
     # Run the update query for this subscription and deliver it
@@ -393,6 +481,62 @@ module GraphQL
     end
 
     private
+
+    # Run the configured pre-update authorization check and normalize its result.
+    # Returns `AUTHORIZED`, `DEFERRED`, or `REVOKED`.
+    def authorize_update_for(subscription_id, event, execute_options)
+      unless authorize_update_enabled?
+        return AUTHORIZED
+      end
+
+      check =
+        if @authorize_update.is_a?(Symbol) || @authorize_update.is_a?(String)
+          method(@authorize_update)
+        elsif @authorize_update.respond_to?(:call)
+          @authorize_update
+        else
+          method(:authorize_update?)
+        end
+
+      if check.nil?
+        return AUTHORIZED
+      end
+
+      auth_result = check.call(
+        subscription_id: subscription_id,
+        event: event,
+        query: execute_options[:query],
+        context: execute_options[:context],
+        variables: execute_options[:variables],
+        operation_name: execute_options[:operation_name],
+        root_value: execute_options[:root_value],
+        subscription_topic: execute_options[:subscription_topic],
+      )
+
+      # Allow lazy values (eg, Promise) to resolve before interpreting the result:
+      if @schema.lazy?(auth_result)
+        auth_result = @schema.sync_lazy(auth_result)
+      end
+
+      normalize_update_authorization(auth_result)
+    end
+
+    def normalize_update_authorization(auth_result)
+      case auth_result
+      when AUTHORIZED, true
+        AUTHORIZED
+      when REVOKED, false
+        REVOKED
+      else
+        # `DEFERRED`, `nil`, and any unrecognized value mean "not confirmed".
+        # Fail closed: don't send data, but keep the subscription.
+        DEFERRED
+      end
+    end
+
+    def authorize_update_overridden?
+      method(:authorize_update?).owner != GraphQL::Subscriptions
+    end
 
     # Recursively normalize `args` as belonging to `arg_owner`:
     # - convert symbols to strings,

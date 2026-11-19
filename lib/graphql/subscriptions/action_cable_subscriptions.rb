@@ -194,7 +194,20 @@ module GraphQL
               first_subscription_id = first_event.context.fetch(:subscription_id)
               object ||= load_action_cable_message(message, first_event.context)
               result = execute_update(first_subscription_id, first_event, object)
-              if !result.nil?
+              if authorize_update_enabled?
+                # Each subscriber may have different permissions, so re-check and evaluate
+                # each one instead of sharing the first subscriber's payload.
+                # Snapshot the list because a revocation may delete entries from it.
+                events.dup.each do |event|
+                  subscription_id = event.context.fetch(:subscription_id)
+                  if subscription_id == first_subscription_id
+                    subscriber_result = result
+                  else
+                    subscriber_result = execute_update(subscription_id, event, object)
+                  end
+                  deliver(subscription_id, subscriber_result) if !subscriber_result.nil?
+                end
+              elsif !result.nil?
                 # Having calculated the result _once_, send the same payload to all subscribers
                 events.each do |event|
                   subscription_id = event.context.fetch(:subscription_id)

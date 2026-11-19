@@ -37,6 +37,7 @@ class InMemoryBackend
             other_int: query.context[:other_int],
             hidden_event: query.context[:hidden_event],
             shared_stream: query.context[:shared_stream],
+            report_permission: query.context[:report_permission],
           },
           transport: :socket,
         }
@@ -1092,6 +1093,243 @@ describe GraphQL::Subscriptions do
 
       assert_equal(":mySubscription:myEnum:one", write_subscription_events[0].topic)
       assert_equal(":mySubscription:myEnum:one", execute_all_events[0].topic)
+    end
+  end
+
+  describe "Authorizing updates before delivery" do
+    class UpdateAuthorizationSchema < GraphQL::Schema
+      UPDATES = []
+
+      class Report < GraphQL::Schema::Object
+        field :title, String, null: false
+      end
+
+      class ReportSubscription < GraphQL::Schema::Subscription
+        argument :report_id, ID
+        field :title, String, null: false
+
+        def update(report_id:)
+          UPDATES << report_id
+          { title: "Report #{report_id}" }
+        end
+      end
+
+      class Subscription < GraphQL::Schema::Object
+        field :report, subscription: ReportSubscription
+      end
+
+      class Query < GraphQL::Schema::Object
+        field :dummy, Integer
+      end
+
+      class AuditSubscriptions < InMemoryBackend::Subscriptions
+        attr_reader :authorization_checks
+
+        def initialize(...)
+          super
+          @authorization_checks = []
+        end
+
+        def authorize_update?(subscription_id:, context:, **rest)
+          permission = context[:report_permission]
+          @authorization_checks << [subscription_id, permission]
+          case permission
+          when :allowed
+            GraphQL::Subscriptions::AUTHORIZED
+          when :unavailable
+            GraphQL::Subscriptions::DEFERRED
+          when :revoked
+            GraphQL::Subscriptions::REVOKED
+          else
+            nil
+          end
+        end
+      end
+
+      query Query
+      subscription Subscription
+      use AuditSubscriptions, extra: nil
+      use GraphQL::Execution::Next
+    end
+
+    let(:schema) { UpdateAuthorizationSchema }
+    let(:implementation) { schema.subscriptions }
+    let(:deliveries) { implementation.deliveries }
+
+    before do
+      implementation.reset
+      implementation.authorization_checks.clear
+      UpdateAuthorizationSchema::UPDATES.clear
+    end
+
+    def subscribe(socket, permission, report_id: "1")
+      exec_query(
+        "subscription { report(reportId: \"#{report_id}\") { title } }",
+        context: { socket: socket, report_permission: permission },
+      )
+    end
+
+    def delivered_titles(socket)
+      deliveries[socket].map { |d| d["data"] && d["data"]["report"] && d["data"]["report"]["title"] }
+    end
+
+    def query_for(socket)
+      implementation.queries.values.find { |q| q.context[:socket] == socket }
+    end
+
+    def subscribed_sockets
+      implementation.queries.values.map { |q| q.context[:socket] }.sort
+    end
+
+    it "delivers authorized updates" do
+      subscribe("1", :allowed)
+
+      schema.subscriptions.trigger(:report, { report_id: "1" }, {})
+      schema.subscriptions.trigger(:report, { report_id: "1" }, {})
+
+      assert_equal ["Report 1", "Report 1"], delivered_titles("1")
+      assert_equal 2, implementation.authorization_checks.size
+      assert_equal ["1"], subscribed_sockets
+    end
+
+    it "doesn't deliver an unconfirmable update, keeps the subscription, and recovers later" do
+      subscribe("1", :unavailable)
+
+      schema.subscriptions.trigger(:report, { report_id: "1" }, {})
+
+      assert_equal [], deliveries["1"]
+      assert_equal ["1"], subscribed_sockets
+      assert_equal [], UpdateAuthorizationSchema::UPDATES
+
+      # Permission can be confirmed again, so the same subscription resumes:
+      query_for("1").context[:report_permission] = :allowed
+      schema.subscriptions.trigger(:report, { report_id: "1" }, {})
+
+      assert_equal ["Report 1"], delivered_titles("1")
+      assert_equal ["1"], subscribed_sockets
+      assert_equal ["1"], UpdateAuthorizationSchema::UPDATES
+    end
+
+    it "doesn't deliver the first update after revocation" do
+      subscribe("1", :allowed)
+      schema.subscriptions.trigger(:report, { report_id: "1" }, {})
+      assert_equal ["Report 1"], delivered_titles("1")
+      assert_equal ["1"], UpdateAuthorizationSchema::UPDATES
+
+      query_for("1").context[:report_permission] = :revoked
+      schema.subscriptions.trigger(:report, { report_id: "1" }, {})
+
+      assert_equal ["Report 1"], delivered_titles("1")
+      assert_equal [], subscribed_sockets
+      # The resolver never ran for the revoked update:
+      assert_equal ["1"], UpdateAuthorizationSchema::UPDATES
+
+      # Later updates are skipped entirely (no read, no delivery):
+      schema.subscriptions.trigger(:report, { report_id: "1" }, {})
+      assert_equal ["Report 1"], delivered_titles("1")
+      assert_equal 2, implementation.authorization_checks.size
+    end
+
+    it "revokes only the affected subscriber when a topic is shared" do
+      subscribe("1", :allowed)
+      subscribe("2", :allowed)
+      subscribe("3", :unavailable)
+
+      assert_equal 1, implementation.events.size
+
+      schema.subscriptions.trigger(:report, { report_id: "1" }, {})
+
+      assert_equal ["Report 1"], delivered_titles("1")
+      assert_equal ["Report 1"], delivered_titles("2")
+      assert_equal [], deliveries["3"]
+      assert_equal ["1", "2", "3"], subscribed_sockets
+
+      query_for("2").context[:report_permission] = :revoked
+      query_for("3").context[:report_permission] = :allowed
+      schema.subscriptions.trigger(:report, { report_id: "1" }, {})
+
+      assert_equal ["Report 1", "Report 1"], delivered_titles("1")
+      assert_equal ["Report 1"], delivered_titles("2")
+      assert_equal ["Report 1"], delivered_titles("3")
+      assert_equal ["1", "3"], subscribed_sockets
+    end
+
+    it "treats an unrecognized return value as unconfirmed" do
+      subscribe("1", :allowed)
+      implementation.define_singleton_method(:authorize_update?) do |**|
+        :who_knows
+      end
+
+      schema.subscriptions.trigger(:report, { report_id: "1" }, {})
+
+      assert_equal [], deliveries["1"]
+      assert_equal ["1"], subscribed_sockets
+    ensure
+      implementation.singleton_class.remove_method(:authorize_update?)
+    end
+  end
+
+  describe "Configuring update authorization" do
+    class ConfigurableUpdateSubscriptions < InMemoryBackend::Subscriptions
+      def check_permission(subscription_id:, context:, **)
+        context[:report_permission] == :allowed ? :authorized : :revoked
+      end
+    end
+
+    class ConfigurableUpdateSchema < GraphQL::Schema
+      query UpdateAuthorizationSchema::Query
+      subscription UpdateAuthorizationSchema::Subscription
+    end
+
+    def build_schema(**options)
+      Class.new(ConfigurableUpdateSchema) do
+        use ConfigurableUpdateSubscriptions, extra: nil, **options
+      end
+    end
+
+    def run_update(schema, permission)
+      result = schema.execute(
+        "subscription { report(reportId: \"1\") { title } }",
+        context: { socket: "1", report_permission: permission },
+      )
+      subscription_id = result.context[:subscription_id]
+      schema.subscriptions.trigger(:report, { report_id: "1" }, {})
+      kept = schema.subscriptions.queries.key?(subscription_id)
+      delivered = schema.subscriptions.deliveries["1"].size
+      [delivered, kept]
+    end
+
+    it "is off by default" do
+      schema = build_schema
+      assert_equal [1, true], run_update(schema, :revoked)
+    end
+
+    it "accepts `authorize_update: false` to disable an overridden check" do
+      schema = build_schema(authorize_update: false)
+      refute schema.subscriptions.authorize_update_enabled?
+      assert_equal [1, true], run_update(schema, :revoked)
+    end
+
+    it "accepts a method name" do
+      schema = build_schema(authorize_update: :check_permission)
+      assert_equal [0, false], run_update(schema, :revoked)
+    end
+
+    it "accepts a callable" do
+      schema = build_schema(authorize_update: ->(context:, **) {
+        context[:report_permission] == :allowed ? true : false
+      })
+      allowed_schema = build_schema(authorize_update: ->(context:, **) { context[:report_permission] == :allowed })
+      assert_equal [1, true], run_update(allowed_schema, :allowed)
+      assert_equal [0, false], run_update(schema, :revoked)
+    end
+
+    it "treats `false` as revoked and `true` as authorized" do
+      schema = build_schema(authorize_update: ->(context:, **) { context[:report_permission] == :allowed })
+      assert_equal [1, true], run_update(schema, :allowed)
+
+      revoked_schema = build_schema(authorize_update: ->(context:, **) { context[:report_permission] == :allowed })
+      assert_equal [0, false], run_update(revoked_schema, :revoked)
     end
   end
 

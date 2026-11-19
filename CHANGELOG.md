@@ -8,6 +8,8 @@
 
 ### New features
 
+- Subscriptions: add opt-in pre-update authorization with `authorize_update:` and `#authorize_update?`, so long-lived subscriptions can be re-authorized before each update. Subscriptions can be kept when permission can't be confirmed, and are removed when permission is revoked.
+
 ### Bug fixes
 
 # 2.6.16 (17 Nov 2026)

@@ -361,3 +361,7 @@ end
 ```
 
 See the [Extra Field Metadata](/fields/introduction#extra-field-metadata) for more information about available metadata.
+
+## Re-checking permissions on every update
+
+`#authorized?` runs again when an update is executed, but a failed check ends the update with an error payload and leaves the subscription in place. If you want to control what happens when a viewer loses permission, and make sure no data is delivered at all, use [pre-update authorization](/subscriptions/triggers#re-authorizing-updates).
