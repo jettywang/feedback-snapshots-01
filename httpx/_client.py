@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import datetime
 import enum
 import logging
@@ -143,11 +144,16 @@ class BoundSyncStream(SyncByteStream):
     """
 
     def __init__(
-        self, stream: SyncByteStream, response: Response, start: float
+        self,
+        stream: SyncByteStream,
+        response: Response,
+        start: float,
+        on_close: typing.Callable[[Response], None] | None = None,
     ) -> None:
         self._stream = stream
         self._response = response
         self._start = start
+        self._on_close = on_close
 
     def __iter__(self) -> typing.Iterator[bytes]:
         for chunk in self._stream:
@@ -157,6 +163,8 @@ class BoundSyncStream(SyncByteStream):
         elapsed = time.perf_counter() - self._start
         self._response.elapsed = datetime.timedelta(seconds=elapsed)
         self._stream.close()
+        if self._on_close is not None:
+            self._on_close(self._response)
 
 
 class BoundAsyncStream(AsyncByteStream):
@@ -166,11 +174,16 @@ class BoundAsyncStream(AsyncByteStream):
     """
 
     def __init__(
-        self, stream: AsyncByteStream, response: Response, start: float
+        self,
+        stream: AsyncByteStream,
+        response: Response,
+        start: float,
+        on_close: typing.Callable[[Response], None] | None = None,
     ) -> None:
         self._stream = stream
         self._response = response
         self._start = start
+        self._on_close = on_close
 
     async def __aiter__(self) -> typing.AsyncIterator[bytes]:
         async for chunk in self._stream:
@@ -180,6 +193,10 @@ class BoundAsyncStream(AsyncByteStream):
         elapsed = time.perf_counter() - self._start
         self._response.elapsed = datetime.timedelta(seconds=elapsed)
         await self._stream.aclose()
+        if self._on_close is not None:
+            # The bookkeeping hook is synchronous on purpose; only the wrapped
+            # network stream needs to be awaited.
+            self._on_close(self._response)
 
 
 EventHook = typing.Callable[..., typing.Any]
@@ -219,6 +236,11 @@ class BaseClient:
         self._trust_env = trust_env
         self._default_encoding = default_encoding
         self._state = ClientState.UNOPENED
+
+        # Responses that have been handed out by this client but whose stream
+        # has not yet been closed. The client closes any stragglers when it is
+        # itself closed, so the state of a remaining response is always explicit.
+        self._responses: set[Response] = set()
 
     @property
     def is_closed(self) -> bool:
@@ -590,6 +612,24 @@ class BaseClient:
             )
             request.extensions = dict(**request.extensions, timeout=timeout.as_dict())
 
+    def _register_response(self, response: Response) -> None:
+        self._responses.add(response)
+
+    def _deregister_response(self, response: Response) -> None:
+        self._responses.discard(response)
+
+    def _close_responses(self) -> None:
+        # Close any responses whose streams are still open. Snapshot the set
+        # because closing a response deregisters it as a side effect.
+        for response in list(self._responses):
+            with contextlib.suppress(Exception):
+                response.close()
+
+    async def _aclose_responses(self) -> None:
+        for response in list(self._responses):
+            with contextlib.suppress(Exception):
+                await response.aclose()
+
 
 class Client(BaseClient):
     """
@@ -685,6 +725,10 @@ class Client(BaseClient):
         allow_env_proxies = trust_env and transport is None
         proxy_map = self._get_proxy_map(proxy, allow_env_proxies)
 
+        # Ownership of a transport is explicit rather than guessed: a transport
+        # instance passed in by the caller is owned by the caller and is never
+        # closed by the client. Only transports the client constructs itself are
+        # tracked here and torn down on `close()` / `__exit__()`.
         self._transport = self._init_transport(
             verify=verify,
             cert=cert,
@@ -694,6 +738,11 @@ class Client(BaseClient):
             limits=limits,
             transport=transport,
         )
+        self._owns_transport = transport is None
+        self._owned_transports: set[BaseTransport] = set()
+        if self._owns_transport:
+            self._owned_transports.add(self._transport)
+
         self._mounts: dict[URLPattern, BaseTransport | None] = {
             URLPattern(key): None
             if proxy is None
@@ -708,9 +757,15 @@ class Client(BaseClient):
             )
             for key, proxy in proxy_map.items()
         }
+        for mounted_transport in self._mounts.values():
+            if mounted_transport is not None:
+                self._owned_transports.add(mounted_transport)
         if mounts is not None:
             self._mounts.update(
-                {URLPattern(key): transport for key, transport in mounts.items()}
+                {
+                    URLPattern(key): mounted_transport
+                    for key, mounted_transport in mounts.items()
+                }
             )
 
         self._mounts = dict(sorted(self._mounts.items()))
@@ -923,9 +978,12 @@ class Client(BaseClient):
 
             return response
 
-        except BaseException as exc:
-            response.close()
-            raise exc
+        except BaseException:
+            # Preserve the original exception, even if closing the response
+            # itself raises.
+            with contextlib.suppress(Exception):
+                response.close()
+            raise
 
     def _send_handling_auth(
         self,
@@ -955,9 +1013,10 @@ class Client(BaseClient):
                     request = next_request
                     history.append(response)
 
-                except BaseException as exc:
-                    response.close()
-                    raise exc
+                except BaseException:
+                    with contextlib.suppress(Exception):
+                        response.close()
+                    raise
         finally:
             auth_flow.close()
 
@@ -994,9 +1053,10 @@ class Client(BaseClient):
                     response.next_request = request
                     return response
 
-            except BaseException as exc:
-                response.close()
-                raise exc
+            except BaseException:
+                with contextlib.suppress(Exception):
+                    response.close()
+                raise
 
     def _send_single_request(self, request: Request) -> Response:
         """
@@ -1017,8 +1077,12 @@ class Client(BaseClient):
 
         response.request = request
         response.stream = BoundSyncStream(
-            response.stream, response=response, start=start
+            response.stream,
+            response=response,
+            start=start,
+            on_close=self._deregister_response,
         )
+        self._register_response(response)
         self.cookies.extract_cookies(response)
         response.default_encoding = self._default_encoding
 
@@ -1263,14 +1327,18 @@ class Client(BaseClient):
     def close(self) -> None:
         """
         Close transport and proxies.
+
+        Outstanding responses are closed first, so their state is always
+        explicit after the client shuts down. Only transports that the client
+        constructed itself are closed; transports passed in by the caller keep
+        their ownership with the caller.
         """
         if self._state != ClientState.CLOSED:
             self._state = ClientState.CLOSED
 
-            self._transport.close()
-            for transport in self._mounts.values():
-                if transport is not None:
-                    transport.close()
+            self._close_responses()
+            for transport in self._owned_transports:
+                transport.close()
 
     def __enter__(self: T) -> T:
         if self._state != ClientState.UNOPENED:
@@ -1284,10 +1352,8 @@ class Client(BaseClient):
 
         self._state = ClientState.OPENED
 
-        self._transport.__enter__()
-        for transport in self._mounts.values():
-            if transport is not None:
-                transport.__enter__()
+        for transport in self._owned_transports:
+            transport.__enter__()
         return self
 
     def __exit__(
@@ -1298,10 +1364,9 @@ class Client(BaseClient):
     ) -> None:
         self._state = ClientState.CLOSED
 
-        self._transport.__exit__(exc_type, exc_value, traceback)
-        for transport in self._mounts.values():
-            if transport is not None:
-                transport.__exit__(exc_type, exc_value, traceback)
+        self._close_responses()
+        for transport in self._owned_transports:
+            transport.__exit__(exc_type, exc_value, traceback)
 
 
 class AsyncClient(BaseClient):
@@ -1399,6 +1464,10 @@ class AsyncClient(BaseClient):
         allow_env_proxies = trust_env and transport is None
         proxy_map = self._get_proxy_map(proxy, allow_env_proxies)
 
+        # Ownership of a transport is explicit rather than guessed: a transport
+        # instance passed in by the caller is owned by the caller and is never
+        # closed by the client. Only transports the client constructs itself are
+        # tracked here and torn down on `aclose()` / `__aexit__()`.
         self._transport = self._init_transport(
             verify=verify,
             cert=cert,
@@ -1408,6 +1477,10 @@ class AsyncClient(BaseClient):
             limits=limits,
             transport=transport,
         )
+        self._owns_transport = transport is None
+        self._owned_transports: set[AsyncBaseTransport] = set()
+        if self._owns_transport:
+            self._owned_transports.add(self._transport)
 
         self._mounts: dict[URLPattern, AsyncBaseTransport | None] = {
             URLPattern(key): None
@@ -1423,9 +1496,15 @@ class AsyncClient(BaseClient):
             )
             for key, proxy in proxy_map.items()
         }
+        for mounted_transport in self._mounts.values():
+            if mounted_transport is not None:
+                self._owned_transports.add(mounted_transport)
         if mounts is not None:
             self._mounts.update(
-                {URLPattern(key): transport for key, transport in mounts.items()}
+                {
+                    URLPattern(key): mounted_transport
+                    for key, mounted_transport in mounts.items()
+                }
             )
         self._mounts = dict(sorted(self._mounts.items()))
 
@@ -1638,9 +1717,12 @@ class AsyncClient(BaseClient):
 
             return response
 
-        except BaseException as exc:
-            await response.aclose()
-            raise exc
+        except BaseException:
+            # Preserve the original exception, even if closing the response
+            # itself raises.
+            with contextlib.suppress(Exception):
+                await response.aclose()
+            raise
 
     async def _send_handling_auth(
         self,
@@ -1670,9 +1752,10 @@ class AsyncClient(BaseClient):
                     request = next_request
                     history.append(response)
 
-                except BaseException as exc:
-                    await response.aclose()
-                    raise exc
+                except BaseException:
+                    with contextlib.suppress(Exception):
+                        await response.aclose()
+                    raise
         finally:
             await auth_flow.aclose()
 
@@ -1710,9 +1793,10 @@ class AsyncClient(BaseClient):
                     response.next_request = request
                     return response
 
-            except BaseException as exc:
-                await response.aclose()
-                raise exc
+            except BaseException:
+                with contextlib.suppress(Exception):
+                    await response.aclose()
+                raise
 
     async def _send_single_request(self, request: Request) -> Response:
         """
@@ -1732,8 +1816,12 @@ class AsyncClient(BaseClient):
         assert isinstance(response.stream, AsyncByteStream)
         response.request = request
         response.stream = BoundAsyncStream(
-            response.stream, response=response, start=start
+            response.stream,
+            response=response,
+            start=start,
+            on_close=self._deregister_response,
         )
+        self._register_response(response)
         self.cookies.extract_cookies(response)
         response.default_encoding = self._default_encoding
 
@@ -1978,14 +2066,18 @@ class AsyncClient(BaseClient):
     async def aclose(self) -> None:
         """
         Close transport and proxies.
+
+        Outstanding responses are closed first, so their state is always
+        explicit after the client shuts down. Only transports that the client
+        constructed itself are closed; transports passed in by the caller keep
+        their ownership with the caller.
         """
         if self._state != ClientState.CLOSED:
             self._state = ClientState.CLOSED
 
-            await self._transport.aclose()
-            for proxy in self._mounts.values():
-                if proxy is not None:
-                    await proxy.aclose()
+            await self._aclose_responses()
+            for transport in self._owned_transports:
+                await transport.aclose()
 
     async def __aenter__(self: U) -> U:
         if self._state != ClientState.UNOPENED:
@@ -1999,10 +2091,8 @@ class AsyncClient(BaseClient):
 
         self._state = ClientState.OPENED
 
-        await self._transport.__aenter__()
-        for proxy in self._mounts.values():
-            if proxy is not None:
-                await proxy.__aenter__()
+        for transport in self._owned_transports:
+            await transport.__aenter__()
         return self
 
     async def __aexit__(
@@ -2013,7 +2103,6 @@ class AsyncClient(BaseClient):
     ) -> None:
         self._state = ClientState.CLOSED
 
-        await self._transport.__aexit__(exc_type, exc_value, traceback)
-        for proxy in self._mounts.values():
-            if proxy is not None:
-                await proxy.__aexit__(exc_type, exc_value, traceback)
+        await self._aclose_responses()
+        for transport in self._owned_transports:
+            await transport.__aexit__(exc_type, exc_value, traceback)

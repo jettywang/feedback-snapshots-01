@@ -200,15 +200,60 @@ async def test_context_managed_transport():
             await super().__aexit__(*args)
             self.events.append("transport.__aexit__")
 
+    # An externally provided transport is not owned by the client, so it is
+    # never entered, closed or exited when the client shuts down.
     transport = Transport()
     async with httpx.AsyncClient(transport=transport):
         pass
 
-    assert transport.events == [
-        "transport.__aenter__",
-        "transport.aclose",
-        "transport.__aexit__",
-    ]
+    assert transport.events == []
+
+
+@pytest.mark.anyio
+async def test_client_does_not_aclose_external_transport():
+    class Transport(httpx.AsyncBaseTransport):
+        def __init__(self) -> None:
+            self.events: list[str] = []
+
+        async def handle_async_request(self, request):
+            return httpx.Response(200)
+
+        async def aclose(self):
+            self.events.append("transport.aclose")
+
+        async def __aenter__(self):
+            await super().__aenter__()
+            self.events.append("transport.__aenter__")
+
+        async def __aexit__(self, *args):
+            await super().__aexit__(*args)
+            self.events.append("transport.__aexit__")
+
+    transport = Transport()
+    async with httpx.AsyncClient(transport=transport) as client:
+        await client.get("http://www.example.com")
+    await client.aclose()
+
+    assert transport.events == []
+
+    # The caller retains ownership and can tear the transport down themselves.
+    await transport.aclose()
+    assert transport.events == ["transport.aclose"]
+
+
+@pytest.mark.anyio
+async def test_transport_ownership_is_explicit():
+    class Transport(httpx.AsyncBaseTransport):
+        async def aclose(self):
+            pass
+
+    owned = httpx.AsyncClient()
+    assert owned._owns_transport is True
+    assert owned._transport in owned._owned_transports
+
+    external = httpx.AsyncClient(transport=Transport())
+    assert external._owns_transport is False
+    assert external._owned_transports == set()
 
 
 @pytest.mark.anyio
@@ -217,6 +262,9 @@ async def test_context_managed_transport_and_mount():
         def __init__(self, name: str) -> None:
             self.name: str = name
             self.events: list[str] = []
+
+        async def handle_async_request(self, request):
+            return httpx.Response(200)
 
         async def aclose(self):
             # The base implementation of httpx.AsyncBaseTransport just
@@ -240,16 +288,10 @@ async def test_context_managed_transport_and_mount():
     ):
         pass
 
-    assert transport.events == [
-        "transport.__aenter__",
-        "transport.aclose",
-        "transport.__aexit__",
-    ]
-    assert mounted.events == [
-        "mounted.__aenter__",
-        "mounted.aclose",
-        "mounted.__aexit__",
-    ]
+    # Both the transport and the mount are provided by the caller, so neither
+    # is owned or closed by the client.
+    assert transport.events == []
+    assert mounted.events == []
 
 
 def hello_world(request):

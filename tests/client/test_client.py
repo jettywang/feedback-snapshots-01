@@ -249,15 +249,64 @@ def test_context_managed_transport():
             super().__exit__(*args)
             self.events.append("transport.__exit__")
 
+    # An externally provided transport is not owned by the client, so it is
+    # never entered, closed or exited when the client shuts down.
     transport = Transport()
     with httpx.Client(transport=transport):
         pass
 
-    assert transport.events == [
-        "transport.__enter__",
-        "transport.close",
-        "transport.__exit__",
-    ]
+    assert transport.events == []
+
+
+def test_client_does_not_close_external_transport():
+    class Transport(httpx.BaseTransport):
+        def __init__(self) -> None:
+            self.events: list[str] = []
+
+        def handle_request(self, request):
+            return httpx.Response(200)
+
+        def close(self):
+            self.events.append("transport.close")
+
+        def __enter__(self):
+            super().__enter__()
+            self.events.append("transport.__enter__")
+
+        def __exit__(self, *args):
+            super().__exit__(*args)
+            self.events.append("transport.__exit__")
+
+    # A transport passed in explicitly keeps its ownership with the caller:
+    # the client must never close, enter or exit it.
+    transport = Transport()
+    with httpx.Client(transport=transport) as client:
+        client.get("http://www.example.com")
+    client.close()
+
+    assert transport.events == []
+
+    # The caller can still reuse and tear the transport down themselves.
+    with httpx.Client(transport=transport) as client:
+        client.get("http://www.example.com")
+    transport.close()
+    assert transport.events == ["transport.close"]
+
+
+def test_transport_ownership_is_explicit():
+    class Transport(httpx.BaseTransport):
+        def close(self):
+            pass
+
+    # The default transport is internally constructed and owned by the client.
+    owned = httpx.Client()
+    assert owned._owns_transport is True
+    assert owned._transport in owned._owned_transports
+
+    # A transport passed in explicitly is not owned by the client.
+    external = httpx.Client(transport=Transport())
+    assert external._owns_transport is False
+    assert external._owned_transports == set()
 
 
 def test_context_managed_transport_and_mount():
@@ -265,6 +314,9 @@ def test_context_managed_transport_and_mount():
         def __init__(self, name: str) -> None:
             self.name: str = name
             self.events: list[str] = []
+
+        def handle_request(self, request):
+            return httpx.Response(200)
 
         def close(self):
             # The base implementation of httpx.BaseTransport just
@@ -286,16 +338,10 @@ def test_context_managed_transport_and_mount():
     with httpx.Client(transport=transport, mounts={"http://www.example.org": mounted}):
         pass
 
-    assert transport.events == [
-        "transport.__enter__",
-        "transport.close",
-        "transport.__exit__",
-    ]
-    assert mounted.events == [
-        "mounted.__enter__",
-        "mounted.close",
-        "mounted.__exit__",
-    ]
+    # Both the transport and the mount are provided by the caller, so neither
+    # is owned or closed by the client.
+    assert transport.events == []
+    assert mounted.events == []
 
 
 def hello_world(request):

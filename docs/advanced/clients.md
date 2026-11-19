@@ -48,6 +48,12 @@ finally:
     client.close()
 ```
 
+Each streaming response owns its own underlying stream, which is closed exactly
+once: automatically when the body is read to completion, or when the response is
+closed explicitly. Closing one response never closes another response or the
+shared connection pool. If a response is still open when the client is closed,
+the client closes it for you, so no response is left in an indeterminate state.
+
 ## Making requests
 
 Once you have a `Client`, you can send requests using `.get()`, `.post()`, etc. For example:

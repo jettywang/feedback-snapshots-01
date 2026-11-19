@@ -947,16 +947,20 @@ class Response:
         self._num_bytes_downloaded = 0
         chunker = ByteChunker(chunk_size=chunk_size)
 
-        with request_context(request=self._request):
-            for raw_stream_bytes in self.stream:
-                self._num_bytes_downloaded += len(raw_stream_bytes)
-                for chunk in chunker.decode(raw_stream_bytes):
-                    yield chunk
+        try:
+            with request_context(request=self._request):
+                for raw_stream_bytes in self.stream:
+                    self._num_bytes_downloaded += len(raw_stream_bytes)
+                    for chunk in chunker.decode(raw_stream_bytes):
+                        yield chunk
 
-        for chunk in chunker.flush():
-            yield chunk
-
-        self.close()
+            for chunk in chunker.flush():
+                yield chunk
+        finally:
+            # Ensure the underlying stream is closed exactly once, including when
+            # the consumer breaks out early, an error is raised mid-stream, or the
+            # generator is garbage collected. `close()` itself is idempotent.
+            self.close()
 
     def close(self) -> None:
         """
@@ -1051,16 +1055,20 @@ class Response:
         self._num_bytes_downloaded = 0
         chunker = ByteChunker(chunk_size=chunk_size)
 
-        with request_context(request=self._request):
-            async for raw_stream_bytes in self.stream:
-                self._num_bytes_downloaded += len(raw_stream_bytes)
-                for chunk in chunker.decode(raw_stream_bytes):
-                    yield chunk
+        try:
+            with request_context(request=self._request):
+                async for raw_stream_bytes in self.stream:
+                    self._num_bytes_downloaded += len(raw_stream_bytes)
+                    for chunk in chunker.decode(raw_stream_bytes):
+                        yield chunk
 
-        for chunk in chunker.flush():
-            yield chunk
-
-        await self.aclose()
+            for chunk in chunker.flush():
+                yield chunk
+        finally:
+            # Ensure the underlying stream is closed exactly once, including when
+            # the consumer breaks out early, an error is raised mid-stream, or the
+            # task is cancelled. `aclose()` itself is idempotent.
+            await self.aclose()
 
     async def aclose(self) -> None:
         """

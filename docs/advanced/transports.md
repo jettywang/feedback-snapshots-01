@@ -160,6 +160,20 @@ At the layer of the transport API we're using the familiar `Request` and
 See the `handle_request` and `handle_async_request` docstrings for more details
 on the specifics of the Transport API.
 
+### Transport ownership
+
+Transport ownership is always explicit, never inferred:
+
+- If you pass a transport instance to a client (`Client(transport=...)`,
+  including mounts), that transport belongs to *you*. The client uses it but
+  never calls `close()`/`aclose()` on it and never enters or exits it as a
+  context manager. This lets several clients, or a long-lived transport reused
+  across clients, share one instance without one client tearing it down for the
+  others. You are responsible for closing it when you are finished with it.
+- If you do not pass a transport, the client constructs and owns its own
+  internal transports, and closes them for you when the client is closed
+  (`.close()`/`.aclose()` or leaving the `with`/`async with` block).
+
 A complete example of a custom transport implementation would be:
 
 ```python
