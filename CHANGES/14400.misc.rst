@@ -1,0 +1,4 @@
+Added a pure-Python, in-memory transport regression test asserting that a request
+body left unconsumed after a handler rejection is never re-parsed as a pipelined
+request (request smuggling), covering fixed-length, chunked, ``Expect:
+100-continue`` and truncated bodies across several TCP segmentations.
