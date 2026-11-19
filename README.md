@@ -92,6 +92,8 @@ Flipper.enable_percentage_of_actors :search, 2
 
 Read more about [getting started with Flipper](https://flippercloud.io/docs?utm_source=oss&utm_medium=readme&utm_campaign=getting_started) and [enabling features](https://flippercloud.io/docs/features?utm_source=oss&utm_medium=readme&utm_campaign=enabling_features).
 
+Need an incident-review trail for local writes? See [Audit](docs/Audit.md).
+
 ## Flipper Cloud
 
 Like Flipper and want more? Check out [Flipper Cloud](https://www.flippercloud.io?utm_source=oss&utm_medium=readme&utm_campaign=check_out), which comes with:

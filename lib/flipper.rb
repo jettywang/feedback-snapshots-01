@@ -233,6 +233,7 @@ require 'flipper/types/percentage_of_actors'
 require 'flipper/types/percentage_of_time'
 require 'flipper/typecast'
 require 'flipper/version'
+require 'flipper/audit'
 
 # Eagerly initialize memoized module state while loading is still
 # single-threaded (require/autoload hold a per-feature lock). This avoids a
