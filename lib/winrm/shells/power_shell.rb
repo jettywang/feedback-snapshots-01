@@ -14,6 +14,7 @@
 
 require 'securerandom' unless defined?(SecureRandom)
 require_relative 'base'
+require_relative '../psrp/fragment'
 require_relative '../psrp/message_fragmenter'
 require_relative '../psrp/receive_response_reader'
 require_relative '../wsmv/configuration'
@@ -59,31 +60,28 @@ module WinRM
         end
       end
 
-      # calculate the maimum fragment size so that they will be as large as possible yet
-      # no greater than the max_envelope_size_kb on the end point. To calculate this
-      # threshold, we:
-      # - determine the maximum number of bytes accepted on the endpoint
-      # - subtract the non-fragment characters in the SOAP envelope
-      # - determine the number of bytes that could be base64 encded to the above length
-      # - subtract the fragment header bytes (ids, length, etc)
+      # Default endpoint MaxEnvelopeSizekb when the configuration query is not
+      # available. PowerShell 2.0 speaks protocol 2.1 and defaults to 150 KB;
+      # later protocol versions default to 500 KB.
+      DEFAULT_MAX_ENVELOPE_SIZE_KB = 150
+      LATER_PROTOCOL_MAX_ENVELOPE_SIZE_KB = 500
+
+      # Placeholder ids used to measure envelope overhead. Real shell, command
+      # and message ids are UUIDs of exactly this width.
+      PLACEHOLDER_ID = '00000000-0000-0000-0000-000000000000'.freeze
+
+      # Calculates the largest PSRP fragment blob whose SOAP envelope still
+      # fits in the endpoint's MaxEnvelopeSize.
+      #
+      # The envelope contains the fragment encoded with strict Base64, so its
+      # size grows in groups of four Base64 characters per three fragment
+      # bytes. Both the PSRP fragment header and Base64 padding therefore have
+      # to be part of the same calculation, rather than subtracted from a
+      # plain byte count afterwards.
       def max_fragment_blob_size
         @max_fragment_blob_size ||= begin
-          fragment_header_length = 21
-
-          begin
-            max_fragment_bytes = (max_envelope_size_kb * 1024) - empty_pipeline_envelope.length
-            base64_deflated(max_fragment_bytes) - fragment_header_length
-          rescue WinRMWSManFault => e
-            # A non administrator user will encounter an access denied
-            # error attempting to query winrm configuration.
-            # we will assin a small default and adjust to a protocol
-            # appropriate max length when that info is available
-            raise unless e.fault_code == '5'
-
-            WinRM::PSRP::MessageFragmenter::DEFAULT_BLOB_LENGTH
-          rescue WinRMSoapFault
-            WinRM::PSRP::MessageFragmenter::DEFAULT_BLOB_LENGTH
-          end
+          envelope_size = max_envelope_size_bytes
+          fragment_blob_size_within(envelope_size)
         end
       end
 
@@ -98,12 +96,13 @@ module WinRM
         command += "\r\nif (!$?) { if($LASTEXITCODE) { exit $LASTEXITCODE } else { exit 1 } }"
         message = PSRP::MessageFactory.create_pipeline_message(@runspace_id, command_id, command)
         fragmenter.fragment(message) do |fragment|
-          command_args = [connection_opts, shell_id, command_id, fragment]
+          envelope = fragment_envelope(fragment, command_id)
+          ensure_envelope_fits!(envelope)
           if fragment.start_fragment
-            resp_doc = transport.send_request(WinRM::WSMV::CreatePipeline.new(*command_args).build)
+            resp_doc = transport.send_request(envelope)
             command_id = REXML::XPath.first(resp_doc, "//*[local-name() = 'CommandId']").text
           else
-            transport.send_request(WinRM::WSMV::SendData.new(*command_args).build)
+            transport.send_request(envelope)
           end
         end
 
@@ -118,7 +117,9 @@ module WinRM
           @runspace_id,
           open_shell_payload(@runspace_id)
         )
-        resp_doc = transport.send_request(runspace_msg.build)
+        envelope = runspace_msg.build
+        ensure_envelope_fits!(envelope)
+        resp_doc = transport.send_request(envelope)
         shell_id = REXML::XPath.first(resp_doc, "//*[@Name='ShellId']").text
         wait_for_running(shell_id)
         shell_id
@@ -130,28 +131,101 @@ module WinRM
 
       private
 
-      def base64_deflated(inflated_length)
-        inflated_length / 4 * 3
+      def fragment_envelope(fragment, command_id)
+        msg = if fragment.start_fragment
+                WinRM::WSMV::CreatePipeline.new(connection_opts, shell_id, command_id, fragment)
+              else
+                WinRM::WSMV::SendData.new(connection_opts, shell_id, command_id, fragment)
+              end
+        msg.build
       end
 
-      def empty_pipeline_envelope
-        WinRM::WSMV::CreatePipeline.new(
-          connection_opts,
-          '00000000-0000-0000-0000-000000000000',
-          '00000000-0000-0000-0000-000000000000'
-        ).build
+      def ensure_envelope_fits!(envelope)
+        envelope_size = max_envelope_size_bytes
+        return if envelope.bytesize <= envelope_size
+
+        raise WinRM::FragmentSizeError.new(
+          "SOAP envelope is #{envelope.bytesize} bytes which exceeds the " \
+          "negotiated MaxEnvelopeSize of #{envelope_size} bytes",
+          envelope_size: envelope_size,
+          actual_size: envelope.bytesize
+        )
+      end
+
+      # Largest blob whose fragment, once Base64 encoded into a pipeline
+      # envelope, still fits the given envelope size.
+      #
+      # A fragment occupies HEADER_SIZE + blob bytes, which strict Base64
+      # expands to 4 characters per completed group of 3 bytes. The header and
+      # padding are therefore part of the same group calculation instead of
+      # being subtracted after the fact. <rsp:Arguments> and <rsp:Stream> only
+      # ever contain Base64, so no XML escaping inflates this section.
+      def fragment_blob_size_within(envelope_size)
+        overhead = pipeline_envelope_overhead.bytesize
+        budget = envelope_size - overhead
+        if budget <= 0
+          raise WinRM::FragmentSizeError.new(
+            "A #{overhead}-byte SOAP envelope cannot fit in the " \
+            "negotiated MaxEnvelopeSize of #{envelope_size} bytes",
+            envelope_size: envelope_size
+          )
+        end
+
+        blob_size = largest_blob_for(budget)
+        if blob_size < 1
+          raise WinRM::FragmentSizeError.new(
+            "No fragment fits in the remaining #{budget} bytes of the " \
+            "negotiated MaxEnvelopeSize of #{envelope_size} bytes",
+            envelope_size: envelope_size
+          )
+        end
+
+        blob_size
+      end
+
+      # Solves for the largest blob n where ceil((HEADER_SIZE + n) / 3) * 4
+      # fits the budget, accounting for Base64 group padding.
+      def largest_blob_for(budget)
+        (budget / 4 * 3) - WinRM::PSRP::Fragment::HEADER_SIZE
+      end
+
+      def pipeline_envelope_overhead
+        WinRM::WSMV::CreatePipeline.new(connection_opts, PLACEHOLDER_ID, PLACEHOLDER_ID).build
+      end
+
+      def max_envelope_size_bytes
+        max_envelope_size_kb * 1024
       end
 
       def max_envelope_size_kb
-        @max_envelope_size_kb ||= begin
-          config_msg = WinRM::WSMV::Configuration.new(connection_opts)
-          msg = config_msg.build
-          resp_doc = transport.send_request(msg)
-          REXML::XPath.first(resp_doc, "//*[local-name() = 'MaxEnvelopeSizekb']").text.to_i
-        rescue REXML::ParseException
-          logger.debug("[WinRM] Endpoint doesn't support config request for MaxEnvelopeSizekb")
-          raise
-        end
+        @max_envelope_size_kb ||= configured_max_envelope_size_kb || mark_fallback(default_max_envelope_size_kb)
+      end
+
+      def configured_max_envelope_size_kb
+        config_msg = WinRM::WSMV::Configuration.new(connection_opts)
+        resp_doc = transport.send_request(config_msg.build)
+        size = REXML::XPath.first(resp_doc, "//*[local-name() = 'MaxEnvelopeSizekb']")
+        kb = size && size.text.to_i
+        kb if kb && kb > 0
+      rescue WinRMWSManFault => e
+        # A non administrator user will encounter an access denied error
+        # attempting to query winrm configuration. Other faults are real.
+        raise unless e.fault_code == '5'
+
+        nil
+      rescue WinRMSoapFault
+        nil
+      end
+
+      def mark_fallback(kb)
+        logger.debug('[WinRM] Endpoint did not report MaxEnvelopeSizekb; using the protocol default')
+        @fallback_envelope_size = true
+        kb
+      end
+
+      # Conservative default used until the endpoint tells us its protocol.
+      def default_max_envelope_size_kb
+        DEFAULT_MAX_ENVELOPE_SIZE_KB
       end
 
       def open_shell_payload(shell_id)
@@ -177,21 +251,35 @@ module WinRM
             when WinRM::PSRP::MessageData::RunspacepoolState
               state = parsed.runspace_state
             when WinRM::PSRP::MessageData::SessionCapability
-              # if the user lacks admin privileges, we cannot query the MaxEnvelopeSizeKB
-              # on the server and will assign to a "best effort" default based on protocol version
-              if fragmenter.max_blob_length == WinRM::PSRP::MessageFragmenter::DEFAULT_BLOB_LENGTH
-                fragmenter.max_blob_length = default_protocol_envelope_size(parsed.protocol_version)
-              end
+              refresh_fallback_envelope_size(parsed.protocol_version)
             end
           end
         end
       end
 
+      # When the configuration query was rejected, refine the conservative
+      # default once the protocol version is known. Any cached budget depends
+      # on the envelope size, so it must be discarded rather than reused.
+      def refresh_fallback_envelope_size(protocol_version)
+        return unless @fallback_envelope_size
+
+        kb = default_protocol_envelope_size_kb(protocol_version)
+        return if kb == @max_envelope_size_kb
+
+        @max_envelope_size_kb = kb
+        @max_fragment_blob_size = nil
+        fragmenter.max_blob_length = max_fragment_blob_size
+      end
+
       # Powershell v2.0 has a protocol version of 2.1
       # which defaults to a 150 MaxEnvelopeSizeKB
       # later versions default to 500
-      def default_protocol_envelope_size(protocol_version)
-        protocol_version > '2.1' ? 512000 : 153600
+      def default_protocol_envelope_size_kb(protocol_version)
+        if protocol_version.to_s > '2.1'
+          LATER_PROTOCOL_MAX_ENVELOPE_SIZE_KB
+        else
+          DEFAULT_MAX_ENVELOPE_SIZE_KB
+        end
       end
 
       def fragmenter

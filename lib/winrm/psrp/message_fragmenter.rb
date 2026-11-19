@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+require_relative '../exceptions'
 require_relative 'fragment'
 
 module WinRM
@@ -23,11 +24,23 @@ module WinRM
 
       def initialize(max_blob_length = DEFAULT_BLOB_LENGTH)
         @message_id = 0
-        @max_blob_length = max_blob_length || DEFAULT_BLOB_LENGTH
+        self.max_blob_length = max_blob_length || DEFAULT_BLOB_LENGTH
       end
 
       attr_reader :message_id
-      attr_accessor :max_blob_length
+
+      def max_blob_length
+        @max_blob_length
+      end
+
+      def max_blob_length=(max_blob_length)
+        unless max_blob_length.is_a?(Integer) && max_blob_length > 0
+          raise WinRM::FragmentSizeError,
+                "Invalid fragment blob size: #{max_blob_length.inspect} bytes"
+        end
+
+        @max_blob_length = max_blob_length
+      end
 
       def fragment(message)
         @message_id += 1
@@ -36,12 +49,19 @@ module WinRM
         fragment_id = 0
         fragment = nil
 
+        # An empty message still needs one fragment so receivers get start/end.
+        if message_bytes.empty?
+          fragment = Fragment.new(message_id, [], 0, true, true)
+          yield fragment if block_given?
+          return fragment
+        end
+
         while bytes_fragmented < message_bytes.length
           last_byte = bytes_fragmented + max_blob_length
           last_byte = message_bytes.length if last_byte > message_bytes.length
           fragment = Fragment.new(
             message_id,
-            message.bytes[bytes_fragmented..last_byte - 1],
+            message_bytes[bytes_fragmented..last_byte - 1],
             fragment_id,
             bytes_fragmented.zero?,
             last_byte == message_bytes.length

@@ -18,6 +18,9 @@ module WinRM
   module PSRP
     # PowerShell Remoting Protocol message fragment.
     class Fragment
+      # Bytes of PSRP fragment header: message id, fragment id, flags and blob length.
+      HEADER_SIZE = 21
+
       # Creates a new PSRP message fragment
       # @param message_id [Integer] The id of the fragmented message.
       # @param blob [Array] Array of fragmented bytes.

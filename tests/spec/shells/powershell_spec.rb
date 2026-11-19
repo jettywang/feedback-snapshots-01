@@ -107,6 +107,19 @@ describe WinRM::Shells::Powershell do
 
       subject { described_class.new(connection_options, transport, Logger.new(IO::NULL)) }
 
+      # Captures the real command envelopes sent by the shell rather than any
+      # stubbed payload, so size assertions see what the transport would post.
+      def capture_command_envelopes(command)
+        allow_any_instance_of(WinRM::WSMV::CreatePipeline).to receive(:build).and_call_original
+        envelopes = []
+        allow(transport).to receive(:send_request).with(%r{<rsp:(?:CommandLine|Send)[ >]}) do |payload|
+          envelopes << payload
+          REXML::Document.new(command_response)
+        end
+        subject.run(command)
+        envelopes
+      end
+
       describe '#run' do
         it 'opens a shell and gets shell id' do
           subject.run(command)
@@ -149,39 +162,35 @@ describe WinRM::Shells::Powershell do
             let(:protocol_version) { 2.1 }
             let(:command) { 'c' * 200000 }
 
-            it 'sets the fragmenter max_blob_length' do
-              expect_any_instance_of(WinRM::PSRP::MessageFragmenter).to receive(:max_blob_length=)
-                .with(153600)
+            it 'refines the blob length from the 150 KB default' do
               subject.run(command)
+              expected = (153600 - subject.send(:pipeline_envelope_overhead).bytesize) / 4 * 3 -
+                         WinRM::PSRP::Fragment::HEADER_SIZE
+              expect(subject.max_fragment_blob_size).to eq expected
             end
 
             it 'fragments messages smaller than max envelope size' do
-              allow_any_instance_of(WinRM::WSMV::CreatePipeline).to receive(:build)
-                .and_call_original
-              allow(transport).to receive(:send_request).with(/CommandLine/) do |payload|
-                expect(payload.length).to eq 206512
-              end.and_return(REXML::Document.new(command_response))
-              subject.run(command)
+              sent = capture_command_envelopes(command)
+              expect(sent.map(&:bytesize).max).to be <= 153600
+              expect(sent.map(&:bytesize).max).to be > 153600 - 4
             end
           end
 
           context 'protocol version 2.2' do
             let(:protocol_version) { 2.2 }
-            let(:command) { 'c' * 200000 }
+            let(:command) { 'c' * 600000 }
 
-            it 'sets the fragmenter max_blob_length' do
-              expect_any_instance_of(WinRM::PSRP::MessageFragmenter).to receive(:max_blob_length=)
-                .with(512000)
+            it 'refines the blob length from the 512 KB default' do
               subject.run(command)
+              expected = (512000 - subject.send(:pipeline_envelope_overhead).bytesize) / 4 * 3 -
+                         WinRM::PSRP::Fragment::HEADER_SIZE
+              expect(subject.max_fragment_blob_size).to eq expected
             end
 
             it 'fragments messages smaller than max envelope size' do
-              allow_any_instance_of(WinRM::WSMV::CreatePipeline).to receive(:build)
-                .and_call_original
-              allow(transport).to receive(:send_request).with(/CommandLine/) do |payload|
-                expect(payload.length).to eq 276028
-              end.and_return(REXML::Document.new(command_response))
-              subject.run(command)
+              sent = capture_command_envelopes(command)
+              expect(sent.map(&:bytesize).max).to be <= 512000
+              expect(sent.map(&:bytesize).max).to be > 512000 - 4
             end
           end
         end
@@ -190,14 +199,10 @@ describe WinRM::Shells::Powershell do
           let(:command) { 'c' * 200000 }
 
           it 'fragments messages as large as max envelope size' do
-            allow_any_instance_of(WinRM::WSMV::CreatePipeline).to receive(:build).and_call_original
-            allow(transport).to receive(:send_request).with(/CommandLine/) do |payload|
-              fallback = subject.max_fragment_blob_size ==
-                         WinRM::PSRP::MessageFragmenter::DEFAULT_BLOB_LENGTH
-              # OMI server uses default blob size b/c config endpoint unavailable
-              expect(payload.length).to eq fallback ? 45404 : max_envelope_size_kb * 1024
-            end.and_return(REXML::Document.new(command_response))
-            subject.run(command)
+            sent = capture_command_envelopes(command)
+            limit = subject.send(:max_envelope_size_bytes)
+            expect(sent.map(&:bytesize).max).to be <= limit
+            expect(sent.map(&:bytesize).max).to be > limit - 4
           end
         end
       end

@@ -76,6 +76,24 @@ module WinRM
     end
   end
 
+  # Raised when the negotiated MaxEnvelopeSize cannot hold a message fragment.
+  class FragmentSizeError < WinRMError
+    attr_reader :envelope_size
+    attr_reader :actual_size
+
+    def initialize(message = nil, envelope_size: nil, actual_size: nil)
+      @envelope_size = envelope_size
+      @actual_size = actual_size
+      super(message || default_message)
+    end
+
+    private
+
+    def default_message
+      'The negotiated MaxEnvelopeSize does not leave room for a message fragment'
+    end
+  end
+
   # non-200 response without a SOAP fault
   class WinRMHTTPTransportError < WinRMError
     attr_reader :status_code
