@@ -1,0 +1,28 @@
+GEM
+  remote: https://rubygems.org/
+  specs:
+    minitest (5.27.0)
+    minitest-global_expectations (1.0.2)
+      minitest (> 5)
+    minitest-hooks (1.5.4)
+      minitest (> 5.3)
+    rack (3.2.8)
+
+PLATFORMS
+  arm64-darwin-25
+  ruby
+
+DEPENDENCIES
+  minitest (~> 5.0)
+  minitest-global_expectations
+  minitest-hooks
+  rack
+
+CHECKSUMS
+  minitest (5.27.0) sha256=2d3b17f8a36fe7801c1adcffdbc38233b938eb0b4966e97a6739055a45fa77d5
+  minitest-global_expectations (1.0.2) sha256=b0fda8574322d099d91196c74245ed07a257dbe61e4b6962ec1a71d0cee957e3
+  minitest-hooks (1.5.4) sha256=1254069f3da51fea234dc4ff974108d03d19260ad5c4b78eed9695726a5069b8
+  rack (3.2.8) sha256=1fecc85e463ebc7a2a945fff829ffcd549babeb1556384796fad946c28dc4ec7
+
+BUNDLED WITH
+  4.0.20
