@@ -16,6 +16,9 @@ Patch-level verification for [bundler].
 * Checks for vulnerable versions of gems in `Gemfile.lock`.
 * Checks for insecure gem sources (`http://` and `git://`).
 * Allows ignoring certain advisories that have been manually worked around.
+* Suggests the minimal safe version from a caller-provided list of
+  candidate versions, honoring project constraints, multiple patched
+  branches, unaffected ranges, and prerelease policy.
 * Prints advisory information.
 * Does not require a network connection.
 
@@ -146,6 +149,38 @@ Output the audit's results in JSON, to a file:
 
 ```shell
 $ bundle-audit check --format json --output bundle-audit.json
+```
+
+## Remediation Suggestions
+
+{Bundler::Audit::Remediation} selects, for a single gem, the minimal
+version from a caller-provided list of candidate versions that avoids every
+advisory while satisfying the project's explicit constraints. It is not a
+general dependency solver: it never contacts a remote gem index and only
+considers the versions it is given.
+
+```ruby
+require 'bundler/audit'
+
+result = Bundler::Audit::Remediation.suggest(
+  gem:         'rack',
+  versions:    %w[2.0.9 2.1.4 2.2.3],       # finite caller-provided list
+  constraints: ['>= 2.0', '< 3.0'],          # explicit project constraints
+  advisories:  advisories,                   # Bundler::Audit::Advisory objects
+  allow_prerelease:  false,
+  covered_sources:   [:rubygems],
+  covered_platforms: [:ruby]
+)
+
+case result
+when Bundler::Audit::Remediation::Suggestion
+  result.version   # the minimal safe version
+  result.definite? # false when the source/platform is not covered by the constraints
+  result.advisory_evidence   # which patched/unaffected requirement matched per advisory
+  result.minimality_evidence # why every smaller candidate was excluded
+when Bundler::Audit::Remediation::Unsatisfiable
+  result.advisory_survivors # per-advisory avoidable versions (no common candidate)
+end
 ```
 
 ## Rake Tasks

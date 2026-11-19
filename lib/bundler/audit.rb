@@ -16,4 +16,5 @@
 #
 
 require 'bundler/audit/database'
+require 'bundler/audit/remediation'
 require 'bundler/audit/version'

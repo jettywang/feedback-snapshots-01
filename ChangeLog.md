@@ -1,3 +1,12 @@
+### Unreleased
+
+* Added {Bundler::Audit::Remediation}, which selects the minimal safe
+  version for a gem from a caller-provided list of candidate versions.
+  The selection honors explicit project constraints, multiple patched
+  branches, unaffected version ranges, and prerelease policy, records the
+  exclusion and minimality evidence for each rejected candidate, and
+  reports an unsatisfiable result when no candidate avoids every advisory.
+
 ### 0.9.3 / 2025-11-28
 
 * Officially support Ruby 3.4, 3.5, and 4.0.
