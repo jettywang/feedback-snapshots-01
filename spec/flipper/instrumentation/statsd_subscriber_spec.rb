@@ -67,6 +67,55 @@ RSpec.describe Flipper::Instrumentation::StatsdSubscriber do
     end
   end
 
+  context 'gate hit counters' do
+    let(:other_user) { Flipper::Actor.new('2') }
+
+    before do
+      Flipper.register(:pilot_group) do |actor|
+        actor.flipper_id == '1'
+      end
+    end
+
+    after do
+      Flipper.unregister_groups
+    end
+
+    it 'counts the gate category that allowed a check' do
+      flipper[:stats].enable_group(:pilot_group)
+      flipper[:stats].enabled?(user)
+
+      assert_counter 'flipper.feature.stats.gate.group.enabled'
+    end
+
+    it 'counts denied checks against the none boundary' do
+      flipper[:stats].enabled?(user)
+
+      assert_counter 'flipper.feature.stats.gate.none.disabled'
+    end
+
+    it 'counts percentage gates without changing the decision' do
+      flipper[:stats].enable_percentage_of_actors(100)
+
+      expect(flipper[:stats].enabled?(user)).to be(true)
+      expect(flipper[:stats].enabled?(other_user)).to be(true)
+      assert_counter 'flipper.feature.stats.gate.percentage_of_actors.enabled'
+    end
+
+    it 'works with the low-sensitivity instrumenter' do
+      Flipper.register(:secret_pilot_group) { |_actor| true }
+      secret_actor = Flipper::Actor.new('User;secret-1')
+      instrumenter = Flipper::Instrumenters::LowSensitivity.new(ActiveSupport::Notifications)
+      low_sensitivity = Flipper.new(adapter, instrumenter: instrumenter)
+      low_sensitivity[:stats].enable_group(:secret_pilot_group)
+      low_sensitivity[:stats].enabled?(secret_actor)
+
+      assert_counter 'flipper.feature.stats.gate.group.enabled'
+      expect(socket.buffer.map(&:first).join).not_to include('secret-1')
+    ensure
+      Flipper.unregister_groups
+    end
+  end
+
   it 'updates adapter metrics when calls happen' do
     flipper[:stats].enable(user)
     assert_timer 'flipper.adapter.memory.enable'

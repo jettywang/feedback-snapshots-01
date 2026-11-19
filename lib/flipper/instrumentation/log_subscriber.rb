@@ -26,11 +26,11 @@ module Flipper
 
         details = if event.payload.key?(:actors)
           "actors=#{event.payload[:actors].inspect}"
-        else
+        elsif event.payload.key?(:thing)
           "thing=#{event.payload[:thing].inspect}"
         end
 
-        details += " gate_name=#{gate_name}" unless gate_name.nil?
+        details = [details, ("gate_name=#{gate_name}" unless gate_name.nil?)].compact.join(' ')
 
         name = '%s (%.1fms)' % [description, event.duration]
         debug "  #{color_name(name)}  [ #{details} ]"

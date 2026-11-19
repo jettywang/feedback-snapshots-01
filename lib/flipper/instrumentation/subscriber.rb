@@ -1,3 +1,5 @@
+require 'flipper/instrumentation/gate_classification'
+
 module Flipper
   module Instrumentation
     class Subscriber
@@ -56,7 +58,17 @@ module Flipper
             end
 
           update_counter metric_name
+          update_gate_counter feature_name, result if result == true || result == false
         end
+      end
+
+      # Private: Count one feature check by the gate category that decided it
+      # and whether it allowed or denied access. The category is bounded (see
+      # GateClassification), so the metric name cannot grow with actor input.
+      def update_gate_counter(feature_name, result)
+        gate_name = GateClassification.for_check(@payload[:gate_name], result)
+        boundary = result ? 'enabled' : 'disabled'
+        update_counter "flipper.feature.#{feature_name}.gate.#{gate_name}.#{boundary}"
       end
 
       # Private

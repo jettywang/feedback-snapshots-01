@@ -92,6 +92,34 @@ Flipper.enable_percentage_of_actors :search, 2
 
 Read more about [getting started with Flipper](https://flippercloud.io/docs?utm_source=oss&utm_medium=readme&utm_campaign=getting_started) and [enabling features](https://flippercloud.io/docs/features?utm_source=oss&utm_medium=readme&utm_campaign=enabling_features).
 
+## Low-Sensitivity Monitoring
+
+Monitoring dashboards often only need to know which kind of gate allowed or
+denied a check, not who asked. Wrap your instrumenter so every subscriber sees
+only low-sensitivity fields:
+
+```ruby
+# config/initializers/flipper.rb
+Flipper.configure do |config|
+  config.default do
+    instrumenter = Flipper::Instrumenters::LowSensitivity.new(ActiveSupport::Notifications)
+    Flipper.new(config.adapter, instrumenter: instrumenter)
+  end
+end
+```
+
+In Rails you can set `config.flipper.low_sensitivity = true` (or
+`FLIPPER_LOW_SENSITIVITY=true`) instead.
+
+Feature decisions are unchanged. Feature and adapter events keep only the
+feature name, operation, adapter name, boolean result, and a bounded gate
+category: `:boolean`, `:actor`, `:group`, `:percentage_of_actors`,
+`:percentage_of_time`, `:expression`, `:other`, or `:none` when no gate opened.
+Actor ids, things, adapter result values, and exception messages are removed.
+The Statsd subscriber counts each check as
+`flipper.feature.<feature>.gate.<category>.<enabled|disabled>`, so a pilot
+feature can be charted by gate without storing identifiers.
+
 ## Flipper Cloud
 
 Like Flipper and want more? Check out [Flipper Cloud](https://www.flippercloud.io?utm_source=oss&utm_medium=readme&utm_campaign=check_out), which comes with:

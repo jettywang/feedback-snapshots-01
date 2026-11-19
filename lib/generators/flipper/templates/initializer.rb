@@ -18,6 +18,11 @@ Rails.application.configure do
   ## Show Flipper checks in logs
   # config.flipper.log = true
 
+  ## Emit only low-sensitivity monitoring data. Actor identifiers, things,
+  ## adapter results, and exception messages are removed before subscribers
+  ## see the payload. Feature decisions are unchanged.
+  # config.flipper.low_sensitivity = true
+
   ## Reconfigure Flipper to use the Memory adapter and disable Cloud in tests
   # config.flipper.test_help = true
 

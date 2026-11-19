@@ -76,6 +76,11 @@ RSpec.describe Flipper::Instrumentation::LogSubscriber do
       feature_line = find_line('Flipper feature(search) enabled?')
       expect(feature_line).to include(user.inspect)
     end
+
+    it 'logs without a dangling thing separator' do
+      feature_line = find_line('Flipper feature(search) enabled?')
+      expect(feature_line).not_to include('thing=nil')
+    end
   end
 
   context 'changing feature enabled state' do

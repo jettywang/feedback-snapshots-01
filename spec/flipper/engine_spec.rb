@@ -35,6 +35,7 @@ RSpec.describe Flipper::Engine do
       example.run
     ensure
       Rails.env = env
+      ENV.delete('FLIPPER_LOW_SENSITIVITY')
     end
   end
 
@@ -142,6 +143,33 @@ RSpec.describe Flipper::Engine do
       ENV['FLIPPER_LOG'] = 'false'
       subject
       expect(config.log).to eq(false)
+    end
+
+    it 'defaults low_sensitivity to false' do
+      subject
+      expect(config.low_sensitivity).to eq(false)
+      expect(Flipper.instance.instrumenter).to be(ActiveSupport::Notifications)
+    end
+
+    it 'can set low_sensitivity from ENV' do
+      ENV['FLIPPER_LOW_SENSITIVITY'] = 'true'
+      subject
+      expect(config.low_sensitivity).to eq(true)
+      expect(Flipper.instance.instrumenter).to be_instance_of(Flipper::Instrumenters::LowSensitivity)
+      expect(Flipper.instance.instrumenter.instrumenter).to be(ActiveSupport::Notifications)
+    end
+
+    it 'can set low_sensitivity in initializer' do
+      initializer { config.low_sensitivity = true }
+      subject
+      expect(Flipper.instance.instrumenter).to be_instance_of(Flipper::Instrumenters::LowSensitivity)
+    end
+
+    it 'still loads the log subscriber when low_sensitivity is enabled' do
+      ENV['FLIPPER_LOW_SENSITIVITY'] = 'true'
+      allow(Flipper::Engine.instance).to receive(:require).and_call_original
+      expect(Flipper::Engine.instance).to receive(:require).with("flipper/instrumentation/log_subscriber")
+      subject
     end
 
     it 'sets defaults' do

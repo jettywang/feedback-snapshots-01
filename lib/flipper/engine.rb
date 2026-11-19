@@ -23,6 +23,7 @@ module Flipper
         preload: ENV.fetch('FLIPPER_PRELOAD', 'true').casecmp('true').zero?,
         instrumenter: ENV.fetch('FLIPPER_INSTRUMENTER', 'ActiveSupport::Notifications').constantize,
         log: ENV.fetch('FLIPPER_LOG', 'true').casecmp('true').zero?,
+        low_sensitivity: Flipper::Typecast.to_boolean(ENV.fetch('FLIPPER_LOW_SENSITIVITY', 'false')),
         cloud_path: "_flipper",
         strict: default_strict_value,
         actor_limit: ENV["FLIPPER_ACTOR_LIMIT"]&.to_i || 100,
@@ -46,13 +47,18 @@ module Flipper
 
       Flipper.configure do |config|
         config.default do
+          instrumenter = app.config.flipper.instrumenter
+          if app.config.flipper.low_sensitivity
+            instrumenter = Flipper::Instrumenters::LowSensitivity.wrap(instrumenter)
+          end
+
           if cloud?
             Flipper::Cloud.new(
               local_adapter: config.adapter,
-              instrumenter: app.config.flipper.instrumenter
+              instrumenter: instrumenter
             )
           else
-            Flipper.new(config.adapter, instrumenter: app.config.flipper.instrumenter)
+            Flipper.new(config.adapter, instrumenter: instrumenter)
           end
         end
       end
@@ -60,8 +66,9 @@ module Flipper
 
     initializer "flipper.log", after: :load_config_initializers do |app|
       flipper = app.config.flipper
+      instrumenter = Flipper::Instrumenters::LowSensitivity.unwrap(flipper.instrumenter)
 
-      if flipper.log && flipper.instrumenter == ActiveSupport::Notifications
+      if flipper.log && instrumenter == ActiveSupport::Notifications
         require "flipper/instrumentation/log_subscriber"
       end
     end
