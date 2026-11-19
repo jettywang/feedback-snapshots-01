@@ -22,6 +22,10 @@ except ImportError:  # pragma: no cover
 # (Issue #112)
 from kombu import exceptions
 
+from .diagnostics import (
+    CATEGORY_CHANNEL, CATEGORY_CONNECTION, CATEGORY_OPERATIONAL,
+    CATEGORY_UNKNOWN, RestrictedDiagnostics,
+)
 from .log import get_logger
 from .resource import Resource
 from .transport import get_transport_cls, supports_librabbitmq
@@ -130,6 +134,11 @@ class Connection:
             Note that if heartbeats are enabled then the
             :meth:`heartbeat_check` method must be called regularly,
             around once per second.
+        safe_alias (str): Safe connection alias explicitly chosen by the
+            integrator.  When set, :attr:`diagnostics` records sanitized
+            failure/failover events that identify this connection only by
+            this alias, so alert output never contains broker URLs,
+            credentials or virtual hosts.
 
     Note:
     ----
@@ -202,6 +211,17 @@ class Connection:
     #: Heartbeat value, currently only supported by the py-amqp transport.
     heartbeat = None
 
+    #: Safe alias explicitly chosen by the integrator.  When set, this is
+    #: the only connection identifier that may appear in alert output;
+    #: broker URLs (which may embed project names and access parameters)
+    #: are never used for diagnostics.
+    safe_alias = None
+
+    #: :class:`~kombu.diagnostics.RestrictedDiagnostics` recorder for
+    #: sanitized failure/failover events, or :const:`None` when no
+    #: :attr:`safe_alias` was configured.
+    diagnostics = None
+
     resolve_aliases = resolve_aliases
     failover_strategies = failover_strategies
 
@@ -212,7 +232,8 @@ class Connection:
                  ssl=False, transport=None, connect_timeout=5,
                  transport_options=None, login_method=None, uri_prefix=None,
                  heartbeat=0, failover_strategy='round-robin',
-                 alternates=None, credential_provider=None, **kwargs):
+                 alternates=None, credential_provider=None,
+                 safe_alias=None, **kwargs):
         alt = [] if alternates is None else alternates
         # have to spell the args out, just to get nice docstrings :(
         params = self._initial_params = {
@@ -279,6 +300,12 @@ class Connection:
             transport_options = {}
         self.transport_options = transport_options
 
+        self.safe_alias = safe_alias
+        self.diagnostics = (
+            RestrictedDiagnostics(safe_alias)
+            if safe_alias is not None else None
+        )
+
         if _log_connection:  # pragma: no cover
             self._logger = True
 
@@ -313,7 +340,23 @@ class Connection:
     def maybe_switch_next(self):
         """Switch to next URL given by the current failover strategy."""
         if self.cycle:
+            if self.diagnostics is not None:
+                self.diagnostics.failover_switch()
             self.switch(next(self.cycle))
+
+    def _classify_failure(self, exc):
+        """Classify a transport failure without exposing its details."""
+        if isinstance(exc, self.recoverable_channel_errors):
+            return CATEGORY_CHANNEL
+        if isinstance(exc, self.recoverable_connection_errors):
+            return CATEGORY_CONNECTION
+        if isinstance(exc, exceptions.OperationalError):
+            return CATEGORY_OPERATIONAL
+        return CATEGORY_UNKNOWN
+
+    def _record_candidate_rejected(self, exc):
+        if self.diagnostics is not None:
+            self.diagnostics.candidate_rejected(self._classify_failure(exc))
 
     def _init_params(self, hostname, userid, password, virtual_host, port,
                      insist, ssl, transport, connect_timeout,
@@ -508,9 +551,10 @@ class Connection:
                 if errback:
                     errback(exc, interval)
             finally:
-                # Select next host after invoking errback so that the
-                # callback can inspect the failing host, but always
-                # switch even if errback raises.
+                # Record the rejection and select next host after invoking
+                # errback so that the callback can inspect the failing
+                # host, but always switch even if errback raises.
+                self._record_candidate_rejected(exc)
                 self.maybe_switch_next()
 
             return interval if round else 0
@@ -519,12 +563,15 @@ class Connection:
         if not reraise_as_library_errors:
             ctx = self._dummy_context
         with ctx():
-            return retry_over_time(
+            connection = retry_over_time(
                 self._connection_factory, self.recoverable_connection_errors,
                 (), {}, on_error, max_retries,
                 interval_start, interval_step, interval_max,
                 callback, timeout=timeout
             )
+        if self.diagnostics is not None:
+            self.diagnostics.candidate_connected()
+        return connection
 
     @contextmanager
     def _reraise_as_library_errors(
