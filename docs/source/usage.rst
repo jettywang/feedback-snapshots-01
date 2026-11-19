@@ -646,6 +646,40 @@ log entries prior to a given date. This may be used to implement time based rete
 
     Using the ``auditlogflush`` command deletes log entries permanently and irreversibly from the database.
 
+Exporting audit evidence
+------------------------
+
+The ``auditlogevidence`` management command produces a read-only, reproducible export of audit log entries. It is
+intended for cases where a batch of audit rows must be handed to a second party and both sides need to compute the same
+digest over the same rows.
+
+The command never writes to the database. It supports both legacy text changes (``changes_text``) and the current JSON
+changes (``changes``), and flags records whose historical values cannot be reliably interpreted instead of silently
+dropping them::
+
+    django-admin auditlogevidence --output evidence.json
+
+Records are always emitted in primary-key order, so the same rows produce a byte-identical document no matter how the
+rows happen to be traversed. Each record carries a ``record_digest`` and the document carries an ``export_digest``, both
+computed with SHA-256 over canonical JSON (sorted keys, ASCII output, compact separators). The document records the
+algorithm and canonicalisation scheme under ``digest_algorithm`` and ``canonicalization``.
+
+Useful options:
+
+- ``--ids 1,2,3`` exports only the given primary keys.
+- ``--database`` reads from a database alias other than ``default``.
+- ``--indent 0`` emits compact single-line JSON.
+- ``--exclude-extra-data`` omits ``serialized_data`` and ``additional_data``, which may contain personal data.
+- ``--fail-on-unreadable`` exits with a non-zero status when any record could not be reliably interpreted.
+- ``--verify PATH`` compares the current database against a previously written export and reports the ids of added,
+  removed and changed records, including the fields that changed.
+
+A record whose changes cannot be interpreted is exported with ``changes_status`` set to ``unreadable`` (or with a
+``changes_text_invalid`` / ``changes_text_conflict`` flag) and the original payload preserved under
+``raw_changes_text``. This makes the affected record directly locatable without modifying the source database.
+
+.. versionadded:: 3.5.0
+
 Django Admin integration
 ------------------------
 

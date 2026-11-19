@@ -2,6 +2,13 @@
 
 ## Next Release
 
+#### Improvements
+
+- Add the read-only ``auditlogevidence`` management command and ``auditlog.evidence`` helpers to export audit log
+  entries as a deterministic, digestible evidence document. Legacy text and current JSON changes are both supported,
+  records with values that cannot be reliably interpreted are flagged, and an export can be verified against a
+  previously written file to locate changed records.
+
 ## 3.4.2 (2026-11-08)
 
 #### Improvements

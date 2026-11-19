@@ -49,6 +49,12 @@ Calculating changes
 .. automodule:: auditlog.diff
     :members:
 
+Evidence export
+---------------
+
+.. automodule:: auditlog.evidence
+    :members: build_evidence_export, diff_evidence_exports, dumps_evidence_export, export_evidence
+
 Registry
 --------
 
