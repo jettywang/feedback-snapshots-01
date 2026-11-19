@@ -174,11 +174,17 @@ def get_scan_command_attempt_cls(scan_command: ScanCommand) -> Type[ScanCommandA
 class ServerConnectivityStatusEnum(str, Enum):
     ERROR = "ERROR"
     COMPLETED = "COMPLETED"
+    # Set if connectivity testing was stopped by a cancellation, before it could determine whether the server was
+    # reachable. This is not a server rejection.
+    CANCELLED = "CANCELLED"
 
 
 class ServerScanStatusEnum(str, Enum):
     ERROR_NO_CONNECTIVITY = "ERROR_NO_CONNECTIVITY"
     COMPLETED = "COMPLETED"
+    # Set if the caller cancelled the scan; scan_result then contains the evidence collected so far, with the
+    # remaining scan commands marked as CANCELLED.
+    CANCELLED = "CANCELLED"
 
 
 @dataclass(frozen=True)
@@ -192,8 +198,10 @@ class ServerScanResult:
         connectivity_status: Whether SSLyze was able to connect to the server, or not.
         connectivity_error_trace: The connectivity error; only set if SSLyze was NOT able to connect to the server.
         connectivity_result: The result of connectivity testing; only set if SSLyze was able to connect to the server.
-        scan_status: Whether SSLyze was able to complete the scan, or not.
-        scan_result: The result of the scan; only set if SSLyze was able to complete the scan.
+        scan_status: Whether SSLyze was able to complete the scan, or not. Set to CANCELLED if the caller stopped
+            the scan before all scan commands completed.
+        scan_result: The result of the scan; set if scan_status == COMPLETED or CANCELLED. When CANCELLED, it
+            contains the evidence gathered so far; scan commands that did not finish are marked as CANCELLED.
     """
 
     uuid: UUID
@@ -207,4 +215,4 @@ class ServerScanResult:
 
     # Then, if SSLyze was able to connect, it performs the TLS scan
     scan_status: ServerScanStatusEnum
-    scan_result: Optional[AllScanCommandsAttempts]  # Set it the scan_status == COMPLETED
+    scan_result: Optional[AllScanCommandsAttempts]  # Set if scan_status is COMPLETED or CANCELLED

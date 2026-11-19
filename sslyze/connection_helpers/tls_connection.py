@@ -1,6 +1,7 @@
 import socket
+import threading
 from pathlib import Path
-from typing import Optional, TYPE_CHECKING
+from typing import Callable, List, Optional, TYPE_CHECKING
 
 from nassl.legacy_ssl_client import LegacySslClient
 
@@ -10,6 +11,7 @@ from sslyze.server_setting import (
     ConnectionTypeEnum,
 )
 from sslyze.errors import (
+    ScanCancelledError,
     ConnectionToServerTimedOut,
     ServerRejectedConnection,
     ConnectionToServerFailed,
@@ -141,6 +143,9 @@ class SslConnection:
     This it the base class to use to connect to a server in order to scan it.
     """
 
+    _connection_ids_nb = 0
+    _connection_ids_lock = threading.Lock()
+
     def __init__(
         self,
         server_location: ServerNetworkLocation,
@@ -153,6 +158,8 @@ class SslConnection:
     ) -> None:
         self._server_location = server_location
         self._network_configuration = network_configuration
+        # Set when sockets got registered with a ScanCancellation; used to unregister on close.
+        self._cancellation_registrations: List[Callable[[], None]] = []
 
         # Create the SSL client
         nassl_tls_version = OpenSslVersionEnum(tls_version.value)
@@ -208,7 +215,42 @@ class SslConnection:
             # TODO(AD): Modify set_tlsext_host_name() to return an exception so we dont need to look at _ssl_version
             self.ssl_client.set_tlsext_host_name(network_configuration.tls_server_name_indication)
 
+    def _register_underlying_socket(self, sock: socket.socket) -> None:
+        """Register the current socket so that cancelling the scan closes it and unblocks the handshake."""
+        # Imported lazily to avoid a circular import between sslyze.connection_helpers and sslyze.scanner.
+        from sslyze.scanner._scan_cancellation import close_socket_quietly, get_current_job
+
+        cancellation, job_token = get_current_job()
+        if cancellation is None or job_token is None:
+            return
+
+        with SslConnection._connection_ids_lock:
+            SslConnection._connection_ids_nb += 1
+            connection_id = SslConnection._connection_ids_nb
+
+        def close_callback() -> None:
+            close_socket_quietly(sock)
+
+        if not cancellation.register_connection(job_token, connection_id, close_callback):
+            # The scan got cancelled concurrently; do not use this connection.
+            close_socket_quietly(sock)
+            raise ScanCancelledError()
+
+        def unregister() -> None:
+            cancellation.unregister_connection(job_token, connection_id)
+
+        self._cancellation_registrations.append(unregister)
+
+    def _raise_if_cancelled(self) -> None:
+        from sslyze.scanner._scan_cancellation import get_current_job
+
+        cancellation, job_token = get_current_job()
+        if cancellation is not None and job_token is not None and cancellation.is_job_cancelled(job_token):
+            raise ScanCancelledError()
+
     def _do_pre_handshake(self) -> None:
+        self._raise_if_cancelled()
+
         try:
             sock = _open_socket(self._server_location, self._network_configuration.network_timeout)
         # Re-raise any proxy error with additional context/info
@@ -248,6 +290,7 @@ class SslConnection:
                 )
 
         # Pass the connected socket to the SSL client
+        self._register_underlying_socket(sock)
         self.ssl_client.set_underlying_socket(sock)
 
     def connect(self, should_retry_connection: bool = True) -> None:
@@ -257,11 +300,16 @@ class SslConnection:
 
         # First try to connect to the server, and do retries if there are timeouts
         while True:
-            # Sleep if it's a retry attempt
-            time.sleep(delay_for_next_attempt)
+            # Sleep if it's a retry attempt, but wake up immediately if the scan gets cancelled
+            if delay_for_next_attempt:
+                if self._wait_for_retry(delay_for_next_attempt):
+                    raise ScanCancelledError()
             try:
                 self._do_pre_handshake()
+            except ScanCancelledError:
+                raise
             except socket.timeout:
+                self._raise_if_cancelled()
                 # Attempt to retry connection if a network error occurred during connection or the handshake
                 connection_attempts_nb += 1
                 if connection_attempts_nb >= max_attempts_nb:
@@ -278,6 +326,7 @@ class SslConnection:
                     # Exponential back off; cap maximum delay at 6 seconds
                     delay_for_next_attempt = min(6, 2 * delay_for_next_attempt)
             except ConnectionError:
+                self._raise_if_cancelled()
                 raise ServerRejectedConnection(
                     server_location=self._server_location,
                     network_configuration=self._network_configuration,
@@ -286,6 +335,7 @@ class SslConnection:
             except OSError:
                 # OSError is the parent class of all socket (ie. non-TLS) connection errors such as socket.timeout or
                 # ConnectionError; hence this is the most generic error handler and should always be defined last
+                self._raise_if_cancelled()
                 raise ConnectionToServerFailed(
                     server_location=self._server_location,
                     network_configuration=self._network_configuration,
@@ -300,10 +350,15 @@ class SslConnection:
         try:
             self.ssl_client.do_handshake()
 
+        except ScanCancelledError:
+            # The cancellation closed the underlying socket while the handshake was in progress
+            raise
         except ClientCertificateRequested:
+            self._raise_if_cancelled()
             # Server expected a client certificate and we didn't provide one
             raise
         except socket.timeout:
+            self._raise_if_cancelled()
             # Network timeout, propagate the error
             raise TlsHandshakeTimedOut(
                 server_location=self._server_location,
@@ -311,12 +366,14 @@ class SslConnection:
                 error_message="Connection to server timed out during the TLS handshake",
             )
         except ConnectionError:
+            self._raise_if_cancelled()
             raise ServerRejectedTlsHandshake(
                 server_location=self._server_location,
                 network_configuration=self._network_configuration,
                 error_message="Server rejected the connection",
             )
         except OSError as e:
+            self._raise_if_cancelled()
             # OSError is the parent of all (non-TLS) socket/connection errors so it should be last
             if "Nassl SSL handshake failed" in str(e.args):
                 # Special error returned by nassl
@@ -328,6 +385,7 @@ class SslConnection:
             # Unknown connection error
             raise
         except _nassl.OpenSSLError as e:
+            self._raise_if_cancelled()
             openssl_error_message = e.args[0]
             if "dh key too small" in openssl_error_message:
                 # This is when SSLyze's OpenSSL rejects DH parameters (to protect against Logjam); this actually
@@ -356,5 +414,29 @@ class SslConnection:
             # Unknown SSL error if we get there
             raise
 
+    def _wait_for_retry(self, delay: float) -> bool:
+        """Wait before retrying; returns True if the scan was cancelled while waiting."""
+        from sslyze.scanner._scan_cancellation import get_current_job
+
+        cancellation, job_token = get_current_job()
+        if cancellation is not None and job_token is not None:
+            return cancellation.wait(delay)
+        time.sleep(delay)
+        return False
+
     def close(self) -> None:
-        self.ssl_client.shutdown()
+        # Stop tracking this connection before shutting it down; if the scan got cancelled, the socket may have
+        # already been closed for us, in which case shutdown() can fail.
+        registrations = self._cancellation_registrations
+        self._cancellation_registrations = []
+        for registration in registrations:
+            registration()
+        try:
+            self.ssl_client.shutdown()
+        except Exception:
+            from sslyze.scanner._scan_cancellation import get_current_job
+
+            cancellation, job_token = get_current_job()
+            if cancellation is None or job_token is None or not cancellation.is_job_cancelled(job_token):
+                raise
+            # Closing must still converge when the connection was interrupted by a cancellation.

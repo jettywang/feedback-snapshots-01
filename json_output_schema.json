@@ -835,7 +835,8 @@
       "enum": [
         "ERROR",
         "COMPLETED",
-        "NOT_SCHEDULED"
+        "NOT_SCHEDULED",
+        "CANCELLED"
       ],
       "title": "ScanCommandAttemptStatusEnum",
       "type": "string"
@@ -853,14 +854,15 @@
     "ServerConnectivityStatusEnum": {
       "enum": [
         "ERROR",
-        "COMPLETED"
+        "COMPLETED",
+        "CANCELLED"
       ],
       "title": "ServerConnectivityStatusEnum",
       "type": "string"
     },
     "ServerScanResultAsJson": {
       "additionalProperties": false,
-      "description": "The result of scanning a server.\n\nAttributes:\n    uuid\n    server_location\n    network_configuration\n    connectivity_status: Whether SSLyze was able to connect to the server, or not.\n    connectivity_error_trace: The connectivity error; only set if SSLyze was NOT able to connect to the server.\n    connectivity_result: The result of connectivity testing; only set if SSLyze was able to connect to the server.\n    scan_status: Whether SSLyze was able to complete the scan, or not.\n    scan_result: The result of the scan; only set if SSLyze was able to complete the scan.",
+      "description": "The result of scanning a server.\n\nAttributes:\n    uuid\n    server_location\n    network_configuration\n    connectivity_status: Whether SSLyze was able to connect to the server, or not.\n    connectivity_error_trace: The connectivity error; only set if SSLyze was NOT able to connect to the server.\n    connectivity_result: The result of connectivity testing; only set if SSLyze was able to connect to the server.\n    scan_status: Whether SSLyze was able to complete the scan, or not. Set to CANCELLED if the caller stopped\n        the scan before all scan commands completed.\n    scan_result: The result of the scan; set if scan_status == COMPLETED or CANCELLED. When CANCELLED, it\n        contains the evidence gathered so far; scan commands that did not finish are marked as CANCELLED.",
       "properties": {
         "uuid": {
           "format": "uuid",
@@ -927,7 +929,8 @@
     "ServerScanStatusEnum": {
       "enum": [
         "ERROR_NO_CONNECTIVITY",
-        "COMPLETED"
+        "COMPLETED",
+        "CANCELLED"
       ],
       "title": "ServerScanStatusEnum",
       "type": "string"

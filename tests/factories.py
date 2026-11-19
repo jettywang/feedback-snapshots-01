@@ -167,6 +167,13 @@ class ServerScanResultFactory:
             connectivity_result = None
             final_scan_result = None
 
+        elif scan_status == ServerScanStatusEnum.CANCELLED:
+            # A cancelled scan can still have partial evidence
+            connectivity_error_trace = None
+            connectivity_status = ServerConnectivityStatusEnum.CANCELLED
+            connectivity_result = None
+            final_scan_result = scan_result if scan_result is not None else AllScanCommandsAttemptsFactory.create()
+
         else:
             raise ValueError("Should never happen")
 

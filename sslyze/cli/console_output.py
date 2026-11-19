@@ -66,10 +66,14 @@ class ObserverToGenerateConsoleOutput(ScannerObserver):
         self._file_to.write(f"   {server_location.display_string:<25} => {network_route} {client_auth_msg}\n")
 
     def server_scan_completed(self, server_scan_result: ServerScanResult) -> None:
-        if server_scan_result.scan_status != ServerScanStatusEnum.COMPLETED:
+        if server_scan_result.scan_status not in [
+            ServerScanStatusEnum.COMPLETED,
+            ServerScanStatusEnum.CANCELLED,
+        ]:
             # Nothing to print here if the scan was not completed
             return
-        assert server_scan_result.scan_result  # Must be set if scan_status == ServerScanStatusEnum.COMPLETED
+        # A cancelled scan still has a scan_result with the evidence that was gathered before the cancellation
+        assert server_scan_result.scan_result
 
         # Generate the console output for each scan command
         scan_command_results_str = ""
@@ -88,7 +92,10 @@ class ObserverToGenerateConsoleOutput(ScannerObserver):
                     server_scan_result.server_location, scan_command, scan_command_attempt
                 )
 
-            elif scan_command_attempt.status == ScanCommandAttemptStatusEnum.NOT_SCHEDULED:
+            elif scan_command_attempt.status in [
+                ScanCommandAttemptStatusEnum.NOT_SCHEDULED,
+                ScanCommandAttemptStatusEnum.CANCELLED,
+            ]:
                 pass
 
             else:

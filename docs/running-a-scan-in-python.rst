@@ -50,6 +50,33 @@ Lastly, the results can be retrieved using the ``Scanner.get_results()`` method,
     for server_scan_result in scanner.get_results():
         print(f"\n\n****Results for {server_scan_result.server_location.hostname}****")
 
+Cancelling a scan
+=================
+
+Calling ``Scanner.cancel_scans()`` after ``queue_scans()`` stops the batch as soon as possible. It is safe to call from
+another thread while ``get_results()`` is being consumed::
+
+    scanner = Scanner()
+    scanner.queue_scans(all_scan_requests)
+
+    def cancel_after_a_while() -> None:
+        scanner.cancel_scans()
+
+    threading.Thread(target=cancel_after_a_while).start()
+    for server_scan_result in scanner.get_results():
+        ...
+
+After cancellation, ``get_results()`` still returns exactly one ``ServerScanResult`` per submitted request, using the
+request's UUID. The result of a request that had already finished keeps its ``COMPLETED`` status; the others have
+``scan_status == ServerScanStatusEnum.CANCELLED``. A cancelled scan result contains the evidence of every scan command
+that had completed before the cancellation, while the scan commands that could not finish are marked as
+``ScanCommandAttemptStatusEnum.CANCELLED``; a request whose connectivity test was cancelled has
+``connectivity_status == ServerConnectivityStatusEnum.CANCELLED``. A cancellation is never reported as a connectivity
+error or as the server rejecting the connection.
+
+TLS handshakes that are in progress when ``cancel_scans()`` is called get their sockets closed so that workers stop
+promptly; the unfinished work never gets attributed to another server.
+
 Full Example
 ************
 

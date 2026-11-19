@@ -12,6 +12,9 @@ class ScanCommandAttemptStatusEnum(str, Enum):
     ERROR = "ERROR"
     COMPLETED = "COMPLETED"
     NOT_SCHEDULED = "NOT_SCHEDULED"
+    # Set if the scan was cancelled before this scan command could complete; the result is None and the attempt
+    # is not an ERROR: the server did not reject anything, the caller stopped the scan.
+    CANCELLED = "CANCELLED"
 
 
 class ScanCommandErrorReasonEnum(str, Enum):

@@ -82,3 +82,12 @@ class TlsHandshakeTimedOut(TlsHandshakeFailed):
     """
 
     pass
+
+
+class ScanCancelledError(Exception):
+    """Raised when work must stop because the caller cancelled the scan.
+
+    This is deliberately not a :class:`ConnectionToServerFailed`: a cancellation is never a server rejection.
+    """
+
+    pass
