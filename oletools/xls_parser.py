@@ -177,6 +177,20 @@ class WorkbookStream(XlsStream):
             return XlsRecordEof, False
         elif rec_type == XlsRecordSupBook.TYPE:
             return XlsRecordSupBook, True
+        elif rec_type == XlsRecordBoundSheet.TYPE:
+            return XlsRecordBoundSheet, True
+        elif rec_type == XlsRecordExternSheet.TYPE:
+            return XlsRecordExternSheet, True
+        elif rec_type == XlsRecordExternName.TYPE:
+            return XlsRecordExternName, True
+        elif rec_type in XlsRecordFormula.FORMULA_TYPES:
+            return XlsRecordFormula, True
+        elif rec_type == XlsRecordShrFmla.TYPE:
+            return XlsRecordShrFmla, True
+        elif rec_type == XlsRecordArray.TYPE:
+            return XlsRecordArray, True
+        elif rec_type == XlsRecordName.TYPE:
+            return XlsRecordName, True
         else:
             return XlsRecord, False
 
@@ -219,6 +233,22 @@ class XlsbStream(record_base.OleRecordStream):
         """
         if rec_type == XlsbBeginSupBook.TYPE:
             return XlsbBeginSupBook, True
+        elif rec_type == XlsbBundleSh.TYPE:
+            return XlsbBundleSh, True
+        elif rec_type == XlsbSupBookSrc.TYPE:
+            return XlsbSupBookSrc, True
+        elif rec_type == XlsbExternSheet.TYPE:
+            return XlsbExternSheet, True
+        elif rec_type == XlsbName.TYPE:
+            return XlsbName, True
+        elif rec_type in XlsbFormula.FORMULA_TYPES:
+            return XlsbFormula, True
+        elif rec_type == XlsbShrFmla.TYPE:
+            return XlsbShrFmla, True
+        elif rec_type == XlsbArrFmla.TYPE:
+            return XlsbArrFmla, True
+        elif rec_type == XlsbRowHdr.TYPE:
+            return XlsbRowHdr, True
         else:
             return XlsbRecord, False
 
@@ -394,6 +424,198 @@ class XlsRecordSupBook(XlsRecord):
         return 'SupBook Record ({0})'.format(self.support_link_type)
 
 
+class XlsRecordBoundSheet(XlsRecord):
+    """ BOUNDSHEET record: offset of a sheet substream and its name """
+
+    TYPE = 133
+
+    def finish_constructing(self, _):
+        self.offset = None
+        self.visibility = None
+        self.sheet_type = None
+        self.name = u''
+        if self.data is None or len(self.data) < 8:
+            return
+        self.offset, self.visibility, self.sheet_type, cch, flags = \
+            unpack('<iBBBB', self.data[:8])
+        pos = 8
+        if cch == 0:
+            return
+        if flags & 0x01:
+            if pos + 2 * cch > len(self.data):
+                return
+            self.name, _ = read_unicode_2byte(self.data, pos, cch)
+        else:
+            self.name = self.data[pos:pos + cch].decode('latin-1')
+
+
+class XlsRecordExternSheet(XlsRecord):
+    """ EXTERNSHEET record: ordered XTI entries used by 3-D references """
+
+    TYPE = 23
+
+    def finish_constructing(self, _):
+        self.entries = []
+        self.truncated = False
+        if self.data is None or len(self.data) < 2:
+            self.truncated = True
+            return
+        count = unpack('<H', self.data[0:2])[0]
+        pos = 2
+        for _ in range(count):
+            if pos + 6 > len(self.data):
+                self.truncated = True
+                break
+            supbook, first, last = unpack('<HHH', self.data[pos:pos + 6])
+            self.entries.append((supbook, first, last))
+            pos += 6
+
+
+class XlsRecordExternName(XlsRecord):
+    """ EXTERNNAME record: a name within the preceding SUPBOOK """
+
+    TYPE = 35
+
+    def finish_constructing(self, _):
+        self.name = u''
+        self.builtin = False
+        self.truncated = False
+        if self.data is None or len(self.data) < 7:
+            self.truncated = True
+            return
+        self.options = unpack('<H', self.data[0:2])[0]
+        # BIFF8: 2 bytes options + 4 bytes unused + XLUnicodeString (1-byte cch)
+        cch = self.data[6]
+        if cch == 0:
+            return
+        if 7 + cch > len(self.data):
+            self.truncated = True
+            return
+        flags = self.data[7]
+        pos = 8
+        if flags & 0x01:
+            if pos + 2 * cch > len(self.data):
+                self.truncated = True
+                return
+            self.name, _ = read_unicode_2byte(self.data, pos, cch)
+        else:
+            self.name = self.data[pos:pos + cch].decode('latin-1')
+
+
+class XlsRecordFormula(XlsRecord):
+    """ FORMULA record (BIFF8), keeps the token stream for reference analysis """
+
+    FORMULA_TYPES = (0x0006, 0x0206, 0x0406)
+    TYPE = None
+
+    def finish_constructing(self, _):
+        self.row = None
+        self.col = None
+        self.cce = None
+        self.rgce = b''
+        self.truncated = False
+        if self.data is None or len(self.data) < 22:
+            self.truncated = True
+            return
+        self.row, self.col, self.xf = unpack('<HHH', self.data[0:6])
+        self.flags = unpack('<H', self.data[14:16])[0]
+        self.cce = unpack('<H', self.data[20:22])[0]
+        end = 22 + self.cce
+        if end > len(self.data):
+            self.truncated = True
+            self.rgce = self.data[22:]
+        else:
+            self.rgce = self.data[22:end]
+
+
+class XlsRecordArray(XlsRecord):
+    """ ARRAY record: formula for a range of cells """
+
+    TYPE = 0x0221
+
+    def finish_constructing(self, _):
+        self.range = None
+        self.cce = None
+        self.rgce = b''
+        self.truncated = False
+        if self.data is None or len(self.data) < 14:
+            self.truncated = True
+            return
+        # row1, row2, col1, col2, flags then 5 reserved bytes
+        self.range = (unpack('<H', self.data[0:2])[0],
+                      unpack('<H', self.data[2:4])[0],
+                      self.data[4], self.data[5])
+        self.cce = unpack('<H', self.data[12:14])[0]
+        self.rgce = self.data[14:14 + self.cce]
+        if len(self.rgce) != self.cce:
+            self.truncated = True
+
+
+class XlsRecordShrFmla(XlsRecord):
+    """ SHRFMLA record: formula shared by a cell range """
+
+    TYPE = 0x04BC
+
+    def finish_constructing(self, _):
+        self.range = None
+        self.cce = None
+        self.rgce = b''
+        self.truncated = False
+        if self.data is None or len(self.data) < 12:
+            self.truncated = True
+            return
+        # row1, row2, col1, col2, nfmlas then tokslen
+        self.range = (unpack('<H', self.data[0:2])[0],
+                      unpack('<H', self.data[2:4])[0],
+                      self.data[4], self.data[5])
+        self.nfmlas = self.data[6]
+        self.cce = unpack('<H', self.data[10:12])[0]
+        self.rgce = self.data[12:12 + self.cce]
+        if len(self.rgce) != self.cce:
+            self.truncated = True
+
+
+class XlsRecordName(XlsRecord):
+    """ NAME record, including a defined name's token stream """
+
+    TYPE = 24      # 0x0018
+
+    def finish_constructing(self, _):
+        self.name = u''
+        self.scope = None
+        self.cce = None
+        self.rgce = b''
+        self.truncated = False
+        if self.data is None or len(self.data) < 15:
+            self.truncated = True
+            return
+        self.options = unpack('<H', self.data[0:2])[0]
+        self.name_len = self.data[3]
+        self.cce = unpack('<H', self.data[4:6])[0]
+        self.scope = unpack('<H', self.data[8:10])[0]
+        cch = self.name_len
+        if cch:
+            if 14 + cch > len(self.data):
+                self.truncated = True
+                return
+            flags = self.data[14]
+            pos = 15
+            if flags & 0x01:
+                if pos + 2 * cch > len(self.data):
+                    self.truncated = True
+                    return
+                self.name, name_end = read_unicode_2byte(
+                    self.data, pos, cch)
+            else:
+                name_end = pos + cch
+                self.name = self.data[pos:name_end].decode('latin-1')
+            self.rgce = self.data[name_end:name_end + self.cce]
+        else:
+            self.rgce = self.data[14:14 + self.cce]
+        if len(self.rgce) != self.cce:
+            self.truncated = True
+
+
 class XlsbRecord(record_base.OleRecordBase):
     """ like an xls record, but from binary part of xlsb file
 
@@ -466,6 +688,198 @@ class XlsbBeginSupBook(XlsbRecord):
     def _type_str(self):
         return 'XlsbBeginSupBook Record ({0}, "{1}", "{2}")' \
                .format(self.link_type, self.string1, self.string2)
+
+
+class XlsbBundleSh(XlsbRecord):
+    """ sheet declaration (name and relationship id) in workbook.bin """
+
+    TYPE = 0x009C
+
+    def finish_constructing(self, _):
+        self.hidden = None
+        self.tab_id = None
+        self.rel_id = u''
+        self.name = u''
+        if self.data is None or len(self.data) < 12:
+            return
+        self.hidden, self.tab_id = unpack('<II', self.data[0:8])
+        cch = unpack('<I', self.data[8:12])[0]
+        if cch and 12 + 2 * cch <= len(self.data):
+            self.rel_id = self.data[12:12 + 2 * cch].decode('utf-16-le')
+        pos = 12 + 2 * cch if cch else 12
+        if pos + 4 > len(self.data):
+            return
+        name_len = unpack('<I', self.data[pos:pos + 4])[0]
+        pos += 4
+        if name_len and pos + 2 * name_len <= len(self.data):
+            self.name = self.data[pos:pos + 2 * name_len].decode('utf-16-le')
+
+
+class XlsbSupBookSrc(XlsbRecord):
+    """ relationship id of an external link part in workbook.bin """
+
+    TYPE = 0x0163
+
+    def finish_constructing(self, _):
+        self.rel_id = u''
+        if self.data is None or len(self.data) < 4:
+            return
+        cch = unpack('<I', self.data[0:4])[0]
+        if cch and 4 + 2 * cch <= len(self.data):
+            self.rel_id = self.data[4:4 + 2 * cch].decode('utf-16-le')
+
+
+class XlsbExternSheet(XlsbRecord):
+    """ XTI table for 3-D references in workbook.bin """
+
+    TYPE = 0x016A
+
+    def finish_constructing(self, _):
+        self.entries = []
+        if self.data is None or len(self.data) < 4:
+            return
+        count = unpack('<I', self.data[0:4])[0]
+        pos = 4
+        for _ in range(count):
+            if pos + 12 > len(self.data):
+                break
+            supbook, first, last = unpack('<Iii', self.data[pos:pos + 12])
+            self.entries.append((supbook, first, last))
+            pos += 12
+
+
+class XlsbRowHdr(XlsbRecord):
+    """ row header; used to derive the row of a following formula cell """
+
+    TYPE = 0x0000
+
+    def finish_constructing(self, _):
+        self.row = None
+        if self.data is not None and len(self.data) >= 4:
+            self.row = unpack('<I', self.data[0:4])[0]
+
+
+class XlsbFormula(XlsbRecord):
+    """ formula cell (BrtFmlaNum/String/Bool/Error) """
+
+    FORMULA_TYPES = (0x0008, 0x0009, 0x000A, 0x000B)
+    TYPE = None
+
+    def finish_constructing(self, _):
+        self.col = None
+        self.row = None
+        self.cce = None
+        self.rgce = b''
+        self.truncated = False
+        if self.data is None or len(self.data) < 12:
+            self.truncated = True
+            return
+        self.col = unpack('<I', self.data[0:4])[0]
+        # cell: col(4) + style(3) + fPhShow(1)
+        pos = 8
+        if self.type == 0x0009:           # BrtFmlaNum
+            pos += 10                      # value(8) + reserved(2)
+        elif self.type == 0x000A:         # BrtFmlaBool
+            pos += 3                       # value(1) + reserved(2)
+        elif self.type == 0x000B:         # BrtFmlaError
+            pos += 3
+        elif self.type == 0x0008:         # BrtFmlaString
+            if pos + 4 > len(self.data):
+                self.truncated = True
+                return
+            cch = unpack('<I', self.data[pos:pos + 4])[0]
+            pos += 4 + 2 * cch + 2         # string + reserved(2)
+        if pos + 4 > len(self.data):
+            self.truncated = True
+            return
+        self.cce = unpack('<I', self.data[pos:pos + 4])[0]
+        pos += 4
+        end = pos + self.cce
+        if end > len(self.data):
+            self.truncated = True
+            self.rgce = self.data[pos:]
+        else:
+            self.rgce = self.data[pos:end]
+
+
+class XlsbShrFmla(XlsbRecord):
+    """ shared formula over a range (BrtShrFmla) """
+
+    TYPE = 0x01AB
+
+    def finish_constructing(self, _):
+        self.range = None
+        self.cce = None
+        self.rgce = b''
+        self.truncated = False
+        if self.data is None or len(self.data) < 20:
+            self.truncated = True
+            return
+        r1, r2, c1, c2 = unpack('<IIII', self.data[0:16])
+        self.range = (r1, r2, c1, c2)
+        self.cce = unpack('<I', self.data[16:20])[0]
+        end = 20 + self.cce
+        self.rgce = self.data[20:end]
+        if len(self.rgce) != self.cce:
+            self.truncated = True
+
+
+class XlsbArrFmla(XlsbRecord):
+    """ array formula over a range (BrtArrFmla) """
+
+    TYPE = 0x01AA
+
+    def finish_constructing(self, _):
+        self.range = None
+        self.cce = None
+        self.rgce = b''
+        self.truncated = False
+        if self.data is None or len(self.data) < 21:
+            self.truncated = True
+            return
+        r1, r2, c1, c2 = unpack('<IIII', self.data[:16])
+        self.range = (r1, r2, c1, c2)
+        self.always_calc = self.data[16]
+        self.cce = unpack('<I', self.data[17:21])[0]
+        end = 21 + self.cce
+        self.rgce = self.data[21:end]
+        if len(self.rgce) != self.cce:
+            self.truncated = True
+
+
+class XlsbName(XlsbRecord):
+    """ defined name with a token stream (BrtName) """
+
+    TYPE = 0x0027
+
+    def finish_constructing(self, _):
+        self.name = u''
+        self.scope = None
+        self.rgce = b''
+        self.truncated = False
+        if self.data is None or len(self.data) < 9:
+            self.truncated = True
+            return
+        # flags(4) chKey(1) itab(4)
+        self.scope = unpack('<I', self.data[5:9])[0]
+        pos = 9
+        if pos + 4 > len(self.data):
+            self.truncated = True
+            return
+        cch = unpack('<I', self.data[pos:pos + 4])[0]
+        pos += 4
+        if cch and pos + 2 * cch <= len(self.data):
+            self.name = self.data[pos:pos + 2 * cch].decode('utf-16-le')
+            pos += 2 * cch
+        # remaining: cce(4) rgce, cb(4), rgcb, comment
+        if pos + 4 > len(self.data):
+            self.truncated = True
+            return
+        cce = unpack('<I', self.data[pos:pos + 4])[0]
+        pos += 4
+        self.rgce = self.data[pos:pos + cce]
+        if len(self.rgce) != cce:
+            self.truncated = True
 
 
 ###############################################################################

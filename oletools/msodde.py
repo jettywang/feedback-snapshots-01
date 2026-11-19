@@ -54,6 +54,7 @@ import os
 import sys
 import re
 import csv
+import json
 
 import olefile
 
@@ -71,6 +72,7 @@ if _parent_dir not in sys.path:
 
 from oletools import ooxml
 from oletools import xls_parser
+from oletools import msodde_excel
 from oletools import rtfobj
 from oletools.ppt_record_parser import is_ppt
 from oletools import crypto
@@ -291,6 +293,16 @@ def process_args(cmd_line_args=None):
                               help='Return all fields, irrespective of their '
                                    'contents')
     parser.set_defaults(field_filter_mode=FIELD_FILTER_DEFAULT)
+    parser.add_argument('--excel-report', action='store_true',
+                        dest='excel_report', default=True,
+                        help='Print the Excel declaration/reference evidence '
+                             'report (default for Excel workbooks)')
+    parser.add_argument('--excel-report-json', action='store_true',
+                        dest='excel_report_json', default=False,
+                        help='Print the Excel evidence report as JSON')
+    parser.add_argument('--no-excel-report', action='store_false',
+                        dest='excel_report', default=True,
+                        help='Do not print the Excel evidence report')
 
     return parser.parse_args(cmd_line_args)
 
@@ -917,6 +929,26 @@ def process_file(filepath, field_filter_mode=None):
 # === MAIN =================================================================
 
 
+def process_excel_report(filepath):
+    """Build an Excel DDE evidence report, or None for non-Excel files.
+
+    This is intentionally separate from :py:func:`process_file`: callers that
+    only need the legacy list of link texts keep using that function.  The
+    analysis is read-only and does not evaluate formulas or contact targets.
+    """
+    if isinstance(filepath, (bytes, bytearray)):
+        return None
+    try:
+        if crypto.is_encrypted(filepath):
+            # Analyzing the encrypted container would only produce noise
+            # (ciphertext misinterpreted as records).  The caller decrypts
+            # first and then calls us again.
+            return None
+        return msodde_excel.analyze_workbook(filepath)
+    except (ValueError, IOError, OSError):
+        return None
+
+
 def process_maybe_encrypted(filepath, passwords=None, decrypted_dir=None, crypto_nesting=0,
                             **kwargs):
     """
@@ -988,16 +1020,20 @@ def main(cmd_line_args=None):
     # Setup logging to the console:
     # here we use stdout instead of stderr by default, so that the output
     # can be redirected properly.
-    log_helper.enable_logging(args.json, args.loglevel, stream=sys.stdout)
+    # A standalone JSON report must not be mixed with the normal log output.
+    log_helper.enable_logging(args.json and not args.excel_report_json,
+                              args.loglevel, stream=sys.stdout)
 
     if args.nounquote:
         global NO_QUOTES
         NO_QUOTES = True
 
-    logger.print_str(BANNER)
-    logger.print_str('Opening file: %s' % args.filepath)
+    if not args.excel_report_json:
+        logger.print_str(BANNER)
+        logger.print_str('Opening file: %s' % args.filepath)
 
     text = ''
+    excel_report = None
     return_code = 1
     try:
         text = process_maybe_encrypted(
@@ -1005,15 +1041,59 @@ def main(cmd_line_args=None):
             field_filter_mode=args.field_filter_mode)
         return_code = 0
     except Exception as exc:
-        logger.exception(str(exc))
+        if not args.excel_report_json:
+            logger.exception(str(exc))
+
+    if args.excel_report:
+        excel_report = _excel_report_maybe_encrypted(
+            args.filepath, args.password, args.decrypted_dir)
+
+    if args.excel_report_json:
+        # Pure JSON on stdout: no banner, no legacy link section.
+        print(json.dumps(
+            excel_report.as_dict() if excel_report is not None else None,
+            ensure_ascii=False, indent=2))
+        log_helper.end_logging()
+        return return_code
 
     logger.print_str('DDE Links:')
     for link in text.splitlines():
         logger.print_str(text, type='dde-link')
 
+    if excel_report is not None:
+        logger.print_str('Excel DDE Evidence:')
+        logger.print_str(excel_report.text_report(),
+                         type='excel-dde-report')
+
     log_helper.end_logging()
 
     return return_code
+
+
+def _excel_report_maybe_encrypted(filepath, passwords=None,
+                                  decrypted_dir=None):
+    """Run the Excel evidence report on a file, decrypting if necessary."""
+    report = process_excel_report(filepath)
+    if report is not None:
+        return report
+    if not crypto.is_encrypted(filepath):
+        return None
+    try:
+        decrypted_file, correct_password = crypto.decrypt(
+            filepath, passwords or crypto.DEFAULT_PASSWORDS, decrypted_dir)
+    except Exception:
+        logger.debug('Could not decrypt for Excel report', exc_info=True)
+        return None
+    try:
+        if decrypted_file and correct_password:
+            return process_excel_report(decrypted_file)
+        return None
+    finally:
+        if decrypted_file and os.path.isfile(decrypted_file):
+            try:
+                os.unlink(decrypted_file)
+            except Exception:
+                logger.debug('Could not remove decrypted file', exc_info=True)
 
 
 if __name__ == '__main__':

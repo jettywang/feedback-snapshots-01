@@ -38,6 +38,13 @@ Software.
 News
 ----
 
+-  **Unreleased**:
+
+   -  msodde: Excel evidence report separating DDE declarations from
+      formula references (OOXML, BIFF and XLSB), with explicit coverage
+      limitations for unknown tokens and broken indexes;
+      ``--excel-report-json`` for machine-readable output
+
 -  **2025-05-22 v0.60.3**:
 
    -  olevba:
