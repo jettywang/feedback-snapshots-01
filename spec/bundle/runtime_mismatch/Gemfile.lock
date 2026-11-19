@@ -1,0 +1,14 @@
+RUBY VERSION
+   ruby 3.2.2p53
+
+GEM
+  remote: https://rubygems.org/
+  specs:
+
+PLATFORMS
+  ruby
+
+DEPENDENCIES
+
+BUNDLED WITH
+   2.2.0

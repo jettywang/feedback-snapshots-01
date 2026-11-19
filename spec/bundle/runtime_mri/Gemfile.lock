@@ -1,0 +1,14 @@
+RUBY VERSION
+   ruby 2.5.0p0
+
+GEM
+  remote: https://rubygems.org/
+  specs:
+
+PLATFORMS
+  ruby
+
+DEPENDENCIES
+
+BUNDLED WITH
+   2.2.0
