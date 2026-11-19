@@ -1,0 +1,714 @@
+{
+  "tool": "ntlmmic-offline-diagnose",
+  "network_access": "none",
+  "context_count": 9,
+  "reused_challenge_warnings": [
+    {
+      "code": "reused_server_challenge",
+      "detail": "Server challenge 1122334455667788 appears in contexts ctx_alpha, ctx_beta, ctx_spliced; they remain separate and are never spliced for MIC verification."
+    }
+  ],
+  "contexts": [
+    {
+      "context_id": "ctx_alpha",
+      "messages_seen": [
+        1,
+        2,
+        3
+      ],
+      "complete": true,
+      "mic": {
+        "presence": "present",
+        "presence_reasons": [
+          {
+            "code": "mic_slot",
+            "detail": "AUTHENTICATE MIC 16-byte slot is populated."
+          },
+          {
+            "code": "client_avflag",
+            "detail": "Client MsvAvFlags bit 0x2 (MIC integrity) is set."
+          },
+          {
+            "code": "server_avflag",
+            "detail": "Server CHALLENGE MsvAvFlags bit 0x2 is not set."
+          }
+        ],
+        "verifiability": "not_verifiable",
+        "verifiability_reasons": [
+          {
+            "code": "no_exported_session_key",
+            "detail": "No defender-supplied exported session key for this context; the HMAC-MD5 key is unavailable offline."
+          }
+        ],
+        "verdict": "unknown",
+        "verdict_reasons": [
+          {
+            "code": "verdict_held_unknown",
+            "detail": "Presence of the MIC field is not a verification result; the verdict stays unknown until the material above is provided."
+          }
+        ],
+        "expected_mic": null,
+        "observed_mic": "f52564aa8c15d93203df1aabd04a7e53"
+      },
+      "channel_binding": {
+        "presence": "present",
+        "presence_reasons": [
+          {
+            "code": "cbt_av_present",
+            "detail": "MsvAvChannelBindings (AV id 0x000A) is present in the NTLMv2 client challenge with value 79fe8b756f2f8ddbc677a0dfbfa7b2e6."
+          }
+        ],
+        "outer_context": "unknown",
+        "outer_context_reasons": [
+          {
+            "code": "server_timestamp_present",
+            "detail": "CHALLENGE carries MsvAvTimestamp; modern SSPs use it alongside EPA, but it does not by itself prove channel binding is required."
+          },
+          {
+            "code": "no_outer_binding",
+            "detail": "No outer-channel binding (for example TLS server end-point hash) supplied; the CBT value cannot be compared offline."
+          }
+        ],
+        "match": "unknown",
+        "match_reasons": [
+          {
+            "code": "match_held_unknown",
+            "detail": "A carried CBT value is only a claim; matching against the real channel is undecided without outer-channel material."
+          }
+        ]
+      },
+      "consistency": [
+        {
+          "code": "three_legs_grouped",
+          "detail": "NEGOTIATE, CHALLENGE and AUTHENTICATE share the explicit context id and were analysed as one handshake."
+        }
+      ],
+      "anomalies": [],
+      "ssp_context": null
+    },
+    {
+      "context_id": "ctx_beta",
+      "messages_seen": [
+        1,
+        2,
+        3
+      ],
+      "complete": true,
+      "mic": {
+        "presence": "present",
+        "presence_reasons": [
+          {
+            "code": "mic_slot",
+            "detail": "AUTHENTICATE MIC 16-byte slot is populated."
+          },
+          {
+            "code": "client_avflag",
+            "detail": "Client MsvAvFlags bit 0x2 (MIC integrity) is set."
+          },
+          {
+            "code": "server_avflag",
+            "detail": "Server CHALLENGE MsvAvFlags bit 0x2 is not set."
+          }
+        ],
+        "verifiability": "not_verifiable",
+        "verifiability_reasons": [
+          {
+            "code": "no_exported_session_key",
+            "detail": "No defender-supplied exported session key for this context; the HMAC-MD5 key is unavailable offline."
+          }
+        ],
+        "verdict": "unknown",
+        "verdict_reasons": [
+          {
+            "code": "verdict_held_unknown",
+            "detail": "Presence of the MIC field is not a verification result; the verdict stays unknown until the material above is provided."
+          }
+        ],
+        "expected_mic": null,
+        "observed_mic": "2817ab40f52e85756a8c18d311a11d68"
+      },
+      "channel_binding": {
+        "presence": "present",
+        "presence_reasons": [
+          {
+            "code": "cbt_av_present",
+            "detail": "MsvAvChannelBindings (AV id 0x000A) is present in the NTLMv2 client challenge with value 2927cde02904b0e00f640ab6e5dfd92a."
+          }
+        ],
+        "outer_context": "unknown",
+        "outer_context_reasons": [
+          {
+            "code": "server_timestamp_present",
+            "detail": "CHALLENGE carries MsvAvTimestamp; modern SSPs use it alongside EPA, but it does not by itself prove channel binding is required."
+          },
+          {
+            "code": "no_outer_binding",
+            "detail": "No outer-channel binding (for example TLS server end-point hash) supplied; the CBT value cannot be compared offline."
+          }
+        ],
+        "match": "unknown",
+        "match_reasons": [
+          {
+            "code": "match_held_unknown",
+            "detail": "A carried CBT value is only a claim; matching against the real channel is undecided without outer-channel material."
+          }
+        ]
+      },
+      "consistency": [
+        {
+          "code": "three_legs_grouped",
+          "detail": "NEGOTIATE, CHALLENGE and AUTHENTICATE share the explicit context id and were analysed as one handshake."
+        }
+      ],
+      "anomalies": [],
+      "ssp_context": null
+    },
+    {
+      "context_id": "ctx_cbt_tamper",
+      "messages_seen": [
+        1,
+        2,
+        3
+      ],
+      "complete": true,
+      "mic": {
+        "presence": "present",
+        "presence_reasons": [
+          {
+            "code": "mic_slot",
+            "detail": "AUTHENTICATE MIC 16-byte slot is populated."
+          },
+          {
+            "code": "client_avflag",
+            "detail": "Client MsvAvFlags bit 0x2 (MIC integrity) is set."
+          },
+          {
+            "code": "server_avflag",
+            "detail": "Server CHALLENGE MsvAvFlags bit 0x2 is not set."
+          }
+        ],
+        "verifiability": "not_verifiable",
+        "verifiability_reasons": [
+          {
+            "code": "no_exported_session_key",
+            "detail": "No defender-supplied exported session key for this context; the HMAC-MD5 key is unavailable offline."
+          }
+        ],
+        "verdict": "unknown",
+        "verdict_reasons": [
+          {
+            "code": "verdict_held_unknown",
+            "detail": "Presence of the MIC field is not a verification result; the verdict stays unknown until the material above is provided."
+          }
+        ],
+        "expected_mic": null,
+        "observed_mic": "3755654a11384876c1be889a79c45ed6"
+      },
+      "channel_binding": {
+        "presence": "present",
+        "presence_reasons": [
+          {
+            "code": "cbt_av_present",
+            "detail": "MsvAvChannelBindings (AV id 0x000A) is present in the NTLMv2 client challenge with value 2e1696bb46e900090a65101cbdea2b3f."
+          }
+        ],
+        "outer_context": "unknown",
+        "outer_context_reasons": [
+          {
+            "code": "server_timestamp_present",
+            "detail": "CHALLENGE carries MsvAvTimestamp; modern SSPs use it alongside EPA, but it does not by itself prove channel binding is required."
+          },
+          {
+            "code": "no_outer_binding",
+            "detail": "No outer-channel binding (for example TLS server end-point hash) supplied; the CBT value cannot be compared offline."
+          }
+        ],
+        "match": "unknown",
+        "match_reasons": [
+          {
+            "code": "match_held_unknown",
+            "detail": "A carried CBT value is only a claim; matching against the real channel is undecided without outer-channel material."
+          }
+        ]
+      },
+      "consistency": [
+        {
+          "code": "three_legs_grouped",
+          "detail": "NEGOTIATE, CHALLENGE and AUTHENTICATE share the explicit context id and were analysed as one handshake."
+        }
+      ],
+      "anomalies": [],
+      "ssp_context": null
+    },
+    {
+      "context_id": "ctx_chal_tamper",
+      "messages_seen": [
+        1,
+        2,
+        3
+      ],
+      "complete": true,
+      "mic": {
+        "presence": "present",
+        "presence_reasons": [
+          {
+            "code": "mic_slot",
+            "detail": "AUTHENTICATE MIC 16-byte slot is populated."
+          },
+          {
+            "code": "client_avflag",
+            "detail": "Client MsvAvFlags bit 0x2 (MIC integrity) is set."
+          },
+          {
+            "code": "server_avflag",
+            "detail": "Server CHALLENGE MsvAvFlags bit 0x2 is not set."
+          }
+        ],
+        "verifiability": "not_verifiable",
+        "verifiability_reasons": [
+          {
+            "code": "no_exported_session_key",
+            "detail": "No defender-supplied exported session key for this context; the HMAC-MD5 key is unavailable offline."
+          }
+        ],
+        "verdict": "unknown",
+        "verdict_reasons": [
+          {
+            "code": "verdict_held_unknown",
+            "detail": "Presence of the MIC field is not a verification result; the verdict stays unknown until the material above is provided."
+          }
+        ],
+        "expected_mic": null,
+        "observed_mic": "3dcccd936f417d05888363e47bb82eeb"
+      },
+      "channel_binding": {
+        "presence": "present",
+        "presence_reasons": [
+          {
+            "code": "cbt_av_present",
+            "detail": "MsvAvChannelBindings (AV id 0x000A) is present in the NTLMv2 client challenge with value 1039cf1e4f900320dc7512e64808b439."
+          }
+        ],
+        "outer_context": "unknown",
+        "outer_context_reasons": [
+          {
+            "code": "server_timestamp_present",
+            "detail": "CHALLENGE carries MsvAvTimestamp; modern SSPs use it alongside EPA, but it does not by itself prove channel binding is required."
+          },
+          {
+            "code": "no_outer_binding",
+            "detail": "No outer-channel binding (for example TLS server end-point hash) supplied; the CBT value cannot be compared offline."
+          }
+        ],
+        "match": "unknown",
+        "match_reasons": [
+          {
+            "code": "match_held_unknown",
+            "detail": "A carried CBT value is only a claim; matching against the real channel is undecided without outer-channel material."
+          }
+        ]
+      },
+      "consistency": [
+        {
+          "code": "three_legs_grouped",
+          "detail": "NEGOTIATE, CHALLENGE and AUTHENTICATE share the explicit context id and were analysed as one handshake."
+        }
+      ],
+      "anomalies": [],
+      "ssp_context": null
+    },
+    {
+      "context_id": "ctx_half",
+      "messages_seen": [
+        2,
+        3
+      ],
+      "complete": false,
+      "mic": {
+        "presence": "present",
+        "presence_reasons": [
+          {
+            "code": "mic_slot",
+            "detail": "AUTHENTICATE MIC 16-byte slot is populated."
+          },
+          {
+            "code": "client_avflag",
+            "detail": "Client MsvAvFlags bit 0x2 (MIC integrity) is set."
+          },
+          {
+            "code": "server_avflag",
+            "detail": "Server CHALLENGE MsvAvFlags bit 0x2 is not set."
+          }
+        ],
+        "verifiability": "not_verifiable",
+        "verifiability_reasons": [
+          {
+            "code": "incomplete_handshake",
+            "detail": "Missing leg(s) NEGOTIATE; the MIC covers all three tokens and cannot be recomputed from a partial capture."
+          },
+          {
+            "code": "no_exported_session_key",
+            "detail": "No defender-supplied exported session key for this context; the HMAC-MD5 key is unavailable offline."
+          }
+        ],
+        "verdict": "unknown",
+        "verdict_reasons": [
+          {
+            "code": "verdict_held_unknown",
+            "detail": "Presence of the MIC field is not a verification result; the verdict stays unknown until the material above is provided."
+          }
+        ],
+        "expected_mic": null,
+        "observed_mic": "c19c0b81b5320f1810cd1eb0bdae7e92"
+      },
+      "channel_binding": {
+        "presence": "absent",
+        "presence_reasons": [
+          {
+            "code": "cbt_av_absent",
+            "detail": "No MsvAvChannelBindings AV pair in the NTLMv2 client challenge."
+          }
+        ],
+        "outer_context": "unknown",
+        "outer_context_reasons": [
+          {
+            "code": "server_timestamp_present",
+            "detail": "CHALLENGE carries MsvAvTimestamp; modern SSPs use it alongside EPA, but it does not by itself prove channel binding is required."
+          },
+          {
+            "code": "no_outer_binding",
+            "detail": "No outer-channel binding (for example TLS server end-point hash) supplied; the CBT value cannot be compared offline."
+          }
+        ],
+        "match": "unknown",
+        "match_reasons": [
+          {
+            "code": "match_held_unknown",
+            "detail": "A carried CBT value is only a claim; matching against the real channel is undecided without outer-channel material."
+          }
+        ]
+      },
+      "consistency": [
+        {
+          "code": "context_incomplete",
+          "detail": "Context has 2 of 3 message types; no cross-leg integrity conclusion is drawn."
+        }
+      ],
+      "anomalies": [],
+      "ssp_context": null
+    },
+    {
+      "context_id": "ctx_mic_flip",
+      "messages_seen": [
+        1,
+        2,
+        3
+      ],
+      "complete": true,
+      "mic": {
+        "presence": "present",
+        "presence_reasons": [
+          {
+            "code": "mic_slot",
+            "detail": "AUTHENTICATE MIC 16-byte slot is populated."
+          },
+          {
+            "code": "client_avflag",
+            "detail": "Client MsvAvFlags bit 0x2 (MIC integrity) is set."
+          },
+          {
+            "code": "server_avflag",
+            "detail": "Server CHALLENGE MsvAvFlags bit 0x2 is not set."
+          }
+        ],
+        "verifiability": "not_verifiable",
+        "verifiability_reasons": [
+          {
+            "code": "no_exported_session_key",
+            "detail": "No defender-supplied exported session key for this context; the HMAC-MD5 key is unavailable offline."
+          }
+        ],
+        "verdict": "unknown",
+        "verdict_reasons": [
+          {
+            "code": "verdict_held_unknown",
+            "detail": "Presence of the MIC field is not a verification result; the verdict stays unknown until the material above is provided."
+          }
+        ],
+        "expected_mic": null,
+        "observed_mic": "689eb8f39e6036694989ee85e86f0692"
+      },
+      "channel_binding": {
+        "presence": "present",
+        "presence_reasons": [
+          {
+            "code": "cbt_av_present",
+            "detail": "MsvAvChannelBindings (AV id 0x000A) is present in the NTLMv2 client challenge with value 642ae93ed592d177a5990cef0382a1dd."
+          }
+        ],
+        "outer_context": "unknown",
+        "outer_context_reasons": [
+          {
+            "code": "server_timestamp_present",
+            "detail": "CHALLENGE carries MsvAvTimestamp; modern SSPs use it alongside EPA, but it does not by itself prove channel binding is required."
+          },
+          {
+            "code": "no_outer_binding",
+            "detail": "No outer-channel binding (for example TLS server end-point hash) supplied; the CBT value cannot be compared offline."
+          }
+        ],
+        "match": "unknown",
+        "match_reasons": [
+          {
+            "code": "match_held_unknown",
+            "detail": "A carried CBT value is only a claim; matching against the real channel is undecided without outer-channel material."
+          }
+        ]
+      },
+      "consistency": [
+        {
+          "code": "three_legs_grouped",
+          "detail": "NEGOTIATE, CHALLENGE and AUTHENTICATE share the explicit context id and were analysed as one handshake."
+        }
+      ],
+      "anomalies": [],
+      "ssp_context": null
+    },
+    {
+      "context_id": "ctx_no_mic",
+      "messages_seen": [
+        1,
+        2,
+        3
+      ],
+      "complete": true,
+      "mic": {
+        "presence": "absent",
+        "presence_reasons": [
+          {
+            "code": "mic_slot",
+            "detail": "AUTHENTICATE MIC 16-byte slot is not populated."
+          },
+          {
+            "code": "client_avflag",
+            "detail": "Client MsvAvFlags bit 0x2 (MIC integrity) is not set."
+          },
+          {
+            "code": "server_avflag",
+            "detail": "Server CHALLENGE MsvAvFlags bit 0x2 is not set."
+          }
+        ],
+        "verifiability": "not_verifiable",
+        "verifiability_reasons": [
+          {
+            "code": "mic_not_negotiated",
+            "detail": "The client did not claim a MIC; there is no value to verify and no handshake-integrity guarantee is provided."
+          }
+        ],
+        "verdict": "unknown",
+        "verdict_reasons": [
+          {
+            "code": "absence_is_not_failure",
+            "detail": "Missing MIC is reported as absent/unknown, not as a failed verification, because no MIC was ever produced."
+          }
+        ],
+        "expected_mic": null,
+        "observed_mic": null
+      },
+      "channel_binding": {
+        "presence": "absent",
+        "presence_reasons": [
+          {
+            "code": "cbt_av_absent",
+            "detail": "No MsvAvChannelBindings AV pair in the NTLMv2 client challenge."
+          }
+        ],
+        "outer_context": "unknown",
+        "outer_context_reasons": [
+          {
+            "code": "server_timestamp_present",
+            "detail": "CHALLENGE carries MsvAvTimestamp; modern SSPs use it alongside EPA, but it does not by itself prove channel binding is required."
+          },
+          {
+            "code": "no_outer_binding",
+            "detail": "No outer-channel binding (for example TLS server end-point hash) supplied; the CBT value cannot be compared offline."
+          }
+        ],
+        "match": "unknown",
+        "match_reasons": [
+          {
+            "code": "match_held_unknown",
+            "detail": "A carried CBT value is only a claim; matching against the real channel is undecided without outer-channel material."
+          }
+        ]
+      },
+      "consistency": [
+        {
+          "code": "three_legs_grouped",
+          "detail": "NEGOTIATE, CHALLENGE and AUTHENTICATE share the explicit context id and were analysed as one handshake."
+        }
+      ],
+      "anomalies": [],
+      "ssp_context": null
+    },
+    {
+      "context_id": "ctx_spliced",
+      "messages_seen": [
+        1,
+        2,
+        3
+      ],
+      "complete": true,
+      "mic": {
+        "presence": "present",
+        "presence_reasons": [
+          {
+            "code": "mic_slot",
+            "detail": "AUTHENTICATE MIC 16-byte slot is populated."
+          },
+          {
+            "code": "client_avflag",
+            "detail": "Client MsvAvFlags bit 0x2 (MIC integrity) is set."
+          },
+          {
+            "code": "server_avflag",
+            "detail": "Server CHALLENGE MsvAvFlags bit 0x2 is not set."
+          }
+        ],
+        "verifiability": "not_verifiable",
+        "verifiability_reasons": [
+          {
+            "code": "no_exported_session_key",
+            "detail": "No defender-supplied exported session key for this context; the HMAC-MD5 key is unavailable offline."
+          }
+        ],
+        "verdict": "unknown",
+        "verdict_reasons": [
+          {
+            "code": "verdict_held_unknown",
+            "detail": "Presence of the MIC field is not a verification result; the verdict stays unknown until the material above is provided."
+          }
+        ],
+        "expected_mic": null,
+        "observed_mic": "2817ab40f52e85756a8c18d311a11d68"
+      },
+      "channel_binding": {
+        "presence": "present",
+        "presence_reasons": [
+          {
+            "code": "cbt_av_present",
+            "detail": "MsvAvChannelBindings (AV id 0x000A) is present in the NTLMv2 client challenge with value 2927cde02904b0e00f640ab6e5dfd92a."
+          }
+        ],
+        "outer_context": "unknown",
+        "outer_context_reasons": [
+          {
+            "code": "server_timestamp_present",
+            "detail": "CHALLENGE carries MsvAvTimestamp; modern SSPs use it alongside EPA, but it does not by itself prove channel binding is required."
+          },
+          {
+            "code": "no_outer_binding",
+            "detail": "No outer-channel binding (for example TLS server end-point hash) supplied; the CBT value cannot be compared offline."
+          }
+        ],
+        "match": "unknown",
+        "match_reasons": [
+          {
+            "code": "match_held_unknown",
+            "detail": "A carried CBT value is only a claim; matching against the real channel is undecided without outer-channel material."
+          }
+        ]
+      },
+      "consistency": [
+        {
+          "code": "three_legs_grouped",
+          "detail": "NEGOTIATE, CHALLENGE and AUTHENTICATE share the explicit context id and were analysed as one handshake."
+        }
+      ],
+      "anomalies": [
+        {
+          "code": "mixed_origin_context",
+          "detail": "Tokens in ctx_spliced carry explicit origins ctx_alpha, ctx_beta; the group is a splice of distinct conversations and must not be treated as one verified handshake."
+        }
+      ],
+      "ssp_context": null
+    },
+    {
+      "context_id": "ctx_user_tamper",
+      "messages_seen": [
+        1,
+        2,
+        3
+      ],
+      "complete": true,
+      "mic": {
+        "presence": "present",
+        "presence_reasons": [
+          {
+            "code": "mic_slot",
+            "detail": "AUTHENTICATE MIC 16-byte slot is populated."
+          },
+          {
+            "code": "client_avflag",
+            "detail": "Client MsvAvFlags bit 0x2 (MIC integrity) is set."
+          },
+          {
+            "code": "server_avflag",
+            "detail": "Server CHALLENGE MsvAvFlags bit 0x2 is not set."
+          }
+        ],
+        "verifiability": "not_verifiable",
+        "verifiability_reasons": [
+          {
+            "code": "no_exported_session_key",
+            "detail": "No defender-supplied exported session key for this context; the HMAC-MD5 key is unavailable offline."
+          }
+        ],
+        "verdict": "unknown",
+        "verdict_reasons": [
+          {
+            "code": "verdict_held_unknown",
+            "detail": "Presence of the MIC field is not a verification result; the verdict stays unknown until the material above is provided."
+          }
+        ],
+        "expected_mic": null,
+        "observed_mic": "abdeb8ec59f6d413f09fd27dd8745e06"
+      },
+      "channel_binding": {
+        "presence": "present",
+        "presence_reasons": [
+          {
+            "code": "cbt_av_present",
+            "detail": "MsvAvChannelBindings (AV id 0x000A) is present in the NTLMv2 client challenge with value a79aa8e6893547efddde4f5f69981567."
+          }
+        ],
+        "outer_context": "unknown",
+        "outer_context_reasons": [
+          {
+            "code": "server_timestamp_present",
+            "detail": "CHALLENGE carries MsvAvTimestamp; modern SSPs use it alongside EPA, but it does not by itself prove channel binding is required."
+          },
+          {
+            "code": "no_outer_binding",
+            "detail": "No outer-channel binding (for example TLS server end-point hash) supplied; the CBT value cannot be compared offline."
+          }
+        ],
+        "match": "unknown",
+        "match_reasons": [
+          {
+            "code": "match_held_unknown",
+            "detail": "A carried CBT value is only a claim; matching against the real channel is undecided without outer-channel material."
+          }
+        ]
+      },
+      "consistency": [
+        {
+          "code": "three_legs_grouped",
+          "detail": "NEGOTIATE, CHALLENGE and AUTHENTICATE share the explicit context id and were analysed as one handshake."
+        }
+      ],
+      "anomalies": [],
+      "ssp_context": null
+    }
+  ]
+}

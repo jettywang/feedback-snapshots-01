@@ -503,3 +503,85 @@ assert pkt.UserName == "BANANANA"
 
 pkt.clear_cache()
 assert bytes(pkt) == data
+
++ Offline MIC / channel-binding diagnostics
+
+= Presence, verifiability and verdict are reported separately
+
+from scapy.tools.ntlmmic.analysis import MatchStatus, Presence, Verdict, Verifiability, analyze_context, detect_reused_challenge
+from scapy.tools.ntlmmic.evidence import CaptureRecord, group_by_context
+from scapy.tools.ntlmmic import synthdata
+
+artifacts, interleaved = synthdata.build_dataset()
+assert len(interleaved) == 6
+
+capture_records = [
+    CaptureRecord(
+        record_id=record["record_id"],
+        context_id=record["context_id"],
+        token_b64=record["token_b64"],
+        note=record.get("note", ""),
+        origin_context=record.get("origin_context"),
+    )
+    for item in artifacts
+    for record in item.records
+]
+grouped = group_by_context(capture_records)
+
+keys = {item.context_id: item.exported_key for item in artifacts if item.exported_key is not None}
+outer = {item.context_id: item.outer_binding_hash for item in artifacts if item.outer_binding_hash is not None}
+
+reports = {}
+for context_id, items in grouped.items():
+    evidences = [evidence for _record, evidence in items]
+    source_records = [record for record, _evidence in items]
+    reports[context_id] = analyze_context(
+        context_id,
+        evidences,
+        exported_key=keys.get(context_id),
+        outer_binding_hash=outer.get(context_id),
+        records=source_records,
+    )
+
+assert reports["ctx_alpha"].mic.verdict == Verdict.PASS
+assert reports["ctx_beta"].mic.verdict == Verdict.PASS
+
+reuse = detect_reused_challenge(
+    [(context_id, [evidence for _record, evidence in items]) for context_id, items in grouped.items()]
+)
+assert len(reuse) == 1 and reuse[0].code == "reused_server_challenge"
+
+for context_id in ("ctx_mic_flip", "ctx_user_tamper", "ctx_chal_tamper"):
+    assert reports[context_id].mic.verdict == Verdict.FAIL
+
+assert reports["ctx_cbt_tamper"].mic.verdict == Verdict.PASS
+assert reports["ctx_cbt_tamper"].channel_binding.match == MatchStatus.MISMATCH
+
+no_mic = reports["ctx_no_mic"].mic
+assert no_mic.presence == Presence.ABSENT
+assert no_mic.verifiability == Verifiability.NOT_VERIFIABLE
+assert no_mic.verdict == Verdict.UNKNOWN
+
+half = reports["ctx_half"]
+assert half.complete is False
+assert half.mic.presence == Presence.PRESENT
+assert half.mic.verifiability == Verifiability.NOT_VERIFIABLE
+assert half.mic.verdict == Verdict.UNKNOWN
+
+spliced = reports["ctx_spliced"]
+assert spliced.complete is True
+assert spliced.mic.verdict == Verdict.FAIL
+assert any(reason.code == "mixed_origin_context" for reason in spliced.anomalies)
+
+unknown_reports = {}
+for context_id, items in grouped.items():
+    evidences = [evidence for _record, evidence in items]
+    unknown_reports[context_id] = analyze_context(context_id, evidences, exported_key=None, outer_binding_hash=None)
+
+for context_id, report in unknown_reports.items():
+    if report.mic.presence == Presence.PRESENT:
+        assert report.mic.verifiability == Verifiability.NOT_VERIFIABLE
+        assert report.mic.verdict == Verdict.UNKNOWN
+    assert report.channel_binding.match == MatchStatus.UNKNOWN
+
+assert unknown_reports["ctx_alpha"].mic.verdict == Verdict.UNKNOWN

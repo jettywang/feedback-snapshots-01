@@ -1,0 +1,50 @@
+{
+  "ctx_alpha": {
+    "context_id": "ctx_alpha",
+    "source": "simulated-ssp-audit (not derived from wire bytes)",
+    "mic_verification": "verified",
+    "reason": "SSP recomputed MIC and accepted CBT"
+  },
+  "ctx_beta": {
+    "context_id": "ctx_beta",
+    "source": "simulated-ssp-audit (not derived from wire bytes)",
+    "mic_verification": "verified",
+    "reason": "SSP recomputed MIC and accepted CBT"
+  },
+  "ctx_mic_flip": {
+    "context_id": "ctx_mic_flip",
+    "source": "simulated-ssp-audit (not derived from wire bytes)",
+    "mic_verification": "fail",
+    "reason": "SSP rejected the token: bad MIC"
+  },
+  "ctx_user_tamper": {
+    "context_id": "ctx_user_tamper",
+    "source": "simulated-ssp-audit (not derived from wire bytes)",
+    "mic_verification": "fail",
+    "reason": "SSP rejected the token: bad MIC over modified AUTHENTICATE"
+  },
+  "ctx_chal_tamper": {
+    "context_id": "ctx_chal_tamper",
+    "source": "simulated-ssp-audit (not derived from wire bytes)",
+    "mic_verification": "fail",
+    "reason": "SSP rejected the token: bad MIC over modified CHALLENGE"
+  },
+  "ctx_cbt_tamper": {
+    "context_id": "ctx_cbt_tamper",
+    "source": "simulated-ssp-audit (not derived from wire bytes)",
+    "mic_verification": "verified",
+    "reason": "SSP accepted the MIC under its negotiated key then rejected channel binding (bad bindings)"
+  },
+  "ctx_no_mic": {
+    "context_id": "ctx_no_mic",
+    "source": "simulated-ssp-audit (not derived from wire bytes)",
+    "mic_verification": "not_requested",
+    "reason": "SSP saw no MIC claim and applied no MIC verification"
+  },
+  "ctx_spliced": {
+    "context_id": "ctx_spliced",
+    "source": "simulated-ssp-audit (not derived from wire bytes)",
+    "mic_verification": "fail",
+    "reason": "SSP rejected: tokens do not belong to one conversation"
+  }
+}

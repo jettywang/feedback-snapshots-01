@@ -1,0 +1,10 @@
+{
+  "ctx_alpha": "25c181f8c291eff1b5670892315d7d17",
+  "ctx_beta": "077ad906041b852f403535eae1e6fcd2",
+  "ctx_mic_flip": "08f10d99e21723601ab6d558a405a657",
+  "ctx_user_tamper": "5e90e46a2c0d179b4dcab3f454dbe5ee",
+  "ctx_chal_tamper": "e3466d43dbb7cb16ce8b7e349fedfbf9",
+  "ctx_cbt_tamper": "cccccccccccccccccccccccccccccccc",
+  "ctx_no_mic": "1d35ae15836225da3fe52816dae6f73e",
+  "ctx_spliced": "077ad906041b852f403535eae1e6fcd2"
+}

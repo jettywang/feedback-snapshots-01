@@ -1,0 +1,51 @@
+{
+  "contexts": [
+    {
+      "context_id": "ctx_alpha",
+      "description": "Complete NTLMv2 handshake with MIC and matching channel binding.",
+      "record_count": 3
+    },
+    {
+      "context_id": "ctx_beta",
+      "description": "Complete handshake reusing the same server challenge as ctx_alpha.",
+      "record_count": 3
+    },
+    {
+      "context_id": "ctx_mic_flip",
+      "description": "MIC present but one byte corrupted; recomputation must fail.",
+      "record_count": 3
+    },
+    {
+      "context_id": "ctx_user_tamper",
+      "description": "User name byte modified after MIC generation; stale MIC must fail.",
+      "record_count": 3
+    },
+    {
+      "context_id": "ctx_chal_tamper",
+      "description": "CHALLENGE modified while AUTHENTICATE is unchanged; MIC must fail.",
+      "record_count": 3
+    },
+    {
+      "context_id": "ctx_cbt_tamper",
+      "description": "CBT hash corrupted and MIC recomputed with an alternate key; MIC can pass only with that key, channel binding must mismatch.",
+      "record_count": 3
+    },
+    {
+      "context_id": "ctx_no_mic",
+      "description": "NTLMv2 handshake generated without a MIC.",
+      "record_count": 3
+    },
+    {
+      "context_id": "ctx_half",
+      "description": "Rear-only capture: NEGOTIATE missing, MIC present but uncheckable.",
+      "record_count": 2
+    },
+    {
+      "context_id": "ctx_spliced",
+      "description": "Three-leg splice of two conversations; MIC recomputation must fail instead of silently passing on a shared challenge.",
+      "record_count": 3
+    }
+  ],
+  "synthetic_only": true,
+  "real_accounts": false
+}
