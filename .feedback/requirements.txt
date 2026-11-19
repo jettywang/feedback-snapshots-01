@@ -1,0 +1,14 @@
+argcomplete==3.7.2
+click==8.5.1
+execnet==2.1.2
+filelock==4.2.12
+iniconfig==2.3.1
+packaging==26.3
+platformdirs==4.14.7
+pluggy==1.7.0
+pygments==2.21.0
+pytest==9.2.0
+pytest-mock==3.17.0
+pytest-timeout==2.4.0
+pytest-xdist==3.8.0
+userpath==1.9.2
