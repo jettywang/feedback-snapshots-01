@@ -57,6 +57,10 @@ module Net
         def authenticate(next_service, username, password = nil)
           debug { "beginning authentication of `#{username}'" }
 
+          # Close the RFC 8308 window: any EXT_INFO after this point must not
+          # change the transport capabilities negotiated before authentication.
+          transport.mark_authentication_started!
+
           transport.send_message(transport.service_request("ssh-userauth"))
           expect_message(SERVICE_ACCEPT)
 

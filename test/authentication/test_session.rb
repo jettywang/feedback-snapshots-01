@@ -12,6 +12,24 @@ module Authentication
       assert_equal session.auth_methods, session.allowed_auth_methods
     end
 
+    def test_authenticate_should_close_ext_info_window_before_service_request
+      refute transport.authentication_started?
+      transport.expect do |t, packet|
+        assert t.authentication_started?, "EXT_INFO window must close before the service request"
+        assert_equal SERVICE_REQUEST, packet.type
+        assert_equal "ssh-userauth", packet.read_string
+        t.return(SERVICE_ACCEPT)
+      end
+
+      Net::SSH::Authentication::Methods::None.any_instance.expects(:authenticate).returns(false)
+      Net::SSH::Authentication::Methods::Publickey.any_instance.expects(:authenticate).raises(Net::SSH::Authentication::DisallowedMethod)
+      Net::SSH::Authentication::Methods::Password.any_instance.expects(:authenticate).raises(Net::SSH::Authentication::DisallowedMethod)
+      Net::SSH::Authentication::Methods::KeyboardInteractive.any_instance.expects(:authenticate).raises(Net::SSH::Authentication::DisallowedMethod)
+
+      session.authenticate("next service", "username", "password")
+      assert transport.authentication_started?
+    end
+
     def test_authenticate_should_continue_if_method_disallowed
       transport.expect do |t, packet|
         assert_equal SERVICE_REQUEST, packet.type

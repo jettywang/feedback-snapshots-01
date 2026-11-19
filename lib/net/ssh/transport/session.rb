@@ -31,6 +31,11 @@ module Net
         MAX_QUEUED_PACKETS = 16_384
         MAX_QUEUED_BYTES = 32 * 1024 * 1024
 
+        # RFC 8308 names the extension that advertises the publickey signature
+        # algorithms the server accepts. It is meaningful only in the first
+        # EXT_INFO, sent just after the initial NEWKEYS.
+        SERVER_SIG_ALGS_EXTENSION = "server-sig-algs".freeze
+
         # The host to connect to, as given to the constructor.
         attr_reader :host
 
@@ -91,6 +96,13 @@ module Net
 
           @queue = []
           @queued_bytes = 0
+
+          # EXT_INFO handling state (RFC 8308). The capability-bearing EXT_INFO
+          # is accepted exactly once, in the window between the initial NEWKEYS
+          # and the start of authentication; later packets are never allowed to
+          # change the negotiated capabilities.
+          @initial_ext_info_seen = false
+          @authentication_started = false
 
           @server_version = ServerVersion.new(socket, logger, options[:timeout])
 
@@ -179,6 +191,13 @@ module Net
           return if algorithms.pending?
 
           socket.if_needs_rekey? { rekey! }
+        end
+
+        # Records that user authentication has begun. RFC 8308 only lets a
+        # server's EXT_INFO influence the transport before this point, so any
+        # EXT_INFO received afterwards is ignored rather than applied.
+        def mark_authentication_started!
+          @authentication_started = true
         end
 
         # Returns a hash of information about the peer (remote) side of the socket,
@@ -304,18 +323,67 @@ module Net
 
         private
 
-        # Parses an RFC 8308 EXT_INFO packet, which servers send after the first
-        # NEWKEYS and possibly again just before USERAUTH_SUCCESS.
+        # Parses an RFC 8308 EXT_INFO packet. Servers send one just after the
+        # initial NEWKEYS and may send a follow-up before USERAUTH_SUCCESS.
+        #
+        # Only the first, well-formed EXT_INFO received while authentication has
+        # not started can change the negotiated capabilities. A packet arriving
+        # during a re-key, after authentication has begun, or any second packet
+        # is discarded without being applied, so a late or conflicting packet
+        # can never silently downgrade the signature algorithms already in use.
         def accept_ext_info(packet)
-          count = packet.read_long or raise Net::SSH::Exception, "malformed EXT_INFO packet from server"
+          unless ext_info_acceptable?
+            lwarn { "ignoring EXT_INFO received outside the pre-authentication window" }
+            return
+          end
+
+          extensions = parse_ext_info(packet)
+
+          @initial_ext_info_seen = true
+
+          server_sig_algs = extensions[SERVER_SIG_ALGS_EXTENSION]
+          @server_sig_algs = server_sig_algs.split(",") unless server_sig_algs.nil?
+        end
+
+        # EXT_INFO is only authoritative in the window after the initial key
+        # exchange has completed (NEWKEYS, marked by the session id), while no
+        # re-key is in progress, before authentication starts, and for the first
+        # such packet.
+        def ext_info_acceptable?
+          !@initial_ext_info_seen &&
+            !@authentication_started &&
+            !algorithms.pending? &&
+            !algorithms.session_id.nil?
+        end
+
+        # Reads and validates every name/value pair in an EXT_INFO packet.
+        # Unknown extension names are retained without interpreting their
+        # contents, while a duplicate name in the same packet is a protocol
+        # error (RFC 8308 section 2.4). Raises Net::SSH::Exception on any
+        # malformed framing so the connection is refused before any
+        # authentication signature is produced.
+        def parse_ext_info(packet)
+          count = packet.read_long
+          # Every extension needs at least two uint32 length prefixes (8 bytes),
+          # so a count larger than the packet could ever hold is malformed and
+          # must not be used to drive a huge allocation loop.
+          raise Net::SSH::Exception, "malformed EXT_INFO packet from server" if count.nil? || count > packet.available / 8
+
+          extensions = {}
           count.times do
             name = packet.read_string
             value = packet.read_string
             raise Net::SSH::Exception, "malformed EXT_INFO packet from server" if name.nil? || value.nil?
 
             debug { "EXT_INFO #{name}: #{value}" }
-            @server_sig_algs = value.split(",") if name == "server-sig-algs"
+            raise Net::SSH::Exception, "duplicate EXT_INFO extension #{name.inspect} from server" if extensions.key?(name)
+
+            extensions[name] = value
           end
+
+          raise Net::SSH::Exception, "malformed EXT_INFO packet from server" unless packet.eof?
+
+          extensions
         end
 
         def shift_queue

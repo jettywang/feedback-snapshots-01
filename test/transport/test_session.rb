@@ -234,13 +234,132 @@ module Transport
       assert_equal %w[ssh-ed25519 rsa-sha2-256 rsa-sha2-512], session.server_sig_algs
     end
 
-    def test_server_sig_algs_should_be_replaced_by_a_later_ext_info
+    def test_unknown_extensions_should_be_kept_without_changing_sig_algs
+      session!
+      packet = P(:byte, EXT_INFO, :long, 2,
+                 :string, "future-thing@example.com", :string, "opaque-value",
+                 :string, "ping@openssh.com", :string, "0")
+      socket.expects(:next_packet).times(2).returns(packet, nil)
+      assert_nil session.poll_message
+      assert_nil session.server_sig_algs
+    end
+
+    def test_empty_ext_info_should_be_consumed_and_close_the_window
+      session!
+      packet = P(:byte, EXT_INFO, :long, 0)
+      socket.expects(:next_packet).times(2).returns(packet, nil)
+      assert_nil session.poll_message
+      assert_nil session.server_sig_algs
+    end
+
+    def test_a_later_ext_info_should_not_replace_adopted_server_sig_algs
       session!
       first = P(:byte, EXT_INFO, :long, 1, :string, "server-sig-algs", :string, "ssh-ed25519")
       second = P(:byte, EXT_INFO, :long, 1, :string, "server-sig-algs", :string, "rsa-sha2-256")
       socket.expects(:next_packet).times(3).returns(first, second, nil)
       assert_nil session.poll_message
-      assert_equal %w[rsa-sha2-256], session.server_sig_algs
+      assert_equal %w[ssh-ed25519], session.server_sig_algs
+    end
+
+    def test_a_later_ext_info_should_not_set_sig_algs_when_first_had_none
+      session!
+      first = P(:byte, EXT_INFO, :long, 1, :string, "ping@openssh.com", :string, "0")
+      second = P(:byte, EXT_INFO, :long, 1, :string, "server-sig-algs", :string, "rsa-sha2-256")
+      socket.expects(:next_packet).times(3).returns(first, second, nil)
+      assert_nil session.poll_message
+      assert_nil session.server_sig_algs
+    end
+
+    def test_ext_info_after_authentication_starts_should_be_ignored
+      session!
+      session.mark_authentication_started!
+      packet = P(:byte, EXT_INFO, :long, 1, :string, "server-sig-algs", :string, "rsa-sha2-256")
+      socket.expects(:next_packet).times(2).returns(packet, nil)
+      assert_nil session.poll_message
+      assert_nil session.server_sig_algs
+    end
+
+    def test_ext_info_during_rekey_should_be_ignored
+      session!
+      algorithms.stubs(:pending?).returns(true)
+      packet = P(:byte, EXT_INFO, :long, 1, :string, "server-sig-algs", :string, "rsa-sha2-256")
+      socket.expects(:next_packet).times(2).returns(packet, nil)
+      assert_nil session.poll_message
+      assert_nil session.server_sig_algs
+    end
+
+    def test_ext_info_before_initial_key_exchange_should_be_ignored
+      session!
+      algorithms.stubs(:session_id).returns(nil)
+      packet = P(:byte, EXT_INFO, :long, 1, :string, "server-sig-algs", :string, "rsa-sha2-256")
+      socket.expects(:next_packet).times(2).returns(packet, nil)
+      assert_nil session.poll_message
+      assert_nil session.server_sig_algs
+    end
+
+    def test_ignored_ext_info_should_not_close_the_window
+      session!
+      session.mark_authentication_started!
+      late = P(:byte, EXT_INFO, :long, 1, :string, "server-sig-algs", :string, "rsa-sha2-256")
+      socket.expects(:next_packet).times(2).returns(late, nil)
+      assert_nil session.poll_message
+      assert_nil session.server_sig_algs
+      refute session.instance_variable_get(:@initial_ext_info_seen)
+    end
+
+    def test_duplicate_extension_name_in_one_ext_info_should_raise
+      session!
+      packet = P(:byte, EXT_INFO, :long, 2,
+                 :string, "server-sig-algs", :string, "ssh-ed25519",
+                 :string, "server-sig-algs", :string, "rsa-sha2-256")
+      socket.expects(:next_packet).returns(packet)
+      error = assert_raises(Net::SSH::Exception) { session.poll_message }
+      assert_match(/duplicate EXT_INFO extension/, error.message)
+      assert_nil session.server_sig_algs
+    end
+
+    def test_duplicate_conflict_should_not_adopt_either_value
+      session!
+      packet = P(:byte, EXT_INFO, :long, 2,
+                 :string, "server-sig-algs", :string, "ssh-ed25519",
+                 :string, "server-sig-algs", :string, "rsa-sha2-256")
+      socket.expects(:next_packet).returns(packet)
+      assert_raises(Net::SSH::Exception) { session.poll_message }
+      assert_nil session.server_sig_algs
+    end
+
+    def test_interleaved_ext_info_sequence_keeps_first_adopted_capabilities
+      session!
+      # A well-formed first EXT_INFO mixes an unknown extension and the
+      # capability the publickey layer will rely on.
+      first = P(:byte, EXT_INFO, :long, 2,
+                :string, "future-thing@example.com", :string, "opaque",
+                :string, "server-sig-algs", :string, "rsa-sha2-512")
+      # A re-key window opens: this must be ignored, not applied.
+      during_rekey = P(:byte, EXT_INFO, :long, 1,
+                       :string, "server-sig-algs", :string, "ssh-rsa")
+      # Authentication begins, then a conflicting late packet arrives.
+      late_conflict = P(:byte, EXT_INFO, :long, 1,
+                        :string, "server-sig-algs", :string, "rsa-sha2-256")
+      # Each EXT_INFO is followed by a nil so poll_message returns after
+      # handling that single packet instead of draining the socket.
+      socket.expects(:next_packet).times(6)
+        .returns(first, nil, during_rekey, nil, late_conflict, nil)
+
+      algorithms.stubs(:pending?).returns(false)
+      assert_nil session.poll_message
+      assert_equal %w[rsa-sha2-512], session.server_sig_algs
+
+      algorithms.stubs(:pending?).returns(true)
+      assert_nil session.poll_message
+      assert_equal %w[rsa-sha2-512], session.server_sig_algs
+
+      algorithms.stubs(:pending?).returns(false)
+      session.mark_authentication_started!
+      assert_nil session.poll_message
+      # The capability adopted before authentication survives every later
+      # conflicting packet, so signatures keep using rsa-sha2-512.
+      assert_equal %w[rsa-sha2-512], session.server_sig_algs
     end
 
     def test_ext_info_without_server_sig_algs_should_leave_them_unset
@@ -254,6 +373,30 @@ module Transport
       session!
       socket.expects(:next_packet).returns(P(:byte, EXT_INFO, :long, 2, :string, "server-sig-algs", :string, "ssh-ed25519"))
       assert_raises(Net::SSH::Exception) { session.poll_message }
+    end
+
+    def test_ext_info_with_trailing_bytes_should_raise
+      session!
+      packet = P(:byte, EXT_INFO, :long, 1, :string, "server-sig-algs", :string, "ssh-ed25519", :raw, "junk")
+      socket.expects(:next_packet).returns(packet)
+      assert_raises(Net::SSH::Exception) { session.poll_message }
+    end
+
+    def test_malformed_ext_info_should_raise_on_extension_count_larger_than_packet
+      session!
+      # 0xFFFFFFFF is the largest uint32 count but the packet carries no pairs.
+      socket.expects(:next_packet).returns(P(:byte, EXT_INFO, :long, 0xFFFFFFFF))
+      assert_raises(Net::SSH::Exception) { session.poll_message }
+      assert_nil session.server_sig_algs
+    end
+
+    def test_malformed_ext_info_with_huge_count_should_not_loop
+      session!
+      socket.expects(:next_packet).returns(P(:byte, EXT_INFO, :long, 0xFFFFFFFF))
+      started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      assert_raises(Net::SSH::Exception) { session.poll_message }
+      elapsed = Process.clock_gettime(Process::CLOCK_MONOTONIC) - started
+      assert elapsed < 1.0, "huge extension count must be rejected without iterating"
     end
 
     def test_poll_message_should_silently_handle_unimplemented_packets
@@ -558,7 +701,7 @@ module Transport
     end
 
     def algorithms
-      @algorithms ||= stub("algorithms", initialized?: true, session_id: "session-id", allow?: true, start: true)
+      @algorithms ||= stub("algorithms", initialized?: true, session_id: "session-id", pending?: false, allow?: true, start: true)
     end
 
     def session(options = {})

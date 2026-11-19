@@ -156,6 +156,16 @@ class MockTransport < Net::SSH::Transport::Session
     options[:server_sig_algs]
   end
 
+  # The mock never drives the real EXT_INFO state machine; record the call so
+  # tests can assert the authentication window closes.
+  def mark_authentication_started!
+    @authentication_started = true
+  end
+
+  def authentication_started?
+    @authentication_started == true
+  end
+
   def closed?
     false
   end
