@@ -2,6 +2,10 @@
 
 ## master
 
+- Add `mandatory: true` option to `pre_check` to declare pre-checks that cannot be skipped via `skip_pre_check`.
+
+  Attempting to skip a mandatory pre-check raises an `ArgumentError` at class definition time, pointing to the check name and the policy class where it was defined.
+
 ## 0.7.8 (2026-11-03)
 
 - Improve policy caching (less key calculations, fixed collisions). ([@palkan][])

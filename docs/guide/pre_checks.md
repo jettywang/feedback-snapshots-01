@@ -54,4 +54,29 @@ end
 
 To halt the authorization process within a pre-check, you must return either `allow!` or `deny!` call value. When any other value is returned, the pre-check is ignored, and the rule is called (or next pre-check).
 
+## Mandatory pre-checks
+
+Some checks must run for every policy in the inheritance chain (e.g., security-related ones). You can declare such a pre-check as _mandatory_ to prevent subclasses from skipping it:
+
+```ruby
+class ApplicationPolicy < ActionPolicy::Base
+  pre_check :deny_disabled_accounts, mandatory: true
+
+  private
+
+  def deny_disabled_accounts
+    deny! if user.disabled?
+  end
+end
+```
+
+Mandatory pre-checks can still be scoped to particular actions via `only` / `except` (matched against the resolved rule, so aliases are taken into account), but calling `skip_pre_check` for them raises an `ArgumentError` at class definition time:
+
+```ruby
+class PostPolicy < ApplicationPolicy
+  # raises ArgumentError: "Couldn't skip mandatory pre-check: deny_disabled_accounts (defined in ApplicationPolicy)"
+  skip_pre_check :deny_disabled_accounts
+end
+```
+
 **NOTE**: pre-checks are available only if you inherit from `ActionPolicy::Base` or include `ActionPolicy::Policy::PreCheck` into your `ApplicationPolicy`.

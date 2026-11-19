@@ -26,6 +26,18 @@ module ActionPolicy
     #        user.admin? && !record.admin?
     #      end
     #    end
+    #
+    # A pre-check can be declared as _mandatory_—such checks cannot be skipped
+    # by subclasses (e.g., security-related checks):
+    #
+    #    class ApplicationPolicy < ActionPolicy::Base
+    #      pre_check :deny_disabled_accounts, mandatory: true
+    #
+    #      private
+    #        def deny_disabled_accounts
+    #          deny! if user.disabled?
+    #        end
+    #    end
     module PreCheck
       # Single pre-check instance.
       #
@@ -33,7 +45,7 @@ module ActionPolicy
       class Check
         attr_reader :name, :policy_class
 
-        def initialize(policy, name, except: nil, only: nil)
+        def initialize(policy, name, except: nil, only: nil, mandatory: false)
           if !except.nil? && !only.nil?
             raise ArgumentError,
               "Only one of `except` and `only` may be specified for pre-check"
@@ -41,11 +53,14 @@ module ActionPolicy
 
           @policy_class = policy
           @name = name
+          @mandatory = mandatory
           @blacklist = Array(except) unless except.nil?
           @whitelist = Array(only) unless only.nil?
 
           rebuild_filter
         end
+
+        def mandatory? = @mandatory
 
         def applicable?(rule)
           return true if filter.nil?
@@ -55,6 +70,11 @@ module ActionPolicy
         def call(policy) = policy.send(name)
 
         def skip!(except: nil, only: nil)
+          if mandatory?
+            raise ArgumentError,
+              "Couldn't skip mandatory pre-check: #{name} (defined in #{policy_class})"
+          end
+
           if !except.nil? && !only.nil?
             raise ArgumentError,
               "Only one of `except` and `only` may be specified when skipping pre-check"
@@ -84,7 +104,8 @@ module ActionPolicy
             policy_class,
             name,
             except: blacklist&.dup,
-            only: whitelist&.dup
+            only: whitelist&.dup,
+            mandatory: mandatory?
           )
         end
 
@@ -136,6 +157,11 @@ module ActionPolicy
           names.each do |name|
             check = pre_checks.find { it.name == name }
             raise "Pre-check not found: #{name}" if check.nil?
+
+            if check.mandatory?
+              raise ArgumentError,
+                "Couldn't skip mandatory pre-check: #{name} (defined in #{check.policy_class})"
+            end
 
             # when no options provided we remove this check completely
             next pre_checks.delete(check) if options.empty?

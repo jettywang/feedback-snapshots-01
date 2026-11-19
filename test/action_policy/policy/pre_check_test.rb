@@ -153,3 +153,118 @@ class TestPreCheck < Minitest::Test
     assert_equal({reasons: [:no_user]}, policy.result.reasons.details)
   end
 end
+
+class TestMandatoryPreCheck < Minitest::Test
+  class SecureBasePolicy
+    include ActionPolicy::Policy::Core
+    include ActionPolicy::Policy::Authorization
+    include ActionPolicy::Policy::PreCheck
+    include ActionPolicy::Policy::Aliases
+
+    authorize :user
+
+    pre_check :deny_disabled_accounts, mandatory: true, only: [:update?]
+    pre_check :allow_admins
+
+    private
+
+    def deny_disabled_accounts
+      deny! if user.name == "disabled"
+    end
+
+    def allow_admins
+      allow! if user.admin?
+    end
+  end
+
+  class MiddlePolicy < SecureBasePolicy
+    alias_rule :publish?, to: :update?
+
+    pre_check :deny_guests, only: [:update?]
+
+    def update?
+      record != false
+    end
+
+    def index?
+      true
+    end
+
+    private
+
+    def deny_guests
+      deny! if user.name == "guest"
+    end
+  end
+
+  class PostPolicy < MiddlePolicy
+    skip_pre_check :allow_admins
+    skip_pre_check :deny_guests, only: :update?
+  end
+
+  def test_normal_pre_checks_can_be_skipped
+    admin = User.new("admin")
+    guest = User.new("guest")
+
+    # allow_admins is still active in MiddlePolicy
+    assert MiddlePolicy.new(false, user: admin).apply(:update?)
+    # ...but skipped in PostPolicy
+    refute PostPolicy.new(false, user: admin).apply(:update?)
+
+    # deny_guests is still active in MiddlePolicy
+    refute MiddlePolicy.new(true, user: guest).apply(:update?)
+    # ...but skipped for update? in PostPolicy
+    assert PostPolicy.new(true, user: guest).apply(:update?)
+  end
+
+  def test_mandatory_pre_check_cannot_be_skipped
+    user = User.new("disabled")
+
+    refute MiddlePolicy.new(true, user: user).apply(:update?)
+    refute PostPolicy.new(true, user: user).apply(:update?)
+  end
+
+  def test_mandatory_pre_check_only_applies_to_matched_rules
+    user = User.new("disabled")
+
+    # mandatory check is scoped to update? only
+    assert PostPolicy.new(true, user: user).apply(:index?)
+  end
+
+  def test_mandatory_pre_check_runs_for_aliased_rule
+    user = User.new("disabled")
+
+    # publish? is an alias for update?, so the mandatory check applies
+    refute PostPolicy.new(true, user: user).apply(:publish?)
+    # normal checks skipped for update? are also skipped for the alias
+    assert PostPolicy.new(true, user: User.new("guest")).apply(:publish?)
+  end
+
+  def test_skip_mandatory_pre_check_raises
+    error = assert_raises(ArgumentError) do
+      Class.new(MiddlePolicy) { skip_pre_check :deny_disabled_accounts }
+    end
+
+    assert_includes error.message, "deny_disabled_accounts"
+    assert_includes error.message, "SecureBasePolicy"
+  end
+
+  def test_skip_mandatory_pre_check_with_options_raises
+    error = assert_raises(ArgumentError) do
+      Class.new(MiddlePolicy) { skip_pre_check :deny_disabled_accounts, only: :update? }
+    end
+
+    assert_includes error.message, "deny_disabled_accounts"
+    assert_includes error.message, "SecureBasePolicy"
+  end
+
+  def test_mandatory_pre_check_with_both_only_and_except_raises
+    error = assert_raises(ArgumentError) do
+      Class.new(SecureBasePolicy) do
+        pre_check :another_check, mandatory: true, only: [:update?], except: [:index?]
+      end
+    end
+
+    assert_includes error.message, "Only one of `except` and `only`"
+  end
+end
