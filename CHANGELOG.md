@@ -2,6 +2,10 @@
 
 ## Next Release
 
+#### Improvements
+
+- Add a minimal disclosure strategy (`M2mLogStrategy.PK`) for registered many-to-many fields. The new `m2m_log_fields` registration option stores related objects' primary keys instead of their string representations, avoiding sensitive data (e.g. customer emails) in the audit log while keeping add/remove operations and a stable identifier per object.
+
 ## 3.4.2 (2026-11-08)
 
 #### Improvements

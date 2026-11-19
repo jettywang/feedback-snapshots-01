@@ -41,6 +41,8 @@ from test_app.models import (
     JSONModel,
     ManyRelatedModel,
     ManyRelatedOtherModel,
+    MinimalDisclosureGroup,
+    MinimalDisclosureMember,
     ModelForReusableThroughModel,
     ModelPrimaryKeyModel,
     NoDeleteHistoryModel,
@@ -73,6 +75,7 @@ from auditlog.diff import mask_str, model_instance_diff
 from auditlog.middleware import AuditlogMiddleware
 from auditlog.models import DEFAULT_OBJECT_REPR
 from auditlog.registry import AuditlogModelRegistry, AuditLogRegistrationError, auditlog
+from auditlog.strategies import M2mLogStrategy
 from auditlog.signals import post_log, pre_log
 
 LogEntry = get_logentry_model()
@@ -547,6 +550,112 @@ class ManyRelatedModelTest(TestCase):
         self.obj_reusable.related.add(self.obj_reusable_related)
         entries = self.obj_reusable.history.all()
         self.assertEqual(len(entries), 1)
+
+
+class MinimalDisclosureM2mTest(TestCase):
+    """
+    The PK disclosure strategy stores only related object primary keys instead
+    of their (potentially sensitive) string representations, while keeping the
+    add/delete operation and a stable per-object identifier.
+    """
+
+    def setUp(self):
+        self.group = MinimalDisclosureGroup.objects.create(label="Team")
+        # Two distinct members that intentionally share a display name. Their
+        # email addresses are what ``str(member)`` would otherwise leak.
+        self.member_one = MinimalDisclosureMember.objects.create(
+            name="Alex Doe", email="alex@example.com"
+        )
+        self.member_two = MinimalDisclosureMember.objects.create(
+            name="Alex Doe", email="alex.doe@example.com"
+        )
+
+    def _latest_changes(self):
+        return self.group.history.first().changes["members"]
+
+    def test_add_logs_primary_key_not_email(self):
+        self.group.members.add(self.member_one)
+        changes = self._latest_changes()
+        self.assertEqual(changes["operation"], "add")
+        self.assertEqual(changes["objects"], [str(self.member_one.pk)])
+        self.assertNotIn(self.member_one.email, json.dumps(changes))
+        self.assertNotIn(self.member_one.name, json.dumps(changes))
+
+    def test_remove_logs_primary_key_and_operation(self):
+        self.group.members.add(self.member_one)
+        self.group.members.remove(self.member_one)
+        remove_entry = self.group.history.first()
+        self.assertEqual(
+            remove_entry.changes["members"]["operation"], "delete"
+        )
+        self.assertEqual(
+            remove_entry.changes["members"]["objects"], [str(self.member_one.pk)]
+        )
+        self.assertNotIn(
+            self.member_one.email, json.dumps(remove_entry.changes)
+        )
+
+    def test_clear_logs_every_primary_key_without_emails(self):
+        self.group.members.add(self.member_one, self.member_two)
+        self.group.members.clear()
+        clear_entry = self.group.history.first()
+        self.assertEqual(
+            clear_entry.changes["members"]["operation"], "delete"
+        )
+        self.assertCountEqual(
+            clear_entry.changes["members"]["objects"],
+            [str(self.member_one.pk), str(self.member_two.pk)],
+        )
+        self.assertNotIn("example.com", json.dumps(clear_entry.changes))
+
+    def test_renamed_member_stays_correlatable(self):
+        self.group.members.add(self.member_one)
+        add_pk = self._latest_changes()["objects"][0]
+
+        # The member's identifying string changes, but the primary key does not.
+        self.member_one.email = "renamed@example.com"
+        self.member_one.save()
+        self.group.members.remove(self.member_one)
+
+        remove_pk = self._latest_changes()["objects"][0]
+        self.assertEqual(add_pk, remove_pk)
+        self.assertEqual(remove_pk, str(self.member_one.pk))
+
+    def test_same_named_members_are_distinguishable(self):
+        self.group.members.add(self.member_one, self.member_two)
+        objects = self._latest_changes()["objects"]
+        self.assertEqual(len(objects), 2)
+        self.assertEqual(len(set(objects)), 2)
+        self.assertCountEqual(
+            objects, [str(self.member_one.pk), str(self.member_two.pk)]
+        )
+
+    def test_reverse_operation_uses_primary_key_strategy(self):
+        # Acting from the related side still goes through the registered
+        # receiver and must only disclose primary keys.
+        self.member_one.groups.add(self.group)
+        log_entry = LogEntry.objects.get_for_object(self.member_one).first()
+        changes = log_entry.changes["members"]
+        self.assertEqual(changes["operation"], "add")
+        self.assertEqual(changes["objects"], [str(self.group.pk)])
+        self.assertNotIn(self.group.label, json.dumps(changes))
+        self.assertNotIn(self.member_one.email, json.dumps(changes))
+
+    def test_changes_str_contains_only_primary_keys(self):
+        self.group.members.add(self.member_one)
+        rendered = self.group.history.first().changes_str
+        self.assertEqual(
+            rendered, f"members: add {[str(self.member_one.pk)]}"
+        )
+        self.assertNotIn(self.member_one.email, rendered)
+
+    def test_admin_render_contains_only_primary_keys(self):
+        self.group.members.add(self.member_one)
+        log_entry = self.group.history.first()
+        rendered = LogEntryAdmin(LogEntry, AdminSite()).msg(log_entry)
+        self.assertIn(str(self.member_one.pk), rendered)
+        self.assertNotIn(self.member_one.email, rendered)
+        self.assertIn("add", rendered)
 
 
 class MiddlewareTest(TestCase):
@@ -1399,7 +1508,7 @@ class RegisterModelSettingsTest(TestCase):
 
         self.assertTrue(self.test_auditlog.contains(SimpleExcludeModel))
         self.assertTrue(self.test_auditlog.contains(ChoicesFieldModel))
-        self.assertEqual(len(self.test_auditlog.get_models()), 36)
+        self.assertEqual(len(self.test_auditlog.get_models()), 38)
 
     def test_register_models_register_model_with_attrs(self):
         self.test_auditlog._register_models(
@@ -1432,6 +1541,59 @@ class RegisterModelSettingsTest(TestCase):
         self.assertTrue(self.test_auditlog.contains(ManyRelatedModel))
         self.assertEqual(
             self.test_auditlog._registry[ManyRelatedModel]["m2m_fields"], {"related"}
+        )
+
+    def test_register_model_with_m2m_pk_strategy(self):
+        self.test_auditlog.register(
+            ManyRelatedModel,
+            m2m_fields={"related"},
+            m2m_log_fields={"related": M2mLogStrategy.PK},
+        )
+
+        self.assertEqual(
+            self.test_auditlog._registry[ManyRelatedModel]["m2m_log_fields"],
+            {"related": M2mLogStrategy.PK},
+        )
+        self.assertEqual(
+            self.test_auditlog.get_m2m_log_strategy(ManyRelatedModel, "related"),
+            M2mLogStrategy.PK,
+        )
+
+    def test_m2m_strategy_defaults_to_string_representation(self):
+        self.test_auditlog.register(ManyRelatedModel, m2m_fields={"related"})
+
+        self.assertEqual(
+            self.test_auditlog._registry[ManyRelatedModel]["m2m_log_fields"], {}
+        )
+        self.assertEqual(
+            self.test_auditlog.get_m2m_log_strategy(ManyRelatedModel, "related"),
+            M2mLogStrategy.STR,
+        )
+
+    def test_register_model_with_invalid_m2m_strategy_raises(self):
+        with self.assertRaises(AuditLogRegistrationError):
+            self.test_auditlog.register(
+                ManyRelatedModel,
+                m2m_fields={"related"},
+                m2m_log_fields={"related": "hash"},
+            )
+        self.assertFalse(self.test_auditlog.contains(ManyRelatedModel))
+
+    def test_register_models_register_model_with_m2m_pk_strategy(self):
+        self.test_auditlog._register_models(
+            (
+                {
+                    "model": "test_app.ManyRelatedModel",
+                    "m2m_fields": {"related"},
+                    "m2m_log_fields": {"related": M2mLogStrategy.PK},
+                },
+            )
+        )
+
+        self.assertTrue(self.test_auditlog.contains(ManyRelatedModel))
+        self.assertEqual(
+            self.test_auditlog._registry[ManyRelatedModel]["m2m_log_fields"],
+            {"related": M2mLogStrategy.PK},
         )
 
     def test_register_from_settings_invalid_settings(self):

@@ -163,8 +163,8 @@ def _create_log_entry(
             raise error
 
 
-def make_log_m2m_changes(field_name):
-    """Return a handler for m2m_changed with field_name enclosed."""
+def make_log_m2m_changes(field_name, strategy):
+    """Return a handler for m2m_changed with field_name and strategy enclosed."""
 
     @check_disable
     def log_m2m_changes(signal, action, **kwargs):
@@ -186,6 +186,7 @@ def make_log_m2m_changes(field_name):
                 kwargs["instance"],
                 "add",
                 field_name,
+                strategy,
             )
         elif action in ["post_remove", "post_clear"]:
             LogEntry.objects.log_m2m_changes(
@@ -193,6 +194,7 @@ def make_log_m2m_changes(field_name):
                 kwargs["instance"],
                 "delete",
                 field_name,
+                strategy,
             )
 
     return log_m2m_changes

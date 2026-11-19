@@ -26,6 +26,7 @@ from django.utils.translation import gettext_lazy as _
 
 from auditlog import get_logentry_model
 from auditlog.diff import get_mask_function
+from auditlog.strategies import M2mLogStrategy
 
 DEFAULT_OBJECT_REPR = "<error forming object repr>"
 
@@ -80,7 +81,13 @@ class LogEntryManager(models.Manager):
         return None
 
     def log_m2m_changes(
-        self, changed_queryset, instance, operation, field_name, **kwargs
+        self,
+        changed_queryset,
+        instance,
+        operation,
+        field_name,
+        strategy=M2mLogStrategy.STR,
+        **kwargs,
     ):
         """Create a new "changed" log entry from m2m record.
 
@@ -92,6 +99,10 @@ class LogEntryManager(models.Manager):
         :type action: str
         :param field_name: The name of the changed m2m field.
         :type field_name: str
+        :param strategy: How to represent the related objects. ``M2mLogStrategy.STR``
+            stores their string representation while ``M2mLogStrategy.PK`` stores
+            only their primary key to avoid disclosing sensitive string data.
+        :type strategy: str
         :param kwargs: Field overrides for the :py:class:`LogEntry` object.
         :return: The new log entry or `None` if there were no changes.
         :rtype: LogEntry
@@ -118,7 +129,10 @@ class LogEntryManager(models.Manager):
             if callable(get_additional_data):
                 kwargs.setdefault("additional_data", get_additional_data())
 
-            objects = [smart_str(instance) for instance in changed_queryset]
+            if strategy == M2mLogStrategy.PK:
+                objects = [smart_str(related.pk) for related in changed_queryset]
+            else:
+                objects = [smart_str(related) for related in changed_queryset]
             kwargs["changes"] = {
                 field_name: {
                     "type": "m2m",

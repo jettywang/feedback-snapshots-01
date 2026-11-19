@@ -179,6 +179,32 @@ This functionality is based on the ``m2m_changed`` signal sent by the ``through`
 
 Note that when the user changes multiple many-to-many fields on the same object through the admin, both adding and removing some objects from each, this code will generate multiple log entries: each log entry will represent a single operation (add or delete) of a single field, e.g. if you both add and delete values from 2 fields on the same form in the same request, you'll get 4 log entries.
 
+By default the log entry stores the string representation (``str(obj)``) of every added or removed related object in ``changes[field_name]["objects"]``. When that representation contains sensitive data — for example a member model whose ``__str__`` returns the customer's email address — use the ``m2m_log_fields`` option to switch an individual many-to-many field to a minimal disclosure strategy that stores only the related object's primary key:
+
+.. code-block:: python
+
+    from auditlog.registry import M2mLogStrategy
+
+    auditlog.register(
+        Group,
+        m2m_fields={"members"},
+        m2m_log_fields={"members": M2mLogStrategy.PK},
+    )
+
+The stored change keeps the same shape, including the ``add``/``delete`` operation, but ``objects`` now holds primary keys instead of string representations:
+
+.. code-block:: python
+
+    {
+        "members": {
+            "type": "m2m",
+            "operation": "add",
+            "objects": ["12"],
+        }
+    }
+
+Because primary keys are stable, events for the same object remain correlatable after the object is renamed, and two objects that happen to share a name can still be distinguished. Fields that are not listed in ``m2m_log_fields`` keep the default ``M2mLogStrategy.STR`` behaviour. The same option can be passed in the dictionary form used by the ``AUDITLOG_INCLUDE_TRACKING_MODELS`` setting.
+
 .. versionadded:: 2.1.0
 
 **Serialized Data**
@@ -323,6 +349,7 @@ It must be a list or tuple. Each item in this setting can be a:
             },
             "mask_fields": ["field5", "field6"],
             "m2m_fields": ["field7", "field8"],
+            "m2m_log_fields": {"field7": "pk"},
             "serialize_data": True,
             "serialize_auditlog_fields_only": False,
             "serialize_kwargs": {"fields": ["foo", "bar", "biz", "baz"]},

@@ -16,6 +16,7 @@ from django.db.models.signals import (
 
 from auditlog.conf import settings
 from auditlog.signals import accessed
+from auditlog.strategies import M2mLogStrategy
 
 DispatchUID = tuple[int, int, int]
 
@@ -68,6 +69,7 @@ class AuditlogModelRegistry:
         mask_fields: list[str] | None = None,
         mask_callable: str | None = None,
         m2m_fields: Collection[str] | None = None,
+        m2m_log_fields: dict[str, str] | None = None,
         serialize_data: bool = False,
         serialize_kwargs: dict[str, Any] | None = None,
         serialize_auditlog_fields_only: bool = False,
@@ -83,6 +85,10 @@ class AuditlogModelRegistry:
         :param mask_callable: The dotted path to a callable that will be used for masking. If not provided,
                               the default mask_callable will be used.
         :param m2m_fields: The fields to handle as many to many.
+        :param m2m_log_fields: Mapping of many-to-many field names to a disclosure
+            strategy from :class:`M2mLogStrategy`. Fields without an entry keep the
+            default string representation. Use ``M2mLogStrategy.PK`` to store only
+            the related object's primary key instead of its string representation.
         :param serialize_data: Option to include a dictionary of the objects state in the auditlog.
         :param serialize_kwargs: Optional kwargs to pass to Django serializer
         :param serialize_auditlog_fields_only: Only fields being considered in changes will be serialized.
@@ -98,6 +104,8 @@ class AuditlogModelRegistry:
             mask_fields = []
         if m2m_fields is None:
             m2m_fields = set()
+        if m2m_log_fields is None:
+            m2m_log_fields = {}
         if serialize_kwargs is None:
             serialize_kwargs = {}
 
@@ -106,6 +114,15 @@ class AuditlogModelRegistry:
                 "Serializer options were given but the 'serialize_data' option is not "
                 "set. Did you forget to set serialized_data to True?"
             )
+
+        valid_m2m_strategies = {value for value, _label in M2mLogStrategy.choices}
+        for field_name, strategy in m2m_log_fields.items():
+            if strategy not in valid_m2m_strategies:
+                raise AuditLogRegistrationError(
+                    f"Unknown m2m logging strategy '{strategy}' for field "
+                    f"'{field_name}'. Valid strategies are: "
+                    f"{', '.join(sorted(valid_m2m_strategies))}."
+                )
 
         for fld in settings.AUDITLOG_EXCLUDE_TRACKING_FIELDS:
             exclude_fields.append(fld)
@@ -125,6 +142,7 @@ class AuditlogModelRegistry:
                 "mask_fields": mask_fields,
                 "mask_callable": mask_callable,
                 "m2m_fields": m2m_fields,
+                "m2m_log_fields": dict(m2m_log_fields),
                 "serialize_data": serialize_data,
                 "serialize_kwargs": serialize_kwargs,
                 "serialize_auditlog_fields_only": serialize_auditlog_fields_only,
@@ -188,6 +206,15 @@ class AuditlogModelRegistry:
             ),
         }
 
+    def get_m2m_log_strategy(self, model: ModelBase, field_name: str) -> str:
+        """
+        Return the configured disclosure strategy for a registered many-to-many
+        field, defaulting to the string representation when no strategy was set.
+        """
+        return self._registry[model]["m2m_log_fields"].get(
+            field_name, M2mLogStrategy.STR
+        )
+
     def _connect_signals(self, model):
         """
         Connect signals for the model.
@@ -202,7 +229,10 @@ class AuditlogModelRegistry:
             )
         if self._m2m:
             for field_name in self._registry[model]["m2m_fields"]:
-                receiver = make_log_m2m_changes(field_name)
+                strategy = self._registry[model]["m2m_log_fields"].get(
+                    field_name, M2mLogStrategy.STR
+                )
+                receiver = make_log_m2m_changes(field_name, strategy)
                 self._m2m_signals[model][field_name] = receiver
                 field = getattr(model, field_name)
                 m2m_model = getattr(field, "through")

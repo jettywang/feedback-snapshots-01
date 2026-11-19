@@ -5,7 +5,7 @@ from django.core.serializers.json import DjangoJSONEncoder
 from django.db import models
 
 from auditlog.models import AuditlogHistoryField
-from auditlog.registry import AuditlogModelRegistry, auditlog
+from auditlog.registry import AuditlogModelRegistry, M2mLogStrategy, auditlog
 
 m2m_only_auditlog = AuditlogModelRegistry(create=False, update=False, delete=False)
 
@@ -469,6 +469,37 @@ class AutoManyRelatedModel(models.Model):
     related = models.ManyToManyField(SimpleModel)
 
 
+class MinimalDisclosureMember(models.Model):
+    """
+    A member whose string representation contains sensitive data (an email
+    address). The same name may be shared by several members.
+    """
+
+    name = models.CharField(max_length=255)
+    email = models.EmailField()
+
+    def __str__(self):
+        # The email is the kind of string that must not end up in the audit log.
+        return self.email
+
+
+class MinimalDisclosureGroup(models.Model):
+    """
+    A group whose members are audited with the minimal disclosure (primary key)
+    strategy, so no member email is persisted in the audit log.
+    """
+
+    label = models.CharField(max_length=255)
+    members = models.ManyToManyField(
+        MinimalDisclosureMember, related_name="groups"
+    )
+
+    history = AuditlogHistoryField(delete_related=True)
+
+    def __str__(self):
+        return self.label
+
+
 class CustomMaskModel(models.Model):
     credit_card = models.CharField(max_length=16)
     text = models.TextField()
@@ -496,6 +527,11 @@ m2m_only_auditlog.register(ModelForReusableThroughModel, m2m_fields={"related"})
 m2m_only_auditlog.register(OtherModelForReusableThroughModel, m2m_fields={"related"})
 m2m_only_auditlog.register(SecretM2MModel, m2m_fields={"m2m_related"})
 m2m_only_auditlog.register(SwappedManagerModel, m2m_fields={"m2m_related"})
+m2m_only_auditlog.register(
+    MinimalDisclosureGroup,
+    m2m_fields={"members"},
+    m2m_log_fields={"members": M2mLogStrategy.PK},
+)
 auditlog.register(SimpleExcludeModel, exclude_fields=["text"])
 auditlog.register(SimpleMappingModel, mapping_fields={"sku": "Product No."})
 auditlog.register(AdditionalDataIncludedModel)
