@@ -142,6 +142,14 @@ RSpec.describe Flipper::Adapter do
       export = source_flipper.export(format: :json, version: 1)
       expect(export.features.dig("search", :boolean)).to eq("true")
     end
+
+    it "exports a redacted view-only export" do
+      source_flipper.enable_actor(:search, Flipper::Actor.new("User;1"))
+      export = source_flipper.export(redacted: true)
+      data = JSON.parse(export.contents)
+      expect(data["license"]).to eq("view-only")
+      expect(data["features"]["search"]["actors"]).to eq(1)
+    end
   end
 
   describe "#adapter_stack" do

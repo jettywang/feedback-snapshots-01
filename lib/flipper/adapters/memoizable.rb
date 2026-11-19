@@ -132,8 +132,8 @@ module Flipper
         @adapter.import(source).tap { cache.clear if memoizing? }
       end
 
-      def export(format: :json, version: 1)
-        @adapter.export(format: format, version: version)
+      def export(format: :json, version: 1, redacted: false)
+        @adapter.export(format: format, version: version, redacted: redacted)
       end
 
       # Internal: Turns local caching on/off.

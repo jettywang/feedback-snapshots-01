@@ -181,16 +181,17 @@ module Flipper
         end
       end
 
-      def export(format: :json, version: 1)
+      def export(format: :json, version: 1, redacted: false)
         default_payload = {
           operation: :export,
           adapter_name: @adapter.name,
           format: format,
           version: version,
+          redacted: redacted,
         }
 
         @instrumenter.instrument(InstrumentationName, default_payload) do |payload|
-          payload[:result] = @adapter.export(format: format, version: version)
+          payload[:result] = @adapter.export(format: format, version: version, redacted: redacted)
         end
       end
     end

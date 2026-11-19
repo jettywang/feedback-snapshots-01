@@ -24,10 +24,16 @@ module Flipper
         # Public: The features hash identical to calling get_all on adapter.
         def features
           @features ||= begin
-            features = Typecast.from_json(contents).fetch("features")
-            Typecast.features_hash(features)
+            data = Typecast.from_json(contents)
+            # View-only (redacted) exports carry a license marker and must
+            # never be imported: importing one would replace production gate
+            # values with anonymous counts.
+            raise InvalidError if data.is_a?(Hash) && data.key?("license")
+            Typecast.features_hash(data.fetch("features"))
           rescue JSON::ParserError
             raise JsonError
+          rescue InvalidError
+            raise
           rescue
             raise InvalidError
           end

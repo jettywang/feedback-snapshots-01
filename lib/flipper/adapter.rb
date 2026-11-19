@@ -60,8 +60,8 @@ module Flipper
     # Public: Exports the adapter in a given format for a given format version.
     #
     # Returns a Flipper::Export instance.
-    def export(format: :json, version: 1)
-      Flipper::Exporter.build(format: format, version: version).call(self)
+    def export(format: :json, version: 1, redacted: false)
+      Flipper::Exporter.build(format: format, version: version, redacted: redacted).call(self)
     end
 
     # Public: Default config for a feature's gate values.

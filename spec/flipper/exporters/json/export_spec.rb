@@ -58,3 +58,22 @@ RSpec.describe Flipper::Exporters::Json::Export do
     }.to raise_error(Flipper::Exporters::Json::InvalidError)
   end
 end
+
+RSpec.describe Flipper::Exporters::Json::Export, "view-only payloads" do
+  let(:contents) {
+    <<~JSON
+      {
+        "version":1,
+        "license":"view-only",
+        "features":{
+          "beta":{"boolean":null,"groups":1,"actors":2,"percentage_of_actors":null,"percentage_of_time":null,"expression":null}
+        }
+      }
+    JSON
+  }
+
+  it "rejects licensed view-only exports so they cannot be imported" do
+    export = described_class.new(contents: contents)
+    expect { export.features }.to raise_error(Flipper::Exporters::Json::InvalidError)
+  end
+end
