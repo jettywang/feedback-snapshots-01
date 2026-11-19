@@ -1,0 +1,6 @@
+#!/bin/sh
+export BUNDLE_GEMFILE="$PWD/.feedback/Gemfile"
+export BUNDLE_PATH="$PWD/.feedback/vendor"
+export BUNDLE_DISABLE_SHARED_GEMS=true
+export CI=1
+exec bundle "$@"
