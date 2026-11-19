@@ -131,6 +131,10 @@ module Brakeman::WarningCodes
     :missing_rsa_padding_mode => 127,
     :small_rsa_key_size => 128,
     :ransack_search => 129,
+    :translation_xss_html_key => 130,
+    :translation_xss_default => 131,
+    :translation_xss_dynamic_key => 132,
+    :translation_xss_raw_output => 133,
 
     :custom_check => 9090,
   }

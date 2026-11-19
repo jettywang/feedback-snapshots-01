@@ -1,0 +1,11 @@
+en:
+  greetings:
+    plain: "Hello %{name}"
+    bold_html: "<b>Hello %{name}</b>"
+    safe_html: "<b>Welcome</b>"
+    absent: "Missing in English %{name}"
+  fallback:
+    text_tail: "Text tail %{name}"
+    html_tail_html: "<strong>%{name}</strong>"
+  pages:
+    title: "Title %{name}"

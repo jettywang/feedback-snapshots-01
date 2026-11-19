@@ -1,0 +1,35 @@
+<%# 1. Plain text key, tainted interpolation: escaped, no translation warning %>
+<%= t('greetings.plain', name: params[:name]) %>
+
+<%# 2. HTML semantic key, tainted interpolation: high confidence XSS %>
+<%= t('greetings.bold_html', name: params[:name]) %>
+
+<%# 3. HTML semantic key, fixed trusted text only, no interpolation: weak notice %>
+<%= t('greetings.safe_html') %>
+
+<%# 4. Plain primary key, symbol default falling back to an HTML key, tainted: capability switch XSS %>
+<%= t('greetings.missing_plain', default: :'fallback.html_tail_html', name: params[:name]) %>
+
+<%# 5. HTML primary key with a plain symbol-key fallback, tainted: HTML primary leg still XSS %>
+<%= t('greetings.bold_html', default: :'greetings.plain', name: params[:name]) %>
+
+<%# 6. Call-level string default (inline text capability), tainted: escaped, no XSS %>
+<%= t('greetings.no_such_key', default: "Hello %{name}", name: params[:name]) %>
+
+<%# 7. Dynamic unknown key, tainted interpolation: medium dynamic-key warning %>
+<%= t(params[:key], name: params[:name]) %>
+
+<%# 8. Plain text key wrapped in raw(), tainted: raw bypass XSS %>
+<%= raw t('pages.title', name: params[:name]) %>
+
+<%# 9. HTML key with a non-tainted interpolation: weak notice only %>
+<%= t('greetings.bold_html', name: 42) %>
+
+<%# 10. Plain key via translate(), tainted interpolation: no warning (text is escaped) %>
+<%= translate('greetings.plain', name: params[:name]) %>
+
+<%# 11. I18n.t HTML key, tainted interpolation (library helper, same capability rules) %>
+<%= I18n.t('greetings.bold_html', name: params[:name]) %>
+
+<%# 12. Array default chain mixing a defined text key and an HTML key, tainted: switch XSS on second leg %>
+<%= t('greetings.unknown', default: [:'fallback.text_tail', :'fallback.html_tail_html'], name: params[:name]) %>

@@ -1,0 +1,7 @@
+es:
+  greetings:
+    plain: "Hola %{name}"
+    bold_html: "<b>Hola %{name}</b>"
+  fallback:
+    text_tail: "Cola de texto %{name}"
+    html_tail_html: "<i>%{name}</i>"
