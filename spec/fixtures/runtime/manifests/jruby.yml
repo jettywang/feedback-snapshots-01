@@ -1,0 +1,7 @@
+---
+ruby:
+  engine: jruby
+  version: '2.5.0'
+  patchlevel: 0
+  engine_version: '9.2.9.0'
+source: deploy/jruby.yml

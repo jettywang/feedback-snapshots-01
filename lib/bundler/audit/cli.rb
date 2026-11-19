@@ -16,6 +16,7 @@
 #
 
 require 'bundler/audit/scanner'
+require 'bundler/audit/runtime'
 require 'bundler/audit/version'
 require 'bundler/audit/cli/formats'
 
@@ -45,6 +46,9 @@ module Bundler
       method_option :gemfile_lock, type: :string, aliases: '-G',
                                    default: 'Gemfile.lock'
       method_option :output, type: :string, aliases: '-o'
+      method_option :runtime_manifest, type: :string
+      method_option :runtime_advisories, type: :string
+      method_option :runtime_strict, type: :boolean, default: false
 
       def check(dir=Dir.pwd)
         unless File.directory?(dir)
@@ -73,7 +77,24 @@ module Bundler
                      exit 1
                    end
 
-        report = scanner.report(ignore: options.ignore)
+        scan_options = {ignore: options.ignore}
+
+        if options[:runtime_manifest] || options[:runtime_advisories]
+          scan_options[:runtime] = {}
+
+          scan_options[:runtime][:manifest] = options[:runtime_manifest] if options[:runtime_manifest]
+          scan_options[:runtime][:advisories] = options[:runtime_advisories] if options[:runtime_advisories]
+        elsif options[:runtime_strict]
+          say_error "No deployment runtime was supplied; use --runtime-manifest", :red
+          exit 1
+        end
+
+        report = begin
+                   scanner.report(scan_options)
+                 rescue Runtime::Error => exception
+                   say_error exception.message, :red
+                   exit 1
+                 end
 
         output = if options[:output]
                    File.new(options[:output],'w')
@@ -86,6 +107,7 @@ module Bundler
         output.close if options[:output]
 
         exit(1) if report.vulnerable?
+        exit(1) if options[:runtime_strict] && report.runtime_unknown?
       end
 
       desc 'stats', 'Prints ruby-advisory-db stats'

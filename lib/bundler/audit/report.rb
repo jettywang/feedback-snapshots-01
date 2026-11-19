@@ -29,13 +29,20 @@ module Bundler
 
       # The insecure sources results.
       #
-      # @return [Array<Results::InsecureSources>]
+      # @return [Array<Results::InsecureSource>]
       attr_reader :insecure_sources
 
       # The unpatched gems results.
       #
-      # @return [Array<Results::UnpatchedGems>]
+      # @return [Array<Results::UnpatchedGem>]
       attr_reader :unpatched_gems
+
+      # The optional Ruby runtime audit result.
+      #
+      # @return [Results::RuntimeAudit, nil]
+      #
+      # @since 0.10.0
+      attr_reader :runtime_audit
 
       #
       # Initializes the report.
@@ -49,6 +56,7 @@ module Bundler
         @results = []
         @insecure_sources = []
         @unpatched_gems = []
+        @runtime_audit = nil
 
         results.each { |result| self << result }
       end
@@ -58,7 +66,7 @@ module Bundler
       #
       # @yield [result]
       #
-      # @yieldparam [Results::InsecureSource, Results::UnpatchedGem] result
+      # @yieldparam [Results::InsecureSource, Results::UnpatchedGem, Results::RuntimeAudit] result
       #
       # @return [Enumerator]
       #
@@ -69,7 +77,7 @@ module Bundler
       #
       # Appends a result to the report.
       #
-      # @param [InsecureSource, UnpatchedGem] result
+      # @param [InsecureSource, UnpatchedGem, RuntimeAudit] result
       #
       def <<(result)
         @results << result
@@ -79,6 +87,8 @@ module Bundler
           @insecure_sources << result
         when Results::UnpatchedGem
           @unpatched_gems << result
+        when Results::RuntimeAudit
+          @runtime_audit = result
         end
 
         return self
@@ -90,7 +100,36 @@ module Bundler
       # @return [Boolean]
       #
       def vulnerable?
-        !@results.empty?
+        @results.any? do |result|
+          case result
+          when Results::RuntimeAudit
+            result.affected?
+          else
+            true
+          end
+        end
+      end
+
+      #
+      # Determines if the optional runtime audit was inconclusive.
+      #
+      # @return [Boolean]
+      #
+      # @since 0.10.0
+      #
+      def runtime_unknown?
+        !@runtime_audit.nil? && @runtime_audit.unknown?
+      end
+
+      #
+      # Determines whether the report only contains the runtime audit.
+      #
+      # @return [Boolean]
+      #
+      # @since 0.10.0
+      #
+      def runtime_only?
+        !@runtime_audit.nil? && @results.all? { |result| result.equal?(@runtime_audit) }
       end
 
       #
@@ -137,11 +176,17 @@ module Bundler
       # @return [Hash{Symbol => Object}]
       #
       def to_h
-        {
+        hash = {
           version:    @version,
           created_at: @created_at,
-          results:    @results.map(&:to_h)
+          results:    @results.reject { |result| result.kind_of?(Results::RuntimeAudit) }.map(&:to_h)
         }
+
+        if @runtime_audit
+          hash[:runtime] = @runtime_audit.to_h
+        end
+
+        return hash
       end
 
     end

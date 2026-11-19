@@ -55,7 +55,7 @@ module Bundler
             say_xml(
               %{<?xml version="1.0" encoding="UTF-8" ?>},
               %{<testsuites id="#{Time.now.to_i}" name="Bundle Audit">},
-              %{  <testsuite id="Gemfile" name="Ruby Gemfile" failures="#{report.count}">}
+              %{  <testsuite id="Gemfile" name="Ruby Gemfile" failures="#{count_failures(report)}">}
             )
 
             yield
@@ -70,6 +70,16 @@ module Bundler
             CGI.escapeHTML(string.to_s)
           end
 
+          def count_failures(report)
+            report.inject(0) do |count,result|
+              if result.kind_of?(Results::RuntimeAudit)
+                count + result.affected_findings.length
+              else
+                count + 1
+              end
+            end
+          end
+
           def print_xml_testcase(result)
             case result
             when Results::InsecureSource
@@ -78,6 +88,8 @@ module Bundler
                 %{      <failure message="Insecure Source URI found: #{xml(result.source)}" type="Unknown"></failure>},
                 %{    </testcase>}
               )
+            when Results::RuntimeAudit
+              print_xml_runtime_testcase(result)
             when Results::UnpatchedGem
               say_xml(
                 %{    <testcase id="#{xml(result.gem.name)}" name="#{xml(bundle_title(result))}">},
@@ -97,6 +109,48 @@ module Bundler
 
           def bundle_title(result)
             "#{advisory_criticality(result.advisory).upcase} #{result.gem.name}(#{result.gem.version}) #{result.advisory.title}"
+          end
+
+          def print_xml_runtime_testcase(result)
+            assessment = result.assessment
+
+            case assessment.status
+            when :affected
+              assessment.findings.each do |finding|
+                next unless finding.affected?
+
+                advisory = finding.advisory
+
+                say_xml(
+                  %{    <testcase id="ruby-runtime:#{xml(advisory.id)}" name="#{xml("RUNTIME #{assessment.target} #{advisory.title}")}">},
+                  %{      <failure message="#{xml(advisory.title)}" type="#{xml(advisory.criticality || 'unknown')}">},
+                  %{        Name: #{xml(advisory.id)}},
+                  %{        Engine: #{xml(assessment.target.engine)}},
+                  %{        Target: #{xml(assessment.target)}},
+                  %{        Advisory: #{xml(advisory.identifiers.join(' '))}},
+                  %{        Criticality: #{xml(advisory.criticality || 'Unknown')}},
+                  %{        URL: #{xml(advisory.url)}},
+                  %{        Title: #{xml(advisory.title)}},
+                  %{        Solution: #{xml(advisory_solution(advisory))}},
+                  %{      </failure>},
+                  %{    </testcase>}
+                )
+              end
+            when :unknown
+              say_xml(
+                %{    <testcase id="ruby-runtime" name="#{xml("RUNTIME #{assessment.target}")}">},
+                %{      <skipped message="#{xml(runtime_unknown_message(assessment))}"/>},
+                %{    </testcase>}
+              )
+            else
+              say_xml(
+                %{    <testcase id="ruby-runtime" name="#{xml("RUNTIME #{assessment.target}")}"/>}
+              )
+            end
+          end
+
+          def runtime_unknown_message(assessment)
+            assessment.notes.map { |note| note[:message] }.join('; ')
           end
 
           def advisory_solution(advisory)

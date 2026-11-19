@@ -1,3 +1,18 @@
+### Unreleased
+
+* Added an optional Ruby runtime audit, driven by an explicit deployment
+  manifest (`--runtime-manifest`) or `Runtime::Target`. The scanning host's
+  Ruby is never used as the target.
+* Runtime targets keep the engine, Ruby compatibility version, patchlevel,
+  and engine version separate, so JRuby is evaluated against its own version.
+* Runtime advisories are read only from `rubies/` and remain independent of
+  gem advisories, even when a gem shares an engine's name.
+* Inconclusive runtime evidence (missing fields, conflicting advisories,
+  misfiled advisories, or missing advisory data) is reported as unknown.
+* Added a separate `runtime` section to the JSON output and runtime test
+  cases to the text and junit formats.
+* Added `--runtime-advisories` and `--runtime-strict`.
+
 ### 0.9.3 / 2025-11-28
 
 * Officially support Ruby 3.4, 3.5, and 4.0.

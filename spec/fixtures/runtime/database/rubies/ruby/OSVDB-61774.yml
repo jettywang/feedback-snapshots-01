@@ -1,0 +1,12 @@
+---
+engine: ruby
+cve: 2009-4492
+osvdb: 61774
+url: https://example.test/osvdb/61774
+title: Patchlevel specific WEBrick fixture advisory
+date: 2010-01-10
+description: |
+  Fixture advisory with four component (patchlevel) version ranges.
+patched_versions:
+  - "~> 1.8.7.249"
+  - ">= 1.9.1.378"

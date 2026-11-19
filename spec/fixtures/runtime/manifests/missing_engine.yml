@@ -1,0 +1,4 @@
+---
+ruby:
+  version: '9.2.9.0'
+source: deploy/incomplete.yml

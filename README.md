@@ -15,6 +15,8 @@ Patch-level verification for [bundler].
 
 * Checks for vulnerable versions of gems in `Gemfile.lock`.
 * Checks for insecure gem sources (`http://` and `git://`).
+* Optionally checks an explicitly supplied deployment Ruby runtime against
+  the runtime advisories in `rubies/`.
 * Allows ignoring certain advisories that have been manually worked around.
 * Prints advisory information.
 * Does not require a network connection.
@@ -140,6 +142,53 @@ Output the audit's results in JSON:
 
 ```shell
 $ bundle-audit check --format json
+```
+
+## Ruby Runtime Audit
+
+The gem audit can also check the Ruby interpreter used by the deployed
+application. This check is opt-in and requires an explicit deployment manifest:
+
+```yaml
+# deploy/runtime.yml
+---
+ruby:
+  engine: jruby
+  version: '2.5.0'          # Ruby compatibility version
+  patchlevel: 0
+  engine_version: '9.2.9.0' # JRuby's own version
+```
+
+```shell
+$ bundle-audit check --runtime-manifest deploy/runtime.yml
+```
+
+The runtime check:
+
+* Never uses the Ruby that is running `bundle-audit` as the target. If no
+  manifest is supplied, the target is unknown rather than the scanning host.
+* Keeps the engine, the Ruby compatibility version, the patchlevel, and the
+  engine version separate. JRuby advisories are evaluated against the JRuby
+  engine version.
+* Reads only `rubies/` from the advisory database. A gem named `ruby` or
+  `jruby` is never treated as the interpreter.
+* Compares the manifest with the `RUBY VERSION` declaration in the lock file
+  and reports differences as notes. The manifest stays authoritative.
+* Reports `unknown` instead of guessing when a target, patchlevel, or
+  advisory is missing or conflicting. Conflicting duplicate advisories and
+  advisories stored under the wrong engine directory are never resolved by
+  choosing one record.
+* Is independent of the gem results; the JSON output keeps the runtime result
+  in a separate `runtime` key.
+
+The remaining runtime advisory fields are read from the same database as the
+gem advisories. `--runtime-advisories DIR` can point at another local copy.
+
+Use `--runtime-strict` to exit with status `1` when the runtime audit is
+inconclusive:
+
+```shell
+$ bundle-audit check --runtime-manifest deploy/runtime.yml --runtime-strict
 ```
 
 Output the audit's results in JSON, to a file:

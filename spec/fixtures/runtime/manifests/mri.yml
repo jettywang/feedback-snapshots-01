@@ -1,0 +1,6 @@
+---
+ruby:
+  engine: ruby
+  version: '2.5.0'
+  patchlevel: 0
+source: deploy/mri.yml

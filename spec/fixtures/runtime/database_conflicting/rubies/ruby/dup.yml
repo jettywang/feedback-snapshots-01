@@ -1,0 +1,10 @@
+---
+engine: ruby
+cve: 2019-0100
+url: https://example.test/CVE-2019-0100
+title: Conflicting fixture advisory (other range)
+date: 2019-02-01
+description: |
+  Same identifier, different patched range.
+patched_versions:
+  - ">= 2.7.0"

@@ -21,6 +21,8 @@ require 'bundler/audit/database'
 require 'bundler/audit/report'
 require 'bundler/audit/results/insecure_source'
 require 'bundler/audit/results/unpatched_gem'
+require 'bundler/audit/results/runtime_audit'
+require 'bundler/audit/runtime'
 require 'bundler/lockfile_parser'
 
 require 'ipaddr'
@@ -84,6 +86,7 @@ module Bundler
           raise(Bundler::GemfileLockNotFound,"Could not find #{gemfile_lock.inspect} in #{@root.inspect}")
         end
 
+        @gemfile_lock_path = gemfile_lock_path
         @lockfile = LockfileParser.new(File.read(gemfile_lock_path))
 
         config_dot_file_full_path = File.absolute_path(config_dot_file, @root)
@@ -134,10 +137,14 @@ module Bundler
       # @option options [Array<String>] :ignore
       #   The advisories to ignore.
       #
+      # @option options [Hash] :runtime
+      #   Optional explicit runtime audit configuration. When absent, the
+      #   gem scan is unchanged and no runtime check is performed.
+      #
       # @yield [result]
       #   The given block will be passed the results of the scan.
       #
-      # @yieldparam [Results::InsecureSource, Results::UnpatchedGem] result
+      # @yieldparam [Results::InsecureSource, Results::UnpatchedGem, Results::RuntimeAudit] result
       #   A result from the scan.
       #
       # @return [Enumerator]
@@ -148,6 +155,7 @@ module Bundler
 
         scan_sources(options,&block)
         scan_specs(options,&block)
+        scan_runtime(options,&block) if options[:runtime]
 
         return self
       end
@@ -234,7 +242,125 @@ module Bundler
         end
       end
 
+      #
+      # Runs the optional Ruby runtime audit.
+      #
+      # Runtime auditing is opt-in. The deployment interpreter must be
+      # supplied explicitly, either as a manifest path or as a
+      # {Runtime::Target}. The Ruby which is running `bundler-audit` is never
+      # used as a fallback.
+      #
+      # @param [Hash] options
+      #
+      # @option options [Hash] :runtime
+      #   Runtime audit options:
+      #   * `:manifest` - path to a deployment manifest
+      #   * `:target` - an explicit {Runtime::Target}
+      #   * `:advisories` - local runtime advisory database path
+      #   * `:declaration` - explicit lock file declaration
+      #
+      # @yield [result]
+      #
+      # @yieldparam [Results::RuntimeAudit] result
+      #
+      # @return [Enumerator]
+      #   If no block is given, an Enumerator will be returned.
+      #
+      # @raise [Runtime::Error]
+      #   The supplied runtime inputs were invalid.
+      #
+      # @since 0.10.0
+      #
+      def scan_runtime(options={})
+        return enum_for(__method__,options) unless block_given?
+
+        runtime_options = options[:runtime] || options
+        runtime_options = {target: runtime_options} if runtime_options.kind_of?(Runtime::Target)
+        runtime_options = {manifest: runtime_options} if runtime_options.kind_of?(String)
+        unless runtime_options.kind_of?(Hash)
+          raise(Runtime::Error,"runtime options must be a Hash, got #{runtime_options.class}")
+        end
+
+        runtime_options = runtime_options.each_with_object({}) do |(key,value),hash|
+          hash[key.to_sym] = value
+        end
+
+        target,manifest = resolve_runtime_target(runtime_options)
+
+        if target.nil?
+          assessment = Runtime::Assessment.new(
+            target: Runtime::Target.new,
+            inputs: {
+              'manifest' => manifest && manifest.to_s,
+              'lockfile' => @gemfile_lock_path
+            }
+          )
+
+          yield Results::RuntimeAudit.new(assessment)
+          return self
+        end
+
+        declaration = runtime_options.fetch(:declaration) do
+          Runtime::Declaration.from_lockfile_text(
+            File.read(@gemfile_lock_path),
+            source: @gemfile_lock_path
+          )
+        end
+
+        advisory_set = if (path = runtime_options[:advisories])
+                         Runtime::AdvisorySet.new(File.expand_path(path.to_s))
+                       else
+                         Runtime::AdvisorySet.new(@database.path)
+                       end
+
+        inputs = {
+          'target'   => target.to_h,
+          'manifest' => manifest && manifest.to_s,
+          'lockfile' => @gemfile_lock_path
+        }
+
+        assessment = Runtime::Assessment.new(
+          target:       target,
+          advisory_set: advisory_set,
+          declaration:  declaration,
+          inputs:       inputs,
+          notes:        manifest ? manifest.notes : []
+        )
+
+        yield Results::RuntimeAudit.new(assessment)
+
+        return self
+      end
+
       private
+
+      #
+      # Resolves the runtime configuration into a target and manifest.
+      #
+      # @param [Hash] options
+      #
+      # @return [Array<(Runtime::Target, Runtime::Manifest)>]
+      #
+      def resolve_runtime_target(options)
+        if (target = options[:target])
+          if target.kind_of?(Hash)
+            attributes = target.each_with_object({}) do |(key,value),hash|
+              hash[key.to_sym] = value
+            end
+
+            target = Runtime::Target.new(**attributes)
+          end
+
+          return [target,nil]
+        end
+
+        if (path = options[:manifest])
+          manifest = Runtime::Manifest.load(File.expand_path(path.to_s))
+          return [manifest.target,manifest]
+        end
+
+        [nil,nil]
+      end
 
       #
       # Determines whether a source is internal.

@@ -1,0 +1,45 @@
+#
+# Copyright (c) 2013-2026 Hal Brodigan (postmodern.mod3 at gmail.com)
+#
+# bundler-audit is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# bundler-audit is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with bundler-audit.  If not, see <https://www.gnu.org/licenses/>.
+#
+
+module Bundler
+  module Audit
+    #
+    # Optional auditing of the Ruby interpreter which will run the application.
+    #
+    # The runtime audit is deliberately independent of the gem audit. The
+    # target interpreter is never inferred from the Ruby which is executing
+    # `bundler-audit`; callers must provide an explicit deployment manifest
+    # or an explicit {Runtime::Target}.
+    #
+    # @since 0.10.0
+    #
+    module Runtime
+      #
+      # Base class for runtime audit errors.
+      #
+      class Error < RuntimeError
+      end
+    end
+  end
+end
+
+require 'bundler/audit/runtime/target'
+require 'bundler/audit/runtime/declaration'
+require 'bundler/audit/runtime/manifest'
+require 'bundler/audit/runtime/advisory'
+require 'bundler/audit/runtime/advisory_set'
+require 'bundler/audit/runtime/assessment'
