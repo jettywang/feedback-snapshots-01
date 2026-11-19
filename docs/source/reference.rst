@@ -111,6 +111,9 @@ The following middleware classes are available, but not enabled by default.
    :members: get_current_message
    :member-order: bysource
 .. autoclass:: dramatiq.middleware.GroupCallbacks
+.. autoclass:: dramatiq.middleware.TaskAuthorization
+.. autoclass:: dramatiq.middleware.PermissionPolicy
+   :members: grant, revoke
 .. autoclass:: dramatiq.middleware.prometheus.Prometheus
 
 .. py:class:: dramatiq.results.Results
@@ -130,6 +133,7 @@ The class hierarchy for middleware exceptions:
     +-- Exception
     |   +-- dramatiq.middleware.MiddlewareError
     |       +-- dramatiq.middleware.SkipMessage
+    |           +-- dramatiq.middleware.AuthorizationDenied
     +-- dramatiq.middleware.Interrupt
         +-- dramatiq.middleware.Shutdown
         +-- dramatiq.middleware.TimeLimitExceeded
@@ -138,6 +142,7 @@ The class hierarchy for middleware exceptions:
 .. autoexception:: dramatiq.middleware.MiddlewareError
    :show-inheritance:
 .. autoexception:: dramatiq.middleware.SkipMessage
+.. autoexception:: dramatiq.middleware.AuthorizationDenied
    :show-inheritance:
 .. autoexception:: dramatiq.middleware.Interrupt
    :show-inheritance:

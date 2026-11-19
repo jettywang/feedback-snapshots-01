@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from .age_limit import AgeLimit
 from .asyncio import AsyncIO
+from .authorization import AuthorizationDenied, PermissionPolicy, TaskAuthorization
 from .callbacks import Callbacks
 from .current_message import CurrentMessage
 from .group_callbacks import GroupCallbacks
@@ -40,13 +41,16 @@ __all__ = [
     # Middlewares
     "AgeLimit",
     "AsyncIO",
+    "AuthorizationDenied",
     "Callbacks",
     "CurrentMessage",
     "GroupCallbacks",
+    "PermissionPolicy",
     "Pipelines",
     "Retries",
     "Shutdown",
     "ShutdownNotifications",
+    "TaskAuthorization",
     "TimeLimit",
     "TimeLimitExceeded",
 ]
