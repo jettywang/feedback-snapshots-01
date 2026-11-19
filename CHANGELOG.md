@@ -1,6 +1,7 @@
 # Changelog
 
 ## [Unreleased]
+* Bound parsing of untrusted XML through a new `WinRM::SafeXML` entry point. SOAP responses, CLIXML message data, WQL responses, and diagnostic SOAP logging now share one per-message budget for document size, element depth, and entity expansion. Hostile payloads (entity-expansion bombs, deep nesting, oversized text, malformed namespace declarations) are rejected with `WinRM::WinRMXMLParseError` before they can drive unbounded work; a rejected body is never re-parsed while logging the error and never returned as output.
 
 ## [2.4.2]
 * Replace erubi with the Ruby standard library ERB; the erubi runtime dependency is gone (#366)

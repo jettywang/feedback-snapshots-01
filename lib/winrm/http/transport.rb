@@ -14,6 +14,7 @@
 
 require 'httpclient'
 require_relative 'response_handler'
+require_relative '../safe_xml'
 
 module WinRM
   module HTTP
@@ -124,13 +125,16 @@ module WinRM
       def log_soap_message(message)
         return unless @logger.debug?
 
-        xml_msg = REXML::Document.new(message)
+        # A bounded parse guards the logger too: a hostile body is rejected
+        # here rather than parsed without limits, and the failure is reported
+        # without ever parsing the same bytes a second time.
+        xml_msg = WinRM::SafeXML.parse(message, 'WinRM SOAP log message')
         formatter = REXML::Formatters::Pretty.new(2)
         formatter.compact = true
         formatter.write(xml_msg, @logger)
         @logger.debug("\n")
-      rescue StandardError => e
-        @logger.debug("Couldn't log SOAP request/response: #{e.message} - #{message}")
+      rescue WinRMXMLParseError => e
+        @logger.debug("Couldn't log SOAP request/response: #{e.message}")
       end
     end
 

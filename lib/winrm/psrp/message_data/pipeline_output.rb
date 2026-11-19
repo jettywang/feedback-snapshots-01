@@ -13,6 +13,7 @@
 # limitations under the License.
 
 require 'rexml/document' unless defined?(REXML::Document)
+require_relative '../../safe_xml'
 
 module WinRM
   module PSRP
@@ -26,7 +27,7 @@ module WinRM
         private
 
         def extract_out_string(text)
-          doc = REXML::Document.new(text)
+          doc = WinRM::SafeXML.parse(text, 'WinRM CLIXML pipeline output')
           doc.root.get_elements('//S').map do |node|
             text = ''
             if node.text

@@ -38,7 +38,7 @@ module WinRM
         end
 
         def doc
-          @doc ||= REXML::Document.new(raw)
+          @doc ||= WinRM::SafeXML.parse(raw, 'WinRM CLIXML error record')
         end
 
         def string_prop(prop_name)

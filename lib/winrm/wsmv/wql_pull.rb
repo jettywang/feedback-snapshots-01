@@ -1,5 +1,6 @@
 require 'nori'
 require_relative 'base'
+require_relative '../safe_xml'
 
 module WinRM
   module WSMV
@@ -12,13 +13,16 @@ module WinRM
       end
 
       def process_response(response)
+        raw_response = WinRM::SafeXML.validate!(
+          response.to_s, 'WinRM WQL pull response'
+        )
         parser = Nori.new(
           parser: :rexml,
           advanced_typecasting: false,
           convert_tags_to: ->(tag) { Nori::StringUtils.snakecase(tag).to_sym },
           strip_namespaces: true
         )
-        parser.parse(response.to_s)[:envelope][:body]
+        parser.parse(raw_response)[:envelope][:body]
       end
 
       protected

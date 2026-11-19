@@ -14,6 +14,7 @@
 
 require 'rexml/document' unless defined?(REXML::Document)
 require_relative '../wsmv/soap'
+require_relative '../safe_xml'
 
 module WinRM
   # Handles the raw WinRM HTTP response. Returns the body as an XML doc
@@ -38,8 +39,8 @@ module WinRM
     private
 
     def response_xml
-      @response_xml ||= REXML::Document.new(@response_body)
-    rescue REXML::ParseException => e
+      @response_xml ||= SafeXML.parse(@response_body, 'WinRM SOAP response')
+    rescue WinRMXMLParseError => e
       raise WinRMHTTPTransportError.new(
         "Unable to parse WinRM response: #{e.message}", @status_code
       )

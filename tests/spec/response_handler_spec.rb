@@ -66,4 +66,71 @@ describe 'response handler', unit: true do
       end
     end
   end
+
+  describe 'bounded parsing of untrusted SOAP bodies' do
+    let(:billion_laughs) do
+      defs = %Q{<!ENTITY e0 "ab">\n}
+      1.upto(8) do |i|
+        defs += %Q{<!ENTITY e#{i} "#{Array.new(5) { "&e#{i - 1};" }.join}">\n}
+      end
+      %Q{<!DOCTYPE r [\n#{defs}]><r>&e8;</r>}
+    end
+    let(:deeply_nested) do
+      "<Envelope>#{'<a>' * 300}x#{'</a>' * 300}</Envelope>"
+    end
+    let(:oversized) { "<Envelope>#{'a' * 600_000}</Envelope>" }
+    let(:malformed_namespace) { %q{<Envelope xmlns:1="bad"><Body/></Envelope>} }
+    let(:truncated) { '<Envelope><Body>' }
+
+    shared_examples 'a bounded SOAP rejection' do
+      it 'raises a WinRMHTTPTransportError rather than returning output' do
+        handler = WinRM::ResponseHandler.new(payload, 200)
+        expect { handler.parse_to_xml }.to raise_error(
+          WinRM::WinRMHTTPTransportError
+        ) do |error|
+          expect(error.message).to include('Unable to parse WinRM response')
+          # The bounded-parser reason is preserved but the raw hostile body is
+          # not handed back as normal output.
+          expect(error.message).not_to include(payload)
+        end
+      end
+
+      it 'does not surface a raw REXML or stack error to the caller' do
+        handler = WinRM::ResponseHandler.new(payload, 200)
+        begin
+          handler.parse_to_xml
+          raise 'expected a rejection'
+        rescue WinRM::WinRMHTTPTransportError
+          # expected: low-level parser/stack errors are normalized away
+        end
+      end
+    end
+
+    it_behaves_like 'a bounded SOAP rejection' do
+      let(:payload) { billion_laughs }
+    end
+    it_behaves_like 'a bounded SOAP rejection' do
+      let(:payload) { deeply_nested }
+    end
+    it_behaves_like 'a bounded SOAP rejection' do
+      let(:payload) { oversized }
+    end
+    it_behaves_like 'a bounded SOAP rejection' do
+      let(:payload) { malformed_namespace }
+    end
+    it_behaves_like 'a bounded SOAP rejection' do
+      let(:payload) { truncated }
+    end
+
+    it 'rejects the same hostile body with a non-200 status before fault XPath work' do
+      handler = WinRM::ResponseHandler.new(deeply_nested, 500)
+      expect { handler.parse_to_xml }.to raise_error(WinRM::WinRMHTTPTransportError)
+    end
+
+    it 'still parses a small well-formed 200 body' do
+      benign = '<Envelope xmlns="http://www.w3.org/2003/05/soap-envelope"><Body/></Envelope>'
+      handler = WinRM::ResponseHandler.new(benign, 200)
+      expect(handler.parse_to_xml).to be_instance_of(REXML::Document)
+    end
+  end
 end

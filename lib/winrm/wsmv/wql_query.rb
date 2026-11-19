@@ -14,6 +14,7 @@
 
 require 'nori'
 require_relative 'base'
+require_relative '../safe_xml'
 
 module WinRM
   module WSMV
@@ -27,6 +28,9 @@ module WinRM
       end
 
       def process_response(response, &block)
+        raw_response = WinRM::SafeXML.validate!(
+          response.to_s, 'WinRM WQL enumerate response'
+        )
         parser = Nori.new(
           parser: :rexml,
           advanced_typecasting: false,
@@ -35,7 +39,7 @@ module WinRM
         )
         @items = Hash.new { |h, k| h[k] = [] }
 
-        hresp = parser.parse(response.to_s)[:envelope][:body][:enumerate_response]
+        hresp = parser.parse(raw_response)[:envelope][:body][:enumerate_response]
         process_items hresp[:items], &block
 
         # Perform WS-Enum PULL's until we have all the elements

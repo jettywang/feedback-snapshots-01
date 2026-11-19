@@ -13,6 +13,7 @@
 # limitations under the License.
 
 require 'nori'
+require_relative '../../safe_xml'
 
 module WinRM
   # PowerShell Remoting Protcol module
@@ -32,6 +33,11 @@ module WinRM
 
         def clixml
           @clixml ||= begin
+            # Nori drives REXML's pull parser itself, so validate the bytes
+            # against the bounded-parse budget first. This keeps entity,
+            # depth, size, and namespace malformation rejection at the real
+            # CLIXML entry point instead of trusting the downstream parser.
+            WinRM::SafeXML.validate!(raw, 'WinRM CLIXML message data')
             parser = Nori.new(
               parser: :rexml,
               advanced_typecasting: false,

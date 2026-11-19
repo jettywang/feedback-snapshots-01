@@ -85,4 +85,10 @@ module WinRM
       super(msg + " (#{status_code}).")
     end
   end
+
+  # An untrusted XML document exceeded the bounded-parse budget (size, depth,
+  # or entity expansion) or was not well-formed. Raised at the real parsing
+  # entry points so a hostile payload is rejected before it can drive
+  # unbounded work, and so the same body is never parsed again while logging.
+  class WinRMXMLParseError < WinRMError; end
 end
