@@ -344,7 +344,13 @@ def _detect_client_auth_requirement_with_tls_1_3(
     server_location: ServerNetworkLocation,
     network_config: ServerNetworkConfiguration,
 ) -> ClientAuthRequirementEnum:
-    """Try to detect if client authentication is optional or required."""
+    """Try to detect if client authentication is optional or required.
+
+    With TLS 1.3 the server's CertificateRequest only reaches the client *after* the handshake completed, hence a
+    second connection with client-auth requests explicitly ignored is needed. If the server merely *requests* a
+    client certificate (optional auth), the ignored request is harmless and application data can be exchanged. If
+    the server *requires* a client certificate, it aborts the post-handshake authentication with an alert.
+    """
     ssl_connection_auth = SslConnection(
         server_location=server_location,
         network_configuration=network_config,
@@ -363,6 +369,9 @@ def _detect_client_auth_requirement_with_tls_1_3(
         client_auth_requirement = ClientAuthRequirementEnum.OPTIONAL
 
     except (ClientCertificateRequested, ServerRejectedTlsHandshake):
+        # The handshake itself, or the post-handshake authentication, was rejected: the server will not let the
+        # connection proceed without a suitable client certificate. nassl turns the TLS 1.3 "certificate required"
+        # alert raised by read() into ClientCertificateRequested, so ending up here means client auth is required.
         client_auth_requirement = ClientAuthRequirementEnum.REQUIRED
 
     except socket.timeout:

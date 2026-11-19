@@ -19,6 +19,8 @@ from sslyze.errors import (
     ServerRejectedOpportunisticTlsNegotiation,
     ServerRejectedTlsHandshake,
     ServerTlsConfigurationNotSupported,
+    ServerRequestedClientAuthentication,
+    ServerRejectedClientCertificate,
     TlsHandshakeTimedOut,
 )
 from sslyze.connection_helpers.http_response_parser import HttpResponseParser
@@ -120,6 +122,14 @@ _HANDSHAKE_REJECTED_TLS_ERRORS = {
     "tlsv1 alert internal error": "TLS alert: Internal error",
     "illegal padding": "TLS alert: Illegal padding",
     "invalid padding": "TLS alert: Invalid padding",
+    # The alerts below are primarily used to reject a client certificate. They are handled as client-auth errors
+    # in _CLIENT_CERT_REJECTED_TLS_ERRORS when a client certificate was supplied; they are also listed here so that
+    # they still translate to a proper handshake failure (instead of leaking a raw OpenSSL error) when no client
+    # certificate was configured.
+    "sslv3 alert bad certificate": "TLS alert: bad certificate",
+    "tlsv1 alert bad certificate": "TLS alert: bad certificate",
+    "tlsv1 alert unknown ca": "TLS alert: unknown CA",
+    "tlsv13 alert certificate required": "TLS alert: certificate required",
     # illegal parameter is sometimes used by server to reject an invalid client certificate
     # https://github.com/nabla-c0d3/sslyze/issues/555
     "illegal parameter": "TLS alert: Illegal parameter",
@@ -127,8 +137,26 @@ _HANDSHAKE_REJECTED_TLS_ERRORS = {
     # enabled in the client; for example client only supports EC cipher suites but server returned an RSA certificate
     "wrong certificate type": "Server returned wrong certificate type",
     "invalid encoding": "TLS error: Invalid encoding",
-    "certificate unknown": "TLS alert: certificate unknown",
 }
+
+# TLS alerts returned by a server to reject a client certificate during client authentication. They must be kept
+# separate from the generic handshake rejections above so that the failure is not reported as "TLS not supported".
+# They are only consulted when the caller actually supplied a client certificate; without one the same alerts are
+# ambiguous and stay classified as generic handshake rejections.
+# https://github.com/nabla-c0d3/sslyze/issues/555
+_CLIENT_CERT_REJECTED_TLS_ERRORS = {
+    "tlsv1 alert unknown ca": "TLS alert: the client certificate is not signed by a trusted CA",
+    "sslv3 alert bad certificate": "TLS alert: bad client certificate",
+    "tlsv1 alert bad certificate": "TLS alert: bad client certificate",
+    "certificate unknown": "TLS alert: certificate unknown",
+    "tlsv13 alert certificate required": "TLS alert: a client certificate is required",
+    # illegal parameter is sometimes used by a server to reject an invalid client certificate
+    "illegal parameter": "TLS alert: Illegal parameter",
+}
+
+
+def _is_client_certificate_configured(network_configuration: ServerNetworkConfiguration) -> bool:
+    return network_configuration.tls_client_auth_credentials is not None
 
 
 class NoCiphersAvailableBugInSSlyze(Exception):
@@ -301,7 +329,9 @@ class SslConnection:
             self.ssl_client.do_handshake()
 
         except ClientCertificateRequested:
-            # Server expected a client certificate and we didn't provide one
+            # Server expected a client certificate and we didn't provide one. The raw nassl exception is propagated
+            # so that callers (connectivity probing, plugins) can still extract the negotiated cipher suite or the
+            # server's certificate chain; the scanner layer turns it into the proper scan error reason.
             raise
         except socket.timeout:
             # Network timeout, propagate the error
@@ -343,6 +373,26 @@ class SslConnection:
                 # Should never happen (SSLyze bugs)
                 raise NoCiphersAvailableBugInSSlyze(
                     f"Set a cipher that is not supported by nassl: {self.ssl_client.get_cipher_list()}"
+                )
+
+            # Alerts specifically tied to client certificate authentication. The classification depends on whether
+            # the caller actually supplied a client certificate:
+            #   * with a certificate configured, an alert means the supplied certificate was rejected;
+            #   * without one, only an explicit "certificate required" alert is unambiguous enough to report that a
+            #     client certificate is needed - the other alerts stay generic handshake rejections.
+            if _is_client_certificate_configured(self._network_configuration):
+                for error_msg in _CLIENT_CERT_REJECTED_TLS_ERRORS.keys():
+                    if error_msg in openssl_error_message:
+                        raise ServerRejectedClientCertificate(
+                            server_location=self._server_location,
+                            network_configuration=self._network_configuration,
+                            error_message=_CLIENT_CERT_REJECTED_TLS_ERRORS[error_msg],
+                        )
+            elif "tlsv13 alert certificate required" in openssl_error_message:
+                raise ServerRequestedClientAuthentication(
+                    server_location=self._server_location,
+                    network_configuration=self._network_configuration,
+                    error_message="The server requires a client certificate but none was supplied",
                 )
 
             for error_msg in _HANDSHAKE_REJECTED_TLS_ERRORS.keys():

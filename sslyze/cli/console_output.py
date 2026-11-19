@@ -140,6 +140,14 @@ def scan_command_error_as_console_output(
         )
         target_result_str += " use --cert and --key to provide one.\n"
 
+    elif scan_command_attempt.error_reason == ScanCommandErrorReasonEnum.CLIENT_CERTIFICATE_REJECTED:
+        target_result_str += cli_connector_cls._format_title(
+            f"Client certificate rejected for --{cli_connector_cls._cli_option}"
+        )
+        target_result_str += (
+            " the supplied --cert/--key was not accepted by the server; use a certificate signed by a trusted CA.\n"
+        )
+
     elif scan_command_attempt.error_reason == ScanCommandErrorReasonEnum.CONNECTIVITY_ISSUE:
         target_result_str += cli_connector_cls._format_title(
             f"Connection timed out or was rejected for --{cli_connector_cls._cli_option}"

@@ -63,12 +63,39 @@ class TlsHandshakeFailed(ABC, ConnectionToServerFailed):
 
 @dataclass(frozen=True)
 class ServerRejectedTlsHandshake(TlsHandshakeFailed):
-    pass
+    """The server rejected the TLS handshake for a reason unrelated to client authentication.
+
+    Examples include an unsupported TLS version or cipher suite, a failed server-side validation of the
+    ClientHello, or the server aborting the handshake with a generic TLS alert.
+    """
 
 
 @dataclass(frozen=True)
 class ServerTlsConfigurationNotSupported(TlsHandshakeFailed):
     pass
+
+
+@dataclass(frozen=True)
+class ClientAuthenticationConfigurationError(TlsHandshakeFailed, ABC):
+    """Base class for handshake failures caused by the server's client authentication configuration."""
+
+
+@dataclass(frozen=True)
+class ServerRequestedClientAuthentication(ClientAuthenticationConfigurationError):
+    """The server asked for a client certificate and the caller did not supply one that satisfies the request.
+
+    The TLS connection itself was established far enough to negotiate a cipher suite; only the client
+    authentication step could not be completed. This must not be reported as "TLS not supported".
+    """
+
+
+@dataclass(frozen=True)
+class ServerRejectedClientCertificate(ClientAuthenticationConfigurationError):
+    """The caller supplied a client certificate but the server rejected it.
+
+    This typically means the certificate is not signed by a CA the server trusts, is expired/revoked, or the
+    server answered with a "bad certificate"/"certificate unknown"/"illegal parameter" alert.
+    """
 
 
 @dataclass(frozen=True)

@@ -9,7 +9,14 @@ from uuid import UUID
 from nassl.ssl_client import ClientCertificateRequested
 
 from sslyze import ServerTlsProbingResult, ScanCommandAttemptStatusEnum, ScanCommandErrorReasonEnum
-from sslyze.errors import ConnectionToServerTimedOut, TlsHandshakeTimedOut, ServerRejectedTlsHandshake
+from sslyze.errors import (
+    ConnectionToServerTimedOut,
+    TlsHandshakeTimedOut,
+    ServerRejectedTlsHandshake,
+    ServerRequestedClientAuthentication,
+    ServerRejectedClientCertificate,
+    ClientAuthenticationConfigurationError,
+)
 from sslyze.plugins.plugin_base import ScanCommandWrongUsageError, ScanJob, ScanJobResult
 from sslyze.plugins.scan_commands import ScanCommandsRepository, ScanCommand
 from sslyze.scanner._jobs_worker_thread import (
@@ -287,10 +294,21 @@ def _generate_result_for_completed_server_scan(completed_scan: _OngoingServerSca
             )
 
         # Process exceptions that may have been raised while the jobs were being completed
-        except ClientCertificateRequested as e:
+        except (ClientCertificateRequested, ServerRequestedClientAuthentication) as e:
+            # The server asks for a client certificate that the caller did not provide (or did not enable):
+            # the TLS connection itself worked, so this is neither a connectivity issue nor an SSLyze bug.
             scan_cmd_attempt = scan_command_attempt_cls(
                 status=ScanCommandAttemptStatusEnum.ERROR,
                 error_reason=ScanCommandErrorReasonEnum.CLIENT_CERTIFICATE_NEEDED,
+                error_trace=TracebackException.from_exception(e),
+                result=None,
+            )
+        except ServerRejectedClientCertificate as e:
+            # A client certificate was supplied but the server rejected it: report the configuration problem
+            # distinctly from "no certificate at all" so the caller knows providing --cert/--key is not enough.
+            scan_cmd_attempt = scan_command_attempt_cls(
+                status=ScanCommandAttemptStatusEnum.ERROR,
+                error_reason=ScanCommandErrorReasonEnum.CLIENT_CERTIFICATE_REJECTED,
                 error_trace=TracebackException.from_exception(e),
                 result=None,
             )
@@ -298,6 +316,15 @@ def _generate_result_for_completed_server_scan(completed_scan: _OngoingServerSca
             scan_cmd_attempt = scan_command_attempt_cls(
                 status=ScanCommandAttemptStatusEnum.ERROR,
                 error_reason=ScanCommandErrorReasonEnum.CONNECTIVITY_ISSUE,
+                error_trace=TracebackException.from_exception(e),
+                result=None,
+            )
+        except ClientAuthenticationConfigurationError as e:
+            # Any other client-auth related handshake failure must be attributed to client authentication rather
+            # than silently falling through to BUG_IN_SSLYZE or CONNECTIVITY_ISSUE.
+            scan_cmd_attempt = scan_command_attempt_cls(
+                status=ScanCommandAttemptStatusEnum.ERROR,
+                error_reason=ScanCommandErrorReasonEnum.CLIENT_CERTIFICATE_NEEDED,
                 error_trace=TracebackException.from_exception(e),
                 result=None,
             )

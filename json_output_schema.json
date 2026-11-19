@@ -844,6 +844,7 @@
       "enum": [
         "BUG_IN_SSLYZE",
         "CLIENT_CERTIFICATE_NEEDED",
+        "CLIENT_CERTIFICATE_REJECTED",
         "CONNECTIVITY_ISSUE",
         "WRONG_USAGE"
       ],
