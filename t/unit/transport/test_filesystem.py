@@ -4,7 +4,7 @@ import contextlib
 import os
 import shutil
 import tempfile
-from pathlib import PurePosixPath, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from queue import Empty
 from typing import Generator
 from unittest.mock import call, mock_open, patch
@@ -606,3 +606,124 @@ class test_FilesystemOpenErrors(WithJanitorMixin):
                 self.channel._get("q")
         assert isinstance(excinfo.value.__cause__, OSError)
         broken.return_value.__exit__.assert_called_once()
+
+
+@t.skip.if_win32
+class test_FilesystemLocationDeclaration:
+    # Layouts for the audit-service migration: a compliant account, one
+    # reaching outside its declared scope, and one whose directory is
+    # read-only for the account.
+
+    def setup_method(self):
+        try:
+            self.root = Path(tempfile.mkdtemp())
+        except Exception:
+            pytest.skip('filesystem transport: cannot create tempfiles')
+        self.audit_root = self.root / 'audit'
+        self.other_root = self.root / 'other'
+        self.audit = self._make_dirs(
+            self.audit_root, ['in', 'out', 'processed', 'control'])
+        self.other = self._make_dirs(
+            self.other_root, ['in', 'out', 'control'])
+
+    def teardown_method(self):
+        # restore the write permission the read-only layout removes
+        for dirpath, _dirnames, _filenames in os.walk(self.root):
+            os.chmod(dirpath, 0o755)
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    @staticmethod
+    def _make_dirs(root, names):
+        folders = {}
+        for name in names:
+            folder = root / name
+            folder.mkdir(parents=True)
+            folders[name] = str(folder)
+        return folders
+
+    def _options(self, folders, **overrides):
+        options = {
+            'data_folder_in': folders['in'],
+            'data_folder_out': folders['out'],
+            'control_folder': folders['control'],
+            'allowed_read_locations': [str(self.audit_root)],
+            'allowed_write_locations': [str(self.audit_root)],
+            'allowed_archive_locations': [str(self.audit_root)],
+        }
+        options.update(overrides)
+        return options
+
+    def _snapshot(self):
+        return sorted(
+            str(p.relative_to(self.root)) for p in self.root.rglob('*'))
+
+    def _assert_rejected_without_side_effects(self, match, **overrides):
+        before = self._snapshot()
+        conn = Connection(
+            transport='filesystem',
+            transport_options=self._options(self.audit, **overrides))
+        try:
+            with pytest.raises(ValueError, match=match):
+                conn.default_channel
+        finally:
+            conn.close()
+        # a rejected initialisation must not create, move or remove
+        # anything, in its own directories or in the other service's
+        assert self._snapshot() == before
+
+    def test_compliant_layout_conveys_real_messages(self):
+        consumer = Connection(
+            transport='filesystem',
+            transport_options=self._options(
+                self.audit, store_processed=True,
+                processed_folder=self.audit['processed']))
+        producer = Connection(
+            transport='filesystem',
+            transport_options=self._options(
+                self.audit,
+                data_folder_in=self.audit['out'],
+                data_folder_out=self.audit['in']))
+        exchange = Exchange('audit_exchange')
+        queue = Queue('audit_queue', exchange=exchange,
+                      routing_key='audit_queue')
+        received = []
+        try:
+            with managed_consumer(consumer.channel(), queue,
+                                  no_ack=True) as c:
+                Producer(producer.channel(), exchange).publish(
+                    {'audit': 'event'}, routing_key='audit_queue')
+                c.register_callback(lambda body, msg: received.append(body))
+                c.consume()
+                while not received:
+                    consumer.drain_events(timeout=1)
+        finally:
+            consumer.close()
+            producer.close()
+        assert received == [{'audit': 'event'}]
+        # store_processed archived the consumed message into the declared
+        # archive location
+        assert os.listdir(self.audit['processed'])
+
+    def test_read_location_outside_declared_scope_rejected(self):
+        self._assert_rejected_without_side_effects(
+            'data_folder_in', data_folder_in=self.other['in'])
+
+    def test_write_location_outside_declared_scope_rejected(self):
+        self._assert_rejected_without_side_effects(
+            'data_folder_out', data_folder_out=self.other['in'])
+
+    def test_control_location_outside_declared_scope_rejected(self):
+        self._assert_rejected_without_side_effects(
+            'control_folder', control_folder=self.other['control'])
+
+    def test_archive_location_outside_declared_scope_rejected(self):
+        self._assert_rejected_without_side_effects(
+            'processed_folder', store_processed=True,
+            processed_folder=self.other['out'])
+
+    @pytest.mark.skipif(getattr(os, 'geteuid', lambda: 1)() == 0,
+                        reason='root ignores permission bits')
+    def test_read_only_write_location_rejected(self):
+        # the account can read its directory but not write to it
+        os.chmod(self.audit['out'], 0o555)
+        self._assert_rejected_without_side_effects('data_folder_out')

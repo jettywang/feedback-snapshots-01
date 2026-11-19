@@ -87,6 +87,25 @@ Transport Options
   ``processed_folder``.
 * ``processed_folder`` - directory where are backed up processed files.
 * ``control_folder`` - directory where are exchange-queue table stored.
+* ``allowed_read_locations`` - optional list of directories
+  ``data_folder_in`` must resolve into.  Declare it when the service account
+  is only entitled to read from specific locations.
+* ``allowed_write_locations`` - optional list of directories
+  ``data_folder_out`` and ``control_folder`` must resolve into.
+* ``allowed_archive_locations`` - optional list of directories
+  ``processed_folder`` must resolve into when ``store_processed`` is
+  enabled.
+
+When a channel is initialised, every configured folder is verified before
+anything is touched: if an ``allowed_*_locations`` list is declared, the
+folder must resolve to it or to one of its children, and the folder (or its
+nearest existing ancestor) must actually be readable/writable by the
+current account.  The verification only probes the filesystem -- it never
+creates, moves or removes anything -- so a rejected configuration leaves
+every service's directories exactly as they were.  A violation raises
+:exc:`ValueError` at channel initialisation; it is deliberately not a
+recoverable transport error, so a misconfigured service fails fast
+instead of being retried.
 """
 
 from __future__ import annotations
@@ -183,6 +202,57 @@ class Channel(virtual.Channel):
     """Filesystem Channel."""
 
     supports_fanout = True
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._validate_locations()
+
+    def _validate_locations(self):
+        """Verify every configured folder before any of them is touched.
+
+        Runs at channel initialisation so that a service whose account
+        lacks the required rights fails before a single file is created,
+        moved or removed, in its own directories or in anyone else's.
+        Only performs read-only probes (path resolution, ``stat`` and
+        :func:`os.access`).
+        """
+        checks = [
+            ('data_folder_in', self.data_folder_in,
+             self.allowed_read_locations, os.R_OK),
+            ('data_folder_out', self.data_folder_out,
+             self.allowed_write_locations, os.W_OK),
+            ('control_folder', str(self.control_folder),
+             self.allowed_write_locations, os.W_OK),
+        ]
+        if self.store_processed:
+            checks.append((
+                'processed_folder', self.processed_folder,
+                self.allowed_archive_locations, os.W_OK))
+        for option, folder, allowed, mode in checks:
+            self._check_location(option, folder, allowed, mode)
+
+    @staticmethod
+    def _check_location(option, folder, allowed, mode):
+        path = Path(folder).expanduser().resolve()
+        if allowed is not None:
+            roots = [Path(root).expanduser().resolve() for root in allowed]
+            if not any(path == root or root in path.parents
+                       for root in roots):
+                raise ValueError(
+                    f'{option}={folder!r} resolves outside the locations '
+                    f'declared for it: {sorted(str(r) for r in roots)!r}')
+        probe = path
+        while not probe.exists():
+            if probe.parent == probe:
+                break
+            probe = probe.parent
+        if not probe.is_dir():
+            raise ValueError(
+                f'{option}={folder!r} does not resolve to a directory')
+        if not os.access(probe, mode):
+            access = 'readable' if mode == os.R_OK else 'writable'
+            raise ValueError(
+                f'{option}={folder!r} is not {access} by this account')
 
     @staticmethod
     def _is_valid_exchange_name(exchange):
@@ -409,6 +479,18 @@ class Channel(virtual.Channel):
     @cached_property
     def processed_folder(self):
         return self.transport_options.get('processed_folder', 'processed')
+
+    @cached_property
+    def allowed_read_locations(self):
+        return self.transport_options.get('allowed_read_locations')
+
+    @cached_property
+    def allowed_write_locations(self):
+        return self.transport_options.get('allowed_write_locations')
+
+    @cached_property
+    def allowed_archive_locations(self):
+        return self.transport_options.get('allowed_archive_locations')
 
     @property
     def control_folder(self):
