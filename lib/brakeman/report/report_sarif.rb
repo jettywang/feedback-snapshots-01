@@ -186,7 +186,7 @@ class Brakeman::Report::SARIF < Brakeman::Report::Base
         ],
       }
 
-      if @ignore_filter && @ignore_filter.ignored?(warning)
+      if @ignore_filter && @ignore_filter.ignored?(warning, mark_used: false)
         result[:suppressions] = [
           {
             :kind => 'external',

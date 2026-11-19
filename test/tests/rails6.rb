@@ -310,52 +310,52 @@ class Rails6Tests < Minitest::Test
   def test_cross_site_scripting_sanity
     assert_warning :type => :template,
       :warning_code => 2,
-      :fingerprint => "9e949d88329883f879b7ff46bdb096ba43e791aacb6558f47beddc34b9d42c4c",
+      :fingerprint => "5fff96c16811146230f092bd19d75f0ddb957901d6b7ccf25ad3bc6a0abee502",
       :warning_type => "Cross-Site Scripting",
       :line => 5,
       :message => /^Unescaped\ model\ attribute/,
       :confidence => 0,
       :relative_path => "app/views/users/show.html.erb",
-      :code => s(:call, s(:call, s(:const, :User), :new, s(:call, nil, :user_params)), :name),
+      :code => s(:call, s(:call, s(:const, :User), :find, s(:call, s(:params), :[], s(:lit, :id))), :name),
       :user_input => nil
   end
 
   def test_cross_site_scripting_2
     assert_warning :type => :template,
       :warning_code => 2,
-      :fingerprint => "9e949d88329883f879b7ff46bdb096ba43e791aacb6558f47beddc34b9d42c4c",
+      :fingerprint => "4ece191ec6fa88e2232cc7950b08e93becc0d67d10e0e8838de418da3ced471f",
       :warning_type => "Cross-Site Scripting",
       :line => 6,
       :message => /^Unescaped\ model\ attribute/,
       :confidence => 0,
       :relative_path => "app/views/users/show.html.erb",
-      :code => s(:call, s(:call, s(:const, :User), :new, s(:call, nil, :user_params)), :name),
+      :code => s(:call, s(:call, s(:const, :User), :find, s(:call, s(:params), :[], s(:lit, :id))), :name),
       :user_input => nil
   end
 
   def test_cross_site_scripting_3
     assert_warning :type => :template,
       :warning_code => 2,
-      :fingerprint => "9e949d88329883f879b7ff46bdb096ba43e791aacb6558f47beddc34b9d42c4c",
+      :fingerprint => "58086429ac08d8c46497344536050f0925aaeba116e60509a7e3b04b5e3fb7d9",
       :warning_type => "Cross-Site Scripting",
       :line => 7,
       :message => /^Unescaped\ model\ attribute/,
       :confidence => 0,
       :relative_path => "app/views/users/show.html.erb",
-      :code => s(:call, s(:call, s(:const, :User), :new, s(:call, nil, :user_params)), :name),
+      :code => s(:call, s(:call, s(:const, :User), :find, s(:call, s(:params), :[], s(:lit, :id))), :name),
       :user_input => nil
   end
 
   def test_cross_site_scripting_4
     assert_warning :type => :template,
       :warning_code => 2,
-      :fingerprint => "9e949d88329883f879b7ff46bdb096ba43e791aacb6558f47beddc34b9d42c4c",
+      :fingerprint => "b6d9fb13983a0ff8d5b6531e06567f787d057d9145b235b2325f00983b382e5d",
       :warning_type => "Cross-Site Scripting",
       :line => 8,
       :message => /^Unescaped\ model\ attribute/,
       :confidence => 0,
       :relative_path => "app/views/users/show.html.erb",
-      :code => s(:call, s(:call, s(:const, :User), :new, s(:call, nil, :user_params)), :name),
+      :code => s(:call, s(:call, s(:const, :User), :find, s(:call, s(:params), :[], s(:lit, :id))), :name),
       :user_input => nil
   end
 
@@ -556,7 +556,7 @@ class Rails6Tests < Minitest::Test
   def test_command_injection_in_render_1
     assert_warning :type => :warning,
       :warning_code => 14,
-      :fingerprint => "6c1c068078e37b94af882d43bd6e239dd8e28912b7f0a56f11b82a504915c064",
+      :fingerprint => "207f8e545a7ca646b9c1d597635d0a19821085d38316af61cc62593b7ca02fa7",
       :warning_type => "Command Injection",
       :line => 10,
       :message => /^Possible\ command\ injection/,
@@ -569,7 +569,7 @@ class Rails6Tests < Minitest::Test
   def test_command_injection_in_render_2
     assert_warning :type => :warning,
       :warning_code => 14,
-      :fingerprint => "6c1c068078e37b94af882d43bd6e239dd8e28912b7f0a56f11b82a504915c064",
+      :fingerprint => "aefab66fe6833e2279b82ecd2fb626b77bf9e5b29da20109e9c38eeca6ad7abd",
       :warning_type => "Command Injection",
       :line => 11,
       :message => /^Possible\ command\ injection/,
@@ -709,7 +709,7 @@ class Rails6Tests < Minitest::Test
   def test_mass_assignment_permit_bang_1
     assert_warning :type => :warning,
       :warning_code => 70,
-      :fingerprint => "58e42d4ef79c278374a8456b1c034c7768e28b9a156e5602bb99a1105349f350",
+      :fingerprint => "5e6cb161ff63d68e1fb6c49f8b2927e9ec3a9226830d8ee160ad79654668a055",
       :warning_type => "Mass Assignment",
       :line => 93,
       :message => /^Specify exact keys allowed for mass assignment/,
@@ -722,7 +722,7 @@ class Rails6Tests < Minitest::Test
   def test_mass_assignment_permit_bang_2
     assert_warning :type => :warning,
       :warning_code => 70,
-      :fingerprint => "58e42d4ef79c278374a8456b1c034c7768e28b9a156e5602bb99a1105349f350",
+      :fingerprint => "8c310d9a0bfeed1705e6bee87475e298beb01254f5f37c97274673ecef2b3e95",
       :warning_type => "Mass Assignment",
       :line => 94,
       :message => /^Specify exact keys allowed for mass assignment/,

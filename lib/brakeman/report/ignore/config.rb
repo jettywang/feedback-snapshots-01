@@ -24,6 +24,8 @@ module Brakeman
       @ignored_warnings = []
       @used_fingerprints = Set.new
 
+      migrate_legacy_entries
+
       @new_warnings.each do |w|
         if ignored? w
           @ignored_warnings << w
@@ -44,9 +46,11 @@ module Brakeman
     end
 
     # Determine if warning should be ignored
-    def ignored? warning
-      @used_fingerprints << warning.fingerprint
-      @ignored_fingerprints.include? warning.fingerprint
+    def ignored? warning, mark_used: true
+      fingerprint = warning.fingerprint
+
+      @used_fingerprints << fingerprint if mark_used
+      @ignored_fingerprints.include? fingerprint
     end
 
     def ignore warning
@@ -88,7 +92,7 @@ module Brakeman
       @ignored_fingerprints -= obsolete
 
       @already_ignored.reject! do |w|
-        if obsolete.include? w[:fingerprint]
+        if obsolete.include?(w[:fingerprint])
           @changed = true
         end
       end
@@ -114,6 +118,7 @@ module Brakeman
       @already_ignored.each do |w|
         @ignored_fingerprints << w[:fingerprint]
         @notes[w[:fingerprint]] = w[:note]
+
       end
     end
 
@@ -138,6 +143,51 @@ module Brakeman
       end
     end
 
+    # Older ignore files store the pre-sink-identity fingerprint.  When that
+    # fingerprint now belongs to more than one real call, it is ambiguous and
+    # must not be widened to cover any of them.  If exactly one warning matches
+    # (for example because the other duplicate was removed), the entry can be
+    # migrated safely and its note preserved.
+    def migrate_legacy_entries
+      @new_warnings ||= []
+
+      @already_ignored.each do |entry|
+        old = entry[:fingerprint]
+        next if @new_warnings.any? { |warning| warning.fingerprint == old }
+
+        candidates = @new_warnings.select do |warning|
+          warning.legacy_fingerprint == old
+        end
+
+        # A group of structurally identical calls cannot be disambiguated by
+        # the old fingerprint.  If every member is on the recorded line, the
+        # only safe outcome is to leave the entry untouched (and obsolete).
+        next if candidates.length > 1 && entry[:line].nil?
+
+        if candidates.length > 1
+          candidates = candidates.select { |warning| warning.line == entry[:line] }
+          next unless candidates.length == 1
+        end
+
+        next unless candidates.length == 1
+
+        # A recorded line that does not match the candidate means the entry
+        # refers to a different (now removed) sink.  Do not move the exemption.
+        next if entry[:line] && candidates.first.line != entry[:line]
+
+        warning = candidates.first
+        new_fingerprint = warning.fingerprint
+        next if new_fingerprint == old
+
+        @ignored_fingerprints.delete old
+        @ignored_fingerprints << new_fingerprint
+        entry[:fingerprint] = new_fingerprint
+
+        @notes[new_fingerprint] = @notes.delete(old) if @notes.key? old
+        @changed = true
+      end
+    end
+
     # Save old ignored warnings and newly ignored ones
     def save_with_old
       warnings = @ignored_warnings.dup
@@ -146,7 +196,12 @@ module Brakeman
       @already_ignored.each do |w|
         fingerprint = w[:fingerprint]
 
-        unless @ignored_warnings.find { |ignored_warning| ignored_warning.fingerprint == fingerprint }
+        existing = @ignored_warnings.find do |ignored_warning|
+          ignored_warning.fingerprint == fingerprint ||
+            (ignored_warning.respond_to?(:legacy_fingerprint) && ignored_warning.legacy_fingerprint == fingerprint)
+        end
+
+        unless existing
           warnings << w
         end
       end

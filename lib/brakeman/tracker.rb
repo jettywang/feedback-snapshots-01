@@ -189,7 +189,7 @@ class Brakeman::Tracker
   def filtered_warnings
     if self.ignored_filter
       self.warnings.reject do |w|
-        self.ignored_filter.ignored? w
+        self.ignored_filter.ignored? w, mark_used: false
       end
     else
       self.warnings

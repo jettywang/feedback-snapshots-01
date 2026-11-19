@@ -1,6 +1,7 @@
 require 'brakeman/processors/output_processor'
 require 'brakeman/processors/lib/processor_helper'
 require 'brakeman/warning'
+require 'brakeman/sink_identity'
 require 'brakeman/util'
 require 'brakeman/messages'
 
@@ -44,12 +45,14 @@ class Brakeman::BaseCheck < Brakeman::SexpProcessor
     @comparison_ops  = Set[:==, :!=, :>, :<, :>=, :<=]
   end
 
-  #Add result to result list, which is used to check for duplicates
+  #Add result to result list, which is used to check for duplicates.
+  #The sink expression is recorded alongside location so two distinct calls
+  #on the same line are not mistaken for one another.
   def add_result result
-    location = get_location result
     location, line = get_location result
+    call = result.is_a?(Hash) ? result[:call] : result
 
-    @results << [line, location, result]
+    @results << [line, location, Brakeman::SinkIdentity.signature(call), result, scope_token]
   end
 
   #Default Sexp processing. Iterates over each value in the Sexp
@@ -162,7 +165,26 @@ class Brakeman::BaseCheck < Brakeman::SexpProcessor
 
   #Report a warning
   def warn options
-    extra_opts = { :check => self.class.to_s }
+    extra_opts = { :check => self.class.to_s, :discovery_scope => scope_token }
+
+    # Template warnings must remember which Template object they came from:
+    # analysed copies share the same file/line but may resolve different
+    # sources, and the ordinal distinguishes distinct outputs on one line.
+    if template = options[:template] || @current_template
+      extra_opts[:template] = template
+
+      # Count outputs at this template line in discovery order.  Across render
+      # paths the same physical outputs are encountered in the same order, so
+      # identical ordinals align.  Distinct outputs on one line (including two
+      # identical-looking ones) therefore remain distinct sinks.
+      code = options[:code] || (options[:result] && options[:result][:call])
+      line = options[:line] || (code && code.line)
+      site = [template.object_id, line]
+
+      @template_site_seen ||= Hash.new(0)
+      extra_opts[:template_site_ordinal] = @template_site_seen[site]
+      @template_site_seen[site] += 1
+    end
 
     if options[:file]
       options[:file] = @app_tree.file_path(options[:file])
@@ -253,22 +275,42 @@ class Brakeman::BaseCheck < Brakeman::SexpProcessor
     true
   end
 
-  #This is to avoid reporting duplicates. Checks if the result has been
-  #reported already from the same line number.
+  # Avoid reporting the same discovery twice. A duplicate must share line,
+  # scope, and call structure. Template outputs are additionally compared by
+  # node identity, so two identical-looking outputs on one line are kept.
   def duplicate? result, location = nil
     location, line = get_location result
+    call = result.is_a?(Hash) ? result[:call] : result
 
-    @results.each do |r|
-      if r[0] == line and r[1] == location
-        if tracker.options[:combine_locations]
-          return true
-        elsif r[2] == result
-          return true
-        end
+    if @current_template
+      # Template outputs are compared by node identity.  Two identical-looking
+      # outputs on one line are distinct Sexps (and distinct sinks), while the
+      # same output re-visited within a check is the same node.
+      @results.any? do |r|
+        r[0] == line && r[1] == location && r[4] == scope_token &&
+          r[3].equal?(result)
+      end
+    else
+      signature = Brakeman::SinkIdentity.signature(call)
+
+      @results.any? do |r|
+        next false unless r[0] == line && r[1] == location
+        next false unless r[4] == scope_token
+        next false unless r[2] == signature
+
+        # Same invocation discovered again.  Preserve the legacy
+        # --[no-]combine-locations behavior for cross-check deduplication.
+        tracker.options[:combine_locations] || r[3] == result
       end
     end
+  end
 
-    false
+  # Different render environments create separate Template objects with the
+  # same source name and line.  Treat them as separate discoveries here so the
+  # warning aggregation layer can union evidence and render paths into one
+  # finding; otherwise the second path is silently discarded.
+  def scope_token
+    @current_template ? @current_template.object_id : nil
   end
 
   def get_location result

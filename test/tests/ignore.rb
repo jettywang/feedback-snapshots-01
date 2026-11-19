@@ -176,6 +176,50 @@ class IgnoreConfigTests < Minitest::Test
     assert new_config.ignored? first_ignored
   end
 
+  def test_current_fingerprint_entry_ignores_only_that_warning
+    warning = report.warnings.first
+    other = report.warnings[1]
+
+    config = make_config_with_entries([{
+      fingerprint: warning.fingerprint,
+      file: warning.file.relative,
+      line: warning.line,
+      note: "current format"
+    }])
+
+    assert config.ignored? warning
+    refute config.ignored? other
+    assert_equal "current format", config.note_for(warning)
+  end
+
+  def test_note_for_legacy_entry_does_not_attach_to_new_fingerprint
+    warning = report.warnings.first
+    legacy = warning.legacy_fingerprint
+
+    config = make_config_with_entries([{
+      fingerprint: legacy,
+      file: warning.file.relative,
+      line: warning.line,
+      note: "old note"
+    }])
+
+    if config.ignored_warnings.include?(warning)
+      assert_equal "old note", config.note_for(warning)
+    else
+      assert_nil config.note_for(warning)
+    end
+  end
+
+  def make_config_with_entries entries
+    require 'json'
+    path = @config_file.path
+    File.write path, JSON.pretty_generate({ ignored_warnings: entries, brakeman_version: "8.1.0" })
+    Brakeman::IgnoreConfig.new(path, report.warnings).tap do |c|
+      c.read_from_file
+      c.filter_ignored
+    end
+  end
+
   def test_bad_ignore_json_error_message
     file = Tempfile.new("brakeman.ignore2")
     file.write "{[ This is bad json cuz I don't have a closing square bracket, bwahahaha...}"

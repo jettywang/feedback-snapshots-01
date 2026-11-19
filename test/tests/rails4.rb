@@ -1447,7 +1447,7 @@ class Rails4Tests < Minitest::Test
   def test_mass_assignment_CVE_2014_3514
     assert_warning :type => :warning,
       :warning_code => 81,
-      :fingerprint => "c4a619b7316e45a5927b098294ff39d7206f84bac084402630318bf6f89f396d",
+      :fingerprint => "534ef107ee30fafa8f6dab7df1afd13a7d7fd9d48bb4e9573590b9d52648301a",
       :warning_type => "Mass Assignment",
       :line => 57,
       :message => /^`create_with`\ is\ vulnerable\ to\ strong\ para/,
@@ -1457,7 +1457,7 @@ class Rails4Tests < Minitest::Test
 
     assert_warning :type => :warning,
       :warning_code => 81,
-      :fingerprint => "c4a619b7316e45a5927b098294ff39d7206f84bac084402630318bf6f89f396d",
+      :fingerprint => "d2a89cda6b34a82b9c943051ec917cce66abb7ed9e211cb3a657c1388e5dc3df",
       :warning_type => "Mass Assignment",
       :line => 58,
       :message => /^`create_with`\ is\ vulnerable\ to\ strong\ para/,

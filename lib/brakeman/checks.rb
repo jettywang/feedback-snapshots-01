@@ -67,6 +67,7 @@ class Brakeman::Checks
     @model_warnings = []
     @controller_warnings = []
     @checks_run = []
+    @suppressed_sinks = []
   end
 
   #Add Warning to list of warnings to report.
@@ -75,7 +76,19 @@ class Brakeman::Checks
   #
   #Will not add warnings which are below the minimum confidence level.
   def add_warning warning
-    unless warning.confidence > @min_confidence
+    existing = find_existing_sink warning
+
+    if existing
+      existing.merge_sink! warning
+      # A merged sink becomes visible if any discovery passed the confidence
+      # filter, even when the first discovery did not.
+      promote_sink(existing) if warning.confidence <= @min_confidence
+      return existing
+    end
+
+    if warning.confidence > @min_confidence
+      @suppressed_sinks << warning
+    else
       case warning.warning_set
       when :template
         @template_warnings << warning
@@ -105,6 +118,47 @@ class Brakeman::Checks
   #Return an array of all warnings found.
   def all_warnings
     @warnings + @template_warnings + @controller_warnings + @model_warnings
+  end
+
+  # Warnings removed by the confidence filter still count as discovered sinks
+  # for merging (so a reportable path is not duplicated by a weak path).
+  def all_discovered_warnings
+    all_warnings + @suppressed_sinks
+  end
+
+  # Assign stable occurrence numbers and disambiguated fingerprints.
+  #
+  # * `occurrence` is line-independent, so a formatting move keeps the same id.
+  # * Members of a legacy-fingerprint collision all receive a suffix, so no
+  #   single old exemption can attach to an arbitrarily chosen call.
+  #
+  # Ordering is by source position, which keeps ids stable across runs.
+  def finalize_warnings
+    # Only reported warnings participate in identity numbering.  Suppressed
+    # discoveries are used for merging but must not shift the occurrence of a
+    # visible warning when confidence thresholds change.
+    warnings = all_warnings
+
+    # Occurrence is line-independent: a formatting move keeps the same ordinal,
+    # while two real instances of the same structure get different ordinals.
+    warnings.group_by(&:sink_move_key).each_value do |group|
+      group.sort_by { |w| [w.line || 0, w.file.to_s, w.method.to_s, w.code.to_s] }.each_with_index do |warning, index|
+        warning.occurrence = index
+      end
+    end
+
+    # The legacy fingerprint cannot distinguish identical calls on different
+    # lines.  Disambiguate every member of a colliding group, including the
+    # first, so an old exemption cannot silently attach to a newly added call.
+    warnings.group_by(&:legacy_fingerprint).each_value do |group|
+      next if group.length < 2
+
+      group.sort_by { |w| [w.line || 0, w.method.to_s, w.file.to_s, w.code.to_s] }.each_with_index do |warning, index|
+        warning.collision_suffix = index
+      end
+    end
+
+    all_warnings
   end
 
   #Run all the checks on the given Tracker.
@@ -162,10 +216,50 @@ class Brakeman::Checks
       end
     end
 
+    check_runner.finalize_warnings
     check_runner
   end
 
   private
+
+  # Merge discoveries for the same physical sink within one discovery scope.
+  # Template sinks are additionally merged across render paths when their
+  # template-file/line/ordinal match; the ordinal keeps distinct outputs on one
+  # line separate while still aligning copies seen through different paths.
+  def find_existing_sink warning
+    exact = all_discovered_warnings.find do |existing|
+      existing.discovery_scope == warning.discovery_scope &&
+        existing.sink_instance_key == warning.sink_instance_key
+    end
+    return exact if exact
+
+    # Template sinks are aggregated across render paths by their position in
+    # the template, not by the resolved call structure.
+    return nil unless warning.warning_set == :template
+
+    all_discovered_warnings.find do |existing|
+      existing.template_mergeable?(warning) &&
+        existing.discovery_scope != warning.discovery_scope
+    end
+  end
+
+  # Move a previously suppressed warning into its report bucket.
+  def promote_sink warning
+    @suppressed_sinks.delete warning
+
+    case warning.warning_set
+    when :template
+      @template_warnings << warning unless @template_warnings.include?(warning)
+    when :warning
+      @warnings << warning unless @warnings.include?(warning)
+    when :controller
+      @controller_warnings << warning unless @controller_warnings.include?(warning)
+    when :model
+      @model_warnings << warning unless @model_warnings.include?(warning)
+    else
+      raise "Unknown warning: #{warning.warning_set}"
+    end
+  end
 
   def self.get_check_name check_class
     check_class.to_s.split("::").last

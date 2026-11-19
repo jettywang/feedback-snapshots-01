@@ -2,12 +2,16 @@ require 'json'
 require 'digest/sha2'
 require 'brakeman/warning_codes'
 require 'brakeman/messages'
+require 'brakeman/sink_identity'
 
 #The Warning class stores information about warnings
 class Brakeman::Warning
   attr_reader :called_from, :check, :class, :confidence, :controller, :cwe_id,
     :line, :method, :model, :template, :user_input, :user_input_type,
-    :warning_code, :warning_set, :warning_type
+    :warning_code, :warning_set, :warning_type, :evidence, :sink_expression,
+    :render_paths, :discovery_scope
+
+  attr_accessor :occurrence, :template_site_ordinal
 
   attr_accessor :code, :context, :file, :message
 
@@ -44,7 +48,13 @@ class Brakeman::Warning
     :user_input => :@user_input,
     :warning_set => :@warning_set,
     :warning_type => :@warning_type,
+    :sink => :@sink_expression,
+    :evidence => :@given_evidence,
+    :discovery_scope => :@discovery_scope,
+    :template_site_ordinal => :@template_site_ordinal,
   }
+
+  attr_writer :collision_suffix
 
   #+options[:result]+ can be a result from Tracker#find_call. Otherwise, it can be +nil+.
   def initialize options = {}
@@ -125,16 +135,25 @@ class Brakeman::Warning
       @message = Brakeman::Messages::Message.new(options[:message])
     end
 
+    @render_paths = []
+    @render_paths << @called_from if @called_from
+    @occurrence = 0
+    @sink_expression ||= result && result[:call]
+    @sink_expression ||= @code
+
+    @evidence = build_evidence(@given_evidence)
+
     @format_message = nil
     @row = nil
   end
 
   def hash
-    self.to_s.hash
+    sink_instance_key.hash
   end
 
   def eql? other_warning
-    self.hash == other_warning.hash
+    other_warning.is_a?(Brakeman::Warning) &&
+      sink_instance_key == other_warning.sink_instance_key
   end
 
   def confidence= conf
@@ -247,13 +266,110 @@ class Brakeman::Warning
    output
   end
 
-  def fingerprint
+  # Stable, path-independent identity for the warning's rule + source location
+  # + sink expression.  It deliberately excludes line numbers, confidence and
+  # evidence so formatting-only changes do not create a new finding.
+  def sink_identity_key
+    [@warning_code, self.file && self.file.relative, scope_key, Brakeman::SinkIdentity.signature(@sink_expression)]
+  end
+
+  # A single physical occurrence of a sink.  Line and the exact source keys are
+  # included so two real calls on one line (or two different sources nested in
+  # one statement) stay distinct.  These are never used to merge discoveries
+  # from different propagation paths.
+  def sink_instance_key
+    key = sink_identity_key + [@line, Brakeman::SinkIdentity.exact_signature(@sink_expression)]
+    key << @template_site_ordinal if warning_set == :template
+    key
+  end
+
+  # Identity used to decide whether a warning merely moved lines.  Everything
+  # except the line number must match: a changed source or sink structure is a
+  # semantic change, not a formatting move.
+  def sink_move_key
+    sink_identity_key + [Brakeman::SinkIdentity.exact_signature(@sink_expression)]
+  end
+
+  # Physical sink inside a template: rule + template file + line + ordinal of
+  # the output on that line.  Template#name can carry a render-path suffix, so
+  # it is not used here.  Resolved source values and the substituted call
+  # structure are also excluded; those differ between render environments for
+  # the same output.
+  def template_site_key
+    [@warning_code, self.file && self.file.relative, template_file_key, @line, @template_site_ordinal]
+  end
+
+  def template_file_key
+    template && template.file && template.file.relative
+  end
+
+  # Stable identifier for this rule firing at this sink instance.  `occurrence`
+  # orders identical structures within a scope, so two calls remain distinct
+  # while a pure line move keeps its id.
+  def sink_id
+    @sink_id ||= Digest::SHA2.new(256).update(
+      "sink-v1\0#{@warning_code}\0#{self.file && self.file.relative}\0#{scope_key.inspect}\0#{Brakeman::SinkIdentity.signature(@sink_expression)}\0#{@occurrence}"
+    ).to_s
+  end
+
+  # Legacy fingerprint formula.  Published ignore files use this value, so it
+  # remains available for migration.  It is intentionally not used for new
+  # duplicates because it cannot distinguish identical calls.
+  def legacy_fingerprint
     loc = self.location
     location_string = loc && loc.sort_by { |k, v| k.to_s }.inspect
     warning_code_string = sprintf("%03d", @warning_code)
     code_string = @code.inspect
 
     Digest::SHA2.new(256).update("#{warning_code_string}#{code_string}#{location_string}#{self.file.relative}#{self.confidence}").to_s
+  end
+
+  def fingerprint
+    base = legacy_fingerprint
+
+    if @collision_suffix
+      Digest::SHA2.new(256).update("sink-v1\0#{@collision_suffix}\0#{base}").to_s
+    else
+      base
+    end
+  end
+
+  # Merge another warning for the same physical template sink (the same output
+  # reached through two render paths). Evidence and paths are unioned; the
+  # strongest confidence is retained.
+  def merge_sink! other
+    return self unless template_mergeable?(other)
+
+    # Sources may live in the other render environment, so keep both code and
+    # the line where that source was resolved.  Identical evidence found in the
+    # same location is never duplicated.
+    combined_evidence = (@evidence + other.evidence).uniq { |e| [e.type, e.code, e.line] }
+    @render_paths |= other.render_paths
+    @render_paths << other.called_from if other.called_from && !@render_paths.include?(other.called_from)
+    @called_from ||= other.called_from
+    self.confidence = [self.confidence, other.confidence].compact.min
+    @user_input ||= other.user_input
+    @user_input_type ||= other.user_input_type
+
+    # Different render environments can resolve the same template output to
+    # different calls (e.g. `User.new(user_params)` vs `User.find(params[:id])`).
+    # Pick a deterministic representative independent of traversal order so
+    # fingerprints and machine reports are stable across runs and machines.
+    if other.legacy_fingerprint < legacy_fingerprint
+      @code = other.code
+      @sink_expression = other.sink_expression
+      @sink_id = nil
+      @format_message = nil
+    end
+
+    @evidence = combined_evidence
+    self
+  end
+
+  def template_mergeable? other
+    other.is_a?(Brakeman::Warning) &&
+      warning_set == :template && other.warning_set == :template &&
+      template_site_key == other.template_site_key
   end
 
   def location include_renderer = true
@@ -295,6 +411,9 @@ class Brakeman::Warning
     { :warning_type => self.warning_type,
       :warning_code => @warning_code,
       :fingerprint => self.fingerprint,
+      :sink_id => self.sink_id,
+      :evidence => self.evidence.map(&:to_h),
+      :render_paths => self.render_paths.map { |path| path.respond_to?(:to_a) ? path.to_a : path },
       :check_name => self.check_name,
       :message => self.message.to_s,
       :file => (absolute_paths ? self.file.absolute : self.file.relative),
@@ -314,6 +433,53 @@ class Brakeman::Warning
   end
 
   private
+
+  def scope_key
+    loc = self.location(false)
+    return loc if loc.nil?
+
+    loc.sort_by { |k, v| k.to_s }.map { |k, v| [k, v.to_s] }
+  end
+
+  def build_evidence given = nil
+    entries = case given
+              when Array then given
+              when Brakeman::SinkIdentity::Evidence, Hash then [given]
+              else []
+              end
+
+    explicit = entries.map do |entry|
+      if entry.is_a? Brakeman::SinkIdentity::Evidence
+        entry
+      elsif entry.is_a? Hash
+        Brakeman::SinkIdentity::Evidence.new(
+          type: entry[:type] || entry["type"],
+          code: entry[:code] || entry["code"],
+          line: entry[:line] || entry["line"]
+        )
+      end
+    end.compact
+
+    if explicit.empty? and @sink_expression
+      explicit = Brakeman::SinkIdentity.collect_sources(@sink_expression).map do |type, exp|
+        Brakeman::SinkIdentity::Evidence.new(
+          type: type,
+          code: Brakeman::SinkIdentity.format_code(exp),
+          line: exp.respond_to?(:line) ? exp.line : nil
+        )
+      end
+    end
+
+    if explicit.empty? and @user_input
+      explicit << Brakeman::SinkIdentity::Evidence.new(
+        type: @user_input_type || :user_input,
+        code: Brakeman::SinkIdentity.format_code(@user_input),
+        line: @user_input.respond_to?(:line) ? @user_input.line : nil
+      )
+    end
+
+    explicit.uniq { |e| [e.type, e.code, e.line] }
+  end
 
   def format_ruby code, strip
     formatted = Brakeman::OutputProcessor.new.format(code)

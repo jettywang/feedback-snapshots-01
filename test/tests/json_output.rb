@@ -52,7 +52,8 @@ class JSONOutputTests < Minitest::Test
 
   def test_for_expected_warning_keys
     expected = ["warning_type", "check_name", "message", "file", "link", "code", "location",
-      "render_path", "user_input", "confidence", "line", "warning_code", "fingerprint", "cwe_id"]
+      "render_path", "user_input", "confidence", "line", "warning_code", "fingerprint", "cwe_id",
+      "sink_id", "evidence", "render_paths"]
 
     @@json["warnings"].each do |warning|
       assert (warning.keys - expected).empty?, "#{(warning.keys - expected).inspect} did not match expected keys"

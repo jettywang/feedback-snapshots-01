@@ -1,3 +1,11 @@
+# Unreleased
+
+* Distinguish sink instances from propagation paths in warning identity; the same sink reached through multiple render/data-flow paths is reported once with unioned evidence and render paths
+* Report all direct user-input sources for a warning's evidence instead of a single opaque expression
+* Add stable `sink_id`, `evidence`, and `render_paths` fields to JSON warnings while keeping `fingerprint` compatible for existing ignore files
+* Disambiguate identical calls that previously shared one fingerprint, and avoid widening legacy ignore entries to a newly added matching call
+* Treat formatting-only line moves as unchanged in rescans/`--compare` while reporting source changes and new sinks accurately
+
 # 8.1.0 - 2026-09-30
 
 * Better help and error message for `--ensure-latest`
