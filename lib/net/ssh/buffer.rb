@@ -235,7 +235,31 @@ module Net
       # Read a bignum (OpenSSL::BN) from the buffer, in SSH2 format. It is
       # essentially just a string, which is reinterpreted to be a bignum in
       # binary format.
-      def read_bignum
+      #
+      # When +maximum_bytes+ is given, the SSH2 string length is checked
+      # before the payload is read, so a malicious peer cannot force the
+      # allocation and parsing of an arbitrarily large bignum. A bignum that
+      # exceeds the limit, or a truncated payload, raises
+      # Net::SSH::Exception, describing a malformed message rather than a
+      # cryptographically invalid value.
+      def read_bignum(maximum_bytes = nil)
+        if maximum_bytes
+          length = read_long
+          return if length.nil?
+
+          if length > maximum_bytes
+            raise Net::SSH::Exception,
+                  "bignum of #{length} bytes exceeds the limit of #{maximum_bytes} bytes"
+          end
+          if length > available
+            raise Net::SSH::Exception,
+                  "bignum declares #{length} bytes but only #{available} bytes remain in the buffer"
+          end
+
+          data = read(length)
+          return OpenSSL::BN.new(data, 2)
+        end
+
         data = read_string
         return unless data
 

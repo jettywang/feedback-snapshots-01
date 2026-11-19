@@ -95,6 +95,9 @@ module Transport
           setup
           @server_dh_pubkey = OpenSSL::BN.new(pub)
           @signature = "unused"
+          # The shared-secret modular exponentiation must never run for an
+          # invalid public value: validation rejects it first.
+          OpenSSL::PKey::DH.any_instance.expects(:compute_key).never
           error = assert_raises(Net::SSH::Exception) { exchange! }
           assert_equal "server's DH public value is invalid", error.message
         end

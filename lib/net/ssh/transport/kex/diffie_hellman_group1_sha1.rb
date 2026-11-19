@@ -118,7 +118,10 @@ module Net
           end
 
           # Rejects degenerate values that would let the server force a
-          # predictable shared secret, as OpenSSH's dh_pub_is_valid.
+          # predictable shared secret, as OpenSSH's dh_pub_is_valid. All checks
+          # are cheap integer comparisons, so this always runs before the
+          # modular exponentiation in #compute_key that derives the shared
+          # secret: an invalid public value never reaches any expensive work.
           def validate_server_dh_pubkey(pub)
             valid = pub > 1 && pub < dh.p - 1 && pub.to_i.to_s(2).count("1") >= 4
             raise Net::SSH::Exception, "server's DH public value is invalid" unless valid

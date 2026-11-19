@@ -226,6 +226,34 @@ class TestBuffer < NetSSHTest
     assert_nil new("\0\1\2").read_bignum
   end
 
+  def test_read_bignum_with_limit_should_read_a_value_within_the_limit
+    buffer = new(Net::SSH::Buffer.from(:bignum, OpenSSL::BN.new("1234567890", 10)).to_s)
+    assert_equal OpenSSL::BN.new("1234567890", 10), buffer.read_bignum(4)
+  end
+
+  def test_read_bignum_with_limit_should_allow_a_leading_zero_pad_byte
+    bn = OpenSSL::BN.new(1 << 31)
+    buffer = new(Net::SSH::Buffer.from(:bignum, bn).to_s)
+    assert_equal bn, buffer.read_bignum(5)
+  end
+
+  def test_read_bignum_with_limit_should_reject_a_value_exceeding_the_limit
+    bn = OpenSSL::BN.new(1) << 2048
+    buffer = new(Net::SSH::Buffer.from(:bignum, bn).to_s)
+    error = assert_raises(Net::SSH::Exception) { buffer.read_bignum(10) }
+    assert_match(/exceeds the limit of 10 bytes/, error.message)
+  end
+
+  def test_read_bignum_with_limit_should_reject_a_truncated_payload
+    buffer = new([64].pack("N"))
+    error = assert_raises(Net::SSH::Exception) { buffer.read_bignum(100) }
+    assert_match(/only 0 bytes remain/, error.message)
+  end
+
+  def test_read_bignum_with_limit_should_return_nil_if_length_cannot_be_read
+    assert_nil new("\0\1\2").read_bignum(100)
+  end
+
   def test_read_key_blob_should_read_dsa_keys
     random_dss { |buffer| buffer.read_keyblob("ssh-dss") }
   end
