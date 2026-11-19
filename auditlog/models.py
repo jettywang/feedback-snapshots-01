@@ -29,6 +29,10 @@ from auditlog.diff import get_mask_function
 
 DEFAULT_OBJECT_REPR = "<error forming object repr>"
 
+#: Marker used for log entries whose source database is not known, e.g. entries
+#: that existed before the ``source_db`` field was introduced.
+UNKNOWN_SOURCE_DB = "unknown"
+
 
 class LogEntryManager(models.Manager):
     """
@@ -73,6 +77,9 @@ class LogEntryManager(models.Manager):
             get_additional_data = getattr(instance, "get_additional_data", None)
             if callable(get_additional_data):
                 kwargs.setdefault("additional_data", get_additional_data())
+
+            # tag the entry with the database the instance lives in
+            kwargs.setdefault("source_db", instance._state.db or DEFAULT_DB_ALIAS)
 
             # set correlation id
             kwargs.setdefault("cid", get_cid())
@@ -127,6 +134,7 @@ class LogEntryManager(models.Manager):
                 }
             }
 
+            kwargs.setdefault("source_db", instance._state.db or DEFAULT_DB_ALIAS)
             kwargs.setdefault("cid", get_cid())
             return self.create(**kwargs)
 
@@ -135,6 +143,12 @@ class LogEntryManager(models.Manager):
     def get_for_object(self, instance):
         """
         Get log entries for the specified model instance.
+
+        Only entries recorded for the same source database as the given instance are
+        returned, so objects that share a primary key across databases (e.g. regional
+        databases) do not get their histories mixed up. Entries with an unknown source
+        database are not included; query them explicitly through
+        :py:attr:`AbstractLogEntry.source_db`.
 
         :param instance: The model instance to get log entries for.
         :type instance: Model
@@ -147,15 +161,24 @@ class LogEntryManager(models.Manager):
 
         content_type = ContentType.objects.get_for_model(instance.__class__)
         pk = self._get_pk_value(instance)
+        source_db = instance._state.db or DEFAULT_DB_ALIAS
 
         if isinstance(pk, int):
-            return self.filter(content_type=content_type, object_id=pk)
+            return self.filter(
+                content_type=content_type, object_id=pk, source_db=source_db
+            )
         else:
-            return self.filter(content_type=content_type, object_pk=smart_str(pk))
+            return self.filter(
+                content_type=content_type, object_pk=smart_str(pk), source_db=source_db
+            )
 
     def get_for_objects(self, queryset):
         """
         Get log entries for the objects in the specified queryset.
+
+        Only entries recorded for the same source database as the given queryset are
+        returned, so objects that share a primary key across databases (e.g. regional
+        databases) do not get their histories mixed up.
 
         :param queryset: The queryset to get the log entries for.
         :type queryset: QuerySet
@@ -169,23 +192,24 @@ class LogEntryManager(models.Manager):
         primary_keys = list(
             queryset.values_list(queryset.model._meta.pk.name, flat=True)
         )
+        source_db = queryset.db or DEFAULT_DB_ALIAS
 
         if isinstance(primary_keys[0], int):
             return (
-                self.filter(content_type=content_type)
+                self.filter(content_type=content_type, source_db=source_db)
                 .filter(Q(object_id__in=primary_keys))
                 .distinct()
             )
         elif isinstance(queryset.model._meta.pk, models.UUIDField):
             primary_keys = [smart_str(pk) for pk in primary_keys]
             return (
-                self.filter(content_type=content_type)
+                self.filter(content_type=content_type, source_db=source_db)
                 .filter(Q(object_pk__in=primary_keys))
                 .distinct()
             )
         else:
             return (
-                self.filter(content_type=content_type)
+                self.filter(content_type=content_type, source_db=source_db)
                 .filter(Q(object_pk__in=primary_keys))
                 .distinct()
             )
@@ -386,6 +410,17 @@ class AbstractLogEntry(models.Model):
     )
     actor_email = models.CharField(
         blank=True, null=True, max_length=254, verbose_name=_("actor email")
+    )
+    source_db = models.CharField(
+        max_length=255,
+        db_index=True,
+        default=UNKNOWN_SOURCE_DB,
+        verbose_name=_("source database"),
+        help_text=_(
+            "Alias of the database the logged object belongs to. "
+            "Entries predating this field are marked as '%s'."
+        )
+        % UNKNOWN_SOURCE_DB,
     )
 
     objects = LogEntryManager()

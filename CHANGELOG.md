@@ -2,6 +2,10 @@
 
 ## Next Release
 
+#### Improvements
+
+- Add `LogEntry.source_db` field that records which database the logged object belongs to, so objects that share a primary key across multiple databases (e.g. regional databases) do not get their histories mixed up. `LogEntry.objects.get_for_object()` and `LogEntry.objects.get_for_objects()` only return entries from the same source database. Existing entries are marked as `"unknown"` by the migration and can be filtered separately.
+
 ## 3.4.2 (2026-11-08)
 
 #### Improvements

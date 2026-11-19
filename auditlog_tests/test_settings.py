@@ -84,6 +84,13 @@ elif TEST_DB_BACKEND == "sqlite3":
 else:
     raise ValueError(f"Unsupported database backend: {TEST_DB_BACKEND}")
 
+# A second regional database used to verify that log entries keep track of the
+# database their object lives in. Always sqlite so no extra service is needed.
+DATABASES["secondary"] = {
+    "ENGINE": "django.db.backends.sqlite3",
+    "NAME": os.getenv("TEST_DB_NAME_SECONDARY", "test_auditlog_secondary.sqlite3"),
+}
+
 TEMPLATES = [
     {
         "APP_DIRS": True,

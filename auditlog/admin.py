@@ -22,6 +22,7 @@ class LogEntryAdmin(admin.ModelAdmin, LogEntryAdminMixin):
         "msg_short",
         "user_url",
         "cid_url",
+        "source_db",
     ]
     search_fields = [
         "timestamp",
@@ -31,7 +32,7 @@ class LogEntryAdmin(admin.ModelAdmin, LogEntryAdminMixin):
         "actor__last_name",
         f"actor__{get_user_model().USERNAME_FIELD}",
     ]
-    list_filter = ["action", ResourceTypeFilter, CIDFilter]
+    list_filter = ["action", "source_db", ResourceTypeFilter, CIDFilter]
     readonly_fields = ["created", "resource_url", "action", "user_url", "msg"]
     fieldsets = [
         (None, {"fields": ["created", "user_url", "resource_url", "cid"]}),

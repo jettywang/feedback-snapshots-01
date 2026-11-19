@@ -627,6 +627,29 @@ related objects::
     rel_history = LogEntry.objects.get_for_objects(obj.related.all())
     full_history = (obj.history.all() | rel_history.all()).order_by('-timestamp')
 
+Multiple databases
+------------------
+
+When your project uses multiple databases, for example one database per region, different databases may contain
+objects of the same model with the same primary key. To keep their histories apart, every log entry records the
+alias of the database its object belongs to in the :py:attr:`LogEntry.source_db` field. Log entries themselves are
+still written to the default database, so they can all be queried from a single place.
+
+The :py:meth:`LogEntryManager.get_for_object` and :py:meth:`LogEntryManager.get_for_objects` methods only return
+entries whose source database matches the database of the given instance or queryset, so the histories of objects
+that happen to share a primary key across databases are never mixed up::
+
+    order_eu = Order.objects.using("eu").get(pk=42)
+    order_us = Order.objects.using("us").get(pk=42)
+
+    LogEntry.objects.get_for_object(order_eu)  # only entries with source_db="eu"
+    LogEntry.objects.get_for_object(order_us)  # only entries with source_db="us"
+
+Entries that were created before the ``source_db`` field existed are marked as ``"unknown"`` by the migration that
+introduces the field. They are not attached to any object's history; query them explicitly when needed::
+
+    LogEntry.objects.filter(source_db="unknown")
+
 Management commands
 -------------------
 
