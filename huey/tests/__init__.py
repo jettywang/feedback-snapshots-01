@@ -10,6 +10,7 @@ from huey.tests.test_postgres import *
 from huey.tests.test_priority import *
 from huey.tests.test_registry import *
 from huey.tests.test_serializer import *
+from huey.tests.test_signed_queue_boundaries import *
 from huey.tests.test_signals import *
 from huey.tests.test_sql_huey import *
 from huey.tests.test_stats import *
