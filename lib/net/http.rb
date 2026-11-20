@@ -1455,6 +1455,12 @@ module Net   #:nodoc:
     # which is the number of seconds to wait for an expected 100 Continue response.
     # If the \HTTP object does not receive a response in this many seconds
     # it sends the request body.
+    #
+    # A +nil+ value disables waiting altogether.
+    # A value of +0+ still waits, but only for a response that is already
+    # readable; otherwise the request body is sent immediately.
+    # A non-zero value is a true timeout: Net::HTTP waits up to that many
+    # seconds for an informational response and then sends the request body.
     def continue_timeout=(sec)
       @socket.continue_timeout = sec if @socket
       @continue_timeout = sec

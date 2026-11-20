@@ -3,6 +3,7 @@
 require 'test/unit'
 require 'net/http'
 require 'stringio'
+require 'timeout'
 require_relative 'utils'
 
 class TestNetHTTP < Test::Unit::TestCase
@@ -1141,6 +1142,395 @@ class TestNetHTTPContinue < Test::Unit::TestCase
     }
     assert_match(/Expect: 100-continue/, @debug.string)
     assert_not_match(/HTTP\/1.1 100 continue/, @debug.string)
+  end
+end
+
+class TestNetHTTPExpectContinueRegression < Test::Unit::TestCase
+  # A stream that records every read Net::HTTP performs on the request body.
+  class RecordingBody
+    attr_reader :reads
+
+    def initialize(content)
+      @io = StringIO.new(content)
+      @reads = []
+    end
+
+    def readpartial(*args)
+      record(:readpartial)
+      @io.readpartial(*args)
+    end
+
+    def read(*args)
+      record(:read)
+      @io.read(*args)
+    end
+
+    def first_read_at
+      @reads.first && @reads.first[:at]
+    end
+
+    private
+
+    def record(kind)
+      @reads << {
+        at: Process.clock_gettime(Process::CLOCK_MONOTONIC),
+        kind: kind,
+      }
+    end
+  end
+
+  # Proves the body writer never ran by failing if Net::HTTP reads at all.
+  class UnreadableBody
+    def readpartial(*)
+      raise 'body was read during early rejection'
+    end
+
+    def read(*)
+      raise 'body was read during early rejection'
+    end
+  end
+
+  # A scripted HTTP/1.1 keep-alive server.  It records the request line,
+  # headers, body, and timestamps so tests can assert what actually crossed
+  # the wire and when the client consumed its request body.
+  class ScriptedServer
+    attr_reader :port, :requests, :connections, :error
+
+    def initialize(request_count, &handler)
+      @request_count = request_count
+      @handler = handler
+      @requests = []
+      @connections = 0
+      @error = nil
+      @listener = TCPServer.new('127.0.0.1', 0)
+      @port = @listener.addr[1]
+    end
+
+    def start
+      @thread = Thread.new do
+        begin
+          while @requests.length < @request_count
+            socket = @listener.accept
+            @connections += 1
+            begin
+              while @requests.length < @request_count
+                exchange = Exchange.read(socket)
+                break unless exchange
+                @requests << exchange
+                @handler.call(exchange, @requests.length - 1)
+              end
+            ensure
+              socket.close
+            end
+          end
+        rescue => exception
+          @error = exception
+        ensure
+          @listener.close unless @listener.closed?
+        end
+      end
+      self
+    end
+
+    def join(timeout)
+      unless @thread.join(timeout)
+        raise "scripted server did not finish"
+      end
+      raise @error if @error
+      self
+    end
+
+    def shutdown
+      @thread&.kill
+      @thread&.join
+      @listener.close unless @listener.closed?
+    end
+
+    class Exchange
+      attr_reader :method, :path, :request_line, :headers, :raw_headers,
+                  :headers_at, :body, :body_at, :continue_at,
+                  :status, :response
+
+      def self.read(socket)
+        request_line = socket.gets
+        return nil if request_line.nil? || request_line.strip.empty?
+
+        raw_headers = +''
+        headers = {}
+        while (line = socket.gets)
+          break if line.strip.empty?
+          raw_headers << line
+          key, value = line.split(':', 2)
+          headers[key.downcase] = value.strip if key && value
+        end
+
+        new(socket, request_line, headers, raw_headers)
+      end
+
+      def initialize(socket, request_line, headers, raw_headers)
+        @socket = socket
+        @request_line = request_line
+        @method, @path, _version = request_line.split(' ', 3)
+        @headers = headers
+        @raw_headers = raw_headers
+        @headers_at = monotonic
+        @body = nil
+        @body_at = nil
+        @continue_at = nil
+      end
+
+      def send_continue
+        # Record before writing so a concurrent client read cannot appear to
+        # precede the consent from the server's point of view.
+        @continue_at = monotonic
+        @socket.write("HTTP/1.1 100 Continue\r\n\r\n")
+      end
+
+      def read_body
+        length = Integer(@headers.fetch('content-length'))
+        data = +''.b
+        while data.bytesize < length
+          chunk = @socket.readpartial(length - data.bytesize)
+          @body_at ||= monotonic
+          data << chunk
+        end
+        @body = data
+      end
+
+      def respond(status, body = '')
+        @status = status
+        @response = body
+        reason = status == 200 ? 'OK' : status == 403 ? 'Forbidden' : 'Error'
+        out = +"HTTP/1.1 #{status} #{reason}\r\n"
+        out << "Content-Type: text/plain\r\n"
+        out << "Content-Length: #{body.bytesize}\r\n"
+        out << "\r\n"
+        out << body
+        @socket.write(out)
+      end
+
+      private
+
+      def monotonic
+        Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      end
+    end
+  end
+
+  BODY_DATA = ('import-body-' * 8_192).b
+
+  def setup
+    @servers = []
+    @http = nil
+  end
+
+  def teardown
+    @http&.finish if @http&.started?
+    @servers.each(&:shutdown)
+  end
+
+  def start_http(server, continue_timeout)
+    http = Net::HTTP.new('127.0.0.1', server.port)
+    http.open_timeout = scaled_timeout(2)
+    http.read_timeout = scaled_timeout(5)
+    http.continue_timeout = continue_timeout
+    http.start
+    http
+  end
+
+  def scaled_timeout(seconds)
+    defined?(EnvUtil) ? EnvUtil.apply_timeout_scale(seconds) : seconds
+  end
+
+  def request_for(path, data, body)
+    request = Net::HTTP::Post.new(path,
+      'content-type' => 'application/octet-stream',
+      'expect' => '100-continue')
+    request.content_length = data.bytesize
+    request.body_stream = body
+    request
+  end
+
+  def with_timeout(seconds = 10)
+    Timeout.timeout(scaled_timeout(seconds)) { yield }
+  end
+
+  def add_server(server)
+    @servers << server
+    server.start
+  end
+
+  def assert_header_contract(exchange, data)
+    assert_equal 'POST', exchange.method
+    assert_equal '100-continue', exchange.headers['expect']
+    assert_equal data.bytesize.to_s, exchange.headers['content-length']
+    assert_equal 'application/octet-stream', exchange.headers['content-type']
+    assert_match(/^Expect: 100-continue\r$/, exchange.raw_headers)
+    assert_match(/^Content-Length: #{data.bytesize}\r$/, exchange.raw_headers)
+  end
+
+  def test_consent_waits_for_100_then_streams_body
+    server = add_server(ScriptedServer.new(2) {|exchange, index|
+      if index == 0
+        sleep scaled_timeout(0.1)
+      end
+      exchange.send_continue
+      exchange.read_body
+      exchange.respond(200, index == 0 ? 'accepted' : 'reused')
+    })
+
+    body = RecordingBody.new(BODY_DATA)
+    @http = start_http(server, scaled_timeout(1))
+    response = with_timeout {
+      @http.request(request_for('/import', BODY_DATA, body))
+    }
+
+    assert_equal '200', response.code
+    assert_equal 'accepted', response.body
+
+    reused_body = RecordingBody.new('second-import'.b)
+    reused = with_timeout {
+      @http.request(request_for('/import/next', 'second-import'.b, reused_body))
+    }
+    assert_equal '200', reused.code
+    assert_equal 'reused', reused.body
+
+    server.join(scaled_timeout(5))
+    assert_equal 1, server.connections, 'expected keep-alive connection reuse'
+
+    consented = server.requests[0]
+    assert_header_contract(consented, BODY_DATA)
+    assert_equal '/import', consented.path
+    assert_equal BODY_DATA, consented.body
+    assert_not_nil consented.continue_at
+    assert_operator body.first_read_at, :>=, consented.headers_at
+    assert_operator body.first_read_at, :>=, consented.continue_at,
+                    'request body must be read only after 100 Continue'
+
+    next_request = server.requests[1]
+    assert_header_contract(next_request, 'second-import'.b)
+    assert_equal '/import/next', next_request.path
+    assert_equal 'second-import'.b, next_request.body
+    assert_not_empty reused_body.reads
+  end
+
+  def test_early_rejection_does_not_touch_body_and_keeps_next_request_distinct
+    server = add_server(ScriptedServer.new(3) {|exchange, index|
+      if index < 2
+        exchange.respond(403, 'denied')
+      else
+        exchange.send_continue
+        exchange.read_body
+        exchange.respond(200, 'reused')
+      end
+    })
+
+    body = RecordingBody.new(BODY_DATA)
+    @http = start_http(server, scaled_timeout(1))
+    response = with_timeout {
+      @http.request(request_for('/import/rejected', BODY_DATA, body))
+    }
+
+    assert_equal '403', response.code
+    assert_equal 'denied', response.body
+    assert_empty body.reads, 'an early rejection must not read the request body'
+
+    denied_data = 'do-not-send'.b
+    unreadable = UnreadableBody.new
+    denied = with_timeout {
+      @http.request(request_for('/import/rejected-twice', denied_data, unreadable))
+    }
+    assert_equal '403', denied.code
+
+    second_data = ('second-import-' * 512).b
+    second_body = RecordingBody.new(second_data)
+    reused = with_timeout {
+      @http.request(request_for('/import/after-rejection', second_data, second_body))
+    }
+    assert_equal '200', reused.code
+    assert_equal 'reused', reused.body
+
+    server.join(scaled_timeout(5))
+    assert_equal 1, server.connections, 'expected the rejected connection to be reused'
+
+    rejected = server.requests[0]
+    assert_header_contract(rejected, BODY_DATA)
+    assert_equal '/import/rejected', rejected.path
+    assert_nil rejected.body
+    assert_nil rejected.body_at
+
+    second_request = server.requests[1]
+    assert_equal 'POST', second_request.method
+    assert_equal '/import/rejected-twice', second_request.path,
+                 'a second rejected request must keep its own framing'
+    assert_equal denied_data.bytesize.to_s, second_request.headers['content-length']
+    assert_nil second_request.body
+
+    next_request = server.requests[2]
+    assert_equal 'POST', next_request.method
+    assert_equal '/import/after-rejection', next_request.path,
+                 'the next request must not be confused with an unsent rejected body'
+    assert_equal second_data.bytesize.to_s, next_request.headers['content-length']
+    assert_equal second_data, next_request.body
+    assert_not_empty second_body.reads
+  end
+
+  def test_timeout_falls_back_to_sending_body_after_continue_timeout
+    # continue_timeout is a truthy seconds value: Net::HTTP waits at most that
+    # long for 100 Continue, then sends the body anyway.  A nil value disables
+    # the wait; 0 is still truthy and performs only a nonblocking readability
+    # check.  This test pins the positive-timeout fallback.
+    continue_timeout = scaled_timeout(0.25)
+
+    server = add_server(ScriptedServer.new(2) {|exchange, index|
+      if index == 0
+        exchange.read_body
+        exchange.respond(200, 'after-timeout')
+      else
+        exchange.send_continue
+        exchange.read_body
+        exchange.respond(200, 'reused')
+      end
+    })
+
+    body = RecordingBody.new(BODY_DATA)
+    @http = start_http(server, continue_timeout)
+    response = with_timeout(10) {
+      @http.request(request_for('/import/slow', BODY_DATA, body))
+    }
+
+    assert_equal '200', response.code
+    assert_equal 'after-timeout', response.body
+
+    second_data = 'after-timeout-reuse'.b
+    second_body = RecordingBody.new(second_data)
+    reused = with_timeout {
+      @http.request(request_for('/import/slow/next', second_data, second_body))
+    }
+    assert_equal '200', reused.code
+    assert_equal 'reused', reused.body
+
+    server.join(scaled_timeout(5))
+    assert_equal 1, server.connections, 'expected keep-alive connection reuse'
+
+    timed_out = server.requests[0]
+    assert_header_contract(timed_out, BODY_DATA)
+    assert_equal '/import/slow', timed_out.path
+    assert_nil timed_out.continue_at
+    assert_equal BODY_DATA, timed_out.body
+    assert_not_nil body.first_read_at
+    assert_operator body.first_read_at, :>=, timed_out.headers_at,
+                    'the body must not be read while waiting for consent'
+    waited = body.first_read_at - timed_out.headers_at
+    assert_operator waited, :>=, continue_timeout * 0.75,
+                    'the client should wait for continue_timeout after headers'
+    assert_operator waited, :<, continue_timeout + scaled_timeout(1),
+                    'the client should not wait far beyond continue_timeout'
+
+    next_request = server.requests[1]
+    assert_equal '/import/slow/next', next_request.path
+    assert_equal second_data, next_request.body
+    assert_not_empty second_body.reads
   end
 end
 
