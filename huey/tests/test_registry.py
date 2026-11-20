@@ -59,6 +59,31 @@ class TestRegistry(BaseTestCase):
         self.assertTrue(task2.expires is None)
         self.assertTrue(task2.expires_resolved is None)
 
+    def test_result_retention_serialized(self):
+        @self.huey.task(result_ttl=3600)
+        def task_a():
+            pass
+
+        task = task_a.s()
+        message = self.registry.create_message(task)
+        self.assertEqual(message.result_ttl, 3600)
+        self.assertEqual(self.registry.create_task(message).result_ttl, 3600)
+
+        # A plain task has no declared policy, and older messages (which lack
+        # the field entirely) deserialize with ``result_ttl=None``.
+        @self.huey.task()
+        def plain():
+            pass
+
+        plain_message = self.registry.create_message(plain.s())
+        self.assertIsNone(plain_message.result_ttl)
+        self.assertIsNone(self.registry.create_task(plain_message).result_ttl)
+
+        from huey.registry import Message
+        legacy = Message(*(plain_message[:-1]))
+        self.assertIsNone(legacy.result_ttl)
+        self.assertIsNone(self.registry.create_task(legacy).result_ttl)
+
     def test_user_task_kwarg_preserved(self):
         @self.huey.task()
         def task_t(**kwargs):

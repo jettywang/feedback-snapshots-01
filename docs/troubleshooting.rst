@@ -55,6 +55,13 @@ Task result is always None even though the task returns a value
         val = result.get(preserve=True)
         val = huey.result(result.id)
 
+Task result was discarded by its retention policy
+    If a task declares ``result_ttl`` or ``read_once=True``, Huey may remove
+    its value after it has been read or after the retention window. A later
+    ``result.get()`` then returns ``None``. Use :py:meth:`Huey.result_info` or
+    :py:meth:`Result.info` to distinguish ``pending`` (never completed) from
+    ``destroyed`` (completed, then discarded by policy) and from ``failed``.
+
 Task result is stale after a retry
     When a task fails and is retried, Huey stores the error from the first
     attempt. If the retry succeeds, the new result overwrites the old one.

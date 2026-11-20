@@ -70,6 +70,79 @@ What happens when we call a task function?
 
 For more information, see the :py:meth:`~Huey.task` decorator documentation.
 
+.. _result-retention:
+
+Task result retention
+---------------------
+
+By default, reading a task's result is destructive: ``Result.get()`` removes
+the value from the result store. Results can instead declare a retention
+policy per task, so tasks that need to be polled (like a compliance report
+valid for a day) and tasks whose result must be handed out exactly once (like
+a one-time password check) can coexist:
+
+.. code-block:: python
+
+    @huey.task(result_ttl=7 * 86400)  # Keep the result for one week.
+    def compliance_scan(target):
+        return run_scan(target)
+
+    @huey.task(read_once=True)  # Shorthand for result_ttl=0.
+    def verify_temp_password(user, password):
+        return check_password(user, password)
+
+``result_ttl`` accepts seconds or a ``timedelta``:
+
+* ``None`` (default) -- historical behavior; a normal read consumes the value.
+* ``0`` -- read once. Plain reads consume the value; ``preserve=True`` reads
+  do not.
+* Positive -- readable for that many seconds, then destroyed.
+* Negative -- retained until explicitly deleted or the store is flushed.
+
+The policy can be overridden per invocation using :py:meth:`TaskWrapper.s`:
+
+.. code-block:: python
+
+    r = compliance_scan.s('host-1', result_ttl=3600)
+
+Because entries in the result store are also used for metadata like revocation
+keys and locks, only the task's own result key is affected. The retention
+policy is enforced by Huey itself, above the storage layer, so the in-memory
+storage, SQLite, Redis and other backends share the same contract. Backends
+with native key expiration (``RedisExpireHuey``) additionally set a server-side
+TTL, but Huey still makes the final retention decision.
+
+Reading a result that has been destroyed by policy returns ``None`` (as does
+an unfinished task). To distinguish the two, and to tell a failure or explicit
+cancellation apart from success, use :py:meth:`Huey.result_info` or
+:py:meth:`Result.info`:
+
+.. code-block:: python
+
+    info = r.info()
+    if info.state == 'pending':
+        return {'status': 'running'}
+    elif info.state == 'success':
+        return {'status': 'complete', 'value': info.value}
+    elif info.state == 'destroyed':
+        return {'status': 'discarded', 'reason': info.reason}
+    elif info.state == 'cancelled':
+        return {'status': 'cancelled'}
+    else:  # "failed", or "expired" (task expired before running).
+        return {'status': 'error', 'detail': info.error}
+
+``info()`` performs a non-destructive read by default, so a status endpoint
+does not accidentally consume a read-once result. ``Result.get()`` continues
+to behave as before: it returns the value, raises :py:class:`TaskException`
+for failures and cancellations, and returns ``None`` when no value is
+available.
+
+Retention markers (``cancelled``, ``expired`` and ``destroyed``) are bounded:
+after an hour without evidence, a task is reported as ``pending`` again rather
+than retaining metadata indefinitely. Read-once consumption leaves a
+``destroyed`` marker with ``reason='read_once'``; TTL expiry leaves one with
+``reason='expired'``.
+
 Scheduling tasks
 ----------------
 
@@ -1738,7 +1811,10 @@ retrieve the result using :py:meth:`Huey.result`:
         return {'status': 'error', 'detail': exc.metadata['error']}
 
     if value is None:
-        return {'status': 'pending'}
+        # Could be unfinished or discarded by a retention policy. Ask for
+        # the state if the difference matters to the caller.
+        info = huey.result_info(task_id)
+        return {'status': info.state}
     return {'status': 'complete', 'value': value}
 
 Schedule Shorthand

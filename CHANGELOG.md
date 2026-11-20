@@ -3,6 +3,20 @@ Changelog
 
 ## Master
 
+* Add per-task result retention via `result_ttl=` (seconds or `timedelta`)
+  and `read_once=` on `task()` / `periodic_task()` and per invocation with
+  `TaskWrapper.s()` / `schedule()`. `result_ttl=0` means read-once, positive
+  values retain the result for that long, negative values retain until deleted,
+  and the default (`None`) preserves the existing read-destructive behavior.
+* Add `Huey.result_info()` and `Result.info()`, returning a `ResultInfo`
+  with a `state` (`pending`, `success`, `failed`, `cancelled`, `expired` or
+  `destroyed`) so callers can tell an unfinished task from a result removed by
+  policy or an explicit failure.
+* Add `put_result_data()` / `pop_result_data()` to the storage interface. The
+  retention policy is enforced above the storage layer, so in-memory, SQLite,
+  Redis and file backends share the same contract; `RedisExpireStorage` also
+  applies a native TTL for stored result data.
+
 [View commits](https://github.com/coleifer/huey/compare/3.5.4...master)
 
 ## 3.5.4

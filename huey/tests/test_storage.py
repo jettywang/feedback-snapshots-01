@@ -190,6 +190,15 @@ class StorageTests(object):
         self.assertEqual(self.s.result_store_size(), 0)
         self.assertEqual(self.s.result_items(), {})
 
+    def test_result_data_methods(self):
+        # Task results use the result-specific storage entrypoints. Storing
+        # with ttl=0 means "retain until removed".
+        self.s.put_result_data(b'r1', b'v1', ttl=0)
+        self.assertEqual(self.s.peek_data(b'r1'), b'v1')
+        self.assertEqual(self.s.pop_result_data(b'r1'), b'v1')
+        self.assertFalse(self.s.has_data_for_key(b'r1'))
+        self.assertTrue(self.s.pop_result_data(b'r1') is EmptyData)
+
     def test_wait_result(self):
         key = str(uuid.uuid4())
         self.assertFalse(self.s.wait_result(key, timeout=0.1))

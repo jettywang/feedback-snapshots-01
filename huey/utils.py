@@ -25,6 +25,49 @@ else:
 Error = namedtuple('Error', ('metadata',))
 
 
+class ResultEnvelope(object):
+    """Internal wrapper for a task result governed by a retention policy.
+
+    Stored in place of the raw return value so that Huey can distinguish a
+    readable result, a failure, and a value destroyed according to policy
+    across every storage backend.
+    """
+    __slots__ = ('state', 'value', 'reason', 'expires_at', 'retention')
+
+    def __init__(self, state, value=None, reason=None, expires_at=None,
+                 retention=None):
+        self.state = state
+        self.value = value
+        self.reason = reason
+        self.expires_at = expires_at
+        self.retention = retention
+
+    def __repr__(self):
+        return ('ResultEnvelope(state=%r, reason=%r, expires_at=%r, '
+                'retention=%r)' % (self.state, self.reason, self.expires_at,
+                                   self.retention))
+
+
+# Result metadata returned by Huey.result_info() / Result.info().
+#
+# state: one of the ``huey.constants.ResultState`` values.
+# value: successful return value, or ``None`` if unavailable.
+# error: error metadata dict for failed / cancelled results, else ``None``.
+# reason: terminal-state detail, e.g. ``read_once`` / ``expired`` for a
+#     destroyed result, ``revoked`` for a cancelled task, else ``None``.
+# retention: the task's declared ``result_ttl`` (``None`` means legacy
+#     read-destructive behavior).
+class ResultInfo(namedtuple('_ResultInfo', ('state', 'value', 'error',
+                                           'reason', 'retention'))):
+    __slots__ = ()
+
+    @property
+    def destroyed_reason(self):
+        from huey.constants import ResultState
+        if self.state in (ResultState.DESTROYED, ResultState.EXPIRED):
+            return self.reason
+
+
 class _Skipped(object):
     def __repr__(self):
         return 'SKIPPED'

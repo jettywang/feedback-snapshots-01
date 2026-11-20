@@ -394,6 +394,13 @@ Huey object
             ``gevent.Timeout``. When using with threads it is necessary to use
             cooperative timeout checking. See :ref:`cooperative-timeout` for
             example.
+        :param result_ttl: result retention policy for this task. ``None``
+            (default) keeps the historical read-destructive behavior. ``0``
+            allows the result to be read once. A positive number of seconds
+            (or a ``timedelta``) keeps the result readable for that long. A
+            negative value keeps it until explicitly deleted. See
+            :ref:`result-retention`.
+        :param bool read_once: shorthand for ``result_ttl=0``.
         :param kwargs: arbitrary key/value arguments that are passed to the
             :py:class:`TaskWrapper` instance.
         :returns: a :py:class:`TaskWrapper` that wraps the decorated function
@@ -900,7 +907,34 @@ Huey object
             value after the value has been successfully read (by a successful
             call to the :py:meth:`~Huey.result` or :py:meth:`Result.get`
             methods). If you intend to access the task result multiple times,
-            you must specify ``preserve=True`` when calling these methods.
+            you must specify ``preserve=True`` when calling these methods, or
+            declare a :ref:`retention policy <result-retention>` on the task.
+
+    .. py:method:: result_info(id, peek=True)
+
+        :param id: the task's unique identifier.
+        :param bool peek: when true (the default), perform a non-destructive
+            read. Note that this does not consume a read-once result.
+        :returns: a :py:class:`ResultInfo` named tuple with ``state``,
+            ``value``, ``error``, ``reason`` and ``retention`` fields.
+
+        Describe a task's result without raising :py:class:`TaskException` for
+        failures. The ``state`` is one of the :py:class:`ResultState` values:
+
+        * ``pending`` -- the task has not completed (or left no record).
+        * ``success`` -- a return value is available.
+        * ``failed`` -- the task raised an exception; ``error`` contains the
+          error metadata.
+        * ``cancelled`` -- the task was explicitly cancelled (for example by a
+          pre-execute hook or :py:class:`CancelExecution`).
+        * ``expired`` -- the task reached its ``expires`` time before running.
+        * ``destroyed`` -- the task completed successfully, but the value was
+          removed according to its retention policy. ``reason`` distinguishes
+          ``read_once`` from ``expired``.
+
+        ``success`` and ``destroyed`` are intentionally distinct: a task that
+        completed successfully is never reported as "not ready" merely because
+        its result was discarded.
 
     .. py:method:: lock_task(lock_name, ttl=None)
 
@@ -1301,6 +1335,9 @@ Huey object
             ``gevent.Timeout``. When using with threads it is necessary to use
             cooperative timeout checking. See :ref:`cooperative-timeout` for
             example.
+        :param result_ttl: override the task's result retention policy for
+            this invocation. See :ref:`result-retention`.
+        :param bool read_once: shorthand for ``result_ttl=0``.
         :returns: a :py:class:`Task` instance representing the execution of the
             task function with the given arguments.
 
@@ -1313,9 +1350,10 @@ Huey object
             The following keyword argument names are reserved and will be
             intercepted by Huey rather than passed to your task function:
             ``id``, ``eta``, ``delay``, ``retries``, ``retry_delay``,
-            ``retry_backoff``, ``priority``, ``expires``, and ``timeout``. If your task function has a parameter
-            with one of these names, rename the parameter or pass the value
-            positionally.
+            ``retry_backoff``, ``priority``, ``expires``, ``timeout``,
+            ``result_ttl`` and ``read_once``. If your task function has a
+            parameter with one of these names, rename the parameter or pass
+            the value positionally.
 
         To illustrate the distinction, when you call a ``task()``-decorated
         function, behind-the-scenes, Huey is doing something like this:
@@ -1393,7 +1431,7 @@ Huey object
 
 
 
-.. py:class:: Task(args=None, kwargs=None, id=None, eta=None, retries=None, retry_delay=None, priority=None, expires=None, on_complete=None, on_error=None, expires_resolved=None, timeout=None, chord_config=None, retry_backoff=None)
+.. py:class:: Task(args=None, kwargs=None, id=None, eta=None, retries=None, retry_delay=None, priority=None, expires=None, on_complete=None, on_error=None, expires_resolved=None, timeout=None, chord_config=None, retry_backoff=None, result_ttl=None)
 
     :param tuple args: arguments for the function call.
     :param dict kwargs: keyword arguments for the function call.
@@ -1420,6 +1458,7 @@ Huey object
     :param Task on_error: Task to execute upon failure / error.
     :param datetime expires_resolved: absolute expiration time, set by huey
         from ``expires`` when the task is enqueued.
+    :param result_ttl: result retention policy, see :ref:`result-retention`.
     :param chord_config: set by huey on members of a :py:class:`chord`.
 
     The ``Task`` class represents the execution of a function. Instances of the
@@ -1928,6 +1967,26 @@ Huey object
 Result
 ------
 
+.. py:class:: ResultState
+
+    Namespace of result states returned by :py:meth:`Huey.result_info` and
+    :py:meth:`Result.info`:
+
+    * ``ResultState.PENDING`` (``'pending'``) -- not completed, or no record.
+    * ``ResultState.SUCCESS`` (``'success'``) -- a value is available.
+    * ``ResultState.FAILED`` (``'failed'``) -- the task raised an exception.
+    * ``ResultState.CANCELLED`` (``'cancelled'``) -- explicit cancellation.
+    * ``ResultState.EXPIRED`` (``'expired'``) -- expired before it could run.
+    * ``ResultState.DESTROYED`` (``'destroyed'``) -- completed successfully,
+      but the value was removed by the task's retention policy.
+
+.. py:class:: ResultInfo
+
+    Named tuple returned by ``result_info()`` / ``info()`` with fields
+    ``state``, ``value``, ``error``, ``reason`` and ``retention``. The
+    ``destroyed_reason`` property returns ``reason`` for destroyed or expired
+    results.
+
 .. py:class:: Result(huey, task)
 
     Although you will probably never instantiate an ``Result`` object yourself,
@@ -1987,6 +2046,17 @@ Result
           File ".../huey/api.py", line 1320, in get
             raise TaskException(result.metadata)
         huey.exceptions.TaskException: Exception('I failed')
+
+    .. py:method:: info(peek=True)
+
+        :param bool peek: non-destructive read (default true).
+        :returns: a :py:class:`ResultInfo` describing the result state.
+
+        Return the result state without raising for a failed task. See
+        :py:meth:`Huey.result_info` for the meaning of each state and the
+        fields returned. This is useful for status endpoints that need to tell
+        an unfinished task apart from a result discarded by its retention
+        policy.
 
     .. py:attribute:: id
 
@@ -2387,6 +2457,31 @@ Huey comes with several built-in storage implementations:
     result store, which has the benefit of keeping the Redis keyspace orderly,
     but which comes with the downside that unread task results can build up
     over time.
+
+    When a task declares a :ref:`retention policy <result-retention>`, its
+    result key uses the task's TTL instead of ``expire_time``. Huey still
+    enforces the logical policy, so the observable states are identical to
+    backends without native expiration.
+
+.. py:class:: BaseStorage
+
+    The storage interface. Implementations manage the queue, schedule and
+    result store. Two methods govern result persistence and are relevant to
+    custom backends:
+
+    .. py:method:: put_result_data(key, value, ttl=None)
+
+        Store a task result. ``ttl`` is ``None`` (backend default), ``0``
+        (retain until removed), a positive number of seconds (purge after) or
+        negative (never expire). The default implementation delegates to
+        ``put_data(key, value, is_result=True)``; backends that ignore ``ttl``
+        still behave correctly because Huey enforces retention itself.
+
+    .. py:method:: pop_result_data(key)
+
+        Destructively read a task result. Backends whose ``pop_data`` is a
+        non-destructive peek (such as :py:class:`RedisExpireStorage`) must
+        implement this to support read-once results.
 
 
 .. py:class:: PriorityRedisStorage(name='huey', blocking=True, read_timeout=1, connection_pool=None, url=None, client_name=None, notify_result=False, notify_result_ttl=60, clean_name=True, **connection_params)

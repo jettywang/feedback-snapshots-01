@@ -36,6 +36,9 @@ from huey.constants import EmptyData
 from huey.exceptions import ConfigurationError
 from huey.utils import FileLock
 
+# Extra seconds a tombstone is retained beyond a task result's logical TTL.
+RESULT_TOMBSTONE_GRACE = 3600
+
 
 class BaseStorage(object):
     """
@@ -162,6 +165,34 @@ class BaseStorage(object):
         :return: No return value.
         """
         raise NotImplementedError
+
+    def pop_result_data(self, key):
+        """
+        Destructively read a task result.
+
+        The default implementation delegates to :py:meth:`pop_data`. Storages
+        that implement ``pop_data`` as a non-destructive peek (e.g. expiring
+        Redis storages) must override this to provide a real consume operation
+        for read-once results.
+        """
+        return self.pop_data(key)
+
+    def put_result_data(self, key, value, ttl=None):
+        """
+        Store a task result. The default implementation delegates to
+        :py:meth:`put_data` with ``is_result=True``. Backends with native key
+        expiration may use ``ttl`` to expire the stored value:
+
+        * ``None`` -- backend default for task results.
+        * ``0`` -- retain until explicitly removed (needed for read-once
+          tombstones).
+        * positive -- expire the value after ``ttl`` seconds.
+        * negative -- never expire.
+
+        Huey still enforces the logical retention policy, so backends that
+        ignore ``ttl`` behave identically (only without automatic cleanup).
+        """
+        return self.put_data(key, value, is_result=True)
 
     def peek_data(self, key):
         """
@@ -320,8 +351,10 @@ class BlackHoleStorage(BaseStorage):
     def scheduled_items(self, limit=None): return []
     def flush_schedule(self): pass
     def put_data(self, key, value, is_result=False): pass
+    def put_result_data(self, key, value, ttl=None): pass
     def peek_data(self, key): return EmptyData
     def pop_data(self, key): return EmptyData
+    def pop_result_data(self, key): return EmptyData
     def has_data_for_key(self, key): return False
     def put_if_empty(self, key, value, ttl=None): return True
     def incr(self, key, amount=1): return amount
@@ -672,6 +705,23 @@ class RedisExpireStorage(RedisStorage):
         self.result_key = lambda k: rp + encode(k)
         self.counter_key = lambda k: cp + encode(k)
 
+    def put_result_data(self, key, value, ttl=None):
+        if ttl is None:
+            # Preserve the historical behavior: results use the storage-wide
+            # expire_time.
+            self.put_data(key, value, is_result=True)
+            return
+        if ttl > 0:
+            # Keep a short grace period beyond the logical TTL so Huey can
+            # report the result as destroyed-by-policy before Redis removes
+            # the tombstone.
+            ex = ttl + RESULT_TOMBSTONE_GRACE
+        else:
+            ex = None
+        self.conn.set(self.result_key(key), value, ex=ex)
+        if self.notify_result:
+            self._notify(key)
+
     def put_data(self, key, value, is_result=False):
         if is_result:
             # We only want to expire task result data. If we are storing an
@@ -694,6 +744,18 @@ class RedisExpireStorage(RedisStorage):
     # same implementation for "pop" (get and delete) as we do for "peek"
     # (non-destructive read).
     pop_data = peek_data
+
+    def pop_result_data(self, key):
+        # Read-once results still need a real destructive read on this backend.
+        rkey = self.result_key(key)
+        if hasattr(self.conn, 'getdel'):
+            val = self.conn.getdel(rkey)
+            return EmptyData if val is None else val
+        pipe = self.conn.pipeline()
+        pipe.get(rkey)
+        pipe.delete(rkey)
+        val = pipe.execute()[0]
+        return EmptyData if val is None else val
 
     def delete_data(self, key):
         return self.conn.delete(self.result_key(key))

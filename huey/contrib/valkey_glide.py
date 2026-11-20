@@ -81,6 +81,14 @@ class ValkeyGlideStorage(RedisStorage):
     def put_data(self, key, value, is_result=False):
         self.conn.hset(self.result_key, {key: value})
 
+    def put_result_data(self, key, value, ttl=None):
+        # Glide's hash-based result store has no native per-field TTL, so the
+        # logical retention policy in Huey is the single source of truth.
+        self.put_data(key, value, is_result=True)
+
+    def pop_result_data(self, key):
+        return self.pop_data(key)
+
     def peek_data(self, key):
         tx = Transaction()
         tx.hexists(self.result_key, key)

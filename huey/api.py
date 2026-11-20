@@ -15,6 +15,7 @@ from functools import wraps
 
 from huey import signals as S
 from huey.constants import EmptyData
+from huey.constants import ResultState
 from huey.consumer import Consumer
 from huey.exceptions import CancelExecution
 from huey.exceptions import ConfigurationError
@@ -39,6 +40,8 @@ from huey.storage import RedisStorage
 from huey.storage import SqliteStorage
 from huey.utils import ChordConfig
 from huey.utils import Error
+from huey.utils import ResultEnvelope
+from huey.utils import ResultInfo
 from huey.utils import SKIPPED
 from huey.utils import noop_context
 from huey.utils import normalize_expire_time
@@ -48,6 +51,40 @@ from huey.utils import utcnow
 
 logger = logging.getLogger('huey')
 _sentinel = object()
+
+# How long a "destroyed" tombstone is retained when the task itself has no
+# positive TTL (read-once results). Long enough for a status endpoint to report
+# that the value was destroyed by policy, short enough not to grow unbounded.
+RESULT_TOMBSTONE_TTL = 3600
+
+
+def _normalize_result_ttl(value):
+    """Normalize a task's declared result-retention time.
+
+    ``None`` keeps the legacy read-destructive behavior. ``0`` means the
+    terminal result may be read once. A positive number is a TTL in seconds.
+    Any negative number means the result is retained until explicitly deleted.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime.timedelta):
+        value = value.total_seconds()
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigurationError('result_ttl must be a number of seconds or '
+                                 'a timedelta, got %r.' % (value,))
+    if value < 0:
+        return -1
+    return value
+
+
+def _resolve_result_ttl(result_ttl, read_once):
+    if read_once:
+        if result_ttl not in (None, 0):
+            raise ConfigurationError('read_once=True is equivalent to '
+                                     'result_ttl=0 and cannot be combined '
+                                     'with a different result_ttl.')
+        return 0
+    return _normalize_result_ttl(result_ttl)
 
 
 class Huey(object):
@@ -74,6 +111,12 @@ class Huey(object):
         storage backend when immediate-mode is enabled.
     :param storage_kwargs: arbitrary keyword arguments that will be passed to
         the storage backend for additional configuration.
+
+    Result retention is configured per task with ``result_ttl=`` (seconds or
+    ``timedelta``) or ``read_once=True`` on :py:meth:`task`; the default
+    keeps the historical read-destructive behavior. Use
+    :py:meth:`result_info` to distinguish an unfinished task from a result
+    removed by its retention policy.
 
     Example usage::
 
@@ -126,6 +169,7 @@ class Huey(object):
         self._signal = S.Signal()
         self._tasks_in_flight = set()
         self._timeout_handler = None  # This is consumer-specific.
+        self._result_clock = time.time  # Override in tests for TTL checks.
 
     def get_task_wrapper_class(self):
         return TaskWrapper
@@ -169,8 +213,10 @@ class Huey(object):
         return Consumer(self, **options)
 
     def task(self, retries=0, retry_delay=0, retry_backoff=0, priority=None,
-             context=False, name=None, expires=None, timeout=None, **kwargs):
+             context=False, name=None, expires=None, timeout=None,
+             result_ttl=None, read_once=False, **kwargs):
         TaskWrapper = self.task_wrapper_class
+        default_result_ttl = _resolve_result_ttl(result_ttl, read_once)
         def decorator(func):
             return TaskWrapper(
                 self,
@@ -183,13 +229,16 @@ class Huey(object):
                 default_priority=priority,
                 default_expires=expires,
                 default_timeout=timeout,
+                default_result_ttl=default_result_ttl,
                 **kwargs)
         return decorator
 
     def periodic_task(self, validate_datetime, retries=0, retry_delay=0,
                       retry_backoff=0, priority=None, context=False, name=None,
-                      expires=None, timeout=None, **kwargs):
+                      expires=None, timeout=None, result_ttl=None,
+                      read_once=False, **kwargs):
         TaskWrapper = self.task_wrapper_class
+        default_result_ttl = _resolve_result_ttl(result_ttl, read_once)
         def decorator(func):
             def method_validate(self, timestamp):
                 return validate_datetime(timestamp)
@@ -205,6 +254,7 @@ class Huey(object):
                 default_priority=priority,
                 default_expires=expires,
                 default_timeout=timeout,
+                default_result_ttl=default_result_ttl,
                 validate_datetime=method_validate,
                 task_base=PeriodicTask,
                 **kwargs)
@@ -378,9 +428,10 @@ class Huey(object):
     def put(self, key, data):
         return self.storage.put_data(key, self.serializer.serialize(data))
 
-    def put_result(self, key, data):
-        return self.storage.put_data(key, self.serializer.serialize(data),
-                                     is_result=True)
+    def put_result(self, key, data, ttl=None):
+        return self.storage.put_result_data(key,
+                                            self.serializer.serialize(data),
+                                            ttl=ttl)
 
     def put_if_empty(self, key, data, ttl=None):
         return self.storage.put_if_empty(key, self.serializer.serialize(data),
@@ -400,6 +451,217 @@ class Huey(object):
     def delete(self, key):
         return self.storage.delete_data(key)
 
+    def _result_retention(self, task):
+        return getattr(task, 'result_ttl', None)
+
+    def _now(self):
+        return self._result_clock()
+
+    def _store_task_result(self, task, value, state=ResultState.SUCCESS,
+                           reason=None):
+        """Persist a task's terminal result honoring its retention policy.
+
+        Tasks without a declared ``result_ttl`` keep the historical behavior:
+        the raw value is stored and readers consume it. Tasks that declare a
+        policy get an envelope so that success and retention are never
+        conflated, and every storage backend sees the same contract.
+        """
+        retention = self._result_retention(task)
+        if retention is None:
+            if state == ResultState.CANCELLED and not isinstance(value, Error):
+                value = Error(self._cancelled_error(value, reason))
+            self.put_result(task.id, value)
+            return
+
+        expiry_state = state
+        if isinstance(value, Error) and state == ResultState.SUCCESS:
+            expiry_state = ResultState.FAILED
+        expires_at = self._terminal_expiry(retention, expiry_state)
+
+        if isinstance(value, ResultEnvelope):
+            envelope = value
+        elif isinstance(value, Error):
+            metadata = dict(value.metadata)
+            if state == ResultState.CANCELLED or metadata.get('cancelled'):
+                envelope = ResultEnvelope(ResultState.CANCELLED, metadata,
+                                          reason=reason or 'cancelled',
+                                          expires_at=expires_at,
+                                          retention=retention)
+            else:
+                envelope = ResultEnvelope(ResultState.FAILED, metadata,
+                                          expires_at=expires_at,
+                                          retention=retention)
+        elif state == ResultState.CANCELLED:
+            envelope = ResultEnvelope(ResultState.CANCELLED,
+                                      self._cancelled_error(value, reason),
+                                      reason=reason or 'cancelled',
+                                      expires_at=expires_at,
+                                      retention=retention)
+        elif state == ResultState.EXPIRED:
+            envelope = ResultEnvelope(ResultState.EXPIRED, None,
+                                      reason=reason or 'expired',
+                                      expires_at=expires_at,
+                                      retention=retention)
+        else:
+            envelope = ResultEnvelope(ResultState.SUCCESS, value,
+                                      expires_at=expires_at,
+                                      retention=retention)
+
+        if retention and retention > 0:
+            ttl = retention
+        elif retention == 0 and envelope.state != ResultState.SUCCESS:
+            # Bound terminal markers for read-once tasks on backends with
+            # native key expiration.
+            ttl = RESULT_TOMBSTONE_TTL
+        else:
+            ttl = 0
+        self.put_result(task.id, envelope, ttl=ttl)
+
+    def _terminal_expiry(self, retention, state):
+        """Absolute expiry for a terminal record, or ``None`` if unbounded.
+
+        Successful read-once results are consumed explicitly, so they need no
+        time-based expiry. Terminal markers (cancelled / expired / failures)
+        and TTL results do, so they cannot linger forever on backends without
+        native key expiration.
+        """
+        if retention and retention > 0:
+            return self._now() + retention
+        if retention == 0 and state != ResultState.SUCCESS:
+            return self._now() + RESULT_TOMBSTONE_TTL
+        return None
+
+    @staticmethod
+    def _cancelled_error(value, reason):
+        if isinstance(value, dict):
+            metadata = dict(value)
+        else:
+            metadata = {'error': str(value or reason or 'cancelled')}
+        metadata.setdefault('error', reason or 'cancelled')
+        metadata['cancelled'] = True
+        return metadata
+
+    def _store_tombstone(self, task_id, reason, retention):
+        # The marker is observable for a bounded window starting when it is
+        # written, so repeated status checks after expiry stay consistent.
+        envelope = ResultEnvelope(ResultState.DESTROYED, None, reason=reason,
+                                  expires_at=self._now() + RESULT_TOMBSTONE_TTL,
+                                  retention=retention)
+        self.put_result(task_id, envelope, ttl=RESULT_TOMBSTONE_TTL)
+
+    def _read_result_record(self, task_id, peek=True):
+        if peek:
+            data = self.storage.peek_data(task_id)
+        else:
+            data = self.storage.pop_result_data(task_id)
+        if data is EmptyData:
+            return EmptyData, False
+        return self.serializer.deserialize(data), True
+
+    def _read_legacy_result(self, task_id, peek):
+        # Tasks without a retention policy keep the storage backend's
+        # historical read semantics. In particular, expiring backends read
+        # non-destructively and let the server expire the value.
+        if peek:
+            data = self.storage.peek_data(task_id)
+        else:
+            data = self.storage.pop_data(task_id)
+        if data is EmptyData:
+            return EmptyData, False
+        return self.serializer.deserialize(data), True
+
+    def _resolve_result(self, task_id, peek=False):
+        """Return ``(state, value, error, reason, retention)`` for a task.
+
+        This is the single place where storage contents are translated into an
+        observable result state, so in-memory and persistent backends agree.
+        """
+        record, exists = self._read_result_record(task_id, peek=True)
+        if not exists:
+            return (ResultState.PENDING, None, None, None, None)
+
+        if not isinstance(record, ResultEnvelope):
+            # Result written by a task that declared no retention policy. Its
+            # read semantics are unchanged: a normal read consumes the value.
+            if not peek:
+                record, exists = self._read_legacy_result(task_id, peek=False)
+                if not exists:
+                    return (ResultState.PENDING, None, None, None, None)
+            if isinstance(record, Error):
+                cancelled = bool(record.metadata.get('cancelled'))
+                state = (ResultState.CANCELLED if cancelled
+                         else ResultState.FAILED)
+                return state, None, record.metadata, None, None
+            return ResultState.SUCCESS, record, None, None, None
+
+        retention = record.retention
+        if record.state == ResultState.FAILED:
+            if self._is_stale(record):
+                self.delete(task_id)
+                return (ResultState.PENDING, None, None, None, None)
+            return (ResultState.FAILED, None, record.value, record.reason,
+                    retention)
+        if record.state == ResultState.CANCELLED:
+            if self._is_stale(record):
+                self.delete(task_id)
+                return (ResultState.PENDING, None, None, None, None)
+            return (ResultState.CANCELLED, None, record.value,
+                    record.reason or 'cancelled', retention)
+        if record.state == ResultState.EXPIRED:
+            if self._is_stale(record):
+                self.delete(task_id)
+                return (ResultState.PENDING, None, None, None, None)
+            return (ResultState.EXPIRED, None, None,
+                    record.reason or 'expired', retention)
+        if record.state == ResultState.DESTROYED:
+            if self._is_stale(record):
+                # Even the tombstone has aged out: no evidence of completion.
+                self.delete(task_id)
+                return (ResultState.PENDING, None, None, None, None)
+            return (ResultState.DESTROYED, None, None, record.reason,
+                    retention)
+
+        # A successful result governed by a retention policy. Plain reads are
+        # non-destructive until the policy says otherwise.
+        if self._is_stale(record):
+            self._store_tombstone(task_id, 'expired', retention)
+            return (ResultState.DESTROYED, None, None, 'expired', retention)
+
+        if retention == 0 and not peek:
+            # Consume the value atomically, then leave a bounded tombstone so
+            # later readers can tell it was destroyed by policy.
+            consumed, exists = self._read_result_record(task_id, peek=False)
+            if not exists or not isinstance(consumed, ResultEnvelope):
+                return (ResultState.PENDING, None, None, None, None)
+            self._store_tombstone(task_id, 'read_once', retention)
+            return (ResultState.SUCCESS, consumed.value, None, None, retention)
+
+        return ResultState.SUCCESS, record.value, None, None, retention
+
+    def _is_stale(self, record):
+        return (record.expires_at is not None and
+                self._now() >= record.expires_at)
+
+    def _peek_result_record(self, task_id):
+        data = self.storage.peek_data(task_id)
+        if data is EmptyData:
+            return EmptyData
+        try:
+            return self.serializer.deserialize(data)
+        except Exception:
+            return EmptyData
+
+    def _result_is_retained(self, task_id):
+        record = self._peek_result_record(task_id)
+        return (isinstance(record, ResultEnvelope) and
+                record.retention is not None)
+
+    def _peek_result_retention(self, task_id):
+        record = self._peek_result_record(task_id)
+        if isinstance(record, ResultEnvelope):
+            return record.retention
+        return None
+
     def _timeout_context(self, task):
         if not task.timeout or self._timeout_handler is None:
             return noop_context()
@@ -418,10 +680,12 @@ class Huey(object):
             self.add_schedule(task)
         elif self.is_revoked(task, timestamp, False):
             logger.warning('Task %s was revoked, not executing', task)
+            self._record_cancelled(task, 'revoked')
             self._emit(S.SIGNAL_REVOKED, task)
             self._abort_chord_member(task, SKIPPED)
         elif task.expires_resolved and task.expires_resolved < timestamp:
             logger.info('Task %s expired, not executing.', task)
+            self._record_expired(task)
             self._emit(S.SIGNAL_EXPIRED, task)
             self._abort_chord_member(task, SKIPPED)
         else:
@@ -433,7 +697,9 @@ class Huey(object):
         if self._pre_execute:
             try:
                 self._run_pre_execute(task)
-            except CancelExecution:
+            except CancelExecution as exc:
+                self._record_cancelled(task, 'pre_execute',
+                                       error=self.build_error_result(task, exc))
                 self._emit(S.SIGNAL_CANCELED, task)
                 self._abort_chord_member(task, SKIPPED)
                 return
@@ -510,8 +776,10 @@ class Huey(object):
 
         store = self.results and not isinstance(task, PeriodicTask)
         if exception is None:
-            if store and (task_value is not None or self.store_none):
-                self.put_result(task.id, task_value)
+            retention = self._result_retention(task)
+            if store and (task_value is not None or self.store_none or
+                          retention is not None):
+                self._store_task_result(task, task_value)
             self._run_post_execute(task, task_value, exception)
             self._emit(S.SIGNAL_COMPLETE, task)
             if task.on_complete:
@@ -523,11 +791,18 @@ class Huey(object):
             final = not task.retries
             surface = final or (self.store_intermediate_errors and
                                 not isinstance(exception, RETRYING_EXCEPTIONS))
+            cancelled = (final and isinstance(exception, CancelExecution))
             if surface:
                 error = Error(self.build_error_result(task, exception))
                 next_task = task if store else None
                 while next_task is not None:
-                    self.put_result(next_task.id, error)
+                    if cancelled:
+                        self._store_task_result(
+                            next_task, error.metadata,
+                            state=ResultState.CANCELLED,
+                            reason='cancelled')
+                    else:
+                        self._store_task_result(next_task, error)
                     next_task = next_task.on_complete if final else None
             self._run_post_execute(task, task_value, exception)
             if surface and task.on_error:
@@ -542,6 +817,22 @@ class Huey(object):
                 self._requeue_task(task, self._get_timestamp(), retry_eta)
 
         return task_value
+
+    def _record_cancelled(self, task, reason, error=None):
+        if self._result_retention(task) is None or not self.results:
+            return
+        if isinstance(task, PeriodicTask):
+            return
+        self._store_task_result(task, error or {'error': 'cancelled'},
+                                state=ResultState.CANCELLED, reason=reason)
+
+    def _record_expired(self, task):
+        if self._result_retention(task) is None or not self.results:
+            return
+        if isinstance(task, PeriodicTask):
+            return
+        self._store_task_result(task, None, state=ResultState.EXPIRED,
+                                reason='expired')
 
     def _abort_chord_member(self, task, value):
         # The rest of the pipeline won't run, so report to its chord here.
@@ -791,6 +1082,20 @@ class Huey(object):
             revoke_on_timeout=revoke_on_timeout,
             preserve=preserve)
 
+    def result_info(self, id, peek=True):
+        """Return a :py:class:`ResultInfo` describing a task's result state.
+
+        Unlike :py:meth:`result`, this never raises ``TaskException`` for a
+        failed task. The state distinguishes an unfinished task (``pending``),
+        a readable result (``success``), an error (``failed``), an explicit
+        cancellation (``cancelled``), an expired-before-running task
+        (``expired``) and a successfully-completed result removed by its
+        retention policy (``destroyed``).
+        """
+        state, value, error, reason, retention = self._resolve_result(
+            id, peek=peek)
+        return ResultInfo(state, value, error, reason, retention)
+
 
 class Task(object):
     default_expires = None
@@ -799,11 +1104,13 @@ class Task(object):
     default_retry_delay = 0
     default_retry_backoff = 0
     default_timeout = None
+    default_result_ttl = None
 
     def __init__(self, args=None, kwargs=None, id=None, eta=None, retries=None,
                  retry_delay=None, priority=None, expires=None,
                  on_complete=None, on_error=None, expires_resolved=None,
-                 timeout=None, chord_config=None, retry_backoff=None):
+                 timeout=None, chord_config=None, retry_backoff=None,
+                 result_ttl=None):
         self.name = type(self).__name__
         self.args = () if args is None else args
         self.kwargs = {} if kwargs is None else kwargs
@@ -822,6 +1129,8 @@ class Task(object):
         self.timeout = timeout if timeout is not None else self.default_timeout
         self.chord_config = chord_config
         self._deadline = None
+        self.result_ttl = (self.default_result_ttl if result_ttl is None
+                           else _normalize_result_ttl(result_ttl))
 
         self.on_complete = on_complete
         self.on_error = on_error
@@ -845,6 +1154,8 @@ class Task(object):
             rep += ' %s retries' % self.retries
         if self.timeout:
             rep += ' timeout=%s' % self.timeout
+        if self.result_ttl is not None:
+            rep += ' result_ttl=%s' % self.result_ttl
         if self.on_complete:
             rep += ' -> %s' % self.on_complete
         if self.on_error:
@@ -998,7 +1309,8 @@ class TaskWrapper(object):
 
     def schedule(self, args=None, kwargs=None, eta=None, delay=None,
                  priority=None, retries=None, retry_delay=None,
-                 retry_backoff=None, expires=None, timeout=None, id=None):
+                 retry_backoff=None, expires=None, timeout=None, id=None,
+                 result_ttl=None, read_once=False):
         if eta is None and delay is None:
             if isinstance(args, (int, float)):
                 delay = args
@@ -1024,7 +1336,8 @@ class TaskWrapper(object):
             retry_backoff=retry_backoff,
             priority=priority,
             expires=expires,
-            timeout=timeout)
+            timeout=timeout,
+            result_ttl=_resolve_result_ttl(result_ttl, read_once))
         return self.huey.enqueue(task)
 
     def _apply(self, it):
@@ -1049,6 +1362,13 @@ class TaskWrapper(object):
         if eta is not None or delay is not None:
             eta = normalize_time(eta, delay, self.huey.utc)
 
+        result_ttl = kwargs.pop('result_ttl', None)
+        read_once = kwargs.pop('read_once', False)
+        if result_ttl is not None:
+            result_ttl = _normalize_result_ttl(result_ttl)
+        elif read_once:
+            result_ttl = 0
+
         return self.task_class(args, kwargs,
                                id=kwargs.pop('id', None),
                                eta=eta,
@@ -1057,7 +1377,8 @@ class TaskWrapper(object):
                                retry_backoff=kwargs.pop('retry_backoff', None),
                                priority=kwargs.pop('priority', None),
                                expires=kwargs.pop('expires', None),
-                               timeout=kwargs.pop('timeout', None))
+                               timeout=kwargs.pop('timeout', None),
+                               result_ttl=result_ttl)
 
 
 class TaskLock(object):
@@ -1210,6 +1531,7 @@ class Result(object):
         self.task = task
         self.revoke_id = task.revoke_id
         self._result = EmptyData
+        self._consumed = False
 
     def __repr__(self):
         return '<Result: task %s>' % self.id
@@ -1221,21 +1543,54 @@ class Result(object):
     def __call__(self, *args, **kwargs):
         return self.get(*args, **kwargs)
 
+    def info(self, peek=True):
+        """Return a :py:class:`ResultInfo` describing the result state.
+
+        Unlike :py:meth:`get`, this never raises for a failed task. With the
+        default ``peek=True`` the read is non-destructive even for read-once
+        results, so status checks do not consume the value.
+        """
+        return self.huey.result_info(self.id, peek=peek)
+
     def is_ready(self):
-        return self._get() is not EmptyData
+        # A readiness check must not consume a result governed by a retention
+        # policy. Legacy results keep their historical destructive read.
+        peek = self.huey._result_is_retained(self.id)
+        return self._get(preserve=peek) is not EmptyData
 
     def _get(self, preserve=False):
-        task_id = self.id
-        if self._result is EmptyData:
-            res = self.huey.get_raw(task_id, peek=preserve)
-
-            if res is not EmptyData:
-                self._result = self.huey.serializer.deserialize(res)
-                return self._result
-            else:
-                return res
-        else:
+        if self._result is not EmptyData:
+            # A cached value from a preserved read must still honor a
+            # read-once policy: the stored value is consumed on the first
+            # non-preserving read, though the caller keeps the cached value.
+            if (not preserve and not self._consumed and
+                    self.huey._peek_result_retention(self.id) == 0):
+                self.huey._resolve_result(self.id, peek=False)
+                self._consumed = True
             return self._result
+
+        state, value, error, reason, retention = \
+            self.huey._resolve_result(self.id, peek=preserve)
+
+        if state == ResultState.SUCCESS and not preserve and retention == 0:
+            self._consumed = True
+
+        if state == ResultState.SUCCESS:
+            self._result = value
+            return self._result
+        elif state == ResultState.FAILED:
+            metadata = error or {}
+            self._result = Error(metadata)
+            return self._result
+        elif state == ResultState.CANCELLED:
+            metadata = error if isinstance(error, dict) else {}
+            metadata.setdefault('error', reason or 'cancelled')
+            self._result = Error(metadata)
+            return self._result
+        elif state in (ResultState.DESTROYED, ResultState.EXPIRED):
+            return EmptyData
+        else:
+            return EmptyData
 
     def get_raw_result(self, blocking=False, timeout=None, backoff=1.15,
                        max_delay=1.0, revoke_on_timeout=False, preserve=False):
@@ -1298,11 +1653,13 @@ class Result(object):
             timeout=self.task.timeout,
             chord_config=self.task.chord_config,
             on_complete=on_complete,
-            on_error=on_error)
+            on_error=on_error,
+            result_ttl=self.task.result_ttl)
         return self.huey.enqueue(task)
 
     def reset(self):
         self._result = EmptyData
+        self._consumed = False
 
 
 class ResultGroup(object):
