@@ -2,13 +2,25 @@
 HTTP Client Library Adapters
 
 """
+import logging
 from abc import ABCMeta, abstractmethod
+from urllib.parse import urljoin, urlsplit
 
 import requests
 import requests.exceptions
 
-from hvac import utils
+from hvac import exceptions, utils
 from hvac.constants.client import DEFAULT_URL
+
+logger = logging.getLogger(__name__)
+
+# Request headers that carry the caller's identity. They may only be sent to
+# the configured Vault hosts and must never appear in outbound response objects.
+IDENTITY_HEADERS = ("X-Vault-Token", "Authorization")
+
+# HTTP status codes that ask the client to switch the method to GET on the next hop.
+_REDIRECT_METHOD_CHANGE_CODES = (301, 302, 303)
+_REDIRECT_STATUSES = (301, 302, 303, 307, 308)
 
 
 class Adapter(metaclass=ABCMeta):
@@ -39,6 +51,8 @@ class Adapter(metaclass=ABCMeta):
             ignore_exceptions=adapter.ignore_exceptions,
             strict_http=adapter.strict_http,
             request_header=adapter.request_header,
+            allowed_redirect_hosts=adapter.allowed_redirect_hosts,
+            max_redirect_hops=adapter.max_redirect_hops,
         )
 
     def __init__(
@@ -55,6 +69,8 @@ class Adapter(metaclass=ABCMeta):
         ignore_exceptions=False,
         strict_http=False,
         request_header=True,
+        allowed_redirect_hosts=None,
+        max_redirect_hops=2,
     ):
         """Create a new request adapter instance.
 
@@ -86,6 +102,14 @@ class Adapter(metaclass=ABCMeta):
         :type strict_http: bool
         :param request_header: If true, add the X-Vault-Request header to all requests to protect against SSRF vulnerabilities.
         :type request_header: bool
+        :param allowed_redirect_hosts: Optional list of Vault failover hosts (URLs or ``host[:port]``
+            values) that redirects may target. When set, hvac follows redirects itself instead of letting
+            ``requests`` do so, and every hop must match one of these hosts (the configured ``base_uri``
+            host is always included). Requests carrying credentials are never sent to other hosts.
+        :type allowed_redirect_hosts: list(str)
+        :param max_redirect_hops: Maximum number of redirect hops followed when ``allowed_redirect_hosts``
+            is configured. Chains longer than this are rejected before the extra request is sent.
+        :type max_redirect_hops: int
         """
         if not session:
             session = requests.Session()
@@ -108,6 +132,8 @@ class Adapter(metaclass=ABCMeta):
         self.ignore_exceptions = ignore_exceptions
         self.strict_http = strict_http
         self.request_header = request_header
+        self.allowed_redirect_hosts = allowed_redirect_hosts
+        self.max_redirect_hops = max_redirect_hops
 
         self._kwargs = {
             "cert": cert,
@@ -115,6 +141,26 @@ class Adapter(metaclass=ABCMeta):
             "timeout": timeout,
             "proxies": proxies,
         }
+
+    @staticmethod
+    def _normalize_host(host):
+        """Return the ``host[:port]`` identity for a URL or host fragment."""
+        if "://" not in host:
+            host = f"https://{host}"
+        return urlsplit(host).netloc
+
+    def _trusted_redirect_hosts(self):
+        """Build the set of hosts that authenticated requests may follow redirects to."""
+        trusted_hosts = {self._normalize_host(self.base_uri)}
+        for host in self.allowed_redirect_hosts or ():
+            trusted_hosts.add(self._normalize_host(host))
+        return trusted_hosts
+
+    def _strip_identity_headers(self, response):
+        """Remove request identity headers from an outbound response before it is returned."""
+        for header in IDENTITY_HEADERS:
+            response.headers.pop(header, None)
+        return response
 
     @staticmethod
     def urljoin(*args):
@@ -312,6 +358,108 @@ class RawAdapter(Adapter):
         response_json = response.json()
         return response_json["auth"]["client_token"]
 
+    def _secure_redirect_request(
+        self, method, url, headers, request_kwargs, trusted_hosts
+    ):
+        """Follow redirects manually, allowing only trusted Vault failover hosts.
+
+        Each hop is sent with ``allow_redirects=False`` so the decision about where
+        credentials go stays with hvac. Every target host is validated against
+        ``trusted_hosts`` before the request (and its identity headers) is sent.
+        """
+        current_url = url
+        current_method = method
+        current_headers = headers
+        hops = 0
+
+        while True:
+            logger.info(
+                "vault secure failover hop %s: %s %s",
+                hops,
+                current_method.upper(),
+                current_url,
+            )
+            response = self.session.request(
+                method=current_method,
+                url=current_url,
+                headers=current_headers,
+                allow_redirects=False,
+                **request_kwargs,
+            )
+
+            if response.status_code not in _REDIRECT_STATUSES:
+                return response
+
+            location = response.headers.get("Location")
+            if not location:
+                logger.warning(
+                    "rejecting redirect response without a Location header "
+                    "after %s hop(s): %s %s",
+                    hops,
+                    current_method.upper(),
+                    current_url,
+                )
+                raise exceptions.UnrecognizedProxyResponse(
+                    message=(
+                        f"redirect response with status {response.status_code} did not "
+                        f"provide a Location header"
+                    ),
+                    method=current_method,
+                    url=current_url,
+                )
+
+            try:
+                target_url = urljoin(current_url, location)
+                target_host = urlsplit(target_url).netloc
+            except ValueError as value_error:
+                logger.warning(
+                    "rejecting unparseable redirect target %r after %s hop(s): %s",
+                    location,
+                    hops,
+                    value_error,
+                )
+                raise exceptions.UnrecognizedProxyResponse(
+                    message=f"redirect Location header is not a valid URL: {location!r}",
+                    method=current_method,
+                    url=current_url,
+                ) from value_error
+
+            if target_host not in trusted_hosts:
+                logger.warning(
+                    "rejecting redirect to untrusted host %r (allowed hosts: %s); "
+                    "identity headers were not forwarded",
+                    target_host,
+                    sorted(trusted_hosts),
+                )
+                raise exceptions.UntrustedRedirectHost(
+                    message=(
+                        f"redirect target {target_host!r} is not in the configured "
+                        f"allowed_redirect_hosts"
+                    ),
+                    method=current_method,
+                    url=target_url,
+                )
+
+            if hops >= self.max_redirect_hops:
+                logger.warning(
+                    "rejecting redirect chain longer than %s hop(s) at %s",
+                    self.max_redirect_hops,
+                    target_url,
+                )
+                raise exceptions.RedirectLimitExceeded(
+                    message=(
+                        f"redirect chain exceeded the limit of {self.max_redirect_hops} "
+                        f"hop(s)"
+                    ),
+                    method=current_method,
+                    url=target_url,
+                )
+
+            hops += 1
+            if response.status_code in _REDIRECT_METHOD_CHANGE_CODES:
+                current_method = "get"
+            current_url = target_url
+
     def request(self, method, url, headers=None, raise_exception=True, **kwargs):
         """Main method for routing HTTP requests to the configured Vault base_uri.
 
@@ -364,13 +512,25 @@ class RawAdapter(Adapter):
                 params.update({"list": "true"})
             _kwargs["params"] = params
 
-        response = self.session.request(
-            method=method,
-            url=url,
-            headers=headers,
-            allow_redirects=self.allow_redirects,
-            **_kwargs
-        )
+        if self.allowed_redirect_hosts is not None:
+            response = self._secure_redirect_request(
+                method=method,
+                url=url,
+                headers=headers,
+                request_kwargs=_kwargs,
+                trusted_hosts=self._trusted_redirect_hosts(),
+            )
+        else:
+            response = self.session.request(
+                method=method,
+                url=url,
+                headers=headers,
+                allow_redirects=self.allow_redirects,
+                **_kwargs
+            )
+
+        # Never echo request identity headers back to the caller, even on failover responses.
+        self._strip_identity_headers(response)
 
         if not response.ok and (raise_exception and not self.ignore_exceptions):
             self._raise_for_error(method, url, response)

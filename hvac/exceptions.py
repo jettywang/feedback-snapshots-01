@@ -83,3 +83,19 @@ class BadGateway(VaultError):
 
 class ParamValidationError(VaultError):
     pass
+
+
+class SecureRedirectError(VaultError):
+    """Base class for failures of the constrained internal failover logic."""
+
+
+class UntrustedRedirectHost(SecureRedirectError):
+    """Raised when a failover target is not part of the allowed Vault hosts."""
+
+
+class RedirectLimitExceeded(SecureRedirectError):
+    """Raised when a redirect chain is longer than the configured hop limit."""
+
+
+class UnrecognizedProxyResponse(SecureRedirectError):
+    """Raised when a redirect cannot be resolved (missing/invalid Location)."""

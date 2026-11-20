@@ -5,6 +5,7 @@
 ### 🚀 Features
 
 - add audience param to kubernetes role creation ([GH-1224](https://github.com/hvac/hvac/pull/1224))
+- add constrained internal failover support: `allowed_redirect_hosts` and `max_redirect_hops` make the adapter follow redirects only to trusted Vault hosts and strip request identity headers from outbound responses
 
 ### 📚 Documentation
 
