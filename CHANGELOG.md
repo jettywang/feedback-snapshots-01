@@ -8,6 +8,8 @@
 
 ### New features
 
+- Add `Schema.preflight` for dry-run authorization of mutation batches (runs `ready?` / `loads:` / `authorized?`, never `resolve`; results are single-use).
+
 ### Bug fixes
 
 # 2.6.16 (17 Nov 2026)

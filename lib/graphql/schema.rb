@@ -47,6 +47,7 @@ require "graphql/schema/mutation"
 require "graphql/schema/has_single_input_argument"
 require "graphql/schema/relay_classic_mutation"
 require "graphql/schema/subscription"
+require "graphql/schema/preflight"
 require "graphql/schema/visibility"
 
 module GraphQL
@@ -2079,6 +2080,75 @@ module GraphQL
           execute_next(query_str, **kwargs)
         else
           execute_legacy(query_str, **kwargs)
+        end
+      end
+
+      # Run a *dry run* of a mutation document. Arguments are coerced, `loads:` hooks are
+      # called, and `ready?` / `authorized?` checks run -- but no mutation `resolve` method
+      # is called, so nothing is written.
+      #
+      # Use it to check a whole batch of updates before deciding which ones to apply:
+      #
+      # ```ruby
+      # batch = MySchema.preflight(mutation_string, context: { current_user: viewer })
+      # batch.each do |result|
+      #   if result.authorized?
+      #     # Apply it (preferably after `result.recheck!` with fresh context)
+      #   end
+      # end
+      # ```
+      #
+      # Results are snapshots, not authorization tokens: each one is single-use
+      # ([Preflight::Result#consume!]) and can be refreshed with
+      # [Preflight::Result#recheck!]. See [GraphQL::Schema::Preflight](rdoc-ref:GraphQL::Schema::Preflight)
+      # for the exact list of hooks.
+      #
+      # **Parameters**
+      #
+      # - `query_string_or_document` (`String, GraphQL::Language::Nodes::Document`) — a document whose selected operation is a mutation
+      # - `context` (`Hash, GraphQL::Query::Context`) — the same kind of context you'd pass to `execute`
+      # - `variables` (`Hash`)
+      # - `operation_name` (`String, nil`)
+      # - `max_fields` (`Integer`) — reject documents with more root fields than this
+      #
+      # **Returns**
+      #
+      # - `GraphQL::Schema::Preflight::Batch`
+      #
+      # :call-seq:
+      #   preflight(String | GraphQL::Language::Nodes::Document query_string_or_document, context: nil, variables: nil, operation_name: nil, max_fields: 50) -> GraphQL::Schema::Preflight::Batch
+      def preflight(query_string_or_document, context: nil, variables: nil, operation_name: nil, max_fields: GraphQL::Schema::Preflight::DEFAULT_MAX_FIELDS)
+        GraphQL::Schema::Preflight.new(
+          self,
+          query_string_or_document,
+          context: context,
+          variables: variables,
+          operation_name: operation_name,
+          max_fields: max_fields,
+        ).run
+      end
+
+      # How long a [Preflight::Result](rdoc-ref:GraphQL::Schema::Preflight::Result) stays usable
+      # before [Preflight::Result#recheck!](rdoc-ref:GraphQL::Schema::Preflight::Result#recheck!) is required.
+      # `nil` disables the age check.
+      #
+      # **Parameters**
+      #
+      # - `seconds` (`Numeric, nil`) — defaults to `30`
+      #
+      # :call-seq:
+      #   preflight_max_age(Numeric | nil seconds) -> Numeric | nil
+      def preflight_max_age(seconds = NOT_CONFIGURED)
+        if NOT_CONFIGURED.equal?(seconds)
+          if instance_variable_defined?(:@preflight_max_age)
+            @preflight_max_age
+          elsif superclass.respond_to?(:preflight_max_age)
+            superclass.preflight_max_age
+          else
+            GraphQL::Schema::Preflight::DEFAULT_MAX_AGE
+          end
+        else
+          @preflight_max_age = seconds
         end
       end
 

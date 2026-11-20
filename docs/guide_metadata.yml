@@ -69,6 +69,7 @@ order:
     - mutation_classes
     - mutation_errors
     - mutation_authorization
+    - preflight
   object_cache:
     - overview
     - schema_setup
