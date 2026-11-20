@@ -28,6 +28,9 @@ you can do, but reach for `server_hostname` first.
 A client certificate is loaded as well, because `.ci/linux/rabbitmq.conf` sets
 `ssl_options.fail_if_no_peer_cert` and so this broker requires one from every TLS client. That is a
 property of the broker, not of the problem shown here.
+
+`tls_rules` is the same decision expressed per candidate; `blocking_consume_tls_rules.py` shows a
+fallback sequence that verifies each candidate by its own name and trust store.
 """
 
 import ssl

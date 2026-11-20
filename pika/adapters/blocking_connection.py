@@ -546,8 +546,13 @@ class BlockingConnection:
         if isinstance(error, connection_workflow.AMQPConnectionWorkflowFailed):
             # Extract exception value from the last connection attempt
             last = error.exceptions[-1]
-            if isinstance(last,
-                          connection_workflow.AMQPConnectorSocketConnectError):
+            if isinstance(
+                    last,
+                    connection_workflow.AMQPConnectorCandidateNotCoveredError):
+                # Its inner error names the candidate, which the workflow exception retains.
+                error = last.exception
+            elif isinstance(
+                    last, connection_workflow.AMQPConnectorSocketConnectError):
                 error = exceptions.AMQPConnectionError(last,
                                                        host=last.host,
                                                        port=last.port)

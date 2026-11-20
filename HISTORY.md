@@ -105,6 +105,14 @@ The errors are accurate and the annotations are an improvement, so nothing here 
 
 `pyright` users see little change, since it reported most of these already.
 
+## Unreleased
+
+### Per-candidate TLS verification
+
+`ConnectionParameters(tls_rules=...)` maps a candidate template to a `pika.TLSVerificationRule`, which carries the name the candidate's certificate must present and the context, or CA file, that must have signed it. The configured host is matched first and the resolved IP address second, and the most specific template wins. A matched rule supplies that candidate's `ssl_options`, so each config in a fallback sequence verifies with its own name and trust store; `TLSVerificationRule` continues to be shared, not mutated, by the copy `Connection` makes of the parameters.
+
+A candidate that matches no template is refused before pika opens a socket to it. The workflow records `AMQPConnectorCandidateNotCoveredError`, whose inner `pika.exceptions.CandidateNotCoveredByTLSRuleError` names the host, the resolved address and the configured templates, and `AMQPConnectionWorkflow.candidate_rejections` keeps those refusals even when a later candidate connects. `TLSVerificationRule(server_hostname=..., cafile=...)` builds its own verifying context when the caller has no `SSLContext`. Leaving `tls_rules` unset keeps the previous behaviour, where `ssl_options` applies to every candidate.
+
 ## [1.5.0](https://github.com/pika/pika/tree/1.5.0) (2026-11-17)
 
 [Full Changelog](https://github.com/pika/pika/compare/1.4.0...1.5.0)

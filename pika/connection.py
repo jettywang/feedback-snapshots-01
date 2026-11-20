@@ -6,6 +6,7 @@ import abc
 import ast
 import copy
 import functools
+import ipaddress
 import logging
 import math
 import numbers
@@ -66,6 +67,7 @@ class Parameters:
         '_ssl_options',
         '_stack_timeout',
         '_tcp_options',
+        '_tls_rules',
         '_virtual_host',
     )
 
@@ -92,6 +94,7 @@ class Parameters:
     DEFAULT_SSL = False
     DEFAULT_SSL_OPTIONS = None
     DEFAULT_SSL_PORT = 5671
+    DEFAULT_TLS_RULES = None
     DEFAULT_VIRTUAL_HOST = '/'
     DEFAULT_TCP_OPTIONS = None
 
@@ -117,6 +120,7 @@ class Parameters:
         self._socket_timeout: float | None = None
         self._stack_timeout: float | None = None
         self._ssl_options: SSLOptions | None = None
+        self._tls_rules: dict[str, TLSVerificationRule] | None = None
         self._virtual_host: str = ''
         self._tcp_options: dict[str, int] | None = None
 
@@ -137,6 +141,7 @@ class Parameters:
         self.socket_timeout = self.DEFAULT_SOCKET_TIMEOUT
         self.stack_timeout = self.DEFAULT_STACK_TIMEOUT
         self.ssl_options = self.DEFAULT_SSL_OPTIONS
+        self.tls_rules = self.DEFAULT_TLS_RULES
         self.virtual_host = self.DEFAULT_VIRTUAL_HOST
         self.tcp_options = self.DEFAULT_TCP_OPTIONS
 
@@ -544,6 +549,50 @@ class Parameters:
         self._ssl_options = value
 
     @property
+    def tls_rules(self) -> dict[str, TLSVerificationRule] | None:
+        """
+        Per-candidate TLS verification rules, keyed by a template.
+
+        The template is a hostname or IP address with `*` for one or more characters in a label,
+        for example `*.broker.example`. The configured host is matched first, then the resolved IP
+        address, and the most specific match wins: an exact template beats a wildcard, and a longer
+        template beats a shorter one. A key that is neither an exact hostname nor a valid template
+        is rejected when the rules are assigned, rather than silently never matching.
+
+        When rules are present, every candidate must match one before pika opens a socket to it; an
+        unmatched candidate makes the workflow fail with
+        `pika.exceptions.CandidateNotCoveredByTLSRuleError` naming the address and reason. When the
+        value is None, the workflow makes no such check and uses `ssl_options` on every candidate.
+        A matched rule supplies that candidate's `ssl_options` for the attempt, so each config in a
+        fallback sequence can name a different certificate and trust store.
+
+        :returns: None, or a mapping of template to `TLSVerificationRule`
+        """
+        return self._tls_rules
+
+    @tls_rules.setter
+    def tls_rules(self, value: dict[str, TLSVerificationRule] | None) -> None:
+        """
+        :param value: None, or a mapping of template to `TLSVerificationRule`. Defaults to None.
+
+        """
+        if value is None:
+            self._tls_rules = None
+            return
+        if not isinstance(value, dict):
+            raise TypeError(
+                f'tls_rules must be a dict or None, but got {value!r}')
+        rules: dict[str, TLSVerificationRule] = {}
+        for template, rule in value.items():
+            _validate_candidate_template(template)
+            if not isinstance(rule, TLSVerificationRule):
+                raise TypeError(
+                    f'tls_rules[{template!r}] must be a TLSVerificationRule, but got {rule!r}'
+                )
+            rules[template] = rule
+        self._tls_rules = rules
+
+    @property
     def virtual_host(self) -> str:
         """
         :returns: rabbitmq virtual host name. Defaults to
@@ -581,6 +630,40 @@ class Parameters:
         self._tcp_options = value
 
 
+def _validate_candidate_template(template: str) -> None:
+    """
+    Validate a `Parameters.tls_rules` key.
+
+    A key is an exact hostname or IP address, or a hostname with `*` in place of one or more
+    characters in one or more labels (`*.broker.example`, `broker-*.example`). `*` never spans a
+    dot, so a template cannot silently cover another domain.
+
+    :param template: the candidate template to validate
+    :raises TypeError: if *template* is not a string
+    :raises ValueError: if *template* is empty, has an empty label, uses a wildcard with IPv6, or
+        contains a character other than a letter, digit, `-`, `_`, `.` or `*`
+    """
+    if not isinstance(template, str):
+        raise TypeError(f'template must be a str, but got {template!r}')
+    if not template:
+        raise ValueError('template must not be empty')
+    if template.startswith('.') or template.endswith('.'):
+        raise ValueError(
+            f'template must not start or end with a dot: {template!r}')
+    if '*' in template and ':' in template:
+        raise ValueError(
+            f'a wildcard template cannot describe an IPv6 address: {template!r}'
+        )
+    for label in template.split('.'):
+        if not label:
+            raise ValueError(f'template has an empty label: {template!r}')
+        for char in label:
+            if char == '*' or char.isalnum() or char in '-_':
+                continue
+            raise ValueError(
+                f'template has an unsupported character {char!r}: {template!r}')
+
+
 class ConnectionParameters(Parameters):
     """Connection parameters object that is passed into the connection adapter upon construction."""
 
@@ -616,6 +699,8 @@ class ConnectionParameters(Parameters):
                  client_properties: DefaultT[dict[str, Any] | None] = _DEFAULT,
                  tcp_options: DefaultT[dict[str, Any] | None] = _DEFAULT,
                  max_inbound_message_body_size: DefaultT[int] = _DEFAULT,
+                 tls_rules: DefaultT[dict[str, TLSVerificationRule] |
+                                     None] = _DEFAULT,
                  **kwargs: Any) -> None:
         """
         Create a new ConnectionParameters instance.
@@ -660,6 +745,9 @@ class ConnectionParameters(Parameters):
         :param max_inbound_message_body_size: The largest message body, in bytes, to accept
             from the broker, from 1 to 512 MiB; see
             [`Parameters.max_inbound_message_body_size`][pika.connection.Parameters.max_inbound_message_body_size]
+        :param tls_rules: None for no per-candidate check, or a mapping of candidate template to
+            `TLSVerificationRule`; see `Parameters.tls_rules`. A candidate that matches none of
+            them is refused before a socket is opened to it.
         """
         super().__init__()
 
@@ -723,6 +811,10 @@ class ConnectionParameters(Parameters):
         if max_inbound_message_body_size is not self._DEFAULT:
             self.max_inbound_message_body_size = cast(
                 int, max_inbound_message_body_size)
+
+        if tls_rules is not self._DEFAULT:
+            self.tls_rules = cast(Optional[Dict[str, TLSVerificationRule]],
+                                  tls_rules)
 
         if kwargs:
             raise TypeError(f'unexpected kwargs: {kwargs!r}')
@@ -1051,6 +1143,195 @@ class SSLOptions:
         self.server_hostname = server_hostname
 
 
+class TLSVerificationRule:
+    """How one candidate's TLS handshake verifies the broker and where it trusts certificates."""
+
+    # Protect against accidental assignment of an invalid attribute
+    __slots__ = ('context', 'server_hostname', 'trust_source')
+
+    def __init__(self,
+                 context: ssl.SSLContext | None = None,
+                 server_hostname: str | None = None,
+                 trust_source: str | None = None,
+                 *,
+                 cafile: str | None = None,
+                 capath: str | None = None,
+                 cadata: str | bytes | None = None) -> None:
+        """
+        Describe one candidate's TLS verification.
+
+        Pass *context* to use an `ssl.SSLContext` prepared elsewhere, or the CA material in
+        *cafile*, *capath* or *cadata* to have a verifying context built here, the same way a URL
+        `ssl_options` with a CA builds one: `CERT_REQUIRED` and hostname checking. The two forms
+        are exclusive.
+
+        :param context: the context used for this candidate; its CA set is the trust source
+        :param server_hostname: the name the candidate's certificate must carry, passed to
+            `SSLContext.wrap_socket` for SNI and hostname verification. Required: a rule exists to
+            name the certificate, so letting it default would hide that it was never chosen.
+        :param trust_source: a label for where the CA certificates come from, so a connection
+            trace can say which store was used. It does not affect verification. Defaults to the
+            CA path given here.
+        :param cafile: path to a CA bundle used to build *context*
+        :param capath: directory of CA files used to build *context*
+        :param cadata: PEM text or DER bytes of CAs used to build *context*
+        :raises TypeError: if *context* is not an `ssl.SSLContext`, or *server_hostname* is not a
+            non-empty string
+        :raises ValueError: if both *context* and CA material are given, or neither is
+        """
+        if not isinstance(server_hostname, str) or not server_hostname:
+            raise TypeError('server_hostname must be a non-empty str, '
+                            f'but got {server_hostname!r}')
+        if trust_source is not None and not isinstance(trust_source, str):
+            raise TypeError(
+                f'trust_source must be a str or None, but got {trust_source!r}')
+
+        has_ca_material = bool(cafile or capath or cadata)
+        if context is not None:
+            if not isinstance(context, ssl.SSLContext):
+                raise TypeError(
+                    f'context must be of ssl.SSLContext type, but got {context!r}'
+                )
+            if has_ca_material:
+                raise ValueError('pass either context or CA material, not both')
+        else:
+            if not has_ca_material:
+                raise ValueError(
+                    'pass a context or CA material (cafile, capath or cadata)')
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            context.verify_mode = ssl.CERT_REQUIRED
+            context.check_hostname = True
+            context.load_verify_locations(cafile, capath, cadata)
+            if trust_source is None:
+                trust_source = cafile or capath or 'context'
+
+        self.context = context
+        self.server_hostname = server_hostname
+        self.trust_source = trust_source
+
+    @override
+    def __repr__(self) -> str:
+        return (
+            f'<{self.__class__.__name__} server_hostname={self.server_hostname!r} '
+            f'trust_source={self.trust_source!r}>')
+
+
+def _match_candidate_template(template: str, host: str) -> bool:
+    """
+    Report whether *host* matches a validated candidate template.
+
+    Matching is case-insensitive and per label, and `*` matches one or more characters within a
+    label, so an IP address never matches a template that contains `*`. A literal IP template
+    matches only the same normalized address, compared with `ipaddress.ip_address` so that
+    `::1` and `0:0:0:0:0:0:0:1` are the same candidate.
+
+    :param template: a validated `Parameters.tls_rules` key
+    :param host: the resolved hostname or IP address
+    :returns: True when the host is covered by the template
+    """
+    template = template.lower()
+    host = host.lower()
+
+    def as_ip(value: str):
+        try:
+            return ipaddress.ip_address(value)
+        except ValueError:
+            return None
+
+    if '*' not in template:
+        template_ip, host_ip = as_ip(template), as_ip(host)
+        if template_ip is not None or host_ip is not None:
+            return template_ip is not None and template_ip == host_ip
+        return template == host
+    if ':' in host:
+        # A wildcard template has dot-separated labels, so it cannot describe IPv6.
+        return False
+
+    template_labels = template.split('.')
+    host_labels = host.split('.')
+    if len(template_labels) != len(host_labels):
+        return False
+    return all(
+        _match_label(pattern, label)
+        for pattern, label in zip(template_labels, host_labels))
+
+
+def _match_label(pattern: str, label: str) -> bool:
+    """Match one label, where `*` stands for one or more characters."""
+    if '*' not in pattern:
+        return pattern == label
+    parts = pattern.split('*')
+    head, tail = parts[0], parts[-1]
+    if not label.startswith(head) or not label.endswith(tail):
+        return False
+    start, end = len(head), len(label) - len(tail)
+    for part in parts[1:-1]:
+        found = label.find(part, start, end)
+        if found < 0:
+            return False
+        start = found + len(part)
+    # Each `*` has to consume at least one character.
+    return end - start >= len(parts) - 1
+
+
+def _most_specific_template(rules: dict[str, TLSVerificationRule],
+                            host: str) -> str | None:
+    """Return the most specific template covering *host*, or None."""
+    matches = [
+        template for template in rules
+        if _match_candidate_template(template, host)
+    ]
+    if not matches:
+        return None
+
+    def specificity(template):
+        return template.count('.'), len(template), template
+
+    return max(matches, key=specificity)
+
+
+def _resolve_candidate_tls_rule(
+        rules: dict[str, TLSVerificationRule] | None,
+        host: str,
+        port: int,
+        address: str | None = None) -> TLSVerificationRule | None:
+    """
+    Select the `Parameters.tls_rules` entry for one connection candidate.
+
+    The configured *host* is matched first, so a rule for a load-balancer name covers every
+    address that name resolves to, and the rule's verification name is what the certificate must
+    carry rather than the name dialed. When no template matches *host*, the resolved *address* is
+    matched instead, which is how a deployment that configures rules by IP covers a name it also
+    dials. A candidate that matches neither is refused. The most specific match wins: an exact
+    template beats a wildcard, and a longer template beats a shorter one.
+
+    :param rules: the rules to select from, or None when the parameters have none
+    :param host: the configured hostname or IP address of the candidate
+    :param port: the configured port, used only in the error text
+    :param address: the resolved IP address the attempt would dial, when different from *host*
+    :returns: the rule for the candidate, or None when *rules* is None
+    :raises pika.exceptions.CandidateNotCoveredByTLSRuleError: when *rules* is not None and no
+        template matches *host* or *address*
+    """
+    if rules is None:
+        return None
+
+    template = _most_specific_template(rules, host)
+    if template is None and address is not None and address != host:
+        template = _most_specific_template(rules, address)
+    if template is None:
+        candidates = f'{host!r}'
+        if address is not None and address != host:
+            candidates += f' (resolved {address!r})'
+        raise exceptions.CandidateNotCoveredByTLSRuleError(
+            f'no tls_rules template covers candidate {candidates} on port {port}; '
+            f'configured templates: {sorted(rules)!r}',
+            host=host,
+            port=port)
+
+    return rules[template]
+
+
 class Connection(abc.ABC):
     """
     This is the core class that implements communication with RabbitMQ.
@@ -1132,11 +1413,16 @@ class Connection(abc.ABC):
 
         # Set our configuration options
         if parameters is not None:
-            # SSLContext cannot be deep-copied, so the copy shares the caller's SSLOptions (gh-1842).
+            # SSLContext cannot be deep-copied, so the copy shares the caller's SSLOptions and
+            # TLSVerificationRules (gh-1842).
             ssl_options = parameters.ssl_options
-            self.params = copy.deepcopy(parameters,
-                                        {id(ssl_options): ssl_options})
+            tls_rules = parameters.tls_rules
+            memo: dict[int, Any] = {id(ssl_options): ssl_options}
+            if tls_rules is not None:
+                memo.update({id(rule): rule for rule in tls_rules.values()})
+            self.params = copy.deepcopy(parameters, memo)
             self.params.ssl_options = ssl_options
+            self.params.tls_rules = tls_rules
         else:
             self.params = ConnectionParameters()
 

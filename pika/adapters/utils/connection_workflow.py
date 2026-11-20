@@ -57,7 +57,8 @@ class AMQPConnectorPhaseErrorBase(AMQPConnectorException):
                  exception: BaseException,
                  *args: Any,
                  host: str | None = None,
-                 port: int | None = None) -> None:
+                 port: int | None = None,
+                 address: str | None = None) -> None:
         """
 
         :param exception: error that occurred while waiting for a
@@ -65,18 +66,27 @@ class AMQPConnectorPhaseErrorBase(AMQPConnectorException):
         :param args: args for parent class
         :param host: hostname or IP of the broker that failed
         :param port: port of the broker that failed
+        :param address: the resolved candidate address that failed, when it differs from *host*
         """
         super().__init__(*args)
         self.exception = exception
         self.host = host
         self.port = port
+        self.address = address
 
     @override
     def __repr__(self) -> str:
-        if self.host is not None:
-            return (f'{self.__class__.__name__}: {self.exception!r}'
-                    f' (host={self.host!r}, port={self.port})')
-        return f'{self.__class__.__name__}: {self.exception!r}'
+        if self.host is None:
+            return f'{self.__class__.__name__}: {self.exception!r}'
+        suffix = f'(host={self.host!r}, port={self.port})'
+        if self.address is not None and self.address != self.host:
+            suffix = (f'(host={self.host!r}, port={self.port}, '
+                      f'address={self.address!r})')
+        return f'{self.__class__.__name__}: {self.exception!r} {suffix}'
+
+
+class AMQPConnectorCandidateNotCoveredError(AMQPConnectorPhaseErrorBase):
+    """A resolved candidate had no `Parameters.tls_rules` entry, so no socket was opened to it."""
 
 
 class AMQPConnectorSocketConnectError(AMQPConnectorPhaseErrorBase):
@@ -163,6 +173,10 @@ class AMQPConnector:
         self._task_ref: nbio_interface.AbstractIOReference | None = None
         self._sock: socket.socket | None = None
         self._amqp_conn: pika.connection.Connection | None = None
+        # Set when this attempt used a Parameters.tls_rules entry.
+        self._tls_rule: pika.connection.TLSVerificationRule | None = None
+        # The resolved address this attempt dials, for error reporting.
+        self._candidate: str | None = None
 
         self._state = self._STATE_INIT
 
@@ -182,6 +196,7 @@ class AMQPConnector:
                 `AMQPConnectorSocketConnectError`
                 `AMQPConnectorTransportSetupError`
                 `AMQPConnectorAMQPHandshakeError`
+                `AMQPConnectorCandidateNotCoveredError`
                 `AMQPConnectorAborted`
         """
         if self._state != self._STATE_INIT:
@@ -191,12 +206,39 @@ class AMQPConnector:
         self._addr_record = addr_record
         self._conn_params = conn_params
         self._on_done = on_done
+        self._tls_rule = None
+        self._state = self._STATE_TCP
+        self._candidate = addr_record[4][0]
+        self._tcp_timeout_ref = None
+        self._stack_timeout_ref = None
+        self._task_ref = None
 
         assert self._nbio is not None
         assert self._conn_factory is not None
 
+        if conn_params.tls_rules is not None:
+            # Resolve before the socket exists, so an unattributable candidate is reported
+            # without touching it, and so only the chosen rule reaches the TLS handshake.
+            try:
+                self._tls_rule = pika.connection._resolve_candidate_tls_rule(
+                    conn_params.tls_rules,
+                    conn_params.host,
+                    conn_params.port,
+                    address=addr_record[4][0])
+            except pika.exceptions.CandidateNotCoveredByTLSRuleError as error:
+                _LOG.warning(
+                    'Refusing candidate %r before opening a socket: %s '
+                    '(host=%r, port=%s)', addr_record[4][0], error.reason,
+                    conn_params.host, conn_params.port)
+                self._report_completion_and_cleanup(
+                    AMQPConnectorCandidateNotCoveredError(
+                        error,
+                        host=conn_params.host,
+                        port=conn_params.port,
+                        address=addr_record[4][0]))
+                return
+
         # Create socket and initiate TCP/IP connection
-        self._state = self._STATE_TCP
         self._sock = socket.socket(*self._addr_record[:3])
         self._sock.setsockopt(pika._utils.SOL_TCP, socket.TCP_NODELAY, 1)
         pika.tcp_socket_opts.set_sock_opts(self._conn_params.tcp_options,
@@ -288,6 +330,9 @@ class AMQPConnector:
         self._nbio = None
         self._addr_record = None
         self._on_done = None
+        self._tls_rule = None
+        self._candidate = None
+        self._conn_params = None
 
         self._state = self._STATE_DONE
 
@@ -343,7 +388,8 @@ class AMQPConnector:
             f'TCP connection attempt timed out: {self._conn_params.host!r}/{self._addr_record}'
         ),
                                                 host=self._conn_params.host,
-                                                port=self._conn_params.port)
+                                                port=self._conn_params.port,
+                                                address=self._candidate)
         self._report_completion_and_cleanup(error)
 
     def _on_overall_timeout(self) -> None:
@@ -382,7 +428,8 @@ class AMQPConnector:
                     f'Timeout while connecting socket to {self._conn_params.host!r}/{self._addr_record}'
                 ),
                 host=self._conn_params.host,
-                port=self._conn_params.port)
+                port=self._conn_params.port,
+                address=self._candidate)
         else:
             assert prev_state == self._STATE_TRANSPORT
             error = AMQPConnectorTransportSetupError(AMQPConnectorStackTimeout(
@@ -390,8 +437,9 @@ class AMQPConnector:
             ),
                                                      host=self._conn_params.
                                                      host,
-                                                     port=self._conn_params.port
-                                                    )
+                                                     port=self._conn_params.
+                                                     port,
+                                                     address=self._candidate)
 
         self._report_completion_and_cleanup(error)
 
@@ -419,7 +467,8 @@ class AMQPConnector:
             self._report_completion_and_cleanup(
                 AMQPConnectorSocketConnectError(exc,
                                                 host=self._conn_params.host,
-                                                port=self._conn_params.port))
+                                                port=self._conn_params.port,
+                                                address=self._candidate))
             return
 
         # We succeeded in making a TCP/IP connection to the server
@@ -429,7 +478,10 @@ class AMQPConnector:
         self._state = self._STATE_TRANSPORT
 
         ssl_context = server_hostname = None
-        if self._conn_params.ssl_options is not None:
+        if self._tls_rule is not None:
+            ssl_context = self._tls_rule.context
+            server_hostname = self._tls_rule.server_hostname
+        elif self._conn_params.ssl_options is not None:
             ssl_context = self._conn_params.ssl_options.context
             server_hostname = self._conn_params.ssl_options.server_hostname
             if server_hostname is None:
@@ -472,7 +524,8 @@ class AMQPConnector:
             self._report_completion_and_cleanup(
                 AMQPConnectorTransportSetupError(result,
                                                  host=self._conn_params.host,
-                                                 port=self._conn_params.port))
+                                                 port=self._conn_params.port,
+                                                 address=self._candidate))
             return
 
         # We succeeded in setting up the streaming transport!
@@ -526,8 +579,9 @@ class AMQPConnector:
             ),
                                                      host=self._conn_params.
                                                      host,
-                                                     port=self._conn_params.port
-                                                    )
+                                                     port=self._conn_params.
+                                                     port,
+                                                     address=self._candidate)
         elif self._state == self._STATE_AMQP:
             if error is None:
                 _LOG.debug(
@@ -542,7 +596,8 @@ class AMQPConnector:
                 result = AMQPConnectorAMQPHandshakeError(
                     error,
                     host=self._conn_params.host,
-                    port=self._conn_params.port)
+                    port=self._conn_params.port,
+                    address=self._candidate)
         else:
             # We timed out or aborted and initiated closing of the connection,
             # but this callback snuck in
@@ -672,8 +727,24 @@ class AMQPConnectionWorkflow(AbstractAMQPConnectionWorkflow):
 
         # Exceptions from all failed connection attempts in this workflow
         self._connection_errors: list[BaseException] | None = []
+        # Candidates refused before a socket was opened, kept after completion so a caller
+        # whose later fallback succeeded can still report why an earlier one was skipped.
+        self._candidate_rejections: list[
+            AMQPConnectorCandidateNotCoveredError] = []
 
         self._state = self._STATE_INIT
+
+    @property
+    def candidate_rejections(
+            self) -> tuple[AMQPConnectorCandidateNotCoveredError, ...]:
+        """
+        Candidates the workflow refused because no `Parameters.tls_rules` template covered them.
+
+        Each entry carries the configured host and port, the resolved address, and the reason. The
+        tuple survives workflow completion, including a completion that succeeded through a later
+        candidate, so a caller can report what it skipped.
+        """
+        return tuple(self._candidate_rejections)
 
     def set_io_services(self, nbio: nbio_interface.AbstractIOServices) -> None:
         """
@@ -789,6 +860,7 @@ class AMQPConnectionWorkflow(AbstractAMQPConnectionWorkflow):
         self._connector = None
         self._addrinfo_iter = None
         self._connection_errors = None
+        # _candidate_rejections is deliberately kept; see its property.
 
         self._state = self._STATE_DONE
 
@@ -950,6 +1022,8 @@ class AMQPConnectionWorkflow(AbstractAMQPConnectionWorkflow):
 
         if isinstance(conn_or_exc, BaseException):
             self._connection_errors.append(conn_or_exc)
+            if isinstance(conn_or_exc, AMQPConnectorCandidateNotCoveredError):
+                self._candidate_rejections.append(conn_or_exc)
 
             if isinstance(conn_or_exc, AMQPConnectorAborted):
                 assert self._state == self._STATE_ABORTING, (

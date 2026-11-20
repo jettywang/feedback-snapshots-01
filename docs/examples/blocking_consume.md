@@ -17,3 +17,9 @@ Example of using more connection parameters, and of a common TLS problem with a 
 ```python
 --8<-- "examples/blocking_consume_tls.py"
 ```
+
+The same problem with more than one candidate: each `tls_rules` entry names the certificate name that candidate must present and the trust store that has to sign it, and each config in a fallback sequence carries its own mapping:
+
+```python
+--8<-- "examples/blocking_consume_tls_rules.py"
+```

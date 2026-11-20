@@ -11,7 +11,7 @@ from urllib.parse import quote as url_quote
 from urllib.parse import urlencode
 
 import pika
-from pika import channel, connection, credentials, spec
+from pika import channel, connection, credentials, exceptions, spec
 
 # Unordered sequence of connection.Parameters's property getters
 _ALL_PUBLIC_PARAMETERS_PROPERTIES = tuple(
@@ -79,7 +79,9 @@ class ParametersTestsBase(unittest.TestCase):
             'virtual_host':
                 kls.DEFAULT_VIRTUAL_HOST,
             'tcp_options':
-                kls.DEFAULT_TCP_OPTIONS
+                kls.DEFAULT_TCP_OPTIONS,
+            'tls_rules':
+                kls.DEFAULT_TLS_RULES
         }
 
         # Make sure we didn't miss anything
@@ -560,7 +562,8 @@ class ConnectionParametersTests(ParametersTestsBase):
             'virtual_host': 'vvhost',
             'tcp_options': {
                 'TCP_USER_TIMEOUT': 1000
-            }
+            },
+            'tls_rules': None
         }
         params = connection.ConnectionParameters(**kwargs)
 
@@ -893,3 +896,135 @@ class URLParametersTests(ParametersTestsBase):
         assert isinstance(parameters.credentials, credentials.PlainCredentials)
         self.assertEqual(parameters.credentials.username, username)
         self.assertEqual(parameters.credentials.password, password)
+
+
+class TLSRulesTests(unittest.TestCase):
+    """`Parameters.tls_rules` and the candidate resolution the workflow uses."""
+
+    def setUp(self):
+        self.corp_ca = connection.TLSVerificationRule(
+            ssl.create_default_context(), 'lb.internal.example', 'corp-ca')
+        self.rotated_ca = connection.TLSVerificationRule(
+            ssl.create_default_context(), 'broker-by-ip.internal', 'rotated-ca')
+
+    def test_it_rejects_a_template_that_can_never_match(self):
+        for template in ('', '.', '*.', 'a..b', '*.broker.example:5671',
+                         '*.broker.*/x'):
+            with self.subTest(template=template):
+                with self.assertRaises(ValueError):
+                    connection.ConnectionParameters(
+                        tls_rules={template: self.corp_ca})
+
+    def test_it_rejects_a_non_string_template_or_wrong_rule_type(self):
+        for template in (None, 1, b'*.example'):
+            with self.subTest(template=template):
+                with self.assertRaises(TypeError):
+                    connection.ConnectionParameters(
+                        tls_rules={template: self.corp_ca})
+        with self.assertRaises(TypeError):
+            connection.ConnectionParameters(tls_rules={
+                'a.example': pika.SSLOptions(ssl.create_default_context())
+            })
+
+    def test_a_rule_needs_a_verification_name(self):
+        for name in (None, '', 5):
+            with self.subTest(name=name):
+                with self.assertRaises(TypeError):
+                    connection.TLSVerificationRule(
+                        ssl.create_default_context(),
+                        name)  # type: ignore[arg-type]
+
+    def test_a_rule_can_build_its_trust_from_ca_material(self):
+        rule = connection.TLSVerificationRule(
+            server_hostname='broker.example',
+            cafile='tests/certs/ca_certificate.pem')
+        self.assertEqual(ssl.CERT_REQUIRED, rule.context.verify_mode)
+        self.assertTrue(rule.context.check_hostname)
+        self.assertEqual(1, len(rule.context.get_ca_certs()))
+        self.assertEqual('tests/certs/ca_certificate.pem', rule.trust_source)
+
+    def test_a_rule_takes_a_context_or_ca_material_but_not_both(self):
+        with self.assertRaises(ValueError):
+            connection.TLSVerificationRule(server_hostname='broker.example')
+        with self.assertRaises(ValueError):
+            connection.TLSVerificationRule(ssl.create_default_context(),
+                                           'broker.example',
+                                           cafile='tests/certs/'
+                                           'ca_certificate.pem')
+
+    def test_it_starts_unset_and_can_be_cleared(self):
+        params = connection.ConnectionParameters()
+        self.assertIsNone(params.tls_rules)
+        params.tls_rules = {'*.broker.example': self.corp_ca}
+        self.assertEqual(list(params.tls_rules),
+                         ['*.broker.example'])  # type: ignore[arg-type]
+        params.tls_rules = None
+        self.assertIsNone(params.tls_rules)
+
+    def test_templates_match_whole_labels_case_insensitively(self):
+        match = connection._match_candidate_template
+        self.assertTrue(match('*.broker.example', 'lb1.broker.example'))
+        self.assertTrue(match('*.broker.example', 'LB1.BROKER.EXAMPLE'))
+        # A single `*` cannot stand for no label, so the apex is not covered.
+        self.assertFalse(match('*.broker.example', 'broker.example'))
+        self.assertFalse(match('*.broker.example', 'a.b.broker.example'))
+        self.assertFalse(match('*.broker.example', 'lb1.broker.example.evil'))
+        self.assertTrue(match('broker-*.example', 'broker-01.example'))
+        self.assertFalse(match('broker-*.example', 'broker-.example'))
+
+    def test_ip_templates_compare_normalized_addresses(self):
+        match = connection._match_candidate_template
+        self.assertTrue(match('10.20.3.*', '10.20.3.4'))
+        self.assertFalse(match('10.20.3.*', '10.20.30.4'))
+        self.assertTrue(match('10.20.3.4', '10.20.3.4'))
+        self.assertFalse(match('10.20.3.4', '10.20.3.41'))
+        self.assertTrue(match('::1', '0:0:0:0:0:0:0:1'))
+        self.assertFalse(match('*.example', 'fd00::1'))
+
+    def test_host_rules_take_precedence_over_the_resolved_address(self):
+        rules = {
+            'lb.internal.example': self.corp_ca,
+            '10.20.*.*': self.rotated_ca,
+        }
+        rule = connection._resolve_candidate_tls_rule(rules,
+                                                      'lb.internal.example',
+                                                      5671,
+                                                      address='10.20.3.4')
+        self.assertIs(rule, self.corp_ca)
+
+    def test_the_address_covers_a_name_with_no_rule(self):
+        rules = {'10.20.*.*': self.rotated_ca}
+        rule = connection._resolve_candidate_tls_rule(
+            rules, 'unlisted.internal.example', 5671, address='10.20.3.4')
+        self.assertIs(rule, self.rotated_ca)
+
+    def test_the_most_specific_template_wins(self):
+        exact = connection.TLSVerificationRule(ssl.create_default_context(),
+                                               'lb1.internal.example')
+        rules = {
+            '*.internal.example': self.corp_ca,
+            'lb1.internal.example': exact
+        }
+        self.assertIs(
+            connection._resolve_candidate_tls_rule(rules,
+                                                   'lb1.internal.example',
+                                                   5671), exact)
+
+    def test_an_uncovered_candidate_states_host_address_and_templates(self):
+        rules = {'*.broker.example': self.corp_ca}
+        with self.assertRaises(
+                exceptions.CandidateNotCoveredByTLSRuleError) as raised:
+            connection._resolve_candidate_tls_rule(rules,
+                                                   'unknown.example',
+                                                   5671,
+                                                   address='192.0.2.9')
+        text = repr(raised.exception)
+        self.assertIn("'unknown.example'", text)
+        self.assertIn("resolved '192.0.2.9'", text)
+        self.assertIn("'*.broker.example'", text)
+        self.assertEqual(raised.exception.host, 'unknown.example')
+        self.assertEqual(raised.exception.port, 5671)
+
+    def test_no_rules_means_no_selection(self):
+        self.assertIsNone(
+            connection._resolve_candidate_tls_rule(None, 'any.example', 5671))

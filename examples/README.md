@@ -88,6 +88,7 @@ Either flag is enough on its own. `durable=True` is the usual answer; `exclusive
 | `blocking_consume_recover_multiple_hosts.py` | Connection recovery across multiple brokers |
 | `blocking_consume_recover_multiple_hosts_retry.py` | Multi-host recovery using the `retry` library |
 | `blocking_consume_tls.py` | Blocking consumer with TLS |
+| `blocking_consume_tls_rules.py` | TLS with a verification name and trust store per candidate |
 | `comparing_publishing_sync.py` | Simple synchronous publish |
 
 ### Asynchronous adapters
@@ -125,6 +126,7 @@ Either flag is enough on its own. `durable=True` is the usual answer; `exclusive
 | `tls_mutual_authentication.py` | Mutual TLS using test certificates from `tests/certs/` |
 | `tls_mutual_authentication_twisted.py` | Mutual TLS with Twisted adapter |
 | `blocking_consume_tls.py` | Blocking consumer over TLS, where the certificate does not name the address dialed |
+| `blocking_consume_tls_rules.py` | Per-candidate `tls_rules`, one verification name and trust store for each broker candidate |
 
 ### Other
 

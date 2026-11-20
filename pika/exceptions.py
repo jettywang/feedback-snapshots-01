@@ -194,6 +194,34 @@ class ConnectionClosedByClient(ConnectionClosed):
     """Connection was closed at request of Pika client."""
 
 
+class CandidateNotCoveredByTLSRuleError(AMQPConnectionError):
+    """
+    A connection candidate has no configured TLS verification rule.
+
+    The candidate is refused before any socket is opened for it, so no AMQP traffic reaches it. Its
+    ``host`` is the configured host and ``port`` the configured port; ``reason`` names what is
+    missing.
+    """
+
+    def __init__(self,
+                 reason: str,
+                 *,
+                 host: str | None = None,
+                 port: int | None = None) -> None:
+        """
+        :param reason: why the candidate cannot be attributed to a rule
+        :param host: hostname or IP from the connection parameters
+        :param port: port from the connection parameters
+        """
+        super().__init__(reason, host=host, port=port)
+        self.reason = reason
+
+    @override
+    def __repr__(self) -> str:
+        return (f'{self.__class__.__name__}: {self.reason}'
+                f'{self._host_port_suffix()}')
+
+
 class ConnectionBlockedTimeout(AMQPConnectionError):
     """RabbitMQ-specific: timed out waiting for connection.unblocked."""
 
