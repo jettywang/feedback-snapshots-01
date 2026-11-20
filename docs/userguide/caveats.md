@@ -86,7 +86,35 @@ We would still **strongly** advise to remove orphaned object permissions explici
 
 ## Using multiple databases
 
-This is not supported at present time due to a Django bug. See
+`ObjectPermissionChecker` (and the shortcuts built on it, such as
+`get_perms()`, `get_user_perms()` and `get_group_perms()`) checks permissions
+against the database each object belongs to. The owning database is taken
+from the object's `_state.db`, which Django sets whenever an instance is
+fetched (e.g. via `.using('replica')`) or saved. Content types, permission
+rows and group memberships are all resolved on that database, and the
+checker's in-memory cache is keyed by database alias, so one checker instance
+can safely be reused for objects living in different databases - even when
+primary keys, content type ids or user ids collide across them.
+
+`prefetch_perms()` works per database as well: pass a queryset routed to the
+desired database (or a list of objects from one database) and the permissions
+are prefetched from that database.
+
+Because primary keys are reused across databases, guardian refuses to guess
+when ownership is unclear and raises
+`guardian.exceptions.ObjectDatabaseAmbiguityError` instead:
+
+- checking an object that was never fetched from or saved to a database
+  (its `_state.db` is `None`), or
+- prefetching a list that mixes objects from different databases -
+  prefetch each database's objects separately.
+
+Note that custom `GUARDIAN_GET_CONTENT_TYPE` functions only take part in
+per-database resolution if they accept an optional `using` keyword argument;
+otherwise they keep being called exactly as before.
+
+Queryset-returning shortcuts such as `get_objects_for_user()` still do not
+support spanning multiple databases due to a Django bug. See
 [288](https://github.com/django-guardian/django-guardian/issues/288) and
 [16281](https://code.djangoproject.com/ticket/16281).
 

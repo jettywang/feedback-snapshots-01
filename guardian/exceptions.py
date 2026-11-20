@@ -34,6 +34,17 @@ class MixedContentTypeError(GuardianError):
     pass
 
 
+class ObjectDatabaseAmbiguityError(GuardianError):
+    """Raised when the database an object belongs to cannot be determined.
+
+    This happens when checking permissions for an object that was never
+    fetched from or saved to a database, or when objects from different
+    databases are mixed in a single permission lookup.
+    """
+
+    pass
+
+
 class MultipleIdentityAndObjectError(GuardianError):
     """Raised when an operation is attempted on both user/group and object."""
 

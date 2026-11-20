@@ -45,7 +45,12 @@ SECRET_KEY = "".join(random.choice(string.ascii_letters) for x in range(40))
 
 # Database specific
 
-DATABASES = {"default": env.db(default="sqlite:///")}
+DATABASES = {
+    "default": env.db(default="sqlite:///"),
+    # Second in-memory database used by the multi-database tests to prove
+    # that object permission checks follow the database each object lives in.
+    "secondary": env.db("SECONDARY_DATABASE_URL", default="sqlite:///"),
+}
 
 
 TEMPLATES = [

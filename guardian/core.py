@@ -2,38 +2,72 @@ from collections.abc import Iterable
 from itertools import chain
 
 from django.contrib.auth.models import Permission
+from django.db import DEFAULT_DB_ALIAS
 from django.db.models import Model
 from django.db.models.query import QuerySet
 from django.utils.encoding import force_str
 
 from guardian.conf import settings as guardian_settings
 from guardian.ctypes import get_content_type
+from guardian.exceptions import ObjectDatabaseAmbiguityError
 from guardian.utils import get_group_obj_perms_model, get_identity, get_user_obj_perms_model
+
+
+def _get_obj_db(obj: Model) -> str:
+    """Return the alias of the database that owns `obj`.
+
+    Raises:
+        ObjectDatabaseAmbiguityError: If the object's database cannot be
+            determined, e.g. the instance was never fetched from or saved
+            to a database.
+    """
+    db = obj._state.db
+    if db is None:
+        raise ObjectDatabaseAmbiguityError(
+            "Cannot check object permissions for %s (pk=%r): the database that owns "
+            "this object is unknown. Fetch the object from the database (e.g. via "
+            ".using('<alias>')) or save it first, so permissions are looked up in "
+            "the database the object belongs to." % (obj._meta.label, obj.pk)
+        )
+    return db
 
 
 def _get_pks_model_and_ctype(objects):
     """
-    Returns the primary keys, model and content type of an iterable of Django model objects.
-    Assumes that all objects are of the same content type.
+    Returns the primary keys, model, content type and database alias of an
+    iterable of Django model objects.
+    Assumes that all objects are of the same content type and come from the
+    same database.
     """
 
     model = None
     ctype = None
     pks = None
+    db = None
 
     if isinstance(objects, QuerySet):
         model = objects.model
+        db = objects.db
         pks = [force_str(pk) for pk in objects.values_list("pk", flat=True)]
-        ctype = get_content_type(model)
+        ctype = get_content_type(model, using=db)
     else:
         pks = []
         for idx, obj in enumerate(objects):
+            obj_db = _get_obj_db(obj)
             if not idx:
                 model = type(obj)
-                ctype = get_content_type(model)
+                db = obj_db
+                ctype = get_content_type(model, using=db)
+            elif obj_db != db:
+                raise ObjectDatabaseAmbiguityError(
+                    "Cannot prefetch permissions for objects from multiple databases "
+                    "in one call: %s (pk=%r) belongs to database '%s' but earlier "
+                    "objects belong to '%s'. Prefetch each database's objects "
+                    "separately." % (obj._meta.label, obj.pk, obj_db, db)
+                )
             pks.append(force_str(obj.pk))
 
-    return pks, model, ctype
+    return pks, model, ctype, db
 
 
 class ObjectPermissionChecker:
@@ -82,12 +116,13 @@ class ObjectPermissionChecker:
         return perm in self.get_perms(obj)
 
     def get_group_filters(self, obj):
-        ctype = get_content_type(obj)
+        db = _get_obj_db(obj)
+        ctype = get_content_type(obj, using=db)
         model = get_group_obj_perms_model(obj)
         related_name = model.permission.field.related_query_name()
 
         if self.user:
-            group_filters = {f"{related_name}__group__in": self.user.groups.all()}
+            group_filters = {f"{related_name}__group__in": self.user.groups.using(db).all()}
         else:
             group_filters = {f"{related_name}__group": self.group}
 
@@ -104,7 +139,8 @@ class ObjectPermissionChecker:
         return group_filters
 
     def get_user_filters(self, obj: Model):
-        ctype = get_content_type(obj)
+        db = _get_obj_db(obj)
+        ctype = get_content_type(obj, using=db)
         model = get_user_obj_perms_model(obj)
         related_name = model.permission.field.related_query_name()  # type: ignore[attr-defined]
 
@@ -126,9 +162,10 @@ class ObjectPermissionChecker:
         if self.user and not self.user.is_active:
             return Permission.objects.none().values_list("codename", flat=True)
 
-        ctype = get_content_type(obj)
+        db = _get_obj_db(obj)
+        ctype = get_content_type(obj, using=db)
 
-        perms_qs = Permission.objects.filter(content_type=ctype)
+        perms_qs = Permission.objects.using(db).filter(content_type=ctype)
         user_filters = self.get_user_filters(obj)
         user_perms_qs = perms_qs.filter(**user_filters)
         user_perms: QuerySet[str] = user_perms_qs.values_list("codename", flat=True)
@@ -139,9 +176,10 @@ class ObjectPermissionChecker:
         if self.user and not self.user.is_active:
             return Permission.objects.none().values_list("codename", flat=True)
 
-        ctype = get_content_type(obj)
+        db = _get_obj_db(obj)
+        ctype = get_content_type(obj, using=db)
 
-        perms_qs = Permission.objects.filter(content_type=ctype)
+        perms_qs = Permission.objects.using(db).filter(content_type=ctype)
         group_filters = self.get_group_filters(obj)
         group_perms_qs = perms_qs.filter(**group_filters)
         group_perms: QuerySet[str] = group_perms_qs.values_list("codename", flat=True)
@@ -165,12 +203,13 @@ class ObjectPermissionChecker:
         if guardian_settings.AUTO_PREFETCH and not (self.user and self.user.is_superuser):
             self._prefetch_cache()
 
-        ctype = get_content_type(obj)
+        db = _get_obj_db(obj)
+        ctype = get_content_type(obj, using=db)
         key = self.get_local_cache_key(obj)
         if key not in self._obj_perms_cache:
             if self.user and self.user.is_superuser:
                 perms: list[str] = list(
-                    Permission.objects.filter(content_type=ctype).values_list("codename", flat=True)
+                    Permission.objects.using(db).filter(content_type=ctype).values_list("codename", flat=True)
                 )
             # If auto-prefetching enabled, do not hit the database
             elif guardian_settings.AUTO_PREFETCH:
@@ -187,9 +226,15 @@ class ObjectPermissionChecker:
         return self._obj_perms_cache[key]
 
     def get_local_cache_key(self, obj: Model) -> tuple:
-        """Returns cache key for `_obj_perms_cache` dict."""
-        ctype = get_content_type(obj)
-        return ctype.id, force_str(obj.pk)
+        """Returns cache key for `_obj_perms_cache` dict.
+
+        The key includes the alias of the database the object belongs to, so
+        that reusing one checker for objects living in different databases
+        never mixes up their permissions.
+        """
+        db = _get_obj_db(obj)
+        ctype = get_content_type(obj, using=db)
+        return db, ctype.id, force_str(obj.pk)
 
     def prefetch_perms(self, objects: QuerySet):
         """Prefetches the permissions for objects in `objects` and puts them in the cache.
@@ -200,19 +245,21 @@ class ObjectPermissionChecker:
         if self.user and not self.user.is_active:
             return []
 
-        pks, model, ctype = _get_pks_model_and_ctype(objects)
+        pks, model, ctype, db = _get_pks_model_and_ctype(objects)
 
         if self.user and self.user.is_superuser:
-            perms: Iterable = list(Permission.objects.filter(content_type=ctype).values_list("codename", flat=True))
+            perms: Iterable = list(
+                Permission.objects.using(db).filter(content_type=ctype).values_list("codename", flat=True)
+            )
 
             for pk in pks:
-                key = (ctype.id, force_str(pk))
+                key = (db, ctype.id, force_str(pk))
                 self._obj_perms_cache[key] = perms
 
             return True
 
         if self.user:
-            group_filters = {"group__in": self.user.groups.all()}
+            group_filters = {"group__in": self.user.groups.using(db).all()}
         else:
             group_filters = {"group": self.group}
 
@@ -240,23 +287,23 @@ class ObjectPermissionChecker:
 
             # Query user and group permissions separately and then combine
             # the results to avoid a slow query
-            user_perms_qs = model.objects.filter(**user_filters).select_related("permission")
-            group_perms_qs = group_model.objects.filter(**group_filters).select_related("permission")
+            user_perms_qs = model.objects.using(db).filter(**user_filters).select_related("permission")
+            group_perms_qs = group_model.objects.using(db).filter(**group_filters).select_related("permission")
             perms = chain(user_perms_qs, group_perms_qs)
         else:
-            perms = group_model.objects.filter(**group_filters).select_related("permission")
+            perms = group_model.objects.using(db).filter(**group_filters).select_related("permission")
 
         # initialize entry in '_obj_perms_cache' for all prefetched objects
         # The ctype is assumed above to be homogenous, so leave `objects` unevaluated.
-        for key in ((ctype.id, pk) for pk in pks):
+        for key in ((db, ctype.id, pk) for pk in pks):
             if key not in self._obj_perms_cache:
                 self._obj_perms_cache[key] = []
 
         for perm in perms:
             if type(perm).objects.is_generic():
-                key = (ctype.id, perm.object_pk)
+                key = (db, ctype.id, perm.object_pk)
             else:
-                key = (ctype.id, force_str(perm.content_object_id))
+                key = (db, ctype.id, force_str(perm.content_object_id))
 
             self._obj_perms_cache[key].append(perm.permission.codename)
 
@@ -267,6 +314,7 @@ class ObjectPermissionChecker:
         cache = {}
         for qs in querysets:
             model = qs.model
+            db = qs.db
             if model.objects.is_generic():
                 perms = qs.select_related("permission__codename").values_list(
                     "content_type_id", "object_pk", "permission__codename"
@@ -280,9 +328,10 @@ class ObjectPermissionChecker:
                 rows = qs.values_list("permission__content_type_id", "content_object_id", "permission__codename")
                 perms = ((ctype_id, force_str(object_pk), codename) for ctype_id, object_pk, codename in rows)
             for p in perms:
-                if p[:2] not in cache:
-                    cache[p[:2]] = []
-                cache[p[:2]] += [
+                key = (db, p[0], p[1])
+                if key not in cache:
+                    cache[key] = []
+                cache[key] += [
                     p[2],
                 ]
         obj._guardian_perms_cache = cache
@@ -305,16 +354,20 @@ class ObjectPermissionChecker:
         direct_user_models = get_direct_obj_perms_models(UserObjectPermissionBase, UserObjectPermission)
         direct_group_models = get_direct_obj_perms_models(GroupObjectPermissionBase, GroupObjectPermission)
 
+        # Permissions are stored in the database the identity belongs to.
+        state = getattr(obj, "_state", None)
+        db = (state.db if state is not None else None) or DEFAULT_DB_ALIAS
+
         if self.user:
             querysets = (
-                [UserObjectPermission.objects.filter(user=obj)]
-                + [model.objects.filter(user=obj) for model in direct_user_models]
-                + [GroupObjectPermission.objects.filter(group__user=obj)]
-                + [model.objects.filter(group__user=obj) for model in direct_group_models]
+                [UserObjectPermission.objects.using(db).filter(user=obj)]
+                + [model.objects.using(db).filter(user=obj) for model in direct_user_models]
+                + [GroupObjectPermission.objects.using(db).filter(group__user=obj)]
+                + [model.objects.using(db).filter(group__user=obj) for model in direct_group_models]
             )
         else:
-            querysets = [GroupObjectPermission.objects.filter(group=obj)] + [
-                model.objects.filter(group=obj) for model in direct_group_models
+            querysets = [GroupObjectPermission.objects.using(db).filter(group=obj)] + [
+                model.objects.using(db).filter(group=obj) for model in direct_group_models
             ]
 
         obj, cache = self._init_obj_prefetch_cache(obj, *querysets)
