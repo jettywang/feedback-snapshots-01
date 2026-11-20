@@ -141,7 +141,8 @@ usage: pip-audit [-h] [-V] [-l] [-r REQUIREMENT] [--locked] [-f FORMAT]
                  [--cache-dir CACHE_DIR] [--progress-spinner {on,off}]
                  [--timeout TIMEOUT] [--path PATH] [-v] [--fix]
                  [--require-hashes] [--index-url INDEX_URL]
-                 [--extra-index-url URL] [--skip-editable] [--no-deps]
+                 [--extra-index-url URL] [--internal-index-url URL]
+                 [--authorize-index-url URL] [--skip-editable] [--no-deps]
                  [-o FILE] [--ignore-vuln ID] [--disable-pip]
                  [project_path]
 
@@ -213,6 +214,18 @@ options:
                         extra URLs of package indexes to use in addition to
                         `--index-url`; should follow the same rules as
                         `--index-url` (default: [])
+  --internal-index-url URL
+                        enforce the company index policy: the temporary
+                        resolution environment is pinned to this internal
+                        mirror, and requirements files declaring other
+                        package sources are rejected before resolution
+                        unless authorized with `--authorize-index-url`
+                        (default: None)
+  --authorize-index-url URL
+                        explicitly authorized exception to the company index
+                        policy: a project-declared package source that may
+                        influence the temporary resolution environment;
+                        requires `--internal-index-url` (default: [])
   --skip-editable       don't audit packages that are marked as editable
                         (default: False)
   --no-deps             don't perform any dependency resolution; requires all
@@ -497,6 +510,16 @@ $ pip-audit --require-hashes -r requirements.txt
 
 `pip-audit` supports `--index-url` and `--extra-index-url` for configuring an alternate
 or supplemental package indices, just like `pip`.
+
+### Enforcing a company index policy
+
+Deployments that must resolve exclusively against a fixed internal mirror can pass
+`--internal-index-url`. This pins the temporary resolution environment to that mirror and,
+*before any resolution happens*, rejects requirements files that declare other package
+sources (`--index-url`, `--extra-index-url`, `--find-links`, or `--no-index`). Declarations
+matching the internal mirror are always accepted; specific project-declared sources can be
+explicitly authorized with repeated `--authorize-index-url` flags. When a conflict is
+reported, the resolver is never invoked.
 
 When *unauthenticated*, these indices should work as expected. However, when a third-party
 index requires authentication, `pip-audit` has a few additional restrictions on top of

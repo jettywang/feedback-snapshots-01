@@ -32,6 +32,7 @@ from pip_audit._format import (
     MarkdownFormat,
     VulnerabilityFormat,
 )
+from pip_audit._index_policy import IndexPolicy
 from pip_audit._service import EcosystemsService, OsvService, PyPIService
 from pip_audit._service.interface import ConnectionError as VulnServiceConnectionError
 from pip_audit._service.interface import (
@@ -354,6 +355,26 @@ def _parser() -> argparse.ArgumentParser:  # pragma: no cover
         "same rules as `--index-url`",
     )
     parser.add_argument(
+        "--internal-index-url",
+        type=str,
+        metavar="URL",
+        default=None,
+        help="enforce the company index policy: the temporary resolution environment is pinned "
+        "to this internal mirror, and requirements files declaring other package sources are "
+        "rejected before resolution unless authorized with `--authorize-index-url`",
+    )
+    parser.add_argument(
+        "--authorize-index-url",
+        type=str,
+        metavar="URL",
+        action="append",
+        dest="authorized_index_urls",
+        default=[],
+        help="explicitly authorized exception to the company index policy: a project-declared "
+        "package source that may influence the temporary resolution environment; requires "
+        "`--internal-index-url`",
+    )
+    parser.add_argument(
         "--skip-editable",
         action="store_true",
         help="don't audit packages that are marked as editable",
@@ -476,6 +497,11 @@ def audit() -> None:  # pragma: no cover
             parser.error("The --no-deps flag can only be used with --requirement (-r)")
         elif args.disable_pip:
             parser.error("The --disable-pip flag can only be used with --requirement (-r)")
+        elif args.internal_index_url:
+            parser.error("The --internal-index-url flag can only be used with --requirement (-r)")
+
+    if args.authorized_index_urls and args.internal_index_url is None:
+        parser.error("The --authorize-index-url flag requires --internal-index-url")
 
     # Nudge users to consider alternate workflows.
     if args.require_hashes and args.no_deps:
@@ -509,6 +535,13 @@ def audit() -> None:  # pragma: no cover
                 if not req.exists():
                     _fatal(f"invalid requirements input: {req}")
 
+            index_policy = None
+            if args.internal_index_url is not None:
+                index_policy = IndexPolicy(
+                    internal_index_url=args.internal_index_url,
+                    authorized_index_urls=frozenset(args.authorized_index_urls),
+                )
+
             source = RequirementSource(
                 args.requirements,
                 require_hashes=args.require_hashes,
@@ -517,6 +550,7 @@ def audit() -> None:  # pragma: no cover
                 skip_editable=args.skip_editable,
                 index_url=args.index_url,
                 extra_index_urls=args.extra_index_urls,
+                index_policy=index_policy,
                 state=state,
             )
         elif args.project_path is not None:

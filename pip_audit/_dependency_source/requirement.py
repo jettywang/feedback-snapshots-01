@@ -29,6 +29,7 @@ from pip_audit._dependency_source import (
     InvalidRequirementSpecifier,
 )
 from pip_audit._fix import ResolvedFixVersion
+from pip_audit._index_policy import IndexPolicy
 from pip_audit._service import Dependency
 from pip_audit._service.interface import ResolvedDependency, SkippedDependency
 from pip_audit._state import AuditState
@@ -54,6 +55,7 @@ class RequirementSource(DependencySource):
         skip_editable: bool = False,
         index_url: str | None = None,
         extra_index_urls: list[str] = [],
+        index_policy: IndexPolicy | None = None,
         state: AuditState = AuditState(),
     ) -> None:
         """
@@ -79,6 +81,12 @@ class RequirementSource(DependencySource):
 
         `extra_index_urls` are the extra URLs of package indexes.
 
+        `index_policy` is an optional company `IndexPolicy`. When supplied,
+        requirements files are checked for index-affecting declarations
+        before any resolution happens: conflicting declarations raise an
+        `IndexPolicyError` and the resolver is never invoked. The temporary
+        resolution environment is pinned to the policy's internal mirror.
+
         `state` is an `AuditState` to use for state callbacks.
         """
         self._filenames = filenames
@@ -88,6 +96,7 @@ class RequirementSource(DependencySource):
         self._skip_editable = skip_editable
         self._index_url = index_url
         self._extra_index_urls = extra_index_urls
+        self._index_policy = index_policy
         self.state = state
         self._dep_cache: dict[Path, set[Dependency]] = {}
 
@@ -167,6 +176,15 @@ class RequirementSource(DependencySource):
             yield from self._collect_preresolved_deps(iter(reqs), require_hashes)
             return
 
+        index_url = self._index_url
+        if self._index_policy is not None:
+            # Enforce the company index policy before any resolution happens:
+            # conflicting declarations raise here and the resolver below is
+            # never invoked. The temporary resolution environment is pinned
+            # to the policy's internal mirror.
+            self._index_policy.check_requirements_files(filenames)
+            index_url = self._index_policy.internal_index_url
+
         ve_args = []
         if self._require_hashes:
             ve_args.append("--require-hashes")
@@ -174,7 +192,7 @@ class RequirementSource(DependencySource):
             ve_args.extend(["-r", str(filename)])
 
         # Try to install the supplied requirements files.
-        ve = VirtualEnv(ve_args, self._index_url, self._extra_index_urls, self.state)
+        ve = VirtualEnv(ve_args, index_url, self._extra_index_urls, self.state)
         try:
             with TemporaryDirectory() as ve_dir:
                 ve.create(ve_dir)
