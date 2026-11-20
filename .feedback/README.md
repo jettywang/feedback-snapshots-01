@@ -9,3 +9,16 @@ uv pip install --python .venv/bin/python -r .feedback/requirements.txt -e .
 ```
 
 Measured on macOS in 0.948 seconds. Tests use local fixtures and require no external service.
+
+## Identity/pool simulation
+
+The temporary-Vault-identity deployment design and its executable evidence live
+outside the upstream suite:
+
+```sh
+.venv/bin/python -m pytest -q -o addopts= tests/simulation
+.venv/bin/python -m tests.simulation.run_all_scenarios
+```
+
+Deliverable: `docs/design/deployment-identity-pool.md` (decision table and exit
+proofs) and `docs/design/observed-timelines.md` (generated request timelines).
