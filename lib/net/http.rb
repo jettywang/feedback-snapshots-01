@@ -2693,3 +2693,5 @@ require_relative 'http/response'
 require_relative 'http/responses'
 
 require_relative 'http/proxy_delta'
+
+require_relative 'http/identity_connection'

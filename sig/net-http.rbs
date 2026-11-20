@@ -2056,6 +2056,55 @@ module Net
     #     #<Net::HTTPOK 200 OK readbody=false>
     #
     def request: (Net::HTTPRequest req, ?String? body) ?{ (Net::HTTPResponse response) -> void } -> Net::HTTPResponse
+
+    class ClientIdentity
+      class LoadError < Net::ProtocolError
+      end
+
+      class MismatchError < LoadError
+      end
+
+      def self.from_pem: (String certificate_pem, String key_pem, ?approved_pem: String?) -> ClientIdentity
+
+      def self.from_files: (String certificate_path, String key_path, ?approved_path: String?) -> ClientIdentity
+
+      def initialize: (untyped certificate, untyped key, ?untyped approved_certificate) -> void
+
+      attr_reader certificate: untyped
+
+      attr_reader fingerprint: String
+
+      def subject: () -> String
+
+      def serial: () -> Integer
+
+      def public_key_pem: () -> String
+
+      def certificate_for?: (untyped other_certificate) -> bool
+
+      def apply!: (Net::HTTP http) -> Net::HTTP
+
+      def inspect: () -> String
+
+      alias to_s inspect
+    end
+
+    class IdentityConnection
+      class IdentityNotFound < Net::ProtocolError
+      end
+
+      def initialize: (String address, ?Integer? port, ?Hash[Symbol, untyped] default_options) -> void
+
+      def register: (Symbol | String name, ClientIdentity identity) -> IdentityConnection
+
+      def identity: (Symbol | String name) -> ClientIdentity
+
+      def identities: () -> Array[Symbol]
+
+      def connection: (Symbol | String name, ?Hash[Symbol, untyped] options) -> Net::HTTP
+
+      def start: (Symbol | String name, ?Hash[Symbol, untyped] options) ?{ (Net::HTTP http) -> untyped } -> untyped
+    end
   end
 
   # <!-- rdoc-file=lib/net/http/generic_request.rb -->
