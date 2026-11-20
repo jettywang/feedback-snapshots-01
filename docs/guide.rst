@@ -436,6 +436,51 @@ monitoring the schedule. The schedule can still be read or written to, but
 scheduled tasks will **not** automatically be executed and periodic tasks will
 not be enqueued.
 
+Scoped debug sessions
+~~~~~~~~~~~~~~~~~~~~~
+
+Flipping the global ``immediate`` flag executes *every* task synchronously and,
+by default, swaps the storage backend for the whole process. For on-call
+debugging against a live system, :py:meth:`Huey.debug_mode` provides a more
+controlled, scoped entry point:
+
+* only tasks on an explicit allow-list (task names or
+  :py:class:`TaskWrapper` instances) run synchronously; any other task keeps
+  its normal enqueue behavior, or raises :class:`~huey.exceptions.DebugModeError`
+  when ``strict=True`` is given;
+* the session runs against a fresh, local in-memory storage backend, so locks,
+  results, schedules and any diverted tasks never touch the configured
+  (persistent) backend;
+* the previous immediate flag, storage backend and lock registry are always
+  restored when the block exits, even if an exception propagates out of it.
+
+The context manager yields a :py:class:`DebugSession`, which records which
+tasks actually ran and offers read-only views into the isolated local state:
+
+.. code-block:: python
+
+    @huey.task()
+    def security_check(value):
+        return inspect(value)
+
+    @huey.task()
+    def regular_job(value):
+        process(value)
+
+    with huey.debug_mode([security_check]) as session:
+        security_check(payload)   # runs synchronously, result stored locally
+        regular_job(payload)      # diverted to the session's local queue
+
+    session.task_names            # ['security_check']
+    session.result_count()        # local-only results
+    session.lock_keys()           # local-only locks
+
+    # The persistent queue and result store are unchanged after the block.
+
+Tasks enqueued inside the block that are not on the allow-list are written to
+the session's in-memory queue, not the live backend, and are discarded when the
+session ends. Use ``strict=True`` if such a call should fail loudly instead.
+
 
 Testing Guidelines
 ------------------

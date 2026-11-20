@@ -5,6 +5,11 @@ Changelog
 
 [View commits](https://github.com/coleifer/huey/compare/3.5.4...master)
 
+* Add `Huey.debug_mode()` context manager for controlled, scoped synchronous
+  debugging: only allow-listed tasks execute synchronously, all locks and
+  results stay in an isolated local storage backend, and the original state is
+  restored on exit even when the block raises.
+
 ## 3.5.4
 
 * Fix possible hang if worker holding the stop flag was killed while holding

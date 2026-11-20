@@ -4,6 +4,7 @@ __version__ = '3.5.4'
 
 from huey.api import BlackHoleHuey
 from huey.api import CySqliteHuey
+from huey.api import DebugSession
 from huey.api import Huey
 from huey.api import FileHuey
 from huey.api import MemoryHuey

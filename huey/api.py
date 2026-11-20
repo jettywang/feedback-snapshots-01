@@ -1,4 +1,5 @@
 import copy
+import contextlib
 import datetime
 import inspect
 import itertools
@@ -18,6 +19,7 @@ from huey.constants import EmptyData
 from huey.consumer import Consumer
 from huey.exceptions import CancelExecution
 from huey.exceptions import ConfigurationError
+from huey.exceptions import DebugModeError
 from huey.exceptions import RateLimitExceeded
 from huey.exceptions import RETRYING_EXCEPTIONS
 from huey.exceptions import ResultTimeout
@@ -127,6 +129,9 @@ class Huey(object):
         self._tasks_in_flight = set()
         self._timeout_handler = None  # This is consumer-specific.
 
+        # State for an active, scoped debug session (see Huey.debug_mode()).
+        self._debug = None
+
     def get_task_wrapper_class(self):
         return TaskWrapper
 
@@ -162,8 +167,73 @@ class Huey(object):
             self._immediate = value
             # If we are using different storage engines for immediate-mode
             # versus normal mode, we need to recreate the storage engine.
-            if self.immediate_use_memory:
+            if self.immediate_use_memory and self._debug is None:
                 self.storage = self.create_storage()
+
+    @contextlib.contextmanager
+    def debug_mode(self, tasks, strict=False):
+        """Run a scoped, synchronous debug session against an allow-list.
+
+        Unlike flipping the global ``immediate`` flag, this context manager
+        only executes tasks named in ``tasks`` synchronously; any other task
+        keeps its normal (enqueue) behavior. All locks, results, schedules and
+        other side-effects produced while the session is active are written to
+        a fresh, local in-memory storage backend, leaving the configured
+        (persistent) backend untouched. The original state is always restored
+        on exit, including when an exception propagates out of the block.
+
+        :param tasks: an iterable of task names (``str``) or registered
+            :py:class:`TaskWrapper` instances that are allowed to run
+            synchronously.
+        :param bool strict: when ``True``, enqueueing a task that is not on
+            the allow-list raises :class:`DebugModeError` instead of routing
+            it through the normal storage backend.
+        """
+        if self._debug is not None:
+            raise ConfigurationError(
+                'a debug session is already active on this Huey instance.')
+
+        debug_storage = self.get_immediate_storage()
+        session = DebugSession(self, self._normalize_debug_tasks(tasks),
+                               strict, debug_storage)
+        previous = {
+            'immediate': self._immediate,
+            'storage': self.storage,
+            'locks': set(self._locks),
+        }
+        self._debug = session
+        self._immediate = True
+        self.storage = debug_storage
+        try:
+            yield session
+        finally:
+            session.close()
+            self._immediate = previous['immediate']
+            self.storage = previous['storage']
+            self._locks = previous['locks']
+            self._debug = None
+
+    def _normalize_debug_tasks(self, tasks):
+        names = set()
+        for task in tasks:
+            if isinstance(task, TaskWrapper):
+                names.add(task.name or
+                          self._registry.task_to_string(task.task_class))
+            elif isinstance(task, str):
+                names.add(task)
+            else:
+                raise ConfigurationError(
+                    'debug_mode() expects task names or TaskWrapper '
+                    'instances, got %r.' % type(task))
+        if not names:
+            raise ConfigurationError(
+                'debug_mode() requires at least one allowed task.')
+        return names
+
+    def _debug_task_allowed(self, task):
+        task_class = type(task)
+        return (task.name in self._debug.tasks or
+                self._registry.task_to_string(task_class) in self._debug.tasks)
 
     def create_consumer(self, **options):
         return Consumer(self, **options)
@@ -313,9 +383,14 @@ class Huey(object):
 
         self._emit(S.SIGNAL_ENQUEUED, task)
 
-        if self._immediate:
+        if self._immediate and (self._debug is None or
+                                self._debug_task_allowed(task)):
             self.execute(task)
         else:
+            if self._debug is not None and self._debug.strict and \
+                    not self._debug_task_allowed(task):
+                raise DebugModeError(
+                    'task %s is not allowed in this debug session.' % task)
             self.storage.enqueue(self.serialize_task(task), task.priority)
 
         if not self.results:
@@ -790,6 +865,62 @@ class Huey(object):
             max_delay=max_delay,
             revoke_on_timeout=revoke_on_timeout,
             preserve=preserve)
+
+
+class DebugSession(object):
+    """Bookkeeping for an active :py:meth:`Huey.debug_mode` session.
+
+    The session exposes what actually ran synchronously plus read-only views
+    into the isolated local storage, so callers can verify debug behavior
+    without touching the persistent backend.
+    """
+    def __init__(self, huey, tasks, strict, storage):
+        self.huey = huey
+        self.tasks = tasks
+        self.strict = strict
+        self.storage = storage
+        self.executed = []
+        self.errors = []
+        self._receiver = self._receive
+        huey.signal(S.SIGNAL_COMPLETE, S.SIGNAL_ERROR)(self._receiver)
+
+    def _receive(self, signal, task, exc=None):
+        if signal == S.SIGNAL_COMPLETE:
+            self.executed.append(task)
+        else:
+            self.errors.append((task, exc))
+
+    def close(self):
+        self.huey.disconnect_signal(self._receiver, S.SIGNAL_COMPLETE,
+                                    S.SIGNAL_ERROR)
+
+    @property
+    def task_names(self):
+        return [task.name for task in self.executed]
+
+    @property
+    def task_ids(self):
+        return [task.id for task in self.executed]
+
+    def result_count(self):
+        return self.storage.result_store_size()
+
+    def results(self):
+        return self.storage.result_items()
+
+    def queue_size(self):
+        return self.storage.queue_size()
+
+    def scheduled_count(self):
+        return self.storage.schedule_size()
+
+    def lock_keys(self):
+        return sorted(key for key in self.huey._locks
+                      if self.storage.has_data_for_key(key))
+
+    def __repr__(self):
+        return '<DebugSession: allowed=%s executed=%s>' % (
+            sorted(self.tasks), self.task_names)
 
 
 class Task(object):
