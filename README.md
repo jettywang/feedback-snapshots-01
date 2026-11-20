@@ -32,6 +32,7 @@ with support from Google, and is currently maintained under the
   * [Environment variables](#environment-variables)
   * [Exit codes](#exit-codes)
   * [Dry runs](#dry-runs)
+  * [Deployment verification](#deployment-verification)
 * [Examples](#examples)
 * [Troubleshooting](#troubleshooting)
 * [Tips and Tricks](#tips-and-tricks)
@@ -143,6 +144,7 @@ usage: pip-audit [-h] [-V] [-l] [-r REQUIREMENT] [--locked] [-f FORMAT]
                  [--require-hashes] [--index-url INDEX_URL]
                  [--extra-index-url URL] [--skip-editable] [--no-deps]
                  [-o FILE] [--ignore-vuln ID] [--disable-pip]
+                 [--verify-deployment LOCK] [--generate-deployment-lock]
                  [project_path]
 
 audit the Python environment for dependencies with known vulnerabilities
@@ -226,6 +228,17 @@ options:
   --disable-pip         don't use `pip` for dependency resolution; this can
                         only be used with hashed requirements files or if the
                         `--no-deps` flag has been provided (default: False)
+  --verify-deployment LOCK
+                        verify the installed environment against a deployment
+                        lockfile instead of auditing: report each locked
+                        package as `same-build`, `pending-evidence`, or
+                        `build-mismatch` based on artifact fingerprints
+                        (default: None)
+  --generate-deployment-lock
+                        emit a deployment lockfile for the installed
+                        environment, recording each distribution's artifact
+                        fingerprint as `--hash=sha256:<digest>` evidence
+                        (default: False)
 ```
 <!-- @end-pip-audit-help@ -->
 
@@ -242,6 +255,7 @@ instead:
 | `--desc`                  | `PIP_AUDIT_DESC`                  | `PIP_AUDIT_DESC=off`                  |
 | `--progress-spinner`      | `PIP_AUDIT_PROGRESS_SPINNER`      | `PIP_AUDIT_PROGRESS_SPINNER=off`      |
 | `--output`                | `PIP_AUDIT_OUTPUT`                | `PIP_AUDIT_OUTPUT=/tmp/example`       |
+| `--verify-deployment`     | `PIP_AUDIT_VERIFY_DEPLOYMENT`     | `PIP_AUDIT_VERIFY_DEPLOYMENT=deployment.lock` |
 
 ### Exit codes
 
@@ -266,6 +280,37 @@ an audit (or fix) step is actually performed.
 * In fix mode, `pip-audit --fix --dry-run` performs the auditing step and prints
   out the fix behavior (i.e., which dependencies would be upgraded or skipped)
   that *would have been performed*.
+
+### Deployment verification
+
+Dependency tooling sometimes rebuilds a wheel under an identical name and
+version, which version-only checks cannot detect. `pip-audit` offers a
+deployment verification mode that fingerprints the installed artifacts and
+compares them against a deployment lockfile, without contacting any
+vulnerability service:
+
+```console
+$ pip-audit --generate-deployment-lock -o deployment.lock
+$ pip-audit --verify-deployment deployment.lock
+```
+
+The lockfile uses a requirements-like syntax: one `name==version` pin per
+line, each followed by `--hash=sha256:<digest>` evidence tokens recording
+the artifact's fingerprint. Each locked package is reported as `same-build`
+(the fingerprints match), `pending-evidence` (name and version match, but
+the lockfile records no evidence), `build-mismatch` (name and version
+match, but the artifact is a different build), `version-mismatch`, or
+`not-installed`. Locked and installed versions are always shown, so
+remediation owners can see what is deployed regardless of the verdict.
+
+Verification exits with `1` if any package is `build-mismatch`,
+`version-mismatch`, or `not-installed`, and `0` otherwise; `pending-evidence`
+is reported without failing the check.
+
+Use `--path` to verify an installation other than the current environment.
+See `examples/deployment-verification/` for a self-contained demo, including
+two rebuilt wheels that share a name and version but receive different
+artifact verdicts.
 
 ## Examples
 

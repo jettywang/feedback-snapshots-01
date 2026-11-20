@@ -43,6 +43,17 @@ from pip_audit._service.interface import (
 )
 from pip_audit._state import AuditSpinner, AuditState
 from pip_audit._util import assert_never
+from pip_audit._verify import (
+    FAILING_VERDICTS,
+    DeploymentLockError,
+    collect_installed,
+    format_verify_results,
+    load_deployment_lock,
+    lock_entries_from_installed,
+    render_deployment_lock,
+    verification_failed,
+    verify_deployment,
+)
 
 logging.basicConfig()
 logger = logging.getLogger(__name__)
@@ -391,6 +402,21 @@ def _parser() -> argparse.ArgumentParser:  # pragma: no cover
         "this can only be used with hashed requirements files or if the `--no-deps` flag has been "
         "provided",
     )
+    parser.add_argument(
+        "--verify-deployment",
+        type=Path,
+        metavar="LOCK",
+        default=os.environ.get("PIP_AUDIT_VERIFY_DEPLOYMENT"),
+        help="verify the installed environment against a deployment lockfile instead of "
+        "auditing: report each locked package as `same-build`, `pending-evidence`, or "
+        "`build-mismatch` based on artifact fingerprints",
+    )
+    parser.add_argument(
+        "--generate-deployment-lock",
+        action="store_true",
+        help="emit a deployment lockfile for the installed environment, recording each "
+        "distribution's artifact fingerprint as `--hash=sha256:<digest>` evidence",
+    )
     return parser
 
 
@@ -406,6 +432,45 @@ def _parse_args(parser: argparse.ArgumentParser) -> argparse.Namespace:  # pragm
     logger.debug(f"parsed arguments: {args}")
 
     return args
+
+
+def _deployment(args: argparse.Namespace, parser: argparse.ArgumentParser) -> NoReturn:  # pragma: no cover
+    """
+    Deployment verification entrypoint: fingerprint the installed environment
+    and either emit a deployment lockfile or verify against one.
+    """
+    if args.requirements is not None or args.project_path is not None:
+        parser.error(
+            "The --verify-deployment and --generate-deployment-lock flags cannot be used "
+            "with --requirement (-r) or a project path"
+        )
+    if args.fix:
+        parser.error("The --fix flag cannot be used with deployment verification")
+
+    installed = sorted(
+        collect_installed(paths=args.paths or None), key=lambda a: (a.canonical_name, a.version)
+    )
+
+    if args.generate_deployment_lock:
+        with _output_io(args.output) as io:
+            io.write(render_deployment_lock(lock_entries_from_installed(installed)))
+        sys.exit(0)
+
+    try:
+        locked = load_deployment_lock(args.verify_deployment)
+    except DeploymentLockError as e:
+        _fatal(str(e))
+    except OSError as e:
+        _fatal(f"couldn't read deployment lockfile: {e}")
+
+    results = verify_deployment(locked, installed)
+    with _output_io(args.output) as io:
+        io.write(format_verify_results(results))
+
+    for result in results:
+        if result.verdict in FAILING_VERDICTS:
+            logger.error(f"{result.name}: {result.verdict}")
+    sys.exit(1 if verification_failed(results) else 0)
 
 
 def _dep_source_from_project_path(
@@ -444,6 +509,9 @@ def audit() -> None:  # pragma: no cover
     """
     parser = _parser()
     args = _parse_args(parser)
+
+    if args.generate_deployment_lock or args.verify_deployment is not None:
+        _deployment(args, parser)
 
     service: VulnerabilityService
     if args.vulnerability_service is VulnerabilityServiceChoice.Osv:
