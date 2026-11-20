@@ -1,9 +1,14 @@
 import datetime
+import logging
 import time
 
 from huey.api import chord
 from huey.signals import *
 from huey.tests.base import BaseTestCase
+
+
+class RestrictedTestError(Exception):
+    pass
 
 
 class TestSignals(BaseTestCase):
@@ -299,3 +304,226 @@ class TestSignals(BaseTestCase):
         self.assertSignals(['enqueued', 'executing', 'complete'])
         self.assertEqual(len(logs.records), 2)
         self.assertIn('handler1', logs.records[0].getMessage())
+
+
+class TestRestrictedSignals(BaseTestCase):
+    def setUp(self):
+        super(TestRestrictedSignals, self).setUp()
+        self.inside = []
+        self.outside = []
+
+        @self.huey.signal()
+        def full_handler(signal, task, *args):
+            self.inside.append((signal, task, args))
+
+        @self.huey.signal(restricted=True)
+        def restricted_handler(signal, task):
+            self.outside.append((signal, task))
+
+    def test_restricted_receiver_sees_only_public_view(self):
+        @self.huey.task()
+        def task_a(secret, token=None):
+            return secret
+
+        r = task_a('customer-secret', token='AAAA')
+        self.assertTrue(r.id)
+
+        self.assertEqual(self.execute_next(), 'customer-secret')
+
+        # The restricted receiver only ever receives two arguments.
+        for signal, view in self.outside:
+            self.assertTrue(isinstance(view, TaskView))
+            self.assertEqual(view.id, r.id)
+            self.assertEqual(view.public_id, r.id)
+            self.assertEqual(view.name, 'task_a')
+            self.assertEqual(view.category, 'task_a')
+            self.assertTrue(view.task.endswith('.task_a'))
+            self.assertEqual(view.queue, self.huey.name)
+
+        # Customer data stayed in the execution path (full receiver).
+        inside_executing = [t for s, t, a in self.inside
+                            if s == SIGNAL_EXECUTING][0]
+        self.assertEqual(inside_executing.args, ('customer-secret',))
+        self.assertEqual(inside_executing.kwargs, {'token': 'AAAA'})
+
+    def test_success_and_error_signals_for_both_listeners(self):
+        @self.huey.task()
+        def good(value):
+            return value + 1
+
+        @self.huey.task()
+        def bad(value):
+            raise RestrictedTestError(value)
+
+        good_result = good(10)
+        bad_result = bad('top-secret')
+
+        self.assertEqual(self.execute_next(), 11)
+        self.assertTrue(self.execute_next() is None)
+
+        def events(entries, name):
+            return [entry for entry in entries
+                    if entry[1].name == name]
+
+        # Full listener gets the task instances and error payloads.
+        self.assertEqual(
+            [(s, t.args) for s, t, _ in events(self.inside, 'good')],
+            [('enqueued', (10,)), ('executing', (10,)),
+             ('complete', (10,))])
+        bad_inside = events(self.inside, 'bad')
+        self.assertEqual([s for s, t, a in bad_inside],
+                         ['enqueued', 'executing', 'error'])
+        error_args = bad_inside[-1][2]
+        self.assertEqual(len(error_args), 1)
+        self.assertTrue(isinstance(error_args[0], RestrictedTestError))
+
+        # Restricted listener reconciles by public task id, and never sees the
+        # arguments or exception.
+        outside_by_id = {}
+        for signal, view in self.outside:
+            outside_by_id.setdefault(view.id, []).append(signal)
+        self.assertEqual(outside_by_id[good_result.id],
+                         ['enqueued', 'executing', 'complete'])
+        self.assertEqual(outside_by_id[bad_result.id],
+                         ['enqueued', 'executing', 'error'])
+        for _, view in self.outside:
+            self.assertFalse(hasattr(view, 'args'))
+            self.assertFalse(hasattr(view, 'kwargs'))
+
+    def test_restricted_error_does_not_log_arguments(self):
+        @self.huey.task()
+        def bad(value):
+            raise RestrictedTestError(value)
+
+        leaked = 'sk-live-customer-secret'
+
+        @self.huey.signal(restricted=True)
+        def broken(signal, task):
+            raise ValueError('listener saw %s' % leaked)
+
+        @self.huey.signal()
+        def good(signal, task):
+            pass
+
+        r = bad(leaked)
+        with self.assertLogs('huey', 'ERROR') as logs:
+            self.assertTrue(self.execute_next() is None)
+
+        for record in logs.records:
+            message = record.getMessage()
+            self.assertNotIn(leaked, message)
+            self.assertNotIn('listener saw', message)
+
+        restricted_records = [record for record in logs.records
+                              if 'restricted receiver "broken"' in
+                              record.getMessage()]
+        self.assertTrue(restricted_records)
+        self.assertTrue(all(record.exc_info is None
+                            for record in restricted_records))
+        self.assertTrue(all(record.exc_text is None
+                            for record in restricted_records))
+
+        # Unrestricted receiver errors still log their traceback, which may
+        # include the exception and its arguments.
+        unrestricted = [record for record in logs.records
+                        if 'broken' not in record.getMessage()]
+        self.assertTrue(unrestricted)
+        self.assertTrue(any(record.exc_info for record in unrestricted))
+        self.assertIn(leaked, logging.Formatter().formatException(
+            unrestricted[-1].exc_info))
+
+    def test_unrestricted_receiver_error_logs_traceback(self):
+        # Existing behavior: a normal receiver failure logs the exception.
+        @self.huey.signal(SIGNAL_COMPLETE)
+        def broken(signal, task):
+            raise ValueError('boom')
+
+        @self.huey.task()
+        def task_a():
+            return 1
+
+        task_a()
+        with self.assertLogs('huey', 'ERROR') as logs:
+            self.execute_next()
+        self.assertTrue(any('boom' in r.getMessage() or r.exc_info
+                            for r in logs.records))
+
+    def test_taskview_is_read_only_and_has_no_payload(self):
+        view = TaskView('id-1', 'task_a', 'myapp.tasks', 'default')
+        self.assertEqual(view.id, 'id-1')
+        self.assertEqual(view.category, 'task_a')
+        self.assertEqual(view.task, 'myapp.tasks.task_a')
+        self.assertEqual(view.module, 'myapp.tasks')
+        self.assertEqual(view.queue, 'default')
+        self.assertNotIn('args', dir(view))
+        self.assertNotIn('kwargs', dir(view))
+        self.assertRaises(AttributeError, setattr, view, 'id', 'other')
+        self.assertRaises(AttributeError, setattr, view, 'args', ('x',))
+
+    def test_restricted_disconnect(self):
+        seen = []
+
+        def restricted(signal, view):
+            seen.append(signal)
+
+        self.huey.signal(SIGNAL_COMPLETE, restricted=True)(restricted)
+
+        @self.huey.task()
+        def task_a():
+            return 1
+
+        task_a()
+        self.execute_next()
+        self.assertIn(SIGNAL_COMPLETE, seen)
+
+        self.huey.disconnect_signal(restricted, SIGNAL_COMPLETE)
+        seen[:] = []
+        task_a()
+        self.execute_next()
+        self.assertNotIn(SIGNAL_COMPLETE, seen)
+
+    def test_restricted_signal_helper(self):
+        seen = []
+
+        @self.huey.restricted_signal(SIGNAL_COMPLETE)
+        def on_complete(signal, view):
+            seen.append((signal, view.name))
+
+        @self.huey.task()
+        def task_a():
+            return 1
+
+        task_a()
+        self.execute_next()
+        self.assertEqual(seen, [(SIGNAL_COMPLETE, 'task_a')])
+
+    def test_broken_receiver_name_does_not_break_dispatch(self):
+        state = []
+
+        class BrokenName(object):
+            @property
+            def __name__(self):
+                raise RuntimeError('cannot read name')
+
+            def __repr__(self):
+                raise RuntimeError('cannot repr')
+
+            def __call__(self, signal, task):
+                raise ValueError('nope')
+
+        self.huey._signal.connect(BrokenName(), restricted=True)
+
+        @self.huey.signal(restricted=True)
+        def good(signal, view):
+            state.append(view.id)
+
+        @self.huey.task()
+        def task_a():
+            return 1
+
+        r = task_a()
+        with self.assertLogs('huey', 'ERROR') as logs:
+            self.execute_next()
+        self.assertTrue(state)
+        self.assertEqual(state[0], r.id)
+        self.assertIn('<receiver>', logs.records[0].getMessage())

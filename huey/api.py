@@ -123,7 +123,7 @@ class Huey(object):
         self._startup = {}
         self._shutdown = {}
         self._registry = Registry()
-        self._signal = S.Signal()
+        self._signal = S.Signal(self.name)
         self._tasks_in_flight = set()
         self._timeout_handler = None  # This is consumer-specific.
 
@@ -281,14 +281,33 @@ class Huey(object):
                 break  # Task might have raced and finished.
             self._emit(S.SIGNAL_INTERRUPTED, task)
 
-    def signal(self, *signals):
+    def signal(self, *signals, restricted=False):
+        """
+        Register a signal receiver.
+
+        When ``restricted=True`` the receiver is called as
+        ``receiver(signal, task)``, where ``task`` is a :py:class:`TaskView`
+        exposing only the public task id, task category/name and queue. Task
+        arguments, kwargs and the exception instance are never passed to a
+        restricted receiver.
+        """
         def decorator(fn):
-            self._signal.connect(fn, *signals)
+            self._signal.connect(fn, *signals, restricted=restricted)
             return fn
         return decorator
 
     def disconnect_signal(self, receiver, *signals):
         self._signal.disconnect(receiver, *signals)
+
+    def restricted_signal(self, *signals):
+        """
+        Shortcut for ``signal(*signals, restricted=True)``.
+
+        Restricted receivers get a :py:class:`~huey.signals.TaskView` instead
+        of the task instance, so task arguments, kwargs and exception objects
+        never leave the task's execution path.
+        """
+        return self.signal(*signals, restricted=True)
 
     def _emit(self, signal, task, *args, **kwargs):
         self._signal.send(signal, task, *args, **kwargs)

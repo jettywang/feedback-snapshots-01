@@ -165,6 +165,47 @@ Signal handlers can be unregistered using :py:meth:`Huey.disconnect_signal`.
     # handling SIGNAL_LOCKED.
     huey.disconnect_signal(task_not_executed_handler, SIGNAL_LOCKED)
 
+Restricted signal handlers
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+A normal handler receives the task instance, which carries ``task.args``,
+``task.kwargs`` and, for ``SIGNAL_ERROR``, the exception as a third argument.
+Plugins such as log shippers or metrics exporters usually only need to know
+*what* ran, not the customer data it ran with.
+
+Pass ``restricted=True`` to :py:meth:`Huey.signal` (or use the
+:py:meth:`Huey.restricted_signal` shortcut) to subscribe without exposing
+task data. A restricted handler is called as ``handler(signal, task)`` where
+``task`` is a read-only :py:class:`~huey.signals.TaskView`:
+
+.. code-block:: python
+
+    from huey.signals import SIGNAL_COMPLETE, SIGNAL_ERROR
+
+    @huey.signal(SIGNAL_COMPLETE, SIGNAL_ERROR, restricted=True)
+    def audit(signal, task):
+        # task is a TaskView, not the Task instance.
+        print(signal, task.id, task.category, task.queue)
+
+``TaskView`` exposes:
+
+* ``id`` (aliases ``public_id``, ``task_id``) -- the public task id, usable
+  with :py:meth:`Huey.result` to reconcile the event.
+* ``name`` / ``category`` -- the task function name.
+* ``module`` and ``task`` / ``task_name`` / ``full_name`` -- the module and
+  fully-qualified task category, e.g. ``myapp.tasks.send_email``.
+* ``queue`` -- the queue name.
+
+The view has no ``args``, ``kwargs``, exception or result attributes, and is
+immutable. Task arguments and exceptions are never passed to a restricted
+handler -- not even the ``exc`` argument for ``SIGNAL_ERROR``. They remain in
+the task's own execution path and are visible to normal handlers only.
+
+Restricted and normal handlers may be registered on the same signals. Each
+handler keeps its own mode, so the log plugin can be restricted while your
+diagnostics handler receives the full task. A receiver registered through
+``restricted=True`` cannot opt back in to the raw task.
+
 Examples
 ^^^^^^^^
 
@@ -279,6 +320,12 @@ its result from being stored.
     @huey.signal(SIGNAL_COMPLETE)
     def working_handler(signal, task):
         record_completion(task.id)
+
+Descriptions of normal receivers are logged with the full traceback. For
+**restricted** receivers the log message names the receiver, the signal and
+the exception *type* only: no traceback, no exception message and no task
+data are logged. This keeps a misbehaving plugin from echoing customer data
+into the log, and protects the handlers registered after it.
 
 Signals and Immediate Mode
 --------------------------

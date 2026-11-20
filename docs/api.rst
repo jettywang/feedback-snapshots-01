@@ -711,9 +711,10 @@ Huey object
 
         Unregister the specified on-shutdown hook.
 
-    .. py:method:: signal(*signals)
+    .. py:method:: signal(*signals, restricted=False)
 
         :param signals: zero or more signals to handle.
+        :param bool restricted: subscribe without exposing task data.
         :returns: a decorator used to wrap the actual signal handler.
 
         Attach a signal handler callback, which will be executed when the
@@ -737,6 +738,23 @@ Huey object
                 # provide a default of ``exc=None``.
                 pass
 
+        When ``restricted=True``, the handler is called as
+        ``handler(signal, task)`` and ``task`` is a read-only
+        :py:class:`TaskView` exposing only the public task id, task category
+        and queue. The task arguments, kwargs and exception are withheld. This
+        is intended for logging or metrics plugins that do not need customer
+        data. See :ref:`signals`.
+
+    .. py:method:: restricted_signal(*signals)
+
+        Shortcut for ``signal(*signals, restricted=True)``.
+
+        .. code-block:: python
+
+            @huey.restricted_signal(SIGNAL_COMPLETE, SIGNAL_ERROR)
+            def audit(signal, task):
+                print(signal, task.id, task.category)
+
     .. py:method:: disconnect_signal(receiver, *signals)
 
         :param receiver: the signal handling function to disconnect.
@@ -744,7 +762,8 @@ Huey object
 
         Disconnect the signal handler from the provided signals. If no signals
         are provided, then the handler is disconnected from any signals it may
-        have been connected to.
+        have been connected to. Works the same for restricted and normal
+        handlers.
 
     .. py:method:: notify_interrupted_tasks()
 
@@ -2166,6 +2185,31 @@ Result
     :py:class:`Result` raises :py:class:`TaskException`. A chord callback
     receives it in place of the failed sub-task's return value. Import it
     from ``huey``.
+
+.. py:class:: TaskView(id, name, module='', queue=None)
+
+    :param str id: the public task id.
+    :param str name: the task function name (category).
+    :param str module: the module the task class was defined in.
+    :param str queue: the queue name.
+
+    Read-only, argument-free view of a task, passed to signal handlers
+    registered with ``restricted=True``. Import it from ``huey`` or
+    ``huey.signals``.
+
+    Properties: ``id`` (aliases ``public_id``, ``task_id``), ``name``
+    (alias ``category``), ``module``, ``task`` (alias ``task_name``,
+    ``full_name``), and ``queue``.
+
+    .. code-block:: python
+
+        @huey.signal(SIGNAL_ERROR, restricted=True)
+        def audit(signal, task):
+            print(task.id, task.category, task.queue)
+
+    The view has no ``args``, ``kwargs`` or exception attributes, cannot be
+    modified, and is constructed without evaluating the task's arguments or
+    calling ``repr()`` on the task.
 
 Consumer
 --------

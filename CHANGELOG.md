@@ -5,6 +5,18 @@ Changelog
 
 [View commits](https://github.com/coleifer/huey/compare/3.5.4...master)
 
+* Add opt-in restricted signal subscriptions: `Huey.signal(...,
+  restricted=True)` (or `Huey.restricted_signal(...)`) calls the receiver with
+  a read-only `TaskView` instead of the task instance. Restricted receivers
+  get only the public task id, task category/name, module and queue -- task
+  arguments, kwargs and the `SIGNAL_ERROR` exception stay in the task's
+  execution path and are visible to normal receivers only.
+* A restricted receiver that raises is logged without a traceback, exception
+  message or task data, so a broken logging plugin cannot reproduce customer
+  data in the log. Later receivers continue to run.
+* Log the receiver name for a failed signal receiver without falling back to
+  `repr(receiver)`, which could itself fail or expose data.
+
 ## 3.5.4
 
 * Fix possible hang if worker holding the stop flag was killed while holding

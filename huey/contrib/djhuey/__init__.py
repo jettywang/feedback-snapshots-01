@@ -117,6 +117,7 @@ on_shutdown = HUEY.on_shutdown
 pre_execute = HUEY.pre_execute
 post_execute = HUEY.post_execute
 signal = HUEY.signal
+restricted_signal = HUEY.restricted_signal
 disconnect_signal = HUEY.disconnect_signal
 
 
