@@ -47,6 +47,19 @@ Then, you can run queries with `context[:visibility_profile]` equal to one of th
 
 The profile contexts passed to `profiles` will have `visibility_profile: ...` added to them, then they're frozen by GraphQL-Ruby.
 
+### Checking profile admission
+
+When named profiles are defined, any query whose `context[:visibility_profile]` is missing or not on the list is rejected with an `ArgumentError` before validation or execution. You can check the admission rules explicitly, for example when selecting a profile up front based on the current site or user:
+
+```ruby
+MySchema.visibility.profile_names # => [:public, :beta, :internal_admin]
+MySchema.visibility.registered_profile?(:beta) # => true
+MySchema.visibility.registered_profile?(:other) # => false
+MySchema.visibility.allowed_profile?(:other) # => false (unless `dynamic: true` is enabled)
+```
+
+`registered_profile?` tells whether a profile was registered with `profiles: ...`; `allowed_profile?` also accounts for `dynamic: true`, which admits unregistered profiles.
+
 ### Preloading profiles
 
 By default, GraphQL-Ruby will preload all named visibility profiles when `Rails.env.production?` is present and true. You can manually set this option by passing `use ... preload: true` (or `false`). Enable preloading in production to reduce latency of the first request to each visibility profile. Disable preloading in development to speed up application boot.

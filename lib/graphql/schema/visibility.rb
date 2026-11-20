@@ -157,10 +157,38 @@ module GraphQL
 
       attr_reader :cached_profiles
 
+      # **Returns**
+      #
+      # - `Array<Symbol>` — The names of all registered visibility profiles
+      def profile_names
+        @profiles.keys
+      end
+
+      # Check whether `profile_name` is registered with this schema.
+      #
+      # When no profiles are registered, any profile (or none) is admitted dynamically.
+      #
+      # **Returns**
+      #
+      # - `Boolean` — `true` if `profile_name` is registered (or no registration is required)
+      def registered_profile?(profile_name)
+        @profiles.empty? || @profiles.key?(profile_name)
+      end
+
+      # Check whether `profile_name` will be admitted for query execution,
+      # either because it's registered or because dynamic profiles are enabled.
+      #
+      # **Returns**
+      #
+      # - `Boolean` — `false` means queries with this profile will be rejected
+      def allowed_profile?(profile_name)
+        @dynamic || registered_profile?(profile_name)
+      end
+
       def profile_for(context)
         if !@profiles.empty?
           visibility_profile = context[:visibility_profile]
-          if @profiles.include?(visibility_profile)
+          if registered_profile?(visibility_profile)
             profile_ctx = @profiles[visibility_profile]
             @cached_profiles[visibility_profile] ||= @schema.visibility_profile_class.new(name: visibility_profile, context: profile_ctx, schema: @schema, visibility: self)
           elsif @dynamic
