@@ -143,6 +143,7 @@ usage: pip-audit [-h] [-V] [-l] [-r REQUIREMENT] [--locked] [-f FORMAT]
                  [--require-hashes] [--index-url INDEX_URL]
                  [--extra-index-url URL] [--skip-editable] [--no-deps]
                  [-o FILE] [--ignore-vuln ID] [--disable-pip]
+                 [--uncovered-report FILE] [--uncovered-report-format FORMAT]
                  [project_path]
 
 audit the Python environment for dependencies with known vulnerabilities
@@ -226,6 +227,17 @@ options:
   --disable-pip         don't use `pip` for dependency resolution; this can
                         only be used with hashed requirements files or if the
                         `--no-deps` flag has been provided (default: False)
+  --uncovered-report FILE
+                        write a source-dispatched list of declarations that
+                        were not audited (skips) to the given file; use `-` or
+                        `stdout` for standard output. Entries are grouped by
+                        their input file (requirements, pyproject.toml,
+                        pylock.toml) and marked as legitimate skips or gaps
+                        that need evidence, each pointing back at the exact
+                        declaration line (default: None)
+  --uncovered-report-format FORMAT
+                        the format to emit the uncovered-dependency report in
+                        (choices: text, json) (default: text)
 ```
 <!-- @end-pip-audit-help@ -->
 
@@ -242,6 +254,8 @@ instead:
 | `--desc`                  | `PIP_AUDIT_DESC`                  | `PIP_AUDIT_DESC=off`                  |
 | `--progress-spinner`      | `PIP_AUDIT_PROGRESS_SPINNER`      | `PIP_AUDIT_PROGRESS_SPINNER=off`      |
 | `--output`                | `PIP_AUDIT_OUTPUT`                | `PIP_AUDIT_OUTPUT=/tmp/example`       |
+| `--uncovered-report`      | `PIP_AUDIT_UNCOVERED_REPORT`      | `PIP_AUDIT_UNCOVERED_REPORT=out.txt`  |
+| `--uncovered-report-format` | `PIP_AUDIT_UNCOVERED_REPORT_FORMAT` | `PIP_AUDIT_UNCOVERED_REPORT_FORMAT=json` |
 
 ### Exit codes
 
@@ -557,6 +571,40 @@ exitcode="${?}"
 ```
 
 See [Exit codes](#exit-codes) for a list of potential codes that need handling.
+
+### Reporting declarations that were not audited
+
+When an input declaration cannot be audited, `pip-audit` records it as a *skip*.
+The normal output only names the skipped package, which makes it hard to know
+which input file or line a remediation owner should edit. The
+`--uncovered-report` flag writes a separate report that dispatches every
+unaudited declaration back to its source for all three supported dependency
+files: requirements files (`-r`), `pyproject.toml`, and `pylock.*.toml`
+(`--locked`).
+
+Each entry is classified as either a **legitimate skip** (nothing to fix, for
+example a requirement whose environment marker excludes the current
+environment, or an editable/URL requirement that cannot be pinned) or **needs
+evidence** (an actionable gap such as a declaration without a version), and
+points precisely at the originating `file:line` plus the raw declaration:
+
+```console
+$ pip-audit -r requirements.txt --no-deps --disable-pip --uncovered-report uncovered.txt
+Uncovered dependencies by input source (1 need evidence, 1 legitimate skip):
+
+requirements.txt: requirements.txt
+  2 uncovered (1 legitimate skip, 1 need evidence)
+  - [legitimate skip] pywin32 (requirement does not apply to this environment)
+      at requirements.txt:2: pywin32==306 ; sys_platform == "win32"
+  - [NEEDS EVIDENCE] loosepkg (no version specified)
+      at requirements.txt:3: loosepkg
+```
+
+Pass `--uncovered-report-format json` (or set
+`PIP_AUDIT_UNCOVERED_REPORT_FORMAT=json`) for a machine-readable report grouped
+by source with per-source counts and `file:line` locations. The report is always
+written when requested, even when no vulnerabilities are found; an empty report
+states that every declaration was audited.
 
 ### Reporting only fixable vulnerabilities
 

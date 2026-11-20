@@ -5,16 +5,87 @@ of vulnerability information for fully resolved Python packages.
 
 from __future__ import annotations
 
+import enum
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
+from pathlib import Path
 from typing import Any, NewType
 
 from packaging.utils import canonicalize_name
 from packaging.version import Version
 
 VulnerabilityID = NewType("VulnerabilityID", str)
+
+
+class DependencySourceType(enum.Enum):
+    """
+    The kind of input file (dependency source) a declaration originated from.
+    """
+
+    Requirements = "requirements.txt"
+    PyProject = "pyproject.toml"
+    PyLock = "pylock.toml"
+
+
+@dataclass(frozen=True)
+class SourceInfo:
+    """
+    Provenance for a dependency declaration: exactly where in an input file
+    it was declared, so that an uncovered (skipped) entry can be traced back
+    to the precise statement that produced it.
+    """
+
+    source: DependencySourceType
+    filename: Path
+    line_number: int | None
+    raw: str
+
+    @property
+    def location(self) -> str:
+        """
+        A human-readable `file:line` pointer back to the declaration.
+        """
+        if self.line_number is None:
+            return str(self.filename)
+        return f"{self.filename}:{self.line_number}"
+
+
+class SkipStatus(enum.Enum):
+    """
+    Whether a skipped dependency was skipped legitimately or needs follow-up.
+
+    `Legitimate`: the declaration cannot or should not be audited by design
+    (e.g. an environment marker that does not apply to this environment, or a
+    URL requirement that cannot be pinned). No remediation is required.
+
+    `NeedsEvidence`: the declaration is incomplete for auditing purposes
+    (e.g. no version is available) and must be supplemented with evidence
+    (a version, a hash, a pinned requirement, etc.) before it can be covered.
+    """
+
+    Legitimate = "legitimate skip"
+    NeedsEvidence = "needs evidence"
+
+
+# Skip reasons that represent expected, non-actionable exclusions. Anything
+# not matching these is treated as requiring follow-up evidence.
+_LEGITIMATE_SKIP_REASONS = (
+    "requirement marked as editable",
+    "URL requirements cannot be pinned to a specific package version",
+    "requirement does not apply to this environment",
+)
+
+
+def classify_skip(skip_reason: str) -> SkipStatus:
+    """
+    Classify a skip reason into a `SkipStatus`, defaulting unknown reasons to
+    `NeedsEvidence` so that novel failures are never silently excused.
+    """
+    if any(skip_reason.startswith(reason) for reason in _LEGITIMATE_SKIP_REASONS):
+        return SkipStatus.Legitimate
+    return SkipStatus.NeedsEvidence
 
 
 def _id_comparison_key(id: str) -> int:
@@ -38,6 +109,18 @@ class Dependency:
     The package's **uncanonicalized** name.
 
     Use the `canonicalized_name` property when a canonicalized form is necessary.
+    """
+
+    source_info: SourceInfo | None = field(default=None, compare=False, kw_only=True)
+    """
+    The input declaration this dependency came from, if it was collected from
+    a supported dependency file. `None` for sources without a single
+    declarative origin (e.g. `pip list`).
+
+    Excluded from equality/hashing so provenance does not perturb the
+    dependency identity used for deduplication and result mapping. Keyword-only
+    so the positional `(name, version)` / `(name, skip_reason)` constructors
+    keep working unchanged.
     """
 
     def __init__(self, *_args: Any, **_kwargs: Any) -> None:
@@ -77,6 +160,22 @@ class SkippedDependency(Dependency):
     """
 
     skip_reason: str
+    skip_status: SkipStatus | None = field(default=None, compare=False, kw_only=True)
+    """
+    Whether the skip is a legitimate, expected exclusion or an actionable gap
+    that needs more evidence. Lazily derived via `status` when unset, which
+    keeps direct test/fixture construction (`SkippedDependency(name, reason)`)
+    working unchanged.
+    """
+
+    @property
+    def status(self) -> SkipStatus:
+        """
+        The classified disposition of this skip.
+        """
+        if self.skip_status is None:
+            return classify_skip(self.skip_reason)
+        return self.skip_status
 
 
 @dataclass(frozen=True)

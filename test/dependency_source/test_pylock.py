@@ -2,7 +2,12 @@ import pytest
 from packaging.version import Version
 
 from pip_audit._dependency_source import DependencySourceError, PyLockSource
-from pip_audit._service import ResolvedDependency, SkippedDependency
+from pip_audit._service import (
+    DependencySourceType,
+    ResolvedDependency,
+    SkipStatus,
+    SkippedDependency,
+)
 
 
 class TestPyLockSource:
@@ -23,6 +28,31 @@ class TestPyLockSource:
 
         deps = list(source.collect())
         assert deps == [SkippedDependency(name="attrs", skip_reason="no version specified")]
+
+    def test_skipped_has_provenance_and_needs_evidence(self, asset):
+        pylock = asset("pylock.skipped.toml")
+        source = PyLockSource([pylock])
+
+        dep = list(source.collect())[0]
+        assert dep.status is SkipStatus.NeedsEvidence
+        assert dep.source_info is not None
+        assert dep.source_info.source is DependencySourceType.PyLock
+        assert dep.source_info.filename == pylock
+        # The `[[packages]]` block for `attrs` begins on line 6 of the asset.
+        assert dep.source_info.line_number == 6
+        assert dep.source_info.location == f"{pylock}:6"
+
+    def test_resolved_dependency_has_provenance(self, asset):
+        pylock = asset("pylock.basic.toml")
+        source = PyLockSource([pylock])
+
+        deps = list(source.collect())
+        attrs = next(dep for dep in deps if dep.canonical_name == "attrs")
+        assert attrs.source_info is not None
+        assert attrs.source_info.source is DependencySourceType.PyLock
+        assert attrs.source_info.filename == pylock
+        # First package block starts at the first `[[packages]]` header.
+        assert attrs.source_info.line_number == 6
 
     @pytest.mark.parametrize(
         ("name", "error"),

@@ -30,13 +30,36 @@ from pip_audit._dependency_source import (
 )
 from pip_audit._fix import ResolvedFixVersion
 from pip_audit._service import Dependency
-from pip_audit._service.interface import ResolvedDependency, SkippedDependency
+from pip_audit._service.interface import (
+    DependencySourceType,
+    ResolvedDependency,
+    SkipStatus,
+    SkippedDependency,
+    SourceInfo,
+)
 from pip_audit._state import AuditState
 from pip_audit._virtual_env import VirtualEnv, VirtualEnvError
 
 logger = logging.getLogger(__name__)
 
 PINNED_SPECIFIER_RE = re.compile(r"==(?P<version>.+?)$", re.VERBOSE)
+
+# Marker text used when a requirement's environment marker excludes the
+# current environment. These are legitimate skips: the package is never
+# installed here, so there is nothing to audit.
+_MARKER_SKIP_REASON = "requirement does not apply to this environment"
+
+
+def _requirement_source_info(filename: Path, req: InstallRequirement) -> SourceInfo:
+    """
+    Build the `SourceInfo` pointing back at a requirement's declaration line.
+    """
+    return SourceInfo(
+        source=DependencySourceType.Requirements,
+        filename=filename,
+        line_number=req.line_number,
+        raw=req.requirement_line.line,
+    )
 
 
 class RequirementSource(DependencySource):
@@ -140,7 +163,7 @@ class RequirementSource(DependencySource):
 
     def _collect_from_files(self, filenames: list[Path]) -> Iterator[Dependency]:
         # Figure out whether we have a fully resolved set of dependencies.
-        reqs: list[InstallRequirement] = []
+        reqs: list[tuple[Path, InstallRequirement]] = []
         require_hashes: bool = self._require_hashes
         for filename in filenames:
             rf = RequirementsFile.from_file(filename)
@@ -153,7 +176,7 @@ class RequirementSource(DependencySource):
 
             # If one or more requirements have a hash, this implies `--require-hashes`.
             require_hashes = require_hashes or any(req.hash_options for req in rf.requirements)
-            reqs.extend(rf.requirements)
+            reqs.extend((filename, req) for req in rf.requirements)
 
         # If the user has supplied `--no-deps` or there are hashed requirements, we should assume
         # that we have a fully resolved set of dependencies and we should waste time by invoking
@@ -293,17 +316,22 @@ class RequirementSource(DependencySource):
                 continue
 
     def _collect_preresolved_deps(
-        self, reqs: Iterator[InstallRequirement], require_hashes: bool
+        self,
+        reqs: Iterator[tuple[Path, InstallRequirement]],
+        require_hashes: bool,
     ) -> Iterator[Dependency]:
         """
         Collect pre-resolved (pinned) dependencies.
         """
         req_specifiers: dict[str, SpecifierSet] = {}
-        for req in reqs:
+        for filename, req in reqs:
+            source_info = _requirement_source_info(filename, req)
             if self._skip_editable and req.is_editable:
                 yield SkippedDependency(
                     name=req.name or req.requirement_line.line,
                     skip_reason="requirement marked as editable",
+                    source_info=source_info,
+                    skip_status=SkipStatus.Legitimate,
                 )
                 continue
             if not req.hash_options and require_hashes:
@@ -318,12 +346,20 @@ class RequirementSource(DependencySource):
                 yield SkippedDependency(
                     name=req.requirement_line.line,
                     skip_reason="could not deduce package version from URL requirement",
+                    source_info=source_info,
                 )
                 continue
             if req.marker is not None and not req.marker.evaluate():
-                # TODO(ww): Remove this `no cover` pragma once we're 3.10+.
-                # See: https://github.com/nedbat/coveragepy/issues/198
-                continue  # pragma: no cover
+                # The marker excludes this environment, so the package is never installed
+                # here. Rather than silently dropping the declaration, report it as a
+                # legitimate skip so the uncovered list stays complete and traceable.
+                yield SkippedDependency(
+                    name=req.name,
+                    skip_reason=_MARKER_SKIP_REASON,
+                    source_info=source_info,
+                    skip_status=SkipStatus.Legitimate,
+                )
+                continue
 
             duplicate_req_specifier = req_specifiers.get(req.name)
 
@@ -350,6 +386,8 @@ class RequirementSource(DependencySource):
                 yield SkippedDependency(
                     name=req.name,
                     skip_reason="URL requirements cannot be pinned to a specific package version",
+                    source_info=source_info,
+                    skip_status=SkipStatus.Legitimate,
                 )
             elif not req.specifier:
                 raise RequirementSourceError(f"requirement {req.name} is not pinned: {str(req)}")
@@ -360,7 +398,11 @@ class RequirementSource(DependencySource):
                         f"requirement {req.name} is not pinned to an exact version: {str(req)}"
                     )
 
-                yield ResolvedDependency(req.name, Version(pinned_specifier.group("version")))
+                yield ResolvedDependency(
+                    req.name,
+                    Version(pinned_specifier.group("version")),
+                    source_info=source_info,
+                )
 
 
 class RequirementSourceError(DependencySourceError):

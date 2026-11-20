@@ -18,7 +18,12 @@ from pip_audit._dependency_source import (
     requirement,
 )
 from pip_audit._fix import ResolvedFixVersion
-from pip_audit._service import ResolvedDependency, SkippedDependency
+from pip_audit._service import (
+    DependencySourceType,
+    ResolvedDependency,
+    SkipStatus,
+    SkippedDependency,
+)
 from pip_audit._state import AuditState
 from pip_audit._virtual_env import VirtualEnv, VirtualEnvError
 
@@ -915,3 +920,64 @@ def test_requirement_source_disable_pip_editable_without_egg_fragment(req_file):
         )
         in specs
     )
+
+
+def test_requirement_source_disable_pip_provenance(req_file):
+    path = req_file()
+    source = _init_requirement([(path, "flask==2.0.1")], disable_pip=True, no_deps=True)
+
+    dep = list(source.collect())[0]
+    assert dep.source_info is not None
+    assert dep.source_info.source is DependencySourceType.Requirements
+    assert dep.source_info.filename == path
+    assert dep.source_info.line_number == 1
+    assert dep.source_info.raw == "flask==2.0.1"
+    assert dep.source_info.location == f"{path}:1"
+
+
+def test_requirement_source_disable_pip_marker_skip_is_legitimate(req_file):
+    path = req_file()
+    source = _init_requirement(
+        [
+            (
+                path,
+                'flask==2.0.1\n'
+                'pywin32==306 ; sys_platform == "win32"',
+            )
+        ],
+        disable_pip=True,
+        no_deps=True,
+    )
+
+    deps = list(source.collect())
+    assert ResolvedDependency("flask", Version("2.0.1")) in deps
+
+    marker_dep = next(dep for dep in deps if dep.canonical_name == "pywin32")
+    assert isinstance(marker_dep, SkippedDependency)
+    assert marker_dep.skip_reason == "requirement does not apply to this environment"
+    assert marker_dep.status is SkipStatus.Legitimate
+    assert marker_dep.source_info is not None
+    assert marker_dep.source_info.line_number == 2
+    assert marker_dep.source_info.raw == 'pywin32==306 ; sys_platform == "win32"'
+
+
+def test_requirement_source_disable_pip_url_skip_has_provenance(req_file):
+    path = req_file()
+    source = _init_requirement(
+        [
+            (
+                path,
+                "https://github.com/pallets/flask/archive/refs/tags/2.0.1.tar.gz#egg=flask\n",
+            )
+        ],
+        disable_pip=True,
+        no_deps=True,
+    )
+
+    dep = list(source.collect())[0]
+    assert isinstance(dep, SkippedDependency)
+    assert dep.status is SkipStatus.Legitimate
+    assert dep.source_info is not None
+    assert dep.source_info.source is DependencySourceType.Requirements
+    assert dep.source_info.filename == path
+    assert dep.source_info.line_number == 1

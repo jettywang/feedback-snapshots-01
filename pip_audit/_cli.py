@@ -12,7 +12,7 @@ import sys
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
-from typing import IO, NoReturn, cast
+from typing import IO, TYPE_CHECKING, NoReturn, cast
 
 from pip_audit import __version__
 from pip_audit._audit import AuditOptions, Auditor
@@ -42,7 +42,15 @@ from pip_audit._service.interface import (
     VulnerabilityService,
 )
 from pip_audit._state import AuditSpinner, AuditState
+from pip_audit._uncovered import (
+    collect_uncovered,
+    render_uncovered_json,
+    render_uncovered_text,
+)
 from pip_audit._util import assert_never
+
+if TYPE_CHECKING:
+    from pip_audit._uncovered import UncoveredGroup
 
 logging.basicConfig()
 logger = logging.getLogger(__name__)
@@ -106,6 +114,27 @@ class VulnerabilityServiceChoice(str, enum.Enum):
     Osv = "osv"
     Pypi = "pypi"
     Esms = "esms"
+
+    def __str__(self) -> str:
+        return self.value
+
+
+@enum.unique
+class UncoveredReportFormatChoice(str, enum.Enum):
+    """
+    Output formats supported by the uncovered-dependency report.
+    """
+
+    Text = "text"
+    Json = "json"
+
+    def render(self, grouped: UncoveredGroup) -> str:
+        if self is UncoveredReportFormatChoice.Text:
+            return render_uncovered_text(grouped)
+        elif self is UncoveredReportFormatChoice.Json:
+            return render_uncovered_json(grouped)
+        else:
+            assert_never(self)  # pragma: no cover
 
     def __str__(self) -> str:
         return self.value
@@ -391,6 +420,29 @@ def _parser() -> argparse.ArgumentParser:  # pragma: no cover
         "this can only be used with hashed requirements files or if the `--no-deps` flag has been "
         "provided",
     )
+    parser.add_argument(
+        "--uncovered-report",
+        type=Path,
+        metavar="FILE",
+        default=os.environ.get("PIP_AUDIT_UNCOVERED_REPORT"),
+        help="write a source-dispatched list of declarations that were not audited (skips) to the "
+        "given file; use `-` or `stdout` for standard output. Entries are grouped by their input "
+        "file (requirements, pyproject.toml, pylock.toml) and marked as legitimate skips or gaps "
+        "that need evidence, each pointing back at the exact declaration line",
+    )
+    parser.add_argument(
+        "--uncovered-report-format",
+        type=UncoveredReportFormatChoice,
+        choices=UncoveredReportFormatChoice,
+        default=os.environ.get(
+            "PIP_AUDIT_UNCOVERED_REPORT_FORMAT", UncoveredReportFormatChoice.Text
+        ),
+        metavar="FORMAT",
+        help=_enum_help(
+            "the format to emit the uncovered-dependency report in",
+            UncoveredReportFormatChoice,
+        ),
+    )
     return parser
 
 
@@ -581,6 +633,15 @@ def audit() -> None:  # pragma: no cover
                 "Tip: your network may be blocking this service. "
                 "Try another service with `-s SERVICE`"
             )
+
+        # Emit the source-dispatched uncovered (skipped) report when requested.
+        # Unlike the vulnerability manifest, this always renders: an empty
+        # report is itself the signal that every declaration was covered.
+        if args.uncovered_report is not None:
+            uncovered = collect_uncovered(result)
+            report = args.uncovered_report_format.render(uncovered)
+            with _output_io(args.uncovered_report) as io:
+                print(report, file=io)
 
         # If the `--fix` flag has been applied, find a set of suitable fix versions and upgrade the
         # dependencies at the source

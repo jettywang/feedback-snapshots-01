@@ -116,3 +116,71 @@ class TestVulnerabilityService:
     )
     def test_parse_rfc3339(self, timestamp, result):
         assert VulnerabilityService._parse_rfc3339(timestamp) == result
+
+
+def test_source_info_and_skip_status_defaults():
+    from pathlib import Path
+
+    from pip_audit._service.interface import (
+        DependencySourceType,
+        SkipStatus,
+        SourceInfo,
+        classify_skip,
+    )
+
+    resolved = ResolvedDependency(name="foo", version=Version("1.0.0"))
+    assert resolved.source_info is None
+
+    info = SourceInfo(
+        source=DependencySourceType.Requirements,
+        filename=Path("r.txt"),
+        line_number=4,
+        raw="foo==1.0.0",
+    )
+    located = ResolvedDependency(name="foo", version=Version("1.0.0"), source_info=info)
+    assert located.source_info.location == "r.txt:4"
+
+    # Provenance and status do not change identity/equality.
+    assert resolved == located
+    assert len({resolved, located}) == 1
+
+    # A file-only source has no `:line` suffix.
+    file_only = SourceInfo(
+        source=DependencySourceType.PyLock,
+        filename=Path("pylock.toml"),
+        line_number=None,
+        raw="",
+    )
+    assert file_only.location == "pylock.toml"
+
+    # Explicit status is honored; unset status is derived from the reason.
+    explicit = SkippedDependency(
+        "bar",
+        "no version specified",
+        source_info=info,
+        skip_status=SkipStatus.NeedsEvidence,
+    )
+    assert explicit.status is SkipStatus.NeedsEvidence
+    assert explicit.source_info is info
+
+    derived = SkippedDependency("bar", "requirement marked as editable")
+    assert derived.status is SkipStatus.Legitimate
+
+
+def test_classify_skip_reasons():
+    from pip_audit._service.interface import SkipStatus, classify_skip
+
+    legitimate = [
+        "requirement marked as editable",
+        "URL requirements cannot be pinned to a specific package version",
+        "requirement does not apply to this environment",
+    ]
+    for reason in legitimate:
+        assert classify_skip(reason) is SkipStatus.Legitimate
+
+    # Unknown or evidence-bearing reasons default to needing evidence.
+    assert classify_skip("no version specified") is SkipStatus.NeedsEvidence
+    assert classify_skip("could not deduce package version from URL requirement") is (
+        SkipStatus.NeedsEvidence
+    )
+    assert classify_skip("something unexpected") is SkipStatus.NeedsEvidence

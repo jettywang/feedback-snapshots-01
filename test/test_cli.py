@@ -232,3 +232,75 @@ def test_environment_variable(monkeypatch):
     assert args.output == Path("/tmp/fake")
     assert not args.progress_spinner
     assert args.vulnerability_service == VulnerabilityServiceChoice.Osv
+
+
+class TestUncoveredReportFormatChoice:
+    def test_render_is_exhaustive(self):
+        from pip_audit._uncovered import collect_uncovered
+
+        from pip_audit._cli import UncoveredReportFormatChoice
+
+        for choice in UncoveredReportFormatChoice:
+            rendered = choice.render(collect_uncovered({}))
+            assert isinstance(rendered, str)
+            assert rendered
+
+    def test_render_text_and_json_differ(self, tmp_path):
+        import json
+
+        from packaging.version import Version
+
+        from pip_audit._cli import UncoveredReportFormatChoice
+        from pip_audit._service import (
+            DependencySourceType,
+            ResolvedDependency,
+            SkipStatus,
+            SkippedDependency,
+            SourceInfo,
+        )
+        from pip_audit._uncovered import collect_uncovered
+
+        info = SourceInfo(
+            source=DependencySourceType.PyLock,
+            filename=tmp_path / "pylock.toml",
+            line_number=3,
+            raw='[[packages]] name = "x"',
+        )
+        result = {
+            SkippedDependency(
+                "x",
+                "no version specified",
+                source_info=info,
+                skip_status=SkipStatus.NeedsEvidence,
+            ): [],
+            # An unrelated resolved dependency must not show up.
+            ResolvedDependency("y", Version("1.0")): [],
+        }
+        grouped = collect_uncovered(result)
+
+        text = UncoveredReportFormatChoice.Text.render(grouped)
+        assert "NEEDS EVIDENCE" in text
+        assert "pylock.toml:3" in text
+
+        payload = json.loads(UncoveredReportFormatChoice.Json.render(grouped))
+        assert payload["summary"]["needs_evidence"] == 1
+        assert payload["sources"][0]["entries"][0]["name"] == "x"
+
+    def test_str(self):
+        from pip_audit._cli import UncoveredReportFormatChoice
+
+        for choice in UncoveredReportFormatChoice:
+            assert str(choice) == choice.value
+
+
+def test_parser_exposes_uncovered_flags():
+    parser = pip_audit._cli._parser()
+    args = parser.parse_args(["--uncovered-report", "out.txt"])
+    assert args.uncovered_report == Path("out.txt")
+    assert args.uncovered_report_format.value == "text"
+
+    args = parser.parse_args(
+        ["--uncovered-report", "-", "--uncovered-report-format", "json"]
+    )
+    assert str(args.uncovered_report) == "-"
+    assert args.uncovered_report_format.value == "json"
