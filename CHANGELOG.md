@@ -8,6 +8,17 @@ All versions prior to 0.0.9 are untracked.
 
 ## [Unreleased]
 
+### Added
+
+* The `json` and CycloneDX output formats now bind each report to the
+  audited inputs: they record the selected dependency source, digests of
+  any local input files, a digest of the resolved dependency set, and a
+  summary of the results. Dependencies, vulnerabilities, and fixes are
+  emitted in a deterministic order, so reports over the same dependency
+  set are comparable regardless of collection order, and changes to lock
+  file entries or the selected environment are detectable during sign-off
+  verification. Reports use workspace-relative paths only
+
 ### Fixed
 
 * Editable requirements skipped with `--skip-editable` no longer require a hash

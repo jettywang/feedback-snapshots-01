@@ -102,6 +102,13 @@ class PipSource(DependencySource):
                 "newer version of pip."
             )
 
+    @property
+    def source_kind(self) -> str:
+        """
+        See `DependencySource.source_kind`.
+        """
+        return "environment"
+
     def collect(self) -> Iterator[Dependency]:
         """
         Collect all of the dependencies discovered by this `PipSource`.

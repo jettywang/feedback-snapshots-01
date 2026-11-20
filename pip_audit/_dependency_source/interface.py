@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
+from pathlib import Path
 
 from pip_audit._fix import ResolvedFixVersion
 from pip_audit._service import Dependency
@@ -21,6 +22,26 @@ class DependencySource(ABC):
     Individual concrete dependency sources (e.g. `pip list`) are expected
     to subclass `DependencySource` and implement it in their terms.
     """
+
+    @property
+    def source_kind(self) -> str:
+        """
+        A short, stable identifier for the kind of dependency source,
+        e.g. `requirements` or `environment`.
+
+        Used to describe the selected source in machine-readable reports.
+        """
+        raise NotImplementedError
+
+    def subject_files(self) -> list[Path]:
+        """
+        Return the local files that this source consumes, for binding an
+        audit report to its packaging inputs.
+
+        Sources that don't read local files (e.g. the active environment)
+        return an empty list.
+        """
+        return []
 
     @abstractmethod
     def collect(self) -> Iterator[Dependency]:  # pragma: no cover

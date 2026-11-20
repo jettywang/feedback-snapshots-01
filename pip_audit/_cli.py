@@ -42,6 +42,7 @@ from pip_audit._service.interface import (
     VulnerabilityService,
 )
 from pip_audit._state import AuditSpinner, AuditState
+from pip_audit._subject import AuditSubject
 from pip_audit._util import assert_never
 
 logging.basicConfig()
@@ -582,6 +583,12 @@ def audit() -> None:  # pragma: no cover
                 "Try another service with `-s SERVICE`"
             )
 
+        # Bind the report to the exact inputs that produced it: the selected
+        # dependency source, the digests of any local files it consumed, and a
+        # digest of the resolved dependency set. This happens before any
+        # `--fix` step so that the digests describe the audited inputs.
+        subject = AuditSubject.from_audit(source, result)
+
         # If the `--fix` flag has been applied, find a set of suitable fix versions and upgrade the
         # dependencies at the source
         fixes = []
@@ -633,7 +640,7 @@ def audit() -> None:  # pragma: no cover
             )
         print(summary_msg, file=sys.stderr)
         with _output_io(args.output) as io:
-            print(formatter.format(result, fixes), file=io)
+            print(formatter.format(result, fixes, subject=subject), file=io)
         if pkg_count != fixed_pkg_count:
             sys.exit(1)
     else:
@@ -649,4 +656,4 @@ def audit() -> None:  # pragma: no cover
         # even if nothing other than a dependency summary is present.
         if skip_count > 0 or formatter.is_manifest:
             with _output_io(args.output) as io:
-                print(formatter.format(result, fixes), file=io)
+                print(formatter.format(result, fixes, subject=subject), file=io)

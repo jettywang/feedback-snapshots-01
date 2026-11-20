@@ -91,6 +91,19 @@ class RequirementSource(DependencySource):
         self.state = state
         self._dep_cache: dict[Path, set[Dependency]] = {}
 
+    @property
+    def source_kind(self) -> str:
+        """
+        See `DependencySource.source_kind`.
+        """
+        return "requirements"
+
+    def subject_files(self) -> list[Path]:
+        """
+        See `DependencySource.subject_files`.
+        """
+        return list(self._filenames)
+
     def collect(self) -> Iterator[Dependency]:
         """
         Collect all of the dependencies discovered by this `RequirementSource`.

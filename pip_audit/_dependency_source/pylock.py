@@ -31,6 +31,19 @@ class PyLockSource(DependencySource):
 
         self._filenames = filenames
 
+    @property
+    def source_kind(self) -> str:
+        """
+        See `DependencySource.source_kind`.
+        """
+        return "pylock"
+
+    def subject_files(self) -> list[Path]:
+        """
+        See `DependencySource.subject_files`.
+        """
+        return list(self._filenames)
+
     def collect(self) -> Iterator[Dependency]:
         """
         Collect all of the dependencies discovered by this `PyLockSource`.

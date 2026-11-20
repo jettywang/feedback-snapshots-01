@@ -11,6 +11,7 @@ from packaging.version import Version
 
 import pip_audit._fix as fix
 import pip_audit._service as service
+from pip_audit._subject import AuditSubject
 
 from .interface import VulnerabilityFormat, pypi_url, vuln_id_url
 
@@ -50,6 +51,7 @@ class MarkdownFormat(VulnerabilityFormat):
         self,
         result: dict[service.Dependency, list[service.VulnerabilityResult]],
         fixes: list[fix.FixVersion],
+        subject: AuditSubject | None = None,
     ) -> str:
         """
         Returns a Markdown formatted string representing a set of vulnerability results and applied

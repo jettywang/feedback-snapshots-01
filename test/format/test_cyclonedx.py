@@ -69,9 +69,9 @@ def test_cyclonedx_vulnerabilities_linked_to_components(vuln_data):
 
     # Verify we have components and vulnerabilities in the output
     assert len(component_bomrefs) > 0, "Should have components in CycloneDX output"
-    assert len(data.get("vulnerabilities", [])) > 0, (
-        "Should have vulnerabilities in CycloneDX output"
-    )
+    assert (
+        len(data.get("vulnerabilities", [])) > 0
+    ), "Should have vulnerabilities in CycloneDX output"
 
     # Track which components have vulnerabilities linked to them
     components_with_vulns = set()
@@ -93,9 +93,9 @@ def test_cyclonedx_vulnerabilities_linked_to_components(vuln_data):
             assert vuln_ref, f"Vulnerability {vuln.get('id')} has empty 'ref' in affects"
 
             # The ref should match one of the component bom-refs
-            assert vuln_ref in component_bomrefs.values(), (
-                f"Vulnerability {vuln.get('id')} references unknown bom-ref: {vuln_ref}"
-            )
+            assert (
+                vuln_ref in component_bomrefs.values()
+            ), f"Vulnerability {vuln.get('id')} references unknown bom-ref: {vuln_ref}"
 
             # Track that this component has a vulnerability linked to it
             for comp_name, comp_ref in component_bomrefs.items():
@@ -106,6 +106,63 @@ def test_cyclonedx_vulnerabilities_linked_to_components(vuln_data):
     # (This ensures the linking is actually working, not just present but wrong)
     for dep, vulns in vuln_data.items():
         if vulns:  # If this dependency has vulnerabilities
-            assert dep.name in components_with_vulns, (
-                f"Component {dep.name} has vulnerabilities but they're not properly linked"
-            )
+            assert (
+                dep.name in components_with_vulns
+            ), f"Component {dep.name} has vulnerabilities but they're not properly linked"
+
+
+def _subject():
+    from pip_audit._subject import AuditSubject, SubjectInput
+
+    return AuditSubject(
+        source="requirements",
+        inputs=(SubjectInput(path="requirements.txt", sha256="f" * 64),),
+        dependencies_sha256="a" * 64,
+    )
+
+
+def test_cyclonedx_summary_properties(vuln_data):
+    formatter = CycloneDxFormat(inner_format=CycloneDxFormat.InnerFormat.Json)
+    data = json.loads(formatter.format(vuln_data, []))
+
+    properties = {p["name"]: p["value"] for p in data["metadata"]["properties"]}
+    assert properties["pip_audit:summary:dependencies"] == "2"
+    assert properties["pip_audit:summary:skipped"] == "0"
+    assert properties["pip_audit:summary:vulnerabilities"] == "3"
+    assert properties["pip_audit:summary:fixes"] == "0"
+    assert "pip_audit:subject:source" not in properties
+
+
+def test_cyclonedx_subject_properties(vuln_data):
+    formatter = CycloneDxFormat(inner_format=CycloneDxFormat.InnerFormat.Json)
+    data = json.loads(formatter.format(vuln_data, [], subject=_subject()))
+
+    properties = {p["name"]: p["value"] for p in data["metadata"]["properties"]}
+    assert properties["pip_audit:subject:source"] == "requirements"
+    assert properties["pip_audit:subject:dependencies_sha256"] == "a" * 64
+    assert properties["pip_audit:subject:inputs:0:path"] == "requirements.txt"
+    assert properties["pip_audit:subject:inputs:0:sha256"] == "f" * 64
+
+
+def test_cyclonedx_subject_deterministic_serial_number(vuln_data):
+    formatter = CycloneDxFormat(inner_format=CycloneDxFormat.InnerFormat.Json)
+
+    first = json.loads(formatter.format(vuln_data, [], subject=_subject()))
+    reordered = dict(reversed(list(vuln_data.items())))
+    second = json.loads(formatter.format(reordered, [], subject=_subject()))
+
+    # The same dependency set, collected in any order, yields the same
+    # serial number, components, and subject properties.
+    assert first["serialNumber"] == second["serialNumber"]
+    assert first["components"] == second["components"]
+    assert first["metadata"]["properties"] == second["metadata"]["properties"]
+
+
+def test_cyclonedx_subject_xml(vuln_data):
+    formatter = CycloneDxFormat(inner_format=CycloneDxFormat.InnerFormat.Xml)
+    root = ET.fromstring(formatter.format(vuln_data, [], subject=_subject()))
+
+    ns = "{http://cyclonedx.org/schema/bom/1.4}"
+    values = {p.get("name"): p.text for p in root.iter(f"{ns}property")}
+    assert values["pip_audit:subject:source"] == "requirements"
+    assert values["pip_audit:summary:vulnerabilities"] == "3"

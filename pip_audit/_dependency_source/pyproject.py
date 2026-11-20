@@ -54,6 +54,19 @@ class PyProjectSource(DependencySource):
         self.filename = filename
         self.state = state
 
+    @property
+    def source_kind(self) -> str:
+        """
+        See `DependencySource.source_kind`.
+        """
+        return "pyproject"
+
+    def subject_files(self) -> list[Path]:
+        """
+        See `DependencySource.subject_files`.
+        """
+        return [self.filename]
+
     def collect(self) -> Iterator[Dependency]:
         """
         Collect all of the dependencies discovered by this `PyProjectSource`.
