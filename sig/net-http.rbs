@@ -1281,6 +1281,16 @@ module Net
 
     # <!--
     #   rdoc-file=lib/net/http.rb
+    #   - max_decompressed_body_size()
+    #   - max_decompressed_body_size=()
+    # -->
+    # Sets or returns the maximum number of decompressed bytes allowed in a
+    # response body; initially `nil` (no limit).
+    #
+    attr_accessor max_decompressed_body_size: Integer?
+
+    # <!--
+    #   rdoc-file=lib/net/http.rb
     #   - started?()
     # -->
     # Returns `true` if the HTTP session has been started:
@@ -4022,6 +4032,12 @@ module Net
     #
     attr_accessor decode_content: bool
 
+    # <!-- rdoc-file=lib/net/http/response.rb -->
+    # The maximum number of decompressed bytes allowed in this response's body,
+    # or `nil` for no limit.
+    #
+    attr_accessor max_decompressed_body_size: Integer?
+
     # <!--
     #   rdoc-file=lib/net/http/response.rb
     #   - inspect()
@@ -5631,5 +5647,11 @@ module Net
 
   class HTTPFatalError < ProtoFatalError
     include Net::HTTPExceptions
+  end
+
+  # Raised when the decompressed response body exceeds the limit set by
+  # Net::HTTP#max_decompressed_body_size.
+  class HTTPDecompressedBodyTooLarge < HTTPError
+    def initialize: (String msg) -> void
   end
 end

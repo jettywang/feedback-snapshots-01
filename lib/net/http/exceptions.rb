@@ -32,4 +32,15 @@ module Net
   # We cannot use the name "HTTPServerError", it is the name of the response.
   HTTPServerException = HTTPClientException # :nodoc:
   deprecate_constant(:HTTPServerException)
+
+  # Raised when the decompressed response body exceeds the limit set by
+  # Net::HTTP#max_decompressed_body_size.
+  #
+  # This error is not retried; the connection is closed before it is
+  # propagated to the caller.
+  class HTTPDecompressedBodyTooLarge < HTTPError
+    def initialize(msg)   #:nodoc:
+      super(msg, nil)
+    end
+  end
 end

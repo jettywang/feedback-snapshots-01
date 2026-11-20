@@ -962,7 +962,114 @@ EOS
     assert_equal '#<Net::HTTPUnknownResponse ??? test response readbody=true>', res.inspect
   end
 
+  def test_read_body_max_decompressed_body_size_at_limit
+    body = '{"data":"' + 'x' * 30_000 + '"}'
+    %w[gzip deflate].each do |encoding|
+      io = compressed_response_io(encoding, body)
+      res = Net::HTTPResponse.read_new(io)
+      res.decode_content = true
+      res.max_decompressed_body_size = body.bytesize
+
+      fragments = []
+      res.reading_body io, true do
+        res.read_body {|fragment| fragments << fragment }
+      end
+
+      assert_equal body.bytesize, fragments.sum(&:bytesize)
+      assert_equal body, fragments.join
+    end
+  end
+
+  def test_read_body_max_decompressed_body_size_exceeded
+    body = '{"data":"' + 'x' * 30_000 + '"}'
+    limit = 20_000
+    %w[gzip deflate].each do |encoding|
+      io = compressed_response_io(encoding, body)
+      res = Net::HTTPResponse.read_new(io)
+      res.decode_content = true
+      res.max_decompressed_body_size = limit
+
+      fragments = []
+      error = assert_raise(Net::HTTPDecompressedBodyTooLarge) do
+        res.reading_body io, true do
+          res.read_body {|fragment| fragments << fragment }
+        end
+      end
+
+      assert_match(/#{limit}/, error.message)
+      assert_equal limit, fragments.sum(&:bytesize)
+      assert_equal body.byteslice(0, limit), fragments.join
+    end
+  end
+
+  def test_read_body_max_decompressed_body_size_no_limit_by_default
+    body = '{"data":"' + 'x' * 30_000 + '"}'
+    %w[gzip deflate].each do |encoding|
+      io = compressed_response_io(encoding, body)
+      res = Net::HTTPResponse.read_new(io)
+      res.decode_content = true
+
+      fragments = []
+      res.reading_body io, true do
+        res.read_body {|fragment| fragments << fragment }
+      end
+
+      assert_equal body, fragments.join
+    end
+  end
+
+  def test_read_body_max_decompressed_body_size_caller_stops
+    body = '{"data":"' + 'x' * 30_000 + '"}'
+    stop_reading = Class.new(StandardError)
+    %w[gzip deflate].each do |encoding|
+      io = compressed_response_io(encoding, body)
+      res = Net::HTTPResponse.read_new(io)
+      res.decode_content = true
+      res.max_decompressed_body_size = body.bytesize
+
+      fragments = []
+      assert_raise(stop_reading) do
+        res.reading_body io, true do
+          res.read_body do |fragment|
+            fragments << fragment
+            raise stop_reading, 'caller stopped reading'
+          end
+        end
+      end
+
+      assert_operator fragments.sum(&:bytesize), :<, body.bytesize
+      assert_equal body.byteslice(0, fragments.sum(&:bytesize)), fragments.join
+    end
+  end
+
 private
+
+  # Builds a chunked, compressed response around +body+ without going
+  # through dummy_io, which would corrupt binary bytes while normalizing
+  # newlines.
+  def compressed_response_io(encoding, body)
+    segments =
+      case encoding
+      when 'gzip'
+        io = StringIO.new
+        gz = Zlib::GzipWriter.new(io)
+        gz.write body
+        gz.close
+        [io.string]
+      when 'deflate'
+        [Zlib::Deflate.deflate(body)]
+      end
+
+    response = +"HTTP/1.1 200 OK\r\nConnection: close\r\n" \
+               "Content-Encoding: #{encoding}\r\nTransfer-Encoding: chunked\r\n\r\n"
+    response.force_encoding Encoding::BINARY
+    segments.each do |segment|
+      response << segment.bytesize.to_s(16) << "\r\n" << segment << "\r\n"
+    end
+    response << "0\r\n\r\n"
+
+    Net::BufferedIO.new(StringIO.new(response))
+  end
 
   def dummy_io(str)
     str = str.gsub(/\n/, "\r\n")

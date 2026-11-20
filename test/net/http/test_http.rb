@@ -1521,3 +1521,248 @@ class TestNetHTTPInRactor < Test::Unit::TestCase
     RUBY
   end
 end if defined?(Ractor) && Ractor.method_defined?(:value)
+
+class TestNetHTTPMaxDecompressedBodySize < Test::Unit::TestCase
+  PIECE_SIZE = 10 * 1024
+
+  def self.json_piece(index, count, size)
+    head = index.zero? ? %Q|[{"chunk":#{index},"data":"| : %Q|,{"chunk":#{index},"data":"|
+    tail = index == count - 1 ? '"}]' : '"}'
+    head + ('x' * (size - head.bytesize - tail.bytesize)) + tail
+  end
+
+  PIECES = 3.times.map { |i| json_piece(i, 3, PIECE_SIZE) }
+  BODY = PIECES.join
+
+  class StopReading < StandardError; end
+
+  # Minimal keep-alive HTTP server that serves locally generated compressed
+  # bodies in chunked segments and records connections and requests.
+  class CompressedServer
+    def initialize(routes)
+      @routes = routes
+      @server = TCPServer.new('127.0.0.1', 0)
+      @port = @server.addr[1]
+      @requests = []
+      @accept_count = 0
+      @mutex = Mutex.new
+      @threads = []
+    end
+
+    attr_reader :port
+
+    def requests
+      @mutex.synchronize { @requests.dup }
+    end
+
+    def accept_count
+      @mutex.synchronize { @accept_count }
+    end
+
+    def start
+      @threads << Thread.new do
+        loop do
+          socket = @server.accept
+          @mutex.synchronize { @accept_count += 1 }
+          @threads << Thread.new(socket) {|conn| serve(conn) }
+        end
+      rescue IOError, SystemCallError
+      end
+      self
+    end
+
+    def shutdown
+      @threads.each(&:kill)
+      @threads.each(&:join)
+      @server.close
+    end
+
+    private
+
+    def serve(conn)
+      loop do
+        request_line = conn.gets or break
+        break if request_line.strip.empty?
+        _method, path, = request_line.split
+        while (line = conn.gets) && line != "\r\n"; end
+        @mutex.synchronize { @requests << path }
+        encoding, segments = @routes.fetch(path)
+        conn.write "HTTP/1.1 200 OK\r\n" \
+                   "Content-Type: application/json\r\n" \
+                   "Content-Encoding: #{encoding}\r\n" \
+                   "Transfer-Encoding: chunked\r\n\r\n"
+        segments.each do |segment|
+          conn.write "#{segment.bytesize.to_s(16)}\r\n#{segment}\r\n"
+        end
+        conn.write "0\r\n\r\n"
+      end
+    rescue IOError, SystemCallError
+    ensure
+      conn.close
+    end
+  end
+
+  def gzip_segments(pieces)
+    io = StringIO.new
+    gz = Zlib::GzipWriter.new(io)
+    pos = 0
+    segments = pieces.map do |piece|
+      gz.write piece
+      gz.flush
+      segment = io.string.byteslice(pos..-1)
+      pos = io.string.bytesize
+      segment
+    end
+    gz.close
+    tail = io.string.byteslice(pos..-1)
+    segments << tail if tail && !tail.empty?
+    segments
+  end
+
+  def deflate_segments(pieces)
+    deflater = Zlib::Deflate.new
+    segments = pieces.map {|piece| deflater.deflate(piece, Zlib::SYNC_FLUSH) }
+    segments << deflater.finish
+    deflater.close
+    segments.reject(&:empty?)
+  end
+
+  def with_compressed_server
+    routes = {
+      '/gzip' => ['gzip', gzip_segments(PIECES)],
+      '/deflate' => ['deflate', deflate_segments(PIECES)],
+      '/plain' => ['identity', ['{"ok":true}']],
+    }
+    server = CompressedServer.new(routes).start
+    begin
+      yield server
+    ensure
+      server.shutdown
+    end
+  end
+
+  def test_max_decompressed_body_size_validation
+    http = Net::HTTP.new('127.0.0.1', 80)
+    assert_nil http.max_decompressed_body_size
+    http.max_decompressed_body_size = 1024
+    assert_equal 1024, http.max_decompressed_body_size
+    http.max_decompressed_body_size = nil
+    assert_nil http.max_decompressed_body_size
+    assert_raise(ArgumentError) { http.max_decompressed_body_size = -1 }
+    assert_raise(ArgumentError) { http.max_decompressed_body_size = 1.5 }
+  end
+
+  # Exactly at the limit: the whole body is delivered to the callback and
+  # the connection is released back for reuse.
+  %w[gzip deflate].each do |encoding|
+    define_method("test_streaming_at_limit_#{encoding}") do
+      with_compressed_server do |server|
+        http = Net::HTTP.new('127.0.0.1', server.port)
+        http.max_decompressed_body_size = BODY.bytesize
+        http.start do
+          received = []
+          http.request(Net::HTTP::Get.new("/#{encoding}")) do |res|
+            res.read_body do |fragment|
+              received << fragment
+            end
+          end
+          assert_equal BODY.bytesize, received.sum(&:bytesize)
+          assert_equal BODY, received.join
+          assert_equal 1, server.accept_count
+
+          # The connection was released back to the pool and is reused.
+          res = http.get('/plain')
+          assert_equal '{"ok":true}', res.body
+          assert_equal 1, server.accept_count
+          assert_equal ["/#{encoding}", '/plain'], server.requests
+        end
+      end
+    end
+  end
+
+  # One more segment over the limit: only the allowed bytes reach the
+  # callback, the error is not retried, and the connection is closed so the
+  # next request opens a new connection.
+  %w[gzip deflate].each do |encoding|
+    define_method("test_streaming_over_limit_#{encoding}") do
+      with_compressed_server do |server|
+        limit = BODY.bytesize - PIECE_SIZE
+        http = Net::HTTP.new('127.0.0.1', server.port)
+        http.max_decompressed_body_size = limit
+        http.start do
+          received = []
+          error = assert_raise(Net::HTTPDecompressedBodyTooLarge) do
+            http.request(Net::HTTP::Get.new("/#{encoding}")) do |res|
+              res.read_body do |fragment|
+                received << fragment
+              end
+            end
+          end
+          assert_match(/#{limit}/, error.message)
+          assert_equal limit, received.sum(&:bytesize)
+          assert_equal BODY.byteslice(0, limit), received.join
+          # No retry: the failing request was sent exactly once.
+          assert_equal ["/#{encoding}"], server.requests
+
+          # The connection was closed; the next request uses a new one.
+          assert http.started?
+          res = http.get('/plain')
+          assert_equal '{"ok":true}', res.body
+          assert_equal 2, server.accept_count
+          assert_equal ["/#{encoding}", '/plain'], server.requests
+        end
+      end
+    end
+  end
+
+  # The caller stops reading before the limit: the connection is closed and
+  # the next request opens a new connection.
+  %w[gzip deflate].each do |encoding|
+    define_method("test_streaming_caller_stops_#{encoding}") do
+      with_compressed_server do |server|
+        http = Net::HTTP.new('127.0.0.1', server.port)
+        http.max_decompressed_body_size = BODY.bytesize
+        http.start do
+          received = []
+          assert_raise(StopReading) do
+            http.request(Net::HTTP::Get.new("/#{encoding}")) do |res|
+              res.read_body do |fragment|
+                received << fragment
+                raise StopReading
+              end
+            end
+          end
+          assert_equal 1, received.size
+          assert_equal received.first.bytesize, received.sum(&:bytesize)
+          assert_equal BODY.byteslice(0, received.first.bytesize), received.first
+          assert_equal ["/#{encoding}"], server.requests
+
+          # The connection was closed; the next request uses a new one.
+          assert http.started?
+          res = http.get('/plain')
+          assert_equal '{"ok":true}', res.body
+          assert_equal 2, server.accept_count
+          assert_equal ["/#{encoding}", '/plain'], server.requests
+        end
+      end
+    end
+  end
+
+  # The limit also applies when the body is read without a block.
+  def test_non_streaming_over_limit
+    with_compressed_server do |server|
+      limit = BODY.bytesize - PIECE_SIZE
+      http = Net::HTTP.new('127.0.0.1', server.port)
+      http.max_decompressed_body_size = limit
+      http.start do
+        assert_raise(Net::HTTPDecompressedBodyTooLarge) do
+          http.get('/gzip')
+        end
+        assert_equal ['/gzip'], server.requests
+        res = http.get('/plain')
+        assert_equal '{"ok":true}', res.body
+        assert_equal 2, server.accept_count
+      end
+    end
+  end
+end

@@ -221,6 +221,7 @@ class Net::HTTPResponse
     @read = false
     @uri  = nil
     @decode_content = false
+    @max_decompressed_body_size = nil
     @body_encoding = false
     @ignore_eof = true
   end
@@ -244,6 +245,12 @@ class Net::HTTPResponse
   # Set to true automatically when the request did not contain an
   # Accept-Encoding header from the user.
   attr_accessor :decode_content
+
+  # The maximum number of decompressed bytes allowed in this response's
+  # body, or +nil+ for no limit.  This is set automatically from
+  # Net::HTTP#max_decompressed_body_size; when the limit is exceeded,
+  # Net::HTTPDecompressedBodyTooLarge is raised while reading the body.
+  attr_accessor :max_decompressed_body_size
 
   # Returns the value set by body_encoding=, or +false+ if none;
   # see #body_encoding=.
@@ -585,7 +592,7 @@ class Net::HTTPResponse
     when 'deflate', 'gzip', 'x-gzip' then
       self.delete 'content-encoding'
 
-      inflate_body_io = Inflater.new(@socket)
+      inflate_body_io = Inflater.new(@socket, @max_decompressed_body_size)
 
       begin
         yield inflate_body_io
@@ -687,11 +694,17 @@ class Net::HTTPResponse
 
     ##
     # Creates a new Inflater wrapping +socket+
+    #
+    # +max_decompressed_body_size+ limits the number of inflated bytes
+    # written to the destination; when the limit is exceeded,
+    # Net::HTTPDecompressedBodyTooLarge is raised.
 
-    def initialize socket
+    def initialize socket, max_decompressed_body_size = nil
       @socket = socket
       # zlib with automatic gzip detection
       @inflate = Zlib::Inflate.new(32 + Zlib::MAX_WBITS)
+      @max_decompressed_body_size = max_decompressed_body_size
+      @bytes_inflated = 0
     end
 
     ##
@@ -725,6 +738,16 @@ class Net::HTTPResponse
       block = proc do |compressed_chunk|
         @inflate.inflate(compressed_chunk) do |chunk|
           compressed_chunk.clear
+          if @max_decompressed_body_size
+            remaining = @max_decompressed_body_size - @bytes_inflated
+            if chunk.bytesize > remaining
+              dest << chunk.byteslice(0, remaining) if remaining > 0
+              @bytes_inflated += remaining
+              raise Net::HTTPDecompressedBodyTooLarge,
+                    "decompressed body size exceeds limit of #{@max_decompressed_body_size} bytes"
+            end
+            @bytes_inflated += chunk.bytesize
+          end
           dest << chunk
         end
       end

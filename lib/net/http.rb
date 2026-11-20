@@ -589,6 +589,12 @@ module Net   #:nodoc:
   # - {:ignore_eof=}[rdoc-ref:Net::HTTP#ignore_eof=]:
   #   Sets whether to ignore end-of-file when reading a response body
   #   with <tt>Content-Length</tt> headers.
+  # - {:max_decompressed_body_size}[rdoc-ref:Net::HTTP#max_decompressed_body_size]:
+  #   Returns the maximum number of decompressed bytes allowed in a
+  #   response body.
+  # - {:max_decompressed_body_size=}[rdoc-ref:Net::HTTP#max_decompressed_body_size=]:
+  #   Sets the maximum number of decompressed bytes allowed in a
+  #   response body.
   # - {:response_body_encoding}[rdoc-ref:Net::HTTP#response_body_encoding]:
   #   Returns the encoding to use for the response body.
   # - {#response_body_encoding=}[rdoc-ref:Net::HTTP#response_body_encoding=]:
@@ -1159,7 +1165,8 @@ module Net   #:nodoc:
         max_retries: 1,
         debug_output: nil,
         response_body_encoding: false,
-        ignore_eof: true
+        ignore_eof: true,
+        max_decompressed_body_size: nil
       }
       options = defaults.merge(self.class.default_configuration || {})
 
@@ -1182,6 +1189,7 @@ module Net   #:nodoc:
       @debug_output = options[:debug_output]
       @response_body_encoding = options[:response_body_encoding]
       @ignore_eof = options[:ignore_eof]
+      @max_decompressed_body_size = options[:max_decompressed_body_size]
       @tcpsocket_supports_open_timeout = nil
 
       @proxy_from_env = false
@@ -1473,6 +1481,33 @@ module Net   #:nodoc:
     # with <tt>Content-Length</tt> headers;
     # initially +true+.
     attr_accessor :ignore_eof
+
+    # Returns the maximum number of decompressed bytes allowed in a response
+    # body; see #max_decompressed_body_size=.
+    attr_reader :max_decompressed_body_size
+
+    # Sets the maximum number of decompressed bytes allowed in a response
+    # body; initially +nil+ (no limit).
+    #
+    # When the response is compressed (see Net::HTTPGenericRequest#decode_content)
+    # and the decompressed body exceeds +size+ bytes,
+    # Net::HTTPDecompressedBodyTooLarge is raised, whether the body is read
+    # all at once or streamed fragment by fragment.
+    # At most +size+ decompressed bytes are passed to the caller before the
+    # error is raised.
+    #
+    # The error is not retried and the connection is closed, so the next
+    # request opens a new connection.
+    #
+    #   http = Net::HTTP.new(hostname)
+    #   http.max_decompressed_body_size = 1024 * 1024 # 1 MiB of decoded JSON
+    #
+    def max_decompressed_body_size=(size)
+      if size && (!size.is_a?(Integer) || size.negative?)
+        raise ArgumentError, 'max_decompressed_body_size should be non-negative integer number or nil'
+      end
+      @max_decompressed_body_size = size
+    end
 
     # Returns +true+ if the \HTTP session has been started:
     #
@@ -2531,6 +2566,7 @@ module Net   #:nodoc:
             res.decode_content = req.decode_content
             res.body_encoding = @response_body_encoding
             res.ignore_eof = @ignore_eof
+            res.max_decompressed_body_size = @max_decompressed_body_size
             if res.kind_of?(HTTPInformation)
               informational_count += 1
               raise HTTPBadResponse, 'too many informational responses' if
