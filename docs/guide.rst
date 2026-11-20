@@ -875,6 +875,51 @@ own. The memory and redis storages support it, others raise
 ``NotImplementedError``. With :py:class:`RedisHuey` the server must support
 hash-field TTL (redis 7.4+ or valkey 9+).
 
+Lock ownership
+^^^^^^^^^^^^^^
+
+By default the lock is a simple marker: any code that can reach the lock key
+can clear it. This is usually fine, but consider a scheduled audit that must
+never run concurrently. If the machine is restarted while the task holds the
+lock, emergency cleanup may force the lock away so a new run can start. When
+the old task's cleanup code later receives its termination notification and
+tries to release, it would blindly delete the lock -- including one that now
+belongs to the new run.
+
+Pass ``owner=True`` to give the lock ownership semantics. Each successful
+:py:meth:`~huey.api.TaskLock.acquire` then stores a unique owner token and the
+lock is only released when that same holder calls
+:py:meth:`~huey.api.TaskLock.release` (or when an explicit, forceful operation
+is used). A stale release from a previous owner becomes a no-op, so the current
+holder keeps running undisturbed.
+
+.. code-block:: python
+
+    old = huey.lock_task('audit', owner=True)
+    old.acquire()                       # old run holds the lock
+
+    # ... machine restart: operator force-clears the stale lock ...
+    huey.flush_locks('audit', reason='crash recovery')
+
+    current = huey.lock_task('audit', owner=True)
+    current.acquire()                   # new run takes over
+
+    old.release()                       # no-op: old token no longer matches
+    print(huey.is_locked('audit'))      # True, current run is unaffected
+    current.release()                   # True: only the holder releases it
+
+You may also pass any hashable value (e.g. a worker or task id) as ``owner`` to
+use it directly as the token instead of generating a random one. The current
+token is available via :py:meth:`~huey.api.TaskLock.get_owner`.
+
+A non-holder can still override the lock deliberately: call
+:py:meth:`~huey.api.TaskLock.release` with ``force=True`` (or the
+backwards-compatible :py:meth:`~huey.api.TaskLock.clear`), or use
+:py:meth:`Huey.flush_locks`. Because these are operator actions rather than
+normal task cleanup, every removal performed by ``flush_locks`` is written to
+the ``huey`` logger (at ``WARNING`` level) together with the lock name and an
+optional ``reason``, leaving an auditable record of the emergency cleanup.
+
 Examples:
 
 .. code-block:: python

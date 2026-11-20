@@ -77,6 +77,28 @@ class StorageTests(object):
         self.s.put_data('k2', b'v2')
         self.assertEqual(self.s.result_items(), {'k1': b'v1', 'k2': b'v2'})
 
+    def test_delete_if_value(self):
+        key = b'lock'
+        # Missing key: nothing to delete.
+        self.assertFalse(self.s.delete_if_value(key, b'ownerA'))
+
+        self.assertTrue(self.s.put_if_empty(key, b'ownerA'))
+        # A non-owner's delete is rejected and the value is untouched.
+        self.assertFalse(self.s.delete_if_value(key, b'ownerB'))
+        self.assertTrue(self.s.has_data_for_key(key))
+        self.assertEqual(self.s.peek_data(key), b'ownerA')
+        # The actual owner's delete succeeds.
+        self.assertTrue(self.s.delete_if_value(key, b'ownerA'))
+        self.assertFalse(self.s.has_data_for_key(key))
+        # Repeating the delete on the now-missing key fails.
+        self.assertFalse(self.s.delete_if_value(key, b'ownerA'))
+
+        # After a new owner takes the key, the old token cannot remove it.
+        self.assertTrue(self.s.put_if_empty(key, b'ownerB'))
+        self.assertFalse(self.s.delete_if_value(key, b'ownerA'))
+        self.assertEqual(self.s.peek_data(key), b'ownerB')
+        self.assertTrue(self.s.delete_if_value(key, b'ownerB'))
+
     @slow_test()
     def test_put_if_empty_ttl(self):
         if not self.supports_ttl:

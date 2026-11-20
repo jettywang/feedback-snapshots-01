@@ -224,6 +224,23 @@ class BaseStorage(object):
         """
         return self.pop_data(key) is not EmptyData
 
+    def delete_if_value(self, key, value):
+        """
+        Atomically delete the key only when the stored value matches the given
+        value. This provides the compare-and-delete primitive used by
+        ownership-aware locks, so that a stale owner cannot release a lock that
+        has since been taken over by another owner.
+
+        :param bytes key: Key to delete.
+        :param bytes value: Value that must be stored for the key.
+        :return: boolean whether the key was deleted.
+        """
+        # Generic, non-atomic fallback. Subclasses override this with an
+        # atomic compare-and-delete where the backend supports one.
+        if self.peek_data(key) != value:
+            return False
+        return self.delete_data(key)
+
     def has_data_for_key(self, key):
         """
         Return whether there is data for the given key.
@@ -324,6 +341,7 @@ class BlackHoleStorage(BaseStorage):
     def pop_data(self, key): return EmptyData
     def has_data_for_key(self, key): return False
     def put_if_empty(self, key, value, ttl=None): return True
+    def delete_if_value(self, key, value): return False
     def incr(self, key, amount=1): return amount
     def delete_counter(self, key): pass
     def result_store_size(self): return 0
@@ -417,6 +435,13 @@ class MemoryStorage(BaseStorage):
             self._results[key] = value
             return True
 
+    def delete_if_value(self, key, value):
+        with self._lock:
+            if self._results.get(key) != value:
+                return False
+            del self._results[key]
+            return True
+
     def incr(self, key, amount=1):
         with self._lock:
             self._counters[key] = self._counters.get(key, 0) + amount
@@ -448,6 +473,15 @@ local res = redis.call('zrangebyscore', KEYS[1], '-inf', unix_ts)
 if #res and redis.call('zremrangebyscore', KEYS[1], '-inf', unix_ts) == #res then
     return res
 end"""
+
+
+# Atomically delete a hash field only when its value matches the expected
+# owner token. Returns 1 when deleted, 0 otherwise.
+HDEL_IF_VALUE_LUA = """\
+if redis.call('hget', KEYS[1], ARGV[1]) == ARGV[2] then
+    return redis.call('hdel', KEYS[1], ARGV[1])
+end
+return 0"""
 
 
 class RedisStorage(BaseStorage):
@@ -484,6 +518,7 @@ class RedisStorage(BaseStorage):
         self.conn = self.redis_client(connection_pool=connection_pool)
         self.connection_params = connection_params
         self._pop = self.conn.register_script(SCHEDULE_POP_LUA)
+        self._delete_if_value = self.conn.register_script(HDEL_IF_VALUE_LUA)
 
         self.name = self.clean_name(name) if clean_name else name
         self.queue_key = 'huey.redis.%s' % self.name
@@ -636,6 +671,10 @@ class RedisStorage(BaseStorage):
             self.conn.hexpire(self.result_key, ttl, key)
         return True
 
+    def delete_if_value(self, key, value):
+        return self._delete_if_value(keys=[self.result_key],
+                                     args=[key, value]) != 0
+
     def incr(self, key, amount=1):
         return self.conn.hincrby(self.counter_key, key, amount)
 
@@ -704,6 +743,12 @@ class RedisExpireStorage(RedisStorage):
     def put_if_empty(self, key, value, ttl=None):
         return bool(self.conn.set(self.result_key(key), value, nx=True,
                                   ex=ttl))
+
+    def delete_if_value(self, key, value):
+        result_key = self.result_key(key)
+        if self.conn.get(result_key) != value:
+            return False
+        return self.conn.delete(result_key) != 0
 
     def incr(self, key, amount=1):
         pipe = self.conn.pipeline()
@@ -1047,6 +1092,12 @@ class SqliteStorage(BaseSqlStorage):
         else:
             return True
 
+    def delete_if_value(self, key, value):
+        with self.db(commit=True) as curs:
+            curs.execute('delete from kv where queue=? and key=? and value=?',
+                         (self.name, key, self.to_blob(value)))
+            return curs.rowcount == 1
+
     def incr(self, key, amount=1):
         with self.db(commit=True) as curs:
             curs.execute('insert into counter (queue, key, value) '
@@ -1345,6 +1396,13 @@ class PostgresStorage(BaseSqlStorage):
                          (self.name, self._key(key), value))
             return curs.rowcount == 1
 
+    def delete_if_value(self, key, value):
+        with self.db() as curs:
+            curs.execute('delete from {} where queue = %s and key = %s and '
+                         'value = %s'.format(self.table_kv),
+                         (self.name, self._key(key), value))
+            return curs.rowcount == 1
+
     def incr(self, key, amount=1):
         with self.db() as curs:
             curs.execute('insert into {t} as c (queue, key, value) '
@@ -1564,6 +1622,18 @@ class FileStorage(BaseStorage):
             if os.path.exists(self.path_for_key(key)):
                 return False
             self._put_data(key, value)
+            return True
+
+    def delete_if_value(self, key, value):
+        filename = self.path_for_key(key)
+        with self.lock:
+            if not os.path.exists(filename):
+                return False
+            with open(filename, 'rb') as fh:
+                _, stored = self._unpack_result(fh.read())
+            if stored != value:
+                return False
+            os.unlink(filename)
             return True
 
     def _unpack_result(self, data):

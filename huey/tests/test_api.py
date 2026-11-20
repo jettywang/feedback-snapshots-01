@@ -2726,6 +2726,126 @@ class TestTaskLocking(BaseTestCase):
         self.assertEqual(self.execute_next(), 6)
 
 
+class TestTaskLockOwnership(BaseTestCase):
+    def test_owner_token_generated_and_stored(self):
+        lock = self.huey.lock_task('owned', owner=True)
+        lock.acquire()
+        try:
+            self.assertTrue(lock.is_locked())
+            # A non-empty, unique token is recorded and readable.
+            self.assertTrue(lock.get_owner())
+            self.assertEqual(lock.get_owner(), lock._token)
+        finally:
+            lock.release()
+        self.assertFalse(lock.is_locked())
+        self.assertIsNone(lock.get_owner())
+
+    def test_explicit_owner_token(self):
+        lock = self.huey.lock_task('explicit', owner='worker-42')
+        lock.acquire()
+        try:
+            self.assertEqual(lock.get_owner(), 'worker-42')
+            self.assertEqual(lock._token, 'worker-42')
+        finally:
+            lock.release()
+        self.assertFalse(lock.is_locked())
+
+    def test_acquire_blocks_while_held(self):
+        first = self.huey.lock_task('lk', owner=True)
+        first.acquire()
+        try:
+            second = self.huey.lock_task('lk', owner=True)
+            self.assertRaises(TaskLockedException, second.acquire)
+            # A blocked acquire leaves no dangling token.
+            self.assertIsNone(second._token)
+        finally:
+            first.release()
+
+    def test_takeover_and_stale_release_noop(self):
+        # The "old" scheduled-audit task acquires the lock.
+        old = self.huey.lock_task('audit', owner=True)
+        old.acquire()
+        old_token = old._token
+
+        # Machine recovery: emergency cleanup force-releases the stale lock,
+        # then the new task takes over.
+        self.huey.flush_locks('audit', reason='crash recovery')
+        current = self.huey.lock_task('audit', owner=True)
+        current.acquire()
+        try:
+            self.assertNotEqual(current._token, old_token)
+            self.assertTrue(self.huey.is_locked('audit'))
+
+            # The old task's cleanup code runs late: its release must not touch
+            # the current holder's lock.
+            self.assertFalse(old.release())
+            self.assertTrue(self.huey.is_locked('audit'))
+            self.assertEqual(current.get_owner(), current._token)
+        finally:
+            # Only the actual holder's normal ending releases the lock.
+            self.assertTrue(current.release())
+        self.assertFalse(self.huey.is_locked('audit'))
+
+    def test_non_holder_cannot_release(self):
+        holder = self.huey.lock_task('lk', owner=True)
+        holder.acquire()
+        try:
+            other = self.huey.lock_task('lk', owner=True)
+            # Never acquired, so release() refuses to touch the lock.
+            self.assertFalse(other.release())
+            self.assertTrue(self.huey.is_locked('lk'))
+        finally:
+            holder.release()
+        self.assertFalse(self.huey.is_locked('lk'))
+
+    def test_force_release_overrides_ownership(self):
+        holder = self.huey.lock_task('lk', owner=True)
+        holder.acquire()
+        other = self.huey.lock_task('lk', owner=True)
+        try:
+            # Explicit operator override bypasses the ownership check.
+            self.assertTrue(other.release(force=True))
+            self.assertFalse(self.huey.is_locked('lk'))
+        finally:
+            # Holder's later release is now a harmless no-op.
+            self.assertFalse(holder.release())
+
+    def test_context_manager_releases_only_held_lock(self):
+        with self.huey.lock_task('cm', owner=True) as lock:
+            token = lock._token
+            self.assertTrue(self.huey.is_locked('cm'))
+        self.assertFalse(self.huey.is_locked('cm'))
+        self.assertIsNone(lock._token)
+        # Re-entering the context after release works.
+        with self.huey.lock_task('cm', owner=True) as lock2:
+            self.assertNotEqual(lock2._token, token)
+
+    def test_legacy_remains_unconditional(self):
+        # owner=False (default) preserves the historical unconditional delete.
+        lock = self.huey.lock_task('legacy')
+        lock.acquire()
+        self.assertTrue(lock.is_locked())
+        self.assertTrue(lock.release())
+        self.assertFalse(lock.is_locked())
+
+    def test_flush_locks_emits_audit_record(self):
+        with self.huey.lock_task('lk', owner=True):
+            with self.assertLogs('huey', level='WARNING') as cap:
+                flushed = self.huey.flush_locks('lk', reason='manual cleanup')
+        self.assertEqual(flushed, set(['lk']))
+        self.assertTrue(any('force-released lock "lk"' in msg
+                            and 'manual cleanup' in msg
+                            for msg in cap.output))
+        self.assertFalse(self.huey.is_locked('lk'))
+
+    def test_flush_locks_default_reason_audited(self):
+        with self.huey.lock_task('lk', owner=True):
+            with self.assertLogs('huey', level='WARNING') as cap:
+                self.huey.flush_locks('lk')
+        self.assertTrue(any('operator flush_locks()' in msg
+                            for msg in cap.output))
+
+
 class TestRateLimit(BaseTestCase):
     def test_rate_limit(self):
         rl = self.huey.rate_limit('test', limit=3, per=60)

@@ -400,6 +400,10 @@ class Huey(object):
     def delete(self, key):
         return self.storage.delete_data(key)
 
+    def delete_if_value(self, key, data):
+        return self.storage.delete_if_value(key,
+                                            self.serializer.serialize(data))
+
     def _timeout_context(self, task):
         if not task.timeout or self._timeout_handler is None:
             return noop_context()
@@ -754,13 +758,34 @@ class Huey(object):
     def flush(self):
         self.storage.flush_all()
 
-    def lock_task(self, lock_name, ttl=None):
-        return TaskLock(self, lock_name, ttl)
+    def lock_task(self, lock_name, ttl=None, owner=False):
+        """
+        Return a :py:class:`TaskLock` for the given name.
+
+        :param str lock_name: Name of the lock.
+        :param int ttl: Optional time-to-live in seconds for the lock.
+        :param owner: Enable ownership semantics. ``False`` (default) keeps the
+            legacy behavior, ``True`` generates a unique owner token per
+            acquisition, any other value is used directly as the owner token.
+        """
+        return TaskLock(self, lock_name, ttl, owner)
 
     def is_locked(self, lock_name):
         return TaskLock(self, lock_name).is_locked()
 
-    def flush_locks(self, *names):
+    def flush_locks(self, *names, reason=None):
+        """
+        Forcefully clear locks, bypassing any ownership checks. This is the
+        explicit operator override and is always permitted, but every removal
+        is written to the ``huey`` logger so emergency cleanup leaves an
+        auditable record.
+
+        :param names: Optional lock names to flush. When empty, all locks seen
+            by this Huey instance are flushed.
+        :param str reason: Optional operator-supplied reason recorded in the
+            audit log entry.
+        :return: Set of lock names that were actually removed.
+        """
         flushed = set()
         locks = self._locks
         if names:
@@ -770,7 +795,11 @@ class Huey(object):
 
         for lock_key in locks:
             if self.delete(lock_key):
-                flushed.add(lock_key.split('.lock.', 1)[-1])
+                lock_name = lock_key.split('.lock.', 1)[-1]
+                flushed.add(lock_name)
+                logger.warning('force-released lock "%s" (key=%s) reason=%s',
+                               lock_name, lock_key,
+                               reason or 'operator flush_locks()')
 
         return flushed
 
@@ -1064,17 +1093,46 @@ class TaskLock(object):
     """
     Utilize the Storage key/value APIs to implement simple locking. For more
     details see :py:meth:`Huey.lock_task`.
+
+    Optional ownership semantics are enabled via ``owner``:
+
+    * ``owner=False`` (the default) preserves the legacy behavior: any caller
+      can clear the lock by deleting its key.
+    * ``owner=True`` makes each :py:meth:`TaskLock.acquire` generate a unique
+      owner token and store it in the lock. A lock is then released only by its
+      actual holder (a matching token) or by an explicit, forceful operation
+      such as :py:meth:`Huey.flush_locks`. A late ``release()`` from a previous
+      holder whose lock was taken over becomes a no-op instead of deleting the
+      current holder's lock.
+    * Any other value is used directly as the owner token, which is useful when
+      the owner identity (e.g. a worker or task id) is known up front.
     """
-    def __init__(self, huey, name, ttl=None):
+    def __init__(self, huey, name, ttl=None, owner=False):
         self._huey = huey
         self._name = name
         self._ttl = ttl
+        self._owner_mode = owner
         self._key = '%s.lock.%s' % (self._huey.name, self._name)
         self._huey._locks.add(self._key)
+        # Token held by this instance after a successful acquire(). ``None``
+        # means this instance does not currently own the lock.
+        self._token = None
+
+    def _new_token(self):
+        return uuid.uuid4().hex
 
     def is_locked(self):
         return self._huey.storage.has_data_for_key(self._key)
     locked = is_locked
+
+    def get_owner(self):
+        """
+        Return the token recorded in the lock, or ``None`` if the lock is free.
+        Note the legacy (non-ownership) locks store a plain marker rather than
+        an owner token.
+        """
+        owner = self._huey.get(self._key, peek=True)
+        return None if owner is EmptyData else owner
 
     def __call__(self, fn):
         @wraps(fn)
@@ -1088,16 +1146,60 @@ class TaskLock(object):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self._huey.delete(self._key)
+        self.release()
 
     def acquire(self):
-        if not self._huey.put_if_empty(self._key, '1', self._ttl):
-            raise TaskLockedException('unable to acquire lock %s' % self._name)
+        if self._owner_mode is False:
+            # Legacy behavior: store a simple marker and allow unconditional
+            # deletion by any caller.
+            if not self._huey.put_if_empty(self._key, '1', self._ttl):
+                raise TaskLockedException(
+                    'unable to acquire lock %s' % self._name)
+            self._token = None
+            return True
+
+        token = (self._new_token() if self._owner_mode is True
+                 else self._owner_mode)
+        if not self._huey.put_if_empty(self._key, token, self._ttl):
+            raise TaskLockedException(
+                'unable to acquire lock %s' % self._name)
+        self._token = token
         return True
 
+    def release(self, force=False):
+        """
+        Release the lock.
+
+        With ownership semantics enabled the lock is deleted only when this
+        instance holds a matching token (or when ``force=True``, which is the
+        explicit operator override). A stale release from a previous owner is a
+        no-op so a lock that has since been taken over stays valid.
+        """
+        if not force and self._owner_mode is not False and self._token is None:
+            # This instance never acquired (or already released) an owned lock:
+            # never touch a lock it does not hold.
+            return False
+
+        if not force and self._owner_mode is not False:
+            removed = self._huey.delete_if_value(self._key, self._token)
+            if removed:
+                self._token = None
+            return removed
+
+        removed = self._huey.delete(self._key)
+        if removed:
+            self._token = None
+        return removed
+
     def clear(self):
-        return self._huey.delete(self._key)
-    release = clear
+        # Unconditional removal, retained for backwards-compatibility. This is
+        # the explicit operator override and bypasses ownership checks.
+        removed = self._huey.delete(self._key)
+        if removed:
+            self._token = None
+        return removed
+    # Backwards-compatible alias.
+    force_release = clear
 
 
 class RateLimit(object):

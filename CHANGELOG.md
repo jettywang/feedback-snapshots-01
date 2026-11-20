@@ -5,6 +5,16 @@ Changelog
 
 [View commits](https://github.com/coleifer/huey/compare/3.5.4...master)
 
+* Add optional ownership semantics to `TaskLock` via the `owner` parameter of
+  `Huey.lock_task()`. An owned lock records an owner token and is only released
+  by its actual holder; a stale release from a previous holder (e.g. cleanup
+  code that runs after the lock was force-cleared during crash recovery) is now
+  a no-op instead of deleting the current holder's lock.
+* Add an atomic compare-and-delete storage primitive (`delete_if_value`)
+  implemented by all storage backends.
+* `Huey.flush_locks()` now logs every force-released lock (with an optional
+  `reason`) so emergency cleanup leaves an auditable record.
+
 ## 3.5.4
 
 * Fix possible hang if worker holding the stop flag was killed while holding
