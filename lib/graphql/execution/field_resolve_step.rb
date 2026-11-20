@@ -76,6 +76,7 @@ module GraphQL
           @runner.schema.sync_lazy(lazy)
         end
       rescue GraphQL::UnauthorizedError => auth_err
+        auth_err.context ||= @selections_step.query.context
         @runner.schema.unauthorized_object(auth_err)
       rescue GraphQL::ExecutionError => err
         err
@@ -704,6 +705,7 @@ module GraphQL
           else
             begin
               err ||= GraphQL::UnauthorizedFieldError.new(object: o, type: @parent_type, context: ctx, field: @field_definition)
+              err.context ||= ctx
               new_obj = ctx.schema.unauthorized_field(err)
               if !new_obj.nil?
                 authorized_objects << new_obj

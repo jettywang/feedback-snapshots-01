@@ -121,3 +121,42 @@ class MySchema < GraphQL::Schema
   end
 end
 ```
+
+### Public Authorization Errors
+
+If your API sends errors to clients outside your organization, you may not want to include the unauthorized object or its GraphQL type in the response -- those details could reveal records that the viewer can't access (for example, primary keys or internal type names).
+
+Use [Schema.authorization_error_strategy](rdoc-ref:GraphQL::Schema.authorization_error_strategy) with `:public` to return a generic, client-safe error for every denied object or field:
+
+```ruby
+class MySchema < GraphQL::Schema
+  authorization_error_strategy(:public)
+end
+```
+
+With that setting, denied selections return an error like this:
+
+```json
+{
+  "message": "You are not authorized to access this resource",
+  "path": ["documents", 1],
+  "locations": [{ "line": 1, "column": 3 }],
+  "extensions": { "code": "UNAUTHORIZED" }
+}
+```
+
+The `path` still identifies which selection was denied (including list indexes), but the message omits the object and its type. The field is replaced with `nil`, just like the default behavior.
+
+Meanwhile, the original failure is still available to the server for logging and investigation:
+
+- [Query::Context#unauthorized_errors](rdoc-ref:GraphQL::Query::Context#unauthorized_errors) returns the original [GraphQL::UnauthorizedError](rdoc-ref:GraphQL::UnauthorizedError) objects, with their `object`, `type`, and `path`.
+- Each response error is a [GraphQL::PublicUnauthorizedError](rdoc-ref:GraphQL::PublicUnauthorizedError), whose `#original_error` holds the same details.
+
+```ruby
+result = MySchema.execute(query, context: { current_user: current_user })
+result.context.unauthorized_errors.each do |err|
+  MyLogger.info("Denied #{err.type.graphql_name}: #{err.object.inspect} at #{err.path.inspect}")
+end
+```
+
+The default strategy is `:custom`, which preserves the historical behavior: return `nil` (or whatever your `.unauthorized_object` / `.unauthorized_field` hooks return). If you override those hooks, your implementations take precedence over the `:public` strategy.

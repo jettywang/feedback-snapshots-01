@@ -96,6 +96,7 @@ module GraphQL
           begin
             is_authed, new_return_value = authorized?(**@prepared_arguments)
           rescue GraphQL::UnauthorizedError  => err
+            err.context ||= context
             new_return_value = q.schema.unauthorized_object(err)
             is_authed = false
           end
@@ -118,6 +119,7 @@ module GraphQL
         q.current_trace.end_execute_field(field, @prepared_arguments, trace_objs, q, [result])
         exec_result[exec_index] = result
       rescue GraphQL::UnauthorizedError => auth_err
+        auth_err.context ||= context
         exec_result[exec_index] = begin
           context.schema.unauthorized_object(auth_err)
         rescue GraphQL::ExecutionError => exec_err

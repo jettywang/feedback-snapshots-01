@@ -140,7 +140,8 @@ module GraphQL
   # and [Schema.unauthorized_field](rdoc-ref:GraphQL::Schema.unauthorized_field)
   # run when an authorization hook returns `false`. Return a replacement value or
   # raise [GraphQL::ExecutionError](rdoc-ref:GraphQL::ExecutionError) to add a
-  # client-facing error.
+  # client-facing error. [Schema.authorization_error_strategy](rdoc-ref:GraphQL::Schema.authorization_error_strategy)
+  # can be set to `:public` to return errors which omit the denied object and its type.
   #
   # ## Execution Configuration
   #
@@ -1675,6 +1676,10 @@ module GraphQL
       # If you want to add an error to the `"errors"` key, raise a [GraphQL::ExecutionError](rdoc-ref:GraphQL::ExecutionError)
       # in this hook.
       #
+      # When [.authorization_error_strategy](rdoc-ref:.authorization_error_strategy) is `:public`,
+      # this hook raises a {GraphQL::PublicUnauthorizedError} which omits the unauthorized object
+      # and its type. See {#public_authorization_error} for details.
+      #
       # **Parameters**
       #
       # - `unauthorized_error` (`GraphQL::UnauthorizedError`)
@@ -1683,10 +1688,19 @@ module GraphQL
       #
       # - `Object` — The returned object will be put in the GraphQL response
       #
+      # **Raises**
+      #
+      # - `GraphQL::PublicUnauthorizedError` — When the authorization error strategy is `:public`
+      #
       # :call-seq:
       #   unauthorized_object(GraphQL::UnauthorizedError unauthorized_error) -> Object
       def unauthorized_object(unauthorized_error)
-        nil
+        case authorization_error_strategy
+        when :public
+          raise public_authorization_error(unauthorized_error)
+        else
+          nil
+        end
       end
 
       # This hook is called when a field fails an `authorized?` check.
@@ -1711,6 +1725,105 @@ module GraphQL
       #   unauthorized_field(GraphQL::UnauthorizedFieldError unauthorized_error) -> Field
       def unauthorized_field(unauthorized_error)
         unauthorized_object(unauthorized_error)
+      end
+
+      # This setting controls how authorization failures are turned into GraphQL errors.
+      #
+      # - `:custom` (default) — Keep backwards-compatible behavior. {.unauthorized_object}
+      #   and {.unauthorized_field} return `nil` unless you've overridden them, so
+      #   the field is replaced with `nil` and nothing is added to `"errors"`.
+      # - `:public` — Return a {GraphQL::PublicUnauthorizedError} for each denied field.
+      #   Its message only says that the resource isn't accessible: the unauthorized
+      #   object and its GraphQL type are left out. Each error's `#path` still points
+      #   at the denied selection so clients can tell which part of their query was
+      #   rejected. The original {GraphQL::UnauthorizedError} (with `object` and `type`)
+      #   is available as `PublicUnauthorizedError#original_error` and is also saved in
+      #   [Query::Context#unauthorized_errors](rdoc-ref:GraphQL::Query::Context#unauthorized_errors), so server-side code can still investigate
+      #   which records were denied.
+      #
+      # Overrides of {.unauthorized_object} or {.unauthorized_field} take precedence
+      # over both settings when they don't call `super`, since they're responsible
+      # for their own error handling. (If they call `super`, the configured strategy
+      # still applies.)
+      #
+      # **Example: Enabling public authorization errors**
+      #
+      # ```ruby
+      # class MySchema < GraphQL::Schema
+      #   authorization_error_strategy(:public)
+      # end
+      # ```
+      #
+      # **Parameters**
+      #
+      # - `new_strategy` (`Symbol, nil`) — `:public` enables client-safe errors; `:custom` keeps the
+      #   historical behavior of returning `nil`.
+      #
+      # **Returns**
+      #
+      # - `Symbol` — The configured strategy
+      #
+      # :call-seq:
+      #   authorization_error_strategy(Symbol | nil new_strategy) -> Symbol
+      def authorization_error_strategy(new_strategy = NOT_CONFIGURED)
+        if NOT_CONFIGURED.equal?(new_strategy)
+          if defined?(@authorization_error_strategy)
+            @authorization_error_strategy
+          else
+            find_inherited_value(:authorization_error_strategy, :custom)
+          end
+        else
+          if ![:custom, :public].include?(new_strategy)
+            raise ArgumentError, "Authorization error strategy must be :custom or :public, not: #{new_strategy.inspect}"
+          end
+          @authorization_error_strategy = new_strategy
+        end
+      end
+
+      # Build the client-facing error for `:public` authorization errors, or `nil` for `:custom`.
+      #
+      # Subclasses may override this to apply a different rendering while keeping
+      # the original error available. The original error is appended to
+      # [Query::Context#unauthorized_errors](rdoc-ref:GraphQL::Query::Context#unauthorized_errors) so it can be logged or inspected later;
+      # that entry isn't included in the GraphQL response.
+      #
+      # **Parameters**
+      #
+      # - `unauthorized_error` (`GraphQL::UnauthorizedError`)
+      #
+      # **Returns**
+      #
+      # - `GraphQL::PublicUnauthorizedError, nil`
+      #
+      # :call-seq:
+      #   public_authorization_error(GraphQL::UnauthorizedError unauthorized_error) -> GraphQL::PublicUnauthorizedError | nil
+      def public_authorization_error(unauthorized_error)
+        record_unauthorized_error(unauthorized_error)
+        GraphQL::PublicUnauthorizedError.new(unauthorized_error)
+      end
+
+      # Record an authorization failure for server-side investigation without
+      # adding it to the GraphQL response.
+      #
+      # Denied errors are available at [Query::Context#unauthorized_errors](rdoc-ref:GraphQL::Query::Context#unauthorized_errors) (an
+      # array). Each entry is the original {GraphQL::UnauthorizedError}, including
+      # its denied `object`, its `type`, and its `path`.
+      #
+      # **Parameters**
+      #
+      # - `unauthorized_error` (`GraphQL::UnauthorizedError`)
+      #
+      # **Returns**
+      #
+      # - `Array<GraphQL::UnauthorizedError>` — The accumulated list
+      #
+      # :call-seq:
+      #   record_unauthorized_error(GraphQL::UnauthorizedError unauthorized_error) -> Array[GraphQL::UnauthorizedError]
+      def record_unauthorized_error(unauthorized_error)
+        ctx = unauthorized_error.context
+        if ctx.is_a?(GraphQL::Query::Context) && !ctx.is_a?(GraphQL::Query::NullContext)
+          ctx.unauthorized_errors << unauthorized_error
+        end
       end
 
       # Called at runtime when GraphQL-Ruby encounters a mismatch between the application behavior

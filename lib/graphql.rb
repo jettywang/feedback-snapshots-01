@@ -154,6 +154,7 @@ This is probably a bug in GraphQL-Ruby, please report this error on GitHub: http
   autoload :UnauthorizedError, "graphql/unauthorized_error"
   autoload :UnauthorizedEnumValueError, "graphql/unauthorized_enum_value_error"
   autoload :UnauthorizedFieldError, "graphql/unauthorized_field_error"
+  autoload :PublicUnauthorizedError, "graphql/public_unauthorized_error"
   autoload :LoadApplicationObjectFailedError, "graphql/load_application_object_failed_error"
   autoload :Testing, "graphql/testing"
   autoload :Current, "graphql/current"

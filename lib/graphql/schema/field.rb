@@ -1314,6 +1314,7 @@ module GraphQL
           err
         end
       rescue GraphQL::UnauthorizedError => err
+        err.context ||= query_ctx
         begin
           query_ctx.schema.unauthorized_object(err)
         rescue GraphQL::ExecutionError => err

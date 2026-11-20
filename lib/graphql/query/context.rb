@@ -187,6 +187,23 @@ module GraphQL
         @execution_errors ||= ExecutionErrors.new(self)
       end
 
+      # Server-side records of authorization failures that happened during this query.
+      #
+      # These aren't added to the GraphQL response. They're populated when
+      # [Schema.authorization_error_strategy](rdoc-ref:Schema.authorization_error_strategy)
+      # is `:public`, so application code can log or inspect which objects were
+      # denied, and where in the query they were requested.
+      #
+      # **Returns**
+      #
+      # - `Array<GraphQL::UnauthorizedError>`
+      #
+      # :call-seq:
+      #   unauthorized_errors() -> Array[GraphQL::UnauthorizedError]
+      def unauthorized_errors
+        @storage[:unauthorized_errors][:errors] ||= []
+      end
+
       def current_path
         current_runtime_state = Fiber[:__graphql_runtime_info]
         query_runtime_state = current_runtime_state && current_runtime_state[@query]

@@ -21,6 +21,7 @@ module GraphQL
         @loaded_value = schema.sync_lazy(@loaded_value)
         assign_value
       rescue GraphQL::UnauthorizedError => auth_err
+        auth_err.context ||= @field_resolve_step.selections_step.query.context
         @is_authorized = false
         schema.unauthorized_object(auth_err)
       rescue GraphQL::RuntimeError => err
@@ -47,6 +48,7 @@ module GraphQL
         @loaded_value = begin
           @load_receiver.load_and_authorize_application_object(@argument_definition, @argument_value, context)
         rescue GraphQL::UnauthorizedError => auth_err
+          auth_err.context ||= context
           @is_authorized = false
           context.schema.unauthorized_object(auth_err)
         end

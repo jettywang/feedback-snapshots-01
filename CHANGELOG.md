@@ -8,6 +8,8 @@
 
 ### New features
 
+- Authorization: add `Schema.authorization_error_strategy(:public)` for client-safe authorization errors which omit the denied object and its GraphQL type, while `Query::Context#unauthorized_errors` keeps the original errors for server-side investigation.
+
 ### Bug fixes
 
 # 2.6.16 (17 Nov 2026)

@@ -131,6 +131,7 @@ module GraphQL
             else
               # It failed the authorization check, so go to the schema's authorized object hook
               err = raised_auth_err || GraphQL::UnauthorizedError.new(object: object, type: self, context: context)
+              err.context ||= context
               # If a new value was returned, wrap that instead of the original value
               begin
                 new_obj = context.schema.unauthorized_object(err)
