@@ -46,6 +46,8 @@ def list_interpreters(
     listed: Final[list[_Interpreter]] = []
     for interpreter in _installed_standalone_interpreters():
         output.append(f"Python {interpreter.name}")
+        if receipt := _approval_receipt(interpreter):
+            output.append(f"    Approved: {receipt['version']} ({receipt['digest']})")
         if used_in := [venv.pipx_metadata for venv in _interpreter_users(interpreter, venvs)]:
             output.append("    Used in:")
             output.extend(f"     - {p.main_package.package} {p.main_package.package_version}" for p in used_in)
@@ -81,6 +83,12 @@ def _installed_standalone_interpreters() -> list[Path]:
         for python_dir in CTX.standalone_python_cachedir.iterdir()
         if python_dir.is_dir() and not python_dir.name.startswith(".")
     ]
+
+
+def _approval_receipt(interpreter: Path) -> dict[str, str | float] | None:
+    from pipx import interpreter_approval  # ruff:ignore[import-outside-top-level]  # keeps interpreter listing startup lazy
+
+    return interpreter_approval.read_approval_receipt(interpreter)
 
 
 def _interpreter_users(interpreter: Path, venvs: list[Venv]) -> list[Venv]:

@@ -1,0 +1,4 @@
+Restrict standalone Python downloads to an admin approval manifest. When ``PIPX_INTERPRETER_APPROVALS`` names a
+manifest, or an ``approvals.json`` sits in the standalone cache, a build downloads only if its version and digest are
+approved; each installed interpreter records an ``approval.json`` receipt that offline runs reuse to state which
+approval it satisfies, and unverified interpreters are refused rather than declared installed.

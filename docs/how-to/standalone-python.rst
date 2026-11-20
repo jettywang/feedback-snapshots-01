@@ -70,6 +70,48 @@ Set it for the whole shell session with the environment variable:
 Reach for ``always`` in CI runs that should not depend on the runner's Python, on distros that strip modules like
 ``tkinter`` or ``lzma``, or on air-gapped hosts with a populated standalone cache.
 
+*****************************
+ Restrict to approved builds
+*****************************
+
+A CI host can pin standalone downloads to the builds an administrator reviewed, instead of trusting whatever the
+release index currently advertises. Drop an approval manifest next to the cached interpreters, or point
+``PIPX_INTERPRETER_APPROVALS`` at one:
+
+.. code-block:: json
+
+    {
+      "created": 1737000000.0,
+      "releases": [
+        {
+          "version": "3.13.2",
+          "digest": "sha256:2f07...c1"
+        }
+      ]
+    }
+
+Each entry pairs a full interpreter version with the ``sha256:`` digest of its build archive, the same digest pipx
+already verifies after every download. While a manifest is in force:
+
+- a download starts only when the index offers a version and digest that the manifest approves, so an unapproved
+  build is refused before any bytes are fetched;
+- pipx records the matched approval in an ``approval.json`` receipt inside the interpreter's cache directory;
+- a later, offline run reuses that receipt to state which approval the cached build satisfies, even when the index is
+  stale or unreachable;
+- an interpreter with no matching receipt or manifest entry is never declared installed, and pipx refuses to use it.
+
+Without a manifest, standalone downloads keep their usual behavior and local interpreters on ``PATH`` remain the first
+choice, so existing setups are unchanged. When ``PIPX_INTERPRETER_APPROVALS`` names a file that is missing or
+malformed, pipx fails closed rather than downloading.
+
+.. code-block:: console
+
+    $ export PIPX_INTERPRETER_APPROVALS=/etc/pipx/interpreter-approvals.json
+    $ pipx install --python 3.13 --fetch-python=always my-package
+    $ pipx interpreter list
+
+``interpreter list`` shows the approval each cached interpreter satisfies, when it has one.
+
 ***************************
  Manage cached interpreters
 ***************************

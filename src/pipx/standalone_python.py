@@ -7,6 +7,7 @@ __lazy_modules__ = [
     "json",
     "pathlib",
     "pipx",
+    "pipx.interpreter_approval",
     "pipx.paths",
     "pipx.util",
     "platform",
@@ -45,6 +46,8 @@ if TYPE_CHECKING:
     from typing import BinaryIO, TypeIs
 
     from filelock import BaseFileLock
+
+    from pipx.interpreter_approval import Approval
 
 _LOGGER: Final[logging.Logger] = logging.getLogger(__name__)
 _PYTHON_PREFIX: Final[re.Pattern[str]] = re.compile(r"[c]?python")
@@ -124,6 +127,7 @@ def download_python_build_standalone(python_version: str, *, override: bool = Fa
     installed_python: Final[Path] = install_dir / "python.exe" if constants.WINDOWS else install_dir / "bin" / "python3"
 
     if not override and installed_python.exists():
+        _verify_cached_build(install_dir)
         return str(installed_python)
 
     # the staging and backup directories of the swap are named after the version, and whatever already has those names
@@ -131,6 +135,7 @@ def download_python_build_standalone(python_version: str, *, override: bool = Fa
     with _version_lock(install_dir):
         if not override and installed_python.exists():
             # another pipx installed this version while this one waited for the lock
+            _verify_cached_build(install_dir)
             return str(installed_python)
         if not override and install_dir.exists():
             # a leftover directory without a usable interpreter is a failed prior attempt with nothing to preserve, so
@@ -139,6 +144,7 @@ def download_python_build_standalone(python_version: str, *, override: bool = Fa
             shutil.rmtree(install_dir)
 
         full_version, (download_link, digest) = resolve_python_version(python_version)
+        approval = _approval_for_build(full_version, digest)
 
         with _staging_dir(install_dir) as staging_dir:
             archive: Final[Path] = staging_dir / f"python-{full_version}.tar.gz"
@@ -155,8 +161,30 @@ def download_python_build_standalone(python_version: str, *, override: bool = Fa
             # is fully extracted do we swap it into place, so a failed download or unpack never destroys a working
             # interpreter
             _install_atomically(download_dir / "python", install_dir)
+            if approval is not None:
+                _write_approval_receipt(install_dir, approval)
 
     return str(installed_python)
+
+
+def _approval_for_build(full_version: str, digest: str) -> Approval | None:
+    from pipx import interpreter_approval  # ruff:ignore[import-outside-top-level]  # pulls in hashlib, keeps startup lazy
+
+    if not interpreter_approval.approvals_enforced():
+        return None
+    return interpreter_approval.approve_build(full_version, digest)
+
+
+def _verify_cached_build(install_dir: Path) -> None:
+    from pipx import interpreter_approval  # ruff:ignore[import-outside-top-level]  # pulls in hashlib, keeps startup lazy
+
+    interpreter_approval.verify_installed_build(install_dir)
+
+
+def _write_approval_receipt(install_dir: Path, approval: Approval) -> None:
+    from pipx import interpreter_approval  # ruff:ignore[import-outside-top-level]  # pulls in hashlib, keeps startup lazy
+
+    interpreter_approval.write_approval_receipt(install_dir, approval)
 
 
 def _version_lock(install_dir: Path) -> BaseFileLock:

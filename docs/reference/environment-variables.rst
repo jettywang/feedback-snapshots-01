@@ -59,6 +59,10 @@ instead:
       - When to fetch a standalone Python build: ``always``, ``missing``, or ``never``. Default: ``never``.
     - - ``PIPX_FETCH_MISSING_PYTHON``
       - Deprecated alias for ``PIPX_FETCH_PYTHON=missing``. Default: unset.
+    - - ``PIPX_INTERPRETER_APPROVALS``
+      - Path to an admin approval manifest restricting standalone Python downloads to reviewed version/digest pairs.
+        A missing or malformed file fails closed. Unset, pipx also enforces an ``approvals.json`` in the standalone
+        cache when present. Default: unset. See :doc:`../how-to/standalone-python`.
     - - ``PIPX_DISABLE_SHARED_LIBS_AUTO_UPGRADE``
       - Set to a truthy value to skip automatic shared library upgrades. Default: unset.
     - - ``PIPX_USE_EMOJI``
