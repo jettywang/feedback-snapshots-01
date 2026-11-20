@@ -27,6 +27,7 @@ from django.core.exceptions import ImproperlyConfigured, PermissionDenied
 from django.db.models import Model, QuerySet
 from django.http import HttpRequest, HttpResponse, HttpResponseForbidden, HttpResponseNotFound, HttpResponseRedirect
 
+from guardian.principals import get_request_principal
 from guardian.shortcuts import get_objects_for_user
 from guardian.utils import get_40x_or_None, get_anonymous_user, get_group_obj_perms_model, get_user_obj_perms_model
 
@@ -477,7 +478,7 @@ class PermissionListMixin:
             queryset (QuerySet): Queryset to filter.
         """
         return dict(
-            user=self.request.user,  # type: ignore[attr-defined]
+            user=get_request_principal(self.request),  # type: ignore[attr-defined]
             perms=self.get_required_permissions(self.request),  # type: ignore[attr-defined]
             klass=queryset,
             **self.get_objects_for_user_extra_kwargs,

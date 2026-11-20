@@ -57,6 +57,7 @@ nav:
           - Admin Integration: userguide/admin-integration.md
           - Signals: userguide/signals.md
           - Asynchronous Views: userguide/async.md
+          - Visitor Principals: userguide/visitor-principals.md
   - Contributing:
       - Overview: develop/overview.md
       - Testing: develop/testing.md
@@ -72,6 +73,7 @@ nav:
     - Managers: api/managers.md
     - Mixins: api/mixins.md
     - Models: api/models.md
+    - Principals: api/principals.md
     - Shortcuts: api/shortcuts.md
     - Template Tags: api/templatetags.md
     - Utilities: api/utils.md

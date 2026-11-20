@@ -9,6 +9,7 @@ from guardian.conf import settings
 from guardian.core import ObjectPermissionChecker
 from guardian.ctypes import get_content_type
 from guardian.exceptions import WrongAppError
+from guardian.principals import Principal
 from guardian.utils import get_anonymous_user
 
 
@@ -33,6 +34,14 @@ def check_user_support(user_obj: Any) -> tuple[bool, Any]:
     Returns:
         A tuple of checkresult and `user_obj` which should be used for permission checks
     """
+    # A Principal carries the scenario type explicitly. A visitor is a real
+    # guest account, so it is checked as that account; an anonymous principal
+    # goes through the site's configured anonymous user below.
+    if isinstance(user_obj, Principal):
+        if user_obj.is_group:
+            return False, user_obj
+        user_obj = user_obj.identity
+
     # This is how we support anonymous users - simply try to retrieve User
     # instance and perform checks for that predefined user
     if not user_obj.is_authenticated:

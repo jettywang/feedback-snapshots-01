@@ -27,6 +27,29 @@ def get_version():
     return version("django-guardian")
 
 
+_PRINCIPAL_EXPORTS = frozenset(
+    {
+        "Principal",
+        "PrincipalSwitch",
+        "PrincipalType",
+        "get_request_principal",
+        "get_visitor_user",
+        "resolve_request_principal",
+    }
+)
+
+
+def __getattr__(name):
+    # These names are loaded lazily: guardian.principals imports the user
+    # model, and guardian itself is imported while Django apps are still
+    # being set up.
+    if name in _PRINCIPAL_EXPORTS:
+        from guardian import principals
+
+        return getattr(principals, name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 def monkey_patch_user():
     from django.contrib.auth import get_user_model
 

@@ -49,6 +49,14 @@ LEGACY_GLOBAL_PERMS_GROUP_UNION = getattr(settings, "GUARDIAN_LEGACY_GLOBAL_PERM
 # 0 = no cache (default), positive number = cache TTL in seconds, -1 = cache indefinitely
 ANONYMOUS_USER_CACHE_TTL = getattr(settings, "GUARDIAN_ANONYMOUS_USER_CACHE_TTL", 0)
 
+# Explicit visitor principal configuration. A visitor is a real guest account
+# that the ingress layer marks per request; it is not the anonymous user.
+VISITOR_USER_NAME = getattr(settings, "GUARDIAN_VISITOR_USER_NAME", None)
+GET_VISITOR_USER = getattr(settings, "GUARDIAN_GET_VISITOR_USER", None)
+VISITOR_HEADER = getattr(settings, "GUARDIAN_VISITOR_HEADER", None)
+ALLOW_INACTIVE_VISITOR_SWITCH = getattr(settings, "GUARDIAN_ALLOW_INACTIVE_VISITOR_SWITCH", False)
+PRINCIPAL_AUDIT_HANDLER = getattr(settings, "GUARDIAN_PRINCIPAL_AUDIT_HANDLER", None)
+
 # Default to using guardian supplied generic object permission models
 USER_OBJ_PERMS_MODEL = getattr(settings, "GUARDIAN_USER_OBJ_PERMS_MODEL", "guardian.UserObjectPermission")
 GROUP_OBJ_PERMS_MODEL = getattr(settings, "GUARDIAN_GROUP_OBJ_PERMS_MODEL", "guardian.GroupObjectPermission")

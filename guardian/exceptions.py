@@ -38,3 +38,15 @@ class MultipleIdentityAndObjectError(GuardianError):
     """Raised when an operation is attempted on both user/group and object."""
 
     pass
+
+
+class VisitorNotConfigured(GuardianError):
+    """Raised when a request is marked as a visitor but no valid visitor account is available."""
+
+    pass
+
+
+class PrincipalSwitchDenied(GuardianError):
+    """Raised when switching an authenticated identity to a visitor lacks confirmation."""
+
+    pass

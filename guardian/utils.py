@@ -102,6 +102,8 @@ def get_identity(identity: Model) -> tuple[Any | None, Any | None]:
     Returns a tuple with one of the members set to `None` depending on whether the input is
     a `Group` instance or a `User` instance.
     Also accepts AnonymousUser instance but would return `User` instead.
+    A `Principal` is unwrapped to its underlying identity, so explicit visitor
+    and anonymous principals can be passed to the regular permission helpers.
     It is convenient and needed for authorization backend to support anonymous users.
 
     Returns:
@@ -133,6 +135,13 @@ def get_identity(identity: Model) -> tuple[Any | None, Any | None]:
         NotUserNorGroup: User/AnonymousUser or Group instance is required (got )
         ```
     """
+    # A Principal wraps the actual identity (user, group, or AnonymousUser)
+    # together with the scenario type that produced it.
+    from guardian.principals import Principal
+
+    if isinstance(identity, Principal):
+        identity = identity.identity
+
     if isinstance(identity, AnonymousUser):
         identity = get_anonymous_user()
 
@@ -163,6 +172,16 @@ def get_identity(identity: Model) -> tuple[Any | None, Any | None]:
     raise NotUserNorGroup("User/AnonymousUser or Group instance is required (got %s)" % identity)
 
 
+def _identity_for_request(request: HttpRequest) -> Any:
+    """Use the resolved principal when present; otherwise ``request.user``."""
+    from guardian.principals import PRINCIPAL_REQUEST_ATTRIBUTE
+
+    principal = getattr(request, PRINCIPAL_REQUEST_ATTRIBUTE, None)
+    if principal is not None:
+        return principal
+    return request.user
+
+
 def get_40x_or_None(
     request: HttpRequest,
     perms: list[str],
@@ -181,19 +200,27 @@ def get_40x_or_None(
     # Handles both original and with object provided permission check
     # as `obj` defaults to None
 
+    identity = _identity_for_request(request)
+    has_perm = getattr(identity, "has_perm", None)
+    if has_perm is None:
+        from guardian.principals import Principal
+
+        identity = Principal.for_request_user(request.user)
+        has_perm = identity.has_perm
+
     has_permissions = False
     # global perms check first (if accept_global_perms)
     if accept_global_perms:
         if any_perm:
-            has_permissions = any(request.user.has_perm(perm) for perm in perms)  # type: ignore[union-attr]
+            has_permissions = any(has_perm(perm) for perm in perms)
         else:
-            has_permissions = all(request.user.has_perm(perm) for perm in perms)  # type: ignore[union-attr]
+            has_permissions = all(has_perm(perm) for perm in perms)
     # if still no permission granted, try obj perms
     if not has_permissions:
         if any_perm:
-            has_permissions = any(request.user.has_perm(perm, obj) for perm in perms)  # type: ignore[union-attr]
+            has_permissions = any(has_perm(perm, obj) for perm in perms)
         else:
-            has_permissions = all(request.user.has_perm(perm, obj) for perm in perms)  # type: ignore[union-attr]
+            has_permissions = all(has_perm(perm, obj) for perm in perms)
 
     if not has_permissions:
         if return_403:

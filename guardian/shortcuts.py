@@ -668,6 +668,26 @@ def get_objects_for_user(
         ``Cast("pk", CharField())`` fallback, so models with any PK type are
         supported without extra configuration.
     """
+    # A Principal groups the scenario type with the identity that actually
+    # participates in the decision. Visitors are real accounts and are checked
+    # as such; anonymous principals keep their AnonymousUser identity so the
+    # site-wide anonymous configuration still applies.
+    from guardian.principals import Principal
+
+    if isinstance(user, Principal):
+        if user.is_group:
+            return get_objects_for_group(
+                user.identity,
+                perms,
+                klass,
+                any_perm=any_perm,
+                accept_global_perms=accept_global_perms,
+            )
+        # The identity is a user, a group, or Django's AnonymousUser. Keeping
+        # AnonymousUser here lets the regular branch below apply the site's
+        # ANONYMOUS_USER_NAME configuration.
+        user = user.identity
+
     ctype, codenames = _compute_codenames_and_ctype(perms)
     ctype, queryset = _compute_queryset(ctype, klass)
 

@@ -233,6 +233,78 @@ GUARDIAN_ANONYMOUS_USER_CACHE_TTL = -1
     configuration (`CACHES` setting). When TTL is 0, no caching occurs
     and each call to `get_anonymous_user()` performs a fresh database query.
 
+## `GUARDIAN_VISITOR_USER_NAME`
+
+!!! abstract "Added in version 3.5.3"
+
+The username of the real guest account that represents requests the ingress
+layer explicitly marks as visitor requests. The visitor is distinct from the
+user named by `ANONYMOUS_USER_NAME` and uses only its own explicit object
+permissions.
+
+The account must already exist and must differ from the anonymous user.
+Requests marked as visitors without a usable account raise
+`guardian.exceptions.VisitorNotConfigured`; Guardian does not fall back to the
+anonymous identity.
+
+Defaults to `None` (no visitor account).
+
+See [Visitor Principals](userguide/visitor-principals.md) for the complete
+integration.
+
+## `GUARDIAN_GET_VISITOR_USER`
+
+!!! abstract "Added in version 3.5.3"
+
+Optional callable (or dotted path to one) that receives the request and returns
+the user instance, or the username, that represents a marked visitor. It takes
+precedence over `GUARDIAN_VISITOR_USER_NAME`. Returning `None` raises
+`VisitorNotConfigured`.
+
+Use this when the visitor account is selected per request, for example from a
+tenant or programme binding, instead of from a single configured name.
+
+Defaults to `None`.
+
+## `GUARDIAN_VISITOR_HEADER`
+
+!!! abstract "Added in version 3.5.3"
+
+Optional request header that marks a request as a visitor. Only enable this when
+a trusted ingress proxy sets and strips the header; clients must not be able to
+inject it. As an alternative, ingress middleware can set
+`request.guardian_visitor = True` directly.
+
+Defaults to `None` (header marking disabled).
+
+## `GUARDIAN_ALLOW_INACTIVE_VISITOR_SWITCH`
+
+!!! abstract "Added in version 3.5.3"
+
+Replacing an authenticated but inactive user with the visitor identity normally
+requires the caller to pass `allow_inactive_switch=True`. Set this to `True` only
+if the deployment has a separate, trusted check of that transition. The setting
+defaults to `False`.
+
+Even when enabled, every switch is still recorded and audited. Prefer per-call
+confirmation, which can carry the operator or ticket reference used by
+`GUARDIAN_PRINCIPAL_AUDIT_HANDLER`.
+
+## `GUARDIAN_PRINCIPAL_AUDIT_HANDLER`
+
+!!! abstract "Added in version 3.5.3"
+
+Optional callable (or dotted path) invoked with a
+`guardian.principals.PrincipalSwitch` record for every authenticated-to-visitor
+switch. Use it to persist the transition in your own audit log.
+
+If the handler raises, the switch is refused: an untraceable transition must not
+happen. The record is also sent through the
+`guardian.signals.principal_switched` signal and logged regardless of this
+setting.
+
+Defaults to `None`.
+
 ## `GUARDIAN_USER_OBJ_PERMS_MODEL`
 
 !!! abstract "Added in version 2.0.0"
