@@ -76,6 +76,9 @@ class HTTPSProxyTest < Test::Unit::TestCase
         http = proxy.new("foo.example.org", 8000)
         http.use_ssl = true
         http.verify_mode = OpenSSL::SSL::VERIFY_NONE
+        # The proxy's certificate is not trusted here, so keep the
+        # historical non-verifying behavior for the proxy layer too.
+        http.proxy_verify_mode = OpenSSL::SSL::VERIFY_NONE
         begin
           http.start
         rescue EOFError

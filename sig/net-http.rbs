@@ -1429,6 +1429,102 @@ module Net
     #
     attr_accessor verify_hostname: untyped
 
+    # <!-- rdoc-file=lib/net/http.rb -->
+    # The SSLContext used for the TLS connection to the destination host.
+    #
+    attr_reader ssl_context: untyped
+
+    # <!-- rdoc-file=lib/net/http.rb -->
+    # The SSLContext used for the TLS connection to the proxy itself.
+    #
+    attr_reader proxy_ssl_context: untyped
+
+    PROXY_SSL_ATTRIBUTES: Array[Symbol]
+
+    PROXY_SSL_IVNAMES: Array[untyped]
+
+    # <!-- rdoc-file=lib/net/http.rb -->
+    # Sets or returns the path to a CA certification file in PEM format, used to
+    # verify the proxy's own certificate.
+    #
+    attr_accessor proxy_ca_file: untyped
+
+    # <!-- rdoc-file=lib/net/http.rb -->
+    # Sets or returns the path of the CA directory containing certification files in
+    # PEM format, used to verify the proxy's own certificate.
+    #
+    attr_accessor proxy_ca_path: untyped
+
+    # <!-- rdoc-file=lib/net/http.rb -->
+    # Sets or returns the certificate presented to the proxy for client
+    # authentication.
+    #
+    attr_accessor proxy_cert: untyped
+
+    # <!-- rdoc-file=lib/net/http.rb -->
+    # Sets or returns the X509::Store used for verifying the proxy's certificate.
+    #
+    attr_accessor proxy_cert_store: untyped
+
+    # <!-- rdoc-file=lib/net/http.rb -->
+    # Sets or returns the available SSL ciphers for the proxy connection.
+    #
+    attr_accessor proxy_ciphers: untyped
+
+    # <!-- rdoc-file=lib/net/http.rb -->
+    # Sets or returns the extra X509 certificates added to the chain presented to
+    # the proxy.
+    #
+    attr_accessor proxy_extra_chain_cert: untyped
+
+    # <!-- rdoc-file=lib/net/http.rb -->
+    # Sets or returns the private key used for client authentication against the
+    # proxy.
+    #
+    attr_accessor proxy_key: untyped
+
+    # <!-- rdoc-file=lib/net/http.rb -->
+    # Sets or returns the SSL timeout seconds for the proxy connection.
+    #
+    attr_accessor proxy_ssl_timeout: untyped
+
+    # <!-- rdoc-file=lib/net/http.rb -->
+    # Sets or returns the SSL version for the proxy connection.
+    #
+    attr_accessor proxy_ssl_version: untyped
+
+    # <!-- rdoc-file=lib/net/http.rb -->
+    # Sets or returns the minimum SSL version for the proxy connection.
+    #
+    attr_accessor proxy_min_version: untyped
+
+    # <!-- rdoc-file=lib/net/http.rb -->
+    # Sets or returns the maximum SSL version for the proxy connection.
+    #
+    attr_accessor proxy_max_version: untyped
+
+    # <!-- rdoc-file=lib/net/http.rb -->
+    # Sets or returns the callback for the proxy's certificate verification.
+    #
+    attr_accessor proxy_verify_callback: untyped
+
+    # <!-- rdoc-file=lib/net/http.rb -->
+    # Sets or returns the maximum depth for the proxy certificate chain
+    # verification.
+    #
+    attr_accessor proxy_verify_depth: untyped
+
+    # <!-- rdoc-file=lib/net/http.rb -->
+    # Sets or returns the flags for the proxy's certificate verification.
+    #
+    attr_accessor proxy_verify_mode: untyped
+
+    # <!-- rdoc-file=lib/net/http.rb -->
+    # Sets or returns whether to verify that the proxy certificate is valid for the
+    # proxy hostname.
+    #
+    attr_accessor proxy_verify_hostname: untyped
+
     # <!--
     #   rdoc-file=lib/net/http.rb
     #   - peer_cert()
