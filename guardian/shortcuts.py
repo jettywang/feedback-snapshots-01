@@ -4,14 +4,14 @@ from collections import defaultdict
 from functools import lru_cache, partial
 from itertools import groupby
 from operator import itemgetter
-from typing import Any, TypeVar
+from typing import Any, TypeAlias, TypeVar
 import warnings
 
 from django.apps import apps
 from django.contrib.auth import get_user_model
 from django.contrib.auth.models import Group, Permission
 from django.contrib.contenttypes.models import ContentType
-from django.db import connection
+from django.db import connection, transaction
 from django.db.models import (
     BigIntegerField,
     CharField,
@@ -34,6 +34,8 @@ from guardian.ctypes import get_content_type
 from guardian.exceptions import (
     MixedContentTypeError,
     MultipleIdentityAndObjectError,
+    ObjectNotPersisted,
+    StalePermissionStateError,
     WrongAppError,
 )
 from guardian.utils import (
@@ -42,6 +44,12 @@ from guardian.utils import (
     get_identity,
     get_user_obj_perms_model,
 )
+
+# Mapping of identity primary keys to the set of permission codenames they hold.
+PermissionGrantMap: TypeAlias = dict[Any, set[str]]
+
+# A full authorization snapshot for one object, covering both user and group grants.
+PermissionSnapshot: TypeAlias = dict[str, PermissionGrantMap]
 
 
 @lru_cache(None)
@@ -335,6 +343,270 @@ def get_perms_for_model(cls: type[Model] | Model | str) -> QuerySet:
         model = cls
     ctype = get_content_type(model)
     return Permission.objects.filter(content_type=ctype)
+
+
+def _object_permission_rows(perms_model: type[Model], obj: Model, for_update: bool = False) -> QuerySet:
+    """Return every object-permission row stored for `obj` in `perms_model`."""
+    queryset = perms_model.objects
+    if perms_model.objects.is_generic():
+        queryset = queryset.filter(content_type=get_content_type(obj), object_pk=obj.pk)
+    else:
+        queryset = queryset.filter(content_object=obj)
+    if for_update and connection.features.has_select_for_update:
+        queryset = queryset.select_for_update()
+    return queryset
+
+
+def _read_permission_grants(
+    perms_model: type[Model], obj: Model, identity_field: str, for_update: bool = False
+) -> PermissionGrantMap:
+    """Build an identity-pk -> codenames mapping from the object's stored rows."""
+    grants: PermissionGrantMap = defaultdict(set)
+    rows = _object_permission_rows(perms_model, obj, for_update=for_update).values(
+        f"{identity_field}_id", "permission__codename"
+    )
+    for row in rows:
+        grants[row[f"{identity_field}_id"]].add(row["permission__codename"])
+    return dict(grants)
+
+
+def get_permission_snapshot(obj: Model) -> PermissionSnapshot:
+    """Read the complete object-level authorization snapshot for `obj`.
+
+    The returned value is the exact format accepted by
+    :func:`sync_object_permissions`: a dictionary with `"users"` and `"groups"`
+    keys, each mapping an identity primary key to the set of permission
+    codenames granted directly to that identity for this object.
+
+    Group membership and global permissions are not included; only rows stored
+    on the object's user and group object-permission models are reported.
+
+    Parameters:
+        obj (Model): A persisted Django model instance.
+
+    Returns:
+        A snapshot dictionary, e.g.
+        `{"users": {1: {"change_post"}}, "groups": {2: {"view_post", "delete_post"}}}`.
+
+    Raises:
+        ObjectNotPersisted: If `obj` has not been saved to the database.
+    """
+    if getattr(obj, "pk", None) is None:
+        raise ObjectNotPersisted("Object %s needs to be persisted first" % obj)
+    user_model = get_user_obj_perms_model(obj)
+    group_model = get_group_obj_perms_model(obj)
+    return {
+        "users": _read_permission_grants(user_model, obj, user_model.objects.user_or_group_field),
+        "groups": _read_permission_grants(group_model, obj, group_model.objects.user_or_group_field),
+    }
+
+
+def _coerce_identity_pk(value: Any, section: str) -> Any:
+    """Validate one key of a submitted grant mapping and return its pk value."""
+    if isinstance(value, Model):
+        pk = value.pk
+        if pk is None:
+            raise ValueError(
+                f"Cannot sync permissions for an unsaved {value.__class__.__name__} in section {section!r}"
+            )
+        return pk
+    if isinstance(value, (QuerySet, list, tuple, set, dict)):
+        raise ValueError(
+            f"Grant keys in section {section!r} must be identity instances or primary keys, got {type(value).__name__}"
+        )
+    return value
+
+
+def _normalize_grant_section(section: str, raw_grants: Any, obj: Model, ctype: ContentType) -> PermissionGrantMap:
+    """Validate one `users`/`groups` section and normalize it to pk -> codenames."""
+    if not isinstance(raw_grants, dict):
+        raise ValueError(f"Permission snapshot section {section!r} must be a dict, got {type(raw_grants).__name__}")
+
+    valid_codenames = set(Permission.objects.filter(content_type=ctype).values_list("codename", flat=True))
+    normalized: PermissionGrantMap = {}
+    for raw_identity, raw_perms in raw_grants.items():
+        identity_pk = _coerce_identity_pk(raw_identity, section)
+        if not isinstance(raw_perms, (list, tuple, set, frozenset)):
+            raise ValueError(
+                f"Permissions for {section!r} identity {raw_identity!r} must be a list, tuple or set, "
+                f"got {type(raw_perms).__name__}"
+            )
+        codenames = set()
+        for raw_perm in raw_perms:
+            if isinstance(raw_perm, Permission):
+                if raw_perm.content_type_id != ctype.pk:
+                    raise ValueError(
+                        f"Permission {raw_perm.codename!r} does not apply to " f"{ctype.app_label}.{ctype.model}"
+                    )
+                codenames.add(raw_perm.codename)
+                continue
+            if not isinstance(raw_perm, str):
+                raise ValueError(
+                    f"Permissions must be codenames or Permission instances, got {type(raw_perm).__name__}"
+                )
+            codename = raw_perm.split(".", 1)[1] if "." in raw_perm else raw_perm
+            if codename not in valid_codenames:
+                raise ValueError(
+                    f"Unknown permission {raw_perm!r} for {ctype.app_label}.{ctype.model}; "
+                    f"valid codenames are {sorted(valid_codenames)}"
+                )
+            codenames.add(codename)
+        normalized[identity_pk] = codenames
+    return normalized
+
+
+def _normalize_permission_snapshot(grants: Any, obj: Model) -> PermissionSnapshot:
+    """Validate and normalize a caller-submitted snapshot for `obj`."""
+    if not isinstance(grants, dict):
+        raise ValueError(f"Permission snapshot must be a dict, got {type(grants).__name__}")
+    missing = {"users", "groups"} - grants.keys()
+    if missing:
+        raise ValueError(
+            f"Permission snapshot must contain both 'users' and 'groups' sections; missing {sorted(missing)}"
+        )
+    ctype = get_content_type(obj)
+    return {
+        "users": _normalize_grant_section("users", grants["users"], obj, ctype),
+        "groups": _normalize_grant_section("groups", grants["groups"], obj, ctype),
+    }
+
+
+def _strip_empty_grants(grants: PermissionSnapshot) -> PermissionSnapshot:
+    """Drop identities holding an empty set so equivalent snapshots compare equal."""
+    return {
+        section: {identity_pk: codenames for identity_pk, codenames in section_grants.items() if codenames}
+        for section, section_grants in grants.items()
+    }
+
+
+def _apply_grant_section(
+    perms_model: type[Model],
+    obj: Model,
+    identity_field: str,
+    desired: PermissionGrantMap,
+    current: PermissionGrantMap,
+) -> None:
+    """Replace this object's grants of one model with the desired mapping."""
+    ctype = get_content_type(obj)
+    object_filter = (
+        Q(content_type=ctype, object_pk=obj.pk) if perms_model.objects.is_generic() else Q(content_object=obj)
+    )
+    managed_identity_ids = set(desired) | set(current)
+    if not managed_identity_ids:
+        return
+
+    rows = perms_model.objects.filter(object_filter, **{f"{identity_field}_id__in": managed_identity_ids})
+    if connection.features.has_select_for_update:
+        rows = rows.select_for_update()
+    existing: dict[tuple[Any, str], int] = {
+        (getattr(row, identity_field + "_id"), row.permission.codename): row.pk for row in rows
+    }
+
+    desired_pairs = {(identity_pk, codename) for identity_pk, codenames in desired.items() for codename in codenames}
+    stale_pks = [pk for pair, pk in existing.items() if pair not in desired_pairs]
+    if stale_pks:
+        perms_model.objects.filter(pk__in=stale_pks).delete()
+
+    missing_codenames = {codename for _, codename in desired_pairs - set(existing)}
+    permissions = {
+        perm.codename: perm for perm in Permission.objects.filter(content_type=ctype, codename__in=missing_codenames)
+    }
+    to_create = [
+        perms_model(
+            permission=permissions[codename],
+            **{
+                identity_field + "_id": identity_pk,
+                **(
+                    {"content_type": ctype, "object_pk": obj.pk}
+                    if perms_model.objects.is_generic()
+                    else {"content_object": obj}
+                ),
+            },
+        )
+        for identity_pk, codename in sorted(desired_pairs - set(existing))
+    ]
+    if to_create:
+        perms_model.objects.bulk_create(to_create, ignore_conflicts=True)
+
+
+def sync_object_permissions(
+    obj: Model,
+    grants: PermissionSnapshot,
+    expected: PermissionSnapshot | None = None,
+) -> PermissionSnapshot:
+    """Atomically replace `obj`'s object-level permission grants with a snapshot.
+
+    User and group object permissions for the single object `obj` are replaced
+    in one database transaction: every grant present in `grants` is stored and
+    every previously stored grant absent from it is removed. If any write is
+    rejected the whole transaction is rolled back, leaving the previous
+    authorization state intact.
+
+    Parameters:
+        obj (Model): A persisted Django model instance whose grants are replaced.
+        grants (PermissionSnapshot): The desired authorization state. Must be a
+            dictionary with `"users"` and `"groups"` sections; each section maps
+            an identity instance or primary key to an iterable of permission
+            codenames (or `Permission` instances) granted directly to that
+            identity on `obj`. An empty section or empty set clears the
+            corresponding grants.
+        expected (PermissionSnapshot | None): Optional optimistic-concurrency
+            base. When given, it must equal the object's current snapshot (as
+            returned by :func:`get_permission_snapshot`); otherwise
+            :class:`guardian.exceptions.StalePermissionStateError` is raised and
+            nothing is changed. Pass `None` to apply unconditionally.
+
+    Returns:
+        The new authorization snapshot, in the same format as
+        :func:`get_permission_snapshot`.
+
+    Raises:
+        ObjectNotPersisted: If `obj` has not been saved to the database.
+        ValueError: If `grants` is malformed or references unknown permissions.
+        StalePermissionStateError: If `expected` does not match the stored state.
+
+    Example:
+        ```python
+        from guardian.shortcuts import get_permission_snapshot, sync_object_permissions
+
+        post = Post.objects.get(pk=1)
+        base = get_permission_snapshot(post)
+        desired = {
+            "users": {**base["users"], editor.pk: {"change_post", "view_post"}},
+            "groups": base["groups"],
+        }
+        sync_object_permissions(post, desired, expected=base)
+        ```
+    """
+    if getattr(obj, "pk", None) is None:
+        raise ObjectNotPersisted("Object %s needs to be persisted first" % obj)
+    desired = _strip_empty_grants(_normalize_permission_snapshot(grants, obj))
+
+    user_model = get_user_obj_perms_model(obj)
+    group_model = get_group_obj_perms_model(obj)
+    user_field = user_model.objects.user_or_group_field
+    group_field = group_model.objects.user_or_group_field
+
+    with transaction.atomic():
+        lock_rows = connection.features.has_select_for_update
+        current = {
+            "users": _read_permission_grants(user_model, obj, user_field, for_update=lock_rows),
+            "groups": _read_permission_grants(group_model, obj, group_field, for_update=lock_rows),
+        }
+        current = _strip_empty_grants(current)
+
+        if expected is not None:
+            expected_normalized = _strip_empty_grants(_normalize_permission_snapshot(expected, obj))
+            if expected_normalized != current:
+                raise StalePermissionStateError(
+                    "Permission snapshot for %s has changed since it was read; "
+                    "re-read it with get_permission_snapshot() and retry" % obj
+                )
+
+        _apply_grant_section(user_model, obj, user_field, desired["users"], current["users"])
+        _apply_grant_section(group_model, obj, group_field, desired["groups"], current["groups"])
+
+        return get_permission_snapshot(obj)
 
 
 def get_users_with_perms(

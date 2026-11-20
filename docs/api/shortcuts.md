@@ -16,6 +16,10 @@
 
 ::: guardian.shortcuts.get_groups_with_perms
 
+::: guardian.shortcuts.get_permission_snapshot
+
+::: guardian.shortcuts.sync_object_permissions
+
 ::: guardian.shortcuts.get_objects_for_user
 
 ::: guardian.shortcuts.get_objects_for_group

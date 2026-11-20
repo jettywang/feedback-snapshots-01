@@ -168,3 +168,87 @@ all_perms = get_perms(user, article)        # ['change_article', 'delete_article
 direct_perms = get_user_perms(user, article) # QuerySet with 'change_article'
 group_perms = get_group_perms(user, article)  # QuerySet with 'delete_article'
 ```
+
+## Atomic Authorization Snapshots
+
+When handing an object over (for example, transferring a document between
+owners), user grants and group grants usually need to change together. Calling
+`assign_perm()` and `remove_perm()` one by one leaves a window where only half
+of the change is visible. The snapshot API replaces *all* object-level grants
+of one object in a single database transaction.
+
+### Reading a snapshot
+
+`get_permission_snapshot(obj)` returns every direct user and group grant stored
+for the object, keyed by identity primary key:
+
+```python
+from guardian.shortcuts import get_permission_snapshot
+
+snapshot = get_permission_snapshot(article)
+# {
+#     "users": {1: {"view_article", "change_article"}},
+#     "groups": {2: {"view_article"}},
+# }
+```
+
+Only object-level rows are reported: group membership expansion and global
+permissions are not part of the snapshot.
+
+### Submitting a new snapshot
+
+`sync_object_permissions(obj, grants)` stores exactly the grants passed in and
+removes every prior grant missing from the submission. User and group rows are
+written inside one transaction, so a failure halfway through rolls the whole
+submission back and the previous state stays queryable.
+
+```python
+from guardian.shortcuts import sync_object_permissions
+
+sync_object_permissions(
+    article,
+    {
+        "users": {new_owner.pk: ["view_article", "change_article", "delete_article"]},
+        "groups": {editors.pk: ["view_article", "change_article"]},
+    },
+)
+```
+
+Both `"users"` and `"groups"` sections are required; pass an empty dict or an
+empty permission set to clear grants. Identity instances may be used instead of
+primary keys, and permissions may be given as codenames or `Permission`
+instances.
+
+### Optimistic concurrency with `expected`
+
+Pass the snapshot the caller based its edit on as `expected`. If another
+process changed the object's grants in the meantime,
+`guardian.exceptions.StalePermissionStateError` is raised and nothing is
+modified. Re-read the snapshot and retry.
+
+```python
+from guardian.exceptions import StalePermissionStateError
+from guardian.shortcuts import get_permission_snapshot, sync_object_permissions
+
+base = get_permission_snapshot(article)
+base["users"][new_owner.pk] = {"change_article"}
+
+try:
+    sync_object_permissions(article, base, expected=base)
+except StalePermissionStateError:
+    # someone else changed the grants; re-read and reconcile
+    ...
+```
+
+Submitting the same snapshot twice is idempotent: the second submission simply
+re-applies an identical state. Submitting `{"users": {}, "groups": {}}` clears
+every object-level grant while leaving global permissions and grants on other
+objects untouched.
+
+### Scope and isolation
+
+- Only the single object's user and group object-permission rows are touched.
+- Global permissions and grants on other objects are never modified.
+- On databases that support `SELECT ... FOR UPDATE` the existing rows are locked
+  for the duration of the transaction; the `expected` check additionally guards
+  against logical conflicts regardless of database locking support.

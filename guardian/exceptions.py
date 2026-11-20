@@ -38,3 +38,14 @@ class MultipleIdentityAndObjectError(GuardianError):
     """Raised when an operation is attempted on both user/group and object."""
 
     pass
+
+
+class StalePermissionStateError(GuardianError):
+    """Raised when an optimistic permission snapshot no longer matches the database.
+
+    The caller submitted the permission set it expected to replace, but another
+    write changed the object's permissions in the meantime. The whole submission
+    is rejected and no permission row is modified.
+    """
+
+    pass
