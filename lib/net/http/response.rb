@@ -133,12 +133,30 @@
 # there is a protocol error.
 #
 class Net::HTTPResponse
-  # The maximum total size in bytes of the response header.
+  # The maximum total size in bytes of the response header lines for one
+  # request, including any informational (1xx) responses that precede the
+  # final response.
   MAX_RESPONSE_HEADER_LENGTH = 1024 * 1024 # 1 MiB
 
   # The maximum number of informational (1xx) responses accepted before the
   # final response.
   MAX_INFORMATIONAL_RESPONSES = 100
+
+  # Tracks the remaining response-header budget for one request. All responses
+  # read while handling that request, including informational ones, consume
+  # from the same budget.
+  class HeaderBudget # :nodoc: internal use only
+    attr_reader :remaining
+
+    def initialize(limit = MAX_RESPONSE_HEADER_LENGTH)
+      @remaining = limit || MAX_RESPONSE_HEADER_LENGTH
+    end
+
+    def consume(bytes)
+      @remaining -= bytes
+      raise Net::HTTPBadResponse, 'response header too large' if @remaining < 0
+    end
+  end
 
   class << self
     # true if the response has a body.
@@ -150,10 +168,12 @@ class Net::HTTPResponse
       self::EXCEPTION_TYPE
     end
 
-    def read_new(sock)   #:nodoc: internal use only
+    def read_new(sock, budget = nil)   #:nodoc: internal use only
+      budget = HeaderBudget.new(budget) if budget.is_a?(Integer)
+      budget ||= HeaderBudget.new
       httpv, code, msg = read_status_line(sock)
       res = response_class(code).new(httpv, code, msg)
-      each_response_header(sock) do |k,v|
+      each_response_header(sock, budget) do |k,v|
         res.add_field k, v
       end
       res
@@ -181,13 +201,11 @@ class Net::HTTPResponse
       Net::HTTPUnknownResponse
     end
 
-    def each_response_header(sock)
+    def each_response_header(sock, budget = HeaderBudget.new)
       key = value = nil
-      remaining = MAX_RESPONSE_HEADER_LENGTH
       while true
         line = read_line(sock, MAX_RESPONSE_HEADER_LENGTH, true)
-        remaining -= line.bytesize
-        raise Net::HTTPBadResponse, 'response header too large' if remaining < 0
+        budget.consume(line.bytesize)
         line = line.chomp
         break if line.empty?
         if line[0] == ?\s or line[0] == ?\t and value

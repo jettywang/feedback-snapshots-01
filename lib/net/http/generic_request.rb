@@ -217,13 +217,13 @@ class Net::HTTPGenericRequest
   # write
   #
 
-  def exec(sock, ver, path)   #:nodoc: internal use only
+  def exec(sock, ver, path, header_budget = nil)   #:nodoc: internal use only
     if @body
-      send_request_with_body sock, ver, path, @body
+      send_request_with_body sock, ver, path, @body, header_budget
     elsif @body_stream
-      send_request_with_body_stream sock, ver, path, @body_stream
+      send_request_with_body_stream sock, ver, path, @body_stream, header_budget
     elsif @body_data
-      send_request_with_body_data sock, ver, path, @body_data
+      send_request_with_body_data sock, ver, path, @body_data, header_budget
     else
       write_header sock, ver, path
     end
@@ -281,21 +281,21 @@ class Net::HTTPGenericRequest
     end
   end
 
-  def send_request_with_body(sock, ver, path, body)
+  def send_request_with_body(sock, ver, path, body, header_budget = nil)
     self.content_length = body.bytesize
     delete 'Transfer-Encoding'
     write_header sock, ver, path
-    wait_for_continue sock, ver if sock.continue_timeout
+    wait_for_continue sock, ver, header_budget if sock.continue_timeout
     sock.write body
   end
 
-  def send_request_with_body_stream(sock, ver, path, f)
+  def send_request_with_body_stream(sock, ver, path, f, header_budget = nil)
     unless content_length() or chunked?
       raise ArgumentError,
           "Content-Length not given and Transfer-Encoding is not `chunked'"
     end
     write_header sock, ver, path
-    wait_for_continue sock, ver if sock.continue_timeout
+    wait_for_continue sock, ver, header_budget if sock.continue_timeout
     if chunked?
       chunker = Chunker.new(sock)
       IO.copy_stream(f, chunker)
@@ -305,10 +305,10 @@ class Net::HTTPGenericRequest
     end
   end
 
-  def send_request_with_body_data(sock, ver, path, params)
+  def send_request_with_body_data(sock, ver, path, params, header_budget = nil)
     if /\Amultipart\/form-data\z/i !~ self.content_type
       self.content_type = 'application/x-www-form-urlencoded'
-      return send_request_with_body(sock, ver, path, URI.encode_www_form(params))
+      return send_request_with_body(sock, ver, path, URI.encode_www_form(params), header_budget)
     end
 
     opt = @form_option.dup
@@ -408,11 +408,11 @@ class Net::HTTPGenericRequest
   # Waits up to the continue timeout for a response from the server provided
   # we're speaking HTTP 1.1 and are expecting a 100-continue response.
 
-  def wait_for_continue(sock, ver)
+  def wait_for_continue(sock, ver, header_budget = nil)
     if ver >= '1.1' and @header['expect'] and
         @header['expect'].include?('100-continue')
       if sock.io.to_io.wait_readable(sock.continue_timeout)
-        res = Net::HTTPResponse.read_new(sock)
+        res = Net::HTTPResponse.read_new(sock, header_budget)
         unless res.kind_of?(Net::HTTPContinue)
           res.decode_content = @decode_content
           throw :response, res

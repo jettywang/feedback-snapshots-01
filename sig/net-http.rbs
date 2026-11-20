@@ -1259,6 +1259,30 @@ module Net
     attr_accessor max_retries: Integer
 
     # <!-- rdoc-file=lib/net/http.rb -->
+    # Returns the response-header budget for each request; see
+    # response_header_budget=.
+    # ----
+    # <!--
+    #   rdoc-file=lib/net/http.rb
+    #   - response_header_budget=(bytes)
+    # -->
+    # Sets the total response-header budget, in bytes, for each request; the
+    # initial value is Net::HTTPResponse::MAX_RESPONSE_HEADER_LENGTH.
+    #
+    # The budget covers the header lines of every response received while
+    # handling one request, including informational (1xx) responses that
+    # precede the final response. A request that exceeds the budget raises
+    # Net::HTTPBadResponse and closes the connection.
+    #
+    def response_header_budget=: (Integer bytes) -> void
+
+    # <!-- rdoc-file=lib/net/http.rb -->
+    # Returns the response-header budget for each request; see
+    # response_header_budget=.
+    #
+    attr_reader response_header_budget: Integer
+
+    # <!-- rdoc-file=lib/net/http.rb -->
     # Returns the continue timeout value; see continue_timeout=.
     # ----
     # <!--

@@ -43,6 +43,50 @@ EOS
     end
   end
 
+  def test_response_header_budget_shared_by_informational_responses
+    informational_headers = "Link: </style.css>; rel=preload\r\n\r\n"
+    final_headers = "Connection: close\r\n\r\n"
+    payload = "HTTP/1.1 103 Early Hints\r\n" + informational_headers +
+              "HTTP/1.1 200 OK\r\n" + final_headers
+    budget = Net::HTTPResponse::HeaderBudget.new(
+      informational_headers.bytesize + final_headers.bytesize)
+    io = dummy_io(wire_format(payload))
+
+    res = Net::HTTPResponse.read_new(io, budget)
+    assert_kind_of Net::HTTPEarlyHints, res
+    assert_equal final_headers.bytesize, budget.remaining
+
+    res = Net::HTTPResponse.read_new(io, budget)
+    assert_kind_of Net::HTTPOK, res
+    assert_equal 0, budget.remaining
+  end
+
+  def test_response_header_budget_exceeded_across_informational_responses
+    informational_headers = "Link: </style.css>; rel=preload\r\n\r\n"
+    final_headers = "Connection: close\r\n\r\n"
+    payload = "HTTP/1.1 103 Early Hints\r\n" + informational_headers +
+              "HTTP/1.1 200 OK\r\n" + final_headers
+    budget = Net::HTTPResponse::HeaderBudget.new(
+      informational_headers.bytesize + final_headers.bytesize - 1)
+    io = dummy_io(wire_format(payload))
+
+    Net::HTTPResponse.read_new(io, budget)
+    e = assert_raise(Net::HTTPBadResponse) do
+      Net::HTTPResponse.read_new(io, budget)
+    end
+    assert_equal 'response header too large', e.message
+    assert_equal(-1, budget.remaining)
+  end
+
+  def test_response_header_budget_resets_without_explicit_budget
+    informational = "HTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel=preload\r\n\r\n"
+    final = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n"
+    io = dummy_io(wire_format(informational + final))
+
+    assert_kind_of Net::HTTPEarlyHints, Net::HTTPResponse.read_new(io)
+    assert_kind_of Net::HTTPOK, Net::HTTPResponse.read_new(io)
+  end
+
   def test_status_line_too_long
     io = endless_io("HTTP/1.1 200 ")
     assert_raise(Net::HTTPBadResponse) do
@@ -962,12 +1006,98 @@ EOS
     assert_equal '#<Net::HTTPUnknownResponse ??? test response readbody=true>', res.inspect
   end
 
+  INFO_HEADERS = "Link: </a>\r\n\r\n"
+  FINAL_HEADERS = "Content-Length: 4\r\n\r\n"
+  EXACT_BUDGET = INFO_HEADERS.bytesize + FINAL_HEADERS.bytesize
+
+  def test_request_over_budget_does_not_reuse_connection
+    informational = "HTTP/1.1 103 Early Hints\r\n" + INFO_HEADERS
+    final = "HTTP/1.1 200 OK\r\n" + FINAL_HEADERS + "BODY"
+    next_response = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nNEXT!"
+
+    first = scripted_io(informational + final)
+    second = scripted_io(next_response)
+    http = local_http(first, budget: EXACT_BUDGET - 1)
+    http.connect_socket = second
+
+    e = assert_raise(Net::HTTPBadResponse) { http.get('/info') }
+    assert_equal 'response header too large', e.message
+    assert_predicate http.instance_variable_get(:@socket), :closed?
+    assert_equal 0, http.connects
+
+    # The closed connection must not be reused, so the next request has to
+    # establish a new one and read from the fresh stream instead.
+    res = http.get('/info')
+    assert_equal 'NEXT!', res.body
+    assert_equal 1, http.connects
+    assert_same second, http.instance_variable_get(:@socket)
+    assert_equal 0, first.io.reads_after_close
+  end
+
+  def test_next_request_gets_a_fresh_budget
+    informational = "HTTP/1.1 103 Early Hints\r\n" + INFO_HEADERS
+    final = "HTTP/1.1 200 OK\r\n" + FINAL_HEADERS + "BODY"
+    data = informational + final + informational + final
+    http = local_http(scripted_io(data), budget: EXACT_BUDGET)
+
+    assert_equal 'BODY', http.get('/info').body
+    assert_equal 'BODY', http.get('/info').body
+  end
+
+  def test_expect_continue_response_counts_against_request_budget
+    continue_response = "HTTP/1.1 100 Continue\r\n" + INFO_HEADERS
+    final = "HTTP/1.1 200 OK\r\n" + FINAL_HEADERS + "BODY"
+
+    http = local_http(scripted_io(continue_response + final), budget: EXACT_BUDGET,
+                      continue_timeout: 0.1)
+    res = http.post('/info', 'x')
+    assert_equal 'BODY', res.body
+
+    http = local_http(scripted_io(continue_response + final), budget: EXACT_BUDGET - 1,
+                      continue_timeout: 0.1)
+    e = assert_raise(Net::HTTPBadResponse) { http.post('/info', 'x') }
+    assert_equal 'response header too large', e.message
+  end
+
 private
+
+  def local_http(io, budget:, continue_timeout: nil)
+    http = ScriptedHTTP.new('127.0.0.1', 1)
+    http.response_header_budget = budget
+    io.continue_timeout = continue_timeout
+    http.instance_variable_set(:@socket, io)
+    http.instance_variable_set(:@started, true)
+    http
+  end
+
+  # Counts how often the connection is (re)established, and hands out a
+  # prepared socket instead of dialing out.
+  class ScriptedHTTP < Net::HTTP
+    attr_writer :connect_socket
+    attr_reader :connects
+
+    def initialize(*)
+      super
+      @connects = 0
+    end
+
+    private
+
+    def connect
+      @connects += 1
+      @socket = @connect_socket
+      @last_communicated = nil
+    end
+  end
 
   def dummy_io(str)
     str = str.gsub(/\n/, "\r\n")
 
     Net::BufferedIO.new(StringIO.new(str))
+  end
+
+  def wire_format(str)
+    str.gsub("\r\n", "\n")
   end
 
   # Yields the given prefix, then streams 'a' without EOF. Stops with an
@@ -997,5 +1127,54 @@ private
 
   def endless_io(prefix)
     Net::BufferedIO.new(EndlessDataIO.new(prefix.gsub(/\n/, "\r\n")))
+  end
+
+  # A scripted byte source for Net::BufferedIO that records whether it was
+  # read after being closed.
+  class ScriptedIO
+    attr_reader :reads_after_close
+
+    def initialize(data)
+      @io = StringIO.new(data.b)
+      @closed = false
+      @reads_after_close = 0
+    end
+
+    def read_nonblock(size, buf = nil, exception: false)
+      @reads_after_close += 1 if @closed
+      @io.read_nonblock(size, buf, exception: exception)
+    end
+
+    def write_nonblock(str, exception: false)
+      str.bytesize
+    end
+
+    def wait_readable(timeout = nil)
+      true
+    end
+
+    def wait_writable(timeout = nil)
+      true
+    end
+
+    def closed?
+      @closed
+    end
+
+    def close
+      @closed = true
+    end
+
+    def eof?
+      @closed
+    end
+
+    def to_io
+      self
+    end
+  end
+
+  def scripted_io(data)
+    Net::BufferedIO.new(ScriptedIO.new(data), read_timeout: 1, write_timeout: 1)
   end
 end

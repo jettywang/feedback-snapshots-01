@@ -589,6 +589,10 @@ module Net   #:nodoc:
   # - {:ignore_eof=}[rdoc-ref:Net::HTTP#ignore_eof=]:
   #   Sets whether to ignore end-of-file when reading a response body
   #   with <tt>Content-Length</tt> headers.
+  # - {:response_header_budget}[rdoc-ref:Net::HTTP#response_header_budget]:
+  #   Returns the response-header budget for each request.
+  # - {#response_header_budget=}[rdoc-ref:Net::HTTP#response_header_budget=]:
+  #   Sets the response-header budget for each request.
   # - {:response_body_encoding}[rdoc-ref:Net::HTTP#response_body_encoding]:
   #   Returns the encoding to use for the response body.
   # - {#response_body_encoding=}[rdoc-ref:Net::HTTP#response_body_encoding=]:
@@ -1157,6 +1161,7 @@ module Net   #:nodoc:
         write_timeout: 60,
         continue_timeout: nil,
         max_retries: 1,
+        response_header_budget: HTTPResponse::MAX_RESPONSE_HEADER_LENGTH,
         debug_output: nil,
         response_body_encoding: false,
         ignore_eof: true
@@ -1179,6 +1184,7 @@ module Net   #:nodoc:
       @write_timeout = options[:write_timeout]
       @continue_timeout = options[:continue_timeout]
       @max_retries = options[:max_retries]
+      @response_header_budget = options[:response_header_budget]
       @debug_output = options[:debug_output]
       @response_body_encoding = options[:response_body_encoding]
       @ignore_eof = options[:ignore_eof]
@@ -1406,6 +1412,30 @@ module Net   #:nodoc:
     # Returns the maximum number of times to retry an idempotent request;
     # see #max_retries=.
     attr_reader :max_retries
+
+    # Sets the total response-header budget, in bytes, for each request;
+    # the initial value is Net::HTTPResponse::MAX_RESPONSE_HEADER_LENGTH.
+    #
+    # The budget covers the header lines of every response received while
+    # handling one request, including informational (1xx) responses that
+    # precede the final response. A request that exceeds the budget raises
+    # Net::HTTPBadResponse and closes the connection.
+    #
+    # Argument +bytes+ must be a positive integer:
+    #
+    #   http = Net::HTTP.new(hostname)
+    #   http.response_header_budget = 16384
+    #   http.response_header_budget # => 16384
+    #
+    def response_header_budget=(bytes)
+      bytes = Integer(bytes)
+      raise ArgumentError, 'response_header_budget should be a positive integer' if bytes <= 0
+      @response_header_budget = bytes
+    end
+
+    # Returns the response-header budget for each request;
+    # see response_header_budget=.
+    attr_reader :response_header_budget
 
     # Sets the read timeout, in seconds, for +self+ to integer +sec+;
     # the initial value is 60.
@@ -2518,8 +2548,9 @@ module Net   #:nodoc:
       begin
         begin_transport req
         res = catch(:response) {
+          header_budget = HTTPResponse::HeaderBudget.new(@response_header_budget)
           begin
-            req.exec @socket, @curr_http_version, edit_path(req.path)
+            req.exec @socket, @curr_http_version, edit_path(req.path), header_budget
           rescue Errno::EPIPE
             # Failure when writing full request, but we can probably
             # still read the received response.
@@ -2527,7 +2558,7 @@ module Net   #:nodoc:
 
           informational_count = 0
           begin
-            res = HTTPResponse.read_new(@socket)
+            res = HTTPResponse.read_new(@socket, header_budget)
             res.decode_content = req.decode_content
             res.body_encoding = @response_body_encoding
             res.ignore_eof = @ignore_eof
