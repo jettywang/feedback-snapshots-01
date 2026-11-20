@@ -5,6 +5,7 @@ behaviors for an AMQP Channel.
 from __future__ import annotations
 
 import functools
+import itertools
 import logging
 import uuid
 from collections import deque
@@ -24,6 +25,10 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 MAX_CHANNELS: int = 65535  # per AMQP 0.9.1 spec.
+
+# Distinguishes channel instances that reuse the same channel number across a reconnect. Only
+# tokens compare it, so a process-wide counter is enough.
+_CHANNEL_GENERATION = itertools.count(1)
 
 _OnAckNackCallback = Callable[
     [frame.Method[Union[spec.Basic.Ack, spec.Basic.Nack]]], None]
@@ -46,7 +51,8 @@ _OnExchangeUnbindCallback = Callable[[frame.Method[spec.Exchange.UnbindOk]],
                                      None]
 _OnFlowCallback = Callable[[bool], None]
 _OnMessageCallback = Callable[
-    ['Channel', spec.Basic.Deliver, spec.BasicProperties, bytes], None]
+    ['Channel', Union[spec.Basic.Deliver, 'DeliveryToken'],
+     spec.BasicProperties, bytes], None]
 _OnOpenCallback = Callable[['Channel'], None]
 _OnQueueBindCallback = Callable[[frame.Method[spec.Queue.BindOk]], None]
 _OnQueueDeclareCallback = Callable[[frame.Method[spec.Queue.DeclareOk]], None]
@@ -58,6 +64,102 @@ _OnReturnCallback = Callable[
 _OnTxCommitCallback = Callable[[frame.Method[spec.Tx.CommitOk]], None]
 _OnTxRollbackCallback = Callable[[frame.Method[spec.Tx.RollbackOk]], None]
 _OnTxSelectCallback = Callable[[frame.Method[spec.Tx.SelectOk]], None]
+
+
+class DeliveryToken:
+    """
+    A delivery bound to the channel instance that issued it.
+
+    Pass `delivery_token=True` to [`basic_consume`][pika.channel.Channel.basic_consume] and the
+    callback receives one of these in place of the `spec.Basic.Deliver` method:
+    ``callback(channel, token, properties, body)``. The token keeps the method available as
+    ``token.method`` and exposes its `consumer_tag`, `delivery_tag`, `redelivered`, `exchange` and
+    `routing_key`. Handing the token rather than the integer to
+    [`basic_ack`][pika.channel.Channel.basic_ack],
+    [`basic_nack`][pika.channel.Channel.basic_nack] or
+    [`basic_reject`][pika.channel.Channel.basic_reject] makes that channel check the token came
+    from the same instance before it sends anything.
+
+    Delivery tags are scoped to a channel and restart at 1, so after a reconnect tag 7 on the new
+    channel is a different message from tag 7 on the old one. A completion that reaches a work
+    queue after the channel it belongs to has been replaced would otherwise acknowledge the wrong
+    message. A token carries the channel number and a per-process generation, and a channel that
+    did not issue it refuses it with
+    [`StaleDeliveryToken`][pika.exceptions.StaleDeliveryToken] before a frame is written. A token
+    from the same instance whose channel has since closed is refused with
+    `ChannelWrongStateError` instead, so the two outcomes are distinguishable.
+
+    The token is opt-in. The default, ``delivery_token=False``, keeps the existing contract:
+    callbacks receive the method and acknowledgements accept a plain integer. The token never
+    travels to the broker; the frame still carries the integer tag. Read the tag from
+    ``token.delivery_tag`` or ``token.method.delivery_tag``; the token itself is not an integer.
+    """
+
+    __slots__ = ('channel_number', 'generation', 'method')
+
+    def __init__(self, channel_number: int, generation: int,
+                 method: spec.Basic.Deliver) -> None:
+        """
+        :param channel_number: The channel number the delivery arrived on.
+        :param generation: Identifies the channel instance that issued the token.
+        :param method: The `Basic.Deliver` method frame for the delivery.
+        """
+        self.channel_number = channel_number
+        self.generation = generation
+        self.method = method
+
+    @property
+    def consumer_tag(self) -> str | bytes | None:
+        """The consumer tag from the delivery method."""
+        return self.method.consumer_tag
+
+    @property
+    def delivery_tag(self) -> int | None:
+        """The server-assigned delivery tag."""
+        return self.method.delivery_tag
+
+    @property
+    def redelivered(self) -> bool:
+        """Whether the broker marked the delivery as redelivered."""
+        return self.method.redelivered
+
+    @property
+    def exchange(self) -> str | bytes | None:
+        """The exchange the message was published to."""
+        return self.method.exchange
+
+    @property
+    def routing_key(self) -> str | bytes | None:
+        """The routing key the message was published with."""
+        return self.method.routing_key
+
+    @override
+    def __repr__(self) -> str:
+        return (f'<DeliveryToken channel={self.channel_number} '
+                f'delivery_tag={self.delivery_tag} '
+                f'generation={self.generation}>')
+
+    @override
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, DeliveryToken):
+            return NotImplemented
+        return (self.channel_number == other.channel_number and
+                self.delivery_tag == other.delivery_tag and
+                self.generation == other.generation)
+
+    @override
+    def __hash__(self) -> int:
+        return hash((self.channel_number, self.delivery_tag, self.generation))
+
+    def belongs_to(self, channel: 'Channel') -> bool:
+        """
+        Whether the given channel instance issued this token.
+
+        :param channel: The candidate issuer.
+        :returns:``True`` if *channel* created this token.
+        """
+        return (self.generation == channel.generation and
+                self.channel_number == channel.channel_number)
 
 
 class Channel:
@@ -105,6 +207,9 @@ class Channel:
         self.channel_number = channel_number
         self.callbacks = connection.callbacks
         self.connection = connection
+        # Identifies this channel instance, not this channel number. A reconnect reuses the
+        # number for a new instance, whose generation differs; DeliveryToken compares it.
+        self.generation: int = next(_CHANNEL_GENERATION)
 
         # Initially, flow is assumed to be active
         self.flow_active = True
@@ -119,6 +224,9 @@ class Channel:
         # them `_cancelled` retains; see `_retain_cancelled_tag`.
         self._nowait_cancelled: deque = deque()
         self._consumers: dict = {}
+        # Consumers registered with delivery_token=True; the callback gets a DeliveryToken
+        # instead of the Basic.Deliver method.
+        self._token_consumers: set = set()
         self._on_flowok_callback: Callable[..., Any] | None = None
         self._on_getok_callback: Callable[..., Any] | None = None
         self._on_ack_nack_callback: _OnAckNackCallback | None = None
@@ -296,7 +404,9 @@ class Channel:
         return self.callbacks.remove_matching(self.channel_number, '_on_return',
                                               lambda cb: cb == callback)
 
-    def basic_ack(self, delivery_tag: int = 0, multiple: bool = False) -> None:
+    def basic_ack(self,
+                  delivery_tag: int | DeliveryToken = 0,
+                  multiple: bool = False) -> None:
         """
         Acknowledge one or more messages.
 
@@ -305,14 +415,41 @@ class Channel:
         messages published with the Publish method on a channel in confirm mode. The acknowledgement
         can be for a single message or a set of messages up to and including a specific message.
 
-        :param delivery_tag: int/long The server-assigned delivery tag
+        :param delivery_tag: int/long The server-assigned delivery tag, or a
+            [`DeliveryToken`][pika.channel.DeliveryToken] from a ``delivery_token=True`` consumer
+            on this same channel instance.
         :param multiple: If set to True, the delivery tag is treated as "up to and including", so
             that multiple messages can be acknowledged with a single method. If set to False, the
             delivery tag refers to a single message. If the multiple field is 1, and the delivery
             tag is zero, this indicates acknowledgement of all outstanding messages.
+        :raises StaleDeliveryToken: if *delivery_tag* is a token this channel did not issue.
         """
         self._raise_if_not_open()
+        delivery_tag = self._resolve_delivery_tag(delivery_tag)
         return self._send_method(spec.Basic.Ack(delivery_tag, multiple))
+
+    def _resolve_delivery_tag(self, delivery_tag: int | DeliveryToken) -> int:
+        """
+        Validate a delivery tag or token and return the integer tag.
+
+        :param delivery_tag: An integer tag or a [`DeliveryToken`][pika.channel.DeliveryToken].
+        :returns: The integer delivery tag to put on the wire.
+        :raises StaleDeliveryToken: if the token was issued by another channel instance.
+        :raises TypeError: if *delivery_tag* is neither an integer nor a token.
+        """
+        if isinstance(delivery_tag, DeliveryToken):
+            if not delivery_tag.belongs_to(self):
+                raise exceptions.StaleDeliveryToken(delivery_tag,
+                                                    self.channel_number,
+                                                    self.generation)
+            tag = delivery_tag.delivery_tag
+            assert tag is not None
+            return tag
+        # bool is an int, and a flag passed here by mistake would ack tag 0 or 1.
+        if not isinstance(delivery_tag, int) or isinstance(delivery_tag, bool):
+            raise TypeError('delivery_tag must be an integer or a DeliveryToken, '
+                            f'but got {delivery_tag!r}')
+        return delivery_tag
 
     def basic_cancel(self,
                      consumer_tag: str = '',
@@ -417,7 +554,8 @@ class Channel:
                       exclusive: bool = False,
                       consumer_tag: str | None = None,
                       arguments: dict[str, Any] | None = None,
-                      callback: _OnBasicConsumeCallback | None = None) -> str:
+                      callback: _OnBasicConsumeCallback | None = None,
+                      delivery_token: bool = False) -> str:
         """
         Sends the AMQP 0-9-1 command Basic.Consume to the broker and binds messages for the
         consumer_tag to the consumer callback. If you do not pass in a consumer_tag, one will be
@@ -434,7 +572,8 @@ class Channel:
             consuming with the signature
             on_message_callback(channel, method, properties, body), where
             - channel: pika.channel.Channel
-            - method: pika.spec.Basic.Deliver
+            - method: pika.spec.Basic.Deliver, or a
+              [`DeliveryToken`][pika.channel.DeliveryToken] when *delivery_token* is True
             - properties: pika.spec.BasicProperties
             - body: bytes
         :param auto_ack: if set to True, automatic acknowledgement mode
@@ -446,6 +585,11 @@ class Channel:
         :param arguments: Custom key/value pair arguments for the consumer
         :param callback: callback(pika.frame.Method) for method
           Basic.ConsumeOk.
+        :param delivery_token: If True, the callback receives a
+            [`DeliveryToken`][pika.channel.DeliveryToken] in place of the `Basic.Deliver` method,
+            so an acknowledgement issued after this channel instance is gone is refused rather
+            than applied to a reused delivery tag. Defaults to False, which keeps the existing
+            callback contract.
         :returns: Consumer tag which may be used to cancel the consumer.
         :raises ValueError:
         """
@@ -462,6 +606,12 @@ class Channel:
             raise exceptions.DuplicateConsumerTag(consumer_tag)
 
         self._consumers[consumer_tag] = on_message_callback
+        if delivery_token:
+            self._token_consumers.add(consumer_tag)
+        else:
+            # A tag can be reused after a cancel retires or evicts it; the mode must follow the
+            # callback it was registered with, not outlive it.
+            self._token_consumers.discard(consumer_tag)
 
         rpc_callback: Callable[
             ...,
@@ -528,7 +678,7 @@ class Channel:
         self._send_method(spec.Basic.Get(queue=queue, no_ack=auto_ack))
 
     def basic_nack(self,
-                   delivery_tag: int = 0,
+                   delivery_tag: int | DeliveryToken = 0,
                    multiple: bool = False,
                    requeue: bool = True) -> None:
         """
@@ -537,7 +687,9 @@ class Channel:
         It can be used to interrupt and cancel large incoming messages, or return untreatable
         messages to their original queue.
 
-        :param delivery_tag: int/long The server-assigned delivery tag
+        :param delivery_tag: int/long The server-assigned delivery tag, or a
+            [`DeliveryToken`][pika.channel.DeliveryToken] from a ``delivery_token=True`` consumer
+            on this same channel instance.
         :param multiple: If set to True, the delivery tag is treated as "up to and including", so
             that multiple messages can be acknowledged with a single method. If set to False, the
             delivery tag refers to a single message. If the multiple field is 1, and the delivery
@@ -545,8 +697,10 @@ class Channel:
         :param requeue: If requeue is true, the server will attempt to requeue the message. If
             requeue is false or the requeue attempt fails the messages are discarded or dead-
             lettered.
+        :raises StaleDeliveryToken: if *delivery_tag* is a token this channel did not issue.
         """
         self._raise_if_not_open()
+        delivery_tag = self._resolve_delivery_tag(delivery_tag)
         return self._send_method(
             spec.Basic.Nack(delivery_tag, multiple, requeue))
 
@@ -645,22 +799,26 @@ class Channel:
             spec.Basic.Qos(prefetch_size, prefetch_count, global_qos), callback,
             [spec.Basic.QosOk])
 
-    def basic_reject(self, delivery_tag: int = 0, requeue: bool = True) -> None:
+    def basic_reject(self,
+                     delivery_tag: int | DeliveryToken = 0,
+                     requeue: bool = True) -> None:
         """
         Reject an incoming message.
 
         This method allows a client to reject a message. It can be used to interrupt and cancel
         large incoming messages, or return untreatable messages to their original queue.
 
-        :param delivery_tag: int/long The server-assigned delivery tag
+        :param delivery_tag: int/long The server-assigned delivery tag, or a
+            [`DeliveryToken`][pika.channel.DeliveryToken] from a ``delivery_token=True`` consumer
+            on this same channel instance.
         :param requeue: If requeue is true, the server will attempt to requeue the message. If
             requeue is false or the requeue attempt fails the messages are discarded or dead-
             lettered.
-        :raises TypeError:
+        :raises StaleDeliveryToken: if *delivery_tag* is a token this channel did not issue.
+        :raises TypeError: if *delivery_tag* is neither an integer nor a token.
         """
         self._raise_if_not_open()
-        if not isinstance(delivery_tag, int):
-            raise TypeError('delivery_tag must be an integer')
+        delivery_tag = self._resolve_delivery_tag(delivery_tag)
         return self._send_method(spec.Basic.Reject(delivery_tag, requeue))
 
     def basic_recover(self,
@@ -1198,6 +1356,7 @@ class Channel:
         self.callbacks.process(self.channel_number,
                                self._ON_CHANNEL_CLEANUP_CB_KEY, self, self)
         self._consumers = {}
+        self._token_consumers = set()
         self._cancelled = set()
         self._nowait_cancelled = deque()
         self.callbacks.cleanup(str(self.channel_number))
@@ -1210,6 +1369,7 @@ class Channel:
         :param consumer_tag: The consumer tag to cleanup
         """
         self._consumers.pop(consumer_tag, None)
+        self._token_consumers.discard(consumer_tag)
         self._cancelled.discard(consumer_tag)
 
     def _retain_cancelled_tag(self, consumer_tag: str) -> None:
@@ -1442,7 +1602,12 @@ class Channel:
             LOGGER.error('Unexpected delivery: %r', method_frame)
             return
 
-        self._consumers[consumer_tag](self, method_frame.method,
+        delivery: Any = method_frame.method
+        if consumer_tag in self._token_consumers:
+            delivery = DeliveryToken(self.channel_number, self.generation,
+                                     method_frame.method)
+
+        self._consumers[consumer_tag](self, delivery,
                                       header_frame.properties, body)
 
     def _on_eventok(self, method_frame: frame.Method) -> None:

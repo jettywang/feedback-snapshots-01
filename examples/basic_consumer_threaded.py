@@ -13,6 +13,11 @@ safe from any thread, including the worker thread that delivers the
 message - so there is no need to bounce the ack through
 add_callback_threadsafe as the BlockingConnection-based example required.
 
+Delivery tags restart at 1 on a new channel, so an ack issued after a
+reconnect would name whatever message now holds that tag.  This example
+consumes with delivery_token=True and acknowledges with the token, which
+is refused with StaleDeliveryToken instead of reaching the wrong message.
+
 Pairs with examples/basic_publisher_threaded.py.  Run this consumer first.
 """
 
@@ -22,7 +27,7 @@ import threading
 import time
 
 import pika
-from pika.exceptions import ConnectionClosed
+from pika.exceptions import ConnectionClosed, StaleDeliveryToken
 from pika.exchange_type import ExchangeType
 
 LOG_FORMAT = ('%(levelname) -10s %(asctime)s %(name) -30s %(funcName) '
@@ -35,23 +40,29 @@ QUEUE_NAME = 'standard'
 ROUTING_KEY = 'standard_key'
 
 
-def on_message(ch, method_frame, _header_frame, body):
+def on_message(ch, token, _header_frame, body):
     thread_id = threading.get_ident()
     LOGGER.info('Worker thread %s received delivery_tag=%s body=%r', thread_id,
-                method_frame.delivery_tag, body)
+                token.delivery_tag, body)
     # Simulate slow work; heartbeats keep flowing on the IOLoop thread,
     # so the broker does not close the connection.
     time.sleep(random.randint(1, 10))
 
     try:
-        ch.basic_ack(delivery_tag=method_frame.delivery_tag)
-        LOGGER.info('Acked delivery_tag=%s', method_frame.delivery_tag)
+        ch.basic_ack(delivery_tag=token)
+        LOGGER.info('Acked delivery_tag=%s', token.delivery_tag)
+    except StaleDeliveryToken:
+        # The channel this delivery came from was replaced while this worker
+        # slept.  The tag may now name a different message on the new channel,
+        # so the ack was refused; the broker will redeliver the old message.
+        LOGGER.info('Skipping ack for delivery_tag=%s: channel was replaced',
+                    token.delivery_tag)
     except ConnectionClosed:
         # Connection closed (likely Ctrl-C) while this worker was sleeping.
         # The broker will redeliver this un-acked message to the next
         # consumer, so dropping it here is safe.
         LOGGER.info('Skipping ack for delivery_tag=%s: connection closed',
-                    method_frame.delivery_tag)
+                    token.delivery_tag)
 
 
 def main():
@@ -79,7 +90,9 @@ def main():
     # broker deliver multiple messages ahead of the worker; the worker
     # still processes them one at a time.
     ch.basic_qos(prefetch_count=1)
-    ch.basic_consume(queue=QUEUE_NAME, on_message_callback=on_message)
+    ch.basic_consume(queue=QUEUE_NAME,
+                     on_message_callback=on_message,
+                     delivery_token=True)
 
     LOGGER.info('Consuming from %s.  Ctrl-C to stop.', QUEUE_NAME)
     try:

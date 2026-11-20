@@ -1074,11 +1074,13 @@ class _ConsumerDeliveryEvt(_ChannelPendingEvt):
 
     __slots__ = ('body', 'method', 'properties')
 
-    def __init__(self, method: pika.spec.Basic.Deliver,
+    def __init__(self,
+                 method: pika.spec.Basic.Deliver
+                 | pika.channel.DeliveryToken,
                  properties: pika.spec.BasicProperties, body: bytes) -> None:
         """
         :param method: NOTE: consumer_tag and delivery_tag
-          are valid only within source channel
+          are valid only within source channel; a DeliveryToken when the consumer opted in
         :param properties: message properties
         :param body: message body; empty string if no body
         """
@@ -1181,6 +1183,7 @@ class _ConsumerInfo:
         'alternate_event_sink',
         'auto_ack',
         'consumer_tag',
+        'delivery_token',
         'on_message_callback',
         'state',
     )
@@ -1199,7 +1202,8 @@ class _ConsumerInfo:
             BlockingChannel, pika.spec.Basic.Deliver, pika.spec.
             BasicProperties, bytes
         ], None] | None = None,
-        alternate_event_sink: Callable[[_ChannelPendingEvt], None] | None = None
+        alternate_event_sink: Callable[[_ChannelPendingEvt], None] | None = None,
+        delivery_token: bool = False
     ) -> None:
         """
         NOTE: exactly one of callback/alternate_event_sink musts be non-None.
@@ -1210,7 +1214,8 @@ class _ConsumerInfo:
             user, having the signature:
             on_message_callback(channel, method, properties, body)
              - channel: BlockingChannel
-             - method: spec.Basic.Deliver
+             - method: spec.Basic.Deliver, or a
+               [`DeliveryToken`][pika.channel.DeliveryToken] when *delivery_token* is True
              - properties: spec.BasicProperties
              - body: bytes
         :param alternate_event_sink: if specified, _ConsumerDeliveryEvt
@@ -1218,6 +1223,8 @@ class _ConsumerInfo:
             callback instead of being deposited in the channel's
             `_pending_events` container. Signature:
             alternate_event_sink(evt)
+        :param delivery_token: whether this consumer asks the underlying channel for delivery
+            tokens; see [`BlockingChannel.basic_consume`][pika.adapters.blocking_connection.BlockingChannel.basic_consume].
         """
         assert (on_message_callback is None) != (
             alternate_event_sink is None
@@ -1227,6 +1234,7 @@ class _ConsumerInfo:
         self.auto_ack = auto_ack
         self.on_message_callback = on_message_callback
         self.alternate_event_sink = alternate_event_sink
+        self.delivery_token = delivery_token
         self.state = self.SETTING_UP
 
     @property
@@ -1552,10 +1560,10 @@ class BlockingChannel:
         else:
             self._add_pending_event(evt)
 
-    def _on_consumer_message_delivery(self, _channel: pika.channel.Channel,
-                                      method: pika.spec.Basic.Deliver,
-                                      properties: pika.spec.BasicProperties,
-                                      body: bytes) -> None:
+    def _on_consumer_message_delivery(
+            self, _channel: pika.channel.Channel,
+            method: pika.spec.Basic.Deliver | pika.channel.DeliveryToken,
+            properties: pika.spec.BasicProperties, body: bytes) -> None:
         """
         Called by impl when a message is delivered for a consumer.
 
@@ -1721,7 +1729,8 @@ class BlockingChannel:
                       auto_ack: bool = False,
                       exclusive: bool = False,
                       consumer_tag: str | None = None,
-                      arguments: dict[str, Any] | None = None) -> str:
+                      arguments: dict[str, Any] | None = None,
+                      delivery_token: bool = False) -> str:
         """
         Sends the AMQP command Basic.Consume to the broker and binds messages for the consumer_tag
         to the consumer callback. If you do not pass in a consumer_tag, one will be automatically
@@ -1740,7 +1749,8 @@ class BlockingChannel:
             to user, having the signature:
             on_message_callback(channel, method, properties, body)
             - channel: BlockingChannel
-            - method: spec.Basic.Deliver
+            - method: spec.Basic.Deliver, or a
+              [`DeliveryToken`][pika.channel.DeliveryToken] when *delivery_token* is True
             - properties: spec.BasicProperties
             - body: bytes
         :param auto_ack: if set to True, automatic acknowledgement mode will be used
@@ -1751,6 +1761,11 @@ class BlockingChannel:
         :param consumer_tag: You may specify your own consumer tag; if left
           empty, a consumer tag will be generated automatically
         :param arguments: Custom key/value pair arguments for the consumer
+        :param delivery_token: Deliver a [`DeliveryToken`][pika.channel.DeliveryToken] to the
+            callback instead of the `Basic.Deliver` method, so an acknowledgement that outlives
+            this channel instance is refused with
+            [`StaleDeliveryToken`][pika.exceptions.StaleDeliveryToken] rather than acknowledging a
+            reused delivery tag. Defaults to False.
         :returns: consumer tag
         :raises pika.exceptions.DuplicateConsumerTag: if consumer with given
             consumer_tag is already present.
@@ -1762,7 +1777,8 @@ class BlockingChannel:
                                         auto_ack=auto_ack,
                                         exclusive=exclusive,
                                         consumer_tag=consumer_tag,
-                                        arguments=arguments)
+                                        arguments=arguments,
+                                        delivery_token=delivery_token)
 
     def _basic_consume_impl(
         self,
@@ -1775,7 +1791,8 @@ class BlockingChannel:
             BlockingChannel, pika.spec.Basic.Deliver, pika.spec.
             BasicProperties, bytes
         ], None] | None = None,
-        alternate_event_sink: Callable[[_ChannelPendingEvt], None] | None = None
+        alternate_event_sink: Callable[[_ChannelPendingEvt], None] | None = None,
+        delivery_token: bool = False
     ) -> str:
         """
         The low-level implementation used by `basic_consume` and `consume`.
@@ -1799,6 +1816,8 @@ class BlockingChannel:
             callback instead of being deposited in the channel's
             `_pending_events` container. Signature:
             alternate_event_sink(evt)
+        :param delivery_token: ask the underlying channel for delivery tokens instead of
+            `Basic.Deliver` methods; see `basic_consume`.
 
         :raises pika.exceptions.DuplicateConsumerTag: if consumer with given
             consumer_tag is already present.
@@ -1823,7 +1842,8 @@ class BlockingChannel:
             consumer_tag,
             auto_ack=auto_ack,
             on_message_callback=on_message_callback,
-            alternate_event_sink=alternate_event_sink)
+            alternate_event_sink=alternate_event_sink,
+            delivery_token=delivery_token)
 
         try:
             with self._basic_consume_ok_result as ok_result:
@@ -1833,7 +1853,8 @@ class BlockingChannel:
                     auto_ack=auto_ack,
                     exclusive=exclusive,
                     consumer_tag=consumer_tag,
-                    arguments=arguments)
+                    arguments=arguments,
+                    delivery_token=delivery_token)
 
                 assert tag == consumer_tag, (tag, consumer_tag)
 
@@ -1920,12 +1941,11 @@ class BlockingChannel:
                         # NOTE: we can't use basic_nack with the multiple option
                         # to avoid nacking messages already held by our client.
                         for message in pending_messages:
-                            delivery_tag = message.method.delivery_tag
-                            # The generated spec types delivery_tag as
-                            # optional, but the broker always sets it on a
-                            # delivery.
-                            assert delivery_tag is not None
-                            self._impl.basic_reject(delivery_tag, requeue=True)
+                            # Pass the method, or the token when the consumer
+                            # opted in, so its channel binding is checked too.
+                            assert message.method.delivery_tag is not None
+                            self._impl.basic_reject(message.method,
+                                                    requeue=True)
 
                 # A consumer the broker already cancelled is not asked about
                 # again: the wait below would end before the reply.
@@ -1955,9 +1975,8 @@ class BlockingChannel:
             # closes it with a 406.
             late = self._remove_pending_deliveries(consumer_tag)
             for evt in late:
-                delivery_tag = evt.method.delivery_tag
-                assert delivery_tag is not None
-                self._impl.basic_reject(delivery_tag, requeue=True)
+                assert evt.method.delivery_tag is not None
+                self._impl.basic_reject(evt.method, requeue=True)
             if late:
                 # Sent now, not at the caller's next I/O, as `cancel` does.
                 self._flush_output()
@@ -2251,8 +2270,7 @@ class BlockingChannel:
                 #      from the server at the end (if any)
                 for _ in range(self.get_waiting_message_count()):
                     evt = pending_events.popleft()
-                    self._impl.basic_reject(evt.method.delivery_tag,
-                                            requeue=True)
+                    self._impl.basic_reject(evt.method, requeue=True)
 
             self.basic_cancel(self._queue_consumer_generator.consumer_tag)
 
@@ -2267,9 +2285,8 @@ class BlockingChannel:
                 for evt in pending_events:
                     if not isinstance(evt, _ConsumerDeliveryEvt):
                         continue
-                    delivery_tag = evt.method.delivery_tag
-                    assert delivery_tag is not None
-                    self._impl.basic_reject(delivery_tag, requeue=True)
+                    assert evt.method.delivery_tag is not None
+                    self._impl.basic_reject(evt.method, requeue=True)
                 pending_events.clear()
                 self._flush_output()
         finally:
@@ -2279,7 +2296,9 @@ class BlockingChannel:
         # why the count is not reported even though it is now known.
         return 0
 
-    def basic_ack(self, delivery_tag: int = 0, multiple: bool = False) -> None:
+    def basic_ack(self,
+                  delivery_tag: int | pika.channel.DeliveryToken = 0,
+                  multiple: bool = False) -> None:
         """
         Acknowledge one or more messages.
 
@@ -2288,7 +2307,10 @@ class BlockingChannel:
         messages published with the Publish method on a channel in confirm mode. The acknowledgement
         can be for a single message or a set of messages up to and including a specific message.
 
-        :param delivery_tag: The server-assigned delivery tag
+        :param delivery_tag: The server-assigned delivery tag, or a
+            [`DeliveryToken`][pika.channel.DeliveryToken] from a ``delivery_token=True`` consumer
+            on this channel. A token from an earlier channel instance raises
+            [`StaleDeliveryToken`][pika.exceptions.StaleDeliveryToken] and sends nothing.
         :param multiple: If set to True, the delivery tag is treated as "up to and including", so
             that multiple messages can be acknowledged with a single method. If set to False, the
             delivery tag refers to a single message. If the multiple field is 1, and the delivery
@@ -2298,7 +2320,7 @@ class BlockingChannel:
         self._flush_output()
 
     def basic_nack(self,
-                   delivery_tag: int = 0,
+                   delivery_tag: int | pika.channel.DeliveryToken = 0,
                    multiple: bool = False,
                    requeue: bool = True) -> None:
         """
@@ -2307,7 +2329,9 @@ class BlockingChannel:
         It can be used to interrupt and cancel large incoming messages, or return untreatable
         messages to their original queue.
 
-        :param delivery_tag: The server-assigned delivery tag
+        :param delivery_tag: The server-assigned delivery tag, or a
+            [`DeliveryToken`][pika.channel.DeliveryToken] from a ``delivery_token=True`` consumer
+            on this channel; see `basic_ack`.
         :param multiple: If set to True, the delivery tag is treated as "up to and including", so
             that multiple messages can be acknowledged with a single method. If set to False, the
             delivery tag refers to a single message. If the multiple field is 1, and the delivery
@@ -2481,14 +2505,18 @@ class BlockingChannel:
                                      callback=recover_ok_result.signal_once)
             self._flush_output(recover_ok_result.is_ready)
 
-    def basic_reject(self, delivery_tag: int = 0, requeue: bool = True) -> None:
+    def basic_reject(self,
+                     delivery_tag: int | pika.channel.DeliveryToken = 0,
+                     requeue: bool = True) -> None:
         """
         Reject an incoming message.
 
         This method allows a client to reject a message. It can be used to interrupt and cancel
         large incoming messages, or return untreatable messages to their original queue.
 
-        :param delivery_tag: The server-assigned delivery tag
+        :param delivery_tag: The server-assigned delivery tag, or a
+            [`DeliveryToken`][pika.channel.DeliveryToken] from a ``delivery_token=True`` consumer
+            on this channel; see `basic_ack`.
         :param requeue: If requeue is true, the server will attempt to requeue the message. If
             requeue is false or the requeue attempt fails the messages are discarded or dead-
             lettered.

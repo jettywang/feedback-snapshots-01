@@ -213,6 +213,45 @@ class ChannelWrongStateError(AMQPChannelError):
     """Channel is in wrong state for the requested operation."""
 
 
+class StaleDeliveryToken(AMQPChannelError):
+    """
+    A delivery token was presented to a channel instance that did not issue it.
+
+    Delivery tags are scoped to a channel and restart at 1, so after a reconnect the same tag names
+    a different message. An acknowledgement carrying a token from an earlier channel instance is
+    refused before any frame is sent, which keeps a late completion from acknowledging an unrelated
+    delivery on the replacement channel.
+
+    This is distinguishable from `ChannelWrongStateError`: here the token belongs to another channel
+    instance and nothing was sent, while `ChannelWrongStateError` means the token's own channel is
+    closed or closing.
+    """
+
+    def __init__(self, token: Any, target_channel_number: int,
+                 target_generation: int) -> None:
+        """
+        :param token: The delivery token that was presented.
+        :param target_channel_number: Channel number of the instance that received it.
+        :param target_generation: Generation of the instance that received it.
+        """
+        super().__init__(token.delivery_tag, token.channel_number,
+                         target_channel_number)
+        self.token = token
+        self.delivery_tag = token.delivery_tag
+        self.token_channel_number = token.channel_number
+        self.channel_number = target_channel_number
+        self.token_generation = token.generation
+        self.target_generation = target_generation
+
+    @override
+    def __repr__(self) -> str:
+        return (
+            f'{self.__class__.__name__}: delivery tag {self.delivery_tag} was issued by '
+            f'an earlier channel instance with number {self.token_channel_number}; '
+            f'channel number {self.channel_number} is a different instance, so nothing '
+            f'was sent')
+
+
 class ChannelClosed(AMQPChannelError):
     """The channel closed by client or by broker."""
 

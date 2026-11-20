@@ -1289,7 +1289,8 @@ class ChannelTests(unittest.TestCase):
         def execute_and_fire(cb):
 
             def fake_consume(queue, on_message_callback, auto_ack, exclusive,
-                             consumer_tag, arguments, callback):
+                             consumer_tag, arguments, callback,
+                             delivery_token=False):
                 callback(mock_frame)
 
             raw_ch.basic_consume.side_effect = fake_consume
@@ -1314,7 +1315,8 @@ class ChannelTests(unittest.TestCase):
         def execute_and_fire(cb):
 
             def fake_consume(queue, on_message_callback, auto_ack, exclusive,
-                             consumer_tag, arguments, callback):
+                             consumer_tag, arguments, callback,
+                             delivery_token=False):
                 on_message_callback(raw_ch, 'method', 'props', b'body')
                 callback(mock_frame)
 
@@ -1591,7 +1593,8 @@ class ConsumerWorkPoolTests(unittest.TestCase):
         def execute_and_fire(cb):
 
             def fake_consume(queue, on_message_callback, auto_ack, exclusive,
-                             consumer_tag, arguments, callback):
+                             consumer_tag, arguments, callback,
+                             delivery_token=False):
                 on_message_callback(raw_ch, 'method', 'props', b'body')
                 callback(mock_frame)
 
@@ -1620,7 +1623,8 @@ class ConsumerWorkPoolTests(unittest.TestCase):
         def execute_and_fire(cb):
 
             def fake_consume(queue, on_message_callback, auto_ack, exclusive,
-                             consumer_tag, arguments, callback):
+                             consumer_tag, arguments, callback,
+                             delivery_token=False):
                 for i in range(10):
                     on_message_callback(raw_ch, 'method', 'props', i)
                 callback(mock_frame)
@@ -1652,7 +1656,8 @@ class ConsumerWorkPoolTests(unittest.TestCase):
         def execute_and_fire(cb):
 
             def fake_consume(queue, on_message_callback, auto_ack, exclusive,
-                             consumer_tag, arguments, callback):
+                             consumer_tag, arguments, callback,
+                             delivery_token=False):
                 on_message_callback(raw_ch, 'method', 'props', 'explode')
                 on_message_callback(raw_ch, 'method', 'props', 'after')
                 callback(mock_frame)
@@ -1691,7 +1696,8 @@ class ConsumerWorkPoolTests(unittest.TestCase):
             if call_count[0] == 1:
                 # First call: basic_consume setup
                 def fake_consume(queue, on_message_callback, auto_ack,
-                                 exclusive, consumer_tag, arguments, callback):
+                                 exclusive, consumer_tag, arguments, callback,
+                                 delivery_token=False):
                     on_message_callback(raw_ch, 'method', 'props', b'body')
                     callback(mock_frame)
 
@@ -1734,7 +1740,8 @@ class ConsumerWorkPoolTests(unittest.TestCase):
         def execute_and_fire(cb):
 
             def fake_consume(queue, on_message_callback, auto_ack, exclusive,
-                             consumer_tag, arguments, callback):
+                             consumer_tag, arguments, callback,
+                             delivery_token=False):
                 on_message_callback(raw_ch, 'method', 'props', b'body')
                 callback(mock_frame)
 
@@ -1761,7 +1768,8 @@ class ConsumerWorkPoolTests(unittest.TestCase):
         def execute_and_fire(cb):
 
             def fake_consume(queue, on_message_callback, auto_ack, exclusive,
-                             consumer_tag, arguments, callback):
+                             consumer_tag, arguments, callback,
+                             delivery_token=False):
                 wrapped_cb_holder.append(on_message_callback)
                 callback(mock_frame)
 

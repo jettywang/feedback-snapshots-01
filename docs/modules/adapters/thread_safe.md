@@ -67,6 +67,27 @@ If the budget runs out before the backlog is done, the close proceeds and a warn
 
 Two cases skip this and behave as they did before 1.5.0, running queued callbacks after the teardown instead: `close()` called from the connection's own IOLoop thread, and `close()` called from inside a delivery or event callback, where waiting for the queue would mean waiting for the calling callback to return. Neither can be fixed on the close path, since the guarantee needs a queue to drain and the caller is sitting in it, so a callback that wants to shut the connection down should set a flag the thread that owns the connection watches and close from there. #1770 covers whether pika should refuse the call instead.
 
+## Acknowledging a delivery after its channel is gone
+
+A consumer whose callback hands work to another queue can finish after the channel has been replaced by a reconnect. The integer `delivery_tag` is scoped to a channel and starts again at 1, so tag 7 on the new channel is a different message, and an acknowledgement carrying the old tag would settle that new message instead.
+
+`basic_consume(..., delivery_token=True)` makes the callback receive a [`DeliveryToken`][pika.channel.DeliveryToken] rather than the `Basic.Deliver` method. `basic_ack`, `basic_nack` and `basic_reject` accept the token and check it belongs to this channel instance:
+
+```python
+def on_message(channel, token, properties, body):
+    # Runs on the worker thread; `token` is bound to the channel that delivered it.
+    work_queue.put((token, body))
+
+def worker():
+    token, body = work_queue.get()
+    process(body)
+    channel.basic_ack(token)   # StaleDeliveryToken if the channel was replaced
+```
+
+A token from an earlier channel instance raises `pika.exceptions.StaleDeliveryToken` **at the call site**, on whichever thread acknowledges, and nothing is scheduled, so it is not lost to a log line. That is why the check runs in the wrapper as well as the core channel: `basic_ack` is fire-and-forget on the IOLoop thread, where an exception would only be logged. A token from the same instance whose channel has since closed raises `ChannelWrongStateError` instead, so a stale token and a closed channel are told apart.
+
+The option is off by default; without it the callback receives the method and the acknowledgement takes the integer, as before.
+
 ## Work queue bounds and back-pressure
 
 Each worker thread consumes from a bounded queue holding at most `work_queue_maxsize` pending dispatches (default 1000, matching the RabbitMQ Java client). When a slow callback lets the queue fill up, further enqueues block the IOLoop thread, which stops reading from the socket and applies back-pressure to the broker through TCP flow control instead of buffering events in memory without limit.

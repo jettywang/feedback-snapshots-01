@@ -6,6 +6,10 @@ Notes for each release are also published on the [GitHub releases page](https://
 
 Twelve changes are worth reading before you upgrade. One adds `pika.Connection`, three can turn a passing build red, two change what a working application observes when it cancels a consumer or closes a channel, one lets RabbitMQ close a channel sooner after a consumer timeout, one refuses messages larger than 64 MiB, one changes what the Twisted adapter reports when a connection closes, one closes the connection when a consumer or reply callback raises `BlockingIOError`, one changes the Python types that field-table numbers decode to, and one makes URL `ssl_options` verify the broker.
 
+### A delivery can be bound to the channel that issued it
+
+A work queue that outlives an AMQP reconnect can acknowledge after the channel is gone. Delivery tags restart at 1 on each channel, so the old tag can name a live delivery on the replacement and settle the wrong message. `basic_consume(..., delivery_token=True)` now hands the callback a `pika.channel.DeliveryToken` instead of the `Basic.Deliver` method, and `basic_ack`, `basic_nack` and `basic_reject` accept it. A token from another channel instance raises `pika.exceptions.StaleDeliveryToken` and sends no frame; a token from the same instance whose channel has closed raises `ChannelWrongStateError`, as before. The option is off by default, so existing callbacks and integer acknowledgements are unchanged.
+
 ### `pika.Connection` is new, and is the connection to use
 
 1.5.0 introduces `pika.Connection` and its `Channel`, a connection that runs its own IOLoop on a background thread and offers a thread-safe blocking API that does not stall heartbeats while your code processes a message. There is nothing to migrate *from*: these classes are new in this release, and `pika.Connection` is the documented import.

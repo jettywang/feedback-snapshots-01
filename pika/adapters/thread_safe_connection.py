@@ -28,11 +28,11 @@ if TYPE_CHECKING:
 
     from typing_extensions import Literal, Self
 
-    import pika.channel
-
+import pika.channel
 from pika import frame, spec, validators
 from pika.adapters.select_connection import SelectConnection
-from pika.exceptions import ConnectionWrongStateError, WorkQueueFullError
+from pika.exceptions import (ConnectionWrongStateError, StaleDeliveryToken,
+                             WorkQueueFullError)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -988,17 +988,26 @@ class Channel:
 
         self._wrapper._schedule_unchecked(_publish)
 
-    def basic_ack(self, delivery_tag: int = 0, multiple: bool = False) -> None:
+    def basic_ack(self,
+                  delivery_tag: int | pika.channel.DeliveryToken = 0,
+                  multiple: bool = False) -> None:
         """
         Schedule an acknowledgement in the IOLoop thread (fire-and-forget).
 
         Safe to call from any thread simultaneously.
 
-        :param delivery_tag: Server-assigned delivery tag
+        :param delivery_tag: Server-assigned delivery tag, or a
+            [`DeliveryToken`][pika.channel.DeliveryToken] produced by a ``delivery_token=True``
+            consumer on this channel. A token from an earlier channel instance is refused here,
+            on the calling thread, with `pika.exceptions.StaleDeliveryToken`, and nothing is
+            scheduled, so a completion that outlived its channel cannot acknowledge a reused tag.
         :param multiple: If True, apply to all messages up to and including this delivery tag
         :raises Exception: if the connection is already closed.
+        :raises pika.exceptions.StaleDeliveryToken: if *delivery_tag* is a token this channel did
+            not issue.
         """
         self._check_not_closed()
+        delivery_tag = self._check_delivery_token(delivery_tag)
 
         def _ack() -> None:
             try:
@@ -1010,8 +1019,30 @@ class Channel:
 
         self._wrapper._schedule_unchecked(_ack)
 
+    def _check_delivery_token(
+        self, delivery_tag: int | pika.channel.DeliveryToken
+    ) -> int | pika.channel.DeliveryToken:
+        """
+        Refuse a token issued by another channel instance, on the calling thread.
+
+        The styled check runs here rather than on the IOLoop thread so the caller sees
+        `StaleDeliveryToken` rather than a log line, as the fire-and-forget contract otherwise
+        would. A token for this instance is left as is; the underlying channel validates it again.
+
+        :param delivery_tag: An integer tag or a [`DeliveryToken`][pika.channel.DeliveryToken].
+        :returns: *delivery_tag*, unchanged.
+        :raises pika.exceptions.StaleDeliveryToken: if the token belongs to another instance.
+        """
+        if isinstance(delivery_tag,
+                      pika.channel.DeliveryToken) and not delivery_tag.belongs_to(
+                          self._channel):
+            raise StaleDeliveryToken(delivery_tag,
+                                     self._channel.channel_number,
+                                     self._channel.generation)
+        return delivery_tag
+
     def basic_nack(self,
-                   delivery_tag: int = 0,
+                   delivery_tag: int | pika.channel.DeliveryToken = 0,
                    multiple: bool = False,
                    requeue: bool = True) -> None:
         """
@@ -1019,12 +1050,17 @@ class Channel:
 
         Safe to call from any thread simultaneously.
 
-        :param delivery_tag: Server-assigned delivery tag
+        :param delivery_tag: Server-assigned delivery tag, or a
+            [`DeliveryToken`][pika.channel.DeliveryToken] from this channel instance; see
+            [`basic_ack`][pika.adapters.thread_safe_connection.Channel.basic_ack].
         :param multiple: If True, apply to all messages up to and including this delivery tag
         :param requeue: If True, requeue the message on the broker
         :raises Exception: if the connection is already closed.
+        :raises pika.exceptions.StaleDeliveryToken: if *delivery_tag* is a token this channel did
+            not issue.
         """
         self._check_not_closed()
+        delivery_tag = self._check_delivery_token(delivery_tag)
 
         def _nack() -> None:
             try:
@@ -1037,17 +1073,24 @@ class Channel:
 
         self._wrapper._schedule_unchecked(_nack)
 
-    def basic_reject(self, delivery_tag: int = 0, requeue: bool = True) -> None:
+    def basic_reject(self,
+                     delivery_tag: int | pika.channel.DeliveryToken = 0,
+                     requeue: bool = True) -> None:
         """
         Schedule a rejection in the IOLoop thread (fire-and-forget).
 
         Safe to call from any thread simultaneously.
 
-        :param delivery_tag: Server-assigned delivery tag
+        :param delivery_tag: Server-assigned delivery tag, or a
+            [`DeliveryToken`][pika.channel.DeliveryToken] from this channel instance; see
+            [`basic_ack`][pika.adapters.thread_safe_connection.Channel.basic_ack].
         :param requeue: If True, requeue the message on the broker
         :raises Exception: if the connection is already closed.
+        :raises pika.exceptions.StaleDeliveryToken: if *delivery_tag* is a token this channel did
+            not issue.
         """
         self._check_not_closed()
+        delivery_tag = self._check_delivery_token(delivery_tag)
 
         def _reject() -> None:
             try:
@@ -1366,7 +1409,8 @@ class Channel:
                       exclusive: bool = False,
                       consumer_tag=None,
                       arguments=None,
-                      timeout: float | None = DEFAULT_RPC_TIMEOUT) -> str:
+                      timeout: float | None = DEFAULT_RPC_TIMEOUT,
+                      delivery_token: bool = False) -> str:
         """
         Register a consumer and block until Basic.ConsumeOk arrives.
 
@@ -1380,13 +1424,17 @@ class Channel:
         Safe to call from any thread.
 
         :param queue: Queue to consume from.
-        :param on_message_callback:``callback(channel, method, properties, body)``
+        :param on_message_callback:``callback(channel, method, properties, body)``; *method* is a
+            [`DeliveryToken`][pika.channel.DeliveryToken] when *delivery_token* is True.
         :param auto_ack: Disable manual acknowledgement.
         :param exclusive: Request exclusive consumer access.
         :param consumer_tag: Client-provided tag; generated if omitted.
         :param arguments: Additional AMQP arguments.
         :param timeout: Seconds to wait for the response. Defaults to [`DEFAULT_RPC_TIMEOUT`][pika.adapters.thread_safe_connection.DEFAULT_RPC_TIMEOUT]
             (10 s). Pass ``None`` to wait indefinitely.
+        :param delivery_token: Deliver a [`DeliveryToken`][pika.channel.DeliveryToken] to the
+            callback so a completion that outlives this channel instance cannot acknowledge a
+            reused delivery tag on a replacement. Defaults to False.
         :returns: The consumer tag assigned by the broker.
         :raises TypeError: if *on_message_callback* is not callable.
         :raises Exception: if the connection is closed before the response arrives.
@@ -1410,7 +1458,8 @@ class Channel:
                                         exclusive=exclusive,
                                         consumer_tag=consumer_tag,
                                         arguments=arguments,
-                                        callback=callback)
+                                        callback=callback,
+                                        delivery_token=delivery_token)
 
         consume_ok = self._blocking_rpc('basic_consume', send, timeout)
         tag = consume_ok.method.consumer_tag

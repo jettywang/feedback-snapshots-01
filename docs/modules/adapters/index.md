@@ -109,6 +109,8 @@ while True:
 
 A variant that recovers across several nodes is in `examples/blocking_consume_recover_multiple_hosts.py`.
 
+Recovery creates a new channel, and a delivery tag is only meaningful on the channel that assigned it. A completion still in another thread when the reconnect happens can therefore acknowledge an unrelated message that now holds the same tag. Consuming with `delivery_token=True` and acknowledging with the token from the callback makes that a `StaleDeliveryToken` instead of a wrong acknowledgement; see [acknowledging a delivery after its channel is gone](thread_safe.md#acknowledging-a-delivery-after-its-channel-is-gone).
+
 Generic operation retry libraries such as [retry](https://github.com/invl/retry) can be used. Decorators make it possible to configure some additional recovery behaviours, like delays between retries and limiting the number of retries:
 
 ```python

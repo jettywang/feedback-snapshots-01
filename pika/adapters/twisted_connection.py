@@ -211,12 +211,13 @@ class TwistedChannel:
         # no delivery tag and answers 406, which closes the channel.
         for pending in ([] if consumer_tag in self._consumers_with_noack else
                         list(queue_obj.pending)):
-            delivery_tag = getattr(getattr(pending, 'method', None),
-                                   'delivery_tag', None)
+            # `method` is a Basic.Deliver, or a DeliveryToken when the consumer opted in.
+            pending_method = getattr(pending, 'method', None)
+            delivery_tag = getattr(pending_method, 'delivery_tag', None)
             if delivery_tag is None:
                 continue
             try:
-                self._channel.basic_reject(delivery_tag, requeue=True)
+                self._channel.basic_reject(pending_method, requeue=True)
             except Exception:
                 LOGGER.debug(
                     'Could not reject delivery %s for cancelled '
@@ -416,7 +417,8 @@ class TwistedChannel:
             auto_ack: bool = False,
             exclusive: bool = False,
             consumer_tag: str | None = None,
-            arguments: dict[str, Any] | None = None) -> defer.Deferred[Any]:
+            arguments: dict[str, Any] | None = None,
+            delivery_token: bool = False) -> defer.Deferred[Any]:
         """
         Consume from a server queue.
 
@@ -439,6 +441,10 @@ class TwistedChannel:
         :param exclusive: Don't allow other consumers on the queue
         :param consumer_tag: Specify your own consumer tag
         :param arguments: Custom key/value pair arguments for the consumer
+        :param delivery_token: Deliver a [`DeliveryToken`][pika.channel.DeliveryToken] as the
+            message's ``method`` instead of the `Basic.Deliver` method, so an acknowledgement that
+            outlives this channel instance is refused with
+            [`StaleDeliveryToken`][pika.exceptions.StaleDeliveryToken]. Defaults to False.
         :returns: Deferred that fires with a tuple
             ``(queue_object, consumer_tag)``. The Deferred will errback with an
             instance of [`exceptions.ChannelClosed`][pika.exceptions.ChannelClosed] if the call fails.
@@ -488,6 +494,7 @@ class TwistedChannel:
                 consumer_tag=consumer_tag,
                 arguments=arguments,
                 callback=on_consume_ok,
+                delivery_token=delivery_token,
             )
         except Exception:
             return defer.fail()
