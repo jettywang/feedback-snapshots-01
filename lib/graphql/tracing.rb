@@ -36,6 +36,7 @@ module GraphQL
     autoload :PrometheusTrace, "graphql/tracing/prometheus_trace"
     autoload :PerfettoTrace, "graphql/tracing/perfetto_trace"
     autoload :DetailedTrace, "graphql/tracing/detailed_trace"
+    autoload :LimitedTrace, "graphql/tracing/limited_trace"
 
     # Objects may include traceable to gain a `.trace(...)` method.
     # The object must have a `@tracers` ivar of type `Array<<#trace(k, d, &b)>>`.

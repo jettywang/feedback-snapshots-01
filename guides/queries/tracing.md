@@ -48,3 +48,27 @@ There integrations for GraphQL-Ruby with several other monitoring systems:
 - [Sentry](https://sentry.io): See [Tracing::SentryTrace](rdoc-ref:GraphQL::Tracing::SentryTrace).
 - [Skylight](https://www.skylight.io):  either enable the [GraphQL probe](https://www.skylight.io/support/getting-more-from-skylight#graphql) or use [Tracing::ActiveSupportNotificationsTrace](rdoc-ref:GraphQL::Tracing::ActiveSupportNotificationsTrace).
 - Statsd: See [Tracing::StatsdTrace](rdoc-ref:GraphQL::Tracing::StatsdTrace).
+
+## Limited Observability
+
+When trace data is sent to a third-party observability platform, application data -- argument values, variable values, and database fields -- may not be allowed to leave your system. [Tracing::LimitedTrace](rdoc-ref:GraphQL::Tracing::LimitedTrace) is an opt-in strategy that emits metadata-only lifecycle events:
+
+- Each event carries a `phase` (such as `"parse"`, `"validate"`, `"execute_field"`, or `"authorized"`) and a `boundary` (`"begin"` or `"end"`), so phases of execution can be correlated across the event stream.
+- Argument values are replaced with a redaction placeholder (keys are kept), objects are represented by class names only, and validation errors are reported by message only -- never with their `extensions`, which may contain provided values.
+- Authorization failures remain visible: the `graphql.authorized.end` event includes `authorized: false` along with the type that rejected the object.
+
+To use it, mix it into a trace class and implement `emit_limited_event` to deliver events to your platform:
+
+```ruby
+class ObservabilityTrace < GraphQL::Tracing::Trace
+  include GraphQL::Tracing::LimitedTrace
+
+  def emit_limited_event(event_name, attributes)
+    MyObservabilityClient.record(event_name, attributes)
+  end
+end
+
+class MySchema < GraphQL::Schema
+  trace_with(ObservabilityTrace)
+end
+```
