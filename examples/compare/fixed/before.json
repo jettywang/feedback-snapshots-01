@@ -1,0 +1,22 @@
+{
+  "dependencies": [
+    {
+      "name": "requests",
+      "version": "2.30.0",
+      "vulns": [
+        {
+          "id": "CVE-2024-35195",
+          "fix_versions": ["2.32.0"],
+          "aliases": ["GHSA-9wx4-h78v-vm56"],
+          "description": "Session fixation via re-used connection pools."
+        }
+      ]
+    },
+    {
+      "name": "flask",
+      "version": "2.3.2",
+      "vulns": []
+    }
+  ],
+  "fixes": []
+}

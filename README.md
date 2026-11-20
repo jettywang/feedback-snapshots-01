@@ -32,6 +32,7 @@ with support from Google, and is currently maintained under the
   * [Environment variables](#environment-variables)
   * [Exit codes](#exit-codes)
   * [Dry runs](#dry-runs)
+  * [Comparing reports](#comparing-reports)
 * [Examples](#examples)
 * [Troubleshooting](#troubleshooting)
 * [Tips and Tricks](#tips-and-tricks)
@@ -266,6 +267,62 @@ an audit (or fix) step is actually performed.
 * In fix mode, `pip-audit --fix --dry-run` performs the auditing step and prints
   out the fix behavior (i.e., which dependencies would be upgraded or skipped)
   that *would have been performed*.
+
+### Comparing reports
+
+`pip-audit-compare` takes a before report and an after report and explains why
+each vulnerability finding changed. This is useful when reviewing an upgrade:
+"did the upgrade remove the risk, did the dependency go away, or is the
+vulnerability simply missing from the newer report?"
+
+```console
+$ pip-audit-compare before.json after.json
+$ pip-audit-compare before.json after.json --format=json
+$ pip-audit-compare before.json after.json --swap   # review the inverse
+```
+
+The same entry point is available as `python -m pip_audit._compare`.
+
+Both the current report shape (an object with `dependencies`) and the legacy
+shape (a bare array, emitted before `pip-audit` 2.0) are accepted, so older
+reports without a `fixes` block can be used directly. Pass `-` as either path
+to read that report from standard input.
+
+Each finding is assigned exactly one status:
+
+| Status                | Meaning                                                                                        |
+| --------------------- | ---------------------------------------------------------------------------------------------- |
+| `fixed`               | The package was upgraded across a listed fix version and the finding is absent afterwards.      |
+| `resolved-by-removal` | The package is absent from the after report, so the risk left with the dependency.             |
+| `not-reported`        | The package version is unchanged, but the finding is absent from the after report.              |
+| `still-reported`      | The finding is present in both reports (including downgrades).                                 |
+| `newly-reported`      | The finding appears only in the after report.                                                  |
+| `unverifiable`        | The reports lack consistent evidence (e.g. a downgrade, a skipped package, or no fix version). |
+
+Only `fixed` findings with complete evidence count as remediated. Complete
+evidence for a fix means all of the following, each backed by a locator in the
+output:
+
+* the before report records the package version and the finding;
+* the before finding lists a fix version that is greater than the before
+  version and no greater than the after version;
+* the after report records the package at the after version without the
+  finding.
+
+A `fixes` entry is included as corroboration when it agrees with the observed
+versions, but it is never required, because legacy reports do not have one.
+Every record in the output includes the input file and JSON path (for example
+`before:before.json:dependencies[0].vulns[0]`), so a review comment can be tied
+back to the original report.
+
+Use `--fail-on unresolved` to exit non-zero when findings remain unexplained,
+or `--fail-on not-fixed` to require every finding to have complete fix
+evidence. The default is `--fail-on none`.
+
+Runnable fixture pairs for each status, including a version downgrade and a
+legacy before report, are in [`examples/compare`](examples/compare). The exit
+code is `0` for a successful comparison, `2` for an input error, and `1` only
+when `--fail-on` is triggered.
 
 ## Examples
 

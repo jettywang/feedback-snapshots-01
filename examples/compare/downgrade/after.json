@@ -1,0 +1,19 @@
+{
+  "dependencies": [
+    {
+      "name": "urllib3",
+      "version": "1.26.18",
+      "vulns": [
+        {
+          "id": "CVE-2024-37891",
+          "fix_versions": [
+            "1.26.19",
+            "2.2.2"
+          ],
+          "aliases": []
+        }
+      ]
+    }
+  ],
+  "fixes": []
+}

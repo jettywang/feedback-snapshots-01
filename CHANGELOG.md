@@ -8,6 +8,13 @@ All versions prior to 0.0.9 are untracked.
 
 ## [Unreleased]
 
+### Added
+
+* `pip-audit-compare` compares two JSON reports and explains which findings were
+  fixed by an upgrade, removed with a dependency, or simply absent from the
+  newer report. It accepts legacy pre-2.0 reports and exposes record-level
+  locators for every finding.
+
 ### Fixed
 
 * Editable requirements skipped with `--skip-editable` no longer require a hash
