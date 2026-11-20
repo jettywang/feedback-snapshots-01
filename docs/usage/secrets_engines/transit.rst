@@ -200,6 +200,46 @@ Example output:
     Encrypted plaintext ciphertext is: vault:...
 
 
+Encrypt Data (Batch with Item Results)
+---------------------------------------
+
+.. automethod:: hvac.api.secrets_engines.Transit.encrypt_data_batch
+   :noindex:
+
+``encrypt_data_batch`` keeps the plaintext values out of diagnostics and returns
+one item per input position. An item is ``encrypted`` (with ``ciphertext`` and,
+when reported by Vault, ``key_version``), ``failed`` (with a redacted ``error``),
+or ``missing`` (Vault returned no result for that position). Use
+``encrypt_data`` when the unmodified Vault response is required.
+
+Examples
+````````
+
+.. testcode:: transit_secret
+
+    import base64
+    import hvac
+    client = hvac.Client(url='https://127.0.0.1:8200')
+
+    batch = [
+        dict(plaintext=base64.urlsafe_b64encode(value.encode()).decode('ascii'))
+        for value in ('audit-one', 'audit-two')
+    ]
+    batch_result = client.secrets.transit.encrypt_data_batch(
+        name='hvac-key',
+        batch_input=batch,
+    )
+    print('Encrypted item indices: {indices}'.format(indices=batch_result.encrypted_indices))
+    print('Items needing repair or retry: {indices}'.format(indices=batch_result.retry_indices))
+
+Example output:
+
+.. testoutput:: transit_secret
+
+    Encrypted item indices: (0, 1)
+    Items needing repair or retry: ()
+
+
 Decrypt Data
 ------------
 

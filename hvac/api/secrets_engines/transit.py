@@ -1,10 +1,188 @@
 #!/usr/bin/env python
 """Transit methods module."""
+import base64
+from dataclasses import dataclass, field
+from typing import Any, Optional, Tuple
+
+import requests
+
 from hvac import exceptions, utils
 from hvac.api.vault_api_base import VaultApiBase
 from hvac.constants import transit as transit_constants
 
 DEFAULT_MOUNT_POINT = "transit"
+
+BATCH_ITEM_ENCRYPTED = "encrypted"
+BATCH_ITEM_FAILED = "failed"
+BATCH_ITEM_MISSING = "missing"
+
+_REDACTED = "[REDACTED]"
+
+
+def _plaintext_variants(plaintext):
+    """Yield the supplied plaintext and any base64-decoded text form of it."""
+    if not isinstance(plaintext, str) or not plaintext:
+        return
+
+    yield plaintext
+
+    padded = plaintext + ("=" * (-len(plaintext) % 4))
+    for decoder in (base64.b64decode, base64.urlsafe_b64decode):
+        try:
+            decoded = decoder(padded)
+            decoded_text = decoded.decode("utf-8")
+        except (ValueError, TypeError, UnicodeDecodeError):
+            continue
+        if decoded_text:
+            yield decoded_text
+
+
+def _redact_plaintext(message, batch_input):
+    """Remove encoded and decoded batch plaintext values from a diagnostic message."""
+    text = str(message)
+    variants = set()
+    for item in batch_input:
+        if not isinstance(item, dict):
+            continue
+        variants.update(_plaintext_variants(item.get("plaintext")))
+
+    for variant in sorted(variants, key=len, reverse=True):
+        text = text.replace(variant, _REDACTED)
+    return text
+
+
+@dataclass(frozen=True)
+class BatchEncryptionItem:
+    """The outcome of one item in a Transit batch encryption request.
+
+    ``index`` is the zero-based position in the submitted ``batch_input`` list.
+    A ``missing`` item is deliberately distinct from a ``failed`` item: Vault did
+    not return a result for that position, whereas a failure carries Vault's
+    per-item error.
+    """
+
+    index: int
+    status: str
+    ciphertext: Optional[str] = None
+    key_version: Optional[int] = None
+    error: Optional[str] = None
+
+    @property
+    def encrypted(self):
+        """Whether this item was encrypted."""
+        return self.status == BATCH_ITEM_ENCRYPTED
+
+    @property
+    def failed(self):
+        """Whether Vault reported an error for this item."""
+        return self.status == BATCH_ITEM_FAILED
+
+    @property
+    def missing(self):
+        """Whether Vault returned no result for this item."""
+        return self.status == BATCH_ITEM_MISSING
+
+    @property
+    def retryable(self):
+        """Whether the caller should fix and/or retry this item."""
+        return self.status in (BATCH_ITEM_FAILED, BATCH_ITEM_MISSING)
+
+    def as_dict(self):
+        """Return a JSON-serializable representation of this item."""
+        return {
+            "index": self.index,
+            "status": self.status,
+            "ciphertext": self.ciphertext,
+            "key_version": self.key_version,
+            "error": self.error,
+        }
+
+
+@dataclass(frozen=True)
+class BatchEncryptionResult:
+    """An item-by-item contract for a Transit batch encryption request.
+
+    The ``items`` tuple always has the same length and order as the submitted
+    ``batch_input``. Successful items retain the ciphertext and ``key_version``
+    reported by Vault. ``raw_response`` is excluded from the representation so
+    that accidentally logging this object cannot expose response diagnostics or
+    request data.
+    """
+
+    items: Tuple[BatchEncryptionItem, ...]
+    batch_error: Optional[str] = None
+    raw_response: Any = field(default=None, repr=False)
+
+    def __iter__(self):
+        return iter(self.items)
+
+    def __len__(self):
+        return len(self.items)
+
+    def __getitem__(self, index):
+        return self.items[index]
+
+    @property
+    def encrypted_items(self):
+        """Items that were successfully encrypted."""
+        return tuple(item for item in self.items if item.encrypted)
+
+    @property
+    def failed_items(self):
+        """Items for which Vault reported an error."""
+        return tuple(item for item in self.items if item.failed)
+
+    @property
+    def missing_items(self):
+        """Items for which Vault returned no result."""
+        return tuple(item for item in self.items if item.missing)
+
+    @property
+    def encrypted_indices(self):
+        """Indices of successfully encrypted items."""
+        return tuple(item.index for item in self.encrypted_items)
+
+    @property
+    def failed_indices(self):
+        """Indices of failed items."""
+        return tuple(item.index for item in self.failed_items)
+
+    @property
+    def missing_indices(self):
+        """Indices of items missing from Vault's response."""
+        return tuple(item.index for item in self.missing_items)
+
+    @property
+    def retry_indices(self):
+        """Indices of items that need to be fixed and/or retried."""
+        return tuple(
+            item.index for item in self.items if item.retryable
+        )
+
+    @property
+    def all_encrypted(self):
+        """Whether every submitted item was encrypted successfully."""
+        return bool(self.items) and all(item.encrypted for item in self.items)
+
+    def as_dict(self, include_raw_response=False):
+        """Return a JSON-serializable representation of this result."""
+        result = {
+            "items": [item.as_dict() for item in self.items],
+            "batch_error": self.batch_error,
+            "all_encrypted": self.all_encrypted,
+            "encrypted_indices": list(self.encrypted_indices),
+            "failed_indices": list(self.failed_indices),
+            "missing_indices": list(self.missing_indices),
+            "retry_indices": list(self.retry_indices),
+        }
+        if include_raw_response:
+            result["raw_response"] = self.raw_response
+        return result
+
+
+# Shorter aliases kept for discoverability.
+BatchEncryptItem = BatchEncryptionItem
+BatchEncryptResult = BatchEncryptionResult
 
 
 class Transit(VaultApiBase):
@@ -397,6 +575,197 @@ class Transit(VaultApiBase):
         return self._adapter.post(
             url=api_path,
             json=params,
+        )
+
+    def encrypt_data_batch(
+        self,
+        name,
+        batch_input,
+        context=None,
+        key_version=None,
+        nonce=None,
+        type=None,
+        convergent_encryption=None,
+        mount_point=DEFAULT_MOUNT_POINT,
+        associated_data=None,
+    ):
+        """Encrypt a batch of plaintexts and return an item-aligned result contract.
+
+        This is an additive wrapper around :meth:`encrypt_data`. Call
+        :meth:`encrypt_data` directly when the unmodified Vault response is
+        needed; the original response is also retained on the returned object
+        as ``raw_response``.
+
+        The returned :class:`BatchEncryptionResult` contains one
+        :class:`BatchEncryptionItem` for every submitted input, in the same
+        order. Each item's ``status`` is one of:
+
+        * ``encrypted``: Vault returned a ciphertext. ``ciphertext`` and
+          ``key_version`` (when Vault reports it) are retained as evidence of
+          which key version performed the encryption.
+        * ``failed``: Vault returned a per-item error. ``error`` contains the
+          diagnostic with plaintext values redacted.
+        * ``missing``: Vault returned no result for this input position. This is
+          intentionally distinct from ``failed``; the item may need to be
+          retried without any reported diagnostic.
+
+        If the whole request fails (for example, a non-2xx response or a
+        transport error), every input item is marked ``failed`` and
+        ``batch_error`` contains the redacted, batch-level diagnostic. No
+        request content is logged by this method.
+
+        :param name: Specifies the name of the encryption key to encrypt
+            against. This is specified as part of the URL.
+        :type name: str | unicode
+        :param batch_input: Specifies a list of items to be encrypted in a
+            single batch. The format is:
+            ``[dict(context="b64_context", plaintext="b64_plaintext"), ...]``.
+        :type batch_input: List[dict]
+        :param context: Specifies the base64 encoded context for key derivation.
+            This is required if key derivation is enabled for this key.
+        :type context: str | unicode
+        :param associated_data: Specifies base64 encoded associated data.
+        :type associated_data: str | unicode
+        :param key_version: Specifies the version of the key to use for
+            encryption. If not set, uses the latest version.
+        :type key_version: int
+        :param nonce: Specifies the base64 encoded nonce value.
+        :type nonce: str | unicode
+        :param type: The type of key to create when performing an upsert.
+        :type type: str | unicode
+        :param convergent_encryption: Whether to support convergent encryption
+            when creating a key.
+        :type convergent_encryption: str | unicode
+        :param mount_point: The "path" the method/backend was mounted on.
+        :type mount_point: str | unicode
+        :return: The item-aligned batch encryption result.
+        :rtype: BatchEncryptionResult
+        """
+        if not isinstance(batch_input, (list, tuple)):
+            raise ValueError("batch_input must be a list of dictionaries")
+        if not batch_input:
+            raise ValueError("batch_input must contain at least one item")
+        if not all(isinstance(item, dict) for item in batch_input):
+            raise ValueError("batch_input must be a list of dictionaries")
+
+        try:
+            raw_response = self.encrypt_data(
+                name=name,
+                context=context,
+                associated_data=associated_data,
+                key_version=key_version,
+                nonce=nonce,
+                batch_input=list(batch_input),
+                type=type,
+                convergent_encryption=convergent_encryption,
+                mount_point=mount_point,
+            )
+        except (exceptions.VaultError, requests.exceptions.RequestException) as exc:
+            batch_error = _redact_plaintext(exc, batch_input)
+            items = tuple(
+                BatchEncryptionItem(
+                    index=index,
+                    status=BATCH_ITEM_FAILED,
+                    error=batch_error,
+                )
+                for index in range(len(batch_input))
+            )
+            return BatchEncryptionResult(
+                items=items,
+                batch_error=batch_error,
+                raw_response=exc,
+            )
+
+        batch_results = []
+        batch_error = None
+        payload = raw_response
+        if isinstance(raw_response, requests.Response):
+            if raw_response.status_code == 200:
+                try:
+                    payload = raw_response.json()
+                except ValueError:
+                    batch_error = "Vault returned a non-JSON HTTP 200 response"
+            else:
+                batch_error = "Vault returned HTTP {code}".format(
+                    code=raw_response.status_code
+                )
+
+        if batch_error is None and isinstance(payload, dict):
+            data = payload.get("data")
+            if isinstance(data, dict):
+                candidate = data.get("batch_results")
+                if isinstance(candidate, (list, tuple)):
+                    batch_results = candidate
+
+        if batch_error is not None:
+            items = tuple(
+                BatchEncryptionItem(
+                    index=index,
+                    status=BATCH_ITEM_FAILED,
+                    error=batch_error,
+                )
+                for index in range(len(batch_input))
+            )
+            return BatchEncryptionResult(
+                items=items,
+                batch_error=batch_error,
+                raw_response=raw_response,
+            )
+
+        items = []
+        for index in range(len(batch_input)):
+            if index >= len(batch_results):
+                items.append(
+                    BatchEncryptionItem(index=index, status=BATCH_ITEM_MISSING)
+                )
+                continue
+            result = batch_results[index]
+            if result is None or result == {}:
+                items.append(
+                    BatchEncryptionItem(index=index, status=BATCH_ITEM_MISSING)
+                )
+                continue
+
+            if not isinstance(result, dict):
+                items.append(
+                    BatchEncryptionItem(
+                        index=index,
+                        status=BATCH_ITEM_FAILED,
+                        error="unexpected non-object batch result",
+                    )
+                )
+                continue
+
+            if result.get("error") is not None:
+                items.append(
+                    BatchEncryptionItem(
+                        index=index,
+                        status=BATCH_ITEM_FAILED,
+                        error=_redact_plaintext(result["error"], batch_input),
+                    )
+                )
+                continue
+
+            ciphertext = result.get("ciphertext")
+            if ciphertext is None:
+                items.append(
+                    BatchEncryptionItem(index=index, status=BATCH_ITEM_MISSING)
+                )
+                continue
+
+            items.append(
+                BatchEncryptionItem(
+                    index=index,
+                    status=BATCH_ITEM_ENCRYPTED,
+                    ciphertext=ciphertext,
+                    key_version=result.get("key_version"),
+                )
+            )
+
+        return BatchEncryptionResult(
+            items=tuple(items),
+            batch_error=batch_error,
+            raw_response=raw_response,
         )
 
     def decrypt_data(
