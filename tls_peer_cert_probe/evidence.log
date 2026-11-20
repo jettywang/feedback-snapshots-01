@@ -1,0 +1,32 @@
+{"t":"02:35:15.103","event":"probe_start","ruby":"4.0.7","openssl":"OpenSSL 3.6.4 25 Aug 2026","server_cert_subject":"/CN=peer.test","server_cert_fp":"ba89bf1b04ac4304","ca1":"/CN=Probe-CA-1","ca2":"/CN=Probe-CA-2"}
+{"t":"02:35:15.104","event":"io_standin_setsockopt","level":6,"optname":1,"value":1,"action":"no-op"}
+{"t":"02:35:15.106","event":"verify_callback","phase":"A-first-handshake","preverify_ok":true,"depth":1,"error":"ok","subject":"/CN=Probe-CA-1","issuer":"/CN=Probe-CA-1","serial":"1001","cert_fp":"39c92ee4b76dee29"}
+{"t":"02:35:15.106","event":"verify_callback","phase":"A-first-handshake","preverify_ok":true,"depth":0,"error":"ok","subject":"/CN=peer.test","issuer":"/CN=Probe-CA-1","serial":"2001","cert_fp":"ba89bf1b04ac4304"}
+{"t":"02:35:15.106","event":"snapshot","phase":"A-after-start","connect_count":1,"ssl_version":"TLSv1.3","cipher":"TLS_AES_256_GCM_SHA384","session_reused":false,"verify_result":0,"peer_cert_subject":"/CN=peer.test","peer_cert_fp":"ba89bf1b04ac4304","cached_session":false,"cached_session_timeout":null}
+{"t":"02:35:15.106","event":"server_accept","conn":1,"ssl_version":"TLSv1.3","session_reused":false}
+{"t":"02:35:15.106","event":"http_get","phase":"A","seq":0,"body":"ok"}
+{"t":"02:35:15.107","event":"http_get","phase":"A","seq":1,"body":"ok"}
+{"t":"02:35:15.107","event":"snapshot","phase":"A-after-keepalive-gets","connect_count":1,"ssl_version":"TLSv1.3","cipher":"TLS_AES_256_GCM_SHA384","session_reused":false,"verify_result":0,"peer_cert_subject":"/CN=peer.test","peer_cert_fp":"ba89bf1b04ac4304","cached_session":true,"cached_session_timeout":7200}
+{"t":"02:35:15.107","event":"io_standin_setsockopt","level":6,"optname":1,"value":1,"action":"no-op"}
+{"t":"02:35:15.108","event":"snapshot","phase":"B-after-reconnect","connect_count":2,"ssl_version":"TLSv1.3","cipher":"TLS_AES_256_GCM_SHA384","session_reused":true,"verify_result":0,"peer_cert_subject":"/CN=peer.test","peer_cert_fp":"ba89bf1b04ac4304","cached_session":true,"cached_session_timeout":7200}
+{"t":"02:35:15.108","event":"server_accept","conn":2,"ssl_version":"TLSv1.3","session_reused":true}
+{"t":"02:35:15.108","event":"http_get","phase":"B","body":"ok"}
+{"t":"02:35:15.108","event":"io_standin_setsockopt","level":6,"optname":1,"value":1,"action":"no-op"}
+{"t":"02:35:15.109","event":"snapshot","phase":"C-after-reconnect-with-new-store","connect_count":3,"ssl_version":"TLSv1.3","cipher":"TLS_AES_256_GCM_SHA384","session_reused":true,"verify_result":0,"peer_cert_subject":"/CN=peer.test","peer_cert_fp":"ba89bf1b04ac4304","cached_session":true,"cached_session_timeout":7200}
+{"t":"02:35:15.109","event":"server_accept","conn":3,"ssl_version":"TLSv1.3","session_reused":true}
+{"t":"02:35:15.109","event":"http_get","phase":"C","body":"ok","note":"新信任库本不应通过, 但恢复会话绕过了验证"}
+{"t":"02:35:15.109","event":"io_standin_setsockopt","level":6,"optname":1,"value":1,"action":"no-op"}
+{"t":"02:35:15.111","event":"verify_callback","phase":"D-forced-full-handshake","preverify_ok":false,"depth":1,"error":"self-signed certificate in certificate chain","subject":"/CN=Probe-CA-1","issuer":"/CN=Probe-CA-1","serial":"1001","cert_fp":"39c92ee4b76dee29"}
+{"t":"02:35:15.111","event":"server_ssl_error","conn":null,"error":"SSL_accept returned=1 errno=0 peeraddr=(null) state=error: tlsv1 alert unknown ca (SSL alert number 48)"}
+{"t":"02:35:15.111","event":"handshake_failed","phase":"D","error":"SSL_connect returned=1 errno=0 peeraddr=empty-path-AF_UNIX-sockaddr state=error: certificate verify failed (self-signed certificate in certificate chain)","note":"全握手下 STORE2 正确拒绝服务器证书, 证明 C 的成功来自会话恢复绕过"}
+{"t":"02:35:15.111","event":"io_standin_setsockopt","level":6,"optname":1,"value":1,"action":"no-op"}
+{"t":"02:35:15.112","event":"verify_callback","phase":"E1-tls12-first","preverify_ok":true,"depth":1,"error":"ok","subject":"/CN=Probe-CA-1","issuer":"/CN=Probe-CA-1","serial":"1001","cert_fp":"39c92ee4b76dee29"}
+{"t":"02:35:15.112","event":"verify_callback","phase":"E1-tls12-first","preverify_ok":true,"depth":0,"error":"ok","subject":"/CN=peer.test","issuer":"/CN=Probe-CA-1","serial":"2001","cert_fp":"ba89bf1b04ac4304"}
+{"t":"02:35:15.113","event":"server_accept","conn":1,"ssl_version":"TLSv1.2","session_reused":false}
+{"t":"02:35:15.113","event":"snapshot","phase":"E1-tls12-after-start","connect_count":1,"ssl_version":"TLSv1.2","cipher":"ECDHE-RSA-AES256-GCM-SHA384","session_reused":false,"verify_result":0,"peer_cert_subject":"/CN=peer.test","peer_cert_fp":"ba89bf1b04ac4304","cached_session":true,"cached_session_timeout":7200}
+{"t":"02:35:15.113","event":"http_get","phase":"E1","body":"ok"}
+{"t":"02:35:15.113","event":"io_standin_setsockopt","level":6,"optname":1,"value":1,"action":"no-op"}
+{"t":"02:35:15.114","event":"snapshot","phase":"E2-tls12-after-reconnect","connect_count":2,"ssl_version":"TLSv1.2","cipher":"ECDHE-RSA-AES256-GCM-SHA384","session_reused":true,"verify_result":0,"peer_cert_subject":"/CN=peer.test","peer_cert_fp":"ba89bf1b04ac4304","cached_session":true,"cached_session_timeout":7200}
+{"t":"02:35:15.114","event":"server_accept","conn":2,"ssl_version":"TLSv1.2","session_reused":true}
+{"t":"02:35:15.114","event":"http_get","phase":"E2","body":"ok"}
+{"t":"02:35:15.114","event":"probe_done","server13_conns":[{"id":1,"ssl_version":"TLSv1.3","session_reused":false,"peer_cert_seen":false},{"id":2,"ssl_version":"TLSv1.3","session_reused":true,"peer_cert_seen":false},{"id":3,"ssl_version":"TLSv1.3","session_reused":true,"peer_cert_seen":false}],"server12_conns":[{"id":1,"ssl_version":"TLSv1.2","session_reused":false,"peer_cert_seen":false},{"id":2,"ssl_version":"TLSv1.2","session_reused":true,"peer_cert_seen":false}]}
