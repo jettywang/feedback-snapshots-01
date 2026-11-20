@@ -135,14 +135,16 @@ python -m pip_audit --help
 
 <!-- @begin-pip-audit-help@ -->
 ```
-usage: pip-audit [-h] [-V] [-l] [-r REQUIREMENT] [--locked] [-f FORMAT]
-                 [-s SERVICE] [--osv-url OSV_URL] [-d] [-S]
-                 [--desc [{on,off,auto}]] [--aliases [{on,off,auto}]]
-                 [--cache-dir CACHE_DIR] [--progress-spinner {on,off}]
-                 [--timeout TIMEOUT] [--path PATH] [-v] [--fix]
-                 [--require-hashes] [--index-url INDEX_URL]
-                 [--extra-index-url URL] [--skip-editable] [--no-deps]
-                 [-o FILE] [--ignore-vuln ID] [--disable-pip]
+usage: pip-audit [-h] [-V] [-l] [-r REQUIREMENT] [--locked]
+                 [--target NAME:KEY=VALUE[,KEY=VALUE...]]
+                 [--target-output DIR] [-f FORMAT] [-s SERVICE]
+                 [--osv-url OSV_URL] [-d] [-S] [--desc [{on,off,auto}]]
+                 [--aliases [{on,off,auto}]] [--cache-dir CACHE_DIR]
+                 [--progress-spinner {on,off}] [--timeout TIMEOUT]
+                 [--path PATH] [-v] [--fix] [--require-hashes]
+                 [--index-url INDEX_URL] [--extra-index-url URL]
+                 [--skip-editable] [--no-deps] [-o FILE] [--ignore-vuln ID]
+                 [--disable-pip]
                  [project_path]
 
 audit the Python environment for dependencies with known vulnerabilities
@@ -162,6 +164,14 @@ options:
   --locked              audit lock files from the local Python project. This
                         flag only applies to auditing from project paths
                         (default: False)
+  --target NAME:KEY=VALUE[,KEY=VALUE...]
+                        audit lockfiles against the given target environment
+                        instead of the current one; may be used multiple
+                        times. Each target is audited and reported
+                        independently. Requires --locked (default: [])
+  --target-output DIR   when auditing targets, write one independent JSON
+                        evidence file per target into DIR (named after the
+                        target); requires --target (default: None)
   -f FORMAT, --format FORMAT
                         the format to emit audit results in (choices: columns,
                         json, cyclonedx-json, cyclonedx-xml, markdown)
@@ -251,6 +261,8 @@ The current codes are:
 
 * `0`: No known vulnerabilities were detected.
 * `1`: One or more known vulnerabilities were found.
+* `2`: (with `--target` only) A target environment could not be audited; see
+  [Auditing lockfiles for specific environments](#auditing-lockfiles-for-specific-environments).
 
 `pip-audit`'s exit code cannot be suppressed.
 See [Suppressing exit codes from `pip-audit`](#suppressing-exit-codes-from-pip-audit)
@@ -306,6 +318,49 @@ No known vulnerabilities found
 
 `pip-audit` searches the provided path for various Python "project" files.
 At the moment, only `pyproject.toml` and `pylock.*.toml` are supported.
+
+### Auditing lockfiles for specific environments
+
+A PEP 751 lockfile can cover more than one deployment environment. Use
+`--target` (repeatable, requires `--locked`) to audit the lockfile against an
+explicit environment instead of the machine running `pip-audit`:
+
+```console
+$ pip-audit --locked . \
+    --target "linux:sys_platform=linux,platform_system=Linux,python_version=3.12" \
+    --target "macos:sys_platform=darwin,platform_system=Darwin,python_version=3.12"
+```
+
+Each target is parsed as `NAME:KEY=VALUE[,KEY=VALUE...]`, where the keys are
+PEP 508 environment markers (`sys_platform`, `platform_machine`,
+`python_version`, and so on). Unlike the host environment, a target only knows
+the values you give it, so results do not change between machines.
+
+For each target, `pip-audit`:
+
+* selects only the packages whose `marker` (and `requires-python`) hold for the
+  target, so packages that are only installed in one environment do not count
+  against another;
+* keeps multiple versions of the same package separate per target;
+* reports packages excluded by a condition under **Excluded by condition**;
+* reports packages whose marker depends on an unspecified value under
+  **Cannot decide for this target**, with the missing key named;
+* emits a standalone result, unaffected by the order targets are supplied in.
+
+Use `--target-output DIR` to write one self-contained JSON evidence file per
+target (`linux.json`, `macos.json`, ...), which can be kept and used for
+release approval independently. The target report's gate passes only when the
+target was fully determined and no selected package has a known vulnerability.
+
+Exit codes with `--target`:
+
+* `0`: every target passed its gate.
+* `1`: at least one target has a known vulnerability or an undecidable package.
+* `2`: at least one target could not be audited at all (for example, no
+  lockfile environment covers it); the reason is included in its result.
+
+A runnable example lives in
+[`examples/target-environments/`](examples/target-environments/).
 
 Audit dependencies when there are vulnerabilities present:
 

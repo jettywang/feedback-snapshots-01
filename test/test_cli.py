@@ -232,3 +232,78 @@ def test_environment_variable(monkeypatch):
     assert args.output == Path("/tmp/fake")
     assert not args.progress_spinner
     assert args.vulnerability_service == VulnerabilityServiceChoice.Osv
+
+
+def test_target_flag_requires_project_path(monkeypatch):
+    parser = pip_audit._cli._parser()
+    monkeypatch.setattr(
+        pip_audit._cli,
+        "_parse_args",
+        lambda *a: parser.parse_args(["--target", "linux:sys_platform=linux"]),
+    )
+
+    with pytest.raises(SystemExit):
+        pip_audit._cli.audit()
+
+
+def test_target_output_requires_target(monkeypatch, tmp_path):
+    parser = pip_audit._cli._parser()
+    monkeypatch.setattr(
+        pip_audit._cli,
+        "_parse_args",
+        lambda *a: parser.parse_args(
+            [str(tmp_path), "--locked", "--target-output", str(tmp_path / "out")]
+        ),
+    )
+
+    with pytest.raises(SystemExit):
+        pip_audit._cli.audit()
+
+
+def test_target_rejects_invalid_spec(monkeypatch, tmp_path):
+    parser = pip_audit._cli._parser()
+    monkeypatch.setattr(
+        pip_audit._cli,
+        "_parse_args",
+        lambda *a: parser.parse_args(
+            [str(tmp_path), "--locked", "--target", "linux:bogus=1"]
+        ),
+    )
+
+    with pytest.raises(SystemExit):
+        pip_audit._cli.audit()
+
+
+def test_target_rejects_duplicate_names(monkeypatch, tmp_path):
+    parser = pip_audit._cli._parser()
+    monkeypatch.setattr(
+        pip_audit._cli,
+        "_parse_args",
+        lambda *a: parser.parse_args(
+            [
+                str(tmp_path),
+                "--locked",
+                "--target",
+                "linux:sys_platform=linux",
+                "--target",
+                "linux:sys_platform=darwin",
+            ]
+        ),
+    )
+
+    with pytest.raises(SystemExit):
+        pip_audit._cli.audit()
+
+
+def test_target_requires_locked(monkeypatch, tmp_path):
+    parser = pip_audit._cli._parser()
+    monkeypatch.setattr(
+        pip_audit._cli,
+        "_parse_args",
+        lambda *a: parser.parse_args(
+            [str(tmp_path), "--target", "linux:sys_platform=linux"]
+        ),
+    )
+
+    with pytest.raises(SystemExit):
+        pip_audit._cli.audit()

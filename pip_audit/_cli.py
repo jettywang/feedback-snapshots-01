@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import enum
+import json
 import logging
 import os
 import sys
@@ -42,6 +43,15 @@ from pip_audit._service.interface import (
     VulnerabilityService,
 )
 from pip_audit._state import AuditSpinner, AuditState
+from pip_audit._target import TargetEnvironment, TargetEnvironmentError
+from pip_audit._target_audit import (
+    EXIT_UNDETERMINED,
+    TargetEvidence,
+    audit_targets,
+    format_target_evidence,
+    format_target_evidence_json,
+    format_target_summary,
+)
 from pip_audit._util import assert_never
 
 logging.basicConfig()
@@ -226,6 +236,24 @@ def _parser() -> argparse.ArgumentParser:  # pragma: no cover
         action="store_true",
         help="audit lock files from the local Python project. This "
         "flag only applies to auditing from project paths",
+    )
+    parser.add_argument(
+        "--target",
+        type=str,
+        metavar="NAME:KEY=VALUE[,KEY=VALUE...]",
+        action="append",
+        dest="targets",
+        default=[],
+        help="audit lockfiles against the given target environment instead of the "
+        "current one; may be used multiple times. Each target is audited and reported "
+        "independently. Requires --locked",
+    )
+    parser.add_argument(
+        "--target-output",
+        type=Path,
+        metavar="DIR",
+        help="when auditing targets, write one independent JSON evidence file per "
+        "target into DIR (named after the target); requires --target",
     )
     parser.add_argument(
         "-f",
@@ -438,6 +466,60 @@ def _dep_source_from_project_path(
     _fatal(f"couldn't find a supported project file in {project_path}")
 
 
+def _target_evidence_filename(target: TargetEnvironment) -> str:
+    """
+    Return the evidence filename for a target.
+
+    Target names are already restricted to a filesystem-safe character set, so this
+    is stable across runs and across targets.
+    """
+
+    return f"{target.name}.json"
+
+
+def _report_targets(
+    evidence: list[TargetEvidence],
+    formatter: VulnerabilityFormat,
+    args: argparse.Namespace,
+) -> NoReturn:
+    """
+    Emit per-target evidence and exit with a release-gate status.
+
+    Each target is reported independently: one target's result never depends on
+    another target's outcome. Exit status is 0 only if every target passed its gate.
+    """
+
+    if args.target_output is not None:
+        args.target_output.mkdir(parents=True, exist_ok=True)
+        written: list[Path] = []
+        for item in evidence:
+            path = args.target_output / _target_evidence_filename(item.target)
+            with path.open("w") as io:
+                print(format_target_evidence_json(item), file=io)
+            written.append(path)
+        for path in written:
+            print(f"Wrote target evidence: {path}", file=sys.stderr)
+    elif isinstance(formatter, JsonFormat):
+        # Emit one valid JSON document that keeps each target's evidence separate
+        # while still allowing a single `--output` file.
+        payload = {"targets": [item.to_dict() for item in evidence]}
+        with _output_io(args.output) as io:
+            print(json.dumps(payload, indent=2, sort_keys=True), file=io)
+    else:
+        blocks = [format_target_evidence(item, formatter) for item in evidence]
+        with _output_io(args.output) as io:
+            print("\n\n".join(blocks), file=io)
+
+    for item in evidence:
+        print(format_target_summary(item), file=sys.stderr)
+
+    if any(item.error is not None for item in evidence):
+        sys.exit(EXIT_UNDETERMINED)
+    if not all(item.is_gate_passed() for item in evidence):
+        sys.exit(1)
+    sys.exit(0)
+
+
 def audit() -> None:  # pragma: no cover
     """
     The primary entrypoint for `pip-audit`.
@@ -463,6 +545,41 @@ def audit() -> None:  # pragma: no cover
     if args.project_path is None:
         if args.locked:
             parser.error("The --locked flag can only be used with a project path")
+        if args.targets:
+            parser.error("The --target flag can only be used with a project path and --locked")
+
+    if args.targets and not args.locked:
+        parser.error("The --target flag requires --locked")
+
+    # Check for flags that are only valid with targets
+    if not args.targets:
+        if args.target_output is not None:
+            parser.error("The --target-output flag can only be used with --target")
+    elif args.fix:
+        parser.error("The --fix flag cannot be used with --target")
+    elif args.dry_run:
+        parser.error("The --dry-run flag cannot be used with --target")
+    elif args.target_output is not None and str(args.output) not in {"stdout", "-"}:
+        parser.error("The --target-output flag cannot be combined with --output")
+    elif isinstance(formatter, CycloneDxFormat) and args.target_output is None:
+        # A CycloneDX document describes exactly one result set, so multiple targets
+        # must go to their own files.
+        parser.error(
+            "CycloneDX formats require --target-output when auditing multiple targets"
+        )
+
+    targets: list[TargetEnvironment] = []
+    if args.targets:
+        try:
+            targets = [TargetEnvironment.parse(spec) for spec in args.targets]
+        except TargetEnvironmentError as e:
+            parser.error(str(e))
+
+        seen_target_names: set[str] = set()
+        for target in targets:
+            if target.name in seen_target_names:
+                parser.error(f"duplicate --target name: {target.name!r}")
+            seen_target_names.add(target.name)
 
     # Check for flags that are only valid with requirements files
     if args.requirements is None:
@@ -538,6 +655,30 @@ def audit() -> None:  # pragma: no cover
                 skip_editable=args.skip_editable,
                 state=state,
             )
+
+        if targets:
+            # When explicit targets are requested, each target is audited and
+            # reported independently, regardless of the host environment.
+            if not isinstance(source, PyLockSource):  # pragma: no cover - CLI guarded
+                _fatal("The --target flag requires a lockfile source (--locked)")
+            try:
+                evidence = audit_targets(
+                    source,
+                    service,
+                    targets,
+                    vulns_to_ignore=set(args.ignore_vulns),
+                )
+            except DependencySourceError as e:
+                _fatal(str(e))
+            except VulnServiceConnectionError as e:
+                logger.error(str(e))
+                _fatal(
+                    "Tip: your network may be blocking this service. "
+                    "Try another service with `-s SERVICE`"
+                )
+
+            _report_targets(evidence, formatter, args)
+            return
 
         # `--dry-run` only affects the auditor if `--fix` is also not supplied,
         # since the combination of `--dry-run` and `--fix` implies that the user

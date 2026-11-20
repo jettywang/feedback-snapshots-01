@@ -1,0 +1,68 @@
+# A single PEP 751 lockfile covering two deployment environments:
+#
+#   * the Linux service      -> target `linux`
+#   * the macOS desktop tool -> target `macos`
+#
+# Packages guarded by a `marker` are only installed where the marker holds, so
+# the two environments do not share one flat dependency list.
+lock-version = '1.0'
+environments = [
+    "(sys_platform == 'linux' and platform_system == 'Linux')",
+    "(sys_platform == 'darwin' and platform_system == 'Darwin')",
+]
+requires-python = '>=3.10'
+created-by = 'demo-release-engineering'
+
+# Shared by both the Linux service and the macOS tool.
+[[packages]]
+name = 'attrs'
+version = '25.1.0'
+
+# Linux-only native event loop.
+[[packages]]
+name = 'uvloop'
+version = '0.21.0'
+marker = "sys_platform == 'linux'"
+
+# macOS-only Objective-C bridge.
+[[packages]]
+name = 'pyobjc-core'
+version = '10.3.2'
+marker = "sys_platform == 'darwin'"
+
+# Two versions of the same package, one per environment.
+[[packages]]
+name = 'certifi'
+version = '2024.8.30'
+marker = "sys_platform == 'darwin'"
+[[packages]]
+name = 'certifi'
+version = '2024.2.2'
+marker = "sys_platform == 'linux'"
+
+# Conditional on the target's Python version rather than the platform.
+# Neither demo target (3.12) selects it.
+[[packages]]
+name = 'tomli'
+version = '2.0.1'
+marker = "python_full_version < '3.11'"
+
+# Guarded by a marker variable the demo targets do not specify, so applicability
+# cannot be decided for them. This is reported explicitly, never silently dropped.
+[[packages]]
+name = 'legacy-ctypes'
+version = '1.1.0'
+marker = "platform_machine == 'i686'"
+
+# A compound condition that known values decide on their own: `python_version`
+# is not 3.9 for either target, so this is excluded without needing to know
+# `platform_machine`.
+[[packages]]
+name = 'backport-typing'
+version = '1.0.0'
+marker = "python_version == '3.9' and platform_machine == 'x86_64'"
+
+# Vulnerable version, installed in both environments.
+[[packages]]
+name = 'jinja2'
+version = '3.1.4'

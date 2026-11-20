@@ -40,3 +40,26 @@ class TestPyLockSource:
 
         with pytest.raises(DependencySourceError, match=error):
             list(source.collect())
+
+
+def test_collect_for_target_does_not_touch_host_environment(asset):
+    from pip_audit._target import TargetEnvironment
+
+    pylock = asset("pylock.targets.toml")
+    source = PyLockSource([pylock])
+
+    linux = source.collect_for_target(
+        TargetEnvironment.parse(
+            "linux:sys_platform=linux,platform_system=Linux,python_version=3.12"
+        )
+    )
+    windows = source.collect_for_target(
+        TargetEnvironment.parse(
+            "win:sys_platform=win32,platform_system=Windows,python_version=3.12"
+        )
+    )
+
+    # The result is determined by the target alone, not by the host running the tests.
+    assert "uvloop" in {dep.canonical_name for dep in linux.dependencies}
+    assert windows.dependencies == ()
+    assert windows.error is not None

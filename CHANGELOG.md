@@ -8,6 +8,16 @@ All versions prior to 0.0.9 are untracked.
 
 ## [Unreleased]
 
+### Added
+
+* `pip-audit` can now audit PEP 751 lockfiles against explicit target
+  environments with the repeatable `--target NAME:KEY=VALUE,...` flag (requires
+  `--locked`). Each target selects only the packages whose markers apply to it,
+  keeps multiple versions of a package separate, and reports packages excluded by
+  a condition or whose applicability cannot be decided. `--target-output DIR`
+  writes one independent JSON evidence file per target. Exit code `2` indicates
+  a target that could not be audited at all.
+
 ### Fixed
 
 * Editable requirements skipped with `--skip-editable` no longer require a hash
