@@ -140,6 +140,13 @@ class Net::HTTPResponse
   # final response.
   MAX_INFORMATIONAL_RESPONSES = 100
 
+  # :stopdoc:
+  # Thrown by #abort_body when called while #read_body is running, so that
+  # control returns to the caller of #read_body instead of reading on.
+  ABORT_BODY = Object.new
+  private_constant :ABORT_BODY
+  # :startdoc:
+
   class << self
     # true if the response has a body.
     def body_permitted?
@@ -218,6 +225,13 @@ class Net::HTTPResponse
     @message      = msg
     initialize_http_header nil
     @body = nil
+    @body_complete = false
+    @body_aborted = false
+    @body_exception = nil
+    @body_length = nil
+    @body_counter = nil
+    @reading_body = false
+    @reading_thread = nil
     @read = false
     @uri  = nil
     @decode_content = false
@@ -334,16 +348,108 @@ class Net::HTTPResponse
   # body
   #
 
+  # Returns +true+ if the response body has been read completely (or if the
+  # response has no body at all).
+  #
+  # A body that was cut short by #abort_body, or whose reading was interrupted
+  # by an exception, leaves this +false+.
+  def body_complete?
+    @body_complete
+  end
+
+  # Returns +true+ if reading of the response body was cut short, either by
+  # #abort_body or by an exception raised while the body was being read.
+  def body_aborted?
+    @body_aborted
+  end
+
+  # Returns the exception that ended reading of the body, or +nil+ if reading
+  # ended normally.
+  #
+  # When an exception is raised from a #read_body block, that same exception
+  # object is stored here (and is also the exception seen by the caller of
+  # Net::HTTP#request). Passing +exception+ to #abort_body records it as well,
+  # without raising, so the caller can re-raise the original object later.
+  attr_reader :body_exception
+  alias body_error body_exception
+
+  # Explicitly abandons the response body.
+  #
+  # Call this from a Net::HTTP#request block or from a #read_body block when
+  # only a prefix of the body (for example, enough to authenticate) is needed.
+  # Reading stops immediately; the rest is not drained.
+  #
+  # The remaining bytes are discarded along with the connection, unless the
+  # body was already complete (or the response has no body):
+  #
+  # - If the whole body has already been read from the connection, there is
+  #   nothing left to discard. The connection remains reusable, and the next
+  #   request on the same Net::HTTP session uses it.
+  # - Otherwise the remaining bytes stay unread and the connection is closed
+  #   at the end of the request; the next request opens a new connection.
+  #   Net::HTTP does not silently drain them, since an unknown-length body can
+  #   block indefinitely and leftover bytes must never be mistaken for the
+  #   next response (for example after a cancelled download of an
+  #   authentication prefix).
+  #
+  # Use #body_complete? and #body_aborted? after the request to learn which
+  # happened. #body_exception returns the exception that ended reading, if
+  # any; passing +exception+ here records it without raising, so the caller
+  # can re-raise the original exception object later.
+  #
+  # When called while #read_body is running, control returns from that
+  # #read_body call; otherwise reading of the body is skipped.
+  #
+  # Returns +true+ if the body was abandoned, +false+ if there was nothing
+  # left to abandon (the body was already complete or absent).
+  def abort_body(exception = nil)
+    return false if @body_complete
+    if @body_counter
+      @body_counter.abort!
+      if @body_length && @body_counter.count >= @body_length
+        # All body bytes have already been consumed from the connection, so
+        # there is nothing left to discard and the connection stays clean.
+        @body_complete = true
+        return false
+      end
+    end
+    @body_aborted = true
+    @body_exception ||= exception
+    if @reading_body && @reading_thread.equal?(Thread.current)
+      # Leave the enclosing read_body call; the remaining bytes stay unread
+      # and the transport closes the connection when the request ends.
+      throw ABORT_BODY
+    end
+    true
+  end
+
   def reading_body(sock, reqmethodallowbody)  #:nodoc: internal use only
     @socket = sock
     @body_exist = reqmethodallowbody && self.class.body_permitted?
+    @body_complete = !@body_exist || empty_body?
     begin
       yield
-      self.body   # ensure to read body
+      self.body unless @body_aborted
+    rescue Exception => err
+      # Stop a later implicit read from draining the rest, and keep the
+      # original exception available on the response object. The transport
+      # closes the connection when the exception propagates.
+      @body_aborted = true unless @body_complete
+      @body_exception ||= err
+      raise
     ensure
       @socket = nil
     end
   end
+
+  # :nodoc: true if the response body is known to be empty before reading.
+  def empty_body?
+    return false if chunked? || @header['transfer-encoding']
+    content_length() == 0
+  rescue Net::HTTPHeaderSyntaxError
+    false
+  end
+  private :empty_body?
 
   # Gets the entity body returned by the remote HTTP server.
   #
@@ -356,6 +462,12 @@ class Net::HTTPResponse
   #
   # Calling this method a second or subsequent time for the same
   # HTTPResponse object will return the value already read.
+  #
+  # If reading stops early because the block calls #abort_body or raises,
+  # only the bytes delivered so far are kept, #body_complete? is +false+ and
+  # the connection is closed when the request finishes; see #abort_body for
+  # the exact disposal rules. A block that uses +break+ keeps the historical
+  # behavior: the rest of the body is read and discarded afterwards.
   #
   #   http.request_get('/index.html') {|res|
   #     puts res.read_body
@@ -378,15 +490,52 @@ class Net::HTTPResponse
       raise IOError, "#{self.class}\#read_body called twice" if dest or block
       return @body
     end
+    return if @body_aborted
     to = procdest(dest, block)
-    stream_check
     if @body_exist
-      read_body_0 to
-      @body = to
-    else
-      @body = nil
+      to = @body_counter = BodyCounter.new(to)
     end
-    @read = true
+    stream_check
+    @body_length = nil
+    @reading_body = true
+    @reading_thread = Thread.current
+    completed = false
+    begin
+      catch(ABORT_BODY) do
+        if @body_exist
+          read_body_0 to
+        else
+          @body = nil
+        end
+        completed = true
+      end
+    ensure
+      @reading_body = false
+      @reading_thread = nil
+      interrupted = @body_aborted
+      @body_counter = nil
+      if completed || interrupted
+        if to.is_a?(BodyCounter)
+          # A known length is also met when abort_body runs from the block
+          # that received the final byte: nothing is left on the wire.
+          @body_complete = completed &&
+            (@body_length.nil? || to.count >= @body_length)
+          if @body_complete
+            @body = to.dest
+          elsif !to.dest.is_a?(Net::ReadAdapter)
+            # A caller-supplied destination keeps the prefix that was
+            # received, matching a block that used `break'.
+            @body = to.dest
+          end
+        else
+          @body_complete = completed
+        end
+        @read = true
+      end
+      # A block that used `break' (neither completed nor aborted) leaves the
+      # body unread here; reading_body's implicit read then drains it, as
+      # before.
+    end
     return if @body.nil?
 
     case enc = @body_encoding
@@ -625,15 +774,20 @@ class Net::HTTPResponse
       unless @header['transfer-encoding']
         clen = content_length()
         if clen
+          # Inflated output does not correspond to Content-Length, so the
+          # byte counter cannot tell whether the body is complete.
+          @body_length = clen unless inflate_body_io.is_a?(Inflater)
           @socket.read clen, dest, @ignore_eof
           return
         end
         clen = range_length()
         if clen
+          @body_length = clen unless inflate_body_io.is_a?(Inflater)
           @socket.read clen, dest
           return
         end
       end
+      @body_length = nil
       @socket.read_all dest
     end
   end
@@ -657,7 +811,10 @@ class Net::HTTPResponse
         chunk_data_io.read len, dest
       ensure
         total += len
-        @socket.read 2   # \r\n
+        # After abort_body the connection is closed anyway; waiting for the
+        # chunk terminator (or the rest of an unknown-length body) here would
+        # defeat the early exit.
+        @socket.read 2 unless @body_aborted # \r\n
       end
     end
     until self.class.read_line(@socket, MAX_RESPONSE_HEADER_LENGTH).chop.empty?
@@ -678,6 +835,30 @@ class Net::HTTPResponse
       dest || +''
     end
   end
+
+  # A destination that records how many bytes were handed to +dest+, so
+  # #abort_body can tell whether a body with a known length has been fully
+  # consumed even when only a prefix was delivered to the caller.
+  class BodyCounter # :nodoc:
+    attr_reader :dest, :count
+
+    def initialize(dest)
+      @dest = dest
+      @count = 0
+      @aborted = false
+    end
+
+    def <<(str)
+      return self if @aborted
+      @count += str.bytesize
+      @dest << str
+    end
+
+    def abort!
+      @aborted = true
+    end
+  end
+  private_constant :BodyCounter
 
   ##
   # Inflater is a wrapper around Net::BufferedIO that transparently inflates

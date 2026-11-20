@@ -4087,6 +4087,48 @@ module Net
 
     # <!--
     #   rdoc-file=lib/net/http/response.rb
+    #   - body_complete?()
+    # -->
+    # Returns `true` if the response body has been read completely (or if the
+    # response has no body at all). A body that was cut short by `abort_body`, or
+    # whose reading was interrupted by an exception, leaves this `false`.
+    #
+    def body_complete?: () -> bool
+
+    # <!--
+    #   rdoc-file=lib/net/http/response.rb
+    #   - body_aborted?()
+    # -->
+    # Returns `true` if reading of the response body was cut short, either by
+    # `abort_body` or by an exception raised while the body was being read.
+    #
+    def body_aborted?: () -> bool
+
+    # <!--
+    #   rdoc-file=lib/net/http/response.rb
+    #   - body_exception()
+    # -->
+    # Returns the exception that ended reading of the body, or `nil` if reading
+    # ended normally.
+    #
+    attr_reader body_exception: Exception?
+
+    alias body_error body_exception
+
+    # <!--
+    #   rdoc-file=lib/net/http/response.rb
+    #   - abort_body(exception = nil)
+    # -->
+    # Explicitly abandons the response body. If the body is already complete,
+    # this is a no-op and the connection remains reusable. Otherwise the rest of
+    # the body is left unread and the connection is closed, so leftover bytes
+    # cannot be mistaken for the next response. Returns `true` if the body was
+    # abandoned, `false` if there was nothing left to abandon.
+    #
+    def abort_body: (?Exception? exception) -> bool
+
+    # <!--
+    #   rdoc-file=lib/net/http/response.rb
     #   - body()
     # -->
     # Returns the string response body; note that repeated calls for the unmodified

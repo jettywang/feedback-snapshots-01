@@ -2477,6 +2477,18 @@ module Net   #:nodoc:
     #
     #   #<Net::HTTPOK 200 OK readbody=false>
     #
+    # To use only a prefix of the response body (for example, enough to
+    # authenticate) and stop the download, call Net::HTTPResponse#abort_body
+    # from the block. The remaining bytes are then discarded with the
+    # connection unless the body was already complete, in which case the
+    # connection stays reusable; see Net::HTTPResponse#abort_body.
+    #
+    #   http.request(req) do |res|
+    #     res.read_body do |chunk|
+    #       res.abort_body if authenticated?(chunk)
+    #     end
+    #   end
+    #
     def request(req, body = nil, &block)  # :yield: +response+
       unless started?
         start {
@@ -2602,6 +2614,13 @@ module Net   #:nodoc:
       @last_communicated = nil
       if @socket.closed?
         debug 'Conn socket closed'
+      elsif !res.body_complete?
+        # Some of the body is unread (abandoned by abort_body, or truncated
+        # by the peer). Those bytes cannot be discarded without either
+        # blocking or being mistaken for the next response, so start the
+        # next request on a fresh connection.
+        debug 'Conn close because the response body is incomplete'
+        @socket.close
       elsif not res.body and @close_on_empty_response
         debug 'Conn close'
         @socket.close
