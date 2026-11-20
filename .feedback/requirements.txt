@@ -1,0 +1,13 @@
+click==8.5.1
+croniter==7.0.0
+fakeredis==2.40.0
+iniconfig==2.3.1
+packaging==26.3
+pluggy==1.7.0
+pygments==2.21.0
+pytest==9.2.0
+pytest-mock==3.17.0
+python-dateutil==4.0.0
+redis==8.1.0
+sortedcontainers==2.4.0
+tzdata==2026.6
