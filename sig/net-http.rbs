@@ -1028,7 +1028,7 @@ module Net
     # For proxy-defining arguments `p_addr` through `p_no_proxy`, see [Proxy
     # Server](rdoc-ref:Net::HTTP@Proxy+Server).
     #
-    def self.new: (String address, ?Integer? port, ?String | :ENV | nil p_addr, ?Integer? p_port, ?String? p_user, ?String? p_pass, ?untyped? p_no_proxy) -> Net::HTTP
+    def self.new: (String address, ?Integer? port, ?String | :ENV | nil p_addr, ?Integer? p_port, ?String? p_user, ?String? p_pass, ?untyped? p_no_proxy, ?untyped? p_use_ssl, ?proxy_policy: (:defer | :pinned)?) -> Net::HTTP
 
     # <!--
     #   rdoc-file=lib/net/http.rb
@@ -1545,6 +1545,26 @@ module Net
 
     def proxy_uri: () -> (nil | URI::Generic)
 
+    # Returns the outbound proxy policy for `self`: `:defer` resolves the
+    # proxy lazily from the environment, while `:pinned` resolves it when the
+    # client is created and keeps that decision for every connection.
+    #
+    attr_reader proxy_policy: :defer | :pinned
+
+    # Returns the Net::HTTP::ProxyDecision that governs the outbound
+    # connection.
+    #
+    def proxy_decision: () -> Net::HTTP::ProxyDecision
+
+    # Returns the connection selections recorded for `self`, oldest first.
+    #
+    def proxy_connection_log: () -> Array[Net::HTTP::ProxyConnection]
+
+    # Clears the recorded connection selections and returns the entries that
+    # were removed.
+    #
+    def clear_proxy_connection_log: () -> Array[Net::HTTP::ProxyConnection]
+
     # <!--
     #   rdoc-file=lib/net/http.rb
     #   - proxyaddr()
@@ -2056,6 +2076,43 @@ module Net
     #     #<Net::HTTPOK 200 OK readbody=false>
     #
     def request: (Net::HTTPRequest req, ?String? body) ?{ (Net::HTTPResponse response) -> void } -> Net::HTTPResponse
+
+    # The outbound proxy rule selected for a connection. Immutable.
+    #
+    class ProxyDecision
+      attr_reader policy: :defer | :pinned
+      attr_reader source: :environment | :argument | :proxy_class | :none
+      attr_reader reason: Symbol
+      attr_reader proxy_uri: URI::Generic?
+      attr_reader address: String?
+      attr_reader port: Integer?
+      attr_reader user: String?
+      attr_reader pass: String?
+      attr_reader use_ssl: bool?
+
+      def pinned?: () -> bool
+      def proxied?: () -> bool
+      alias proxy? proxied?
+      def from_env?: () -> bool
+      def to_h: () -> Hash[Symbol, untyped]
+    end
+
+    # One recorded connection selection.
+    #
+    class ProxyConnection
+      attr_reader sequence: Integer
+      attr_reader event: :connect | :reuse
+      attr_reader decision: Net::HTTP::ProxyDecision
+      attr_reader address: String?
+      attr_reader port: Integer?
+      attr_reader outcome: :opened | :reused | :error
+      attr_reader error_class: Class?
+      attr_reader at: Float
+
+      def reused?: () -> bool
+      def proxied?: () -> bool
+      def to_h: () -> Hash[Symbol, untyped]
+    end
   end
 
   # <!-- rdoc-file=lib/net/http/generic_request.rb -->

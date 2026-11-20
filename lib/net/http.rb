@@ -431,6 +431,54 @@ module Net   #:nodoc:
   #     http = Net::HTTP.new('example.com', nil, 'my.proxy', 8000, 'pname', 'ppass', 'my.proxy,proxy.example:8000')
   #     http.proxy_address # => nil
   #
+  # === Pinned Proxy Decisions
+  #
+  # By default a client resolves its proxy lazily: the environment is read
+  # the first time the client needs the decision (in practice, when its first
+  # connection is opened), and that choice is then kept for the life of the
+  # client.  A long-lived worker that runs jobs with different network
+  # boundaries may want to lock the outbound decision at creation time, so a
+  # later change to <tt>ENV['http_proxy']</tt> made by another job cannot
+  # redirect traffic that belongs to this one:
+  #
+  #   ENV['http_proxy'] = 'http://isolated.example:3128'
+  #   http = Net::HTTP.new(hostname, nil, :ENV, nil, nil, nil, nil, nil,
+  #                        proxy_policy: :pinned)
+  #   http.proxy_policy                # => :pinned
+  #   decision = http.proxy_decision
+  #   decision.pinned?                 # => true
+  #   decision.source                  # => :environment
+  #   decision.reason                  # => :environment_proxy
+  #   decision.address                 # => "isolated.example"
+  #
+  #   ENV['http_proxy'] = 'http://enterprise.example:8080'
+  #   http.proxy_address               # => "isolated.example"
+  #
+  # The policy applies to clients created afterward; it is not a global
+  # setting, and clients created without it keep the deferred behavior:
+  #
+  #   other = Net::HTTP.new(hostname)
+  #   other.proxy_policy               # => :defer
+  #   other.proxy_address              # => "enterprise.example"
+  #
+  # For a pinned client, #proxy?, #proxy_address, #proxy_port, #proxy_user,
+  # #proxy_pass, and #proxy_uri all report the locked decision.  The same
+  # decision is used by every connection the client opens.
+  #
+  # A deferred client resolves its decision the first time #proxy_decision or
+  # one of the proxy readers is used, or when its first connection is opened;
+  # the resolved rule is then kept, matching the historical lazy lookup.
+  #
+  # Each actual connection selection is appended to #proxy_connection_log,
+  # which records whether a new connection was opened or an existing
+  # keep-alive connection was reused:
+  #
+  #   http.start
+  #   http.get('/one')
+  #   http.get('/two')
+  #   http.proxy_connection_log.map {|entry| [entry.event, entry.outcome, entry.address] }
+  #   # => [[:connect, :opened, "isolated.example"], [:reuse, :reused, "isolated.example"]]
+  #
   # == Compression and Decompression
   #
   # \Net::HTTP does not compress the body of a request before sending.
@@ -622,6 +670,14 @@ module Net   #:nodoc:
   #   Returns the proxy user name.
   # - {:proxy_user=}[rdoc-ref:Net::HTTP#proxy_user=]:
   #   Sets the proxy user.
+  # - {#proxy_policy}[rdoc-ref:Net::HTTP#proxy_policy]:
+  #   Returns the proxy policy, +:defer+ or +:pinned+.
+  # - {#proxy_decision}[rdoc-ref:Net::HTTP#proxy_decision]:
+  #   Returns the rule selected for outbound connections.
+  # - {#proxy_connection_log}[rdoc-ref:Net::HTTP#proxy_connection_log]:
+  #   Returns the recorded connection selections.
+  # - {#clear_proxy_connection_log}[rdoc-ref:Net::HTTP#clear_proxy_connection_log]:
+  #   Clears the recorded connection selections.
   #
   # === Security
   #
@@ -736,6 +792,176 @@ module Net   #:nodoc:
       HAVE_ZLIB=false
     end
     # :startdoc:
+
+    # The outbound proxy rule selected for a connection.
+    #
+    # A decision is immutable and records both where the rule came from
+    # (+source+) and why it was selected (+reason+).  For a client created
+    # with <tt>proxy_policy: :pinned</tt>, the decision is resolved while the
+    # client is being created and is not affected by later environment
+    # changes.
+    #
+    # See Net::HTTP@Pinned+Proxy+Decisions.
+    class ProxyDecision
+      # The policy that produced this decision: +:pinned+ or +:defer+.
+      attr_reader :policy
+
+      # Where the proxy configuration came from:
+      # +:environment+, +:argument+, +:proxy_class+, or +:none+.
+      attr_reader :source
+
+      # Why this rule was selected, for example +:environment_proxy+,
+      # +:environment_direct+, +:explicit_proxy+, or +:explicit_direct+.
+      attr_reader :reason
+
+      # The proxy URI, or +nil+ when the connection is direct.
+      attr_reader :proxy_uri
+
+      # The proxy host, or +nil+ when the connection is direct.
+      attr_reader :address
+
+      # The proxy port, or +nil+ when the connection is direct.
+      attr_reader :port
+
+      # The proxy user name, or +nil+.
+      attr_reader :user
+
+      # The proxy password, or +nil+.
+      attr_reader :pass
+
+      # Whether TLS is used to talk to the proxy.
+      attr_reader :use_ssl
+
+      def initialize(policy:, source:, reason:, proxy_uri:, address:, port:, user:, pass:, use_ssl:) # :nodoc:
+        @policy = policy
+        @source = source
+        @reason = reason
+        @proxy_uri = proxy_uri&.dup&.freeze
+        @address = address&.dup&.freeze
+        @port = port
+        @user = user&.dup&.freeze
+        @pass = pass&.dup&.freeze
+        @use_ssl = use_ssl
+        freeze
+      end
+
+      # Returns +true+ if the decision was locked when the client was created.
+      def pinned?
+        @policy == :pinned
+      end
+
+      # Returns +true+ if this decision selects a proxy.
+      def proxied?
+        !@address.nil?
+      end
+      alias proxy? proxied?
+
+      # Returns +true+ if the proxy rule came from the environment.
+      def from_env?
+        @source == :environment
+      end
+
+      # Returns a hash representation of the decision.
+      # The proxy password is intentionally omitted.
+      def to_h
+        {
+          policy: @policy,
+          source: @source,
+          reason: @reason,
+          proxied: proxied?,
+          proxy_uri: display_proxy_uri,
+          address: @address,
+          port: @port,
+          user: @user,
+          use_ssl: @use_ssl,
+        }
+      end
+
+      def display_proxy_uri # :nodoc:
+        return nil unless @proxy_uri
+        uri = @proxy_uri.dup
+        uri.password = nil if uri.password
+        uri.to_s
+      end
+      private :display_proxy_uri
+
+      def inspect # :nodoc:
+        "#<#{self.class} policy=#{@policy.inspect} source=#{@source.inspect} " \
+          "reason=#{@reason.inspect} proxy=#{@address.inspect}:#{@port.inspect} " \
+          "proxied=#{proxied?}>"
+      end
+    end
+
+    # A record of one actual connection selection.
+    #
+    # Entries are appended to Net::HTTP#proxy_connection_log.
+    class ProxyConnection
+      # Monotonic sequence number within the client.
+      attr_reader :sequence
+
+      # +:connect+ when a new transport connection was opened,
+      # +:reuse+ when an existing keep-alive connection was used.
+      attr_reader :event
+
+      # The Net::HTTP::ProxyDecision in effect for this connection.
+      attr_reader :decision
+
+      # The address actually connected to (the proxy when proxied).
+      attr_reader :address
+
+      # The port actually connected to.
+      attr_reader :port
+
+      # +:opened+, +:reused+, or +:error+.
+      attr_reader :outcome
+
+      # The exception class when +outcome+ is +:error+.
+      attr_reader :error_class
+
+      # Monotonic timestamp.
+      attr_reader :at
+
+      def initialize(sequence:, event:, decision:, address:, port:, outcome:, error_class:, at:) # :nodoc:
+        @sequence = sequence
+        @event = event
+        @decision = decision
+        @address = address&.dup&.freeze
+        @port = port
+        @outcome = outcome
+        @error_class = error_class
+        @at = at
+        freeze
+      end
+
+      # Returns +true+ if an existing connection was reused.
+      def reused?
+        @event == :reuse
+      end
+
+      # Returns +true+ if this connection used a proxy.
+      def proxied?
+        @decision.proxied?
+      end
+
+      # Returns a hash representation of the connection record.
+      def to_h
+        {
+          sequence: @sequence,
+          event: @event,
+          outcome: @outcome,
+          address: @address,
+          port: @port,
+          proxied: proxied?,
+          error_class: @error_class,
+          decision: @decision.to_h,
+        }
+      end
+
+      def inspect # :nodoc:
+        "#<#{self.class} ##{@sequence} #{@event} #{@outcome} " \
+          "#{@address.inspect}:#{@port.inspect} proxied=#{proxied?}>"
+      end
+    end
 
     # Returns +true+; retained for compatibility.
     def HTTP.version_1_2
@@ -1041,6 +1267,8 @@ module Net   #:nodoc:
     # - #verify_depth
     # - #verify_mode
     # - #write_timeout
+    # - +proxy_policy+ (either +:defer+ or +:pinned+; see
+    #   {Pinned Proxy Decisions}[rdoc-ref:Net::HTTP@Pinned+Proxy+Decisions])
     #
     # Note: If +port+ is +nil+ and <tt>opts[:use_ssl]</tt> is a truthy value,
     # the value passed to +new+ is Net::HTTP.https_default_port, not +port+.
@@ -1050,6 +1278,8 @@ module Net   #:nodoc:
       port, p_addr, p_port, p_user, p_pass = *arg
       p_addr = :ENV if arg.size < 2
       port = https_default_port if !port && opt && opt[:use_ssl]
+      proxy_policy = opt && opt[:proxy_policy]
+      opt = opt&.reject {|key, _| key == :proxy_policy }
       http = new(address, port, p_addr, p_port, p_user, p_pass)
       http.ipaddr = opt[:ipaddr] if opt && opt[:ipaddr]
 
@@ -1064,6 +1294,7 @@ module Net   #:nodoc:
         end
       end
 
+      http.__send__(:apply_proxy_policy, proxy_policy) if proxy_policy
       http.start(&block)
     end
 
@@ -1097,19 +1328,19 @@ module Net   #:nodoc:
     #   # => #<Net::HTTP jsonplaceholder.typicode.com:8000 open=false>
     #   http.port # => 8000
     #
-    # For proxy-defining arguments +p_addr+ through +p_no_proxy+,
+    # For proxy-defining arguments +p_addr+ through +p_use_ssl+,
     # see {Proxy Server}[rdoc-ref:Net::HTTP@Proxy+Server].
     #
-    def HTTP.new(address, port = nil, p_addr = :ENV, p_port = nil, p_user = nil, p_pass = nil, p_no_proxy = nil, p_use_ssl = nil)
+    # With keyword argument +proxy_policy+ given as +:pinned+,
+    # the returned +http+ resolves and locks its outbound proxy decision
+    # at creation time; see
+    # {Pinned Proxy Decisions}[rdoc-ref:Net::HTTP@Pinned+Proxy+Decisions].
+    #
+    def HTTP.new(address, port = nil, p_addr = :ENV, p_port = nil, p_user = nil, p_pass = nil, p_no_proxy = nil, p_use_ssl = nil, proxy_policy: nil)
       http = super address, port
 
       if proxy_class? then # from Net::HTTP::Proxy()
-        http.proxy_from_env = @proxy_from_env
-        http.proxy_address  = @proxy_address
-        http.proxy_port     = @proxy_port
-        http.proxy_user     = @proxy_user
-        http.proxy_pass     = @proxy_pass
-        http.proxy_use_ssl  = @proxy_use_ssl
+        http.__send__(:apply_proxy_class_configuration, self)
       elsif p_addr == :ENV then
         http.proxy_from_env = true
       else
@@ -1124,6 +1355,7 @@ module Net   #:nodoc:
         http.proxy_use_ssl = p_use_ssl
       end
 
+      http.__send__(:apply_proxy_policy, proxy_policy) if proxy_policy
       http
     end
 
@@ -1191,6 +1423,11 @@ module Net   #:nodoc:
       @proxy_user     = nil
       @proxy_pass     = nil
       @proxy_use_ssl  = nil
+
+      @proxy_policy = :defer
+      @proxy_decision = nil
+      @proxy_connection_log = []
+      @proxy_connection_sequence = 0
 
       @use_ssl = false
       @ssl_context = nil
@@ -1690,9 +1927,10 @@ module Net   #:nodoc:
         @ssl_context = OpenSSL::SSL::SSLContext.new
       end
 
-      if proxy? then
-        conn_addr = proxy_address
-        conn_port = proxy_port
+      decision = proxy_decision
+      if decision.proxied?
+        conn_addr = decision.address
+        conn_port = decision.port
       else
         conn_addr = conn_address
         conn_port = port
@@ -1702,6 +1940,7 @@ module Net   #:nodoc:
       begin
         s = timeouted_connect(conn_addr, conn_port)
       rescue => e
+        record_proxy_connection(:connect, decision, conn_addr, conn_port, :error, e.class)
         if (defined?(IO::TimeoutError) && e.is_a?(IO::TimeoutError)) || e.is_a?(Errno::ETIMEDOUT)  # for compatibility with previous versions
           e = Net::OpenTimeout.new(e)
         end
@@ -1711,8 +1950,8 @@ module Net   #:nodoc:
       s.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_NODELAY, 1)
       debug "opened"
       if use_ssl?
-        if proxy?
-          if @proxy_use_ssl
+        if decision.proxied?
+          if decision.use_ssl
             proxy_sock = OpenSSL::SSL::SSLSocket.new(s)
             ssl_socket_connect(proxy_sock, @open_timeout)
           else
@@ -1730,8 +1969,8 @@ module Net   #:nodoc:
           end
           buf = +"CONNECT #{conn_address}:#{@port} HTTP/#{HTTPVersion}\r\n" \
             "Host: #{@address}:#{@port}\r\n"
-          if proxy_user
-            credential = ["#{proxy_user}:#{proxy_pass}"].pack('m0')
+          if decision.user
+            credential = ["#{decision.user}:#{decision.pass}"].pack('m0')
             buf << "Proxy-Authorization: Basic #{credential}\r\n"
           end
           buf << "\r\n"
@@ -1796,6 +2035,7 @@ module Net   #:nodoc:
                                continue_timeout: @continue_timeout,
                                debug_output: @debug_output)
       @last_communicated = nil
+      record_proxy_connection(:connect, decision, conn_addr, conn_port, :opened, nil)
       on_connect
     rescue => exception
       if s
@@ -1911,18 +2151,32 @@ module Net   #:nodoc:
     # Returns +true+ if a proxy server is defined, +false+ otherwise;
     # see {Proxy Server}[rdoc-ref:Net::HTTP@Proxy+Server].
     def proxy?
-      !!(@proxy_from_env ? proxy_uri : @proxy_address)
+      if @proxy_policy == :pinned
+        proxy_decision.proxied?
+      else
+        !!(@proxy_from_env ? proxy_uri : @proxy_address)
+      end
     end
 
     # Returns +true+ if the proxy server is defined in the environment,
     # +false+ otherwise;
     # see {Proxy Server}[rdoc-ref:Net::HTTP@Proxy+Server].
+    #
+    # For a pinned client this reports where the locked decision came from,
+    # not the current environment.
     def proxy_from_env?
-      @proxy_from_env
+      if @proxy_policy == :pinned
+        proxy_decision.source == :environment
+      else
+        @proxy_from_env
+      end
     end
 
     # The proxy URI determined from the environment for this connection.
     def proxy_uri # :nodoc:
+      if @proxy_policy == :pinned
+        return proxy_decision.proxy_uri
+      end
       return if @proxy_uri == false
       @proxy_uri ||= URI::HTTP.new(
         "http", nil, address, port, nil, nil, nil, nil, nil
@@ -1933,7 +2187,9 @@ module Net   #:nodoc:
     # Returns the address of the proxy server, if defined, +nil+ otherwise;
     # see {Proxy Server}[rdoc-ref:Net::HTTP@Proxy+Server].
     def proxy_address
-      if @proxy_from_env then
+      if @proxy_policy == :pinned
+        proxy_decision.address
+      elsif @proxy_from_env then
         proxy_uri&.hostname
       else
         @proxy_address
@@ -1943,7 +2199,9 @@ module Net   #:nodoc:
     # Returns the port number of the proxy server, if defined, +nil+ otherwise;
     # see {Proxy Server}[rdoc-ref:Net::HTTP@Proxy+Server].
     def proxy_port
-      if @proxy_from_env then
+      if @proxy_policy == :pinned
+        proxy_decision.port
+      elsif @proxy_from_env then
         proxy_uri&.port
       else
         @proxy_port
@@ -1953,7 +2211,9 @@ module Net   #:nodoc:
     # Returns the user name of the proxy server, if defined, +nil+ otherwise;
     # see {Proxy Server}[rdoc-ref:Net::HTTP@Proxy+Server].
     def proxy_user
-      if @proxy_from_env
+      if @proxy_policy == :pinned
+        proxy_decision.user
+      elsif @proxy_from_env
         user = proxy_uri&.user
         unescape(user) if user
       else
@@ -1964,7 +2224,9 @@ module Net   #:nodoc:
     # Returns the password of the proxy server, if defined, +nil+ otherwise;
     # see {Proxy Server}[rdoc-ref:Net::HTTP@Proxy+Server].
     def proxy_pass
-      if @proxy_from_env
+      if @proxy_policy == :pinned
+        proxy_decision.pass
+      elsif @proxy_from_env
         pass = proxy_uri&.password
         unescape(pass) if pass
       else
@@ -1975,6 +2237,43 @@ module Net   #:nodoc:
     alias proxyaddr proxy_address   #:nodoc: obsolete
     alias proxyport proxy_port      #:nodoc: obsolete
 
+    # Returns the outbound proxy policy for +self+:
+    # +:defer+ (the default) resolves the proxy from the environment when a
+    # connection is opened, while +:pinned+ resolves it when the client is
+    # created and keeps that decision for every connection it opens.
+    #
+    # See Net::HTTP@Pinned+Proxy+Decisions.
+    attr_reader :proxy_policy
+
+    # Returns the Net::HTTP::ProxyDecision that governs the outbound
+    # connection.
+    #
+    # For a client created with <tt>proxy_policy: :pinned</tt>, the decision
+    # is available immediately after creation and never changes.  For the
+    # default +:defer+ policy, the decision is resolved the first time it is
+    # read (or when the first connection is opened) and then retained for the
+    # life of the client, matching the historical lazy environment lookup.
+    def proxy_decision
+      @proxy_decision ||= build_proxy_decision(@proxy_policy)
+    end
+
+    # Returns the connection selections made by +self+ so far, oldest first.
+    #
+    # Each entry is a Net::HTTP::ProxyConnection recording whether a new
+    # connection was opened (+:connect+) or an existing keep-alive connection
+    # was reused (+:reuse+), which Net::HTTP::ProxyDecision was in effect,
+    # and the address actually used.
+    def proxy_connection_log
+      @proxy_connection_log.dup
+    end
+
+    # Clears #proxy_connection_log and returns the entries that were removed.
+    def clear_proxy_connection_log
+      entries = @proxy_connection_log.dup
+      @proxy_connection_log.clear
+      entries
+    end
+
     private
     # :stopdoc:
 
@@ -1982,6 +2281,129 @@ module Net   #:nodoc:
       require 'cgi/escape'
       require 'cgi/util' unless defined?(CGI::EscapeExt)
       CGI.unescape(value)
+    end
+
+    def apply_proxy_policy(policy) # :nodoc:
+      policy = policy.to_sym
+      unless policy == :defer || policy == :pinned
+        raise ArgumentError, "unknown proxy policy: #{policy.inspect}"
+      end
+      raise IOError, "proxy policy changed, but session already started" if started?
+      raise IOError, "proxy policy cannot be changed once pinned" if @proxy_policy == :pinned && policy != :pinned
+      @proxy_policy = policy
+      @proxy_decision = policy == :pinned ? build_proxy_decision(policy) : nil
+    end
+
+    # Copies the proxy configuration stored on a Net::HTTP::Proxy subclass.
+    def apply_proxy_class_configuration(proxy_class) # :nodoc:
+      @proxy_from_env = proxy_class.instance_variable_get(:@proxy_from_env)
+      @proxy_address  = proxy_class.instance_variable_get(:@proxy_address)
+      @proxy_port     = proxy_class.instance_variable_get(:@proxy_port)
+      @proxy_user     = proxy_class.instance_variable_get(:@proxy_user)
+      @proxy_pass     = proxy_class.instance_variable_get(:@proxy_pass)
+      @proxy_use_ssl  = proxy_class.instance_variable_get(:@proxy_use_ssl)
+    end
+
+    def build_proxy_decision(policy) # :nodoc:
+      if @proxy_from_env
+        uri = environment_proxy_uri
+        if uri
+          ProxyDecision.new(
+            policy: policy,
+            source: :environment,
+            reason: :environment_proxy,
+            proxy_uri: uri,
+            address: uri.hostname,
+            port: uri.port,
+            user: environment_proxy_user,
+            pass: environment_proxy_pass,
+            use_ssl: @proxy_use_ssl
+          )
+        else
+          ProxyDecision.new(
+            policy: policy,
+            source: :environment,
+            reason: :environment_direct,
+            proxy_uri: nil,
+            address: nil,
+            port: nil,
+            user: nil,
+            pass: nil,
+            use_ssl: nil
+          )
+        end
+      elsif @proxy_address
+        decision_port = @proxy_port || self.class.default_port
+        ProxyDecision.new(
+          policy: policy,
+          source: self.class.proxy_class? ? :proxy_class : :argument,
+          reason: :explicit_proxy,
+          proxy_uri: build_proxy_uri(@proxy_address, decision_port, @proxy_user, @proxy_pass),
+          address: @proxy_address,
+          port: decision_port,
+          user: @proxy_user,
+          pass: @proxy_pass,
+          use_ssl: @proxy_use_ssl
+        )
+      else
+        ProxyDecision.new(
+          policy: policy,
+          source: self.class.proxy_class? ? :proxy_class : :none,
+          reason: :explicit_direct,
+          proxy_uri: nil,
+          address: nil,
+          port: nil,
+          user: nil,
+          pass: nil,
+          use_ssl: nil
+        )
+      end
+    end
+
+    def environment_proxy_uri # :nodoc:
+      return if @proxy_uri == false
+      @proxy_uri ||= URI::HTTP.new(
+        "http", nil, address, port, nil, nil, nil, nil, nil
+      ).find_proxy || false
+      @proxy_uri || nil
+    end
+
+    def environment_proxy_user # :nodoc:
+      user = environment_proxy_uri&.user
+      unescape(user) if user
+    end
+
+    def environment_proxy_pass # :nodoc:
+      pass = environment_proxy_uri&.password
+      unescape(pass) if pass
+    end
+
+    def build_proxy_uri(host, prt, user, pass) # :nodoc:
+      if user
+        escape = URI::DEFAULT_PARSER.method(:escape)
+        userinfo = escape.call(user.to_s, /[^#{URI::PATTERN::UNRESERVED}]/)
+        userinfo << ":" << escape.call(pass.to_s, /[^#{URI::PATTERN::UNRESERVED}]/) if pass
+        URI::HTTP.build(host: host, port: prt, userinfo: userinfo)
+      else
+        URI::HTTP.build(host: host, port: prt)
+      end
+    rescue URI::Error
+      nil
+    end
+
+    def record_proxy_connection(event, decision, addr, prt, outcome, error_class) # :nodoc:
+      @proxy_connection_sequence += 1
+      @proxy_connection_log << ProxyConnection.new(
+        sequence: @proxy_connection_sequence,
+        event: event,
+        decision: decision,
+        address: addr,
+        port: prt,
+        outcome: outcome,
+        error_class: error_class,
+        at: Process.clock_gettime(Process::CLOCK_MONOTONIC)
+      )
+      nil
     end
 
     # without proxy, obsolete
@@ -2586,6 +3008,13 @@ module Net   #:nodoc:
           debug "Conn close because of EOF"
           @socket.close
           connect
+        else
+          decision = proxy_decision
+          if decision.proxied?
+            record_proxy_connection(:reuse, decision, decision.address, decision.port, :reused, nil)
+          else
+            record_proxy_connection(:reuse, decision, conn_address, port, :reused, nil)
+          end
         end
       end
 

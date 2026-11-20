@@ -254,6 +254,336 @@ class TestNetHTTP < Test::Unit::TestCase
     end
   end
 
+  def test_proxy_policy_pinned_from_env_survives_env_change
+    TestNetHTTPUtils.clean_http_proxy_env do
+      ENV['http_proxy'] = 'http://isolated.example:3128'
+
+      http = Net::HTTP.new('hostname.example', nil, :ENV, nil, nil, nil, nil, nil,
+                           proxy_policy: :pinned)
+
+      assert_equal :pinned, http.proxy_policy
+      assert_predicate http, :proxy?
+      assert_equal 'isolated.example', http.proxy_address
+      assert_equal 3128, http.proxy_port
+
+      decision = http.proxy_decision
+      assert_predicate decision, :pinned?
+      assert_predicate decision, :proxied?
+      assert_predicate decision, :from_env?
+      assert_equal :environment_proxy, decision.reason
+
+      ENV['http_proxy'] = 'http://enterprise.example:8080'
+
+      assert_equal 'isolated.example', http.proxy_address
+      assert_equal 3128, http.proxy_port
+      assert_predicate http, :proxy?
+      assert_equal :environment_proxy, http.proxy_decision.reason
+
+      other = Net::HTTP.new('hostname.example')
+      assert_equal :defer, other.proxy_policy
+      assert_equal 'enterprise.example', other.proxy_address
+      assert_predicate other, :proxy?
+    end
+  end
+
+  def test_proxy_policy_pinned_uses_http_proxy_class_default
+    TestNetHTTPUtils.clean_http_proxy_env do
+      ENV['http_proxy'] = 'http://isolated.example:3128'
+      klass = Net::HTTP.Proxy(:ENV)
+      http = klass.new('hostname.example', nil, nil, nil, nil, nil, nil, nil,
+                       proxy_policy: :pinned)
+
+      assert_equal :pinned, http.proxy_policy
+      assert_predicate http, :proxy?
+      assert_predicate http, :proxy_from_env?
+      assert_equal 'isolated.example', http.proxy_address
+
+      ENV['http_proxy'] = 'http://enterprise.example:8080'
+      assert_equal 'isolated.example', http.proxy_address
+    end
+  end
+
+  def test_proxy_policy_pinned_without_proxy
+    TestNetHTTPUtils.clean_http_proxy_env do
+      ENV['no_proxy'] = 'hostname.example'
+      http = Net::HTTP.new('hostname.example', nil, :ENV, nil, nil, nil, nil, nil,
+                           proxy_policy: :pinned)
+
+      refute_predicate http, :proxy?
+      assert_equal :environment_direct, http.proxy_decision.reason
+      assert_nil http.proxy_address
+
+      ENV.delete('no_proxy')
+      ENV['http_proxy'] = 'http://later.example:8080'
+
+      refute_predicate http, :proxy?
+      assert_nil http.proxy_address
+      assert_equal :environment_direct, http.proxy_decision.reason
+    end
+  end
+
+  def test_proxy_policy_pinned_explicit_argument
+    TestNetHTTPUtils.clean_http_proxy_env do
+      http = Net::HTTP.new('hostname.example', nil, 'proxy.example', 8000, 'user', 'pass',
+                           nil, nil, proxy_policy: :pinned)
+
+      assert_equal :pinned, http.proxy_policy
+      assert_equal :argument, http.proxy_decision.source
+      assert_equal :explicit_proxy, http.proxy_decision.reason
+      assert_equal 'proxy.example', http.proxy_address
+      assert_equal 8000, http.proxy_port
+      assert_equal 'user', http.proxy_user
+      assert_equal 'pass', http.proxy_pass
+
+      ENV['http_proxy'] = 'http://enterprise.example:8080'
+
+      assert_equal 'proxy.example', http.proxy_address
+      assert_equal 8000, http.proxy_port
+    end
+  end
+
+  def test_proxy_policy_pinned_direct_argument
+    TestNetHTTPUtils.clean_http_proxy_env do
+      ENV['http_proxy'] = 'http://enterprise.example:8080'
+      http = Net::HTTP.new('hostname.example', nil, nil, nil, nil, nil, nil, nil,
+                           proxy_policy: :pinned)
+
+      refute_predicate http, :proxy?
+      assert_equal :explicit_direct, http.proxy_decision.reason
+      assert_nil http.proxy_address
+    end
+  end
+
+  def test_proxy_policy_does_not_affect_explicit_new_clients
+    TestNetHTTPUtils.clean_http_proxy_env do
+      ENV['http_proxy'] = 'http://isolated.example:3128'
+
+      _pinned = Net::HTTP.new('hostname.example', nil, :ENV, nil, nil, nil, nil, nil,
+                              proxy_policy: :pinned)
+
+      explicit = Net::HTTP.new('hostname.example', nil, 'proxy.example', 8000)
+      assert_equal :defer, explicit.proxy_policy
+      assert_equal 'proxy.example', explicit.proxy_address
+
+      deferred = Net::HTTP.new('hostname.example')
+      assert_equal :defer, deferred.proxy_policy
+
+      ENV['http_proxy'] = 'http://enterprise.example:8080'
+
+      assert_equal 'proxy.example', explicit.proxy_address
+      assert_equal 'enterprise.example', deferred.proxy_address
+    end
+  end
+
+  def test_proxy_policy_rejects_unknown_value
+    assert_raise(ArgumentError) do
+      Net::HTTP.new('hostname.example', nil, nil, nil, nil, nil, nil, nil,
+                    proxy_policy: :unknown)
+    end
+  end
+
+  def test_proxy_policy_cannot_be_loosened_after_pinning
+    http = Net::HTTP.new('hostname.example', nil, nil, nil, nil, nil, nil, nil,
+                         proxy_policy: :pinned)
+    assert_raise(IOError) do
+      http.__send__(:apply_proxy_policy, :defer)
+    end
+    assert_equal :pinned, http.proxy_policy
+  end
+
+  def test_proxy_policy_via_http_start_opts
+    TestNetHTTPUtils.clean_http_proxy_env do
+      ENV['http_proxy'] = 'http://isolated.example:3128'
+      http = Net::HTTP.start('hostname.example', nil, :ENV, nil, nil, nil,
+                             proxy_policy: :pinned, open_timeout: 0.001)
+      assert_equal :pinned, http.proxy_policy
+    rescue Net::OpenTimeout, SocketError
+      # The sandbox may refuse outgoing connections; policy is still pinned.
+      assert_equal :pinned, Net::HTTP.new('hostname.example', nil, :ENV, nil, nil, nil, nil, nil,
+                                          proxy_policy: :pinned).proxy_policy
+    ensure
+      http&.finish if http&.started?
+    end
+  end
+
+  def test_proxy_policy_pinned_connect_stays_within_selected_rule
+    TestNetHTTPUtils.clean_http_proxy_env do
+      ENV['http_proxy'] = 'http://isolated.example:3128'
+      http = Net::HTTP.new('hostname.example', nil, :ENV, nil, nil, nil, nil, nil,
+                           proxy_policy: :pinned)
+
+      attempts = []
+      http.define_singleton_method(:timeouted_connect) do |addr, prt|
+        attempts << [addr, prt]
+        raise Errno::ECONNREFUSED, 'simulated refusal'
+      end
+
+      assert_raise(Errno::ECONNREFUSED) { http.start }
+
+      ENV['http_proxy'] = 'http://enterprise.example:8080'
+      ENV.delete('no_proxy')
+
+      assert_raise(Errno::ECONNREFUSED) { http.start }
+
+      assert_equal [['isolated.example', 3128], ['isolated.example', 3128]], attempts
+
+      log = http.proxy_connection_log
+      assert_equal 2, log.size
+      log.each do |entry|
+        assert_equal :connect, entry.event
+        assert_equal :error, entry.outcome
+        assert_equal Errno::ECONNREFUSED, entry.error_class
+        assert_equal 'isolated.example', entry.address
+        assert_equal 3128, entry.port
+      end
+    end
+  end
+
+  def test_proxy_policy_deferred_connect_uses_latched_rule
+    TestNetHTTPUtils.clean_http_proxy_env do
+      ENV['http_proxy'] = 'http://first.example:3128'
+      http = Net::HTTP.new('hostname.example')
+      http.define_singleton_method(:timeouted_connect) {|_addr, _prt| ProxyPolicyFakeTransport.new }
+      http.start
+
+      assert_equal 'first.example', http.proxy_decision.address
+      assert_equal :defer, http.proxy_decision.policy
+
+      ENV['http_proxy'] = 'http://second.example:8080'
+
+      attempts = []
+      http.define_singleton_method(:timeouted_connect) do |addr, prt|
+        attempts << [addr, prt]
+        raise Errno::ECONNREFUSED, 'simulated refusal'
+      end
+
+      # Reconnecting must keep the rule already resolved for this client.
+      http.instance_variable_get(:@socket).close
+      http.__send__(:connect) rescue Errno::ECONNREFUSED
+      assert_equal [['first.example', 3128]], attempts
+      assert_equal 'first.example', http.proxy_decision.address
+    end
+  end
+
+  class ProxyPolicyFakeTransport
+    def setsockopt(*)
+    end
+    def close
+    end
+  end
+
+  def test_proxy_policy_deferred_resolves_on_first_read
+    TestNetHTTPUtils.clean_http_proxy_env do
+      ENV['http_proxy'] = 'http://first.example:3128'
+      http = Net::HTTP.new('hostname.example')
+
+      assert_equal :defer, http.proxy_policy
+      assert_equal 'first.example', http.proxy_decision.address
+
+      ENV['http_proxy'] = 'http://second.example:8080'
+
+      # The client keeps the rule it resolved, so later jobs cannot redirect
+      # an existing client even under the default policy once it is in use.
+      assert_equal 'first.example', http.proxy_decision.address
+      assert_equal 'first.example', http.proxy_address
+    end
+  end
+
+  def test_proxy_policy_pinned_direct_connection_selection
+    TestNetHTTPUtils.clean_http_proxy_env do
+      ENV['http_proxy'] = 'http://isolated.example:3128'
+      http = Net::HTTP.new('hostname.example', nil, nil, nil, nil, nil, nil, nil,
+                           proxy_policy: :pinned)
+
+      http.instance_variable_set(:@started, true)
+      http.instance_variable_set(:@socket, ProxyPolicyFakeSocket.new)
+      http.instance_variable_set(:@last_communicated,
+                                 Process.clock_gettime(Process::CLOCK_MONOTONIC))
+      http.keep_alive_timeout = 30
+      http.__send__(:begin_transport, Net::HTTP::Get.new('/'))
+
+      entry = http.proxy_connection_log.first
+      refute_predicate entry, :proxied?
+      assert_equal 'hostname.example', entry.address
+      assert_equal 80, entry.port
+      assert_equal :explicit_direct, entry.decision.reason
+    end
+  end
+
+  def test_proxy_policy_decision_to_h_hides_password
+    TestNetHTTPUtils.clean_http_proxy_env do
+      ENV['http_proxy'] = 'http://user:secret@proxy.example:8000'
+      http = Net::HTTP.new('hostname.example', nil, :ENV, nil, nil, nil, nil, nil,
+                           proxy_policy: :pinned)
+
+      hash = http.proxy_decision.to_h
+      assert_equal 'user', hash[:user]
+      refute_match(/secret/, hash.inspect)
+      refute_match(/secret/, http.proxy_decision.inspect)
+      refute_match(/secret/, http.proxy_connection_log.inspect)
+    end
+  end
+
+  def test_proxy_policy_pinned_reports_connection_selection
+    TestNetHTTPUtils.clean_http_proxy_env do
+      ENV['http_proxy'] = 'http://isolated.example:3128'
+      http = Net::HTTP.new('hostname.example', nil, :ENV, nil, nil, nil, nil, nil,
+                           proxy_policy: :pinned)
+
+      assert_equal [], http.proxy_connection_log
+
+      # Simulate a session whose transport is already connected.
+      http.instance_variable_set(:@started, true)
+      http.instance_variable_set(:@socket, ProxyPolicyFakeSocket.new)
+      http.instance_variable_set(:@last_communicated,
+                                 Process.clock_gettime(Process::CLOCK_MONOTONIC))
+      http.keep_alive_timeout = 30
+      http.__send__(:begin_transport, Net::HTTP::Get.new('/'))
+
+      log = http.proxy_connection_log
+      assert_equal 1, log.size
+      entry = log.first
+      assert_predicate entry, :reused?
+      assert_equal :reused, entry.outcome
+      assert_equal 'isolated.example', entry.address
+      assert_equal 3128, entry.port
+      assert_predicate entry, :proxied?
+      assert_equal :pinned, entry.decision.policy
+
+      cleared = http.clear_proxy_connection_log
+      assert_equal 1, cleared.size
+      assert_equal [], http.proxy_connection_log
+
+      assert_not_same log, http.proxy_connection_log
+    end
+  end
+
+  class ProxyPolicyFakeSocket
+    def closed?
+      false
+    end
+    def close
+    end
+    def io
+      self
+    end
+    def to_io
+      self
+    end
+    def wait_readable(timeout)
+      nil
+    end
+    def eof?
+      false
+    end
+    def read_timeout=(value)
+    end
+    def write_timeout=(value)
+    end
+    def continue_timeout=(value)
+    end
+  end
+
   def test_default_configuration
     Net::HTTP.default_configuration = { open_timeout: 5 }
     http = Net::HTTP.new 'hostname.example'
