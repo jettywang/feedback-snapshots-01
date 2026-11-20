@@ -6,7 +6,7 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.management import create_permissions
 from django.contrib.auth.models import AnonymousUser, Group, Permission
 from django.contrib.contenttypes.models import ContentType
-from django.db import connection
+from django.db import connection, transaction
 from django.template import Context, Template
 from django.test import TestCase
 from django.test.utils import CaptureQueriesContext
@@ -16,7 +16,7 @@ from guardian.core import ObjectPermissionChecker
 from guardian.exceptions import NotUserNorGroup
 from guardian.management import create_anonymous_user
 from guardian.models import GroupObjectPermission, UserObjectPermission
-from guardian.shortcuts import assign_perm
+from guardian.shortcuts import assign_perm, remove_perm
 from guardian.testapp.models import (
     MixedGroupObjectPermission,
     Project,
@@ -786,3 +786,92 @@ class ObjectPermissionCheckerTest(ObjectPermissionTestCase):
         # Ignore other queries that JOIN this table.
         group_selects = [q for q in queries if q["sql"].endswith(auth_group_from)]
         self.assertEqual(len(group_selects), 1)
+
+
+class ObjectPermissionCheckerRefreshTest(ObjectPermissionTestCase):
+    """Demonstrates the opt-in `refresh()` convention: a long-running
+    operation prefetches permissions for a batch of objects, and after a
+    revocation on one object is committed it re-checks just that object
+    without discarding the rest of the prefetched cache."""
+
+    def setUp(self):
+        super().setUp()
+        # Required if MySQL backend is used :/
+        create_permissions(auth_app, 1)
+        self.member = User.objects.create(username="batch_member", is_active=True)
+        self.member.groups.add(self.group)
+        # One object with both a direct and a group grant, one with only a
+        # direct grant, and one that stays untouched for the whole batch.
+        self.direct_and_group = Group.objects.create(name="direct_and_group")
+        self.direct_only = Group.objects.create(name="direct_only")
+        self.untouched = Group.objects.create(name="untouched")
+        assign_perm("change_group", self.member, self.direct_and_group)
+        assign_perm("change_group", self.group, self.direct_and_group)
+        assign_perm("change_group", self.member, self.direct_only)
+        assign_perm("change_group", self.member, self.untouched)
+
+        self.checker = ObjectPermissionChecker(self.member)
+        self.checker.prefetch_perms([self.direct_and_group, self.direct_only, self.untouched])
+
+    def test_refresh_after_revoking_direct_grant_keeps_group_grant(self):
+        remove_perm("change_group", self.member, self.direct_and_group)
+        # The cached entry is stale until explicitly refreshed.
+        self.assertTrue(self.checker.has_perm("change_group", self.direct_and_group))
+
+        self.checker.refresh(self.direct_and_group)
+        # The group grant still applies, so the permission survives.
+        self.assertTrue(self.checker.has_perm("change_group", self.direct_and_group))
+
+    def test_refresh_after_revoking_last_grant_denies(self):
+        remove_perm("change_group", self.member, self.direct_only)
+        # The cached entry is stale until explicitly refreshed.
+        self.assertTrue(self.checker.has_perm("change_group", self.direct_only))
+
+        self.checker.refresh(self.direct_only)
+        # That was the last grant, so the permission is now denied.
+        self.assertFalse(self.checker.has_perm("change_group", self.direct_only))
+
+    def test_refresh_after_rollback_keeps_original_grant(self):
+        try:
+            with transaction.atomic():
+                remove_perm("change_group", self.member, self.direct_only)
+                raise RuntimeError("force rollback")
+        except RuntimeError:
+            pass
+
+        self.checker.refresh(self.direct_only)
+        # The revocation was rolled back, so the grant is still there.
+        self.assertTrue(self.checker.has_perm("change_group", self.direct_only))
+
+    def test_untouched_object_still_uses_prefetched_cache(self):
+        settings.DEBUG = True
+        try:
+            remove_perm("change_group", self.member, self.direct_only)
+            self.checker.refresh(self.direct_only)
+
+            # Refreshing one object does not discard the rest of the batch:
+            # checking an untouched object spawns no queries.
+            query_count = len(connection.queries)
+            self.assertTrue(self.checker.has_perm("change_group", self.untouched))
+            self.assertEqual(len(connection.queries), query_count)
+        finally:
+            settings.DEBUG = False
+
+    def test_refresh_updates_shared_auto_prefetch_cache(self):
+        guardian_settings.AUTO_PREFETCH = True
+        try:
+            checker = ObjectPermissionChecker(self.member)
+            checker._prefetch_cache()
+            self.assertTrue(checker.has_perm("change_group", self.direct_only))
+
+            remove_perm("change_group", self.member, self.direct_only)
+            checker.refresh(self.direct_only)
+
+            # The refreshed entry lives in the user's shared cache, so a fresh
+            # checker on the same user sees the revocation too...
+            fresh_checker = ObjectPermissionChecker(self.member)
+            self.assertFalse(fresh_checker.has_perm("change_group", self.direct_only))
+            # ...while untouched objects keep their prefetched entries.
+            self.assertTrue(fresh_checker.has_perm("change_group", self.untouched))
+        finally:
+            guardian_settings.AUTO_PREFETCH = False

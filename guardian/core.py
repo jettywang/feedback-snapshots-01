@@ -51,6 +51,11 @@ class ObjectPermissionChecker:
        perm1/object1 on the same instance of ObjectPermissionChecker we won't see a
        difference as permissions are already fetched and stored within the cache
        dictionary.
+
+       Long-running operations that prefetched permissions for many objects
+       can call `refresh(obj)` after a permission change on a single object
+       has been committed, to see the change for that object without
+       discarding the rest of the prefetched cache.
     """
 
     def __init__(self, user_or_group: Model | None = None) -> None:
@@ -185,6 +190,46 @@ class ObjectPermissionChecker:
                 perms: list[str] = list(set(self.get_group_perms(obj)))  # type: ignore[no-redef]
             self._obj_perms_cache[key] = perms
         return self._obj_perms_cache[key]
+
+    def refresh(self, obj: Model) -> list[str]:
+        """Re-fetch permissions for a single object and update the cache in place.
+
+        Explicit, opt-in convention for long-running operations that prefetch
+        permissions for many objects: after a permission change on one object
+        has been committed, call `refresh(obj)` so subsequent checks on that
+        object see the change, without discarding the rest of the prefetched
+        cache. Unchanged objects keep using their cached entries.
+
+        Parameters:
+            obj (Model): Django model instance whose permissions should be re-fetched.
+
+        Returns:
+            list of codenames for all permissions for given `obj`.
+        """
+        if self.user and not self.user.is_active:
+            return []
+
+        if guardian_settings.AUTO_PREFETCH and not (self.user and self.user.is_superuser):
+            # Make sure we write into the shared prefetch cache rather than a
+            # local dict that the next lazy `_prefetch_cache()` would replace.
+            self._prefetch_cache()
+
+        if self.user and self.user.is_superuser:
+            ctype = get_content_type(obj)
+            perms: list[str] = list(
+                Permission.objects.filter(content_type=ctype).values_list("codename", flat=True)
+            )
+        elif self.user:
+            # Query user and group permissions separately and then combine
+            # the results to avoid a slow query
+            user_perms = self.get_user_perms(obj)
+            group_perms = self.get_group_perms(obj)
+            perms: list[str] = list(set(chain(user_perms, group_perms)))  # type: ignore[no-redef]
+        else:
+            perms: list[str] = list(set(self.get_group_perms(obj)))  # type: ignore[no-redef]
+
+        self._obj_perms_cache[self.get_local_cache_key(obj)] = perms
+        return perms
 
     def get_local_cache_key(self, obj: Model) -> tuple:
         """Returns cache key for `_obj_perms_cache` dict."""

@@ -143,3 +143,25 @@ for project in projects:
     # No additional lookups needed to check permissions
     checker.has_perm('change_project', project)
 ```
+
+### Refreshing a single object after a change
+
+A long-running operation may prefetch permissions for many objects and
+then change the permission state of one of them midway (for example,
+revoking a share). Because checks are served from the cache, the checker
+would keep returning the stale result for that object. Instead of
+discarding the whole prefetched batch, call `refresh()` on just the
+changed object once the change has been committed:
+
+``` python
+remove_perm('change_project', joe, project)
+# Re-fetch only this object's permissions; all other prefetched
+# entries stay cached and are served without database queries.
+checker.refresh(project)
+checker.has_perm('change_project', project)  # sees the revocation
+```
+
+If the change is rolled back, `refresh()` simply re-reads the original
+state, so the same convention is safe to use either way. This also works
+with `GUARDIAN_AUTO_PREFETCH` enabled: the refreshed entry is written
+into the user's shared prefetch cache.
