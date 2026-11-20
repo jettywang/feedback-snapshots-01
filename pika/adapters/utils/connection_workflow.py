@@ -122,6 +122,37 @@ class AMQPConnectionWorkflowFailed(AMQPConnectorException):
         )
 
 
+class AMQPConnectionWorkflowTargetRejected(AMQPConnectorException):
+    """A resolved connection target was rejected by the target validator."""
+
+    def __init__(self,
+                 addr_record: tuple,
+                 reason: str,
+                 *args: Any,
+                 host: str | None = None,
+                 port: int | None = None) -> None:
+        """
+
+        :param addr_record: the rejected address record in
+            `socket.getaddrinfo()` format.
+        :param reason: human-readable explanation of the rejection.
+        :param args: args for parent class
+        :param host: hostname or IP of the broker whose target was rejected
+        :param port: port of the broker whose target was rejected
+        """
+        super().__init__(*args)
+        self.addr_record = addr_record
+        self.reason = reason
+        self.host = host
+        self.port = port
+
+    @override
+    def __repr__(self) -> str:
+        return (f'{self.__class__.__name__}: {self.reason} '
+                f'(host={self.host!r}, port={self.port}, '
+                f'addr_record={self.addr_record!r})')
+
+
 class AMQPConnector:
     """Performs a single TCP/[SSL]/AMQP connection workflow."""
 
@@ -631,7 +662,10 @@ class AMQPConnectionWorkflow(AbstractAMQPConnectionWorkflow):
     _STATE_ABORTING = 2
     _STATE_DONE = 3
 
-    def __init__(self, _until_first_amqp_attempt: bool = False) -> None:
+    def __init__(
+        self, _until_first_amqp_attempt: bool = False,
+        target_validator: Callable[[tuple], bool | None] | None = None
+    ) -> None:
         """
         :param _until_first_amqp_attempt: INTERNAL USE ONLY; ends workflow
             after first AMQP handshake attempt, regardless of outcome (success
@@ -639,6 +673,15 @@ class AMQPConnectionWorkflow(AbstractAMQPConnectionWorkflow):
             `pika.connection.Connection` enables this because it's not
             designed/tested to reset all state properly to handle more than one
             AMQP handshake attempt.
+        :param target_validator: optional callable invoked with each resolved
+            address record (in `socket.getaddrinfo()` format) before any
+            connection attempt is made against it. It returns True to permit
+            the target, False to deny it, or None when it cannot decide.
+            Denied and undecided targets are skipped and recorded in the
+            workflow's failure report; a validator that raises is treated as
+            undecided for that target. The initial candidates and all fallback
+            attempts are drawn from the same filtered list, so a single
+            network boundary governs every connection target.
 
         TODO: Do we need getaddrinfo timeout?
         TODO: Would it be useful to implement exponential back-off?
@@ -647,6 +690,7 @@ class AMQPConnectionWorkflow(AbstractAMQPConnectionWorkflow):
         self._attempts_remaining: int | None = None
         self._retry_pause: float | None = None
         self._until_first_amqp_attempt = _until_first_amqp_attempt
+        self._target_validator = target_validator
 
         # Provided by set_io_services()
         self._nbio: nbio_interface.AbstractIOServices | None = None
@@ -903,9 +947,58 @@ class AMQPConnectionWorkflow(AbstractAMQPConnectionWorkflow):
             return
 
         _LOG.debug('getaddrinfo returned %s records', len(addrinfos_or_exc))
+
+        if self._target_validator is not None:
+            addrinfos_or_exc = self._filter_permitted_targets(
+                addrinfos_or_exc)
+
         self._addrinfo_iter = iter(addrinfos_or_exc)
 
         self._try_next_resolved_address()
+
+    def _filter_permitted_targets(
+            self, addrinfos: Sequence[tuple]) -> list[tuple]:
+        """
+        Apply the target validator to resolved address records, preserving
+        their original order, and record a readable rejection for each target
+        that is not permitted.
+
+        :param addrinfos: address records returned by `getaddrinfo()`.
+        :returns: the permitted subset of `addrinfos`, in the original order.
+        """
+        assert self._connection_configs is not None
+        assert self._current_config_index is not None
+        assert self._connection_errors is not None
+        assert self._target_validator is not None
+
+        params = self._connection_configs[self._current_config_index]
+
+        permitted = []
+        for addr_record in addrinfos:
+            try:
+                verdict = self._target_validator(addr_record)
+            except Exception as error:
+                verdict = None
+                reason = f'target validator raised {error!r}'
+            else:
+                if verdict is True:
+                    permitted.append(addr_record)
+                    continue
+                if verdict is False:
+                    reason = 'target denied by target validator'
+                else:
+                    reason = ('target validator returned ambiguous verdict '
+                              f'{verdict!r}')
+
+            _LOG.warning('Rejecting connection target %r for %r:%s: %s.',
+                         addr_record, params.host, params.port, reason)
+            self._connection_errors.append(
+                AMQPConnectionWorkflowTargetRejected(addr_record,
+                                                     reason,
+                                                     host=params.host,
+                                                     port=params.port))
+
+        return permitted
 
     def _try_next_resolved_address(self) -> None:
         """
