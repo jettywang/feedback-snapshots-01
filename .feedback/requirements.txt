@@ -1,0 +1,12 @@
+asgiref==3.13.0
+dj-database-url==3.1.2
+django==5.2.19
+django-filter==26.2
+iniconfig==2.3.1
+markdown==3.11.3
+packaging==26.3
+pluggy==1.7.0
+pygments==2.21.0
+pytest==9.2.0
+pytest-django==4.14.0
+sqlparse==0.6.1
