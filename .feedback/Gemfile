@@ -1,0 +1,6 @@
+source "https://rubygems.org"
+gem "net-protocol"
+gem "time"
+gem "ostruct"
+gem "test-unit"
+gem "test-unit-ruby-core"

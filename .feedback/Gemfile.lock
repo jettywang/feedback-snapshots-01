@@ -1,0 +1,39 @@
+GEM
+  remote: https://rubygems.org/
+  specs:
+    date (3.6.0)
+    net-protocol (0.4.0)
+      timeout
+    ostruct (0.6.3)
+    power_assert (3.1.0)
+    test-unit (3.7.8)
+      power_assert
+    test-unit-ruby-core (1.0.16)
+      test-unit (>= 3.7.2)
+    time (0.5.0)
+      date
+    timeout (0.6.1)
+
+PLATFORMS
+  arm64-darwin-25
+  ruby
+
+DEPENDENCIES
+  net-protocol
+  ostruct
+  test-unit
+  test-unit-ruby-core
+  time
+
+CHECKSUMS
+  date (3.6.0) sha256=18ac945c4e24ebd93534f8eab8c2fd8c5604b3e977105b3798d62a1e8d27b580
+  net-protocol (0.4.0) sha256=f9f90c8c6f64794a45160bf422177a336db12809de3beeeaa26b88fcd2e8c853
+  ostruct (0.6.3) sha256=95a2ed4a4bd1d190784e666b47b2d3f078e4a9efda2fccf18f84ddc6538ed912
+  power_assert (3.1.0) sha256=fefe98ed5d3140628138f3f9f9194d6ece01f1320e69700d3c928adca7518251
+  test-unit (3.7.8) sha256=689d1ca53f4d46f678b4e5d68d8e4294f87fc5e8b9238cc4de7c5727e8d65943
+  test-unit-ruby-core (1.0.16) sha256=2f8bd142ef69a1a29637bc56804163ef9a0a398fd349bf9d4a3c67c4dfa82557
+  time (0.5.0) sha256=abea008a7c3e8d2727f95f6fab334b7862004c514fbb4b3315285910e8d1650f
+  timeout (0.6.1) sha256=78f57368a7e7bbadec56971f78a3f5ecbcfb59b7fcbb0a3ed6ddc08a5094accb
+
+BUNDLED WITH
+  4.0.20
