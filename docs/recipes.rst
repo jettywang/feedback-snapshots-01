@@ -346,6 +346,54 @@ consumer. If a message has been tampered with, deserialization will raise a
     own ``_serialize``/``_deserialize`` methods using a library like
     ``cryptography``.
 
+Rotating the Signing Key
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+Swapping a shared secret normally requires draining the queue and restarting
+every producer and consumer at the same instant. The
+:py:class:`RotatingSignedSerializer` removes that coordination by keeping a
+list of keys, each in one of three lifecycle states:
+
+* ``active`` — signs every new message and verifies existing ones. Exactly
+  one key must be active.
+* ``accepted`` — verification-only key for messages already sitting in the
+  queue. An optional ``valid_until`` deadline (a ``datetime`` or unix
+  timestamp) limits how long the grace period lasts; afterwards the key is
+  treated as retired.
+* ``retired`` — kept so its signatures can still be recognized and reported
+  in error messages, but never trusted.
+
+A zero-downtime rotation therefore takes two configuration deploys:
+
+.. code-block:: python
+
+    import datetime
+    from huey import RedisHuey
+    from huey.serializer import RotatingSignedSerializer
+
+    # Deploy 1: introduce the new key as active, keep the old one accepted
+    # long enough for in-flight tasks to drain.
+    serializer = RotatingSignedSerializer(keys=[
+        {'key_id': 'k2026', 'secret': 'new-secret', 'state': 'active'},
+        {'key_id': 'k2025', 'secret': 'old-secret', 'state': 'accepted',
+         'valid_until': datetime.datetime(2026, 12, 31)},
+        {'key_id': 'k2024', 'secret': 'ancient-secret',
+         'state': 'retired'},
+    ])
+    huey = RedisHuey('my-app', serializer=serializer)
+
+Once the grace window has passed and the old key is no longer needed, deploy
+again and move it to ``retired`` (or remove it). Messages that still carry a
+retired or expired signature raise ``ValueError`` when a worker reads them;
+the consumer logs the failure as an "Error reading from queue" and continues
+with the next message.
+
+The serializer accepts a ``time_func`` callable returning a unix timestamp,
+which lets tests and controlled environments drive the acceptance window
+with a fake clock instead of real wall-clock time. The wire format is
+unchanged from :py:class:`SignedSerializer`, so a single-key rotating
+serializer can verify messages produced with an equivalent ``secret``.
+
 
 .. _recipe-exponential-backoff:
 

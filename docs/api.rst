@@ -2267,6 +2267,63 @@ Serializer
     Both the application and the consumer must use the same ``secret`` and
     ``salt``.
 
+.. py:class:: SigningKey(key_id, secret, state='accepted', valid_until=None, salt='huey')
+
+    :param str key_id: unique identifier for the key, used in logs and
+        :py:meth:`RotatingSignedSerializer.key_state` lookups.
+    :param str secret: secret value mixed with the salt to derive the key.
+    :param str state: one of ``KEY_ACTIVE``, ``KEY_ACCEPTED`` or
+        ``KEY_RETIRED``.
+    :param valid_until: optional deadline for an ``accepted`` key, given as a
+        ``datetime`` or a unix timestamp. Once the deadline passes the key is
+        treated as retired even though its configured state is unchanged.
+    :param str salt: salt combined with the secret.
+
+    A single HMAC key together with its lifecycle state. ``active`` keys sign
+    new messages, ``accepted`` keys only verify within their optional window,
+    and ``retired`` keys are never trusted.
+
+.. py:class:: RotatingSignedSerializer(keys, salt='huey', time_func=None, **kwargs)
+
+    :param keys: iterable of :py:class:`SigningKey` instances or dicts with
+        the same fields. Exactly one key must have the ``active`` state and
+        all ``key_id`` values must be unique.
+    :param str salt: default salt for keys that do not specify their own.
+    :param callable time_func: injected clock returning a unix timestamp (or a
+        ``datetime``), used to evaluate the ``accepted`` key acceptance
+        window. Defaults to the system clock.
+    :param kwargs: additional keyword arguments passed to the base
+        :py:class:`Serializer` (e.g. ``compression``, ``use_zlib``).
+
+    A :py:class:`SignedSerializer` subclass that supports zero-downtime secret
+    rotation. New messages are signed with the single active key while
+    verification accepts messages from any non-expired ``accepted`` key.
+    Signatures matching a retired or expired key raise ``ValueError`` naming
+    the offending ``key_id``.
+
+    .. code-block:: python
+
+        serializer = RotatingSignedSerializer(keys=[
+            SigningKey('k2026', 'new-secret', KEY_ACTIVE),
+            SigningKey('k2025', 'old-secret', KEY_ACCEPTED,
+                       valid_until=datetime.datetime(2026, 12, 31)),
+            SigningKey('k2024', 'ancient-secret', KEY_RETIRED),
+        ], time_func=lambda: time.time())
+
+    The wire format is identical to :py:class:`SignedSerializer`, so a
+    single-key rotating serializer interoperates with messages signed with a
+    matching ``secret`` and ``salt``.
+
+    .. py:method:: key_state(key_id=None)
+
+        Returns the effective state (``active``, ``accepted`` or ``retired``)
+        of the given key, accounting for the acceptance window. Defaults to
+        the active key.
+
+    .. py:method:: get_key(key_id)
+
+        Returns the :py:class:`SigningKey` registered with ``key_id``.
+
 .. _exceptions:
 
 Exceptions
