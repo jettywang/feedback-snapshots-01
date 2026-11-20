@@ -1,6 +1,7 @@
 """Tests for pika.heartbeat."""
 
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 import pika.exceptions
@@ -202,3 +203,203 @@ class HeartbeatTests(unittest.TestCase):
         self.mock_conn.bytes_received = 256
         self.obj._update_counters()
         self.assertEqual(self.obj._bytes_received, 256)
+
+
+class ControllableClock:
+    """Deterministic stand-in for an adapter's `call_later` / `remove_timeout` pair."""
+
+    def __init__(self):
+        self.now = 0.0
+        self._timers = []
+
+    def call_later(self, delay, callback):
+        timer = SimpleNamespace(deadline=self.now + delay,
+                                callback=callback,
+                                cancelled=False)
+        self._timers.append(timer)
+        return timer
+
+    def remove_timeout(self, handle):
+        handle.cancelled = True
+
+    def advance(self, seconds):
+        target = self.now + seconds
+        for _ in range(1000):
+            due = [
+                timer for timer in self._timers
+                if not timer.cancelled and timer.deadline <= target
+            ]
+            if not due:
+                break
+            timer = min(due, key=lambda item: item.deadline)
+            self._timers.remove(timer)
+            self.now = max(self.now, timer.deadline)
+            timer.callback()
+        self.now = target
+
+    def fire(self, timer):
+        """Deliver a timer callback that was already dispatched when it was cancelled."""
+        timer.cancelled = True
+        timer.callback()
+
+    @property
+    def pending(self):
+        return [timer for timer in self._timers if not timer.cancelled]
+
+
+class FakeConnection:
+    """The `pika.Connection` surface `HeartbeatChecker` touches."""
+
+    def __init__(self, clock, bytes_received=100):
+        self.clock = clock
+        self.bytes_received = bytes_received
+        self.params = SimpleNamespace(host='broker.local', port=5672)
+        self.frames_sent = []
+        self.terminated = []
+
+    def _adapter_call_later(self, delay, callback):
+        return self.clock.call_later(delay, callback)
+
+    def _adapter_remove_timeout(self, handle):
+        self.clock.remove_timeout(handle)
+
+    def _send_frame(self, frame_value):
+        self.frames_sent.append(frame_value)
+
+    def _terminate_stream(self, error):
+        self.terminated.append(error)
+
+
+class HeartbeatLifecycleTests(unittest.TestCase):
+    """Timer ownership across healthy traffic, stream loss, stop and late callbacks."""
+
+    INTERVAL = 10
+    CHECK_INTERVAL = INTERVAL + 5
+
+    def setUp(self):
+        self.clock = ControllableClock()
+        self.connection = FakeConnection(self.clock)
+        self.checker = heartbeat.HeartbeatChecker(self.connection,
+                                                  self.INTERVAL)
+
+    def _deliver_heartbeat(self):
+        """Model a heartbeat frame arriving on the wire."""
+        self.connection.bytes_received += 1
+        self.checker.received()
+
+    def test_active_stream_survives_repeated_check_intervals(self):
+        for _ in range(4):
+            self.connection.bytes_received += 64
+            self.clock.advance(self.CHECK_INTERVAL)
+
+        self.assertEqual([], self.connection.terminated)
+        self.assertEqual(2, len(self.clock.pending))
+
+    def test_idle_connection_with_heartbeats_survives(self):
+        for _ in range(4):
+            self._deliver_heartbeat()
+            self.clock.advance(self.CHECK_INTERVAL)
+
+        self.assertEqual([], self.connection.terminated)
+        self.assertEqual(2, len(self.clock.pending))
+        self.assertEqual(4, self.checker._heartbeat_frames_received)
+
+    def test_lost_connection_times_out_once_and_releases_timers(self):
+        self.clock.advance(self.CHECK_INTERVAL)
+
+        self.assertEqual(1, len(self.connection.terminated))
+        self.assertIsInstance(self.connection.terminated[0],
+                              pika.exceptions.AMQPHeartbeatTimeout)
+        self.assertEqual([], self.clock.pending)
+        self.assertIsNone(self.checker._send_timer)
+        self.assertIsNone(self.checker._check_timer)
+
+        self.clock.advance(self.CHECK_INTERVAL * 3)
+        self.assertEqual(1, len(self.connection.terminated))
+
+    def test_traffic_that_stops_midway_times_out_on_the_next_check(self):
+        self.connection.bytes_received += 64
+        self.clock.advance(self.CHECK_INTERVAL)
+        self.assertEqual([], self.connection.terminated)
+
+        self.clock.advance(self.CHECK_INTERVAL)
+        self.assertEqual(1, len(self.connection.terminated))
+        self.assertEqual([], self.clock.pending)
+
+    def test_stop_releases_both_timers_and_logs_a_graceful_close(self):
+        with self.assertLogs('pika.heartbeat', level='INFO') as logs:
+            self.checker.stop()
+
+        self.assertTrue(any(
+            'connection closed' in line for line in logs.output))
+        self.assertEqual([], self.clock.pending)
+        self.assertEqual([], self.connection.terminated)
+
+    def test_timeout_logs_as_a_real_timeout_not_a_graceful_close(self):
+        with self.assertLogs('pika.heartbeat', level='INFO') as logs:
+            self.clock.advance(self.CHECK_INTERVAL)
+
+        self.assertTrue(
+            any('Connection is idle' in line for line in logs.output))
+        self.assertFalse(
+            any('connection closed' in line for line in logs.output))
+
+    def test_late_callbacks_after_stop_do_not_send_rearm_or_terminate(self):
+        send_timer = self.checker._send_timer
+        check_timer = self.checker._check_timer
+        self.checker.stop()
+        sent_before = len(self.connection.frames_sent)
+
+        self.clock.fire(send_timer)
+        self.clock.fire(check_timer)
+        self.checker.received()
+
+        self.assertEqual(sent_before, len(self.connection.frames_sent))
+        self.assertEqual([], self.connection.terminated)
+        self.assertEqual([], self.clock.pending)
+        self.assertEqual(0, self.checker._heartbeat_frames_received)
+
+    def test_the_old_checker_is_reaped_without_touching_a_new_connection(self):
+        old = self.connection
+        old_checker = self.checker
+        old_timers = (old_checker._send_timer, old_checker._check_timer)
+
+        new = FakeConnection(self.clock)
+        new_checker = heartbeat.HeartbeatChecker(new, self.INTERVAL)
+
+        old_checker.stop()
+        self.clock.fire(old_timers[0])
+        self.clock.fire(old_timers[1])
+
+        for _ in range(3):
+            new.bytes_received += 1
+            new_checker.received()
+            self.clock.advance(self.CHECK_INTERVAL)
+
+        self.assertEqual([], old.terminated)
+        self.assertEqual([], new.terminated)
+        self.assertEqual([], old.frames_sent)
+        self.assertEqual(2, len(self.clock.pending))
+
+    def test_retiring_an_old_connection_leaves_a_live_new_connection_alone(
+            self):
+        old = self.connection
+        old_checker = self.checker
+
+        new = FakeConnection(self.clock)
+        new_checker = heartbeat.HeartbeatChecker(new, self.INTERVAL)
+
+        new.bytes_received += 1
+        new_checker.received()
+        self.clock.advance(self.CHECK_INTERVAL)
+
+        self.assertEqual(1, len(old.terminated))
+        self.assertEqual([], new.terminated)
+        old_checker.stop()
+
+        new.bytes_received += 1
+        new_checker.received()
+        self.clock.advance(self.CHECK_INTERVAL)
+
+        self.assertEqual([], new.terminated)
+        self.assertEqual(2, len(self.clock.pending))

@@ -79,6 +79,7 @@ class HeartbeatChecker:
         self._heartbeat_frames_sent = 0
         self._idle_byte_intervals = 0
 
+        self._stopped = False
         self._send_timer: object | None = None
         self._check_timer: object | None = None
         self._start_send_timer()
@@ -105,11 +106,17 @@ class HeartbeatChecker:
 
     def received(self) -> None:
         """Called when a heartbeat is received."""
+        if self._stopped:
+            LOGGER.debug('Ignoring heartbeat received by a stopped checker')
+            return
         LOGGER.debug('Received heartbeat frame')
         self._heartbeat_frames_received += 1
 
     def _send_heartbeat(self) -> None:
         """Invoked by a timer to send a heartbeat when we need to."""
+        if self._stopped:
+            LOGGER.debug('Ignoring send callback for a stopped checker')
+            return
         LOGGER.debug('Sending heartbeat frame')
         self._send_heartbeat_frame()
         self._start_send_timer()
@@ -121,6 +128,10 @@ class HeartbeatChecker:
         Checks to see if we've missed any heartbeats and disconnect our connection if it's been idle
         too long.
         """
+        if self._stopped:
+            LOGGER.debug('Ignoring check callback for a stopped checker')
+            return
+
         if self._has_received_data:
             self._idle_byte_intervals = 0
         else:
@@ -140,6 +151,15 @@ class HeartbeatChecker:
 
     def stop(self) -> None:
         """Stop the heartbeat checker."""
+        if self._stopped:
+            LOGGER.debug('Heartbeat checker already stopped')
+            return
+        self._stopped = True
+        LOGGER.info('Stopping heartbeat checker: connection closed')
+        self._remove_timers()
+
+    def _remove_timers(self) -> None:
+        """Cancel this checker's timers so a stopped checker cannot rearm or reuse them."""
         if self._send_timer:
             LOGGER.debug('Removing timer for next heartbeat send interval')
             self._connection._adapter_remove_timeout(self._send_timer)
@@ -151,6 +171,13 @@ class HeartbeatChecker:
 
     def _close_connection(self) -> None:
         """Close the connection with the AMQP Connection-Forced value."""
+        if self._stopped:
+            LOGGER.debug('Ignoring timeout for a stopped checker')
+            return
+        # One timeout owns this connection's teardown. Remove both timers first so a late send
+        # callback cannot rearm them while the stream is being torn down.
+        self._stopped = True
+        self._remove_timers()
         LOGGER.info('Connection is idle, %i stale byte intervals',
                     self._idle_byte_intervals)
         text = HeartbeatChecker._STALE_CONNECTION % self._timeout
