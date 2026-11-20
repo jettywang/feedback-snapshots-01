@@ -24,6 +24,8 @@ module GraphQL
         # - `queries` (`Array<GraphQL::Query, Hash>`)
         # - `context` (`Hash`)
         # - `max_complexity` (`Integer, nil`)
+        # - `max_tenant_complexity` (`Integer, nil`)
+        # - `tenant_complexity_isolation` (`Boolean`)
         #
         # **Returns**
         #
@@ -32,7 +34,7 @@ module GraphQL
         # :call-seq:
         #   run_all(GraphQL::Schema schema, query_options, Hash context:, Integer | nil max_complexity:) -> Array[GraphQL::Query::Result]
         #: (singleton(GraphQL::Schema) schema, Array[untyped] query_options, ?context: Hash[Symbol, untyped], ?max_complexity: Integer?) -> Array[GraphQL::Query::Result]
-        def run_all(schema, query_options, context: {}, max_complexity: schema.max_complexity)
+        def run_all(schema, query_options, context: {}, max_complexity: schema.max_complexity, max_tenant_complexity: schema.max_tenant_complexity, tenant_complexity_isolation: schema.tenant_complexity_isolation)
           previous_multiplex = Fiber[:__graphql_current_multiplex]
           queries = query_options.map do |opts|
             query = case opts
@@ -48,7 +50,7 @@ module GraphQL
 
           return GraphQL::EmptyObjects::EMPTY_ARRAY if queries.empty?
 
-          multiplex = Execution::Multiplex.new(schema: schema, queries: queries, context: context, max_complexity: max_complexity)
+          multiplex = Execution::Multiplex.new(schema: schema, queries: queries, context: context, max_complexity: max_complexity, max_tenant_complexity: max_tenant_complexity, tenant_complexity_isolation: tenant_complexity_isolation)
           trace = multiplex.current_trace
           Fiber[:__graphql_current_multiplex] = multiplex
           trace.execute_multiplex(multiplex: multiplex) do
@@ -57,6 +59,9 @@ module GraphQL
             multiplex_analyzers = schema.multiplex_analyzers
             if multiplex.max_complexity
               multiplex_analyzers += [GraphQL::Analysis::MaxQueryComplexity]
+            end
+            if multiplex.max_tenant_complexity
+              multiplex_analyzers += [GraphQL::Analysis::MaxTenantComplexity]
             end
 
             trace.begin_analyze_multiplex(multiplex, multiplex_analyzers)

@@ -6,6 +6,7 @@ require "graphql/analysis/analyzer"
 require "graphql/analysis/field_usage"
 require "graphql/analysis/query_complexity"
 require "graphql/analysis/max_query_complexity"
+require "graphql/analysis/max_tenant_complexity"
 require "graphql/analysis/query_depth"
 require "graphql/analysis/max_query_depth"
 module GraphQL
@@ -53,8 +54,21 @@ module GraphQL
 
         multiplex_analyzers.map!(&:result)
         multiplex_errors = analysis_errors(EmptyObjects::EMPTY_ARRAY, multiplex_analyzers)
+        # Errors with a `query` target are routed to that query only;
+        # all other multiplex errors apply to every query in the multiplex.
+        query_scoped_errors = nil
+        multiplex_errors = multiplex_errors.reject do |err|
+          if err.is_a?(GraphQL::AnalysisError) && !err.query.nil?
+            query_scoped_errors ||= Hash.new { |h, k| h[k] = [] }
+            query_scoped_errors[err.query] << err
+            true
+          else
+            false
+          end
+        end
         multiplex.queries.each_with_index do |query, idx|
-          query.analysis_errors = analysis_errors(multiplex_errors, query_results[idx])
+          scoped_errors = query_scoped_errors ? multiplex_errors + query_scoped_errors[query] : multiplex_errors
+          query.analysis_errors = analysis_errors(scoped_errors, query_results[idx])
         end
         multiplex_analyzers
       end

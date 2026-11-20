@@ -1199,6 +1199,52 @@ module GraphQL
         end
       end
 
+      attr_writer :max_tenant_complexity
+
+      # The maximum total complexity that queries belonging to a single tenant
+      # may use within one multiplex (a batch of queries). Tenants are identified
+      # by [.tenant_complexity_key_for](rdoc-ref:.tenant_complexity_key_for).
+      # May be overridden per run with `Schema.multiplex(..., max_tenant_complexity: ...)`.
+      def max_tenant_complexity(new_max_tenant_complexity = NOT_CONFIGURED)
+        if !NOT_CONFIGURED.equal?(new_max_tenant_complexity)
+          @max_tenant_complexity = new_max_tenant_complexity
+        elsif defined?(@max_tenant_complexity)
+          @max_tenant_complexity
+        else
+          find_inherited_value(:max_tenant_complexity)
+        end
+      end
+
+      # When `true`, queries which exceed their tenant's complexity budget are
+      # rejected independently, so compliant queries in the same multiplex still
+      # run. When `false` (default), any tenant budget violation rejects the
+      # whole multiplex. May be overridden per run with
+      # `Schema.multiplex(..., tenant_complexity_isolation: ...)`.
+      def tenant_complexity_isolation(new_isolation = NOT_CONFIGURED)
+        if !NOT_CONFIGURED.equal?(new_isolation)
+          @tenant_complexity_isolation = new_isolation
+        elsif defined?(@tenant_complexity_isolation)
+          @tenant_complexity_isolation
+        else
+          find_inherited_value(:tenant_complexity_isolation, false)
+        end
+      end
+
+      # Determines which tenant a query's complexity is attributed to when
+      # `max_tenant_complexity` is used. Override this to identify tenants
+      # another way, for example from the current user.
+      #
+      # **Parameters**
+      #
+      # - `query` (`GraphQL::Query`) — The query being analyzed
+      #
+      # **Returns**
+      #
+      # - `Any` — The tenant key for this query; queries with the same key share a complexity budget
+      def tenant_complexity_key_for(query)
+        query.context[:tenant_id]
+      end
+
       attr_writer :analysis_engine
 
       def analysis_engine
@@ -2134,6 +2180,8 @@ module GraphQL
       #
       # - `kwargs.:context` (`Hash`) — ({}) Multiplex-level context
       # - `kwargs.:max_complexity` (`nil, Integer`) — (nil)
+      # - `kwargs.:max_tenant_complexity` (`nil, Integer`) — (nil)
+      # - `kwargs.:tenant_complexity_isolation` (`Boolean`) — (false)
       #
       # **Returns**
       #

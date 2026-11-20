@@ -92,6 +92,25 @@ Using `nil` will disable the validation:
 MySchema.execute(query_string, max_complexity: nil)
 ```
 
+#### Tenant and batch limits
+
+When several queries are executed together as a batch (with `MySchema.multiplex`), you can limit complexity per _tenant_ alongside the whole-batch total (`max_complexity`):
+
+```ruby
+class MySchema < GraphQL::Schema
+  # Each tenant may use at most 80 complexity points per batch:
+  max_tenant_complexity 80
+end
+```
+
+By default, queries are attributed to tenants by `query.context[:tenant_id]`; override `Schema.tenant_complexity_key_for(query)` to identify tenants another way. When any tenant exceeds the budget, the whole batch is rejected. To let compliant queries run independently instead, opt in per run (or set `tenant_complexity_isolation true` on the schema):
+
+```ruby
+MySchema.multiplex(queries, max_tenant_complexity: 80, tenant_complexity_isolation: true)
+```
+
+With isolation enabled, queries are admitted in batch order until a tenant's budget is exhausted; only the exceeding queries are rejected, with an error scoped to those queries.
+
 To get a feeling for complexity of queries in your system, you can extend [GraphQL::Analysis::QueryComplexity](rdoc-ref:GraphQL::Analysis::QueryComplexity). Hook it up to log out values from each query:
 
 ```ruby

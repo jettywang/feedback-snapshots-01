@@ -26,9 +26,9 @@ module GraphQL
     class Multiplex # :nodoc:
       include Tracing::Traceable
 
-      attr_reader :context, :queries, :schema, :max_complexity, :dataloader, :current_trace
+      attr_reader :context, :queries, :schema, :max_complexity, :max_tenant_complexity, :tenant_complexity_isolation, :dataloader, :current_trace
 
-      def initialize(schema:, queries:, context:, max_complexity:)
+      def initialize(schema:, queries:, context:, max_complexity:, max_tenant_complexity: nil, tenant_complexity_isolation: false)
         @schema = schema
         @queries = queries
         @queries.each { |q| q.multiplex = self }
@@ -36,6 +36,8 @@ module GraphQL
         @dataloader = @context[:dataloader] ||= @schema.dataloader_class.new
         @tracers = schema.tracers + (context[:tracers] || EmptyObjects::EMPTY_ARRAY)
         @max_complexity = max_complexity
+        @max_tenant_complexity = max_tenant_complexity
+        @tenant_complexity_isolation = tenant_complexity_isolation
         @current_trace = context[:trace] ||= schema.new_trace(multiplex: self)
         @logger = nil
       end
