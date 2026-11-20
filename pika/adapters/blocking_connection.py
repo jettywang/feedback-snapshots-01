@@ -274,6 +274,79 @@ class _TimerEvt:
         self._callback()
 
 
+class PendingControlAction(NamedTuple):
+    """Snapshot of a control-class callback still waiting to be dispatched; see
+    `BlockingConnection.pending_control_actions`.
+    """
+
+    label: str | None
+    deadline: float | None
+
+
+class ExpiredControlAction(NamedTuple):
+    """Diagnostic record of a control-class callback whose expiry boundary
+    passed before it could be dispatched; see
+    `BlockingConnection.expired_control_actions`.
+    """
+
+    label: str | None
+    deadline: float
+    overdue_by: float
+
+
+class _ControlEvt:
+    """Represents a control-class callback registered via
+    `BlockingConnection.add_control_callback`
+    """
+
+    __slots__ = ('_callback', '_deadline', '_label')
+
+    def __init__(self, callback: Callable[[], None], deadline: float | None,
+                 label: str | None) -> None:
+        """
+        :param callback: see callback in `BlockingConnection.add_control_callback`
+        :param deadline: absolute monotonic time after which the callback must
+            not run, or None for no expiry
+        :param label: see label in `BlockingConnection.add_control_callback`
+        """
+        self._callback = callback
+        self._deadline = deadline
+        self._label = label
+
+    @override
+    def __repr__(self) -> str:
+        return (f'<{self.__class__.__name__} label={self._label!r} '
+                f'deadline={self._deadline!r} callback={self._callback}>')
+
+    def is_expired(self, now: float) -> bool:
+        """
+        :param now: current monotonic time
+        :returns: True if the expiry boundary has been reached
+        """
+        return self._deadline is not None and now >= self._deadline
+
+    def pending_info(self) -> PendingControlAction:
+        """:returns: snapshot for `BlockingConnection.pending_control_actions`"""
+        return PendingControlAction(label=self._label, deadline=self._deadline)
+
+    def expired_info(self, now: float) -> ExpiredControlAction:
+        """
+        :param now: current monotonic time
+        :returns: overdue-exit record for
+            `BlockingConnection.expired_control_actions`
+        """
+        assert self._deadline is not None
+        return ExpiredControlAction(label=self._label,
+                                    deadline=self._deadline,
+                                    overdue_by=now - self._deadline)
+
+    def dispatch(self) -> None:
+        """Dispatch the user's callback method."""
+        LOGGER.debug('_ControlEvt.dispatch: invoking callback=%r',
+                     self._callback)
+        self._callback()
+
+
 class _ConnectionBlockedUnblockedEvtBase(Generic[T]):
     """Base class for `_ConnectionBlockedEvt` and `_ConnectionUnblockedEvt`"""
 
@@ -331,6 +404,7 @@ class BlockingConnection:
     `BlockingChannel.queue_declare` to complete), dispatching them synchronously
     once nesting returns to the desired context. This concerns all callbacks,
     such as those registered via `BlockingConnection.call_later`,
+    `BlockingConnection.add_control_callback`,
     `BlockingConnection.add_on_connection_blocked_callback`,
     `BlockingConnection.add_on_connection_unblocked_callback`,
     `BlockingChannel.basic_consume`, etc.
@@ -408,6 +482,15 @@ class BlockingConnection:
         # _ConnectionBlockedEvt, _ConnectionUnblockedEvt
         self._ready_events: deque[Any] = deque()
 
+        # Control-class events that are ready for dispatch: _ControlEvt.
+        # Dispatched ahead of `_ready_events`; see `add_control_callback`.
+        self._ready_control_events: deque[_ControlEvt] = deque()
+
+        # Diagnostic record of control-class callbacks dropped because their
+        # expiry boundary passed before dispatch; survives `_cleanup` so it
+        # can be inspected after the connection is closed.
+        self._expired_control_actions: list[ExpiredControlAction] = []
+
         # Channel numbers of channels that are requesting a call to their
         # BlockingChannel._dispatch_events method; See
         # `_request_channel_dispatch`
@@ -456,6 +539,7 @@ class BlockingConnection:
             if getattr(self, '_impl', None) is not None:
                 self._impl.ioloop.close()
             self._ready_events.clear()
+            self._ready_control_events.clear()
             self._closed_result.reset()
 
     @contextlib.contextmanager
@@ -697,14 +781,35 @@ class BlockingConnection:
             _ConnectionUnblockedEvt(user_callback, method_frame))
 
     def _dispatch_connection_events(self) -> None:
-        """Dispatch ready connection events."""
-        if not self._ready_events:
+        """Dispatch ready connection events, control-class events first."""
+        if not self._ready_control_events and not self._ready_events:
             return
 
         with self._acquire_event_dispatch() as dispatch_acquired:
             if not dispatch_acquired:
                 # Nested dispatch or dispatch blocked higher in call stack
                 return
+
+            # Control-class events jump the queue so that a long blocked
+            # window cannot hold a shutdown signal behind business events.
+            # Limit dispatch to the number of currently ready events to avoid
+            # getting stuck in this loop
+            now = pika._utils.time_now()
+            for _ in range(len(self._ready_control_events)):
+                try:
+                    control_evt = self._ready_control_events.popleft()
+                except IndexError:
+                    break
+
+                if control_evt.is_expired(now):
+                    expired = control_evt.expired_info(now)
+                    self._expired_control_actions.append(expired)
+                    LOGGER.warning(
+                        'Control callback exited overdue without running: %r',
+                        expired)
+                    continue
+
+                control_evt.dispatch()
 
             # Limit dispatch to the number of currently ready events to avoid
             # getting stuck in this loop
@@ -804,6 +909,73 @@ class BlockingConnection:
         evt.timer_id = timer_id
 
         return timer_id
+
+    def add_control_callback(self,
+                             callback: Callable[[], None],
+                             expires_in: float | None = None,
+                             label: str | None = None) -> None:
+        """Register a control-class callback, the category for actions such as
+        a safe-shutdown signal that must not wait behind queued business
+        events (timers, blocked/unblocked notifications) when the broker
+        applies prolonged back-pressure.
+
+        The contract:
+
+        - Control callbacks dispatch ahead of all business events queued in
+          the same dispatch pass, in registration order among themselves.
+        - Each callback carries its own expiry boundary: *expires_in* seconds
+          from registration. A callback whose boundary passes before dispatch
+          does not run; it is recorded in `expired_control_actions` as an
+          overdue exit instead.
+        - Like `call_later`, callbacks dispatch only in the scope of
+          specially-designated methods: see
+          `BlockingConnection.process_data_events()` and
+          `BlockingChannel.start_consuming()`. Like `call_later`, this method
+          is not thread-safe; call it from the connection's thread.
+
+        While the connection is blocked, `pending_control_actions` and
+        `pending_business_actions` report what is still waiting in each
+        category.
+
+        :param callback: The callback method with the signature callback()
+        :param expires_in: seconds the callback stays valid; None means it
+            never expires
+        :param label: optional name reported by `pending_control_actions` and
+            `expired_control_actions` to identify the action
+        :raises ValueError: if *expires_in* is negative
+        """
+        validators.require_callback(callback)
+        if expires_in is not None and expires_in < 0:
+            raise ValueError(
+                f'expires_in must be non-negative, but got {expires_in!r}')
+
+        deadline = (None if expires_in is None else pika._utils.time_now() +
+                    expires_in)
+        self._ready_control_events.append(_ControlEvt(callback, deadline,
+                                                      label))
+
+    @property
+    def pending_control_actions(self) -> tuple[PendingControlAction, ...]:
+        """Snapshots of the control-class callbacks still waiting to be
+        dispatched, in dispatch order. Empty when nothing is queued.
+        """
+        return tuple(evt.pending_info() for evt in self._ready_control_events)
+
+    @property
+    def pending_business_actions(self) -> tuple[str, ...]:
+        """Type names of the business events still waiting to be dispatched,
+        in dispatch order. Empty when nothing is queued.
+        """
+        return tuple(type(evt).__name__ for evt in self._ready_events)
+
+    @property
+    def expired_control_actions(self) -> tuple[ExpiredControlAction, ...]:
+        """Diagnostic record of control-class callbacks that exited overdue:
+        each entry names the action, its deadline, and by how much the
+        deadline had passed when the dispatch pass reached it. The record is
+        kept after the connection closes so it can be inspected post-mortem.
+        """
+        return tuple(self._expired_control_actions)
 
     def add_callback_threadsafe(self, callback: Callable[..., None]) -> None:
         """
@@ -940,9 +1112,9 @@ class BlockingConnection:
         with self._acquire_event_dispatch() as dispatch_acquired:
             # Check whether we can process pending events
             def common_terminator() -> bool:
-                return bool(
-                    dispatch_acquired and
-                    (self._channels_pending_dispatch or self._ready_events))
+                return bool(dispatch_acquired and
+                            (self._channels_pending_dispatch or
+                             self._ready_events or self._ready_control_events))
 
             if time_limit is None:
                 self._flush_output(common_terminator)
@@ -950,7 +1122,7 @@ class BlockingConnection:
                 with _IoloopTimerContext(time_limit, self._impl) as timer:
                     self._flush_output(timer.is_ready, common_terminator)
 
-        if self._ready_events:
+        if self._ready_events or self._ready_control_events:
             self._dispatch_connection_events()
 
         if self._channels_pending_dispatch:

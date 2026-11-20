@@ -534,3 +534,126 @@ class BlockingConnectionTests(unittest.TestCase):
             select_connection_class_mock)
         impl_mock.publisher_confirms = True
         self.assertIs(connection.publisher_confirms_supported, True)
+
+
+class FakeClock:
+    """Controllable stand-in for `pika._utils.time_now`."""
+
+    def __init__(self, now=1000.0):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
+class BlockingConnectionControlCallbackTests(unittest.TestCase):
+    """Tests for the control-class callback contract on BlockingConnection."""
+
+    @staticmethod
+    def _make_connection():
+        impl_mock = mock.Mock()
+        impl_mock.is_closed = False
+        with mock.patch.object(blocking_connection.BlockingConnection,
+                               '_create_connection',
+                               return_value=impl_mock):
+            return blocking_connection.BlockingConnection(None)
+
+    def test_control_callbacks_jump_business_queue_and_expire(self):
+        connection = self._make_connection()
+        clock = FakeClock()
+        dispatched = []
+
+        with mock.patch.object(pika._utils, 'time_now', clock):
+            # The broker is blocked, so business events and control
+            # callbacks pile up instead of dispatching.
+            connection._on_timer_ready(
+                blocking_connection._TimerEvt(
+                    callback=lambda: dispatched.append('business-1')))
+            connection.add_control_callback(
+                lambda: dispatched.append('shutdown'),
+                expires_in=30,
+                label='shutdown')
+            connection.add_control_callback(lambda: dispatched.append('stale'),
+                                            expires_in=5,
+                                            label='stale-probe')
+            connection._on_timer_ready(
+                blocking_connection._TimerEvt(
+                    callback=lambda: dispatched.append('business-2')))
+
+            # While blocked, the waiting control actions and business
+            # actions are visible as separate categories.
+            self.assertEqual(
+                [a.label for a in connection.pending_control_actions],
+                ['shutdown', 'stale-probe'])
+            self.assertEqual(list(connection.pending_business_actions),
+                             ['_TimerEvt', '_TimerEvt'])
+
+            # The clock crosses the stale-probe deadline and the moment the
+            # broker unblocks, but not the shutdown deadline.
+            clock.advance(10)
+
+            connection._dispatch_connection_events()
+
+        # The live control callback ran ahead of all business events; the
+        # overdue one did not run at all.
+        self.assertEqual(dispatched, ['shutdown', 'business-1', 'business-2'])
+        expired = connection.expired_control_actions
+        self.assertEqual(len(expired), 1)
+        self.assertEqual(expired[0].label, 'stale-probe')
+        self.assertEqual(expired[0].deadline, 1005.0)
+        self.assertEqual(expired[0].overdue_by, 5.0)
+        self.assertEqual(connection.pending_control_actions, ())
+        self.assertEqual(connection.pending_business_actions, ())
+
+    def test_control_callback_without_expiry_survives_any_delay(self):
+        connection = self._make_connection()
+        clock = FakeClock()
+        dispatched = []
+
+        with mock.patch.object(pika._utils, 'time_now', clock):
+            connection.add_control_callback(
+                lambda: dispatched.append('shutdown'), label='shutdown')
+            clock.advance(3600)
+            connection._dispatch_connection_events()
+
+        self.assertEqual(dispatched, ['shutdown'])
+        self.assertEqual(connection.expired_control_actions, ())
+
+    def test_expired_control_actions_survive_cleanup(self):
+        connection = self._make_connection()
+        clock = FakeClock()
+
+        with mock.patch.object(pika._utils, 'time_now', clock):
+            connection.add_control_callback(lambda: None,
+                                            expires_in=5,
+                                            label='stale-probe')
+            clock.advance(10)
+            connection._dispatch_connection_events()
+
+        connection._cleanup()
+        self.assertEqual([a.label for a in connection.expired_control_actions],
+                         ['stale-probe'])
+
+    def test_add_control_callback_validates_arguments(self):
+        connection = self._make_connection()
+
+        with self.assertRaises(TypeError):
+            connection.add_control_callback(None)
+        with self.assertRaises(ValueError):
+            connection.add_control_callback(lambda: None, expires_in=-1)
+
+        self.assertEqual(connection.pending_control_actions, ())
+
+    def test_process_data_events_dispatches_control_events(self):
+        connection = self._make_connection()
+        dispatched = []
+
+        connection.add_control_callback(lambda: dispatched.append('shutdown'),
+                                        label='shutdown')
+        with mock.patch.object(connection, '_flush_output'):
+            connection.process_data_events(time_limit=0)
+
+        self.assertEqual(dispatched, ['shutdown'])
