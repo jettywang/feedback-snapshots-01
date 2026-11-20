@@ -9,6 +9,15 @@ from hvac.api.secrets_engines.identity import Identity
 from hvac.api.secrets_engines.kv import Kv
 from hvac.api.secrets_engines.kv_v1 import KvV1
 from hvac.api.secrets_engines.kv_v2 import KvV2
+from hvac.api.secrets_engines.kv_v2_retention import (
+    KvV2RetentionAuditor,
+    MetadataAccessStatus,
+    RetentionPolicy,
+    RetentionReport,
+    UnverifiableReason,
+    VersionStatus,
+    audit_kv_v2_retention,
+)
 from hvac.api.secrets_engines.ldap import Ldap
 from hvac.api.secrets_engines.pki import Pki
 from hvac.api.secrets_engines.rabbitmq import RabbitMQ
@@ -26,6 +35,13 @@ __all__ = (
     "Kv",
     "KvV1",
     "KvV2",
+    "KvV2RetentionAuditor",
+    "MetadataAccessStatus",
+    "RetentionPolicy",
+    "RetentionReport",
+    "UnverifiableReason",
+    "VersionStatus",
+    "audit_kv_v2_retention",
     "Ldap",
     "Pki",
     "Transform",

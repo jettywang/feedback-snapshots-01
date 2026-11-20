@@ -15,5 +15,6 @@ Secrets Engines
    kv
    kv_v1
    kv_v2
+   kv_v2_retention
    transform
    transit
