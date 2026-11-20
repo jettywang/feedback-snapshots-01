@@ -157,3 +157,38 @@ hvac does not currently offer direct support of requests to a `Vault agent proce
 		session=socket_session,
 	)
 	print(client.secrets.kv.read_secret_version(path='some-secret'))
+
+Audit Receipts
+--------------
+
+Jobs that must prove they only changed approved mount points can opt in to
+client-side audit receipts. :meth:`Client.audit() <hvac.v1.Client.audit>`
+returns a context manager that records one
+:class:`AuditReceipt <hvac.audit.AuditReceipt>` per Vault call made inside the
+``with`` block. Each receipt carries the caller-supplied job id and Vault's
+response ``request_id``, which can be reconciled against the Vault server audit
+log. Receipts never contain request or response bodies, headers, tokens or
+other secrets, and state that cannot be observed (for example the status code
+of a transport failure) is explicitly marked ``UNOBSERVED``. Calls keep their
+normal return type; receipts are collected alongside them.
+
+.. code:: python
+
+	import hvac
+
+	client = hvac.Client()
+
+	with client.audit(job_id="JOB-42") as audit:
+		# The return value is exactly what the method normally returns.
+		client.secrets.kv.v2.create_or_update_secret(
+			path="approved-mount/example",
+			secret={"password": "..."},
+		)
+
+	for receipt in audit.receipts:
+		# Reconcile receipt.request_id with the Vault server audit log.
+		print(receipt.to_dict())
+
+The possible ``outcome`` values are ``success``, ``permission_denied``,
+``http_error`` and ``transport_error``; see :mod:`hvac.audit` for the full
+list of constants and receipt fields.

@@ -3,7 +3,7 @@ import typing as t
 
 from warnings import warn
 
-from hvac import adapters, api, exceptions, utils
+from hvac import adapters, api, audit, exceptions, utils
 from hvac.constants.client import (
     DEFAULT_URL,
     DEPRECATED_PROPERTIES,
@@ -550,3 +550,29 @@ class Client:
         :rtype: requests.Response
         """
         return self._adapter.login(url=url, use_token=use_token, **kwargs)
+
+    def audit(self, job_id=None):
+        """Collect secret-free audit receipts for calls made within the context.
+
+        The returned context manager instruments this client's adapter session,
+        so every Vault call made inside the ``with`` block produces an
+        :class:`hvac.audit.AuditReceipt` containing reconciliation metadata
+        (such as the supplied ``job_id`` and Vault's response ``request_id``).
+        Calls keep their normal return type; receipts are collected alongside
+        them. No request/response bodies, headers, tokens or other secrets are
+        stored, and unobservable state (e.g. the status code of a transport
+        failure) is explicitly marked as ``UNOBSERVED``.
+
+        :param job_id: Optional caller-supplied job/correlation id attached to
+            every collected receipt.
+        :type job_id: str | None
+        :return: A context manager exposing the collected receipts.
+        :rtype: hvac.audit.AuditRecorder
+
+        Usage::
+
+            with client.audit(job_id="JOB-42") as record:
+                client.write("secret/data/foo", secret={"key": "value"})
+            record.receipts  # list of AuditReceipt
+        """
+        return audit.AuditRecorder(adapter=self._adapter, job_id=job_id)

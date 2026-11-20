@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### 🚀 Features
+
+- Add optional, opt-in audit receipts via `Client.audit(job_id=...)`. The context manager collects secret-free `hvac.audit.AuditReceipt` metadata (job id, method, path, mount point, status code, Vault `request_id`, outcome) for reconciliation against the Vault server audit log. Unobservable state is explicitly marked `UNOBSERVED`, and calls retain their normal return type.
+
 ## 2.4.0
 
 ### 🚀 Features
