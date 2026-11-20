@@ -66,6 +66,8 @@ class ParametersTestsBase(unittest.TestCase):
                 kls.DEFAULT_LOCALE,
             'max_inbound_message_body_size':
                 kls.DEFAULT_MAX_INBOUND_MESSAGE_BODY_SIZE,
+            'max_inbound_pending_body_size':
+                kls.DEFAULT_MAX_INBOUND_PENDING_BODY_SIZE,
             'port':
                 kls.DEFAULT_PORT,
             'retry_delay':
@@ -316,6 +318,24 @@ class ParametersTests(ParametersTestsBase):
             with self.assertRaises(ValueError, msg=repr(bad_value)):
                 params.max_inbound_message_body_size = bad_value
 
+    def test_max_inbound_pending_body_size(self):
+        params = connection.Parameters()
+        self.assertIsNone(params.max_inbound_pending_body_size)
+
+        params.max_inbound_pending_body_size = 1
+        self.assertEqual(params.max_inbound_pending_body_size, 1)
+
+        params.max_inbound_pending_body_size = None
+        self.assertIsNone(params.max_inbound_pending_body_size)
+
+        for bad_type in (True, 1024.0, '1024'):
+            with self.assertRaises(TypeError, msg=repr(bad_type)):
+                params.max_inbound_pending_body_size = bad_type
+
+        for bad_value in (0, -1):
+            with self.assertRaises(ValueError, msg=repr(bad_value)):
+                params.max_inbound_pending_body_size = bad_value
+
     def test_heartbeat(self):
         params = connection.Parameters()
 
@@ -552,6 +572,7 @@ class ConnectionParametersTests(ParametersTestsBase):
             'host': 'https://www.test.com',
             'locale': 'en',
             'max_inbound_message_body_size': 1024,
+            'max_inbound_pending_body_size': 4096,
             'port': 5678,
             'retry_delay': 3,
             'socket_timeout': 100.5,
@@ -746,6 +767,13 @@ class URLParametersTests(ParametersTestsBase):
                     f'amqp://localhost/%2F?max_inbound_message_body_size={value}'
                 )
 
+    def test_bad_max_inbound_pending_body_size_raises_value_error(self):
+        for value in ('abc', '0', '-1'):
+            with self.assertRaises(ValueError, msg=value):
+                connection.URLParameters(
+                    f'amqp://localhost/%2F?max_inbound_pending_body_size={value}'
+                )
+
     def test_good_parameters(self):
         """Test for the different query stings checked by process url."""
         query_args = {
@@ -756,6 +784,7 @@ class URLParametersTests(ParametersTestsBase):
             'heartbeat': 7,
             'locale': 'en_UK',
             'max_inbound_message_body_size': 2048,
+            'max_inbound_pending_body_size': 4096,
             'retry_delay': 3,
             'socket_timeout': 100.5,
             'ssl_options': None,

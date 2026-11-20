@@ -53,9 +53,6 @@ class ConnectionTests(unittest.TestCase):
 
     def setUp(self):
 
-        class ChannelTemplate(channel.Channel):
-            channel_number = None
-
         with mock.patch.object(ConstructibleConnection,
                                '_adapter_connect_stream'):
             self.connection = ConstructibleConnection()
@@ -63,16 +60,25 @@ class ConnectionTests(unittest.TestCase):
                 connection.Connection.CONNECTION_OPEN)
             self.connection._opened = True
 
-        self.channel = mock.Mock(spec=ChannelTemplate)
-        self.channel.channel_number = 1
-        self.channel.is_open = True
-        self.channel.is_closing = False
-        self.channel.is_closed = False
-        self.connection._channels[self.channel.channel_number] = self.channel
+        self.channel = self._register_channel(1)
 
     def tearDown(self):
         del self.connection
         del self.channel
+
+    def _register_channel(self, channel_number):
+        """Add a mock channel to the connection and return it."""
+
+        class ChannelTemplate(channel.Channel):
+            channel_number = None
+
+        mock_channel = mock.Mock(spec=ChannelTemplate)
+        mock_channel.channel_number = channel_number
+        mock_channel.is_open = True
+        mock_channel.is_closing = False
+        mock_channel.is_closed = False
+        self.connection._channels[channel_number] = mock_channel
+        return mock_channel
 
     def test_constructor_does_not_mutate_caller_ssl_options(self):
         """Constructing a Connection must not mutate the caller's parameters."""
@@ -1173,6 +1179,99 @@ class ConnectionTests(unittest.TestCase):
         self.assertIsInstance(self.connection._error,
                               exceptions.FrameTooLargeError)
         self.assertIn('host=', repr(self.connection._error))
+
+    def test_pending_body_budget_names_the_message_that_exceeds_it(self):
+        self.connection.params.max_inbound_pending_body_size = 2048
+        second = self._register_channel(2)
+        heartbeat_checker = mock.Mock()
+        self.connection._heartbeat_checker = heartbeat_checker
+        deliver1 = frame.Method(
+            1, spec.Basic.Deliver('ctag', 1, exchange='',
+                                  routing_key='q')).marshal()
+        header1 = frame.Header(1, 1500, spec.BasicProperties()).marshal()
+        deliver2 = frame.Method(
+            2, spec.Basic.Deliver('ctag', 2, exchange='',
+                                  routing_key='q')).marshal()
+        header2 = frame.Header(2, 1000, spec.BasicProperties()).marshal()
+        heartbeat = frame.Heartbeat().marshal()
+
+        self._feed_with_real_terminate(deliver1 + header1 + deliver2 +
+                                       header2 + heartbeat)
+
+        error = self.connection._error
+        self.assertIsInstance(error,
+                              exceptions.PendingMessageBodiesTooLargeError)
+        self.assertIsInstance(error, exceptions.AMQPConnectionError)
+        self.assertEqual((2, 1000, 2500, 2048), error.args)
+        self.assertEqual(self.connection.params.host, error.host)
+        self.assertEqual(self.connection.params.port, error.port)
+        self.assertIn('channel 2', repr(error))
+        # Channel 1's message is in flight; channel 2's over-budget header
+        # never reached it.
+        self.assertEqual(2, self.channel._handle_content_frame.call_count)
+        self.assertEqual(1, second._handle_content_frame.call_count)
+        # Nothing after the over-budget header is decoded, now or later.
+        self._feed_with_real_terminate(heartbeat)
+        self.assertFalse(heartbeat_checker.received.called)
+
+    def test_completed_message_releases_its_pending_body_reservation(self):
+        self.connection.params.max_inbound_pending_body_size = 2048
+        second = self._register_channel(2)
+        header1 = frame.Header(1, 1500, spec.BasicProperties()).marshal()
+        body1a = frame.Body(1, b'x' * 1000).marshal()
+        body1b = frame.Body(1, b'y' * 500).marshal()
+        header2 = frame.Header(2, 1500, spec.BasicProperties()).marshal()
+
+        self._feed_with_real_terminate(header1 + body1a)
+        self.assertEqual({1: 500}, self.connection._pending_body_bytes)
+
+        self._feed_with_real_terminate(body1b + header2)
+
+        self.assertIsNone(self.connection._error)
+        self.assertEqual({2: 1500}, self.connection._pending_body_bytes)
+        self.assertEqual(1, second._handle_content_frame.call_count)
+
+    def test_closed_channel_releases_its_pending_body_reservation(self):
+        self.connection.params.max_inbound_pending_body_size = 2048
+        second = self._register_channel(2)
+        header1 = frame.Header(1, 1500, spec.BasicProperties()).marshal()
+
+        self._feed_with_real_terminate(header1)
+        self.assertEqual({1: 1500}, self.connection._pending_body_bytes)
+
+        self.connection._on_channel_cleanup(self.channel)
+        self.assertEqual({}, self.connection._pending_body_bytes)
+
+        header2 = frame.Header(2, 1500, spec.BasicProperties()).marshal()
+        self._feed_with_real_terminate(header2)
+
+        self.assertIsNone(self.connection._error)
+        self.assertEqual({2: 1500}, self.connection._pending_body_bytes)
+        self.assertEqual(1, second._handle_content_frame.call_count)
+
+    def test_pending_body_budget_defaults_to_no_aggregate_limit(self):
+        second = self._register_channel(2)
+        header1 = frame.Header(1, 1024 * 1024,
+                               spec.BasicProperties()).marshal()
+        header2 = frame.Header(2, 1024 * 1024,
+                               spec.BasicProperties()).marshal()
+
+        self._feed_with_real_terminate(header1 + header2)
+
+        self.assertIsNone(self.connection._error)
+        self.assertEqual({}, self.connection._pending_body_bytes)
+        self.assertEqual(1, self.channel._handle_content_frame.call_count)
+        self.assertEqual(1, second._handle_content_frame.call_count)
+
+    def test_bodiless_message_does_not_charge_the_pending_body_budget(self):
+        self.connection.params.max_inbound_pending_body_size = 1
+        header = frame.Header(1, 0, spec.BasicProperties()).marshal()
+
+        self._feed_with_real_terminate(header)
+
+        self.assertIsNone(self.connection._error)
+        self.assertEqual({}, self.connection._pending_body_bytes)
+        self.assertEqual(1, self.channel._handle_content_frame.call_count)
 
     def test_add_on_connection_blocked_callback(self):
         blocked_buffer = []

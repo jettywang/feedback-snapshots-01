@@ -222,6 +222,16 @@ class ExceptionTests(unittest.TestCase):
             'BodyTooLongError: Received too many bytes for a message delivery: '
             'Received 100, expected 50')
 
+    def test_pending_message_bodies_too_large_error_repr(self):
+        self.assertEqual(
+            repr(
+                exceptions.PendingMessageBodiesTooLargeError(
+                    2, 1000, 2500, 2048, host='broker', port=5672)),
+            'PendingMessageBodiesTooLargeError: A 1000-byte message on '
+            'channel 2 would bring pending inbound bodies to 2500 bytes, '
+            'above the max_inbound_pending_body_size of 2048 bytes '
+            "(host='broker', port=5672)")
+
     def test_channel_closed_properties_positional_args(self):
         exc = exceptions.ChannelClosed(9, 'args abcd')
         self.assertEqual(exc.reply_code, 9)

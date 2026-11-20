@@ -376,6 +376,20 @@ class MessageBodyTooLargeError(AMQPConnectionError):
             f'{self._host_port_suffix()}')
 
 
+class PendingMessageBodiesTooLargeError(AMQPConnectionError):
+    """An inbound message would push pending bodies across the connection's channels above
+    ``max_inbound_pending_body_size``.
+    """
+
+    @override
+    def __repr__(self) -> str:
+        return (
+            f'{self.__class__.__name__}: A {self.args[1]}-byte message on channel '
+            f'{self.args[0]} would bring pending inbound bodies to {self.args[2]} bytes, '
+            f'above the max_inbound_pending_body_size of {self.args[3]} bytes'
+            f'{self._host_port_suffix()}')
+
+
 class BodyTooLongError(ProtocolSyntaxError):
 
     @override

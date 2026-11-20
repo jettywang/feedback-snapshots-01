@@ -60,6 +60,7 @@ class Parameters:
         '_host',
         '_locale',
         '_max_inbound_message_body_size',
+        '_max_inbound_pending_body_size',
         '_port',
         '_retry_delay',
         '_socket_timeout',
@@ -85,6 +86,7 @@ class Parameters:
     DEFAULT_MAX_INBOUND_MESSAGE_BODY_SIZE = 64 * 1024 * 1024
     # RabbitMQ refuses messages above this, whatever its max_message_size says.
     MAX_INBOUND_MESSAGE_BODY_SIZE_LIMIT = 512 * 1024 * 1024
+    DEFAULT_MAX_INBOUND_PENDING_BODY_SIZE = None
     DEFAULT_PORT = 5672
     DEFAULT_RETRY_DELAY = 2.0
     DEFAULT_SOCKET_TIMEOUT = 10.0  # socket.connect() timeout
@@ -112,6 +114,7 @@ class Parameters:
         self._host: str = ''
         self._locale: str = ''
         self._max_inbound_message_body_size: int = 0
+        self._max_inbound_pending_body_size: int | None = None
         self._port: int = 0
         self._retry_delay: float = 0.0
         self._socket_timeout: float | None = None
@@ -132,6 +135,8 @@ class Parameters:
         self.locale = self.DEFAULT_LOCALE
         self.max_inbound_message_body_size = (
             self.DEFAULT_MAX_INBOUND_MESSAGE_BODY_SIZE)
+        self.max_inbound_pending_body_size = (
+            self.DEFAULT_MAX_INBOUND_PENDING_BODY_SIZE)
         self.port = self.DEFAULT_PORT
         self.retry_delay = self.DEFAULT_RETRY_DELAY
         self.socket_timeout = self.DEFAULT_SOCKET_TIMEOUT
@@ -352,6 +357,49 @@ class Parameters:
                 f'{self.MAX_INBOUND_MESSAGE_BODY_SIZE_LIMIT}, but got {value!r}'
             )
         self._max_inbound_message_body_size = value
+
+    @property
+    def max_inbound_pending_body_size(self) -> int | None:
+        """
+        The most bytes, across all channels of the connection, to retain in
+        incomplete inbound message bodies: an int of at least 1, or None for
+        no aggregate limit, defaulting to
+        `DEFAULT_MAX_INBOUND_PENDING_BODY_SIZE` (None).
+
+        Each inbound message reserves its declared body size against this
+        budget when its header frame arrives; the reservation is released
+        when the body is fully received or the channel closes. A message
+        whose reservation would exceed the budget closes the connection with
+        `pika.exceptions.PendingMessageBodiesTooLargeError`, which names the
+        channel and the message. The per-message
+        [`Parameters.max_inbound_message_body_size`][pika.connection.Parameters.max_inbound_message_body_size]
+        limit still applies to each message on its own.
+
+        :returns: the budget in bytes, or None
+        """
+        return self._max_inbound_pending_body_size
+
+    @max_inbound_pending_body_size.setter
+    def max_inbound_pending_body_size(self, value: int | None) -> None:
+        """
+        :param value: the most bytes to retain in incomplete inbound message
+            bodies across all channels, an int of at least 1, or None for no
+            aggregate limit
+
+        """
+        if value is None:
+            self._max_inbound_pending_body_size = None
+            return
+        if (not isinstance(value, numbers.Integral) or
+                isinstance(value, bool)):
+            raise TypeError(
+                'max_inbound_pending_body_size must be an int or None, but '
+                f'got {value!r}')
+        if value < 1:
+            raise ValueError(
+                f'max_inbound_pending_body_size must be at least 1, but got {value!r}'
+            )
+        self._max_inbound_pending_body_size = value
 
     @property
     def heartbeat(self) -> int | Callable[[Connection, float], int] | None:
@@ -616,6 +664,7 @@ class ConnectionParameters(Parameters):
                  client_properties: DefaultT[dict[str, Any] | None] = _DEFAULT,
                  tcp_options: DefaultT[dict[str, Any] | None] = _DEFAULT,
                  max_inbound_message_body_size: DefaultT[int] = _DEFAULT,
+                 max_inbound_pending_body_size: DefaultT[int | None] = _DEFAULT,
                  **kwargs: Any) -> None:
         """
         Create a new ConnectionParameters instance.
@@ -660,6 +709,9 @@ class ConnectionParameters(Parameters):
         :param max_inbound_message_body_size: The largest message body, in bytes, to accept
             from the broker, from 1 to 512 MiB; see
             [`Parameters.max_inbound_message_body_size`][pika.connection.Parameters.max_inbound_message_body_size]
+        :param max_inbound_pending_body_size: The most bytes to retain in incomplete
+            inbound message bodies across all channels, or None for no aggregate limit; see
+            [`Parameters.max_inbound_pending_body_size`][pika.connection.Parameters.max_inbound_pending_body_size]
         """
         super().__init__()
 
@@ -724,6 +776,10 @@ class ConnectionParameters(Parameters):
             self.max_inbound_message_body_size = cast(
                 int, max_inbound_message_body_size)
 
+        if max_inbound_pending_body_size is not self._DEFAULT:
+            self.max_inbound_pending_body_size = cast(
+                Optional[int], max_inbound_pending_body_size)
+
         if kwargs:
             raise TypeError(f'unexpected kwargs: {kwargs!r}')
 
@@ -760,6 +816,9 @@ class URLParameters(Parameters):
             Override the default `en_US` locale value
         - max_inbound_message_body_size:
             The largest message body, in bytes, to accept from the broker
+        - max_inbound_pending_body_size:
+            The most bytes to retain in incomplete inbound message bodies
+            across all channels
         - ssl_options:
             None for plaintext; for SSL: dict of public ssl context-related
             arguments that may be passed to `ssl.SSLSocket` as kwargs,
@@ -938,6 +997,18 @@ class URLParameters(Parameters):
                 f'Invalid max_inbound_message_body_size value {value!r}: {exc!r}'
             )
         self.max_inbound_message_body_size = size
+
+    def _set_url_max_inbound_pending_body_size(self, value: str) -> None:
+        """Deserialize and apply the corresponding query string arg
+        :param value: Raw query-string value to deserialize
+        """
+        try:
+            size = int(value)
+        except ValueError as exc:
+            raise ValueError(
+                f'Invalid max_inbound_pending_body_size value {value!r}: {exc!r}'
+            )
+        self.max_inbound_pending_body_size = size
 
     def _set_url_retry_delay(self, value: float) -> None:
         """Deserialize and apply the corresponding query string arg
@@ -1206,6 +1277,9 @@ class Connection(abc.ABC):
 
         # Dict of open channels
         self._channels = {}
+
+        # Body bytes reserved by incomplete inbound messages, per channel
+        self._pending_body_bytes: dict[int, int] = {}
 
         # Data used for Heartbeat checking
         self.bytes_sent = 0
@@ -1814,7 +1888,44 @@ class Connection(abc.ABC):
             raise exceptions.MessageBodyTooLargeError(
                 value.body_size, self.params.max_inbound_message_body_size)
 
+        self._track_pending_body(value)
+
         self._channels[value.channel_number]._handle_content_frame(value)
+
+    def _track_pending_body(self, value: frame.Frame) -> None:
+        """
+        Account an inbound content frame against `max_inbound_pending_body_size`.
+
+        A header reserves its declared body size for its channel; body frames
+        spend the reservation down, and the last one releases it. A
+        reservation that would exceed the budget raises
+        `pika.exceptions.PendingMessageBodiesTooLargeError` before the frame
+        reaches its channel.
+
+        :param value: The frame about to be delivered to its channel
+        :raises: pika.exceptions.PendingMessageBodiesTooLargeError
+        """
+        budget = self.params.max_inbound_pending_body_size
+        if budget is None:
+            return
+        if isinstance(value, frame.Header):
+            if value.body_size == 0:
+                return
+            pending = sum(self._pending_body_bytes.values())
+            if pending + value.body_size > budget:
+                raise exceptions.PendingMessageBodiesTooLargeError(
+                    value.channel_number, value.body_size,
+                    pending + value.body_size, budget)
+            self._pending_body_bytes[value.channel_number] = value.body_size
+        elif isinstance(value, frame.Body):
+            remaining = self._pending_body_bytes.get(value.channel_number)
+            if remaining is None:
+                return
+            remaining -= len(value.fragment)
+            if remaining > 0:
+                self._pending_body_bytes[value.channel_number] = remaining
+            else:
+                del self._pending_body_bytes[value.channel_number]
 
     def _get_body_frame_max_length(self) -> int:
         """Calculate the maximum amount of bytes that can be in a body frame."""
@@ -1888,6 +1999,7 @@ class Connection(abc.ABC):
             LOGGER.debug('Removed channel %s', channel.channel_number)
         except KeyError:
             LOGGER.error('Channel %r not in channels', channel.channel_number)
+        self._pending_body_bytes.pop(channel.channel_number, None)
         if self.is_closing:
             if not self._channels:
                 # Initiate graceful closing of the connection
@@ -2179,8 +2291,10 @@ class Connection(abc.ABC):
 
         :param data_in: The data that is available to read
         """
-        if isinstance(self._error, (exceptions.FrameTooLargeError,
-                                    exceptions.MessageBodyTooLargeError)):
+        if isinstance(self._error,
+                      (exceptions.FrameTooLargeError,
+                       exceptions.MessageBodyTooLargeError,
+                       exceptions.PendingMessageBodiesTooLargeError)):
             # Transport teardown is asynchronous, so reads can still arrive; drop them.
             return
 
@@ -2212,7 +2326,8 @@ class Connection(abc.ABC):
                     self.bytes_received += consumed_count
                     self._process_frame(frame_value)
                 except (exceptions.FrameTooLargeError,
-                        exceptions.MessageBodyTooLargeError) as error:
+                        exceptions.MessageBodyTooLargeError,
+                        exceptions.PendingMessageBodiesTooLargeError) as error:
                     # Ends the connection with this error as its reason, rather than letting the
                     # adapter wrap it as a lost stream, and decodes nothing more.
                     error.host = self.params.host
