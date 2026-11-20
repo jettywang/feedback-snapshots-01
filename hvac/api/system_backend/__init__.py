@@ -15,6 +15,7 @@ from hvac.api.system_backend.policies import Policies
 from hvac.api.system_backend.policy import Policy
 from hvac.api.system_backend.quota import Quota
 from hvac.api.system_backend.raft import Raft
+from hvac.api.system_backend.revocation import Revocation
 from hvac.api.system_backend.seal import Seal
 from hvac.api.system_backend.system_backend_mixin import SystemBackendMixin
 from hvac.api.system_backend.wrapping import Wrapping
@@ -35,6 +36,7 @@ __all__ = (
     "Policy",
     "Quota",
     "Raft",
+    "Revocation",
     "Seal",
     "SystemBackend",
     "SystemBackendMixin",
@@ -61,6 +63,7 @@ class SystemBackend(
     Policy,
     Quota,
     Raft,
+    Revocation,
     Seal,
     Wrapping,
 ):
@@ -79,6 +82,7 @@ class SystemBackend(
         Policy,
         Quota,
         Raft,
+        Revocation,
         Seal,
         Wrapping,
     ]

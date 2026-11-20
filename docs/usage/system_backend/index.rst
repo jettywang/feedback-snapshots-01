@@ -17,5 +17,6 @@ System Backend
    policy
    quota
    raft
+   revocation
    seal
    wrapping

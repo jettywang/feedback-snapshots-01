@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### 🚀 Features
+
+- Add approval-gated revocation plans for dynamic credentials (`client.sys.revocation`).
+
 ## 2.4.0
 
 ### 🚀 Features
