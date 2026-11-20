@@ -9,6 +9,7 @@ from django.contrib.contenttypes.models import ContentType
 from django.db.models import IntegerField, Value
 from django.db.models.query import QuerySet
 from django.test import TestCase, TransactionTestCase
+from django.utils import timezone
 
 from guardian.compat import get_user_permission_full_codename
 from guardian.conf import settings as guardian_settings
@@ -33,6 +34,7 @@ from guardian.shortcuts import (
     get_perms_for_model,
     get_user_perms,
     get_users_with_perms,
+    get_users_with_perms_paged,
     remove_perm,
 )
 from guardian.testapp.models import (
@@ -908,6 +910,192 @@ class GetUsersWithPermsTest(TestCase):
         result = get_users_with_perms(self.obj1, with_group_users=False, with_superusers=True)
         expected = [admin]
         self.assertEqual(set(result), set(expected))
+
+
+class GetUsersWithPermsPagedTest(TestCase):
+    """
+    Tests get_users_with_perms_paged stable pagination.
+
+    The fixture deliberately includes:
+      * duplicate authorizations - several permission rows per user and users
+        reachable through more than one group / both direct and group grants,
+      * an inactive account holding an authorization,
+      * two users sharing the same sort value (identical ``last_login``).
+    """
+
+    def setUp(self):
+        self.obj = ContentType.objects.create(model="paged", app_label="guardian-tests")
+        self.group_a = Group.objects.create(name="paged-group-a")
+        self.group_b = Group.objects.create(name="paged-group-b")
+
+        # alice: two direct grants plus a group grant for the same object
+        # (multiple authorization rows, multiple authorization paths).
+        self.alice = User.objects.create(username="alice")
+        assign_perm("change_contenttype", self.alice, self.obj)
+        assign_perm("view_contenttype", self.alice, self.obj)
+        self.alice.groups.add(self.group_a)
+        assign_perm("change_contenttype", self.group_a, self.obj)
+
+        # bob: reachable through two different groups granting access.
+        self.bob = User.objects.create(username="bob")
+        self.bob.groups.add(self.group_a, self.group_b)
+        assign_perm("view_contenttype", self.group_a, self.obj)
+        assign_perm("delete_contenttype", self.group_b, self.obj)
+
+        # carol: disabled account, still holding a direct authorization.
+        self.carol = User.objects.create(username="carol", is_active=False)
+        assign_perm("change_contenttype", self.carol, self.obj)
+
+        # dave and erin share an identical sort value.
+        self.shared_login = timezone.now()
+        self.dave = User.objects.create(username="dave", last_login=self.shared_login)
+        self.erin = User.objects.create(username="erin", last_login=self.shared_login)
+        assign_perm("view_contenttype", self.dave, self.obj)
+        assign_perm("view_contenttype", self.erin, self.obj)
+
+        # frank has no authorization at all and must never appear.
+        self.frank = User.objects.create(username="frank")
+
+        self.expected_users = {self.alice, self.bob, self.carol, self.dave, self.erin}
+
+    def _walk_pages(self, page_size, **kwargs):
+        pages = []
+        page = 1
+        while True:
+            result = get_users_with_perms_paged(self.obj, page=page, page_size=page_size, **kwargs)
+            pages.append(result)
+            if not result.has_next:
+                break
+            page += 1
+        return pages
+
+    def test_returns_paged_result_with_metadata(self):
+        result = get_users_with_perms_paged(self.obj, page=2, page_size=2)
+        self.assertEqual(result.page, 2)
+        self.assertEqual(result.page_size, 2)
+        self.assertEqual(result.total_count, 5)
+        self.assertEqual(result.total_pages, 3)
+        self.assertTrue(result.has_next)
+        self.assertTrue(result.has_previous)
+        self.assertEqual(len(result.results), 2)
+
+    def test_duplicate_authorizations_are_deduplicated(self):
+        result = get_users_with_perms_paged(self.obj, page_size=50)
+        self.assertEqual(result.total_count, 5)
+        pks = [user.pk for user in result.results]
+        self.assertEqual(len(pks), len(set(pks)))
+        self.assertEqual(set(result.results), self.expected_users)
+        # alice and bob stay single rows despite their multiple grants.
+        self.assertEqual([user for user in result.results if user == self.alice], [self.alice])
+        self.assertEqual([user for user in result.results if user == self.bob], [self.bob])
+
+    def test_inactive_account_is_listed(self):
+        result = get_users_with_perms_paged(self.obj, page_size=50)
+        self.assertIn(self.carol, result.results)
+
+    def test_pages_concatenate_to_full_membership(self):
+        pages = self._walk_pages(page_size=2)
+        concatenated = [user for page in pages for user in page.results]
+
+        self.assertEqual(len(pages), 3)
+        self.assertEqual([len(page.results) for page in pages], [2, 2, 1])
+        self.assertEqual(set(concatenated), self.expected_users)
+        self.assertEqual(len(concatenated), len(set(concatenated)))
+        self.assertEqual(
+            sorted(user.pk for user in concatenated),
+            sorted(get_users_with_perms(self.obj).values_list("pk", flat=True)),
+        )
+
+    def test_default_ordering_is_primary_key_and_stable(self):
+        first = get_users_with_perms_paged(self.obj, page_size=50).results
+        second = get_users_with_perms_paged(self.obj, page_size=50).results
+        self.assertEqual([user.pk for user in first], [user.pk for user in second])
+        self.assertEqual([user.pk for user in first], sorted(user.pk for user in first))
+
+    def test_tied_sort_values_are_broken_by_primary_key(self):
+        pages = self._walk_pages(page_size=2, order_by="last_login")
+        concatenated = [user for page in pages for user in page.results]
+        self.assertEqual(set(concatenated), self.expected_users)
+
+        # dave and erin have the same last_login; their relative order must be
+        # deterministic and follow the primary key tie-breaker.
+        tied = [user for user in concatenated if user in (self.dave, self.erin)]
+        self.assertEqual([user.pk for user in tied], sorted(user.pk for user in tied))
+
+        # Repeated walks produce byte-identical ordering.
+        again = [user for page in self._walk_pages(2, order_by="last_login") for user in page.results]
+        self.assertEqual([user.pk for user in concatenated], [user.pk for user in again])
+
+    def test_query_count_does_not_grow_with_page_size(self):
+        # One COUNT(*) plus one LIMIT/OFFSET query per page, independently of
+        # how many rows the page holds - no N+1 and no in-memory pagination.
+        for page_size in (1, 2, 5, 100):
+            with self.assertNumQueries(2):
+                get_users_with_perms_paged(self.obj, page=1, page_size=page_size)
+
+        # Walking every page costs exactly two queries per page.
+        for page_size, expected_pages in ((1, 5), (2, 3), (5, 1), (100, 1)):
+            with self.assertNumQueries(2 * expected_pages):
+                self._walk_pages(page_size=page_size)
+
+    def test_count_total_disabled_runs_single_query(self):
+        with self.assertNumQueries(1):
+            result = get_users_with_perms_paged(self.obj, page=1, page_size=2, count_total=False)
+        self.assertIsNone(result.total_count)
+        self.assertIsNone(result.total_pages)
+        self.assertIsNone(result.has_next)
+        self.assertFalse(result.has_previous)
+        self.assertEqual(len(result.results), 2)
+
+    def test_empty_object_pagination(self):
+        empty_obj = ContentType.objects.create(model="empty", app_label="guardian-tests")
+        result = get_users_with_perms_paged(empty_obj)
+        self.assertEqual(result.results, [])
+        self.assertEqual(result.total_count, 0)
+        self.assertEqual(result.total_pages, 1)
+        self.assertFalse(result.has_next)
+        self.assertFalse(result.has_previous)
+
+    def test_only_with_perms_in_filtering(self):
+        result = get_users_with_perms_paged(
+            self.obj,
+            page_size=50,
+            only_with_perms_in=("delete_contenttype",),
+        )
+        # Only bob reaches the object through a delete_contenttype grant.
+        self.assertEqual(result.total_count, 1)
+        self.assertEqual(list(result.results), [self.bob])
+
+    def test_invalid_arguments_raise_value_error(self):
+        with self.assertRaises(ValueError):
+            get_users_with_perms_paged(self.obj, page=0)
+        with self.assertRaises(ValueError):
+            get_users_with_perms_paged(self.obj, page_size=0)
+        with self.assertRaises(ValueError):
+            get_users_with_perms_paged(self.obj, page=-1, page_size=2)
+
+    def test_authorization_changes_during_walk_shift_offsets(self):
+        # OFFSET/LIMIT is evaluated per request against the current database
+        # state rather than a snapshot. With a fixed dataset pages are stable;
+        # a grant inserted before the current offset shifts the window and the
+        # boundary row is served on two pages.
+        first = get_users_with_perms_paged(self.obj, page=1, page_size=2, order_by="username")
+        self.assertEqual([user.username for user in first.results], ["alice", "bob"])
+
+        newcomer = User.objects.create(username="aaron")
+        assign_perm("view_contenttype", newcomer, self.obj)
+
+        second = get_users_with_perms_paged(self.obj, page=2, page_size=2, order_by="username")
+        self.assertEqual([user.username for user in second.results], ["bob", "carol"])
+        # bob appears on both pages because the inserted grant moved offsets.
+        self.assertIn(self.bob, first.results)
+        self.assertIn(self.bob, second.results)
+
+        # A fresh walk over the new dataset covers every member exactly once.
+        restarted = self._walk_pages(page_size=2, order_by="username")
+        concatenated = [user for page in restarted for user in page.results]
+        self.assertEqual(set(concatenated), self.expected_users | {newcomer})
+        self.assertEqual(len(concatenated), len(set(concatenated)))
 
 
 class GetGroupsWithPerms(TestCase):

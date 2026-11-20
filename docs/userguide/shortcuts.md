@@ -81,6 +81,56 @@ print(f"Direct permissions: {direct_perms}")
 print(f"Group permissions: {group_perms}")
 ```
 
+### Paginated Membership Listing
+
+Compliance pages that list who can access a single object should use
+`get_users_with_perms_paged()`. It paginates in the database with
+`LIMIT`/`OFFSET` instead of loading the full member list into memory first,
+and returns a `PagedUsersWithPerms` object together with pagination metadata:
+
+```python
+from guardian.shortcuts import get_users_with_perms_paged
+
+page = get_users_with_perms_paged(document, page=1, page_size=25)
+for user in page.results:
+    ...  # render one row per authorized user
+
+page.total_count   # total distinct authorized users
+page.total_pages   # number of pages at this page size
+page.has_next      # whether another page exists
+```
+
+Duplicate authorization rows and users reachable through several groups (or
+both a direct and a group grant) are returned once because the underlying
+queryset is always `DISTINCT`. Ordering is deterministic: the user primary
+key is appended as the final tie-breaker, so users sharing every requested
+sort value keep a fixed position and concatenating consecutive pages yields
+the complete authorized member set without overlaps or gaps. Pass custom
+sort fields with `order_by`; the primary key tie-breaker is still applied:
+
+```python
+get_users_with_perms_paged(document, page=2, page_size=25, order_by="last_login")
+```
+
+Inactive users (`is_active=False`) are included: like
+`get_users_with_perms()`, this is a membership query over stored
+authorizations and does not filter on account status.
+
+**Query count.** Each page costs one `COUNT(*)` query plus one
+`LIMIT`/`OFFSET` query — two queries per page regardless of `page_size`;
+there is no per-row query. Pass `count_total=False` to skip the count and
+serve a page with a single query (then `total_count`, `total_pages` and
+`has_next` are `None` and end-of-data is detected from a short result page).
+
+**Changes during pagination.** `OFFSET`/`LIMIT` is evaluated per request
+against the current database state; no snapshot is taken. Pages are stable
+as long as the underlying authorizations do not change, but grants added or
+removed while a client is walking the pages shift offsets: an inserted grant
+before the current offset can repeat a row on the next page, a removed grant
+can skip one. For a point-in-time consistent walk, wrap the requests in a
+transaction using a repeatable-read isolation level, or paginate a frozen
+snapshot of the membership.
+
 ### Selective Permission Removal
 
 Use `get_user_perms()` when you need to remove only direct permissions without affecting group permissions:

@@ -1,10 +1,11 @@
 """Convenient shortcuts to manage or check object permissions."""
 
 from collections import defaultdict
+from dataclasses import dataclass
 from functools import lru_cache, partial
 from itertools import groupby
 from operator import itemgetter
-from typing import Any, TypeVar
+from typing import Any, Sequence, TypeVar
 import warnings
 
 from django.apps import apps
@@ -376,51 +377,15 @@ def get_users_with_perms(
         [<User: joe>]
         ```
     """
-    ctype = get_content_type(obj)
     if not attach_perms:
         # It's much easier without attached perms so we do it first if that is
         # the case
-        user_model = get_user_obj_perms_model(obj)
-        related_name = user_model.user.field.related_query_name()
-        if user_model.objects.is_generic():
-            user_filters = {
-                "%s__content_type" % related_name: ctype,
-                "%s__object_pk" % related_name: obj.pk,
-            }
-        else:
-            user_filters = {"%s__content_object" % related_name: obj}
-        qset = Q(**user_filters)
-        if only_with_perms_in is not None:
-            permission_ids = Permission.objects.filter(content_type=ctype, codename__in=only_with_perms_in).values_list(
-                "id", flat=True
-            )
-            qset &= Q(
-                **{
-                    "%s__permission_id__in" % related_name: permission_ids,
-                }
-            )
-        if with_group_users:
-            group_model = get_group_obj_perms_model(obj)
-            if group_model.objects.is_generic():
-                group_obj_perm_filters = {
-                    "content_type": ctype,
-                    "object_pk": obj.pk,
-                }
-            else:
-                group_obj_perm_filters = {
-                    "content_object": obj,
-                }
-            if only_with_perms_in is not None:
-                group_obj_perm_filters.update(
-                    {
-                        "permission_id__in": permission_ids,
-                    }
-                )
-            group_ids = group_model.objects.filter(**group_obj_perm_filters).values("group_id").distinct()
-            qset = qset | Q(groups__in=group_ids)
-        if with_superusers:
-            qset = qset | Q(is_superuser=True)
-        return get_user_model().objects.filter(qset).distinct()
+        return _get_users_with_perms_queryset(
+            obj,
+            with_superusers=with_superusers,
+            with_group_users=with_group_users,
+            only_with_perms_in=only_with_perms_in,
+        )
     else:
         # TODO: Do not hit db for each user!
         users = {}
@@ -436,6 +401,198 @@ def get_users_with_perms(
             else:
                 users[user] = sorted(get_user_perms(user, obj))
         return users
+
+
+def _get_users_with_perms_queryset(
+    obj: Model,
+    with_superusers: bool = False,
+    with_group_users: bool = True,
+    only_with_perms_in: list[str] | None = None,
+) -> QuerySet:
+    """Build the distinct, unordered ``User`` queryset used by
+    :func:`get_users_with_perms` and :func:`get_users_with_perms_paged`.
+
+    A user reachable through more than one authorization path (a direct
+    permission, several group permissions, duplicated rows) appears exactly
+    once because the queryset always carries ``DISTINCT``. Ordering is applied
+    by the callers so the same base query can serve both list and pagination
+    use cases.
+    """
+    ctype = get_content_type(obj)
+    user_model = get_user_obj_perms_model(obj)
+    related_name = user_model.user.field.related_query_name()
+    if user_model.objects.is_generic():
+        user_filters = {
+            "%s__content_type" % related_name: ctype,
+            "%s__object_pk" % related_name: obj.pk,
+        }
+    else:
+        user_filters = {"%s__content_object" % related_name: obj}
+    qset = Q(**user_filters)
+    permission_ids = None
+    if only_with_perms_in is not None:
+        permission_ids = Permission.objects.filter(content_type=ctype, codename__in=only_with_perms_in).values_list(
+            "id", flat=True
+        )
+        qset &= Q(
+            **{
+                "%s__permission_id__in" % related_name: permission_ids,
+            }
+        )
+    if with_group_users:
+        group_model = get_group_obj_perms_model(obj)
+        if group_model.objects.is_generic():
+            group_obj_perm_filters = {
+                "content_type": ctype,
+                "object_pk": obj.pk,
+            }
+        else:
+            group_obj_perm_filters = {
+                "content_object": obj,
+            }
+        if permission_ids is not None:
+            group_obj_perm_filters.update(
+                {
+                    "permission_id__in": permission_ids,
+                }
+            )
+        group_ids = group_model.objects.filter(**group_obj_perm_filters).values("group_id").distinct()
+        qset = qset | Q(groups__in=group_ids)
+    if with_superusers:
+        qset = qset | Q(is_superuser=True)
+    return get_user_model().objects.filter(qset).distinct()
+
+
+@dataclass
+class PagedUsersWithPerms:
+    """A single, deterministically ordered page of users authorized on an object.
+
+    Attributes:
+        results: ``User`` instances belonging to the requested page.
+        page: 1-based number of the page that was returned.
+        page_size: Maximum number of users per page.
+        total_count: Total number of distinct authorized users across every
+            page. ``None`` when the query was built with ``count_total=False``.
+        total_pages: Number of pages needed to cover ``total_count`` at
+            ``page_size``. ``None`` when ``total_count`` was not computed.
+        has_next: Whether a subsequent page exists. ``None`` when it cannot be
+            decided without a total count (i.e. ``count_total=False``).
+        has_previous: Whether a page with a lower number exists.
+    """
+
+    results: list
+    page: int
+    page_size: int
+    total_count: int | None
+    total_pages: int | None
+    has_next: bool | None
+    has_previous: bool
+
+
+def get_users_with_perms_paged(
+    obj: Model,
+    page: int = 1,
+    page_size: int = 25,
+    *,
+    with_superusers: bool = False,
+    with_group_users: bool = True,
+    only_with_perms_in: list[str] | None = None,
+    order_by: Sequence[str] | str | None = None,
+    count_total: bool = True,
+) -> PagedUsersWithPerms:
+    """Get a stable, database-side page of users with permissions on `obj`.
+
+    Unlike iterating :func:`get_users_with_perms`, this never materializes the
+    full membership in application memory: each page is produced with a single
+    ``LIMIT``/``OFFSET`` query (plus one ``COUNT(*)`` query when
+    ``count_total`` is enabled, which is the default).
+
+    Ordering is always made deterministic by appending the user primary key as
+    the final tie-breaker, so users sharing every requested sort value (for
+    example two users created at the same instant) keep a fixed position and
+    consecutive pages never overlap or skip a row. The queryset stays
+    ``DISTINCT``, so duplicate authorization rows and users reachable through
+    several groups or both direct and group grants are returned once.
+
+    Parameters:
+        obj (Model): Instance of a Django `Model`.
+        page (int): 1-based page number to return.
+        page_size (int): Maximum number of users per page; must be a positive
+            integer.
+        with_superusers (bool): Whether results should contain superusers.
+        with_group_users (bool): Whether results should contain users who
+            have only group permissions for given `obj`.
+        only_with_perms_in (list[str]): Only return users with these permissions.
+        order_by (sequence or str): Field names passed to ``QuerySet.order_by``.
+            Defaults to the user primary key. The primary key is always
+            appended as a final tie-breaker.
+        count_total (bool): When `True` (default), run an additional
+            ``COUNT(*)`` query and populate ``total_count``, ``total_pages``
+            and ``has_next``. Set to `False` to serve a page with a single
+            query; ``has_next`` then has to be inferred from a short result
+            page by the caller.
+
+    Returns:
+        PagedUsersWithPerms: The requested page together with pagination
+        metadata.
+
+    Concurrency semantics:
+        Pagination is computed with ``OFFSET``/``LIMIT`` against the current
+        database state on every request, without taking a snapshot. Pages are
+        stable *within a fixed dataset* thanks to the deterministic ordering,
+        but authorizations added or removed while a client walks the pages may
+        shift offsets: a grant inserted before the current offset can push a
+        user onto the next page (duplicate), a removal can pull one onto the
+        current page (skip). For a point-in-time consistent walk, wrap the
+        page requests in a transaction with a repeatable-read isolation level
+        or paginate a frozen snapshot of the membership.
+    """
+    if not isinstance(page, int) or page < 1:
+        raise ValueError("page must be a positive integer (1-based)")
+    if not isinstance(page_size, int) or page_size < 1:
+        raise ValueError("page_size must be a positive integer")
+
+    queryset = _get_users_with_perms_queryset(
+        obj,
+        with_superusers=with_superusers,
+        with_group_users=with_group_users,
+        only_with_perms_in=only_with_perms_in,
+    )
+
+    if order_by is None:
+        ordering: list[str] = []
+    elif isinstance(order_by, str):
+        ordering = [order_by]
+    else:
+        ordering = list(order_by)
+    pk_name = queryset.model._meta.pk.name
+    # The primary key uniquely identifies every row, so appending it turns any
+    # ordering (even one full of ties) into a total, stable ordering.
+    if pk_name not in ordering and f"-{pk_name}" not in ordering:
+        ordering.append(pk_name)
+    queryset = queryset.order_by(*ordering)
+
+    total_count = queryset.count() if count_total else None
+    offset = (page - 1) * page_size
+    results = list(queryset[offset : offset + page_size])
+
+    if count_total:
+        assert total_count is not None
+        total_pages = max(1, (total_count + page_size - 1) // page_size)
+        has_next = page < total_pages
+    else:
+        total_pages = None
+        has_next = None
+
+    return PagedUsersWithPerms(
+        results=results,
+        page=page,
+        page_size=page_size,
+        total_count=total_count,
+        total_pages=total_pages,
+        has_next=has_next,
+        has_previous=page > 1,
+    )
 
 
 def get_groups_with_perms(

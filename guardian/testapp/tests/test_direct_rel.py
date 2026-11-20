@@ -8,6 +8,7 @@ from guardian.shortcuts import (
     get_objects_for_group,
     get_objects_for_user,
     get_users_with_perms,
+    get_users_with_perms_paged,
     remove_perm,
 )
 from guardian.testapp.models import (
@@ -97,6 +98,30 @@ class TestDirectUserPermissions(TestCase):
                 jane: ["change_project"],
             },
         )
+
+    def test_get_users_with_perms_paged(self):
+        jane = User.objects.create_user("jane", "jane@foobar.com", "jane")
+        group = Group.objects.create(name="devs")
+        self.joe.groups.add(group)
+        # Duplicate authorization rows for joe plus a group grant.
+        assign_perm("add_project", self.joe, self.project)
+        assign_perm("change_project", self.joe, self.project)
+        assign_perm("change_project", group, self.project)
+        assign_perm("change_project", jane, self.project)
+
+        first = get_users_with_perms_paged(self.project, page=1, page_size=1)
+        second = get_users_with_perms_paged(self.project, page=2, page_size=1)
+
+        self.assertEqual(first.total_count, 2)
+        self.assertEqual(first.total_pages, 2)
+        self.assertTrue(first.has_next)
+        self.assertFalse(first.has_previous)
+        self.assertTrue(second.has_previous)
+        self.assertFalse(second.has_next)
+
+        concatenated = first.results + second.results
+        self.assertEqual(set(concatenated), {self.joe, jane})
+        self.assertEqual(len(concatenated), len({user.pk for user in concatenated}))
 
     def test_get_objects_for_user(self):
         foo = Project.objects.create(name="foo")

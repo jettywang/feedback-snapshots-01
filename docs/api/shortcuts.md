@@ -14,6 +14,10 @@
 
 ::: guardian.shortcuts.get_users_with_perms
 
+::: guardian.shortcuts.get_users_with_perms_paged
+
+::: guardian.shortcuts.PagedUsersWithPerms
+
 ::: guardian.shortcuts.get_groups_with_perms
 
 ::: guardian.shortcuts.get_objects_for_user
