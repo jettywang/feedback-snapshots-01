@@ -1180,6 +1180,9 @@ module Net   #:nodoc:
       @continue_timeout = options[:continue_timeout]
       @max_retries = options[:max_retries]
       @debug_output = options[:debug_output]
+      @debug_phases = nil
+      @debug_req_seq = 0
+      @debug_req_id = nil
       @response_body_encoding = options[:response_body_encoding]
       @ignore_eof = options[:ignore_eof]
       @tcpsocket_supports_open_timeout = nil
@@ -1262,6 +1265,32 @@ module Net   #:nodoc:
     def set_debug_output(output)
       warn 'Net::HTTP#set_debug_output called after HTTP started', uplevel: 1 if started?
       @debug_output = output
+    end
+
+    # Sets the output stream for a share-safe, phase-level debug view:
+    #
+    #   http = Net::HTTP.new(hostname)
+    #   http.set_debug_phases($stderr)
+    #   http.start
+    #   http.get('/')
+    #   http.finish
+    #
+    # Output (one line per event):
+    #
+    #   [net-http] phase=connect addr=example.com port=80 via=direct
+    #   [net-http] phase=tcp_open addr=example.com port=80
+    #   [net-http] phase=request req=1 method=GET path=/ attempt=1
+    #   [net-http] phase=response req=1 status=200
+    #
+    # Unlike #set_debug_output, this view is safe to share: it only records
+    # connection phases (including proxy handoff and retries), a per-request
+    # sequence number, the request method and path, the response status,
+    # connection endpoints, and error class names.  It never writes header
+    # values (such as Authorization, Cookie, or Proxy-Authorization),
+    # credentials, or message bodies.
+    def set_debug_phases(output)
+      warn 'Net::HTTP#set_debug_phases called after HTTP started', uplevel: 1 if started?
+      @debug_phases = output
     end
 
     # Returns the string host name or host IP given as argument +address+ in ::new.
@@ -1699,6 +1728,8 @@ module Net   #:nodoc:
       end
 
       debug "opening connection to #{conn_addr}:#{conn_port}..."
+      debug_phase('connect', addr: conn_addr, port: conn_port,
+                  via: proxy? ? 'proxy' : 'direct')
       begin
         s = timeouted_connect(conn_addr, conn_port)
       rescue => e
@@ -1710,6 +1741,7 @@ module Net   #:nodoc:
       end
       s.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_NODELAY, 1)
       debug "opened"
+      debug_phase('tcp_open', addr: conn_addr, port: conn_port)
       if use_ssl?
         if proxy?
           if @proxy_use_ssl
@@ -1735,8 +1767,11 @@ module Net   #:nodoc:
             buf << "Proxy-Authorization: Basic #{credential}\r\n"
           end
           buf << "\r\n"
+          debug_phase('proxy_connect', to: "#{conn_address}:#{@port}",
+                      auth: proxy_user ? true : false)
           proxy_sock.write(buf)
           HTTPResponse.read_new(proxy_sock).value
+          debug_phase('proxy_established', to: "#{conn_address}:#{@port}")
           # assuming nothing left in buffers after successful CONNECT response
         end
 
@@ -1777,6 +1812,7 @@ module Net   #:nodoc:
         end
 
         debug "starting SSL for #{conn_addr}:#{conn_port}..."
+        debug_phase('ssl_handshake', addr: conn_addr, port: conn_port)
         s = OpenSSL::SSL::SSLSocket.new(s, @ssl_context)
         s.sync_close = true
         s.hostname = ssl_host_address if s.respond_to?(:hostname=) && ssl_host_address
@@ -1790,6 +1826,7 @@ module Net   #:nodoc:
           s.post_connection_check(@address)
         end
         debug "SSL established, protocol: #{s.ssl_version}, cipher: #{s.cipher[0]}"
+        debug_phase('ssl_established', protocol: s.ssl_version, cipher: s.cipher[0])
       end
       @socket = BufferedIO.new(s, read_timeout: @read_timeout,
                                write_timeout: @write_timeout,
@@ -1798,6 +1835,7 @@ module Net   #:nodoc:
       @last_communicated = nil
       on_connect
     rescue => exception
+      debug_phase('connect_error', error: exception.class.name)
       if s
         debug "Conn close because of connect error #{exception}"
         s.close
@@ -2515,7 +2553,10 @@ module Net   #:nodoc:
 
     def transport_request(req)
       count = 0
+      @debug_req_id = next_debug_request_id
       begin
+        debug_phase('request', method: req.method, path: req.path,
+                    attempt: count + 1)
         begin_transport req
         res = catch(:response) {
           begin
@@ -2542,6 +2583,7 @@ module Net   #:nodoc:
 
           res
         }
+        debug_phase('response', status: res.code)
         res.reading_body(@socket, req.response_body_permitted?) {
           if block_given?
             count = max_retries # Don't restart in the middle of a download
@@ -2559,6 +2601,7 @@ module Net   #:nodoc:
           count += 1
           @socket.close if @socket
           debug "Conn close because of error #{exception}, and retry"
+          debug_phase('retry', error: exception.class.name, attempt: count + 1)
           retry
         end
         debug "Conn close because of error #{exception}"
@@ -2570,8 +2613,11 @@ module Net   #:nodoc:
       res
     rescue => exception
       debug "Conn close because of error #{exception}"
+      debug_phase('error', error: exception.class.name)
       @socket.close if @socket
       raise exception
+    ensure
+      @debug_req_id = nil
     end
 
     def begin_transport(req)
@@ -2672,6 +2718,23 @@ module Net   #:nodoc:
     end
 
     alias_method :D, :debug
+
+    # Adds a redacted, phase-level event to the share-safe debug view
+    # enabled by #set_debug_phases.  Only pass values that are safe to
+    # share: never header values, credentials, or message bodies.
+    def debug_phase(phase, **fields)
+      return unless @debug_phases
+      line = +"[net-http] phase=#{phase}"
+      line << " req=#{@debug_req_id}" if @debug_req_id
+      fields.each do |key, value|
+        line << " #{key}=#{value}"
+      end
+      @debug_phases << line << "\n"
+    end
+
+    def next_debug_request_id
+      @debug_req_seq += 1
+    end
   end
 
   # for backward compatibility until Ruby 4.0
