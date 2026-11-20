@@ -80,8 +80,18 @@ orphaned permissions periodically with `guardian.utils.clean_orphan_obj_perms` f
 We would still **strongly** advise to remove orphaned object permissions explicitly
 (i.e., at view that confirms object removal or using signals as described above).
 
+For a safer two-phase cleanup, `guardian.utils.find_orphan_obj_perms` builds a
+read-only preview of orphan candidates grouped by content type and permission
+model, and `guardian.utils.remove_orphan_obj_perms` re-validates each candidate
+immediately before deleting it, skipping entries whose target reappeared in the
+meantime. The management command exposes the same flow via
+`clean_orphan_obj_perms --dry-run` (preview only) and
+`clean_orphan_obj_perms --checked` (verified removal).
+
 !!! info
     - `guardian.utils.clean_orphan_obj_perms`
+    - `guardian.utils.find_orphan_obj_perms`
+    - `guardian.utils.remove_orphan_obj_perms`
     - `clean_orphan_obj_perms`
 
 ## Using multiple databases

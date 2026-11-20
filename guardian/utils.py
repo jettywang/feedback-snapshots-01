@@ -5,20 +5,21 @@ Functions defined within this module are a part of django-guardian's internal fu
 and be considered unstable; their APIs may change in any future releases.
 """
 
+from dataclasses import dataclass
 import gc
 from itertools import chain
 import logging
 from math import ceil
 import os
 import time
-from typing import Any
+from typing import Any, Iterable
 
 from django.apps import apps as django_apps
 from django.conf import settings
 from django.contrib.auth import REDIRECT_FIELD_NAME, get_user_model
 from django.contrib.auth.models import AnonymousUser
 from django.core.cache import cache
-from django.core.exceptions import ImproperlyConfigured, PermissionDenied
+from django.core.exceptions import FieldDoesNotExist, ImproperlyConfigured, PermissionDenied
 from django.db.models import Model, QuerySet
 from django.http import (
     Http404,
@@ -437,6 +438,153 @@ def clean_orphan_obj_perms(
         logger.info(suggestion)
 
     return deleted
+
+
+@dataclass(frozen=True)
+class OrphanObjPermCandidate:
+    """A single object permission entry believed to point at a missing target.
+
+    Attributes:
+        perm_model: Label (``"app_label.ModelName"``) of the permission model
+            storing the entry, i.e. the store the entry would be removed from.
+        pk: Primary key of the permission entry.
+        content_type: Label (``"app_label.model"``) of the target's content type.
+        object_pk: Primary key of the missing target, as stored on the entry.
+        reason: Why the entry is considered an orphan.
+    """
+
+    perm_model: str
+    pk: int
+    content_type: str
+    object_pk: str
+    reason: str
+
+
+class OrphanObjPermPreview:
+    """Read-only result of :func:`find_orphan_obj_perms`.
+
+    Attributes:
+        candidates: Flat list of :class:`OrphanObjPermCandidate`.
+        groups: Candidates grouped by ``(content_type, perm_model)`` labels,
+            preserving discovery order.
+    """
+
+    def __init__(self, candidates: Iterable[OrphanObjPermCandidate]):
+        self.candidates = list(candidates)
+        self.groups: dict[tuple[str, str], list[OrphanObjPermCandidate]] = {}
+        for candidate in self.candidates:
+            key = (candidate.content_type, candidate.perm_model)
+            self.groups.setdefault(key, []).append(candidate)
+
+    def __len__(self) -> int:
+        return len(self.candidates)
+
+
+def _get_obj_perm_models() -> list[type[Model]]:
+    """Return every concrete object permission model, generic and direct FK."""
+    from guardian.models import BaseObjectPermission
+
+    return [model for model in django_apps.get_models() if issubclass(model, BaseObjectPermission)]
+
+
+def _is_generic_obj_perm_model(model: type[Model]) -> bool:
+    try:
+        model._meta.get_field("content_type")
+    except FieldDoesNotExist:
+        return False
+    return True
+
+
+def _orphan_obj_perm_reason(obj: Model) -> str | None:
+    """Return why ``obj`` is an orphan object permission, or ``None`` if it is not."""
+    model = type(obj)
+    if _is_generic_obj_perm_model(model):
+        content_type = obj.content_type
+        if content_type.model_class() is None:
+            return f"content type '{content_type.app_label}.{content_type.model}' is not installed"
+        if obj.content_object is None:
+            return "target object does not exist"
+        return None
+
+    target_model = model._meta.get_field("content_object").remote_field.model
+    if not target_model._base_manager.filter(pk=obj.content_object_id).exists():
+        return "target object does not exist"
+    return None
+
+
+def _obj_perm_candidate(obj: Model, reason: str) -> OrphanObjPermCandidate:
+    model = type(obj)
+    if _is_generic_obj_perm_model(model):
+        content_type = obj.content_type
+        content_type_label = f"{content_type.app_label}.{content_type.model}"
+        object_pk = str(obj.object_pk)
+    else:
+        target_meta = model._meta.get_field("content_object").remote_field.model._meta
+        content_type_label = f"{target_meta.app_label}.{target_meta.model_name}"
+        object_pk = str(obj.content_object_id)
+    return OrphanObjPermCandidate(
+        perm_model=model._meta.label,
+        pk=obj.pk,
+        content_type=content_type_label,
+        object_pk=object_pk,
+        reason=reason,
+    )
+
+
+def find_orphan_obj_perms() -> OrphanObjPermPreview:
+    """Scan all object permission models and collect orphan candidates.
+
+    This is a read-only preview: nothing is deleted. Candidates cover generic
+    permissions (including entries whose content type is no longer installed)
+    as well as permissions stored in direct foreign key models, and are
+    grouped by target content type and permission model.
+    """
+    candidates = []
+    for model in _get_obj_perm_models():
+        for obj in model._base_manager.order_by("pk").iterator():
+            reason = _orphan_obj_perm_reason(obj)
+            if reason is not None:
+                candidates.append(_obj_perm_candidate(obj, reason))
+
+    preview = OrphanObjPermPreview(candidates)
+    logger.info("Found %d orphan object permission candidates", len(preview))
+    return preview
+
+
+def remove_orphan_obj_perms(
+    candidates: Iterable[OrphanObjPermCandidate],
+) -> tuple[int, list[tuple[OrphanObjPermCandidate, str]]]:
+    """Delete previously identified orphan candidates, re-validating each one.
+
+    Every candidate is fetched again and its orphan reason is re-checked right
+    before deletion, so entries whose target reappeared between the preview
+    and the cleanup (restored objects, reused primary keys) are kept.
+
+    Returns:
+        A tuple ``(removed, skipped)`` where ``skipped`` is a list of
+        ``(candidate, reason)`` pairs explaining why each entry was kept.
+    """
+    removed = 0
+    skipped: list[tuple[OrphanObjPermCandidate, str]] = []
+
+    for candidate in candidates:
+        model = django_apps.get_model(candidate.perm_model)
+        obj = model._base_manager.filter(pk=candidate.pk).first()
+        if obj is None:
+            skipped.append((candidate, "permission entry no longer exists"))
+            continue
+        if _orphan_obj_perm_reason(obj) is None:
+            skipped.append((candidate, "target object exists again (restored or primary key reused)"))
+            continue
+        logger.debug("Removing %s (pk=%s): %s", candidate.perm_model, candidate.pk, candidate.reason)
+        obj.delete()
+        removed += 1
+
+    for candidate, reason in skipped:
+        logger.info("Skipped %s (pk=%s): %s", candidate.perm_model, candidate.pk, reason)
+
+    logger.info("Removed %d orphan object permission entries, skipped %d", removed, len(skipped))
+    return removed, skipped
 
 
 # TODO: should raise error when multiple UserObjectPermission direct relations

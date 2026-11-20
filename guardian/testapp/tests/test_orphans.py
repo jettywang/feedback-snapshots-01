@@ -9,10 +9,15 @@ from django.contrib.contenttypes.models import ContentType
 from django.core.management import call_command
 from django.test import TestCase
 
-from guardian.models import Group
+from guardian.models import Group, GroupObjectPermission, UserObjectPermission
 from guardian.shortcuts import assign_perm
+from guardian.testapp.models import Project, ProjectUserObjectPermission
 from guardian.testapp.tests.conf import skipUnlessTestApp
-from guardian.utils import clean_orphan_obj_perms
+from guardian.utils import (
+    clean_orphan_obj_perms,
+    find_orphan_obj_perms,
+    remove_orphan_obj_perms,
+)
 
 auth_app = django_apps.get_app_config("auth")
 
@@ -422,3 +427,197 @@ class OrphanedObjectPermissionsTest(TestCase):
 
         output = out.getvalue()
         self.assertIn("Removed 0 object permission entries with no targets", output)
+
+
+@skipUnlessTestApp
+class OrphanObjPermTwoPhaseTest(TestCase):
+    """Tests for the preview/verified-removal orphan cleanup flow"""
+
+    def setUp(self):
+        # Required if MySQL backend is used :/
+        create_permissions(auth_app, 1)
+
+        self.user = User.objects.create(username="two-phase-user")
+        self.group = Group.objects.create(name="two-phase-group")
+
+    def _target(self, model):
+        return ContentType.objects.create(model=model, app_label="fake-for-guardian-tests")
+
+    def _restore(self, model, pk):
+        """Recreate a deleted fake target reusing its primary key"""
+        target = ContentType(model=model, app_label="fake-for-guardian-tests")
+        target.pk = pk
+        target.save()
+        return target
+
+    def test_preview_groups_candidates_by_content_type_and_store(self):
+        target_user = User.objects.create(username="preview-target-user")
+        target_group = Group.objects.create(name="preview-target-group")
+        assign_perm("change_%s" % user_module_name, self.user, target_user)
+        assign_perm("delete_group", self.user, target_group)
+        assign_perm("change_group", self.group, target_group)
+
+        user_ct = ContentType.objects.get_for_model(target_user)
+        group_ct = ContentType.objects.get_for_model(target_group)
+        target_user.delete()
+        target_group.delete()
+
+        preview = find_orphan_obj_perms()
+
+        self.assertEqual(len(preview), 3)
+        self.assertEqual(
+            set(preview.groups),
+            {
+                (f"{user_ct.app_label}.{user_ct.model}", "guardian.UserObjectPermission"),
+                (f"{group_ct.app_label}.{group_ct.model}", "guardian.UserObjectPermission"),
+                (f"{group_ct.app_label}.{group_ct.model}", "guardian.GroupObjectPermission"),
+            },
+        )
+        for candidates in preview.groups.values():
+            for candidate in candidates:
+                self.assertEqual(candidate.reason, "target object does not exist")
+
+        # Preview must not delete anything
+        self.assertEqual(UserObjectPermission.objects.count(), 2)
+        self.assertEqual(GroupObjectPermission.objects.count(), 1)
+
+    def test_preview_flags_historical_content_type(self):
+        target = self._target("historical")
+        assign_perm("change_contenttype", self.user, target)
+        stale_ct = ContentType.objects.create(model="oldmodel", app_label="removed-app")
+        UserObjectPermission.objects.filter(user=self.user).update(content_type=stale_ct)
+
+        preview = find_orphan_obj_perms()
+
+        self.assertEqual(len(preview), 1)
+        candidate = preview.candidates[0]
+        self.assertEqual(candidate.content_type, "removed-app.oldmodel")
+        self.assertIn("not installed", candidate.reason)
+
+        removed, skipped = remove_orphan_obj_perms(preview.candidates)
+        self.assertEqual(removed, 1)
+        self.assertEqual(skipped, [])
+        self.assertEqual(UserObjectPermission.objects.count(), 0)
+
+    def test_preview_ignores_reused_primary_key(self):
+        target = self._target("reused")
+        assign_perm("change_contenttype", self.user, target)
+        old_pk = target.pk
+        target.delete()
+        self._restore("reused", old_pk)
+
+        preview = find_orphan_obj_perms()
+
+        self.assertEqual(len(preview), 0)
+        removed, skipped = remove_orphan_obj_perms(preview.candidates)
+        self.assertEqual(removed, 0)
+        self.assertEqual(skipped, [])
+        self.assertEqual(UserObjectPermission.objects.count(), 1)
+
+    def test_preview_handles_direct_fk_objects(self):
+        project = Project.objects.create(name="direct-fk-project")
+        assign_perm("change_project", self.user, project)
+        assign_perm("delete_project", self.group, project)
+        self.assertEqual(ProjectUserObjectPermission.objects.count(), 1)
+
+        # Live objects with direct FK permissions must not be flagged
+        preview = find_orphan_obj_perms()
+        self.assertEqual(len(preview), 0)
+
+        # Deleting the target cascades into the direct FK permission models,
+        # so no orphan candidates can appear afterwards either
+        project.delete()
+        self.assertEqual(ProjectUserObjectPermission.objects.count(), 0)
+        preview = find_orphan_obj_perms()
+        self.assertEqual(len(preview), 0)
+
+    def test_execute_skips_restored_object_and_removes_confirmed_orphans(self):
+        restored_target = self._target("restored")
+        gone_target = self._target("gone")
+        assign_perm("change_contenttype", self.user, restored_target)
+        assign_perm("change_contenttype", self.user, gone_target)
+        restored_pk = restored_target.pk
+        gone_pk = gone_target.pk
+        restored_target.delete()
+        gone_target.delete()
+
+        preview = find_orphan_obj_perms()
+        self.assertEqual(len(preview), 2)
+
+        # Between preview and execution the deleted object comes back
+        restored = self._restore("restored", restored_pk)
+
+        removed, skipped = remove_orphan_obj_perms(preview.candidates)
+
+        self.assertEqual(removed, 1)
+        self.assertEqual(len(skipped), 1)
+        candidate, reason = skipped[0]
+        self.assertEqual(candidate.object_pk, str(restored_pk))
+        self.assertIn("restored", reason)
+
+        # The restored object keeps its permission, the confirmed orphan is reclaimed
+        self.assertTrue(UserObjectPermission.objects.filter(object_pk=str(restored_pk)).exists())
+        self.assertFalse(UserObjectPermission.objects.filter(object_pk=str(gone_pk)).exists())
+        self.assertTrue(self.user.has_perm("change_contenttype", restored))
+
+    def test_execute_skips_entries_removed_elsewhere(self):
+        target = self._target("gone-elsewhere")
+        assign_perm("change_contenttype", self.user, target)
+        target.delete()
+
+        preview = find_orphan_obj_perms()
+        self.assertEqual(len(preview), 1)
+
+        # Someone else reclaims the entry between preview and execution
+        UserObjectPermission.objects.all().delete()
+
+        removed, skipped = remove_orphan_obj_perms(preview.candidates)
+        self.assertEqual(removed, 0)
+        self.assertEqual(len(skipped), 1)
+        self.assertIn("no longer exists", skipped[0][1])
+
+    def test_command_dry_run_groups_candidates_without_deleting(self):
+        target = self._target("dry-run")
+        assign_perm("change_contenttype", self.user, target)
+        target.delete()
+
+        out = StringIO()
+        call_command("clean_orphan_obj_perms", dry_run=True, verbosity=1, stdout=out)
+
+        output = out.getvalue()
+        self.assertIn("contenttypes.contenttype", output)
+        self.assertIn("guardian.UserObjectPermission", output)
+        self.assertIn("1 entries", output)
+        self.assertEqual(UserObjectPermission.objects.count(), 1)
+
+    def test_command_dry_run_no_orphans(self):
+        out = StringIO()
+        call_command("clean_orphan_obj_perms", dry_run=True, verbosity=1, stdout=out)
+        self.assertIn("No orphan object permission entries found", out.getvalue())
+
+    def test_command_checked_removes_orphans_and_reports_skips(self):
+        restored_target = self._target("checked-restored")
+        gone_target = self._target("checked-gone")
+        assign_perm("change_contenttype", self.user, restored_target)
+        assign_perm("change_contenttype", self.user, gone_target)
+        restored_pk = restored_target.pk
+        restored_target.delete()
+        gone_target.delete()
+
+        # Preview first, then the object comes back before the command executes
+        preview = find_orphan_obj_perms()
+        self.assertEqual(len(preview), 2)
+        self._restore("checked-restored", restored_pk)
+
+        out = StringIO()
+        with patch(
+            "guardian.management.commands.clean_orphan_obj_perms.find_orphan_obj_perms",
+            return_value=preview,
+        ):
+            call_command("clean_orphan_obj_perms", checked=True, verbosity=1, stdout=out)
+
+        output = out.getvalue()
+        self.assertIn("Removed 1 object permission entries with no targets", output)
+        self.assertIn("Skipped 1 entries (no longer orphan)", output)
+        self.assertIn("restored", output)
+        self.assertEqual(UserObjectPermission.objects.count(), 1)

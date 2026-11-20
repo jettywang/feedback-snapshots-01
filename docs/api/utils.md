@@ -11,3 +11,7 @@ django-guardian helper functions.
 ::: guardian.utils.get_identity
 
 ::: guardian.utils.clean_orphan_obj_perms
+
+::: guardian.utils.find_orphan_obj_perms
+
+::: guardian.utils.remove_orphan_obj_perms
