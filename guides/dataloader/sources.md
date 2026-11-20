@@ -167,3 +167,42 @@ def result_key_for(record)
   record.object_id # even if the records are equivalent, handle each distinct Ruby object separately
 end
 ```
+
+## Sharing caches across a multiplex
+
+When several queries run together in a [multiplex](/queries/multiplex), they all share one [GraphQL::Dataloader](rdoc-ref:GraphQL::Dataloader) instance -- including its Source caches. That's great for batching, but it means cached results are shared across queries, even when those queries run for different identities.
+
+For permission-constrained data, pass a permission "view" as a batch parameter so that results are only shared between equivalent views. Use [GraphQL::Dataloader::Source.batch_key_for](rdoc-ref:GraphQL::Dataloader::Source.batch_key_for) to canonicalize views that should be treated as equivalent:
+
+```ruby
+class Sources::SecureRecord < GraphQL::Dataloader::Source
+  def initialize(view:)
+    @view = view
+  end
+
+  # Views with the same permissions (in any order) share a cache;
+  # any other view gets its own source instance and its own cache.
+  def self.batch_key_for(view:)
+    view.is_a?(Array) ? view.sort : view
+  end
+
+  def fetch(ids)
+    # ... load records, filtered according to `@view` ...
+  end
+end
+```
+
+Then, in your resolver, always provide a view -- and when there isn't one, fall back to an identity-specific scope so that nothing is shared with other viewers:
+
+```ruby
+def secure_record(id:)
+  view = context[:permission_view] || "user:#{context[:current_user]&.id}"
+  dataloader.with(Sources::SecureRecord, view: view).load(id)
+end
+```
+
+With this in place:
+
+- Queries with _equivalent_ views (for example, `["name:read", "secret:read"]` and `["secret:read", "name:read"]`) share batched loads and cached results, even across different identities in the same multiplex.
+- Queries with _different_ views use different source instances, so they never see one another's cached results.
+- Queries with _no_ view fall back to a per-identity scope, so they don't read (or populate) anyone else's cache either.

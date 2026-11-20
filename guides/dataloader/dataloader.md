@@ -5,6 +5,8 @@
 - Cache [Source](/dataloader/sources) instances for the duration of GraphQL execution
 - Run pending Fibers to resolve data requirements and continue GraphQL execution
 
+Since a multiplex shares one `Dataloader` (and its Source caches) across all of its queries, permission-constrained data should be scoped to a permission "view" so that cached results are only shared between equivalent views. See [Sharing caches across a multiplex](/dataloader/sources#sharing-caches-across-a-multiplex) for details.
+
 During a query, you can access the dataloader instance with:
 
 - [GraphQL::Query::Context#dataloader](rdoc-ref:GraphQL::Query::Context#dataloader) (`context.dataloader`, anywhere that query context is available)

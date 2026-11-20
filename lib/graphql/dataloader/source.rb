@@ -241,6 +241,12 @@ module GraphQL
       # this method to call `.to_sql` on them, thus merging `.load(...)` calls when they apply
       # to equivalent relations.
       #
+      # Since all queries in a multiplex share one [Dataloader](rdoc-ref:Dataloader) (and its
+      # Source caches), you can also use this to keep permission-constrained results from
+      # leaking between identities: pass a permission "view" as a batch argument and
+      # canonicalize equivalent views here, so that cached results are only shared between
+      # equivalent views.
+      #
       # **Parameters**
       #
       # - `batch_args` (`Array<Object>`)
