@@ -920,6 +920,195 @@ describe "GraphQL::Authorization" do
     end
   end
 
+  describe "authorizing objects at multiple entry points" do
+    module EntryPointAuthTest
+      ROLE_RANKS = { reader: 1, admin: 2 }
+
+      Document = Struct.new(:id, :title, :minimum_role, keyword_init: true)
+
+      DOCUMENTS = {
+        "doc-public" => Document.new(id: "doc-public", title: "Public doc", minimum_role: :reader),
+        "doc-secret" => Document.new(id: "doc-secret", title: "Secret doc", minimum_role: :admin),
+      }
+
+      class DocumentType < GraphQL::Schema::Object
+        graphql_name "Document"
+
+        field :id, ID, null: false
+        field :title, String, null: false
+
+        def self.authorized?(document, context)
+          context[:authorized_document_ids] << document.id
+          ROLE_RANKS.fetch(context[:role], 0) >= ROLE_RANKS.fetch(document.minimum_role)
+        end
+      end
+
+      class DocumentsResolver < GraphQL::Schema::Resolver
+        type [DocumentType, null: true], null: false
+        argument :ids, [ID]
+
+        def resolve(ids:)
+          context[:resolver_calls] << ids
+          ids.map { |id| DOCUMENTS[id] }
+        end
+      end
+
+      class UpdateDocument < GraphQL::Schema::Mutation
+        argument :document_id, ID, loads: DocumentType
+
+        field :document_id, ID, null: false, hash_key: :document_id
+        field :title, String, null: false, hash_key: :title
+
+        def resolve(document:)
+          context[:mutation_calls] << document.id
+          { document_id: document.id, title: "Updated: #{document.title}" }
+        end
+      end
+
+      class Query < GraphQL::Schema::Object
+        field :documents, resolver: DocumentsResolver
+      end
+
+      class Mutation < GraphQL::Schema::Object
+        field :update_document, mutation: UpdateDocument
+      end
+
+      class Schema < GraphQL::Schema
+        query(Query)
+        mutation(Mutation)
+        use GraphQL::Schema::Warden if ADD_WARDEN
+
+        def self.object_from_id(id, context)
+          context[:lookup_ids] << id
+          DOCUMENTS[id]
+        end
+
+        def self.resolve_type(_abstract_type, _object, _context)
+          DocumentType
+        end
+
+        def self.unauthorized_object(err)
+          raise GraphQL::ExecutionError, "Restricted #{err.type.graphql_name}: #{err.object.id}"
+        end
+      end
+    end
+
+    def entry_point_context(role)
+      {
+        role: role,
+        resolver_calls: [],
+        mutation_calls: [],
+        lookup_ids: [],
+        authorized_document_ids: [],
+      }
+    end
+
+    def list_documents(role:, ids:)
+      context = entry_point_context(role)
+      res = EntryPointAuthTest::Schema.execute(<<~GRAPHQL, variables: { "ids" => ids }, context: context)
+        query($ids: [ID!]!) {
+          documents(ids: $ids) {
+            id
+            title
+          }
+        }
+      GRAPHQL
+      [res, context]
+    end
+
+    def update_document(role:, id:)
+      context = entry_point_context(role)
+      res = EntryPointAuthTest::Schema.execute(<<~GRAPHQL, variables: { "id" => id }, context: context)
+        mutation($id: ID!) {
+          updateDocument(documentId: $id) {
+            documentId
+            title
+          }
+        }
+      GRAPHQL
+      [res, context]
+    end
+
+    [
+      [:reader, "doc-public", true],
+      [:reader, "doc-secret", false],
+      [:admin, "doc-public", true],
+      [:admin, "doc-secret", true],
+    ].each do |role, document_id, allowed|
+      it "applies the same #{role} authorization to #{document_id} through list lookups and loaded arguments" do
+        expected_document = EntryPointAuthTest::DOCUMENTS[document_id]
+
+        list_res, list_ctx = list_documents(role: role, ids: [document_id])
+        assert_equal [[document_id]], list_ctx[:resolver_calls],
+          "the list resolver should run before per-object authorization"
+        assert_equal [document_id], list_ctx[:authorized_document_ids],
+          "the list entry point should authorize the resolved object"
+
+        mutation_res, mutation_ctx = update_document(role: role, id: document_id)
+        assert_equal [document_id], mutation_ctx[:lookup_ids],
+          "the mutation should load the document by ID"
+        assert_equal [document_id], mutation_ctx[:authorized_document_ids],
+          "the mutation entry point should authorize the loaded object"
+
+        if allowed
+          assert_equal [{ "id" => document_id, "title" => expected_document.title }], list_res["data"]["documents"]
+          refute list_res.key?("errors")
+
+          assert_equal document_id, mutation_res["data"]["updateDocument"]["documentId"]
+          assert_equal "Updated: #{expected_document.title}", mutation_res["data"]["updateDocument"]["title"]
+          refute mutation_res.key?("errors")
+          assert_equal [document_id], mutation_ctx[:mutation_calls]
+        else
+          assert_nil list_res["data"]["documents"].first
+          assert_equal ["Restricted Document: #{document_id}"], list_res["errors"].map { |err| err["message"] }
+          assert_equal [["documents", 0]], list_res["errors"].map { |err| err["path"] }
+
+          assert_nil mutation_res["data"]["updateDocument"]
+          assert_equal ["Restricted Document: #{document_id}"], mutation_res["errors"].map { |err| err["message"] }
+          assert_equal [["updateDocument"]], mutation_res["errors"].map { |err| err["path"] }
+          assert_empty mutation_ctx[:mutation_calls]
+        end
+      end
+    end
+
+    it "treats a visible but forbidden document the same way through both entry points" do
+      list_res, list_ctx = list_documents(role: :reader, ids: ["doc-public", "doc-secret"])
+      assert_equal [
+        { "id" => "doc-public", "title" => "Public doc" },
+        nil,
+      ], list_res["data"]["documents"]
+      assert_equal ["Restricted Document: doc-secret"], list_res["errors"].map { |err| err["message"] }
+      assert_equal [["documents", 1]], list_res["errors"].map { |err| err["path"] }
+      assert_equal [["doc-public", "doc-secret"]], list_ctx[:resolver_calls]
+      assert_equal ["doc-public", "doc-secret"], list_ctx[:authorized_document_ids]
+
+      mutation_res, mutation_ctx = update_document(role: :reader, id: "doc-secret")
+      assert_nil mutation_res["data"]["updateDocument"]
+      assert_equal ["Restricted Document: doc-secret"], mutation_res["errors"].map { |err| err["message"] }
+      assert_equal [["updateDocument"]], mutation_res["errors"].map { |err| err["path"] }
+      assert_equal ["doc-secret"], mutation_ctx[:lookup_ids]
+      assert_equal ["doc-secret"], mutation_ctx[:authorized_document_ids]
+      assert_empty mutation_ctx[:mutation_calls]
+    end
+
+    it "distinguishes a missing document from a forbidden one at both entry points" do
+      list_res, list_ctx = list_documents(role: :reader, ids: ["doc-missing"])
+      assert_equal [nil], list_res["data"]["documents"]
+      refute list_res.key?("errors")
+      assert_equal [["doc-missing"]], list_ctx[:resolver_calls]
+      assert_empty list_ctx[:authorized_document_ids]
+
+      mutation_res, mutation_ctx = update_document(role: :reader, id: "doc-missing")
+      assert_nil mutation_res["data"]["updateDocument"]
+      assert_equal ['No object found for `documentId: "doc-missing"`'],
+        mutation_res["errors"].map { |err| err["message"] }
+      assert_equal [["updateDocument"]], mutation_res["errors"].map { |err| err["path"] }
+      assert_equal ["doc-missing"], mutation_ctx[:lookup_ids]
+      assert_empty mutation_ctx[:authorized_document_ids]
+      assert_empty mutation_ctx[:mutation_calls]
+    end
+  end
+
   describe "returning false" do
     class FalseSchema < GraphQL::Schema
       class Query < GraphQL::Schema::Object
