@@ -165,3 +165,56 @@ Examples
     client.sys.delete_policy(
         name='secret-writer',
     )
+
+Batch Policy Changes With Version Evidence
+------------------------------------------
+
+Vault policy endpoints are unversioned last-write-wins objects. The batch
+interface records the current body of every targeted policy as version
+evidence before writing anything, then uses that evidence to skip writes when
+another administrator has changed a policy in the meantime and to roll back
+only changes whose evidence still matches.
+
+.. automethod:: hvac.api.system_backend.PolicyBatch.apply_policy_batch
+   :noindex:
+
+.. automethod:: hvac.api.system_backend.PolicyBatch.rollback_policy_batch
+   :noindex:
+
+Examples
+````````
+
+Tightening several policies in one guarded batch::
+
+    result = client.sys.apply_policy_batch(
+        changes=[
+            ("policy-a", 'path "secret/a/*" { capabilities = ["read"] }'),
+            ("policy-b", 'path "secret/b/*" { capabilities = ["read", "list"] }'),
+        ],
+        rollback_on_failure=True,
+    )
+
+    print(result.status)              # "succeeded", "failed", or "unknown"
+    for entry in result.results:
+        print(entry.name, entry.apply_status, entry.rollback_status,
+              entry.final_status)
+
+A *known* failure (an HTTP error status Vault documents) restores the policies
+the batch applied, but only while their stored body still matches the evidence
+captured up front; policies another administrator has since modified are
+reported as skipped and left untouched. An *unknown* response stops the batch
+without a blind rollback and sets ``readback_required``:
+
+    >>> result.readback_required
+    True
+    >>> result.readback_names
+    ['policy-b']
+
+Read those policies back with :meth:`hvac.api.system_backend.Policy.read_policy`,
+and once their real state is known, restore the batch explicitly:
+
+    client.sys.rollback_policy_batch(result)
+
+A runnable, offline walkthrough of creation/replacement, a scripted write
+failure, a concurrent administrator update, and an unclassifiable response is
+available at ``tests/scripts/policy_batch_demo.py``.
