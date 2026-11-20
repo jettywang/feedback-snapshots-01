@@ -9,9 +9,52 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 
 from pip_audit._dependency_source import DependencySource
-from pip_audit._service import Dependency, VulnerabilityResult, VulnerabilityService
+from pip_audit._service import (
+    INTERNAL_SOURCE,
+    Dependency,
+    SkippedDependency,
+    VulnerabilityResult,
+    VulnerabilityService,
+)
 
 logger = logging.getLogger(__name__)
+
+#: Reason attached to internal dependencies that a plain public service was asked
+#: to query. This should be unreachable through the CLI (which installs a
+#: `RoutingService`), but protects API users who hand an `Auditor` a public
+#: service directly.
+UNROUTED_INTERNAL_REASON = (
+    "not audited: package originates from an internal source, but the configured "
+    "vulnerability service is not permitted to receive internal package names"
+)
+
+
+def _enforce_confidentiality(
+    service: VulnerabilityService, specs: Iterator[Dependency]
+) -> Iterator[Dependency]:
+    """
+    Prevent internal package names from reaching a service that is not permitted
+    to receive them.
+
+    Services that understand source policy (e.g. `RoutingService`) declare
+    `supports_internal_queries`; anything else gets a policy skip instead of a
+    query, so an internal name can never be leaked by accident.
+    """
+
+    if service.supports_internal_queries:
+        yield from specs
+        return
+
+    for spec in specs:
+        if spec.source == INTERNAL_SOURCE:
+            yield SkippedDependency(
+                name=spec.name,
+                source=spec.source,
+                skip_reason=UNROUTED_INTERNAL_REASON,
+                policy_skipped=True,
+            )
+        else:
+            yield spec
 
 
 def _add_unique_vulnerability(
@@ -83,7 +126,23 @@ class Auditor:
             logger.info(f"Dry run: would have audited {len(list(specs))} packages")
             yield from ()
         else:
+            specs = _enforce_confidentiality(self._service, specs)
             for dep, vulns in self._service.query_all(specs):
+                # Defensive: a service could echo or synthesize a dependency. If an
+                # internal-source dependency comes back from a service that is not
+                # permitted to see internal names, do not trust its result.
+                if (
+                    dep.source == INTERNAL_SOURCE
+                    and not self._service.supports_internal_queries
+                ):
+                    dep = SkippedDependency(
+                        name=dep.name,
+                        source=dep.source,
+                        skip_reason=UNROUTED_INTERNAL_REASON,
+                        policy_skipped=True,
+                    )
+                    vulns = []
+
                 unique_vulns: list[VulnerabilityResult] = []
                 seen_aliases: set[str] = set()
 

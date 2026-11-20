@@ -8,6 +8,21 @@ All versions prior to 0.0.9 are untracked.
 
 ## [Unreleased]
 
+### Added
+
+* `pip-audit` can now keep confidential package names away from public
+  vulnerability services. Declare one or more private indexes with
+  `--internal-index-url URL`; dependencies resolved from those indexes are
+  routed exclusively to the internal advisory service configured with
+  `--internal-vulnerability-service-url URL` (an OSV-compatible endpoint).
+  Public dependencies continue to be checked against the normal public service.
+
+  When an internal dependency cannot be checked -- because no internal service
+  was configured, or because it was unreachable -- the result is an explicit
+  policy skip rather than a silent "no vulnerabilities". The `json` format adds
+  a `coverage` block and marks affected dependencies with `policy_skipped`, and
+  the other formats label the gap in their skip-reason output.
+
 ### Fixed
 
 * Editable requirements skipped with `--skip-editable` no longer require a hash

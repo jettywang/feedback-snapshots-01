@@ -8,16 +8,33 @@ import json
 import logging
 import venv
 from collections.abc import Iterator
+from dataclasses import dataclass
 from os import PathLike
 from tempfile import NamedTemporaryFile, TemporaryDirectory, gettempdir
 from types import SimpleNamespace
 
 from packaging.version import Version
 
+from ._service.interface import classify_index_source
 from ._state import AuditState
 from ._subprocess import CalledProcessError, run
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class InstalledPackage:
+    """
+    A package installed into a `VirtualEnv`, together with its provenance.
+    """
+
+    name: str
+    version: Version
+    source: str | None = None
+    """
+    `INTERNAL_SOURCE` or `PUBLIC_SOURCE` when the caller configured internal
+    indexes, otherwise `None`.
+    """
 
 
 class VirtualEnv(venv.EnvBuilder):
@@ -47,6 +64,7 @@ class VirtualEnv(venv.EnvBuilder):
         index_url: str | None = None,
         extra_index_urls: list[str] = [],
         state: AuditState = AuditState(),
+        internal_index_urls: list[str] = [],
     ):
         """
         Create a new `VirtualEnv`.
@@ -63,13 +81,19 @@ class VirtualEnv(venv.EnvBuilder):
         `extra_index_urls` are the extra URLs of package indexes.
 
         `state` is an `AuditState` to use for state callbacks.
+
+        `internal_index_urls` are package indexes whose contents are considered
+        confidential. Installed packages resolved from one of these indexes are
+        attributed `INTERNAL_SOURCE`; all others are attributed `PUBLIC_SOURCE`.
+        When empty, no provenance is recorded.
         """
         super().__init__(with_pip=True)
         self._install_args = install_args
         self._index_url = index_url
         self._extra_index_urls = extra_index_urls
-        self._packages: list[tuple[str, Version]] | None = None
+        self._packages: list[InstalledPackage] | None = None
         self._state = state
+        self._internal_index_urls = internal_index_urls
 
     def create(self, env_dir: str | bytes | PathLike[str] | PathLike[bytes]) -> None:
         """
@@ -174,18 +198,37 @@ class VirtualEnv(venv.EnvBuilder):
             install_report = json.load(tmp)
             package_list = install_report["install"]
 
-            # Convert into a series of name, version pairs
+            # Convert into a series of name, version pairs, attributing each
+            # package to its index origin when provenance tracking is enabled.
             self._packages = []
             for package in package_list:
                 package_metadata = package["metadata"]
+                download_info = package.get("download_info") or {}
+                source = classify_index_source(
+                    download_info.get("url"), self._internal_index_urls
+                )
                 self._packages.append(
-                    (package_metadata["name"], Version(package_metadata["version"]))
+                    InstalledPackage(
+                        name=package_metadata["name"],
+                        version=Version(package_metadata["version"]),
+                        source=source,
+                    )
                 )
 
     @property
     def installed_packages(self) -> Iterator[tuple[str, Version]]:
         """
         A property to inspect the list of packages installed in the virtual environment.
+
+        This method can only be called after the `create` method has been called.
+        """
+        for package in self.installed_packages_with_source:
+            yield package.name, package.version
+
+    @property
+    def installed_packages_with_source(self) -> Iterator[InstalledPackage]:
+        """
+        Like `installed_packages`, but also reports each package's index provenance.
 
         This method can only be called after the `create` method has been called.
         """

@@ -107,3 +107,19 @@ def test_columns_terminal_links(monkeypatch, vuln_data):
 {_P("foo")}  1.0     {_V("VULN-1")} 1.0          {_V("CVE-0000-00001")}
 {_P("bar")}  0.1     {_V("VULN-2")}              {_V("CVE-0000-00002")}"""
     assert columns_format.format(vuln_data, []) == expected_columns
+
+
+def test_columns_marks_policy_skip():
+    import pip_audit._service as service
+
+    dep = service.SkippedDependency(
+        name="secret-plugin",
+        source=service.INTERNAL_SOURCE,
+        skip_reason="internal service unavailable",
+        policy_skipped=True,
+    )
+    output = format.ColumnsFormat(False, False).format({dep: []}, [])
+    assert "Policy" not in output.splitlines()[0]  # existing header shape preserved
+    assert "Coverage" in output
+    assert "policy gap" in output
+    assert "[POLICY]" in output

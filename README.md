@@ -136,7 +136,8 @@ python -m pip_audit --help
 <!-- @begin-pip-audit-help@ -->
 ```
 usage: pip-audit [-h] [-V] [-l] [-r REQUIREMENT] [--locked] [-f FORMAT]
-                 [-s SERVICE] [--osv-url OSV_URL] [-d] [-S]
+                 [-s SERVICE] [--osv-url OSV_URL] [--internal-index-url URL]
+                 [--internal-vulnerability-service-url URL] [-d] [-S]
                  [--desc [{on,off,auto}]] [--aliases [{on,off,auto}]]
                  [--cache-dir CACHE_DIR] [--progress-spinner {on,off}]
                  [--timeout TIMEOUT] [--path PATH] [-v] [--fix]
@@ -171,6 +172,15 @@ options:
                         against (choices: osv, pypi, esms) (default: pypi)
   --osv-url OSV_URL     URL to use for the OSV API instead of the default
                         (default: https://api.osv.dev/v1/query)
+  --internal-index-url URL
+                        treat packages served by this index as confidential;
+                        such packages are only checked against the internal
+                        vulnerability service and their names are never sent
+                        to a public service; this option can be used multiple
+                        times (default: [])
+  --internal-vulnerability-service-url URL
+                        base URL of the internal OSV-compatible vulnerability
+                        API used for confidential dependencies (default: None)
   -d, --dry-run         without `--fix`: collect all dependencies but do not
                         perform the auditing step; with `--fix`: perform the
                         auditing step but do not perform any fixes (default:
@@ -515,6 +525,43 @@ In addition to the above, some third-party indices have required, hard-coded use
 For example, for Google Artifact registry, the hard-coded username is `oauth2accesstoken`.
 See [#742](https://github.com/pypa/pip-audit/issues/742) and
 [pip#11971](https://github.com/pypa/pip/issues/11971) for additional context.
+
+### Confidential packages and internal advisory services
+
+For some organizations the *name* of an internal package is itself sensitive: sending
+it to PyPI, OSV, or Ecosyste.ms would leak information about private tooling. `pip-audit`
+can enforce a split policy between a public service and an internal advisory service:
+
+* `--internal-index-url URL` marks the given index (by origin) as confidential. Any
+  dependency resolved from that index is attributed to the internal source.
+* `--internal-vulnerability-service-url URL` points at an OSV-compatible endpoint
+  serving advisories for those internal packages (for example an internal mirror or a
+  custom OSV database). `PIP_AUDIT_INTERNAL_VULNERABILITY_SERVICE_URL` is the
+  environment-variable equivalent.
+
+With both flags set, internal dependencies are queried **only** against the internal
+service, while all public dependencies are audited against the normal service exactly
+as before. Internal package names are never placed in a request to the public service.
+This also applies to the follow-up queries performed by `--fix`.
+
+```console
+$ pip-audit -r requirements.txt \
+    --internal-index-url https://pypi.internal.example/simple \
+    --internal-vulnerability-service-url https://osv.internal.example/v1/query
+```
+
+If an internal dependency cannot be checked — because no internal service was configured
+or because it was unreachable — the report records an explicit coverage gap instead of
+quietly treating the package as clean:
+
+* the `json` output includes a top-level `coverage` object with `"complete": false` and
+  an `unaudited` list, and the affected dependency carries `"policy_skipped": true`,
+  its `source`, and a human-readable `skip_reason`;
+* the `columns` and `markdown` formats mark the skip reason as a policy gap;
+* a `Coverage incomplete` warning is written to standard error.
+
+`--internal-index-url` applies to `--requirement` inputs and project paths. The implicit
+`pip list` source has no index provenance, so all of its packages are treated as public.
 
 ## Tips and Tricks
 

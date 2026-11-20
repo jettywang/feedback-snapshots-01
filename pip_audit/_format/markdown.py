@@ -163,4 +163,7 @@ class MarkdownFormat(VulnerabilityFormat):
         ) + "\n".join(skipped_dep_rows)
 
     def _format_skipped_dep(self, dep: service.SkippedDependency) -> str:
-        return f"{dep.name} | {dep.skip_reason}"
+        reason = dep.skip_reason
+        if dep.policy_skipped:
+            reason = f"**POLICY** — {reason}"
+        return f"{dep.name} | {reason}"

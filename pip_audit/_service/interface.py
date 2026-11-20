@@ -7,14 +7,61 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, NewType
+from urllib.parse import urlsplit
 
 from packaging.utils import canonicalize_name
 from packaging.version import Version
 
 VulnerabilityID = NewType("VulnerabilityID", str)
+
+#: Source label for dependencies that originate from a private/internal index.
+INTERNAL_SOURCE = "internal"
+
+#: Source label for dependencies that originate from a public index (e.g. PyPI).
+PUBLIC_SOURCE = "public"
+
+
+def _url_origin(url: str) -> tuple[str, str]:
+    parsed = urlsplit(url)
+    return parsed.scheme.lower(), parsed.netloc.lower()
+
+
+def index_is_internal(url: str | None, internal_index_urls: list[str]) -> bool:
+    """
+    Return whether a package/index URL belongs to one of the configured internal
+    indexes.
+
+    Matching is done on the URL origin (scheme plus host), which is the part that
+    reliably identifies the index even for artifact download URLs that live under
+    a different path than the simple index itself.
+    """
+
+    if not url or not internal_index_urls:
+        return False
+
+    origin = _url_origin(url)
+    if not origin[1]:
+        return False
+
+    return any(origin == _url_origin(index_url) for index_url in internal_index_urls)
+
+
+def classify_index_source(
+    url: str | None, internal_index_urls: list[str]
+) -> str | None:
+    """
+    Classify a package/index URL as `INTERNAL_SOURCE`, `PUBLIC_SOURCE`, or `None`.
+
+    `None` is returned when no internal indexes are configured, meaning the caller
+    has not opted into source-based policy enforcement.
+    """
+
+    if not internal_index_urls:
+        return None
+    return INTERNAL_SOURCE if index_is_internal(url, internal_index_urls) else PUBLIC_SOURCE
 
 
 def _id_comparison_key(id: str) -> int:
@@ -38,6 +85,15 @@ class Dependency:
     The package's **uncanonicalized** name.
 
     Use the `canonicalized_name` property when a canonicalized form is necessary.
+    """
+
+    source: str | None = field(default=None, kw_only=True)
+    """
+    The provenance of the dependency, used to enforce vulnerability-service policies.
+
+    `INTERNAL_SOURCE` marks a dependency from a private/internal index, meaning its
+    package name is itself sensitive. `PUBLIC_SOURCE` marks an ordinary public
+    dependency. `None` is treated as public by policy-aware services.
     """
 
     def __init__(self, *_args: Any, **_kwargs: Any) -> None:
@@ -77,6 +133,17 @@ class SkippedDependency(Dependency):
     """
 
     skip_reason: str
+
+    policy_skipped: bool = field(default=False, kw_only=True)
+    """
+    Whether the dependency was skipped because of a confidentiality policy rather
+    than a data problem.
+
+    Policy skips represent an explicit coverage gap: the package was deliberately
+    not queried against the service that would otherwise handle it. Formats should
+    mark these distinctly so operators can tell "not vulnerable" apart from
+    "could not check".
+    """
 
 
 @dataclass(frozen=True)
@@ -156,6 +223,18 @@ class VulnerabilityService(ABC):
     """
     Represents an abstract provider of Python package vulnerability information.
     """
+
+    @property
+    def supports_internal_queries(self) -> bool:
+        """
+        Whether this service is allowed to receive queries for confidential,
+        internal-source dependencies.
+
+        This defaults to `False`: a plain public service (PyPI, OSV, Ecosyste.ms)
+        must never be handed an internal package name. Policy-aware wrappers such
+        as `RoutingService` override this to `True`.
+        """
+        return False
 
     @abstractmethod
     def query(

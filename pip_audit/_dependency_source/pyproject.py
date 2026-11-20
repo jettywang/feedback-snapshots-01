@@ -38,6 +38,7 @@ class PyProjectSource(DependencySource):
         filename: Path,
         index_url: str | None = None,
         extra_index_urls: list[str] = [],
+        internal_index_urls: list[str] = [],
         state: AuditState = AuditState(),
     ) -> None:
         """
@@ -49,10 +50,17 @@ class PyProjectSource(DependencySource):
 
         `extra_index_urls` are the extra URLs of package indexes.
 
+        `internal_index_urls` are package indexes whose contents are confidential.
+        When non-empty, dependencies resolved from these indexes are attributed
+        `INTERNAL_SOURCE`.
+
         `state` is an `AuditState` to use for state callbacks.
         """
         self.filename = filename
         self.state = state
+        self._index_url = index_url
+        self._extra_index_urls = extra_index_urls
+        self._internal_index_urls = internal_index_urls
 
     def collect(self) -> Iterator[Dependency]:
         """
@@ -95,15 +103,26 @@ class PyProjectSource(DependencySource):
                 req_file.flush()
 
                 # Try to install the generated requirements file.
-                ve = VirtualEnv(install_args=["-r", req_file.name], state=self.state)
+                if self._internal_index_urls:
+                    ve = VirtualEnv(
+                        install_args=["-r", req_file.name],
+                        index_url=self._index_url,
+                        extra_index_urls=self._extra_index_urls,
+                        state=self.state,
+                        internal_index_urls=self._internal_index_urls,
+                    )
+                else:
+                    ve = VirtualEnv(install_args=["-r", req_file.name], state=self.state)
                 try:
                     ve.create(ve_dir)
                 except VirtualEnvError as exc:
                     raise PyProjectSourceError(str(exc)) from exc
 
                 # Now query the installed packages.
-                for name, version in ve.installed_packages:
-                    yield ResolvedDependency(name=name, version=version)
+                for package in ve.installed_packages_with_source:
+                    yield ResolvedDependency(
+                        name=package.name, version=package.version, source=package.source
+                    )
 
     def fix(self, fix_version: ResolvedFixVersion) -> None:
         """

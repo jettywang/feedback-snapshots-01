@@ -32,7 +32,7 @@ from pip_audit._format import (
     MarkdownFormat,
     VulnerabilityFormat,
 )
-from pip_audit._service import EcosystemsService, OsvService, PyPIService
+from pip_audit._service import EcosystemsService, OsvService, PyPIService, RoutingService
 from pip_audit._service.interface import ConnectionError as VulnServiceConnectionError
 from pip_audit._service.interface import (
     Dependency,
@@ -257,6 +257,26 @@ def _parser() -> argparse.ArgumentParser:  # pragma: no cover
         help="URL to use for the OSV API instead of the default",
     )
     parser.add_argument(
+        "--internal-index-url",
+        type=str,
+        metavar="URL",
+        action="append",
+        dest="internal_index_urls",
+        default=[],
+        help="treat packages served by this index as confidential; such packages are only "
+        "checked against the internal vulnerability service and their names are never sent "
+        "to a public service; this option can be used multiple times",
+    )
+    parser.add_argument(
+        "--internal-vulnerability-service-url",
+        type=str,
+        metavar="URL",
+        dest="internal_vulnerability_service_url",
+        default=os.environ.get("PIP_AUDIT_INTERNAL_VULNERABILITY_SERVICE_URL"),
+        help="base URL of the internal OSV-compatible vulnerability API used for confidential "
+        "dependencies",
+    )
+    parser.add_argument(
         "-d",
         "--dry-run",
         action="store_true",
@@ -409,7 +429,12 @@ def _parse_args(parser: argparse.ArgumentParser) -> argparse.Namespace:  # pragm
 
 
 def _dep_source_from_project_path(
-    project_path: Path, index_url: str, extra_index_urls: list[str], locked: bool, state: AuditState
+    project_path: Path,
+    index_url: str,
+    extra_index_urls: list[str],
+    locked: bool,
+    state: AuditState,
+    internal_index_urls: list[str] = [],
 ) -> DependencySource:  # pragma: no cover
     # If the user has passed `--locked`, we check for `pylock.*.toml` files.
     if locked:
@@ -430,6 +455,7 @@ def _dep_source_from_project_path(
             pyproject_path,
             index_url=index_url,
             extra_index_urls=extra_index_urls,
+            internal_index_urls=internal_index_urls,
             state=state,
         )
 
@@ -447,13 +473,31 @@ def audit() -> None:  # pragma: no cover
 
     service: VulnerabilityService
     if args.vulnerability_service is VulnerabilityServiceChoice.Osv:
-        service = OsvService(cache_dir=args.cache_dir, timeout=args.timeout, osv_url=args.osv_url)
+        public_service: VulnerabilityService = OsvService(
+            cache_dir=args.cache_dir, timeout=args.timeout, osv_url=args.osv_url
+        )
     elif args.vulnerability_service is VulnerabilityServiceChoice.Pypi:
-        service = PyPIService(cache_dir=args.cache_dir, timeout=args.timeout)
+        public_service = PyPIService(cache_dir=args.cache_dir, timeout=args.timeout)
     elif args.vulnerability_service is VulnerabilityServiceChoice.Esms:
-        service = EcosystemsService(cache_dir=args.cache_dir, timeout=args.timeout)
+        public_service = EcosystemsService(cache_dir=args.cache_dir, timeout=args.timeout)
     else:
         assert_never(args.vulnerability_service)  # pragma: no cover
+
+    internal_service: VulnerabilityService | None = None
+    if args.internal_vulnerability_service_url:
+        internal_service = OsvService(
+            cache_dir=args.cache_dir,
+            timeout=args.timeout,
+            osv_url=args.internal_vulnerability_service_url,
+        )
+
+    # Confidential-source packages must never reach the public service. Install a
+    # routing layer whenever the operator declares internal indexes or an internal
+    # advisory service; otherwise internal packages would be policy-skipped.
+    if args.internal_index_urls or internal_service is not None:
+        service = RoutingService(public_service, internal_service)
+    else:
+        service = public_service
 
     output_desc = args.desc.to_bool(args.format)
     output_aliases = args.aliases.to_bool(args.format)
@@ -517,6 +561,7 @@ def audit() -> None:  # pragma: no cover
                 skip_editable=args.skip_editable,
                 index_url=args.index_url,
                 extra_index_urls=args.extra_index_urls,
+                internal_index_urls=args.internal_index_urls,
                 state=state,
             )
         elif args.project_path is not None:
@@ -530,6 +575,7 @@ def audit() -> None:  # pragma: no cover
                 args.extra_index_urls,
                 args.locked,
                 state,
+                args.internal_index_urls,
             )
         else:
             source = PipSource(
@@ -548,6 +594,7 @@ def audit() -> None:  # pragma: no cover
         pkg_count = 0
         vuln_count = 0
         skip_count = 0
+        policy_skip_count = 0
         vuln_ignore_count = 0
         vulns_to_ignore = set(args.ignore_vulns)
         try:
@@ -556,6 +603,9 @@ def audit() -> None:  # pragma: no cover
                     spec = cast(SkippedDependency, spec)
                     if args.strict:
                         _fatal(f"{spec.name}: {spec.skip_reason}")
+                    elif getattr(spec, "policy_skipped", False):
+                        state.update_state(f"Policy skip {spec.name}: {spec.skip_reason}")
+                        policy_skip_count += 1
                     else:
                         state.update_state(f"Skipping {spec.name}: {spec.skip_reason}")
                     skip_count += 1
@@ -632,6 +682,7 @@ def audit() -> None:  # pragma: no cover
                 f"{'package' if fixed_pkg_count == 1 else 'packages'}"
             )
         print(summary_msg, file=sys.stderr)
+        _warn_policy_coverage(policy_skip_count)
         with _output_io(args.output) as io:
             print(formatter.format(result, fixes), file=io)
         if pkg_count != fixed_pkg_count:
@@ -645,8 +696,27 @@ def audit() -> None:  # pragma: no cover
             summary_msg,
             file=sys.stderr,
         )
+        _warn_policy_coverage(policy_skip_count)
         # If our output format is a "manifest" format we always emit it,
         # even if nothing other than a dependency summary is present.
         if skip_count > 0 or formatter.is_manifest:
             with _output_io(args.output) as io:
                 print(formatter.format(result, fixes), file=io)
+
+
+def _warn_policy_coverage(policy_skip_count: int) -> None:
+    """
+    Emit a prominent warning when confidentiality policy left packages unaudited.
+
+    "No known vulnerabilities found" is misleading when coverage was incomplete,
+    so we make the gap unmistakable on stderr.
+    """
+
+    if not policy_skip_count:
+        return
+
+    logger.warning(
+        f"Coverage incomplete: {policy_skip_count} "
+        f"{'package was' if policy_skip_count == 1 else 'packages were'} not audited "
+        "because of confidentiality policy; see the skip reasons in the report"
+    )

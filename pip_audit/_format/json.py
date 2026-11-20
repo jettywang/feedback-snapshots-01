@@ -50,10 +50,15 @@ class JsonFormat(VulnerabilityFormat):
 
         See `VulnerabilityFormat.format`.
         """
-        output_json = {
+        output_json: dict[str, Any] = {
             "dependencies": [self._format_dep(dep, vulns) for dep, vulns in result.items()],
             "fixes": [self._format_fix(f) for f in fixes],
         }
+        coverage = self._format_coverage(result)
+        # Only surface the coverage block when policy actually left something
+        # unaudited, preserving the historical shape for ordinary audits.
+        if coverage is not None:
+            output_json["coverage"] = coverage
         return json.dumps(output_json)
 
     def _format_dep(
@@ -61,16 +66,55 @@ class JsonFormat(VulnerabilityFormat):
     ) -> dict[str, Any]:
         if dep.is_skipped():
             dep = cast(service.SkippedDependency, dep)
-            return {
+            formatted: dict[str, Any] = {
                 "name": dep.canonical_name,
                 "skip_reason": dep.skip_reason,
             }
+            if dep.policy_skipped:
+                formatted["policy_skipped"] = True
+            if dep.source is not None:
+                formatted["source"] = dep.source
+            return formatted
 
         dep = cast(service.ResolvedDependency, dep)
-        return {
+        formatted = {
             "name": dep.canonical_name,
             "version": str(dep.version),
             "vulns": [self._format_vuln(vuln) for vuln in vulns],
+        }
+        if dep.source is not None:
+            formatted["source"] = dep.source
+        return formatted
+
+    def _format_coverage(
+        self, result: dict[service.Dependency, list[service.VulnerabilityResult]]
+    ) -> dict[str, Any] | None:
+        """
+        Summarize which dependencies were deliberately left unaudited by policy.
+
+        This makes the coverage gap explicit even when there are no vulnerabilities,
+        so a policy skip is never mistaken for a clean result. Returns `None` when
+        there is nothing to report.
+        """
+
+        unaudited = []
+        for dep in result:
+            if dep.is_skipped() and cast(service.SkippedDependency, dep).policy_skipped:
+                dep = cast(service.SkippedDependency, dep)
+                entry: dict[str, Any] = {
+                    "name": dep.canonical_name,
+                    "reason": dep.skip_reason,
+                }
+                if dep.source is not None:
+                    entry["source"] = dep.source
+                unaudited.append(entry)
+
+        if not unaudited:
+            return None
+
+        return {
+            "complete": False,
+            "unaudited": unaudited,
         }
 
     def _format_vuln(self, vuln: service.VulnerabilityResult) -> dict[str, Any]:

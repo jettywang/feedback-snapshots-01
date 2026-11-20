@@ -915,3 +915,31 @@ def test_requirement_source_disable_pip_editable_without_egg_fragment(req_file):
         )
         in specs
     )
+
+
+def test_requirement_source_preresolved_provenance(req_file):
+    source = _init_requirement(
+        [
+            (
+                req_file(),
+                "--index-url https://internal.example/simple\n"
+                "secret-plugin==1.0.0\n"
+                "--index-url https://pypi.org/simple\n"
+                "requests==2.0.0\n",
+            )
+        ],
+        disable_pip=True,
+        no_deps=True,
+        internal_index_urls=["https://internal.example/simple"],
+    )
+
+    specs = {dep.canonical_name: dep for dep in source.collect()}
+    assert specs["secret-plugin"].source == "internal"
+    assert specs["requests"].source == "public"
+
+
+def test_requirement_source_without_policy_has_no_source(req_file):
+    source = _init_requirement([(req_file(), "requests==2.0.0")], disable_pip=True, no_deps=True)
+
+    (dep,) = list(source.collect())
+    assert dep.source is None

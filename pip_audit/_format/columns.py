@@ -123,14 +123,24 @@ class ColumnsFormat(VulnerabilityFormat):
                 columns_string += row
 
         # Now display the skipped dependencies
-        skip_data = [
-            self._format_skipped_dep(cast(service.SkippedDependency, dep))
+        skipped_deps = [
+            cast(service.SkippedDependency, dep)
             for dep in result.keys()
             if dep.is_skipped()
         ]
 
-        if skip_data:
-            skip_data.insert(0, ["Name", "Skip Reason"])
+        if skipped_deps:
+            has_policy_skip = any(dep.policy_skipped for dep in skipped_deps)
+            skip_data: list[list[Any]] = []
+            if has_policy_skip:
+                skip_data.append(["Name", "Skip Reason", "Coverage"])
+                for dep in skipped_deps:
+                    coverage = "policy gap" if dep.policy_skipped else ""
+                    skip_data.append([*self._format_skipped_dep(dep), coverage])
+            else:
+                skip_data.append(["Name", "Skip Reason"])
+                skip_data.extend(self._format_skipped_dep(dep) for dep in skipped_deps)
+
             skip_strings, sizes = tabulate(skip_data)
             skip_strings.insert(1, " ".join("-" * x for x in sizes))
 
@@ -168,9 +178,12 @@ class ColumnsFormat(VulnerabilityFormat):
         return ",".join([str(version) for version in fix_versions])
 
     def _format_skipped_dep(self, dep: service.SkippedDependency) -> list[Any]:
+        reason = dep.skip_reason
+        if dep.policy_skipped:
+            reason = f"[POLICY] {reason}"
         return [
             dep.canonical_name,
-            dep.skip_reason,
+            reason,
         ]
 
     def _format_applied_fix(self, applied_fix: fix.FixVersion) -> str:

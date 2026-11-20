@@ -262,3 +262,48 @@ def test_json_skipped_fix(vuln_data, skipped_fix_data):
         ],
     }
     assert json_format.format(vuln_data, skipped_fix_data) == json.dumps(expected_json)
+
+
+def test_json_policy_skipped_dep_marks_coverage_gap():
+    import pip_audit._service as service
+    from packaging.version import Version
+
+    dep = service.SkippedDependency(
+        name="secret-plugin",
+        source=service.INTERNAL_SOURCE,
+        skip_reason="internal vulnerable service unavailable",
+        policy_skipped=True,
+    )
+    resolved = service.ResolvedDependency(
+        name="requests", version=Version("2.0.0"), source=service.PUBLIC_SOURCE
+    )
+
+    fmt = format.JsonFormat(False, False)
+    payload = json.loads(fmt.format({dep: [], resolved: []}, []))
+
+    assert payload["dependencies"][0] == {
+        "name": "secret-plugin",
+        "skip_reason": "internal vulnerable service unavailable",
+        "policy_skipped": True,
+        "source": "internal",
+    }
+    assert payload["dependencies"][1]["source"] == "public"
+    assert payload["coverage"] == {
+        "complete": False,
+        "unaudited": [
+            {
+                "name": "secret-plugin",
+                "reason": "internal vulnerable service unavailable",
+                "source": "internal",
+            }
+        ],
+    }
+
+
+def test_json_omits_coverage_when_complete():
+    import pip_audit._service as service
+    from packaging.version import Version
+
+    dep = service.ResolvedDependency(name="requests", version=Version("2.0.0"))
+    payload = json.loads(format.JsonFormat(False, False).format({dep: []}, []))
+    assert "coverage" not in payload

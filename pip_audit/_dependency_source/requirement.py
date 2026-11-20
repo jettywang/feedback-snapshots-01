@@ -19,6 +19,7 @@ from packaging.version import Version
 from pip_requirements_parser import (
     InstallRequirement,
     InvalidRequirementLine,
+    OptionLine,
     RequirementsFile,
 )
 
@@ -30,7 +31,13 @@ from pip_audit._dependency_source import (
 )
 from pip_audit._fix import ResolvedFixVersion
 from pip_audit._service import Dependency
-from pip_audit._service.interface import ResolvedDependency, SkippedDependency
+from pip_audit._service.interface import (
+    INTERNAL_SOURCE,
+    PUBLIC_SOURCE,
+    ResolvedDependency,
+    SkippedDependency,
+    index_is_internal,
+)
 from pip_audit._state import AuditState
 from pip_audit._virtual_env import VirtualEnv, VirtualEnvError
 
@@ -54,6 +61,7 @@ class RequirementSource(DependencySource):
         skip_editable: bool = False,
         index_url: str | None = None,
         extra_index_urls: list[str] = [],
+        internal_index_urls: list[str] = [],
         state: AuditState = AuditState(),
     ) -> None:
         """
@@ -79,6 +87,11 @@ class RequirementSource(DependencySource):
 
         `extra_index_urls` are the extra URLs of package indexes.
 
+        `internal_index_urls` are package indexes whose contents are confidential.
+        When non-empty, dependencies resolved from these indexes are attributed
+        `INTERNAL_SOURCE` so that they are only ever checked against the internal
+        vulnerability service.
+
         `state` is an `AuditState` to use for state callbacks.
         """
         self._filenames = filenames
@@ -88,6 +101,7 @@ class RequirementSource(DependencySource):
         self._skip_editable = skip_editable
         self._index_url = index_url
         self._extra_index_urls = extra_index_urls
+        self._internal_index_urls = internal_index_urls
         self.state = state
         self._dep_cache: dict[Path, set[Dependency]] = {}
 
@@ -164,7 +178,9 @@ class RequirementSource(DependencySource):
                     "the --disable-pip flag can only be used with a hashed requirements files or "
                     "if the --no-deps flag has been provided"
                 )
-            yield from self._collect_preresolved_deps(iter(reqs), require_hashes)
+            yield from self._collect_preresolved_deps(
+                iter(reqs), require_hashes, self._collect_line_sources(filenames)
+            )
             return
 
         ve_args = []
@@ -174,7 +190,16 @@ class RequirementSource(DependencySource):
             ve_args.extend(["-r", str(filename)])
 
         # Try to install the supplied requirements files.
-        ve = VirtualEnv(ve_args, self._index_url, self._extra_index_urls, self.state)
+        if self._internal_index_urls:
+            ve = VirtualEnv(
+                ve_args,
+                self._index_url,
+                self._extra_index_urls,
+                self.state,
+                internal_index_urls=self._internal_index_urls,
+            )
+        else:
+            ve = VirtualEnv(ve_args, self._index_url, self._extra_index_urls, self.state)
         try:
             with TemporaryDirectory() as ve_dir:
                 ve.create(ve_dir)
@@ -182,8 +207,96 @@ class RequirementSource(DependencySource):
             raise RequirementSourceError(str(exc)) from exc
 
         # Now query the installed packages.
-        for name, version in ve.installed_packages:
-            yield ResolvedDependency(name=name, version=version)
+        line_sources = self._collect_line_sources(filenames)
+        for package in ve.installed_packages_with_source:
+            source = package.source
+            # Pip's install report tells us which index the artifact came from.
+            # For requirements that pin a single version, a per-line index option
+            # is an equally authoritative (and easier to test) signal.
+            if source is None:
+                source = line_sources.get(canonicalize_name(package.name), PUBLIC_SOURCE)
+            yield ResolvedDependency(name=package.name, version=package.version, source=source)
+
+    def _collect_line_sources(self, filenames: list[Path]) -> dict[str, str | None]:
+        """
+        Build a mapping of canonicalized package name to the source implied by the
+        index options that are in effect on that requirement's line.
+
+        pip requirements files allow `--index-url` / `--extra-index-url` both as
+        global options and inline on a requirement line. We track the index URLs
+        in effect as we walk each file, treating the primary index plus all extra
+        indexes as the candidate set: a requirement is internal only when every
+        index it could have come from is internal.
+        """
+
+        if not self._internal_index_urls:
+            return {}
+
+        sources: dict[str, str | None] = {}
+        for filename in filenames:
+            primary = self._index_url
+            extras = list(self._extra_index_urls)
+
+            try:
+                parsed = RequirementsFile.parse(filename=filename.as_posix())
+            except Exception:
+                # If the file cannot be re-parsed here, pip's install report
+                # remains the fallback provenance signal.
+                continue
+
+            for item in parsed:
+                if isinstance(item, OptionLine):
+                    primary, extras = self._apply_index_options(
+                        primary, extras, item.options
+                    )
+                elif isinstance(item, InstallRequirement) and item.name:
+                    line_primary, line_extras = primary, extras
+                    if item.global_options:
+                        line_primary, line_extras = self._apply_index_options(
+                            line_primary, line_extras, item.global_options
+                        )
+                    sources[canonicalize_name(item.name)] = self._classify_indexes(
+                        line_primary, line_extras
+                    )
+        return sources
+
+    @staticmethod
+    def _apply_index_options(
+        primary: str | None, extras: list[str], options: dict[str, object]
+    ) -> tuple[str | None, list[str]]:
+        """
+        Apply index options to the currently effective index set.
+
+        An explicit `--index-url` replaces the primary index; extra indexes are
+        additive. This mirrors pip's own option precedence.
+        """
+
+        index_url = options.get("index_url")
+        if isinstance(index_url, str):
+            primary = index_url or None
+
+        extra = options.get("extra_index_urls")
+        if isinstance(extra, list):
+            extras = [*extras, *(str(url) for url in extra)]
+
+        return primary, extras
+
+    def _classify_indexes(self, primary: str | None, extras: list[str]) -> str | None:
+        """
+        Classify a requirement's index set as internal or public.
+
+        With no index information at all, provenance is unknown (`None`). Without
+        an internal index configured, nothing can be internal either, so this is
+        reported as `PUBLIC_SOURCE`.
+        """
+
+        indexes = [url for url in [primary, *extras] if url]
+        if not indexes:
+            return PUBLIC_SOURCE
+
+        if all(index_is_internal(url, self._internal_index_urls) for url in indexes):
+            return INTERNAL_SOURCE
+        return PUBLIC_SOURCE
 
     def fix(self, fix_version: ResolvedFixVersion) -> None:
         """
@@ -293,11 +406,15 @@ class RequirementSource(DependencySource):
                 continue
 
     def _collect_preresolved_deps(
-        self, reqs: Iterator[InstallRequirement], require_hashes: bool
+        self,
+        reqs: Iterator[InstallRequirement],
+        require_hashes: bool,
+        sources: dict[str, str | None] | None = None,
     ) -> Iterator[Dependency]:
         """
         Collect pre-resolved (pinned) dependencies.
         """
+        sources = sources or {}
         req_specifiers: dict[str, SpecifierSet] = {}
         for req in reqs:
             if self._skip_editable and req.is_editable:
@@ -360,7 +477,11 @@ class RequirementSource(DependencySource):
                         f"requirement {req.name} is not pinned to an exact version: {str(req)}"
                     )
 
-                yield ResolvedDependency(req.name, Version(pinned_specifier.group("version")))
+                yield ResolvedDependency(
+                    req.name,
+                    Version(pinned_specifier.group("version")),
+                    source=sources.get(canonicalize_name(req.name)),
+                )
 
 
 class RequirementSourceError(DependencySourceError):

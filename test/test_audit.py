@@ -6,7 +6,13 @@ from packaging.version import Version
 
 from pip_audit import _audit as audit
 from pip_audit._audit import AuditOptions, Auditor
-from pip_audit._service.interface import VulnerabilityResult, VulnerabilityService
+from pip_audit._service.interface import (
+    INTERNAL_SOURCE,
+    PUBLIC_SOURCE,
+    ResolvedDependency,
+    VulnerabilityResult,
+    VulnerabilityService,
+)
 
 
 def test_audit(vuln_service, dep_source):
@@ -160,3 +166,44 @@ def test_audit_dedupes_matching_pysec_ids(dep_source):
     assert len(results[0][1]) == 1
     assert results[0][1][0].id == "PYSEC-2025-1"
     assert results[0][1][0].aliases == {"CVE-2025-0001", "GHSA-abcd-1234"}
+
+
+def test_auditor_blocks_internal_dependencies_from_public_service():
+    """
+    A plain public service must never receive an internal package name, even if
+    an API user hands an `Auditor` a service that lacks policy routing.
+    """
+
+    class RecordingService(VulnerabilityService):
+        def __init__(self):
+            self.queries = []
+
+        def query(self, spec):
+            # Real services early-return for skipped specs; record only the specs
+            # that would actually be sent over the wire.
+            if not spec.is_skipped():
+                self.queries.append(spec)
+            return spec, []
+
+    class Source:
+        def collect(self):
+            yield ResolvedDependency(
+                name="secret-plugin", version=Version("1.0.0"), source=INTERNAL_SOURCE
+            )
+            yield ResolvedDependency(
+                name="requests", version=Version("2.0.0"), source=PUBLIC_SOURCE
+            )
+
+        def fix(self, _):
+            raise NotImplementedError
+
+    service = RecordingService()
+    results = dict(Auditor(service).audit(Source()))
+
+    # Only the public dependency was queried.
+    assert [q.name for q in service.queries] == ["requests"]
+
+    skipped = [dep for dep in results if dep.is_skipped()]
+    assert len(skipped) == 1
+    assert skipped[0].canonical_name == "secret-plugin"
+    assert skipped[0].policy_skipped is True
