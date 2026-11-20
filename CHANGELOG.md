@@ -5,6 +5,13 @@ Changelog
 
 [View commits](https://github.com/coleifer/huey/compare/3.5.4...master)
 
+* Periodic tasks support a `catchup` quota and a `skip_if` predicate so a
+  consumer that was stalled (e.g. an offline collector suspended overnight)
+  replays a bounded number of missed occurrences on resume instead of
+  flooding the queue. The current-minute occurrence always fires on time,
+  and a given scheduled timestamp is never billed twice across wall-clock or
+  timezone changes.
+
 ## 3.5.4
 
 * Fix possible hang if worker holding the stop flag was killed while holding

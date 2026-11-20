@@ -174,6 +174,56 @@ For more information see the following API documentation:
 * :py:meth:`~Huey.periodic_task`
 * :py:func:`crontab`
 
+Catching up missed periodic tasks
+---------------------------------
+
+When the consumer is stalled for a while (for example an offline collector
+that is suspended overnight), the scheduler does not dump every missed
+periodic check into the queue at once when it wakes up. Instead, each
+periodic task declares a ``catchup`` quota: the maximum number of missed
+occurrences that are replayed on resume. The most recent missed occurrences
+are kept, the older ones are dropped, and the occurrence for the current
+minute always fires on time so normal scheduling continues immediately.
+
+.. code-block:: python
+
+    # A critical security scan: replay at least one missed collection when
+    # the collector comes back online, but never queue a large backlog.
+    @huey.periodic_task(crontab(minute='0', hour='*'), catchup=1)
+    def critical_security_scan():
+        run_security_scan()
+
+    # A lower-priority bulk check may skip its catch-up entirely (the
+    # default), it just resumes on its next regular tick.
+    @huey.periodic_task(crontab(minute='*/30'))
+    def bulk_inventory_check():
+        run_inventory_check()
+
+``catchup`` accepts an integer: ``0`` (the default) skips missed occurrences,
+a positive number caps how many are replayed, and a negative number removes
+the limit.
+
+Individual missed occurrences can additionally be filtered with ``skip_if``,
+a callable that receives the missed timestamp and returns ``True`` when that
+occurrence should not be replayed. The predicate only applies to catch-up
+replays, never to the regular on-time occurrence.
+
+.. code-block:: python
+
+    def skip_stale_windows(timestamp):
+        # Data older than the retention window is no longer worth collecting.
+        return timestamp < retention_cutoff()
+
+    @huey.periodic_task(crontab(minute='0', hour='*'), catchup=3,
+                        skip_if=skip_stale_windows)
+    def collect_metrics():
+        ...
+
+Catch-up occurrences are enqueued oldest-first, ahead of the current
+on-time occurrence. A given scheduled timestamp is only billed once: if the
+wall clock repeats (a DST fall-back) or the same instant is presented through
+a different timezone, it is never enqueued a second time.
+
 Retrying tasks that fail
 ------------------------
 

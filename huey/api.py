@@ -188,15 +188,36 @@ class Huey(object):
 
     def periodic_task(self, validate_datetime, retries=0, retry_delay=0,
                       retry_backoff=0, priority=None, context=False, name=None,
-                      expires=None, timeout=None, **kwargs):
+                      expires=None, timeout=None, catchup=0, skip_if=None,
+                      **kwargs):
+        """
+        Decorator for registering a periodic task.
+
+        :param validate_datetime: a callable that returns ``True`` when the
+            task should be enqueued for the given (minute-aligned) timestamp.
+        :param int catchup: maximum number of missed occurrences that are
+            replayed when the consumer comes back online after a stall (for
+            example an offline collector that was suspended overnight). The
+            most recent missed occurrences are replayed first; the default of
+            zero means missed occurrences are skipped entirely. A negative
+            value means no limit. The occurrence for the current minute is
+            always enqueued regardless of this quota.
+        :param callable skip_if: optional callable that receives a missed
+            timestamp and returns ``True`` when that occurrence should not be
+            replayed during catch-up. It is only applied to missed
+            occurrences, never to the regular, on-time occurrence.
+        """
+        if not isinstance(catchup, int):
+            raise ValueError('periodic_task() catchup must be an integer.')
+        if skip_if is not None and not callable(skip_if):
+            raise ValueError('periodic_task() skip_if must be callable.')
+
         TaskWrapper = self.task_wrapper_class
         def decorator(func):
             def method_validate(self, timestamp):
                 return validate_datetime(timestamp)
 
-            return TaskWrapper(
-                self,
-                func.func if isinstance(func, TaskWrapper) else func,
+            settings = dict(
                 context=context,
                 name=name,
                 default_retries=retries,
@@ -207,7 +228,17 @@ class Huey(object):
                 default_timeout=timeout,
                 validate_datetime=method_validate,
                 task_base=PeriodicTask,
-                **kwargs)
+                catchup=catchup)
+            if skip_if is not None:
+                def method_skip(self, timestamp):
+                    return bool(skip_if(timestamp))
+                settings['skip_datetime'] = method_skip
+            settings.update(kwargs)
+
+            return TaskWrapper(
+                self,
+                func.func if isinstance(func, TaskWrapper) else func,
+                **settings)
 
         return decorator
 
@@ -929,7 +960,16 @@ def _signature(task, args=(), kwargs=None):
 
 
 class PeriodicTask(Task):
+    # Maximum number of missed occurrences replayed after a scheduler stall.
+    # A negative value means no limit; zero (default) skips missed occurrences.
+    catchup = 0
+
     def validate_datetime(self, timestamp):
+        return False
+
+    def skip_datetime(self, timestamp):
+        # Called for missed occurrences during catch-up. Returning True drops
+        # the occurrence from the catch-up replay.
         return False
 
 

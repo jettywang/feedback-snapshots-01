@@ -1,4 +1,5 @@
 import contextlib
+import datetime
 import logging
 import os
 import select
@@ -156,9 +157,22 @@ class Scheduler(BaseProcess):
 
     If periodic tasks are enabled, the scheduler will wake up every 60 seconds
     to enqueue any periodic tasks that should be run.
+
+    When the process is stalled (e.g. a laptop is suspended overnight, or an
+    offline collection point loses connectivity), the missed minute-aligned
+    checks are not all dumped into the queue at once. Instead each periodic
+    task declares a ``catchup`` quota that limits how many of its missed
+    occurrences are replayed (the most recent ones), and an optional
+    ``skip_if`` predicate can drop individual missed occurrences. The
+    occurrence for the current minute is always enqueued on time. Missed
+    occurrences that were already billed are never enqueued a second time,
+    even across timezone or wall-clock changes.
     """
     periodic_task_seconds = 60
     process_name = 'Scheduler'
+    # Forget billed timestamps once they are older than this, so the dedup
+    # bookkeeping cannot grow without bound.
+    billed_retention = datetime.timedelta(days=1)
 
     def __init__(self, huey, stop_flag, interval, periodic):
         super(Scheduler, self).__init__(huey, stop_flag)
@@ -167,6 +181,9 @@ class Scheduler(BaseProcess):
         self.periodic = periodic
         self._next_loop = time.monotonic()
         self._next_periodic = time.monotonic()
+        # Set of (task name, scheduled timestamp) that has already been
+        # enqueued, so the same point in time is never billed twice.
+        self._periodic_billed = set()
 
     def loop(self, now=None):
         current = self._next_loop
@@ -189,22 +206,101 @@ class Scheduler(BaseProcess):
                     self._logger.exception('Error enqueueing %s.', task)
 
         if self.periodic and self._next_periodic <= time.monotonic():
-            # Skip checks missed during a stall (e.g. suspend) to avoid dupes.
+            # Count the minute-aligned checks that elapsed during the stall
+            # (e.g. suspend/resume) so catch-up can be quota-limited instead
+            # of enqueueing all missed checks back-to-back.
+            missed = 0
             while self._next_periodic <= time.monotonic():
                 self._next_periodic += self.periodic_task_seconds
-            self.enqueue_periodic_tasks(now)
+                missed += 1
+            self.enqueue_periodic_tasks(now, missed)
 
         self.sleep_for_interval(current, self.interval)
 
-    def enqueue_periodic_tasks(self, now):
+    def _periodic_timestamps(self, now, missed):
+        """Return the de-duplicated, ascending minute-aligned timestamps that
+        should be considered. The final entry is always the current tick."""
+        step = datetime.timedelta(seconds=self.periodic_task_seconds)
+        timestamps = []
+        seen = set()
+        for index in range(missed - 1, -1, -1):
+            timestamp = now - step * index
+            if timestamp not in seen:
+                seen.add(timestamp)
+                timestamps.append(timestamp)
+        if not timestamps or timestamps[-1] != now:
+            timestamps.append(now)
+        return timestamps
+
+    def _prune_billed(self, now):
+        cutoff = now - self.billed_retention
+        self._periodic_billed = set(
+            item for item in self._periodic_billed if item[1] > cutoff)
+
+    def enqueue_periodic_tasks(self, now, missed=1):
         self._logger.debug('Checking periodic tasks')
-        for task in self.huey.read_periodic(now):
-            self._logger.info('Enqueueing periodic task %s.', task)
-            try:
-                self.huey.enqueue(task)
-            except Exception:
-                self._logger.exception('Error enqueueing periodic task %s.',
-                                       task)
+        if now is None:
+            now = self.huey._get_timestamp()
+        self._prune_billed(now)
+
+        timestamps = self._periodic_timestamps(now, missed)
+        current = timestamps[-1]
+
+        # First pass: decide, per periodic task, which missed occurrences are
+        # replayed, applying the catch-up quota and skip predicate.
+        replay = []
+        for index, task in enumerate(self.huey.read_periodic(current)):
+            candidates = []
+            for timestamp in timestamps[:-1]:
+                if not task.validate_datetime(timestamp):
+                    continue
+                if task.skip_datetime(timestamp):
+                    continue
+                key = (task.name, timestamp)
+                if key in self._periodic_billed:
+                    continue
+                candidates.append(timestamp)
+
+            limit = task.catchup
+            if limit >= 0 and len(candidates) > limit:
+                # Keep the most recent missed occurrences.
+                candidates = candidates[len(candidates) - limit:]
+            replay.append((index, task, candidates))
+
+        # Enqueue catch-up occurrences in chronological order so the queue
+        # replays the missed checks oldest-first, ahead of the current tick.
+        # Tasks matching the same timestamp stay in registration order.
+        catchup_events = []
+        for index, task, candidates in replay:
+            for timestamp in candidates:
+                catchup_events.append((timestamp, index, task))
+        catchup_events.sort(key=lambda event: (event[0], event[1]))
+
+        for timestamp, index, task in catchup_events:
+            self._enqueue_periodic(task, timestamp)
+
+        # Second pass: the on-time occurrence for the current minute always
+        # fires (subject only to normal validation), so regular scheduling
+        # continues immediately after a stall.
+        for index, task, _ in replay:
+            if task.validate_datetime(current):
+                self._enqueue_periodic(task, current)
+
+    def _enqueue_periodic(self, task, timestamp):
+        key = (task.name, timestamp)
+        if key in self._periodic_billed:
+            # The same point in time must never be billed twice, even when
+            # wall-clocks repeat (DST fall-back) or timezones change.
+            return
+        self._periodic_billed.add(key)
+        self._logger.info('Enqueueing periodic task %s for %s.', task,
+                          timestamp)
+        try:
+            self.huey.enqueue(type(task)())
+        except Exception:
+            self._periodic_billed.discard(key)
+            self._logger.exception('Error enqueueing periodic task %s.',
+                                   task)
 
 
 class ForkSafeFlag(object):

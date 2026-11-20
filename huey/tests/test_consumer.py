@@ -9,6 +9,7 @@ import time
 import unittest
 
 from huey import SqliteHuey
+from huey import MemoryHuey
 from huey.api import crontab
 from huey.consumer import Consumer
 from huey.consumer import ConsumerStopped
@@ -31,6 +32,16 @@ class TestConsumer(Consumer):
     class _Scheduler(Scheduler):
         def sleep_for_interval(self, current, interval):
             pass
+
+        def loop(self, now=None, missed=None):
+            # When an explicit missed count is supplied, drive the periodic
+            # checks with a fake clock instead of relying on time.monotonic(),
+            # so the catch-up behavior is fully deterministic.
+            if missed is not None:
+                self._next_loop = time.monotonic() + 60
+                self._next_periodic = time.monotonic() + 60
+                return self.enqueue_periodic_tasks(now, missed)
+            return super(TestConsumer._Scheduler, self).loop(now)
     scheduler_class = _Scheduler
 
 
@@ -153,46 +164,204 @@ class TestConsumerIntegration(BaseTestCase):
         self.work_on_tasks(consumer, 1)
         self.assertEqual(state, ['p1', 'p2', 'p1'])  # No change, not executed.
 
+    def make_scheduler(self):
+        consumer = self.consumer(workers=1)
+        scheduler = consumer._create_scheduler()
+        scheduler._next_loop = time.monotonic() + 60
+        return scheduler
+
+    def resume_after_stall(self, scheduler, now, missed):
+        # Simulate the consumer coming back online after "missed" minute
+        # checks elapsed while the collector was paused.
+        return scheduler.loop(now, missed=missed)
+
+    def tick(self, scheduler, now):
+        # A regular, on-time scheduler iteration.
+        return scheduler.loop(now, missed=1)
+
     def test_scheduler_periodic_catch_up(self):
         @self.huey.periodic_task(crontab(minute='*'))
         def task_p():
             pass
 
-        consumer = self.consumer(workers=1)
+        scheduler = self.make_scheduler()
+
+        # Simulate a 5-minute stall (e.g. suspend/resume). With the default
+        # catchup=0 quota the missed checks are skipped and the task fires once
+        # for the current minute, rather than dumping all checks into queue.
+        self.resume_after_stall(
+            scheduler, datetime.datetime(2000, 1, 1, 0, 0), missed=5)
+        self.assertEqual(len(self.huey), 1)
+
+        # Subsequent iterations do not re-fire for the stalled period.
+        self.tick(scheduler, datetime.datetime(2000, 1, 1, 0, 1))
+        self.assertEqual(len(self.huey), 2)
+
+    def test_scheduler_catchup_quota_and_order(self):
+        # A critical security scan is allowed one catch-up run; a bulk check
+        # is allowed two. The collector was paused overnight, so four checks
+        # were missed before it resumes.
+        @self.huey.periodic_task(crontab(minute='*'), catchup=1)
+        def critical_scan():
+            pass
+
+        @self.huey.periodic_task(crontab(minute='*'), catchup=2)
+        def bulk_scan():
+            pass
+
+        scheduler = self.make_scheduler()
+        resume = datetime.datetime(2000, 1, 1, 8, 0)
+        self.resume_after_stall(scheduler, resume, missed=5)
+
+        # Catch-up occurrences are replayed oldest-first (chronological order),
+        # ahead of the on-time occurrence for the current minute. Tasks due at
+        # the same timestamp stay in task registration order.
+        names = [type(task).__name__ for task in self.huey.pending()]
+        self.assertEqual(names, [
+            'bulk_scan',      # catch-up for 07:58
+            'critical_scan',  # catch-up for 07:59
+            'bulk_scan',      # catch-up for 07:59
+            'critical_scan',  # on-time for 08:00
+            'bulk_scan'])     # on-time for 08:00
+
+        # The critical task received at least one catch-up collection, but
+        # never more than its quota, even though four checks were missed.
+        self.assertEqual(names.count('critical_scan'), 2)
+        self.assertEqual(names.count('bulk_scan'), 3)
+        self.assertEqual(len(self.huey), 5)
+
+        # Normal periodic scheduling keeps running minute after minute, with
+        # one on-time occurrence per task per tick.
+        before = len(self.huey)
+        self.tick(scheduler, datetime.datetime(2000, 1, 1, 8, 1))
+        self.tick(scheduler, datetime.datetime(2000, 1, 1, 8, 2))
+        self.assertEqual(len(self.huey) - before, 4)
+        names = [type(task).__name__ for task in self.huey.pending()]
+        self.assertEqual(names[-4:], [
+            'critical_scan', 'bulk_scan',
+            'critical_scan', 'bulk_scan'])
+
+    def test_scheduler_catchup_keeps_most_recent(self):
+        fired = []
+
+        @self.huey.periodic_task(crontab(minute='*'), catchup=2)
+        def scan():
+            fired.append('scan')
+
+        scheduler = self.make_scheduler()
+        self.resume_after_stall(
+            scheduler, datetime.datetime(2000, 1, 1, 0, 3), missed=4)
+
+        # Two catch-up runs (the two most recent missed minutes) plus the
+        # current tick: the older occurrences are dropped.
+        self.assertEqual(len(self.huey), 3)
+        for _ in range(3):
+            self.execute_next()
+        self.assertEqual(fired, ['scan', 'scan', 'scan'])
+
+    def test_scheduler_catchup_skip_condition(self):
+        # Only replay the missed occurrences that still carry useful data.
+        def skip_even_minutes(timestamp):
+            return timestamp.minute % 2 == 0
+
+        @self.huey.periodic_task(crontab(minute='*'), catchup=10,
+                                 skip_if=skip_even_minutes)
+        def scan():
+            pass
+
+        scheduler = self.make_scheduler()
+        # Missed ticks are 07:57, 07:58, 07:59; even minutes are skipped.
+        self.resume_after_stall(
+            scheduler, datetime.datetime(2000, 1, 1, 8, 0), missed=4)
+
+        # Only the 07:57 and 07:59 catch-ups survive, plus the on-time tick.
+        self.assertEqual(len(self.huey), 3)
+
+        # The skip predicate never blocks the regular, on-time occurrence,
+        # even when it lands on an even minute.
+        before = len(self.huey)
+        scheduler = self.make_scheduler()
+        self.tick(scheduler, datetime.datetime(2000, 1, 1, 8, 2))
+        self.assertEqual(len(self.huey) - before, 1)
+
+    def test_scheduler_catchup_unlimited(self):
+        @self.huey.periodic_task(crontab(minute='*'), catchup=-1)
+        def scan():
+            pass
+
+        scheduler = self.make_scheduler()
+        self.resume_after_stall(
+            scheduler, datetime.datetime(2000, 1, 1, 0, 5), missed=6)
+
+        # A negative quota replays every missed occurrence plus the current.
+        self.assertEqual(len(self.huey), 6)
+
+    def test_scheduler_catchup_no_double_billing_across_timezones(self):
+        huey = MemoryHuey(utc=True)
+
+        @huey.periodic_task(crontab(minute='*'), catchup=-1)
+        def scan():
+            pass
+
+        consumer = self.consumer()
+        consumer.huey = huey
         scheduler = consumer._create_scheduler()
         scheduler._next_loop = time.monotonic() + 60
 
-        # Simulate a 5-minute stall (e.g. suspend/resume): the periodic check
-        # timestamp is far in the past. The scheduler skips the missed checks
-        # and fires once for the current minute, rather than running the
-        # back-to-back checks, which would enqueue duplicate tasks.
-        scheduler._next_periodic = time.monotonic() - 300
-        scheduler.loop(datetime.datetime(2000, 1, 1, 0, 0))
-        self.assertEqual(len(self.huey), 1)
-        self.assertTrue(scheduler._next_periodic > time.monotonic())
+        utc = datetime.timezone.utc
+        eastern = datetime.timezone(datetime.timedelta(hours=-5))
 
-        # Subsequent iterations do not re-fire for the stalled period.
-        scheduler.loop(datetime.datetime(2000, 1, 1, 0, 0))
-        self.assertEqual(len(self.huey), 1)
+        # The same absolute instant expressed in two different timezones must
+        # only be enqueued (billed) once.
+        scheduler.loop(datetime.datetime(2000, 1, 1, 12, 0, tzinfo=utc),
+                       missed=1)
+        scheduler.loop(datetime.datetime(2000, 1, 1, 7, 0, tzinfo=eastern),
+                       missed=1)
+        self.assertEqual(len(huey), 1)
+
+        # A two-minute window around a wall-clock fall-back (DST) enqueues its
+        # two distinct minutes once each, never repeating a billed instant.
+        scheduler.loop(datetime.datetime(2000, 1, 1, 1, 30, tzinfo=utc),
+                       missed=2)
+        self.assertEqual(len(huey), 3)
+
+        # Replaying the exact same instants again bills nothing new, even with
+        # an unlimited catch-up quota.
+        scheduler.loop(datetime.datetime(2000, 1, 1, 1, 30, tzinfo=utc),
+                       missed=2)
+        self.assertEqual(len(huey), 3)
+
+    def test_periodic_task_invalid_catchup_arguments(self):
+        def scan():
+            pass
+
+        self.assertRaises(ValueError,
+                          self.huey.periodic_task, crontab(minute='*'),
+                          catchup=1.5)
+        self.assertRaises(ValueError,
+                          self.huey.periodic_task, crontab(minute='*'),
+                          skip_if='not-callable')
 
     def test_scheduler_periodic_enqueue_error(self):
         @self.huey.periodic_task(crontab(minute='*'))
         def task_p():
             pass
 
-        consumer = self.consumer(workers=1)
-        scheduler = consumer._create_scheduler()
-        scheduler._next_loop = time.monotonic() + 60
-        scheduler._next_periodic = time.monotonic() - 1
+        scheduler = self.make_scheduler()
+        original_enqueue = scheduler.huey.enqueue
 
         def broken_enqueue(task):
             raise ValueError('storage down')
         scheduler.huey.enqueue = broken_enqueue
 
         # The error is logged and the scheduler keeps running.
-        scheduler.loop(datetime.datetime(2000, 1, 1, 0, 0))
+        self.tick(scheduler, datetime.datetime(2000, 1, 1, 0, 0))
         self.assertEqual(len(self.huey), 0)
-        self.assertTrue(scheduler._next_periodic > time.monotonic())
+
+        # The failed occurrence was not marked billed, so it can fire again.
+        scheduler.huey.enqueue = original_enqueue
+        self.tick(scheduler, datetime.datetime(2000, 1, 1, 0, 1))
+        self.assertEqual(len(self.huey), 1)
 
 
 class TestConsumerConfig(BaseTestCase):
