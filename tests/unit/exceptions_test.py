@@ -83,6 +83,161 @@ class ReturnedMessageLikeTests(unittest.TestCase):
         self.assertFalse(hasattr(exceptions, 'ReturnedMessageLike'))
 
 
+class PublishFailureTests(unittest.TestCase):
+    """The restricted view of a publish failure, and what it withholds.
+
+    These pin the contract an external log reader relies on: the view identifies one
+    publish and its failure kind, while the body, the header table and the
+    person-identifying properties never appear, whether read as attributes or
+    rendered.
+    """
+
+    BODY = b'business-payload-must-not-leak'
+
+    def _properties(self):
+        return pika.spec.BasicProperties(content_type='application/json',
+                                         correlation_id='order-77',
+                                         message_id='msg-9',
+                                         user_id='alice',
+                                         reply_to='private.queue',
+                                         headers={
+                                             'x-private-account': 'acct-123',
+                                             'trace-id': 'trace-abc',
+                                         })
+
+    def _view(self, kind=exceptions.PublishFailureKind.RETURNED, approved=()):
+        return exceptions.PublishFailure.from_publish(
+            kind,
+            channel_number=2,
+            exchange='orders',
+            routing_key='orders.new',
+            body=self.BODY,
+            properties=self._properties(),
+            approved_headers=approved,
+            delivery_tag=7,
+            method=pika.spec.Basic.Return(312, 'NO_ROUTE', 'orders',
+                                          'orders.new'))
+
+    def test_defaults_withhold_every_header(self):
+        view = self._view()
+        self.assertEqual(view.headers, {})
+        self.assertEqual(view.withheld_header_count, 2)
+        self.assertNotIn('acct-123', repr(view))
+        self.assertNotIn('trace-abc', repr(view))
+
+    def test_approved_headers_are_disclosed(self):
+        view = self._view(approved=('trace-id',))
+        self.assertEqual(dict(view.headers), {'trace-id': 'trace-abc'})
+        self.assertEqual(view.withheld_header_count, 1)
+        self.assertIn('trace-abc', repr(view))
+        self.assertNotIn('acct-123', repr(view))
+
+    def test_body_never_reaches_the_view(self):
+        view = self._view(approved=('trace-id', 'x-private-account'))
+        self.assertFalse(hasattr(view, 'body'))
+        self.assertEqual(view.body_size, len(self.BODY))
+        for rendered in (repr(view), str(view), repr(view.as_dict())):
+            self.assertNotIn(self.BODY.decode(), rendered)
+
+    def test_person_identifying_properties_are_absent(self):
+        view = self._view()
+        self.assertFalse(hasattr(view, 'user_id'))
+        self.assertFalse(hasattr(view, 'reply_to'))
+        self.assertNotIn('alice', repr(view))
+        self.assertNotIn('private.queue', repr(view))
+
+    def test_approved_properties_survive(self):
+        view = self._view()
+        self.assertEqual(view.correlation_id, 'order-77')
+        self.assertEqual(view.message_id, 'msg-9')
+        self.assertEqual(view.content_type, 'application/json')
+        self.assertEqual(view.body_size, len(self.BODY))
+        for value in ('order-77', 'msg-9', 'application/json'):
+            self.assertIn(value, repr(view))
+
+    def test_kind_tells_routing_from_confirmation(self):
+        returned = self._view(exceptions.PublishFailureKind.RETURNED)
+        nacked = self._view(exceptions.PublishFailureKind.NACKED)
+        lost = exceptions.PublishFailure.from_publish(
+            exceptions.PublishFailureKind.CONNECTION_LOST,
+            exchange='orders',
+            routing_key='orders.new',
+            body=self.BODY,
+            properties=self._properties())
+        self.assertEqual(returned.kind, exceptions.PublishFailureKind.RETURNED)
+        self.assertEqual(returned.reply_code, 312)
+        self.assertEqual(returned.reply_text, 'NO_ROUTE')
+        self.assertEqual(nacked.kind, exceptions.PublishFailureKind.NACKED)
+        self.assertEqual(lost.kind,
+                         exceptions.PublishFailureKind.CONNECTION_LOST)
+        self.assertIsNone(lost.reply_code)
+        # The enum compares equal to its wire string, so a log consumer that
+        # parses JSON keeps working.
+        self.assertEqual(returned.as_dict()['kind'], 'returned')
+
+    def test_delivery_tag_and_channel_identify_the_publish(self):
+        view = self._view()
+        self.assertEqual(view.channel_number, 2)
+        self.assertEqual(view.delivery_tag, 7)
+        self.assertEqual(view.exchange, 'orders')
+        self.assertEqual(view.routing_key, 'orders.new')
+        self.assertIn('delivery_tag=7', repr(view))
+
+    def test_view_is_read_only(self):
+        view = self._view()
+        with self.assertRaises(AttributeError):
+            view.kind = exceptions.PublishFailureKind.NACKED
+        with self.assertRaises(TypeError):
+            view.headers['trace-id'] = 'forged'
+
+    def test_oversized_property_is_bounded_in_repr(self):
+        properties = pika.spec.BasicProperties(correlation_id='c' * 5000)
+        view = exceptions.PublishFailure.from_publish(
+            exceptions.PublishFailureKind.NACKED,
+            exchange='e',
+            routing_key='r',
+            body=b'',
+            properties=properties)
+        self.assertLess(len(repr(view)),
+                        4 * exceptions.MAX_DISCLOSED_TEXT + 200)
+
+
+class AttachPublishFailureTests(unittest.TestCase):
+
+    def test_attach_leaves_the_original_exception_alone(self):
+        original = exceptions.StreamLostError('lost', host='broker', port=5672)
+        view = exceptions.PublishFailure(
+            exceptions.PublishFailureKind.CONNECTION_LOST)
+        publish = exceptions.FailedPublish('', 'q', b'body', None)
+        raised = exceptions.attach_publish_failure(original, view, publish)
+
+        self.assertEqual(type(raised), exceptions.StreamLostError)
+        self.assertEqual(raised.args, ('lost',))
+        self.assertEqual((raised.host, raised.port), ('broker', 5672))
+        self.assertIs(raised.failure, view)
+        self.assertIs(raised.publish, publish)
+        # The shared close reason must not describe one caller's publish.
+        self.assertFalse(hasattr(original, 'failure'))
+        self.assertFalse(hasattr(original, 'publish'))
+
+    def test_describe_publish_failure_reads_only_the_view(self):
+        view = exceptions.PublishFailure(exceptions.PublishFailureKind.NACKED)
+        error = exceptions.attach_publish_failure(Exception('x'), view)
+        self.assertIs(exceptions.describe_publish_failure(error), view)
+        # Never falls back to `.publish`, which holds the body.
+        self.assertIsNone(exceptions.describe_publish_failure(Exception('x')))
+
+    def test_exceptions_expose_the_view_and_the_publish(self):
+        publish = exceptions.FailedPublish('', 'q', b'body', None)
+        view = exceptions.PublishFailure(exceptions.PublishFailureKind.RETURNED)
+        for factory in (exceptions.UnroutableError, exceptions.NackError):
+            exc = factory([], view, publish)
+            self.assertIs(exc.failure, view)
+            self.assertIs(exc.publish, publish)
+            self.assertIn('kind=returned', repr(exc))
+            self.assertNotIn('body', repr(exc))
+
+
 class ExceptionTests(unittest.TestCase):
 
     def test_amqp_connection_error_one_param_repr(self):

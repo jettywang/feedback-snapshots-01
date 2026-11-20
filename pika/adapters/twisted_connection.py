@@ -29,6 +29,13 @@ from pika import exceptions, spec
 from pika._utils import override
 from pika.adapters.utils import nbio_interface
 from pika.adapters.utils.io_services_utils import check_callback_arg
+from pika.exceptions import (
+    FailedPublish,
+    PublishFailure,
+    PublishFailureKind,
+    attach_publish_failure,
+    is_publish_transport_failure,
+)
 from pika.exchange_type import ExchangeType
 
 if TYPE_CHECKING:
@@ -138,6 +145,9 @@ class TwistedChannel:
         self._delivery_confirmation = False
         self._delivery_message_id: int | None = None
         self._deliveries: dict[int, defer.Deferred[Any]] = {}
+        # The publish behind each pending delivery tag, so a failure can carry what
+        # the caller needs to republish it without keeping it in the Deferred.
+        self._delivery_requests: dict[int, FailedPublish] = {}
         # Holds a ReceivedMessage object representing a message received via
         # Basic.Return in publisher-acknowledgments mode.
         self._puback_return: ReceivedMessage | None = None
@@ -159,14 +169,30 @@ class TwistedChannel:
         for d in self._calls:
             d.errback(self._closed)
         # errback all pending deliveries
-        for d in self._deliveries.values():
-            d.errback(self._closed)
+        for tag, d in self._deliveries.items():
+            if reason is None:
+                d.errback(reason)
+                continue
+            publish = self._delivery_requests.get(tag)
+            failure = PublishFailure.from_publish(
+                PublishFailureKind.CONNECTION_LOST,
+                channel_number=self.channel_number,
+                exchange=publish.exchange if publish else None,
+                routing_key=publish.routing_key if publish else None,
+                body=publish.body if publish else None,
+                properties=publish.properties if publish else None,
+                approved_headers=self._publish_failure_approved_headers(),
+                delivery_tag=tag)
+            LOGGER.warning('Publish failed with the connection: %r', failure)
+            # `reason` is not None here: the branch above handles None.
+            d.errback(attach_publish_failure(reason, failure, publish))
         # close all open queues
         for consumer in self._consumers.values():
             consumer.close(self._closed)
         # release references to stored objects
         self._calls = set()
         self._deliveries = {}
+        self._delivery_requests = {}
         self._consumers = {}
         self._consumers_with_noack = set()
         self.on_closed.callback(self._closed)
@@ -605,11 +631,32 @@ class TwistedChannel:
         """
         if self._closed:
             return defer.fail(self._closed)
-        self._channel.basic_publish(exchange=exchange,
-                                    routing_key=routing_key,
-                                    body=body,
-                                    properties=properties,
-                                    mandatory=mandatory)
+        try:
+            self._channel.basic_publish(exchange=exchange,
+                                        routing_key=routing_key,
+                                        body=body,
+                                        properties=properties,
+                                        mandatory=mandatory)
+        except Exception as exc:
+            if not is_publish_transport_failure(exc):
+                raise
+            failure = PublishFailure.from_publish(
+                PublishFailureKind.CONNECTION_LOST,
+                channel_number=self.channel_number,
+                exchange=exchange,
+                routing_key=routing_key,
+                body=body,
+                properties=properties,
+                approved_headers=self._publish_failure_approved_headers())
+            LOGGER.warning('Publish failed with the connection: %r', failure)
+            return defer.fail(
+                attach_publish_failure(
+                    exc, failure,
+                    FailedPublish(exchange,
+                                  routing_key,
+                                  body,
+                                  properties,
+                                  mandatory=mandatory)))
         if not self._delivery_confirmation:
             # `Channel.basic_publish()` returns nothing, so without delivery
             # confirmation there is no result to report beyond completion.
@@ -618,6 +665,8 @@ class TwistedChannel:
         assert self._delivery_message_id is not None
         self._delivery_message_id += 1
         self._deliveries[self._delivery_message_id] = defer.Deferred()
+        self._delivery_requests[self._delivery_message_id] = FailedPublish(
+            exchange, routing_key, body, properties, self._delivery_message_id)
         return self._deliveries[self._delivery_message_id]
 
     def basic_qos(self,
@@ -724,6 +773,11 @@ class TwistedChannel:
         self._channel.add_on_return_callback(self._on_puback_message_returned)
         return d
 
+    def _publish_failure_approved_headers(self) -> tuple[str, ...]:
+        """Header names this connection allows a publish failure view to disclose."""
+        params = getattr(self._channel.connection, 'params', None)
+        return getattr(params, 'publish_failure_approved_headers', ())
+
     def _on_delivery_confirmation(
         self, method_frame: (pika.frame.Method[pika.spec.Basic.Ack] |
                              pika.frame.Method[pika.spec.Basic.Nack])
@@ -751,12 +805,10 @@ class TwistedChannel:
         for tag in tags:
             d = self._deliveries[tag]
             del self._deliveries[tag]
+            publish = self._delivery_requests.pop(tag, None)
             if isinstance(method_frame.method, pika.spec.Basic.Nack):
                 # Broker was unable to process the message due to internal
                 # error
-                LOGGER.warning(
-                    "Message was Nack'ed by broker: nack=%r; channel=%s;",
-                    method_frame.method, self.channel_number)
                 if self._puback_return is not None:
                     returned_messages: list[ReceivedMessage] = [
                         self._puback_return
@@ -764,14 +816,38 @@ class TwistedChannel:
                     self._puback_return = None
                 else:
                     returned_messages = []
-                d.errback(exceptions.NackError(returned_messages))
+                failure = PublishFailure.from_publish(
+                    PublishFailureKind.NACKED,
+                    channel_number=self.channel_number,
+                    exchange=publish.exchange if publish else None,
+                    routing_key=publish.routing_key if publish else None,
+                    body=publish.body if publish else None,
+                    properties=publish.properties if publish else None,
+                    approved_headers=self._publish_failure_approved_headers(),
+                    delivery_tag=tag)
+                LOGGER.warning('Publish was refused by broker: %r', failure)
+                d.errback(
+                    exceptions.NackError(returned_messages, failure, publish))
             else:
                 assert isinstance(method_frame.method, pika.spec.Basic.Ack)
                 if self._puback_return is not None:
                     # Unroutable message was returned
                     returned_messages = [self._puback_return]
                     self._puback_return = None
-                    d.errback(exceptions.UnroutableError(returned_messages))
+                    failure = PublishFailure.from_publish(
+                        PublishFailureKind.RETURNED,
+                        channel_number=self.channel_number,
+                        exchange=publish.exchange if publish else None,
+                        routing_key=publish.routing_key if publish else None,
+                        body=publish.body if publish else None,
+                        properties=publish.properties if publish else None,
+                        approved_headers=self._publish_failure_approved_headers(
+                        ),
+                        delivery_tag=tag,
+                        method=returned_messages[0].method)
+                    d.errback(
+                        exceptions.UnroutableError(returned_messages, failure,
+                                                   publish))
                 else:
                     d.callback(method_frame.method)
 
@@ -792,17 +868,21 @@ class TwistedChannel:
         assert isinstance(method, spec.Basic.Return), method
         assert isinstance(properties, spec.BasicProperties), properties
 
-        LOGGER.warning(
-            'Published message was returned: _delivery_confirmation=%s; '
-            'channel=%s; method=%r; properties=%r; body_size=%d; '
-            'body_prefix=%.255r', self._delivery_confirmation,
-            channel.channel_number, method, properties,
-            len(body) if body is not None else None, body)
-
         self._puback_return = ReceivedMessage(channel=self,
                                               method=method,
                                               properties=properties,
                                               body=body)
+
+        failure = PublishFailure.from_publish(
+            PublishFailureKind.RETURNED,
+            channel_number=channel.channel_number,
+            exchange=method.exchange,
+            routing_key=method.routing_key,
+            body=body,
+            properties=properties,
+            approved_headers=self._publish_failure_approved_headers(),
+            method=method)
+        LOGGER.warning('Published message was returned: %r', failure)
 
     def exchange_bind(
             self,

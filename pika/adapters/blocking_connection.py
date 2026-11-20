@@ -46,6 +46,12 @@ from pika._utils import override
 # NOTE: import SelectConnection after others to avoid circular dependency
 from pika.adapters import select_connection
 from pika.adapters.utils import connection_workflow
+from pika.exceptions import (
+    FailedPublish,
+    PublishFailure,
+    PublishFailureKind,
+    attach_publish_failure,
+)
 from pika.exchange_type import ExchangeType
 
 if TYPE_CHECKING:
@@ -1452,6 +1458,12 @@ class BlockingChannel:
                                          exceptions.ChannelClosedByBroker):
             raise self._closing_reason
 
+    def _publish_failure_approved_headers(self) -> Sequence[str]:
+        """Header names this connection allows a publish failure view to disclose."""
+        impl = getattr(self, '_impl', None)
+        params = getattr(impl, 'params', None)
+        return getattr(params, 'publish_failure_approved_headers', ())
+
     def _on_puback_message_returned(self, channel: pika.channel.Channel,
                                     method: pika.spec.Basic.Return,
                                     properties: pika.spec.BasicProperties,
@@ -1472,14 +1484,18 @@ class BlockingChannel:
         assert isinstance(method, pika.spec.Basic.Return), method
         assert isinstance(properties, pika.spec.BasicProperties), (properties)
 
-        LOGGER.warning(
-            'Published message was returned: _delivery_confirmation=%s; '
-            'channel=%s; method=%r; properties=%r; body_size=%d; '
-            'body_prefix=%.255r', self._delivery_confirmation,
-            channel.channel_number, method, properties,
-            len(body) if body is not None else None, body)
-
         self._puback_return = ReturnedMessage(method, properties, body)
+
+        failure = PublishFailure.from_publish(
+            PublishFailureKind.RETURNED,
+            channel_number=channel.channel_number,
+            exchange=method.exchange,
+            routing_key=method.routing_key,
+            body=body,
+            properties=properties,
+            approved_headers=self._publish_failure_approved_headers(),
+            method=method)
+        LOGGER.warning('Published message was returned: %r', failure)
 
     def _add_pending_event(self, evt: _ChannelPendingEvt) -> None:
         """
@@ -2388,28 +2404,42 @@ class BlockingChannel:
         :raises NackError: raised when a message published in
             publisher-acknowledgements mode is Nack'ed by the broker. See
             `BlockingChannel.confirm_delivery`.
+
+        The raised exception carries two attributes. `publish` is the message that
+        failed, as a `pika.exceptions.FailedPublish`, ready to be published again.
+        `failure` is a `pika.exceptions.PublishFailure`, a restricted view that
+        identifies this publish and says whether routing or confirmation failed,
+        without the body or any header value the connection's
+        `publish_failure_approved_headers` does not approve. The warning pika logs
+        for the failure contains only that view.
+
+        If the connection closes while waiting for the confirmation, the exception
+        describing the close is raised with the same two attributes.
         """
         if self._delivery_confirmation:
             # In publisher-acknowledgments mode
             with self._message_confirmation_result:
-                self._impl.basic_publish(exchange=exchange,
-                                         routing_key=routing_key,
-                                         body=body,
-                                         properties=properties,
-                                         mandatory=mandatory)
+                try:
+                    self._impl.basic_publish(exchange=exchange,
+                                             routing_key=routing_key,
+                                             body=body,
+                                             properties=properties,
+                                             mandatory=mandatory)
 
-                self._flush_output(self._message_confirmation_result.is_ready)
+                    self._flush_output(
+                        self._message_confirmation_result.is_ready)
+                except Exception as exc:
+                    if not exceptions.is_publish_transport_failure(exc):
+                        raise
+                    raise self._publish_connection_failure(
+                        exc, exchange, routing_key, body, properties,
+                        mandatory) from exc
                 conf_method = (
                     self._message_confirmation_result.value.method_frame.method)
 
                 if isinstance(conf_method, pika.spec.Basic.Nack):
                     # Broker was unable to process the message due to internal
                     # error
-                    LOGGER.warning(
-                        "Message was Nack'ed by broker: nack=%r; channel=%s; "
-                        "exchange=%s; routing_key=%s; mandatory=%r; ",
-                        conf_method, self.channel_number, exchange, routing_key,
-                        mandatory)
                     if self._puback_return is not None:
                         returned_messages: list[ReturnedMessage] = [
                             self._puback_return
@@ -2417,7 +2447,25 @@ class BlockingChannel:
                         self._puback_return = None
                     else:
                         returned_messages = []
-                    raise exceptions.NackError(returned_messages)
+                    failure = PublishFailure.from_publish(
+                        PublishFailureKind.NACKED,
+                        channel_number=self.channel_number,
+                        exchange=exchange,
+                        routing_key=routing_key,
+                        body=body,
+                        properties=properties,
+                        approved_headers=self._publish_failure_approved_headers(
+                        ),
+                        delivery_tag=conf_method.delivery_tag)
+                    LOGGER.warning('Publish was refused by broker: %r', failure)
+                    publish = FailedPublish(exchange,
+                                            routing_key,
+                                            body,
+                                            properties,
+                                            conf_method.delivery_tag,
+                                            mandatory=mandatory)
+                    raise exceptions.NackError(returned_messages, failure,
+                                               publish)
 
                 assert isinstance(conf_method,
                                   pika.spec.Basic.Ack), (conf_method)
@@ -2426,15 +2474,78 @@ class BlockingChannel:
                     # Unroutable message was returned
                     messages = [self._puback_return]
                     self._puback_return = None
-                    raise exceptions.UnroutableError(messages)
+                    failure = PublishFailure.from_publish(
+                        PublishFailureKind.RETURNED,
+                        channel_number=self.channel_number,
+                        exchange=exchange,
+                        routing_key=routing_key,
+                        body=body,
+                        properties=properties,
+                        approved_headers=self._publish_failure_approved_headers(
+                        ),
+                        delivery_tag=conf_method.delivery_tag,
+                        method=messages[0].method)
+                    publish = FailedPublish(exchange,
+                                            routing_key,
+                                            body,
+                                            properties,
+                                            conf_method.delivery_tag,
+                                            mandatory=mandatory)
+                    raise exceptions.UnroutableError(messages, failure, publish)
         else:
             # In non-publisher-acknowledgments mode
-            self._impl.basic_publish(exchange=exchange,
-                                     routing_key=routing_key,
-                                     body=body,
-                                     properties=properties,
-                                     mandatory=mandatory)
-            self._flush_output()
+            try:
+                self._impl.basic_publish(exchange=exchange,
+                                         routing_key=routing_key,
+                                         body=body,
+                                         properties=properties,
+                                         mandatory=mandatory)
+                self._flush_output()
+            except Exception as exc:
+                if not exceptions.is_publish_transport_failure(exc):
+                    raise
+                raise self._publish_connection_failure(exc, exchange,
+                                                       routing_key, body,
+                                                       properties,
+                                                       mandatory) from exc
+
+    def _publish_connection_failure(self,
+                                    exc: Exception,
+                                    exchange: str | bytes | None,
+                                    routing_key: str | bytes | None,
+                                    body: bytes,
+                                    properties: pika.spec.BasicProperties |
+                                    None,
+                                    mandatory: bool = False) -> Exception:
+        """
+        Attach the publish that failed to the exception describing a lost connection.
+
+        The exception raised is a copy of *exc*, so the connection's shared close
+        reason does not end up describing whichever publish happened to fail first.
+
+        :param exc: The exception the connection or channel raised
+        :param exchange: The exchange the publish was addressed to
+        :param routing_key: The routing key the publish used
+        :param body: The message body
+        :param properties: The message properties
+        :param mandatory: Whether the publish used the mandatory flag
+        :returns: A copy of *exc* carrying `publish` and `failure`
+        """
+        failure = PublishFailure.from_publish(
+            PublishFailureKind.CONNECTION_LOST,
+            channel_number=self.channel_number,
+            exchange=exchange,
+            routing_key=routing_key,
+            body=body,
+            properties=properties,
+            approved_headers=self._publish_failure_approved_headers())
+        LOGGER.warning('Publish failed with the connection: %r', failure)
+        publish = FailedPublish(exchange,
+                                routing_key,
+                                body,
+                                properties,
+                                mandatory=mandatory)
+        return cast(Exception, attach_publish_failure(exc, failure, publish))
 
     def basic_qos(self,
                   prefetch_size: int = 0,

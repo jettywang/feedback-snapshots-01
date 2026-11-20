@@ -26,6 +26,7 @@ from pika.exceptions import (
     ConsumerCancelled,
     DuplicateGetOkCallback,
     NackError,
+    PublishFailureKind,
     UnroutableError,
 )
 from pika.frame import Method
@@ -722,6 +723,77 @@ class TwistedChannelTestCase(TestCase):
         d.addCallback(send_message)
         d.addCallback(check_response)
         self.pika_channel.confirm_delivery.call_args[1]['callback'](None)
+        assert d.called
+
+    @pytest.mark.timeout(5)
+    def test_confirm_delivery_returned_keeps_the_message_and_restricts_the_log(
+            self):
+        self.pika_channel.connection.params.publish_failure_approved_headers = (
+        )
+        d = self.channel.confirm_delivery()
+        return_cb = self.pika_channel.add_on_return_callback.call_args[0][0]
+        body = b'business-payload-must-not-leak'
+        properties = spec.BasicProperties(
+            correlation_id='order-77',
+            user_id='alice',
+            headers={'x-private-account': 'acct-123'})
+
+        def send_message(_result):
+            d = self.channel.basic_publish('testexch',
+                                           'testrk',
+                                           body,
+                                           properties=properties)
+            method = spec.Basic.Return(312, 'NO_ROUTE', 'testexch', 'testrk')
+            return_cb(self.channel, method, properties, body)
+            self.channel._on_delivery_confirmation(
+                Method(1, spec.Basic.Ack(delivery_tag=1)))
+            return d
+
+        def check_response(failure):
+            error = failure.value
+            self.assertIsInstance(error, UnroutableError)
+            self.assertEqual(error.publish.body, body)
+            self.assertEqual(error.publish.routing_key, 'testrk')
+            self.assertIs(error.failure.kind, PublishFailureKind.RETURNED)
+            self.assertEqual(error.failure.delivery_tag, 1)
+            self.assertEqual(error.failure.reply_code, 312)
+
+        d.addCallback(send_message)
+        d.addCallbacks(self.fail, check_response)
+        with self.assertLogs('pika.adapters.twisted_connection',
+                             level='WARNING') as logs:
+            self.pika_channel.confirm_delivery.call_args[1]['callback'](None)
+        assert d.called
+        logged = '\n'.join(logs.output)
+        self.assertNotIn(body.decode(), logged)
+        self.assertNotIn('acct-123', logged)
+        self.assertNotIn('alice', logged)
+        self.assertIn('kind=returned', logged)
+
+    @pytest.mark.timeout(5)
+    def test_connection_close_errbacks_pending_publish_with_the_view(self):
+        d = self.channel.confirm_delivery()
+        self.pika_channel.confirm_delivery.call_args[1]['callback'](None)
+        body = b'business-payload-must-not-leak'
+
+        def send_message_and_close_channel(_result):
+            pending = self.channel.basic_publish('testexch', 'testrk', body)
+            self.channel._on_channel_closed(
+                mock.Mock(), ConnectionClosedByBroker(320, 'forced'))
+            return pending
+
+        d.addCallback(send_message_and_close_channel)
+
+        def check_response(failure):
+            error = failure.value
+            self.assertIsInstance(error, ConnectionClosedByBroker)
+            self.assertEqual((error.reply_code, error.reply_text),
+                             (320, 'forced'))
+            self.assertEqual(error.publish.body, body)
+            self.assertIs(error.failure.kind,
+                          PublishFailureKind.CONNECTION_LOST)
+
+        d.addCallbacks(self.fail, check_response)
         assert d.called
 
     @pytest.mark.timeout(5)

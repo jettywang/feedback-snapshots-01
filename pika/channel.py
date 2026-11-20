@@ -1536,8 +1536,19 @@ class Channel:
         if not self.callbacks.process(self.channel_number, '_on_return', self,
                                       self, method_frame.method,
                                       header_frame.properties, body):
-            LOGGER.debug('Basic.Return received from server (%r, %r)',
-                         method_frame.method, header_frame.properties)
+            params = getattr(self.connection, 'params', None)
+            failure = exceptions.PublishFailure.from_publish(
+                exceptions.PublishFailureKind.RETURNED,
+                channel_number=self.channel_number,
+                exchange=method_frame.method.exchange,
+                routing_key=method_frame.method.routing_key,
+                body=body,
+                properties=header_frame.properties,
+                approved_headers=getattr(params,
+                                         'publish_failure_approved_headers',
+                                         ()),
+                method=method_frame.method)
+            LOGGER.debug('Basic.Return received from server: %r', failure)
 
     def _on_selectok(self, method_frame: frame.Method) -> None:
         """

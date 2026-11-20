@@ -68,6 +68,8 @@ class ParametersTestsBase(unittest.TestCase):
                 kls.DEFAULT_MAX_INBOUND_MESSAGE_BODY_SIZE,
             'port':
                 kls.DEFAULT_PORT,
+            'publish_failure_approved_headers':
+                kls.DEFAULT_PUBLISH_FAILURE_APPROVED_HEADERS,
             'retry_delay':
                 kls.DEFAULT_RETRY_DELAY,
             'socket_timeout':
@@ -316,6 +318,29 @@ class ParametersTests(ParametersTestsBase):
             with self.assertRaises(ValueError, msg=repr(bad_value)):
                 params.max_inbound_message_body_size = bad_value
 
+    def test_publish_failure_approved_headers(self):
+        params = connection.Parameters()
+        self.assertEqual(params.publish_failure_approved_headers, ())
+
+        params.publish_failure_approved_headers = ('trace-id', 'tenant')
+        self.assertEqual(params.publish_failure_approved_headers,
+                         ('trace-id', 'tenant'))
+
+        params.publish_failure_approved_headers = []
+        self.assertEqual(params.publish_failure_approved_headers, ())
+
+        for bad_type in ('trace-id', b'trace-id', None, 1, ('ok', 2)):
+            with self.assertRaises(TypeError, msg=repr(bad_type)):
+                params.publish_failure_approved_headers = bad_type
+
+        for bad_value in (('',), ('x' * 256,), ('ok', '')):
+            with self.assertRaises(ValueError, msg=repr(bad_value)):
+                params.publish_failure_approved_headers = bad_value
+
+        # A valid name of exactly the maximum short-string length is accepted.
+        params.publish_failure_approved_headers = ('x' * 255,)
+        self.assertEqual(params.publish_failure_approved_headers, ('x' * 255,))
+
     def test_heartbeat(self):
         params = connection.Parameters()
 
@@ -553,6 +578,7 @@ class ConnectionParametersTests(ParametersTestsBase):
             'locale': 'en',
             'max_inbound_message_body_size': 1024,
             'port': 5678,
+            'publish_failure_approved_headers': ('trace-id',),
             'retry_delay': 3,
             'socket_timeout': 100.5,
             'stack_timeout': 150,
@@ -794,6 +820,26 @@ class URLParametersTests(ParametersTestsBase):
         self.assertEqual(params.host, 'www.test.com')
         self.assertEqual(params.port, 5678)
         self.assertEqual(params.virtual_host, virtual_host)
+
+    def test_publish_failure_approved_headers_from_the_query_string(self):
+        params = connection.URLParameters(
+            'amqp://localhost/%2F?publish_failure_approved_headers='
+            '%28%27trace-id%27%2C%27tenant%27%29')
+        self.assertEqual(params.publish_failure_approved_headers,
+                         ('trace-id', 'tenant'))
+
+    def test_bad_publish_failure_approved_headers_in_the_query_string(self):
+        with self.assertRaises(ValueError):
+            connection.URLParameters(
+                'amqp://localhost/%2F?publish_failure_approved_headers='
+                'not-a-literal')
+
+        # Valid Python that is not a sequence of names is rejected by the setter.
+        for value in ("''", "'trace-id'", '1'):
+            with self.assertRaises(TypeError, msg=value):
+                connection.URLParameters(
+                    'amqp://localhost/%2F?publish_failure_approved_headers=' +
+                    url_quote(value))
 
     def test_accepts_plain_string(self):
         parameters = pika.URLParameters('amqp://prtfqpeo:oihdglkhcp0@myserver.'

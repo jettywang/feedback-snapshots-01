@@ -23,6 +23,12 @@ No. No pika connection survives `os.fork()`, and that includes `multiprocessing`
 
 The child inherits the parent's socket descriptor but none of its threads, so for `pika.Connection` the IOLoop thread and every consumer worker exist only in the parent: nothing in the child reads from the socket or sends heartbeats, and a blocking call there waits for a reply that no thread will deliver. Both processes can still write to that one socket, and interleaved frames corrupt the connection for the parent as well. Using the connection in the child is undefined, whatever the state of its attributes suggests.
 
+### Why does a publish failure log not show my message?
+
+Because the failure log is meant to be shareable, and the message is not. `UnroutableError` and `NackError` still carry the message in `.messages`, and both also expose `.publish`, a [`FailedPublish`](modules/adapters/blocking.md#publishing-failures-and-what-they-disclose) with the exact body and properties to send again. The log reports `.failure`, a `PublishFailure` whose `kind` says whether the broker could not route the message, refused it, or the connection closed first, and which omits the body, the header table and the `user_id` and `reply_to` properties.
+
+If an external reader needs a header value, list that header's name in `Parameters.publish_failure_approved_headers`. Until then the view reports only how many headers it withheld.
+
 ### Why does mypy report new errors on my consumer callback after upgrading?
 
 Pika ships a `py.typed` marker, so a type checker reads pika's own annotations. `pika.spec` is generated code, and it was previously excluded from pika's `mypy` configuration, which left every field of a decoded frame typed as `Any`. `Any` silences all checking, so code like this passed:

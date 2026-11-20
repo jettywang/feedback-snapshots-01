@@ -30,8 +30,10 @@ try:
                           properties=properties,
                           mandatory=True)
     print('Message was published')
-except pika.exceptions.UnroutableError:
-    print('Message was returned')
+except pika.exceptions.UnroutableError as error:
+    # `error.publish` holds the message, ready to send again. `error.failure`
+    # is the view safe to log: no body, no unapproved headers.
+    print('Message was returned:', error.failure)
 
 # Clear it again, so repeated runs do not pile messages up in the queue and
 # leave the other examples that read `test` dependent on what ran before.
@@ -46,5 +48,7 @@ try:
                           properties=properties,
                           mandatory=True)
     print('Message was published')
-except pika.exceptions.UnroutableError:
-    print('Message was returned')
+except pika.exceptions.UnroutableError as error:
+    # `error.publish` holds the message, ready to send again. `error.failure`
+    # is the view safe to log: no body, no unapproved headers.
+    print('Message was returned:', error.failure)

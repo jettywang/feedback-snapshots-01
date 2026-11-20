@@ -2023,6 +2023,30 @@ class ChannelTests(unittest.TestCase):
                                                   header_value.properties,
                                                   body_value)
 
+    def test_onreturn_without_a_listener_logs_only_the_restricted_view(self):
+        """No registered listener used to mean the whole property table reached the log."""
+        self.callbacks.process.return_value = False
+        method_value = frame.Method(
+            1,
+            spec.Basic.Return(312, 'NO_ROUTE', 'exchange_value',
+                              'routing.key'))
+        properties = spec.BasicProperties(
+            correlation_id='order-77',
+            user_id='alice',
+            headers={'x-private-account': 'acct-123'})
+        header_value = frame.Header(1, 10, properties)
+
+        with self.assertLogs('pika.channel', level='DEBUG') as logs:
+            self.obj._on_return(method_value, header_value,
+                                b'business-payload')
+
+        logged = '\n'.join(logs.output)
+        self.assertNotIn('business-payload', logged)
+        self.assertNotIn('acct-123', logged)
+        self.assertNotIn('alice', logged)
+        self.assertIn('kind=returned', logged)
+        self.assertIn('correlation_id=', logged)
+
     @mock.patch('pika.channel.Channel._rpc')
     def test_on_synchronous_complete(self, rpc):
         mock_callback = mock.Mock()

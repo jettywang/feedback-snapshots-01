@@ -61,6 +61,7 @@ class Parameters:
         '_locale',
         '_max_inbound_message_body_size',
         '_port',
+        '_publish_failure_approved_headers',
         '_retry_delay',
         '_socket_timeout',
         '_ssl_options',
@@ -86,6 +87,7 @@ class Parameters:
     # RabbitMQ refuses messages above this, whatever its max_message_size says.
     MAX_INBOUND_MESSAGE_BODY_SIZE_LIMIT = 512 * 1024 * 1024
     DEFAULT_PORT = 5672
+    DEFAULT_PUBLISH_FAILURE_APPROVED_HEADERS: tuple[str, ...] = ()
     DEFAULT_RETRY_DELAY = 2.0
     DEFAULT_SOCKET_TIMEOUT = 10.0  # socket.connect() timeout
     DEFAULT_STACK_TIMEOUT = 15.0  # full-stack TCP/[SSl]/AMQP bring-up timeout
@@ -113,6 +115,7 @@ class Parameters:
         self._locale: str = ''
         self._max_inbound_message_body_size: int = 0
         self._port: int = 0
+        self._publish_failure_approved_headers: tuple[str, ...] = ()
         self._retry_delay: float = 0.0
         self._socket_timeout: float | None = None
         self._stack_timeout: float | None = None
@@ -133,6 +136,8 @@ class Parameters:
         self.max_inbound_message_body_size = (
             self.DEFAULT_MAX_INBOUND_MESSAGE_BODY_SIZE)
         self.port = self.DEFAULT_PORT
+        self.publish_failure_approved_headers = (
+            self.DEFAULT_PUBLISH_FAILURE_APPROVED_HEADERS)
         self.retry_delay = self.DEFAULT_RETRY_DELAY
         self.socket_timeout = self.DEFAULT_SOCKET_TIMEOUT
         self.stack_timeout = self.DEFAULT_STACK_TIMEOUT
@@ -466,6 +471,48 @@ class Parameters:
         self._retry_delay = value
 
     @property
+    def publish_failure_approved_headers(self) -> tuple[str, ...]:
+        """
+        Header names whose values `pika.exceptions.PublishFailure` may disclose.
+
+        Publish failures are logged for external readers, so the view withholds the
+        body and every header except these. It defaults to none, so a failed publish's
+        log line reports only the number of headers withheld.
+
+        :returns: tuple of approved header names, empty by default
+        """
+        return self._publish_failure_approved_headers
+
+    @publish_failure_approved_headers.setter
+    def publish_failure_approved_headers(self, value: Sequence[str]) -> None:
+        """
+        :param value: header names to disclose in a publish failure view; each must
+            be a non-empty short string AMQP can carry as a header key
+        :raises TypeError: if *value* is not a sequence of `str`
+        :raises ValueError: if a name is empty or longer than 255 UTF-8 bytes
+        """
+        if isinstance(value, (str, bytes)):
+            raise TypeError(
+                'publish_failure_approved_headers must be a sequence of str, '
+                f'not {value!r}')
+        try:
+            names = tuple(value)
+        except TypeError:
+            raise TypeError(
+                'publish_failure_approved_headers must be a sequence of str, '
+                f'not {value!r}') from None
+        for name in names:
+            if not isinstance(name, str):
+                raise TypeError(
+                    'publish_failure_approved_headers must contain str, but got '
+                    f'{name!r}')
+            if not name or len(name.encode('utf-8')) > 255:
+                raise ValueError(
+                    'a publish failure approved header name must be from 1 to '
+                    f'255 UTF-8 bytes, but got {name!r}')
+        self._publish_failure_approved_headers = names
+
+    @property
     def socket_timeout(self) -> float | None:
         """
         :returns: socket connect timeout in seconds. Defaults to
@@ -616,6 +663,8 @@ class ConnectionParameters(Parameters):
                  client_properties: DefaultT[dict[str, Any] | None] = _DEFAULT,
                  tcp_options: DefaultT[dict[str, Any] | None] = _DEFAULT,
                  max_inbound_message_body_size: DefaultT[int] = _DEFAULT,
+                 publish_failure_approved_headers: DefaultT[
+                     Sequence[str]] = _DEFAULT,
                  **kwargs: Any) -> None:
         """
         Create a new ConnectionParameters instance.
@@ -660,6 +709,9 @@ class ConnectionParameters(Parameters):
         :param max_inbound_message_body_size: The largest message body, in bytes, to accept
             from the broker, from 1 to 512 MiB; see
             [`Parameters.max_inbound_message_body_size`][pika.connection.Parameters.max_inbound_message_body_size]
+        :param publish_failure_approved_headers: Header names whose values a publish
+            failure log line may disclose; see
+            [`Parameters.publish_failure_approved_headers`][pika.connection.Parameters.publish_failure_approved_headers]
         """
         super().__init__()
 
@@ -724,6 +776,10 @@ class ConnectionParameters(Parameters):
             self.max_inbound_message_body_size = cast(
                 int, max_inbound_message_body_size)
 
+        if publish_failure_approved_headers is not self._DEFAULT:
+            self.publish_failure_approved_headers = cast(
+                Sequence[str], publish_failure_approved_headers)
+
         if kwargs:
             raise TypeError(f'unexpected kwargs: {kwargs!r}')
 
@@ -768,6 +824,10 @@ class URLParameters(Parameters):
         - retry_delay:
             The number of seconds to sleep before attempting to connect on
             connection failure.
+        - publish_failure_approved_headers:
+            Python literal of header names whose values a publish failure log line
+            may disclose, such as `('trace-id',)`. Defaults to `()`, which withholds
+            every header value.
         - socket_timeout:
             Socket connect timeout value in seconds (float or int)
         - stack_timeout:
@@ -948,6 +1008,17 @@ class URLParameters(Parameters):
         except ValueError as exc:
             raise ValueError(f'Invalid retry_delay value {value!r}: {exc!r}')
         self.retry_delay = retry_delay
+
+    def _set_url_publish_failure_approved_headers(self, value: str) -> None:
+        """Deserialize and apply the corresponding query string arg
+        :param value: Python literal of a sequence of header names
+        """
+        try:
+            names = ast.literal_eval(value)
+        except (SyntaxError, ValueError) as exc:
+            raise ValueError('Invalid publish_failure_approved_headers value '
+                             f'{value!r}: {exc!r}')
+        self.publish_failure_approved_headers = names
 
     def _set_url_socket_timeout(self, value: float) -> None:
         """Deserialize and apply the corresponding query string arg

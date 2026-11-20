@@ -105,6 +105,14 @@ The errors are accurate and the annotations are an improvement, so nothing here 
 
 `pyright` users see little change, since it reported most of these already.
 
+### Publish failures now expose a restricted view, not the message
+
+`UnroutableError` and `NackError`, and the connection error raised when a connection closes with a publish unconfirmed, now expose `.publish` with the message to send again and `.failure` with a [`PublishFailure`](https://pika.github.io/pika/latest/modules/adapters/blocking/#publishing-failures-and-what-they-disclose) suitable for a log or an alert. `.failure.kind` says whether the broker could not route the message, refused it, or the connection closed first, and carries the channel number, delivery tag, exchange, routing key and reply code.
+
+Pika's warnings for these failures now log only that view. The body and the header table are absent, as are the `user_id` and `reply_to` properties. Header values are disclosed only for names listed in the new `publish_failure_approved_headers` connection parameter, which defaults to empty and reports `withheld_header_count` instead, so an upgraded application that forwards pika's logs sends less than before. Code that read the message from the exception's `repr` or parsed pika's old warning text must use `.messages` or `.publish`.
+
+The connection error is raised as a copy carrying the new attributes, so its type, `args` and `host`/`port` are unchanged.
+
 ## [1.5.0](https://github.com/pika/pika/tree/1.5.0) (2026-11-17)
 
 [Full Changelog](https://github.com/pika/pika/compare/1.4.0...1.5.0)
