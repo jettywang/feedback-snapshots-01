@@ -8,6 +8,15 @@ All versions prior to 0.0.9 are untracked.
 
 ## [Unreleased]
 
+### Added
+
+* `--fix-plan FILE` now produces a reviewable, JSON work order instead of
+  upgrading dependencies immediately. The plan records each target file's
+  before/after digests and the advisory evidence behind every upgrade, and can
+  be applied later with `--apply-fix-plan FILE`. Applying a plan verifies the
+  workspace is unchanged and applies every file edit transactionally, restoring
+  all targets if any write fails.
+
 ### Fixed
 
 * Editable requirements skipped with `--skip-editable` no longer require a hash

@@ -27,16 +27,101 @@ from pip_audit._dependency_source import (
     DependencySource,
     DependencySourceError,
     InvalidRequirementSpecifier,
+    PlannedEdit,
+    PlannedFix,
 )
 from pip_audit._fix import ResolvedFixVersion
 from pip_audit._service import Dependency
 from pip_audit._service.interface import ResolvedDependency, SkippedDependency
 from pip_audit._state import AuditState
+from pip_audit._util import sha256
 from pip_audit._virtual_env import VirtualEnv, VirtualEnvError
 
 logger = logging.getLogger(__name__)
 
 PINNED_SPECIFIER_RE = re.compile(r"==(?P<version>.+?)$", re.VERBOSE)
+
+
+def rewrite_requirements(
+    filename: Path, contents: str, fix_version: ResolvedFixVersion
+) -> tuple[str, bool]:
+    """
+    Rewrite the given requirements file contents to pin `fix_version`.
+
+    Returns the rewritten contents and whether the dependency was explicitly
+    listed in the file. No filesystem writes are performed.
+
+    Raises a `RequirementFixError` if the contents cannot be safely rewritten.
+    """
+    # Reparse the requirements file. We want to rewrite each line to the new requirements file
+    # and only modify the lines that we're fixing.
+    #
+    # This time we're using the `RequirementsFile.parse` API instead of `Requirements.from_file`
+    # since we want to access each line sequentially in order to rewrite the file.
+    with NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".txt", delete=False) as tmp:
+        tmp.write(contents)
+        tmp_path = Path(tmp.name)
+    try:
+        reqs = list(RequirementsFile.parse(filename=tmp_path.as_posix()))
+    finally:
+        tmp_path.unlink()
+
+    # Check ahead of time for anything invalid in the requirements file since we don't want to
+    # encounter this while writing out the file. Check for duplicate requirements and lines that
+    # failed to parse.
+    req_specifiers: dict[str, SpecifierSet] = {}
+
+    for req in reqs:
+        if (
+            isinstance(req, InstallRequirement)
+            and (req.marker is None or req.marker.evaluate())
+            and req.req is not None
+        ):
+            duplicate_req_specifier = req_specifiers.get(req.name)
+
+            if not duplicate_req_specifier:
+                req_specifiers[req.name] = req.specifier
+
+            elif duplicate_req_specifier != req.specifier:
+                raise RequirementFixError(
+                    f"package {req.name} has duplicate requirements: {str(req)}"
+                )
+        elif isinstance(req, InvalidRequirementLine):
+            raise RequirementFixError(
+                f"requirement file {filename} has invalid requirement: {str(req)}"
+            )
+
+    # Now render the new requirements file
+    lines = []
+    found = False
+    for req in reqs:
+        if (
+            isinstance(req, InstallRequirement)
+            and canonicalize_name(req.name) == fix_version.dep.canonical_name
+        ):
+            found = True
+            if req.specifier.contains(fix_version.dep.version) and not req.specifier.contains(
+                fix_version.version
+            ):
+                req.req.specifier = SpecifierSet(f"=={fix_version.version}")
+        lines.append(req.dumps())
+
+    # The vulnerable dependency may not be explicitly listed in the requirements file if it
+    # is a subdependency of a requirement. In this case, we should explicitly add the fixed
+    # dependency into the requirements file.
+    #
+    # To know whether this is the case, we'll need to resolve dependencies if we haven't
+    # already in order to figure out whether this subdependency belongs to this file or
+    # another.
+    if not found:
+        logger.warning(
+            "added fixed subdependency explicitly to requirements file "
+            f"{filename}: {fix_version.dep.canonical_name}"
+        )
+        lines.append("    # pip-audit: subdependency explicitly fixed")
+        lines.append(f"{fix_version.dep.canonical_name}=={fix_version.version}")
+
+    return "".join(f"{line}\n" for line in lines), found
 
 
 class RequirementSource(DependencySource):
@@ -214,71 +299,35 @@ class RequirementSource(DependencySource):
                 self._recover_files(tmp_files)
                 raise e
 
-    def _fix_file(self, filename: Path, fix_version: ResolvedFixVersion) -> None:
-        # Reparse the requirements file. We want to rewrite each line to the new requirements file
-        # and only modify the lines that we're fixing.
-        #
-        # This time we're using the `RequirementsFile.parse` API instead of `Requirements.from_file`
-        # since we want to access each line sequentially in order to rewrite the file.
-        reqs = list(RequirementsFile.parse(filename=filename.as_posix()))
-
-        # Check ahead of time for anything invalid in the requirements file since we don't want to
-        # encounter this while writing out the file. Check for duplicate requirements and lines that
-        # failed to parse.
-        req_specifiers: dict[str, SpecifierSet] = {}
-
-        for req in reqs:
-            if (
-                isinstance(req, InstallRequirement)
-                and (req.marker is None or req.marker.evaluate())
-                and req.req is not None
-            ):
-                duplicate_req_specifier = req_specifiers.get(req.name)
-
-                if not duplicate_req_specifier:
-                    req_specifiers[req.name] = req.specifier
-
-                elif duplicate_req_specifier != req.specifier:
-                    raise RequirementFixError(
-                        f"package {req.name} has duplicate requirements: {str(req)}"
+    def plan_fixes(self, fixes: list[ResolvedFixVersion]) -> list[PlannedFix]:
+        """
+        Compute the requirements file edits for this `RequirementSource`.
+        """
+        current = {filename: filename.read_bytes() for filename in self._filenames}
+        planned = []
+        for fix_version in fixes:
+            edits = []
+            for filename in self._filenames:
+                before = current[filename]
+                rewritten, _ = rewrite_requirements(filename, before.decode("utf-8"), fix_version)
+                after = rewritten.encode("utf-8")
+                current[filename] = after
+                edits.append(
+                    PlannedEdit(
+                        path=filename,
+                        before_sha256=sha256(before),
+                        after_sha256=sha256(after),
+                        before_content=before,
+                        after_content=after,
                     )
-            elif isinstance(req, InvalidRequirementLine):
-                raise RequirementFixError(
-                    f"requirement file {filename} has invalid requirement: {str(req)}"
                 )
+            planned.append(PlannedFix(fix=fix_version, edits=tuple(edits)))
+        return planned
 
-        # Now write out the new requirements file
-        with filename.open("w") as f:
-            found = False
-            for req in reqs:
-                if (
-                    isinstance(req, InstallRequirement)
-                    and canonicalize_name(req.name) == fix_version.dep.canonical_name
-                ):
-                    found = True
-                    if req.specifier.contains(
-                        fix_version.dep.version
-                    ) and not req.specifier.contains(fix_version.version):
-                        req.req.specifier = SpecifierSet(f"=={fix_version.version}")
-                print(req.dumps(), file=f)
-
-            # The vulnerable dependency may not be explicitly listed in the requirements file if it
-            # is a subdependency of a requirement. In this case, we should explicitly add the fixed
-            # dependency into the requirements file.
-            #
-            # To know whether this is the case, we'll need to resolve dependencies if we haven't
-            # already in order to figure out whether this subdependency belongs to this file or
-            # another.
-            if not found:
-                logger.warning(
-                    "added fixed subdependency explicitly to requirements file "
-                    f"{filename}: {fix_version.dep.canonical_name}"
-                )
-                print(
-                    "    # pip-audit: subdependency explicitly fixed",
-                    file=f,
-                )
-                print(f"{fix_version.dep.canonical_name}=={fix_version.version}", file=f)
+    def _fix_file(self, filename: Path, fix_version: ResolvedFixVersion) -> None:
+        contents = filename.read_text(encoding="utf-8")
+        rewritten, _ = rewrite_requirements(filename, contents, fix_version)
+        filename.write_text(rewritten, encoding="utf-8")
 
     def _recover_files(self, tmp_files: list[IO[str]]) -> None:
         for filename, tmp_file in zip(self._filenames, tmp_files, strict=True):

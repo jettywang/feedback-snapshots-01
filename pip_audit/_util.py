@@ -2,10 +2,18 @@
 Utility functions for `pip-audit`.
 """
 
+import hashlib
 import sys
 from typing import NoReturn  # pragma: no cover
 
 from packaging.version import Version
+
+
+def sha256(contents: bytes) -> str:
+    """
+    Return the lowercase hexadecimal SHA-256 digest of `contents`.
+    """
+    return hashlib.sha256(contents).hexdigest()
 
 
 def assert_never(x: NoReturn) -> NoReturn:  # pragma: no cover

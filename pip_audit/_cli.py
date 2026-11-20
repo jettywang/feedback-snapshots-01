@@ -20,11 +20,21 @@ from pip_audit._dependency_source import (
     DependencySource,
     DependencySourceError,
     PipSource,
+    PlanningUnsupported,
     PyProjectSource,
     RequirementSource,
 )
 from pip_audit._dependency_source.pylock import PyLockSource
 from pip_audit._fix import ResolvedFixVersion, SkippedFixVersion, resolve_fix_versions
+from pip_audit._fix_plan import (
+    FixPlanError,
+    FixPlanInvalid,
+    FixPlanStale,
+    apply_fix_plan,
+    create_fix_plan,
+    load_fix_plan,
+    write_fix_plan,
+)
 from pip_audit._format import (
     ColumnsFormat,
     CycloneDxFormat,
@@ -332,6 +342,21 @@ def _parser() -> argparse.ArgumentParser:  # pragma: no cover
         help="automatically upgrade dependencies with known vulnerabilities",
     )
     parser.add_argument(
+        "--fix-plan",
+        type=Path,
+        metavar="FILE",
+        help="audit, resolve fixes, and write a reviewable fix plan to FILE without changing "
+        "any dependency files; apply the approved plan with --apply-fix-plan",
+    )
+    parser.add_argument(
+        "--apply-fix-plan",
+        type=Path,
+        metavar="FILE",
+        dest="apply_fix_plan",
+        help="apply a previously approved fix plan, after checking that every target file "
+        "still matches the contents the plan was generated against",
+    )
+    parser.add_argument(
         "--require-hashes",
         action="store_true",
         help="require a hash to check each requirement against, for repeatable audits; this option "
@@ -438,12 +463,57 @@ def _dep_source_from_project_path(
     _fatal(f"couldn't find a supported project file in {project_path}")
 
 
+def _plan_root(args: argparse.Namespace) -> Path:
+    # Plans record their workspace so that applying them later verifies the
+    # same files, regardless of where the apply command is run from.
+    if args.requirements is not None:
+        return Path.cwd()
+    project_path: Path = args.project_path
+    return project_path.resolve()
+
+
+def _apply_fix_plan(plan_path: Path) -> None:  # pragma: no cover
+    try:
+        plan = load_fix_plan(plan_path)
+    except FixPlanError as exc:
+        _fatal(str(exc))
+
+    try:
+        apply_fix_plan(plan)
+    except FixPlanStale as exc:
+        _fatal(f"fix plan no longer applies to this workspace; regenerate it: {exc}")
+    except FixPlanInvalid as exc:
+        _fatal(f"invalid fix plan: {exc}")
+    except FixPlanError as exc:
+        _fatal(f"failed to apply fix plan: {exc}")
+
+    for change in plan.changes:
+        logger.info(
+            f"Applied {change.dependency} => {change.fix.version} "
+            f"({len(change.edits)} file edit(s))"
+        )
+    logger.info(f"Applied fix plan {plan_path} ({len(plan.changes)} change(s))")
+
+
 def audit() -> None:  # pragma: no cover
     """
     The primary entrypoint for `pip-audit`.
     """
     parser = _parser()
     args = _parse_args(parser)
+
+    if args.apply_fix_plan is not None:
+        if args.fix or args.fix_plan is not None:
+            parser.error("--apply-fix-plan cannot be combined with --fix or --fix-plan")
+        _apply_fix_plan(args.apply_fix_plan)
+        return
+
+    if args.fix_plan is not None and args.fix:
+        parser.error("--fix-plan cannot be combined with --fix")
+
+    if args.requirements is None and args.project_path is None:
+        if args.fix_plan is not None:
+            parser.error("--fix-plan can only be used with --requirement (-r) or a project path")
 
     service: VulnerabilityService
     if args.vulnerability_service is VulnerabilityServiceChoice.Osv:
@@ -587,8 +657,48 @@ def audit() -> None:  # pragma: no cover
         fixes = []
         fixed_pkg_count = 0
         fixed_vuln_count = 0
-        if args.fix:
+        resolved: list[ResolvedFixVersion] = []
+        skipped: list[SkippedFixVersion] = []
+        ordered_fixes: list[ResolvedFixVersion | SkippedFixVersion] = []
+        if args.fix or args.fix_plan is not None:
             for fix in resolve_fix_versions(service, result, state):
+                if fix.is_skipped():
+                    skipped_fix = cast(SkippedFixVersion, fix)
+                    ordered_fixes.append(skipped_fix)
+                    skipped.append(skipped_fix)
+                else:
+                    resolved_fix = cast(ResolvedFixVersion, fix)
+                    ordered_fixes.append(resolved_fix)
+                    resolved.append(resolved_fix)
+
+        if args.fix_plan is not None:
+            plan_root = _plan_root(args)
+            try:
+                plan = create_fix_plan(
+                    source,
+                    result,
+                    resolved,
+                    skipped,
+                    tool_version=__version__,
+                    root=plan_root,
+                )
+                write_fix_plan(plan, args.fix_plan)
+            except PlanningUnsupported as exc:
+                _fatal(f"cannot create a fix plan: {exc}")
+            except (FixPlanError, DependencySourceError) as exc:
+                _fatal(f"failed to create fix plan: {exc}")
+            for skipped_fix in plan.skipped:
+                logger.info(
+                    f"Skipped {skipped_fix.dep.name} upgrade because {skipped_fix.skip_reason}"
+                )
+            logger.info(
+                f"Wrote fix plan with {len(plan.changes)} change(s) to {args.fix_plan}; "
+                "review and apply it with --apply-fix-plan"
+            )
+            return
+
+        if args.fix:
+            for fix in ordered_fixes:
                 if args.dry_run:
                     if fix.is_skipped():
                         fix = cast(SkippedFixVersion, fix)

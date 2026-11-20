@@ -8,6 +8,9 @@ from .interface import (
     DependencySource,
     DependencySourceError,
     InvalidRequirementSpecifier,
+    PlannedEdit,
+    PlannedFix,
+    PlanningUnsupported,
 )
 from .pip import PipSource, PipSourceError
 from .pylock import PyLockSource
@@ -20,6 +23,9 @@ __all__ = [
     "DependencySource",
     "DependencySourceError",
     "InvalidRequirementSpecifier",
+    "PlannedEdit",
+    "PlannedFix",
+    "PlanningUnsupported",
     "PipSource",
     "PipSourceError",
     "PyLockSource",

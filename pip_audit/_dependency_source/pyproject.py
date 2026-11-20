@@ -14,18 +14,62 @@ import tomli
 import tomli_w
 from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
+from packaging.utils import canonicalize_name
 
 from pip_audit._dependency_source import (
     DependencyFixError,
     DependencySource,
     DependencySourceError,
+    PlannedEdit,
+    PlannedFix,
 )
 from pip_audit._fix import ResolvedFixVersion
 from pip_audit._service import Dependency, ResolvedDependency
 from pip_audit._state import AuditState
+from pip_audit._util import sha256
 from pip_audit._virtual_env import VirtualEnv, VirtualEnvError
 
 logger = logging.getLogger(__name__)
+
+
+def rewrite_pyproject(
+    filename: Path, contents: bytes, fix_version: ResolvedFixVersion
+) -> bytes | None:
+    """
+    Rewrite the given `pyproject.toml` contents to pin `fix_version`.
+
+    Returns the rewritten TOML bytes, or `None` if the file has no
+    `dependencies` list to edit. No filesystem writes are performed.
+
+    Raises a `PyProjectFixError` if the contents cannot be safely rewritten.
+    """
+    pyproject_data = tomli.loads(contents.decode("utf-8"))
+
+    project = pyproject_data.get("project")
+    if project is None:
+        raise PyProjectFixError(f"pyproject file {filename} does not contain `project` section")
+
+    deps = project.get("dependencies")
+    if deps is None:
+        # Projects without dependencies aren't an error case
+        logger.warning(f"pyproject file {filename} does not contain `dependencies` list")
+        return None
+
+    reqs = [Requirement(dep) for dep in deps]
+    for i in range(len(reqs)):
+        # When we find a requirement that matches the provided fix version, we need to edit
+        # the requirement's specifier and then write it back to the underlying TOML data.
+        req = reqs[i]
+        if (
+            canonicalize_name(req.name) == fix_version.dep.canonical_name
+            and req.specifier.contains(fix_version.dep.version)
+            and not req.specifier.contains(fix_version.version)
+        ):
+            req.specifier = SpecifierSet(f"=={fix_version.version}")
+            deps[i] = str(req)
+        assert req.marker is None or req.marker.evaluate()
+
+    return tomli_w.dumps(pyproject_data).encode("utf-8")
 
 
 class PyProjectSource(DependencySource):
@@ -110,42 +154,45 @@ class PyProjectSource(DependencySource):
         Fixes a dependency version for this `PyProjectSource`.
         """
 
-        with self.filename.open("rb+") as f, NamedTemporaryFile(mode="rb+", delete=False) as tmp:
-            pyproject_data = tomli.load(f)
+        with self.filename.open("rb") as f:
+            contents = f.read()
 
-            project = pyproject_data.get("project")
-            if project is None:
-                raise PyProjectFixError(
-                    f"pyproject file {self.filename} does not contain `project` section"
-                )
+        rewritten = rewrite_pyproject(self.filename, contents, fix_version)
+        if rewritten is None:
+            return
 
-            deps = project.get("dependencies")
-            if deps is None:
-                # Projects without dependencies aren't an error case
-                logger.warning(
-                    f"pyproject file {self.filename} does not contain `dependencies` list"
-                )
-                return
-
-            reqs = [Requirement(dep) for dep in deps]
-            for i in range(len(reqs)):
-                # When we find a requirement that matches the provided fix version, we need to edit
-                # the requirement's specifier and then write it back to the underlying TOML data.
-                req = reqs[i]
-                if (
-                    req.name == fix_version.dep.name
-                    and req.specifier.contains(fix_version.dep.version)
-                    and not req.specifier.contains(fix_version.version)
-                ):
-                    req.specifier = SpecifierSet(f"=={fix_version.version}")
-                    deps[i] = str(req)
-                assert req.marker is None or req.marker.evaluate()
-
-            # Now dump the new edited TOML to the temporary file.
-            tomli_w.dump(pyproject_data, tmp)
-
+        with NamedTemporaryFile(mode="wb", delete=False) as tmp:
+            tmp.write(rewritten)
         # And replace the original `pyproject.toml` file.
         os.replace(tmp.name, self.filename)
+
+    def plan_fixes(self, fixes: list[ResolvedFixVersion]) -> list[PlannedFix]:
+        """
+        Compute the `pyproject.toml` edits for this `PyProjectSource`.
+        """
+        current = self.filename.read_bytes()
+        planned = []
+        for fix_version in fixes:
+            rewritten = rewrite_pyproject(self.filename, current, fix_version)
+            if rewritten is None:
+                planned.append(PlannedFix(fix=fix_version, edits=()))
+                continue
+            planned.append(
+                PlannedFix(
+                    fix=fix_version,
+                    edits=(
+                        PlannedEdit(
+                            path=self.filename,
+                            before_sha256=sha256(current),
+                            after_sha256=sha256(rewritten),
+                            before_content=current,
+                            after_content=rewritten,
+                        ),
+                    ),
+                )
+            )
+            current = rewritten
+        return planned
 
 
 class PyProjectSourceError(DependencySourceError):

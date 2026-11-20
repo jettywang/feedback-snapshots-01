@@ -140,9 +140,10 @@ usage: pip-audit [-h] [-V] [-l] [-r REQUIREMENT] [--locked] [-f FORMAT]
                  [--desc [{on,off,auto}]] [--aliases [{on,off,auto}]]
                  [--cache-dir CACHE_DIR] [--progress-spinner {on,off}]
                  [--timeout TIMEOUT] [--path PATH] [-v] [--fix]
-                 [--require-hashes] [--index-url INDEX_URL]
-                 [--extra-index-url URL] [--skip-editable] [--no-deps]
-                 [-o FILE] [--ignore-vuln ID] [--disable-pip]
+                 [--fix-plan FILE] [--apply-fix-plan FILE] [--require-hashes]
+                 [--index-url INDEX_URL] [--extra-index-url URL]
+                 [--skip-editable] [--no-deps] [-o FILE] [--ignore-vuln ID]
+                 [--disable-pip]
                  [project_path]
 
 audit the Python environment for dependencies with known vulnerabilities
@@ -200,6 +201,14 @@ options:
                         times to increase verbosity (default: 0)
   --fix                 automatically upgrade dependencies with known
                         vulnerabilities (default: False)
+  --fix-plan FILE       audit, resolve fixes, and write a reviewable fix plan
+                        to FILE without changing any dependency files; apply
+                        the approved plan with --apply-fix-plan (default:
+                        None)
+  --apply-fix-plan FILE
+                        apply a previously approved fix plan, after checking
+                        that every target file still matches the contents the
+                        plan was generated against (default: None)
   --require-hashes      require a hash to check each requirement against, for
                         repeatable audits; this option is implied when any
                         package in a requirements file has a `--hash` option.
@@ -266,6 +275,65 @@ an audit (or fix) step is actually performed.
 * In fix mode, `pip-audit --fix --dry-run` performs the auditing step and prints
   out the fix behavior (i.e., which dependencies would be upgraded or skipped)
   that *would have been performed*.
+
+### Reviewable fix plans
+
+`--fix` applies upgrades immediately. When upgrades need a human sign-off,
+split repair into two phases instead:
+
+1. **Generate a work order.** `--fix-plan FILE` audits, resolves fix versions,
+   and writes a JSON plan describing the exact file edits it *would* make. It
+   records the target files, their before/after SHA-256 digests, a unified diff,
+   and the advisory evidence (vulnerability IDs, aliases and offered fix
+   versions) behind every upgrade. No dependency file is modified.
+2. **Apply after approval.** `--apply-fix-plan FILE` first verifies that every
+   target is still byte-for-byte identical to the contents the plan was made
+   against. It refuses to run if the plan was already applied, or if a file was
+   changed since the plan was generated. It then applies all edits across all
+   files as a single transaction: if any write fails, every file is restored to
+   its pre-application contents.
+
+```console
+$ pip-audit -r requirements.txt --fix-plan fix-plan.json
+$ # review fix-plan.json, then approve it out-of-band
+$ pip-audit --apply-fix-plan fix-plan.json
+```
+
+A plan is a plain JSON document that can be diffed and stored alongside the
+change request:
+
+```json
+{
+  "plan_version": 1,
+  "tool": "pip-audit",
+  "tool_version": "2.10.1",
+  "root": "/srv/app",
+  "changes": [
+    {
+      "dependency": {"name": "flask", "version": "0.5"},
+      "fix_version": "1.0",
+      "evidence": [
+        {"id": "PYSEC-2019-179", "fix_versions": ["1.0"], "aliases": ["CVE-2019-0001"]}
+      ],
+      "edits": [
+        {
+          "path": "/srv/app/requirements.txt",
+          "before_sha256": "…",
+          "after_sha256": "…",
+          "before": "…",
+          "after": "…",
+          "diff": "--- a//srv/app/requirements.txt\n+++ b//srv/app/requirements.txt\n…"
+        }
+      ]
+    }
+  ],
+  "skipped": []
+}
+```
+
+`root` pins the workspace the plan belongs to. Plans can only be generated for
+requirements files (`-r`) and project paths; the local environment is upgraded
+by `--fix` (or your installer) rather than by a file plan.
 
 ## Examples
 
