@@ -17,6 +17,7 @@ from huey.api import group
 from huey.constants import EmptyData
 from huey.exceptions import CancelExecution
 from huey.exceptions import RateLimitExceeded
+from huey.exceptions import RescheduleDenied
 from huey.exceptions import ResultTimeout
 from huey.exceptions import ConfigurationError
 from huey.exceptions import RetryTask
@@ -3135,3 +3136,319 @@ class TestCustomErrorMetadata(BaseTestCase):
 
         self.assertEqual(self.huey.result_count(), 0)
         self.assertEqual(len(self.huey), 0)
+
+
+class TestOpsReschedule(BaseTestCase):
+    """Operator-approved reschedule boundaries and audit trail."""
+
+    def setUp(self):
+        super(TestOpsReschedule, self).setUp()
+
+        @self.huey.task(task_type='security-collection',
+                        name='security_collect')
+        def collect(n):
+            return n
+
+        @self.huey.task(task_type='secret-job', retryable=False,
+                        name='secret_job')
+        def secret(n):
+            return n
+
+        @self.huey.task(name='plain_task')
+        def plain(n):
+            return n
+
+        self.collect = collect
+        self.secret = secret
+        self.plain = plain
+
+    def canceled(self, wrapper, n=1, **kwargs):
+        result = wrapper(n, **kwargs)
+        result.revoke()
+        self.assertTrue(result.is_revoked())
+        return result
+
+    def test_declared_metadata(self):
+        self.assertEqual(self.collect.task_class.task_type,
+                         'security-collection')
+        self.assertTrue(self.collect.task_class.retryable)
+        self.assertEqual(self.secret.task_class.task_type, 'secret-job')
+        self.assertFalse(self.secret.task_class.retryable)
+        self.assertTrue(self.plain.task_class.retryable)
+
+        # Metadata is serialized with the task.
+        task = self.collect.s(1)
+        task2 = self.huey.deserialize_task(self.huey.serialize_task(task))
+        self.assertEqual(task2.task_type, 'security-collection')
+        self.assertTrue(task2.retryable)
+        self.assertEqual(task2.origin, 'submitted')
+
+    def test_approved_reschedule(self):
+        result = self.canceled(self.collect, 5)
+
+        record = result.ops_reschedule(
+            task_type='security-collection',
+            approval_id='approval-1',
+            operator='oncall-ada',
+            reason='operator typo in source')
+        self.assertTrue(record.approved)
+        self.assertEqual(record['action'], 'reschedule-approved')
+        self.assertEqual(record['task_id'], result.id)
+        self.assertEqual(record['task_type'], 'security-collection')
+        self.assertNotEqual(record.new_task_id, result.id)
+
+        # Original remains canceled; exactly one replacement was queued.
+        self.assertTrue(result.is_revoked())
+        pending = self.huey.pending()
+        self.assertEqual(len(pending), 2)
+        replacement = [t for t in pending if t.id == record.new_task_id][0]
+        self.assertEqual(replacement.origin, 'ops-reschedule')
+        self.assertEqual(replacement.source_id, result.id)
+        self.assertEqual(replacement.approval_id, 'approval-1')
+        self.assertEqual(replacement.operator, 'oncall-ada')
+        self.assertEqual(replacement.task_type, 'security-collection')
+        self.assertTrue(replacement.retryable)
+
+        # New task executes normally.
+        original = [t for t in pending if t.id == result.id][0]
+        self.assertTrue(self.huey.execute(original) is None)  # Still revoked.
+        self.assertEqual(self.huey.execute(replacement), 5)
+
+    def test_history_distinguishes_submission_and_reschedule(self):
+        result = self.canceled(self.collect, 1)
+        self.collect.ops_reschedule(result,
+                                    task_type='security-collection',
+                                    approval_id='approval-1',
+                                    operator='oncall-ada')
+
+        history = self.huey.task_history(result.id)
+        self.assertEqual(len(history), 2)
+        self.assertEqual(history[0]['action'], 'submitted')
+        self.assertEqual(history[0]['origin'], 'submitted')
+        self.assertEqual(history[1]['action'], 'reschedule-approved')
+        self.assertEqual(history[1]['origin'] if 'origin' in history[1]
+                         else history[1]['action'], 'reschedule-approved')
+        self.assertEqual(history[1]['approval_id'], 'approval-1')
+
+        # The replacement has its own enqueue record.
+        replacement_id = history[1]['new_task_id']
+        rep_history = self.huey.task_history(replacement_id)
+        self.assertEqual(rep_history[0]['action'],
+                         'ops-reschedule-enqueued')
+        self.assertEqual(rep_history[0]['origin'], 'ops-reschedule')
+        self.assertEqual(rep_history[0]['source_id'], result.id)
+
+        self.assertNotEqual(history[0]['task_id'], replacement_id)
+
+    def test_non_retryable_denied_without_side_effects(self):
+        result = self.canceled(self.secret, 2)
+        before = len(self.huey.pending())
+
+        with self.assertRaises(RescheduleDenied) as ctx:
+            result.ops_reschedule(task_type='secret-job',
+                                  approval_id='approval-secret')
+        exc = ctx.exception
+        self.assertEqual(exc.reason, 'task-not-retryable')
+        self.assertEqual(exc.task_type, 'secret-job')
+        self.assertEqual(exc.state, 'canceled')
+
+        # Revocation state untouched, nothing enqueued.
+        self.assertTrue(result.is_revoked())
+        self.assertEqual(len(self.huey.pending()), before)
+
+        # And the refusal was audited for the task.
+        history = self.huey.task_history(result.id)
+        self.assertEqual(history[-1]['action'], 'reschedule-denied')
+        self.assertEqual(history[-1]['denial_reason'], 'task-not-retryable')
+
+    def test_task_type_mismatch_denied(self):
+        result = self.canceled(self.collect, 1)
+        with self.assertRaises(RescheduleDenied) as ctx:
+            result.ops_reschedule(task_type='secret-job',
+                                  approval_id='approval-x')
+        self.assertEqual(ctx.exception.reason, 'task-type-mismatch')
+        self.assertTrue(result.is_revoked())
+        self.assertEqual(len(self.huey.pending()), 1)  # Only original.
+
+    def test_submitted_task_requires_type(self):
+        result = self.canceled(self.collect, 1)
+        with self.assertRaises(RescheduleDenied) as ctx:
+            result.ops_reschedule(task_type=None, approval_id='approval-x')
+        self.assertEqual(ctx.exception.reason, 'task-type-required')
+        self.assertTrue(result.is_revoked())
+
+    def test_state_boundaries(self):
+        # Executed task is refused (result exists, not canceled).
+        executed = self.collect(4)
+        self.assertEqual(self.execute_next(), 4)
+        with self.assertRaises(RescheduleDenied) as ctx:
+            executed.ops_reschedule(task_type='security-collection',
+                                    approval_id='approval-executed')
+        self.assertEqual(ctx.exception.reason, 'task-not-canceled')
+        self.assertEqual(ctx.exception.state, 'executed')
+
+        # Pending (not canceled) is refused.
+        result = self.collect(3)
+        before = len(self.huey.pending())
+        with self.assertRaises(RescheduleDenied) as ctx:
+            result.ops_reschedule(task_type='security-collection',
+                                  approval_id='approval-pending')
+        self.assertEqual(ctx.exception.reason, 'task-not-canceled')
+        self.assertEqual(ctx.exception.state, 'pending')
+        self.assertEqual(len(self.huey.pending()), before)
+        self.assertFalse(result.is_revoked())
+
+        # Unknown id is refused.
+        with self.assertRaises(RescheduleDenied) as ctx:
+            self.huey.ops_reschedule('does-not-exist',
+                                     task_type='security-collection',
+                                     approval_id='approval-unknown')
+        self.assertEqual(ctx.exception.reason, 'task-type-unknown')
+
+    def test_scheduled_state_refused(self):
+        scheduled = self.collect.schedule((2,), delay=60)
+        # Dequeueing an unready task moves it into the schedule.
+        task = self.huey.dequeue()
+        self.assertEqual(task.id, scheduled.id)
+        self.assertTrue(self.huey.execute(task) is None)
+        self.assertEqual(self.huey.scheduled_count(), 1)
+
+        before = self.huey.scheduled_count()
+        with self.assertRaises(RescheduleDenied) as ctx:
+            scheduled.ops_reschedule(task_type='security-collection',
+                                     approval_id='approval-sched')
+        self.assertEqual(ctx.exception.reason, 'task-not-canceled')
+        self.assertEqual(ctx.exception.state, 'scheduled')
+        self.assertEqual(self.huey.scheduled_count(), before)
+
+    def test_approval_replay_is_idempotent(self):
+        result = self.canceled(self.collect, 1)
+        record = result.ops_reschedule(task_type='security-collection',
+                                       approval_id='approval-1')
+        count = len(self.huey.pending())
+
+        replay = result.ops_reschedule(task_type='security-collection',
+                                       approval_id='approval-1')
+        self.assertEqual(replay['new_task_id'], record['new_task_id'])
+        self.assertEqual(len(self.huey.pending()), count)
+
+        # Fresh approval for the same source is also refused.
+        with self.assertRaises(RescheduleDenied) as ctx:
+            result.ops_reschedule(task_type='security-collection',
+                                  approval_id='approval-2')
+        self.assertEqual(ctx.exception.reason, 'already-rescheduled')
+        self.assertEqual(len(self.huey.pending()), count)
+
+    def test_approval_id_bound_to_one_task(self):
+        first = self.canceled(self.collect, 1)
+        second = self.canceled(self.collect, 2)
+        first.ops_reschedule(task_type='security-collection',
+                             approval_id='shared-approval')
+
+        with self.assertRaises(RescheduleDenied) as ctx:
+            second.ops_reschedule(task_type='security-collection',
+                                  approval_id='shared-approval')
+        self.assertEqual(ctx.exception.reason, 'approval-id-reused')
+        self.assertTrue(second.is_revoked())
+
+    def test_preview_does_not_enqueue_or_bind(self):
+        result = self.canceled(self.collect, 1)
+        before = len(self.huey.pending())
+
+        record = result.ops_reschedule(task_type='security-collection',
+                                       approval_id='approval-preview',
+                                       commit=False)
+        self.assertTrue(record.approved)
+        self.assertFalse(record['committed'])
+        self.assertTrue(record.new_task_id is None)
+        self.assertEqual(len(self.huey.pending()), before)
+        self.assertTrue(result.is_revoked())
+
+        # The preview does not consume the approval; committing succeeds.
+        committed = result.ops_reschedule(task_type='security-collection',
+                                          approval_id='approval-preview')
+        self.assertEqual(committed['action'], 'reschedule-approved')
+        self.assertEqual(len(self.huey.pending()), before + 1)
+
+    def test_wrapper_uses_declared_type(self):
+        result = self.canceled(self.collect, 1)
+        record = self.collect.ops_reschedule(result, approval_id='approval-1')
+        self.assertTrue(record.approved)
+        self.assertEqual(record.task_type, 'security-collection')
+
+    def test_plain_task_uses_registry_type(self):
+        result = self.canceled(self.plain, 1)
+        declared = '%s.%s' % (self.plain.task_class.__module__,
+                              self.plain.task_class.__name__)
+        record = result.ops_reschedule(task_type=declared,
+                                       approval_id='approval-plain')
+        self.assertTrue(record.approved)
+        self.assertEqual(record.task_type, declared)
+
+    def test_record_attribute_access(self):
+        result = self.canceled(self.collect, 1)
+        record = self.collect.ops_reschedule(
+            result, 'security-collection', 'approval-attrs')
+        self.assertEqual(record.task_id, result.id)
+        self.assertTrue(record.new_task_id is not None)
+        self.assertTrue(record.approved)
+        self.assertFalse(record.denied)
+        self.assertIsInstance(record, dict)
+
+    def test_positional_call(self):
+        result = self.canceled(self.collect, 2)
+        record = self.huey.ops_reschedule(
+            result, 'security-collection', 'approval-pos')
+        self.assertEqual(record['action'], 'reschedule-approved')
+
+    def test_missing_approval_is_denied(self):
+        result = self.canceled(self.collect, 1)
+        with self.assertRaises(RescheduleDenied) as ctx:
+            result.ops_reschedule(task_type='security-collection')
+        self.assertEqual(ctx.exception.reason, 'approval-id-required')
+        self.assertTrue(result.is_revoked())
+        self.assertEqual(len(self.huey.pending()), 1)
+
+    def test_inline_metadata_overrides_declared(self):
+        result = self.collect(1, task_type='ad-hoc-collection',
+                              retryable=False)
+        result.revoke()
+        with self.assertRaises(RescheduleDenied) as ctx:
+            result.ops_reschedule(task_type='ad-hoc-collection',
+                                  approval_id='approval-inline')
+        self.assertEqual(ctx.exception.reason, 'task-not-retryable')
+        self.assertEqual(ctx.exception.task_type, 'ad-hoc-collection')
+
+    def test_approval_reuse_does_not_move_approval(self):
+        first = self.canceled(self.collect, 1)
+        second = self.canceled(self.collect, 2)
+        record = first.ops_reschedule(task_type='security-collection',
+                                      approval_id='approval-1')
+
+        with self.assertRaises(RescheduleDenied):
+            second.ops_reschedule(task_type='security-collection',
+                                  approval_id='approval-1')
+
+        # The original binding still works, and the refused task stays
+        # canceled and unqueued.
+        self.assertEqual(first.ops_reschedule(
+            task_type='security-collection',
+            approval_id='approval-1')['new_task_id'], record['new_task_id'])
+        self.assertTrue(second.is_revoked())
+        pending_ids = [t.id for t in self.huey.pending()]
+        self.assertEqual(pending_ids.count(record['new_task_id']), 1)
+
+    def test_reschedule_keeps_per_task_settings(self):
+        result = self.collect.schedule((3,), delay=60, retries=2,
+                                       retry_delay=5, retry_backoff=4)
+        result.revoke()
+        record = result.ops_reschedule(task_type='security-collection',
+                                       approval_id='approval-1',
+                                       delay=120)
+        replacement = [t for t in self.huey.pending()
+                       if t.id == record.new_task_id][0]
+        self.assertEqual(replacement.retries, 2)
+        self.assertEqual(replacement.retry_delay, 5)
+        self.assertEqual(replacement.retry_backoff, 4)
+        self.assertTrue(replacement.eta is not None)
+

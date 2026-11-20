@@ -363,7 +363,7 @@ Huey object
             # ... later ...
             consumer.stop(graceful=True)
 
-    .. py:method:: task(retries=0, retry_delay=0, retry_backoff=0, priority=None, context=False, name=None, expires=None, timeout=None, **kwargs)
+    .. py:method:: task(retries=0, retry_delay=0, retry_backoff=0, priority=None, context=False, name=None, expires=None, timeout=None, task_type=None, retryable=True, **kwargs)
 
         :param int retries: number of times to retry the function if an
             unhandled exception occurs when it is executed.
@@ -394,6 +394,13 @@ Huey object
             ``gevent.Timeout``. When using with threads it is necessary to use
             cooperative timeout checking. See :ref:`cooperative-timeout` for
             example.
+        :param str task_type: optional operational category for the task,
+            used as an explicit boundary by
+            :py:meth:`~Huey.ops_reschedule`. When omitted, the registered
+            task name is used.
+        :param bool retryable: whether on-call operators may reschedule this
+            task. Set to ``False`` for tasks that must never be re-queued,
+            such as one-off key operations. Defaults to ``True``.
         :param kwargs: arbitrary key/value arguments that are passed to the
             :py:class:`TaskWrapper` instance.
         :returns: a :py:class:`TaskWrapper` that wraps the decorated function
@@ -453,7 +460,7 @@ Huey object
         revocation, etc.), see :py:class:`TaskWrapper`, :py:class:`Task`,
         and :py:class:`Result`.
 
-    .. py:method:: periodic_task(validate_datetime, retries=0, retry_delay=0, retry_backoff=0, priority=None, context=False, name=None, expires=None, timeout=None, **kwargs)
+    .. py:method:: periodic_task(validate_datetime, retries=0, retry_delay=0, retry_backoff=0, priority=None, context=False, name=None, expires=None, timeout=None, task_type=None, retryable=True, **kwargs)
 
         :param function validate_datetime: function which accepts a
             ``datetime`` instance and returns whether the task should be
@@ -828,6 +835,22 @@ Huey object
     .. py:method:: restore_all(task_class)
 
         .. seealso:: Use :py:meth:`TaskWrapper.restore` instead.
+
+    .. py:method:: ops_reschedule(task, *, task_type, approval_id, operator=None, reason=None, eta=None, delay=None, expires=None, priority=None, preserve_pipeline=True, commit=True)
+
+        Reschedule a canceled task through the operator-approval boundary.
+        ``task`` may be a :py:class:`Result`, a :py:class:`Task`, or a task
+        id. See :py:meth:`Result.ops_reschedule` for parameter and boundary
+        details.
+
+    .. py:method:: task_history(task_id)
+
+        :returns: list of audit records for the task, oldest first. Records
+            have an ``action`` such as ``submitted``,
+            ``ops-reschedule-enqueued``, ``reschedule-approved`` or
+            ``reschedule-denied``. Approval records include ``approval_id``,
+            ``operator``, ``task_type`` and the resulting ``new_task_id``;
+            refusals include ``denial_reason`` and the observed ``state``.
 
     .. py:method:: is_revoked(task, timestamp=None, peek=True)
 
@@ -2067,6 +2090,47 @@ Result
         **or** the task class itself has been revoked.
 
         .. seealso:: :py:meth:`TaskWrapper.is_revoked`.
+
+    .. py:method:: ops_reschedule(task_type=None, approval_id=None, operator=None, reason=None, eta=None, delay=None, expires=None, priority=None, preserve_pipeline=True, commit=True)
+
+        :param str task_type: the task-type boundary the operator is
+            authorized to touch. Must match the task's recorded type.
+        :param str approval_id: identifier for the human approval. An approval
+            may be replayed safely and may only be used for one task.
+        :param str operator: optional identity of the on-call operator, stored
+            in the audit record.
+        :param str reason: optional free-form explanation, stored in the audit
+            record.
+        :param datetime eta: execute replacement at the given time.
+        :param int delay: execute replacement after the given delay.
+        :param expires: expiration for the replacement.
+        :param priority: priority for the replacement.
+        :param bool preserve_pipeline: retain ``on_complete`` / ``on_error``
+            chains from the original task.
+        :param bool commit: when ``False``, evaluate and audit the decision
+            without enqueueing a replacement.
+        :returns: a :py:class:`~huey.api.RescheduleRecord` describing the
+            decision.
+        :raises: :py:class:`~huey.exceptions.RescheduleDenied` when the
+            boundary check fails.
+
+        Reschedule a **canceled** task on behalf of an on-call operator. Unlike
+        :py:meth:`reschedule`, this path enforces an explicit boundary:
+
+        * the task must be marked canceled (revoked). Pending, scheduled,
+          executed and unknown tasks are refused;
+        * non-retryable tasks (``retryable=False``) are always refused;
+        * the requested ``task_type`` must match the task's recorded type;
+        * the original task remains canceled -- the refusal path never changes
+          revocation state, and the approved path enqueues a new task with a
+          new id rather than restoring the original;
+        * replaying an ``approval_id`` returns the original decision without
+          enqueueing a second task, and one source task may only be
+          rescheduled once.
+
+        Every decision, including refusals, is appended to the task's audit
+        history (see :py:meth:`Huey.task_history`), which distinguishes the
+        original submission from an operator-initiated reschedule.
 
     .. py:method:: reschedule(eta=None, delay=None, expires=None, priority=None, preserve_pipeline=True)
 

@@ -18,7 +18,9 @@ from huey.constants import EmptyData
 from huey.consumer import Consumer
 from huey.exceptions import CancelExecution
 from huey.exceptions import ConfigurationError
+from huey.exceptions import HueyException
 from huey.exceptions import RateLimitExceeded
+from huey.exceptions import RescheduleDenied
 from huey.exceptions import RETRYING_EXCEPTIONS
 from huey.exceptions import ResultTimeout
 from huey.exceptions import RetryTask
@@ -48,6 +50,39 @@ from huey.utils import utcnow
 
 logger = logging.getLogger('huey')
 _sentinel = object()
+
+
+class RescheduleRecord(dict):
+    """Audit record returned by :py:meth:`Huey.ops_reschedule`.
+
+    Behaves like a dict (and serializes as one) while also exposing the most
+    commonly used fields as attributes. This keeps audits easy to persist
+    while remaining convenient to inspect in application code.
+    """
+    def __getattr__(self, name):
+        try:
+            return self[name]
+        except KeyError:
+            raise AttributeError(name)
+
+    def __setattr__(self, name, value):
+        self[name] = value
+
+    @property
+    def approved(self):
+        return self.get('result') == 'approved'
+
+    @property
+    def denied(self):
+        return self.get('result') == 'denied'
+
+    @property
+    def task_id(self):
+        return self.get('task_id')
+
+    @property
+    def new_task_id(self):
+        return self.get('new_task_id')
 
 
 class Huey(object):
@@ -169,7 +204,8 @@ class Huey(object):
         return Consumer(self, **options)
 
     def task(self, retries=0, retry_delay=0, retry_backoff=0, priority=None,
-             context=False, name=None, expires=None, timeout=None, **kwargs):
+             context=False, name=None, expires=None, timeout=None,
+             task_type=None, retryable=None, **kwargs):
         TaskWrapper = self.task_wrapper_class
         def decorator(func):
             return TaskWrapper(
@@ -183,12 +219,15 @@ class Huey(object):
                 default_priority=priority,
                 default_expires=expires,
                 default_timeout=timeout,
+                task_type=task_type,
+                retryable=retryable,
                 **kwargs)
         return decorator
 
     def periodic_task(self, validate_datetime, retries=0, retry_delay=0,
                       retry_backoff=0, priority=None, context=False, name=None,
-                      expires=None, timeout=None, **kwargs):
+                      expires=None, timeout=None, task_type=None,
+                      retryable=None, **kwargs):
         TaskWrapper = self.task_wrapper_class
         def decorator(func):
             def method_validate(self, timestamp):
@@ -207,6 +246,8 @@ class Huey(object):
                 default_timeout=timeout,
                 validate_datetime=method_validate,
                 task_base=PeriodicTask,
+                task_type=task_type,
+                retryable=retryable,
                 **kwargs)
 
         return decorator
@@ -310,6 +351,13 @@ class Huey(object):
         # Resolve the expiration time when the task is enqueued.
         if task.expires:
             task.resolve_expires(self.utc)
+
+        # Persist opt-in operational metadata so that an ops reschedule can
+        # still verify the task type / retryability after the task has left
+        # the pending or scheduled queues. Tasks using only the defaults do
+        # not incur any extra storage.
+        self._persist_task_metadata(task)
+        self._audit_submission(task)
 
         self._emit(S.SIGNAL_ENQUEUED, task)
 
@@ -626,6 +674,359 @@ class Huey(object):
             task_class = task_class.task_class
         return ':'.join((key, self._registry.task_to_string(task_class)))
 
+    # -- Operations-initiated reschedule ------------------------------------
+    #
+    # Normal task submission has no authority to place a task back into the
+    # queue. The methods below implement a separate, explicitly-approved
+    # reschedule path for on-call operators. The boundary is:
+    #
+    #   * only task types the operator names, and that are retryable, may be
+    #     rescheduled;
+    #   * the task must currently be canceled (revoked) -- already-executed,
+    #     pending, scheduled, and otherwise unknown states are refused;
+    #   * a refusal never changes the revocation state and never enqueues;
+    #   * an approval binds once. Replaying the same approval returns the
+    #     original decision without adding a second task.
+    #
+    # Every decision (allowed or denied) is appended to a per-task audit
+    # history so that the original submission and the human reschedule remain
+    # distinguishable afterwards.
+
+    TASK_META_PREFIX = 'meta:task:'
+    RESCHEDULE_AUDIT_PREFIX = 'audit:task:'
+    RESCHEDULE_APPROVAL_PREFIX = 'approval:reschedule:'
+    RESCHEDULE_MARKER_PREFIX = 'rescheduled:task:'
+
+    def _task_metadata_key(self, task_id):
+        return '%s%s' % (self.TASK_META_PREFIX, task_id)
+
+    def _reschedule_audit_key(self, task_id):
+        return '%s%s' % (self.RESCHEDULE_AUDIT_PREFIX, task_id)
+
+    def _reschedule_approval_key(self, approval_id):
+        return '%s%s' % (self.RESCHEDULE_APPROVAL_PREFIX, approval_id)
+
+    def _reschedule_marker_key(self, task_id):
+        return '%s%s' % (self.RESCHEDULE_MARKER_PREFIX, task_id)
+
+    def _task_has_metadata(self, task):
+        return bool(task.task_type or not task.retryable or
+                    task.approval_id or task.origin != 'submitted')
+
+    def _persist_task_metadata(self, task):
+        if not isinstance(task, Task) or not self._task_has_metadata(task):
+            return
+        data = {
+            'task_type': task.task_type,
+            'retryable': task.retryable,
+            'origin': task.origin,
+            'source_id': task.source_id,
+            'approval_id': task.approval_id,
+            'operator': task.operator,
+            'reason': task.reason,
+            'name': task.name,
+        }
+        self.put(self._task_metadata_key(task.id), data)
+
+    def _load_task_metadata(self, task_id):
+        return self.get(self._task_metadata_key(task_id), peek=True)
+
+    def _task_state(self, task_id, task=None):
+        """Return one of: canceled, pending, scheduled, executed, unknown.
+
+        The check is intentionally conservative: unless the task is provably
+        canceled (revoked), an ops reschedule is refused.
+        """
+        if task is not None:
+            if self.is_revoked(task, peek=True):
+                return 'canceled'
+        else:
+            if self.is_revoked(task_id, peek=True):
+                return 'canceled'
+
+        for candidate in self.pending():
+            if candidate.id == task_id:
+                return 'pending'
+        for candidate in self.scheduled():
+            if candidate.id == task_id:
+                return 'scheduled'
+        if self.storage.has_data_for_key(task_id):
+            return 'executed'
+        return 'unknown'
+
+    def _audit_reschedule(self, task_id, record):
+        key = self._reschedule_audit_key(task_id)
+        history = self.get(key, peek=True)
+        if not isinstance(history, list):
+            history = []
+        else:
+            history = list(history)
+        history.append(record)
+        self.put(key, history)
+        return record
+
+    def reschedule_history(self, task_id):
+        """Return the ordered audit records for the given task id."""
+        history = self.get(self._reschedule_audit_key(task_id), peek=True)
+        return list(history) if isinstance(history, list) else []
+
+    def _audit_submission(self, task):
+        if not isinstance(task, Task) or not self._task_has_metadata(task):
+            return
+        self._audit_reschedule(task.id, {
+            'action': ('ops-reschedule-enqueued'
+                       if task.origin == 'ops-reschedule' else 'submitted'),
+            'task_id': task.id,
+            'task_type': task.task_type,
+            'retryable': task.retryable,
+            'origin': task.origin,
+            'source_id': task.source_id,
+            'approval_id': task.approval_id,
+            'operator': task.operator,
+            'reason': task.reason,
+        })
+
+    def task_history(self, task_id):
+        """Return the ordered submission / ops-reschedule audit history."""
+        return self.reschedule_history(task_id)
+
+    def _resolve_task_metadata(self, task_id, task):
+        metadata = self._load_task_metadata(task_id)
+        if not isinstance(metadata, dict):
+            metadata = {}
+
+        if isinstance(task, Task):
+            # The in-memory task is authoritative for metadata declared on the
+            # class; persisted metadata fills in anything it does not carry.
+            for attr in ('task_type', 'retryable', 'origin', 'source_id',
+                         'approval_id', 'operator', 'reason', 'name'):
+                if metadata.get(attr) is None:
+                    value = getattr(task, attr, None)
+                    if value is not None:
+                        metadata[attr] = value
+
+            # A task declared without an explicit task_type still has a
+            # stable boundary: its registered task name.
+            if metadata.get('task_type') is None:
+                task_str = self._registry.task_to_string(type(task))
+                try:
+                    self._registry.string_to_task(task_str)
+                except HueyException:
+                    pass
+                else:
+                    metadata['task_type'] = task_str
+
+        metadata.setdefault('retryable', True)
+        metadata.setdefault('origin', 'submitted')
+        if metadata.get('retryable') is None:
+            metadata['retryable'] = True
+        return metadata
+
+    def ops_reschedule(self, task, task_type=None, approval_id=None,
+                       operator=None, reason=None, eta=None, delay=None,
+                       expires=None, priority=None, preserve_pipeline=True,
+                       commit=True):
+        """Reschedule a canceled task on behalf of an on-call operator.
+
+        ``task`` may be a :py:class:`Result`, a :py:class:`Task`, or a task id.
+        ``task_type`` is the boundary the caller is willing to touch and must
+        match the task's recorded type. Non-retryable tasks are always refused.
+
+        With ``commit=False`` the decision is only evaluated and audited; when
+        the decision is "allowed", no new task is enqueued. This allows callers
+        to present an approval preview before committing.
+
+        Replaying the same ``approval_id`` returns the original decision and
+        never enqueues a duplicate task.
+        """
+        # -- Resolve the task and its stable identity. ----------------------
+        if isinstance(task, Result):
+            result = task
+            task_obj = task.task
+            task_id = task_obj.id
+        elif isinstance(task, Task):
+            result = None
+            task_obj = task
+            task_id = task_obj.id
+        elif isinstance(task, str):
+            result = None
+            task_obj = Task(id=task)
+            task_id = task
+        else:
+            raise TypeError('ops_reschedule() requires a Result, Task or id')
+
+        # -- Idempotency: an approval is a one-shot capability. -------------
+        if not approval_id:
+            record = RescheduleRecord(
+                action='reschedule-denied',
+                task_id=task_id,
+                requested_task_type=task_type,
+                result='denied',
+                denial_reason='approval-id-required')
+            self._audit_reschedule(task_id, record)
+            raise RescheduleDenied('approval-id-required', task_id=task_id,
+                                   record=record)
+
+        prior = self.get(self._reschedule_approval_key(approval_id), peek=True)
+        if isinstance(prior, dict):
+            if prior.get('task_id') != task_id:
+                record = RescheduleRecord(
+                    action='reschedule-denied',
+                    approval_id=approval_id,
+                    operator=operator,
+                    reason=reason,
+                    task_id=task_id,
+                    requested_task_type=task_type,
+                    result='denied',
+                    denial_reason='approval-id-reused',
+                    bound_task_id=prior.get('task_id'))
+                self._audit_reschedule(task_id, record)
+                raise RescheduleDenied(
+                    'approval-id-reused', task_id=task_id,
+                    approval_id=approval_id, record=record)
+            return prior
+
+        metadata = self._resolve_task_metadata(task_id, task_obj)
+        actual_type = metadata.get('task_type')
+        retryable = metadata.get('retryable', True)
+        state = self._task_state(task_id,
+                                 task_obj if isinstance(task, (Result, Task))
+                                 else None)
+
+        def deny(reason_code):
+            record = RescheduleRecord(
+                action='reschedule-denied',
+                approval_id=approval_id,
+                operator=operator,
+                reason=reason,
+                task_id=task_id,
+                task_type=actual_type,
+                requested_task_type=task_type,
+                retryable=retryable,
+                state=state,
+                result='denied',
+                denial_reason=reason_code)
+            self._audit_reschedule(task_id, record)
+            raise RescheduleDenied(
+                reason_code, task_id=task_id, task_type=actual_type,
+                state=state, approval_id=approval_id, record=record)
+
+        # -- Boundary checks. None of these mutate revocation state. --------
+        if not task_type:
+            deny('task-type-required')
+        if not retryable:
+            deny('task-not-retryable')
+        if actual_type is None:
+            deny('task-type-unknown')
+        if actual_type != task_type:
+            deny('task-type-mismatch')
+        if state != 'canceled':
+            deny('task-not-canceled')
+
+        prior_reschedule = self.get(self._reschedule_marker_key(task_id),
+                                    peek=True)
+        if isinstance(prior_reschedule, dict):
+            # A given source task may only be rescheduled once, even if the
+            # operator presents a fresh approval id.
+            record = RescheduleRecord(
+                action='reschedule-denied',
+                approval_id=approval_id,
+                operator=operator,
+                reason=reason,
+                task_id=task_id,
+                task_type=actual_type,
+                requested_task_type=task_type,
+                retryable=retryable,
+                state=state,
+                result='denied',
+                denial_reason='already-rescheduled',
+                new_task_id=prior_reschedule.get('new_task_id'))
+            self._audit_reschedule(task_id, record)
+            raise RescheduleDenied(
+                'already-rescheduled', task_id=task_id, task_type=actual_type,
+                state=state, approval_id=approval_id, record=record)
+
+        # -- Approved. Build the replacement without touching the original
+        #    revocation state (the original must remain canceled).
+        if eta is not None or delay is not None:
+            eta = normalize_time(eta, delay, self.utc)
+        if preserve_pipeline:
+            on_complete = task_obj.on_complete
+            on_error = task_obj.on_error
+        else:
+            on_complete = on_error = None
+
+        replacement = type(task_obj)(
+            task_obj.args,
+            task_obj.kwargs,
+            eta=eta,
+            retries=task_obj.retries,
+            retry_delay=task_obj.retry_delay,
+            retry_backoff=task_obj.retry_backoff,
+            priority=priority if priority is not None else task_obj.priority,
+            expires=expires if expires is not None else task_obj.expires,
+            timeout=task_obj.timeout,
+            chord_config=task_obj.chord_config,
+            on_complete=on_complete,
+            on_error=on_error,
+            task_type=actual_type,
+            retryable=retryable,
+            origin='ops-reschedule',
+            source_id=task_id,
+            approval_id=approval_id,
+            operator=operator,
+            reason=reason)
+
+        record = RescheduleRecord(
+            action='reschedule-approved',
+            approval_id=approval_id,
+            operator=operator,
+            reason=reason,
+            task_id=task_id,
+            task_type=actual_type,
+            requested_task_type=task_type,
+            retryable=retryable,
+            state=state,
+            result='approved',
+            committed=bool(commit),
+            new_task_id=replacement.id if commit else None)
+
+        if commit:
+            # Claim the approval atomically so two concurrent operators cannot
+            # both enqueue a replacement for the same approved decision.
+            claim = {'action': 'reschedule-pending', 'task_id': task_id,
+                     'approval_id': approval_id}
+            approval_key = self._reschedule_approval_key(approval_id)
+            if not self.put_if_empty(approval_key, claim):
+                existing = self.get(
+                    self._reschedule_approval_key(approval_id), peek=True)
+                if (isinstance(existing, dict) and
+                        existing.get('action') != 'reschedule-pending' and
+                        existing.get('task_id') == task_id):
+                    return existing
+                raise RescheduleDenied(
+                    'approval-in-use', task_id=task_id, task_type=actual_type,
+                    state=state, approval_id=approval_id)
+
+            try:
+                self.enqueue(replacement)
+            except Exception:
+                self.delete(self._reschedule_approval_key(approval_id))
+                raise
+
+            record['new_task_id'] = replacement.id
+            self.put(self._reschedule_approval_key(approval_id), record)
+            self.put(self._reschedule_marker_key(task_id), record)
+
+        self._audit_reschedule(task_id, record)
+        return record
+
+    # Convenience aliases used by ops tooling.
+    ops_requeue = ops_reschedule
+    operator_reschedule = ops_reschedule
+    reschedule_for_operator = ops_reschedule
+    reschedule_task = ops_reschedule
+
     def revoke_all(self, task_class, revoke_until=None, revoke_once=False):
         if revoke_until is not None:
             revoke_until = normalize_time(revoke_until, utc=self.utc)
@@ -800,10 +1201,19 @@ class Task(object):
     default_retry_backoff = 0
     default_timeout = None
 
+    # Operational metadata defaults. A task class may override these, either
+    # via a task-base subclass or by passing task_type=/retryable= to the
+    # task decorator. Per-instance values take precedence.
+    task_type = None
+    retryable = True
+    origin = 'submitted'
+
     def __init__(self, args=None, kwargs=None, id=None, eta=None, retries=None,
                  retry_delay=None, priority=None, expires=None,
                  on_complete=None, on_error=None, expires_resolved=None,
-                 timeout=None, chord_config=None, retry_backoff=None):
+                 timeout=None, chord_config=None, retry_backoff=None,
+                 task_type=None, retryable=None, origin=None, source_id=None,
+                 approval_id=None, operator=None, reason=None):
         self.name = type(self).__name__
         self.args = () if args is None else args
         self.kwargs = {} if kwargs is None else kwargs
@@ -822,6 +1232,20 @@ class Task(object):
         self.timeout = timeout if timeout is not None else self.default_timeout
         self.chord_config = chord_config
         self._deadline = None
+
+        # Operational metadata. These fields are serialized with the task so
+        # that operators and audit tooling can distinguish a normal submission
+        # from a reschedule approved by an on-call engineer, and so that
+        # task-type / retryability boundaries survive a trip through the queue.
+        if task_type is not None:
+            self.task_type = task_type
+        if retryable is not None:
+            self.retryable = retryable
+        self.origin = origin or self.origin
+        self.source_id = source_id
+        self.approval_id = approval_id
+        self.operator = operator
+        self.reason = reason
 
         self.on_complete = on_complete
         self.on_error = on_error
@@ -851,6 +1275,12 @@ class Task(object):
             rep += ', on error %s' % self.on_error
         if self.chord_config:
             rep += ', chord %s' % self.chord_config.cid
+        if self.task_type:
+            rep += ' type=%s' % self.task_type
+        if not self.retryable:
+            rep += ' non-retryable'
+        if self.origin and self.origin != 'submitted':
+            rep += ' origin=%s' % self.origin
         return rep
 
     def __hash__(self):
@@ -959,6 +1389,39 @@ class TaskWrapper(object):
     def retry_delay(self):
         return self.task_class.default_retry_delay
 
+    @property
+    def task_type(self):
+        return self.task_class.task_type
+
+    @property
+    def retryable(self):
+        return self.task_class.retryable
+
+    def ops_reschedule(self, task_or_id, task_type=None, approval_id=None,
+                       operator=None, reason=None, eta=None, delay=None,
+                       expires=None, priority=None, preserve_pipeline=True,
+                       commit=True):
+        """Operator-approved reschedule of one of this task's instances.
+
+        When ``task_type`` is omitted the wrapper's declared task type is
+        used, so the caller still has to name the task they are willing to
+        touch.
+        """
+        if task_type is None:
+            task_type = self.task_class.task_type
+        return self.huey.ops_reschedule(
+            task_or_id,
+            task_type=task_type,
+            approval_id=approval_id,
+            operator=operator,
+            reason=reason,
+            eta=eta,
+            delay=delay,
+            expires=expires,
+            priority=priority,
+            preserve_pipeline=preserve_pipeline,
+            commit=commit)
+
     def unregister(self):
         return self.huey._registry.unregister(self.task_class)
 
@@ -980,7 +1443,10 @@ class TaskWrapper(object):
             'execute': execute,
             '__module__': func.__module__,
             '__doc__': func.__doc__}
-        attrs.update(settings)
+        # ``None`` means "inherit the task-base default" (e.g. retryable).
+        # Do not install None as a class attribute, which would shadow the
+        # base-class value for every instance.
+        attrs.update((k, v) for k, v in settings.items() if v is not None)
 
         if not name:
             name = func.__name__
@@ -998,7 +1464,8 @@ class TaskWrapper(object):
 
     def schedule(self, args=None, kwargs=None, eta=None, delay=None,
                  priority=None, retries=None, retry_delay=None,
-                 retry_backoff=None, expires=None, timeout=None, id=None):
+                 retry_backoff=None, expires=None, timeout=None, id=None,
+                 task_type=None, retryable=None):
         if eta is None and delay is None:
             if isinstance(args, (int, float)):
                 delay = args
@@ -1024,7 +1491,9 @@ class TaskWrapper(object):
             retry_backoff=retry_backoff,
             priority=priority,
             expires=expires,
-            timeout=timeout)
+            timeout=timeout,
+            task_type=task_type,
+            retryable=retryable)
         return self.huey.enqueue(task)
 
     def _apply(self, it):
@@ -1057,7 +1526,9 @@ class TaskWrapper(object):
                                retry_backoff=kwargs.pop('retry_backoff', None),
                                priority=kwargs.pop('priority', None),
                                expires=kwargs.pop('expires', None),
-                               timeout=kwargs.pop('timeout', None))
+                               timeout=kwargs.pop('timeout', None),
+                               task_type=kwargs.pop('task_type', None),
+                               retryable=kwargs.pop('retryable', None))
 
 
 class TaskLock(object):
@@ -1286,6 +1757,13 @@ class Result(object):
         else:
             on_complete = on_error = None
 
+        # Preserve the origin/approval fields when an approved replacement is
+        # itself rescheduled again by the same operator path.
+        metadata = self.huey.get(
+            self.huey._task_metadata_key(self.task.id), peek=True)
+        if not isinstance(metadata, dict):
+            metadata = {}
+
         task = type(self.task)(
             self.task.args,
             self.task.kwargs,
@@ -1298,8 +1776,37 @@ class Result(object):
             timeout=self.task.timeout,
             chord_config=self.task.chord_config,
             on_complete=on_complete,
-            on_error=on_error)
+            on_error=on_error,
+            task_type=metadata.get('task_type'),
+            retryable=metadata.get('retryable'),
+            origin=metadata.get('origin'),
+            source_id=metadata.get('source_id'),
+            approval_id=metadata.get('approval_id'),
+            operator=metadata.get('operator'),
+            reason=metadata.get('reason'))
         return self.huey.enqueue(task)
+
+    def ops_reschedule(self, task_type=None, approval_id=None, operator=None,
+                       reason=None, eta=None, delay=None, expires=None,
+                       priority=None, preserve_pipeline=True, commit=True):
+        """Request an operator-approved reschedule of this canceled task.
+
+        See :py:meth:`Huey.ops_reschedule` for the boundary and audit
+        behavior. The original task stays canceled; on commit a replacement
+        task with a new id is enqueued.
+        """
+        return self.huey.ops_reschedule(
+            self,
+            task_type=task_type,
+            approval_id=approval_id,
+            operator=operator,
+            reason=reason,
+            eta=eta,
+            delay=delay,
+            expires=expires,
+            priority=priority,
+            preserve_pipeline=preserve_pipeline,
+            commit=commit)
 
     def reset(self):
         self._result = EmptyData
