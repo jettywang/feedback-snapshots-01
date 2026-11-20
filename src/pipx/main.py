@@ -625,6 +625,18 @@ def _add_backend_arg(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_verify_source_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--verify-source",
+        action="store_true",
+        help=(
+            "Before reinstalling from a local source directory, check it against the fingerprint recorded at "
+            "install time. When the directory changed, changed hands, or predates recording, keep the "
+            "environment as it is and write a review report instead."
+        ),
+    )
+
+
 def _add_output_option(parser: argparse.ArgumentParser, *, snapshot_json: bool = False) -> None:
     group: Final[argparse._MutuallyExclusiveGroup] = parser.add_mutually_exclusive_group()
     group.add_argument(
@@ -1230,6 +1242,7 @@ def _add_reinstall(
     _complete_with(parser.add_argument("package", metavar="ENVIRONMENT"), venv_completer)
     _add_python_options(parser)
     _add_backend_arg(parser)
+    _add_verify_source_arg(parser)
     _add_output_option(parser)
     parser.set_defaults(func=_cmd_reinstall)
 
@@ -1251,6 +1264,7 @@ def _reinstall_options(ctx: _DispatchContext) -> ReinstallOptions:
         python_flag_passed=ctx.python_flag_passed,
         backend=ctx.backend,
         skip=ctx.skip_list,
+        verify_source=ctx.verify_source,
     )
 
 
@@ -1278,6 +1292,7 @@ def _add_reinstall_all(subparsers: argparse._SubParsersAction, shared_parser: ar
     _add_python_options(parser)
     parser.add_argument("--skip", nargs="+", default=[], help="skip these packages")
     _add_backend_arg(parser)
+    _add_verify_source_arg(parser)
     _add_output_option(parser)
     parser.set_defaults(func=_cmd_reinstall_all)
 
@@ -2201,6 +2216,7 @@ def _run_pipx_command(args: argparse.Namespace) -> ExitCode:
         cooldown=CooldownOptions(
             cli_days=getattr(args, "cooldown", None), env_days=_COOLDOWN if "cooldown" in args else None
         ),
+        verify_source=bool(getattr(args, "verify_source", False)),
     )
     with (
         skip_shared_libs_maintenance(enabled=getattr(args, "skip_maintenance", False)),
@@ -2269,6 +2285,7 @@ class _DispatchContext:
     backend: BackendOptions
     cooldown: CooldownOptions
     fetch_python: FetchPythonOptions
+    verify_source: bool
 
 
 def get_pip_args(args: argparse.Namespace) -> list[str]:

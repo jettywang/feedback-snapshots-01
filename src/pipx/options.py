@@ -249,6 +249,8 @@ class ReinstallOptions:
     :param python_flag_passed: whether ``--python`` was given on the command line.
     :param backend: the backend that installs the package.
     :param skip: the packages to leave out of the reinstall.
+    :param verify_source: whether to check a local source directory against the fingerprint recorded at install
+        time before rebuilding, holding the reinstall for review when it does not match.
     """
 
     local_bin_dir: Path
@@ -258,6 +260,7 @@ class ReinstallOptions:
     python_flag_passed: bool = False
     backend: BackendOptions = DEFAULT_BACKEND_OPTIONS
     skip: Sequence[str] = ()
+    verify_source: bool = False
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

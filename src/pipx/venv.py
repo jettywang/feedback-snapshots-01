@@ -13,6 +13,7 @@ __lazy_modules__ = [
     "pipx.requires_python",
     "pipx.script",
     "pipx.shared_libs",
+    "pipx.source_audit",
     "pipx.subprocess_runner",
     "pipx.trash",
     "pipx.util",
@@ -73,6 +74,7 @@ from pipx.shared_libs import (
     shared_libs_auto_upgrade_disabled,
     write_shared_pth,
 )
+from pipx.source_audit import fingerprint_source, local_source_dir
 from pipx.subprocess_runner import exec_app, get_site_packages, subprocess_post_check
 from pipx.trash import rmdir
 from pipx.util import (
@@ -687,6 +689,10 @@ class Venv:  # ruff:ignore[too-many-public-methods]  # single facade over a pipx
             lock_file=lock_file,
             cooldown_days=cooldown_days,
             pinned=pinned,
+            # the fingerprint of a local build directory lets a later reinstall check it is still the approved source
+            source_fingerprint=(
+                fingerprint_source(source_dir) if (source_dir := local_source_dir(package_or_url)) else None
+            ),
         )
         if is_main_package:
             self.pipx_metadata.main_package = package_info

@@ -5,6 +5,7 @@ __lazy_modules__ = [
     "pipx.backends",
     "pipx.package_specifier",
     "pipx.redact",
+    "pipx.source_audit",
     "pipx.util",
     "pipx.wrap",
     "tempfile",
@@ -23,6 +24,7 @@ from pipx.emojis import HAZARD
 from pipx.options import ExposureOptions
 from pipx.package_specifier import replayable_pip_args
 from pipx.redact import redact_url_credentials
+from pipx.source_audit import SourceFingerprint
 from pipx.util import PipxError
 from pipx.wrap import pipx_wrap
 
@@ -36,7 +38,7 @@ _LOGGER: Final[logging.Logger] = logging.getLogger(__name__)
 #: Name of the file that records a virtual environment's pipx metadata.
 PIPX_INFO_FILENAME: Final[str] = "pipx_metadata.json"
 # bump only when the file format changes
-_METADATA_VERSION: Final[str] = "0.12"
+_METADATA_VERSION: Final[str] = "0.13"
 
 
 class _RawPackageRecord(TypedDict, total=False):
@@ -48,6 +50,7 @@ class _RawPackageRecord(TypedDict, total=False):
     lock_file: Path | None
     cooldown_days: int | None
     pinned: bool
+    source_fingerprint: dict[str, str] | None
 
 
 class _RawExposure(TypedDict, total=False):
@@ -203,7 +206,7 @@ class PipxMetadata:
                 # 0.1 recorded no suffix, so take it from the venv name
                 main_package_data["suffix"] = self.venv_dir.name.replace(package_name, "")
             metadata_dict["source_interpreter"] = None
-        elif version not in {_METADATA_VERSION, "0.11", "0.10", "0.9", "0.8", "0.7", "0.6", "0.5"}:
+        elif version not in {_METADATA_VERSION, "0.12", "0.11", "0.10", "0.9", "0.8", "0.7", "0.6", "0.5"}:
             msg = f"""
                 {self.venv_dir.name}: Unknown metadata version {version}, written
                 by a later version of pipx. Upgrade pipx to manage this package.
@@ -328,6 +331,7 @@ class PackageInfo:
     :param lock_file: the lock file the environment was installed from, or None.
     :param cooldown_days: the cooldown in days applied to the new releases, or None.
     :param pinned: whether the package is pinned.
+    :param source_fingerprint: the fingerprint of the local source directory recorded at install time, or None.
     """
 
     package: str | None
@@ -340,6 +344,7 @@ class PackageInfo:
     lock_file: Path | None = None
     cooldown_days: int | None = None
     pinned: bool = False
+    source_fingerprint: SourceFingerprint | None = None
 
     @classmethod
     def from_dict(cls, data: _RawPackageInfo) -> Self:
@@ -349,6 +354,11 @@ class PackageInfo:
         :returns: the metadata.
         :raises TypeError: when the dictionary misses a required key or holds an unknown one.
         """
+        record: Final[dict[str, Any]] = {
+            key: value for key, value in data.items() if key not in _EXPOSURE_KEYS | _RESOURCE_KEYS
+        }
+        if isinstance(record.get("source_fingerprint"), dict):
+            record["source_fingerprint"] = SourceFingerprint.from_dict(record["source_fingerprint"])
         return cls(
             exposure=ExposureOptions(
                 **cast("_RawExposure", {key: value for key, value in data.items() if key in _EXPOSURE_KEYS})
@@ -356,10 +366,7 @@ class PackageInfo:
             resources=PackageResources(
                 **cast("_RawResources", {key: value for key, value in data.items() if key in _RESOURCE_KEYS})
             ),
-            **cast(
-                "_RawPackageRecord",
-                {key: value for key, value in data.items() if key not in _EXPOSURE_KEYS | _RESOURCE_KEYS},
-            ),
+            **cast("_RawPackageRecord", record),
         )
 
     @property
@@ -448,6 +455,7 @@ class PackageInfo:
             "lock_file": self.lock_file,
             "cooldown_days": self.cooldown_days,
             "pinned": self.pinned,
+            "source_fingerprint": self.source_fingerprint.to_dict() if self.source_fingerprint is not None else None,
             **asdict(self.exposure),
             **asdict(self.resources),
         }

@@ -15,6 +15,7 @@ __lazy_modules__ = [
     "pipx.paths",
     "pipx.pipx_metadata_file",
     "pipx.redact",
+    "pipx.source_audit",
     "pipx.trash",
     "pipx.util",
     "pipx.venv",
@@ -76,6 +77,7 @@ from pipx.paths import CTX
 from pipx.pipx_metadata_file import PIPX_INFO_FILENAME, PipxMetadata
 from pipx.redact import redact_url_credentials
 from pipx.result import OperationData, OperationError, OperationResult, OutputLevel, OutputMessage, OutputStream
+from pipx.source_audit import check_source, local_source_dir, write_review_report
 from pipx.trash import rmdir, safe_unlink
 from pipx.util import PipxError
 from pipx.venv import Venv, VenvContainer
@@ -189,11 +191,7 @@ def reinstall(
     }
     venv.check_upgrade_shared_libs(pip_args=main_pip_args, verbose=options.verbose)
 
-    package_or_url: Final[str] = (
-        venv.pipx_metadata.main_package.package_or_url
-        if venv.pipx_metadata.main_package.package_or_url is not None
-        else _unrecorded_package_spec(venv)
-    )
+    package_or_url: Final[str] = _checked_reinstall_spec(venv, options, main_pip_args)
 
     if venv.pipx_metadata.main_package.pinned:
         msg: Final[str] = (
@@ -303,6 +301,54 @@ def reinstall(
         data=ReinstallData(environments=(_ReinstalledEnvironment(environment=venv.name),)),
         messages=tuple(messages),
     )
+
+
+def _checked_reinstall_spec(venv: Venv, options: ReinstallOptions, pip_args: list[str]) -> str:
+    """Return the spec to reinstall from, after the opt-in check of a local source directory.
+
+    :param venv: the environment being reinstalled.
+    :param options: the options of the reinstall.
+    :param pip_args: the pip arguments the reinstall replays.
+    :returns: the recorded package spec.
+    :raises PipxError: when the environment has no record of its package, or when the source check is on and
+        does not approve the source.
+    """
+    package_or_url: Final[str] = (
+        venv.pipx_metadata.main_package.package_or_url
+        if venv.pipx_metadata.main_package.package_or_url is not None
+        else _unrecorded_package_spec(venv)
+    )
+    # checked before the backup, like the recorded pip arguments, so a source that fails the check leaves the
+    # environment and its exposed commands exactly as they were
+    _check_recorded_source(venv, package_or_url, pip_args, verify=options.verify_source)
+    return package_or_url
+
+
+def _check_recorded_source(venv: Venv, package_or_url: str, pip_args: list[str], *, verify: bool) -> None:
+    """Hold the reinstall for review when a local source directory fails the recorded-source check.
+
+    :param venv: the environment being reinstalled.
+    :param package_or_url: the recorded package spec.
+    :param pip_args: the pip arguments the reinstall replays.
+    :param verify: whether the check runs at all; it is opt-in.
+    :raises PipxError: when the check is on and does not approve the source.
+    """
+    if not verify or (source_dir := local_source_dir(package_or_url)) is None:
+        return
+    recorded: Final = venv.pipx_metadata.main_package.source_fingerprint
+    check: Final = check_source(recorded, source_dir)
+    # the report doubles as the reconciliation record: it pairs the decision with the source and the actual pip
+    # arguments the reinstall replays
+    report: Final[Path] = write_review_report(
+        environment=venv.name, source_dir=source_dir, check=check, recorded=recorded, pip_args=pip_args
+    )
+    if check.approved:
+        return
+    msg: Final[str] = (
+        f"{ERROR} Not reinstalling {venv.name}: {check.summary}. The environment and its commands are "
+        f"unchanged. Review report written to {report}"
+    )
+    raise PipxError(msg)
 
 
 def _outcome(environment: str, message: OutputMessage, *, exit_code: ExitCode) -> OperationResult[ReinstallData]:
