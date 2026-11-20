@@ -9,6 +9,7 @@ from guardian.conf import settings
 from guardian.core import ObjectPermissionChecker
 from guardian.ctypes import get_content_type
 from guardian.exceptions import WrongAppError
+from guardian.explain import PermissionExplanation
 from guardian.utils import get_anonymous_user
 
 
@@ -112,6 +113,57 @@ class ObjectPermissionBackend:
 
         check = ObjectPermissionChecker(user_obj)
         return check.has_perm(perm, obj)
+
+    def explain_perm(
+        self, user_obj: Any, perm: str, obj: Model | None = None, consider_global: bool = True
+    ) -> PermissionExplanation:
+        """Explain why a user does or doesn't have a permission for an object.
+
+        Opt-in companion to `has_perm` for trusted callers (support/audit
+        tooling). Applies the same user/object support checks as `has_perm`,
+        but returns a `PermissionExplanation` whose evidence is gathered in a
+        single fresh evaluation instead of a bare boolean. The plain boolean
+        `has_perm` behavior is unchanged.
+
+        Parameters:
+            user_obj (User): User instance.
+            perm (str): Permission string.
+            obj (Model): Model instance.
+            consider_global (bool): Whether global (model-level) permissions
+                count towards the verdict and are reported as evidence.
+
+        Returns:
+            `PermissionExplanation` with the verdict and its supporting evidence.
+        """
+        # check if user_obj and object are supported
+        support, user_obj = check_support(user_obj, obj)
+        if not support:
+            return PermissionExplanation(
+                user=user_obj,
+                perm=perm,
+                obj=obj,
+                allowed=False,
+                consider_global=consider_global,
+                is_active=bool(getattr(user_obj, "is_active", False)),
+                is_superuser=bool(getattr(user_obj, "is_superuser", False)),
+                reason="user or object not supported by this backend",
+            )
+
+        if "." in perm:
+            app_label, _ = perm.split(".", 1)
+            if app_label != obj._meta.app_label:
+                # Check the content_type app_label when permission
+                # and obj app labels don't match.
+                ctype = get_content_type(obj)
+                if app_label != ctype.app_label:
+                    raise WrongAppError(
+                        f"Passed perm has app label of '{app_label}' while "
+                        f"given obj has app label '{obj._meta.app_label}' and given obj"
+                        f"content_type has app label '{ctype.app_label}'"
+                    )
+
+        check = ObjectPermissionChecker(user_obj)
+        return check.explain_perm(perm, obj, consider_global=consider_global)
 
     def get_group_permissions(self, user_obj: Any, obj: Model | None = None) -> Iterable[str]:
         """Returns group permissions for a given object.

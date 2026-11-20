@@ -2,12 +2,13 @@ from collections.abc import Iterable
 from itertools import chain
 
 from django.contrib.auth.models import Permission
-from django.db.models import Model
+from django.db.models import Model, Q
 from django.db.models.query import QuerySet
 from django.utils.encoding import force_str
 
 from guardian.conf import settings as guardian_settings
 from guardian.ctypes import get_content_type
+from guardian.explain import PermissionExplanation
 from guardian.utils import get_group_obj_perms_model, get_identity, get_user_obj_perms_model
 
 
@@ -80,6 +81,115 @@ class ObjectPermissionChecker:
         if "." in perm:
             _, perm = perm.split(".", 1)
         return perm in self.get_perms(obj)
+
+    def explain_perm(self, perm: str, obj: Model, consider_global: bool = True) -> PermissionExplanation:
+        """Evaluate `perm` for `obj` and explain the verdict.
+
+        Opt-in companion to `has_perm` for trusted callers (support/audit
+        tooling). Unlike `has_perm`, this never reads or writes
+        `_obj_perms_cache`: every piece of evidence in the returned
+        `PermissionExplanation` is queried during this call, and the verdict
+        is derived solely from that evidence.
+
+        Parameters:
+            perm (str): permission as string, may or may not contain app_label
+                prefix (if not prefixed, we grab app_label from `obj`)
+            obj (Model): Django model instance for which permission should be explained
+            consider_global (bool): when `True` (default), model-level
+                ("global") permissions held by the identity count towards the
+                verdict and are reported as evidence, mirroring
+                ``get_objects_for_user(..., accept_global_perms=True)``;
+                when `False`, they are excluded from both the verdict and the
+                evidence, mirroring ``accept_global_perms=False``.
+
+        Returns:
+            `PermissionExplanation` with the verdict and its supporting evidence.
+        """
+        app_label = obj._meta.app_label
+        codename = perm.split(".", 1)[1] if "." in perm else perm
+        full_perm = f"{app_label}.{codename}"
+        identity = self.user if self.user is not None else self.group
+
+        if self.user and not self.user.is_active:
+            return PermissionExplanation(
+                user=identity,
+                perm=full_perm,
+                obj=obj,
+                allowed=False,
+                consider_global=consider_global,
+                is_active=False,
+                is_superuser=bool(self.user.is_superuser),
+                reason="user account is inactive",
+            )
+
+        if self.user and self.user.is_superuser:
+            return PermissionExplanation(
+                user=identity,
+                perm=full_perm,
+                obj=obj,
+                allowed=True,
+                consider_global=consider_global,
+                is_superuser=True,
+                sources=["superuser"],
+                reason="granted via superuser",
+            )
+
+        ctype = get_content_type(obj)
+
+        direct_perms: list[str] = []
+        if self.user:
+            direct_perms = sorted(self.get_user_perms(obj))
+
+        group_perms: dict[str, list[str]] = {}
+        group_model = get_group_obj_perms_model(obj)
+        if self.user:
+            group_filters: dict = {"group__in": self.user.groups.all()}
+        else:
+            group_filters = {"group": self.group}
+        if group_model.objects.is_generic():
+            group_filters.update({"content_type": ctype, "object_pk": obj.pk})
+        else:
+            group_filters["content_object"] = obj
+        rows = group_model.objects.filter(**group_filters).values_list("group__name", "permission__codename")
+        for group_name, code in rows:
+            group_perms.setdefault(group_name, []).append(code)
+
+        global_perms: list[str] = []
+        if consider_global:
+            global_qs = Permission.objects.filter(content_type=ctype)
+            if self.user:
+                global_qs = global_qs.filter(Q(user=self.user) | Q(group__user=self.user))
+            else:
+                global_qs = global_qs.filter(group=self.group)
+            global_perms = sorted(set(global_qs.values_list("codename", flat=True)))
+
+        sources: list[str] = []
+        if codename in direct_perms:
+            sources.append("direct")
+        sources.extend(f"group:{name}" for name in sorted(group_perms) if codename in group_perms[name])
+        if codename in global_perms:
+            sources.append("global")
+
+        allowed = bool(sources)
+        if allowed:
+            reason = "granted via " + ", ".join(sources)
+        else:
+            reason = "no matching permission grant"
+            if not consider_global:
+                reason += " (global permissions excluded)"
+
+        return PermissionExplanation(
+            user=identity,
+            perm=full_perm,
+            obj=obj,
+            allowed=allowed,
+            consider_global=consider_global,
+            direct_perms=direct_perms,
+            group_perms=group_perms,
+            global_perms=global_perms,
+            sources=sources,
+            reason=reason,
+        )
 
     def get_group_filters(self, obj):
         ctype = get_content_type(obj)

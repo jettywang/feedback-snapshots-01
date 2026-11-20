@@ -46,6 +46,7 @@ nav:
           - Example Project: userguide/examples.md
           - Assign Object Permissions: userguide/assign.md
           - Checks Object Permissions: userguide/checks.md
+          - Explain Permission Decisions: userguide/explain.md
           - Remove Object Permissions: userguide/remove.md
           - Shortcuts: userguide/shortcuts.md
       - Advanced Usage:
@@ -67,6 +68,7 @@ nav:
     - Backends: api/backends.md
     - Core: api/core.md
     - Decorators: api/decorators.md
+    - Explain: api/explain.md
     - Forms: api/forms.md
     - Management Commands: api/management.md
     - Managers: api/managers.md
