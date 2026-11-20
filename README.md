@@ -35,6 +35,7 @@ with support from Google, and is currently maintained under the
 * [Examples](#examples)
 * [Troubleshooting](#troubleshooting)
 * [Tips and Tricks](#tips-and-tricks)
+* [Disclosure reports](#disclosure-reports)
 * [Security model](#security-model)
 * [Licensing](#licensing)
 * [Contributing](#contributing)
@@ -142,7 +143,8 @@ usage: pip-audit [-h] [-V] [-l] [-r REQUIREMENT] [--locked] [-f FORMAT]
                  [--timeout TIMEOUT] [--path PATH] [-v] [--fix]
                  [--require-hashes] [--index-url INDEX_URL]
                  [--extra-index-url URL] [--skip-editable] [--no-deps]
-                 [-o FILE] [--ignore-vuln ID] [--disable-pip]
+                 [-o FILE] [--public-report FILE] [--internal-report FILE]
+                 [--public-allowlist FILE] [--ignore-vuln ID] [--disable-pip]
                  [project_path]
 
 audit the Python environment for dependencies with known vulnerabilities
@@ -220,6 +222,17 @@ options:
                         False)
   -o FILE, --output FILE
                         output results to the given file (default: stdout)
+  --public-report FILE  write a disclosure-safe public audit summary to the
+                        given file; requires --public-allowlist and is
+                        withheld when the audit fails (default: None)
+  --internal-report FILE
+                        write a full remediation work order (including
+                        descriptions, skip reasons, and error details) to the
+                        given file (default: None)
+  --public-allowlist FILE
+                        file containing the dependency names that may appear
+                        in --public-report, one per line; blank lines and #
+                        comments are ignored (default: None)
   --ignore-vuln ID      ignore a specific vulnerability by its vulnerability
                         ID; this option can be used multiple times (default:
                         [])
@@ -573,6 +586,40 @@ test -z "$(pip-audit -r requirements.txt --format=json 2>/dev/null | jq '.depend
 ```
 
 which runs `pip-audit` as usual and exits with a non-zero code only if there are fixed versions for the known vulnerabilities.
+
+## Disclosure reports
+
+`pip-audit`'s ordinary output is an operator artifact. It contains unchanged
+dependency names and versions, skip reasons, and advisory descriptions, and it
+can contain exception text on `stderr`. That output is not safe to publish.
+
+Two opt-in report flags separate the audiences:
+
+```console
+$ pip-audit \
+    --public-allowlist public-deps.txt \
+    --public-report public.json \
+    --internal-report internal.json
+```
+
+* `--public-report FILE` writes a disclosure-safe summary. It names only
+  dependencies listed in `--public-allowlist`, and contains only validated
+  identifiers, aliases, fix versions, and applied fix versions. It has no
+  description, skip-reason, error, or traceback fields, and no counts derived
+  from private dependencies.
+* `--internal-report FILE` writes the complete remediation work order,
+  including every dependency, advisory descriptions, skip reasons, and a
+  structured error when the audit fails.
+* `--public-allowlist FILE` is a line-oriented list of dependency names
+  approved for publication. Blank lines and `#` comments are ignored.
+
+The public report is built from an allowlisted projection, not by formatting
+the full result and redacting it. If the audit fails, the public report target
+is removed and no new public artifact is written; the internal report still
+records the partial result and the error.
+
+`examples/disclosure/` contains a runnable offline example with fake installed
+dependencies and a failing service, along with a verifier for each artifact.
 
 ## Security Model
 

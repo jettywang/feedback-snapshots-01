@@ -24,7 +24,19 @@ from pip_audit._dependency_source import (
     RequirementSource,
 )
 from pip_audit._dependency_source.pylock import PyLockSource
-from pip_audit._fix import ResolvedFixVersion, SkippedFixVersion, resolve_fix_versions
+from pip_audit._disclosure import (
+    DisclosureError,
+    DisclosurePolicy,
+    build_internal_report,
+    build_public_report,
+    clear_public_report,
+    private_names,
+    project_public_inputs,
+    sensitive_strings,
+    write_internal_report,
+    write_public_report,
+)
+from pip_audit._fix import FixVersion, ResolvedFixVersion, SkippedFixVersion, resolve_fix_versions
 from pip_audit._format import (
     ColumnsFormat,
     CycloneDxFormat,
@@ -34,6 +46,7 @@ from pip_audit._format import (
 )
 from pip_audit._service import EcosystemsService, OsvService, PyPIService
 from pip_audit._service.interface import ConnectionError as VulnServiceConnectionError
+from pip_audit._service.interface import ServiceError as VulnServiceError
 from pip_audit._service.interface import (
     Dependency,
     ResolvedDependency,
@@ -190,6 +203,60 @@ def _fatal(msg: str) -> NoReturn:  # pragma: no cover
     # ensuring that the fatal message is formatted on its own line.
     logger.error(msg)
     sys.exit(1)
+
+
+def _write_internal_report(
+    args: argparse.Namespace,
+    result: dict[Dependency, list[VulnerabilityResult]],
+    fixes: list[FixVersion],
+    policy: DisclosurePolicy | None,
+    *,
+    error: BaseException | None = None,
+    exit_code: int = 0,
+) -> None:
+    """
+    Write the internal work order, if requested.
+
+    This runs on both success and failure: operators need the partial result
+    and the structured error even when the vulnerability service is down.
+    """
+    if args.internal_report is None:
+        return
+    report = build_internal_report(result, fixes, policy, error=error, exit_code=exit_code)
+    try:
+        write_internal_report(args.internal_report, report)
+    except OSError as e:
+        _fatal(f"could not write internal report: {e}")
+
+
+def _write_public_report(
+    args: argparse.Namespace,
+    result: dict[Dependency, list[VulnerabilityResult]],
+    fixes: list[FixVersion],
+    policy: DisclosurePolicy | None,
+) -> None:
+    """
+    Write the public audit summary, if requested.
+
+    The summary is derived only from the allowlisted projection.  Publication
+    is refused if the result contains a non-allowlisted name or any free-form
+    advisory/skip/error text.
+    """
+    if args.public_report is None:
+        return
+    assert policy is not None  # checked during argument validation
+    try:
+        inputs = project_public_inputs(result, fixes, policy)
+        report = build_public_report(inputs)
+        write_public_report(
+            args.public_report,
+            report,
+            policy,
+            private_dependency_names=private_names(result, policy),
+            sensitive_text=sensitive_strings(result, fixes),
+        )
+    except (DisclosureError, OSError) as e:
+        _fatal(f"refusing to publish public report: {e}")
 
 
 def _parser() -> argparse.ArgumentParser:  # pragma: no cover
@@ -373,6 +440,27 @@ def _parser() -> argparse.ArgumentParser:  # pragma: no cover
         default=os.environ.get("PIP_AUDIT_OUTPUT", "stdout"),
     )
     parser.add_argument(
+        "--public-report",
+        type=Path,
+        metavar="FILE",
+        help="write a disclosure-safe public audit summary to the given file; "
+        "requires --public-allowlist and is withheld when the audit fails",
+    )
+    parser.add_argument(
+        "--internal-report",
+        type=Path,
+        metavar="FILE",
+        help="write a full remediation work order (including descriptions, skip reasons, "
+        "and error details) to the given file",
+    )
+    parser.add_argument(
+        "--public-allowlist",
+        type=Path,
+        metavar="FILE",
+        help="file containing the dependency names that may appear in --public-report, "
+        "one per line; blank lines and # comments are ignored",
+    )
+    parser.add_argument(
         "--ignore-vuln",
         type=str,
         metavar="ID",
@@ -445,16 +533,6 @@ def audit() -> None:  # pragma: no cover
     parser = _parser()
     args = _parse_args(parser)
 
-    service: VulnerabilityService
-    if args.vulnerability_service is VulnerabilityServiceChoice.Osv:
-        service = OsvService(cache_dir=args.cache_dir, timeout=args.timeout, osv_url=args.osv_url)
-    elif args.vulnerability_service is VulnerabilityServiceChoice.Pypi:
-        service = PyPIService(cache_dir=args.cache_dir, timeout=args.timeout)
-    elif args.vulnerability_service is VulnerabilityServiceChoice.Esms:
-        service = EcosystemsService(cache_dir=args.cache_dir, timeout=args.timeout)
-    else:
-        assert_never(args.vulnerability_service)  # pragma: no cover
-
     output_desc = args.desc.to_bool(args.format)
     output_aliases = args.aliases.to_bool(args.format)
     formatter = args.format.to_format(output_desc, output_aliases)
@@ -463,6 +541,34 @@ def audit() -> None:  # pragma: no cover
     if args.project_path is None:
         if args.locked:
             parser.error("The --locked flag can only be used with a project path")
+
+    # Disclosure reports are opt-in and validated before any audit work
+    # happens, so a bad policy fails before it can produce a partial artifact.
+    if args.public_report is not None and args.public_allowlist is None:
+        parser.error("The --public-report flag requires --public-allowlist")
+    if args.public_allowlist is not None and args.public_report is None:
+        parser.error("The --public-allowlist flag requires --public-report")
+
+    # A public summary must describe a completed, non-dry-run audit.
+    if args.public_report is not None and args.dry_run and not args.fix:
+        parser.error("The --public-report flag cannot be used with --dry-run")
+
+    # The public and internal reports have different audiences.  Never let one
+    # overwrite the other, the ordinary CLI output, or the allowlist itself.
+    report_paths = {
+        "--public-report": args.public_report,
+        "--internal-report": args.internal_report,
+        "--public-allowlist": args.public_allowlist,
+        "--output": args.output if str(args.output) not in {"stdout", "-"} else None,
+    }
+    seen: dict[Path, str] = {}
+    for flag, path in report_paths.items():
+        if path is None:
+            continue
+        resolved = Path(path).resolve()
+        if resolved in seen:
+            parser.error(f"{flag} and {seen[resolved]} must not be the same file")
+        seen[resolved] = flag
 
     # Check for flags that are only valid with requirements files
     if args.requirements is None:
@@ -476,6 +582,31 @@ def audit() -> None:  # pragma: no cover
             parser.error("The --no-deps flag can only be used with --requirement (-r)")
         elif args.disable_pip:
             parser.error("The --disable-pip flag can only be used with --requirement (-r)")
+
+    policy: DisclosurePolicy | None = None
+    if args.public_allowlist is not None:
+        try:
+            policy = DisclosurePolicy.from_file(args.public_allowlist)
+        except DisclosureError as e:
+            _fatal(str(e))
+
+    # A public artifact is fail-closed: if this audit does not finish
+    # successfully, no public report may remain at the target path.
+    if args.public_report is not None:
+        try:
+            clear_public_report(args.public_report)
+        except DisclosureError as e:
+            _fatal(str(e))
+
+    service: VulnerabilityService
+    if args.vulnerability_service is VulnerabilityServiceChoice.Osv:
+        service = OsvService(cache_dir=args.cache_dir, timeout=args.timeout, osv_url=args.osv_url)
+    elif args.vulnerability_service is VulnerabilityServiceChoice.Pypi:
+        service = PyPIService(cache_dir=args.cache_dir, timeout=args.timeout)
+    elif args.vulnerability_service is VulnerabilityServiceChoice.Esms:
+        service = EcosystemsService(cache_dir=args.cache_dir, timeout=args.timeout)
+    else:
+        assert_never(args.vulnerability_service)  # pragma: no cover
 
     # Nudge users to consider alternate workflows.
     if args.require_hashes and args.no_deps:
@@ -572,15 +703,22 @@ def audit() -> None:  # pragma: no cover
                     pkg_count += 1
                     vuln_count += len(vulns)
         except DependencySourceError as e:
+            _write_internal_report(args, result, [], policy, error=e, exit_code=1)
             _fatal(str(e))
         except VulnServiceConnectionError as e:
             # The most common source of connection errors is corporate blocking,
             # so we offer a bit of advice.
             logger.error(str(e))
+            _write_internal_report(args, result, [], policy, error=e, exit_code=1)
             _fatal(
                 "Tip: your network may be blocking this service. "
                 "Try another service with `-s SERVICE`"
             )
+        except VulnServiceError as e:
+            # Other service failures (malformed responses, HTTP errors) are
+            # still operator-relevant; keep the structured cause internal.
+            _write_internal_report(args, result, [], policy, error=e, exit_code=1)
+            _fatal(str(e))
 
         # If the `--fix` flag has been applied, find a set of suitable fix versions and upgrade the
         # dependencies at the source
@@ -634,6 +772,8 @@ def audit() -> None:  # pragma: no cover
         print(summary_msg, file=sys.stderr)
         with _output_io(args.output) as io:
             print(formatter.format(result, fixes), file=io)
+        _write_internal_report(args, result, fixes, policy, exit_code=1)
+        _write_public_report(args, result, fixes, policy)
         if pkg_count != fixed_pkg_count:
             sys.exit(1)
     else:
@@ -650,3 +790,5 @@ def audit() -> None:  # pragma: no cover
         if skip_count > 0 or formatter.is_manifest:
             with _output_io(args.output) as io:
                 print(formatter.format(result, fixes), file=io)
+        _write_internal_report(args, result, fixes, policy, exit_code=0)
+        _write_public_report(args, result, fixes, policy)

@@ -8,6 +8,15 @@ All versions prior to 0.0.9 are untracked.
 
 ## [Unreleased]
 
+### Added
+
+* `pip-audit` can now emit two audience-specific JSON reports:
+  `--public-report` writes a disclosure-safe summary restricted to an
+  explicit `--public-allowlist` of dependency names, while
+  `--internal-report` writes a full remediation work order including
+  descriptions, skip reasons, and structured error details. Public reports are
+  withheld when an audit fails.
+
 ### Fixed
 
 * Editable requirements skipped with `--skip-editable` no longer require a hash
