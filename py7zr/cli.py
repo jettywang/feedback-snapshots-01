@@ -21,6 +21,7 @@ import argparse
 import getpass
 import inspect
 import io
+import json
 import lzma
 import os
 import pathlib
@@ -123,6 +124,22 @@ class Cli:
             help="Password protected archive(you will be asked a password).",
         )
         extract_parser.add_argument("--verbose", action="store_true", help="verbose output")
+        extract_parser.add_argument(
+            "--volumes",
+            type=pathlib.Path,
+            metavar="DIR",
+            help="Directory holding a verified multi-volume set.",
+        )
+        extract_parser.add_argument(
+            "--catalog",
+            type=pathlib.Path,
+            metavar="FILE",
+            help="JSON catalog of expected volumes (name, size, sha256).",
+        )
+        extract_parser.add_argument(
+            "--basename",
+            help="Archive base name; limits the unexpected-volume scan to these volumes.",
+        )
         create_parser = subparsers.add_parser("c")
         create_parser.set_defaults(func=self.run_create)
         create_parser.add_argument("arcfile", help="7z archive file")
@@ -319,8 +336,54 @@ class Cli:
                 print("The archive is encrypted but password is not given. FAILED.")
                 return 1
 
+    def _run_extract_volumes(self, args: argparse.Namespace, volumes_dir: pathlib.Path, catalog_file: pathlib.Path) -> int:
+        try:
+            with catalog_file.open("r", encoding="utf-8") as fp:
+                raw = json.load(fp)
+        except (OSError, ValueError) as exc:
+            sys.stderr.write(f"Error: cannot read volume catalog: {exc}\n")
+            return 1
+        if isinstance(raw, dict):
+            raw = raw.get("volumes")
+        if not isinstance(raw, list):
+            sys.stderr.write("Error: volume catalog must be a JSON list or an object with a 'volumes' list.\n")
+            return 1
+        password: str | None = None
+        if args.password:
+            try:
+                password = getpass.getpass()
+            except getpass.GetPassWarning:
+                sys.stderr.write("Warning: your password may be shown.\n")
+                return 1
+        try:
+            with py7zr.load_volumes(volumes_dir, raw, basename=args.basename) as volumes:
+                sys.stderr.write(f"Verified {len(volumes.volume_names)} volume(s).\n")
+                with py7zr.SevenZipFile(volumes, "r", password=password) as archive:
+                    if args.files:
+                        archive.extract(args.odir, targets=args.files, recursive=True)
+                    else:
+                        archive.extractall(args.odir)
+        except py7zr.VolumeSetError as exc:
+            sys.stderr.write(f"Error: {exc.verification.reason()}: {exc.verification.describe()}\n")
+            return 1
+        except py7zr.Bad7zFile:
+            sys.stderr.write("Error: header is corrupted. Cannot read as 7z file.\n")
+            return 1
+        except (py7zr.PasswordRequired, lzma.LZMAError):
+            sys.stderr.write("Error: the archive is encrypted or corrupted; cannot extract.\n")
+            return 1
+        return 0
+
     def run_extract(self, args: argparse.Namespace) -> int:
         target = args.arcfile
+        volumes_dir = getattr(args, "volumes", None)
+        catalog_file = getattr(args, "catalog", None)
+        if (volumes_dir is None) != (catalog_file is None):
+            sys.stderr.write("Error: --volumes and --catalog must be given together.\n")
+            return 1
+        if volumes_dir is not None:
+            assert catalog_file is not None
+            return self._run_extract_volumes(args, volumes_dir, catalog_file)
         verbose = args.verbose
         if not py7zr.is_7zfile(target):
             print("not a 7z file")

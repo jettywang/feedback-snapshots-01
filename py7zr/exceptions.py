@@ -89,3 +89,27 @@ class DecompressionBombError(ArchiveError):
 class AbsolutePathError(Exception):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
+
+
+class VolumeSetError(ArchiveError):
+    """Raised when a multi-volume set cannot be verified before reading.
+
+    The :attr:`verification` attribute holds the full outcome, including
+    which volumes are missing, altered, or unexpected.
+    """
+
+    def __init__(self, *args: Any, verification: Any = None) -> None:
+        super().__init__(*args)
+        self.verification = verification
+
+
+class VolumeSetIncompleteError(VolumeSetError):
+    """Raised when one or more volumes listed in the catalog are absent."""
+
+
+class VolumeSetAlteredError(VolumeSetError):
+    """Raised when a volume does not match the size or digest in the catalog."""
+
+
+class VolumeSetUnexpectedError(VolumeSetError):
+    """Raised when the directory contains volume files that the catalog does not list."""

@@ -74,6 +74,7 @@ from py7zr.helpers import (
 from py7zr.io import MemIO, NullIO, WriterFactory
 from py7zr.member import FILE_ATTRIBUTE_UNIX_EXTENSION, MemberType
 from py7zr.properties import DEFAULT_FILTERS, FILTER_DEFLATE64, MAGIC_7Z, get_default_blocksize, get_memory_limit
+from py7zr.volume import VolumeSet
 
 if TYPE_CHECKING:
     from typing_extensions import NotRequired
@@ -427,7 +428,9 @@ class SevenZipFile(contextlib.AbstractContextManager):
     Only ``filename``, ``mode`` and ``files`` are part of the stable public
     API; the others reflect implementation details and may change.
 
-    :ivar fp: The underlying file object for the archive.
+    :ivar fp: The underlying file object for the archive. When the
+        archive was opened through :func:`py7zr.load_volumes`, this is
+        the verified :class:`py7zr.VolumeSet`.
     :ivar mode: The current operation mode ('r', 'w', 'x', or 'a').
     :ivar filename: The path of the archive file, or ``None`` when a
         file-like object was passed.
@@ -530,6 +533,11 @@ class SevenZipFile(contextlib.AbstractContextManager):
                     raise
                 break
             self.mode = mode
+        elif isinstance(file, VolumeSet):
+            self._filePassed = True
+            self.fp = file
+            self.filename = None
+            self.mode = mode  # noqa
         elif isinstance(file, multivolumefile.MultiVolume):
             self._filePassed = True
             self.fp = file
@@ -546,6 +554,9 @@ class SevenZipFile(contextlib.AbstractContextManager):
         self.header_encryption = header_encryption
         try:
             if mode == "r":
+                if isinstance(self.fp, VolumeSet):
+                    self.fp.check_unchanged()
+                    self.fp.seek(0)
                 self._real_get_contents(password)
                 self.fp.seek(self.pack_data_start)  # seek into start of payload and prepare worker to extract
                 self.worker = Worker(self.files, self.pack_data_start, self.header, self.mp)
@@ -1128,7 +1139,11 @@ class SevenZipFile(contextlib.AbstractContextManager):
         """
         uncompressed_list = [f.uncompressed for f in self.files]
         total_uncompressed = functools.reduce(lambda x, y: x + y, uncompressed_list, 0)
-        if isinstance(self.fp, multivolumefile.MultiVolume):
+        fname: str | None
+        if isinstance(self.fp, VolumeSet):
+            fname = self.fp.name
+            fstat = self.fp.stat_result
+        elif isinstance(self.fp, multivolumefile.MultiVolume):
             fname = self.fp.name
             fstat = self.fp.stat()
         else:
@@ -1484,7 +1499,7 @@ class SevenZipFile(contextlib.AbstractContextManager):
             self.worker.register_filelike(f.id, None)
         try:
             self.worker.extract(
-                self.fp, None, parallel=(not self.password_protected), skip_notarget=False
+                self.fp, None, parallel=(not self.password_protected and not self._filePassed), skip_notarget=False
             )  # TODO: print progress
         except CrcError as crce:
             return crce.args[2]

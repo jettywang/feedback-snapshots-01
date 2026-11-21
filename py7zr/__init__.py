@@ -23,6 +23,10 @@ from py7zr.exceptions import (
     DecompressionError,
     PasswordRequired,
     UnsupportedCompressionMethodError,
+    VolumeSetAlteredError,
+    VolumeSetError,
+    VolumeSetIncompleteError,
+    VolumeSetUnexpectedError,
 )
 from py7zr.io import Py7zIO, WriterFactory
 from py7zr.properties import (
@@ -51,6 +55,7 @@ from py7zr.properties import (
 )
 from py7zr.py7zr import ArchiveInfo, FileInfo, SevenZipFile, is_7zfile, pack_7zarchive, unpack_7zarchive
 from py7zr.version import __version__
+from py7zr.volume import VolumeEntry, VolumeSet, VolumeSetVerification, load_volumes
 
 __copyright__ = "Copyright (C) 2019-2021 Hiroshi Miura"
 
@@ -68,6 +73,14 @@ __all__ = [
     "Bad7zFile",
     "DecompressionBombError",
     "DecompressionError",
+    "VolumeSetError",
+    "VolumeSetIncompleteError",
+    "VolumeSetAlteredError",
+    "VolumeSetUnexpectedError",
+    "VolumeEntry",
+    "VolumeSet",
+    "VolumeSetVerification",
+    "load_volumes",
     "Py7zIO",
     "WriterFactory",
     "FILTER_LZMA",

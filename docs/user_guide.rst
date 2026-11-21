@@ -217,9 +217,70 @@ Here is a simple example to append some files into existent
 Extraction from multi-volume archive
 ------------------------------------
 
-You should concatenate multi-volume archives into single archive file before
-call py7zr, or consider using files wrapping class that handle multiple files
-as a virtual single file, (ex. multivolumefile library)
+A 7z volume carries no manifest naming its siblings, so opening a partially
+delivered set succeeds and then fails -- or, worse, silently misreads -- only
+once decompression reaches the missing volume. When the caller can obtain a
+catalog of the volumes it expects, use :func:`py7zr.load_volumes` instead.
+
+Each catalog entry records the volume's file name, byte size, and SHA-256
+digest. :func:`py7zr.load_volumes` checks the directory against the catalog,
+then hands the verified files to :class:`~py7zr.SevenZipFile` as one seekable
+read-only stream. The volumes are read in place; they are never concatenated
+into a temporary archive.
+
+.. code-block:: python
+
+    import hashlib
+    import pathlib
+    import py7zr
+
+    def catalog(paths):
+        return [
+            py7zr.VolumeEntry(
+                path.name,
+                path.stat().st_size,
+                hashlib.sha256(path.read_bytes()).hexdigest(),
+            )
+            for path in sorted(paths)
+        ]
+
+    directory = pathlib.Path("backup")
+    expected = catalog(directory.glob("backup.7z.[0-9]*"))
+
+    with py7zr.load_volumes(directory, expected) as volumes:
+        with py7zr.SevenZipFile(volumes, "r") as archive:
+            archive.extractall("restore")
+
+Catalog entries may also be plain mappings with ``name``, ``size`` and
+``sha256`` keys, so a catalog can be loaded from JSON.
+
+:func:`py7zr.load_volumes` raises a :class:`py7zr.VolumeSetError` subclass
+before any data is read. Each error carries a ``verification`` object whose
+``reason()`` is one of ``"missing"``, ``"altered"``, or ``"unexpected"`` and
+whose ``describe()`` names the offending volumes:
+
+* :class:`py7zr.VolumeSetIncompleteError` -- a catalog volume is absent. It is
+  also raised when the directory holds volume-shaped files outside the
+  catalog, so a set that stops early is not mistaken for a complete one.
+* :class:`py7zr.VolumeSetAlteredError` -- a volume's size or digest changed.
+* :class:`py7zr.VolumeSetUnexpectedError` -- only unlisted volumes are present.
+
+Verification and extraction share the same open descriptors, and an inode and
+modification-time check runs when the archive is opened. Replacing a volume
+by path after verification therefore cannot feed new bytes to the parser.
+Extraction failures leave both the backup volumes and the target directory
+untouched.
+
+The command line exposes the same flow with a JSON catalog:
+
+.. code-block:: shell
+
+    $ py7zr x backup/backup.7z.0001 restore \
+        --volumes backup --catalog backup.sha256.json
+
+Alternatively, concatenate multi-volume archives into a single archive file
+before calling py7zr, or use a files wrapping class that handles multiple
+files as a virtual single file (for example the multivolumefile library).
 
 
 .. code-block:: python

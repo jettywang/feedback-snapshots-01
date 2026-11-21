@@ -62,6 +62,21 @@ Functions
    and collections of files.
 
 
+Multi-volume Archives
+=====================
+
+.. autofunction:: py7zr.load_volumes
+
+.. autoclass:: py7zr.VolumeEntry
+   :members:
+
+.. autoclass:: py7zr.VolumeSetVerification
+   :members:
+
+.. autoclass:: py7zr.VolumeSet
+   :members: volume_names, stat_result
+
+
 .. _io-interfaces:
 
 I/O Interfaces
@@ -87,6 +102,14 @@ Exceptions
 .. autoexception:: py7zr.DecompressionError
 
 .. autoexception:: py7zr.DecompressionBombError
+
+.. autoexception:: py7zr.VolumeSetError
+
+.. autoexception:: py7zr.VolumeSetIncompleteError
+
+.. autoexception:: py7zr.VolumeSetAlteredError
+
+.. autoexception:: py7zr.VolumeSetUnexpectedError
 
 
 .. _api-constants:
