@@ -23,6 +23,8 @@ from typing import Any, Self, TypeAlias, TypeVar, TYPE_CHECKING, overload
 from oslo_context import context
 import stevedore
 
+from oslo_policy import _trace
+
 if TYPE_CHECKING:
     from oslo_policy.policy import Enforcer
 
@@ -80,6 +82,22 @@ def _check(
     :param enforcer: The Enforcer being used.
     :param current_rule: The name of the policy being checked.
     """
+    trace = _trace.get_active_trace()
+    if trace is not None:
+        return trace.evaluate(
+            rule, target, creds, enforcer, current_rule, _call_check
+        )
+    return _call_check(rule, target, creds, enforcer, current_rule)
+
+
+def _call_check(
+    rule: 'BaseCheck',
+    target: TargetT,
+    creds: MutableMapping[str, Any],
+    enforcer: 'Enforcer',
+    current_rule: str | None,
+) -> bool:
+    """Invoke a check, supporting both the current and legacy signatures."""
     # Evaluate the rule so we can check if the rule argument must be included
     # or not
     argspec = inspect.getfullargspec(rule.__call__)

@@ -80,6 +80,12 @@ it is necessary to enable debug logging for oslo.policy. This can be done
 by enabling debug logging for the service in question, and also removing
 ``oslo_policy`` from the default_log_levels option.
 
+When only rule evaluation needs to be inspected, for example to find which
+referenced rule denied a request, use ``Enforcer.explain()`` instead. It
+returns a structured trace of the rule names and branches that were actually
+evaluated without dumping request credentials; see
+:doc:`/user/usage` for details.
+
 Many APIs can only be called by administrators. This can be expressed by
 the rule ``"role:admin"``. The following policy ensures that only
 administrators can create new users in the Identity database:

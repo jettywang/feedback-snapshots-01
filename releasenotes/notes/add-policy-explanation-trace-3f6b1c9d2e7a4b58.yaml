@@ -1,0 +1,14 @@
+---
+features:
+  - |
+    Added :meth:`oslo_policy.policy.Enforcer.explain` and
+    :meth:`oslo_policy.policy.Enforcer.explain_authorize`, restricted
+    diagnostic entry points that evaluate a policy exactly like
+    ``enforce()`` and ``authorize()`` but return a
+    :class:`oslo_policy.policy.PolicyTrace`. The trace lists the policy rule
+    names that were followed, the checks that actually ran in order with
+    their boolean result, and the branches that were short-circuited (reported
+    as not executed with a ``None`` result). Target and credential values are
+    never copied into a trace, so it can be exposed to restricted diagnostic
+    consumers without leaking request secrets. The authorization result and
+    the behavior of existing ``enforce()`` callers are unchanged.

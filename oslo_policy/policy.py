@@ -237,6 +237,7 @@ from oslo_policy import _cache_handler
 from oslo_policy import _checks
 from oslo_policy._i18n import _
 from oslo_policy import _parser
+from oslo_policy import _trace
 from oslo_policy import opts
 
 
@@ -293,6 +294,14 @@ checks returns ``True``.
 
 RuleCheck = _checks.RuleCheck
 """Recursively checks credentials based on the defined rules."""
+
+PolicyTrace: TypeAlias = _trace.PolicyTrace
+"""The structured explanation returned by :meth:`Enforcer.explain`.
+
+It records the policy rule names that were followed, the checks that actually
+ran and their results, and the branches that were short-circuited. It never
+contains target or credential values.
+"""
 
 
 class PolicyNotAuthorized(Exception):
@@ -1002,8 +1011,109 @@ class Enforcer:
             ``True``.  Note: for rules using the "case" expression, this
             ``True`` value will be the specified string from the expression.
         """
-        self.load_rules()
+        return self._evaluate(
+            rule, target, creds, do_raise, exc, *args, **kwargs
+        )
 
+    def explain(
+        self,
+        rule: _checks.BaseCheck | str,
+        target: _checks.TargetT,
+        creds: _checks.CredsT,
+        do_raise: bool = False,
+        exc: type[Exception] | None = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> PolicyTrace:
+        """Evaluate a rule exactly like :meth:`enforce` and explain it.
+
+        The authorization decision is identical to :meth:`enforce`, including
+        ``do_raise`` handling and any configured scope enforcement.  The
+        returned :class:`~oslo_policy.policy.PolicyTrace` additionally records
+        which checks actually ran, in which order, which referenced rule names
+        were followed, and which branches were short-circuited.  Branches that
+        were skipped are reported as not executed; their result is ``None``.
+
+        The trace contains only rule structure and check expressions.  It
+        never captures the target or credential values, so it is safe to hand
+        to a restricted diagnostic consumer without exposing request secrets.
+
+        :param rule: The rule to evaluate as a string or :class:`BaseCheck`.
+        :param target: Attributes of the object of the operation.
+        :param creds: Attributes of the user performing the operation.
+        :param do_raise: Whether to raise an exception or not if check fails.
+        :param exc: Class of the exception to raise if the check fails.
+        :returns: A :class:`~oslo_policy.policy.PolicyTrace` describing the
+            evaluation and carrying the underlying result.
+        """
+        trace = _trace.PolicyTrace(
+            requested_rule=None if isinstance(rule, _checks.BaseCheck) else rule
+        )
+        with _trace.activate(trace):
+            try:
+                trace.result = self._evaluate(
+                    rule, target, creds, do_raise, exc, *args, **kwargs
+                )
+            except Exception as e:
+                trace.error = type(e).__name__
+                raise
+        return trace
+
+    def explain_authorize(
+        self,
+        rule: str,
+        target: _checks.TargetT,
+        creds: _checks.CredsT,
+        do_raise: bool = False,
+        exc: type[Exception] | None = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> PolicyTrace:
+        """Like :meth:`explain`, but require a registered policy first.
+
+        This is the explanatory counterpart of :meth:`authorize`: it raises
+        :class:`PolicyNotRegistered` when ``rule`` has not been registered,
+        then returns the same trace :meth:`explain` would.
+        """
+        if rule not in self.registered_rules:
+            raise PolicyNotRegistered(rule)
+        return self.explain(
+            rule, target, creds, do_raise, exc, *args, **kwargs
+        )
+
+    def _evaluate(
+        self,
+        rule: _checks.BaseCheck | str,
+        target: _checks.TargetT,
+        creds: _checks.CredsT,
+        do_raise: bool = False,
+        exc: type[Exception] | None = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> bool:
+        trace = _trace.get_active_trace()
+        try:
+            return self._enforce(
+                rule, target, creds, do_raise, exc, *args, **kwargs
+            )
+        except InvalidScope:
+            if trace is not None:
+                trace.scope_valid = False
+                trace.reason = 'scope_mismatch'
+            raise
+
+    def _enforce(
+        self,
+        rule: _checks.BaseCheck | str,
+        target: _checks.TargetT,
+        creds: _checks.CredsT,
+        do_raise: bool = False,
+        exc: type[Exception] | None = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> bool:
+        trace = _trace.get_active_trace()
+        self.load_rules()
         creds_dict: MutableMapping[str, Any]
         if isinstance(creds, context.RequestContext):
             creds_dict = self._map_context_attributes_into_creds(creds)
@@ -1035,7 +1145,9 @@ class Enforcer:
         if creds_dict.get('system_scope'):
             creds_dict['system'] = creds_dict.get('system_scope')
 
-        if LOG.isEnabledFor(logging.DEBUG):
+        # Restricted explanations must not emit the request credentials, so
+        # the usual debug dump is skipped while a trace is being collected.
+        if trace is None and LOG.isEnabledFor(logging.DEBUG):
             try:
                 creds_msg = jsonutils.dumps(
                     strutils.mask_dict_password(creds_dict),
@@ -1069,7 +1181,11 @@ class Enforcer:
             scope_valid = self._enforce_scope(
                 creds_dict, rule, do_raise=do_raise
             )
+            if trace is not None:
+                trace.scope_valid = scope_valid
             if not scope_valid:
+                if trace is not None:
+                    trace.reason = 'scope_mismatch'
                 return False
             result = _checks._check(
                 rule=rule,
@@ -1081,6 +1197,8 @@ class Enforcer:
         elif not self.rules:
             # No rules to reference means we're going to fail closed
             result = False
+            if trace is not None:
+                trace.reason = 'no_rules'
         else:
             try:
                 to_check = self.rules[rule]
@@ -1088,6 +1206,8 @@ class Enforcer:
                 LOG.debug('Rule [%s] does not exist', rule)
                 # If the rule doesn't exist, fail closed
                 result = False
+                if trace is not None:
+                    trace.reason = 'unknown_rule'
             else:
                 # NOTE(moguimar): suppressing [B105:hardcoded_password_string]
                 #                 as token_scope is not actually a hardcoded
@@ -1099,8 +1219,15 @@ class Enforcer:
                     scope_valid = self._enforce_scope(
                         creds_dict, registered_rule, do_raise=do_raise
                     )
+                    if trace is not None:
+                        trace.scope_valid = scope_valid
                     if not scope_valid:
+                        if trace is not None:
+                            trace.reason = 'scope_mismatch'
                         return False
+                else:
+                    if trace is not None:
+                        trace.scope_valid = True
                 result = _checks._check(
                     rule=to_check,
                     target=target,

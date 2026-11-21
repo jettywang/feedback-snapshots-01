@@ -589,3 +589,61 @@ example of a context modeling a project-scoped token:
 
 The significance here is the difference between administrator authorization on
 the deployment system and administrator authorization on a project.
+
+Explaining an authorization decision
+====================================
+
+Rejections in production report only that an action was disallowed, which
+makes it hard to tell which rule or branch did the denying. For on-call and
+integration diagnostics, :meth:`~oslo_policy.policy.Enforcer.explain`
+evaluates a rule exactly like :meth:`~oslo_policy.policy.Enforcer.enforce`,
+but returns a trace describing the evaluation::
+
+    trace = enforcer.explain(
+        'compute:start',
+        target,
+        request_context,
+    )
+    if not trace.allowed:
+        LOG.warning('policy denied: %s', trace)
+
+The trace records:
+
+* the policy rule name that was requested and every ``rule:`` reference
+  that was actually followed,
+* which checks ran, in evaluation order, and their boolean result,
+* which branches were short-circuited, reported as ``not executed`` with a
+  ``None`` result.
+
+Short-circuiting is reported faithfully. With ``role:admin or role:member``,
+an ``admin`` credential means ``role:member`` is listed as *not executed*, not
+as ``False``. The same applies to the remaining operands of an ``and`` whose
+first operand denied. Counting checks can be used in tests to confirm that the
+trace matches the invocations the checks actually observed.
+
+The trace is intentionally limited to policy structure and check
+expressions. Target and credential values are never copied into a trace or
+written to the log, so it is safe to hand the trace to a restricted
+diagnostic consumer. While a trace is being collected the usual debug log
+line emitted by :meth:`~oslo_policy.policy.Enforcer.enforce`, which dumps
+masked credentials and target, is suppressed; use the trace for diagnostics
+instead. Normal ``enforce`` calls keep their existing debug logging.
+
+The decision itself is unchanged: ``explain`` returns the same value as
+``enforce``, honours ``do_raise`` and scope enforcement, and existing callers
+of ``enforce`` that do not use ``explain`` keep receiving their original
+boolean result. Use :meth:`~oslo_policy.policy.Enforcer.explain_authorize`
+when the rule must also be registered, mirroring
+:meth:`~oslo_policy.policy.Enforcer.authorize`.
+
+``trace.to_dict()`` returns a JSON-compatible structure for diagnostic
+endpoints, ``trace.to_json()`` serializes it, and ``str(trace)`` renders a
+compact tree::
+
+    compute:start: deny
+      compute:start: (rule:admin_or_owner and project_id:%(project_id)s) [executed] -> false
+      +- admin_or_owner: rule:admin_or_owner [executed] -> true
+      |  `- admin_or_owner: (role:admin or project_id:%(project_id)s) [executed] -> true
+      |     +- admin_or_owner: role:admin [executed] -> true
+      |     `- admin_or_owner: project_id:%(project_id)s [not executed]
+      `- compute:start: project_id:%(project_id)s [executed] -> false
