@@ -77,6 +77,7 @@ class EnvironmentOptions:
     :param python_flag_passed: whether ``--python`` was given on the command line.
     :param fetch_python: whether to fetch a missing Python interpreter.
     :param preinstall_packages: packages installed before the main package, or None.
+    :param profile: the shared-libraries profile a new environment links to, or None for the default.
     """
 
     python: str | None
@@ -84,6 +85,7 @@ class EnvironmentOptions:
     python_flag_passed: bool = False
     fetch_python: FetchPythonOptions = FetchPythonOptions.NEVER
     preinstall_packages: list[str] | None = None
+    profile: str | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -278,6 +280,26 @@ class SyncOptions:
     verbose: bool
     prune: bool
     backend: BackendOptions
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SharedProfileOptions:
+    """Options of the shared-profile commands.
+
+    :param requires: the pip requirement a profile declares or installs.
+    :param python_requires: the Python requirement a profile promises, or None.
+    :param pip_args: extra arguments passed to pip when applying the profile.
+    :param force: allow an upgrade or pin to cross the profile's declared requirement.
+    :param apply: create or upgrade the profile environment after declaring it.
+    :param verbose: whether to print verbose output.
+    """
+
+    requires: str
+    python_requires: str | None = None
+    pip_args: list[str] = field(default_factory=list)
+    force: bool = False
+    apply: bool = False
+    verbose: bool = False
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

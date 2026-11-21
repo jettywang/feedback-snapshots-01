@@ -25,7 +25,7 @@ from pipx.backends import PIP, Backend, OutdatedPackage
 from pipx.constants import WINDOWS
 from pipx.paths import CTX
 from pipx.redact import redact_command_line
-from pipx.shared_libs import SHARED_LIBS, write_shared_pth
+from pipx.shared_libs import SHARED_LIBS, _SharedLibs, shared_libs_for, write_shared_pth
 from pipx.subprocess_runner import get_site_packages, run_subprocess, subprocess_post_check
 from pipx.trash import safe_unlink
 from pipx.util import PipxError, get_venv_paths, open_owner_only
@@ -113,6 +113,7 @@ class PipBackend(Backend):
         pip_args: list[str],
         include_pip: bool,
         verbose: bool,
+        profile: str | None = None,
     ) -> None:
         """Create a virtual environment and install the shared pip libraries into it.
 
@@ -122,6 +123,7 @@ class PipBackend(Backend):
         :param pip_args: extra arguments for the installer.
         :param include_pip: whether the environment ships its own pip.
         :param verbose: show the progress of the creation.
+        :param profile: the shared profile to link to, or None for the default.
         :raises PipxError: when the environment cannot be created.
         """
         cmd: Final = [python, "-m", "venv", *([] if include_pip else ["--without-pip"]), *venv_args, str(root)]
@@ -129,12 +131,13 @@ class PipBackend(Backend):
             venv_process: Final = run_subprocess(cmd, run_dir=str(root))
         subprocess_post_check(venv_process)
 
-        SHARED_LIBS.create(verbose=verbose, pip_args=pip_args)
+        shared: Final[_SharedLibs] = shared_libs_for(profile)
+        shared.create(verbose=verbose, pip_args=pip_args)
         if not include_pip:
             _, python_path, _ = get_venv_paths(root)
             purelib: Final = get_site_packages(python_path)[0]
             purelib.mkdir(parents=True, exist_ok=True)
-            write_shared_pth(root, purelib)
+            write_shared_pth(root, purelib, shared)
 
     def install(  # ruff:ignore[too-many-arguments]  # Backend interface method mapping flags to pip options
         self,

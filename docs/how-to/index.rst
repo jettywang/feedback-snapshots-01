@@ -21,6 +21,7 @@ effect. They assume pipx is already installed unless the guide is about installi
     move-installation
     standalone-python
     dependency-cooldown
+    shared-profiles
     use-private-index
     use-uv-backend
     use-with-pre-commit

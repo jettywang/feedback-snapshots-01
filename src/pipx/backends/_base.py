@@ -41,6 +41,7 @@ class Backend(ABC):
         pip_args: list[str],
         include_pip: bool,
         verbose: bool,
+        profile: str | None = None,
     ) -> None:
         """Create an environment using the requested Python and installer options.
 
@@ -50,6 +51,7 @@ class Backend(ABC):
         :param pip_args: arguments for the installer.
         :param include_pip: install pip into the environment.
         :param verbose: show installer output.
+        :param profile: the shared profile to link to, or None for the default.
         """
 
     def install_lock(

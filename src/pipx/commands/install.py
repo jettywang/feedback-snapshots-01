@@ -608,6 +608,8 @@ def _install_into_venv(
                 # `pipx install pip` needs pip, which uv venvs lack; an explicit --backend uv still reaches
                 # assert_not_pip_under_uv and fails
                 backend=BackendOptions(cli=options.backend.cli or PIP) if installs_pip else options.backend,
+                # a profile chosen on the command line applies to a new environment; an existing one keeps its record
+                profile=options.environment.profile,
             )
             recorded_lock: Final[Path | None] = venv.pipx_metadata.main_package.lock_file
             required_lock: Final[Path | None] = (

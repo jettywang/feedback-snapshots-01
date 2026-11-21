@@ -18,6 +18,7 @@ from pipx.commands.uninstall import UninstallData, uninstall_all
 from pipx.constants import COMPLETION_SECTIONS, MAN_SECTIONS
 from pipx.paths import CTX
 from pipx.result import OperationData, OperationResult, OutputMessage, OutputStream
+from pipx.shared_profiles import profiles_root
 from pipx.trash import rmdir
 from pipx.venv import Venv
 
@@ -48,6 +49,7 @@ def reset(
         target
         for target in (
             CTX.venvs,
+            profiles_root(),
             CTX.shared_libs,
             CTX.venv_cache,
             CTX.standalone_python_cachedir,

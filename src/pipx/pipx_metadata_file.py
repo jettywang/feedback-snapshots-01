@@ -18,6 +18,8 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import TYPE_CHECKING, Any, Final, Self, TypedDict, cast
 
+from packaging.version import Version
+
 from pipx.backends import KNOWN_BACKENDS
 from pipx.emojis import HAZARD
 from pipx.options import ExposureOptions
@@ -36,7 +38,12 @@ _LOGGER: Final[logging.Logger] = logging.getLogger(__name__)
 #: Name of the file that records a virtual environment's pipx metadata.
 PIPX_INFO_FILENAME: Final[str] = "pipx_metadata.json"
 # bump only when the file format changes
-_METADATA_VERSION: Final[str] = "0.12"
+_METADATA_VERSION: Final[str] = "0.13"
+# 0.13 records the shared profile an environment links to; earlier files all use the default profile
+_PROFILE_METADATA_VERSION: Final[Version] = Version("0.13")
+_KNOWN_METADATA_VERSIONS: Final[frozenset[str]] = frozenset(
+    {_METADATA_VERSION, "0.12", "0.11", "0.10", "0.9", "0.8", "0.7", "0.6", "0.5"}
+)
 
 
 class _RawPackageRecord(TypedDict, total=False):
@@ -85,6 +92,7 @@ class _RawMetadata(TypedDict, total=False):
     injected_packages: dict[str, _RawPackageInfo]
     backend: str
     exposure_enabled: bool
+    shared_profile: str
     pipx_metadata_version: str
     pinned: bool
 
@@ -112,6 +120,7 @@ class PipxMetadata:
     :ivar venv_args: extra arguments passed when creating the environment.
     :ivar injected_packages: the metadata of the injected packages, keyed by package name.
     :ivar backend: the name of the backend that installs packages.
+    :ivar shared_profile: the name of the shared libraries profile the environment links to.
     :ivar exposure_enabled: whether the apps are exposed.
     :ivar read_metadata_version: the version of the metadata file read, or None until a read succeeds.
     """
@@ -132,6 +141,7 @@ class PipxMetadata:
         self.venv_args: list[str] = []
         self.injected_packages: dict[str, PackageInfo] = {}
         self.backend: str = "pip"
+        self.shared_profile: str = "default"
         self.exposure_enabled: bool = True
         # stays None until a read succeeds, which tells a fresh instance from one holding the values on disk
         self.read_metadata_version: str | None = None
@@ -187,6 +197,7 @@ class PipxMetadata:
             )
             recorded_backend = "pip"
         self.backend = recorded_backend
+        self.shared_profile = input_dict.get("shared_profile") or "default"
         self.exposure_enabled = input_dict["exposure_enabled"]
         self.read_metadata_version = input_dict.get("pipx_metadata_version")
 
@@ -203,7 +214,7 @@ class PipxMetadata:
                 # 0.1 recorded no suffix, so take it from the venv name
                 main_package_data["suffix"] = self.venv_dir.name.replace(package_name, "")
             metadata_dict["source_interpreter"] = None
-        elif version not in {_METADATA_VERSION, "0.11", "0.10", "0.9", "0.8", "0.7", "0.6", "0.5"}:
+        elif version not in _KNOWN_METADATA_VERSIONS:
             msg = f"""
                 {self.venv_dir.name}: Unknown metadata version {version}, written
                 by a later version of pipx. Upgrade pipx to manage this package.
@@ -212,6 +223,9 @@ class PipxMetadata:
         # files before 0.6 record no backend
         metadata_dict.setdefault("backend", "pip")
         metadata_dict.setdefault("exposure_enabled", True)
+        # a file before 0.13 links to the historical shared libraries, which are the default profile
+        if Version(version) < _PROFILE_METADATA_VERSION:
+            metadata_dict.setdefault("shared_profile", "default")
         # an earlier pipx named include_resources_from include_apps_from; PackageInfo takes no such field, so the
         # TypedDict leaves the old key out and the pop goes through an untyped view
         for package_data in (metadata_dict["main_package"], *(metadata_dict.get("injected_packages") or {}).values()):
@@ -254,6 +268,7 @@ class PipxMetadata:
             "venv_args": self.venv_args,
             "injected_packages": {name: data.to_dict() for (name, data) in self.injected_packages.items()},
             "backend": self.backend,
+            "shared_profile": self.shared_profile,
             "exposure_enabled": self.exposure_enabled,
             "pipx_metadata_version": _METADATA_VERSION,
         }

@@ -33,16 +33,27 @@ from pipx.emojis import strtobool
 from pipx.fanout import in_turn
 from pipx.interpreter import get_default_python, read_pyvenv_cfg
 from pipx.package_specifier import absolute_path_pip_args
-from pipx.paths import CTX
 from pipx.requires_python import unsatisfied_by_interpreter
+from pipx.shared_profiles import (
+    DEFAULT_PROFILE,
+    Profile,
+    bump,
+    installed_pip_version,
+    profile_root,
+    validate_profile_name,
+)
+from pipx.shared_profiles import load as load_profile
+from pipx.shared_profiles import write as write_profile
 from pipx.subprocess_runner import get_site_packages, run_subprocess, subprocess_post_check
 from pipx.util import PipxError, get_venv_paths
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
+    from importlib.metadata import Distribution
     from subprocess import CompletedProcess
 
     from filelock import BaseFileLock
+    from packaging.requirements import Requirement
 
 _LOGGER: Final[logging.Logger] = logging.getLogger(__name__)
 #: Age after which the shared libraries are upgraded automatically.
@@ -92,13 +103,48 @@ class _SharedLibs:
         self._lock: Final[RLock] = RLock()
         self.has_been_updated_this_run = False
         self.has_been_logged_this_run = False
+        # the default profile keeps the historical directory, so nothing changes for environments that name none
+        self._profile: Final[str] = DEFAULT_PROFILE
+        # one instance per profile, so its validity cache and lock states last as long as this default instance's
+        self._by_profile: Final[dict[str, _SharedLibs]] = {}
+
+    @property
+    def profile_name(self) -> str:
+        """Return the name of the profile this instance manages.
+
+        :returns: the profile name.
+        """
+        return self._profile
+
+    @property
+    def profile(self) -> Profile:
+        """Return the declaration of the profile this instance manages.
+
+        :returns: the profile.
+        """
+        return load_profile(self._profile)
+
+    def for_profile(self, name: str) -> _SharedLibs:
+        """Return an instance that manages the given profile, reusing the one already handed out.
+
+        :param name: the profile name.
+        :returns: the instance for that profile.
+        """
+        validated: Final[str] = validate_profile_name(name)
+        if validated == DEFAULT_PROFILE:
+            return self
+        if validated not in self._by_profile:
+            instance: Final[_SharedLibs] = _SharedLibs()
+            object.__setattr__(instance, "_profile", validated)
+            self._by_profile[validated] = instance
+        return self._by_profile[validated]
 
     @property
     def needs_upgrade(self) -> bool:
         if self.has_been_updated_this_run:
             return False
 
-        if not self.pip_path.is_file() or self._pip_below_floor():
+        if not self.pip_path.is_file() or self._pip_below_floor() or self._pip_outside_declaration():
             return True
 
         time_since_last_update_sec: Final[float] = _time() - self.pip_path.stat().st_mtime
@@ -119,15 +165,28 @@ class _SharedLibs:
 
     @property
     def root(self) -> Path:
-        return CTX.shared_libs
+        return profile_root(self._profile)
 
     def _pip_below_floor(self) -> bool:
-        from importlib.metadata import distributions  # ruff:ignore[import-outside-top-level]  # slows startup
+        floor: Final[Version] = self.profile.minimum_pip
+        return any(Version(dist.version) < floor for dist in self._pip_distributions())
 
+    def _pip_outside_declaration(self) -> bool:
+        requirement: Final[Requirement | None] = self.profile.specifier
+        if requirement is None or not requirement.specifier:
+            return False
         return any(
-            Version(dist.version) < Version(_PIP_FLOOR)
-            for dist in distributions(name="pip", path=[str(path) for path in self.site_packages])
+            not requirement.specifier.contains(Version(dist.version), prereleases=True)
+            for dist in self._pip_distributions()
         )
+
+    def _pip_distributions(self) -> tuple[Distribution, ...]:
+        from importlib.metadata import (  # ruff:ignore[import-outside-top-level]  # slows startup
+            Distribution,
+            distributions,
+        )
+
+        return tuple(distributions(name="pip", path=[str(path) for path in self.site_packages]))
 
     @property
     def site_packages(self) -> list[Path]:
@@ -205,6 +264,7 @@ class _SharedLibs:
             # a copy that fails under 3.12+ because the standard library no longer includes distutils.
             if any(self.root.glob("*/site-packages/setuptools")) or any(self.root.glob("*/*/site-packages/setuptools")):
                 run_subprocess([self.python_path, "-m", "pip", "--no-input", "uninstall", "-y", "setuptools"])
+            self._record_success()
 
     @property
     def is_valid(self) -> bool:
@@ -247,28 +307,59 @@ class _SharedLibs:
             return False
         return True
 
-    def _install_pip(self, *, pip_args: list[str], verbose: bool, raises: bool, pythonpath: str | None = None) -> None:
+    def _install_pip(
+        self, *, pip_args: list[str], verbose: bool, raises: bool, pythonpath: str | None = None, override: bool = False
+    ) -> None:
         cooldown_days: Final[int | None] = _COOLDOWN_DAYS.get()
+        requirement: Final[str] = self._pip_requirement(pip_args)
+        # the requirement is appended explicitly, so a pip pin already in pip_args must not be passed a second time
+        pip_args = [argument for argument in pip_args if not _is_pip_requirement(argument)]
+        floor: Final[Version] = self.profile.minimum_pip
         # pip before 26.1 rejects --uploaded-prior-to, and a reinstall under a cooldown fails when no release is old
-        # enough, so first lay down the oldest pip pipx accepts; the cooldown upgrade then keeps it as a candidate
+        # enough, so first lay down the oldest pip the profile accepts; the cooldown upgrade then keeps it a candidate
         if floor_first := bool(cooldown_days) and (
             pythonpath is not None or "--force-reinstall" in pip_args or self._pip_below_floor()
         ):
             self._run_pip_install(
-                pip_args, f"pip == {_PIP_FLOOR}", verbose=verbose, raises=raises, pythonpath=pythonpath
+                pip_args, f"pip == {floor}", verbose=verbose, raises=raises, pythonpath=pythonpath, override=override
             )
             pip_args = [arg for arg in pip_args if arg != "--force-reinstall"]
             pythonpath = None
         self._run_pip_install(
             [*pip_args, *(["--uploaded-prior-to", f"P{cooldown_days}D"] if cooldown_days else [])],
-            f"pip >= {_PIP_FLOOR}",
+            requirement,
             verbose=verbose,
             raises=raises and not floor_first,
             pythonpath=pythonpath,
+            override=override,
         )
 
-    def _run_pip_install(
-        self, pip_args: list[str], requirement: str, *, verbose: bool, raises: bool, pythonpath: str | None
+    def _pip_requirement(self, pip_args: list[str]) -> str:
+        # an explicit pip pin replaces the profile requirement, as pip rejects one requirement beside a conflicting
+        # pin; the pin was already checked against, or accepted over, the declaration
+        from packaging.requirements import (  # ruff:ignore[import-outside-top-level]  # slows startup
+            InvalidRequirement,
+            Requirement,
+        )
+
+        for argument in pip_args:
+            try:
+                requirement: Final = Requirement(argument)
+            except InvalidRequirement:
+                continue
+            if requirement.name.lower() == "pip" and requirement.specifier:
+                return str(requirement)
+        return self.profile.effective_requires or f"pip>={PIP_FLOOR}"
+
+    def _run_pip_install(  # ruff:ignore[too-many-arguments]  # mirrors run_subprocess switches plus the override flag
+        self,
+        pip_args: list[str],
+        requirement: str,
+        *,
+        verbose: bool,
+        raises: bool,
+        pythonpath: str | None,
+        override: bool,
     ) -> None:
         _LOGGER.info("Upgrading shared libraries in %s", self.root)
 
@@ -300,16 +391,29 @@ class _SharedLibs:
 
             self.has_been_updated_this_run = True
             self.pip_path.touch()
+            self._record_success(override)
 
         except Exception:  # an automatic upgrade that fails must not abort the command that triggered it
             _LOGGER.exception("Failed to upgrade shared libraries", exc_info=not raises)
             if raises:
                 raise
 
+    def _record_success(self, override: bool = False) -> None:
+        profile: Final[Profile] = self.profile
+        if not profile.registered:
+            return
+        write_profile(
+            bump(
+                profile,
+                pip_version=installed_pip_version(self.root),
+                overridden=override,
+            )
+        )
+
     def _bootstrap_pip(self) -> None:
         subprocess_post_check(run_subprocess([self.python_path, "-m", "ensurepip", "--upgrade", "--default-pip"]))
 
-    def _upgrade(self, *, pip_args: list[str], verbose: bool, raises: bool) -> None:
+    def _upgrade(self, *, pip_args: list[str], verbose: bool, raises: bool, override: bool = False) -> None:
         if not self.is_valid:
             self._create(verbose=verbose, pip_args=pip_args, reinstall_pip=True)
             return
@@ -318,7 +422,7 @@ class _SharedLibs:
             _LOGGER.info("Already upgraded libraries in %s", self.root)
             return
 
-        self._install_pip(pip_args=pip_args, verbose=verbose, raises=raises)
+        self._install_pip(pip_args=pip_args, verbose=verbose, raises=raises, override=override)
 
     def run_repairing_pip(
         self, run: Callable[[], CompletedProcess[str]], *, pip_args: list[str], verbose: bool
@@ -357,26 +461,41 @@ class _SharedLibs:
             ).returncode
         )
 
-    def upgrade(self, *, pip_args: list[str], verbose: bool, raises: bool = False) -> None:
+    def upgrade(
+        self, *, pip_args: list[str], verbose: bool, raises: bool = False, override: bool = False
+    ) -> None:
         with in_turn(lambda: self.has_been_updated_this_run), self._lock, self._maintenance_lock():
-            self._upgrade(pip_args=pip_args, verbose=verbose, raises=raises)
+            self._upgrade(pip_args=pip_args, verbose=verbose, raises=raises, override=override)
 
 
 #: The shared libraries that pipx's environments use.
 SHARED_LIBS: Final[_SharedLibs] = _SharedLibs()
 
 
-def write_shared_pth(venv_root: Path, purelib: Path) -> None:
-    """Point an environment at the shared libraries, in the encoding its Python reads ``.pth`` files with.
+def write_shared_pth(venv_root: Path, purelib: Path, shared: _SharedLibs | None = None) -> None:
+    """Point an environment at a shared-libraries profile, in the encoding its Python reads ``.pth`` files with.
 
     :param venv_root: the environment to point at the shared libraries.
     :param purelib: the environment's site-packages directory.
+    :param shared: the profile to link to, the default profile when None.
     """
-    data: Final[bytes] = "".join(f"{path}\n" for path in SHARED_LIBS.site_packages).encode(_pth_encoding(venv_root))
+    profile: Final[_SharedLibs] = SHARED_LIBS if shared is None else shared
+    data: Final[bytes] = "".join(f"{path}\n" for path in profile.site_packages).encode(_pth_encoding(venv_root))
     pth: Final[Path] = purelib / PIPX_SHARED_PTH
     # an older pipx may have written the right paths in an encoding the environment's Python cannot read
     if not pth.is_file() or pth.read_bytes() != data:
         pth.write_bytes(data)
+
+
+def shared_libs_for(profile_name: str | None) -> _SharedLibs:
+    """Return the shared-libraries instance for a profile, the shared default when it names none.
+
+    :param profile_name: the profile name, or None for the default profile.
+    :returns: the instance, which is the module's shared instance for the default profile.
+    """
+    if profile_name in {None, DEFAULT_PROFILE}:
+        return SHARED_LIBS
+    return SHARED_LIBS.for_profile(profile_name)
 
 
 def _pth_encoding(venv_root: Path) -> str:
@@ -392,6 +511,19 @@ def _pth_encoding(venv_root: Path) -> str:
     return locale.getencoding()
 
 
+def _is_pip_requirement(argument: str) -> bool:
+    from packaging.requirements import (  # ruff:ignore[import-outside-top-level]  # slows startup
+        InvalidRequirement,
+        Requirement,
+    )
+
+    try:
+        requirement: Final = Requirement(argument)
+    except InvalidRequirement:
+        return False
+    return requirement.name.lower() == "pip" and bool(requirement.specifier)
+
+
 def shared_libs_auto_upgrade_disabled() -> bool:
     """Return whether the automatic upgrade of the shared libraries is turned off.
 
@@ -405,6 +537,7 @@ __all__ = [
     "SHARED_LIBS",
     "SHARED_LIBS_MAX_AGE_SEC",
     "shared_libs_auto_upgrade_disabled",
+    "shared_libs_for",
     "shared_pip_cooldown",
     "skip_shared_libs_maintenance",
     "write_shared_pth",

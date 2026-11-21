@@ -96,6 +96,7 @@ from pipx.options import (
     ReinstallOptions,
     RunInterpreterOptions,
     RunOptions,
+    SharedProfileOptions,
     SyncOptions,
     UninjectOptions,
     UpgradeOptions,
@@ -137,6 +138,7 @@ if TYPE_CHECKING:
     from pipx.commands.pin import PinData
     from pipx.commands.reinstall import ReinstallData
     from pipx.commands.reset import ResetData
+    from pipx.commands.shared import SharedProfilesData
     from pipx.commands.uninstall import UninstallData
     from pipx.commands.upgrade import SharedData, UpgradeData
 
@@ -312,6 +314,7 @@ def get_command_parser(*, prog: str | None = None) -> argparse.ArgumentParser:
     _add_upgrade(subparsers, completer_venvs.use, shared_parser)
     _add_upgrade_all(subparsers, shared_parser)
     _add_upgrade_shared(subparsers, shared_parser)
+    _add_profile(subparsers, shared_parser)
     _add_uninstall(subparsers, completer_venvs.use, shared_parser)
     _add_uninstall_all(subparsers, shared_parser)
     _add_reset(subparsers, shared_parser)
@@ -493,6 +496,14 @@ def _add_install(subparsers: argparse._SubParsersAction, shared_parser: argparse
     )
     _add_pip_venv_args(parser)
     _add_backend_arg(parser)
+    parser.add_argument(
+        "--profile",
+        default=None,
+        help=(
+            "Shared-libraries profile a new environment links to. Declare profiles with `pipx profile declare` "
+            "to keep services on different pip versions."
+        ),
+    )
     _add_output_option(parser)
     parser.set_defaults(func=_cmd_install)
 
@@ -661,6 +672,7 @@ def _cmd_install(args: argparse.Namespace, ctx: _DispatchContext) -> OperationRe
                 python_flag_passed=ctx.python_flag_passed,
                 fetch_python=ctx.fetch_python,
                 preinstall_packages=args.preinstall,
+                profile=args.profile,
             ),
             existing=ExistingOptions(force=args.force, upgrade=args.upgrade, upgrade_strategy=args.upgrade_strategy),
             pip_args=ctx.pip_args,
@@ -1116,6 +1128,167 @@ def _cmd_upgrade_shared(args: argparse.Namespace, ctx: _DispatchContext) -> Oper
     from pipx.commands.upgrade import upgrade_shared
 
     return upgrade_shared(ctx.pip_args, verbose=ctx.verbose)
+
+
+def _add_profile(subparsers: argparse._SubParsersAction, shared_parser: argparse.ArgumentParser) -> None:
+    parser: Final[argparse.ArgumentParser] = subparsers.add_parser(
+        "profile",
+        help="Manage versioned shared libraries profiles",
+        description=(
+            "Manage the shared libraries that pip-backed environments borrow. Each profile pins its own pip "
+            "version and declares the compatibility it promises, so one service can stay on an older pip without "
+            "holding back the others."
+        ),
+    )
+    subcommands: Final[argparse._SubParsersAction] = parser.add_subparsers(
+        title="subcommands",
+        description="Get help for commands with pipx profile COMMAND --help",
+        dest="profile_command",
+    )
+
+    list_parser: Final[argparse.ArgumentParser] = subcommands.add_parser(
+        "list",
+        help="List shared profiles",
+        description="List the shared profiles of this pipx home, their declared requirement, and their users.",
+        parents=[shared_parser],
+    )
+    _add_output_option(list_parser)
+    list_parser.set_defaults(func=_cmd_profile_list)
+
+    declare_parser: Final[argparse.ArgumentParser] = subcommands.add_parser(
+        "declare",
+        help="Declare what a shared profile satisfies",
+        description=(
+            "Record a profile's pip requirement without upgrading any environment, so existing environments keep "
+            "running what they already have until the profile is upgraded on purpose."
+        ),
+        parents=[shared_parser],
+    )
+    declare_parser.add_argument("name", help="Name of the shared profile.")
+    declare_parser.add_argument(
+        "--requires",
+        required=True,
+        help="The pip requirement the profile installs, such as 'pip>=26.1,<26.2'.",
+    )
+    declare_parser.add_argument(
+        "--python-requires",
+        help="The Python requirement the profile promises, recorded for callers that pick a profile.",
+    )
+    declare_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Create or upgrade the profile's environment now instead of only recording the declaration.",
+    )
+    declare_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Accept a pip pin or upgrade outside the declared requirement, recording the override.",
+    )
+    declare_parser.add_argument(
+        "--pip-args",
+        help="Arbitrary pip arguments to pass through when --apply upgrades the profile.",
+    )
+    _add_output_option(declare_parser)
+    declare_parser.set_defaults(func=_cmd_profile_declare)
+
+    upgrade_parser: Final[argparse.ArgumentParser] = subcommands.add_parser(
+        "upgrade",
+        help="Upgrade one shared profile",
+        description="Upgrade the pip of one profile, leaving every other profile's environment alone.",
+        parents=[shared_parser],
+    )
+    upgrade_parser.add_argument("name", help="Name of the shared profile.")
+    upgrade_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Accept a pip pin or upgrade outside the declared requirement, recording the override.",
+    )
+    upgrade_parser.add_argument(
+        "--pip-args",
+        help="Arbitrary pip arguments to pass to the upgrade, such as a pip pin.",
+    )
+    _add_output_option(upgrade_parser)
+    upgrade_parser.set_defaults(func=_cmd_profile_upgrade)
+
+    reclaim_parser: Final[argparse.ArgumentParser] = subcommands.add_parser(
+        "reclaim",
+        help="Reclaim an unused shared profile",
+        description="Remove a profile's environment once no environment references it.",
+        parents=[shared_parser],
+    )
+    reclaim_parser.add_argument("name", help="Name of the shared profile.")
+    reclaim_parser.add_argument(
+        "--dry-run", action="store_true", help="Report what would be removed without removing it."
+    )
+    _add_output_option(reclaim_parser)
+    reclaim_parser.set_defaults(func=_cmd_profile_reclaim)
+
+    gc_parser: Final[argparse.ArgumentParser] = subcommands.add_parser(
+        "gc",
+        help="Reclaim every unused shared profile",
+        description="Remove every non-default profile that no environment references.",
+        parents=[shared_parser],
+    )
+    gc_parser.add_argument(
+        "--dry-run", action="store_true", help="Report what would be removed without removing it."
+    )
+    _add_output_option(gc_parser)
+    gc_parser.set_defaults(func=_cmd_profile_gc)
+
+    parser.set_defaults(func=_make_print_help(parser))
+
+
+def _cmd_profile_list(args: argparse.Namespace, ctx: _DispatchContext) -> OperationResult[SharedProfilesData]:
+    del args, ctx
+    from pipx.commands.shared import list_profiles
+
+    return list_profiles()
+
+
+def _profile_options(args: argparse.Namespace, ctx: _DispatchContext, *, apply: bool) -> SharedProfileOptions:
+    return SharedProfileOptions(
+        requires=args.requires,
+        python_requires=args.python_requires,
+        pip_args=ctx.pip_args,
+        force=args.force,
+        apply=apply,
+        verbose=ctx.verbose,
+    )
+
+
+def _cmd_profile_declare(args: argparse.Namespace, ctx: _DispatchContext) -> OperationResult[SharedProfilesData]:
+    from pipx.commands.shared import declare_profile
+
+    return declare_profile(args.name, _profile_options(args, ctx, apply=args.apply))
+
+
+def _cmd_profile_upgrade(args: argparse.Namespace, ctx: _DispatchContext) -> OperationResult[SharedProfilesData]:
+    from pipx.commands.shared import upgrade_profile
+
+    return upgrade_profile(
+        args.name,
+        SharedProfileOptions(
+            requires="",
+            pip_args=ctx.pip_args,
+            force=args.force,
+            apply=True,
+            verbose=ctx.verbose,
+        ),
+    )
+
+
+def _cmd_profile_reclaim(args: argparse.Namespace, ctx: _DispatchContext) -> OperationResult[SharedProfilesData]:
+    del ctx
+    from pipx.commands.shared import reclaim_profile
+
+    return reclaim_profile(args.name, dry_run=args.dry_run)
+
+
+def _cmd_profile_gc(args: argparse.Namespace, ctx: _DispatchContext) -> OperationResult[SharedProfilesData]:
+    del ctx
+    from pipx.commands.shared import gc_profiles
+
+    return gc_profiles(dry_run=args.dry_run)
 
 
 def _add_uninstall(
@@ -2315,7 +2488,7 @@ def _output_format(args: argparse.Namespace) -> OutputFormat:
 
 def _command_tokens(args: argparse.Namespace) -> tuple[str, ...]:
     tokens: Final[list[str]] = [args.command]
-    for subcommand in ("cache_command", "interpreter_command", "manifest_command"):
+    for subcommand in ("cache_command", "interpreter_command", "manifest_command", "profile_command"):
         if value := getattr(args, subcommand, None):
             tokens.append(value)
     return tuple(tokens)

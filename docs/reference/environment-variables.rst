@@ -113,6 +113,8 @@ platform; they are reported, not set.
       - Meaning
     - - ``PIPX_LOCAL_VENVS``
       - Directory holding the per-package virtual environments (``$PIPX_HOME/venvs``).
+    - - ``PIPX_SHARED_PROFILES``
+      - Directory holding the non-default shared-library profiles (``$PIPX_HOME/shared.profiles``).
     - - ``PIPX_LOG_DIR``
       - Directory holding command logs.
     - - ``PIPX_TRASH_DIR``

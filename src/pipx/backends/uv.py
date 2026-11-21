@@ -100,6 +100,7 @@ class UvBackend(Backend):
         pip_args: list[str],
         include_pip: bool,
         verbose: bool,
+        profile: str | None = None,
     ) -> None:
         """Create a virtual environment with uv.
 
@@ -109,9 +110,10 @@ class UvBackend(Backend):
         :param pip_args: extra arguments for the installer, unused as uv seeds no pip.
         :param include_pip: whether the environment ships its own pip, which uv cannot do.
         :param verbose: show the progress of the creation.
+        :param profile: the shared profile to link to, unused as uv environments need none.
         :raises PipxError: when the environment is asked to ship pip.
         """
-        del pip_args  # uv venv has no pip to seed
+        del pip_args, profile  # uv venv has no pip to seed and links no shared libraries
         if include_pip:
             msg = (
                 "The uv backend cannot create a virtual environment with pip preinstalled.\n"

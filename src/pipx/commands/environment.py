@@ -23,6 +23,7 @@ from pipx.shared_libs import (
     DISABLE_SHARED_LIBS_AUTO_UPGRADE,
     shared_libs_auto_upgrade_disabled,
 )
+from pipx.shared_profiles import profiles_root
 from pipx.util import PipxError
 
 if TYPE_CHECKING:
@@ -52,6 +53,7 @@ ENVIRONMENT_VARIABLES: Final[list[str]] = [
 #: Environment variables that pipx derives from the ones users set.
 DERIVED_ENVIRONMENT_VARIABLES: Final[list[str]] = [
     "PIPX_LOCAL_VENVS",
+    "PIPX_SHARED_PROFILES",
     "PIPX_LOG_DIR",
     "PIPX_TRASH_DIR",
     "PIPX_VENV_CACHEDIR",
@@ -83,6 +85,7 @@ def environment(value: str | None) -> ExitCode:
         "PIPX_MAN_DIR": lambda: CTX.man_dir,
         "PIPX_COMPLETION_DIR": lambda: CTX.completion_dir,
         "PIPX_SHARED_LIBS": lambda: CTX.shared_libs,
+        "PIPX_SHARED_PROFILES": profiles_root,
         "PIPX_LOCAL_VENVS": lambda: CTX.venvs,
         "PIPX_LOG_DIR": lambda: CTX.logs,
         "PIPX_TRASH_DIR": lambda: CTX.trash,

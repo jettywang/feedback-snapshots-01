@@ -70,9 +70,12 @@ from pipx.script import installable_script, local_script
 from pipx.shared_libs import (
     DISABLE_SHARED_LIBS_AUTO_UPGRADE,
     SHARED_LIBS,
+    _SharedLibs,
     shared_libs_auto_upgrade_disabled,
+    shared_libs_for,
     write_shared_pth,
 )
+from pipx.shared_profiles import DEFAULT_PROFILE, validate_profile_name
 from pipx.subprocess_runner import exec_app, get_site_packages, subprocess_post_check
 from pipx.trash import rmdir
 from pipx.util import (
@@ -195,6 +198,7 @@ class Venv:  # ruff:ignore[too-many-public-methods]  # single facade over a pipx
         verbose: bool = False,
         python: str | None = None,
         backend: BackendOptions = DEFAULT_BACKEND_OPTIONS,
+        profile: str | None = None,
     ) -> None:
         self.root: Final[Path] = path
         self.python = python or get_default_python()
@@ -214,6 +218,8 @@ class Venv:  # ruff:ignore[too-many-public-methods]  # single facade over a pipx
         )
         self._site_packages: list[Path] | None = None
         self._uses_shared_libs_cache: bool | None = None
+        # a new environment may name the profile to link; an existing one keeps the profile it recorded
+        self._requested_profile: Final[str | None] = validate_profile_name(profile) if profile is not None else None
 
     @staticmethod
     def _resolve_backend(
@@ -261,6 +267,24 @@ class Venv:  # ruff:ignore[too-many-public-methods]  # single facade over a pipx
             return self.root.name
         return f"{package}{self.pipx_metadata.main_package.exposure.suffix}"
 
+    @property
+    def shared_profile_name(self) -> str:
+        """Return the name of the shared profile this environment links to.
+
+        :returns: the recorded profile, or the default profile.
+        """
+        return self.pipx_metadata.shared_profile or DEFAULT_PROFILE
+
+    @property
+    def shared_libs(self) -> _SharedLibs:
+        """Return the shared libraries this environment links to.
+
+        :returns: the shared-libraries instance of the environment's profile.
+        """
+        if self.shared_profile_name == DEFAULT_PROFILE:
+            return SHARED_LIBS
+        return shared_libs_for(self.shared_profile_name)
+
     def check_upgrade_shared_libs(self, *, verbose: bool, pip_args: list[str]) -> None:
         """Raise when the shared libraries of an existing environment need reinstalling.
 
@@ -269,20 +293,23 @@ class Venv:  # ruff:ignore[too-many-public-methods]  # single facade over a pipx
         :raises PipxError: when the shared libraries are invalid and cannot be upgraded automatically.
         """
         if self._existing and self.uses_shared_libs:
-            if SHARED_LIBS.is_valid:
+            shared: Final[_SharedLibs] = self.shared_libs
+            if shared.is_valid:
                 if shared_libs_auto_upgrade_disabled():
                     _LOGGER.info(
                         "Skipping shared libs auto-upgrade because %s is set.", DISABLE_SHARED_LIBS_AUTO_UPGRADE
                     )
-                elif SHARED_LIBS.needs_upgrade:
-                    SHARED_LIBS.upgrade(verbose=verbose, pip_args=pip_args)
+                elif shared.needs_upgrade:
+                    shared.upgrade(verbose=verbose, pip_args=pip_args)
             else:
-                SHARED_LIBS.create(verbose=verbose, pip_args=pip_args)
+                shared.create(verbose=verbose, pip_args=pip_args)
 
-            if not SHARED_LIBS.is_valid:
+            if not shared.is_valid:
+                profile_name: Final[str] = self.shared_profile_name
+                where: Final[str] = "" if profile_name == DEFAULT_PROFILE else f" profile {profile_name!r}"
                 message: Final = pipx_wrap(
                     f"""
-                    Error: pipx's shared venv {SHARED_LIBS.root} is invalid
+                    Error: pipx's shared venv {shared.root}{where} is invalid
                     and needs re-installation. To fix this, install or
                     reinstall a package. For example:
                     """
@@ -332,12 +359,17 @@ class Venv:  # ruff:ignore[too-many-public-methods]  # single facade over a pipx
             pip_args=pip_args,
             include_pip=override_shared,
             verbose=self.verbose,
+            profile=self._requested_profile,
         )
         self._site_packages = None
 
         self.pipx_metadata.venv_args = venv_args
         # recorded only here, so a --backend override on an existing venv (`pipx upgrade --backend uv`) cannot flip it
         self.pipx_metadata.backend = self._backend.name
+        # likewise a new pip-backed environment records the profile it links, and an existing one keeps its record; a
+        # uv environment has no shared libraries, so it records none
+        if self._requested_profile is not None and self._backend.backend.needs_shared_libs():
+            self.pipx_metadata.shared_profile = self._requested_profile
         # update_package_metadata records it from the package inspection, sparing a `python --version` run
         self.pipx_metadata.python_version = None
         if source_interpreter := shutil.which(self.python):
@@ -389,8 +421,9 @@ class Venv:  # ruff:ignore[too-many-public-methods]  # single facade over a pipx
             )
             raise PipxError(msg, wrap_message=False)
         # rebuilding shared pip with another Python minor moves its site-packages on POSIX
-        if self.uses_shared_libs and SHARED_LIBS.is_valid and (self.site_packages[0] / PIPX_SHARED_PTH).is_file():
-            write_shared_pth(self.root, self.site_packages[0])
+        shared: Final[_SharedLibs] = self.shared_libs
+        if self.uses_shared_libs and shared.is_valid and (self.site_packages[0] / PIPX_SHARED_PTH).is_file():
+            write_shared_pth(self.root, self.site_packages[0], shared)
         return self.python_path
 
     @property

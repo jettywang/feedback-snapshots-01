@@ -16,7 +16,7 @@ since ``reinstall`` and ``upgrade`` need them. Those credentials stay in plain t
 --json`` snapshot, so prefer a keyring or a ``.netrc`` file over credentials embedded in a URL. pipx writes the file
 readable by its owner only, whatever the umask; for a ``--global`` environment that owner is root.
 
-The current schema version is ``0.12`` (``pipx_metadata_version``). pipx migrates older files forward on read.
+The current schema version is ``0.13`` (``pipx_metadata_version``). pipx migrates older files forward on read.
 
 ******************
  Top-level fields
@@ -29,7 +29,7 @@ The current schema version is ``0.12`` (``pipx_metadata_version``). pipx migrate
     - - Field
       - Meaning
     - - ``pipx_metadata_version``
-      - Schema version string, currently ``"0.12"``.
+      - Schema version string, currently ``"0.13"``.
     - - ``environment``
       - The environment (venv) name, or ``null``.
     - - ``main_package``
@@ -48,6 +48,9 @@ The current schema version is ``0.12`` (``pipx_metadata_version``). pipx migrate
     - - ``backend``
       - Backend that manages the environment, ``pip`` or ``uv``. pipx reads an unknown value back as ``pip``, with a
         warning.
+    - - ``shared_profile``
+      - Shared-libraries profile the environment links to, ``default`` for the historical directory. Files written
+        before ``0.13`` read as ``default``.
     - - ``exposure_enabled``
       - Whether pipx currently exposes the environment's apps and man pages on ``PATH``.
 

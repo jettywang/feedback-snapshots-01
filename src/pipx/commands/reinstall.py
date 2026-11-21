@@ -227,6 +227,8 @@ def reinstall(
                         venv_args=venv.pipx_metadata.venv_args,
                         python_flag_passed=options.python_flag_passed,
                         preinstall_packages=[],
+                        # the rebuilt environment keeps the profile the old one linked to
+                        profile=venv.pipx_metadata.shared_profile,
                     ),
                     existing=ExistingOptions(force=True, reinstall=True),
                     pip_args=main_pip_args,
