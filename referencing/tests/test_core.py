@@ -31,6 +31,28 @@ def blow_up(uri):  # pragma: no cover
     raise RuntimeError("This retrieve function expects to never be called!")
 
 
+class RecordingRetriever:
+    """
+    An in-memory fake retriever which records each URI it is asked for.
+
+    URIs present in its mapping are "allowed" and return their resource;
+    anything else is "denied" by raising `NoSuchResource`. Either way the
+    attempt is appended to ``calls``, so tests can distinguish "external
+    retrieval happened" from "only local resources were read".
+    """
+
+    def __init__(self, resources=None):
+        self._resources = {} if resources is None else dict(resources)
+        self.calls = []
+
+    def __call__(self, uri):
+        self.calls.append(uri)
+        try:
+            return self._resources[uri]
+        except KeyError:
+            raise exceptions.NoSuchResource(ref=uri) from None
+
+
 class TestRegistry:
     def test_with_resource(self):
         """
@@ -574,6 +596,150 @@ class TestRegistry:
 
     def test_repr_empty(self):
         assert repr(Registry()) == "<Registry (0 resources)>"
+
+
+class TestCombineRetrievalContract:
+    """
+    The contract for how `Registry.combine` inherits retrieval behavior.
+
+    Only registries explicitly configured with a ``retrieve`` function
+    (e.g. platform-approved ones) carry external retrieval into a combined
+    registry. Registries without one (e.g. business-team ones) contribute
+    only their local resources.
+    """
+
+    def test_approved_registry_brings_retrieval_to_combination(self):
+        external = Resource.opaque({"source": "external"})
+        retriever = RecordingRetriever({"urn:external": external})
+        platform = Registry(retrieve=retriever)
+
+        local = Resource.opaque({"source": "local"})
+        business = Registry().with_resource("urn:local", local)
+
+        combined = business.combine(platform)
+        assert combined.get_or_retrieve("urn:local").value is local
+        assert retriever.calls == []
+
+        assert combined.get_or_retrieve("urn:external").value is external
+        assert retriever.calls == ["urn:external"]
+
+    def test_business_registries_contribute_only_local_resources(self):
+        one = Resource.opaque({"source": "one"})
+        two = Resource.opaque({"source": "two"})
+        first = Registry().with_resource("urn:one", one)
+        second = Registry().with_resource("urn:two", two)
+
+        combined = first.combine(second)
+        assert combined.get_or_retrieve("urn:one").value is one
+        assert combined.get_or_retrieve("urn:two").value is two
+        with pytest.raises(exceptions.NoSuchResource) as e:
+            combined.get_or_retrieve("urn:nowhere")
+        assert e.value == exceptions.NoSuchResource(ref="urn:nowhere")
+
+    def test_nested_combination_keeps_retrieval(self):
+        external = Resource.opaque({"source": "external"})
+        retriever = RecordingRetriever({"urn:external": external})
+        platform = Registry(retrieve=retriever)
+
+        one = Resource.opaque({"source": "one"})
+        two = Resource.opaque({"source": "two"})
+        business_one = Registry().with_resource("urn:one", one)
+        business_two = Registry().with_resource("urn:two", two)
+
+        nested = business_one.combine(platform).combine(business_two)
+        assert nested.get_or_retrieve("urn:one").value is one
+        assert nested.get_or_retrieve("urn:two").value is two
+        assert retriever.calls == []
+
+        assert nested.get_or_retrieve("urn:external").value is external
+        assert retriever.calls == ["urn:external"]
+
+        regrouped = business_one.combine(business_two.combine(platform))
+        assert regrouped.get_or_retrieve("urn:external").value is external
+        assert retriever.calls == ["urn:external"] * 2
+
+    def test_retrieved_resource_is_cached_in_resulting_registry(self):
+        external = Resource.opaque({"source": "external"})
+        retriever = RecordingRetriever({"urn:external": external})
+        combined = Registry().combine(Registry(retrieve=retriever))
+
+        retrieved = combined.get_or_retrieve("urn:external")
+        assert retrieved.value is external
+        assert retriever.calls == ["urn:external"]
+
+        again = retrieved.registry.get_or_retrieve("urn:external")
+        assert again.value is external
+        assert retriever.calls == ["urn:external"]
+
+    def test_already_cached_resource_stays_local_after_combining(self):
+        external = Resource.opaque({"source": "external"})
+        retriever = RecordingRetriever({"urn:external": external})
+        platform = Registry(retrieve=retriever)
+
+        cached = platform.get_or_retrieve("urn:external").registry
+        assert retriever.calls == ["urn:external"]
+
+        local = Resource.opaque({"source": "local"})
+        business = Registry().with_resource("urn:local", local)
+        combined = business.combine(cached)
+
+        assert combined["urn:external"] is external
+        assert combined.get_or_retrieve("urn:external").value is external
+        assert retriever.calls == ["urn:external"]
+
+    def test_derived_resolver_uses_inherited_retrieval(self):
+        external = Resource.opaque({"source": "external"})
+        other = Resource.opaque({"source": "other"})
+        retriever = RecordingRetriever(
+            {"urn:external": external, "urn:other": other},
+        )
+        platform = Registry(retrieve=retriever)
+        business = Registry().with_resource(
+            "urn:local",
+            Resource.opaque({"source": "local"}),
+        )
+        combined = business.combine(platform)
+
+        resolved = combined.resolver().lookup("urn:external")
+        assert resolved.contents == external.contents
+        assert retriever.calls == ["urn:external"]
+
+        derived = resolved.resolver
+        assert derived.lookup("urn:external").contents == external.contents
+        assert retriever.calls == ["urn:external"]
+
+        assert derived.lookup("urn:other").contents == other.contents
+        assert retriever.calls == ["urn:external", "urn:other"]
+
+    def test_same_named_resources_are_read_locally(self):
+        from_business = Resource.opaque({"source": "business"})
+        from_platform = Resource.opaque({"source": "platform"})
+        retriever = RecordingRetriever()
+        platform = Registry(retrieve=retriever).with_resource(
+            "urn:shared",
+            from_platform,
+        )
+        business = Registry().with_resource("urn:shared", from_business)
+
+        assert business.combine(platform)["urn:shared"] is from_platform
+        assert platform.combine(business)["urn:shared"] is from_business
+        assert retriever.calls == []
+
+    def test_denied_retrieval_is_recorded(self):
+        retriever = RecordingRetriever()
+        platform = Registry(retrieve=retriever)
+
+        local = Resource.opaque({"source": "local"})
+        business = Registry().with_resource("urn:local", local)
+        combined = business.combine(platform)
+
+        assert combined.get_or_retrieve("urn:local").value is local
+        assert retriever.calls == []
+
+        with pytest.raises(exceptions.NoSuchResource) as e:
+            combined.get_or_retrieve("urn:denied")
+        assert e.value == exceptions.NoSuchResource(ref="urn:denied")
+        assert retriever.calls == ["urn:denied"]
 
 
 class TestResource:
