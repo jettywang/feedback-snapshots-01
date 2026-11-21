@@ -43,12 +43,55 @@ import radicale.item as radicale_item
 from radicale import httputils, pathutils, storage, types, utils, xmlutils
 from radicale.app.base import Access, ApplicationBase
 from radicale.item import filter as radicale_filter
+from radicale.item.filter import ReportBudgetExceeded
 from radicale.log import logger
 
 DT_FORMAT_TIMESTAMP: str = '%Y%m%dT%H%M%SZ'
 DT_FORMAT_DATE: str = '%Y%m%d'
 
 FreeBusyPeriod = Tuple[datetime.datetime, datetime.datetime, str]
+
+
+class ReportBudget:
+    """Compute budget spent while answering one report query.
+
+    A unit is charged for every recurrence instance a report actually
+    examines and for every result item it emits. The budget belongs to the
+    request, so several collections merged into one query share it. When
+    it is exhausted, :meth:`charge` raises before the caller starts the
+    work that unit would pay for, so no partial result reaches the client.
+
+    A ``limit`` of ``0`` disables accounting.
+
+    """
+
+    limit: int
+    used: int
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.used = 0
+
+    @property
+    def enabled(self) -> bool:
+        return self.limit > 0
+
+    def charge(self, units: int = 1) -> None:
+        if not self.enabled:
+            return
+        if self.used + units > self.limit:
+            raise ReportBudgetExceeded(
+                "REPORT compute budget of {} units exceeded".format(
+                    self.limit))
+        self.used += units
+
+    def scanner(self) -> Callable[[], None]:
+        """Callback that charges one unit per examined occurrence."""
+
+        def scan() -> None:
+            self.charge()
+
+        return scan
 
 
 def _to_utc(value: datetime.datetime) -> datetime.datetime:
@@ -168,7 +211,9 @@ def _fbtype_for_component(component: vobject.base.Component) -> Optional[str]:
 def freebusy_periods(item: radicale_item.Item,
                      range_start: datetime.datetime,
                      range_end: datetime.datetime,
-                     max_occurrence: int) -> List[FreeBusyPeriod]:
+                     max_occurrence: int,
+                     budget: Optional[ReportBudget] = None
+                     ) -> List[FreeBusyPeriod]:
     if item.component_name != 'VEVENT':
         return []
     range_start = _to_utc(range_start)
@@ -191,6 +236,9 @@ def freebusy_periods(item: radicale_item.Item,
             return True
         if not (range_start < occurrence_end and occurrence_start < range_end):
             return False
+        if budget is not None:
+            # The occurrence is examined whether or not it yields a period.
+            budget.charge()
         examined += 1
         if max_occurrence > 0 and examined >= max_occurrence:
             return True
@@ -208,6 +256,9 @@ def freebusy_periods(item: radicale_item.Item,
             end = range_end
         if end <= start:
             return False
+        if budget is not None:
+            # One busy period is a result of the report.
+            budget.charge()
         periods.append((start, end, fbtype))
         return False
 
@@ -229,7 +280,8 @@ def freebusy_collection_text(collection: storage.BaseCollection,
                              max_occurrence: int,
                              unlock_storage_fn: Callable[[], None],
                              time_range_element: Optional[ET.Element] = None,
-                             output: str = "vfreebusy"
+                             output: str = "vfreebusy",
+                             budget: Optional[ReportBudget] = None
                              ) -> str:
     range_start = _to_utc(range_start)
     range_end = _to_utc(range_end)
@@ -267,8 +319,11 @@ def freebusy_collection_text(collection: storage.BaseCollection,
         item, filter_matched = retrieved_items.pop(0)
         if not filter_matched:
             try:
-                if not test_filter(collection_tag, item, filter_element, max_occurrence):
+                if not test_filter(collection_tag, item, filter_element,
+                                   max_occurrence, budget):
                     continue
+            except ReportBudgetExceeded:
+                raise
             except ValueError as e:
                 raise ValueError("Failed to free-busy filter item %r from %r: %s" %
                                  (item.href, collection.path, e)) from e
@@ -277,7 +332,7 @@ def freebusy_collection_text(collection: storage.BaseCollection,
                                    (item.href, collection.path, e)) from e
 
         periods.extend(freebusy_periods(
-            item, range_start, range_end, max_occurrence))
+            item, range_start, range_end, max_occurrence, budget))
     if output == "vevent":
         return render_busy_events(periods, collection.path)
     if output == "vfreebusy":
@@ -288,7 +343,8 @@ def freebusy_collection_text(collection: storage.BaseCollection,
 def free_busy_report(base_prefix: str, path: str, xml_request: Optional[ET.Element],
                      collection: storage.BaseCollection, encoding: str,
                      unlock_storage_fn: Callable[[], None],
-                     max_occurrence: int
+                     max_occurrence: int,
+                     budget: Optional[ReportBudget] = None
                      ) -> Tuple[int, Union[ET.Element, str]]:
     # NOTE: this function returns both an Element and a string because
     # free-busy reports are an edge-case on the return type according
@@ -309,21 +365,40 @@ def free_busy_report(base_prefix: str, path: str, xml_request: Optional[ET.Eleme
     range_start, range_end = radicale_filter.parse_time_range(time_range_element)
     return (client.OK, freebusy_collection_text(
         collection, range_start, range_end, max_occurrence,
-        unlock_storage_fn, time_range_element))
+        unlock_storage_fn, time_range_element, budget=budget))
 
 
 def xml_report(base_prefix: str, path: str, xml_request: Optional[ET.Element],
                collection: storage.BaseCollection, encoding: str,
                unlock_storage_fn: Callable[[], None],
                max_occurrence: int = 0, user: str = "", request_info: dict = {},
-               share: Union[dict, None] = None) -> Tuple[int, ET.Element]:
+               share: Union[dict, None] = None,
+               budget: Optional[ReportBudget] = None,
+               extra_collections: Sequence[storage.BaseCollection] = ()
+               ) -> Tuple[int, ET.Element]:
     """Read and answer REPORT requests that return XML.
+
+    ``budget`` is charged for every examined recurrence and every emitted
+    result item. It is shared by all collections merged into the answer.
+    Only a ``calendar-query`` spends it here; a ``sync-collection``,
+    multiget, and the other reports ignore it so a client can always
+    resynchronize. A ``free-busy-query`` is answered by
+    :func:`free_busy_report` and spends the same budget.
+
+    ``extra_collections`` are additional calendar collections of the same
+    owner that are answered in the same response. They are only used by a
+    ``calendar-query`` with ``Depth: 1`` on a collection that is not itself
+    a calendar.
 
     Read rfc3253-3.6 for info.
 
     """
     if logger.isEnabledFor(logging.DEBUG):
         logger.trace("REPORT/xml_report: base_prefix=%r path=%r", base_prefix, path)
+
+    if xml_request is not None and xml_request.tag != xmlutils.make_clark(
+            "C:calendar-query"):
+        budget = None
 
     share_bday_automap = False
     if share and share['Conversion'] == "bday":
@@ -425,24 +500,38 @@ def xml_report(base_prefix: str, path: str, xml_request: Optional[ET.Element],
 
         main_filters.append(filter_copy)
 
-    # Retrieve everything required for finishing the request.
-    retrieved_items = list(retrieve_items(
-        base_prefix, path, collection, hreferences, main_filters, multistatus, share))
+    # Retrieve everything required for finishing the request. Every entry
+    # carries the collection it came from, because a merged answer can span
+    # several collections. All storage access happens before the read lock
+    # is released.
+    retrieved: List[Tuple[radicale_item.Item, bool,
+                          storage.BaseCollection]] = [
+        (item, flag, collection) for item, flag in retrieve_items(
+            base_prefix, path, collection, hreferences, main_filters,
+            multistatus, share)]
+    for extra_collection in extra_collections:
+        retrieved.extend(
+            (item, flag, extra_collection) for item, flag in retrieve_items(
+                base_prefix, path, extra_collection,
+                (pathutils.unstrip_path(extra_collection.path, True),),
+                main_filters, multistatus, None))
     collection_tag = collection.tag
     # !!! Don't access storage after this !!!
     unlock_storage_fn()
+    retrieved_items = retrieved
     if share and share['Conversion'] == "bday":
         collection_tag = "VCALENDAR"
         # autoconvert
         retrieved_items_vcf_to_ics = []
-        for item, flag in retrieved_items:
+        for item, flag, item_collection in retrieved_items:
             item_ics = item.convert_vcf_to_ics(ShareActions=share['Actions'])
             if item_ics is None:
                 continue
             else:
                 pass
             item_ics.href = item.href
-            retrieved_items_vcf_to_ics.append((item_ics, flag))
+            retrieved_items_vcf_to_ics.append(
+                (item_ics, flag, item_collection))
         retrieved_items = retrieved_items_vcf_to_ics
         if logger.isEnabledFor(logging.DEBUG):
             logger.trace("REPORT/retrieved_items: %r", retrieved_items)
@@ -455,19 +544,25 @@ def xml_report(base_prefix: str, path: str, xml_request: Optional[ET.Element],
         # ``item.vobject_item`` might be accessed during filtering.
         # Don't keep reference to ``item``, because VObject requires a lot of
         # memory.
-        item, filters_matched = retrieved_items.pop(0)
+        item, filters_matched, item_collection = retrieved_items.pop(0)
         if filters and not filters_matched:
+            item_tag = item_collection.tag
+            if item_collection is collection and collection_tag == "VCALENDAR":
+                item_tag = "VCALENDAR"
             item_href = item.href
-            collection_path = collection.path
-            if share:
+            collection_path = item_collection.path
+            if share and item_collection is collection:
                 # backmap
                 collection_path = share['PathOrToken'].removeprefix("/")
                 if share['Conversion'] == "bday" and item_href is not None:
                     item_href = item_href.removesuffix(".vcf") + ".ics"
             try:
-                if not all(test_filter(collection_tag, item, filter_, max_occurrence)
+                if not all(test_filter(item_tag, item, filter_,
+                                       max_occurrence, budget)
                            for filter_ in main_filters):
                     continue
+            except ReportBudgetExceeded:
+                raise
             except ValueError as e:
                 raise ValueError("Failed to filter item %r from %r: %s" %
                                  (item_href, collection_path, e)) from e
@@ -515,6 +610,7 @@ def xml_report(base_prefix: str, path: str, xml_request: Optional[ET.Element],
                         start=start, end=end,
                         time_range_start=time_range_start, time_range_end=time_range_end,
                         max_occurrence=max_occurrence,
+                        budget=budget,
                     )
 
                     if n_vev == 0:
@@ -555,13 +651,21 @@ def xml_report(base_prefix: str, path: str, xml_request: Optional[ET.Element],
 
         assert item.href
         uri = pathutils.unstrip_path(
-            posixpath.join(collection.path, item.href))
+            posixpath.join(item_collection.path, item.href))
 
         if found_props or not_found_props:
+            if budget is not None:
+                # The response is a result item of the merged report.
+                budget.charge()
             multistatus.append(xml_item_response(
                 base_prefix, uri, found_props=found_props,
-                not_found_props=not_found_props, found_item=True, share=share))
+                not_found_props=not_found_props, found_item=True,
+                share=share if item_collection is collection else None))
 
+    if budget is not None:
+        # The multistatus itself (e.g. its sync token) is a result too,
+        # so an empty answer is not completely free.
+        budget.charge()
     return client.MULTI_STATUS, multistatus
 
 
@@ -573,6 +677,7 @@ def _expand(
         time_range_start: Optional[datetime.datetime] = None,
         time_range_end: Optional[datetime.datetime] = None,
         max_occurrence: int = 0,
+        budget: Optional[ReportBudget] = None,
 ) -> Tuple[ET.Element, int]:
     vevent_component: vobject.base.Component = copy.copy(item.vobject_item)
     logger.debug("Expanding event %s", item.href)
@@ -656,20 +761,29 @@ def _expand(
         # that event should be included as it is still ongoing. If no
         # extra point is generated then it was a no-op.
         rstart = start - duration if duration and duration.total_seconds() > 0 else start
-        recurrences = rruleset.between(rstart, end, inc=True, count=max_occurrence)
-        if max_occurrence and len(recurrences) >= max_occurrence:
-            # this shouldn't be > and if it's == then assume a limit
-            # was hit and ignore that maybe some would be filtered out
-            # by EXDATE etc. This is anti-DoS, not precise limits
-            raise ValueError("REPORT occurrences limit of {} hit"
-                             .format(max_occurrence))
 
         _strip_component(vevent_component)
         _strip_single_event(base_vevent, dt_format, all_day_event)
 
         i_overridden = 0
+        n_recurrences = 0
 
-        for recurrence_dt in recurrences:
+        # Enumerate lazily so the budget bounds the work before the whole
+        # recurrence set is materialised. A rule that yields past ``end``
+        # is stopped there, as ``between`` would have stopped.
+        for recurrence_dt in rruleset.xafter(rstart, inc=True):
+            if recurrence_dt > end:
+                break
+            n_recurrences += 1
+            if max_occurrence and n_recurrences >= max_occurrence:
+                # this shouldn't be > and if it's == then assume a limit
+                # was hit and ignore that maybe some would be filtered out
+                # by EXDATE etc. This is anti-DoS, not precise limits
+                raise ValueError("REPORT occurrences limit of {} hit"
+                                 .format(max_occurrence))
+            if budget is not None:
+                # Every enumerated recurrence instance is processed work.
+                budget.charge()
             recurrence_utc = recurrence_dt if all_day_event else recurrence_dt.astimezone(datetime.timezone.utc)
             logger.debug("Processing recurrence: %s (all_day_event: %s)", recurrence_utc, all_day_event)
 
@@ -1019,8 +1133,13 @@ def retrieve_items(
 
 
 def test_filter(collection_tag: str, item: radicale_item.Item,
-                filter_: ET.Element, max_occurrence: int = 0) -> bool:
+                filter_: ET.Element, max_occurrence: int = 0,
+                budget: Optional[ReportBudget] = None) -> bool:
     """Match an item against a filter."""
+    occurrence_fn: Optional[Callable[[], None]] = None
+    if budget is not None:
+        occurrence_fn = budget.scanner()
+
     if (collection_tag == "VCALENDAR" and
             filter_.tag != xmlutils.make_clark("C:%s" % filter_)):
         if len(filter_) == 0:
@@ -1029,8 +1148,9 @@ def test_filter(collection_tag: str, item: radicale_item.Item,
             raise ValueError("Filter with %d children" % len(filter_))
         if filter_[0].tag != xmlutils.make_clark("C:comp-filter"):
             raise ValueError("Unexpected %r in filter" % filter_[0].tag)
-        return radicale_filter.comp_match(item, filter_[0],
-                                          max_occurrences=max_occurrence)
+        return radicale_filter.comp_match(
+            item, filter_[0], max_occurrences=max_occurrence,
+            occurrence_fn=occurrence_fn)
     if (collection_tag == "VADDRESSBOOK" and
             filter_.tag != xmlutils.make_clark("CR:%s" % filter_)):
         for child in filter_:
@@ -1049,6 +1169,38 @@ def test_filter(collection_tag: str, item: radicale_item.Item,
 
 
 class ApplicationPartReport(ApplicationBase):
+
+    def _report_calendar_children(
+            self, path: str, user: str, user_groups: set,
+            permissions_filter: Union[str, None], share: Union[dict, None]
+            ) -> List[storage.BaseCollection]:
+        """Calendar collections direct below ``path`` the user may read.
+
+        Used by a ``calendar-query`` with ``Depth: 1`` on a collection that
+        is not itself a calendar. Every child is authorized on its own
+        path, because the parent permission does not grant access to a
+        child collection.
+
+        """
+        if share:
+            # A share maps one collection, not a calendar home set.
+            return []
+        children: List[storage.BaseCollection] = []
+        for child in self._storage.discover(path, "1"):
+            if not isinstance(child, storage.BaseCollection):
+                continue
+            if child.tag != "VCALENDAR":
+                continue
+            child_path = pathutils.unstrip_path(child.path, True)
+            child_access = Access(
+                self._rights, user, user_groups, child_path,
+                permissions_filter)
+            if not child_access.check("r", child):
+                logger.debug("REPORT: skip unreadable child collection %r",
+                             child_path)
+                continue
+            children.append(child)
+        return children
 
     def do_REPORT(self, environ: types.WSGIEnviron, base_prefix: str,
                   path: str, user: str, user_groups: set, request_info: dict) -> types.WSGIResponse:
@@ -1091,6 +1243,9 @@ class ApplicationPartReport(ApplicationBase):
                 assert item.collection is not None
                 collection = item.collection
 
+            budget = ReportBudget(
+                self.configuration.get("reporting", "report_budget"))
+
             if xml_content is not None and \
                xml_content.tag == xmlutils.make_clark("C:free-busy-query"):
                 if (isinstance(item, storage.BaseCollection) and
@@ -1112,7 +1267,14 @@ class ApplicationPartReport(ApplicationBase):
                 try:
                     status, body = free_busy_report(
                         base_prefix, path, xml_content, collection, self._encoding,
-                        lock_stack.close, max_occurrence)
+                        lock_stack.close, max_occurrence, budget)
+                except ReportBudgetExceeded as e:
+                    logger.warning(
+                        "REPORT compute budget exhausted on %r (user %r): %s",
+                        path, user, e)
+                    return self._webdav_error_response(
+                        client.INSUFFICIENT_STORAGE,
+                        "C:number-of-matches-within-limits", request_info)
                 except ValueError as e:
                     logger.warning(
                         "Bad REPORT request on %r: %s", path, e, exc_info=True)
@@ -1128,10 +1290,28 @@ class ApplicationPartReport(ApplicationBase):
                 if not read_allowed or not access.check("r", item):
                     return httputils.NOT_ALLOWED
                 max_occurrence = self.configuration.get("reporting", "max_expand_occurrence")
+                extra_collections: List[storage.BaseCollection] = []
+                if (isinstance(item, storage.BaseCollection) and
+                        item.tag != "VCALENDAR" and
+                        environ.get("HTTP_DEPTH", "0") == "1" and
+                        xml_content is not None and
+                        xml_content.tag == xmlutils.make_clark("C:calendar-query")):
+                    # A calendar home set answers one merged calendar-query
+                    # over all of its readable calendars.
+                    extra_collections = self._report_calendar_children(
+                        path, user, user_groups, permissions_filter, share)
                 try:
                     status, xml_answer = xml_report(
                         base_prefix, path, xml_content, collection, self._encoding,
-                        lock_stack.close, max_occurrence, user, request_info, share=share)
+                        lock_stack.close, max_occurrence, user, request_info, share=share,
+                        budget=budget, extra_collections=extra_collections)
+                except ReportBudgetExceeded as e:
+                    logger.warning(
+                        "REPORT compute budget exhausted on %r (user %r): %s",
+                        path, user, e)
+                    return self._webdav_error_response(
+                        client.INSUFFICIENT_STORAGE,
+                        "C:number-of-matches-within-limits", request_info)
                 except ValueError as e:
                     logger.warning(
                         "Bad REPORT request on %r: %s", path, e, exc_info=True)

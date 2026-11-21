@@ -2532,6 +2532,30 @@ is thrown instead of returning the results.
 
 Default: 10000
 
+##### report_budget
+
+_(>= 3.9.3)_
+
+Maximum compute units one report query may spend. A unit is charged for
+every recurrence instance the server examines while filtering or
+expanding a calendar, and for every result item it emits. The budget
+belongs to the request and spans every collection the answer covers, so
+a `Depth: 1` `calendar-query` on a calendar home shares one budget
+across all of its readable calendars.
+
+When the next unit would exceed the budget, the request fails with `507
+Insufficient Storage` and a `C:number-of-matches-within-limits` body
+element. No partial `multistatus` is sent, so a client never receives
+some occurrences of an event without the rest. The server keeps
+answering later requests, including smaller reports and
+`sync-collection`, normally. Only `calendar-query` and
+`free-busy-query` spend the budget; `sync-collection`, multiget, and the
+principal reports ignore it.
+
+`0` disables accounting.
+
+Default: 0
+
 ##### freebusy_view_past_days
 
 _(>= 3.8.2)_

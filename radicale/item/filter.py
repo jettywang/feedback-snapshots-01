@@ -48,6 +48,17 @@ else:
     TRIGGER = datetime | None
 
 
+class ReportBudgetExceeded(Exception):
+    """A report query spent more compute units than it was allowed.
+
+    Raised from an occurrence callback while a report enumerates
+    recurrences. It is intentionally not a :class:`ValueError`, so the
+    ``except ValueError`` paths that translate malformed filters into a
+    client error do not hide it.
+
+    """
+
+
 def date_to_datetime(d: date, tzinfo=vobject.icalendar.utc) -> datetime:
     """Transform any date to a UTC datetime.
 
@@ -110,11 +121,16 @@ def _capped_iter(iterable: Iterable[date], limit: int) -> Iterator[date]:
 
 
 def comp_match(item: "item.Item", filter_: ET.Element, level: int = 0,
-               max_occurrences: int = 0) -> bool:
+               max_occurrences: int = 0,
+               occurrence_fn: Optional[Callable[[], None]] = None) -> bool:
     """Check whether the ``item`` matches the comp ``filter_``.
 
     If ``level`` is ``0``, the filter is applied on the
     item's collection. Otherwise, it's applied on the item.
+
+    ``occurrence_fn``, if given, is called for every recurrence instance
+    whose time range is visited. It may raise to stop a report that has
+    spent its compute budget.
 
     See rfc4791-9.7.1.
 
@@ -181,17 +197,21 @@ def comp_match(item: "item.Item", filter_: ET.Element, level: int = 0,
             if (level == 0) and (name == "VCALENDAR"):
                 for name_try in ("VTODO", "VEVENT", "VJOURNAL"):
                     try:
-                        if time_range_match(item.vobject_item, filter_[0], name_try, trigger, max_occurrences):
+                        if time_range_match(item.vobject_item, filter_[0], name_try, trigger, max_occurrences, occurrence_fn):
                             return True
+                    except ReportBudgetExceeded:
+                        raise
                     except Exception:
                         continue
                 return False
-            if not time_range_match(item.vobject_item, filter_[0], tag, trigger, max_occurrences):
+            if not time_range_match(item.vobject_item, filter_[0], tag, trigger, max_occurrences, occurrence_fn):
                 return False
         elif child.tag == xmlutils.make_clark("C:comp-filter"):
             if logger.isEnabledFor(logging.DEBUG):
                 logger.trace("ITEM/FILTER/comp_match: comp-filter level=%d", level)
-            if not comp_match(item, child, level=level + 1, max_occurrences=max_occurrences):
+            if not comp_match(item, child, level=level + 1,
+                              max_occurrences=max_occurrences,
+                              occurrence_fn=occurrence_fn):
                 return False
         else:
             raise ValueError("Unexpected %r in comp-filter" % child.tag)
@@ -235,9 +255,15 @@ def prop_match(vobject_item: vobject.base.Component,
 
 def time_range_match(vobject_item: vobject.base.Component,
                      filter_: ET.Element, child_name: str, trigger: TRIGGER,
-                     max_occurrences: int = 0) -> bool:
+                     max_occurrences: int = 0,
+                     occurrence_fn: Optional[Callable[[], None]] = None) -> bool:
     """Check whether the component/property ``child_name`` of
-       ``vobject_item`` matches the time-range ``filter_``."""
+       ``vobject_item`` matches the time-range ``filter_``.
+
+    ``occurrence_fn`` is called for each visited instance so a report can
+    charge its budget.
+
+    """
     # supporting since 3.5.4 now optional trigger (either absolute or relative offset)
 
     if not filter_.get("start") and not filter_.get("end"):
@@ -249,6 +275,8 @@ def time_range_match(vobject_item: vobject.base.Component,
     def range_fn(range_start: datetime, range_end: datetime,
                  is_recurrence: bool) -> bool:
         nonlocal matched
+        if occurrence_fn is not None:
+            occurrence_fn()
         if trigger is not None:
             # if trigger is given, only check range_start
             if isinstance(trigger, timedelta):

@@ -551,6 +551,15 @@ Content-Security-Policy = default-src 'self'; object-src 'none'
 # occurences per event to prevent DoS attacks.
 #max_freebusy_occurrence = 10000
 
+# Maximum compute units one report query may spend, counted over all
+# collections it touches (0 = unlimited). Every examined recurrence
+# instance costs one unit and every returned result item costs one more.
+# A query that needs more fails with HTTP 507 and returns no partial
+# result. A Depth: 1 calendar-query on a calendar home merges all readable
+# calendars into one budget. Other reports, including sync-collection,
+# are not charged.
+#report_budget = 0
+
 # Days before and after today in the default free-busy view
 # (?view=freebusy). The window is aligned to midnight UTC.
 # A request can override both with start and end.
