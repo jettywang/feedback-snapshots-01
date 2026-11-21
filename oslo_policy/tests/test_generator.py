@@ -10,6 +10,7 @@
 #    under the License.
 
 import operator
+import os
 from unittest import mock
 import warnings
 
@@ -942,3 +943,201 @@ class ConvertJsonToYamlTestCase(base.PolicyBaseTestCase):
         self.assertIn(
             existing_deprecated_rule_with_warning, converted_policy_data
         )
+
+
+class CheckRuleSourcesTestCase(base.PolicyBaseTestCase):
+    """Tests for the registration source check.
+
+    Simulates two local plugins (namespaces 'plugin-a' and 'plugin-b')
+    that each carry their own policy registrations.
+    """
+
+    def _run_check(self, namespaces, approved_overrides_file=None):
+        extensions = []
+        for name, rules in namespaces.items():
+            ext = stevedore.extension.Extension(
+                name=name,
+                entry_point=None,  # type: ignore
+                plugin=None,  # type: ignore
+                obj=rules,
+            )
+            extensions.append(ext)
+        test_mgr = stevedore.named.NamedExtensionManager.make_test_instance(
+            extensions=extensions, namespace='oslo.policy.policies'
+        )
+
+        output_file = self.get_config_file_fullname('source-check.txt')
+        with mock.patch(
+            'stevedore.named.NamedExtensionManager', return_value=test_mgr
+        ):
+            result = generator._check_rule_sources(
+                list(namespaces),
+                approved_overrides_file=approved_overrides_file,
+                output_path=output_file,
+            )
+        with open(output_file) as f:
+            report = f.read()
+        return result, report
+
+    def test_no_conflicts(self):
+        namespaces = {
+            'plugin-a': [
+                policy.RuleDefault('admin', 'is_admin:True'),
+            ],
+            'plugin-b': [
+                policy.RuleDefault('shared', 'field:networks:shared=True'),
+            ],
+        }
+        result, report = self._run_check(namespaces)
+        self.assertEqual(0, result)
+        self.assertIn('1. plugin-a (1 rules)', report)
+        self.assertIn('2. plugin-b (1 rules)', report)
+        self.assertIn('Duplicate registrations (identical', report)
+        self.assertIn('Conflicting registrations:\n  none', report)
+        self.assertIn('Result: all registrations are consistent', report)
+
+    def test_exact_duplicate(self):
+        namespaces = {
+            'plugin-a': [
+                policy.RuleDefault(
+                    'admin', 'is_admin:True', scope_types=['system']
+                ),
+            ],
+            'plugin-b': [
+                policy.RuleDefault(
+                    'admin', 'is_admin:True', scope_types=['system']
+                ),
+            ],
+        }
+        result, report = self._run_check(namespaces)
+        self.assertEqual(0, result)
+        self.assertIn(
+            '"admin" registered identically by: plugin-a, plugin-b', report
+        )
+        self.assertIn('adopted registration: plugin-a', report)
+        self.assertIn('Conflicting registrations:\n  none', report)
+
+    def test_scope_conflict_unapproved(self):
+        namespaces = {
+            'plugin-a': [
+                policy.RuleDefault(
+                    'owner',
+                    'project_id:%(project_id)s',
+                    scope_types=['system'],
+                ),
+            ],
+            'plugin-b': [
+                policy.RuleDefault(
+                    'owner',
+                    'project_id:%(project_id)s',
+                    scope_types=['project'],
+                ),
+            ],
+        }
+        result, report = self._run_check(namespaces)
+        self.assertEqual(1, result)
+        self.assertIn('"owner":', report)
+        self.assertIn(
+            'plugin-a: check="project_id:%(project_id)s" scope=[system]',
+            report,
+        )
+        self.assertIn(
+            'plugin-b: check="project_id:%(project_id)s" scope=[project]',
+            report,
+        )
+        self.assertIn('differences: scope_types', report)
+        self.assertIn(
+            'adopted registration: plugin-a '
+            '(first source in precedence order)',
+            report,
+        )
+        self.assertIn('shadowed registration(s): plugin-b', report)
+        self.assertIn('UNAPPROVED', report)
+        self.assertIn('1 issue(s) require operator approval', report)
+
+    def test_scope_conflict_with_approved_override(self):
+        namespaces = {
+            'plugin-a': [
+                policy.RuleDefault(
+                    'owner',
+                    'project_id:%(project_id)s',
+                    scope_types=['system'],
+                ),
+            ],
+            'plugin-b': [
+                policy.RuleDefault(
+                    'owner',
+                    'project_id:%(project_id)s',
+                    scope_types=['project'],
+                ),
+            ],
+        }
+        overrides_file = self.get_config_file_fullname('overrides.yaml')
+        self.create_config_file(
+            'overrides.yaml',
+            'overrides:\n'
+            '  owner:\n'
+            '    check_str: "project_id:%(project_id)s"\n'
+            '    scope_types: ["project"]\n',
+        )
+        result, report = self._run_check(
+            namespaces, approved_overrides_file=overrides_file
+        )
+        self.assertEqual(0, result)
+        self.assertIn(f'(from {overrides_file})', report)
+        self.assertIn(
+            '"owner": check="project_id:%(project_id)s" scope=[project]',
+            report,
+        )
+        self.assertIn('registered by: plugin-a, plugin-b', report)
+        self.assertIn('APPROVED: site-approved override', report)
+        self.assertNotIn('UNAPPROVED', report)
+
+    def test_stale_approved_override(self):
+        namespaces = {
+            'plugin-a': [
+                policy.RuleDefault('admin', 'is_admin:True'),
+            ],
+            'plugin-b': [
+                policy.RuleDefault('shared', 'field:networks:shared=True'),
+            ],
+        }
+        overrides_file = self.get_config_file_fullname('overrides.yaml')
+        self.create_config_file(
+            'overrides.yaml',
+            'overrides:\n'
+            '  no_such_rule: "role:admin"\n',
+        )
+        result, report = self._run_check(
+            namespaces, approved_overrides_file=overrides_file
+        )
+        self.assertEqual(1, result)
+        self.assertIn('"no_such_rule": check="role:admin"', report)
+        self.assertIn('STALE: no registered rule with this name', report)
+
+    def test_report_does_not_apply_unapproved_config(self):
+        # The source check is read-only: it must not create or modify any
+        # policy file, even when conflicts are found.
+        namespaces = {
+            'plugin-a': [
+                policy.RuleDefault(
+                    'owner',
+                    'project_id:%(project_id)s',
+                    scope_types=['system'],
+                ),
+            ],
+            'plugin-b': [
+                policy.RuleDefault(
+                    'owner',
+                    'user_id:%(user_id)s',
+                    scope_types=['project'],
+                ),
+            ],
+        }
+        policy_file = self.get_config_file_fullname('policy.yaml')
+        result, _report = self._run_check(namespaces)
+        self.assertEqual(1, result)
+        self.assertFalse(os.path.exists(policy_file))
+        self.enforcer.load_rules()
+        self.assertEqual({}, self.enforcer.file_rules)
+        self.assertEqual({}, self.enforcer.registered_rules)

@@ -77,6 +77,15 @@ CONVERT_OPTS = [
     ),
 ]
 
+SOURCE_CHECK_OPTS = [
+    cfg.StrOpt(
+        'approved-overrides',
+        help='Path to a YAML file listing the rule overrides approved by the '
+        'site. Every entry is checked against the actual rule '
+        'registrations and listed explicitly in the report.',
+    ),
+]
+
 
 def get_policies_dict(
     namespaces: Sequence[str],
@@ -524,6 +533,244 @@ def _convert_policy_json_to_yaml(
         sys.stdout.writelines(yaml_format_rules)
 
 
+def _load_approved_overrides(
+    path: str,
+) -> dict[str, dict[str, Any]]:
+    """Load the site-approved rule overrides from a YAML file.
+
+    The file must contain a top-level ``overrides`` mapping of rule name to
+    either a plain check string or a mapping with ``check_str`` and,
+    optionally, ``scope_types`` keys.
+
+    :param path: Path to the YAML file.
+    :returns: a dict of {rule_name: {'check_str': str, 'scope_types': list}}
+    """
+    with open(path) as f:
+        data = yaml.safe_load(f) or {}
+
+    overrides = data.get('overrides')
+    if not isinstance(overrides, dict):
+        raise ValueError(
+            f'Approved overrides file "{path}" must contain a top-level '
+            '"overrides" mapping.'
+        )
+
+    parsed: dict[str, dict[str, Any]] = {}
+    for name, override in overrides.items():
+        if isinstance(override, str):
+            parsed[name] = {'check_str': override, 'scope_types': None}
+        elif isinstance(override, dict) and 'check_str' in override:
+            parsed[name] = {
+                'check_str': override['check_str'],
+                'scope_types': override.get('scope_types'),
+            }
+        else:
+            raise ValueError(
+                f'Approved override for rule "{name}" in "{path}" must be '
+                'a check string or a mapping with a "check_str" key.'
+            )
+    return parsed
+
+
+def _registrations_equal(
+    first: policy.RuleDefault, second: policy.RuleDefault
+) -> bool:
+    """Compare two registrations of the same rule, including scope."""
+    return (
+        first == second
+        and first.scope_types == second.scope_types
+        and first.description == second.description
+    )
+
+
+def _registration_diff(
+    registrations: list[tuple[str, policy.RuleDefault]],
+) -> list[str]:
+    """Return the fields on which the given registrations differ."""
+    differing = []
+    for field in ('check_str', 'scope_types', 'description'):
+        values = [getattr(rule, field) for _, rule in registrations]
+        if any(value != values[0] for value in values[1:]):
+            differing.append(field)
+    return differing
+
+
+def _format_registration(rule: policy.RuleDefault) -> str:
+    scope = (
+        ', '.join(rule.scope_types)
+        if rule.scope_types is not None
+        else '<unspecified>'
+    )
+    return f'check="{rule.check_str}" scope=[{scope}]'
+
+
+def _check_rule_sources(
+    namespaces: list[str],
+    approved_overrides_file: str | None = None,
+    output_path: str | None = None,
+) -> int:
+    """Check rule registrations from multiple sources before generating config.
+
+    This is a read-only audit tool: it never writes a policy file and never
+    modifies an enforcer, so generating the report cannot apply unapproved
+    configuration. It cross-checks the rules registered by each namespace
+    and reports:
+
+    * the registration sources, in the precedence order used to resolve
+      duplicates (the first source registering a rule wins),
+    * the site-approved overrides, each traced back to the actual
+      registrations for that rule,
+    * rules registered identically by more than one source,
+    * rules registered with conflicting definitions, showing the
+      differences, which registration will be adopted, and whether a
+      site-approved override covers the conflict.
+
+    :param namespaces: a list of namespaces registered under
+                       'oslo.policy.policies', in precedence order.
+    :param approved_overrides_file: path to a YAML file with site-approved
+                                    overrides, or None.
+    :param output_path: The path of a file to output to. stdout used if None.
+    :returns: 0 if no unapproved conflicts or stale overrides were found,
+              1 otherwise.
+    """
+    policies = get_policies_dict(namespaces)
+
+    approved: dict[str, dict[str, Any]] = {}
+    if approved_overrides_file:
+        approved = _load_approved_overrides(approved_overrides_file)
+
+    # Index every registration by rule name, keeping source order so that
+    # the adopted registration (first source in precedence order) is known.
+    by_name: dict[str, list[tuple[str, policy.RuleDefault]]] = {}
+    for namespace in namespaces:
+        for rule in policies.get(namespace, []):
+            by_name.setdefault(rule.name, []).append((namespace, rule))
+
+    lines = []
+    lines.append('Policy registration source check\n')
+    lines.append('================================\n\n')
+    lines.append('Registration sources (in precedence order):\n')
+    for index, namespace in enumerate(namespaces, start=1):
+        count = len(policies.get(namespace, []))
+        lines.append(f'  {index}. {namespace} ({count} rules)\n')
+    lines.append('\n')
+
+    failures = 0
+
+    lines.append('Site-approved overrides:\n')
+    if approved_overrides_file:
+        lines.append(f'(from {approved_overrides_file})\n')
+    if not approved:
+        lines.append('  none configured\n')
+    for name in sorted(approved):
+        override = approved[name]
+        scope = override['scope_types']
+        scope_text = ', '.join(scope) if scope else '<unspecified>'
+        lines.append(
+            f'  "{name}": check="{override["check_str"]}" '
+            f'scope=[{scope_text}]\n'
+        )
+        registrations = by_name.get(name)
+        if not registrations:
+            lines.append(
+                '    STALE: no registered rule with this name; the '
+                'override does not apply to anything\n'
+            )
+            failures += 1
+            continue
+        sources = ', '.join(source for source, _ in registrations)
+        lines.append(f'    registered by: {sources}\n')
+        adopted = registrations[0][1]
+        if (
+            adopted.check_str == override['check_str']
+            and adopted.scope_types == scope
+        ):
+            lines.append(
+                '    NOTE: identical to the adopted registration; the '
+                'override is redundant\n'
+            )
+        else:
+            lines.append(
+                f'    adopted default: {_format_registration(adopted)}\n'
+            )
+            lines.append(
+                '    the override changes the effective rule and must be '
+                'carried into the config submitted for approval\n'
+            )
+    lines.append('\n')
+
+    duplicates = []
+    conflicts = []
+    for name in sorted(by_name):
+        registrations = by_name[name]
+        if len(registrations) < 2:
+            continue
+        first = registrations[0][1]
+        if all(
+            _registrations_equal(first, rule) for _, rule in registrations[1:]
+        ):
+            duplicates.append((name, registrations))
+        else:
+            conflicts.append((name, registrations))
+
+    lines.append('Duplicate registrations (identical, no action needed):\n')
+    if not duplicates:
+        lines.append('  none\n')
+    for name, registrations in duplicates:
+        sources = ', '.join(source for source, _ in registrations)
+        lines.append(f'  "{name}" registered identically by: {sources}\n')
+        lines.append(f'    adopted registration: {registrations[0][0]}\n')
+    lines.append('\n')
+
+    lines.append('Conflicting registrations:\n')
+    if not conflicts:
+        lines.append('  none\n')
+    for name, registrations in conflicts:
+        lines.append(f'  "{name}":\n')
+        for source, rule in registrations:
+            lines.append(
+                f'    {source}: {_format_registration(rule)}\n'
+            )
+        differing = _registration_diff(registrations)
+        lines.append(f'    differences: {", ".join(differing)}\n')
+        adopted_source, adopted = registrations[0]
+        lines.append(
+            f'    adopted registration: {adopted_source} '
+            '(first source in precedence order)\n'
+        )
+        shadowed = ', '.join(source for source, _ in registrations[1:])
+        lines.append(f'    shadowed registration(s): {shadowed}\n')
+        override = approved.get(name)
+        if override is not None:
+            lines.append(
+                f'    APPROVED: site-approved override '
+                f'check="{override["check_str"]}" covers this rule\n'
+            )
+        else:
+            lines.append(
+                '    UNAPPROVED: no site-approved override covers this '
+                'conflict; nothing is applied by this report\n'
+            )
+            failures += 1
+    lines.append('\n')
+
+    if failures:
+        lines.append(
+            f'Result: {failures} issue(s) require operator approval\n'
+        )
+        return_code = 1
+    else:
+        lines.append('Result: all registrations are consistent\n')
+        return_code = 0
+
+    output_file = open(output_path, 'w') if output_path else sys.stdout
+    output_file.writelines(lines)
+    if output_file != sys.stdout:
+        output_file.close()
+
+    return return_code
+
+
 def on_load_failure_callback(
     em: stevedore.ExtensionManager[Any],
     ep: importlib.metadata.EntryPoint,
@@ -629,6 +876,26 @@ def list_redundant(args: list[str] | None = None) -> None:
     conf(args)
     _check_for_namespace_opt(conf)
     _list_redundant(conf.namespace)
+
+
+def check_rule_sources(
+    args: list[str] | None = None, conf: cfg.ConfigOpts | None = None
+) -> None:
+    logging.basicConfig(level=logging.WARNING)
+    # Allow the caller to pass in a local conf object for unit testing
+    if conf is None:
+        conf = cfg.CONF
+    conf.register_cli_opts(GENERATOR_OPTS + RULE_OPTS + SOURCE_CHECK_OPTS)
+    conf.register_opts(GENERATOR_OPTS + RULE_OPTS + SOURCE_CHECK_OPTS)
+    conf(list(args) if args else None)
+    _check_for_namespace_opt(conf)
+    sys.exit(
+        _check_rule_sources(
+            conf.namespace,
+            approved_overrides_file=conf.approved_overrides,
+            output_path=conf.output_file,
+        )
+    )
 
 
 def validate_policy(args: list[str] | None = None) -> None:

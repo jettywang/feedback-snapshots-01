@@ -1,0 +1,14 @@
+---
+features:
+  - |
+    Added the ``oslopolicy-check-rule-sources`` tool, which audits the policy
+    rules registered by each plugin namespace before a generated
+    configuration is handed to operators for approval. The report lists the
+    registration sources in precedence order, the site-approved overrides
+    (each traced back to the actual registrations), rules registered
+    identically by multiple sources, and rules registered with conflicting
+    definitions (including differing intended scopes) along with the
+    adopted registration. The tool is read-only: it never writes a policy
+    file, so generating the report cannot apply unapproved configuration.
+    It exits with a non-zero status when a conflict lacks a site-approved
+    override or an approved override matches no registered rule.

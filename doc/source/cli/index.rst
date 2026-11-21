@@ -11,6 +11,7 @@ This document describes the various command line tools exposed by
    oslopolicy-checker
    oslopolicy-validator
    oslopolicy-list-redundant
+   oslopolicy-check-rule-sources
    oslopolicy-policy-generator
    oslopolicy-sample-generator
    oslopolicy-convert-json-to-yaml
