@@ -1,0 +1,16 @@
+---
+features:
+  - |
+    Added :meth:`oslo_policy.policy.Enforcer.reload_rules`, a
+    caller-controlled reload that reads the main policy file and all policy
+    directories as one batch. The candidate rule set is validated before it
+    is activated, so a malformed or incomplete batch leaves the previous
+    version in effect. The method returns a
+    :class:`oslo_policy.policy.PolicyVersion`, which can also be read from
+    ``Enforcer.version``, describing the active generation, a fingerprint of
+    the effective rules, and the files that contributed to it.
+  - |
+    Each ``Enforcer.enforce`` call now pins the rule set it starts with.
+    A reload that completes while an enforcement is in progress no longer
+    makes that enforcement observe a mix of old and new rules while following
+    ``rule:`` references.

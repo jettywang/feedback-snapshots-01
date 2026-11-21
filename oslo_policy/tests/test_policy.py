@@ -2213,3 +2213,305 @@ class EnforcerCheckRulesTest(base.PolicyBaseTestCase):
         self.enforcer.load_rules(True)
 
         self.assertTrue(self.enforcer.check_rules())
+
+
+class AtomicReloadTestCase(base.PolicyBaseTestCase):
+    def setUp(self):
+        super().setUp()
+        self.create_config_file(
+            'policy.yaml',
+            yaml.dump(
+                {
+                    'api:read': 'role:reader',
+                    'admin_required': 'role:admin',
+                    'api:write': 'rule:admin_required',
+                }
+            ),
+        )
+
+    def _write_dir_rules(self, filename, rules):
+        self.create_config_file(
+            os.path.join('policy.d', filename), yaml.dump(rules)
+        )
+
+    def test_reload_cross_file_references_are_one_atomic_batch(self):
+        # The new version is split across two files in the same directory and
+        # the first file references a rule declared by the second one. The
+        # batch must be evaluated as a whole, not file by file.
+        self._write_dir_rules(
+            '10-api.yaml', {'api:write': 'rule:api:write:validated'}
+        )
+        self._write_dir_rules(
+            '20-support.yaml', {'api:write:validated': 'role:writer'}
+        )
+
+        version = self.enforcer.reload_rules()
+
+        self.assertEqual(1, version.generation)
+        self.assertTrue(
+            any(path.endswith('20-support.yaml') for path in version.files)
+        )
+        self.assertTrue(
+            self.enforcer.enforce('api:write', {}, {'roles': ['writer']})
+        )
+        self.assertFalse(
+            self.enforcer.enforce('api:write', {}, {'roles': ['admin']})
+        )
+
+    def test_reload_rejects_bad_rule_and_keeps_previous_version(self):
+        self._write_dir_rules('10-api.yaml', {'api:read': 'role:reader'})
+        first = self.enforcer.reload_rules()
+
+        self._write_dir_rules(
+            '10-api.yaml', {'api:read': 'role:reader and'}
+        )
+
+        with self.assertRaises(policy.InvalidPolicyDefinitionError) as ctx:
+            self.enforcer.reload_rules()
+
+        self.assertEqual(['api:read'], ctx.exception.names)
+        self.assertEqual(first, self.enforcer.get_version())
+        self.assertEqual(first.generation, self.enforcer.version.generation)
+        # The previous rules are still enforced.
+        self.assertTrue(
+            self.enforcer.enforce('api:read', {}, {'roles': ['reader']})
+        )
+
+    def test_reload_rejects_undefined_and_cyclic_rules(self):
+        self._write_dir_rules(
+            '10-api.yaml',
+            {
+                'api:read': 'rule:does_not_exist',
+                'a': 'rule:b',
+                'b': 'rule:a',
+            },
+        )
+
+        with self.assertRaises(policy.InvalidPolicyDefinitionError) as ctx:
+            self.enforcer.reload_rules()
+
+        self.assertEqual(['a', 'api:read', 'b'], ctx.exception.names)
+
+    def test_reload_replaces_rule_and_advances_version(self):
+        before = self.enforcer.reload_rules()
+        self.assertTrue(
+            self.enforcer.enforce('api:read', {}, {'roles': ['reader']})
+        )
+
+        self._write_dir_rules('10-api.yaml', {'api:read': 'role:auditor'})
+        after = self.enforcer.reload_rules()
+
+        self.assertGreater(after.generation, before.generation)
+        self.assertNotEqual(before.fingerprint, after.fingerprint)
+        self.assertFalse(
+            self.enforcer.enforce('api:read', {}, {'roles': ['reader']})
+        )
+        self.assertTrue(
+            self.enforcer.enforce('api:read', {}, {'roles': ['auditor']})
+        )
+
+    def test_reload_without_changes_keeps_version(self):
+        first = self.enforcer.reload_rules()
+        second = self.enforcer.reload_rules()
+
+        self.assertEqual(first, second)
+        self.assertEqual(first.generation, second.generation)
+        self.assertEqual(first.fingerprint, second.fingerprint)
+
+    def test_reload_with_explicit_dirs_only_uses_those_dirs(self):
+        other = os.path.join(self.config_dir, 'other.d')
+        os.makedirs(other)
+        with open(os.path.join(other, '10-api.yaml'), 'w') as f:
+            f.write(yaml.dump({'api:read': 'role:other'}))
+
+        version = self.enforcer.reload_rules(policy_dirs=[other])
+
+        self.assertIn(
+            os.path.join(other, '10-api.yaml'), version.files
+        )
+        self.assertTrue(
+            self.enforcer.enforce('api:read', {}, {'roles': ['other']})
+        )
+
+    def test_reload_with_nonexistent_explicit_dir_is_rejected(self):
+        self.enforcer.reload_rules()
+        with self.assertRaises(cfg.ConfigFilesNotFoundError):
+            self.enforcer.reload_rules(
+                policy_dirs=[os.path.join(self.config_dir, 'missing.d')]
+            )
+
+    def test_failed_reload_can_be_retried_successfully(self):
+        self._write_dir_rules('10-api.yaml', {'api:read': 'role:reader'})
+        first = self.enforcer.reload_rules()
+
+        self._write_dir_rules('10-api.yaml', {'api:read': 'role:reader or'})
+        with self.assertRaises(policy.InvalidPolicyDefinitionError):
+            self.enforcer.reload_rules()
+
+        self.assertEqual(first.generation, self.enforcer.version.generation)
+
+        self._write_dir_rules('10-api.yaml', {'api:read': 'role:auditor'})
+        second = self.enforcer.reload_rules()
+
+        self.assertGreater(second.generation, first.generation)
+        # The failed candidate did not leak into the committed version.
+        self.assertNotIn(
+            'role:reader or', str(self.enforcer.rules['api:read'])
+        )
+        self.assertTrue(
+            self.enforcer.enforce('api:read', {}, {'roles': ['auditor']})
+        )
+
+    def test_enforcement_uses_one_snapshot_across_rule_chain(self):
+        # Install version 1 where api:write references admin_required.
+        self.create_config_file(
+            'policy.yaml',
+            yaml.dump(
+                {
+                    'api:write': 'rule:admin_required',
+                    'admin_required': 'role:admin',
+                }
+            ),
+        )
+        first = self.enforcer.reload_rules()
+        self.assertTrue(
+            self.enforcer.enforce('api:write', {}, {'roles': ['admin']})
+        )
+
+        seen = {}
+        config_dir = self.config_dir
+
+        class ReloadCheck(_checks.RuleCheck):
+            def __call__(self, target, creds, enforcer, current_rule=None):
+                seen.setdefault('first', str(enforcer.rules['admin_required']))
+                # Simulate another thread installing the new version while the
+                # first rule chain is still being evaluated.
+                if 'reloaded' not in seen:
+                    seen['reloaded'] = True
+                    with open(
+                        os.path.join(config_dir, 'policy.yaml'), 'w'
+                    ) as f:
+                        f.write(
+                            yaml.dump(
+                                {
+                                    'api:write': 'rule:admin_required',
+                                    'admin_required': 'role:superuser',
+                                }
+                            )
+                        )
+                    enforcer.reload_rules()
+                    # ``rules`` remains pinned to the in-flight snapshot,
+                    # while the newly active version is visible via
+                    # ``_rules``.
+                    seen['after_reload'] = str(
+                        enforcer._rules['admin_required']
+                    )
+                result = super().__call__(
+                    target, creds, enforcer, current_rule
+                )
+                seen['during'] = str(enforcer.rules['admin_required'])
+                return result
+
+        self.enforcer._rules['api:write'] = ReloadCheck(
+            'rule', 'admin_required'
+        )
+
+        result = self.enforcer.enforce(
+            'api:write', {}, {'roles': ['admin']}
+        )
+
+        self.assertTrue(result)
+        self.assertEqual('role:admin', seen['first'])
+        self.assertEqual('role:admin', seen['during'])
+        # The reload did install a new version for later calls, but the
+        # in-flight enforcement kept seeing its original snapshot.
+        self.assertEqual('role:superuser', seen['after_reload'])
+        self.assertEqual(
+            'role:superuser', str(self.enforcer.rules['admin_required'])
+        )
+        self.assertGreater(self.enforcer.version.generation, first.generation)
+
+    def test_version_readback_includes_active_files_and_fingerprint(self):
+        self._write_dir_rules('10-api.yaml', {'api:read': 'role:reader'})
+        version = self.enforcer.reload_rules()
+
+        self.assertIsInstance(version, policy.PolicyVersion)
+        self.assertEqual(version, self.enforcer.version)
+        self.assertEqual(version, self.enforcer.get_version())
+        self.assertEqual(
+            self.enforcer.rules.fingerprint, version.fingerprint
+        )
+        self.assertTrue(version.path.endswith('policy.yaml'))
+        self.assertTrue(version.files)
+        self.assertEqual(1, version.version)
+
+    def test_reload_policy_is_alias(self):
+        first = self.enforcer.reload_rules()
+        second = self.enforcer.reload_policy()
+        self.assertEqual(first, second)
+
+    def test_failed_reload_reports_every_error_with_name(self):
+        self._write_dir_rules(
+            '10-api.yaml',
+            {
+                'api:read': 'role:reader or',
+                'api:list': 'rule:absent',
+            },
+        )
+        self._write_dir_rules('20-more.yaml', {'api:write': 'rule:loop:two'})
+        self._write_dir_rules(
+            '30-loop.yaml', {'api:write:loop:two': 'rule:loop:one'}
+        )
+        self._write_dir_rules('40-loop.yaml', {'loop:one': 'rule:api:write'})
+
+        with self.assertRaises(policy.InvalidPolicyDefinitionError) as ctx:
+            self.enforcer.reload_rules()
+
+        self.assertEqual(
+            ['api:list', 'api:read', 'api:write'],
+            ctx.exception.names,
+        )
+        self.assertEqual(3, len(ctx.exception.errors))
+        self.assertTrue(
+            any(
+                'api:read' in error and 'Could not parse' in error
+                for error in ctx.exception.errors
+            )
+        )
+
+    def test_nested_enforcement_reuses_the_pinned_snapshot(self):
+        self.create_config_file(
+            'policy.yaml',
+            yaml.dump(
+                {
+                    'outer': 'rule:inner',
+                    'inner': 'rule:deep',
+                    'deep': 'role:admin',
+                }
+            ),
+        )
+        first = self.enforcer.reload_rules()
+        seen = []
+
+        class NestedCheck(_checks.RuleCheck):
+            def __call__(self, target, creds, enforcer, current_rule=None):
+                # Switch the active version, then enforce a nested rule on the
+                # same enforcer. The nested call must not pick up the new one.
+                enforcer._install_rules(
+                    policy.Rules(
+                        {'inner': _parser.parse_rule('role:superuser')},
+                        enforcer.default_rule,
+                    )
+                )
+                seen.append(
+                    enforcer.enforce('inner', target, creds)
+                )
+                return super().__call__(target, creds, enforcer, current_rule)
+
+        self.enforcer._rules['outer'] = NestedCheck('rule', 'inner')
+        result = self.enforcer.enforce('outer', {}, {'roles': ['admin']})
+
+        self.assertTrue(result)
+        self.assertEqual([True], seen)
+        self.assertGreater(self.enforcer.version.generation, first.generation)
+

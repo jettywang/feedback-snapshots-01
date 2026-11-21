@@ -330,9 +330,58 @@ def _parse_text_rule(rule: str) -> _checks.BaseCheck:
         return _checks.FalseCheck()
 
 
-def parse_rule(rule: str | Sequence[str | Sequence[str]]) -> _checks.BaseCheck:
-    """Parses a policy rule into a tree of :class:`.Check` objects."""
-    # If the rule is a string, it's in the policy language
+def _strict_parse_rule(
+    rule: str | Sequence[str | Sequence[str]]
+) -> _checks.BaseCheck:
+    """Parse a rule, raising :class:`ValueError` on malformed input.
+
+    The regular parsers fail closed, which is the right behavior at
+    enforcement time. A candidate policy version must instead be rejected, so
+    this helper validates both the input shape and the resulting check tree.
+    """
+    if isinstance(rule, str):
+        if not rule:
+            return _checks.TrueCheck()
+        state = ParseState()
+        for token in _parse_tokenize(rule):
+            state.shift(token)
+        try:
+            return state.result
+        except ValueError as exc:
+            raise ValueError(f'Could not parse rule {rule!r}') from exc
+    if not isinstance(rule, Sequence):
+        raise ValueError(f'Could not parse rule {rule!r}')
+    if not rule:
+        return _checks.TrueCheck()
+
+    # Outer list is joined by "or"; inner list by "and".
+    or_list: list[_checks.BaseCheck] = []
+    for inner_rule in rule:
+        if not inner_rule:
+            continue
+        if isinstance(inner_rule, str):
+            inner_rule = [inner_rule]
+        and_list = [_strict_parse_rule(r) for r in inner_rule]
+        or_list.append(
+            and_list[0] if len(and_list) == 1 else _checks.AndCheck(and_list)
+        )
+    if not or_list:
+        return _checks.FalseCheck()
+    if len(or_list) == 1:
+        return or_list[0]
+    return _checks.OrCheck(or_list)
+
+
+def parse_rule(
+    rule: str | Sequence[str | Sequence[str]], *, raise_on_error: bool = False
+) -> _checks.BaseCheck:
+    """Parses a policy rule into a tree of :class:`.Check` objects.
+
+    :param raise_on_error: Raise :class:`ValueError` for a malformed rule
+        instead of returning a fail-closed check.
+    """
+    if raise_on_error:
+        return _strict_parse_rule(rule)
     if isinstance(rule, str):
         return _parse_text_rule(rule)
     return _parse_list_rule(rule)

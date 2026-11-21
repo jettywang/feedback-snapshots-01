@@ -589,3 +589,52 @@ example of a context modeling a project-scoped token:
 
 The significance here is the difference between administrator authorization on
 the deployment system and administrator authorization on a project.
+
+Atomically reloading policy files
+=================================
+
+Services that split their authorization rules across the main policy file and
+one or more policy directories can reload the complete set with a single
+caller-controlled operation::
+
+    version = enforcer.reload_rules()
+
+    if version != previous_version:
+        LOG.info('Activated policy version %s', version)
+
+``reload_rules()`` rereads the configured policy file and every file in the
+configured ``policy_dirs``. The new rule set is parsed, combined with the
+registered defaults, and validated as one candidate before it is made active.
+If any rule is malformed, references an undefined rule, or participates in a
+cycle, the enforcer raises :class:`~oslo_policy.policy.InvalidPolicyDefinitionError`
+and continues enforcing the previous version. The exception's ``errors``
+attribute lists every problem found in the candidate, while ``names`` lists the
+affected policy names.
+
+The returned :class:`~oslo_policy.policy.PolicyVersion` identifies what is now
+active and can also be read back later from ``enforcer.version`` or
+``enforcer.get_version()``:
+
+* ``generation`` increases only when a validated reload changes the effective
+  rules.
+* ``fingerprint`` is a stable digest of the complete effective rule set,
+  including registered defaults.
+* ``files`` lists the policy files that contributed to the version.
+* ``path`` is the main policy file, if one was found.
+
+A reload does not disturb enforcements that are already running. Each
+``enforce()`` call pins the rule set it started with, so every ``rule:``
+reference in that call resolves against the same version even if another
+thread activates a new one midway through.
+
+For programmatic batches, pass the paths explicitly::
+
+    version = enforcer.reload_rules(
+        policy_file='/etc/foo/policy.yaml',
+        policy_dirs=['/etc/foo/policy.d'],
+    )
+
+Explicitly passed paths must exist. A missing directory raises
+``oslo_config.cfg.ConfigFilesNotFoundError`` instead of being silently
+ignored. Every reload is validated; there is no way to activate a candidate
+that is not complete and well defined.

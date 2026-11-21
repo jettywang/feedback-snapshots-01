@@ -220,10 +220,15 @@ by setting the ``policy_default_rule`` configuration setting to the
 desired rule name.
 """
 
-from collections.abc import Callable, MutableMapping, Sequence
+from collections.abc import MutableMapping, Sequence
+import contextvars
 import copy
+import dataclasses
+import errno
+import hashlib
 import logging
 import os
+import threading
 from typing import Any, Self, TypeAlias, TypedDict
 import warnings
 
@@ -241,6 +246,15 @@ from oslo_policy import opts
 
 
 LOG = logging.getLogger(__name__)
+
+# NOTE: This context variable pins the rule set used by an in-flight
+# enforcement. A reload can install a completely new rule set at any time, but
+# every ``rule:`` reference followed during a single ``enforce()`` call must be
+# resolved against the same version. The value is a tuple so that nested
+# enforcers do not accidentally pin each other's rules.
+_ACTIVE_RULES: contextvars.ContextVar[Any] = contextvars.ContextVar(
+    'oslo_policy_active_rules', default=None
+)
 
 
 register = _checks.register
@@ -337,11 +351,17 @@ class PolicyNotRegistered(Exception):
 
 
 class InvalidDefinitionError(Exception):
-    def __init__(self, names: list[str]) -> None:
+    def __init__(
+        self, names: list[str], errors: list[str] | None = None
+    ) -> None:
         msg = _(
             'Policies %(names)s are not well defined. Check logs for '
             'more details.'
         ) % {'names': names}
+        self.names = names
+        self.errors = errors or []
+        if self.errors:
+            msg = f'{msg} {" ".join(self.errors)}'
         super().__init__(msg)
 
 
@@ -376,6 +396,17 @@ def parse_file_contents(data: str | bytes) -> dict[str, str]:
     return parsed or {}
 
 
+def _rules_fingerprint(rules: MutableMapping[str, _checks.BaseCheck]) -> str:
+    """Return a stable fingerprint for a set of parsed rules."""
+    digest = hashlib.sha256()
+    for name in sorted(rules):
+        digest.update(str(name).encode('utf-8'))
+        digest.update(b'\0')
+        digest.update(str(rules[name]).encode('utf-8'))
+        digest.update(b'\0')
+    return digest.hexdigest()
+
+
 class Rules(dict[str, _checks.BaseCheck]):
     """A store for rules. Handles the default_rule setting directly."""
 
@@ -383,11 +414,18 @@ class Rules(dict[str, _checks.BaseCheck]):
         self,
         rules: MutableMapping[str, _checks.BaseCheck] | None = None,
         default_rule: _checks.BaseCheck | str | None = None,
+        generation: int = 0,
     ) -> None:
         """Initialize the Rules store."""
 
         super().__init__(dict(rules or {}))
         self.default_rule = default_rule
+        self.generation = generation
+
+    @property
+    def fingerprint(self) -> str:
+        """A stable digest of the effective rules in this collection."""
+        return _rules_fingerprint(self)
 
     @classmethod
     def load(
@@ -459,6 +497,50 @@ class Rules(dict[str, _checks.BaseCheck]):
         return jsonutils.dumps(out_rules, indent=4)
 
 
+class InvalidPolicyDefinitionError(InvalidDefinitionError):
+    """Raised when a policy directory cannot be loaded as one version.
+
+    The exception reports every problem found while staging the candidate
+    policy set. No part of the candidate set is made active when this is
+    raised.
+    """
+
+
+@dataclasses.dataclass(frozen=True)
+class PolicyVersion:
+    """Identifies the policy version currently active in an enforcer.
+
+    :param generation: Monotonically increasing version number. It is only
+        advanced when a reload successfully installs a new rule set.
+    :param fingerprint: A stable digest of the effective rules, including
+        rules from the main policy file, policy directories and registered
+        defaults.
+    :param path: The path of the main policy file, if one was found.
+    :param files: The policy files that contributed rules to this version.
+    """
+
+    generation: int
+    fingerprint: str
+    path: str | None
+    files: tuple[str, ...]
+
+    @property
+    def version(self) -> int:
+        """Alias for :attr:`generation`."""
+        return self.generation
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return the version as a plain dictionary."""
+        return dataclasses.asdict(self)
+
+    def __str__(self) -> str:
+        return (
+            f'generation={self.generation} '
+            f'fingerprint={self.fingerprint} '
+            f'path={self.path}'
+        )
+
+
 class Enforcer:
     """Responsible for loading and enforcing rules.
 
@@ -477,12 +559,17 @@ class Enforcer:
     """
 
     default_rule: _checks.BaseCheck | str | None
-    rules: Rules
     registered_rules: dict[str, 'RuleDefault']
-    file_rules: dict[str, 'RuleDefault']
     policy_path: str | None
     policy_file: str
     overwrite: bool
+
+    _file_rules: dict[str, 'RuleDefault']
+    _rules: Rules
+    _generation: int
+    _version: PolicyVersion
+    _loaded_files: tuple[str, ...]
+    _reload_lock: threading.RLock
 
     _need_check_rule: bool
     # FIXME(stephenfin): This is actually a simpler type since only the mtime
@@ -512,9 +599,9 @@ class Enforcer:
         self.default_rule = (
             default_rule or self.conf.oslo_policy.policy_default_rule
         )
-        self.rules = Rules(rules, self.default_rule)
+        self._rules = Rules(rules, self.default_rule)
         self.registered_rules = {}
-        self.file_rules = {}
+        self._file_rules = {}
 
         self.policy_path = None
 
@@ -522,6 +609,11 @@ class Enforcer:
         self.use_conf = use_conf
         self.overwrite = overwrite
 
+        self._generation = 0
+        self._loaded_files = ()
+        self._version = self._make_version()
+        self._reload_lock = threading.RLock()
+        self._policy_dirs_override: tuple[str, ...] | None = None
         self._need_check_rule = True
         self._policy_dir_mtimes = {}
         self._file_cache = {}
@@ -538,6 +630,97 @@ class Enforcer:
         # enforcers to check only partial rules with the full policy rules, and
         # this sometimes causes a lot of undefined warnings
         self.skip_undefined_check = False
+
+    @property
+    def rules(self) -> Rules:
+        """The rules visible to the current enforcement.
+
+        During an enforcement this is the immutable snapshot pinned for that
+        call. Outside an enforcement it is the currently active rule set.
+        """
+        return self._rules_for_enforcement
+
+    @rules.setter
+    def rules(self, rules: Rules) -> None:
+        self._rules = rules
+
+    @property
+    def file_rules(self) -> dict[str, 'RuleDefault']:
+        """The rules loaded from policy files for the active version."""
+        return self._file_rules
+
+    @file_rules.setter
+    def file_rules(self, rules: dict[str, 'RuleDefault']) -> None:
+        self._file_rules = rules
+
+    @property
+    def version(self) -> PolicyVersion:
+        """The policy version currently active for new enforcements."""
+        with self._reload_lock:
+            return self._version
+
+    def get_version(self) -> PolicyVersion:
+        """Return the policy version currently in effect.
+
+        This is equivalent to reading :attr:`version`. The returned object is
+        immutable and can be retained to compare against a later reload.
+        """
+        return self.version
+
+    @property
+    def _rules_for_enforcement(self) -> Rules:
+        """Rules to use while resolving a rule chain.
+
+        During an enforcement this returns the snapshot pinned by
+        :meth:`enforce`. Outside of an enforcement it returns the currently
+        active version.
+        """
+        active = _ACTIVE_RULES.get()
+        if active is not None:
+            owner, rules = active
+            if owner is self:
+                return rules
+        return self._rules
+
+    def _make_version(self) -> PolicyVersion:
+        return PolicyVersion(
+            generation=self._generation,
+            fingerprint=self._rules.fingerprint,
+            path=self.policy_path,
+            files=self._loaded_files,
+        )
+
+    def _pin_version(self) -> PolicyVersion:
+        """Publish a new version for subsequent enforcements."""
+        self._rules.generation = self._generation
+        self._version = self._make_version()
+        return self._version
+
+    def _install_rules(
+        self,
+        rules: Rules,
+        file_rules: dict[str, 'RuleDefault'] | None = None,
+        files: Sequence[str] | None = None,
+        policy_path: str | None = None,
+    ) -> PolicyVersion:
+        """Install a fully built rule set in one step.
+
+        The swap only touches the active rule set reference, so an enforcement
+        that has already pinned the previous ``Rules`` object keeps seeing a
+        consistent view.
+        """
+        with self._reload_lock:
+            changed = rules.fingerprint != self._rules.fingerprint
+            self._rules = rules
+            if file_rules is not None:
+                self._file_rules = file_rules
+            if files is not None:
+                self._loaded_files = tuple(sorted(set(files)))
+            if policy_path is not None:
+                self.policy_path = policy_path
+            if changed:
+                self._generation += 1
+            return self._pin_version()
 
     def set_rules(
         self,
@@ -558,12 +741,15 @@ class Enforcer:
                 _('Rules must be an instance of dict or Rules, got %s instead')
                 % type(rules)
             )
-        self.use_conf = use_conf
-        self._need_check_rule = True
-        if overwrite:
-            self.rules = Rules(rules, self.default_rule)
-        else:
-            self.rules.update(rules)
+        with self._reload_lock:
+            self.use_conf = use_conf
+            self._need_check_rule = True
+            if overwrite:
+                new_rules = Rules(rules, self.default_rule)
+            else:
+                new_rules = Rules(self._rules, self.default_rule)
+                new_rules.update(rules)
+            self._install_rules(new_rules)
 
     def clear(self) -> None:
         """Clears :class:`Enforcer` contents.
@@ -571,21 +757,28 @@ class Enforcer:
         This will clear this instances rules, policy's cache, file cache
         and policy's path.
         """
-        self.set_rules({})
-        self.default_rule = None
-        self.policy_path = None
-        self._policy_dir_mtimes = {}
-        self._file_cache.clear()
-        self.registered_rules = {}
-        self.file_rules = {}
-        self._informed_no_policy_file = False
-        self.suppress_default_change_warnings = False
-        self.suppress_deprecation_warnings = False
+        with self._reload_lock:
+            self.set_rules({})
+            self.default_rule = None
+            self.policy_path = None
+            self._policy_dir_mtimes = {}
+            self._file_cache = {}
+            self.registered_rules = {}
+            self._file_rules = {}
+            self._loaded_files = ()
+            self._policy_dirs_override = None
+            self._generation = 0
+            self._pin_version()
+            self._informed_no_policy_file = False
+            self.suppress_default_change_warnings = False
+            self.suppress_deprecation_warnings = False
 
     def load_rules(self, force_reload: bool = False) -> None:
         """Loads policy_path's rules.
 
-        Policy file is cached and will be reloaded if modified.
+        Policy file is cached and will be reloaded if modified. When a change
+        is found, the complete rule set is rebuilt and installed only after
+        the rebuild finished, so a failed load never exposes a partial policy.
 
         :param force_reload: Whether to reload rules from config file.
         """
@@ -593,91 +786,436 @@ class Enforcer:
         if force_reload:
             self.use_conf = force_reload
 
-        policy_file_rules_changed = False
+        if not self.use_conf:
+            return
 
-        if self.use_conf:
-            if not self.policy_path:
-                try:
-                    self.policy_path = self._get_policy_path(self.policy_file)
-                except cfg.ConfigFilesNotFoundError:
-                    if not self._informed_no_policy_file:
-                        LOG.debug(
-                            'The policy file %s could not be found.',
-                            self.policy_file,
-                        )
-                        self._informed_no_policy_file = True
+        with self._reload_lock:
+            self._load_rules_locked(force_reload, strict=False)
 
-            if self.policy_path:
-                # If the policy file rules have changed any policy.d rules
-                # also need to be reapplied on top of that change.
-                policy_file_rules_changed = self._load_policy_file(
-                    self.policy_path, force_reload, overwrite=self.overwrite
+    def reload_rules(
+        self,
+        policy_file: str | None = None,
+        policy_dirs: Sequence[str] | None = None,
+    ) -> PolicyVersion:
+        """Reload all policy sources once and activate them atomically.
+
+        Unlike :meth:`load_rules`, this method always rereads the policy file
+        and every file in the selected policy directories. The candidate rule
+        set is built and validated as a whole before it is made active. If any
+        file cannot be parsed, references an undefined rule, or contains a
+        cyclical reference, :class:`InvalidPolicyDefinitionError` is raised
+        and the previously active version remains in effect.
+
+        :param policy_file: Policy file to use for this and subsequent reloads.
+            Defaults to the file configured on the enforcer.
+        :param policy_dirs: Policy directories to use for this and subsequent
+            reloads. Defaults to ``conf.oslo_policy.policy_dirs``.
+        :returns: The :class:`PolicyVersion` now in effect.
+        :raises InvalidPolicyDefinitionError: If the candidate rule set is not
+            complete and well defined.
+        """
+        with self._reload_lock:
+            if policy_file is not None:
+                self.policy_file = policy_file
+                self.policy_path = None
+            if policy_dirs is not None:
+                self._policy_dirs_override = tuple(policy_dirs)
+
+            self._load_rules_locked(
+                force_reload=True,
+                strict=True,
+                require_main=policy_file is not None,
+                require_dirs=policy_dirs is not None,
+            )
+            return self.version
+
+    def reload_policy(
+        self,
+        policy_file: str | None = None,
+        policy_dirs: Sequence[str] | None = None,
+    ) -> PolicyVersion:
+        """Alias for :meth:`reload_rules`."""
+        return self.reload_rules(
+            policy_file=policy_file,
+            policy_dirs=policy_dirs,
+        )
+
+    def _load_rules_locked(
+        self,
+        force_reload: bool,
+        strict: bool,
+        require_main: bool = False,
+        require_dirs: bool = False,
+    ) -> PolicyVersion:
+        try:
+            main_path = self._get_policy_path(self.policy_file)
+        except cfg.ConfigFilesNotFoundError:
+            main_path = None
+
+        policy_dirs = self._selected_policy_dirs()
+        existing_policy_dirs = []
+        missing_policy_dirs = []
+        for path in policy_dirs:
+            try:
+                absolute_path = self._get_policy_path(path)
+                existing_policy_dirs.append(absolute_path)
+            except cfg.ConfigFilesNotFoundError:
+                missing_policy_dirs.append(path)
+                continue
+
+        if strict and require_dirs and missing_policy_dirs:
+            raise cfg.ConfigFilesNotFoundError(missing_policy_dirs)
+        if strict and require_main and main_path is None:
+            raise cfg.ConfigFilesNotFoundError([self.policy_file])
+
+        if main_path is None:
+            if not self._informed_no_policy_file:
+                LOG.debug(
+                    'The policy file %s could not be found.',
+                    self.policy_file,
                 )
+                self._informed_no_policy_file = True
+        else:
+            self._informed_no_policy_file = False
 
-            force_reload_policy_dirs = force_reload
-            if policy_file_rules_changed:
-                force_reload_policy_dirs = True
-            existing_policy_dirs = []
-
-            for path in self.conf.oslo_policy.policy_dirs:
-                try:
-                    absolute_path = self._get_policy_path(path)
-                    existing_policy_dirs.append(absolute_path)
-                except cfg.ConfigFilesNotFoundError:
-                    continue
-                # If change was made in any policy directory or main policy
-                # file then all policy directories and main file are
-                # re-calculated from scratch. We don't have separate rule sets
-                # for every policy folder, we only have the only rule set in
-                # RAM for all rule configs (self.rules). So it's the only way
-                # to be consistent.
-                if self._is_directory_updated(
-                    self._policy_dir_mtimes, absolute_path
-                ):
-                    force_reload_policy_dirs = True
-            if force_reload_policy_dirs and existing_policy_dirs:
-                # Here we realize that some policy folders or main policy file
-                # were changed and we need to recalculate all rules from
-                # scratch.
-                # If policy_file_rules_changed is True then we know:
-                # 1. all rules were already reset.
-                # 2. rules from main policy file were already applied.
-                # Otherwise main policy file was not changed and rules were not
-                # reset and. So we reset rules and force to re-calculate
-                # rules in main policy file. And after that we apply rules
-                # from every policy directory.
-                if self.policy_path:
-                    if not policy_file_rules_changed and self.overwrite:
-                        self._load_policy_file(
-                            path=self.policy_path,
-                            force_reload=True,
-                            overwrite=self.overwrite,
-                        )
-                elif self.overwrite:
-                    self.rules = Rules(default_rule=self.default_rule)
-                    self.file_rules = {}
-                for path in existing_policy_dirs:
-                    self._walk_through_policy_directory(
-                        path, self._load_policy_file, True, False
-                    )
-
-            for default in self.registered_rules.values():
-                if default.deprecated_for_removal:
-                    self._emit_deprecated_for_removal_warning(default)
-
-                if default.name in self.rules:
-                    continue
-
-                check = default.check
-                if default.deprecated_rule:
-                    check = self._handle_deprecated_rule(default)
-
-                self.rules[default.name] = check
-
-            # Detect and log obvious incorrect rule definitions
+        changed = force_reload or self._policy_inputs_changed(
+            main_path, existing_policy_dirs
+        )
+        missing_defaults = any(
+            name not in self._rules for name in self.registered_rules
+        )
+        if not changed and not missing_defaults:
             if self._need_check_rule:
                 self.check_rules()
                 self._need_check_rule = False
+            return self.version
+
+        candidate, file_rules, files, errors = self._build_candidate(
+            main_path, existing_policy_dirs, strict
+        )
+
+        if strict:
+            # Report syntax problems and structural problems from the same
+            # batch together, so operators can fix everything in one pass.
+            problems = errors + self._candidate_problems(candidate)
+            if problems:
+                # Remember the rejected input so a later implicit load
+                # through enforce() does not pick it up until the files
+                # change again.
+                self._record_input_caches(existing_policy_dirs)
+                raise InvalidPolicyDefinitionError(
+                    sorted({name for name, _ in problems}),
+                    errors=[message for _, message in problems],
+                )
+        else:
+            for _name, message in errors:
+                LOG.warning('Ignoring invalid policy definition: %s', message)
+
+        self.policy_path = main_path
+        version = self._install_rules(candidate, file_rules, files)
+        # Cache updates happen after the rule set is in place; the reload lock
+        # keeps other loads from observing an inconsistent pair.
+        self._commit_policy_caches(existing_policy_dirs)
+        self._need_check_rule = False
+        if not strict:
+            self.check_rules()
+        return version
+
+    def _selected_policy_dirs(self) -> Sequence[str]:
+        if self._policy_dirs_override is not None:
+            return self._policy_dirs_override
+        return self.conf.oslo_policy.policy_dirs
+
+    def _policy_inputs_changed(
+        self, main_path: str | None, policy_dirs: Sequence[str]
+    ) -> bool:
+        """Check whether any policy source differs from the active version.
+
+        This is a cheap mtime based check used by the compatibility
+        :meth:`load_rules` path. It never mutates the caches; those are only
+        updated after a candidate has been successfully installed.
+        """
+        if not self._rules:
+            return True
+
+        if main_path is not None:
+            try:
+                mtime = os.path.getmtime(main_path)
+            except OSError:
+                return True
+            cache_info = self._file_cache.get(main_path)
+            if cache_info is None or mtime != cache_info.get('mtime'):
+                return True
+
+        for path in policy_dirs:
+            mtime = self._directory_mtime(path)
+            cache_info = self._policy_dir_mtimes.get(path)
+            if cache_info is None or mtime != cache_info.get('mtime'):
+                return True
+
+        return False
+
+    @staticmethod
+    def _directory_mtime(path: str) -> float:
+        if not os.path.isdir(path):
+            raise ValueError(f'{path} is not a directory')
+        files = [path] + [os.path.join(path, f) for f in os.listdir(path)]
+        return os.path.getmtime(max(files, key=os.path.getmtime))
+
+    def _read_policy_file(self, path: str) -> tuple[str, float]:
+        try:
+            mtime = os.path.getmtime(path)
+            with open(path) as fap:
+                return fap.read(), mtime
+        except OSError as err:
+            if err.errno == errno.EACCES:
+                raise cfg.ConfigFilesPermissionDeniedError([path])
+            raise cfg.ConfigFilesNotFoundError([path])
+
+    def _parse_policy_file(
+        self, path: str, strict: bool
+    ) -> tuple[
+        dict[str, _checks.BaseCheck],
+        dict[str, 'RuleDefault'],
+        list[tuple[str, str]],
+    ]:
+        """Parse one policy file into checks and file-rule records."""
+        errors: list[tuple[str, str]] = []
+        checks: dict[str, _checks.BaseCheck] = {}
+        file_rules: dict[str, 'RuleDefault'] = {}
+        redundant_file_rules: list[str] = []
+
+        try:
+            data, _mtime = self._read_policy_file(path)
+        except (
+            cfg.ConfigFilesNotFoundError,
+            cfg.ConfigFilesPermissionDeniedError,
+        ) as exc:
+            if strict:
+                return {}, {}, [(path, f'{path}: {exc}')]
+            raise
+
+        try:
+            parsed = parse_file_contents(data)
+        except ValueError as exc:
+            if strict:
+                return {}, {}, [(path, f'{path}: invalid policy file: {exc}')]
+            raise
+
+        if not isinstance(parsed, dict):
+            message = f'{path}: policy file must contain a mapping'
+            if strict:
+                return {}, {}, [(path, message)]
+            raise ValueError(message)
+
+        for name, check_str in parsed.items():
+            if not isinstance(name, str):
+                message = f'{path}: policy name {name!r} is not a string'
+                if strict:
+                    errors.append((str(name), message))
+                else:
+                    LOG.warning(message)
+                continue
+            try:
+                check = _parser.parse_rule(
+                    check_str, raise_on_error=strict
+                )
+                file_rule = RuleDefault(name, check_str)
+            except (TypeError, ValueError) as exc:
+                errors.append((name, f'{path}: {name}: {exc}'))
+                continue
+            checks[name] = check
+            file_rules[name] = file_rule
+            reg_rule = self.registered_rules.get(name)
+            if reg_rule and file_rule == reg_rule:
+                redundant_file_rules.append(name)
+
+        if redundant_file_rules:
+            # NOTE(gmann): Log warning for redundant file rules which
+            # can be detected via 'oslopolicy-list-redundant' tool too.
+            LOG.warning(
+                'Policy Rules %(names)s specified in policy files '
+                'are the same as the defaults provided by the '
+                'service. You can remove these rules from policy '
+                'files which will make maintenance easier. You can '
+                'detect these redundant rules by '
+                '``oslopolicy-list-redundant`` tool also.',
+                {'names': redundant_file_rules},
+            )
+
+        return checks, file_rules, errors
+
+    def _build_candidate(
+        self,
+        main_path: str | None,
+        policy_dirs: Sequence[str],
+        strict: bool,
+    ) -> tuple[
+        Rules,
+        dict[str, 'RuleDefault'],
+        tuple[str, ...],
+        list[tuple[str, str]],
+    ]:
+        """Build a complete candidate rule set without touching active state.
+
+        All policy files are read and parsed, rules are merged in declaration
+        order, and registered defaults are applied. The result is only
+        installed by the caller once it has been validated.
+        """
+        if self.overwrite:
+            candidate = Rules(default_rule=self.default_rule)
+            file_rules: dict[str, 'RuleDefault'] = {}
+        else:
+            candidate = Rules(self._rules, self.default_rule)
+            file_rules = dict(self._file_rules)
+
+        files: list[str] = []
+        errors: list[tuple[str, str]] = []
+
+        sources: list[str] = []
+        if main_path is not None:
+            sources.append(main_path)
+        for path in policy_dirs:
+            if not os.path.isdir(path):
+                raise ValueError(f'{path} is not a directory')
+            policy_files = next(os.walk(path))[2]
+            policy_files.sort()
+            sources.extend(
+                os.path.join(path, name)
+                for name in policy_files
+                if not name.startswith('.')
+            )
+
+        for path in sources:
+            checks, parsed_file_rules, parsed_errors = self._parse_policy_file(
+                path, strict
+            )
+            errors.extend(parsed_errors)
+            candidate.update(checks)
+            file_rules.update(parsed_file_rules)
+            files.append(path)
+
+        self._apply_registered_defaults(candidate, file_rules, strict, errors)
+        return candidate, file_rules, tuple(files), errors
+
+    def _apply_registered_defaults(
+        self,
+        rules: Rules,
+        file_rules: dict[str, 'RuleDefault'],
+        strict: bool,
+        errors: list[tuple[str, str]],
+    ) -> None:
+        """Apply registered defaults on top of a staged rule set."""
+        for default in self.registered_rules.values():
+            if default.deprecated_for_removal:
+                self._emit_deprecated_for_removal_warning(default, file_rules)
+
+            if default.name in rules:
+                continue
+
+            if strict:
+                try:
+                    _parser.parse_rule(
+                        default.check_str, raise_on_error=True
+                    )
+                except (TypeError, ValueError) as exc:
+                    errors.append(
+                        (
+                            default.name,
+                            f'registered default {default.name}: {exc}',
+                        )
+                    )
+                    continue
+            # NOTE: Resolve deprecations against the staged file rules so
+            # the candidate is consistent with the version being installed.
+            check = default.check
+            if default.deprecated_rule:
+                check = self._handle_deprecated_rule(default, file_rules)
+
+            rules[default.name] = check
+
+    def _candidate_problems(
+        self, rules: MutableMapping[str, _checks.BaseCheck]
+    ) -> list[tuple[str, str]]:
+        """Return undefined and cyclical references in a candidate set."""
+        problems: list[tuple[str, str]] = []
+        for name, check in rules.items():
+            if not self.skip_undefined_check and self._undefined_check(
+                check, rules
+            ):
+                problems.append(
+                    (
+                        name,
+                        f'{name}: references a rule that is not defined',
+                    )
+                )
+            if self._cycle_check(check, rules=rules):
+                problems.append(
+                    (name, f'{name}: is part of a cyclical reference')
+                )
+        return problems
+
+    def _record_input_caches(self, policy_dirs: Sequence[str]) -> None:
+        """Record current input state without installing new rules.
+
+        Used when a candidate is rejected. The active rule set is untouched,
+        but a subsequent implicit load will not retry the same content until
+        one of the files changes.
+        """
+        sources = set(self._loaded_files)
+        if self.policy_path is not None:
+            sources.add(self.policy_path)
+        for path in policy_dirs:
+            if not os.path.isdir(path):
+                continue
+            for name in next(os.walk(path))[2]:
+                if not name.startswith('.'):
+                    sources.add(os.path.join(path, name))
+
+        for path in sources:
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                continue
+            self._file_cache[path] = {
+                'data': '',
+                'mtime': mtime,
+            }
+        for path in policy_dirs:
+            if not os.path.isdir(path):
+                continue
+            self._policy_dir_mtimes[path] = {
+                'data': '',
+                'mtime': self._directory_mtime(path),
+            }
+
+    def _commit_policy_caches(self, policy_dirs: Sequence[str]) -> None:
+        """Update mtime caches only after a candidate was installed."""
+        active_files = set(self._loaded_files)
+        self._file_cache = {
+            path: info
+            for path, info in self._file_cache.items()
+            if path in active_files
+        }
+        for path in active_files:
+            try:
+                mtime = os.path.getmtime(path)
+                with open(path) as fap:
+                    data = fap.read()
+            except OSError:
+                continue
+            self._file_cache[path] = {'data': data, 'mtime': mtime}
+
+        self._policy_dir_mtimes = {
+            path: info
+            for path, info in self._policy_dir_mtimes.items()
+            if path in policy_dirs
+        }
+        for path in policy_dirs:
+            self._policy_dir_mtimes[path] = {
+                'data': '',
+                'mtime': self._directory_mtime(path),
+            }
 
     def check_rules(self, raise_on_violation: bool = False) -> bool:
         """Look for rule definitions that are obviously incorrect."""
@@ -709,15 +1247,19 @@ class Enforcer:
         return not violation
 
     def _emit_deprecated_for_removal_warning(
-        self, default: 'RuleDefault'
+        self,
+        default: 'RuleDefault',
+        file_rules: dict[str, 'RuleDefault'] | None = None,
     ) -> None:
+        if file_rules is None:
+            file_rules = self.file_rules
         # If the policy is being removed completely, we need to let operators
         # know that the policy is going to be silently ignored in the future
         # and they can remove it from their overrides since it isn't being
         # replaced by another policy.
         if (
             not self.suppress_deprecation_warnings
-            and default.name in self.file_rules
+            and default.name in file_rules
         ):
             warnings.warn(
                 f'Policy "{default.name}":"{default.check_str}" was '
@@ -727,13 +1269,19 @@ class Enforcer:
             )
 
     def _handle_deprecated_rule(
-        self, default: 'RuleDefault'
+        self,
+        default: 'RuleDefault',
+        file_rules: dict[str, 'RuleDefault'] | None = None,
     ) -> _checks.BaseCheck:
         """Handle cases where a policy rule has been deprecated.
 
         :param default: an instance of RuleDefault that contains an instance of
             DeprecatedRule
+        :param file_rules: The file rules of the candidate version. Defaults
+            to the active version's file rules.
         """
+        if file_rules is None:
+            file_rules = self.file_rules
         deprecated_rule = default.deprecated_rule
         assert deprecated_rule is not None  # narrow type
 
@@ -760,7 +1308,7 @@ class Enforcer:
         # self.file_rules, we know that it's being overridden.
         if (
             deprecated_rule.name != default.name
-            and deprecated_rule.name in self.file_rules
+            and deprecated_rule.name in file_rules
         ):
             if not self.suppress_deprecation_warnings:
                 warnings.warn(deprecated_msg)
@@ -773,13 +1321,13 @@ class Enforcer:
             # we set the deprecated rule name to reference the new rule. If we
             # see that the deprecated override rule is just the new rule, then
             # we shouldn't mess with it.
-            file_rule = self.file_rules[deprecated_rule.name]
+            file_rule = file_rules[deprecated_rule.name]
             if (
                 file_rule.check != deprecated_rule.check
                 and str(file_rule.check) != f'rule:{default.name}'
-                and default.name not in self.file_rules.keys()
+                and default.name not in file_rules.keys()
             ):
-                return self.file_rules[deprecated_rule.name].check
+                return file_rule.check
 
         # In this case, the default check string is changing. We need to let
         # operators know that this is going to change. If they don't want to
@@ -796,7 +1344,7 @@ class Enforcer:
         if (
             not self.conf.oslo_policy.enforce_new_defaults
             and deprecated_rule.check_str != default.check_str
-            and default.name not in self.file_rules
+            and default.name not in file_rules
         ):
             if not (
                 self.suppress_deprecation_warnings
@@ -808,19 +1356,25 @@ class Enforcer:
 
         return default.check
 
-    def _undefined_check(self, check: _checks.BaseCheck) -> bool:
+    def _undefined_check(
+        self,
+        check: _checks.BaseCheck,
+        rules: MutableMapping[str, _checks.BaseCheck] | None = None,
+    ) -> bool:
         """Check if a RuleCheck references an undefined rule."""
+        if rules is None:
+            rules = self.rules
         if isinstance(check, RuleCheck):
-            if check.match not in self.rules:
+            if check.match not in rules:
                 # Undefined rule
                 return True
 
         # An AndCheck or OrCheck is composed of multiple rules so check
         # each of those.
-        rules = getattr(check, 'rules', None)
-        if rules:
-            for rule in rules:
-                if self._undefined_check(rule):
+        nested_rules = getattr(check, 'rules', None)
+        if nested_rules:
+            for rule in nested_rules:
+                if self._undefined_check(rule, rules):
                     return True
         return False
 
@@ -828,6 +1382,7 @@ class Enforcer:
         self,
         check: _checks.BaseCheck,
         seen: set[str] | None = None,
+        rules: MutableMapping[str, _checks.BaseCheck] | None = None,
     ) -> bool:
         """Check if RuleChecks cycle.
 
@@ -838,121 +1393,36 @@ class Enforcer:
 
         :param check: The check to search for.
         :param seen: A set of previously seen rules, else None.
+        :param rules: The rule set to resolve references against, else the
+            active rules.
         """
         if seen is None:
             seen = set()
+
+        if rules is None:
+            rules = self.rules
 
         if isinstance(check, RuleCheck):
             if check.match in seen:
                 # Cycle found
                 return True
             seen.add(check.match)
-            if check.match in self.rules:
+            if check.match in rules:
                 # There can only be a cycle if the referenced rule is defined.
-                if self._cycle_check(self.rules[check.match], seen):
+                if self._cycle_check(rules[check.match], seen, rules):
                     return True
 
         # An AndCheck or OrCheck is composed of multiple rules so check
         # each of those.
-        rules = getattr(check, 'rules', None)
-        if rules:
-            for rule in rules:
+        nested_rules = getattr(check, 'rules', None)
+        if nested_rules:
+            for rule in nested_rules:
                 # As there being an OrCheck or AndCheck, a copy of the father's
                 # seen should be called here. In order that the checks in
                 # different branchs are separated.
-                if self._cycle_check(rule, seen.copy()):
+                if self._cycle_check(rule, seen.copy(), rules):
                     return True
         return False
-
-    @staticmethod
-    def _is_directory_updated(cache: _cache_handler.CacheT, path: str) -> bool:
-        # Get the current modified time and compare it to what is in
-        # the cache and check if the new mtime is greater than what
-        # is in the cache
-        mtime = 0.0
-        if os.path.exists(path):
-            if not os.path.isdir(path):
-                raise ValueError(f'{path} is not a directory')
-            # Make a list of all the files
-            files = [path] + [
-                os.path.join(path, file) for file in os.listdir(path)
-            ]
-            # Pick the newest one, let's use its time.
-            mtime = os.path.getmtime(max(files, key=os.path.getmtime))
-        cache_info = cache.setdefault(path, {'data': '', 'mtime': 0.0})
-        if mtime > cache_info.get('mtime', 0.0):
-            cache_info['mtime'] = mtime
-            return True
-        return False
-
-    @staticmethod
-    def _walk_through_policy_directory(
-        path: str,
-        func: Callable[..., bool],
-        *args: Any,
-    ) -> None:
-        if not os.path.isdir(path):
-            raise ValueError(f'{path} is not a directory')
-        # We do not iterate over sub-directories.
-        policy_files = next(os.walk(path))[2]
-        policy_files.sort()
-        for policy_file in [p for p in policy_files if not p.startswith('.')]:
-            func(os.path.join(path, policy_file), *args)
-
-    def _record_file_rules(self, data: str, overwrite: bool = False) -> None:
-        """Store a copy of rules loaded from a file.
-
-        It is useful to be able to distinguish between rules loaded from a file
-        and those registered by a consuming service. In order to do so we keep
-        a record of rules loaded from a file.
-
-        :param data: The raw contents of a policy file.
-        :param overwrite: If True clear out previously loaded rules.
-        """
-        if overwrite:
-            self.file_rules = {}
-        parsed_file = parse_file_contents(data)
-        redundant_file_rules = []
-        for name, check_str in parsed_file.items():
-            file_rule = RuleDefault(name, check_str)
-            self.file_rules[name] = file_rule
-            reg_rule = self.registered_rules.get(name)
-            if reg_rule and (file_rule == reg_rule):
-                redundant_file_rules.append(name)
-        if redundant_file_rules:
-            # NOTE(gmann): Log warning for redundant file rules which
-            # can be detected via 'oslopolicy-list-redundant' tool too.
-            LOG.warning(
-                'Policy Rules %(names)s specified in policy files '
-                'are the same as the defaults provided by the '
-                'service. You can remove these rules from policy '
-                'files which will make maintenance easier. You can '
-                'detect these redundant rules by '
-                '``oslopolicy-list-redundant`` tool also.',
-                {'names': redundant_file_rules},
-            )
-
-    def _load_policy_file(
-        self, path: str, force_reload: bool, overwrite: bool = True
-    ) -> bool:
-        """Load policy rules from the specified policy file.
-
-        :param path: A path of the policy file to load rules from.
-        :param force_reload: Forcefully reload the policy file content.
-        :param overwrite: Replace policy rules instead of updating them.
-        :return: A bool indicating whether rules have been changed or not.
-        """
-        rules_changed = False
-        reloaded, data = _cache_handler.read_cached_file(
-            self._file_cache, path, force_reload=force_reload
-        )
-        if reloaded or not self.rules:
-            rules = Rules.load(data, self.default_rule)
-            self.set_rules(rules, overwrite=overwrite, use_conf=True)
-            rules_changed = True
-            self._record_file_rules(data, overwrite)
-            LOG.debug('Reloaded policy file: %(path)s', {'path': path})
-        return rules_changed
 
     def _get_policy_path(self, path: str) -> str:
         """Locate the policy YAML data file/path.
@@ -1002,7 +1472,37 @@ class Enforcer:
             ``True``.  Note: for rules using the "case" expression, this
             ``True`` value will be the specified string from the expression.
         """
+        # Resolve the whole rule chain against one version. A concurrent
+        # reload may install a new rule set while this call is running, but
+        # every ``rule:`` reference followed by this call keeps using the
+        # snapshot pinned here.
+        active = _ACTIVE_RULES.get()
+        if active is not None and active[0] is self:
+            # A check invoked nested enforcement on the same enforcer. Reuse
+            # the already pinned snapshot instead of consulting a newer one.
+            return self._enforce_loaded(
+                rule, target, creds, do_raise, exc, *args, **kwargs
+            )
+
         self.load_rules()
+        token = _ACTIVE_RULES.set((self, self._rules_for_enforcement))
+        try:
+            return self._enforce_loaded(
+                rule, target, creds, do_raise, exc, *args, **kwargs
+            )
+        finally:
+            _ACTIVE_RULES.reset(token)
+
+    def _enforce_loaded(
+        self,
+        rule: _checks.BaseCheck | str,
+        target: _checks.TargetT,
+        creds: _checks.CredsT,
+        do_raise: bool = False,
+        exc: type[Exception] | None = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> bool:
 
         creds_dict: MutableMapping[str, Any]
         if isinstance(creds, context.RequestContext):
