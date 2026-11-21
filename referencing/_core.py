@@ -289,6 +289,84 @@ def _fail_to_retrieve(uri: URI):
     raise exceptions.NoSuchResource(ref=uri)
 
 
+def _resource_pairs(
+    resources: (
+        Resource[D]
+        | tuple[URI, Resource[D]]
+        | Mapping[URI, Resource[D]]
+        | Iterable[tuple[URI, Resource[D]]]
+        | Iterable[Resource[D]]
+    ),
+) -> list[tuple[URI, Resource[D]]]:
+    """
+    Normalize the various ways of spelling a collection of resources.
+    """
+    if isinstance(resources, Resource):
+        id = resources.id()
+        if id is None:
+            raise exceptions.NoInternalID(resource=resources)
+        return [(id, resources)]
+
+    if isinstance(resources, Mapping):
+        return list(resources.items())
+
+    if (
+        isinstance(resources, tuple)
+        and len(resources) == 2
+        and isinstance(resources[0], str)
+        and isinstance(resources[1], Resource)
+    ):
+        return [(resources[0], resources[1])]
+
+    pairs: list[tuple[URI, Resource[D]]] = []
+    for each in resources:
+        if isinstance(each, Resource):
+            id = each.id()
+            if id is None:
+                raise exceptions.NoInternalID(resource=each)
+            pairs.append((id, each))
+        else:
+            pairs.append(tuple(each))
+    return pairs
+
+
+@frozen
+class _Package(Generic[D]):
+    """
+    The frozen resources which a single package contributed to a registry.
+
+    A package's snapshot includes not only the resources which were explicitly
+    registered for it, but also every nested resource which crawling those
+    resources discovered. In other words, it is the set of resources which
+    belong to the package, and which must be withdrawn when it is withdrawn.
+
+    ``claimed`` is the subset of those resources which were not already
+    present in the registry when the package was registered. Resources which
+    were already present belong to another package (or to the registry's
+    base), so withdrawing this package must leave them in place.
+    """
+
+    resources: HashTrieMap[URI, Resource[D]]
+    anchors: HashTrieMap[tuple[URI, str], AnchorType[D]]
+    claimed: HashTrieSet[URI]
+
+    @classmethod
+    def from_pairs(
+        cls,
+        pairs: Iterable[tuple[URI, Resource[D]]],
+        existing: Mapping[URI, Resource[D]],
+    ) -> _Package[D]:
+        crawled = Registry().with_resources(pairs).crawl()
+        claimed = HashTrieSet(
+            uri for uri in crawled._resources if uri not in existing
+        )
+        return cls(
+            resources=crawled._resources,
+            anchors=crawled._anchors,
+            claimed=claimed,
+        )
+
+
 @frozen
 class Registry(Mapping[URI, Resource[D]]):
     r"""
@@ -322,6 +400,12 @@ class Registry(Mapping[URI, Resource[D]]):
     _anchors: HashTrieMap[tuple[URI, str], AnchorType[D]] = HashTrieMap()
     _uncrawled: HashTrieSet[URI] = EMPTY_UNCRAWLED
     _retrieve: Retrieve[D] = field(default=_fail_to_retrieve, alias="retrieve")
+    _packages: HashTrieMap[str, _Package[D]] = field(
+        default=HashTrieMap(),
+        converter=HashTrieMap.convert,  # type: ignore[reportGeneralTypeIssues]
+        alias="packages",
+    )
+    _withdrawn: HashTrieSet[URI] = EMPTY_UNCRAWLED
 
     def __getitem__(self, uri: URI) -> Resource[D]:
         """
@@ -381,13 +465,20 @@ class Registry(Mapping[URI, Resource[D]]):
 
         resources = self._resources
         uncrawled = self._uncrawled
+        withdrawn = self._withdrawn
         for resource in new:
             id = resource.id()
             if id is None:
                 raise exceptions.NoInternalID(resource=resource)
             uncrawled = uncrawled.insert(id)
             resources = resources.insert(id, resource)
-        return evolve(self, resources=resources, uncrawled=uncrawled)
+            withdrawn = withdrawn.discard(id)
+        return evolve(
+            self,
+            resources=resources,
+            uncrawled=uncrawled,
+            withdrawn=withdrawn,
+        )
 
     def __repr__(self) -> str:
         size = len(self)
@@ -413,6 +504,9 @@ class Registry(Mapping[URI, Resource[D]]):
         resource = self._resources.get(uri)
         if resource is not None:
             return Retrieved(registry=self, value=resource)
+
+        if uri.rstrip("#") in self._withdrawn:
+            raise exceptions.NoSuchResource(ref=uri)
 
         registry = self.crawl()
         resource = registry._resources.get(uri)
@@ -447,6 +541,198 @@ class Registry(Mapping[URI, Resource[D]]):
                 (k, v) for k, v in self._anchors.items() if k[0] != uri
             ),
         )
+
+    def _retract(
+        self,
+        name: str,
+        package: _Package[D],
+    ) -> Registry[D]:
+        """
+        Remove everything a package owns, keeping shared dependencies.
+        """
+        registry = self.crawl()
+        others = [
+            other
+            for each, other in registry._packages.items()
+            if each != name
+        ]
+        held_elsewhere = HashTrieSet(
+            uri for other in others for uri in other.resources
+        )
+
+        resources = registry._resources
+        anchors = registry._anchors
+        uncrawled = registry._uncrawled
+        withdrawn = registry._withdrawn
+        for uri in package.claimed:
+            if uri in held_elsewhere:
+                continue
+            current = resources.get(uri)
+            if current is None or current is not package.resources.get(uri):
+                continue
+            resources = resources.remove(uri)
+            uncrawled = uncrawled.discard(uri)
+            anchors = HashTrieMap(
+                (key, value)
+                for key, value in anchors.items()
+                if key[0] != uri
+            )
+            withdrawn = withdrawn.insert(uri)
+        return evolve(
+            registry,
+            resources=resources,
+            anchors=anchors,
+            uncrawled=uncrawled,
+            withdrawn=withdrawn,
+            packages=registry._packages.remove(name),
+        )
+
+    def with_package(
+        self,
+        name: str,
+        resources: (
+            Resource[D]
+            | tuple[URI, Resource[D]]
+            | Mapping[URI, Resource[D]]
+            | Iterable[tuple[URI, Resource[D]]]
+            | Iterable[Resource[D]]
+        ),
+    ) -> Registry[D]:
+        """
+        Register a named package of resources, including their subresources.
+
+        Unlike `with_resource`, the package is crawled immediately, so the
+        registry records every resource which the package derives (for
+        example nested resources identified by their own ``$id``). Those
+        derived resources are considered owned by the package, which is what
+        allows `replace` and `withdraw` to retract them together later.
+
+        Resources which were already present in the registry before the
+        package was registered are *not* owned by it: they are shared
+        dependencies belonging to whichever package (or base registry) added
+        them first, and are left in place when this package is withdrawn.
+
+        Registering a package under a name which is already present replaces
+        it, as if `replace` had been called.
+        """
+        if name in self._packages:
+            return self.replace(name, resources)
+
+        registry = self.crawl()
+        package = _Package.from_pairs(
+            _resource_pairs(resources),
+            existing=registry._resources,
+        )
+        claimed_resources = HashTrieMap(
+            (uri, package.resources[uri]) for uri in package.claimed
+        )
+        claimed_anchors = HashTrieMap(
+            (key, value)
+            for key, value in package.anchors.items()
+            if key[0] in package.claimed
+        )
+        return evolve(
+            registry,
+            resources=registry._resources.update(claimed_resources),
+            anchors=registry._anchors.update(claimed_anchors),
+            packages=registry._packages.insert(name, package),
+            withdrawn=registry._withdrawn.difference(package.claimed),
+        )
+
+    def replace(
+        self,
+        name: str,
+        resources: (
+            Resource[D]
+            | tuple[URI, Resource[D]]
+            | Mapping[URI, Resource[D]]
+            | Iterable[tuple[URI, Resource[D]]]
+            | Iterable[Resource[D]]
+        ),
+    ) -> Registry[D]:
+        """
+        Retract a registered package and load a replacement in its place.
+
+        Every resource which the old package owned -- including the nested
+        resources which crawling its roots derived -- is withdrawn together.
+        Shared dependencies are kept: a resource which another registered
+        package also uses, or which the base registry already provided, is
+        not removed.
+
+        The withdrawn URIs are remembered as explicitly unavailable, so a
+        ``retrieve`` callable cannot silently resurrect one of them.
+
+        The replacement is registered under the same name, and the returned
+        registry is a new immutable snapshot: resolvers constructed from the
+        old registry continue to interpret their requests against it.
+
+        Raises:
+
+            `exceptions.NoSuchPackage`
+
+                if no package with the given name is registered
+
+        """
+        old = self._packages.get(name)
+        if old is None:
+            raise exceptions.NoSuchPackage(name=name)
+
+        return self._retract(name, old).with_package(name, resources)
+
+    def withdraw(self, name: str) -> Registry[D]:
+        """
+        Retract a registered package without loading a replacement.
+
+        As with `replace`, the resources which the package owned are removed
+        (unless another package still legitimately uses them) and remembered
+        as unavailable, while shared dependencies remain.
+
+        Raises:
+
+            `exceptions.NoSuchPackage`
+
+                if no package with the given name is registered
+
+        """
+        old = self._packages.get(name)
+        if old is None:
+            raise exceptions.NoSuchPackage(name=name)
+
+        return self._retract(name, old)
+
+    def replace_package(
+        self,
+        name: str,
+        resources: (
+            Resource[D]
+            | tuple[URI, Resource[D]]
+            | Mapping[URI, Resource[D]]
+            | Iterable[tuple[URI, Resource[D]]]
+            | Iterable[Resource[D]]
+        ),
+    ) -> Registry[D]:
+        """
+        An alias for `replace`.
+        """
+        return self.replace(name, resources)
+
+    def withdraw_package(self, name: str) -> Registry[D]:
+        """
+        An alias for `withdraw`.
+        """
+        return self.withdraw(name)
+
+    def packages(self) -> Iterable[str]:
+        """
+        Return the names of the packages registered with this registry.
+        """
+        return self._packages.keys()
+
+    def is_withdrawn(self, uri: URI) -> bool:
+        """
+        Return whether a URI was explicitly retracted by a package withdrawal.
+        """
+        return uri.rstrip("#") in self._withdrawn
 
     def anchor(self, uri: URI, name: str):
         """
@@ -495,6 +781,11 @@ class Registry(Mapping[URI, Resource[D]]):
             id = resource.id()
             if id is not None:
                 uri = urljoin(uri, id)
+
+            if uri in self._withdrawn:
+                continue
+
+            if id is not None:
                 resources = resources.insert(uri, resource)
             for each in resource.anchors():
                 anchors = anchors.insert((uri, each.name), each)
@@ -521,13 +812,20 @@ class Registry(Mapping[URI, Resource[D]]):
         """
         resources = self._resources
         uncrawled = self._uncrawled
+        withdrawn = self._withdrawn
         for uri, resource in pairs:
             # Empty fragment URIs are equivalent to URIs without the fragment.
             # TODO: Is this true for non JSON Schema resources? Probably not.
             uri = uri.rstrip("#")
             uncrawled = uncrawled.insert(uri)
             resources = resources.insert(uri, resource)
-        return evolve(self, resources=resources, uncrawled=uncrawled)
+            withdrawn = withdrawn.discard(uri)
+        return evolve(
+            self,
+            resources=resources,
+            uncrawled=uncrawled,
+            withdrawn=withdrawn,
+        )
 
     def with_contents(
         self,
@@ -552,10 +850,24 @@ class Registry(Mapping[URI, Resource[D]]):
         anchors = self._anchors
         uncrawled = self._uncrawled
         retrieve = self._retrieve
+        packages = self._packages
+        withdrawn = self._withdrawn
         for registry in registries:
             resources = resources.update(registry._resources)
             anchors = anchors.update(registry._anchors)
             uncrawled = uncrawled.update(registry._uncrawled)
+            for name, package in registry._packages.items():
+                existing = packages.get(name)
+                if existing is not None:
+                    package = _Package(
+                        resources=existing.resources.update(
+                            package.resources,
+                        ),
+                        anchors=existing.anchors.update(package.anchors),
+                        claimed=existing.claimed.union(package.claimed),
+                    )
+                packages = packages.insert(name, package)
+            withdrawn = withdrawn.update(registry._withdrawn)
 
             if registry._retrieve is not _fail_to_retrieve:
                 if registry._retrieve is not retrieve is not _fail_to_retrieve:
@@ -570,6 +882,8 @@ class Registry(Mapping[URI, Resource[D]]):
             resources=resources,
             uncrawled=uncrawled,
             retrieve=retrieve,
+            packages=packages,
+            withdrawn=withdrawn,
         )
 
     def resolver(self, base_uri: URI = "") -> Resolver[D]:

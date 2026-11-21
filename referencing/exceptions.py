@@ -36,6 +36,28 @@ class NoSuchResource(KeyError):
 
 
 @frozen
+class NoSuchPackage(KeyError):
+    """
+    No package with the given name has been registered.
+
+    Raised when withdrawing or replacing a package which was never loaded.
+    """
+
+    name: str
+
+    def __eq__(self, other: object) -> bool:
+        if self.__class__ is not other.__class__:
+            return NotImplemented
+        return attrs.astuple(self) == attrs.astuple(other)
+
+    def __hash__(self) -> int:
+        return hash(attrs.astuple(self))
+
+    def __str__(self) -> str:
+        return f"No package named {self.name!r} is registered"
+
+
+@frozen
 class NoInternalID(Exception):
     """
     A resource has no internal ID, but one is needed.

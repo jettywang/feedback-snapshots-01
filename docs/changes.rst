@@ -2,6 +2,11 @@
 Changelog
 =========
 
+v0.38.0
+-------
+
+* Add `Registry.with_package`, `Registry.replace` and `Registry.withdraw`, which register a named package of resources along with the nested resources crawling derives from it, and retract that whole snapshot when the package is replaced or withdrawn. Shared dependencies (resources already provided by the registry or still used by another package) are kept, and withdrawn URIs are not resurrected by ``retrieve``.
+
 v0.37.0
 -------
 

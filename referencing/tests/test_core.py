@@ -575,6 +575,386 @@ class TestRegistry:
     def test_repr_empty(self):
         assert repr(Registry()) == "<Registry (0 resources)>"
 
+    def test_with_package_crawls_derived_resources(self):
+        """
+        A package's nested resources are discovered eagerly.
+        """
+        root = ID_AND_CHILDREN.create_resource(
+            {
+                "ID": "urn:package:root",
+                "children": [{"ID": "urn:package:child", "foo": 12}],
+            },
+        )
+        registry = Registry().with_package("pkg", [root])
+        assert registry["urn:package:child"].contents == {
+            "ID": "urn:package:child",
+            "foo": 12,
+        }
+        assert list(registry.packages()) == ["pkg"]
+
+    def test_with_package_accepts_mappings_and_resources(self):
+        one = ID_AND_CHILDREN.create_resource({"ID": "urn:one"})
+        two = ID_AND_CHILDREN.create_resource({"ID": "urn:two"})
+        assert (
+            Registry().with_package("pkg", {"urn:alias": one})["urn:alias"]
+            == one
+        )
+        assert Registry().with_package("pkg", [one, two])["urn:two"] == two
+
+    def test_with_package_without_ids(self):
+        resource = Resource.opaque(contents={})
+        with pytest.raises(exceptions.NoInternalID) as e:
+            Registry().with_package("pkg", [resource])
+        assert e.value == exceptions.NoInternalID(resource=resource)
+
+    def test_with_package_existing_name_replaces(self):
+        old = ID_AND_CHILDREN.create_resource({"ID": "urn:root", "foo": "old"})
+        new = ID_AND_CHILDREN.create_resource({"ID": "urn:root", "foo": "new"})
+        registry = Registry().with_package("pkg", [old])
+        replaced = registry.with_package("pkg", [new])
+        assert replaced["urn:root"].contents == {
+            "ID": "urn:root",
+            "foo": "new",
+        }
+
+    def test_replace_nonexistent_package(self):
+        with pytest.raises(exceptions.NoSuchPackage) as e:
+            Registry().replace("pkg", [])
+        assert e.value == exceptions.NoSuchPackage(name="pkg")
+
+    def test_withdraw_nonexistent_package(self):
+        with pytest.raises(exceptions.NoSuchPackage) as e:
+            Registry().withdraw("pkg")
+        assert e.value == exceptions.NoSuchPackage(name="pkg")
+
+    def test_replace_withdraws_derived_resources(self):
+        old = ID_AND_CHILDREN.create_resource(
+            {
+                "ID": "urn:package:root",
+                "anchors": {"version": "old"},
+                "children": [
+                    {"ID": "urn:package:legacy", "anchors": {"only": "old"}},
+                ],
+            },
+        )
+        new = ID_AND_CHILDREN.create_resource(
+            {
+                "ID": "urn:package:root",
+                "anchors": {"version": "new"},
+                "children": [
+                    {"ID": "urn:package:current", "anchors": {"only": "new"}},
+                ],
+            },
+        )
+        registry = Registry().with_package("pkg", [old])
+        replaced = registry.replace("pkg", [new])
+
+        resolver = replaced.resolver()
+        assert resolver.lookup("urn:package:root#version").contents == "new"
+        assert resolver.lookup("urn:package:current#only").contents == "new"
+
+        with pytest.raises(exceptions.NoSuchResource):
+            replaced["urn:package:legacy"]
+        with pytest.raises(exceptions.Unresolvable):
+            resolver.lookup("urn:package:legacy#only")
+        assert replaced.is_withdrawn("urn:package:legacy")
+
+    def test_replace_keeps_shared_dependency(self):
+        """
+        A resource another package also legitimately uses is not withdrawn.
+        """
+        shared = ID_AND_CHILDREN.create_resource(
+            {"ID": "urn:shared", "anchors": {"shared": "yes"}},
+        )
+        old = ID_AND_CHILDREN.create_resource(
+            {
+                "ID": "urn:package:root",
+                "children": [{"ID": "urn:package:legacy"}],
+            },
+        )
+        other = ID_AND_CHILDREN.create_resource(
+            {"ID": "urn:other", "children": [shared.contents]},
+        )
+        new = ID_AND_CHILDREN.create_resource({"ID": "urn:package:root"})
+
+        registry = (
+            Registry()
+            .with_package("shared", [shared])
+            .with_package("other", [other])
+            .with_package("pkg", [old])
+        )
+        replaced = registry.replace("pkg", [new])
+
+        assert replaced["urn:shared"] == shared
+        assert replaced["urn:other"].contents["ID"] == "urn:other"
+        resolver = replaced.resolver()
+        assert resolver.lookup("urn:shared#shared").contents == "yes"
+        with pytest.raises(exceptions.NoSuchResource):
+            replaced["urn:package:legacy"]
+
+    def test_replace_keeps_base_registry_resources(self):
+        shared = ID_AND_CHILDREN.create_resource({"ID": "urn:shared"})
+        old = ID_AND_CHILDREN.create_resource(
+            {
+                "ID": "urn:package:root",
+                "children": [shared.contents],
+            },
+        )
+        registry = Registry().with_resource(
+            "urn:shared",
+            shared,
+        ).with_package("pkg", [old])
+        replaced = registry.replace(
+            "pkg",
+            [ID_AND_CHILDREN.create_resource({"ID": "urn:package:root"})],
+        )
+        assert replaced["urn:shared"] == shared
+
+    def test_replace_does_not_resurrect_withdrawn_resource(self):
+        """
+        Even if ``retrieve`` could produce a withdrawn URI, it is not used.
+        """
+        old = ID_AND_CHILDREN.create_resource(
+            {"ID": "urn:package:root", "children": [{"ID": "urn:legacy"}]},
+        )
+        retrieved = ID_AND_CHILDREN.create_resource({"ID": "urn:legacy"})
+
+        def retrieve(uri):  # pragma: no cover
+            if uri == "urn:legacy":
+                return retrieved
+            raise exceptions.NoSuchResource(ref=uri)
+
+        registry = Registry(retrieve=retrieve).with_package("pkg", [old])
+        replaced = registry.replace(
+            "pkg",
+            [ID_AND_CHILDREN.create_resource({"ID": "urn:package:root"})],
+        )
+        with pytest.raises(exceptions.NoSuchResource):
+            replaced.get_or_retrieve("urn:legacy")
+
+    def test_replace_returns_new_snapshot(self):
+        """
+        The old registry (and resolvers built from it) are unaffected.
+        """
+        old = ID_AND_CHILDREN.create_resource(
+            {"ID": "urn:package:root", "anchors": {"version": "old"}},
+        )
+        new = ID_AND_CHILDREN.create_resource(
+            {"ID": "urn:package:root", "anchors": {"version": "new"}},
+        )
+        registry = Registry().with_package("pkg", [old])
+        resolver = registry.resolver()
+        replaced = registry.replace("pkg", [new])
+
+        assert resolver.lookup("urn:package:root#version").contents == "old"
+        assert replaced.resolver().lookup(
+            "urn:package:root#version",
+        ).contents == "new"
+        assert list(registry.packages()) == ["pkg"]
+        assert registry["urn:package:root"] == old
+
+    def test_withdraw(self):
+        old = ID_AND_CHILDREN.create_resource(
+            {
+                "ID": "urn:package:root",
+                "children": [{"ID": "urn:package:legacy"}],
+            },
+        )
+        registry = Registry().with_package("pkg", [old])
+        withdrawn = registry.withdraw("pkg")
+
+        assert list(withdrawn.packages()) == []
+        with pytest.raises(exceptions.NoSuchResource):
+            withdrawn["urn:package:root"]
+        with pytest.raises(exceptions.NoSuchResource):
+            withdrawn["urn:package:legacy"]
+
+    def test_replace_aliases(self):
+        old = ID_AND_CHILDREN.create_resource({"ID": "urn:package:root"})
+        registry = Registry().with_package("pkg", [old])
+        new = ID_AND_CHILDREN.create_resource({"ID": "urn:package:root"})
+        assert registry.replace_package("pkg", [new])[
+            "urn:package:root"
+        ] == new
+        assert list(registry.withdraw_package("pkg").packages()) == []
+
+    def test_crawl_does_not_reintroduce_withdrawn_resource(self):
+        """
+        Crawling a resource cannot bypass an explicit package withdrawal.
+        """
+        old = ID_AND_CHILDREN.create_resource(
+            {"ID": "urn:package:root", "children": [{"ID": "urn:legacy"}]},
+        )
+        registry = Registry().with_package("pkg", [old]).withdraw("pkg")
+        raiser = ID_AND_CHILDREN.create_resource(
+            {"ID": "urn:other", "children": [{"ID": "urn:legacy"}]},
+        )
+        assert (
+            registry.with_resource("urn:other", raiser)
+            .crawl()
+            .get("urn:legacy")
+            is None
+        )
+
+    def test_adding_withdrawn_resource_explicitly_revives_it(self):
+        old = ID_AND_CHILDREN.create_resource(
+            {"ID": "urn:package:root", "children": [{"ID": "urn:legacy"}]},
+        )
+        registry = Registry().with_package("pkg", [old]).withdraw("pkg")
+        revived = registry.with_resource(
+            "urn:legacy",
+            ID_AND_CHILDREN.create_resource({"ID": "urn:legacy"}),
+        )
+        assert not revived.is_withdrawn("urn:legacy")
+        assert revived["urn:legacy"].contents == {"ID": "urn:legacy"}
+
+    def test_package_replacement_end_to_end(self):
+        """
+        Shared and package-private indirect references are handled differently.
+
+        The old resolver keeps interpreting in-flight requests, while a
+        resolver built from the replacement sees its new anchors and the
+        shared dependency, and the retracted private resource is explicitly
+        unavailable.
+        """
+        shared = ID_AND_CHILDREN.create_resource(
+            {
+                "ID": "urn:shared",
+                "anchors": {"shared": "value"},
+                "children": [{"ID": "urn:shared:detail", "foo": "detail"}],
+            },
+        )
+        old = ID_AND_CHILDREN.create_resource(
+            {
+                "ID": "urn:package:root",
+                "anchors": {"version": "legacy"},
+                "children": [
+                    {"ID": "urn:package:private", "anchors": {"only": "old"}},
+                    # A legitimate reuse of a shared dependency.
+                    shared.contents,
+                ],
+            },
+        )
+        new = ID_AND_CHILDREN.create_resource(
+            {
+                "ID": "urn:package:root",
+                "anchors": {"version": "current"},
+                "children": [
+                    {"ID": "urn:package:private", "anchors": {"only": "new"}},
+                    shared.contents,
+                ],
+            },
+        )
+
+        registry = (
+            Registry()
+            .with_package("shared", [shared])
+            .with_package("package", [old])
+        )
+        in_flight = registry.resolver()
+        replaced = registry.replace("package", [new])
+        fresh = replaced.resolver()
+
+        assert in_flight.lookup(
+            "urn:package:root#version",
+        ).contents == "legacy"
+        assert fresh.lookup("urn:package:root#version").contents == "current"
+
+        assert fresh.lookup("urn:shared#shared").contents == "value"
+        assert fresh.lookup("urn:shared:detail").contents["foo"] == "detail"
+
+        # The replacement's own private resource is a new version.
+        assert fresh.lookup("urn:package:private#only").contents == "new"
+        # The old resolver still has its version of the private resource.
+        assert in_flight.lookup("urn:package:private#only").contents == "old"
+
+    def test_withdrawn_private_resource_is_explicitly_unavailable(self):
+        old = ID_AND_CHILDREN.create_resource(
+            {
+                "ID": "urn:package:root",
+                "children": [{"ID": "urn:package:private"}],
+            },
+        )
+        new = ID_AND_CHILDREN.create_resource({"ID": "urn:package:root"})
+        replaced = (
+            Registry().with_package("package", [old]).replace("package", [new])
+        )
+
+        with pytest.raises(exceptions.NoSuchResource):
+            replaced["urn:package:private"]
+        with pytest.raises(exceptions.Unresolvable):
+            replaced.resolver().lookup("urn:package:private")
+        assert replaced.is_withdrawn("urn:package:private")
+
+    def test_combine_merges_same_named_package(self):
+        first = Registry().with_package(
+            "pkg",
+            [ID_AND_CHILDREN.create_resource({"ID": "urn:one"})],
+        )
+        second = Registry().with_package(
+            "pkg",
+            [ID_AND_CHILDREN.create_resource({"ID": "urn:two"})],
+        )
+        combined = first.combine(second)
+        assert list(combined.packages()) == ["pkg"]
+        withdrawn = combined.withdraw("pkg")
+        with pytest.raises(exceptions.NoSuchResource):
+            withdrawn["urn:one"]
+        with pytest.raises(exceptions.NoSuchResource):
+            withdrawn["urn:two"]
+
+    def test_with_package_accepts_list_of_uri_pairs(self):
+        resource = ID_AND_CHILDREN.create_resource({"ID": "urn:internal"})
+        registry = Registry().with_package("pkg", [("urn:alias", resource)])
+        assert registry["urn:alias"] == resource
+        assert registry["urn:internal"] == resource
+
+    def test_replace_does_not_remove_taken_over_resource(self):
+        """
+        A resource another package also refers to is not withdrawn.
+
+        Registration is first-wins: a later package referring to a URI which
+        is already present records a shared dependency rather than taking
+        ownership of it.
+        """
+        old = ID_AND_CHILDREN.create_resource({"ID": "urn:root", "v": "old"})
+        shared = ID_AND_CHILDREN.create_resource({"ID": "urn:root", "v": "s"})
+        registry = (
+            Registry()
+            .with_package("first", [old])
+            .with_package("second", [shared])
+        )
+        after = registry.replace(
+            "first",
+            [ID_AND_CHILDREN.create_resource({"ID": "urn:root", "v": "x"})],
+        )
+        assert after["urn:root"].contents["v"] == "old"
+        assert "urn:root" not in after._withdrawn
+
+    def test_replace_withdraws_when_only_first_package_owned_resource(self):
+        old = ID_AND_CHILDREN.create_resource({"ID": "urn:root", "v": "old"})
+        registry = Registry().with_package("first", [old])
+        after = registry.replace(
+            "first",
+            [ID_AND_CHILDREN.create_resource({"ID": "urn:root", "v": "x"})],
+        )
+        assert after["urn:root"].contents["v"] == "x"
+
+    def test_replace_reloads_withdrawn_uri(self):
+        """
+        A replacement which reintroduces a withdrawn URI makes it available.
+        """
+        old = ID_AND_CHILDREN.create_resource(
+            {"ID": "urn:package:root", "children": [{"ID": "urn:legacy"}]},
+        )
+        new = ID_AND_CHILDREN.create_resource(
+            {"ID": "urn:package:root", "children": [{"ID": "urn:legacy"}]},
+        )
+        replaced = Registry().with_package("pkg", [old]).replace("pkg", [new])
+        assert replaced["urn:legacy"] == ID_AND_CHILDREN.create_resource(
+            {"ID": "urn:legacy"},
+        )
+
 
 class TestResource:
     def test_from_contents_from_json_schema(self):
