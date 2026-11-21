@@ -94,6 +94,20 @@ class Roda
     #                         override any of the plugin options for this specific call.
     #                         The :token option can be used to specify the provided CSRF token
     #                         (instead of looking for the token in the submitted parameters).
+    #                         The :action option can be used to check the token against a
+    #                         specific stable action identifier.  If the routing branch
+    #                         declared an action with +csrf_action+, that action is used by
+    #                         default, and the :action option must match it.
+    # csrf_action(action=nil) :: If an argument is given, declare the stable action identifier for
+    #                            the current routing branch and return true.  With no argument,
+    #                            return the action identifier declared for the current request,
+    #                            or nil if no action was declared.  This is available both as an
+    #                            instance method and as a request method, so it can be called
+    #                            bare or on +r+.
+    # csrf_action_tag(action, method='POST') :: An HTML hidden input tag string containing a CSRF
+    #                                           token bound to the given stable action identifier.
+    # csrf_action_token(action, method='POST') :: The value of a CSRF token bound to the given
+    #                                             stable action identifier.
     # csrf_formaction_tag(path, method='POST') :: An HTML hidden input tag string containing the CSRF token, suitable
     #                                             for placing in an HTML form that has inputs that use formaction
     #                                             attributes to change the endpoint to which the form is submitted.
@@ -104,20 +118,58 @@ class Roda
     #                      that should be valid for the form submission.  The argument should
     #                      either be nil or a string representing a relative path, absolute
     #                      path, or full URL (using appropriate URL encoding).
-    # csrf_tag(path=nil, method='POST') :: An HTML hidden input tag string containing the CSRF token, suitable
-    #                                      for placing in an HTML form.  Takes the same arguments as csrf_token.
-    # csrf_token(path=nil, method='POST') :: The value of the csrf token, in case it needs to be accessed
-    #                                        directly.  It is recommended to call this method with a
-    #                                        path, which will create a request-specific token.  Calling
-    #                                        this method without an argument will create a token that is
-    #                                        not specific to the request, but such a token will only
-    #                                        work if you set the :require_request_specific_tokens option
-    #                                        to false, which is a bad idea from a security standpoint.
+    # csrf_tag(path=nil, method='POST', action: nil) :: An HTML hidden input tag string containing the CSRF token, suitable
+    #                                                   for placing in an HTML form.  Takes the same arguments as csrf_token.
+    # csrf_token(path=nil, method='POST', action: nil) :: The value of the csrf token, in case it needs to be accessed
+    #                                                    directly.  It is recommended to call this method with a
+    #                                                    path, which will create a request-specific token.  Calling
+    #                                                    this method without an argument will create a token that is
+    #                                                    not specific to the request, but such a token will only
+    #                                                    work if you set the :require_request_specific_tokens option
+    #                                                    to false, which is a bad idea from a security standpoint.
+    #                                                    If the :action keyword is given, the token is bound to that
+    #                                                    stable action identifier instead of a request path.  If the
+    #                                                    current routing branch declared an action with +csrf_action+,
+    #                                                    calling this method without a path uses that action.
     # use_request_specific_csrf_tokens? :: Whether the plugin is configured to only support
     #                                      request-specific tokens, true by default.
     # valid_csrf?(opts={}) :: Returns whether the submitted CSRF token is valid (also true if
     #                         the request does not require a CSRF token).  Takes same option hash
     #                         as check_csrf!.
+    # valid_csrf_action?(action, opts={}) :: Returns whether the submitted CSRF token is valid for
+    #                                        the given stable action identifier.
+    #
+    # == Stable Action Identifiers
+    #
+    # By default, CSRF tokens are specific to the request method and path.  If the same
+    # business action is reachable by multiple paths (for example, a form in the main
+    # application and a mounted sub-application), a trusted route can declare a stable
+    # action identifier and bind the token to that identifier instead:
+    #
+    #   r.get "admin/profile" do
+    #     r.csrf_action :update_profile
+    #     csrf_tag
+    #   end
+    #
+    #   r.post "admin/profile" do
+    #     r.csrf_action :update_profile
+    #     check_csrf!
+    #   end
+    #
+    # A token generated for :update_profile is accepted by every trusted route that
+    # declares the same action and uses the same request method, regardless of the
+    # route's actual path, how the application is mounted, or any internal path
+    # rewriting.  Routes that declare a different action do not accept the token.
+    #
+    # Only declare an action inside the block of a route that actually handles
+    # the request.  Declarations are scoped to the current request and are
+    # discarded when matching moves on to a branch that does not handle the
+    # request, so a branch that is passed over cannot leave an action behind.
+    #
+    # Forms that do not declare an action continue to use the existing path-specific
+    # token behavior.  Action-specific and path-specific tokens are deliberately not
+    # interchangeable, so a missing action identifier never falls back to a token for
+    # another action or to the legacy path-specific check.
     #
     # This plugin also adds the following instance methods for compatibility with the
     # older csrf plugin, but it is not recommended to use these methods in new code:
@@ -138,11 +190,16 @@ class Roda
     # which is stored base64 encoded in the session.  For each CSRF token, it generates 31 bytes
     # of random data.
     #
-    # For request-specific CSRF tokens, this pseudocode generates the HMAC: 
+    # For request-specific CSRF tokens, this pseudocode generates the HMAC:
     #
     #   hmac = HMAC(secret, method + path + random_data)
     #
-    # For CSRF tokens not specific to a request, this pseudocode generates the HMAC: 
+    # For CSRF tokens specific to a stable action identifier, this pseudocode
+    # generates the HMAC:
+    #
+    #   hmac = HMAC(secret, method + "\\0csrf_action\\0" + action + random_data)
+    #
+    # For CSRF tokens not specific to a request, this pseudocode generates the HMAC:
     #
     #   hmac = HMAC(secret, random_data)
     #
@@ -191,6 +248,26 @@ class Roda
       # a valid CSRF token was not provided.
       class InvalidToken < RodaError; end
 
+      # Prefix used to domain separate action-specific token HMACs from
+      # path-specific and non-request-specific token HMACs.
+      ACTION_HMAC_PREFIX = "\0csrf_action\0".freeze
+
+      # Validate and normalize a stable action identifier.  Symbols and strings
+      # are accepted; any other type, an empty identifier, or an identifier
+      # containing a null byte is rejected.
+      def self.action_identifier(action)
+        unless action.is_a?(String) || action.is_a?(Symbol)
+          raise RodaError, "CSRF action identifiers must be strings or symbols, not #{action.class}"
+        end
+
+        action = action.to_s
+        if action.empty? || action.include?("\0")
+          raise RodaError, "CSRF action identifiers must be non-empty and must not contain null bytes"
+        end
+
+        action
+      end
+
       def self.load_dependencies(app, opts=OPTS, &_)
         app.plugin :_base64
       end
@@ -216,7 +293,42 @@ class Roda
         RodaPlugins.opt_attr_reader(self, :route_csrf, name: :route_csrf_opts)
       end
 
+      module RequestMethods
+        # With an argument, declare the stable action identifier for the current
+        # routing branch.  Without an argument, return the action identifier
+        # declared for the current request, or nil if none was declared.
+        def csrf_action(action=nil)
+          return @_csrf_action if action.nil?
+
+          @_csrf_action = RouteCsrf.action_identifier(action)
+          true
+        end
+
+        private
+
+        # Restore any action declared while matching if the match does not
+        # consume the request.  A successful match always throws :halt, so this
+        # only runs when matching fails or is skipped via r.pass, ensuring a
+        # branch that does not handle the request can never leak its action
+        # identifier to a later branch.
+        def if_match(args)
+          action = @_csrf_action
+          super
+        ensure
+          @_csrf_action = action
+        end
+      end
+
       module InstanceMethods
+        # With an argument, declare the stable action identifier for the current
+        # routing branch.  Without an argument, return the action identifier
+        # declared for the current request, or nil if none was declared.  This is
+        # a convenience method that delegates to the request method of the same
+        # name, so it can be called either bare or on the request object.
+        def csrf_action(action=nil)
+          @_request.csrf_action(action)
+        end
+
         # Check that the submitted CSRF token is valid, if the request requires a CSRF token.
         # If the CSRF token is valid or the request does not require a CSRF token, return nil.
         # Otherwise, if a block is given, treat it as a routing block and yield to it, and
@@ -266,7 +378,7 @@ class Roda
         # An HTML meta tag string containing a CSRF token that is not request-specific.
         # It is not recommended to use this, as it doesn't support request-specific tokens.
         def csrf_metatag
-          "<meta name=\"#{csrf_field}\" content=\"#{csrf_token}\" \/>"
+          "<meta name=\"#{csrf_field}\" content=\"#{csrf_unbound_token}\" \/>"
         end
 
         # Given a form action, return the appropriate path to use for the CSRF token.
@@ -295,17 +407,49 @@ class Roda
           "<input type=\"hidden\" name=\"#{csrf_options[:formaction_field]}[#{Rack::Utils.escape_html(path)}]\" value=\"#{csrf_token(path, *args)}\" \/>"
         end
 
+        # An action-specific HTML hidden input tag string containing a CSRF token
+        # bound to the given stable action identifier.  See csrf_action_token for
+        # arguments.
+        def csrf_action_tag(action, method='POST')
+          "<input type=\"hidden\" name=\"#{csrf_field}\" value=\"#{csrf_action_token(action, method)}\" \/>"
+        end
+
         # An HTML hidden input tag string containing the CSRF token.  See csrf_token for
         # arguments.
-        def csrf_tag(*args)
-          "<input type=\"hidden\" name=\"#{csrf_field}\" value=\"#{csrf_token(*args)}\" \/>"
+        def csrf_tag(path=nil, method=('POST' if path), action: nil)
+          "<input type=\"hidden\" name=\"#{csrf_field}\" value=\"#{csrf_token(path, method, :action=>action)}\" \/>"
+        end
+
+        # The value of a CSRF token bound to the given stable action identifier.
+        # The token works for any trusted route that declares the same action and
+        # accepts the same request method, no matter the route's path.  By default,
+        # the POST request method is assumed.
+        def csrf_action_token(action, method='POST')
+          token = SecureRandom.random_bytes(31)
+          token << csrf_action_hmac(token, method, action)
+          [token].pack("m0")
+        end
+
+        # The value of a CSRF token that is not specific to a request or to an
+        # action.  Used by csrf_metatag.
+        def csrf_unbound_token
+          token = SecureRandom.random_bytes(31)
+          token << csrf_hmac(token, '', '')
+          [token].pack("m0")
         end
 
         # The value of the csrf token.  For a path specific token, provide a path
         # argument.  By default, it a path is provided, the POST request method will
         # be assumed.  To generate a token for a non-POST request method, pass the
-        # method as the second argument.
-        def csrf_token(path=nil, method=('POST' if path))
+        # method as the second argument.  If the :action keyword is given, an
+        # action-specific token is generated instead, using the given stable action
+        # identifier (and the path is ignored).  If the current routing branch
+        # declared an action with csrf_action, calling this method with no path and
+        # no :action keyword generates a token for that declared action.
+        def csrf_token(path=nil, method=('POST' if path), action: nil)
+          action = @_request.csrf_action if action.nil? && path.nil?
+          return csrf_action_token(action, method || 'POST') unless action.nil?
+
           token = SecureRandom.random_bytes(31)
           token << csrf_hmac(token, method, path)
           [token].pack("m0")
@@ -322,6 +466,12 @@ class Roda
           csrf_invalid_message(opts).nil?
         end
 
+        # Whether the submitted CSRF token is valid for the given stable action
+        # identifier.  True if the request does not require a CSRF token.
+        def valid_csrf_action?(action, opts=OPTS)
+          csrf_invalid_message(opts, action).nil?
+        end
+
         private
 
         # The request method to use to determine whether to perform a CSRF check.
@@ -332,15 +482,37 @@ class Roda
         end
 
         # Returns error message string if the CSRF token is not valid.
-        # Returns nil if the CSRF token is valid.
-        def csrf_invalid_message(opts)
+        # Returns nil if the CSRF token is valid.  If +action+ is given, the
+        # token must be valid for that stable action identifier.  Otherwise, if
+        # the :action option is given, or the current routing branch declared an
+        # action with csrf_action, the token must be valid for that action.  If
+        # no action is available, the legacy request method and path check is
+        # used.  An action-specific check never falls back to a path-specific
+        # check or to a different action.
+        def csrf_invalid_message(opts=OPTS, action=nil)
           opts = opts.empty? ? csrf_options : csrf_options.merge(opts)
+
+          declared_action = @_request.csrf_action
+          requested_action = action || opts[:action]
+
           method = csrf_request_method
 
           if exempt = opts[:exempt_request_methods]
             return if exempt.include?(method)
           elsif !opts[:check_request_methods].include?(method)
             return
+          end
+
+          if declared_action
+            declared_action = RouteCsrf.action_identifier(declared_action)
+
+            if requested_action && RouteCsrf.action_identifier(requested_action) != declared_action
+              raise RodaError, "CSRF action #{requested_action.inspect} conflicts with action #{declared_action.inspect} declared by the route"
+            end
+
+            action = declared_action
+          elsif requested_action
+            action = RouteCsrf.action_identifier(requested_action)
           end
 
           path = @_request.path
@@ -350,7 +522,7 @@ class Roda
             when :only
               env[opts[:env_header]]
             when true
-              return (csrf_invalid_message(opts.merge(:check_header=>false)) && csrf_invalid_message(opts.merge(:check_header=>:only)))
+              return (csrf_invalid_message(opts.merge(:check_header=>false), action) && csrf_invalid_message(opts.merge(:check_header=>:only), action))
             else
               params = @_request.params
               ((formactions = params[opts[:formaction_field]]).is_a?(Hash) && (formactions[path])) || params[opts[:field]]
@@ -361,7 +533,7 @@ class Roda
             return "encoded token is not a string"
           end
 
-          if (rack_csrf_key = opts[:upgrade_from_rack_csrf_key]) && (rack_csrf_value = session[rack_csrf_key]) && csrf_compare(rack_csrf_value, encoded_token)
+          if action.nil? && (rack_csrf_key = opts[:upgrade_from_rack_csrf_key]) && (rack_csrf_value = session[rack_csrf_key]) && csrf_compare(rack_csrf_value, encoded_token)
             # RODA4: Remove :upgrade_from_rack_csrf_key support
             return
           end
@@ -382,6 +554,14 @@ class Roda
 
           random_data = submitted_hmac.slice!(0...31)
 
+          if action
+            if csrf_compare(csrf_action_hmac(random_data, method, action), submitted_hmac)
+              return
+            end
+
+            return "decoded token is not valid for request method and action"
+          end
+
           if csrf_compare(csrf_hmac(random_data, method, path), submitted_hmac)
             return
           end
@@ -394,7 +574,7 @@ class Roda
             end
           end
         end
-        
+
         # Helper for getting the plugin options.
         def csrf_options
           self.class.route_csrf_opts
@@ -408,6 +588,16 @@ class Roda
         # Return the HMAC-SHA-256 for the secret and the given arguments.
         def csrf_hmac(random_data, method, path)
           OpenSSL::HMAC.digest(OpenSSL::Digest::SHA256.new, csrf_secret, "#{method.to_s.upcase}#{path}#{random_data}")
+        end
+
+        # Return the HMAC-SHA-256 for the secret, request method, and stable action
+        # identifier.  The null byte prefix domain separates action-specific tokens
+        # from path-specific and non-request-specific tokens, so a token for one
+        # kind can never validate as another kind, even if an action identifier
+        # happens to equal a path.
+        def csrf_action_hmac(random_data, method, action)
+          action = RouteCsrf.action_identifier(action)
+          OpenSSL::HMAC.digest(OpenSSL::Digest::SHA256.new, csrf_secret, "#{method.to_s.upcase}#{ACTION_HMAC_PREFIX}#{action}#{random_data}")
         end
 
         # If a secret has not already been specified, generate a random 32-byte

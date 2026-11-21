@@ -1,5 +1,7 @@
 === master
 
+* Support stable action identifiers for CSRF tokens in the route_csrf plugin, so the same business action can use one token from multiple trusted routes
+
 * Add keyword arguments and deprecate positional hash for json_parser plugin (jeremyevans)
 
 * Deprecate the indifferent_params plugin, switch to typecast_params instead (jeremyevans)

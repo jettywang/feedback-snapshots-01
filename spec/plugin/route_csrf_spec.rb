@@ -352,10 +352,313 @@ describe "route_csrf plugin" do
     body('/b/a/b', "REQUEST_METHOD"=>'POST', 'rack.input'=>rack_input("_csrf=#{Rack::Utils.escape(body('/b/a', 'HTTPS'=>'on', 'HTTP_HOST'=>'foo.com', 'CP'=>'a/b'))}")).must_equal '/b/a/b2'
   end
 
+  it "supports stable action identifiers shared by multiple routes" do
+    sub_app = Class.new(Roda) do
+      plugin :sessions, :secret=>'1'*64
+      plugin :route_csrf
+
+      route do |r|
+        r.get 'profile' do
+          r.csrf_action :update_profile
+          csrf_tag
+        end
+
+        r.post 'profile' do
+          r.csrf_action :update_profile
+          check_csrf!
+          'mounted-update-profile'
+        end
+      end
+    end
+
+    app(:bare) do
+      send(*DEFAULT_SESSION_ARGS)
+      plugin :route_csrf
+
+      route do |r|
+        r.on 'admin' do
+          r.get 'profile' do
+            r.csrf_action :update_profile
+            csrf_tag
+          end
+
+          r.post 'profile' do
+            r.csrf_action :update_profile
+            check_csrf!
+            'main-update-profile'
+          end
+
+          r.get 'settings' do
+            r.csrf_action :update_settings
+            csrf_tag
+          end
+
+          r.post 'settings' do
+            r.csrf_action :update_settings
+            check_csrf!
+            'main-update-settings'
+          end
+        end
+
+        r.get 'generate' do
+          csrf_action_tag(:update_profile)
+        end
+
+        r.get 'legacy' do
+          csrf_tag('/legacy')
+        end
+
+        r.post 'legacy' do
+          check_csrf!
+          'legacy-ok'
+        end
+
+        r.on 'mounted' do
+          r.run sub_app
+        end
+      end
+    end
+
+    main_tag = body('/admin/profile')
+    main_tag =~ /\A<input type="hidden" name="_csrf" value="([+\/0-9A-Za-z]{84})" \/>\z/
+    main_token = $1
+
+    body("/admin/profile", "REQUEST_METHOD"=>'POST', 'rack.input'=>rack_input("_csrf=#{Rack::Utils.escape(main_token)}")).must_equal 'main-update-profile'
+
+    # The token for the same action is accepted by the mounted sub application,
+    # even though the request path and the application handling it differ.  The
+    # mounted sub application shares the parent application's session secret.
+    body("/mounted/profile", "REQUEST_METHOD"=>'POST', 'rack.input'=>rack_input("_csrf=#{Rack::Utils.escape(main_token)}")).must_equal 'mounted-update-profile'
+
+    mounted_tag = body('/mounted/profile')
+    mounted_tag =~ /\A<input type="hidden" name="_csrf" value="([+\/0-9A-Za-z]{84})" \/>\z/
+    mounted_token = $1
+
+    # A token generated in the mounted sub application is accepted by the main
+    # application route for the same action.
+    body("/admin/profile", "REQUEST_METHOD"=>'POST', 'rack.input'=>rack_input("_csrf=#{Rack::Utils.escape(mounted_token)}")).must_equal 'main-update-profile'
+
+    # A token generated directly for the action works on both routes.
+    generate_tag = body('/generate')
+    generate_tag =~ /\A<input type="hidden" name="_csrf" value="([+\/0-9A-Za-z]{84})" \/>\z/
+    generate_token = $1
+    body("/admin/profile", "REQUEST_METHOD"=>'POST', 'rack.input'=>rack_input("_csrf=#{Rack::Utils.escape(generate_token)}")).must_equal 'main-update-profile'
+    body("/mounted/profile", "REQUEST_METHOD"=>'POST', 'rack.input'=>rack_input("_csrf=#{Rack::Utils.escape(generate_token)}")).must_equal 'mounted-update-profile'
+
+    # A different independent action is isolated from the first action.
+    settings_tag = body('/admin/settings')
+    settings_tag =~ /\A<input type="hidden" name="_csrf" value="([+\/0-9A-Za-z]{84})" \/>\z/
+    settings_token = $1
+    body("/admin/settings", "REQUEST_METHOD"=>'POST', 'rack.input'=>rack_input("_csrf=#{Rack::Utils.escape(settings_token)}")).must_equal 'main-update-settings'
+    proc{body("/admin/profile", "REQUEST_METHOD"=>'POST', 'rack.input'=>rack_input("_csrf=#{Rack::Utils.escape(settings_token)}"))}.must_raise Roda::RodaPlugins::RouteCsrf::InvalidToken
+    proc{body("/mounted/profile", "REQUEST_METHOD"=>'POST', 'rack.input'=>rack_input("_csrf=#{Rack::Utils.escape(settings_token)}"))}.must_raise Roda::RodaPlugins::RouteCsrf::InvalidToken
+    proc{body("/admin/settings", "REQUEST_METHOD"=>'POST', 'rack.input'=>rack_input("_csrf=#{Rack::Utils.escape(main_token)}"))}.must_raise Roda::RodaPlugins::RouteCsrf::InvalidToken
+
+    # Forms without an action continue to use the existing path-specific rules.
+    legacy_tag = body('/legacy')
+    legacy_tag =~ /\A<input type="hidden" name="_csrf" value="([+\/0-9A-Za-z]{84})" \/>\z/
+    legacy_token = $1
+    body("/legacy", "REQUEST_METHOD"=>'POST', 'rack.input'=>rack_input("_csrf=#{Rack::Utils.escape(legacy_token)}")).must_equal 'legacy-ok'
+
+    # Action-specific tokens and path-specific tokens are not interchangeable,
+    # and a missing action never falls back to a different action.
+    proc{body("/legacy", "REQUEST_METHOD"=>'POST', 'rack.input'=>rack_input("_csrf=#{Rack::Utils.escape(main_token)}"))}.must_raise Roda::RodaPlugins::RouteCsrf::InvalidToken
+    proc{body("/admin/profile", "REQUEST_METHOD"=>'POST', 'rack.input'=>rack_input("_csrf=#{Rack::Utils.escape(legacy_token)}"))}.must_raise Roda::RodaPlugins::RouteCsrf::InvalidToken
+  end
+
+  it "binds action tokens to the request method" do
+    app(:bare) do
+      send(*DEFAULT_SESSION_ARGS)
+      plugin :route_csrf
+
+      route do |r|
+        r.get 'tag' do
+          csrf_action_tag(:update_profile, env['ACTION_METHOD'] || 'POST')
+        end
+
+        r.post 'matched' do
+          r.csrf_action :update_profile
+          check_csrf!
+          'matched-post'
+        end
+
+        r.is 'matched', :method=>'PUT' do
+          r.csrf_action :update_profile
+          check_csrf!
+          'matched-put'
+        end
+
+        r.post 'other' do
+          r.csrf_action :other_action
+          check_csrf!
+          'other'
+        end
+      end
+    end
+
+    post_token = body('/tag')
+    post_token =~ /value="([+\/0-9A-Za-z]{84})"/
+    post_token = $1
+    body("/matched", "REQUEST_METHOD"=>'POST', 'rack.input'=>rack_input("_csrf=#{Rack::Utils.escape(post_token)}")).must_equal 'matched-post'
+    proc{body("/matched", "REQUEST_METHOD"=>'PUT', 'rack.input'=>rack_input, 'QUERY_STRING'=>"_csrf=#{Rack::Utils.escape(post_token)}")}.must_raise Roda::RodaPlugins::RouteCsrf::InvalidToken
+    proc{body("/other", "REQUEST_METHOD"=>'POST', 'rack.input'=>rack_input("_csrf=#{Rack::Utils.escape(post_token)}"))}.must_raise Roda::RodaPlugins::RouteCsrf::InvalidToken
+
+    put_token = body('/tag', 'ACTION_METHOD'=>'PUT')
+    put_token =~ /value="([+\/0-9A-Za-z]{84})"/
+    put_token = $1
+    body("/matched", "REQUEST_METHOD"=>'PUT', 'rack.input'=>rack_input, 'QUERY_STRING'=>"_csrf=#{Rack::Utils.escape(put_token)}").must_equal 'matched-put'
+    proc{body("/matched", "REQUEST_METHOD"=>'POST', 'rack.input'=>rack_input("_csrf=#{Rack::Utils.escape(put_token)}"))}.must_raise Roda::RodaPlugins::RouteCsrf::InvalidToken
+  end
+
+  it "does not leak a declared action from a route branch that does not match" do
+    app(:bare) do
+      send(*DEFAULT_SESSION_ARGS)
+      plugin :route_csrf
+      plugin :pass
+
+      route do |r|
+        r.on 'scope' do
+          # The path matches and the block declares an action, but the branch
+          # passes, so it must not leave the action declared for later branches.
+          r.post 'partial/extra' do
+            r.csrf_action :leaked_action
+            r.pass
+          end
+
+          r.get 'partial/extra' do
+            csrf_token('/scope/partial/extra')
+          end
+
+          r.post 'partial/extra' do
+            check_csrf!
+            'path-specific-after-passed-action'
+          end
+        end
+      end
+    end
+
+    token = body('/scope/partial/extra')
+    body("/scope/partial/extra", "REQUEST_METHOD"=>'POST', 'rack.input'=>rack_input("_csrf=#{Rack::Utils.escape(token)}")).must_equal 'path-specific-after-passed-action'
+  end
+
+  it "raises for invalid action identifiers" do
+    app(:bare) do
+      send(*DEFAULT_SESSION_ARGS)
+      plugin :route_csrf
+
+      route do |r|
+        r.get 'invalid' do
+          r.csrf_action(1)
+        end
+
+        r.post 'invalid' do
+          check_csrf!(:action=>1)
+        end
+      end
+    end
+
+    proc{body('/invalid')}.must_raise Roda::RodaError
+    proc{body('/invalid', "REQUEST_METHOD"=>'POST', 'rack.input'=>rack_input)}.must_raise Roda::RodaError
+  end
+
+  it "raises if the checked action conflicts with the action declared by the route" do
+    app(:bare) do
+      send(*DEFAULT_SESSION_ARGS)
+      plugin :route_csrf
+
+      route do |r|
+        r.get 'tag' do
+          csrf_action_tag(:declared_action)
+        end
+
+        r.post 'conflict' do
+          r.csrf_action :declared_action
+          check_csrf!(:action=>:other_action)
+        end
+      end
+    end
+
+    token = body('/tag')[/value="([^"]+)"/, 1]
+    proc{body("/conflict", "REQUEST_METHOD"=>'POST', 'rack.input'=>rack_input("_csrf=#{Rack::Utils.escape(token)}"))}.must_raise Roda::RodaError
+  end
+
+  it "supports csrf_tag with an explicit action and valid_csrf_action?" do
+    app(:bare) do
+      send(*DEFAULT_SESSION_ARGS)
+      plugin :route_csrf
+
+      route do |r|
+        r.get 'tag' do
+          csrf_tag(:action=>:update_profile)
+        end
+
+        r.post 'check' do
+          valid_csrf_action?(:update_profile).to_s
+        end
+
+        r.post 'check-other' do
+          valid_csrf_action?(:other_action).to_s
+        end
+
+        r.post 'consume' do
+          r.csrf_action :update_profile
+          check_csrf!
+          'consumed'
+        end
+      end
+    end
+
+    token = body('/tag')[/value="([^"]+)"/, 1]
+    body("/consume", "REQUEST_METHOD"=>'POST', 'rack.input'=>rack_input("_csrf=#{Rack::Utils.escape(token)}")).must_equal 'consumed'
+
+    body("/check", "REQUEST_METHOD"=>'POST', 'rack.input'=>rack_input("_csrf=#{Rack::Utils.escape(token)}")).must_equal 'true'
+    body("/check-other", "REQUEST_METHOD"=>'POST', 'rack.input'=>rack_input("_csrf=#{Rack::Utils.escape(token)}")).must_equal 'false'
+  end
+
+  it "does not accept non-request-specific tokens for a declared action" do
+    app(:bare) do
+      send(*DEFAULT_SESSION_ARGS)
+      plugin :route_csrf, :require_request_specific_tokens=>false
+
+      route do |r|
+        r.get 'tag' do
+          # A token that is not specific to a request or action.
+          csrf_metatag[/content="([^"]+)"/, 1]
+        end
+
+        r.get 'action-tag' do
+          csrf_action_tag(:update_profile)
+        end
+
+        r.post 'consume' do
+          r.csrf_action :update_profile
+          check_csrf!
+          'consumed'
+        end
+
+        r.post 'legacy' do
+          check_csrf!
+          'legacy'
+        end
+      end
+    end
+
+    unbound_token = body('/tag')
+    action_token = body('/action-tag')[/value="([^"]+)"/, 1]
+
+    # Without a declared action, the legacy behavior allows the unbound token.
+    body("/legacy", "REQUEST_METHOD"=>'POST', 'rack.input'=>rack_input("_csrf=#{Rack::Utils.escape(unbound_token)}")).must_equal 'legacy'
+
+    # With a declared action, the unbound token is not accepted.
+    proc{body("/consume", "REQUEST_METHOD"=>'POST', 'rack.input'=>rack_input("_csrf=#{Rack::Utils.escape(unbound_token)}"))}.must_raise Roda::RodaPlugins::RouteCsrf::InvalidToken
+
+    body("/consume", "REQUEST_METHOD"=>'POST', 'rack.input'=>rack_input("_csrf=#{Rack::Utils.escape(action_token)}")).must_equal 'consumed'
+  end
+
 begin
   require 'rack/csrf'
 rescue LoadError
-  warn "rack_csrf not installed, skipping route_csrf plugin test for rack_csrf upgrade"  
+  warn "rack_csrf not installed, skipping route_csrf plugin test for rack_csrf upgrade"
 else
   it "supports upgrades from existing rack_csrf token" do
     route_csrf_app(:upgrade_from_rack_csrf_key=>'csrf.token', :no_sessions_plugin=>true) do |r|

@@ -904,6 +904,29 @@ but before handling other requests:
     # ...
   end
 
+By default, CSRF tokens are specific to the request method and path. If the
+same business action is reachable from multiple routes (for example, a form
+in the main application and a mounted sub-application), you can declare a
+stable action identifier in each trusted route and bind the token to that
+identifier instead:
+
+  route do |r|
+    r.get "admin/profile" do
+      r.csrf_action :update_profile
+      csrf_tag
+    end
+
+    r.post "admin/profile" do
+      r.csrf_action :update_profile
+      check_csrf!
+    end
+  end
+
+A token for the action is accepted by any trusted route that declares the
+same action and request method, regardless of the route's path or how it is
+mounted. Routes that do not declare an action keep the existing path-specific
+behavior, and action-specific and path-specific tokens are not interchangeable.
+
 
 === Cross Site Scripting (XSS)
 
