@@ -1,5 +1,15 @@
 ## next / unreleased
 
+* `SafeListSanitizer#sanitize` accepts a `compose: true` option to combine a custom
+  `scrubber:` with the safe list. The custom scrubber runs first, then the safe list
+  (from `tags:`/`attributes:` or the class defaults) constrains the final structure, so
+  valid transformations are kept while the result stays within the platform policy.
+
+* Add `Rails::HTML::CallbackScrubber`, a scrubber that runs a plain block against every
+  node. When the callback raises, the default `on_error: :prune` strategy removes the
+  offending node so unscrubbed content is never handed downstream; `on_error: :raise`
+  aborts the scrub instead.
+
 
 ## v1.7.2 / 2026-11-02
 

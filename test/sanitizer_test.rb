@@ -489,6 +489,80 @@ module SanitizerTests
       assert_equal "<h1>hello!</h1>", safe_list_sanitize(html, scrubber: scrubber, tags: ["foo"])
     end
 
+    def test_compose_opt_in_keeps_valid_transformations_and_applies_safe_list
+      scrubber = Rails::HTML::CallbackScrubber.new do |node|
+        if node.element? && node.name == "font"
+          color = node["color"]
+          node.remove_attribute("color")
+          node.name = "span"
+          node["class"] = "corp-text-#{color}"
+        end
+      end
+
+      html = '<font color="red">hello</font><script>alert(1)</script>'
+      assert_equal '<span class="corp-text-red">hello</span>alert(1)',
+        safe_list_sanitize(html, scrubber: scrubber, compose: true)
+    end
+
+    def test_compose_constrains_attributes_added_by_the_custom_scrubber
+      scrubber = Rails::HTML::CallbackScrubber.new do |node|
+        if node.element?
+          node["class"] = "corp"
+          node["onclick"] = "alert(1)"
+        end
+      end
+
+      assert_equal '<p class="corp">hi</p>',
+        safe_list_sanitize("<p>hi</p>", scrubber: scrubber, compose: true)
+    end
+
+    def test_compose_constrains_tags_introduced_by_the_custom_scrubber
+      scrubber = Rails::HTML::CallbackScrubber.new do |node|
+        node.name = "script" if node.element? && node.name == "font"
+      end
+
+      assert_equal "alert(1)",
+        safe_list_sanitize("<font>alert(1)</font>", scrubber: scrubber, compose: true)
+    end
+
+    def test_compose_honors_tags_and_attributes_options
+      scrubber = Rails::HTML::CallbackScrubber.new do |node|
+        node["data-rewritten"] = "true" if node.element?
+      end
+
+      html = "<p>hi</p>"
+      assert_equal '<p data-rewritten="true">hi</p>',
+        safe_list_sanitize(html, scrubber: scrubber, compose: true, attributes: %w(data-rewritten))
+    end
+
+    def test_compose_callback_failure_does_not_deliver_unscrubbed_content
+      scrubber = Rails::HTML::CallbackScrubber.new do |node|
+        raise "boom" if node.element? && node.name == "marquee"
+      end
+
+      html = '<marquee><img src="javascript:bang"></marquee><p>ok</p>'
+      assert_equal "<p>ok</p>", safe_list_sanitize(html, scrubber: scrubber, compose: true)
+    end
+
+    def test_compose_callback_failure_with_raise_aborts_sanitize
+      scrubber = Rails::HTML::CallbackScrubber.new(on_error: :raise) do |node|
+        raise "boom" if node.element?
+      end
+
+      assert_raises(RuntimeError) do
+        safe_list_sanitize("<p>hi</p>", scrubber: scrubber, compose: true)
+      end
+    end
+
+    def test_without_compose_custom_scrubber_output_is_not_safe_listed
+      scrubber = Rails::HTML::CallbackScrubber.new do |node|
+        node["onclick"] = "alert(1)" if node.element?
+      end
+
+      assert_equal '<p onclick="alert(1)">hi</p>',
+        safe_list_sanitize("<p>hi</p>", scrubber: scrubber)
+    end
+
     def test_should_strip_src_attribute_in_img_with_bad_protocols
       assert_sanitized %(<img src="javascript:bang" title="1">), %(<img title="1">)
     end

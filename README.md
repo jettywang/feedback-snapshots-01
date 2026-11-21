@@ -63,6 +63,10 @@ safe_list_sanitizer.sanitize(@article.body, tags: %w(table tr td), attributes: %
 # sanitize via a custom scrubber
 safe_list_sanitizer.sanitize(@article.body, scrubber: ArticleScrubber.new)
 
+# compose a custom scrubber with the safe list: the custom scrubber runs first,
+# then the platform safe list constrains the final structure
+safe_list_sanitizer.sanitize(@article.body, scrubber: ArticleScrubber.new, compose: true)
+
 # prune nodes from the tree instead of stripping tags and leaving inner content
 safe_list_sanitizer = Rails::HTML5::SafeListSanitizer.new(prune: true)
 
@@ -161,6 +165,48 @@ end
 ```
 
 See `Rails::HTML::PermitScrubber` documentation to learn more about which methods can be overridden.
+
+#### `Rails::HTML::CallbackScrubber`
+
+For simple rewrites, `Rails::HTML::CallbackScrubber` runs a plain block against
+every node, so you don't need to define a scrubber class.
+
+```ruby
+scrubber = Rails::HTML::CallbackScrubber.new do |node|
+  if node.element? && node.name == "font"
+    node.name = "span"
+    node["class"] = "corp-legacy"
+  end
+end
+
+html_fragment = Loofah.fragment('<font>text</font>')
+html_fragment.scrub!(scrubber)
+html_fragment.to_s # => "<span class=\"corp-legacy\">text</span>"
+```
+
+If the callback raises, the default `on_error: :prune` strategy removes the
+offending node and its subtree, so unscrubbed content is never handed
+downstream. Pass `on_error: :raise` to abort the scrub instead.
+
+#### Composing a custom scrubber with the safe list
+
+A custom scrubber passed via `scrubber:` replaces the safe list entirely. To
+keep the result constrained by the platform policy, opt in to composition with
+`compose: true`: the custom scrubber runs first, then the safe list (from
+`tags:`/`attributes:` or the class defaults) is applied to the rewritten
+structure. Valid transformations are kept, but anything outside the safe list
+is still scrubbed.
+
+```ruby
+legacy_format_scrubber = Rails::HTML::CallbackScrubber.new do |node|
+  if node.element? && node.name == "font"
+    node.name = "span"
+    node["class"] = "corp-legacy"
+  end
+end
+
+safe_list_sanitizer.sanitize(@article.body, scrubber: legacy_format_scrubber, compose: true)
+```
 
 #### Custom Scrubber in a Rails app
 

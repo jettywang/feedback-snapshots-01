@@ -223,6 +223,73 @@ class TextOnlyScrubberTest < ScrubberTest
   end
 end
 
+class CallbackScrubberTest < ScrubberTest
+  def setup
+    @scrubber = Rails::HTML::CallbackScrubber.new { |node| }
+  end
+
+  def test_requires_a_callback
+    error = assert_raises(ArgumentError) do
+      Rails::HTML::CallbackScrubber.new
+    end
+
+    assert_equal "a callback block is required", error.message
+  end
+
+  def test_rejects_unknown_on_error_strategy
+    error = assert_raises(ArgumentError) do
+      Rails::HTML::CallbackScrubber.new(on_error: :ignore) { |node| }
+    end
+
+    assert_equal "on_error must be :prune or :raise", error.message
+  end
+
+  def test_callback_can_add_attributes
+    @scrubber = Rails::HTML::CallbackScrubber.new do |node|
+      node["data-rewritten"] = "true" if node.element?
+    end
+
+    assert_scrubbed "<p>hello</p>", '<p data-rewritten="true">hello</p>'
+  end
+
+  def test_callback_can_rewrite_legacy_tags_to_company_format
+    @scrubber = Rails::HTML::CallbackScrubber.new do |node|
+      if node.element? && node.name == "font"
+        color = node["color"]
+        node.remove_attribute("color")
+        node.name = "span"
+        node["class"] = "corp-text-#{color}"
+      end
+    end
+
+    assert_scrubbed '<font color="red">hello</font>', '<span class="corp-text-red">hello</span>'
+  end
+
+  def test_callback_can_remove_content
+    @scrubber = Rails::HTML::CallbackScrubber.new do |node|
+      node.remove if node.element? && node.name == "blink"
+    end
+
+    assert_scrubbed "<p>a<blink>b</blink>c</p>", "<p>ac</p>"
+  end
+
+  def test_callback_failure_prunes_the_offending_node_by_default
+    @scrubber = Rails::HTML::CallbackScrubber.new do |node|
+      raise "boom" if node.element? && node.name == "marquee"
+    end
+
+    assert_scrubbed "<p>ok</p><marquee>unhandled</marquee>", "<p>ok</p>"
+  end
+
+  def test_callback_failure_can_be_configured_to_raise
+    @scrubber = Rails::HTML::CallbackScrubber.new(on_error: :raise) do |node|
+      raise "boom" if node.element?
+    end
+
+    assert_raises(RuntimeError) { scrub_fragment("<p>ok</p>") }
+  end
+end
+
 class ReturningStopFromScrubNodeTest < ScrubberTest
   class ScrubStopper < Rails::HTML::PermitScrubber
     def scrub_node(node)

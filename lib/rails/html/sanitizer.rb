@@ -161,14 +161,16 @@ module Rails
             if scrubber = options[:scrubber]
               # No duck typing, Loofah ensures subclass of Loofah::Scrubber
               fragment.scrub!(scrubber)
+              # compose: true explicitly opts in to running the platform safe list
+              # after the custom scrubber, so the final structure stays
+              # constrained by the allowed tags and attributes.
+              fragment.scrub!(permit_scrubber(options)) if options[:compose]
             elsif allowed_tags(options) || allowed_attributes(options)
-              permit_scrubber = PermitScrubber.new(prune: @prune)
-              permit_scrubber.tags = allowed_tags(options)
-              permit_scrubber.attributes = allowed_attributes(options)
-              fragment.scrub!(permit_scrubber)
+              fragment.scrub!(permit_scrubber(options))
             else
               fragment.scrub!(:strip)
             end
+            fragment
           end
 
           def sanitize_css(style_string)
@@ -176,6 +178,13 @@ module Rails
           end
 
           private
+            def permit_scrubber(options)
+              scrubber = PermitScrubber.new(prune: @prune)
+              scrubber.tags = allowed_tags(options)
+              scrubber.attributes = allowed_attributes(options)
+              scrubber
+            end
+
             def allowed_tags(options)
               options[:tags] || self.class.allowed_tags
             end
@@ -294,6 +303,10 @@ module Rails
     #   # sanitize via a custom Loofah scrubber
     #   safe_list_sanitizer.sanitize(@article.body, scrubber: ArticleScrubber.new)
     #
+    #   # compose a custom scrubber with the safe list: the custom scrubber runs
+    #   # first, then the safe list constrains the final structure
+    #   safe_list_sanitizer.sanitize(@article.body, scrubber: ArticleScrubber.new, compose: true)
+    #
     #   # prune nodes from the tree instead of stripping tags and leaving inner content
     #   safe_list_sanitizer = Rails::HTML4::SafeListSanitizer.new(prune: true)
     #
@@ -403,6 +416,10 @@ module Rails
     #
     #   # sanitize via a custom Loofah scrubber
     #   safe_list_sanitizer.sanitize(@article.body, scrubber: ArticleScrubber.new)
+    #
+    #   # compose a custom scrubber with the safe list: the custom scrubber runs
+    #   # first, then the safe list constrains the final structure
+    #   safe_list_sanitizer.sanitize(@article.body, scrubber: ArticleScrubber.new, compose: true)
     #
     #   # prune nodes from the tree instead of stripping tags and leaving inner content
     #   safe_list_sanitizer = Rails::HTML5::SafeListSanitizer.new(prune: true)

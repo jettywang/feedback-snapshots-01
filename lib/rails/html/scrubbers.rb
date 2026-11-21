@@ -190,6 +190,54 @@ module Rails
       end
     end
 
+    # === Rails::HTML::CallbackScrubber
+    #
+    # +Rails::HTML::CallbackScrubber+ runs a pure local callback against every
+    # node, so simple rewrites (like converting legacy tags to a company
+    # format) don't need a full scrubber subclass.
+    #
+    #   scrubber = Rails::HTML::CallbackScrubber.new do |node|
+    #     if node.element? && node.name == "font"
+    #       node.name = "span"
+    #       node["class"] = "corp-legacy"
+    #     end
+    #   end
+    #
+    # The callback's return value is ignored; traversal always continues.
+    #
+    # +on_error+ controls what happens when the callback raises:
+    # - +:prune+ (default) removes the offending node and its subtree, so a
+    #   failed transformation never hands unscrubbed content downstream.
+    # - +:raise+ re-raises the error, aborting the scrub.
+    #
+    # To keep the rewritten output constrained by the platform safe list, pass
+    # the scrubber together with +compose: true+ to +SafeListSanitizer#sanitize+.
+    class CallbackScrubber < Loofah::Scrubber
+      attr_reader :callback, :on_error
+
+      def initialize(on_error: :prune, &callback)
+        raise ArgumentError, "a callback block is required" unless callback
+
+        unless [:prune, :raise].include?(on_error)
+          raise ArgumentError, "on_error must be :prune or :raise"
+        end
+
+        @callback = callback
+        @on_error = on_error
+        @direction = :bottom_up
+      end
+
+      def scrub(node)
+        callback.call(node)
+        CONTINUE
+      rescue StandardError
+        raise if on_error == :raise
+
+        node.remove if node.parent
+        CONTINUE
+      end
+    end
+
     # === Rails::HTML::TextOnlyScrubber
     #
     # +Rails::HTML::TextOnlyScrubber+ allows you to permit text nodes.
