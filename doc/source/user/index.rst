@@ -5,6 +5,7 @@
 .. toctree::
 
    usage
+   decision-replay
    plugins
    sphinxpolicygen
    history

@@ -1,0 +1,11 @@
+---
+features:
+  - |
+    Add the optional ``oslo_policy.replay`` module for minimal-evidence
+    decision recording and replay. ``record_decision`` observes a single
+    enforcement call and persists rule text, rule-set and input digests,
+    a per-leaf result trace, and remote request/response digests without
+    retaining raw target or credentials. ``DecisionReplayer`` re-evaluates
+    the evidence offline or in live mode and classifies each part of the
+    decision as reproduced, externally attested, or mismatched, with
+    separate verdicts for input drift, rule drift, and HMAC seal failure.
