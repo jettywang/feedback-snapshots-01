@@ -16,6 +16,7 @@
 """Test of Policy Engine"""
 
 import os
+import warnings
 from unittest import mock
 import yaml
 
@@ -1127,6 +1128,236 @@ class EnforcerTest(base.PolicyBaseTestCase):
         )
         # and the same should return False if do_raise=False
         self.assertFalse(self.enforcer.enforce(rule, {}, ctx, do_raise=False))
+
+
+class EnforcerScopeMatrixTestCase(base.PolicyBaseTestCase):
+    """Coverage for the token scope x rule source matrix.
+
+    The same action (``role:admin``) is exercised with project-scoped,
+    system-scoped and unscoped ("unknown") tokens.  Rules defined only in a
+    policy file carry no ``scope_types`` metadata, so scope checks do not apply
+    to them.  Registered defaults and file overrides of registered defaults
+    keep the registered ``scope_types`` and are checked before the role check.
+
+    An unscoped token has neither ``system_scope`` nor ``domain_id``, so the
+    enforcer classifies it as project-scoped.  This is the current behavior
+    captured by the matrix below.
+    """
+
+    ACTION = 'service:do_something'
+    ROLE = 'admin'
+    LEGACY_ROLE = 'legacy'
+    PROJECT = 'project'
+    SYSTEM = 'system'
+    UNKNOWN = 'unknown'
+    SCOPES = (PROJECT, SYSTEM, UNKNOWN)
+
+    def _token(self, scope, role=None):
+        creds = {'roles': [role or self.ROLE]}
+        if scope == self.PROJECT:
+            creds['project_id'] = 'project-id'
+        elif scope == self.SYSTEM:
+            creds['system_scope'] = 'all'
+        return context.RequestContext(**creds)
+
+    def _prepare(
+        self, rule_list=(), file_rules=None, enforce_new_defaults=None
+    ):
+        if file_rules is not None:
+            self.create_config_file('policy.yaml', yaml.dump(file_rules))
+        enforcer = policy.Enforcer(self.conf)
+        enforcer.register_defaults(rule_list)
+        if enforce_new_defaults is not None:
+            self.conf.set_override(
+                'enforce_new_defaults',
+                enforce_new_defaults,
+                group='oslo_policy',
+            )
+        # Deprecated-default warnings are emitted while loading rules, which
+        # happens on the first enforce() call.  Load explicitly so callers can
+        # inspect them alongside the authorization result.
+        with warnings.catch_warnings(record=True) as load_warnings:
+            warnings.simplefilter('always')
+            enforcer.load_rules()
+        return enforcer, load_warnings
+
+    def _enforce(self, enforcer, scope, role=None):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter('always')
+            try:
+                result = enforcer.enforce(
+                    self.ACTION,
+                    {},
+                    self._token(scope, role),
+                    do_raise=True,
+                )
+                error = None
+            except (policy.InvalidScope, policy.PolicyNotAuthorized) as exc:
+                result = None
+                error = exc
+        return result, error, caught
+
+    def _assert_allowed(self, enforcer, scope, role=None):
+        result, error, caught = self._enforce(enforcer, scope, role)
+        self.assertIsNone(error)
+        self.assertTrue(result)
+        self.assertEqual([], caught)
+
+    def _assert_scope_denied(self, enforcer, scope, role=None):
+        # An unscoped token is reported as project-scoped by the enforcer.
+        error_scope = self.PROJECT if scope == self.UNKNOWN else scope
+        result, error, caught = self._enforce(enforcer, scope, role)
+        self.assertIsInstance(error, policy.InvalidScope)
+        self.assertIn(
+            f'was made with {error_scope} scope',
+            str(error),
+        )
+        self.assertIsNone(result)
+        self.assertEqual([], caught)
+
+    def _assert_denied_by_role(self, enforcer, scope, role):
+        result, error, caught = self._enforce(enforcer, scope, role)
+        self.assertIsInstance(error, policy.PolicyNotAuthorized)
+        self.assertIsNone(result)
+        self.assertEqual([], caught)
+
+    def _assert_deprecated_warning(self, warned):
+        self.assertEqual(1, len(warned))
+        self.assertEqual(UserWarning, warned[0].category)
+        message = str(warned[0].message)
+        self.assertIn(f'Policy "{self.ACTION}"', message)
+        self.assertIn('was deprecated', message)
+        self.assertIn(f'role:{self.LEGACY_ROLE}', message)
+
+    def test_custom_file_rule_does_not_enforce_scope(self):
+        # A rule that exists only in policy.yaml has no scope_types, so even a
+        # mismatched token scope cannot be detected for it.
+        enforcer, _ = self._prepare(
+            file_rules={self.ACTION: f'role:{self.ROLE}'}
+        )
+
+        for scope in self.SCOPES:
+            with self.subTest(scope=scope):
+                self._assert_allowed(enforcer, scope)
+
+        self.assertIsNone(enforcer.rules[self.ACTION].scope_types)
+
+    def test_registered_default_without_scope_types_is_not_scope_checked(self):
+        # Declaration of scope_types is what enables scope checking; a
+        # registered default without it behaves like a plain file rule.
+        rule = policy.RuleDefault(
+            name=self.ACTION,
+            check_str=f'role:{self.ROLE}',
+        )
+        enforcer, _ = self._prepare([rule])
+
+        for scope in self.SCOPES:
+            with self.subTest(scope=scope):
+                self._assert_allowed(enforcer, scope)
+
+        self.assertIsNone(enforcer.rules[self.ACTION].scope_types)
+
+    def test_registered_project_default_scope_matrix(self):
+        rule = policy.RuleDefault(
+            name=self.ACTION,
+            check_str=f'role:{self.ROLE}',
+            scope_types=[self.PROJECT],
+        )
+        enforcer, _ = self._prepare([rule])
+
+        self._assert_allowed(enforcer, self.PROJECT)
+        self._assert_scope_denied(enforcer, self.SYSTEM)
+        # An unscoped token is classified as project-scoped.
+        self._assert_allowed(enforcer, self.UNKNOWN)
+
+    def test_registered_system_default_scope_matrix(self):
+        rule = policy.RuleDefault(
+            name=self.ACTION,
+            check_str=f'role:{self.ROLE}',
+            scope_types=[self.SYSTEM],
+        )
+        enforcer, _ = self._prepare([rule])
+
+        self._assert_scope_denied(enforcer, self.PROJECT)
+        self._assert_allowed(enforcer, self.SYSTEM)
+        # An unscoped token is classified as project-scoped.
+        self._assert_scope_denied(enforcer, self.UNKNOWN)
+
+    def test_file_override_keeps_registered_scope(self):
+        # Overriding the check string in a policy file does not strip the
+        # scope_types of the registered default with the same name.
+        rule = policy.RuleDefault(
+            name=self.ACTION,
+            check_str=f'role:{self.ROLE}',
+            scope_types=[self.PROJECT],
+        )
+        enforcer, _ = self._prepare(
+            [rule],
+            file_rules={
+                self.ACTION: (f'role:{self.ROLE} or role:{self.LEGACY_ROLE}')
+            },
+        )
+
+        self._assert_allowed(enforcer, self.PROJECT)
+        self._assert_scope_denied(enforcer, self.SYSTEM)
+        self._assert_allowed(enforcer, self.UNKNOWN)
+        self.assertIn(self.ACTION, enforcer.file_rules)
+
+    def _deprecated_project_rule(self):
+        deprecated_rule = policy.DeprecatedRule(
+            name=self.ACTION,
+            check_str=f'role:{self.LEGACY_ROLE}',
+            deprecated_reason='"role:admin" is a better default',
+            deprecated_since='N',
+        )
+        return policy.DocumentedRuleDefault(
+            name=self.ACTION,
+            check_str=f'role:{self.ROLE}',
+            description='Do something.',
+            operations=[{'path': '/v1/things', 'method': 'POST'}],
+            deprecated_rule=deprecated_rule,
+            scope_types=[self.PROJECT],
+        )
+
+    def test_compat_switch_enabled_checks_result_and_warnings(self):
+        for scope in self.SCOPES:
+            for role in (self.ROLE, self.LEGACY_ROLE):
+                with self.subTest(scope=scope, role=role):
+                    enforcer, load_warnings = self._prepare(
+                        [self._deprecated_project_rule()],
+                        enforce_new_defaults=True,
+                    )
+                    # The old check string is not OR'd in, so its role is
+                    # rejected and no deprecation warning is emitted.
+                    self.assertEqual([], load_warnings)
+                    if scope == self.PROJECT:
+                        if role == self.ROLE:
+                            self._assert_allowed(enforcer, scope)
+                        else:
+                            self._assert_denied_by_role(enforcer, scope, role)
+                    elif scope == self.SYSTEM:
+                        self._assert_scope_denied(enforcer, scope, role)
+                    elif role == self.ROLE:
+                        # The unscoped token is treated as project-scoped.
+                        self._assert_allowed(enforcer, scope)
+                    else:
+                        self._assert_denied_by_role(enforcer, scope, role)
+
+    def test_compat_switch_disabled_checks_result_and_warnings(self):
+        for scope in self.SCOPES:
+            for role in (self.ROLE, self.LEGACY_ROLE):
+                with self.subTest(scope=scope, role=role):
+                    enforcer, load_warnings = self._prepare(
+                        [self._deprecated_project_rule()],
+                        enforce_new_defaults=False,
+                    )
+                    # The compatibility switch ORs the deprecated check
+                    # string into the rule and warns once while loading.
+                    self._assert_deprecated_warning(load_warnings)
+                    if scope == self.SYSTEM:
+                        self._assert_scope_denied(enforcer, scope, role)
+                    else:
+                        self._assert_allowed(enforcer, scope, role)
 
 
 class EnforcerNoPolicyFileTest(base.PolicyBaseTestCase):
