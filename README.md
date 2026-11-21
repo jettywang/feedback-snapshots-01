@@ -66,6 +66,10 @@ safe_list_sanitizer.sanitize(@article.body, scrubber: ArticleScrubber.new)
 # prune nodes from the tree instead of stripping tags and leaving inner content
 safe_list_sanitizer = Rails::HTML5::SafeListSanitizer.new(prune: true)
 
+# prune only the listed elements along with their contents, and keep
+# stripping other disallowed tags (leaving their inner content)
+safe_list_sanitizer = Rails::HTML5::SafeListSanitizer.new(prune_tags: %w(iframe x-widget))
+
 # the sanitizer can also sanitize css
 safe_list_sanitizer.sanitize_css('background-color: #000;')
 ```
@@ -105,6 +109,18 @@ scrubber.tags = ['a']
 html_fragment = Loofah.fragment('<a><span>text</span></a>')
 html_fragment.scrub!(scrubber)
 html_fragment.to_s # => "<a></a>"
+```
+
+Pruning can also be limited to specific elements, so other disallowed tags are
+still stripped while keeping their inner content.
+
+```ruby
+scrubber = Rails::HTML::PermitScrubber.new(prune_tags: ['x-widget'])
+scrubber.tags = ['a']
+
+html_fragment = Loofah.fragment('<a><x-widget><b>secret</b></x-widget><span>text</span></a>')
+html_fragment.scrub!(scrubber)
+html_fragment.to_s # => "<a>text</a>"
 ```
 
 #### `Rails::HTML::TargetScrubber`

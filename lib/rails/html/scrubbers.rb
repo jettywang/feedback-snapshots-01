@@ -29,6 +29,11 @@ module Rails
     # If set, attributes excluded will be removed.
     # If not, attributes are removed based on Loofahs +HTML5::Scrub.scrub_attributes+.
     #
+    # +prune_tags=+
+    # If set, unallowed elements with these names will be pruned, i.e. the element
+    # and its whole subtree are removed, instead of stripped. Elements not listed
+    # here are still stripped, keeping their inner content.
+    #
     #  class CommentScrubber < Rails::HTML::PermitScrubber
     #    def initialize
     #      super
@@ -47,12 +52,13 @@ module Rails
     # See the documentation for +Nokogiri::XML::Node+ to understand what's possible
     # with nodes: https://nokogiri.org/rdoc/Nokogiri/XML/Node.html
     class PermitScrubber < Loofah::Scrubber
-      attr_reader :tags, :attributes, :prune
+      attr_reader :tags, :attributes, :prune, :prune_tags
 
-      def initialize(prune: false)
+      def initialize(prune: false, prune_tags: nil)
         @prune = prune
-        @direction = @prune ? :top_down : :bottom_up
-        @tags, @attributes = nil, nil
+        @tags, @attributes, @prune_tags = nil, nil, nil
+        self.prune_tags = prune_tags if prune_tags
+        update_direction!
       end
 
       def tags=(tags)
@@ -61,6 +67,11 @@ module Rails
 
       def attributes=(attributes)
         @attributes = validate!(attributes.dup, :attributes)
+      end
+
+      def prune_tags=(tags)
+        @prune_tags = validate!(tags.dup, :prune_tags)
+        update_direction!
       end
 
       def scrub(node)
@@ -103,10 +114,24 @@ module Rails
         def scrub_node(node)
           # If a node has a namespace, then it's a tag in either a `math` or `svg` foreign context,
           # and we should always prune it to avoid namespace confusion and mutation XSS vectors.
-          unless prune || node.namespace
-            node.before(node.children)
+          if prune || prune_tagged_node?(node) || node.namespace
+            node.remove
+          else
+            children = node.children
+            node.before(children)
+            node.remove
+            # Loofah's top-down traversal will not descend into the hoisted children,
+            # so scrub them explicitly to keep prune_tags enforceable everywhere.
+            children.each { |child| traverse(child) } if @direction == :top_down
           end
-          node.remove
+        end
+
+        def prune_tagged_node?(node)
+          node.element? && @prune_tags && @prune_tags.include?(node.name)
+        end
+
+        def update_direction!
+          @direction = (prune || (@prune_tags && !@prune_tags.empty?)) ? :top_down : :bottom_up
         end
 
         def scrub_attributes(node)
@@ -180,6 +205,10 @@ module Rails
     #
     # +attributes=+
     # If set, attributes included will be removed.
+    #
+    # +prune_tags=+
+    # If set, targeted elements with these names will be pruned, i.e. removed
+    # along with their whole subtree, instead of stripped.
     class TargetScrubber < PermitScrubber
       def allowed_node?(node)
         !super

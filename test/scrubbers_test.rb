@@ -85,6 +85,50 @@ class PermitScrubberTest < ScrubberTest
     assert_scrubbed html, "<tag>leave me </tag>"
   end
 
+  def test_prunes_only_supplied_prune_tags
+    @scrubber.tags = %w(tag)
+    @scrubber.prune_tags = %w(component)
+    html = "<tag>leave me <component><b>now</b></component><span>again</span></tag>"
+    assert_scrubbed html, "<tag>leave me again</tag>"
+  end
+
+  def test_prune_tags_constructor
+    scrubber = Rails::HTML::PermitScrubber.new(prune_tags: %w(component))
+    scrubber.tags = %w(tag)
+
+    assert_equal %w(component), scrubber.prune_tags
+    assert_equal :top_down, scrubber.direction
+
+    @scrubber = scrubber
+    assert_scrubbed "<tag>leave me <component>now</component></tag>", "<tag>leave me </tag>"
+  end
+
+  def test_prune_tags_defaults_to_bottom_up_direction
+    assert_equal :bottom_up, @scrubber.direction
+  end
+
+  def test_prune_tags_does_not_prune_allowed_tags
+    @scrubber.tags = %w(component)
+    @scrubber.prune_tags = %w(component)
+    assert_scrubbed "<component>keep me</component>"
+  end
+
+  def test_prune_tags_prunes_components_nested_inside_stripped_tags
+    @scrubber.tags = %w(tag)
+    @scrubber.prune_tags = %w(component)
+    html = "<tag><span><em><component>secret</component></em></span>keep</tag>"
+    assert_scrubbed html, "<tag>keep</tag>"
+  end
+
+  def test_prune_tags_accessor_validation
+    e = assert_raises(ArgumentError) do
+      @scrubber.prune_tags = "component"
+    end
+
+    assert_equal "You should pass :prune_tags as an Enumerable", e.message
+    assert_nil @scrubber.prune_tags, "Prune tags should be nil when validation fails"
+  end
+
   def test_leaves_comments_when_supplied_as_tag
     @scrubber.tags = %w(div comment)
     assert_scrubbed("<div>one</div><!-- two --><span>three</span>",
@@ -206,6 +250,13 @@ class TargetScrubberTest < ScrubberTest
     @scrubber.tags = %w(span)
     html = "<tag>leave me <span>now</span></tag>"
     assert_scrubbed html, "<tag>leave me </tag>"
+  end
+
+  def test_prunes_only_targeted_prune_tags
+    @scrubber.tags = %w(component span)
+    @scrubber.prune_tags = %w(component)
+    html = "<div><component><b>now</b></component><span>again</span></div>"
+    assert_scrubbed html, "<div>again</div>"
   end
 end
 

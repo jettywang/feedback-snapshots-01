@@ -1,5 +1,13 @@
 ## next / unreleased
 
+* Disallowed elements can now be pruned selectively by name, instead of only globally via
+  `prune: true`.
+
+  `PermitScrubber` and `TargetScrubber` accept a `prune_tags` enumerable (constructor keyword or
+  writer), and `SafeListSanitizer` accepts a `prune_tags:` constructor keyword. Elements named in
+  `prune_tags` are removed along with their whole subtree, while other disallowed elements are
+  still stripped, keeping their inner content in place.
+
 
 ## v1.7.2 / 2026-11-02
 

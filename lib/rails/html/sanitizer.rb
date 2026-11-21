@@ -153,8 +153,9 @@ module Rails
             klass.allowed_attributes = DEFAULT_ALLOWED_ATTRIBUTES.dup
           end
 
-          def initialize(prune: false)
+          def initialize(prune: false, prune_tags: nil)
             @prune = prune
+            @prune_tags = prune_tags
           end
 
           def scrub(fragment, options = {})
@@ -162,7 +163,7 @@ module Rails
               # No duck typing, Loofah ensures subclass of Loofah::Scrubber
               fragment.scrub!(scrubber)
             elsif allowed_tags(options) || allowed_attributes(options)
-              permit_scrubber = PermitScrubber.new(prune: @prune)
+              permit_scrubber = PermitScrubber.new(prune: @prune, prune_tags: @prune_tags)
               permit_scrubber.tags = allowed_tags(options)
               permit_scrubber.attributes = allowed_attributes(options)
               fragment.scrub!(permit_scrubber)
@@ -297,6 +298,10 @@ module Rails
     #   # prune nodes from the tree instead of stripping tags and leaving inner content
     #   safe_list_sanitizer = Rails::HTML4::SafeListSanitizer.new(prune: true)
     #
+    #   # prune only the listed elements along with their contents, and keep
+    #   # stripping other disallowed tags (leaving their inner content)
+    #   safe_list_sanitizer = Rails::HTML4::SafeListSanitizer.new(prune_tags: %w(iframe x-widget))
+    #
     #   # the sanitizer can also sanitize CSS
     #   safe_list_sanitizer.sanitize_css('background-color: #000;')
     #
@@ -406,6 +411,10 @@ module Rails
     #
     #   # prune nodes from the tree instead of stripping tags and leaving inner content
     #   safe_list_sanitizer = Rails::HTML5::SafeListSanitizer.new(prune: true)
+    #
+    #   # prune only the listed elements along with their contents, and keep
+    #   # stripping other disallowed tags (leaving their inner content)
+    #   safe_list_sanitizer = Rails::HTML5::SafeListSanitizer.new(prune_tags: %w(iframe x-widget))
     #
     #   # the sanitizer can also sanitize CSS
     #   safe_list_sanitizer.sanitize_css('background-color: #000;')

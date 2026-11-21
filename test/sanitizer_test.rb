@@ -421,6 +421,44 @@ module SanitizerTests
       assert_equal "<u>leave me </u>", sanitizer.sanitize(text, tags: %w(u))
     end
 
+    def test_prune_tags_keeps_nested_formatting_text_in_order
+      sanitizer = module_under_test::SafeListSanitizer.new(prune_tags: %w(x-related-articles))
+      input = read_fixture("archive_nested_formatting.html")
+
+      assert_equal "<p>Alpha <strong>bold <em>and italic</em></strong> underlined omega.</p>",
+        sanitizer.sanitize(input)
+    end
+
+    def test_prune_tags_removes_component_with_legitimate_contents
+      sanitizer = module_under_test::SafeListSanitizer.new(prune_tags: %w(x-related-articles))
+      input = read_fixture("archive_embedded_component.html")
+
+      assert_equal "", sanitizer.sanitize(input)
+    end
+
+    def test_prune_tags_preserves_adjacent_paragraphs_around_component
+      sanitizer = module_under_test::SafeListSanitizer.new(prune_tags: %w(x-related-articles))
+      input = read_fixture("archive_adjacent_paragraphs.html")
+
+      assert_equal "<p>Before the component.</p>\n\n<p>After the component.</p>",
+        sanitizer.sanitize(input)
+    end
+
+    def test_prune_tags_prunes_components_nested_inside_stripped_tags
+      sanitizer = module_under_test::SafeListSanitizer.new(prune_tags: %w(x-related-articles))
+      input = "<p><u><x-related-articles>Hidden teaser</x-related-articles></u>visible</p>"
+
+      assert_equal "<p>visible</p>", sanitizer.sanitize(input)
+    end
+
+    def test_without_prune_tags_component_contents_are_stripped_into_text
+      sanitizer = module_under_test::SafeListSanitizer.new
+      input = read_fixture("archive_embedded_component.html")
+
+      assert_equal '<p>Legitimate teaser text</p><a href="https://example.com/story">Read more</a>',
+        sanitizer.sanitize(input)
+    end
+
     def test_should_allow_custom_tags
       text = "<u>foo</u>"
       assert_equal text, safe_list_sanitize(text, tags: %w(u))
@@ -1294,6 +1332,10 @@ module SanitizerTests
     protected
       def safe_list_sanitize(input, options = {})
         module_under_test::SafeListSanitizer.new.sanitize(input, options)
+      end
+
+      def read_fixture(name)
+        File.read(File.join(__dir__, "fixtures", name)).chomp
       end
 
       def assert_sanitized(input, expected = nil)
