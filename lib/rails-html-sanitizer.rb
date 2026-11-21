@@ -5,6 +5,9 @@ require_relative "rails/html/sanitizer/version"
 require "loofah"
 
 require_relative "rails/html/scrubbers"
+require_relative "rails/html/sanitizer/policy"
+require_relative "rails/html/sanitizer/policy_registry"
+require_relative "rails/html/sanitizer/managed_sanitizer"
 require_relative "rails/html/sanitizer"
 
 module Rails

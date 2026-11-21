@@ -170,6 +170,63 @@ Using the `CommentScrubber` from above, you can use this in a Rails view like so
 <%= sanitize @comment, scrubber: CommentScrubber.new %>
 ```
 
+### Versioned sanitization policies
+
+Applications that roll out richer HTML permissions per tenant can publish an
+immutable policy version and sanitize against that exact version. A policy is a
+value object: later publications cannot change permissions used by content that
+is already being generated.
+
+```ruby
+registry = Rails::HTML::Sanitizer::PolicyRegistry.new
+
+registry.publish(name: "tenant-a", version: 1, tags: %w(p b i a), attributes: %w(href))
+registry.publish(name: "tenant-a", version: 2, tags: %w(p b i u mark a), attributes: %w(href class))
+
+managed = Rails::HTML5::SafeListSanitizer.managed(registry)
+
+# Resolve once and keep one version for every fragment of the same message.
+session = managed.with_policy("tenant-a@2")
+header = session.sanitize(header_html)
+body = session.sanitize(body_html)
+body.policy_reference # => "tenant-a@2"
+
+# Or sanitize with an explicit reference.
+result = managed.sanitize(html, policy: "tenant-a@1")
+result.policy_digest      # stable SHA256 of the effective permissions
+result.policy_version     # => 1
+```
+
+The sanitized value behaves like a `String` and additionally exposes
+`policy_reference`, `policy_version`, `policy_digest`, and `policy` so an
+operator can locate exactly which permission set produced a message.
+
+Publishing a different definition under an already-published `name@version`
+raises `Rails::HTML::Sanitizer::PolicyConflictError` and leaves the registry
+untouched. Unknown names and versions raise
+`Rails::HTML::Sanitizer::PolicyNotFoundError` with the published versions in the
+message. Invalid permissions (for example `script`, `style`, or `on*`
+attributes) raise `Rails::HTML::Sanitizer::InvalidPolicyError` before anything is
+published. All of these include `Rails::HTML::Sanitizer::PolicyError`.
+
+`registry.publish_next("tenant-a", tags: ...)` derives the next version from the
+current one, and `registry.rollback("tenant-a", 1)` promotes an existing version
+without modifying it.
+
+Applications that use the original class-level configuration are unaffected:
+
+```ruby
+Rails::HTML5::SafeListSanitizer.allowed_tags = %w(p b)
+Rails::HTML5::SafeListSanitizer.new.sanitize(html)
+```
+
+The managed path is also available from an instance without changing legacy
+calls, by passing `policy:` in the options hash:
+
+```ruby
+Rails::HTML5::SafeListSanitizer.new.sanitize(html, policy: "tenant-a@2")
+```
+
 ### A note on HTML entities
 
 __Rails HTML sanitizers are intended to be used by the view layer, at page-render time. They are *not* intended to sanitize persisted strings that will be sanitized *again* at page-render time.__

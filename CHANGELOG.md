@@ -1,5 +1,23 @@
 ## next / unreleased
 
+* Add versioned, immutable sanitization policies for per-tenant rich-text
+  rollouts.
+
+  `Rails::HTML::Sanitizer::PolicyRegistry` publishes named policy versions.
+  Each `Rails::HTML::Sanitizer::Policy` is an immutable value object, so
+  publishing a newer version or republishing a conflicting definition cannot
+  change permissions used by an in-flight message. A managed sanitizer resolves
+  a policy once per call and returns a String-compatible result carrying
+  `policy_reference`, `policy_version`, and `policy_digest` for provenance.
+  `with_policy` pins one version across several fragments of the same message.
+
+  Conflict and invalid publication fail before changing the registry and raise
+  errors that include `Rails::HTML::Sanitizer::PolicyError`. Legacy class-level
+  `allowed_tags` / `allowed_attributes` configuration and the existing
+  `sanitize` signature are unchanged.
+
+  *Rails HTML Sanitizer contributors*
+
 
 ## v1.7.2 / 2026-11-02
 

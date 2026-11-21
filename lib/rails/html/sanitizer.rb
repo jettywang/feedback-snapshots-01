@@ -1,8 +1,16 @@
 # frozen_string_literal: true
 
+require "thread"
+require_relative "sanitizer/policy"
+require_relative "sanitizer/policy_registry"
+require_relative "sanitizer/managed_sanitizer"
+
 module Rails
   module HTML
     class Sanitizer
+      POLICY_REGISTRY_MUTEX = Mutex.new
+      private_constant :POLICY_REGISTRY_MUTEX
+
       class << self
         def html5_support?
           return @html5_support if defined?(@html5_support)
@@ -16,6 +24,33 @@ module Rails
 
         def allowed_uri?(uri_string)
           Loofah::HTML5::Scrub.allowed_uri?(uri_string)
+        end
+
+        # The process-wide registry used by the managed sanitizer entry points.
+        # Applications may replace it when they want to publish policies
+        # explicitly rather than lazily.
+        def policy_registry
+          POLICY_REGISTRY_MUTEX.synchronize do
+            @policy_registry ||= PolicyRegistry.new
+          end
+        end
+
+        def policy_registry=(registry)
+          unless registry.respond_to?(:resolve) && registry.respond_to?(:publish)
+            raise ArgumentError, "policy_registry must be a Rails::HTML::Sanitizer::PolicyRegistry"
+          end
+          POLICY_REGISTRY_MUTEX.synchronize { @policy_registry = registry }
+        end
+
+        # Build a managed sanitizer directly from the base class. Defaults to
+        # the process-wide registry and the best supported parser.
+        def managed(registry = policy_registry, sanitizer: nil)
+          sanitizer ||= best_supported_vendor.safe_list_sanitizer.new
+          ManagedSanitizer.new(sanitizer, registry)
+        end
+
+        def publish_policy(policy = nil, **attributes)
+          policy_registry.publish(policy, **attributes)
         end
       end
 
@@ -175,6 +210,10 @@ module Rails
             Loofah::HTML5::Scrub.scrub_css(style_string)
           end
 
+          def prune?
+            @prune
+          end
+
           private
             def allowed_tags(options)
               options[:tags] || self.class.allowed_tags
@@ -305,6 +344,7 @@ module Rails
       include HTML::Concern::Parser::HTML4
       include HTML::Concern::Scrubber::SafeList
       include HTML::Concern::Serializer::UTF8Encode
+      include Rails::HTML::Sanitizer::PolicyManaged
     end
   end
 
@@ -415,6 +455,7 @@ module Rails
       include HTML::Concern::Parser::HTML5
       include HTML::Concern::Scrubber::SafeList
       include HTML::Concern::Serializer::UTF8Encode
+      include Rails::HTML::Sanitizer::PolicyManaged
     end
   end if Rails::HTML::Sanitizer.html5_support?
 
