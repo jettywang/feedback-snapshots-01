@@ -48,6 +48,8 @@ ENVIRONMENT_VARIABLES: Final[list[str]] = [
     DISABLE_SHARED_LIBS_AUTO_UPGRADE,
     "PIPX_USE_EMOJI",
     "PIPX_MAX_LOGS",
+    "PIPX_INSTALL_ENV_ALLOWLIST",
+    "PIPX_APP_ENV_ALLOWLIST",
 ]
 #: Environment variables that pipx derives from the ones users set.
 DERIVED_ENVIRONMENT_VARIABLES: Final[list[str]] = [

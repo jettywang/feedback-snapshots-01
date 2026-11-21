@@ -38,6 +38,7 @@ from typing import (
     TextIO,
 )
 
+from pipx._env_parsing import compute_env_allowlist  # ruff:ignore[import-private-name]  # same package
 from pipx.animate import show_cursor
 from pipx.constants import WINDOWS
 from pipx.fanout import output_is_held, stop_process_group, stopped_on_interrupt
@@ -56,6 +57,10 @@ if not WINDOWS:
     import termios
 
 _LOGGER: Final[logging.Logger] = logging.getLogger(__name__)
+#: Names of the variables holding the environment allowlists: one for installer subprocesses, one as the default for
+#: launched apps, and a per-app override derived from the app name.
+INSTALL_ENV_ALLOWLIST_VARIABLE: Final[str] = "PIPX_INSTALL_ENV_ALLOWLIST"
+APP_ENV_ALLOWLIST_VARIABLE: Final[str] = "PIPX_APP_ENV_ALLOWLIST"
 _STREAM_STDOUT_TO_STDERR: Final[ContextVar[bool]] = ContextVar("stream_stdout_to_stderr", default=False)
 _TERMINAL_ESCAPE: Final[re.Pattern[str]] = re.compile(
     r"""
@@ -78,6 +83,7 @@ def run_pypackage_bin(bin_path: Path, args: list[str]) -> NoReturn:
     exec_app(
         [str(bin_path.resolve()), *args],
         extra_python_paths=[".", str(bin_path.parent.parent)],
+        app_name=bin_path.stem,
     )
 
 
@@ -85,14 +91,21 @@ def exec_app(
     cmd: Sequence[str | Path],
     env: dict[str, str] | None = None,
     extra_python_paths: list[str] | None = None,
+    app_name: str | None = None,
 ) -> NoReturn:
     """Run a command in place of the current process and exit with its return code.
 
     :param cmd: the command and its arguments.
     :param env: the environment of the command, the current one when None.
     :param extra_python_paths: directories to add to ``PYTHONPATH`` for the command.
+    :param app_name: the name of the app, selecting a ``PIPX_APP_ENV_ALLOWLIST_<APP>`` policy over
+        ``PIPX_APP_ENV_ALLOWLIST``; either filters the inherited variables down to the listed ones, so install
+        credentials do not leak into the app.
     """
-    environment: Final[dict[str, str]] = _fix_subprocess_env(dict(os.environ) if env is None else env, force_utf8=False)
+    environment: Final[dict[str, str]] = _fix_subprocess_env(
+        _apply_env_allowlist(dict(os.environ) if env is None else env, _app_env_allowlist(app_name)),
+        force_utf8=False,
+    )
 
     if extra_python_paths is not None:
         environment["PYTHONPATH"] = os.path.pathsep.join(
@@ -243,13 +256,48 @@ def run_subprocess(  # ruff:ignore[too-many-arguments]  # thin wrapper over subp
 
 
 def _subprocess_env(env_overrides: dict[str, str | None] | None) -> dict[str, str]:
-    env: Final[dict[str, str]] = _fix_subprocess_env(dict(os.environ))
+    env: Final[dict[str, str]] = _fix_subprocess_env(_apply_env_allowlist(dict(os.environ), _install_env_allowlist()))
     for key, value in (env_overrides or {}).items():
         if value is None:
             env.pop(key, None)
         else:
             env[key] = value
     return env
+
+
+def _install_env_allowlist() -> frozenset[str] | None:
+    allowlist, invalid = compute_env_allowlist(os.environ.get(INSTALL_ENV_ALLOWLIST_VARIABLE))
+    if invalid:
+        _LOGGER.warning("%s holds entries that are not variable names; ignoring them", INSTALL_ENV_ALLOWLIST_VARIABLE)
+    return allowlist
+
+
+def _app_env_allowlist(app_name: str | None) -> frozenset[str] | None:
+    # a per-app policy wins over the default one, and an unset one leaves the environment untouched
+    variables: Final[list[str]] = (
+        [f"{APP_ENV_ALLOWLIST_VARIABLE}_{re.sub(r'[^A-Z0-9]+', '_', app_name.upper())}", APP_ENV_ALLOWLIST_VARIABLE]
+        if app_name
+        else [APP_ENV_ALLOWLIST_VARIABLE]
+    )
+    raw: str | None = None
+    variable: str = variables[-1]
+    for candidate in variables:
+        if (value := os.environ.get(candidate)) is not None:
+            variable, raw = candidate, value
+            break
+    allowlist, invalid = compute_env_allowlist(raw)
+    if invalid:
+        _LOGGER.warning("%s holds entries that are not variable names; ignoring them", variable)
+    return allowlist
+
+
+def _apply_env_allowlist(env: dict[str, str], allowlist: frozenset[str] | None) -> dict[str, str]:
+    if allowlist is None:
+        return env
+    filtered: Final[dict[str, str]] = {key: value for key, value in env.items() if key in allowlist}
+    # diagnostics name the keys a policy lets through, never the values, which can hold credentials
+    _LOGGER.info("environment allowlist passes keys: %s", ", ".join(sorted(filtered)) or "(none)")
+    return filtered
 
 
 def _run_streaming_subprocess(
@@ -487,6 +535,8 @@ def subprocess_post_check(completed_process: subprocess.CompletedProcess[str], *
 
 
 __all__ = [
+    "APP_ENV_ALLOWLIST_VARIABLE",
+    "INSTALL_ENV_ALLOWLIST_VARIABLE",
     "exec_app",
     "get_site_packages",
     "run_pypackage_bin",

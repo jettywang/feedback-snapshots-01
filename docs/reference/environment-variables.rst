@@ -68,6 +68,14 @@ instead:
       - Number of command logs to keep in the log directory, counting the current command's; `pip
         <https://pip.pypa.io>`_ and ``uv`` error logs share a separate limit of the same size. ``0`` acts like ``1``.
         pipx keeps the logs of commands still running. Default: ``10``.
+    - - ``PIPX_INSTALL_ENV_ALLOWLIST``
+      - Comma-separated names of the environment variables installer subprocesses (``pip`` and ``uv``) may inherit,
+        for example ``PIP_INDEX_URL,PIP_EXTRA_INDEX_URL``. Variables pipx sets itself and per-command overrides still
+        apply. Default: unset, inheriting everything.
+    - - ``PIPX_APP_ENV_ALLOWLIST``
+      - Comma-separated names of the environment variables launched apps may inherit, so install credentials do not
+        leak into them. ``PIPX_APP_ENV_ALLOWLIST_<APP>`` (the app name uppercased, non-alphanumerics replaced by
+        ``_``) overrides it per app. Default: unset, inheriting everything.
 
 .. note::
 

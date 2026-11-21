@@ -884,7 +884,7 @@ class Venv:  # ruff:ignore[too-many-public-methods]  # single facade over a pipx
             if python_args:
                 msg = f"Cannot pass Python arguments because {app!r} is not a Python entry point."
                 raise PipxError(msg)
-            exec_app([str(self.bin_path / filename), *app_args])
+            exec_app([str(self.bin_path / filename), *app_args], app_name=app)
 
         _LOGGER.info("Using discovered entry point for 'pipx run'")
         code: Final[str] = (
@@ -893,7 +893,7 @@ class Venv:  # ruff:ignore[too-many-public-methods]  # single facade over a pipx
             f"sys.exit(EntryPoint(name={entry_point.name!r}, value={entry_point.value!r}, "
             f"group={entry_point.group!r}).load()())\n"
         )
-        exec_app([str(self.python_path), "-P", *python_args, "-c", code, *app_args])
+        exec_app([str(self.python_path), "-P", *python_args, "-c", code, *app_args], app_name=app)
 
     def _find_entry_point(self, app: str, group: str) -> EntryPoint | None:
         if not self.python_path.exists():

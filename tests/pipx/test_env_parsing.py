@@ -2,8 +2,36 @@ from __future__ import annotations
 
 import pytest
 
-from pipx._env_parsing import compute_cooldown, compute_fetch_python, compute_max_logs  # ruff:ignore[import-private-name]  # mirrors the private source path
+from pipx._env_parsing import (  # ruff:ignore[import-private-name]  # mirrors the private source path
+    compute_cooldown,
+    compute_env_allowlist,
+    compute_fetch_python,
+    compute_max_logs,
+)
 from pipx.constants import FetchPythonOptions
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected_names", "expected_invalid"),
+    [
+        pytest.param(None, None, False, id="unset"),
+        pytest.param("", frozenset(), False, id="empty"),
+        pytest.param("  ", frozenset(), False, id="whitespace-only"),
+        pytest.param("PIP_INDEX_URL", frozenset({"PIP_INDEX_URL"}), False, id="single"),
+        pytest.param(
+            "PIP_INDEX_URL, PIP_EXTRA_INDEX_URL ,UV_DEFAULT_INDEX",
+            frozenset({"PIP_INDEX_URL", "PIP_EXTRA_INDEX_URL", "UV_DEFAULT_INDEX"}),
+            False,
+            id="comma-separated-with-whitespace",
+        ),
+        pytest.param("PIP_INDEX_URL,,PIP_USER", frozenset({"PIP_INDEX_URL", "PIP_USER"}), False, id="empty-entry"),
+        pytest.param("PIP_INDEX_URL,1BAD", frozenset({"PIP_INDEX_URL"}), True, id="invalid-leading-digit"),
+        pytest.param("HAS SPACE", frozenset(), True, id="invalid-space"),
+        pytest.param("A=B", frozenset(), True, id="invalid-assignment"),
+    ],
+)
+def test_compute_env_allowlist(raw: str | None, expected_names: frozenset[str] | None, expected_invalid: bool) -> None:
+    assert compute_env_allowlist(raw) == (expected_names, expected_invalid)
 
 
 @pytest.mark.parametrize(

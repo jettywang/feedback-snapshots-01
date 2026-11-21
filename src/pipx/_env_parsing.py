@@ -2,9 +2,27 @@ from __future__ import annotations
 
 __lazy_modules__ = ["typing"]
 
+import re
 from typing import Final
 
 from pipx.constants import FetchPythonOptions
+
+_ENV_NAME: Final[re.Pattern[str]] = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def compute_env_allowlist(raw: str | None) -> tuple[frozenset[str] | None, bool]:
+    """Parse a comma-separated allowlist of environment variable names.
+
+    :param raw: the raw value of the allowlist variable.
+    :returns: the allowed names, None when the variable is unset so no filtering applies, and whether any
+        non-empty entry was not a valid variable name.
+    """
+    if raw is None:
+        return None, False
+    entries: Final[list[str]] = [entry.strip() for entry in raw.split(",")]
+    names: Final[set[str]] = {entry for entry in entries if _ENV_NAME.fullmatch(entry)}
+    invalid: Final[bool] = any(entry and not _ENV_NAME.fullmatch(entry) for entry in entries)
+    return frozenset(names), invalid
 
 
 def compute_fetch_python(missing_raw: str | None, python_raw: str | None) -> tuple[FetchPythonOptions, bool]:
@@ -40,6 +58,7 @@ def compute_max_logs(raw: str | None) -> tuple[int, bool]:
 
 __all__ = [
     "compute_cooldown",
+    "compute_env_allowlist",
     "compute_fetch_python",
     "compute_max_logs",
 ]
