@@ -13,16 +13,20 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import copy
 import json
 from unittest import mock
 
 import fixtures
 from oslo_serialization import jsonutils
+from requests.exceptions import Timeout
 from requests_mock.contrib import fixture as rm_fixture
 from urllib import parse as urlparse
 
+from oslo_policy import _checks
 from oslo_policy import _external
 from oslo_policy import opts
+from oslo_policy import policy
 from oslo_policy.tests import base
 
 
@@ -348,3 +352,178 @@ class HttpsCheckTestCase(base.PolicyBaseTestCase):
                 target, dict(user='user', roles=['a', 'b', 'c']), self.enforcer
             )
         )
+
+
+class RecordingTimeoutCheck:
+    """Fake external check extension that records payloads, then times out."""
+
+    def __init__(self):
+        self.received = []
+
+    def __call__(self, payload):
+        self.received.append(copy.deepcopy(payload))
+        raise Timeout('simulated approval service timeout')
+
+
+class RecordingDenyCheck:
+    """Fake external check extension that records payloads, then denies."""
+
+    def __init__(self):
+        self.received = []
+
+    def __call__(self, payload):
+        self.received.append(copy.deepcopy(payload))
+        return False
+
+
+class ExternalCheckContextTestCase(base.PolicyBaseTestCase):
+    def setUp(self):
+        super().setUp()
+        self.enforcer.set_rules(
+            {
+                'get_file': _checks.RoleCheck('role', 'admin'),
+                'list_files': _checks.TrueCheck(),
+            }
+        )
+        self.target = {
+            'name': 'file-a',
+            'internal_path': '/srv/secret/file-a',
+        }
+        self.creds = {
+            'user': 'alice',
+            'roles': ['admin'],
+            'password': 's3cret-pass',
+            'token': 'tok-abc123',
+        }
+
+    def _make_context(self, check, actions=('get_file',)):
+        return _external.ExternalCheckContext(
+            check,
+            actions=actions,
+            target_fields=('name',),
+            cred_fields=('user', 'roles'),
+        )
+
+    def test_external_check_receives_only_approved_fields(self):
+        check = RecordingDenyCheck()
+        self.enforcer.external_check = self._make_context(check)
+
+        self.assertFalse(
+            self.enforcer.enforce('get_file', self.target, self.creds)
+        )
+
+        self.assertEqual(1, len(check.received))
+        self.assertEqual(
+            {
+                'action': 'get_file',
+                'target': {'name': 'file-a'},
+                'credentials': {'user': 'alice', 'roles': ['admin']},
+            },
+            check.received[0],
+        )
+
+    def test_local_policy_unaffected_for_unlisted_actions(self):
+        check = RecordingDenyCheck()
+        self.enforcer.external_check = self._make_context(check)
+
+        # 'list_files' is not part of the external check context, so the
+        # local policy alone decides and the external service is never
+        # consulted.
+        self.assertTrue(
+            self.enforcer.enforce('list_files', self.target, self.creds)
+        )
+        self.assertEqual([], check.received)
+
+    def test_local_denial_does_not_consult_external_service(self):
+        check = RecordingDenyCheck()
+        self.enforcer.external_check = self._make_context(check)
+
+        creds = dict(self.creds, roles=['reader'])
+        self.assertFalse(
+            self.enforcer.enforce('get_file', self.target, creds)
+        )
+        self.assertEqual([], check.received)
+
+    def test_external_approval_allows_action(self):
+        check = mock.Mock(return_value=True)
+        self.enforcer.external_check = self._make_context(check)
+
+        self.assertTrue(
+            self.enforcer.enforce('get_file', self.target, self.creds)
+        )
+        check.assert_called_once_with(
+            {
+                'action': 'get_file',
+                'target': {'name': 'file-a'},
+                'credentials': {'user': 'alice', 'roles': ['admin']},
+            }
+        )
+
+    def test_timeout_is_not_an_approval(self):
+        check = RecordingTimeoutCheck()
+        self.enforcer.external_check = self._make_context(check)
+
+        # A timeout fails closed with an explicit error instead of
+        # being treated as an approval.
+        self.assertRaises(
+            _external.ExternalCheckTimeout,
+            self.enforcer.enforce,
+            'get_file',
+            self.target,
+            self.creds,
+        )
+        self.assertEqual(1, len(check.received))
+
+    def test_timeout_error_does_not_leak_credentials(self):
+        check = RecordingTimeoutCheck()
+        self.enforcer.external_check = self._make_context(check)
+
+        exc = self.assertRaises(
+            _external.ExternalCheckTimeout,
+            self.enforcer.enforce,
+            'get_file',
+            self.target,
+            self.creds,
+            do_raise=True,
+        )
+        message = str(exc)
+        self.assertIn('get_file', message)
+        self.assertNotIn('s3cret-pass', message)
+        self.assertNotIn('tok-abc123', message)
+        self.assertNotIn('/srv/secret/file-a', message)
+
+    def test_denial_is_not_an_approval(self):
+        check = RecordingDenyCheck()
+        self.enforcer.external_check = self._make_context(check)
+
+        exc = self.assertRaises(
+            policy.PolicyNotAuthorized,
+            self.enforcer.enforce,
+            'get_file',
+            self.target,
+            self.creds,
+            do_raise=True,
+        )
+        message = str(exc)
+        self.assertNotIn('s3cret-pass', message)
+        self.assertNotIn('tok-abc123', message)
+        self.assertNotIn('/srv/secret/file-a', message)
+
+    def test_external_failure_does_not_leak_credentials(self):
+        check = mock.Mock(
+            side_effect=RuntimeError('backend rejected s3cret-pass')
+        )
+        self.enforcer.external_check = self._make_context(check)
+
+        exc = self.assertRaises(
+            _external.ExternalCheckError,
+            self.enforcer.enforce,
+            'get_file',
+            self.target,
+            self.creds,
+        )
+        message = str(exc)
+        self.assertIn('get_file', message)
+        self.assertNotIn('s3cret-pass', message)
+        self.assertNotIn('tok-abc123', message)
+        self.assertNotIn('/srv/secret/file-a', message)

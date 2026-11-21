@@ -16,6 +16,7 @@
 
 import contextlib
 import copy
+from collections.abc import Callable, Iterable, Mapping
 import os
 from typing import Any, TYPE_CHECKING
 
@@ -28,6 +29,121 @@ from oslo_serialization import jsonutils
 
 if TYPE_CHECKING:
     from oslo_policy.policy import Enforcer
+
+
+class ExternalCheckError(Exception):
+    """External approval check failed.
+
+    The message intentionally contains only the action being checked so
+    that it is safe to expose publicly: no target or credential data is
+    ever included.
+    """
+
+    message = _('External approval check for action %(action)s failed.')
+
+    def __init__(self, action: str | None) -> None:
+        super().__init__(self.message % {'action': action})
+
+
+class ExternalCheckTimeout(ExternalCheckError):
+    """The external approval service did not respond in time.
+
+    A timeout is never treated as an approval.
+    """
+
+    message = _(
+        'External approval check for action %(action)s timed out.'
+    )
+
+
+ExternalCheckCallbackT = Callable[[dict[str, Any]], bool]
+
+
+class ExternalCheckContext:
+    """Caller-configurable context for consulting an external approver.
+
+    This allows an internal approval service to take part in a subset of
+    permission decisions. Only the current action and the explicitly
+    approved target and credential fields are ever handed to the
+    external system; everything else stays local.
+
+    :param check: Callable invoked with the filtered payload. It must
+        return a true value to approve the action. Raising
+        ``requests.exceptions.Timeout`` or ``TimeoutError`` is reported
+        as :class:`ExternalCheckTimeout`; any other exception is
+        reported as :class:`ExternalCheckError`. Neither is ever
+        treated as an approval.
+    :param actions: Names of the policy rules (actions) the external
+        service participates in. All other rules are decided purely by
+        local policy.
+    :param target_fields: Target (resource) fields approved for
+        sharing with the external system.
+    :param cred_fields: Credential (subject) fields approved for
+        sharing with the external system.
+    """
+
+    def __init__(
+        self,
+        check: ExternalCheckCallbackT,
+        actions: Iterable[str],
+        target_fields: Iterable[str] = (),
+        cred_fields: Iterable[str] = (),
+    ) -> None:
+        self.check = check
+        self.actions = frozenset(actions)
+        self.target_fields = frozenset(target_fields)
+        self.cred_fields = frozenset(cred_fields)
+
+    def applies_to(self, action: str | None) -> bool:
+        """Whether the external service participates in this action."""
+        return action in self.actions
+
+    def build_payload(
+        self,
+        action: str | None,
+        target: Mapping[str, Any],
+        creds: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Build the payload sent to the external system.
+
+        Only the current action and the approved target and credential
+        fields are included.
+        """
+        return {
+            'action': action,
+            'target': {
+                key: value
+                for key, value in target.items()
+                if key in self.target_fields
+            },
+            'credentials': {
+                key: value
+                for key, value in creds.items()
+                if key in self.cred_fields
+            },
+        }
+
+    def allows(
+        self,
+        action: str | None,
+        target: Mapping[str, Any],
+        creds: Mapping[str, Any],
+    ) -> bool:
+        """Ask the external system whether the action is approved.
+
+        Failures of the external service are never treated as an
+        approval: timeouts raise :class:`ExternalCheckTimeout` and any
+        other error raises :class:`ExternalCheckError`.
+        """
+        payload = self.build_payload(action, target, creds)
+        try:
+            return bool(self.check(payload))
+        except (Timeout, TimeoutError) as e:
+            raise ExternalCheckTimeout(action) from e
+        except ExternalCheckError:
+            raise
+        except Exception as e:
+            raise ExternalCheckError(action) from e
 
 
 class HttpCheck(_checks.Check):

@@ -236,6 +236,7 @@ import yaml
 from oslo_policy import _cache_handler
 from oslo_policy import _checks
 from oslo_policy._i18n import _
+from oslo_policy import _external
 from oslo_policy import _parser
 from oslo_policy import opts
 
@@ -474,6 +475,15 @@ class Enforcer:
     :param use_conf: Whether to load rules from cache or config file.
     :param overwrite: Whether to overwrite existing rules when reload rules
         from config file.
+
+    .. attribute:: external_check
+
+        An optional :class:`oslo_policy._external.ExternalCheckContext`
+        configured by the caller. When set, actions listed in the context
+        must additionally be approved by the external approval service
+        after the local policy allows them. Only the current action and
+        the approved target and credential fields are shared with the
+        external system. Defaults to ``None`` (local policy only).
     """
 
     default_rule: _checks.BaseCheck | str | None
@@ -483,6 +493,7 @@ class Enforcer:
     policy_path: str | None
     policy_file: str
     overwrite: bool
+    external_check: '_external.ExternalCheckContext | None'
 
     _need_check_rule: bool
     # FIXME(stephenfin): This is actually a simpler type since only the mtime
@@ -538,6 +549,9 @@ class Enforcer:
         # enforcers to check only partial rules with the full policy rules, and
         # this sometimes causes a lot of undefined warnings
         self.skip_undefined_check = False
+        # Caller-configurable external approval check, consulted for a
+        # subset of actions after the local policy allows them.
+        self.external_check = None
 
     def set_rules(
         self,
@@ -1107,6 +1121,17 @@ class Enforcer:
                     creds=creds_dict,
                     enforcer=self,
                     current_rule=rule,
+                )
+
+        # Local policy allowed the action; consult the caller-configured
+        # external approval service for the subset of actions it
+        # participates in. A denial, timeout or any other failure of the
+        # external service is never treated as an approval.
+        if result and self.external_check is not None:
+            action = rule if isinstance(rule, str) else None
+            if self.external_check.applies_to(action):
+                result = self.external_check.allows(
+                    action, target, creds_dict
                 )
 
         # If it is False, raise the exception if requested
