@@ -120,6 +120,16 @@ replacement:
 ``--no-cache`` also rebuilds, but under the pip backend marks the new environment for cleanup by a later run. The two
 options are mutually exclusive.
 
+Teams that run reviewed internal tools can opt into a stricter cache with ``--approved-cache``: pipx fingerprints the
+local wheels, source trees and scripts the environment is built from, records the fingerprints next to it, and reuses
+the environment only while those approved sources are unchanged. A local build released again under the same name and
+version no longer matches, so the cached environment is not executed but prepared again; pipx logs whether it reuses
+the cache or prepares it again, and why. The option is mutually exclusive with ``--no-cache`` and ``--refresh``.
+
+.. code-block:: console
+
+    $ pipx run --approved-cache --spec ./dist/demo-1.0-py3-none-any.whl demo
+
 Show the cache directory or remove pipx's cached run environments:
 
 .. code-block:: console

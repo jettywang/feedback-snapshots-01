@@ -78,6 +78,7 @@ _LOGGER: Final[logging.Logger] = logging.getLogger(__name__)
 _VENV_EXPIRED_FILENAME: Final[str] = "pipx_expired_venv"
 _RUN_KEY_FILENAME: Final[str] = ".run-key"
 _RUN_KEY_BYTES: Final[int] = 32
+_APPROVED_SOURCES_FILENAME: Final[str] = "pipx_approved_sources.json"
 
 
 def run(app: str, options: RunOptions, *, spec: str | None) -> NoReturn:
@@ -565,6 +566,74 @@ def _prepare_venv_cache(venv: Venv, bin_path: Path | None, *, use_cache: bool, r
         rmdir(venv_dir)
 
 
+def _approved_sources(requirements: list[str]) -> dict[str, dict[str, str]]:
+    """Fingerprint the source of each requirement, so a later run can approve the cached environment.
+
+    :param requirements: the requirements the environment is built from.
+    :returns: the fingerprint of each requirement's source, keyed by the requirement as given.
+    """
+    return {requirement: _source_fingerprint(requirement) for requirement in requirements}
+
+
+def _source_fingerprint(requirement: str) -> dict[str, str]:
+    if (script := local_script(requirement)) is not None:
+        return {"sha256": _hash_file(script)}
+    # resolve_local_path resolves a local path (extras aside) and leaves any other spec as typed, so only the
+    # resolved form is absolute; an index name or a URL carries no local content to approve
+    path: Final[Path] = Path(resolve_local_path(requirement).partition("[")[0])
+    if path.is_absolute() and path.is_file():
+        return {"sha256": _hash_file(path)}
+    if path.is_absolute() and path.is_dir():
+        return {"sha256": _hash_tree(path)}
+    return {"coordinates": requirement}
+
+
+def _hash_file(path: Path) -> str:
+    digest: Final = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _hash_tree(path: Path) -> str:
+    digest: Final = hashlib.sha256()
+    for member in sorted(path.rglob("*")):
+        if member.is_file():
+            digest.update(str(member.relative_to(path)).encode())
+            digest.update(bytes.fromhex(_hash_file(member)))
+    return digest.hexdigest()
+
+
+def _write_approved_sources(venv_dir: Path, approved: dict[str, dict[str, str]]) -> None:
+    (venv_dir / _APPROVED_SOURCES_FILENAME).write_text(
+        json.dumps(approved, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+
+def _approval_mismatch(venv_dir: Path, expected: dict[str, dict[str, str]]) -> str | None:
+    """Return why a cached environment fails the approved-source check, or None when it matches.
+
+    :param venv_dir: the cached environment to check.
+    :param expected: the fingerprints of the sources the run requests now.
+    :returns: the reason the environment must be prepared again, or None when it is approved.
+    """
+    try:
+        recorded: Final = json.loads((venv_dir / _APPROVED_SOURCES_FILENAME).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return "it has no record of approved sources"
+    except (OSError, ValueError):
+        return "its record of approved sources is unreadable"
+    if not isinstance(recorded, dict):
+        return "its record of approved sources is unreadable"
+    changed: Final[list[str]] = sorted(
+        requirement for requirement, fingerprint in expected.items() if recorded.get(requirement) != fingerprint
+    )
+    if changed:
+        return f"the approved source changed: {', '.join(changed)}"
+    return None
+
+
 def run_package(
     app: str,
     package_or_url: str,
@@ -624,6 +693,10 @@ def run_package(
         resolved_backend,
         cooldown_days=options.cooldown.days,
     )
+    # hashed before the lock, so a large source tree does not stall the other runs
+    approved: Final[dict[str, dict[str, str]] | None] = (
+        _approved_sources([package_or_url, *options.dependencies]) if options.approved_cache else None
+    )
 
     with _locked_venv_cache(venv_dir):
         venv = Venv(venv_dir, backend=options.backend)
@@ -633,13 +706,27 @@ def run_package(
                 cached.resources.apps[0] if len(cached.resources.apps) == 1 else cached.package
             )
         _prepare_venv_cache(venv, venv.bin_path / app_filename, use_cache=options.use_cache, refresh=options.refresh)
+        if approved is not None and venv_dir.is_dir() and (mismatch := _approval_mismatch(venv_dir, approved)):
+            # an unapproved cache is never executed: it is prepared again from the sources approved now
+            _LOGGER.info("Preparing cached venv %s again: %s", venv_dir, mismatch)
+            rmdir(venv_dir)
 
         if venv.has_app(app, app_filename):
-            _LOGGER.info("Reusing cached venv %s", venv_dir)
+            if approved is None:
+                _LOGGER.info("Reusing cached venv %s", venv_dir)
+            else:
+                _LOGGER.info("Reusing cached venv %s: the approved sources are unchanged", venv_dir)
         else:
+            if approved is not None and venv_dir.exists():
+                _LOGGER.info("Preparing cached venv %s again: it does not provide the app %s", venv_dir, app_filename)
             _LOGGER.info("venv location is %s", venv_dir)
             venv, app, app_filename = _prepare_venv(
-                venv_dir, package_or_url, (app, app_filename), options, infer_app_name=infer_app_name
+                venv_dir,
+                package_or_url,
+                (app, app_filename),
+                options,
+                infer_app_name=infer_app_name,
+                approved_sources=approved,
             )
         venv.run_app(app, app_filename, options.app_args, python_args=options.interpreter.python_args)
 
@@ -660,6 +747,7 @@ def _prepare_venv(
     options: RunOptions,
     *,
     infer_app_name: bool,
+    approved_sources: dict[str, dict[str, str]] | None = None,
 ) -> _PreparedVenv:
     app, app_filename = app_names
     pip_args: Final[list[str]] = options.pip_args
@@ -722,6 +810,10 @@ def _prepare_venv(
     if not options.use_cache:
         # the next run's cache sweep removes a venv built without the cache
         (venv_dir / _VENV_EXPIRED_FILENAME).touch()
+
+    if approved_sources is not None:
+        # recorded only after the environment provides the app, so a half-built cache stays unapproved
+        _write_approved_sources(venv_dir, approved_sources)
 
     return _PreparedVenv(venv, app, app_filename)
 

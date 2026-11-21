@@ -1608,6 +1608,14 @@ def _add_run(subparsers: argparse._SubParsersAction, shared_parser: argparse.Arg
         action="store_true",
         help="Rebuild and cache the virtual environment",
     )
+    cache_group.add_argument(
+        "--approved-cache",
+        action="store_true",
+        help=(
+            "Reuse the cached virtual environment only while the approved sources it was "
+            "built from are unchanged; a re-released local build is prepared again"
+        ),
+    )
     parser.add_argument(
         "--no-path-check",
         action="store_true",
@@ -1684,6 +1692,7 @@ def _cmd_run(args: argparse.Namespace, ctx: _DispatchContext) -> NoReturn:
             verbose=ctx.verbose,
             use_cache=not args.no_cache,
             refresh=args.refresh,
+            approved_cache=args.approved_cache,
             backend=ctx.backend,
             cooldown=ctx.cooldown,
         ),

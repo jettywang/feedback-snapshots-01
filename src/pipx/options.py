@@ -357,6 +357,7 @@ class RunOptions:
     :param verbose: whether to print verbose output.
     :param use_cache: whether to reuse a cached environment.
     :param refresh: whether to rebuild the cached environment.
+    :param approved_cache: whether to reuse a cached environment only while its approved sources are unchanged.
     :param backend: the backend that installs the package.
     :param cooldown: the cooldown applied to the new releases.
     """
@@ -370,8 +371,9 @@ class RunOptions:
     verbose: bool
     use_cache: bool
     refresh: bool
-    backend: BackendOptions
-    cooldown: CooldownOptions
+    approved_cache: bool = False
+    backend: BackendOptions = DEFAULT_BACKEND_OPTIONS
+    cooldown: CooldownOptions = DEFAULT_COOLDOWN_OPTIONS
 
 
 __all__ = [
