@@ -60,9 +60,36 @@ with an additional ``size`` method:
     Standard stream operations; ``size`` returns the number of bytes written.
 
 ``close()``
-    Called once when the member is complete. It is optional to override; use it
-    to release per-member resources or to finalize an upload before py7zr
-    moves on to the next member.
+    Called once when the member's data is complete and its integrity check
+    passed. It is optional to override; use it to validate the payload or
+    finalize an upload. Raising from ``close`` rejects the member.
+
+``commit()``
+    Called once, immediately after ``close`` returned normally. Use it to
+    publish the member or record that both the archive integrity check and
+    the receiver succeeded. It is optional to override and a no-op by
+    default, so receivers without transactional support keep working.
+
+``cancel()``
+    Called at most once instead of ``commit`` when the member could not be
+    completed: a decompression or CRC failure, an extraction aborted
+    mid-file, or ``close``/``commit`` raising. Use it to delete partial data
+    or leave it explicitly uncommitted. It is optional to override and a
+    no-op by default.
+
+The complete sequence for one member is therefore either::
+
+    write* -> close -> commit
+
+or, on any failure after the receiver was created::
+
+    write* -> cancel
+
+``close`` is not called for a member that failed before its data was
+complete, so a partially written payload never looks like a finished one.
+py7zr does not call ``commit`` or ``cancel`` for a member whose receiver was
+never created. A failure in any hook propagates out of
+``extract``/``extractall``.
 
 .. note::
 
@@ -130,7 +157,9 @@ This factory keeps at most ``limit`` bytes of each member in memory.
 Example: extract into network storage
 -------------------------------------
 
-Here is pseudo code that streams contents to cloud storage.
+Here is pseudo code that streams contents to cloud storage. It uses the three
+receiver hooks: ``close`` finalizes, ``commit`` publishes, and ``cancel``
+discards a partial upload.
 To keep the example simple, authentication, bucket operations and
 mandatory headers are omitted.
 
@@ -169,7 +198,16 @@ mandatory headers are omitted.
             return self.length
 
         def close(self) -> None:
-            # The member is complete; commit the upload here.
+            # The member's data is complete and the CRC check passed; do the
+            # final validation here and raise to reject the upload.
+            pass
+
+        def commit(self) -> None:
+            # close() succeeded; publish the upload or record the receipt.
+            pass
+
+        def cancel(self) -> None:
+            # Something failed; discard the partial upload.
             pass
 
 
@@ -189,3 +227,28 @@ mandatory headers are omitted.
         factory = StreamIOFactory()
         with py7zr.SevenZipFile("target.7z") as archive:
             archive.extractall(factory=factory)
+
+
+Testing a receiver
+------------------
+
+:class:`py7zr.io.RecordingWriterFactory` is a local receiver that stores no
+payload and records every hook call, which makes the lifecycle observable in
+tests:
+
+.. code-block:: python
+
+    import py7zr
+
+    factory = py7zr.io.RecordingWriterFactory(fail_on_close={"setup.cfg"})
+    with py7zr.SevenZipFile("archive.7z") as archive:
+        archive.extractall(factory=factory)
+
+    factory.committed()            # members that reached commit()
+    factory.cancelled()            # members that reached cancel()
+    factory.events("setup.cfg")    # calls for one member, in order
+
+A member rejected by the receiver's ``close`` appears in ``cancelled()`` and
+never in ``committed()``. If :class:`py7zr.io.MemIO` is held directly, its
+:attr:`~py7zr.io.MemIO.status` reports the same outcome as a
+:class:`py7zr.io.MemberStatus` value.

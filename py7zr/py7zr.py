@@ -1196,8 +1196,11 @@ class SevenZipFile(contextlib.AbstractContextManager):
             progress reports.
         :param factory: An optional :class:`WriterFactory`. When given,
             member data is written to objects created by the factory instead
-            of to files, and directories are skipped. See
-            :ref:`advanced_usage`.
+            of to files, and directories are skipped. For each such member
+            the factory's receiver gets :meth:`Py7zIO.close` after the
+            member is complete and its integrity check passed, then
+            :meth:`Py7zIO.commit`; on any failure it gets
+            :meth:`Py7zIO.cancel` instead. See :ref:`advanced_usage`.
         :raises PasswordRequired: If the archive is encrypted and no password
             was given.
         :raises DecompressionBombError: If the extracted size exceeds

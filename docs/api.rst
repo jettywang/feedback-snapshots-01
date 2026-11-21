@@ -74,6 +74,18 @@ I/O Interfaces
 .. autoclass:: py7zr.WriterFactory
    :members:
 
+.. autoclass:: py7zr.io.RecordingIO
+   :members: write, close, commit, cancel
+
+.. autoclass:: py7zr.io.RecordingWriterFactory
+   :members: create, events, committed, cancelled
+
+.. autoclass:: py7zr.io.MemberStatus
+   :members:
+
+.. autoclass:: py7zr.io.MemIO
+   :members: status, committed
+
 
 Exceptions
 ==========
