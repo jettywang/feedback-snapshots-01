@@ -89,3 +89,27 @@ class DecompressionBombError(ArchiveError):
 class AbsolutePathError(Exception):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
+
+
+class DestinationConflictError(ArchiveError):
+    """Raised when extraction is refused because destination names collide.
+
+    This is a preflight failure: no destination file and no
+    :class:`py7zr.WriterFactory` output has been written when it is raised.
+
+    :ivar conflicts: The :class:`py7zr.preflight.DestinationConflict` objects
+        that are still unresolved.
+    """
+
+    def __init__(self, conflicts, message: str = "destination name conflict") -> None:
+        super().__init__(conflicts, message)
+        self.conflicts = conflicts
+        self.message = message
+
+    def __str__(self) -> str:
+        names = ", ".join(
+            " / ".join(repr(member.name) for member in conflict.members) or conflict.key for conflict in self.conflicts
+        )
+        if len(self.conflicts) <= 3:
+            return f"{self.message}: {names}" if names else self.message
+        return f"{self.message}: {len(self.conflicts)} conflicts ({names}, ...)"

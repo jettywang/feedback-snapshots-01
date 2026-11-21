@@ -35,6 +35,63 @@ An archive can be extracted only once per open. To extract again from the same
 first, or reopen the archive.
 
 
+.. _destination_preflight:
+
+Rehearse a cross-platform extraction
+====================================
+
+An archive stores member names as strings, but the destination decides which of
+them denote the same file.  Before moving an archive to a case-insensitive or
+Unicode-normalizing share, inspect where each member would land:
+
+.. code-block:: python
+
+    from py7zr import DestinationEntry, SevenZipFile
+
+    with SevenZipFile('bundle.7z', 'r') as archive:
+        report = archive.preflight_destination(
+            'windows',
+            existing=[DestinationEntry('team/old-report.txt')],
+        )
+    print(report.summary())
+
+Nothing is written by the preflight.  ``destination`` may be a platform name
+(``"windows"``, ``"macos"``, ``"linux"``) or a
+:class:`~py7zr.DestinationProfile` for a custom share.  ``existing`` simulates
+paths already present at the destination; a trailing ``/`` marks a directory.
+
+``report.conflicts`` lists every collision.  Each conflict carries the archive
+indices and names of both members, so two members with the same name remain
+distinguishable:
+
+.. code-block:: python
+
+    for conflict in report.conflicts:
+        print(conflict.kind, conflict.indices, conflict.names)
+
+Choose a policy and approve a plan.  ``reject`` (the default) leaves every
+collision unresolved; ``skip`` keeps the first member; ``rename`` gives later
+members a unique name such as ``report~1.txt``; ``overwrite`` lets archive
+order decide where that is safe.
+
+.. code-block:: python
+
+    plan = report.approve('rename')
+    with SevenZipFile('bundle.7z', 'r') as archive:
+        archive.extractall('shared-drive', plan=plan)
+
+Extraction validates the plan before creating the destination directory or
+calling a :class:`~py7zr.WriterFactory`.  An unapproved or unresolved plan, or
+one built for a different archive, raises ``DestinationConflictError`` and
+leaves no output.  Directory names are merged onto the first spelling under
+every non-``reject`` policy, so both subtrees are kept.
+
+Exact duplicate member names are a collision too, even on a case-sensitive
+destination.  Without a plan, extraction keeps the historical behaviour: the
+first member keeps its name and later duplicates receive suffixes such as
+``file.txt_0``.
+
+
 .. _stream-7z-content:
 
 Stream 7z content

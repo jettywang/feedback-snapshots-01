@@ -43,6 +43,30 @@ Out of scope: the decompressed *size* of archive members, which a caller bounds 
 ``max_extract_size`` argument to ``SevenZipFile``; and archives the caller has already
 chosen to trust.
 
+Destination name collisions
+---------------------------
+
+Member names that are distinct in the archive can still denote one file at the
+destination.  A case-insensitive share folds ``Report.txt`` and ``report.txt``;
+a normalizing volume folds canonically equivalent Unicode spellings; Windows
+ignores trailing dots and spaces.  Writing such an archive can silently
+overwrite one member with another, or replace a file that was already there.
+
+``SevenZipFile.preflight_destination()`` makes that decision before anything is
+written.  It takes a :class:`py7zr.DestinationProfile` -- or a platform name --
+and a list of simulated existing entries, and returns a
+:class:`py7zr.PreflightReport` that names each colliding pair by archive index
+and member name.  The report creates no directory, decompresses nothing and
+calls no ``WriterFactory``.
+
+The report carries a :class:`py7zr.MigrationPlan`.  Extraction validates a plan
+before it creates the destination directory or a ``WriterFactory`` product, so a
+plan that is unapproved, still has unresolved conflicts, or was built for a
+different archive is refused with ``DestinationConflictError`` and leaves no
+partial output.  Plan output names are re-sanitized, so a forged plan cannot act
+as a path-traversal bypass.  See :ref:`destination_preflight` for policies and
+examples.
+
 
 Hardening in the header parser
 ------------------------------

@@ -37,6 +37,30 @@ SevenZipFile Object
    member data to custom objects with a :class:`WriterFactory`.
 
 
+.. _preflight-object:
+
+Destination Preflight
+=====================
+
+.. autoclass:: py7zr.DestinationProfile
+   :members:
+
+.. autoclass:: py7zr.DestinationEntry
+
+.. autoclass:: py7zr.DestinationMember
+
+.. autoclass:: py7zr.DestinationConflict
+   :members:
+
+.. autoclass:: py7zr.PreflightReport
+   :members:
+
+.. autoclass:: py7zr.MigrationPlan
+   :members:
+
+.. autofunction:: py7zr.preflight.preflight
+
+
 .. _archiveinfo-object:
 
 Information Objects
@@ -87,6 +111,8 @@ Exceptions
 .. autoexception:: py7zr.DecompressionError
 
 .. autoexception:: py7zr.DecompressionBombError
+
+.. autoexception:: py7zr.DestinationConflictError
 
 
 .. _api-constants:

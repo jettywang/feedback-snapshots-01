@@ -55,6 +55,7 @@ from py7zr.exceptions import (
     AbsolutePathError,
     Bad7zFile,
     CrcError,
+    DestinationConflictError,
     DecompressionBombError,
     DecompressionError,
     InternalError,
@@ -63,6 +64,7 @@ from py7zr.exceptions import (
 )
 from py7zr.helpers import (
     ArchiveTimestamp,
+    _sanitize_member_name,
     calculate_crc32,
     check_archive_path,
     filetime_to_dt,
@@ -73,6 +75,13 @@ from py7zr.helpers import (
 )
 from py7zr.io import MemIO, NullIO, WriterFactory
 from py7zr.member import FILE_ATTRIBUTE_UNIX_EXTENSION, MemberType
+from py7zr.preflight import (
+    DestinationMember,
+    DestinationProfile,
+    MigrationPlan,
+    PreflightReport,
+    preflight,
+)
 from py7zr.properties import DEFAULT_FILTERS, FILTER_DEFLATE64, MAGIC_7Z, get_default_blocksize, get_memory_limit
 
 if TYPE_CHECKING:
@@ -471,7 +480,10 @@ class SevenZipFile(contextlib.AbstractContextManager):
     * Socket files stored in archives are not extracted.
     * When duplicate file names exist in an archive, the first member
       keeps its original name and subsequent duplicates receive
-      incrementing numeric suffixes, such as ``file.txt_0``.
+      incrementing numeric suffixes, such as ``file.txt_0``.  This is a
+      historical behaviour; a destination preflight treats exact duplicates
+      as a collision unless a plan says otherwise.  See
+      :meth:`preflight_destination`.
     * Multiprocessing extraction is disabled for password-protected
       archives and when a file-like object is passed instead of a path.
     """
@@ -699,7 +711,14 @@ class SevenZipFile(contextlib.AbstractContextManager):
         callback: ExtractCallback | None = None,
         recursive: bool | None = False,
         writer_factory: WriterFactory | None = None,
+        plan: MigrationPlan | None = None,
     ) -> None:
+        # A plan is validated before the destination directory, the callback
+        # thread, or a WriterFactory is touched so a rejected migration cannot
+        # leave a partial extraction behind.
+        if plan is not None:
+            plan.require_usable(self._destination_fingerprint())
+            self._validate_plan_paths(plan, targets, recursive)
         if callback is None:
             pass
         elif isinstance(callback, ExtractCallback):
@@ -726,6 +745,10 @@ class SevenZipFile(contextlib.AbstractContextManager):
             # faster lookups
             targets = set(targets)
         fnames: dict[str, int] = {}  # check duplicated filename in one archive?
+        planned_entries = {entry.index: entry for entry in plan.entries} if plan is not None else None
+        has_planned_overwrite = planned_entries is not None and any(
+            entry.action == "overwrite" for entry in planned_entries.values()
+        )
         self.q.put(("pre", None, None))
         for f in self.files:
             if targets is not None and recursive is False:
@@ -737,11 +760,16 @@ class SevenZipFile(contextlib.AbstractContextManager):
                     self.worker.register_filelike(f.id, None)
                     continue
 
-            # When archive has a multiple files which have same name
-            # To guarantee order of archive, multi-thread decompression becomes off.
-            # Currently always overwrite by latter archives.
-            # TODO: provide option to select overwrite or skip.
-            if f.filename not in fnames:
+            # When archive has multiple files with the same name, keep the
+            # historical suffixing behaviour unless an approved migration plan
+            # says what should happen at the destination.
+            if planned_entries is not None:
+                planned = planned_entries.get(f.id)
+                if planned is None or planned.action == "skip" or planned.output_name is None:
+                    self.worker.register_filelike(f.id, None)
+                    continue
+                outname = planned.output_name
+            elif f.filename not in fnames:
                 outname = f.filename
                 fnames[f.filename] = 0
             else:
@@ -783,19 +811,14 @@ class SevenZipFile(contextlib.AbstractContextManager):
                     raise DecompressionError(f"Directory {target_dir} making fails on unknown condition.")
 
         self.worker.max_extract_size = self.max_extract_size
+        # A planned overwrite deliberately reuses a destination path, so it
+        # must follow the member it replaces.  Keep such an extraction
+        # sequential to preserve archive order.
+        parallel = not self.password_protected and not self._filePassed and not has_planned_overwrite
         if callback is not None:
-            self.worker.extract(
-                self.fp,
-                path,
-                parallel=(not self.password_protected and not self._filePassed),
-                q=self.q,
-            )
+            self.worker.extract(self.fp, path, parallel=parallel, q=self.q)
         else:
-            self.worker.extract(
-                self.fp,
-                path,
-                parallel=(not self.password_protected and not self._filePassed),
-            )
+            self.worker.extract(self.fp, path, parallel=parallel)
 
         self.q.put(("post", None, None))
         # early return when dict specified
@@ -1081,6 +1104,102 @@ class SevenZipFile(contextlib.AbstractContextManager):
             return True
         return False
 
+    def _destination_members(self) -> tuple[DestinationMember, ...]:
+        """Snapshot archive members for a destination preflight."""
+        return tuple(
+            DestinationMember(index=f.id, name=f.filename, is_directory=f.is_directory) for f in self.files
+        )
+
+    def _destination_fingerprint(self) -> tuple[tuple[int, str, bool], ...]:
+        return tuple((member.index, member.name, member.is_directory) for member in self._destination_members())
+
+    def _validate_plan_paths(
+        self,
+        plan: MigrationPlan,
+        targets: Collection[str] | None,
+        recursive: bool | None,
+    ) -> None:
+        """Refuse a plan whose names would escape the destination.
+
+        Containment is checked here, before extraction writes anything, so a
+        crafted plan cannot act as a path-traversal bypass.  It uses the same
+        sanitizer as extraction rather than trusting the plan.
+        """
+        selected = None if targets is None else set(targets)
+        for member in self.files:
+            if selected is not None and member.filename not in selected:
+                if recursive is not True:
+                    continue
+                if not any(member.filename.startswith(target) for target in selected):
+                    continue
+            entry = plan.entry_for(member.id)
+            if entry is None or entry.action == "skip" or entry.output_name is None:
+                continue
+            try:
+                name = _sanitize_member_name(entry.output_name)
+            except Bad7zFile as error:
+                raise DestinationConflictError(
+                    plan.conflicts,
+                    f"approved plan contains an unsafe destination name for member "
+                    f"{member.id} {member.filename!r}: {entry.output_name!r}",
+                ) from error
+            if name != pathlib.PurePosixPath(entry.output_name).as_posix():
+                raise DestinationConflictError(
+                    plan.conflicts,
+                    f"approved plan contains an unsafe destination name for member "
+                    f"{member.id} {member.filename!r}: {entry.output_name!r}",
+                )
+
+    def preflight_destination(
+        self,
+        destination: DestinationProfile | str | None = None,
+        *,
+        existing: Any | None = None,
+        policy: str = "reject",
+    ) -> PreflightReport:
+        """Check where archive members would land, without writing anything.
+
+        This is a pure inspection: the destination directory is not created,
+        no member is decompressed and no :class:`WriterFactory` is called.  A
+        :class:`DestinationProfile` (or a platform name for
+        :meth:`DestinationProfile.for_platform`) decides which names denote the
+        same file, so a case-insensitive Windows or macOS share can be
+        rehearsed on any host.
+
+        The report names every colliding pair by archive index and member name
+        and carries a :class:`MigrationPlan`.  Approve a plan with the desired
+        policy and pass it to :meth:`extract` or :meth:`extractall`.
+
+        :param destination: The destination profile or platform name. Defaults
+            to the host platform.
+        :param existing: Simulated existing destination entries: an iterable of
+            paths (a trailing separator marks a directory), a mapping of path
+            to ``is_directory``, or :class:`DestinationEntry` objects.
+        :param policy: The initial plan policy: ``"reject"``, ``"skip"``,
+            ``"rename"`` or ``"overwrite"``.
+        :return: A :class:`PreflightReport`.
+        :raises ValueError: If *destination* or *policy* is unknown.
+        """
+        return preflight(
+            self._destination_members(),
+            destination=destination,
+            existing=existing,
+            policy=policy,
+        )
+
+    def plan_extraction(
+        self,
+        destination: DestinationProfile | str | None = None,
+        *,
+        existing: Any | None = None,
+        policy: str = "reject",
+    ) -> MigrationPlan:
+        """Return the migration plan for a destination preflight.
+
+        Shorthand for ``preflight_destination(...).plan``.
+        """
+        return self.preflight_destination(destination, existing=existing, policy=policy).plan
+
     # --------------------------------------------------------------------------
     # The public methods which SevenZipFile provides:
     def getnames(self) -> list[str]:
@@ -1181,6 +1300,7 @@ class SevenZipFile(contextlib.AbstractContextManager):
         *,
         callback: ExtractCallback | None = None,
         factory: WriterFactory | None = None,
+        plan: MigrationPlan | None = None,
     ) -> None:
         """Extract all members from the archive.
 
@@ -1198,12 +1318,20 @@ class SevenZipFile(contextlib.AbstractContextManager):
             member data is written to objects created by the factory instead
             of to files, and directories are skipped. See
             :ref:`advanced_usage`.
+        :param plan: An approved :class:`py7zr.MigrationPlan` from
+            :meth:`preflight_destination`. When given, its output names and
+            skip/overwrite decisions are used instead of the historical
+            duplicate suffixing. A plan that is unapproved, unresolved or was
+            built for a different archive is refused before anything is
+            written.
         :raises PasswordRequired: If the archive is encrypted and no password
             was given.
         :raises DecompressionBombError: If the extracted size exceeds
             ``max_extract_size``.
+        :raises DestinationConflictError: If *plan* has unresolved collisions
+            or has not been approved.
         """
-        self._extract(path=path, callback=callback, writer_factory=factory)
+        self._extract(path=path, callback=callback, writer_factory=factory, plan=plan)
 
     def extract(
         self,
@@ -1213,6 +1341,7 @@ class SevenZipFile(contextlib.AbstractContextManager):
         *,
         callback: ExtractCallback | None = None,
         factory: WriterFactory | None = None,
+        plan: MigrationPlan | None = None,
     ) -> None:
         """Extract selected members from the archive.
 
@@ -1233,7 +1362,11 @@ class SevenZipFile(contextlib.AbstractContextManager):
             progress reports.
         :param factory: An optional :class:`WriterFactory`; see
             :meth:`extractall`.
+        :param plan: An approved :class:`py7zr.MigrationPlan`; see
+            :meth:`extractall`. Members that the plan skips are not extracted
+            even when *targets* selects them.
         :raises TypeError: If *targets* is not a collection or ``None``.
+        :raises DestinationConflictError: If *plan* is not usable.
         """
         if not self._is_none_or_collection(targets):
             raise TypeError(
@@ -1244,7 +1377,7 @@ class SevenZipFile(contextlib.AbstractContextManager):
         # This also matches the behavior of TarFile
         if targets is not None:
             targets = [remove_trailing_slash(target) for target in targets]
-        self._extract(path, targets, recursive=recursive, callback=callback, writer_factory=factory)
+        self._extract(path, targets, recursive=recursive, callback=callback, writer_factory=factory, plan=plan)
 
     def reporter(self, callback: ExtractCallback) -> None:
         """Forward progress events from the worker to *callback* (internal).

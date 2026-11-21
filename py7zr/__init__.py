@@ -21,6 +21,7 @@ from py7zr.exceptions import (
     Bad7zFile,
     DecompressionBombError,
     DecompressionError,
+    DestinationConflictError,
     PasswordRequired,
     UnsupportedCompressionMethodError,
 )
@@ -49,6 +50,14 @@ from py7zr.properties import (
     PRESET_DEFAULT,
     PRESET_EXTREME,
 )
+from py7zr.preflight import (
+    DestinationConflict,
+    DestinationEntry,
+    DestinationMember,
+    DestinationProfile,
+    MigrationPlan,
+    PreflightReport,
+)
 from py7zr.py7zr import ArchiveInfo, FileInfo, SevenZipFile, is_7zfile, pack_7zarchive, unpack_7zarchive
 from py7zr.version import __version__
 
@@ -68,6 +77,13 @@ __all__ = [
     "Bad7zFile",
     "DecompressionBombError",
     "DecompressionError",
+    "DestinationConflictError",
+    "DestinationConflict",
+    "DestinationEntry",
+    "DestinationMember",
+    "DestinationProfile",
+    "MigrationPlan",
+    "PreflightReport",
     "Py7zIO",
     "WriterFactory",
     "FILTER_LZMA",

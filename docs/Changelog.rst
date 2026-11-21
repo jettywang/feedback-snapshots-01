@@ -9,6 +9,20 @@ All notable changes to this project will be documented in this file.
 `Unreleased`_
 =============
 
+Added
+-----
+- Destination preflight for cross-platform migrations.
+  ``SevenZipFile.preflight_destination()`` inspects member names against a
+  declarative :class:`DestinationProfile` -- case sensitivity, Unicode
+  normalization and Windows trailing-dot folding -- without writing anything.
+  The :class:`PreflightReport` names every colliding pair by archive index and
+  member name, and carries a :class:`MigrationPlan`.  Approve a plan with the
+  ``reject``, ``skip``, ``rename`` or ``overwrite`` policy and pass it to
+  ``extract()``/``extractall()``; an unapproved or unresolved plan is refused
+  before the destination directory or a ``WriterFactory`` is touched.  Existing
+  destination entries can be simulated, so a Windows or macOS share can be
+  rehearsed on any host.
+
 Changed
 -------
 - Switch the 7zAES crypto dependency from ``pycryptodomex`` (``Cryptodome``
