@@ -40,6 +40,10 @@ module Rails
           return unless html
           return html if html.empty?
 
+          if options[:report]
+            options = options.merge(report: Rails::HTML::Sanitizer::Report.sink(options[:report]))
+          end
+
           serialize(scrub(parse_fragment(html), options))
         end
       end
@@ -61,21 +65,28 @@ module Rails
       module Scrubber
         module Full
           def scrub(fragment, options = {})
-            fragment.scrub!(TextOnlyScrubber.new)
+            fragment.scrub!(TextOnlyScrubber.new(report: options[:report]))
           end
         end
 
         module Link
           def initialize
             super
-            @link_scrubber = TargetScrubber.new
-            @link_scrubber.tags = %w(a)
-            @link_scrubber.attributes = %w(href)
+            @link_scrubber = build_link_scrubber
           end
 
           def scrub(fragment, options = {})
-            fragment.scrub!(@link_scrubber)
+            scrubber = options[:report] ? build_link_scrubber(report: options[:report]) : @link_scrubber
+            fragment.scrub!(scrubber)
           end
+
+          private
+            def build_link_scrubber(report: nil)
+              TargetScrubber.new(report: report).tap do |scrubber|
+                scrubber.tags = %w(a)
+                scrubber.attributes = %w(href)
+              end
+            end
         end
 
         module SafeList
@@ -162,10 +173,12 @@ module Rails
               # No duck typing, Loofah ensures subclass of Loofah::Scrubber
               fragment.scrub!(scrubber)
             elsif allowed_tags(options) || allowed_attributes(options)
-              permit_scrubber = PermitScrubber.new(prune: @prune)
+              permit_scrubber = PermitScrubber.new(prune: @prune, report: options[:report])
               permit_scrubber.tags = allowed_tags(options)
               permit_scrubber.attributes = allowed_attributes(options)
               fragment.scrub!(permit_scrubber)
+            elsif options[:report]
+              fragment.scrub!(ReportingStripScrubber.new(report: options[:report]))
             else
               fragment.scrub!(:strip)
             end

@@ -1,5 +1,13 @@
 ## next / unreleased
 
+* Add an optional `report:` to sanitizers and built-in scrubbers.
+
+  The report records one entry per sanitization decision with the element
+  name, the disposition (`:prune`, `:strip`, or `:attribute`), the reason,
+  and, for attribute changes, the attribute name. Text and attribute values
+  are never copied into the report, so it can be logged or shared with
+  moderators. Passing `report:` does not change the sanitized HTML.
+
 
 ## v1.7.2 / 2026-11-02
 

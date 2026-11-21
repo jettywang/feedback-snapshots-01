@@ -47,12 +47,15 @@ module Rails
     # See the documentation for +Nokogiri::XML::Node+ to understand what's possible
     # with nodes: https://nokogiri.org/rdoc/Nokogiri/XML/Node.html
     class PermitScrubber < Loofah::Scrubber
+      include Rails::HTML::Recorder
+
       attr_reader :tags, :attributes, :prune
 
-      def initialize(prune: false)
+      def initialize(prune: false, report: nil)
         @prune = prune
         @direction = @prune ? :top_down : :bottom_up
         @tags, @attributes = nil, nil
+        @report = Rails::HTML::Sanitizer::Report.sink(report)
       end
 
       def tags=(tags)
@@ -72,7 +75,15 @@ module Rails
         return CONTINUE if skip_node?(node)
 
         unless (node.element? || node.comment?) && keep_node?(node)
-          return STOP unless scrub_node(node) == CONTINUE
+          disposition = removal_disposition(node)
+          reason = removal_reason(node)
+          result = scrub_node(node)
+          unless result == CONTINUE
+            # A subclass may return STOP without detaching the node; only report
+            # content that actually left the tree.
+            record_tag(node, disposition, reason) if node.parent.nil?
+            return STOP
+          end
         end
 
         scrub_attributes(node)
@@ -110,9 +121,13 @@ module Rails
         end
 
         def scrub_attributes(node)
+          before = snapshot_attributes(node) if @report
+          removal_reasons = {}
+
           if @attributes
             node.attribute_nodes.each do |attr|
               if scrub_attribute?(attr.name)
+                removal_reasons[attr] = attribute_removal_reason(attr) if @report
                 attr.remove
               else
                 scrub_attribute(node, attr)
@@ -123,6 +138,33 @@ module Rails
           else
             Loofah::HTML5::Scrub.scrub_attributes(node)
           end
+
+          if @report
+            record_attribute_changes(node, before, removal_reasons)
+          end
+        end
+
+        def removal_disposition(node)
+          if prune || node.namespace
+            :prune
+          else
+            :strip
+          end
+        end
+
+        def removal_reason(node)
+          return :comment if node.comment?
+          return :namespace if node.namespace
+
+          :not_allowed
+        end
+
+        def attribute_name(attr)
+          Loofah::HTML5::Scrub.prefixed_attribute_name(attr)
+        end
+
+        def attribute_removal_reason(_attr)
+          :not_allowed
         end
 
         def scrub_css_attribute(node)
@@ -188,6 +230,40 @@ module Rails
       def scrub_attribute?(name)
         !super
       end
+
+      protected
+        def removal_reason(node)
+          return :comment if node.comment?
+          return :namespace if node.namespace
+
+          :targeted
+        end
+
+        def attribute_removal_reason(_attr)
+          :targeted
+        end
+    end
+
+    # === Rails::HTML::ReportingStripScrubber
+    #
+    # Behaves exactly like Loofah's +:strip+ scrubber, but also records each
+    # unwrapped element in an optional report.
+    class ReportingStripScrubber < Loofah::Scrubbers::Strip
+      include Rails::HTML::Recorder
+
+      def initialize(report: nil)
+        super()
+        @report = Rails::HTML::Sanitizer::Report.sink(report)
+      end
+
+      def scrub(node)
+        result = super
+        if result == STOP && @report
+          reason = node.comment? ? :comment : :not_allowed
+          record_tag(node, :strip, reason)
+        end
+        result
+      end
     end
 
     # === Rails::HTML::TextOnlyScrubber
@@ -196,14 +272,22 @@ module Rails
     #
     # Unallowed elements will be stripped, i.e. element is removed but its subtree kept.
     class TextOnlyScrubber < Loofah::Scrubber
-      def initialize
+      include Rails::HTML::Recorder
+
+      def initialize(report: nil)
         @direction = :bottom_up
+        @report = Rails::HTML::Sanitizer::Report.sink(report)
       end
 
       def scrub(node)
         if node.text?
           CONTINUE
         else
+          if @report && !node.comment?
+            record_tag(node, :strip, :not_allowed)
+          elsif @report
+            record_tag(node, :strip, :comment)
+          end
           node.before node.children
           node.remove
         end

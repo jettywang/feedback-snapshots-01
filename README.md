@@ -170,6 +170,43 @@ Using the `CommentScrubber` from above, you can use this in a Rails view like so
 <%= sanitize @comment, scrubber: CommentScrubber.new %>
 ```
 
+### Reporting what was sanitized
+
+Every sanitizer and the built-in scrubbers accept an optional `report:` object. It records one
+entry per sanitization decision without copying any text or attribute values, so it is safe to log
+or hand to a moderator:
+
+```ruby
+report = Rails::HTML::Sanitizer::Report.new
+html = Rails::HTML5::SafeListSanitizer.new.sanitize(@article.body, report: report)
+
+html # => sanitized HTML, identical to a call without :report
+
+report.entries.each do |entry|
+  entry.tag          # => "script", "svg", "a", ..., or "comment"
+  entry.attribute    # => "href" for :attribute entries, otherwise nil
+  entry.disposition  # => :prune, :strip, or :attribute
+  entry.reason       # => :not_allowed, :namespace, :unsafe_value, ...
+end
+
+report.tags           # => ["script", "a"]
+report.dispositions   # => [:strip, :attribute]
+```
+
+The three dispositions are:
+
+- `:prune` — the element and its whole subtree were removed.
+- `:strip` — the element was unwrapped and its children were kept.
+- `:attribute` — an attribute was removed or its value was adjusted.
+
+An array (or any other object responding to `<<`) can be passed instead of a `Report`:
+
+```ruby
+entries = []
+Rails::HTML5::FullSanitizer.new.sanitize(@article.body, report: entries)
+entries # => [#<struct Rails::HTML::Sanitizer::Report::Entry ...>]
+```
+
 ### A note on HTML entities
 
 __Rails HTML sanitizers are intended to be used by the view layer, at page-render time. They are *not* intended to sanitize persisted strings that will be sanitized *again* at page-render time.__
