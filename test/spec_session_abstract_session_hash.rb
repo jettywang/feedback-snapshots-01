@@ -102,4 +102,42 @@ describe Rack::Session::Abstract::SessionHash do
   it "#stringify_keys returns hash or session hash with keys stringified" do
     assert_equal({ "foo" => :bar, "baz" => :qux, "x" => { y: 1 } }, hash.send(:stringify_keys, hash).to_h)
   end
+
+  it "#rotate! delegates to the store with the declared keys" do
+    calls = []
+    store = Object.new
+    store.define_singleton_method(:rotate_session) do |req, session, keys|
+      calls << [session, keys]
+      :new_id
+    end
+
+    session = @class.new(store, nil)
+    session.rotate!(keys: [:locale, "timezone"])
+
+    calls.size.must_equal 1
+    calls.first[0].must_be_same_as session
+    calls.first[1].must_equal [:locale, "timezone"]
+  end
+
+  it "#rotate! accepts keys positionally and through aliases" do
+    calls = []
+    store = Object.new
+    store.define_singleton_method(:rotate_session) do |req, session, keys|
+      calls << keys
+      :new_id
+    end
+
+    session = @class.new(store, nil)
+    session.rotate!("locale")
+    session.rotate(keep: "locale")
+    session.rotate(migrate: ["locale"])
+    session.rotate!(allow: [:locale], only: [:timezone])
+
+    calls.must_equal [["locale"], ["locale"], ["locale"], [:locale, :timezone]]
+  end
+
+  it "#rotate! rejects unknown options" do
+    session = @class.new(Object.new, nil)
+    lambda { session.rotate!(bogus: "locale") }.must_raise ArgumentError
+  end
 end

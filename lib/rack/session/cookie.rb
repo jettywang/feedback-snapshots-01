@@ -156,6 +156,10 @@ module Rack
 
       attr_reader :coder, :encryptors
 
+      # How many retired session identifiers to remember for revocation. The
+      # oldest identifiers are discarded once this limit is reached.
+      DEFAULT_MAX_REVOKED_SESSIONS = 10_000
+
       def initialize(app, options = {})
         # support both :secrets and :secret for backwards compatibility
         secrets = [*(options[:secrets] || options[:secret])]
@@ -163,6 +167,13 @@ module Rack
         encryptor_opts = {
           purpose: options[:key], serialize_json: options[:serialize_json]
         }
+
+        # Retired session identifiers. Because cookie sessions are stored on
+        # the client, a rotated cookie would otherwise remain valid until it
+        # expired; revoking its identifier makes the previous cookie inert.
+        @revoked_sessions = {}
+        @revoked_sessions_mutex = Mutex.new
+        @max_revoked_sessions = options.delete(:max_revoked_sessions) || DEFAULT_MAX_REVOKED_SESSIONS
 
         # For each secret, create an Encryptor. We have iterate this Array at
         # decryption time to achieve key rotation.
@@ -243,6 +254,13 @@ module Rack
               # if encryptors are present but decryption failed, the cookie is rejected.
               session_data = coder.decode(cookie_data)
             end
+
+            # A cookie whose session identifier has been retired by a rotation
+            # is no longer authoritative, even though it is still validly
+            # signed. Treat it as absent rather than restoring old privileges.
+            if session_data.is_a?(Hash) && revoked_session?(session_data["session_id"])
+              session_data = nil
+            end
           end
 
           request.set_header(k, session_data || {})
@@ -265,6 +283,14 @@ module Rack
       end
 
       def write_session(req, session_id, session, options)
+        # A request that captured the session before a rotation must not be
+        # able to re-issue the retired identifier, which would resurrect the
+        # previous (possibly lower-privileged) session state.
+        if revoked_session?(session_id)
+          req.get_header(RACK_ERRORS).puts("Warning! Rack::Session::Cookie refused to write a revoked session.")
+          return nil
+        end
+
         session = session.merge("session_id" => session_id)
         session_data = encode_session_data(session)
 
@@ -278,7 +304,57 @@ module Rack
 
       def delete_session(req, session_id, options)
         # Nothing to do here, data is in the client
+        revoke_session(session_id)
         generate_sid unless options[:drop]
+      end
+
+      # Rotate +session+ to a fresh identifier. The previous identifier is
+      # revoked, so any cookie carrying it is rejected even though it remains
+      # correctly signed. If the previous identifier is already revoked (for
+      # example because a stale request is committing after a rotation), this
+      # raises RotationError instead of reinstating the old session.
+      def rotate_session(req, session, keys)
+        session.send(:load!) unless session.loaded?
+
+        migrated = extract_migrated_keys(session, keys)
+        previous_id = session.id
+
+        if previous_id && !revoke_session(previous_id)
+          raise RotationError, "cannot rotate session: identifier is already retired"
+        end
+
+        new_id = generate_sid
+        session.replace(migrated)
+        session.id = new_id
+        session.instance_variable_set(:@rotated, true)
+
+        new_id
+      end
+
+      # Mark +session_id+ as retired. Returns false if it was already retired.
+
+      def revoke_session(session_id)
+        return false unless session_id
+
+        session_id = session_id.to_s
+
+        @revoked_sessions_mutex.synchronize do
+          return false if @revoked_sessions.key?(session_id)
+
+          @revoked_sessions[session_id] = true
+          @revoked_sessions.shift while @revoked_sessions.size > @max_revoked_sessions
+          true
+        end
+      end
+
+      def revoked_session?(session_id)
+        return false unless session_id
+
+        session_id = session_id.to_s
+
+        @revoked_sessions_mutex.synchronize do
+          @revoked_sessions.key?(session_id)
+        end
       end
 
       def legacy_digest_match?(data, digest)

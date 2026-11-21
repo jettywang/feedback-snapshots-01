@@ -59,6 +59,41 @@ module Rack
         end
       end
 
+      # Rotate +session+ to a fresh identifier, atomically replacing the
+      # previous record. The previous identifier must still be present in the
+      # pool: a request holding a context that has already been rotated (or
+      # otherwise retired) cannot migrate data or resurrect its privileges.
+      def rotate_session(req, session, keys)
+        session.send(:load!) unless session.loaded?
+
+        migrated = extract_migrated_keys(session, keys)
+        previous_id = session.id
+
+        new_id = @mutex.synchronize do
+          # The previous identifier must still be present. If it was already
+          # retired by a concurrent rotation, fail closed instead of reviving
+          # or migrating a dead session.
+          if previous_id && !get_session_with_fallback(previous_id)
+            raise RotationError, "cannot rotate session: identifier is no longer valid"
+          end
+
+          if previous_id
+            @pool.delete(previous_id.public_id)
+            @pool.delete(previous_id.private_id)
+          end
+
+          sid = generate_sid(use_mutex: false)
+          @pool.store(sid.private_id, {})
+          sid
+        end
+
+        session.replace(migrated)
+        session.id = new_id
+        session.instance_variable_set(:@rotated, true)
+
+        new_id
+      end
+
       def delete_session(req, session_id, options)
         @mutex.synchronize do
           @pool.delete(session_id.public_id)

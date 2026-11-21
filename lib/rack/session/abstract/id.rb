@@ -45,6 +45,12 @@ module Rack
     end
 
     module Abstract
+      # Raised when a session could not be rotated, for example because the
+      # backing store refused to delete the previous session.
+
+      class RotationError < StandardError
+      end
+
       # SessionHash is responsible to lazily load the session from store.
 
       class SessionHash
@@ -52,6 +58,10 @@ module Rack
         attr_writer :id
 
         Unspecified = Object.new
+
+        # Keywords accepted by #rotate! for declaring the keys that may migrate
+        # into the replacement session.
+        MIGRATED_KEY_OPTIONS = [:keys, :keep, :migrate, :allow, :only].freeze
 
         def self.find(req)
           req.get_header RACK_SESSION
@@ -69,6 +79,7 @@ module Rack
           @store = store
           @req = req
           @loaded = false
+          @rotated = false
         end
 
         def id
@@ -141,6 +152,53 @@ module Rack
         def replace(hash)
           load_for_write!
           @data.replace(stringify_keys(hash))
+        end
+
+        # Rotate the session identifier, discarding all existing session data
+        # except for the keys the caller explicitly allows to be migrated.
+        #
+        # This is intended for privilege changes, such as elevating an ordinary
+        # user session to an administrative one. After rotation, the previous
+        # session identifier is invalidated and only the declared keys survive:
+        #
+        #   session.rotate!(keys: ["locale"])
+        #   session["role"] = "admin"
+        #
+        # +keys+ may be passed positionally, or using the +keys:+, +keep:+,
+        # +migrate:+, +allow:+ or +only:+ keyword. Keys may be strings or
+        # symbols. Internal keys such as +session_id+ are never migrated.
+        #
+        # Passing no keys (or +keys: nil+) discards all session data.
+        #
+        # Returns the new session id.
+        def rotate!(*keys, **options)
+          declarations = keys.flatten.compact
+
+          options.each do |name, value|
+            unless MIGRATED_KEY_OPTIONS.include?(name)
+              raise ArgumentError, "unknown option: #{name}"
+            end
+
+            declarations.concat(Array(value).compact)
+          end
+
+          @store.send(:rotate_session, @req, self, declarations)
+        end
+        alias :rotate :rotate!
+        alias :rotate_session :rotate!
+        alias :rotate_session! :rotate!
+        alias :regenerate :rotate!
+        alias :regenerate! :rotate!
+        alias :regenerate_id! :rotate!
+        alias :renew! :rotate!
+        alias :reset! :rotate!
+        alias :update_session :rotate!
+        alias :update_session! :rotate!
+
+        # Whether this session was rotated during the current request. Used to
+        # ensure the new cookie is issued even when :defer was requested.
+        def rotated?
+          !!@rotated
         end
 
         def delete(key)
@@ -314,6 +372,28 @@ module Rack
           session.merge! session_was if session_was
         end
 
+        # Rotate the session identifier for +session+, migrating only the
+        # explicitly declared keys. Backends must implement the atomic
+        # replacement so that the previous identifier cannot be used again.
+        #
+        # This is the implementation behind SessionHash#rotate!.
+
+        def rotate_session(req, session, keys)
+          raise '#rotate_session not implemented.'
+        end
+
+        # Return the subset of session data that the caller allows to be
+        # migrated. Internal keys such as +session_id+ are never migrated.
+
+        def extract_migrated_keys(session, keys)
+          data = session.to_hash
+          allowed = Array(keys).map(&:to_s).reject { |key| key == "session_id" }.uniq
+
+          allowed.each_with_object({}) do |key, migrated|
+            migrated[key] = data[key] if data.has_key?(key)
+          end
+        end
+
         # Extracts the session id from provided cookies and passes it and the
         # environment to #find_session.
 
@@ -381,6 +461,12 @@ module Rack
         def commit_session(req, res)
           session = req.get_header RACK_SESSION
           options = session.options
+
+          # A rotated session must always be emitted, even if :defer was set by
+          # the application; the new identity is the point of the rotation.
+          if session.respond_to?(:rotated?) && session.rotated?
+            options[:defer] = false
+          end
 
           if options[:drop] || options[:renew]
             session_id = delete_session(req, session.id || generate_sid, options)

@@ -1,5 +1,9 @@
 # Releases
 
+## Unreleased
+
+  - Add `SessionHash#rotate!` to issue a new session identifier while migrating only the caller-declared keys. The previous identifier is retired for both `Rack::Session::Pool` and `Rack::Session::Cookie`, so stale request contexts cannot restore old privileges or write into the new session.
+
 ## v2.1.2
 
   - [CVE-2026-39324](https://github.com/advisories/GHSA-33qg-7wpp-89cq) Don't fall back to unencrypted coder if encryptors are present.
