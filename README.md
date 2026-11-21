@@ -60,6 +60,11 @@ safe_list_sanitizer.sanitize(@article.body)
 # sanitize only the supplied tags and attributes
 safe_list_sanitizer.sanitize(@article.body, tags: %w(table tr td), attributes: %w(id class style))
 
+# sanitize only the supplied tags, and the supplied attributes per element,
+# where "data-value" is only permitted on "td" elements and "class" is
+# permitted on every allowed element
+safe_list_sanitizer.sanitize(@article.body, tags: %w(table tr td), attributes: { "td" => %w(data-value), all: %w(class) })
+
 # sanitize via a custom scrubber
 safe_list_sanitizer.sanitize(@article.body, scrubber: ArticleScrubber.new)
 
@@ -87,6 +92,20 @@ scrubber.tags = ['a']
 html_fragment = Loofah.fragment('<a><img/ ></a>')
 html_fragment.scrub!(scrubber)
 html_fragment.to_s # => "<a></a>"
+```
+
+Attributes can also be permitted per element by passing a Hash mapping element
+names to attribute lists. The special key `:all` applies to every allowed
+element without its own entry.
+
+```ruby
+scrubber = Rails::HTML::PermitScrubber.new
+scrubber.tags = ['a', 'span']
+scrubber.attributes = { 'a' => ['href'], all: ['class'] }
+
+html_fragment = Loofah.fragment('<a href="example.com" title="hi">x</a><span href="bad">y</span>')
+html_fragment.scrub!(scrubber)
+html_fragment.to_s # => '<a href="example.com">x</a><span>y</span>'
 ```
 
 By default, inner content is left, but it can be removed as well.

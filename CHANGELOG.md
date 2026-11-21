@@ -1,5 +1,17 @@
 ## next / unreleased
 
+* `SafeListSanitizer` and `PermitScrubber` support per-element attribute safe lists.
+
+  The `attributes` option (and `PermitScrubber#attributes=`) now also accepts a Hash mapping
+  element names to the attributes permitted on that element. The special key `:all` applies to
+  every allowed element without its own entry. An attribute is kept only when it is listed for
+  the element it appears on, so the same attribute name can be permitted on one element and
+  removed from all others. Flat Enumerables of attribute names keep their existing behavior.
+
+  ``` ruby
+  sanitizer.sanitize(html, tags: %w(div span), attributes: { "span" => %w(data-order-id), all: %w(class) })
+  ```
+
 
 ## v1.7.2 / 2026-11-02
 

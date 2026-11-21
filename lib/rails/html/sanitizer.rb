@@ -291,6 +291,15 @@ module Rails
     #     attributes: %w(id class style),
     #   )
     #
+    #   # sanitize via the supplied tags and per-element attributes,
+    #   # where "data-value" is only permitted on "td" elements and
+    #   # "class" is permitted on every allowed element
+    #   safe_list_sanitizer.sanitize(
+    #     @article.body,
+    #     tags: %w(table tr td),
+    #     attributes: { "td" => %w(data-value), all: %w(class) },
+    #   )
+    #
     #   # sanitize via a custom Loofah scrubber
     #   safe_list_sanitizer.sanitize(@article.body, scrubber: ArticleScrubber.new)
     #
@@ -399,6 +408,15 @@ module Rails
     #     @article.body,
     #     tags: %w(table tr td),
     #     attributes: %w(id class style),
+    #   )
+    #
+    #   # sanitize via the supplied tags and per-element attributes,
+    #   # where "data-value" is only permitted on "td" elements and
+    #   # "class" is permitted on every allowed element
+    #   safe_list_sanitizer.sanitize(
+    #     @article.body,
+    #     tags: %w(table tr td),
+    #     attributes: { "td" => %w(data-value), all: %w(class) },
     #   )
     #
     #   # sanitize via a custom Loofah scrubber

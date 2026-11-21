@@ -169,6 +169,27 @@ class PermitScrubberTest < ScrubberTest
     assert_equal "You should pass :attributes as an Enumerable", e.message
     assert_nil @scrubber.attributes, "Attributes should be nil when validation fails"
   end
+
+  def test_per_element_attributes_accessor_validation
+    e = assert_raises(ArgumentError) do
+      @scrubber.attributes = { "a" => "cooler" }
+    end
+
+    assert_equal "You should pass :attributes as an Enumerable", e.message
+    assert_nil @scrubber.attributes, "Attributes should be nil when validation fails"
+  end
+
+  def test_leaves_only_attributes_supplied_for_that_element
+    @scrubber.attributes = { "a" => %w(cooler) }
+    html = '<a cooler="hello" b="c"></a><span cooler="hello"></span>'
+    assert_scrubbed html, '<a cooler="hello"></a><span></span>'
+  end
+
+  def test_leaves_attributes_supplied_for_all_elements_without_their_own_entry
+    @scrubber.attributes = { "a" => %w(cooler), all: %w(shared) }
+    html = '<a cooler="hello" shared="x"></a><span cooler="hello" shared="x"></span>'
+    assert_scrubbed html, '<a cooler="hello"></a><span shared="x"></span>'
+  end
 end
 
 class TargetScrubberTest < ScrubberTest

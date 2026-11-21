@@ -29,6 +29,12 @@ module Rails
     # If set, attributes excluded will be removed.
     # If not, attributes are removed based on Loofahs +HTML5::Scrub.scrub_attributes+.
     #
+    # Attributes can be passed either as an Enumerable of attribute names that
+    # are permitted on every allowed element, or as a Hash mapping element
+    # names to an Enumerable of attribute names permitted on that element only.
+    # The special key +:all+ permits attributes on every allowed element that
+    # doesn't have its own entry.
+    #
     #  class CommentScrubber < Rails::HTML::PermitScrubber
     #    def initialize
     #      super
@@ -39,8 +45,8 @@ module Rails
     #      node.text?
     #    end
     #
-    #    def scrub_attribute?(name)
-    #      name == "style"
+    #    def scrub_attribute?(node, attr_node)
+    #      attr_node.name == "style"
     #    end
     #  end
     #
@@ -60,7 +66,14 @@ module Rails
       end
 
       def attributes=(attributes)
-        @attributes = validate!(attributes.dup, :attributes)
+        @attributes = if attributes.is_a?(Hash)
+          attributes.each do |element, attrs|
+            attributes[element] = validate!(attrs.dup, :attributes)
+          end
+          validate!(attributes, :attributes)
+        else
+          validate!(attributes.dup, :attributes)
+        end
       end
 
       def scrub(node)
@@ -88,8 +101,18 @@ module Rails
           node.text?
         end
 
-        def scrub_attribute?(name)
-          !@attributes.include?(name)
+        def scrub_attribute?(node, attr_node)
+          if @attributes.is_a?(Hash)
+            if @attributes.key?(node.name)
+              !@attributes[node.name].include?(attr_node.name)
+            elsif @attributes.key?(:all)
+              !@attributes[:all].include?(attr_node.name)
+            else
+              true
+            end
+          else
+            !@attributes.include?(attr_node.name)
+          end
         end
 
         def keep_node?(node)
@@ -112,7 +135,7 @@ module Rails
         def scrub_attributes(node)
           if @attributes
             node.attribute_nodes.each do |attr|
-              if scrub_attribute?(attr.name)
+              if scrub_attribute?(node, attr)
                 attr.remove
               else
                 scrub_attribute(node, attr)
@@ -185,7 +208,7 @@ module Rails
         !super
       end
 
-      def scrub_attribute?(name)
+      def scrub_attribute?(node, attr_node)
         !super
       end
     end

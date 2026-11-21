@@ -415,6 +415,72 @@ module SanitizerTests
       end
     end
 
+    def test_per_element_attributes_are_only_kept_on_approved_elements
+      policy = {
+        "span" => %w(class data-order-id),
+        "a" => %w(class href),
+        all: %w(class),
+      }
+      input = %(Order summary: <div class="order" data-order-id="A-100"><span class="customer" data-order-id="A-100">Alice</span><span class="status">paid</span><a class="link" href="https://example.com/orders/A-100" data-order-id="A-100">track</a></div>)
+
+      output = safe_list_sanitize(input, tags: %w(div span a), attributes: policy)
+      fragment = Loofah.fragment(output)
+
+      div = fragment.at_css("div")
+      assert_equal({ "class" => "order" }, div.attributes.transform_values(&:value))
+      assert_equal 3, div.element_children.length
+
+      spans = fragment.css("span")
+      assert_equal 2, spans.length
+      assert_equal({ "class" => "customer", "data-order-id" => "A-100" }, spans[0].attributes.transform_values(&:value))
+      assert_equal({ "class" => "status" }, spans[1].attributes.transform_values(&:value))
+
+      link = fragment.at_css("a")
+      assert_equal({ "class" => "link", "href" => "https://example.com/orders/A-100" }, link.attributes.transform_values(&:value))
+
+      assert_equal "Order summary: Alicepaidtrack", fragment.text
+    end
+
+    def test_per_element_attributes_without_all_removes_attributes_from_unlisted_elements
+      input = %(<div class="order" data-order-id="A-100"><span data-order-id="A-100" title="customer">Alice</span></div>)
+
+      output = safe_list_sanitize(input, tags: %w(div span), attributes: { "span" => %w(data-order-id) })
+      fragment = Loofah.fragment(output)
+
+      assert_empty fragment.at_css("div").attributes
+      assert_equal({ "data-order-id" => "A-100" }, fragment.at_css("span").attributes.transform_values(&:value))
+      assert_equal "Alice", fragment.at_css("span").text
+    end
+
+    def test_flat_attribute_allowlist_still_applies_to_every_element
+      input = %(<div data-order-id="A-100"><span data-order-id="A-100">Alice</span></div>)
+
+      output = safe_list_sanitize(input, tags: %w(div span), attributes: %w(data-order-id))
+      fragment = Loofah.fragment(output)
+
+      assert_equal "A-100", fragment.at_css("div")["data-order-id"]
+      assert_equal "A-100", fragment.at_css("span")["data-order-id"]
+      assert_equal "Alice", fragment.at_css("span").text
+    end
+
+    def test_setting_allowed_attributes_to_a_hash_affects_sanitization
+      scope_allowed_attributes({ "span" => %w(data-order-id) }) do |sanitizer|
+        input = %(<div data-order-id="A-100"><span data-order-id="A-100">Alice</span></div>)
+
+        output = sanitizer.sanitize(input, tags: %w(div span))
+        fragment = Loofah.fragment(output)
+
+        assert_nil fragment.at_css("div")["data-order-id"]
+        assert_equal "A-100", fragment.at_css("span")["data-order-id"]
+      end
+    end
+
+    def test_should_raise_argument_error_if_per_element_attributes_is_not_enumerable
+      assert_raises ArgumentError do
+        safe_list_sanitize("<a>some html</a>", attributes: { "a" => "href" })
+      end
+    end
+
     def test_should_allow_prune
       sanitizer = module_under_test::SafeListSanitizer.new(prune: true)
       text = "<u>leave me <b>now</b></u>"
