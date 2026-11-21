@@ -37,6 +37,7 @@ from collections import Counter
 from contextlib import AbstractContextManager, contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass, fields, replace
+from enum import StrEnum
 from importlib.machinery import all_suffixes
 from pathlib import Path
 from shutil import which
@@ -831,6 +832,88 @@ def get_expected_venv_resource_paths(venv: Venv, local_bin_dir: Path, local_man_
     return _expected_resource_paths(venv.pipx_metadata, venv.package_metadata.values(), local_bin_dir, local_man_dir)
 
 
+def get_venv_resource_paths_by_type(
+    venv: Venv, local_bin_dir: Path, local_man_dir: Path, package_infos: tuple[PackageInfo, ...] | None
+) -> dict[str, set[Path]]:
+    """Return the exposed paths of an environment, keyed by the kind of resource.
+
+    The paths recorded in the metadata are included even when they are missing or now hold another environment's file,
+    so an uninstall can report evidence for every entry it once exposed.
+
+    :param venv: the environment.
+    :param local_bin_dir: the directory the apps are exposed in.
+    :param local_man_dir: the directory the man pages are exposed in.
+    :param package_infos: the packages of the environment, or None to match the exposed links instead.
+    :returns: the exposed paths of each resource kind.
+    """
+    paths: Final[dict[str, set[Path]]] = {
+        "app": get_venv_resource_paths("app", venv.bin_path, local_bin_dir, package_infos)
+    }
+    for man_section in MAN_SECTIONS:
+        paths.setdefault("man", set()).update(
+            get_venv_resource_paths("man", venv.man_path / man_section, local_man_dir / man_section, package_infos)
+        )
+    for completion_section in COMPLETION_SECTIONS:
+        paths.setdefault("completion", set()).update(
+            get_venv_resource_paths(
+                "completion",
+                venv.man_path.parent / completion_section,
+                CTX.completion_dir / completion_section,
+                package_infos,
+            )
+        )
+    for resource_type, expected in expected_venv_resource_paths_by_type(
+        package_infos if venv.pipx_metadata.exposure_enabled else None, local_bin_dir, local_man_dir
+    ).items():
+        paths.setdefault(resource_type, set()).update(expected)
+    return paths
+
+
+def expected_venv_resource_paths_by_type(
+    package_infos: tuple[PackageInfo, ...] | None, local_bin_dir: Path, local_man_dir: Path
+) -> dict[str, set[Path]]:
+    """Return the exposed paths the recorded packages should occupy, keyed by the kind of resource.
+
+    :param package_infos: the packages of the environment, or None when there is no record.
+    :param local_bin_dir: the directory the apps are exposed in.
+    :param local_man_dir: the directory the man pages are exposed in.
+    :returns: the expected exposed paths of each resource kind.
+    """
+    expected: Final[dict[str, set[Path]]] = {"app": set(), "man": set(), "completion": set()}
+    for package_info in package_infos or ():
+        for path in package_info.app_paths_to_expose:
+            expected["app"].add(local_bin_dir / add_suffix(path.name, package_info.exposure.suffix))
+        for path in package_info.man_paths_to_expose:
+            expected["man"].add(local_man_dir / path.parent.name / path.name)
+        for path in package_info.completion_paths_to_expose:
+            expected["completion"].add(CTX.completion_dir / path.parent.parent.name / path.parent.name / path.name)
+    return {resource_type: paths for resource_type, paths in expected.items() if paths}
+
+
+def get_venv_resource_sources(
+    package_infos: tuple[PackageInfo, ...] | None, local_bin_dir: Path, local_man_dir: Path
+) -> dict[Path, list[Path]]:
+    """Return the environment files each exposed path is expected to copy or link to.
+
+    :param package_infos: the packages of the environment, or None without metadata.
+    :param local_bin_dir: the directory the apps are exposed in.
+    :param local_man_dir: the directory the man pages are exposed in.
+    :returns: the source paths of each exposed path.
+    """
+    sources: Final[dict[Path, list[Path]]] = {}
+    for package_info in package_infos or ():
+        for path in package_info.app_paths_to_expose:
+            for name in exposed_app_names(path.name, package_info.exposure.suffix):
+                sources.setdefault(local_bin_dir / name, []).append(path)
+        for path in package_info.man_paths_to_expose:
+            sources.setdefault(local_man_dir / path.parent.name / path.name, []).append(path)
+        for path in package_info.completion_paths_to_expose:
+            sources.setdefault(CTX.completion_dir / path.parent.parent.name / path.parent.name / path.name, []).append(
+                path
+            )
+    return sources
+
+
 def _venv_owned_resource_paths(venv: Venv, local_bin_dir: Path, local_man_dir: Path) -> set[Path]:
     owned: set[Path] = get_exposed_paths_for_package(
         venv.bin_path, local_bin_dir, group_app_paths(venv.package_metadata.values())
@@ -919,6 +1002,281 @@ def _symlink_owner_ids(resource_path: Path) -> list[tuple[int, int]]:
 class _ResourceDirScan:
     by_owner: dict[tuple[int, int], set[Path]]
     by_name: dict[str, list[Path]]
+
+
+class OwnershipClaim(StrEnum):
+    """What pipx can prove about an exposed resource of one environment.
+
+    :cvar OWNED: the entry still resolves into the environment or is a copy whose shebang names it.
+    :cvar TAKEN_OVER: the entry now resolves into another pipx environment, so it belongs to that one.
+    :cvar OTHER_ENVIRONMENT: the entry is a copy claimed by another environment's metadata.
+    :cvar MODIFIED: the entry was replaced by a file pipx cannot prove it wrote.
+    :cvar STALE: a dangling link that no environment claims any more.
+    :cvar MISSING: the recorded entry is no longer at its exposed path.
+    """
+
+    OWNED = "owned"
+    TAKEN_OVER = "taken-over"
+    OTHER_ENVIRONMENT = "other-environment"
+    MODIFIED = "modified"
+    STALE = "stale"
+    MISSING = "missing"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class OwnershipEvidence:
+    """The reviewable evidence for one exposed resource path of an environment.
+
+    :ivar path: the exposed path.
+    :ivar resource_type: ``app``, ``man`` or ``completion``.
+    :ivar kind: ``symlink``, ``copy`` or ``absent``.
+    :ivar claim: what pipx proves about the path.
+    :ivar detail: why the claim holds, in words.
+    :ivar target: the resolved target of a link, or None.
+    :ivar owner_environment: the environment pipx attributes the path to, when it proved one.
+    """
+
+    path: Path
+    resource_type: str
+    kind: str
+    claim: OwnershipClaim
+    detail: str
+    target: Path | None = None
+    owner_environment: str | None = None
+
+    @property
+    def reclaimable(self) -> bool:
+        """Whether uninstalling the environment may take the path away."""
+        return self.claim in {OwnershipClaim.OWNED, OwnershipClaim.STALE}
+
+    def to_dict(self) -> dict[str, object]:
+        """Return the evidence in the JSON form the uninstall preview reports.
+
+        :returns: the evidence as plain JSON-ready values.
+        """
+        return {
+            "path": str(self.path),
+            "resource_type": self.resource_type,
+            "kind": self.kind,
+            "claim": str(self.claim),
+            "detail": self.detail,
+            "target": None if self.target is None else str(self.target),
+            "owner_environment": self.owner_environment,
+            "reclaimable": self.reclaimable,
+        }
+
+
+def ownership_evidence(
+    resource_paths: Iterable[Path],
+    *,
+    resource_type: str,
+    venv_root: Path,
+    venv_bin_path: Path,
+    venv_dirs: Collection[Path],
+    sources: Mapping[Path, Sequence[Path]] | None = None,
+) -> list[OwnershipEvidence]:
+    """Classify each exposed resource path by what pipx can prove about its owner.
+
+    :param resource_paths: the exposed paths recorded for the environment.
+    :param resource_type: ``app``, ``man`` or ``completion``.
+    :param venv_root: the directory of the environment being uninstalled.
+    :param venv_bin_path: the bin directory of the environment being uninstalled.
+    :param venv_dirs: the environments the path may belong to, the environment itself included.
+    :param sources: the recorded source file of each exposed path, to prove a copy byte for byte.
+    :returns: one evidence record per path, sorted by path.
+    """
+    own_root: Final[Path] = venv_root.resolve()
+    roots: Final[dict[Path, str]] = {venv_dir.resolve(): venv_dir.name for venv_dir in venv_dirs}
+    roots.setdefault(own_root, venv_root.name)
+    claims: Final[list[OwnershipEvidence]] = [
+        _classify_resource(
+            path,
+            resource_type=resource_type,
+            own_root=own_root,
+            venv_bin_path=venv_bin_path,
+            roots=roots,
+            claims_by_venv=_venv_claims_by_dir(),
+            sources=sources or {},
+        )
+        for path in sorted(resource_paths)
+    ]
+    return claims
+
+
+def _classify_resource(
+    path: Path,
+    *,
+    resource_type: str,
+    own_root: Path,
+    venv_bin_path: Path,
+    roots: Mapping[Path, str],
+    claims_by_venv: Mapping[Path, set[Path]],
+    sources: Mapping[Path, Sequence[Path]],
+) -> OwnershipEvidence:
+    copies_expected: Final[bool] = not can_symlink(path.parent)
+    if path.is_symlink():
+        return _classify_link(path, resource_type=resource_type, own_root=own_root, roots=roots)
+    if path.exists():
+        return _classify_copy(
+            path,
+            resource_type=resource_type,
+            venv_bin_path=venv_bin_path,
+            claims_by_venv=claims_by_venv,
+            sources=sources.get(path, ()),
+            copies_expected=copies_expected,
+        )
+    return OwnershipEvidence(
+        path=path,
+        resource_type=resource_type,
+        kind="absent",
+        claim=OwnershipClaim.MISSING,
+        detail="no file or link is exposed at the recorded path",
+    )
+
+
+def _classify_link(
+    path: Path,
+    *,
+    resource_type: str,
+    own_root: Path,
+    roots: Mapping[Path, str],
+) -> OwnershipEvidence:
+    try:
+        direct: Final[Path] = _link_target(path)
+        resolved: Final[Path] = direct.resolve()
+        dangling: Final[bool] = not resolved.exists()
+    except (OSError, RuntimeError):
+        return OwnershipEvidence(
+            path=path,
+            resource_type=resource_type,
+            kind="symlink",
+            claim=OwnershipClaim.MODIFIED,
+            detail="the link cannot be read, so pipx cannot prove which environment it serves",
+        )
+    # with UV_LINK_MODE=symlink the exposed link names a venv file that itself links into uv's cache, so the first hop
+    # names the owner even when the resolved target leaves every environment
+    owner: Final[tuple[Path, str] | None] = next(
+        ((root, name) for root, name in roots.items() if direct.is_relative_to(root) or resolved.is_relative_to(root)),
+        None,
+    )
+    if owner is None:
+        if dangling and resolved.is_relative_to(CTX.venvs.resolve()):
+            return OwnershipEvidence(
+                path=path,
+                resource_type=resource_type,
+                kind="symlink",
+                claim=OwnershipClaim.STALE,
+                detail=f"the link dangles into a removed environment at {resolved}",
+                target=resolved,
+            )
+        return OwnershipEvidence(
+            path=path,
+            resource_type=resource_type,
+            kind="symlink",
+            claim=OwnershipClaim.MODIFIED,
+            detail=f"the link points at {resolved}, outside every pipx environment",
+            target=resolved,
+        )
+    root, name = owner
+    if root != own_root:
+        return OwnershipEvidence(
+            path=path,
+            resource_type=resource_type,
+            kind="symlink",
+            claim=OwnershipClaim.TAKEN_OVER,
+            detail=f"the link resolves into environment {name!r} at {resolved}",
+            target=resolved,
+            owner_environment=name,
+        )
+    if dangling:
+        return OwnershipEvidence(
+            path=path,
+            resource_type=resource_type,
+            kind="symlink",
+            claim=OwnershipClaim.STALE,
+            detail=f"the link names this environment at {resolved}, where its target is already gone",
+            target=resolved,
+            owner_environment=name,
+        )
+    return OwnershipEvidence(
+        path=path,
+        resource_type=resource_type,
+        kind="symlink",
+        claim=OwnershipClaim.OWNED,
+        detail=f"the link resolves into this environment at {resolved}",
+        target=resolved,
+        owner_environment=name,
+    )
+
+
+def _classify_copy(
+    path: Path,
+    *,
+    resource_type: str,
+    venv_bin_path: Path,
+    claims_by_venv: Mapping[Path, set[Path]],
+    sources: Sequence[Path],
+    copies_expected: bool,
+) -> OwnershipEvidence:
+    own_id: Final[tuple[int, int] | None] = _directory_id_or_none(venv_bin_path)
+    own_shebang: Final[bool] = own_id is not None and own_id in _launcher_owner_ids(path)
+    other_owners: Final[list[str]] = sorted(
+        venv_dir.name
+        for venv_dir, claimed in claims_by_venv.items()
+        if venv_dir.is_dir() and path in claimed and not venv_bin_path.is_relative_to(venv_dir)
+    )
+    if other_owners and not own_shebang:
+        return OwnershipEvidence(
+            path=path,
+            resource_type=resource_type,
+            kind="copy",
+            claim=OwnershipClaim.OTHER_ENVIRONMENT,
+            detail=f"another environment's metadata claims the copy: {', '.join(other_owners)}",
+            owner_environment=other_owners[0],
+        )
+    # without copy permission the same bytes could be a hard link another venv still owns, so only a shebang or a
+    # recorded source proves this environment wrote the file
+    if own_shebang:
+        return OwnershipEvidence(
+            path=path,
+            resource_type=resource_type,
+            kind="copy",
+            claim=OwnershipClaim.OWNED,
+            detail="the copy names this environment in its shebang",
+            owner_environment=venv_bin_path.parent.name,
+        )
+    matching_source: Final[Path | None] = next(
+        (source for source in sources if source.is_file() and filecmp.cmp(path, source, shallow=False)),
+        None,
+    )
+    if matching_source is not None:
+        return OwnershipEvidence(
+            path=path,
+            resource_type=resource_type,
+            kind="copy",
+            claim=OwnershipClaim.OWNED,
+            detail=f"the copy is byte-for-byte this environment's recorded file {matching_source}",
+            target=matching_source,
+            owner_environment=venv_bin_path.parent.name,
+        )
+    if copies_expected:
+        # the existing uninstall contract treats every non-link in a directory that cannot hold symlinks as the copy
+        # pipx exposed; a copy another environment also exposes was already dropped above
+        return OwnershipEvidence(
+            path=path,
+            resource_type=resource_type,
+            kind="copy",
+            claim=OwnershipClaim.OWNED,
+            detail="pipx copies resources on this filesystem, and no other environment claims the file",
+            owner_environment=venv_bin_path.parent.name,
+        )
+    return OwnershipEvidence(
+        path=path,
+        resource_type=resource_type,
+        kind="copy",
+        claim=OwnershipClaim.MODIFIED,
+        detail="the file is not a link and its content carries no proof this environment wrote it",
+    )
 
 
 def _copy_matches_source(
@@ -1340,6 +1698,8 @@ def get_package_completion_paths(
 
 __all__ = [
     "VenvProblems",
+    "OwnershipClaim",
+    "OwnershipEvidence",
     "add_suffix",
     "can_symlink",
     "drop_copies_claimed_elsewhere",
@@ -1357,11 +1717,15 @@ __all__ = [
     "get_package_man_paths",
     "get_venv_package_infos",
     "get_venv_resource_paths",
+    "get_venv_resource_paths_by_type",
+    "get_venv_resource_sources",
+    "expected_venv_resource_paths_by_type",
     "get_venv_summary",
     "give_back_shared_links",
     "group_app_paths",
     "group_resource_paths",
     "locked_package_message",
+    "ownership_evidence",
     "package_name_from_spec",
     "remove_stale_venv_resources",
     "reuse_resource_dir_scans",

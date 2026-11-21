@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
@@ -19,7 +20,9 @@ from harness import (
 )
 from package_info import PKG
 from pipx import paths, venv_inspect
+from pipx.options import ExposureOptions
 from pipx.paths import CTX
+from pipx.pipx_metadata_file import PackageInfo, PackageResources, PipxMetadata
 from pipx.util import get_venv_paths
 
 if TYPE_CHECKING:
@@ -452,3 +455,187 @@ def test_uninstall_killed_midway_leaves_nothing_for_reinstall_to_guess(mocker: M
     mocker.stopall()
 
     assert run_pipx_cli(["reinstall", "pycowsay"])
+
+
+def _write_environment(name: str, app: str) -> Path:
+    venv_dir: Final[Path] = CTX.venvs / name
+    bin_dir, python_path, man_dir = get_venv_paths(venv_dir)
+    bin_dir.mkdir(parents=True)
+    man_dir.mkdir(parents=True)
+    CTX.bin_dir.mkdir(parents=True, exist_ok=True)
+    package: Final[Path] = bin_dir / app
+    package.write_text(f"#!{python_path}\nprint({name!r})\n", encoding="utf-8")
+    package.chmod(0o755)
+    python_path.touch()
+    metadata: Final[PipxMetadata] = PipxMetadata(venv_dir, read=False)
+    metadata.main_package = PackageInfo(
+        package=name,
+        package_or_url=name,
+        pip_args=[],
+        exposure=ExposureOptions(),
+        resources=PackageResources(
+            apps=[app],
+            app_paths=[package],
+            apps_of_dependencies=[],
+            app_paths_of_dependencies={},
+        ),
+        package_version="1",
+    )
+    metadata.write()
+    return venv_dir
+
+
+@SKIP_IF_WINDOWS
+@pytest.mark.usefixtures("pipx_temp_env")
+def test_uninstall_preview_reports_owned_entries(capsys: pytest.CaptureFixture[str]) -> None:
+    venv_dir: Final[Path] = _write_environment("alpha", "tool")
+    (CTX.bin_dir / "tool").symlink_to(get_venv_paths(venv_dir)[0] / "tool")
+    capsys.readouterr()
+
+    assert not run_pipx_cli(["uninstall", "alpha", "--dry-run", "--output", "json"])
+    envelope: Final = json.loads(capsys.readouterr().out)
+
+    assert (envelope["status"], envelope["data"]["would_remove"], envelope["data"]["retained"]) == (
+        "success",
+        [str(CTX.bin_dir / "tool")],
+        [],
+    )
+    assert (envelope["data"]["evidence"][0]["claim"], envelope["data"]["evidence"][0]["kind"]) == ("owned", "symlink")
+    assert (CTX.bin_dir / "tool").exists()
+
+
+@SKIP_IF_WINDOWS
+@pytest.mark.usefixtures("pipx_temp_env")
+def test_uninstall_keeps_entry_taken_over_after_the_preview(capsys: pytest.CaptureFixture[str]) -> None:
+    alpha: Final[Path] = _write_environment("alpha", "tool")
+    beta: Final[Path] = _write_environment("beta", "tool")
+    (CTX.bin_dir / "tool").symlink_to(get_venv_paths(alpha)[0] / "tool")
+    capsys.readouterr()
+
+    assert not run_pipx_cli(["uninstall", "alpha", "--dry-run", "--output", "json"])
+    assert json.loads(capsys.readouterr().out)["data"]["evidence"][0]["claim"] == "owned"
+
+    # the operator repoints the entry between reviewing the preview and running the uninstall
+    (CTX.bin_dir / "tool").unlink()
+    (CTX.bin_dir / "tool").symlink_to(get_venv_paths(beta)[0] / "tool")
+
+    assert not run_pipx_cli(["uninstall", "alpha", "--output", "json"])
+    capsys.readouterr()
+
+    assert ((CTX.bin_dir / "tool").resolve(), (CTX.venvs / "alpha").exists()) == (
+        (get_venv_paths(beta)[0] / "tool").resolve(),
+        False,
+    )
+
+
+@SKIP_IF_WINDOWS
+@pytest.mark.usefixtures("pipx_temp_env")
+def test_uninstall_preview_reports_taken_over_entry(capsys: pytest.CaptureFixture[str]) -> None:
+    _write_environment("alpha", "tool")
+    beta: Final[Path] = _write_environment("beta", "tool")
+    (CTX.bin_dir / "tool").symlink_to(get_venv_paths(beta)[0] / "tool")
+    capsys.readouterr()
+
+    assert not run_pipx_cli(["uninstall", "alpha", "--dry-run", "--output", "json"])
+    evidence: Final = json.loads(capsys.readouterr().out)["data"]["evidence"][0]
+
+    assert (evidence["claim"], evidence["owner_environment"], evidence["reclaimable"]) == ("taken-over", "beta", False)
+
+
+@SKIP_IF_WINDOWS
+@pytest.mark.usefixtures("pipx_temp_env")
+def test_uninstall_preview_reports_modified_entry(capsys: pytest.CaptureFixture[str]) -> None:
+    alpha: Final[Path] = _write_environment("alpha", "tool")
+    (other := CTX.home / "other").write_text("echo elsewhere\n", encoding="utf-8")
+    (CTX.bin_dir / "tool").symlink_to(other)
+    capsys.readouterr()
+
+    assert not run_pipx_cli(["uninstall", "alpha", "--dry-run", "--output", "json"])
+    evidence: Final = json.loads(capsys.readouterr().out)["data"]["evidence"][0]
+
+    assert (evidence["claim"], evidence["reclaimable"], evidence["target"]) == (
+        "modified",
+        False,
+        str(other.resolve()),
+    )
+
+    assert not run_pipx_cli(["uninstall", "alpha"])
+    assert (CTX.bin_dir / "tool").resolve() == other.resolve() and not alpha.exists()
+
+
+@SKIP_IF_WINDOWS
+@pytest.mark.usefixtures("pipx_temp_env")
+def test_uninstall_preview_reports_stale_entry(capsys: pytest.CaptureFixture[str]) -> None:
+    alpha: Final[Path] = _write_environment("alpha", "tool")
+    (CTX.bin_dir / "tool").symlink_to(get_venv_paths(alpha)[0] / "tool")
+    (get_venv_paths(alpha)[0] / "tool").unlink()
+    capsys.readouterr()
+
+    assert not run_pipx_cli(["uninstall", "alpha", "--dry-run", "--output", "json"])
+    evidence: Final = json.loads(capsys.readouterr().out)["data"]["evidence"][0]
+
+    assert (evidence["claim"], evidence["reclaimable"]) == ("stale", True)
+
+
+@SKIP_IF_WINDOWS
+@pytest.mark.usefixtures("pipx_temp_env")
+def test_uninstall_preview_reports_copy_proven_by_its_shebang(capsys: pytest.CaptureFixture[str]) -> None:
+    alpha: Final[Path] = _write_environment("alpha", "tool")
+    (CTX.bin_dir / "tool").write_text(f"#!{get_venv_paths(alpha)[1]}\nexit\n", encoding="utf-8")
+    capsys.readouterr()
+
+    assert not run_pipx_cli(["uninstall", "alpha", "--dry-run", "--output", "json"])
+    evidence: Final = json.loads(capsys.readouterr().out)["data"]["evidence"][0]
+
+    assert (evidence["kind"], evidence["claim"], evidence["reclaimable"]) == ("copy", "owned", True)
+
+
+@SKIP_IF_WINDOWS
+@pytest.mark.usefixtures("pipx_temp_env")
+def test_uninstall_preview_reports_copy_claimed_by_another_environment(capsys: pytest.CaptureFixture[str]) -> None:
+    _write_environment("alpha", "tool")
+    beta: Final[Path] = _write_environment("beta", "other")
+    (get_venv_paths(beta)[0] / "tool").write_text("echo beta\n", encoding="utf-8")
+    beta_metadata: Final[PipxMetadata] = PipxMetadata(beta)
+    beta_metadata.main_package = replace(
+        beta_metadata.main_package,
+        resources=replace(beta_metadata.main_package.resources, app_paths=[get_venv_paths(beta)[0] / "tool"]),
+    )
+    beta_metadata.write()
+    (CTX.bin_dir / "tool").write_text("echo static\n", encoding="utf-8")
+    capsys.readouterr()
+
+    assert not run_pipx_cli(["uninstall", "alpha", "--dry-run", "--output", "json"])
+    evidence: Final = json.loads(capsys.readouterr().out)["data"]["evidence"][0]
+
+    assert (evidence["kind"], evidence["claim"], evidence["owner_environment"], evidence["reclaimable"]) == (
+        "copy",
+        "other-environment",
+        "beta",
+        False,
+    )
+
+
+@SKIP_IF_WINDOWS
+@pytest.mark.usefixtures("pipx_temp_env")
+def test_uninstall_preview_reports_missing_entry(capsys: pytest.CaptureFixture[str]) -> None:
+    _write_environment("alpha", "tool")
+    capsys.readouterr()
+
+    assert not run_pipx_cli(["uninstall", "alpha", "--dry-run", "--output", "json"])
+    evidence: Final = json.loads(capsys.readouterr().out)["data"]["evidence"][0]
+
+    assert (evidence["claim"], evidence["reclaimable"]) == ("missing", False)
+
+
+@SKIP_IF_WINDOWS
+@pytest.mark.usefixtures("pipx_temp_env")
+def test_uninstall_preview_human_output_names_the_action(capsys: pytest.CaptureFixture[str]) -> None:
+    venv_dir: Final[Path] = _write_environment("alpha", "tool")
+    (CTX.bin_dir / "tool").symlink_to(get_venv_paths(venv_dir)[0] / "tool")
+    capsys.readouterr()
+
+    assert not run_pipx_cli(["uninstall", "alpha", "--dry-run"])
+    captured: Final = capsys.readouterr()
+
+    assert (f"remove {CTX.bin_dir / 'tool'}" in captured.out, captured.err) == (True, "")

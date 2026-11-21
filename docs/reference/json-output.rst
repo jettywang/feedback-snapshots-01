@@ -65,6 +65,17 @@ option or a missing argument, print plain text instead: the usage message goes t
 It is not available on ``install-all``, ``run``, ``exec``, ``runpip``, ``ensurepath``, ``environment``,
 ``completions``, or ``help``.
 
+*************************
+ ``uninstall --dry-run``
+*************************
+
+``pipx uninstall ENVIRONMENT --dry-run`` adds the ownership evidence it reviewed to the envelope's ``data``:
+``would_remove`` and ``retained`` hold the exposed paths it would take away or leave, while ``evidence`` has one
+object per exposed path with ``path``, ``resource_type``, ``kind`` (``symlink``, ``copy`` or ``absent``), ``claim``
+(``owned``, ``taken-over``, ``other-environment``, ``modified``, ``stale`` or ``missing``), ``detail``, ``target``,
+``owner_environment`` and ``reclaimable``. A real uninstall keeps its usual ``packages`` payload, so existing scripts
+are unaffected; the same evidence is available before removing anything by previewing first.
+
 ***********************
  ``list`` is different
 ***********************

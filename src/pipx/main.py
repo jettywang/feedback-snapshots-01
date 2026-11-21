@@ -1132,6 +1132,11 @@ def _add_uninstall(
         parents=[shared_parser],
     )
     _complete_with(parser.add_argument("package", metavar="ENVIRONMENT"), venv_completer)
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report the ownership evidence and what would be removed, without removing anything",
+    )
     _add_output_option(parser)
     parser.set_defaults(func=_cmd_uninstall)
 
@@ -1141,7 +1146,7 @@ def _cmd_uninstall(args: argparse.Namespace, ctx: _DispatchContext) -> Operation
     with ctx.venv_container.venv_lock(venv_dir):
         from pipx.commands.uninstall import uninstall
 
-        return uninstall(venv_dir, CTX.bin_dir, CTX.man_dir, verbose=ctx.verbose)
+        return uninstall(venv_dir, CTX.bin_dir, CTX.man_dir, verbose=ctx.verbose, dry_run=args.dry_run)
 
 
 def _add_uninstall_all(subparsers: argparse._SubParsersAction, shared_parser: argparse.ArgumentParser) -> None:

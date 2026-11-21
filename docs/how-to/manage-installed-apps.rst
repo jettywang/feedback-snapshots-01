@@ -77,7 +77,22 @@ Verify:
 
     $ pipx uninstall black
 
-pipx deletes the environment and unlinks its apps, manual pages, and shell completions.
+pipx deletes the environment and unlinks its apps, manual pages, and shell completions. It only reclaims an exposed
+entry it can still prove the environment owns: a link that resolves into the environment, a dangling link that names
+it, or a copy whose shebang or bytes match the recorded file. An entry an operator repointed to another environment, a
+file replaced by hand, and a copy another environment's metadata claims are left in place, because deleting them would
+take away something this uninstall no longer owns.
+
+Preview the decision first with ``--dry-run``:
+
+.. code-block:: console
+
+    $ pipx uninstall black --dry-run
+
+The preview prints one line per exposed entry with the evidence pipx found and whether it would remove or keep the
+entry, without changing anything. ``--output json`` reports the same evidence in the ``evidence`` list, with
+``would_remove`` and ``retained`` naming the paths either way. The real uninstall re-checks each entry immediately
+before unlinking it, so an entry repointed to another environment after the preview is kept.
 
 Verify:
 
