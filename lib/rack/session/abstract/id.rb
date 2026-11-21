@@ -162,6 +162,18 @@ module Rack
           @exists = @store.send(:session_exists?, @req)
         end
 
+        # Whether the request presented session credentials (such as a
+        # cookie), regardless of whether they could be resolved to a
+        # session. Does not load the session.
+
+        def presented?
+          if @store.respond_to?(:session_presented?, true)
+            @store.send(:session_presented?, @req)
+          else
+            false
+          end
+        end
+
         def loaded?
           @loaded
         end
@@ -329,6 +341,13 @@ module Rack
           sid = request.cookies[@key]
           sid ||= request.params[@key] unless @cookie_only
           sid
+        end
+
+        # Check if the request presented session credentials, regardless
+        # of whether they could be resolved to a session.
+
+        def session_presented?(request)
+          request.cookies.key?(@key)
         end
 
         # Returns the current session id from the SessionHash.

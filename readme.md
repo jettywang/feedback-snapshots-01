@@ -32,6 +32,18 @@ class MyApp
 end
 ```
 
+### Observing session state
+
+For diagnostics and support tooling, `Rack::Session::Observation` provides a restricted, read-only view of the session state of a request, without exposing session values:
+
+``` ruby
+observation = Rack::Session::Observation.new(request, allow: [:user_id])
+observation.status # => :unloaded, :prepared, :invalid or :rejected
+observation.to_h # => {status: :prepared, keys: ["user_id"], classification: {"user_id" => "Integer"}}
+```
+
+Observing a request never forces the session to be loaded, and only reports the keys explicitly approved using the `:allow` option, along with the classification (class name) of their values.
+
 ### Compatibility
 
 `rack-session` code used to be part of Rack, but it was extracted in Rack v3 to this gem. The v1 release of this gem is compatible with Rack v2, and the v2 release of this gem is compatible with Rack v3+. That means you can add `gem "rack-session"` to your application and it will be compatible with all versions of Rack.

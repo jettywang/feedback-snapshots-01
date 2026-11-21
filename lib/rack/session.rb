@@ -8,5 +8,6 @@ module Rack
   module Session
     autoload :Cookie, "rack/session/cookie"
     autoload :Pool, "rack/session/pool"
+    autoload :Observation, "rack/session/observation"
   end
 end
