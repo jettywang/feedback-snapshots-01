@@ -2589,6 +2589,133 @@ END:VCARD
         assert listed(path_wf_shared) == (
             ["C:read-free-busy", "D:write-content"], ["C:free-busy-query"])
 
+    def test_sharing_api_map_freebusy_recurrence(self) -> None:
+        """An f-only share reports recurrence overrides and no event details."""
+        self.configure({"auth": {"type": "htpasswd",
+                                 "htpasswd_filename": self.htpasswd_file_path,
+                                 "htpasswd_encryption": "plain"},
+                        "sharing": {
+                                    "type": "csv",
+                                    "permit_create_map": True,
+                                    "collection_by_map": "True"},
+                        "rights": {"type": "owner_only"}})
+        path_cal = "/owner/cal-f-recur/"
+        path_cal_shared = "/user/cal-f-recur/"
+        collection_path = "owner/cal-f-recur"
+        self.mkcalendar(path_cal, login="owner:ownerpw")
+        series = """\
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//Radicale//EN
+BEGIN:VEVENT
+UID:recur-secret
+SUMMARY:Secret series title
+DESCRIPTION:Secret series notes
+ATTENDEE:mailto:secret-attendee@example.com
+ORGANIZER:mailto:secret-organizer@example.com
+DTSTART:20130902T100000Z
+DTEND:20130902T110000Z
+RRULE:FREQ=DAILY;COUNT=4
+STATUS:CONFIRMED
+END:VEVENT
+BEGIN:VEVENT
+UID:recur-secret
+SUMMARY:Secret cancelled title
+RECURRENCE-ID:20130903T100000Z
+DTSTART:20130903T100000Z
+DTEND:20130903T110000Z
+STATUS:CANCELLED
+END:VEVENT
+BEGIN:VEVENT
+UID:recur-secret
+SUMMARY:Secret moved title
+RECURRENCE-ID:20130904T100000Z
+DTSTART:20130904T150000Z
+DTEND:20130904T160000Z
+STATUS:CONFIRMED
+END:VEVENT
+END:VCALENDAR
+"""
+        self.put(path_cal + "series.ics", series, login="owner:ownerpw")
+        _, _headers, answer = self._sharing_api_json(
+            "map", "create", check=200, login="owner:ownerpw", json_dict={
+                "User": "user",
+                "PathMapped": path_cal,
+                "PathOrToken": path_cal_shared,
+                "Permissions": "f",
+                "Enabled": True,
+                "Hidden": False})
+        assert json.loads(answer)["Status"] == "success"
+        self._sharing_api_json(
+            "map", "enable", check=200, login="user:userpw",
+            json_dict={"PathOrToken": path_cal_shared})
+        self._sharing_api_json(
+            "map", "unhide", check=200, login="user:userpw",
+            json_dict={"PathOrToken": path_cal_shared})
+        window = "start=20130902T000000Z&end=20130906T000000Z"
+        secrets = ("Secret series title", "Secret series notes",
+                   "Secret cancelled title", "Secret moved title",
+                   "recur-secret", "secret-attendee@example.com",
+                   "secret-organizer@example.com", "DESCRIPTION",
+                   "ATTENDEE", "ORGANIZER", "RECURRENCE-ID", "series.ics")
+
+        freebusy_query = """\
+<?xml version="1.0" encoding="utf-8" ?>
+<C:free-busy-query xmlns:C="urn:ietf:params:xml:ns:caldav">
+    <C:time-range start="20130902T000000Z" end="20130906T000000Z"/>
+</C:free-busy-query>"""
+        status, headers, answer = self.request(
+            "REPORT", path_cal_shared, freebusy_query, check=200,
+            login="user:userpw")
+        assert headers["Content-Type"].startswith("text/calendar")
+        for secret in secrets:
+            assert secret not in answer
+        vcalendar = vobject.readOne(answer)
+        assert len(vcalendar.vfreebusy_list) == 1
+        periods = {
+            (fb.value[0][0].strftime("%Y%m%dT%H%M%SZ"),
+             fb.value[0][1].strftime("%Y%m%dT%H%M%SZ"),
+             fb.params.get("FBTYPE", ["BUSY"])[0])
+            for fb in vcalendar.vfreebusy.freebusy_list}
+        # cancelled instance is FREE, the moved override keeps its new time
+        assert ("20130902T100000Z", "20130902T110000Z", "BUSY") in periods
+        assert ("20130903T100000Z", "20130903T110000Z", "FREE") in periods
+        assert ("20130904T150000Z", "20130904T160000Z", "BUSY") in periods
+        assert ("20130905T100000Z", "20130905T110000Z", "BUSY") in periods
+
+        # the subscription view returns one busy VEVENT per period, no details
+        status, headers, answer = self.request(
+            "GET", path_cal_shared, check=200, login="user:userpw",
+            QUERY_STRING="view=freebusy&" + window)
+        assert "-busy.ics" in headers["Content-Disposition"]
+        for secret in secrets:
+            assert secret not in answer
+        vcalendar = vobject.readOne(answer)
+        assert "vfreebusy" not in vcalendar.contents
+        busy_events = vcalendar.contents["vevent"]
+        starts = {event.dtstart.value.strftime("%Y%m%dT%H%M%SZ")
+                  for event in busy_events}
+        assert starts == {
+            "20130902T100000Z", "20130904T150000Z", "20130905T100000Z"}
+        for event in busy_events:
+            assert event.summary.value == "Busy"
+            assert event.uid.value == busy_event_uid(
+                collection_path,
+                event.dtstart.value.strftime("%Y%m%dT%H%M%SZ"),
+                event.dtend.value.strftime("%Y%m%dT%H%M%SZ"), "BUSY")
+            assert event.uid.value != "recur-secret"
+
+        # plain GET and an item GET still expose nothing
+        status, _headers, answer = self.request(
+            "GET", path_cal_shared, check=403, login="user:userpw")
+        for secret in secrets:
+            assert secret not in answer
+        status, _headers, answer = self.request(
+            "GET", path_cal_shared + "series.ics", check=403,
+            login="user:userpw")
+        for secret in secrets:
+            assert secret not in answer
+
     def test_sharing_api_map_report_access(self) -> None:
         """share-by-map API usage tests related to report."""
         self.configure({"auth": {"type": "htpasswd",
