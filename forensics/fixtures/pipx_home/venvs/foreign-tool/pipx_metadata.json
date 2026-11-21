@@ -1,0 +1,24 @@
+{
+    "injected_packages": {},
+    "main_package": {
+        "app_paths": [],
+        "app_paths_of_dependencies": {},
+        "apps": ["foreign-tool"],
+        "apps_of_dependencies": [],
+        "include_apps": true,
+        "include_dependencies": false,
+        "man_pages": [],
+        "man_pages_of_dependencies": [],
+        "man_paths": [],
+        "man_paths_of_dependencies": {},
+        "package": "foreign-tool",
+        "package_or_url": "foreign-tool",
+        "package_version": "0.0.0",
+        "pip_args": [],
+        "suffix": ""
+    },
+    "pipx_metadata_version": "0.4",
+    "python_version": "Python 3.11.0 (fake evidence)",
+    "source_interpreter": null,
+    "venv_args": []
+}
