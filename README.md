@@ -142,6 +142,34 @@ html_fragment.scrub!(scrubber)
 html_fragment.to_s # => "<a></a>"
 ```
 
+#### `Rails::HTML::LinkTargetScrubber`
+
+This scrubber enforces a per-channel policy on the destination of `a` tags, so the
+same sanitized content can be published to channels with different link requirements
+(e.g. web pages and email).
+
+Relative links, such as internal documentation paths, are kept as-is on the `web`
+channel. On the `email` channel they are resolved against `base_url`, because
+relative destinations are broken in mail clients; without a `base_url` their `href`
+is removed.
+
+Absolute `http`/`https` links are kept only when their host matches one of
+`approved_domains` (subdomains included). Any other destination is unapproved: the
+`href` attribute is removed, while the link text and all other attributes are left
+untouched.
+
+Pass it to a safe list sanitizer via the `link_policy` option:
+
+```ruby
+policy = Rails::HTML::LinkTargetScrubber.new(
+  channel: :email,
+  approved_domains: %w(help.example.com),
+  base_url: "https://help.example.com",
+)
+
+safe_list_sanitizer.sanitize(@article.body, link_policy: policy)
+```
+
 #### Custom Scrubbers
 
 You can also create custom scrubbers in your application if you want to.

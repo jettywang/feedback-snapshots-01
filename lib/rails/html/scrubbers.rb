@@ -209,5 +209,100 @@ module Rails
         end
       end
     end
+
+    # === Rails::HTML::LinkTargetScrubber
+    #
+    # +Rails::HTML::LinkTargetScrubber+ enforces a per-channel policy on the
+    # destination of +a+ tags, so the same sanitized content can be published
+    # to channels with different link requirements (e.g. web pages and email).
+    #
+    # Relative links, such as internal documentation paths, are kept as-is on
+    # the +web+ channel. On the +email+ channel they are resolved against
+    # +base_url+, because relative destinations are broken in mail clients;
+    # without a +base_url+ their +href+ is removed.
+    #
+    # Absolute +http+/+https+ links are kept only when their host matches one
+    # of +approved_domains+ (subdomains included). Any other destination is
+    # unapproved: the +href+ attribute is removed at publish time, while the
+    # link text and all other attributes are left untouched. The scrubber
+    # never annotates the output with its decisions.
+    #
+    #   policy = Rails::HTML::LinkTargetScrubber.new(
+    #     channel: :email,
+    #     approved_domains: %w(help.example.com),
+    #     base_url: "https://help.example.com",
+    #   )
+    #   Rails::HTML::SafeListSanitizer.new.sanitize(html, link_policy: policy)
+    class LinkTargetScrubber < Loofah::Scrubber
+      CHANNELS = %i(web email).freeze
+
+      attr_reader :channel, :approved_domains, :base_url
+
+      def initialize(channel: :web, approved_domains: [], base_url: nil)
+        @channel = channel.to_sym
+        unless CHANNELS.include?(@channel)
+          raise ArgumentError, "unknown link policy channel: #{channel.inspect}"
+        end
+
+        @approved_domains = approved_domains.map { |domain| domain.to_s.downcase }.freeze
+        @base_url = base_url
+        @direction = :top_down
+      end
+
+      def scrub(node)
+        return CONTINUE unless node.element? && node.name == "a"
+
+        href = node["href"]
+        return CONTINUE if href.nil? || href.strip.empty?
+
+        uri = parse_uri(href)
+        if uri.nil?
+          node.remove_attribute("href")
+        elsif relative?(uri)
+          scrub_relative(node, href)
+        elsif !approved?(uri)
+          node.remove_attribute("href")
+        end
+
+        CONTINUE
+      end
+
+      private
+        def parse_uri(href)
+          URI.parse(href.strip)
+        rescue URI::InvalidURIError
+          nil
+        end
+
+        def relative?(uri)
+          uri.scheme.nil? && uri.host.nil?
+        end
+
+        def approved?(uri)
+          return false unless %w(http https).include?(uri.scheme.to_s.downcase)
+
+          host = uri.host.to_s.downcase
+          approved_domains.any? { |domain| host == domain || host.end_with?(".#{domain}") }
+        end
+
+        def scrub_relative(node, href)
+          return if channel == :web
+
+          resolved = resolve(href)
+          if resolved && approved?(resolved)
+            node["href"] = resolved.to_s
+          else
+            node.remove_attribute("href")
+          end
+        end
+
+        def resolve(href)
+          return unless base_url
+
+          parse_uri(URI.join(base_url, href).to_s)
+        rescue URI::InvalidURIError
+          nil
+        end
+    end
   end
 end

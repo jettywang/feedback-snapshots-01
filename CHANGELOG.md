@@ -1,5 +1,21 @@
 ## next / unreleased
 
+* Add `Rails::HTML::LinkTargetScrubber` and a `link_policy:` option for the safe list sanitizers.
+
+  The scrubber enforces a per-channel (`web` or `email`) policy on `a` tag destinations at
+  publish time: relative links are kept on the web channel and resolved against a `base_url`
+  on the email channel, absolute `http`/`https` links are kept only for `approved_domains`,
+  and any other target has its `href` removed while link text and other attributes are kept.
+
+  ```ruby
+  policy = Rails::HTML::LinkTargetScrubber.new(
+    channel: :email,
+    approved_domains: %w(help.example.com),
+    base_url: "https://help.example.com",
+  )
+  safe_list_sanitizer.sanitize(html, link_policy: policy)
+  ```
+
 
 ## v1.7.2 / 2026-11-02
 

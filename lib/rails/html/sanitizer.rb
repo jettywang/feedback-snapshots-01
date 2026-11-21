@@ -169,6 +169,12 @@ module Rails
             else
               fragment.scrub!(:strip)
             end
+
+            if link_policy = options[:link_policy]
+              fragment.scrub!(link_policy)
+            end
+
+            fragment
           end
 
           def sanitize_css(style_string)
