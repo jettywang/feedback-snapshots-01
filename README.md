@@ -70,6 +70,74 @@ safe_list_sanitizer = Rails::HTML5::SafeListSanitizer.new(prune: true)
 safe_list_sanitizer.sanitize_css('background-color: #000;')
 ```
 
+### Inline style policies
+
+Email and web content often accept different inline CSS. A `Rails::HTML::StylePolicy`
+describes the properties and values a caller accepts, and the same object can be
+used both for a standalone style string and while sanitizing an HTML fragment.
+
+A policy can only narrow the declarations Loofah already considers safe. CSS is
+always run through Loofah's scrubber first, so a policy cannot re-enable an unsafe
+property or value. Without a policy, `sanitize_css` and `style` attributes keep
+their existing default behavior.
+
+```ruby
+# Business-approved color and width. `cursor` is a normal CSS property, but
+# email clients do not support it, so it is not part of the email policy.
+email_policy = Rails::HTML::StylePolicy.new(
+  properties: %w(color width),
+  values: {
+    "color" => %w(#0b57d0),
+    "width" => %w(600px 100%),
+  },
+)
+
+style = "color: #0b57d0; width: 600px; cursor: pointer;"
+sanitizer = Rails::HTML5::SafeListSanitizer.new
+
+# Standalone style string
+sanitizer.sanitize_css(style, style_policy: email_policy)
+# => "color:#0b57d0;width:600px;"
+
+# The same policy while sanitizing an HTML fragment
+sanitizer.sanitize(
+  %(<p style="#{style}">Your order has shipped.</p>),
+  attributes: %w(style),
+  style_policy: email_policy,
+)
+# => %(<p style="color:#0b57d0;width:600px;">Your order has shipped.</p>)
+```
+
+`properties:` limits property names, and `values:` limits values per property.
+A value may be a String (compared case-insensitively after whitespace is
+collapsed), a Regexp, a Proc, or an Enumerable of those. The `!important` flag is
+preserved, but it is not part of the value match. An empty `properties:` list
+removes every declaration. A policy can also be set as a class-level default:
+
+```ruby
+Rails::HTML5::SafeListSanitizer.allowed_style_policy = email_policy
+# or pass a Hash of options directly
+sanitizer.sanitize_css(style, style_policy: { properties: %w(color) })
+```
+
+To find out which declarations a policy removed, pass a report. Entries contain
+the property name, disposition, and reason, but never the original style string
+or the property value:
+
+```ruby
+report = Rails::HTML::StylePolicy::Report.new
+sanitizer.sanitize_css(style, style_policy: email_policy, style_report: report)
+report.entries
+# => [{property: "cursor", disposition: :removed, reason: :property_not_allowed}]
+```
+
+The reason is `:property_not_allowed` when the property name is not in
+`properties:`, and `:value_not_allowed` when a value does not match its
+constraint. Reports can also be an Array or any object that responds to `<<`.
+
+`Rails::HTML::PermitScrubber` accepts the same policy through its
+`style_policy=` writer when it is used directly with Loofah.
+
 ### Scrubbers
 
 Scrubbers are objects responsible for removing nodes or attributes you don't want in your HTML document.

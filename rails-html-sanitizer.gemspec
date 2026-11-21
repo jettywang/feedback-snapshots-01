@@ -25,6 +25,7 @@ Gem::Specification.new do |spec|
   spec.files         = Dir["lib/**/*", "README.md", "MIT-LICENSE", "CHANGELOG.md"]
   spec.require_paths = ["lib"]
 
+  spec.add_dependency "crass", "~> 1.0"
   spec.add_dependency "loofah", "~> 2.25", ">= 2.25.3"
 
   # A fix was shipped in nokogiri v1.15.7 and v1.16.8 without which there is a vulnerability in this gem.

@@ -1,5 +1,18 @@
 ## next / unreleased
 
+* Add `Rails::HTML::StylePolicy`, an optional per-call or class-level constraint
+  on inline CSS for `SafeListSanitizer`.
+
+  The same policy can be passed to `sanitize_css` as `style_policy:` and to
+  `sanitize` to constrain `style` attributes, so callers such as an email
+  renderer and a help-center renderer can express different accepted CSS while
+  sharing one policy object. A policy only narrows Loofah's existing safe CSS;
+  the default scrub behavior is unchanged when no policy is supplied.
+
+  A `Rails::HTML::StylePolicy::Report` can be passed as `style_report:` to
+  record which property names were removed and why. Reports never contain the
+  original style string or property values.
+
 
 ## v1.7.2 / 2026-11-02
 

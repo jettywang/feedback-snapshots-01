@@ -47,7 +47,12 @@ module Rails
     # See the documentation for +Nokogiri::XML::Node+ to understand what's possible
     # with nodes: https://nokogiri.org/rdoc/Nokogiri/XML/Node.html
     class PermitScrubber < Loofah::Scrubber
-      attr_reader :tags, :attributes, :prune
+      attr_reader :tags, :attributes, :prune, :style_policy
+      attr_accessor :style_report
+
+      def style_policy=(policy)
+        @style_policy = StylePolicy.coerce(policy)
+      end
 
       def initialize(prune: false)
         @prune = prune
@@ -121,16 +126,25 @@ module Rails
 
             scrub_css_attribute(node)
           else
+            # Loofah scrubs attributes and the style attribute together. When a
+            # style policy narrows the result, apply it afterwards; the baseline
+            # scrub is idempotent so the style value is not rewritten twice.
             Loofah::HTML5::Scrub.scrub_attributes(node)
+            scrub_css_attribute(node) if @style_policy
           end
         end
 
         def scrub_css_attribute(node)
-          if Loofah::HTML5::Scrub.respond_to?(:scrub_css_attribute)
+          style = node.attributes["style"]
+          return unless style
+
+          if @style_policy
+            style.value = @style_policy.sanitize(style.value, report: @style_report)
+            style.remove if style.value.empty?
+          elsif Loofah::HTML5::Scrub.respond_to?(:scrub_css_attribute)
             Loofah::HTML5::Scrub.scrub_css_attribute(node)
           else
-            style = node.attributes["style"]
-            style.value = Loofah::HTML5::Scrub.scrub_css(style.value) if style
+            style.value = Loofah::HTML5::Scrub.scrub_css(style.value)
           end
         end
 

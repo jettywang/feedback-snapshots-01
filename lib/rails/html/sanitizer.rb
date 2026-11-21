@@ -147,10 +147,12 @@ module Rails
             class << klass
               attr_accessor :allowed_tags
               attr_accessor :allowed_attributes
+              attr_accessor :allowed_style_policy
             end
 
             klass.allowed_tags = DEFAULT_ALLOWED_TAGS.dup
             klass.allowed_attributes = DEFAULT_ALLOWED_ATTRIBUTES.dup
+            klass.allowed_style_policy = nil
           end
 
           def initialize(prune: false)
@@ -158,21 +160,31 @@ module Rails
           end
 
           def scrub(fragment, options = {})
+            policy = style_policy(options)
+
             if scrubber = options[:scrubber]
               # No duck typing, Loofah ensures subclass of Loofah::Scrubber
               fragment.scrub!(scrubber)
-            elsif allowed_tags(options) || allowed_attributes(options)
+            elsif allowed_tags(options) || allowed_attributes(options) || policy
               permit_scrubber = PermitScrubber.new(prune: @prune)
               permit_scrubber.tags = allowed_tags(options)
               permit_scrubber.attributes = allowed_attributes(options)
+              permit_scrubber.style_policy = policy
+              permit_scrubber.style_report = options[:style_report]
               fragment.scrub!(permit_scrubber)
             else
               fragment.scrub!(:strip)
             end
           end
 
-          def sanitize_css(style_string)
-            Loofah::HTML5::Scrub.scrub_css(style_string)
+          def sanitize_css(style_string, options = {})
+            policy = style_policy(options)
+
+            if policy
+              policy.sanitize(style_string, report: options[:style_report])
+            else
+              Loofah::HTML5::Scrub.scrub_css(style_string)
+            end
           end
 
           private
@@ -182,6 +194,10 @@ module Rails
 
             def allowed_attributes(options)
               options[:attributes] || self.class.allowed_attributes
+            end
+
+            def style_policy(options)
+              StylePolicy.coerce(options[:style_policy] || self.class.allowed_style_policy)
             end
         end
       end
@@ -300,6 +316,11 @@ module Rails
     #   # the sanitizer can also sanitize CSS
     #   safe_list_sanitizer.sanitize_css('background-color: #000;')
     #
+    #   # constrain inline CSS with a shared policy for both entry points
+    #   policy = Rails::HTML::StylePolicy.new(properties: %w(color width))
+    #   safe_list_sanitizer.sanitize_css('color: #000; cursor: pointer;', style_policy: policy)
+    #   safe_list_sanitizer.sanitize(html, attributes: %w(style), style_policy: policy)
+    #
     class SafeListSanitizer < Rails::HTML::Sanitizer
       include HTML::Concern::ComposedSanitize
       include HTML::Concern::Parser::HTML4
@@ -409,6 +430,11 @@ module Rails
     #
     #   # the sanitizer can also sanitize CSS
     #   safe_list_sanitizer.sanitize_css('background-color: #000;')
+    #
+    #   # constrain inline CSS with a shared policy for both entry points
+    #   policy = Rails::HTML::StylePolicy.new(properties: %w(color width))
+    #   safe_list_sanitizer.sanitize_css('color: #000; cursor: pointer;', style_policy: policy)
+    #   safe_list_sanitizer.sanitize(html, attributes: %w(style), style_policy: policy)
     #
     class SafeListSanitizer < Rails::HTML::Sanitizer
       include HTML::Concern::ComposedSanitize

@@ -4,6 +4,7 @@ require_relative "rails/html/sanitizer/version"
 
 require "loofah"
 
+require_relative "rails/html/style_policy"
 require_relative "rails/html/scrubbers"
 require_relative "rails/html/sanitizer"
 
