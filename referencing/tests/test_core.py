@@ -960,6 +960,151 @@ class TestResolver:
         assert list(first.resolver.dynamic_scope()) == []
 
 
+class TestSanitizedResolutionFailures:
+    def test_retrieval_unavailable(self):
+        """
+        A failed retrieval is reported only as an actionable category, while
+        the original cause chain remains available for diagnostics.
+        """
+
+        def retrieve(uri):
+            raise RuntimeError(f"customer codename in {uri}")
+
+        resolver = Registry(retrieve=retrieve).resolver()
+        with pytest.raises(exceptions.ResolutionFailure) as e:
+            resolver.lookup("urn:customer:codename", sanitize=True)
+
+        failure = e.value
+        assert failure.category is (
+            exceptions.FailureCategory.RETRIEVAL_UNAVAILABLE
+        )
+        assert failure.stage is exceptions.ResolutionStage.RETRIEVAL
+        assert str(failure) == "retrieval_unavailable"
+        assert failure.as_dict() == {"category": "retrieval_unavailable"}
+
+        assert "codename" not in str(failure)
+        assert "codename" not in repr(failure)
+        assert "codename" not in str(failure.args)
+        assert "codename" not in str(failure.as_dict())
+
+        cause = failure.__cause__
+        assert isinstance(cause, exceptions.Unresolvable)
+        assert isinstance(cause.__cause__, exceptions.Unretrievable)
+        assert isinstance(cause.__cause__.__cause__, RuntimeError)
+        assert "codename" in str(cause.__cause__.__cause__)
+
+    def test_pointer_not_found(self):
+        """
+        A pointer which does not exist is reported as a sanitized category,
+        without the resource contents or the pointer in the public message.
+        """
+
+        resource = Resource.opaque({"customer": {"codename": {}}})
+        resolver = Registry({"urn:customer:codename": resource}).resolver()
+
+        with pytest.raises(exceptions.ResolutionFailure) as e:
+            resolver.lookup(
+                "urn:customer:codename#/customer/missing",
+                sanitize=True,
+            )
+
+        failure = e.value
+        assert failure.category is exceptions.FailureCategory.POINTER_NOT_FOUND
+        assert failure.stage is exceptions.ResolutionStage.POINTER
+        assert str(failure) == "pointer_not_found"
+        assert failure.as_dict() == {"category": "pointer_not_found"}
+
+        assert "customer" not in str(failure)
+        assert "missing" not in str(failure)
+        assert "customer" not in repr(failure)
+        assert "customer" not in str(failure.args)
+
+        cause = failure.__cause__
+        assert isinstance(cause, exceptions.PointerToNowhere)
+        assert cause.ref == "/customer/missing"
+        assert isinstance(cause.__cause__, KeyError)
+
+    def test_anchor_not_found(self):
+        """
+        An anchor which does not exist is reported as a sanitized category.
+        """
+
+        resource = ID_AND_CHILDREN.create_resource(
+            {"ID": "urn:customer:codename", "anchors": {}},
+        )
+        resolver = Registry().with_resource(
+            "urn:customer:codename",
+            resource,
+        ).resolver()
+
+        with pytest.raises(exceptions.ResolutionFailure) as e:
+            resolver.lookup("urn:customer:codename#codename", sanitize=True)
+
+        failure = e.value
+        assert failure.category is exceptions.FailureCategory.ANCHOR_NOT_FOUND
+        assert failure.stage is exceptions.ResolutionStage.ANCHOR
+        assert str(failure) == "anchor_not_found"
+        assert failure.as_dict() == {"category": "anchor_not_found"}
+
+        assert "codename" not in str(failure)
+        assert "codename" not in repr(failure)
+        assert "codename" not in str(failure.args)
+
+        cause = failure.__cause__
+        assert isinstance(cause, exceptions.NoSuchAnchor)
+        assert cause.anchor == "codename"
+
+    def test_unsanitized_lookup_is_unchanged(self):
+        """
+        By default, lookup continues to raise the original detailed errors.
+        """
+
+        resource = Resource.opaque({"customer": {}})
+        resolver = Registry({"urn:customer:codename": resource}).resolver()
+
+        with pytest.raises(exceptions.PointerToNowhere):
+            resolver.lookup("urn:customer:codename#/customer/missing")
+
+    def test_successful_lookup_still_returns_resolution(self):
+        resource = Resource.opaque({"customer": 12})
+        resolver = Registry({"urn:customer:codename": resource}).resolver()
+
+        resolved = resolver.lookup(
+            "urn:customer:codename#/customer",
+            sanitize=True,
+        )
+        assert resolved.contents == 12
+
+    def test_non_resolution_failure_is_rejected(self):
+        with pytest.raises(TypeError, match="ValueError"):
+            exceptions.ResolutionFailure.from_exception(ValueError("boom"))
+
+    def test_retrieved_resource_without_specification(self):
+        """
+        A retrieved resource whose specification cannot be determined is
+        sanitized and remains diagnosable.
+        """
+
+        def retrieve(uri):
+            return Resource.from_contents({"not": "a schema"})
+
+        resolver = Registry(retrieve=retrieve).resolver()
+        with pytest.raises(exceptions.ResolutionFailure) as e:
+            resolver.lookup("urn:customer:codename", sanitize=True)
+
+        failure = e.value
+        assert failure.category is (
+            exceptions.FailureCategory.RETRIEVAL_UNAVAILABLE
+        )
+        assert failure.stage is exceptions.ResolutionStage.SPECIFICATION
+        assert isinstance(
+            failure.__cause__,
+            exceptions.CannotDetermineSpecification,
+        )
+        assert "codename" not in str(failure)
+        assert "codename" not in repr(failure)
+
+
 class TestSpecification:
     def test_create_resource(self):
         specification = Specification(

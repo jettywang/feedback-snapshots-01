@@ -2,6 +2,17 @@
 Changelog
 =========
 
+v0.38.0
+-------
+
+* Add ``exceptions.ResolutionFailure``, a sanitized representation of a failed
+  reference lookup.
+  Its message contains only an actionable ``category`` (one of retrieval
+  unavailable, pointer not found, or anchor not found), while its ``__cause__``
+  retains the original exception and its ``stage`` identifies the internal
+  resolution phase which failed.
+  Pass ``sanitize=True`` to ``Resolver.lookup`` to receive these failures.
+
 v0.37.0
 -------
 

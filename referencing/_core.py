@@ -645,9 +645,16 @@ class Resolver(Generic[D]):
     _registry: Registry[D] = field(alias="registry")
     _previous: List[URI] = field(default=List(), repr=False, alias="previous")
 
-    def lookup(self, ref: URI) -> Resolved[D]:
+    def lookup(self, ref: URI, *, sanitize: bool = False) -> Resolved[D]:
         """
         Resolve the given reference to the resource it points to.
+
+        Args:
+            ref: The reference to resolve.
+            sanitize: If true, resolution failures are raised as a
+                `referencing.exceptions.ResolutionFailure`, whose message
+                contains only an actionable category and whose ``__cause__``
+                retains the original exception for in-process diagnostics.
 
         Raises:
 
@@ -668,7 +675,22 @@ class Resolver(Generic[D]):
                 contains a JSON pointer to a location within the resource
                 that does not exist
 
+            `exceptions.ResolutionFailure`
+
+                if ``sanitize`` is true and resolution fails
+
         """
+        try:
+            return self._lookup(ref)
+        except (
+            exceptions.Unresolvable,
+            exceptions.CannotDetermineSpecification,
+        ) as error:
+            if not sanitize:
+                raise
+            raise exceptions.ResolutionFailure.from_exception(error) from error
+
+    def _lookup(self, ref: URI) -> Resolved[D]:
         if ref.startswith("#"):
             uri, fragment = self._base_uri, ref[1:]
         else:

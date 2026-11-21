@@ -267,3 +267,36 @@ The above example would be written:
     print(resolver.lookup("https://json-schema.org/draft/2020-12/schema"))
 
 It is otherwise functionally equivalent to the above, other than that retrieval will not repeatedly make a web request.
+
+
+Sanitizing Resolution Failures
+------------------------------
+
+When a reference cannot be resolved, `referencing` normally raises an error describing exactly what failed, including the reference URI and the resource contents involved.
+That detail is useful in-process, but it can be undesirable to return to an external caller, for instance from a schema validation service, since URIs and schema names may reveal customer or project information.
+
+`referencing.exceptions.ResolutionFailure` is a sanitized failure representation suitable for that boundary.
+Its string representation contains only an actionable `referencing.exceptions.FailureCategory`, and its `~referencing.exceptions.ResolutionFailure.as_dict` method returns only that category.
+
+Request it via the ``sanitize`` keyword argument to `referencing._core.Resolver.lookup` (the method returned by `referencing.Registry.resolver`):
+
+.. code:: python
+
+    from referencing import Registry, Resource, exceptions
+
+    registry = Registry({"urn:example:root": Resource.opaque({"foo": {}})})
+    resolver = registry.resolver()
+
+    try:
+        resolver.lookup("urn:example:root#/foo/bar", sanitize=True)
+    except exceptions.ResolutionFailure as failure:
+        print(failure.category)
+        print(failure.as_dict())
+
+.. code:: text
+
+    pointer_not_found
+    {'category': 'pointer_not_found'}
+
+The original exception remains available as ``failure.__cause__``, so in-process diagnostics can still inspect the precise reference and underlying error.
+`~referencing.exceptions.ResolutionFailure.stage` additionally identifies the internal resolution phase which failed.
