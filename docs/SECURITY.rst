@@ -43,6 +43,14 @@ Out of scope: the decompressed *size* of archive members, which a caller bounds 
 ``max_extract_size`` argument to ``SevenZipFile``; and archives the caller has already
 chosen to trust.
 
+Related caller-side bounds: in a solid archive, extracting one member can require
+decompressing every member that precedes it in the same solid block, so the work needed
+to serve a request is not visible from the member's own size. ``get_extract_workload()``
+computes that decompression cost from the archive header before extraction starts, and
+the ``max_workload`` argument to ``SevenZipFile`` refuses requests whose cost exceeds
+the limit before any output is produced. A service can use them to accept or reject
+extraction requests against a verifiable limit.
+
 
 Hardening in the header parser
 ------------------------------

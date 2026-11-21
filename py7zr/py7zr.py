@@ -420,6 +420,10 @@ class SevenZipFile(contextlib.AbstractContextManager):
         on non-encrypted archives.
     :param max_extract_size: Upper bound on the total extracted data size
         in bytes. When the limit is exceeded, extraction stops with an error.
+    :param max_workload: Upper bound on the pre-extraction decompression
+        workload in bytes, as computed by :meth:`get_extract_workload`.
+        When the requested members require decompressing more than this,
+        extraction is refused with an error before any output is produced.
 
     **Attributes**
 
@@ -444,6 +448,8 @@ class SevenZipFile(contextlib.AbstractContextManager):
     :ivar mp: ``True`` when multiprocessing extraction is enabled.
     :ivar dereference: ``True`` when symbolic links are followed.
     :ivar max_extract_size: Maximum allowed extracted data size in bytes.
+    :ivar max_workload: Maximum allowed pre-extraction decompression
+        workload in bytes.
     :ivar encoded_header_mode: ``True`` when the header is stored in
         compressed form.
     :ivar header_encryption: ``True`` when the header is encrypted.
@@ -488,6 +494,7 @@ class SevenZipFile(contextlib.AbstractContextManager):
         blocksize: int | None = None,
         mp: bool = False,
         max_extract_size: int | None = None,
+        max_workload: int | None = None,
     ) -> None:
         # check invalid mode.
         if mode not in ("r", "w", "x", "a"):
@@ -496,6 +503,7 @@ class SevenZipFile(contextlib.AbstractContextManager):
         self.mp = mp
         self.password_protected = password is not None
         self.max_extract_size = max_extract_size
+        self.max_workload = max_workload
         if blocksize:
             self._block_size = blocksize
         else:
@@ -771,6 +779,14 @@ class SevenZipFile(contextlib.AbstractContextManager):
             else:
                 self.worker.register_filelike(f.id, outfilename)
                 target_files.append((outfilename, f.file_properties()))
+        if self.max_workload is not None:
+            selected_ids = {fid for fid, fileish in self.worker.target_filepath.items() if fileish is not None}
+            workload = self._compute_extract_workload(selected_ids)
+            if workload > self.max_workload:
+                raise DecompressionBombError(
+                    f"Extraction refused: decompression workload of {workload} bytes "
+                    f"exceeds limit of {self.max_workload} bytes"
+                )
         for target_dir in sorted(target_dirs):
             try:
                 target_dir.mkdir(parents=True)
@@ -1175,6 +1191,68 @@ class SevenZipFile(contextlib.AbstractContextManager):
             )
         return alist
 
+    @staticmethod
+    def _is_extract_target(filename: str, targets: Collection[str] | None, recursive: bool) -> bool:
+        if targets is None:
+            return True
+        if recursive:
+            return filename in targets or any(filename.startswith(target) for target in targets)
+        return filename in targets
+
+    def _compute_extract_workload(self, selected_ids: set[int]) -> int:
+        """Return the bytes the decompressor must produce for *selected_ids*.
+
+        Folders are decompressed sequentially from their first member, so
+        selecting a member of a solid block also counts every preceding
+        member of the same block. Members stored after the last selected
+        member of a block, and blocks without any selected member, are
+        never reached and do not count.
+        """
+        header = getattr(self, "header", None)
+        if header is None or header.main_streams is None:
+            return 0
+        total = 0
+        for folder in header.main_streams.unpackinfo.folders:
+            if folder.files is None:
+                continue
+            pending = 0
+            for f in folder.files:
+                pending += f.uncompressed
+                if f.id in selected_ids:
+                    total += pending
+                    pending = 0
+        return total
+
+    def get_extract_workload(
+        self,
+        targets: Collection[str] | None = None,
+        recursive: bool = False,
+    ) -> int:
+        """Return the decompression workload in bytes for extracting *targets*.
+
+        The workload is the number of uncompressed bytes the decompressor
+        must produce to extract the selected members, computed from the
+        archive header only. Because a solid block is decompressed
+        sequentially, selecting a member also counts every member that
+        precedes it in the same block, even when those members are not
+        selected themselves. Members after the last selected member of a
+        block and blocks without selected members do not count.
+
+        This is the same value that ``max_workload`` is checked against,
+        so a service can call it to accept or reject a request against a
+        verifiable limit before starting an extraction.
+
+        :param targets: A collection of member names, or ``None`` for all
+            members. Trailing slashes are ignored.
+        :param recursive: When ``True``, also count every member whose name
+            starts with one of the *targets*.
+        :return: The workload in uncompressed bytes.
+        """
+        if targets is not None:
+            targets = {remove_trailing_slash(target) for target in targets}
+        selected_ids = {f.id for f in self.files if self._is_extract_target(f.filename, targets, recursive)}
+        return self._compute_extract_workload(selected_ids)
+
     def extractall(
         self,
         path: Any | None = None,
@@ -1201,7 +1279,8 @@ class SevenZipFile(contextlib.AbstractContextManager):
         :raises PasswordRequired: If the archive is encrypted and no password
             was given.
         :raises DecompressionBombError: If the extracted size exceeds
-            ``max_extract_size``.
+            ``max_extract_size``, or if the decompression workload for the
+            requested members exceeds ``max_workload``.
         """
         self._extract(path=path, callback=callback, writer_factory=factory)
 
@@ -1234,6 +1313,9 @@ class SevenZipFile(contextlib.AbstractContextManager):
         :param factory: An optional :class:`WriterFactory`; see
             :meth:`extractall`.
         :raises TypeError: If *targets* is not a collection or ``None``.
+        :raises DecompressionBombError: If the decompression workload for
+            *targets* exceeds ``max_workload``; see
+            :meth:`get_extract_workload`.
         """
         if not self._is_none_or_collection(targets):
             raise TypeError(
