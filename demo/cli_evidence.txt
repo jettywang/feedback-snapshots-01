@@ -1,0 +1,23 @@
+### 1) validator: NEW service rejects orphan aliases (rc must be 1)
+Unknown rule found in policy file: widget:post
+Unknown rule found in policy file: gizmo:edit
+Unknown rule found in policy file: thing:admin
+rc=1 (1 expected)
+
+### 2) validator: NEW service accepts the cleaned file (rc must be 0)
+rc=0 (0 expected)
+
+### 3) validator: OLD service accepts canonical-name file (rc must be 0)
+rc=0 (0 expected)
+
+### 4) list-redundant: flags thing:admin override as removable
+"thing:admin": "role:admin"
+
+### 5) policy-upgrade: rewrites aliases to canonical names
+gizmo:update: role:admin or role:ops-gizmo
+thing:admin: role:admin
+widget:create: role:viewer
+
+### 6) checker: raw file-rule decisions with fake credentials
+passed: widget:post
+passed: gizmo:edit

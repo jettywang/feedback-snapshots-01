@@ -1,0 +1,6 @@
+# Phase C (service upgraded to NEW release, dead overrides removed):
+# thing:admin is gone from the code, so its override was dropped.
+# widget:create / gizmo:update overrides are kept deliberately because they
+# differ from the in-code defaults (they are load-bearing, not redundant).
+"widget:create": "role:viewer"
+"gizmo:update": "role:admin or role:ops-gizmo"

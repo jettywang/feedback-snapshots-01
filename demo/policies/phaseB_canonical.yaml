@@ -1,0 +1,7 @@
+# Phase B (site config migrated, service still on OLD release):
+# same effective check strings, keyed by the CANONICAL names the new
+# release registers. The old release also registers these names, so this
+# file loads cleanly on both releases.
+"widget:create": "role:viewer"
+"gizmo:update": "role:admin or role:ops-gizmo"
+"thing:admin": "role:admin"

@@ -1,0 +1,146 @@
+==============================================================================
+SCENARIO: PHASE A - old service + site file on ALIASES (END=True)
+  service release     : old
+  policy file         : policies/phaseA_aliases.yaml
+  enforce_new_defaults: True
+------------------------------------------------------------------------------
+  effective in-memory rules after load:
+    widget:create   -> role:member
+    gizmo:update    -> (role:admin or role:ops-gizmo)
+    thing:admin     -> role:admin
+  rules loaded from the site file (file_rules):
+    ['gizmo:edit', 'thing:admin', 'widget:post']
+  DEPRECATION warnings (the engine telling you an alias is in play):
+    ! Policy "widget:post":"role:viewer" was deprecated in 2025.1 in favor of "widget:create":"role:member". Reason: widget:post renamed to widget:create and default tightened from viewer to member. Either ensure your deplo...
+    ! Policy "gizmo:edit":"role:admin" was deprecated in 2025.1 in favor of "gizmo:update":"role:admin". Reason: gizmo:edit renamed to gizmo:update. Either ensure your deployment is ready for the new default or copy/paste t...
+    ! Policy "thing:admin":"role:admin" was deprecated for removal in 2025.1. Reason: thing:admin is no longer enforced by the service. Its value may be silently ignored in the future.
+  AUTHORIZATION EVIDENCE (real Enforcer.authorize results):
+    rule \ user             legacy-user          ops-user       member-user        admin-user       nobody-user
+    widget:create                   DENY              DENY             ALLOW              DENY              DENY
+    gizmo:update                    DENY             ALLOW              DENY             ALLOW              DENY
+    thing:admin                     DENY              DENY              DENY             ALLOW              DENY
+
+==============================================================================
+SCENARIO: PHASE A - old service + site file on ALIASES (END=False)
+  service release     : old
+  policy file         : policies/phaseA_aliases.yaml
+  enforce_new_defaults: False
+------------------------------------------------------------------------------
+  effective in-memory rules after load:
+    widget:create   -> (role:member or role:viewer)
+    gizmo:update    -> (role:admin or role:ops-gizmo)
+    thing:admin     -> role:admin
+  rules loaded from the site file (file_rules):
+    ['gizmo:edit', 'thing:admin', 'widget:post']
+  DEPRECATION warnings (the engine telling you an alias is in play):
+    ! Policy "widget:post":"role:viewer" was deprecated in 2025.1 in favor of "widget:create":"role:member". Reason: widget:post renamed to widget:create and default tightened from viewer to member. Either ensure your deplo...
+    ! Policy "widget:post":"role:viewer" was deprecated in 2025.1 in favor of "widget:create":"role:member". Reason: widget:post renamed to widget:create and default tightened from viewer to member. Either ensure your deplo...
+    ! Policy "gizmo:edit":"role:admin" was deprecated in 2025.1 in favor of "gizmo:update":"role:admin". Reason: gizmo:edit renamed to gizmo:update. Either ensure your deployment is ready for the new default or copy/paste t...
+    ! Policy "thing:admin":"role:admin" was deprecated for removal in 2025.1. Reason: thing:admin is no longer enforced by the service. Its value may be silently ignored in the future.
+  AUTHORIZATION EVIDENCE (real Enforcer.authorize results):
+    rule \ user             legacy-user          ops-user       member-user        admin-user       nobody-user
+    widget:create                  ALLOW              DENY             ALLOW              DENY              DENY
+    gizmo:update                    DENY             ALLOW              DENY             ALLOW              DENY
+    thing:admin                     DENY              DENY              DENY             ALLOW              DENY
+
+==============================================================================
+SCENARIO: PHASE B - old service + site file migrated to CANONICAL names (END=True)
+  service release     : old
+  policy file         : policies/phaseB_canonical.yaml
+  enforce_new_defaults: True
+------------------------------------------------------------------------------
+  effective in-memory rules after load:
+    widget:create   -> role:viewer
+    gizmo:update    -> (role:admin or role:ops-gizmo)
+    thing:admin     -> role:admin
+  rules loaded from the site file (file_rules):
+    ['gizmo:update', 'thing:admin', 'widget:create']
+  DEPRECATION warnings (the engine telling you an alias is in play):
+    ! Policy "thing:admin":"role:admin" was deprecated for removal in 2025.1. Reason: thing:admin is no longer enforced by the service. Its value may be silently ignored in the future.
+  AUTHORIZATION EVIDENCE (real Enforcer.authorize results):
+    rule \ user             legacy-user          ops-user       member-user        admin-user       nobody-user
+    widget:create                  ALLOW              DENY              DENY              DENY              DENY
+    gizmo:update                    DENY             ALLOW              DENY             ALLOW              DENY
+    thing:admin                     DENY              DENY              DENY             ALLOW              DENY
+
+==============================================================================
+SCENARIO: PHASE B - old service + site file migrated to CANONICAL names (END=False)
+  service release     : old
+  policy file         : policies/phaseB_canonical.yaml
+  enforce_new_defaults: False
+------------------------------------------------------------------------------
+  effective in-memory rules after load:
+    widget:create   -> role:viewer
+    gizmo:update    -> (role:admin or role:ops-gizmo)
+    thing:admin     -> role:admin
+  rules loaded from the site file (file_rules):
+    ['gizmo:update', 'thing:admin', 'widget:create']
+  DEPRECATION warnings (the engine telling you an alias is in play):
+    ! Policy "thing:admin":"role:admin" was deprecated for removal in 2025.1. Reason: thing:admin is no longer enforced by the service. Its value may be silently ignored in the future.
+  AUTHORIZATION EVIDENCE (real Enforcer.authorize results):
+    rule \ user             legacy-user          ops-user       member-user        admin-user       nobody-user
+    widget:create                  ALLOW              DENY              DENY              DENY              DENY
+    gizmo:update                    DENY             ALLOW              DENY             ALLOW              DENY
+    thing:admin                     DENY              DENY              DENY             ALLOW              DENY
+
+==============================================================================
+SCENARIO: PHASE C - new service + dead overrides removed (closeout)
+  service release     : new
+  policy file         : policies/phaseC_cleanup.yaml
+  enforce_new_defaults: True
+------------------------------------------------------------------------------
+  effective in-memory rules after load:
+    widget:create   -> role:viewer
+    gizmo:update    -> (role:admin or role:ops-gizmo)
+    thing:admin     -> <absent, fail-closed>
+  rules loaded from the site file (file_rules):
+    ['gizmo:update', 'widget:create']
+  AUTHORIZATION EVIDENCE (real Enforcer.authorize results):
+    rule \ user             legacy-user          ops-user       member-user        admin-user       nobody-user
+    widget:create                  ALLOW              DENY              DENY              DENY              DENY
+    gizmo:update                    DENY             ALLOW              DENY             ALLOW              DENY
+    thing:admin           NOT-REGISTERED    NOT-REGISTERED    NOT-REGISTERED    NOT-REGISTERED    NOT-REGISTERED
+
+==============================================================================
+SCENARIO: COUNTER-EXAMPLE - new service FIRST, orphan aliases left behind
+  service release     : new
+  policy file         : policies/wrong_order_orphan_aliases.yaml
+  enforce_new_defaults: True
+------------------------------------------------------------------------------
+  effective in-memory rules after load:
+    widget:create   -> role:member
+    gizmo:update    -> role:admin
+    thing:admin     -> role:admin
+  rules loaded from the site file (file_rules):
+    ['gizmo:edit', 'thing:admin', 'widget:post']
+  AUTHORIZATION EVIDENCE (real Enforcer.authorize results):
+    rule \ user             legacy-user          ops-user       member-user        admin-user       nobody-user
+    widget:create                   DENY              DENY             ALLOW              DENY              DENY
+    gizmo:update                    DENY              DENY              DENY             ALLOW              DENY
+    thing:admin           NOT-REGISTERED    NOT-REGISTERED    NOT-REGISTERED    NOT-REGISTERED    NOT-REGISTERED
+
+==============================================================================
+SCENARIO: hot reload + rollback inside one long-lived enforcer process
+------------------------------------------------------------------------------
+  1) initial state (Phase A alias override):
+     widget:create for legacy-user = False
+  2) after swapping in Phase B file and force_reload:
+     widget:create for legacy-user = True (must equal step 1)
+  3) ROLLBACK: restored backup, force_reload again:
+     widget:create for legacy-user = False (back to step 1)
+  rollback artifact kept at: backups/phaseA_aliases.yaml.bak
+
+==============================================================================
+SCENARIO: exception injection and where the rollback point is
+------------------------------------------------------------------------------
+  1) good file loads; gizmo:update for ops-user = True
+  2) broken file (references undefined rule):
+     check_rules flags undefined rule names: ['widget:create']
+     authorize still fail-closed for legacy-user = False
+  3) malformed YAML on next load:
+     ValueError raised by parser: while parsing a block mapping
+     -> the previously running process keeps its last good in-memory
+        rules until restart; restart would fail, so restore the backup.
+  4) after restoring backup, gizmo:update for ops-user = True
+  rollback artifact kept at: backups/phaseB_canonical.yaml.bak
+

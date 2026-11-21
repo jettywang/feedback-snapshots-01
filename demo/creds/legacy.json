@@ -1,0 +1,1 @@
+{"token": {"user": {"id": "u-legacy"}, "project": {"id": "proj-fake-1"}, "roles": [{"name": "viewer", "id": "r-viewer"}, {"name": "legacy-ops", "id": "r-legacy-ops"}]}}

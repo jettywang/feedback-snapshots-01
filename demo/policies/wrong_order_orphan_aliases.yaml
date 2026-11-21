@@ -1,0 +1,5 @@
+# COUNTER-EXAMPLE (service upgraded FIRST, site file never migrated):
+# these names no longer exist in the NEW release's registration.
+"widget:post": "role:viewer"
+"gizmo:edit": "role:admin or role:ops-gizmo"
+"thing:admin": "role:admin"

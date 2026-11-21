@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fakesvc"
+version = "0.0.1"
+requires-python = ">=3.10"
+
+[project.entry-points."oslo.policy.enforcer"]
+fakesvc_old = "fakesvc:old_enforcer"
+fakesvc_new = "fakesvc:new_enforcer"
+
+[tool.setuptools]
+packages = ["fakesvc"]

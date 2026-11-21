@@ -1,0 +1,5 @@
+# Phase A (site config BEFORE service upgrade):
+# operator overrides expressed with the OLD alias names.
+"widget:post": "role:viewer"
+"gizmo:edit": "role:admin or role:ops-gizmo"
+"thing:admin": "role:admin"
