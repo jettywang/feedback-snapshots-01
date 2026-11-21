@@ -609,6 +609,13 @@ DEFAULT_CONFIG_SCHEMA: types.CONFIG_SCHEMA = OrderedDict([
             "value": "False",
             "help": "strict preconditions check on PUT",
             "type": bool}),
+        ("verify_collection_replace", {
+            "value": "False",
+            "help": "verify the staged items of a whole-collection replacement "
+                    "(format, collection tag membership, unique UIDs) before "
+                    "the new collection is published; a failed verification "
+                    "keeps the previous collection and its sync tokens",
+            "type": bool}),
         ("filesystem_fsync", {
             "value": "True",
             "help": "sync all changes to filesystem during requests",

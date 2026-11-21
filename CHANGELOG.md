@@ -18,6 +18,7 @@
 * Fix: hook: a CANCEL for an event with no SEQUENCE is sent with SEQUENCE:1. Building that message used to fail
 * Fix: hook: notify on a whole-collection PUT. The prepared items were consumed while the collection was stored, so the hook never saw them
 * Fix: hook: a whole-collection PUT reports a replaced item's previous body as old_content and the uploaded body as content. The filename written for each item was discarded, so every item was reported as new
+* Add: [storage] verify_collection_replace: verify the staged items of a whole-collection replacement (format, collection tag membership, unique UIDs) before publishing the new collection; a failed check keeps the previous collection and its sync tokens
 
 ## 3.9.2
 * Fix: [server] report an inactive SSL protocol before assigning version 0

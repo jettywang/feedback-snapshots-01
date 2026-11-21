@@ -295,6 +295,11 @@ type = none
 # Strict preconditions check on PUT
 #strict_preconditions = False
 
+# Verify the staged items of a whole-collection replacement before the new collection is published
+# Checked on disk in the temporary staging area: item format, membership in the collection tag, unique UIDs
+# A failed verification rejects the request and keeps the previous collection and its sync tokens
+#verify_collection_replace = False
+
 # Command that is run after changes to storage, default is emtpy
 #  Supported placeholders:
 #   %(user)s: logged-in user

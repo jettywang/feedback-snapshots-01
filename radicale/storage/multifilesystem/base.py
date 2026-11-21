@@ -84,6 +84,7 @@ class StorageBase(storage.BaseStorage):
     _config_umask: int
     _max_resource_size: int
     _group_collections_folder: str
+    _verify_collection_replace: bool
 
     def __init__(self, configuration: config.Configuration) -> None:
         super().__init__(configuration)
@@ -109,6 +110,8 @@ class StorageBase(storage.BaseStorage):
             "server", "max_resource_size")
         self._max_vevent_rrule_occurrence = configuration.get("server", "max_vevent_rrule_occurrence")
         self._group_collections_folder = configuration.get("group", "group_collections_folder")
+        self._verify_collection_replace = configuration.get(
+            "storage", "verify_collection_replace")
 
     def _get_collection_root_folder(self) -> str:
         return os.path.join(self._filesystem_folder, "collection-root")

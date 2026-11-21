@@ -19,7 +19,7 @@
 
 import os
 from tempfile import TemporaryDirectory
-from typing import Dict, Iterable, List, Optional, Tuple, cast
+from typing import Dict, Iterable, List, Optional, Set, Tuple, cast
 
 import radicale.item as radicale_item
 from radicale import pathutils
@@ -29,6 +29,56 @@ from radicale.storage.multifilesystem.base import StorageBase
 
 
 class StoragePartCreateCollection(StorageBase):
+
+    # Item component names that belong to a collection tag.
+    _TAG_ITEM_NAMES = {
+        "VCALENDAR": frozenset(("VEVENT", "VTODO", "VJOURNAL")),
+        "VADDRESSBOOK": frozenset(("VCARD", "VLIST")),
+    }
+
+    def _verify_staged_collection(
+            self, tmp_collection: "multifilesystem.Collection") -> None:
+        """Verify a staged collection before it is published.
+
+        Every item is re-read from the temporary directory so that the format
+        on disk, the membership in the collection tag and the uniqueness of
+        the UIDs are checked. Raises ValueError on the first problem; the
+        caller discards the temporary directory and keeps the existing
+        collection untouched.
+        """
+        tag = tmp_collection.tag
+        if tag not in self._TAG_ITEM_NAMES:
+            raise ValueError("Unsupported collection tag: %r" % tag)
+        allowed_item_names = self._TAG_ITEM_NAMES[tag]
+        seen_uids: Set[str] = set()
+        for href in tmp_collection._list():
+            try:
+                item = tmp_collection._get(href, verify_href=False)
+            except ValueError as e:
+                raise ValueError(
+                    "Failed to verify item %r in temporary collection %r: %s" %
+                    (href, tmp_collection.path, e)) from e
+            if item is None:
+                raise ValueError(
+                    "Failed to verify item %r in temporary collection %r: "
+                    "unreadable" % (href, tmp_collection.path))
+            # A calendar item is a VCALENDAR wrapper; its component_name names
+            # the contained VEVENT/VTODO/VJOURNAL. An address book item names
+            # its component (VCARD/VLIST) directly.
+            item_name = (item.component_name
+                         if tag == "VCALENDAR" else item.name)
+            if item_name not in allowed_item_names:
+                raise ValueError(
+                    "Item type %r not supported in %r collection (item %r "
+                    "in temporary collection %r)" %
+                    (item_name, tag, href, tmp_collection.path))
+            if item.uid in seen_uids:
+                raise ValueError(
+                    "UID conflict %r in temporary collection %r (item %r)" %
+                    (item.uid, tmp_collection.path, href))
+            seen_uids.add(item.uid)
+        logger.debug("Verified staged collection %r: %d item(s)",
+                     tmp_collection.path, len(seen_uids))
 
     def _discover_existing_items_pre_overwrite(self,
                                                tmp_collection: "multifilesystem.Collection",
@@ -97,6 +147,12 @@ class StoragePartCreateCollection(StorageBase):
                         col._upload_all_nonatomic(items, suffix=".ics")
                     elif props.get("tag") == "VADDRESSBOOK":
                         col._upload_all_nonatomic(items, suffix=".vcf")
+
+                if self._verify_collection_replace:
+                    logger.debug(
+                        "Verify staged collection before publishing: %r",
+                        filesystem_path)
+                    self._verify_staged_collection(col)
 
                 if os.path.lexists(filesystem_path):
                     replaced_items, new_item_hrefs = self._discover_existing_items_pre_overwrite(

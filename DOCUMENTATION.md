@@ -1807,6 +1807,27 @@ Strict preconditions check on PUT in case item already exists [RFC6352#9.2](http
 
 Default: `False`
 
+##### verify_collection_replace
+
+Verify the staged items of a whole-collection replacement (a PUT that replaces
+an existing collection) before the new collection is published.
+
+The new content is first written to a temporary staging area. With this option
+enabled, every staged item is re-read from disk and checked for:
+
+* a format that can be parsed and stored
+* membership in the collection tag (only events, todos and journals in a
+  calendar; only vCards and lists in an address book)
+* a unique UID within the collection
+
+The replacement is published only when every check passes. If a check fails or
+a write to the staging area fails, the request is rejected and the previous
+collection stays in place, including its items and sync tokens. Clients
+synchronizing against an old sync token therefore never see a partially
+imported address book or calendar.
+
+Default: `False`
+
 ##### hook
 
 Command that is run after changes to storage. See the
