@@ -72,6 +72,37 @@ module Rack
     #     legacy_hmac: OpenSSL::Digest::SHA256
     #   })
     #
+    # === Rotating the secret and cookie format
+    #
+    # A release can rotate both the session secret and the cookie format at
+    # once, using an explicit read/write rotation policy. New cookies are
+    # always written in the current format (encrypted with the first of
+    # :secrets); legacy HMAC cookies are only ever read, and only until the
+    # :legacy_hmac_until deadline. Once the deadline has passed, legacy
+    # cookies are rejected without verification and only the current format
+    # is accepted:
+    #
+    #   Rack::Session::Cookie.new(application, {
+    #     # Write and read the current (encrypted) format:
+    #     secrets: [new_secret],
+    #     # Read-only support for the previous format and secret:
+    #     legacy_hmac_secret: old_secret,
+    #     # Legacy cookies are accepted until this time, then rejected:
+    #     legacy_hmac_until: Time.utc(2027, 1, 1),
+    #   })
+    #
+    # For every request, the middleware records how the presented cookie was
+    # handled in env['rack.session.rotation'] (available once the session has
+    # been accessed), as one of:
+    #
+    # * :current - the cookie verified against the current format.
+    # * :legacy - the cookie verified against the legacy HMAC format; the
+    #   session is re-issued in the current format in the response.
+    # * :legacy_expired - a legacy cookie was presented after the
+    #   :legacy_hmac_until deadline and was rejected.
+    # * :invalid - the cookie could not be verified by any means.
+    # * :none - no session cookie was presented.
+    #
     # Example of a cookie with no encoding:
     #
     #   Rack::Session::Cookie.new(application, {
@@ -177,6 +208,7 @@ module Rack
 
           @legacy_hmac_secret = options[:legacy_hmac_secret] || options[:secret]
           @legacy_hmac_coder  = options.fetch(:legacy_hmac_coder, Base64::Marshal.new)
+          @legacy_hmac_until  = options[:legacy_hmac_until]
         else
           @legacy_hmac = false
         end
@@ -212,13 +244,17 @@ module Rack
 
       def unpacked_cookie_data(request)
         request.fetch_header(RACK_SESSION_UNPACKED_COOKIE_DATA) do |k|
+          rotation = :none
+
           if cookie_data = request.cookies[@key]
             session_data = nil
+            rotation = :invalid
 
             # Try to decrypt the session data with our encryptors
             encryptors.each do |encryptor|
               begin
                 session_data = encryptor.decrypt(cookie_data)
+                rotation = :current
                 break
               rescue Rack::Session::Encryptor::Error => error
                 request.env[Rack::RACK_ERRORS].puts "Session cookie encryptor error: #{error.message}"
@@ -230,21 +266,34 @@ module Rack
             # If session decryption fails but there is @legacy_hmac_secret
             # defined, attempt legacy HMAC verification
             if !session_data && @legacy_hmac_secret
-              # Parse and verify legacy HMAC session cookie
-              session_data, _, digest = cookie_data.rpartition('--')
-              session_data = nil unless legacy_digest_match?(session_data, digest)
+              if legacy_hmac_expired?
+                # The rotation deadline has passed: reject the legacy cookie
+                # without verifying it. Only the current format is accepted.
+                rotation = :legacy_expired
+                request.env[Rack::RACK_ERRORS].puts "Session cookie rejected: legacy HMAC format expired at #{@legacy_hmac_until}"
+              else
+                # Parse and verify legacy HMAC session cookie
+                session_data, _, digest = cookie_data.rpartition('--')
+                session_data = nil unless legacy_digest_match?(session_data, digest)
 
-              # Decode using legacy HMAC decoder
-              session_data = @legacy_hmac_coder.decode(session_data)
+                # Decode using legacy HMAC decoder
+                session_data = @legacy_hmac_coder.decode(session_data)
+
+                # The legacy cookie is still accepted; the session will be
+                # re-issued in the current format when the response commits.
+                rotation = :legacy if session_data
+              end
 
             elsif !session_data && encryptors.empty? && coder
               # Use the coder option, which has the potential to be very unsafe.
               # This path is only reached when no encryptors (secrets:) are configured;
               # if encryptors are present but decryption failed, the cookie is rejected.
               session_data = coder.decode(cookie_data)
+              rotation = :current if session_data
             end
           end
 
+          request.set_header(RACK_SESSION_ROTATION, rotation)
           request.set_header(k, session_data || {})
         end
       end
@@ -285,6 +334,13 @@ module Rack
         return false unless data && digest
 
         Rack::Utils.secure_compare(digest, legacy_generate_hmac(data))
+      end
+
+      # Whether the legacy HMAC rotation deadline has passed. When a
+      # :legacy_hmac_until time is configured, legacy cookies are only
+      # accepted before that time.
+      def legacy_hmac_expired?
+        @legacy_hmac_until && Time.now >= @legacy_hmac_until
       end
 
       def legacy_generate_hmac(data)
