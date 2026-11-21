@@ -35,6 +35,42 @@ An archive can be extracted only once per open. To extract again from the same
 first, or reopen the archive.
 
 
+.. _restrict-allowed-methods:
+
+Restrict allowed compression methods
+====================================
+
+An import service may only accept compression methods that operations has
+validated. Pass ``allowed_methods`` to :class:`~py7zr.SevenZipFile` with the
+``FILTER_*`` IDs that are approved for decoding:
+
+.. code-block:: python
+
+    from py7zr import FILTER_DEFLATE, FILTER_LZMA2, SevenZipFile
+
+    approved = [FILTER_LZMA2, FILTER_DEFLATE]
+    with SevenZipFile('incoming.7z', 'r', allowed_methods=approved) as archive:
+        names = archive.getnames()   # header only: always available
+        archive.extractall(path='out')
+
+The policy is evaluated from the archive header before any decoder or
+:class:`~py7zr.WriterFactory` product is created. A member whose folder uses a
+method outside the list -- including a method py7zr cannot decode at all --
+raises :class:`~py7zr.UnsupportedCompressionMethodError`, and no data is
+decompressed. Because the header is parsed independently,
+:meth:`~py7zr.SevenZipFile.list`, :meth:`~py7zr.SevenZipFile.getnames` and
+:meth:`~py7zr.SevenZipFile.archiveinfo` keep working, so an archive can be
+inspected and triaged even when its payload is rejected.
+
+Build the full capability list with
+:meth:`~py7zr.SupportedMethods.supported_filter_ids`. With no argument
+(the default) every method py7zr supports remains allowed. With targeted
+:meth:`~py7zr.SevenZipFile.extract`, only the folders behind the selected
+members are checked, so an allowed member in an otherwise non-compliant
+archive can still be read. :meth:`~py7zr.SevenZipFile.testzip` enforces the
+same policy before decompressing.
+
+
 .. _stream-7z-content:
 
 Stream 7z content

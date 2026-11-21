@@ -420,6 +420,14 @@ class SevenZipFile(contextlib.AbstractContextManager):
         on non-encrypted archives.
     :param max_extract_size: Upper bound on the total extracted data size
         in bytes. When the limit is exceeded, extraction stops with an error.
+    :param allowed_methods: Optional allowlist of compression filter IDs (the
+        ``FILTER_*`` constants) that may be used when decoding. When given,
+        extraction and :meth:`testzip` reject any member whose folder uses a
+        method not in the list -- including methods py7zr cannot decode at
+        all -- with :class:`UnsupportedCompressionMethodError`, before any
+        decoder or :class:`WriterFactory` is invoked. Directory listing and
+        :meth:`namelist` stay available because they only read the header.
+        ``None`` (the default) permits every method py7zr supports.
 
     **Attributes**
 
@@ -447,6 +455,8 @@ class SevenZipFile(contextlib.AbstractContextManager):
     :ivar encoded_header_mode: ``True`` when the header is stored in
         compressed form.
     :ivar header_encryption: ``True`` when the header is encrypted.
+    :ivar allowed_methods: Frozen set of filter IDs allowed for decoding,
+        or ``None`` when no policy is configured.
 
     **Pack data positioning**
 
@@ -488,6 +498,7 @@ class SevenZipFile(contextlib.AbstractContextManager):
         blocksize: int | None = None,
         mp: bool = False,
         max_extract_size: int | None = None,
+        allowed_methods: Collection[int] | None = None,
     ) -> None:
         # check invalid mode.
         if mode not in ("r", "w", "x", "a"):
@@ -496,6 +507,9 @@ class SevenZipFile(contextlib.AbstractContextManager):
         self.mp = mp
         self.password_protected = password is not None
         self.max_extract_size = max_extract_size
+        # Configurable decoding capability list: None means no policy,
+        # otherwise only folders whose methods are in the set may be decoded.
+        self.allowed_methods: frozenset[int] | None = None if allowed_methods is None else frozenset(allowed_methods)
         if blocksize:
             self._block_size = blocksize
         else:
@@ -707,6 +721,10 @@ class SevenZipFile(contextlib.AbstractContextManager):
             self.reporterd.start()
         else:
             raise ValueError("Callback specified is not an instance of subclass of py7zr.callbacks.ExtractCallback class")
+        # Enforce the decoding policy before any output directory, decoder or
+        # WriterFactory product is touched, so a disallowed member is rejected
+        # while the archive directory listing remains readable.
+        self._enforce_decoding_policy(targets, recursive)
         target_files: list[tuple[pathlib.Path, FileInfoDict]] = []
         target_dirs: list[pathlib.Path] = []
         if path is not None:
@@ -818,6 +836,39 @@ class SevenZipFile(contextlib.AbstractContextManager):
                 ro_mask = 0o777 ^ (stat.S_IWRITE | stat.S_IWGRP | stat.S_IWOTH)
                 outfilename.chmod(outfilename.stat().st_mode & ro_mask)
         return None
+
+    def _selected_folders(self, targets: Collection[str] | None, recursive: bool | None) -> list[Folder]:
+        """Collect the folders behind the members an extraction would decode.
+
+        Directories and empty-stream members carry no packed data, so they
+        never need a decoder and are exempt from the decoding policy.
+        """
+        folders: list[Folder] = []
+        for member in self.files:
+            if targets is not None and recursive is False:
+                if member.filename not in targets:
+                    continue
+            elif targets is not None and recursive is True:
+                if member.filename not in targets and not any(
+                    [member.filename.startswith(target) for target in targets]
+                ):
+                    continue
+            folder = member.folder
+            if folder is not None and folder not in folders:
+                folders.append(folder)
+        return folders
+
+    def _enforce_decoding_policy(self, targets: Collection[str] | None = None, recursive: bool | None = False) -> None:
+        """Reject disallowed compression methods before decoders are created.
+
+        No-op when no ``allowed_methods`` policy was configured. Otherwise
+        every folder that a requested member depends on is checked against
+        the allowlist using header metadata only.
+        """
+        if self.allowed_methods is None:
+            return
+        for folder in self._selected_folders(targets, recursive):
+            SupportedMethods.check_decoding_policy(folder.coders, self.allowed_methods)
 
     def _prepare_append(self, filters, password):
         if password is not None and filters is None:
@@ -1478,6 +1529,7 @@ class SevenZipFile(contextlib.AbstractContextManager):
         :return: The name of the first member with a bad CRC, or ``None`` if
             all members are intact.
         """
+        self._enforce_decoding_policy()
         self.fp.seek(self.pack_data_start)
         self.worker = Worker(self.files, self.pack_data_start, self.header, self.mp)
         for f in self.files:

@@ -27,6 +27,7 @@ import struct
 import sys
 import zlib
 from abc import ABC, abstractmethod
+from collections.abc import Collection
 from enum import Enum
 from typing import Any, BinaryIO, Tuple, Union
 
@@ -1168,6 +1169,41 @@ class SupportedMethods:
             "numinstreams": 1,
             "numoutstreams": 1,
         }
+
+    @classmethod
+    def supported_filter_ids(cls) -> list[int]:
+        """Return the filter IDs of every method py7zr knows how to decode."""
+        return [method["filter_id"] for method in cls.methods]
+
+    @classmethod
+    def get_coder_name(cls, coder: dict[str, Any]) -> str:
+        """Return the human-readable name of a coder method.
+
+        Unknown methods are rendered as a hexadecimal method id so that a
+        policy rejection can name the offending coder.
+        """
+        method = cls._find_method("id", coder["method"])
+        if method is None:
+            return "0x" + bytes(coder["method"]).hex()
+        return method["name"]
+
+    @classmethod
+    def check_decoding_policy(cls, coders: list[dict[str, Any]], allowed_filter_ids: Collection[int]) -> None:
+        """Raise :class:`UnsupportedCompressionMethodError` on a disallowed coder.
+
+        Every coder in the folder must map to a filter ID contained in
+        *allowed_filter_ids*. Unknown methods, which py7zr cannot decode
+        anyway, are rejected as well. The check is purely metadata based and
+        runs before any decoder is instantiated.
+        """
+        for coder in coders:
+            filter_id = cls.get_filter_id(coder)
+            if filter_id is None or filter_id not in allowed_filter_ids:
+                raise UnsupportedCompressionMethodError(
+                    coder,
+                    f"Compression method {cls.get_coder_name(coder)} is not allowed by the configured "
+                    f"decoding policy.",
+                )
 
     @classmethod
     def needs_password(cls, coders) -> bool:

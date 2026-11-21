@@ -9,6 +9,17 @@ All notable changes to this project will be documented in this file.
 `Unreleased`_
 =============
 
+Added
+-----
+- Configurable decoding capability list: ``SevenZipFile`` accepts an
+  ``allowed_methods`` argument of approved ``FILTER_*`` IDs. When set,
+  extraction and ``testzip()`` reject members whose folder uses a method
+  outside the list (including methods py7zr cannot decode) with
+  ``UnsupportedCompressionMethodError`` before any decoder or
+  ``WriterFactory`` runs, while header-based directory listing stays
+  available. ``SupportedMethods.supported_filter_ids()`` returns the full
+  built-in capability list.
+
 Changed
 -------
 - Switch the 7zAES crypto dependency from ``pycryptodomex`` (``Cryptodome``
