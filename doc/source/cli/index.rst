@@ -10,6 +10,7 @@ This document describes the various command line tools exposed by
 
    oslopolicy-checker
    oslopolicy-validator
+   oslopolicy-reachability
    oslopolicy-list-redundant
    oslopolicy-policy-generator
    oslopolicy-sample-generator

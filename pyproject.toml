@@ -39,6 +39,7 @@ oslopolicy-sample-generator = "oslo_policy.generator:generate_sample"
 oslopolicy-policy-generator = "oslo_policy.generator:generate_policy"
 oslopolicy-list-redundant = "oslo_policy.generator:list_redundant"
 oslopolicy-policy-upgrade = "oslo_policy.generator:upgrade_policy"
+oslopolicy-reachability = "oslo_policy.reachability_shell:main"
 oslopolicy-validator = "oslo_policy.generator:validate_policy"
 oslopolicy-convert-json-to-yaml = "oslo_policy.generator:convert_policy_json_to_yaml"
 

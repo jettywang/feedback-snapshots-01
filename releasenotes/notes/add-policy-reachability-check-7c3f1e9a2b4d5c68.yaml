@@ -1,0 +1,16 @@
+---
+features:
+  - |
+    Adds the ``oslopolicy-reachability`` command and the
+    ``oslo_policy.reachability`` module for read-only reachability analysis
+    of policy rules. Starting from registered actions, it follows every
+    ``rule:`` reference and reports which rules are reachable, reachable
+    actions that are explicitly disabled (``!``), deprecated legacy names,
+    and rules that are not referenced by any action.
+  - |
+    References to undefined rules and cyclical ``rule:`` references are
+    treated as blocking issues and reported with the full action chain that
+    introduces them, so they can be fixed before publishing an authorization
+    configuration. Rules that are simply unreachable are advisory only and do
+    not make the check fail, which keeps historical policy names retained for
+    backwards compatibility from being mistaken for release failures.
