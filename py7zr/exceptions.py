@@ -80,6 +80,15 @@ class PasswordRequired(Exception):
     """Raised when reading or writing an encrypted archive without a password."""
 
 
+class PasswordError(PasswordRequired):
+    """Raised when a supplied password cannot decrypt the archive.
+
+    A wrong password and a damaged encrypted header look the same to the
+    decoder, so both are reported with this exception.  The message never
+    contains the password itself.
+    """
+
+
 class DecompressionBombError(ArchiveError):
     """Exception raised when decompressed size exceeds the configured limit."""
 

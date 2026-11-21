@@ -29,9 +29,11 @@ from __future__ import annotations
 import collections.abc
 import contextlib
 import datetime
+import enum
 import errno
 import functools
 import io
+import lzma
 import os
 import pathlib
 import queue
@@ -58,6 +60,7 @@ from py7zr.exceptions import (
     DecompressionBombError,
     DecompressionError,
     InternalError,
+    PasswordError,
     PasswordRequired,
     UnsupportedCompressionMethodError,
 )
@@ -396,6 +399,52 @@ class FileInfo:
             )
 
 
+class EncryptionStatus(enum.Enum):
+    """Whether an archive needs a password.
+
+    :attr:`NOT_ENCRYPTED` -- the directory is readable and member data is
+    not encrypted.
+
+    :attr:`CONTENT_ENCRYPTED` -- the directory is readable, so member names
+    and sizes are known, but member data is encrypted.
+
+    :attr:`HEADER_ENCRYPTED` -- the header is encrypted, so member names
+    and sizes are protected.  Without a password the directory cannot be
+    listed and member data may be encrypted as well.
+    """
+
+    NOT_ENCRYPTED = "not_encrypted"
+    CONTENT_ENCRYPTED = "content_encrypted"
+    HEADER_ENCRYPTED = "header_encrypted"
+
+
+class ArchiveEncryptionInfo:
+    """Result of :func:`get_encryption_info`.
+
+    :ivar status: One of the :class:`EncryptionStatus` values.
+    :ivar needs_password: ``True`` for every status except
+        :attr:`EncryptionStatus.NOT_ENCRYPTED`.  For
+        :attr:`EncryptionStatus.HEADER_ENCRYPTED` this reflects that the
+        archive certainly needs one, not merely that it might.
+    :ivar directory_known: ``True`` when member names and sizes could be read.
+    :ivar member_count: Number of members when *directory_known*, else ``None``.
+    """
+
+    __slots__ = ["status", "needs_password", "directory_known", "member_count"]
+
+    def __init__(self, status: EncryptionStatus, member_count: int | None) -> None:
+        self.status = status
+        self.directory_known = status is not EncryptionStatus.HEADER_ENCRYPTED
+        self.needs_password = status is not EncryptionStatus.NOT_ENCRYPTED
+        self.member_count = member_count
+
+    def __repr__(self) -> str:
+        return (
+            f"ArchiveEncryptionInfo(status={self.status.name!r}, "
+            f"directory_known={self.directory_known!r}, member_count={self.member_count!r})"
+        )
+
+
 class SevenZipFile(contextlib.AbstractContextManager):
     """Provide an interface to 7z archives for reading, writing, and extracting.
 
@@ -440,13 +489,18 @@ class SevenZipFile(contextlib.AbstractContextManager):
     :ivar pack_data_start: File position where pack data begins, calculated
         as ``afterheader + packpos``. Used for all pack data positioning.
     :ivar password_protected: ``True`` when the archive contains encrypted
-        content.
+        content or an encrypted header.
     :ivar mp: ``True`` when multiprocessing extraction is enabled.
     :ivar dereference: ``True`` when symbolic links are followed.
     :ivar max_extract_size: Maximum allowed extracted data size in bytes.
     :ivar encoded_header_mode: ``True`` when the header is stored in
         compressed form.
-    :ivar header_encryption: ``True`` when the header is encrypted.
+    :ivar header_encryption: ``True`` when the archive was opened or created
+        with header encryption requested.  After reading, use
+        :meth:`encryption_status` for the value actually found in the
+        archive.
+    :ivar header_encrypted: ``True`` when the header read from the archive
+        was encrypted.
 
     **Pack data positioning**
 
@@ -494,7 +548,9 @@ class SevenZipFile(contextlib.AbstractContextManager):
             raise ValueError("SevenZipFile requires mode 'r', 'w', 'x', or 'a'")
         self.fp: IO[bytes]
         self.mp = mp
-        self.password_protected = password is not None
+        self.password: str | None = password
+        self.password_protected = False
+        self.header_encrypted = False
         self.max_extract_size = max_extract_size
         if blocksize:
             self._block_size = blocksize
@@ -602,6 +658,7 @@ class SevenZipFile(contextlib.AbstractContextManager):
             return
         header.size += 32 + self.sig_header.nextheadersize
         self.header = header
+        self.header_encrypted = getattr(header, "header_encrypted", False)
         # Calculate pack data start position once
         if self.header.main_streams is not None:
             self.pack_data_start = self.afterheader + self.header.main_streams.packinfo.packpos
@@ -691,6 +748,9 @@ class SevenZipFile(contextlib.AbstractContextManager):
             self.password_protected = any(
                 [SupportedMethods.needs_password(folder.coders) for folder in self.header.main_streams.unpackinfo.folders]
             )
+        if self.header_encrypted:
+            # The header itself needed a password even when member data does not.
+            self.password_protected = True
 
     def _extract(
         self,
@@ -830,6 +890,7 @@ class SevenZipFile(contextlib.AbstractContextManager):
                     raise UnsupportedCompressionMethodError(filters, "Compression with deflate64 is not supported.")
         if password is None and SupportedMethods.needs_password_for_filters(filters):
             raise PasswordRequired(filters, "Password is required for writing encrypted archive.")
+        self.password_protected = SupportedMethods.needs_password_for_filters(filters)
         self.header.filters = filters
         self.header.password = password
         if self.header.main_streams is not None:
@@ -846,6 +907,7 @@ class SevenZipFile(contextlib.AbstractContextManager):
             filters = DEFAULT_FILTERS.ARCHIVE_FILTER
         if password is None and SupportedMethods.needs_password_for_filters(filters):
             raise PasswordRequired(filters, "Password is required for writing encrypted archive.")
+        self.password_protected = SupportedMethods.needs_password_for_filters(filters)
         self.files = ArchiveFileList()
         self.sig_header = SignatureHeader()
         self.sig_header._write_skeleton(self.fp)
@@ -1147,8 +1209,27 @@ class SevenZipFile(contextlib.AbstractContextManager):
         )
 
     def needs_password(self) -> bool:
-        """Return ``True`` if the archive contains encrypted content."""
+        """Return ``True`` if the archive contains encrypted content.
+
+        An archive whose header could not be opened without a password
+        cannot answer this through this object; use
+        :func:`get_encryption_info` for the three-way answer the upload
+        service needs.
+        """
         return self.password_protected
+
+    def encryption_status(self) -> EncryptionStatus:
+        """Return whether this archive is encrypted.
+
+        Requires the archive to have been opened, so either the directory is
+        readable or a password was supplied.  Use
+        :func:`get_encryption_info` when no password is available.
+        """
+        if self.header_encrypted:
+            return EncryptionStatus.HEADER_ENCRYPTED
+        if self.password_protected:
+            return EncryptionStatus.CONTENT_ENCRYPTED
+        return EncryptionStatus.NOT_ENCRYPTED
 
     def list(self) -> list[FileInfo]:
         """Return information about all archive members.
@@ -1524,6 +1605,68 @@ def is_7zfile(file: SupportsReadAndSeek | IO[bytes] | str | os.PathLike[str]) ->
     raise TypeError(msg)
 
 
+def get_encryption_info(file: SupportsReadAndSeek | IO[bytes] | str | os.PathLike[str]) -> ArchiveEncryptionInfo:
+    """Classify whether a 7z archive needs a password, without one.
+
+    Intended for callers such as an upload service that must report the
+    encryption state before accepting credentials.  The three possible
+    results are:
+
+    * :attr:`EncryptionStatus.NOT_ENCRYPTED` -- the directory is readable
+      and no member data is encrypted.
+    * :attr:`EncryptionStatus.CONTENT_ENCRYPTED` -- the directory is
+      readable but member data is encrypted, the common case of a plain
+      header over encrypted content.
+    * :attr:`EncryptionStatus.HEADER_ENCRYPTED` -- member names and sizes
+      are encrypted, so the directory cannot be inspected and member data
+      may be encrypted as well.
+
+    Unlike :meth:`SevenZipFile.needs_password`, a password is never passed
+    in and therefore can never be logged or echoed; the result does not
+    depend on the caller supplying one.
+
+    :param file: Path to the archive, or a seekable binary file object.
+    :return: An :class:`ArchiveEncryptionInfo` describing the archive.
+    :raises Bad7zFile: If *file* is not a valid 7z archive or its header is
+        damaged.
+    :raises TypeError: If *file* is neither a path nor a file object.
+    """
+    if hasattr(file, "read") and hasattr(file, "seek"):
+        stream: IO[bytes] = file  # type: ignore[assignment]
+        try:
+            position = stream.tell()
+        except (OSError, io.UnsupportedOperation):  # pragma: no-cover
+            position = None
+        try:
+            stream.seek(0)
+            return _read_encryption_info(stream)
+        finally:
+            if position is not None:
+                stream.seek(position)
+
+    if isinstance(file, (str, os.PathLike)):
+        with open(os.fspath(file), mode="rb") as stream:
+            return _read_encryption_info(stream)
+
+    msg = (
+        f"Invalid 'file' argument: Expected a path-like object "
+        f"or a binary file-like object; got {type(file).__name__}."
+    )
+    raise TypeError(msg)
+
+
+def _read_encryption_info(stream: IO[bytes]) -> ArchiveEncryptionInfo:
+    try:
+        with SevenZipFile(stream, "r") as archive:
+            if archive.password_protected:
+                return ArchiveEncryptionInfo(EncryptionStatus.CONTENT_ENCRYPTED, len(archive.files))
+            return ArchiveEncryptionInfo(EncryptionStatus.NOT_ENCRYPTED, len(archive.files))
+    except PasswordRequired:
+        # The directory is encrypted, so no member list can be produced
+        # without a credential.  Nothing was decrypted, so this is certain.
+        return ArchiveEncryptionInfo(EncryptionStatus.HEADER_ENCRYPTED, None)
+
+
 def unpack_7zarchive(archive, path, extra=None):
     """Extract a 7z archive; a helper for :func:`shutil.register_unpack_format`.
 
@@ -1829,31 +1972,39 @@ class Worker:
         decompressor = folder.get_decompressor(compressed_size)
         previous_update_at = time.time()
         decompressed_bytes = 0
-        while out_remaining > 0:
-            src_pos = fp.tell()
-            tmp = decompressor.decompress(fp, min(out_remaining, max_block_size))
-            if len(tmp) > 0:
-                if self.max_extract_size is not None:
-                    self._total_extracted += len(tmp)
-                    if self._total_extracted > self.max_extract_size:
-                        raise DecompressionBombError(
-                            f"Extraction aborted: decompressed size {self._total_extracted} "
-                            f"exceeds limit of {self.max_extract_size} bytes"
-                        )
-                out_remaining -= len(tmp)
-                fq.write(tmp)
-                crc32 = calculate_crc32(tmp, crc32)
-            elif fp.tell() == src_pos:
-                raise Bad7zFile("decompression failed to make progress before reaching declared size")
-            if q is not None:
-                time_delta = time.time() - previous_update_at
-                decompressed_bytes += len(tmp)
-                if out_remaining <= 0 or time_delta >= 1:
-                    q.put(("u", None, str(decompressed_bytes)))
-                    previous_update_at += time_delta
-                    decompressed_bytes = 0
-            if out_remaining <= 0:
-                break
+        try:
+            while out_remaining > 0:
+                src_pos = fp.tell()
+                tmp = decompressor.decompress(fp, min(out_remaining, max_block_size))
+                if len(tmp) > 0:
+                    if self.max_extract_size is not None:
+                        self._total_extracted += len(tmp)
+                        if self._total_extracted > self.max_extract_size:
+                            raise DecompressionBombError(
+                                f"Extraction aborted: decompressed size {self._total_extracted} "
+                                f"exceeds limit of {self.max_extract_size} bytes"
+                            )
+                    out_remaining -= len(tmp)
+                    fq.write(tmp)
+                    crc32 = calculate_crc32(tmp, crc32)
+                elif fp.tell() == src_pos:
+                    raise Bad7zFile("decompression failed to make progress before reaching declared size")
+                if q is not None:
+                    time_delta = time.time() - previous_update_at
+                    decompressed_bytes += len(tmp)
+                    if out_remaining <= 0 or time_delta >= 1:
+                        q.put(("u", None, str(decompressed_bytes)))
+                        previous_update_at += time_delta
+                        decompressed_bytes = 0
+                if out_remaining <= 0:
+                    break
+        except (lzma.LZMAError, ValueError) as e:
+            # A wrong password produces garbage that the LZMA2 decoder in the
+            # chain rejects. Report it as a credential problem without echoing
+            # the password.
+            if folder.password is not None:
+                raise PasswordError("Password is wrong or the encrypted data is damaged.") from e
+            raise
         if fp.tell() >= src_end:
             if decompressor.crc is not None and not decompressor.check_crc():
                 raise CrcError(decompressor.crc, decompressor.digest, None)

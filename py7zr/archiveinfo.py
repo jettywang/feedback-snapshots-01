@@ -23,6 +23,7 @@
 #
 import functools
 import io
+import lzma
 import operator
 import os
 import struct
@@ -33,8 +34,8 @@ from operator import and_, or_
 from struct import pack, unpack
 from typing import Any, BinaryIO
 
-from py7zr.compressor import SevenZipCompressor, SevenZipDecompressor
-from py7zr.exceptions import Bad7zFile
+from py7zr.compressor import SevenZipCompressor, SevenZipDecompressor, SupportedMethods
+from py7zr.exceptions import Bad7zFile, PasswordError, PasswordRequired
 from py7zr.helpers import ArchiveTimestamp, calculate_crc32
 from py7zr.properties import DEFAULT_FILTERS, MAGIC_7Z, PROPERTY
 
@@ -1141,6 +1142,7 @@ class Header:
         self.size: int = 0
         self._start_pos: int = 0
         self.password: str | None = None
+        self.header_encrypted: bool = False
         self._initialized: bool = False
         self.filters: list[dict[str, int]] | None = None
 
@@ -1171,6 +1173,10 @@ class Header:
         streams = HeaderStreamsInfo.retrieve(buffer)
         if not streams.packinfo.packsizes or not streams.unpackinfo.folders:
             raise Bad7zFile("encoded header without packed stream")
+        header_encrypted = any(SupportedMethods.needs_password(folder.coders) for folder in streams.unpackinfo.folders)
+        self.header_encrypted = header_encrypted
+        if header_encrypted and password is None:
+            raise PasswordRequired(streams.unpackinfo.folders, "Password is required for reading the archive header.")
         buffer2 = io.BytesIO()
         src_start = self._start_pos
         decoded_size = 0
@@ -1189,17 +1195,25 @@ class Header:
             decompressor = folder.get_decompressor(compressed_size)
             remaining = uncompressed_size
             folder_data = bytearray()
-            while remaining > 0:
-                # Once the packed stream is exhausted, the decompressor keeps
-                # returning b"" forever, so bail out instead of spinning when an
-                # iteration makes no progress at either end.
-                before = decompressor.consumed
-                decompressed = decompressor.decompress(fp, max_length=remaining)
-                if decompressed:
-                    folder_data += decompressed
-                    remaining -= len(decompressed)
-                elif decompressor.consumed == before:
-                    raise Bad7zFile("truncated or corrupted encoded header")
+            try:
+                while remaining > 0:
+                    # Once the packed stream is exhausted, the decompressor keeps
+                    # returning b"" forever, so bail out instead of spinning when an
+                    # iteration makes no progress at either end.
+                    before = decompressor.consumed
+                    decompressed = decompressor.decompress(fp, max_length=remaining)
+                    if decompressed:
+                        folder_data += decompressed
+                        remaining -= len(decompressed)
+                    elif decompressor.consumed == before:
+                        raise Bad7zFile("truncated or corrupted encoded header")
+            except (lzma.LZMAError, struct.error) as e:
+                # The decoder cannot tell a wrong password from a damaged
+                # header. Both mean the supplied credential did not open the
+                # directory; never echo the password into the message.
+                if header_encrypted:
+                    raise PasswordError("Password is wrong or the encrypted header is damaged.") from e
+                raise Bad7zFile("truncated or corrupted encoded header") from e
             self.size += compressed_size
             src_start += compressed_size
             if folder.digestdefined:
@@ -1210,8 +1224,15 @@ class Header:
         buffer2.seek(0, 0)
         pid = buffer2.read(1)
         if pid != PROPERTY.HEADER:
+            if header_encrypted:
+                raise PasswordError("Password is wrong or the encrypted header is damaged.")
             raise TypeError(f"Unknown field: {repr(pid)}")  # pragma: no-cover
-        self._extract_header_info(buffer2)
+        try:
+            self._extract_header_info(buffer2)
+        except Bad7zFile as e:
+            if header_encrypted:
+                raise PasswordError("Password is wrong or the encrypted header is damaged.") from e
+            raise
 
     def _encode_header(self, file: BinaryIO, afterheader: int, filters):
         startpos = file.tell()

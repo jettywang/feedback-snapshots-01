@@ -46,9 +46,15 @@ Information Objects
 
 .. autoclass:: py7zr.FileInfo
 
+.. autoclass:: py7zr.ArchiveEncryptionInfo
+
+.. autoclass:: py7zr.EncryptionStatus
+
 
 Functions
 =========
+
+.. autofunction:: py7zr.get_encryption_info
 
 .. autofunction:: py7zr.is_7zfile
 
@@ -81,6 +87,8 @@ Exceptions
 .. autoexception:: py7zr.Bad7zFile
 
 .. autoexception:: py7zr.PasswordRequired
+
+.. autoexception:: py7zr.PasswordError
 
 .. autoexception:: py7zr.UnsupportedCompressionMethodError
 

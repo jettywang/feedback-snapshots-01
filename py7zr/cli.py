@@ -315,6 +315,9 @@ class Cli:
             except py7zr.exceptions.Bad7zFile:
                 print("Header is corrupted. Cannot read as 7z file.")
                 return 1
+            except py7zr.exceptions.PasswordError:
+                print("The archive is corrupted, or password is wrong. ABORT.")
+                return 1
             except py7zr.exceptions.PasswordRequired:
                 print("The archive is encrypted but password is not given. FAILED.")
                 return 1
@@ -337,6 +340,9 @@ class Cli:
             a = py7zr.SevenZipFile(target, "r", password=password)
         except py7zr.exceptions.Bad7zFile:
             print("Header is corrupted. Cannot read as 7z file.")
+            return 1
+        except py7zr.exceptions.PasswordError:
+            print("The archive is corrupted, or password is wrong. ABORT.")
             return 1
         except py7zr.exceptions.PasswordRequired:
             print("The archive is encrypted, but password is not given. ABORT.")
@@ -368,6 +374,9 @@ class Cli:
             return 1
         except py7zr.exceptions.DecompressionError:
             print("Error has been occurred during decompression. ABORT.")
+            return 1
+        except py7zr.exceptions.PasswordError:
+            print("The archive is corrupted, or password is wrong. ABORT.")
             return 1
         except py7zr.exceptions.PasswordRequired:
             print("The archive is encrypted, but password is not given. ABORT.")

@@ -9,12 +9,35 @@ All notable changes to this project will be documented in this file.
 `Unreleased`_
 =============
 
+Added
+-----
+- Add ``get_encryption_info()`` for callers that must report whether an
+  archive needs a password before a credential is available.  It returns
+  ``EncryptionStatus.NOT_ENCRYPTED``, ``CONTENT_ENCRYPTED`` (a readable
+  directory over encrypted member data, the common "plain header" case) or
+  ``HEADER_ENCRYPTED`` (member names and sizes are encrypted, so the
+  directory cannot be inspected).  ``SevenZipFile.encryption_status()``
+  provides the same classification once an archive is open.
+- Add ``PasswordError``, a subclass of ``PasswordRequired``, for a supplied
+  password that does not decrypt the archive.  Its message never contains
+  the password.  Opening a header-encrypted archive with a wrong password
+  now raises it instead of an unrelated ``TypeError``, and extracting
+  content-encrypted data with a wrong password raises it instead of
+  ``lzma.LZMAError``.
+
 Changed
 -------
 - Switch the 7zAES crypto dependency from ``pycryptodomex`` (``Cryptodome``
   namespace) to ``pycryptodome`` (``Crypto`` namespace). Upstream stopped
   regular releases of ``pycryptodomex`` at 3.x with pycryptodome 4.0, and
   it lacks wheels for PyPy 3.11 on Windows.
+
+Fixed
+-----
+- ``needs_password()`` no longer reports an unencrypted archive as
+  encrypted merely because a password was supplied when opening it.
+  Header-encrypted archives now report ``True`` even when member data is
+  stored unencrypted.
 
 `v1.1.4`_
 =========
