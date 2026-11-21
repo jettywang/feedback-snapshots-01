@@ -57,6 +57,14 @@ referencing.jsonschema
    :undoc-members:
 
 
+referencing.preflight
+^^^^^^^^^^^^^^^^^^^^^
+
+.. automodule:: referencing.preflight
+   :members:
+   :undoc-members:
+
+
 referencing.exceptions
 ^^^^^^^^^^^^^^^^^^^^^^
 
