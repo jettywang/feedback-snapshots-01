@@ -59,7 +59,20 @@ module Rack
         end
       end
 
+      # A discarded session (for example one whose cookie belonged to another
+      # partition) must resolve to an empty record, otherwise writing it back
+      # later would be rejected.
+      def prepare_session_record(req, session_id, options)
+        @mutex.synchronize do
+          @pool[session_id.private_id] = {}
+        end
+      end
+
       def delete_session(req, session_id, options)
+        # An explicitly addressed partition may supply a raw session id rather
+        # than a SessionId object.
+        session_id = Rack::Session::SessionId.new(session_id) if session_id.is_a?(String)
+
         @mutex.synchronize do
           @pool.delete(session_id.public_id)
           @pool.delete(session_id.private_id)

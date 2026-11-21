@@ -160,15 +160,18 @@ module Rack
         # support both :secrets and :secret for backwards compatibility
         secrets = [*(options[:secrets] || options[:secret])]
 
-        encryptor_opts = {
-          purpose: options[:key], serialize_json: options[:serialize_json]
+        # A partitioned session is bound to its partition by the encryption
+        # purpose, so a cookie issued for one partition cannot be unsealed as
+        # another even when the same secret is reused.
+        @secrets = secrets
+        @encryptor_options = {
+          serialize_json: options[:serialize_json]
         }
 
         # For each secret, create an Encryptor. We have iterate this Array at
-        # decryption time to achieve key rotation.
-        @encryptors = secrets.map do |secret|
-          Rack::Session::Encryptor.new secret, encryptor_opts
-        end
+        # decryption time to achieve key rotation. The ordinary session keeps
+        # the upstream purpose: the explicit :key option, if any.
+        @encryptors = build_encryptors(options[:key])
 
         # If a legacy HMAC secret is present, initialize those features.
         # Fallback to :secret for backwards compatibility.
@@ -200,6 +203,29 @@ module Rack
 
       private
 
+      def build_encryptors(purpose)
+        @secrets.map do |secret|
+          Rack::Session::Encryptor.new secret, @encryptor_options.merge(purpose: purpose)
+        end
+      end
+
+      # Named partitions are bound to their cookie name, so the same partition
+      # cannot be unsealed under a different cookie even when the secret is
+      # shared. The purpose is cached alongside the encryptor chain.
+
+      def encryptors_for_partition(partition)
+        return encryptors unless partition
+
+        @partition_encryptors ||= {}
+        @partition_encryptors[partition] ||= build_encryptors(cookie_key_for(partition))
+      end
+
+      # Encryptors for the partition selected on +request+.
+
+      def encryptors_for(request)
+        encryptors_for_partition(request.session_options[:partition])
+      end
+
       def find_session(req, sid)
         data = unpacked_cookie_data(req)
         data = persistent_session_id!(data)
@@ -212,11 +238,12 @@ module Rack
 
       def unpacked_cookie_data(request)
         request.fetch_header(RACK_SESSION_UNPACKED_COOKIE_DATA) do |k|
-          if cookie_data = request.cookies[@key]
+          if cookie_data = request.cookies[request.session_options[:key]]
             session_data = nil
+            partition = request.session_options[:partition]
 
             # Try to decrypt the session data with our encryptors
-            encryptors.each do |encryptor|
+            encryptors_for(request).each do |encryptor|
               begin
                 session_data = encryptor.decrypt(cookie_data)
                 break
@@ -228,8 +255,9 @@ module Rack
             end
 
             # If session decryption fails but there is @legacy_hmac_secret
-            # defined, attempt legacy HMAC verification
-            if !session_data && @legacy_hmac_secret
+            # defined, attempt legacy HMAC verification. The legacy format is
+            # never accepted for a named partition.
+            if !session_data && @legacy_hmac_secret && partition.nil?
               # Parse and verify legacy HMAC session cookie
               session_data, _, digest = cookie_data.rpartition('--')
               session_data = nil unless legacy_digest_match?(session_data, digest)
@@ -266,9 +294,10 @@ module Rack
 
       def write_session(req, session_id, session, options)
         session = session.merge("session_id" => session_id)
-        session_data = encode_session_data(session)
+        session_data = encode_session_data(session, options[:partition])
+        cookie_key = options[:key] || @key
 
-        if session_data.size > (4096 - @key.size)
+        if session_data.size > (4096 - cookie_key.size)
           req.get_header(RACK_ERRORS).puts("Warning! Rack::Session::Cookie data size exceeds 4K.")
           nil
         else
@@ -291,11 +320,11 @@ module Rack
         OpenSSL::HMAC.hexdigest(@legacy_hmac, @legacy_hmac_secret, data)
       end
 
-      def encode_session_data(session)
+      def encode_session_data(session, partition = nil)
         if encryptors.empty?
           coder.encode(session)
         else
-          encryptors.first.encrypt(session)
+          encryptors_for_partition(partition).first.encrypt(session)
         end
       end
 

@@ -53,6 +53,10 @@ module Rack
 
         Unspecified = Object.new
 
+        # Internal keys are part of the persisted representation and are not
+        # exposed through the public session hash.
+        INTERNAL_KEYS = [RACK_SESSION_PARTITION_DATA].freeze
+
         def self.find(req)
           req.get_header RACK_SESSION
         end
@@ -127,6 +131,27 @@ module Rack
           @id = @store.send(:delete_session, @req, id, options)
         end
 
+        # Expire (clear) the session belonging to a partition. Without an
+        # argument the current request's partition is cleared; a Symbol or
+        # String selects a different partition explicitly. This removes the
+        # persisted state and expires only that partition's cookie, leaving
+        # sessions in other partitions untouched.
+        #
+        #   env['rack.session'].expire!            # clear the current partition
+        #   env['rack.session'].expire!(:embedded) # clear only the embedded one
+
+        def expire!(partition = Unspecified)
+          options[:expire] =
+            partition == Unspecified ? true : partition.to_sym
+        end
+        alias :expire_session! :expire!
+
+        # The partition this session belongs to, or nil for the ordinary,
+        # unpartitioned session.
+        def partition
+          options[:partition]
+        end
+
         def to_hash
           load_for_read!
           @data.dup
@@ -194,6 +219,7 @@ module Rack
         def load!
           @id, session = @store.send(:load_session, @req)
           @data = stringify_keys(session)
+          INTERNAL_KEYS.each { |key| @data.delete(key) }
           @loaded = true
         end
 
@@ -217,6 +243,15 @@ module Rack
       #   'rack.session'
       # * :path, :domain, :expire_after, :secure, :httponly, :partitioned and :same_site set
       #   the related cookie options as by Rack::Response#set_cookie
+      # * :partition selects an optional session partitioning strategy. It may
+      #   be a Symbol naming a fixed partition, or a callable receiving the
+      #   request and returning a partition name. A nil partition means the
+      #   ordinary, unpartitioned session. Partitioning is disabled by default.
+      # * :partitions declares per-partition cookie options, for example
+      #   <tt>{embedded: {partitioned: true, secure: true, same_site: :none}}</tt>.
+      #   A named partition without a declaration defaults to a partitioned,
+      #   secure cookie. Declared partitions may also override the cookie
+      #   :key, so each partition can keep its own client-side session.
       # * :skip will not a set a cookie in the response nor update the session state
       # * :defer will not set a cookie in the response but still update the session
       #   state if it is used with a backend
@@ -245,6 +280,8 @@ module Rack
           secure: false,
           httponly: true,
           partitioned: false,
+          partition: nil,
+          partitions: {},
           defer: false,
           renew: false,
           sidbits: 128,
@@ -261,6 +298,8 @@ module Rack
           @assume_ssl = @default_options.delete(:assume_ssl)
           @cookie_only = @default_options.delete(:cookie_only)
           @same_site = @default_options.delete(:same_site)
+          @partition = @default_options.delete(:partition)
+          @partitions = normalize_partitions(@default_options.delete(:partitions))
           initialize_sid
         end
 
@@ -289,6 +328,23 @@ module Rack
           @sid_length = @sidbits / 4
         end
 
+        # Normalize <tt>:partitions</tt> into a hash keyed by partition name,
+        # with Symbol keys in the per-partition options.
+
+        def normalize_partitions(partitions)
+          (partitions || {}).each_with_object({}) do |(name, options), normalized|
+            normalized[name.to_sym] =
+              case options
+              when nil
+                {}
+              when Hash
+                options.each_with_object({}) { |(key, value), hash| hash[key.to_sym] = value }
+              else
+                raise ArgumentError, "partition options must be a Hash: #{options.inspect}"
+              end
+          end
+        end
+
         # Generate a new session id using Ruby #rand.  The size of the
         # session id is controlled by the :sidbits option.
         # Monkey patch this to use custom methods for session id generation.
@@ -309,25 +365,160 @@ module Rack
         def prepare_session(req)
           session_was               = req.get_header RACK_SESSION
           session                   = session_class.new(self, req)
+          resolve_partition(req)
           req.set_header RACK_SESSION, session
-          req.set_header RACK_SESSION_OPTIONS, @default_options.dup
+          req.set_header RACK_SESSION_OPTIONS, session_options_for(req)
           session.merge! session_was if session_was
+        end
+
+        # The partition selected for the current request. The explicit
+        # <tt>rack.session.partition</tt> request header wins, then the
+        # configured :partition strategy, then the ordinary (nil) partition.
+        # An :auto strategy only selects a named partition when the request is
+        # marked as embedded in a third-party page.
+
+        def resolve_partition(req)
+          explicit = req.get_header(RACK_SESSION_PARTITION)
+          partition = if explicit
+            explicit
+          elsif @partition.respond_to?(:call)
+            @partition.call(req)
+          elsif @partition == :auto
+            embedded_request?(req) ? :embedded : nil
+          else
+            @partition
+          end
+
+          partition = partition&.to_sym
+          req.set_header(RACK_SESSION_PARTITION_CURRENT, partition)
+          partition
+        end
+
+        # Whether the request reports that it is embedded in a third-party
+        # document. +:auto+ only treats a cross-site request as embedded; the
+        # same site's own pages keep the ordinary session.
+
+        def embedded_request?(req)
+          sec_fetch_site = req.get_header('HTTP_SEC_FETCH_SITE')
+          return true if sec_fetch_site && sec_fetch_site.downcase == 'cross-site'
+
+          req.get_header('HTTP_SEC_FETCH_DEST') == 'iframe' &&
+            req.get_header('HTTP_SEC_FETCH_MODE') == 'navigate'
+        end
+
+        # The cookie name used for +partition+. Every named partition gets its
+        # own cookie, so an embedded session and a direct session never
+        # overwrite each other in the browser.
+
+        def cookie_key_for(partition)
+          cookie_key = partition && (@partitions[partition] || {})[:key]
+          cookie_key ||= @key if partition.nil?
+          cookie_key || "#{@key}.#{partition}"
+        end
+
+        # The cookie attributes for +partition+. Named partitions default to a
+        # partitioned, secure cookie; only the ordinary session may be
+        # unpartitioned unless the integrator explicitly says otherwise. The
+        # Partitioned attribute requires Secure, so Secure is enforced whenever
+        # Partitioned is in effect.
+
+        def cookie_options_for(partition)
+          options = {}
+          options.merge!(@partitions[partition]) if partition && @partitions[partition]
+          options.delete(:key)
+
+          if partition
+            options[:partitioned] = true unless options.key?(:partitioned)
+            options[:secure] = true unless options.key?(:secure)
+            options[:same_site] = :none unless options.key?(:same_site)
+            options[:secure] = true if options[:partitioned]
+          end
+
+          options
+        end
+
+        # The effective session options for the current request, including the
+        # partition-specific cookie key and attributes.
+
+        def session_options_for(req)
+          options = @default_options.dup
+          partition = req.get_header(RACK_SESSION_PARTITION_CURRENT)
+
+          if partition
+            options[:partition] = partition
+            options.merge!(cookie_options_for(partition))
+          end
+
+          options[:key] = cookie_key_for(partition)
+          options
+        end
+
+        # Whether a persisted session may be presented as +partition+. An
+        # ordinary session (without a marker) can only be presented as the
+        # ordinary partition; a marked session only as its own partition. This
+        # keeps the unpartitioned cookie from granting a named partition.
+
+        def session_usable_for_partition?(session, partition)
+          recorded = session[RACK_SESSION_PARTITION_DATA]
+          recorded = recorded&.to_sym
+
+          if session.key?(RACK_SESSION_PARTITION_DATA)
+            recorded == partition
+          else
+            partition.nil?
+          end
         end
 
         # Extracts the session id from provided cookies and passes it and the
         # environment to #find_session.
 
         def load_session(req)
-          sid = current_session_id(req)
-          sid, session = find_session(req, sid)
-          [sid, session || {}]
+          presented_id = current_session_id(req)
+          sid, session = find_session(req, presented_id)
+          session ||= {}
+          partition = req.get_header(RACK_SESSION_PARTITION_CURRENT)
+
+          if presented_id && session.is_a?(Hash) && !session_usable_for_partition?(session, partition)
+            # A cookie was presented but its session belongs to another
+            # partition (or lacks a partition marker and is therefore only valid
+            # for the ordinary session). Start a fresh session instead of
+            # reusing it.
+            sid, session = discard_session(req)
+          end
+
+          [sid, session]
+        end
+
+        # Abandon a session that does not belong to the current partition and
+        # start a fresh one. Backends that keep server-side records must ensure
+        # the new session id resolves to an empty record.
+
+        def discard_session(req)
+          sid = generate_sid
+          prepare_session_record(req, sid, req.session_options)
+          [sid, {}]
+        end
+
+        # Persist the record for a freshly generated session id, so server-side
+        # stores have somewhere to write when a request starts over (for
+        # example because a cookie belonged to another partition). Stateless
+        # stores have nothing to prepare.
+
+        def prepare_session_record(req, sid, options)
         end
 
         # Extract session id from request object.
 
         def extract_session_id(request)
-          sid = request.cookies[@key]
-          sid ||= request.params[@key] unless @cookie_only
+          extract_session_id_for(request, request.session_options[:key])
+        end
+
+        # Extract the session id stored under an explicit cookie +key+. Used to
+        # address a partition other than the one selected for the request.
+
+        def extract_session_id_for(request, key)
+          sid = request.cookies[key]
+          sid ||= request.params[key] unless @cookie_only
           sid
         end
 
@@ -382,6 +573,13 @@ module Rack
           session = req.get_header RACK_SESSION
           options = session.options
 
+          if options.key?(:expire)
+            expired_current = expire_partition(req, res, session, options.delete(:expire))
+            # Expiring the current partition ends the session for this request;
+            # never re-issue it from any staged data.
+            return if expired_current
+          end
+
           if options[:drop] || options[:renew]
             session_id = delete_session(req, session.id || generate_sid, options)
             return unless session_id
@@ -392,6 +590,10 @@ module Rack
           session.send(:load!) unless loaded_session?(session)
           session_id ||= session.id
           session_data = session.to_hash.delete_if { |k, v| v.nil? }
+
+          if (partition = options[:partition])
+            session_data[RACK_SESSION_PARTITION_DATA] = partition.to_s
+          end
 
           if not data = write_session(req, session_id, session_data, options)
             req.get_header(RACK_ERRORS).puts("Warning! #{self.class.name} failed to save session. Content dropped.")
@@ -408,6 +610,8 @@ module Rack
             else
               cookie[:same_site] = @same_site
             end
+
+            cookie[:same_site] = options[:same_site] if options.key?(:same_site)
             set_cookie(req, res, cookie.merge!(options))
           end
         end
@@ -421,9 +625,57 @@ module Rack
         # setting if the value didn't change (sid is the same) or expires was given.
 
         def set_cookie(request, response, cookie)
-          if request.cookies[@key] != cookie[:value] || cookie[:expires]
-            response.set_cookie(@key, cookie)
+          key = cookie[:key] || request.session_options[:key] || @key
+
+          if request.cookies[key] != cookie[:value] || cookie[:expires]
+            response.set_cookie(key, cookie)
           end
+        end
+
+        # Expire the session for +partition+ (nil for the ordinary session).
+        # The persisted state of that partition is removed and its cookie is
+        # expired. Returns true when the expired partition is the one the
+        # request is currently using.
+
+        def expire_partition(req, res, session, partition)
+          current = req.get_header(RACK_SESSION_PARTITION_CURRENT)
+          partition = current if partition == true
+          partition = partition&.to_sym
+
+          if partition == current
+            session_id = session.id
+          else
+            # Another partition was named explicitly: address its cookie
+            # directly so its server-side record can be removed as well.
+            session_id = extract_session_id_for(req, cookie_key_for(partition))
+          end
+
+          if session_id && !session_id.to_s.empty?
+            options = @default_options.merge(
+              partition: partition,
+              key: cookie_key_for(partition),
+              drop: true
+            )
+            delete_session(req, session_id, options)
+          end
+
+          delete_session_cookie(req, res, partition)
+          partition == current
+        end
+
+        # Expire the cookie for +partition+ on the response. The cookie is
+        # expired with the same path, domain and partitioning attributes it was
+        # issued with, so browsers remove exactly that session.
+
+        def delete_session_cookie(req, response, partition)
+          key = cookie_key_for(partition)
+          attributes = cookie_options_for(partition)
+          attributes[:path] = @default_options[:path]
+          attributes[:domain] = @default_options[:domain] if @default_options[:domain]
+
+          # Rack::Response::Raw does not implement #delete_cookie, so expire
+          # the cookie directly with the same attributes it was issued with.
+          response.set_cookie(key, attributes.merge(value: '', max_age: 0, expires: Time.at(0)))
         end
 
         # Allow subclasses to prepare_session for different Session classes
