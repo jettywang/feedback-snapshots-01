@@ -2,6 +2,13 @@
 Changelog
 =========
 
+Unreleased
+----------
+
+* Add ``referencing.manifest``, which records the allowed content digest and expected identity of each dependency in an offline manifest.
+  Manifests can be built from a registry or bulk-imported from local JSON files, serialized and reloaded, and used to verify a registry without any retrieval -- reporting changed contents, changed identities, and missing dependencies independently.
+  A manifest also works as a `Registry` retrieval function, rejecting contents which fail verification.
+
 v0.37.0
 -------
 

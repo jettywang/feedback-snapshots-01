@@ -83,3 +83,12 @@ referencing.typing
 .. automodule:: referencing.typing
    :members:
    :undoc-members:
+
+
+referencing.manifest
+^^^^^^^^^^^^^^^^^^^^
+
+.. automodule:: referencing.manifest
+   :members:
+   :undoc-members:
+   :special-members: __iter__, __getitem__, __len__, __call__
