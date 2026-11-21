@@ -1,0 +1,8 @@
+gemspec 约束: loofah ~> 2.25, >= 2.25.3
+gemspec 约束: nokogiri >= 1.15.7, != 1.16.0, != 1.16.0.rc1, != 1.16.1, != 1.16.2, != 1.16.3, != 1.16.4, != 1.16.5, != 1.16.6, != 1.16.7
+当前解析: loofah=2.25.3 nokogiri=1.19.7
+
+-- 模拟 loofah 降回 < 2.25.3 (移除 Scrub.scrub_attribute_value) --
+respond_to?(:scrub_attribute_value) = false
+结果: NoMethodError: undefined method 'scrub_attribute_value' for module Loofah::HTML5::Scrub
+结论: 降版后任何带 attributes 的 SafeList 调用都会 500, 启动探针可在部署前拦截

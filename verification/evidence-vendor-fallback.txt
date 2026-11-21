@@ -1,0 +1,8 @@
+Loofah.html5_support? = false
+Rails::HTML::Sanitizer.html5_support? = false
+best_supported_vendor = Rails::HTML4::Sanitizer
+Rails::HTML5 defined? = no(HTML5 解析器模块未定义)
+Rails::HTML::Concern::Parser::HTML5 defined? = no
+HTML4 SafeList 基本净化: "<b>hi</b>x<a>l</a>"
+HTML4 sanitize_css 仍走 Loofah::HTML5::Scrub.scrub_css: "color:blue;"
+allowed_uri? 仍可用: true

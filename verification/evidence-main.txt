@@ -1,0 +1,46 @@
+== 0. 依赖与 vendor 选择 ==
+loofah=2.25.3 nokogiri=1.19.7 nokogiri-uses-libgumbo=n/a
+Loofah.html5_support? = true
+best_supported_vendor = Rails::HTML5::Sanitizer
+版本下限: Scrub.scrub_attribute_value 存在(loofah>=2.25.3)                     PASS
+版本下限: Scrub.scrub_css_attribute 存在                                       PASS
+vendor: CRuby+libgumbo 下选中 HTML5                                         PASS
+
+== 1. 路径A: 普通 SafeList (PermitScrubber) ==
+A1 保留白名单标签                                                               PASS
+A2 script 标签剥离(子文本保留为纯文本)                                                PASS
+  expected: nil
+A3 移除事件属性                                                                PASS
+A4 javascript: URI 被中和                                                   PASS
+  expected: nil
+A5 自定义 tags/attributes 生效                                                PASS
+A6 SVG use 外链 href 被移除(GHSA-cj75-f6xr-r4g7)                              PASS
+  expected: nil
+A7 SVG use 本地锚点保留                                                        PASS
+  expected: nil
+A8 mglyph 强制移除                                                           PASS
+  expected: nil
+A9 style 属性内 CSS 被净化                                                     PASS
+  expected: nil
+A10 并发调用不串配置(GHSA-h7wh-q2qr-458c)                                        PASS
+
+== 2. 路径B: 自定义 scrubber ==
+B1 Loofah::Scrubber 子类经 options[:scrubber] 生效                            PASS
+B2 PermitScrubber 子类生效                                                   PASS
+B3 非 Loofah::Scrubber 被拒绝                                                PASS
+  expected: nil
+
+== 3. 路径C: 独立 CSS 净化 ==
+C1 合法声明保留(允许序列化差异: 去空格/补分号)                                              PASS
+  expected: nil
+C2 expression() 被移除                                                      PASS
+  expected: nil
+C3 javascript: url 被移除                                                   PASS
+  expected: nil
+C4 -moz-binding 被移除                                                      PASS
+  expected: nil
+C5 allowed_uri? 委托                                                       PASS
+C6 allowed_uri? 拦截 javascript:                                           PASS
+
+== 结果 ==
+ALL PASS
