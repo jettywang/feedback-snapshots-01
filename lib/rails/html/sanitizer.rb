@@ -3,6 +3,28 @@
 module Rails
   module HTML
     class Sanitizer
+      # Raised when a document exceeds the per-call processing budget passed
+      # via the +:budget+ option. Callers can rescue this error to distinguish
+      # documents that are merely too expensive (and may be retried after
+      # splitting) from content that is fundamentally unacceptable, which
+      # surfaces as other errors (e.g. encoding or parse failures).
+      #
+      # The error reports the +phase+ in which the budget was consumed
+      # (:parse, :scrub, or :serialize), the +limit+ that was tripped, the
+      # configured +threshold+, and the +actual+ value observed.
+      class BudgetExceededError < StandardError
+        attr_reader :phase, :limit, :threshold, :actual
+
+        def initialize(phase:, limit:, threshold:, actual:)
+          @phase = phase
+          @limit = limit
+          @threshold = threshold
+          @actual = actual
+          super("sanitization budget exceeded during #{phase}: " \
+                "#{limit} is #{actual}, threshold is #{threshold}")
+        end
+      end
+
       class << self
         def html5_support?
           return @html5_support if defined?(@html5_support)
@@ -40,8 +62,44 @@ module Rails
           return unless html
           return html if html.empty?
 
-          serialize(scrub(parse_fragment(html), options))
+          budget = options[:budget]
+
+          enforce_budget!(budget, :max_input_bytes, html.bytesize, phase: :parse)
+
+          fragment = parse_fragment(html)
+
+          if budget
+            enforce_budget!(budget, :max_depth, tree_depth(fragment), phase: :scrub)
+            enforce_budget!(budget, :max_nodes, fragment.css("*").size, phase: :scrub)
+          end
+
+          output = serialize(scrub(fragment, options))
+
+          enforce_budget!(budget, :max_output_bytes, output.bytesize, phase: :serialize)
+
+          output
         end
+
+        private
+          def enforce_budget!(budget, limit, actual, phase:)
+            return unless budget
+
+            threshold = budget[limit]
+            return unless threshold
+
+            if actual > threshold
+              raise Sanitizer::BudgetExceededError.new(
+                phase: phase, limit: limit, threshold: threshold, actual: actual
+              )
+            end
+          end
+
+          def tree_depth(node)
+            children = node.element_children
+            return 0 if children.empty?
+
+            1 + children.map { |child| tree_depth(child) }.max
+          end
       end
 
       module Parser

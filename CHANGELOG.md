@@ -1,5 +1,10 @@
 ## next / unreleased
 
+* Sanitizers accept a per-document `:budget` option (`max_input_bytes`, `max_depth`,
+  `max_nodes`, `max_output_bytes`). Exceeding a limit aborts sanitization with
+  `Rails::HTML::Sanitizer::BudgetExceededError`, which reports the consumed `phase`,
+  the `limit`, its `threshold`, and the `actual` value. No partial output is returned,
+  and the sanitizer remains usable for subsequent documents.
 
 ## v1.7.2 / 2026-11-02
 

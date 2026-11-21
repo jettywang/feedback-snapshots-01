@@ -70,6 +70,32 @@ safe_list_sanitizer = Rails::HTML5::SafeListSanitizer.new(prune: true)
 safe_list_sanitizer.sanitize_css('background-color: #000;')
 ```
 
+#### Per-document processing budget
+
+All sanitizers accept a `:budget` option that caps the resources a single
+document may consume. This is useful when sanitizing untrusted imports in
+parallel batches and you want to bound each document's cost:
+
+```ruby
+safe_list_sanitizer.sanitize(@article.body, budget: {
+  max_input_bytes: 100_000,  # checked before parsing
+  max_depth: 50,             # element nesting depth, checked before scrubbing
+  max_nodes: 1_000,          # element count, checked before scrubbing
+  max_output_bytes: 100_000, # checked after serialization
+})
+```
+
+When a limit is exceeded, sanitization aborts and
+`Rails::HTML::Sanitizer::BudgetExceededError` is raised. No partial output is
+returned, and the sanitizer instance remains usable for subsequent documents.
+The error reports the `phase` in which the budget was consumed (`:parse`,
+`:scrub`, or `:serialize`), the `limit` that was tripped, the configured
+`threshold`, and the `actual` value observed.
+
+Callers can rescue `BudgetExceededError` to distinguish documents that are
+merely too expensive (and may be retried, e.g. after splitting) from content
+that is fundamentally unacceptable, which surfaces as other errors.
+
 ### Scrubbers
 
 Scrubbers are objects responsible for removing nodes or attributes you don't want in your HTML document.
