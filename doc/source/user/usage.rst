@@ -344,6 +344,53 @@ mindful of the relationship between the API they are protecting with a policy
 and the resource level the API operates at, whether it's system-level or
 project-level.
 
+Enforcing policies in strict mode
+----------------------------------
+
+By default, a check that references information which is not present in the
+target or credentials fails closed by returning ``False``. For example,
+``role:admin`` denies access when the credentials carry no ``roles`` list, and
+a ownership check such as ``project_id:%(project_id)s`` denies access when the
+target does not provide a ``project_id``. This is safe but can make an
+integration mistake (for example forgetting to populate the credentials) look
+identical to a genuine policy denial.
+
+Passing ``strict=True`` to :meth:`Enforcer.enforce` or
+:meth:`Enforcer.authorize` turns these missing-context cases into explicit
+failures. A check that needs an attribute which was not provided raises
+:class:`oslo_policy.policy.PolicyMissingContext`, whose message names the
+failing check and the missing attribute::
+
+    enforcer.enforce(
+        'service:do_thing',
+        target,
+        creds,
+        strict=True,
+    )
+    # Policy check 'role:admin' requires credentials attribute 'roles', but
+    # it was not provided. Pass the missing context or evaluate the policy
+    # without strict mode.
+
+This is especially useful for a rule that constrains several dimensions of a
+single action, such as the caller's role, the ownership of the resource and a
+service account marker::
+
+    'role:admin '
+    'and project_id:%(project_id)s '
+    'and service_account:%(is_service_account)s'
+
+Strict mode guarantees that unknown or incomplete context is never treated as
+an accepted match. In particular, the logical ``not`` operator does not invert
+a missing-context failure into an allow: ``not role:admin`` still raises
+``PolicyMissingContext`` when no ``roles`` list is supplied. A value that is
+present but explicitly ``None`` is treated as real context and compared
+normally, so it results in a normal denial rather than a missing-context
+error.
+
+Strict mode is opt-in per call. Existing policy syntax and calls made without
+``strict=True`` keep their historical behavior, and the strict flag does not
+leak beyond the enforcement call in which it is used.
+
 Sample file generation
 ----------------------
 

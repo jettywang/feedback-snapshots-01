@@ -92,6 +92,181 @@ class RoleCheckTestCase(base.PolicyBaseTestCase):
 
         self.assertFalse(check({}, {}, self.enforcer))
 
+    def test_strict_accept(self):
+        check = _checks.RoleCheck('role', 'sPaM')
+
+        with _checks.strict_check():
+            self.assertTrue(
+                check({}, {'roles': ['SpAm']}, self.enforcer)
+            )
+
+    def test_strict_reject_on_mismatch(self):
+        check = _checks.RoleCheck('role', 'spam')
+
+        with _checks.strict_check():
+            self.assertFalse(
+                check({}, {'roles': ['other']}, self.enforcer)
+            )
+
+    def test_strict_raises_when_roles_missing(self):
+        check = _checks.RoleCheck('role', 'spam')
+
+        with _checks.strict_check():
+            exc = self.assertRaises(
+                _checks.PolicyMissingContext,
+                check,
+                {},
+                {},
+                self.enforcer,
+            )
+        self.assertEqual('roles', exc.attribute)
+        self.assertEqual('credentials', exc.source)
+        self.assertIn('role:spam', str(exc))
+        self.assertIn('roles', str(exc))
+
+    def test_strict_raises_when_target_key_missing(self):
+        check = _checks.RoleCheck('role', '%(target.role.name)s')
+
+        with _checks.strict_check():
+            exc = self.assertRaises(
+                _checks.PolicyMissingContext,
+                check,
+                {},
+                {'roles': ['a']},
+                self.enforcer,
+            )
+        self.assertEqual('target.role.name', exc.attribute)
+        self.assertEqual('target', exc.source)
+
+    def test_strict_mode_does_not_leak_outside_context(self):
+        check = _checks.RoleCheck('role', 'spam')
+
+        with _checks.strict_check():
+            self.assertRaises(
+                _checks.PolicyMissingContext, check, {}, {}, self.enforcer
+            )
+
+        # Legacy fail-closed behavior is restored once the context exits.
+        self.assertFalse(check({}, {}, self.enforcer))
+
+
+class GenericCheckStrictTestCase(base.PolicyBaseTestCase):
+    def test_strict_accept(self):
+        check = _checks.GenericCheck('name', '%(name)s')
+
+        with _checks.strict_check():
+            self.assertTrue(
+                check({'name': 'spam'}, {'name': 'spam'}, self.enforcer)
+            )
+
+    def test_strict_reject_on_mismatch(self):
+        check = _checks.GenericCheck('name', '%(name)s')
+
+        with _checks.strict_check():
+            self.assertFalse(
+                check({'name': 'spam'}, {'name': 'ham'}, self.enforcer)
+            )
+
+    def test_strict_raises_when_target_key_missing(self):
+        check = _checks.GenericCheck('name', '%(name)s')
+
+        with _checks.strict_check():
+            exc = self.assertRaises(
+                _checks.PolicyMissingContext,
+                check,
+                {},
+                {'name': 'spam'},
+                self.enforcer,
+            )
+        self.assertEqual('name', exc.attribute)
+        self.assertEqual('target', exc.source)
+
+    def test_strict_raises_when_credential_key_missing(self):
+        check = _checks.GenericCheck('name', '%(name)s')
+
+        with _checks.strict_check():
+            exc = self.assertRaises(
+                _checks.PolicyMissingContext,
+                check,
+                {'name': 'spam'},
+                {},
+                self.enforcer,
+            )
+        self.assertEqual('name', exc.attribute)
+        self.assertEqual('credentials', exc.source)
+        self.assertIn('name:%(name)s', str(exc))
+
+    def test_strict_raises_on_missing_nested_key(self):
+        check = _checks.GenericCheck('a.b.c', 'APPLES')
+
+        with _checks.strict_check():
+            exc = self.assertRaises(
+                _checks.PolicyMissingContext,
+                check,
+                {},
+                {'a': {'b': {}}},
+                self.enforcer,
+            )
+        self.assertEqual('a.b.c', exc.attribute)
+
+    def test_strict_present_none_is_not_missing_context(self):
+        # A real null value is present context: it must compare and fail
+        # rather than being reported as missing context.
+        check = _checks.GenericCheck('name', '%(name)s')
+
+        with _checks.strict_check():
+            self.assertFalse(
+                check({'name': 'spam'}, {'name': None}, self.enforcer)
+            )
+
+    def test_strict_none_value_with_logical_negation_accepts(self):
+        rule = _checks.NotCheck(
+            _checks.GenericCheck('name', '%(name)s')
+        )
+
+        with _checks.strict_check():
+            self.assertTrue(
+                rule({'name': 'spam'}, {'name': None}, self.enforcer)
+            )
+
+    def test_strict_not_check_raises_on_missing_context(self):
+        # Negation must not turn unknown/missing context into an allow.
+        rule = _checks.NotCheck(_checks.RoleCheck('role', 'admin'))
+
+        with _checks.strict_check():
+            self.assertRaises(
+                _checks.PolicyMissingContext, rule, {}, {}, self.enforcer
+            )
+
+    def test_strict_nested_list_match_still_accepts(self):
+        check = _checks.GenericCheck('a.b.c.d', 'APPLES')
+        credentials = {
+            'a': {'b': [{'c': {'d': ['BANANAS', 'APPLES']}}, {}]}
+        }
+
+        with _checks.strict_check():
+            self.assertTrue(check({}, credentials, self.enforcer))
+
+    def test_strict_nested_list_missing_context_raises(self):
+        check = _checks.GenericCheck('a.b.c.d', 'APPLES')
+        # No element carries the required path.
+        credentials = {'a': {'b': [{'c': {}}, {'c': {}}]}}
+
+        with _checks.strict_check():
+            exc = self.assertRaises(
+                _checks.PolicyMissingContext,
+                check,
+                {},
+                credentials,
+                self.enforcer,
+            )
+        self.assertEqual('a.b.c.d', exc.attribute)
+
+    def test_legacy_behavior_unchanged_without_strict(self):
+        check = _checks.GenericCheck('name', '%(name)s')
+
+        self.assertFalse(check({'name': 'spam'}, {}, self.enforcer))
+
 
 class GenericCheckTestCase(base.PolicyBaseTestCase):
     def test_no_cred(self):

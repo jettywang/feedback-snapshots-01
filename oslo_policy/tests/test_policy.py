@@ -1129,6 +1129,268 @@ class EnforcerTest(base.PolicyBaseTestCase):
         self.assertFalse(self.enforcer.enforce(rule, {}, ctx, do_raise=False))
 
 
+class StrictEnforcementTestCase(base.PolicyBaseTestCase):
+    """Tests for strict enforcement of role, ownership and service checks."""
+
+    def setUp(self):
+        super().setUp()
+        # A single action simultaneously constrains the caller's role, the
+        # resource ownership and the service account marker.
+        self.check_str = (
+            'role:admin '
+            'and project_id:%(project_id)s '
+            'and service_account:%(is_service_account)s'
+        )
+        self.enforcer.set_rules(
+            {'strict_action': _parser.parse_rule(self.check_str)}
+        )
+        self.target = {
+            'project_id': 'project-1',
+            'is_service_account': 'True',
+        }
+        self.admin_creds = {
+            'roles': ['admin'],
+            'project_id': 'project-1',
+            'service_account': 'True',
+        }
+
+    def test_strict_allows_complete_credentials(self):
+        self.assertTrue(
+            self.enforcer.enforce(
+                'strict_action', self.target, self.admin_creds, strict=True
+            )
+        )
+
+    def test_strict_allows_when_marker_value_matches(self):
+        target = {'project_id': 'project-1', 'is_service_account': 'False'}
+        creds = {
+            'roles': ['admin'],
+            'project_id': 'project-1',
+            'service_account': 'False',
+        }
+
+        self.assertTrue(
+            self.enforcer.enforce(
+                'strict_action', target, creds, strict=True
+            )
+        )
+
+    def test_strict_denies_on_role_mismatch(self):
+        creds = dict(self.admin_creds, roles=['member'])
+
+        self.assertFalse(
+            self.enforcer.enforce(
+                'strict_action', self.target, creds, strict=True
+            )
+        )
+
+    def test_strict_denies_on_ownership_mismatch(self):
+        creds = dict(self.admin_creds, project_id='project-2')
+
+        self.assertFalse(
+            self.enforcer.enforce(
+                'strict_action', self.target, creds, strict=True
+            )
+        )
+
+    def test_strict_raises_when_roles_missing(self):
+        creds = {
+            'project_id': 'project-1',
+            'service_account': 'True',
+        }
+
+        exc = self.assertRaises(
+            policy.PolicyMissingContext,
+            self.enforcer.enforce,
+            'strict_action',
+            self.target,
+            creds,
+            strict=True,
+        )
+        self.assertEqual('roles', exc.attribute)
+        self.assertEqual('credentials', exc.source)
+        self.assertIn('role:admin', str(exc))
+
+    def test_strict_raises_when_target_owner_missing(self):
+        target = {'is_service_account': 'True'}
+
+        exc = self.assertRaises(
+            policy.PolicyMissingContext,
+            self.enforcer.enforce,
+            'strict_action',
+            target,
+            self.admin_creds,
+            strict=True,
+        )
+        self.assertEqual('project_id', exc.attribute)
+        self.assertEqual('target', exc.source)
+
+    def test_strict_raises_when_credential_owner_missing(self):
+        creds = dict(self.admin_creds)
+        del creds['project_id']
+
+        exc = self.assertRaises(
+            policy.PolicyMissingContext,
+            self.enforcer.enforce,
+            'strict_action',
+            self.target,
+            creds,
+            strict=True,
+        )
+        self.assertEqual('project_id', exc.attribute)
+        self.assertEqual('credentials', exc.source)
+
+    def test_strict_raises_when_service_account_marker_missing(self):
+        creds = dict(self.admin_creds)
+        del creds['service_account']
+
+        exc = self.assertRaises(
+            policy.PolicyMissingContext,
+            self.enforcer.enforce,
+            'strict_action',
+            self.target,
+            creds,
+            strict=True,
+        )
+        self.assertEqual('service_account', exc.attribute)
+
+    def test_strict_raises_when_target_service_marker_missing(self):
+        target = {'project_id': 'project-1'}
+
+        exc = self.assertRaises(
+            policy.PolicyMissingContext,
+            self.enforcer.enforce,
+            'strict_action',
+            target,
+            self.admin_creds,
+            strict=True,
+        )
+        self.assertEqual('is_service_account', exc.attribute)
+        self.assertEqual('target', exc.source)
+
+    def test_strict_present_none_value_denies_without_raising(self):
+        # A real null is present context: it compares and fails, it must not
+        # be confused with a missing attribute.
+        target = {'project_id': 'project-1', 'is_service_account': None}
+
+        self.assertFalse(
+            self.enforcer.enforce(
+                'strict_action', target, self.admin_creds, strict=True
+            )
+        )
+
+    def test_strict_not_check_raises_on_missing_context(self):
+        # Logical negation must not let unknown/missing context pass.
+        self.enforcer.set_rules(
+            {'not_admin': _parser.parse_rule('not role:admin')}
+        )
+
+        self.assertRaises(
+            policy.PolicyMissingContext,
+            self.enforcer.enforce,
+            'not_admin',
+            {},
+            {},
+            strict=True,
+        )
+
+    def test_strict_missing_context_raises_even_without_do_raise(self):
+        creds = {'project_id': 'project-1', 'service_account': 'True'}
+
+        self.assertRaises(
+            policy.PolicyMissingContext,
+            self.enforcer.enforce,
+            'strict_action',
+            self.target,
+            creds,
+            False,
+            None,
+            strict=True,
+        )
+
+    def test_non_strict_missing_context_denies_quietly(self):
+        creds = {'project_id': 'project-1', 'service_account': 'True'}
+
+        self.assertFalse(
+            self.enforcer.enforce('strict_action', self.target, creds)
+        )
+
+    def test_strict_mode_does_not_leak_into_later_calls(self):
+        creds = {'project_id': 'project-1', 'service_account': 'True'}
+        self.assertRaises(
+            policy.PolicyMissingContext,
+            self.enforcer.enforce,
+            'strict_action',
+            self.target,
+            creds,
+            strict=True,
+        )
+
+        # The following non-strict call keeps the legacy quiet denial.
+        self.assertFalse(
+            self.enforcer.enforce('strict_action', self.target, creds)
+        )
+
+    def test_authorize_strict_passes_strict_through(self):
+        # Use a dedicated enforcer so the registered default is loaded via
+        # the normal load_rules() path (set_rules() in setUp disables that).
+        enforcer = policy.Enforcer(self.conf)
+        self.addCleanup(enforcer.clear)
+        enforcer.register_default(
+            policy.RuleDefault(
+                name='registered_action', check_str=self.check_str
+            )
+        )
+
+        self.assertTrue(
+            enforcer.authorize(
+                'registered_action',
+                self.target,
+                self.admin_creds,
+                strict=True,
+            )
+        )
+
+        creds = {
+            'project_id': 'project-1',
+            'service_account': 'True',
+        }
+        self.assertRaises(
+            policy.PolicyMissingContext,
+            enforcer.authorize,
+            'registered_action',
+            self.target,
+            creds,
+            strict=True,
+        )
+
+    def test_legacy_list_syntax_and_non_strict_still_work(self):
+        rules = policy.Rules.from_dict(
+            {
+                'legacy_action': [
+                    ['role:admin', 'project_id:%(project_id)s'],
+                    ['role:service'],
+                ]
+            }
+        )
+        self.enforcer.set_rules(rules)
+
+        self.assertTrue(
+            self.enforcer.enforce(
+                'legacy_action',
+                {'project_id': 'project-1'},
+                {'roles': ['admin'], 'project_id': 'project-1'},
+            )
+        )
+        self.assertFalse(
+            self.enforcer.enforce(
+                'legacy_action',
+                {'project_id': 'project-1'},
+                {'roles': ['member']},
+            )
+        )
+
+
 class EnforcerNoPolicyFileTest(base.PolicyBaseTestCase):
     def setUp(self):
         super().setUp()

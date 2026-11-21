@@ -1,0 +1,16 @@
+---
+features:
+  - |
+    Adds a strict enforcement mode to ``Enforcer.enforce()`` and
+    ``Enforcer.authorize()`` via a new keyword-only ``strict`` argument. When
+    a check requires target or credential context that the caller did not
+    provide (for example the credential ``roles`` list, a resource owner such
+    as ``project_id`` or a service account marker), strict mode raises a new
+    ``oslo_policy.policy.PolicyMissingContext`` exception naming the failing
+    check and the missing attribute instead of silently denying the request.
+    This ensures unknown or incomplete context can never be treated as an
+    accepted match, including when a check is combined with the ``not``
+    operator. A present but null value is still treated as real context and
+    compared normally. The default behavior is unchanged: existing policy
+    syntax and calls without ``strict=True`` continue to fail closed without
+    raising.

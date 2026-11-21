@@ -221,6 +221,7 @@ desired rule name.
 """
 
 from collections.abc import Callable, MutableMapping, Sequence
+import contextlib
 import copy
 import logging
 import os
@@ -355,6 +356,15 @@ class InvalidContextObject(Exception):
     def __init__(self, error: str) -> None:
         msg = _('Invalid context object: %(error)s.') % {'error': error}
         super().__init__(msg)
+
+
+PolicyMissingContext = _checks.PolicyMissingContext
+"""Raised by strict enforcement when required context is not provided.
+
+In strict mode, checks fail closed with a meaningful error naming the missing
+target or credential attribute instead of silently treating it as a
+non-match.
+"""
 
 
 def parse_file_contents(data: str | bytes) -> dict[str, str]:
@@ -979,6 +989,7 @@ class Enforcer:
         do_raise: bool = False,
         exc: type[Exception] | None = None,
         *args: Any,
+        strict: bool = False,
         **kwargs: Any,
     ) -> bool:
         """Checks authorization of a rule against the target and credentials.
@@ -997,6 +1008,13 @@ class Enforcer:
             Any remaining arguments passed to :meth:`enforce` (both positional
             and keyword arguments) will be passed to the exception class. If
             not specified, :class:`PolicyNotAuthorized` will be used.
+        :param strict: When ``True``, evaluate the rule in strict mode. A
+            check that needs a target or credential attribute which was not
+            provided raises :class:`PolicyMissingContext` with a descriptive
+            message instead of silently denying the access. This guarantees
+            that unknown or incomplete context is never treated as an
+            accepted match. Defaults to ``False`` to preserve the historical
+            fail-closed-but-quiet behavior.
         :return: ``False`` if the policy does not allow the action and ``exc``
             is not provided; otherwise, returns a value that evaluates to
             ``True``.  Note: for rules using the "case" expression, this
@@ -1063,51 +1081,56 @@ class Enforcer:
             )
 
         # Allow the rule to be a Check tree
-        if isinstance(rule, _checks.BaseCheck):
-            # If the thing we're given is a Check, we don't know the
-            # name of the rule, so pass None for current_rule.
-            scope_valid = self._enforce_scope(
-                creds_dict, rule, do_raise=do_raise
-            )
-            if not scope_valid:
-                return False
-            result = _checks._check(
-                rule=rule,
-                target=target,
-                creds=creds_dict,
-                enforcer=self,
-                current_rule=None,
-            )
-        elif not self.rules:
-            # No rules to reference means we're going to fail closed
-            result = False
-        else:
-            try:
-                to_check = self.rules[rule]
-            except KeyError:
-                LOG.debug('Rule [%s] does not exist', rule)
-                # If the rule doesn't exist, fail closed
-                result = False
-            else:
-                # NOTE(moguimar): suppressing [B105:hardcoded_password_string]
-                #                 as token_scope is not actually a hardcoded
-                #                 token.
-
-                registered_rule = self.registered_rules.get(rule)
-                if registered_rule:
-                    # FIXME(stephenfin): Is registered_rule a rule or check?
-                    scope_valid = self._enforce_scope(
-                        creds_dict, registered_rule, do_raise=do_raise
-                    )
-                    if not scope_valid:
-                        return False
+        strict_context = (
+            _checks.strict_check() if strict else contextlib.nullcontext()
+        )
+        with strict_context:
+            if isinstance(rule, _checks.BaseCheck):
+                # If the thing we're given is a Check, we don't know the
+                # name of the rule, so pass None for current_rule.
+                scope_valid = self._enforce_scope(
+                    creds_dict, rule, do_raise=do_raise
+                )
+                if not scope_valid:
+                    return False
                 result = _checks._check(
-                    rule=to_check,
+                    rule=rule,
                     target=target,
                     creds=creds_dict,
                     enforcer=self,
-                    current_rule=rule,
+                    current_rule=None,
                 )
+            elif not self.rules:
+                # No rules to reference means we're going to fail closed
+                result = False
+            else:
+                try:
+                    to_check = self.rules[rule]
+                except KeyError:
+                    LOG.debug('Rule [%s] does not exist', rule)
+                    # If the rule doesn't exist, fail closed
+                    result = False
+                else:
+                    # NOTE(moguimar): suppressing
+                    # [B105:hardcoded_password_string] as token_scope is not
+                    # actually a hardcoded token.
+
+                    registered_rule = self.registered_rules.get(rule)
+                    if registered_rule:
+                        # FIXME(stephenfin): Is registered_rule a rule or
+                        # check?
+                        scope_valid = self._enforce_scope(
+                            creds_dict, registered_rule, do_raise=do_raise
+                        )
+                        if not scope_valid:
+                            return False
+                    result = _checks._check(
+                        rule=to_check,
+                        target=target,
+                        creds=creds_dict,
+                        enforcer=self,
+                        current_rule=rule,
+                    )
 
         # If it is False, raise the exception if requested
         if do_raise and not result:
@@ -1194,6 +1217,7 @@ class Enforcer:
         do_raise: bool = False,
         exc: type[Exception] | None = None,
         *args: Any,
+        strict: bool = False,
         **kwargs: Any,
     ) -> bool:
         """A wrapper around 'enforce' that checks for policy registration.
@@ -1209,7 +1233,14 @@ class Enforcer:
         if rule not in self.registered_rules:
             raise PolicyNotRegistered(rule)
         return self.enforce(
-            rule, target, creds, do_raise, exc, *args, **kwargs
+            rule,
+            target,
+            creds,
+            do_raise,
+            exc,
+            *args,
+            strict=strict,
+            **kwargs,
         )
 
 

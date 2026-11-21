@@ -17,11 +17,15 @@
 import abc
 import ast
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
+import contextlib
+import contextvars
 import inspect
 from typing import Any, Self, TypeAlias, TypeVar, TYPE_CHECKING, overload
 
 from oslo_context import context
 import stevedore
+
+from oslo_policy._i18n import _
 
 if TYPE_CHECKING:
     from oslo_policy.policy import Enforcer
@@ -31,6 +35,70 @@ TargetT: TypeAlias = Mapping[str, Any]
 
 registered_checks: dict[str | None, 'type[Check]'] = {}
 extension_checks: dict[str, 'Callable[..., Check]'] | None = None
+
+# Tracks whether the current enforcement is running in strict mode. Strict
+# mode fails closed when a check needs context (a target or credential
+# attribute) that the caller did not provide, instead of silently treating the
+# missing information as a non-match. The variable is request-local so nested
+# checks observe the mode without changing the public ``BaseCheck`` API.
+_strict_mode: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    'oslo_policy_strict_mode', default=False
+)
+
+
+@contextlib.contextmanager
+def strict_check() -> (
+    contextlib.AbstractContextManager[contextvars.Token[bool]]
+):
+    """Run policy checks in strict mode for the duration of the context.
+
+    In strict mode, a check raises :class:`PolicyMissingContext` instead of
+    returning ``False`` when the target or credentials it depends on are not
+    provided. This makes missing integration context a hard, explainable
+    failure rather than a silent denial.
+    """
+    token = _strict_mode.set(True)
+    try:
+        yield token
+    finally:
+        _strict_mode.reset(token)
+
+
+def _is_strict() -> bool:
+    return _strict_mode.get()
+
+
+class PolicyMissingContext(Exception):
+    """Raised in strict mode when a check needs context that is not present.
+
+    Unlike a normal policy denial, this indicates the calling application did
+    not supply the information required to make a decision (for example a
+    credential role list, a target resource owner or a service account
+    marker). The message names the failing check and the missing attribute so
+    that integrations can correct the context they pass.
+
+    :param check: The check (or its string form) that could not be evaluated.
+    :param attribute: The target or credential attribute that was not
+        provided.
+    :param source: Where the attribute is expected, either ``'target'`` or
+        ``'credentials'``.
+    """
+
+    def __init__(
+        self,
+        check: 'BaseCheck | str',
+        attribute: str,
+        source: str = 'credentials',
+    ) -> None:
+        self.check = str(check)
+        self.attribute = attribute
+        self.source = source
+        msg = _(
+            "Policy check '%(check)s' requires %(source)s attribute "
+            "'%(attribute)s', but it was not provided. Pass the missing "
+            "context or evaluate the policy without strict mode."
+        ) % {'check': self.check, 'source': source, 'attribute': attribute}
+        super().__init__(msg)
 
 
 def get_extensions() -> dict[str, 'Callable[..., Check]']:
@@ -350,13 +418,20 @@ class RoleCheck(Check):
     ) -> bool:
         try:
             match = self.match % target
-        except KeyError:
+        except KeyError as e:
+            if _is_strict():
+                raise PolicyMissingContext(
+                    self, e.args[0], source='target'
+                ) from e
             # While doing RoleCheck if key not
             # present in Target return false
             return False
 
         if 'roles' in creds:
             return match.lower() in [x.lower() for x in creds['roles']]
+
+        if _is_strict():
+            raise PolicyMissingContext(self, 'roles')
 
         return False
 
@@ -408,6 +483,49 @@ class GenericCheck(Check):
         else:
             return cls._find_in_dict(test_value, path_segments, match)
 
+    def _find_in_dict_strict(
+        self,
+        test_value: MutableMapping[str, Any],
+        path_segments: list[str],
+        match: str,
+        missing_path: list[str],
+    ) -> bool:
+        """Strict variant of :meth:`_find_in_dict`.
+
+        Behaves like :meth:`_find_in_dict` but raises
+        :class:`PolicyMissingContext` when a credential attribute referenced by
+        the check is absent. A present attribute whose value does not match
+        (including a real ``None`` value) is still a normal ``False`` result.
+        """
+        if len(path_segments) == 0:
+            return match == str(test_value)
+        key, remaining = path_segments[0], path_segments[1:]
+        current_path = [*missing_path, key]
+        try:
+            next_value = test_value[key]
+        except KeyError as e:
+            raise PolicyMissingContext(
+                self, '.'.join(current_path)
+            ) from e
+        if isinstance(next_value, list):
+            missing: PolicyMissingContext | None = None
+            for val in next_value:
+                try:
+                    if self._find_in_dict_strict(
+                        val, remaining, match, current_path
+                    ):
+                        return True
+                except PolicyMissingContext as e:
+                    # Another element may still match; keep the first missing
+                    # context error in case none of them do.
+                    missing = e
+            if missing is not None:
+                raise missing
+            return False
+        return self._find_in_dict_strict(
+            next_value, remaining, match, current_path
+        )
+
     def __call__(
         self,
         target: TargetT,
@@ -417,7 +535,11 @@ class GenericCheck(Check):
     ) -> bool:
         try:
             match = self.match % target
-        except KeyError:
+        except KeyError as e:
+            if _is_strict():
+                raise PolicyMissingContext(
+                    self, e.args[0], source='target'
+                ) from e
             # While doing GenericCheck if key not
             # present in Target return false
             return False
@@ -430,4 +552,8 @@ class GenericCheck(Check):
             pass
 
         path_segments = self.kind.split('.')
+        if _is_strict():
+            return self._find_in_dict_strict(
+                creds, path_segments, match, []
+            )
         return self._find_in_dict(creds, path_segments, match)
