@@ -1,0 +1,8 @@
+<pre>
+def approved?(content)
+  save(content) &amp;&amp; resanitize(content) &amp;&amp; render(content)
+end
+</pre>
+<p>字面值保留:&lt;script&gt;alert(1)&lt;/script&gt; 只会作为文本出现。</p>
+<p>不断行空格&nbsp;应保留为同一个字符,与 &amp; 符号一样。</p>
+<p>英文引号 &quot;double&quot; 与 &#39;single&#39; 均按文本处理。</p>
