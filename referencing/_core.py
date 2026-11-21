@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from enum import Enum
-from typing import Any, ClassVar, Generic, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar
 from urllib.parse import unquote, urldefrag, urljoin
 
 from attrs import evolve, field
@@ -11,6 +11,9 @@ from rpds import HashTrieMap, HashTrieSet, List
 from referencing import exceptions
 from referencing._attrs import frozen
 from referencing.typing import URI, Anchor as AnchorType, D, Mapping, Retrieve
+
+if TYPE_CHECKING:
+    from referencing.evidence import Tracer
 
 EMPTY_UNCRAWLED: HashTrieSet[URI] = HashTrieSet()
 EMPTY_PREVIOUS_RESOLVERS: List[URI] = List()
@@ -430,7 +433,7 @@ class Registry(Mapping[URI, Resource[D]]):
             raise exceptions.Unretrievable(ref=uri) from error
         else:
             registry = registry.with_resource(uri, resource)
-            return Retrieved(registry=registry, value=resource)
+            return Retrieved(registry=registry, value=resource, retrieved=True)
 
     def remove(self, uri: URI):
         """
@@ -572,20 +575,46 @@ class Registry(Mapping[URI, Resource[D]]):
             retrieve=retrieve,
         )
 
-    def resolver(self, base_uri: URI = "") -> Resolver[D]:
+    def resolver(
+        self,
+        base_uri: URI = "",
+        *,
+        evidence: Tracer | None = None,
+    ) -> Resolver[D]:
         """
         Return a `Resolver` which resolves references against this registry.
-        """
-        return Resolver(base_uri=base_uri, registry=self)
 
-    def resolver_with_root(self, resource: Resource[D]) -> Resolver[D]:
+        Optionally pass a `referencing.evidence.Recorder` as ``evidence`` to
+        record an audit trail of the resolutions which are performed.
+        """
+        source = self._resources.get(base_uri.rstrip("#"))
+        if source is None:
+            source = self._resources.get(base_uri)
+        return Resolver(
+            base_uri=base_uri,
+            registry=self,
+            source=source,
+            tracer=evidence,
+        )
+
+    def resolver_with_root(
+        self,
+        resource: Resource[D],
+        *,
+        evidence: Tracer | None = None,
+    ) -> Resolver[D]:
         """
         Return a `Resolver` with a specific root resource.
+
+        As with `resolver`, an optional ``evidence`` recorder may be passed to
+        record the resolutions which take place.
         """
         uri = resource.id() or ""
         return Resolver(
             base_uri=uri,
             registry=self.with_resource(uri, resource),
+            source=resource,
+            tracer=evidence,
         )
 
 
@@ -606,6 +635,7 @@ class Retrieved(Generic[D, AnchorOrResource]):
 
     value: AnchorOrResource
     registry: Registry[D]
+    retrieved: bool = field(default=False, repr=False)
 
 
 @frozen
@@ -644,6 +674,39 @@ class Resolver(Generic[D]):
     _base_uri: URI = field(alias="base_uri")
     _registry: Registry[D] = field(alias="registry")
     _previous: List[URI] = field(default=List(), repr=False, alias="previous")
+    _source: Resource[D] | None = field(
+        default=None,
+        repr=False,
+        alias="source",
+    )
+    _tracer: Tracer | None = field(default=None, repr=False, alias="tracer")
+
+    def _recording(
+        self,
+        *,
+        ref: URI,
+        uri: URI | None,
+        fragment: str,
+        fragment_kind: str,
+        target: Resource[D],
+        contents: D,
+        retrieved: bool,
+    ) -> None:
+        if self._tracer is None:
+            return
+        from referencing.evidence import digest_of
+
+        self._tracer.resolution(
+            ref=ref,
+            base_uri=self._base_uri,
+            source=self._source,
+            target=target,
+            target_uri=uri,
+            fragment_kind=fragment_kind,
+            fragment=fragment,
+            resolved_digest=digest_of(contents),
+            retrieved=retrieved,
+        )
 
     def lookup(self, ref: URI) -> Resolved[D]:
         """
@@ -679,17 +742,63 @@ class Resolver(Generic[D]):
             raise exceptions.Unresolvable(ref=ref) from None
         except exceptions.Unretrievable as error:
             raise exceptions.Unresolvable(ref=ref) from error
+        was_retrieved = retrieved.retrieved
 
         if fragment.startswith("/"):
-            resolver = self._evolve(registry=retrieved.registry, base_uri=uri)
-            return retrieved.value.pointer(pointer=fragment, resolver=resolver)
+            resolver = self._evolve(
+                registry=retrieved.registry,
+                base_uri=uri,
+                source=retrieved.value,
+            )
+            resolved = retrieved.value.pointer(
+                pointer=fragment,
+                resolver=resolver,
+            )
+            self._recording(
+                ref=ref,
+                uri=uri,
+                fragment=fragment,
+                fragment_kind="pointer",
+                target=retrieved.value,
+                contents=resolved.contents,
+                retrieved=was_retrieved,
+            )
+            return resolved
 
         if fragment:
             retrieved = retrieved.registry.anchor(uri, fragment)
-            resolver = self._evolve(registry=retrieved.registry, base_uri=uri)
-            return retrieved.value.resolve(resolver=resolver)
+            resolver = self._evolve(
+                registry=retrieved.registry,
+                base_uri=uri,
+                source=retrieved.registry[uri],
+            )
+            resolved = retrieved.value.resolve(resolver=resolver)
+            self._recording(
+                ref=ref,
+                uri=uri,
+                fragment=fragment,
+                fragment_kind="anchor",
+                target=resolved.resolver._source
+                or retrieved.registry[uri],
+                contents=resolved.contents,
+                retrieved=was_retrieved,
+            )
+            return resolved
 
-        resolver = self._evolve(registry=retrieved.registry, base_uri=uri)
+        resolver = self._evolve(
+            registry=retrieved.registry,
+            base_uri=uri,
+            source=retrieved.value,
+        )
+        self._recording(
+            ref=ref,
+            uri=uri,
+            fragment="",
+            fragment_kind="resource",
+            target=retrieved.value,
+            contents=retrieved.value.contents,
+            retrieved=was_retrieved,
+        )
         return Resolved(contents=retrieved.value.contents, resolver=resolver)
 
     def in_subresource(self, subresource: Resource[D]) -> Resolver[D]:
@@ -699,7 +808,11 @@ class Resolver(Generic[D]):
         id = subresource.id()
         if id is None:
             return self
-        return evolve(self, base_uri=urljoin(self._base_uri, id))
+        return evolve(
+            self,
+            base_uri=urljoin(self._base_uri, id),
+            source=subresource,
+        )
 
     def dynamic_scope(self) -> Iterable[tuple[URI, Registry[D]]]:
         """

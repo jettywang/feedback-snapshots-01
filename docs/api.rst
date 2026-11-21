@@ -77,6 +77,16 @@ referencing.retrieval
 .. autoclass:: referencing.retrieval._T
 
 
+referencing.evidence
+^^^^^^^^^^^^^^^^^^^^
+
+.. automodule:: referencing.evidence
+   :members:
+   :undoc-members:
+
+.. autoclass:: referencing.evidence.Tracer
+
+
 referencing.typing
 ^^^^^^^^^^^^^^^^^^
 

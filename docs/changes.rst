@@ -2,6 +2,12 @@
 Changelog
 =========
 
+Unreleased
+----------
+
+* Add an optional ``referencing.evidence`` module for recording, serializing, verifying and reconciling the evidence of reference resolution: which documents were used, by canonical identity and content digest, and whether each reference depended on a whole resource, a JSON pointer, or an anchor.
+  Recording is opt-in via a ``Recorder`` passed to ``Registry.resolver`` or ``Registry.resolver_with_root``, and never includes document contents.
+
 v0.37.0
 -------
 

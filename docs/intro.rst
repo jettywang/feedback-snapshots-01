@@ -267,3 +267,82 @@ The above example would be written:
     print(resolver.lookup("https://json-schema.org/draft/2020-12/schema"))
 
 It is otherwise functionally equivalent to the above, other than that retrieval will not repeatedly make a web request.
+
+
+Recording Resolution Evidence
+-----------------------------
+
+Sometimes you need to prove *which* documents were actually used to resolve a reference -- for instance when investigating a customer complaint about a validation result, or when answering an auditor's question months later.
+`referencing.evidence.Recorder` provides an optional, content-free record of the resolutions which took place.
+
+Pass a recorder as the ``evidence`` argument to `referencing.Registry.resolver` (or `referencing.Registry.resolver_with_root`):
+
+.. testcode::
+
+    from referencing import Registry, Resource
+    from referencing.evidence import Recorder
+    from referencing.jsonschema import DRAFT202012
+
+    shared = {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "https://example.com/shared",
+        "$defs": {
+            "leaf": {"$anchor": "leaf", "type": "string"},
+        },
+    }
+    root = {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": "urn:example:root",
+        "$ref": "https://example.com/shared#leaf",
+    }
+
+    documents = {
+        "https://example.com/shared": shared,
+        "urn:example:root": root,
+    }
+    registry = Registry().with_resources(
+        (uri, DRAFT202012.create_resource(contents))
+        for uri, contents in documents.items()
+    )
+
+    recorder = Recorder()
+    resolver = registry.resolver(base_uri="urn:example:root", evidence=recorder)
+    resolver.lookup("https://example.com/shared")
+    resolver.lookup("https://example.com/shared#/$defs/leaf")
+    for line in recorder.evidence().log_lines():
+        print(line)  # doctest: +ELLIPSIS
+
+.. testoutput::
+
+    urn:example:root -> https://example.com/shared (resource: ) ref=https://example.com/shared document=sha256:... value=sha256:...
+    urn:example:root -> https://example.com/shared (pointer: /$defs/leaf) ref=https://example.com/shared#/$defs/leaf document=sha256:... value=sha256:...
+
+Each record identifies the source document, the document which was actually depended on, whether the reference pointed at that whole document, a JSON pointer, or an anchor, and a digest of both the document and the resolved value.
+No document contents are ever stored or logged.
+
+Because the identity of each document is paired with a digest, evidence can be (re-)checked later, even if the documents are stored elsewhere by then.
+`referencing.evidence.Evidence.verify` compares recorded digests against documents retrieved later, while `referencing.evidence.Evidence.reconcile` compares two recordings against one another and reports only what changed:
+
+.. testcode::
+
+    from referencing.evidence import Evidence
+
+    first = recorder.evidence()
+    again = Evidence.from_json(first.to_json())  # e.g. loaded from an old log
+    print(again == first)
+    print(again.verify(documents))
+    print(first.reconcile(again))
+
+.. testoutput::
+
+    True
+    []
+    []
+
+If one of the documents is later found to differ, only the evidence which depends on it is reported.
+`referencing.evidence.Evidence.dependencies` groups the recorded resolutions by the document they actually hit, which is helpful when several entry points share one external resource and another reference lands on an anchor within the same document.
+
+.. note::
+
+    Recording is entirely opt-in.
+    Resolvers created without an ``evidence`` recorder have no overhead beyond a scalar check, and do not retain any state between lookups.
