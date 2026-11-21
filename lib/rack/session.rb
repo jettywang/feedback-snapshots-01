@@ -8,5 +8,9 @@ module Rack
   module Session
     autoload :Cookie, "rack/session/cookie"
     autoload :Pool, "rack/session/pool"
+    autoload :CommitPolicy, "rack/session/commit_policy"
+    autoload :CommitResult, "rack/session/commit_policy"
+    autoload :CommitContext, "rack/session/commit_policy"
+    autoload :CommitBody, "rack/session/commit_policy"
   end
 end

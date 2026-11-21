@@ -1,5 +1,16 @@
 # Releases
 
+## Unreleased
+
+  - Add configurable commit policies (`commit_policy:`) so applications can
+    decide whether staged session data is committed based on the response
+    family and an optional business marker.
+  - Defer commits for streaming bodies until the body is delivered and closed,
+    and skip the commit if the stream raises.
+  - Expose `rack.session.commit_result` with independent business and
+    persistence outcomes.
+  - Preserve existing behaviour when no commit policy is configured.
+
 ## v2.1.2
 
   - [CVE-2026-39324](https://github.com/advisories/GHSA-33qg-7wpp-89cq) Don't fall back to unencrypted coder if encryptors are present.

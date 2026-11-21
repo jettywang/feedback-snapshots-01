@@ -13,6 +13,7 @@ require 'rack/request'
 require 'rack/response'
 
 require_relative '../constants'
+require_relative '../commit_policy'
 
 module Rack
 
@@ -123,8 +124,42 @@ module Rack
         end
 
         def destroy
-          clear
-          @id = @store.send(:delete_session, @req, id, options)
+          if @store.respond_to?(:defer_session_destroy?) && @store.defer_session_destroy?(@req)
+            # With a commit policy, destroying is a pending change: the store
+            # entry is only removed if the policy allows the commit. This
+            # prevents a failed business response from deleting an existing
+            # session.
+            load_for_write!
+            @destroyed_session_id = id
+            @pending_destroy = true
+            @data.clear
+            @id
+          else
+            clear
+            @id = @store.send(:delete_session, @req, id, options)
+          end
+        end
+
+        def pending_destroy?
+          !!@pending_destroy
+        end
+
+        def apply_pending_destroy!
+          return unless @pending_destroy
+
+          @pending_destroy = false
+          session_id = @destroyed_session_id
+          @destroyed_session_id = nil
+          @id = @store.send(:delete_session, @req, session_id || @store.send(:generate_sid), options)
+        end
+
+        def cancel_pending_destroy!
+          return unless @pending_destroy
+
+          @pending_destroy = false
+          @id = @destroyed_session_id
+          @destroyed_session_id = nil
+          nil
         end
 
         def to_hash
@@ -252,7 +287,7 @@ module Rack
           secure_random: ::SecureRandom
         }.freeze
 
-        attr_reader :key, :default_options, :sid_secure, :same_site
+        attr_reader :key, :default_options, :sid_secure, :same_site, :commit_policy
 
         def initialize(app, options = {})
           @app = app
@@ -261,6 +296,8 @@ module Rack
           @assume_ssl = @default_options.delete(:assume_ssl)
           @cookie_only = @default_options.delete(:cookie_only)
           @same_site = @default_options.delete(:same_site)
+          @commit_policy = @default_options.delete(:commit_policy)
+          @commit_policy = @default_options.delete(:commit_on) if @commit_policy.nil?
           initialize_sid
         end
 
@@ -273,7 +310,28 @@ module Rack
           prepare_session(req)
           status, headers, body = app.call(req.env)
           res = Rack::Response::Raw.new status, headers
-          commit_session(req, res)
+
+          if commit_enabled?(req)
+            policy = commit_policy_for(req)
+
+            if CommitPolicy.defer_streaming?(policy) && deferrable_body?(body)
+              # For a streaming body, the response has not been fully delivered
+              # yet. Defer the commit until the body is closed successfully, so
+              # a stream (or stream close) error does not persist staged data.
+              result = build_commit_result(req, res, policy, body)
+              commit = lambda { commit_session(req, res, result: result) }
+              error = lambda { |exception| fail_deferred_commit(req, result, exception) }
+              body = CommitBody.new(body, commit, error)
+            else
+              commit_session(req, res)
+            end
+          else
+            # No policy was requested: preserve the historical behaviour
+            # exactly, including the return value and the absence of any
+            # additional environment keys.
+            commit_session(req, res)
+          end
+
           [status, headers, body]
         end
 
@@ -287,6 +345,110 @@ module Rack
           @sidbits = @default_options[:sidbits]
           @sid_secure = @default_options[:secure_random]
           @sid_length = @sidbits / 4
+        end
+
+        # Returns the effective commit policy for the request. A policy may be
+        # configured globally, overridden through session options, or provided
+        # directly in the environment.
+        def commit_policy_for(req)
+          options = req.get_header(RACK_SESSION_OPTIONS)
+          if options.respond_to?(:key?) && options.key?(:commit_policy)
+            return options[:commit_policy]
+          end
+
+          if req.env.key?(RACK_SESSION_COMMIT_POLICY)
+            return req.get_header(RACK_SESSION_COMMIT_POLICY)
+          end
+
+          @commit_policy
+        end
+
+        def policy_configured?(policy)
+          !policy.nil?
+        end
+
+        # A policy is considered enabled when it is configured globally, set
+        # per request, or when the caller supplied an explicit commit decision.
+        def commit_enabled?(req)
+          policy = commit_policy_for(req)
+          return true if policy_configured?(policy)
+
+          options = req.get_header(RACK_SESSION_OPTIONS)
+          !CommitPolicy.resolve_explicit_decision(req.env, options).nil?
+        end
+
+        # Whether the store should defer a SessionHash#destroy until commit
+        # time, so the policy can veto destructive changes.
+        def defer_session_destroy?(req)
+          commit_enabled?(req)
+        end
+        public :defer_session_destroy?
+
+        # Only bodies which are not already buffered need to be wrapped so
+        # that we can observe the end of the stream.
+        def deferrable_body?(body)
+          return false if body.nil?
+          return false if body.is_a?(Array)
+          return false if body.respond_to?(:to_str)
+
+          true
+        end
+
+        def commit_context(req, res, session, options, policy, body = nil)
+          CommitContext.new(
+            env: req.env,
+            status: res.status,
+            headers: res.headers,
+            body: body,
+            session: session,
+            options: options,
+            policy: policy
+          )
+        end
+
+        def build_commit_result(req, res, policy = nil, body = nil)
+          session = req.get_header RACK_SESSION
+          options = session.respond_to?(:options) ? session.options : req.get_header(RACK_SESSION_OPTIONS) || {}
+          context = commit_context(req, res, session, options, policy, body)
+
+          CommitResult.new(
+            status: res.status,
+            family: context.family,
+            business_success: context.business_success?
+          )
+        end
+
+        # Record the commit outcome in the environment and session options,
+        # keeping business success and persistence success independent.
+        def store_commit_result(req, session, result)
+          env = req.env
+          env[RACK_SESSION_COMMIT_RESULT] = result
+          env[RACK_SESSION_COMMITTED] = result.committed?
+          env[RACK_SESSION_PERSISTED] = result.persisted?
+          env[RACK_SESSION_COMMIT_STATUS] = result.reason
+          env[RACK_SESSION_COMMIT_ERROR] = result.error
+
+          options = session.respond_to?(:options) ? session.options : req.get_header(RACK_SESSION_OPTIONS)
+          if options
+            options[:commit_result] = result
+            options[:commit_status] = result.reason
+            options[:committed] = result.committed?
+            options[:persisted] = result.persisted?
+            options[:business_success] = result.business_success?
+          end
+
+          result
+        end
+
+        def fail_deferred_commit(req, result, exception)
+          result.fail_stream!(exception)
+
+          session = req.get_header RACK_SESSION
+          store_commit_result(req, session, result)
+
+          if errors = req.get_header(RACK_ERRORS)
+            errors.puts("Warning! #{self.class.name} did not save session after response stream error: #{exception.message}")
+          end
         end
 
         # Generate a new session id using Ruby #rand.  The size of the
@@ -346,6 +508,11 @@ module Rack
 
         # Session should be committed if it was loaded, any of specific options like :renew, :drop
         # or :expire_after was given and the security permissions match. Skips if skip is given.
+        #
+        # When a commit policy is configured, the policy decides whether the
+        # staged data is eligible. The policy is evaluated even when the
+        # session would not otherwise be committed, so callers can observe the
+        # decision.
 
         def commit_session?(req, session, options)
           if options[:skip]
@@ -354,6 +521,22 @@ module Rack
             has_session = loaded_session?(session) || forced_session_update?(session, options)
             has_session && security_matches?(req, options)
           end
+        end
+
+        # Apply the configured commit policy (if any) for this request.
+        #
+        # Returns true when the policy allows the commit. A request-specific
+        # policy in the session options takes precedence over the middleware
+        # policy, and an explicit `env['rack.session.commit']` decision takes
+        # precedence over both.
+        def commit_policy_allows?(req, session, options, res = nil, body = nil)
+          policy = commit_policy_for(req)
+          explicit = CommitPolicy.resolve_explicit_decision(req.env, options)
+          return explicit unless explicit.nil?
+          return true unless policy_configured?(policy)
+
+          context = commit_context(req, res, session, options, policy, body)
+          CommitPolicy.resolve(policy, context)
         end
 
         def loaded_session?(session)
@@ -377,8 +560,105 @@ module Rack
         # the session options and passes them to #write_session. If successful
         # and the :defer option is not true, a cookie will be added to the
         # response with the session's id.
+        #
+        # When a commit policy is enabled, the policy is consulted first and
+        # the outcome is returned as a CommitResult. Without a policy, the
+        # historical implementation and return value are used unchanged.
 
-        def commit_session(req, res)
+        def commit_session(req, res, result: nil, body: nil)
+          return legacy_commit_session(req, res) unless commit_enabled?(req)
+
+          session = req.get_header RACK_SESSION
+          options = session.options
+
+          result ||= build_commit_result(req, res, commit_policy_for(req), body)
+
+          # The policy is consulted before any destructive operation so a
+          # business failure cannot delete or renew staged session state.
+          allowed = commit_policy_allows?(req, session, options, res, body)
+          destructive = false
+
+          if session.respond_to?(:pending_destroy?) && session.pending_destroy?
+            if allowed
+              session.apply_pending_destroy!
+              destructive = true
+            else
+              session.cancel_pending_destroy!
+            end
+          end
+
+          unless allowed
+            result.skip!(:policy)
+            return finish_commit(req, session, result)
+          end
+
+          if options[:drop] || options[:renew]
+            session_id = delete_session(req, session.id || generate_sid, options)
+            destructive = true
+
+            unless session_id
+              result.commit!(persisted: true, session_id: nil, reason: :dropped)
+              return finish_commit(req, session, result)
+            end
+          end
+
+          unless commit_session?(req, session, options)
+            if destructive
+              result.commit!(persisted: true, session_id: session_id, reason: :destroyed)
+            else
+              result.skip!(options[:skip] ? :skip : :not_loaded)
+            end
+
+            return finish_commit(req, session, result)
+          end
+
+          session.send(:load!) unless loaded_session?(session)
+          session_id ||= session.id
+          session_data = session.to_hash.delete_if { |k, v| v.nil? }
+
+          begin
+            data = write_session(req, session_id, session_data, options)
+          rescue => exception
+            result.fail_write!(exception)
+            store_commit_result(req, session, result)
+
+            if errors = req.get_header(RACK_ERRORS)
+              errors.puts("Warning! #{self.class.name} failed to save session: #{exception.class}: #{exception.message}")
+            end
+
+            return finish_commit(req, session, result)
+          end
+
+          if not data
+            result.fail_write!(nil)
+            store_commit_result(req, session, result)
+            req.get_header(RACK_ERRORS).puts("Warning! #{self.class.name} failed to save session. Content dropped.")
+          elsif options[:defer] and not options[:renew]
+            result.commit!(persisted: true, session_id: session_id)
+            store_commit_result(req, session, result)
+            req.get_header(RACK_ERRORS).puts("Deferring cookie for #{session_id}") if $VERBOSE
+          else
+            commit_cookie(req, res, data, session_id, options)
+            result.commit!(persisted: true, session_id: session_id)
+            store_commit_result(req, session, result)
+          end
+
+          finish_commit(req, session, result)
+        end
+        public :commit_session
+
+        # Store the result for observation and return it. This path is only
+        # used when a commit policy or explicit decision is enabled; without
+        # one, #legacy_commit_session preserves the historical return value.
+        def finish_commit(req, session, result)
+          store_commit_result(req, session, result)
+          result
+        end
+
+        # The historical commit implementation, used verbatim when no commit
+        # policy is enabled. Keep this in sync with the old behaviour so that
+        # existing applications are unaffected.
+        def legacy_commit_session(req, res)
           session = req.get_header RACK_SESSION
           options = session.options
 
@@ -398,20 +678,24 @@ module Rack
           elsif options[:defer] and not options[:renew]
             req.get_header(RACK_ERRORS).puts("Deferring cookie for #{session_id}") if $VERBOSE
           else
-            cookie = Hash.new
-            cookie[:value] = cookie_value(data)
-            cookie[:expires] = Time.now + options[:expire_after] if options[:expire_after]
-            cookie[:expires] = Time.now + options[:max_age] if options[:max_age]
-
-            if @same_site.respond_to? :call
-              cookie[:same_site] = @same_site.call(req, res)
-            else
-              cookie[:same_site] = @same_site
-            end
-            set_cookie(req, res, cookie.merge!(options))
+            commit_cookie(req, res, data, session_id, options)
           end
         end
-        public :commit_session
+        private :legacy_commit_session
+
+        def commit_cookie(req, res, data, session_id, options)
+          cookie = Hash.new
+          cookie[:value] = cookie_value(data)
+          cookie[:expires] = Time.now + options[:expire_after] if options[:expire_after]
+          cookie[:expires] = Time.now + options[:max_age] if options[:max_age]
+
+          if @same_site.respond_to? :call
+            cookie[:same_site] = @same_site.call(req, res)
+          else
+            cookie[:same_site] = @same_site
+          end
+          set_cookie(req, res, cookie.merge!(options))
+        end
 
         def cookie_value(data)
           data
