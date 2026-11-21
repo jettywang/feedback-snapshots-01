@@ -35,10 +35,11 @@ resolves on its own; pipx rejects the manifest otherwise:
     apps = ["http", "https"]
 
 Add a ``tool.pipx.tools`` table only when a tool needs policy beyond its package requirement. A tool table may set
-``suffix``, ``apps``, ``include-dependencies``, ``include-resources-from``, ``expose``, or ``lock``. Use
+``suffix``, ``apps``, ``only-apps``, ``include-dependencies``, ``include-resources-from``, ``expose``, or ``lock``. Use
 ``include-resources-from = ["PACKAGE"]`` to select dependency resources; do not combine it with
-``include-dependencies``. Relative ``lock`` paths start from the manifest directory. Put `nab
-<https://pypi.org/project/nab/>`__ settings in ``tool.nab``.
+``include-dependencies``. Use ``only-apps = ["APP"]`` to publish just those entry points while still installing every
+dependency; it cannot be combined with either resource option. Relative ``lock`` paths start from the manifest
+directory. Put `nab <https://pypi.org/project/nab/>`__ settings in ``tool.nab``.
 
 Use the normalized package name plus its suffix as the environment name when a tool sets a suffix:
 

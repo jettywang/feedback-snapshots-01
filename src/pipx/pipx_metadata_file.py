@@ -36,7 +36,7 @@ _LOGGER: Final[logging.Logger] = logging.getLogger(__name__)
 #: Name of the file that records a virtual environment's pipx metadata.
 PIPX_INFO_FILENAME: Final[str] = "pipx_metadata.json"
 # bump only when the file format changes
-_METADATA_VERSION: Final[str] = "0.12"
+_METADATA_VERSION: Final[str] = "0.13"
 
 
 class _RawPackageRecord(TypedDict, total=False):
@@ -54,6 +54,7 @@ class _RawExposure(TypedDict, total=False):
     include_dependencies: bool
     include_apps: bool
     include_resources_from: list[str]
+    only_apps: list[str]
     suffix: str
 
 
@@ -203,7 +204,7 @@ class PipxMetadata:
                 # 0.1 recorded no suffix, so take it from the venv name
                 main_package_data["suffix"] = self.venv_dir.name.replace(package_name, "")
             metadata_dict["source_interpreter"] = None
-        elif version not in {_METADATA_VERSION, "0.11", "0.10", "0.9", "0.8", "0.7", "0.6", "0.5"}:
+        elif version not in {_METADATA_VERSION, "0.12", "0.11", "0.10", "0.9", "0.8", "0.7", "0.6", "0.5"}:
             msg = f"""
                 {self.venv_dir.name}: Unknown metadata version {version}, written
                 by a later version of pipx. Upgrade pipx to manage this package.
@@ -218,6 +219,8 @@ class PipxMetadata:
             raw_package_data = cast("dict[str, Any]", package_data)
             if "include_apps_from" in raw_package_data:
                 package_data.setdefault("include_resources_from", raw_package_data.pop("include_apps_from"))
+            # a file written before the selection existed publishes every app the package provides
+            package_data.setdefault("only_apps", [])
 
     def _package_info(self, data: _RawPackageInfo) -> PackageInfo:
         return replace(PackageInfo.from_dict(data), pip_args=replayable_pip_args(data["pip_args"], self.venv_dir))
@@ -365,12 +368,47 @@ class PackageInfo:
     @property
     def app_paths_to_expose(self) -> list[Path]:
         """Paths of the apps exposed for the package and its included dependencies."""
+        main_paths: list[Path] = self.resources.app_paths if self.exposure.include_apps else []
+        dependency_paths: Final[list[Path]] = self._included_dependency_paths(
+            self.resources.app_paths_of_dependencies
+        )
         return [
-            *(self.resources.app_paths if self.exposure.include_apps else ()),
-            *self._included_dependency_paths(self.resources.app_paths_of_dependencies),
+            *(path for path in main_paths if self._is_selected(path.name)),
+            *(path for path in dependency_paths if self._is_selected(path.name)),
         ]
 
+    def _selection(self) -> tuple[str, ...]:
+        # an empty selection keeps the historical behavior; --only-apps and the manifest's only-apps restrict it
+        return tuple(self.exposure.only_apps)
+
+    def _is_selected(self, name: str) -> bool:
+        # an empty selection keeps the historical behavior of publishing every app the package provides
+        selected: Final[tuple[str, ...]] = self._selection()
+        if not selected:
+            return True
+        names: Final[set[str]] = set(selected)
+        # Windows installs an entry point as foo.exe beside foo, and a selected foo must keep its launcher and the
+        # companion files an editable app needs to run
+        return (
+            name in names
+            or (name.lower().endswith(".exe") and name[:-4] in names)
+            or any(name == f"{app}{companion}" for app in names for companion in ("-script.py", ".exe.manifest"))
+        )
+
+    def _is_selected_page(self, name: str) -> bool:
+        # a selection names the command, while a man page adds its section, as in tool.1 or tool.1.gz
+        selected: Final[tuple[str, ...]] = self._selection()
+        if not selected:
+            return True
+        names: Final[set[str]] = set(selected)
+        page: Final[Path] = Path(name)
+        stem: Final[str] = Path(page.name.removesuffix(".gz")).stem
+        return page.name in names or stem in names
+
     def _included_dependency_paths(self, paths_by_package: dict[str, list[Path]]) -> list[Path]:
+        # --only-apps names the main package's commands, so a dependency's same-named entry stays hidden
+        if self.exposure.only_apps:
+            return []
         included_packages: Final[set[str]] = set(self.exposure.include_resources_from)
         return [
             path
@@ -380,9 +418,15 @@ class PackageInfo:
         ]
 
     @property
+    def exposed_main_apps(self) -> list[str]:
+        """Names of this package's own apps that the selection publishes."""
+        main_apps: list[str] = self.resources.apps if self.exposure.include_apps else []
+        return [app for app in main_apps if self._is_selected(app)]
+
+    @property
     def apps_to_expose(self) -> list[str]:
         """Names of the apps exposed for the package and its included dependencies."""
-        return [*(self.resources.apps if self.exposure.include_apps else ()), *self.included_dependency_apps]
+        return [*self.exposed_main_apps, *self.included_dependency_apps]
 
     @property
     def included_dependency_apps(self) -> list[str]:
@@ -393,12 +437,35 @@ class PackageInfo:
         return [app for app in self.resources.apps_of_dependencies if app in included_names]
 
     @property
+    def available_apps(self) -> list[str]:
+        """Names of the apps the package and its selected dependencies provide, before any selection."""
+        main_apps: Final[list[str]] = self.resources.apps if self.exposure.include_apps else []
+        included_packages: Final[set[str]] = set(self.exposure.include_resources_from)
+        dependency_apps: Final[list[str]] = [
+            path.name
+            for package, paths in self.resources.app_paths_of_dependencies.items()
+            if self.exposure.include_dependencies or package in included_packages
+            for path in paths
+        ]
+        return [*main_apps, *dependency_apps]
+
+    @property
     def man_paths_to_expose(self) -> list[Path]:
         """Paths of the man pages exposed for the package and its included dependencies."""
+        main_paths: list[Path] = self.resources.man_paths if self.exposure.include_apps else []
+        dependency_paths: Final[list[Path]] = self._included_dependency_paths(
+            self.resources.man_paths_of_dependencies
+        )
         return [
-            *(self.resources.man_paths if self.exposure.include_apps else ()),
-            *self._included_dependency_paths(self.resources.man_paths_of_dependencies),
+            *(path for path in main_paths if self._is_selected_page(path.name)),
+            *(path for path in dependency_paths if self._is_selected_page(path.name)),
         ]
+
+    @property
+    def exposed_main_man_pages(self) -> list[str]:
+        """Names of this package's own man pages that the selection publishes."""
+        main_pages: list[str] = self.resources.man_pages if self.exposure.include_apps else []
+        return [page for page in main_pages if self._is_selected_page(Path(page).name)]
 
     @property
     def man_pages_to_expose(self) -> list[str]:
@@ -408,28 +475,41 @@ class PackageInfo:
             for path in self._included_dependency_paths(self.resources.man_paths_of_dependencies)
         }
         return [
-            *(self.resources.man_pages if self.exposure.include_apps else ()),
-            *(page for page in self.resources.man_pages_of_dependencies if page in included_names),
+            *self.exposed_main_man_pages,
+            *(
+                page
+                for page in self.resources.man_pages_of_dependencies
+                if page in included_names and self._is_selected_page(Path(page).name)
+            ),
         ]
 
     @property
     def completion_paths_to_expose(self) -> list[Path]:
         """Paths of the completions exposed for the package and its included dependencies."""
+        main_paths: list[Path] = self.resources.completion_paths if self.exposure.include_apps else []
+        dependency_paths: Final[list[Path]] = self._included_dependency_paths(
+            self.resources.completion_paths_of_dependencies
+        )
         return [
-            *(self.resources.completion_paths if self.exposure.include_apps else ()),
-            *self._included_dependency_paths(self.resources.completion_paths_of_dependencies),
+            *(path for path in main_paths if self._is_selected(path.name)),
+            *(path for path in dependency_paths if self._is_selected(path.name)),
         ]
 
     @property
     def completions_to_expose(self) -> list[str]:
         """Names of the completions exposed for the package and its included dependencies."""
+        main_completions: list[str] = self.resources.completions if self.exposure.include_apps else []
         included_names: Final[set[str]] = {
             f"{path.parent.parent.name}/{path.parent.name}/{path.name}"
             for path in self._included_dependency_paths(self.resources.completion_paths_of_dependencies)
         }
         return [
-            *(self.resources.completions if self.exposure.include_apps else ()),
-            *(completion for completion in self.resources.completions_of_dependencies if completion in included_names),
+            *(completion for completion in main_completions if self._is_selected(Path(completion).name)),
+            *(
+                completion
+                for completion in self.resources.completions_of_dependencies
+                if completion in included_names and self._is_selected(Path(completion).name)
+            ),
         ]
 
     def to_dict(

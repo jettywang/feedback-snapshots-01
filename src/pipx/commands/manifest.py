@@ -219,7 +219,7 @@ def _parse_tool(
         msg = f"Manifest tool name must be normalized: {environment}"
         raise PipxError(msg)
     if unknown := sorted(
-        set(data) - {"suffix", "apps", "include-dependencies", "include-resources-from", "expose", "lock"}
+        set(data) - {"suffix", "apps", "only-apps", "include-dependencies", "include-resources-from", "expose", "lock"}
     ):
         msg = f"Unknown {'key' if len(unknown) == 1 else 'keys'} for manifest tool {environment}: {', '.join(unknown)}"
         raise PipxError(msg)
@@ -237,6 +237,10 @@ def _parse_tool(
     if include_dependencies and include_resources_from:
         msg = f"Manifest tool {environment} cannot combine include-dependencies with include-resources-from."
         raise PipxError(msg)
+    only_apps: Final[tuple[str, ...]] = _parse_only_apps(environment, data)
+    if only_apps and (include_dependencies or include_resources_from):
+        msg = f"Manifest tool {environment} cannot combine only-apps with dependency resources."
+        raise PipxError(msg)
     if not isinstance(expose_resources := data.get("expose", True), bool):
         msg = f"Manifest tool {environment} expose must be a boolean."
         raise PipxError(msg)
@@ -247,6 +251,7 @@ def _parse_tool(
         package_name=package_name,
         suffix=suffix,
         apps=_parse_apps(environment, data),
+        only_apps=only_apps,
         include_dependencies=include_dependencies,
         include_resources_from=include_resources_from,
         expose=expose_resources,
@@ -289,10 +294,21 @@ class _ManifestTool:
     package_name: str
     suffix: str
     apps: tuple[str, ...]
+    only_apps: tuple[str, ...]
     include_dependencies: bool
     include_resources_from: tuple[str, ...]
     expose: bool
     lock_file: Path | None
+
+
+def _parse_only_apps(environment: str, data: dict[str, _TomlValue]) -> tuple[str, ...]:
+    if not _is_non_empty_strings(apps := data.get("only-apps", [])):
+        msg = f"Manifest tool {environment} only-apps must be non-empty strings."
+        raise PipxError(msg)
+    if len(apps) != len(set(apps)):
+        msg = f"Manifest tool {environment} only-apps must be unique."
+        raise PipxError(msg)
+    return tuple(apps)
 
 
 def _parse_apps(environment: str, data: dict[str, _TomlValue]) -> tuple[str, ...]:
@@ -378,11 +394,13 @@ def _install_tool(
                     exposure=ExposureOptions(
                         include_dependencies=tool.include_dependencies,
                         include_resources_from=tool.include_resources_from,
+                        only_apps=tool.only_apps,
                         suffix=tool.suffix,
                     ),
                     record=RecordOptions(
                         expected_apps=tool.apps,
                         replace_expected_apps=True,
+                        replace_only_apps=True,
                         lock_file=tool.lock_file,
                         replace_lock=True,
                         exposure_enabled=tool.expose,

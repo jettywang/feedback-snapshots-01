@@ -27,6 +27,7 @@ __lazy_modules__ = [
 import filecmp
 import logging
 import os
+import posixpath
 import re
 import shlex
 import shutil
@@ -1137,6 +1138,23 @@ def _get_list_output(venv: Venv, package_name: str, *, new_install: bool, includ
     return "\n".join(output)
 
 
+def _published(name: str, resource_packages: tuple[PackageInfo, ...], resource_type: str) -> bool:
+    """Return whether an exposed link belongs to an app or man page the environment publishes.
+
+    :param name: the exposed app name, or the man section and file name.
+    :param resource_packages: the packages whose resources the environment exposes.
+    :param resource_type: ``app`` or ``man``.
+    :returns: whether the environment publishes the link.
+    """
+    if resource_type == "app":
+        published: Final[set[str]] = {
+            add_suffix(app, package.exposure.suffix) for package in resource_packages for app in package.apps_to_expose
+        }
+    else:
+        published = {page for package in resource_packages for page in package.man_pages_to_expose}
+    return name in published
+
+
 def _get_exposed_resource_names(
     venv: Venv,
     package_metadata: PackageInfo,
@@ -1148,22 +1166,32 @@ def _get_exposed_resource_names(
         if new_install
         else tuple(metadata for metadata in venv.package_metadata.values() if metadata.exposure.include_apps)
     )
-    exposed_binary_names: Final[list[str]] = sorted(
+    installed_binary_names: Final[list[str]] = sorted(
         path.name
         for path in get_exposed_paths_for_package(venv.bin_path, CTX.bin_dir, group_app_paths(resource_packages))
     )
+    exposed_binary_names: Final[list[str]] = sorted(
+        name
+        for name in installed_binary_names
+        if _published(name, resource_packages, "app")
+    )
     unavailable_binary_names: Final[list[str]] = sorted({
         add_suffix(name, package_metadata.exposure.suffix)
-        for name in package_metadata.resources.apps
+        for name in package_metadata.exposed_main_apps
         if not exposed_app_names(name, package_metadata.exposure.suffix) & set(exposed_binary_names)
     })
     man_paths: Final[list[Path]] = [path for metadata in resource_packages for path in metadata.man_paths_to_expose]
-    exposed_man_pages: Final[list[str]] = sorted(
-        str(Path(path.parent.name) / path.name)
+    installed_man_pages: Final[list[str]] = sorted(
+        posixpath.join(path.parent.name, path.name)
         for man_section in MAN_SECTIONS
         for path in get_exposed_man_paths_for_package(venv.man_path / man_section, CTX.man_dir / man_section, man_paths)
     )
-    unavailable_man_pages: Final[list[str]] = sorted(set(package_metadata.resources.man_pages) - set(exposed_man_pages))
+    exposed_man_pages: Final[list[str]] = [
+        page for page in installed_man_pages if _published(page, resource_packages, "man")
+    ]
+    unavailable_man_pages: Final[list[str]] = sorted(
+        set(package_metadata.exposed_main_man_pages) - set(exposed_man_pages)
+    )
     return _ExposedResourceNames(
         exposed_binary_names=exposed_binary_names,
         unavailable_binary_names=unavailable_binary_names,
@@ -1192,11 +1220,35 @@ def validate_expected_apps(venv: Venv, package_name: str, expected_apps: Sequenc
 
     package: Final[PackageInfo] = venv.package_metadata[package_name]
     available_apps: Final[list[str]] = sorted({
-        app[:-4] if WINDOWS and app.lower().endswith(".exe") else app for app in package.apps_to_expose
+        app[:-4] if WINDOWS and app.lower().endswith(".exe") else app for app in package.available_apps
     })
     if missing_apps := sorted(set(expected_apps) - set(available_apps)):
         msg: Final[str] = (
             f"Package {package_name} does not provide expected {'app' if len(missing_apps) == 1 else 'apps'} "
+            f"{', '.join(missing_apps)}. "
+            f"Available apps: {', '.join(available_apps) or 'none'}."
+        )
+        raise PipxError(msg)
+
+
+def validate_selected_apps(venv: Venv, package_name: str, selected_apps: Sequence[str]) -> None:
+    """Check that the package provides every app the caller selected for publication.
+
+    :param venv: the environment of the package.
+    :param package_name: the package the selection belongs to, named as the environment records it.
+    :param selected_apps: the app names to publish, nothing is checked when empty.
+    :raises PipxError: when a selected app is missing from the package.
+    """
+    if not selected_apps:
+        return
+
+    package: Final[PackageInfo] = venv.package_metadata[package_name]
+    available_apps: Final[list[str]] = sorted({
+        app[:-4] if WINDOWS and app.lower().endswith(".exe") else app for app in package.resources.apps
+    })
+    if missing_apps := sorted(set(selected_apps) - set(available_apps)):
+        msg: Final[str] = (
+            f"Package {package_name} does not provide selected {'app' if len(missing_apps) == 1 else 'apps'} "
             f"{', '.join(missing_apps)}. "
             f"Available apps: {', '.join(available_apps) or 'none'}."
         )
@@ -1367,6 +1419,7 @@ __all__ = [
     "reuse_resource_dir_scans",
     "run_post_install_actions",
     "validate_expected_apps",
+    "validate_selected_apps",
     "validate_suffix",
     "venv_health_check",
 ]

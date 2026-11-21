@@ -59,12 +59,14 @@ class ExposureOptions:
     :param include_apps: whether to expose the apps of the environment.
     :param include_dependencies: whether to expose the apps of its dependencies.
     :param include_resources_from: packages whose shared resources are exposed as well.
+    :param only_apps: the apps the main package may expose, or empty to expose every app it provides.
     :param suffix: the suffix appended to every exposed app name.
     """
 
     include_apps: bool = True
     include_dependencies: bool = False
     include_resources_from: Sequence[str] = field(default_factory=list)
+    only_apps: Sequence[str] = field(default_factory=list)
     suffix: str = ""
 
 
@@ -110,6 +112,7 @@ class RecordOptions:
 
     :param expected_apps: apps the install must expose.
     :param replace_expected_apps: whether the expected apps replace the recorded ones.
+    :param replace_only_apps: whether the exposure selection replaces the recorded one.
     :param lock_file: the lock file to install from, or None.
     :param replace_lock: whether to replace the lock file.
     :param exposure_enabled: whether exposure is enabled, or None to keep the recorded state.
@@ -118,6 +121,7 @@ class RecordOptions:
 
     expected_apps: Sequence[str] = ()
     replace_expected_apps: bool = False
+    replace_only_apps: bool = False
     lock_file: Path | None = None
     replace_lock: bool = False
     exposure_enabled: bool | None = None
@@ -167,6 +171,7 @@ class InjectOptions:
     :param include_apps: whether to expose the apps of the injected package.
     :param include_dependencies: whether to expose the apps of its dependencies.
     :param include_resources_from: packages whose shared resources are exposed as well.
+    :param only_apps: the apps the injected package may expose, or empty to expose every app it provides.
     :param force: whether to inject even when the package is already present.
     :param force_reinstall: whether an injected package is reinstalled.
     :param with_suffix: whether the exposed app names carry the environment suffix.
@@ -181,6 +186,7 @@ class InjectOptions:
     include_apps: bool
     include_dependencies: bool
     include_resources_from: Sequence[str]
+    only_apps: Sequence[str] = ()
     force: bool
     force_reinstall: bool = True
     with_suffix: bool

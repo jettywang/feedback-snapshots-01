@@ -814,3 +814,31 @@ def test_sync_manifest_invalid_requirement_hides_url_credentials(
     err: Final[str] = capsys.readouterr().err
     output: Final[str] = err + current_log_file().read_text(encoding="utf-8")
     assert (redact_url_credentials(package) in " ".join(err.split()), "s3cr3ttok" in output) == (True, False)
+
+
+@pytest.mark.usefixtures("pipx_temp_env")
+def test_sync_manifest_publishes_only_selected_apps(write_manifest: Callable[[str], Path]) -> None:
+    manifest: Final[Path] = write_manifest(
+        _manifest("pycowsay", "pycowsay", 'only-apps = ["pycowsay"]\napps = ["pycowsay"]\n')
+    )
+
+    assert not run_pipx_cli(["manifest", "sync", str(manifest)])
+
+    metadata: Final[PipxMetadata] = PipxMetadata(CTX.venvs / "pycowsay")
+    assert (metadata.main_package.exposure.only_apps, (CTX.bin_dir / app_name("pycowsay")).is_file()) == (
+        ["pycowsay"],
+        True,
+    )
+
+
+@pytest.mark.usefixtures("pipx_temp_env")
+def test_sync_manifest_rejects_only_apps_with_dependency_resources(
+    write_manifest: Callable[[str], Path], capsys: pytest.CaptureFixture[str]
+) -> None:
+    manifest: Final[Path] = write_manifest(
+        _manifest("pycowsay", "pycowsay", 'only-apps = ["pycowsay"]\ninclude-dependencies = true\n')
+    )
+
+    assert run_pipx_cli(["manifest", "sync", str(manifest)])
+
+    assert "cannot combine only-apps with dependency resources" in capsys.readouterr().err

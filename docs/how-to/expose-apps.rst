@@ -31,6 +31,32 @@ rebuilding the environment. Run it on an exposed environment to restore a link y
 own already sits at a target path, pipx leaves it in place, links the rest, and exits with ``1``. Move that file away
 and run ``pipx expose`` again to link the skipped resource.
 
+*****************************
+ Publish only selected entries
+*****************************
+
+A toolkit can add management or documentation commands in a new release, while ordinary users should see only the
+commands in the configuration. ``--only-apps`` installs the package and all its dependencies as usual, then links only
+the named entry points:
+
+.. code-block:: console
+
+    $ pipx install "toolbox==2.0" --only-apps toolbox
+
+The environment still holds every entry point the package ships, so a later release can add one without changing what
+your users can run. An entry that the package or a dependency ships under another selected name stays hidden, and the
+selection also limits the manual pages and shell completions pipx links. pipx records the selection, so ``upgrade``,
+``reinstall``, ``expose``, and ``pipx manifest sync`` keep publishing the same entries.
+
+The install fails and rolls back when a selected app is missing. A failed upgrade, including one that only adds entry
+points, leaves the existing environment and the commands users run in place. The list of installed files in the
+environment and the commands on ``PATH`` stay separate, so ``pipx list`` shows the published entries rather than every
+installed one.
+
+``--only-apps`` applies one package spec at a time and cannot be combined with ``--include-deps`` or
+``--include-resources-from``, because it already restricts those dependency resources. The manifest accepts the same
+selection as ``only-apps = ["toolbox"]``.
+
 ***************************
  Expose a dependency's apps
 ***************************

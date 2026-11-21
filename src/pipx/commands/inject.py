@@ -102,7 +102,12 @@ def inject(
 
     dependency_options: Final[InjectOptions] = replace(
         options,
-        include_apps=options.include_apps or options.include_dependencies or bool(options.include_resources_from),
+        include_apps=(
+            options.include_apps
+            or bool(options.only_apps)
+            or options.include_dependencies
+            or bool(options.include_resources_from)
+        ),
         emit_output=False,
     )
     changed: Final[list[InjectionPackage]] = []
@@ -321,6 +326,7 @@ def _install_into(
             include_apps=options.include_apps,
             include_dependencies=options.include_dependencies,
             include_resources_from=options.include_resources_from,
+            only_apps=options.only_apps or (),
             suffix=venv.package_metadata[venv.main_package_name].exposure.suffix if options.with_suffix else "",
         )
     )
@@ -337,7 +343,12 @@ def _install_into(
     with (
         preserve_venv(
             venv_dir,
-            enabled=exposure.include_apps or bool(exposure.include_resources_from) or runs_from_venv(venv_dir),
+            enabled=(
+                exposure.include_apps
+                or bool(exposure.only_apps)
+                or bool(exposure.include_resources_from)
+                or runs_from_venv(venv_dir)
+            ),
         ),
         marked_unfinished(venv_dir),
     ):

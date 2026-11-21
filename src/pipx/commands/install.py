@@ -43,6 +43,7 @@ from pipx.commands.common import (
     remove_stale_venv_resources,
     run_post_install_actions,
     validate_expected_apps,
+    validate_selected_apps,
     validate_suffix,
 )
 from pipx.commands.inject import inject
@@ -211,11 +212,13 @@ def _install_spec_venv(
                     exposure=ExposureOptions(
                         include_dependencies=main_package.exposure.include_dependencies,
                         include_resources_from=main_package.exposure.include_resources_from,
+                        only_apps=main_package.exposure.only_apps,
                         suffix=main_package.exposure.suffix,
                     ),
                     record=RecordOptions(
                         expected_apps=main_package.expected_apps,
                         replace_expected_apps=True,
+                        replace_only_apps=True,
                         lock_file=main_package.lock_file,
                         replace_lock=True,
                         exposure_enabled=venv_metadata.exposure_enabled,
@@ -240,6 +243,7 @@ def _install_spec_venv(
                         include_apps=inject_package.exposure.include_apps,
                         include_dependencies=inject_package.exposure.include_dependencies,
                         include_resources_from=inject_package.exposure.include_resources_from,
+                        only_apps=inject_package.exposure.only_apps,
                         force=options.existing.force,
                         with_suffix=inject_package.exposure.suffix == main_package.exposure.suffix,
                         cooldown_days=_first_cooldown(options.cooldown.days, inject_package.cooldown_days),
@@ -427,8 +431,16 @@ def _validate_install_options(package_specs: Sequence[str], options: InstallOpti
     if options.existing.upgrade_strategy is not None and not options.existing.upgrade:
         msg = "--upgrade-strategy requires --upgrade"
         raise PipxError(msg)
+    if options.exposure.only_apps and (
+        options.exposure.include_dependencies or options.exposure.include_resources_from
+    ):
+        msg = "--only-apps cannot be combined with --include-deps or --include-resources-from"
+        raise PipxError(msg)
     if options.record.expected_apps and len(package_specs) != 1:
         msg = "--app accepts one package spec"
+        raise PipxError(msg)
+    if options.exposure.only_apps and len(package_specs) != 1:
+        msg = "--only-apps accepts one package spec"
         raise PipxError(msg)
     if options.record.lock_file is None:
         return None
@@ -626,7 +638,9 @@ def _install_into_venv(
                 package_name=package_name,
                 package_spec=package_spec,
                 force_reinstall=options.existing.force and exists,
-                exposure=options.exposure,
+                exposure=_exposure_or_recorded(
+                    options.exposure, venv.pipx_metadata.main_package.exposure, replace=options.record.replace_only_apps
+                ),
                 expected_apps=tuple(
                     dict.fromkeys(
                         options.record.expected_apps
@@ -714,6 +728,19 @@ class _VenvCreation:
     override_shared: bool
     exposure_enabled: bool
     preinstall_packages: list[str] | None
+
+
+def _exposure_or_recorded(selected: ExposureOptions, recorded: ExposureOptions, *, replace: bool) -> ExposureOptions:
+    """Return the exposure to apply, keeping a recorded selection unless the caller replaces it.
+
+    :param selected: the exposure chosen on this command line.
+    :param recorded: the exposure the environment recorded.
+    :param replace: whether the chosen selection replaces the recorded one.
+    :returns: the exposure to apply.
+    """
+    if replace or selected.only_apps or not recorded.only_apps:
+        return selected
+    return replace(selected, only_apps=recorded.only_apps)
 
 
 def _handle_existing_install(
@@ -805,11 +832,12 @@ def _upgrade_existing_venv(
         skip = None
     if skip is not None:
         validate_expected_apps(venv, build.package_name, build.expected_apps)
+        validate_selected_apps(venv, build.package_name, build.exposure.only_apps)
         _record_expected_apps(venv, build.expected_apps)
         reason, message = skip
         return reason, (OutputMessage(text=message),)
 
-    with preserve_venv(venv.root, enabled=bool(build.expected_apps)):
+    with preserve_venv(venv.root, enabled=bool(build.expected_apps or build.exposure.only_apps)):
         main_pip_args: Final[list[str]] = options.pip_args or trusted_recorded_pip_args(
             package_metadata.pip_args, venv.root
         )
@@ -818,11 +846,17 @@ def _upgrade_existing_venv(
         previous_resource_paths: Final[set[Path]] = get_expected_venv_resource_paths(
             venv, options.local_bin_dir, options.local_man_dir
         )
+        # an upgrade keeps the exposure the environment recorded, unless the caller chooses a new selection
+        recorded_exposure: Final[ExposureOptions] = (
+            build.exposure
+            if options.record.replace_only_apps or build.exposure.only_apps
+            else package_metadata.exposure
+        )
         venv.upgrade_package(
             build.package_name,
             build.package_spec,
             main_pip_args,
-            exposure=package_metadata.exposure,
+            exposure=recorded_exposure,
             is_main_package=True,
             upgrade_only_pip_args=[f"--upgrade-strategy={options.existing.upgrade_strategy}"]
             if options.existing.upgrade_strategy is not None
@@ -831,6 +865,7 @@ def _upgrade_existing_venv(
             cooldown_days=build.cooldown_days,
         )
         validate_expected_apps(venv, build.package_name, build.expected_apps)
+        validate_selected_apps(venv, build.package_name, build.exposure.only_apps)
         package_metadata = venv.pipx_metadata.main_package
         if venv.pipx_metadata.exposure_enabled:
             expose_package_resources(package_metadata, options.local_bin_dir, options.local_man_dir, force=False)
@@ -893,7 +928,7 @@ def _build_and_expose(
     )
     preserve_existing_venv: Final[bool] = exists and (
         options.existing.preserve
-        or bool(build.expected_apps or options.exposure.include_resources_from)
+        or bool(build.expected_apps or options.exposure.only_apps or options.exposure.include_resources_from)
         or build.lock_file is not None
     )
     try:  # ruff:ignore[too-many-statements-in-try-clause]  # one handler must roll back the whole build-and-expose sequence on failure
@@ -909,6 +944,7 @@ def _build_and_expose(
                 )
             venv = _install_on_supported_python(venv, build, options, venv_backup=venv_backup, messages=run.messages)
             validate_expected_apps(venv, build.package_name, build.expected_apps)
+            validate_selected_apps(venv, build.package_name, build.exposure.only_apps)
             run.messages.extend(
                 run_post_install_actions(
                     venv,

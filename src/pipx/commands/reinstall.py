@@ -234,10 +234,12 @@ def reinstall(
                     exposure=ExposureOptions(
                         include_dependencies=venv.pipx_metadata.main_package.exposure.include_dependencies,
                         include_resources_from=venv.pipx_metadata.main_package.exposure.include_resources_from,
+                        only_apps=venv.pipx_metadata.main_package.exposure.only_apps,
                         suffix=venv.pipx_metadata.main_package.exposure.suffix,
                     ),
                     record=RecordOptions(
                         expected_apps=venv.pipx_metadata.main_package.expected_apps,
+                        replace_only_apps=True,
                         lock_file=venv.pipx_metadata.main_package.lock_file,
                         exposure_enabled=venv.pipx_metadata.exposure_enabled,
                     ),
@@ -381,6 +383,7 @@ def _reinject_packages(
                 include_apps=injected_package.exposure.include_apps,
                 include_dependencies=injected_package.exposure.include_dependencies,
                 include_resources_from=injected_package.exposure.include_resources_from,
+                only_apps=injected_package.exposure.only_apps,
                 force=True,
                 # the venv was just rebuilt, and --force-reinstall would also refetch the main package by name
                 # from the injected package's index when the injected package depends on it

@@ -487,6 +487,15 @@ def _add_install(subparsers: argparse._SubParsersAction, shared_parser: argparse
         help="Require this application entry point after installation. Repeat to require multiple entry points.",
     )
     parser.add_argument(
+        "--only-apps",
+        action="append",
+        metavar="APP",
+        help=(
+            "Publish only this application entry point after installation. Repeat for multiple apps. "
+            "The rest of the package and its dependencies are installed but not linked onto PATH."
+        ),
+    )
+    parser.add_argument(
         "--lock",
         type=Path,
         help="Install the environment from an explicit pylock.toml file.",
@@ -668,9 +677,14 @@ def _cmd_install(args: argparse.Namespace, ctx: _DispatchContext) -> OperationRe
             exposure=ExposureOptions(
                 include_dependencies=args.include_deps,
                 include_resources_from=args.include_resources_from,
+                only_apps=args.only_apps or (),
                 suffix=args.suffix,
             ),
-            record=RecordOptions(expected_apps=args.app or (), lock_file=args.lock),
+            record=RecordOptions(
+                expected_apps=args.app or (),
+                replace_only_apps=bool(args.only_apps),
+                lock_file=args.lock,
+            ),
             backend=ctx.backend,
             cooldown=ctx.cooldown,
             emit_output=False,
@@ -821,6 +835,12 @@ def _add_inject(
         action="store_true",
         help="Add apps from the injected packages onto your PATH and expose their manual pages",
     )
+    parser.add_argument(
+        "--only-apps",
+        action="append",
+        metavar="APP",
+        help="Publish only this injected application entry point. Repeat for multiple apps.",
+    )
     _add_dependency_app_options(parser)
     _add_pip_venv_args(parser, _IGNORED_ON_EXISTING_VENV)
     parser.add_argument(
@@ -855,6 +875,7 @@ def _cmd_inject(args: argparse.Namespace, ctx: _DispatchContext) -> OperationRes
                 include_apps=args.include_apps,
                 include_dependencies=args.include_deps,
                 include_resources_from=args.include_resources_from,
+                only_apps=args.only_apps or (),
                 force=args.force,
                 with_suffix=args.with_suffix,
                 backend=ctx.backend,

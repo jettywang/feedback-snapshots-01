@@ -16,7 +16,7 @@ since ``reinstall`` and ``upgrade`` need them. Those credentials stay in plain t
 --json`` snapshot, so prefer a keyring or a ``.netrc`` file over credentials embedded in a URL. pipx writes the file
 readable by its owner only, whatever the umask; for a ``--global`` environment that owner is root.
 
-The current schema version is ``0.12`` (``pipx_metadata_version``). pipx migrates older files forward on read.
+The current schema version is ``0.13`` (``pipx_metadata_version``). pipx migrates older files forward on read.
 
 ******************
  Top-level fields
@@ -29,7 +29,7 @@ The current schema version is ``0.12`` (``pipx_metadata_version``). pipx migrate
     - - Field
       - Meaning
     - - ``pipx_metadata_version``
-      - Schema version string, currently ``"0.12"``.
+      - Schema version string, currently ``"0.13"``.
     - - ``environment``
       - The environment (venv) name, or ``null``.
     - - ``main_package``
@@ -98,6 +98,9 @@ The current schema version is ``0.12`` (``pipx_metadata_version``). pipx migrate
       - Dependencies whose apps and man pages pipx exposes individually.
     - - ``include_apps``
       - Whether pipx exposes this package's own apps. Always true for ``main_package``.
+    - - ``only_apps``
+      - Entry points the configuration publishes, from ``--only-apps`` or the manifest's ``only-apps``. Empty keeps
+        every app the package provides.
     - - ``apps`` / ``app_paths``
       - App names and their paths inside the environment.
     - - ``apps_of_dependencies`` / ``app_paths_of_dependencies``

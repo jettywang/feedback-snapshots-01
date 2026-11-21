@@ -36,6 +36,7 @@ from pipx.commands.common import (
     locked_package_message,
     remove_stale_venv_resources,
     validate_expected_apps,
+    validate_selected_apps,
 )
 from pipx.commands.install import install as install_package
 from pipx.commands.outdated import inspect_outdated
@@ -252,7 +253,13 @@ def _upgrade_venv_packages(
         preserve_venv(
             venv.root,
             enabled=upgrading
-            and (runs_from_venv(venv.root) or any(package.expected_apps for package in venv.package_metadata.values())),
+            and (
+                runs_from_venv(venv.root)
+                or any(
+                    package.expected_apps or package.exposure.only_apps
+                    for package in venv.package_metadata.values()
+                )
+            ),
         ),
         marked_unfinished(venv.root),
     ):
@@ -368,6 +375,7 @@ def _upgrade_package(
 
     upgraded_metadata: Final[PackageInfo] = venv.package_metadata[package_name]
     validate_expected_apps(venv, package_name, upgraded_metadata.expected_apps)
+    validate_selected_apps(venv, package_name, upgraded_metadata.exposure.only_apps)
     if venv.pipx_metadata.exposure_enabled:
         expose_package_resources(upgraded_metadata, CTX.bin_dir, CTX.man_dir, force=force)
         remove_stale_venv_resources(previous_resource_paths, venv, CTX.bin_dir, CTX.man_dir)
