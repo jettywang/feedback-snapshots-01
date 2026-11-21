@@ -77,6 +77,14 @@ referencing.retrieval
 .. autoclass:: referencing.retrieval._T
 
 
+referencing.budget
+^^^^^^^^^^^^^^^^^^
+
+.. automodule:: referencing.budget
+   :members:
+   :undoc-members:
+
+
 referencing.typing
 ^^^^^^^^^^^^^^^^^^
 

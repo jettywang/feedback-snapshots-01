@@ -2,6 +2,12 @@
 Changelog
 =========
 
+v0.38.0
+-------
+
+* Add a new `referencing.budget` module for accounting for the full reference graph reachable from one or more entry points against a size budget, before business validation begins.
+  The resulting `referencing.budget.BudgetReport` splits the distinct resources across local, preinstalled, and dynamically retrieved origins, charging shared nodes a single time, and `referencing.budget.BudgetExceeded` is raised (stopping further retrieval) when the budget would be exceeded.
+
 v0.37.0
 -------
 

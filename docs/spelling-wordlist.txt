@@ -1,6 +1,7 @@
 amongst
 autodetecting
 boolean
+budget
 changelog
 deduplication
 dereferenced
@@ -17,6 +18,8 @@ instantiation
 iterable
 lookups
 metaschemas
+preinstalled
+pre-populated
 referenceable
 resolvers
 runtime
