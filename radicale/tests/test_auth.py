@@ -27,7 +27,7 @@ import datetime
 import logging
 import os
 import sys
-from typing import Iterable, Tuple, Union
+from typing import Iterable, Optional, Tuple, Union
 
 import pytest
 
@@ -743,3 +743,164 @@ class TestBaseAuthRequests(BaseTest):
         self.propfind("/", login="tmp:bepo", check=207)
         assert any("htpasswd file still contains issues (REMINDER" in message
                    for message in caplog.messages)
+
+
+class TestAuthGatewayContract(BaseTest):
+    """Trust contract at the WSGI entry for the two gateway modes.
+
+    The same image is deployed behind two gateways:
+
+    - ``remote_user``: a trusted WSGI upstream authenticates the request
+      and fills ``REMOTE_USER`` in the WSGI environ. Radicale adopts that
+      identity and ignores any ``Authorization`` header the client sent.
+    - ``htpasswd``: Radicale authenticates the request itself with HTTP
+      Basic. A ``REMOTE_USER`` left in the environ by an upstream is
+      ignored.
+
+    Each scenario asserts the identity Radicale adopts (via
+    ``current-user-principal``), which requests fall back to internal
+    authentication, and which must be rejected, so that swapping the two
+    modes breaks this suite.
+
+    """
+
+    PROPFIND_PRINCIPAL = """\
+<?xml version="1.0" encoding="utf-8"?>
+<propfind xmlns="DAV:">
+    <prop>
+        <current-user-principal />
+    </prop>
+</propfind>"""
+
+    def _principal(self, **kwargs) -> Tuple[int, Optional[str]]:
+        """PROPFIND ``/`` and return (status, principal href or None)."""
+        status, responses = self.propfind(
+            "/", self.PROPFIND_PRINCIPAL, check=None, **kwargs)
+        if status != 207:
+            return status, None
+        response = responses["/"]
+        assert not isinstance(response, int)
+        prop_status, prop = response["D:current-user-principal"]
+        assert prop_status == 200
+        href_element = prop.find(xmlutils.make_clark("D:href"))
+        assert href_element is not None
+        return status, href_element.text
+
+    def _configure_htpasswd(self) -> None:
+        htpasswd_file_path = os.path.join(self.colpath, ".htpasswd")
+        with open(htpasswd_file_path, "w") as f:
+            f.write("alice:secret\n")
+        self.configure({"auth": {"type": "htpasswd",
+                                 "htpasswd_filename": htpasswd_file_path,
+                                 "htpasswd_encryption": "plain"}})
+
+    def test_remote_user_trusted_upstream(self) -> None:
+        """Identity filled by the trusted WSGI upstream is adopted."""
+        self.configure({"auth": {"type": "remote_user"}})
+        status, principal = self._principal(REMOTE_USER="alice")
+        assert status == 207
+        assert principal == "/alice/"
+
+    def test_remote_user_missing_upstream_identity(self) -> None:
+        """Without ``REMOTE_USER`` the request is anonymous: rejected with
+        403 and no offer to fall back to internal Basic authentication."""
+        self.configure({"auth": {"type": "remote_user"}})
+        status, headers, _ = self.request(
+            "PROPFIND", "/", self.PROPFIND_PRINCIPAL, check=None)
+        assert status == 403
+        assert "WWW-Authenticate" not in headers
+
+    def test_remote_user_ignores_basic_credentials(self) -> None:
+        """On conflicting authentication information the WSGI-filled
+        identity wins; Basic credentials sent by the client are ignored."""
+        self.configure({"auth": {"type": "remote_user"}})
+        status, principal = self._principal(
+            REMOTE_USER="alice", login="mallory:secret")
+        assert status == 207
+        assert principal == "/alice/"
+
+    def test_remote_user_ignores_forwarded_user_headers(self) -> None:
+        """``remote_user`` reads only the WSGI environ; user headers a
+        client can forge do not change the identity."""
+        self.configure({"auth": {"type": "remote_user"}})
+        status, principal = self._principal(
+            REMOTE_USER="alice", HTTP_X_REMOTE_USER="mallory",
+            HTTP_REMOTE_USER="mallory")
+        assert status == 207
+        assert principal == "/alice/"
+
+    def test_remote_user_rights_follow_upstream_identity(self) -> None:
+        """The adopted upstream identity owns its principal collection
+        only."""
+        self.configure({"auth": {"type": "remote_user"}})
+        status, _ = self.propfind(
+            "/alice/", self.PROPFIND_PRINCIPAL, check=None,
+            REMOTE_USER="alice")
+        assert status == 207
+        status, _ = self.propfind(
+            "/bob/", self.PROPFIND_PRINCIPAL, check=None, REMOTE_USER="alice")
+        assert status == 403
+
+    def test_htpasswd_internal_account(self) -> None:
+        """Internal accounts authenticate with HTTP Basic as before."""
+        self._configure_htpasswd()
+        status, principal = self._principal(login="alice:secret")
+        assert status == 207
+        assert principal == "/alice/"
+
+    def test_htpasswd_ignores_remote_user(self) -> None:
+        """A ``REMOTE_USER`` left in the environ is not an identity: the
+        request falls back to internal authentication and is challenged."""
+        self._configure_htpasswd()
+        status, headers, _ = self.request(
+            "PROPFIND", "/", self.PROPFIND_PRINCIPAL, check=None,
+            REMOTE_USER="alice")
+        assert status == 401
+        assert headers["WWW-Authenticate"].startswith("Basic")
+
+    def test_htpasswd_basic_wins_over_remote_user(self) -> None:
+        """On conflicting authentication information the internal Basic
+        credentials win; ``REMOTE_USER`` is ignored."""
+        self._configure_htpasswd()
+        status, principal = self._principal(
+            REMOTE_USER="mallory", login="alice:secret")
+        assert status == 207
+        assert principal == "/alice/"
+
+    def test_htpasswd_rejects_bad_password(self) -> None:
+        """Invalid internal credentials are rejected with a challenge."""
+        self._configure_htpasswd()
+        status, headers, _ = self.request(
+            "PROPFIND", "/", self.PROPFIND_PRINCIPAL, check=None,
+            login="alice:wrong")
+        assert status == 401
+        assert headers["WWW-Authenticate"].startswith("Basic")
+
+    def test_htpasswd_rights_follow_basic_identity(self) -> None:
+        """The internally authenticated identity owns its principal
+        collection only."""
+        self._configure_htpasswd()
+        status, _ = self.propfind(
+            "/alice/", self.PROPFIND_PRINCIPAL, check=None,
+            login="alice:secret")
+        assert status == 207
+        status, _ = self.propfind(
+            "/bob/", self.PROPFIND_PRINCIPAL, check=None,
+            login="alice:secret")
+        assert status == 403
+
+    def test_gateway_modes_are_not_interchangeable(self) -> None:
+        """The same upstream request (``REMOTE_USER`` only, no Basic)
+        discriminates the two modes: adopted as identity under
+        ``remote_user``, challenged under ``htpasswd``. Pointing a gateway
+        at the wrong mode fails one side of this test."""
+        self.configure({"auth": {"type": "remote_user"}})
+        status, principal = self._principal(REMOTE_USER="alice")
+        assert status == 207
+        assert principal == "/alice/"
+        self._configure_htpasswd()
+        status, headers, _ = self.request(
+            "PROPFIND", "/", self.PROPFIND_PRINCIPAL, check=None,
+            REMOTE_USER="alice")
+        assert status == 401
+        assert headers["WWW-Authenticate"].startswith("Basic")

@@ -658,6 +658,46 @@ Set the configuration option `type` in the `auth` section to `remote_user`.
 This way Radicale uses the username provided by the WSGI server and disables
 its internal authentication over HTTP.
 
+##### Trust contract at the WSGI entry
+
+When the same image is deployed behind two gateways — one where the WSGI
+upstream fills the identity (`remote_user`) and one where Radicale
+authenticates internally (e.g. `htpasswd`) — the entry behaves as follows:
+
+- With `type = remote_user` the identity comes only from the `REMOTE_USER`
+  WSGI environment variable. An `Authorization` header sent by the client
+  and forgeable user headers (`Remote-User`, `X-Remote-User`) are ignored.
+- If the upstream does not set `REMOTE_USER`, the request is anonymous and
+  answered `403 Forbidden`; Radicale does not offer Basic authentication
+  (no `WWW-Authenticate` header). The upstream must set `REMOTE_USER` on
+  every request it authenticated.
+- With an internal backend such as `type = htpasswd`, a `REMOTE_USER` left
+  in the environ is ignored: requests without valid Basic credentials are
+  answered `401 Unauthorized` with a `WWW-Authenticate` challenge.
+
+To check a deployment against this contract, send a PROPFIND for
+`current-user-principal` on `/` through each gateway:
+
+```bash
+curl -i -X PROPFIND -H 'Depth: 0' --data '<?xml version="1.0" encoding="utf-8"?>
+<propfind xmlns="DAV:"><prop><current-user-principal /></prop></propfind>' \
+     https://radicale.example/
+```
+
+- WSGI-identity gateway: an authenticated request answers `207` with the
+  upstream account as principal; a request the upstream did not
+  authenticate answers `403` without a `WWW-Authenticate` header. A `401`
+  here means the internal backend is configured by mistake.
+- Internal-accounts gateway: a request without credentials answers `401`
+  with `WWW-Authenticate: Basic`; valid credentials answer `207` with the
+  matching principal. A `207` without credentials here means `remote_user`
+  is configured by mistake.
+
+The regression suite `radicale/tests/test_auth.py::TestAuthGatewayContract`
+covers each of these cases, including the rights outcome (a user can read
+its own principal collection but not another user's), and fails if the two
+modes are swapped.
+
 ### Versioning collections with Git
 
 This tutorial describes how to keep track of all changes to calendars and
