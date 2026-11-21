@@ -8,6 +8,7 @@ py7zr -- a 7z library on python
    user_guide
    advanced
    SECURITY
+   PERMISSIONS
    api
    contribution
    archive_format
