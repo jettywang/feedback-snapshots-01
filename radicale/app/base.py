@@ -334,3 +334,17 @@ class Access:
                 item.tag != "VCALENDAR"):
             return False
         return "r" in self.permissions or "f" in self.permissions
+
+    def can_notify(self) -> bool:
+        """Whether the actor may trigger a hook notification on this path.
+
+        The ``n`` permission denies notifications without denying the
+        write itself, so an import-only account can store events while
+        the configured hook stays silent. Parent-collection rights
+        apply to items the same way write checks do.
+        """
+        if "n" in self.permissions:
+            return False
+        if self.path != self.parent_path and "n" in self.parent_permissions:
+            return False
+        return True

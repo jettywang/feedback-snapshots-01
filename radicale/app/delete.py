@@ -114,7 +114,7 @@ class ApplicationPartDelete(ApplicationBase):
                     if not access.check("D", item):
                         logger.info("delete of collection is prevented by config/option [rights] permit_delete_collection and not explicit allowed by permission 'D': %r", path)
                         return httputils.NOT_ALLOWED
-                if self._hook.enabled:
+                if self._hook.enabled and access.can_notify():
                     for i in item.get_all():
                         hook_notification_item_list.append(
                             HookNotificationItem(
@@ -132,7 +132,7 @@ class ApplicationPartDelete(ApplicationBase):
             else:
                 assert item.collection is not None
                 assert item.href is not None
-                if self._hook.enabled:
+                if self._hook.enabled and access.can_notify():
                     hook_notification_item_list.append(
                         HookNotificationItem(
                             notification_item_type=HookNotificationItemTypes.DELETE,

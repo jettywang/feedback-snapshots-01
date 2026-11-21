@@ -3021,6 +3021,7 @@ The following `permissions` are recognized:
 * **E:** enable enforce properties overlay in case enforce_properties_overlay=False _(>= 3.7.0)_
 * **e:** disable enforce of properties overlay in case enforce_properties_overlay=True _(>= 3.7.0)_
 * **l:** lock properties (disable write-properties) _(>= 3.8.4)_
+* **n:** deny hook notifications (e.g. invitation emails) for writes the actor can still perform _(>= 3.9.3)_. An import-only account can hold the write rights plus `n` so its legal PUT and DELETE requests change the storage but never trigger the configured hook; without `n` the same writes notify as before
 
 ### Storage
 

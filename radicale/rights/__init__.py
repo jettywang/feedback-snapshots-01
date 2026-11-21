@@ -44,6 +44,9 @@ Permissions:
   - E: enable enforce properties overlay in case enforce_properties_overlay=False (>= 3.7.0)
   - e: disable enforce of properties overlay in case enforce_properties_overlay=True (>= 3.7.0)
   - l: lock properties (disable write-properties) (>= 3.8.4)
+  - n: deny hook notifications (e.g. invitation emails) for writes the
+       actor can still perform (>= 3.9.3). An account without this
+       permission keeps the write and triggers the configured hook
 
 Permissions flags (automatically set by server):
   - u: flag for group share with user placeholder (>= 3.8.0)
@@ -60,7 +63,7 @@ from radicale import config, utils
 INTERNAL_TYPES: Sequence[str] = ("authenticated", "owner_write", "owner_only",
                                  "from_file")
 
-INTERNAL_PERMISSIONS: str = "RrifWwDdOoTtMmSPpEel"
+INTERNAL_PERMISSIONS: str = "RrifWwDdOoTtMmSPpEeln"
 INTERNAL_PERMISSIONS_ITEM: str = "rwdDoD"  # used in radicale/app/base.py
 
 

@@ -247,6 +247,11 @@ type = none
 # Permit overwrite of a collection (global)
 #permit_overwrite_collection = True
 
+# Supported permission letters in rights files:
+#   R r i f W w D d O o T t M m S P p E e l
+#   n: deny hook notifications (e.g. invitation emails) for writes the
+#      actor can still perform, e.g. for an import-only service account
+
 
 [storage]
 

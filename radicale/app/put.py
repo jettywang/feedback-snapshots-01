@@ -324,10 +324,16 @@ class ApplicationPartPut(ApplicationBase):
                         items=stored_items,
                         props=props)
                     # Only run the hook if the hook is enabled
-                    if self._hook.enabled:
+                    if self._hook.enabled and access.can_notify():
                         for item in stored_items:
                             # Try to grab the previously-existing item by href
                             existing_item = replaced_items.get(item.href, None)  # type: ignore
+                            # A retry that stores identical content changes
+                            # nothing an attendee would see, so it must not
+                            # produce another notification.
+                            if (existing_item and
+                                    existing_item.serialize() == item.serialize()):
+                                continue
                             if existing_item:
                                 hook_notification_item = HookNotificationItem(
                                     notification_item_type=HookNotificationItemTypes.UPSERT,
@@ -369,18 +375,22 @@ class ApplicationPartPut(ApplicationBase):
                 try:
                     uploaded_item, replaced_item = parent_item.upload(href, prepared_item)
                     etag = uploaded_item.etag
-                    if self._hook.enabled:
-                        hook_notification_item = HookNotificationItem(
-                            notification_item_type=HookNotificationItemTypes.UPSERT,
-                            path=access.path,
-                            content=prepared_item.serialize(),
-                            content_type=prepared_item.name,
-                            uid=None,
-                            old_content=replaced_item.serialize() if replaced_item else None,
-                            new_content=prepared_item.serialize(),
-                            actor=actor,
-                        )
-                        self._hook.notify(hook_notification_item)
+                    if self._hook.enabled and access.can_notify():
+                        # An unchanged retry still uploads, but it has no
+                        # effect an attendee could observe, so skip the hook.
+                        if not (replaced_item and
+                                replaced_item.serialize() == prepared_item.serialize()):
+                            hook_notification_item = HookNotificationItem(
+                                notification_item_type=HookNotificationItemTypes.UPSERT,
+                                path=access.path,
+                                content=prepared_item.serialize(),
+                                content_type=prepared_item.name,
+                                uid=None,
+                                old_content=replaced_item.serialize() if replaced_item else None,
+                                new_content=prepared_item.serialize(),
+                                actor=actor,
+                            )
+                            self._hook.notify(hook_notification_item)
                 except ValueError as e:
                     # return better matching HTTP result in case errno is provided and catched
                     errno_match = re.search("\\[Errno ([0-9]+)\\]", str(e))

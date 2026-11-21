@@ -1,6 +1,8 @@
 # Changelog
 
 ## 3.9.3.dev
+* Add: [rights] permission `n`: deny hook notifications (e.g. invitation emails) for writes the actor can still perform, so an import-only service account can store events without the configured hook firing
+* Fix: hook: a PUT that re-uploads content identical to the stored item is a no-op for the hook, so retries and unchanged saves no longer produce duplicate notifications
 * Adjustment: the built-in server logs a warning at startup that it is meant for local testing, not for production (use `[server] type = cheroot` or `hypercorn`)
 * Fix: PROPFIND reports a shared principal's own URL, including from its parent
 * Fix: a calendar component that is only a recurrence override is reported once

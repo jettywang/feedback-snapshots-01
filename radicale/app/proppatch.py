@@ -242,7 +242,7 @@ class ApplicationPartProppatch(ApplicationBase):
                         xml_content,
                         encoding=self._encoding
                     ).decode(encoding=self._encoding)
-                    if self._hook.enabled:
+                    if self._hook.enabled and access.can_notify():
                         hook_notification_item = HookNotificationItem(
                             notification_item_type=HookNotificationItemTypes.CPATCH,
                             path=access.path,
