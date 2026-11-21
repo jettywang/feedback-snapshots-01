@@ -1,0 +1,83 @@
+lock-version = "1.0"
+created-by = "nab 0.9.0"
+dependency-groups = ["black"]
+default-groups = ["black"]
+
+[tool.pipx]
+approval = "review:ops-2026-11-19"
+
+[[packages]]
+name = "black"
+version = "25.1.0"
+dependencies = [
+    { name = "click" },
+    { name = "packaging" },
+    { name = "pathspec" },
+    { name = "platformdirs" },
+]
+
+[[packages.wheels]]
+name = "black-25.1.0-py3-none-any.whl"
+url = "https://files.pythonhosted.org/packages/black-25.1.0-py3-none-any.whl"
+
+[packages.wheels.hashes]
+sha256 = "1111111111111111111111111111111111111111111111111111111111111111"
+
+[[packages]]
+name = "click"
+version = "8.3.2"
+dependencies = [
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+]
+
+[[packages.wheels]]
+name = "click-8.3.2-py3-none-any.whl"
+url = "https://files.pythonhosted.org/packages/click-8.3.2-py3-none-any.whl"
+
+[packages.wheels.hashes]
+sha256 = "2222222222222222222222222222222222222222222222222222222222222222"
+
+[[packages]]
+name = "colorama"
+version = "0.4.6"
+marker = "sys_platform == 'win32'"
+
+[[packages.wheels]]
+name = "colorama-0.4.6-py2.py3-none-any.whl"
+url = "https://files.pythonhosted.org/packages/colorama-0.4.6-py2.py3-none-any.whl"
+
+[packages.wheels.hashes]
+sha256 = "7777777777777777777777777777777777777777777777777777777777777777"
+
+[[packages]]
+name = "packaging"
+version = "26.3"
+
+[[packages.wheels]]
+name = "packaging-26.3-py3-none-any.whl"
+url = "https://files.pythonhosted.org/packages/packaging-26.3-py3-none-any.whl"
+
+[packages.wheels.hashes]
+sha256 = "3333333333333333333333333333333333333333333333333333333333333333"
+
+[[packages]]
+name = "pathspec"
+version = "1.0.3"
+
+[[packages.wheels]]
+name = "pathspec-1.0.3-py3-none-any.whl"
+url = "https://files.pythonhosted.org/packages/pathspec-1.0.3-py3-none-any.whl"
+
+[packages.wheels.hashes]
+sha256 = "4444444444444444444444444444444444444444444444444444444444444444"
+
+[[packages]]
+name = "platformdirs"
+version = "4.5.1"
+
+[[packages.wheels]]
+name = "platformdirs-4.5.1-py3-none-any.whl"
+url = "https://files.pythonhosted.org/packages/platformdirs-4.5.1-py3-none-any.whl"
+
+[packages.wheels.hashes]
+sha256 = "5555555555555555555555555555555555555555555555555555555555555555"

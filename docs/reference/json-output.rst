@@ -83,3 +83,15 @@ default Python there.
     $ pipx install-all pipx.json
 
 ``--json`` is a legacy alias only on ``list``; every other command uses ``--output json``.
+
+**************************
+ ``manifest sync --verify``
+**************************
+
+With ``--policy POLICY --verify``, ``manifest sync`` prints its read-only policy verdict rather than installing. The
+``data`` object holds one entry per manifest tool under ``data.tools``: ``environment``, ``lock``, ``intent``, the
+``approval`` source the lock declares, the ``source`` it names as its generator, the selected ``packages``,
+``pending_review`` and ``missing`` package names, a ``status`` of ``verified``, ``needs_review``, or ``failed``, and the
+``problems`` that explain a non-verified status. A ``sync`` that runs with ``--policy`` and fails verification uses the
+usual envelope, with ``data.environments`` empty and one ``manifest_verification_failed`` error per rejected tool, or
+``manifest_review_pending`` when the only problem is an extra dependency to review.

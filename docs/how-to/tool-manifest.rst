@@ -99,6 +99,57 @@ Without ``--prune``, sync leaves your other pipx environments alone. Pass ``--gl
 ``--backend`` after ``sync`` to select the pipx store or the installation backend. pipx reads only the manifest path you
 supply on the command line.
 
+*****************************
+ Check locks against a policy
+*****************************
+
+An operator who installs tools for other people can require that every submitted lock be checked against a local
+approval policy before pipx installs anything. Write the policy in a file the operator controls and pass it explicitly;
+pipx never searches for one:
+
+.. code-block:: toml
+
+    # policy.toml
+    version = "1"
+
+    [[intent]]
+    id = "ops-review-42"
+    environment = "black"
+    lock = "pylock.black.toml"
+    approval = "review:ops-2026-11-19"
+    packages = ["black==25.1.0", "click==8.3.2", "packaging==26.3", "pathspec==1.0.3", "platformdirs==4.5.1"]
+
+Each ``intent`` is one approval: the manifest tool it covers (``environment``), the lock name it is bound to (optional
+``lock``), the provenance a matching lock must declare (``approval``), and the exact package pins it approves. A lock
+declares its provenance in a ``[tool.pipx]`` table with an ``approval`` key. A lock may also report ``created-by``, but
+only ``[tool.pipx].approval`` can satisfy an intent, so a lock that names only its generator fails verification. Every
+policy pin is an exact ``==`` version. A ``hashes`` table may pin the SHA-256 of an approved artifact per package.
+
+Run the read-only stage first. It parses the manifest and every declared lock, names the intent each lock matched, and
+lists any dependency left for a person to review without installing, unlocking, or exposing anything:
+
+.. code-block:: console
+
+    $ pipx manifest sync ./pipx.toml --policy ./policy.toml --verify
+
+Passing ``--policy`` to a normal ``sync`` runs the same checks first and stops before the first lock, environment, or app
+link is touched when any tool fails. The command exits ``1``, and with ``--output json`` reports the same envelope as a
+failed sync. The verification holds every tool to the policy, so a tool that declares no lock fails rather than
+bypassing the gate.
+
+The check fails when a lock declares no approval source, declares a different source than its intent, is not a
+lock format version 1 file, omits an approved package, names a version the intent or the manifest requirement does not
+accept, references a package the lock does not contain, or selects a dependency absent from the intent. A marker on a
+package that only involves the Python version is treated as selected, because the check runs on pipx's own
+interpreter rather than the one the environment will use. A lock that is
+otherwise approved but carries an extra dependency is reported as ``needs_review`` and names that dependency in both
+``data.tools[].pending_review`` and the error message, so the reviewer sees exactly what to look at next. The
+same JSON entry reports the lock's own ``approval`` and the ``source`` it names as its generator, so a reviewer can
+tell an approved lock from one that only says what produced it.
+
+A lock file whose ``[tool.pipx]`` table or policy is missing is not trusted by default: name the approval source in the
+policy and in the lock, and keep both files where only the operator can write them.
+
 **********
  Verify it
 **********

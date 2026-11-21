@@ -270,6 +270,8 @@ class SyncOptions:
     :param verbose: whether to print verbose output.
     :param prune: whether environments missing from the manifest are removed.
     :param backend: the backend that installs the packages.
+    :param policy: the local approval policy every lock must pass before anything installs, or None.
+    :param verify: whether to only check the locks against the policy and stop.
     """
 
     local_bin_dir: Path
@@ -278,6 +280,8 @@ class SyncOptions:
     verbose: bool
     prune: bool
     backend: BackendOptions
+    policy: Path | None = None
+    verify: bool = False
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

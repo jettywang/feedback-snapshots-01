@@ -1,0 +1,18 @@
+lock-version = "1.0"
+created-by = "nab 0.9.0"
+dependency-groups = ["pycowsay"]
+default-groups = ["pycowsay"]
+
+[tool.pipx]
+approval = "review:ops-2026-11-19"
+
+[[packages]]
+name = "pycowsay"
+version = "0.0.0.2"
+
+[[packages.wheels]]
+name = "pycowsay-0.0.0.2-py3-none-any.whl"
+url = "https://files.pythonhosted.org/packages/pycowsay-0.0.0.2-py3-none-any.whl"
+
+[packages.wheels.hashes]
+sha256 = "6666666666666666666666666666666666666666666666666666666666666666"

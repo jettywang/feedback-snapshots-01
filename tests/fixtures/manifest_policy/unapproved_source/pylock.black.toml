@@ -1,0 +1,41 @@
+lock-version = "1.0"
+created-by = "nab 0.9.0"
+dependency-groups = ["black"]
+default-groups = ["black"]
+
+[tool.pipx]
+approval = "review:other-team-2026-01-01"
+
+[[packages]]
+name = "black"
+version = "25.1.0"
+dependencies = [
+    { name = "click" },
+    { name = "packaging" },
+    { name = "pathspec" },
+    { name = "platformdirs" },
+]
+
+[[packages]]
+name = "click"
+version = "8.3.2"
+dependencies = [
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+]
+
+[[packages]]
+name = "colorama"
+version = "0.4.6"
+marker = "sys_platform == 'win32'"
+
+[[packages]]
+name = "packaging"
+version = "26.3"
+
+[[packages]]
+name = "pathspec"
+version = "1.0.3"
+
+[[packages]]
+name = "platformdirs"
+version = "4.5.1"

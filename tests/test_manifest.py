@@ -224,6 +224,67 @@ def test_sync_manifest_reapplies_lock(
 
 
 @pytest.mark.usefixtures("pipx_temp_env")
+def test_sync_manifest_policy_gate_accepts_an_approved_lock(
+    write_manifest: Callable[[str], Path],
+    make_pylock: Callable[[str, str], Path],
+    tmp_path: Path,
+) -> None:
+    lock_file: Final[Path] = make_pylock("pycowsay", "0.0.0.2")
+    manifest: Final[Path] = write_manifest(_manifest("pycowsay>=0", "pycowsay", f'lock = "{lock_file.name}"\n'))
+    lock_text: Final[str] = lock_file.read_text(encoding="utf-8").replace(
+        'created-by = "pipx tests"', 'created-by = "pipx tests"\n[tool.pipx]\napproval = "review:test"'
+    )
+    lock_file.write_text(lock_text, encoding="utf-8")
+    policy: Final[Path] = tmp_path / "policy.toml"
+    policy.write_text(
+        """version = "1"
+[[intent]]
+id = "test-intent"
+environment = "pycowsay"
+lock = "pylock.test.toml"
+approval = "review:test"
+packages = ["pycowsay==0.0.0.2"]
+""",
+        encoding="utf-8",
+    )
+
+    assert not run_pipx_cli(["manifest", "sync", "--policy", str(policy), str(manifest)])
+
+    metadata: Final[PackageInfo] = PipxMetadata(CTX.venvs / "pycowsay").main_package
+    assert (metadata.package_version, metadata.lock_file) == ("0.0.0.2", lock_file.resolve())
+
+
+@pytest.mark.usefixtures("pipx_temp_env")
+def test_sync_manifest_policy_gate_refuses_an_unapproved_lock(
+    write_manifest: Callable[[str], Path],
+    make_pylock: Callable[[str, str], Path],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    lock_file: Final[Path] = make_pylock("pycowsay", "0.0.0.2")
+    manifest: Final[Path] = write_manifest(_manifest("pycowsay>=0", "pycowsay", f'lock = "{lock_file.name}"\n'))
+    policy: Final[Path] = tmp_path / "policy.toml"
+    policy.write_text(
+        """version = "1"
+[[intent]]
+id = "test-intent"
+environment = "pycowsay"
+approval = "review:test"
+packages = ["pycowsay==0.0.0.2"]
+""",
+        encoding="utf-8",
+    )
+
+    assert run_pipx_cli(["manifest", "sync", "--policy", str(policy), str(manifest)])
+
+    assert (
+        "approval source" in capsys.readouterr().err,
+        not (CTX.venvs / "pycowsay").exists(),
+        not (CTX.bin_dir / app_name("pycowsay")).exists(),
+    ) == (True, True, True)
+
+
+@pytest.mark.usefixtures("pipx_temp_env")
 def test_sync_manifest_clears_app_and_lock_state(
     write_manifest: Callable[[str], Path],
     make_pylock: Callable[[str, str], Path],

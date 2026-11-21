@@ -1,0 +1,43 @@
+lock-version = "1.0"
+created-by = "nab 0.9.0"
+dependency-groups = ["black"]
+default-groups = ["black"]
+
+[tool.pipx]
+approval = "review:ops-2026-11-19"
+
+[[packages]]
+name = "black"
+version = "25.1.0"
+dependencies = [
+    { name = "click" },
+    { name = "mypy-extensions" },
+    { name = "packaging" },
+    { name = "pathspec" },
+    { name = "platformdirs" },
+]
+
+[[packages]]
+name = "click"
+version = "8.3.2"
+
+[[packages]]
+name = "colorama"
+version = "0.4.6"
+marker = "sys_platform == 'win32'"
+
+[[packages]]
+name = "mypy-extensions"
+version = "1.1.0"
+
+[[packages]]
+name = "packaging"
+version = "26.3"
+
+[[packages]]
+name = "pathspec"
+version = "1.0.3"
+
+[[packages]]
+name = "platformdirs"
+version = "4.5.1"

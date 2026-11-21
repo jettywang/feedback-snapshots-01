@@ -1,0 +1,22 @@
+version = "1"
+
+[[intent]]
+id = "ops-review-42"
+environment = "black"
+lock = "pylock.black.toml"
+approval = "review:ops-2026-11-19"
+packages = [
+    "black==25.1.0",
+    "click==8.3.2",
+    "colorama==0.4.6",
+    "packaging==26.3",
+    "pathspec==1.0.3",
+    "platformdirs==4.5.1",
+]
+
+[[intent]]
+id = "ops-review-43"
+environment = "pycowsay"
+lock = "pylock.pycowsay.toml"
+approval = "review:ops-2026-11-19"
+packages = ["pycowsay==0.0.0.2"]

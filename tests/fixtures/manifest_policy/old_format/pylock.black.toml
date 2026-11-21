@@ -1,0 +1,9 @@
+lock-version = "0.9"
+created-by = "nab 0.1.0"
+
+[tool.pipx]
+approval = "review:ops-2026-11-19"
+
+[[packages]]
+name = "black"
+version = "25.1.0"

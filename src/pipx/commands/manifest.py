@@ -11,6 +11,7 @@ __lazy_modules__ = [
     "pipx.commands.install",
     "pipx.commands.uninstall",
     "pipx.fanout",
+    "pipx.manifest_policy",
     "pipx.options",
     "pipx.package_specifier",
     "pipx.pipx_metadata_file",
@@ -42,6 +43,7 @@ from pipx.commands.install import install
 from pipx.commands.uninstall import uninstall
 from pipx.constants import EXIT_CODE_OK, ExitCode
 from pipx.fanout import uninterrupted
+from pipx.manifest_policy import LockTool, ManifestVerificationData, verify_tools
 from pipx.options import EnvironmentOptions, ExistingOptions, ExposureOptions, InstallOptions, RecordOptions
 from pipx.package_specifier import trusted_recorded_pip_args
 from pipx.pipx_metadata_file import PipxMetadata
@@ -67,17 +69,29 @@ if TYPE_CHECKING:
 
 def sync_manifest(
     manifest_file: Path, venv_container: VenvContainer, options: SyncOptions
-) -> OperationResult[ManifestData]:
+) -> OperationResult[ManifestData] | OperationResult[ManifestVerificationData]:
     """Install and update the tools that a manifest declares.
 
     :param manifest_file: the manifest that declares the environments to sync.
     :param venv_container: the container of the environments.
     :param options: the options of the sync.
-    :returns: the result listing the synced environments and the failures.
+    :returns: the result listing the synced environments and the failures, or the policy verdicts when verifying.
+    :raises PipxError: when ``--verify`` is selected without a policy.
     """
     manifest: Final[_Manifest] = _load_manifest(manifest_file, require_locks=True)
+    if options.verify:
+        return _verify_manifest(manifest, options)
+    if options.policy is not None:
+        verdicts: Final[OperationResult[ManifestVerificationData]] = verify_tools(
+            _policy_tools(manifest), options.policy
+        )
+        if verdicts.exit_code != EXIT_CODE_OK:
+            # the policy gate runs before any lock, venv or app link is touched, so a rejected lock installs nothing
+            return _as_sync_failure(verdicts)
+        messages: Final[list[OutputMessage]] = list(verdicts.messages)
+    else:
+        messages = []
     failures: Final[list[_FailedTool]] = []
-    messages: Final[list[OutputMessage]] = []
     synced: Final[list[str]] = []
     for tool in manifest.tools:
         venv_dir: Final[Path] = venv_container.get_venv_dir(tool.environment)
@@ -111,6 +125,38 @@ def sync_manifest(
             for failure in failures
         ),
         succeeded=bool(synced),
+    )
+
+
+def _policy_tools(manifest: _Manifest) -> list[LockTool]:
+    return [
+        LockTool(
+            environment=tool.environment,
+            package=tool.package,
+            package_name=tool.package_name,
+            lock_file=tool.lock_file,
+        )
+        for tool in manifest.tools
+    ]
+
+
+def _verify_manifest(manifest: _Manifest, options: SyncOptions) -> OperationResult[ManifestVerificationData]:
+    if options.policy is None:
+        raise PipxError("Manifest verification requires --policy.")
+    return verify_tools(_policy_tools(manifest), options.policy)
+
+
+def _as_sync_failure(
+    verdicts: OperationResult[ManifestVerificationData],
+) -> OperationResult[ManifestData]:
+    # the verification errors keep their codes, so a script can tell a stale lock from a source mismatch
+    return OperationResult(
+        command=("manifest", "sync"),
+        data=ManifestData(environments=(), locks=()),
+        messages=verdicts.messages,
+        exit_code=verdicts.exit_code,
+        errors=verdicts.errors,
+        succeeded=False,
     )
 
 

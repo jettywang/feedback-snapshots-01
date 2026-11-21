@@ -52,6 +52,11 @@ pipx can record an environment's resolved dependencies as a lock file in the PyP
 ``pipx manifest lock`` writes these locks and ``pipx install --lock`` reads one back. pipx does not use
 ``requirements.txt`` as a state or lock format.
 
+``pipx manifest sync --policy`` adds an operator-owned approval gate: pipx reads the policy only from the path given on
+the command line, and ``--verify`` checks submitted locks against it without installing or exposing anything. Approval
+provenance lives in the lock's ``[tool.pipx]`` table, so a lock another account can change changes the verdict a later
+run reports; keep both files where only the operator can write them.
+
 pipx exposes top-level policy when `pip <https://pip.pypa.io>`_ and `uv <https://docs.astral.sh/uv/>`_ honor the same
 contract. Backend arguments carry controls specific to ``pip`` or ``uv``. ``--cooldown DAYS`` maps one pipx release-age
 policy to both backends.

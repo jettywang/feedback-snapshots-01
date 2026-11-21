@@ -139,6 +139,7 @@ if TYPE_CHECKING:
     from pipx.commands.reset import ResetData
     from pipx.commands.uninstall import UninstallData
     from pipx.commands.upgrade import SharedData, UpgradeData
+    from pipx.manifest_policy import ManifestVerificationData
 
 _LOGGER: Final[logging.Logger] = logging.getLogger(__name__)
 _LOG_NAME: Final[re.Pattern[str]] = re.compile(
@@ -1542,6 +1543,17 @@ def _add_manifest(subparsers: argparse._SubParsersAction, shared_parser: argpars
     )
     sync_parser.add_argument("manifest", type=Path, help="Path to the tool manifest.")
     sync_parser.add_argument("--prune", action="store_true", help="Uninstall environments absent from the manifest.")
+    sync_parser.add_argument(
+        "--policy",
+        type=Path,
+        metavar="POLICY",
+        help="Check every lock against the local approval policy before installing or exposing anything.",
+    )
+    sync_parser.add_argument(
+        "--verify",
+        action="store_true",
+        help="Only check the locks against --policy and report, without installing or exposing anything.",
+    )
     _add_backend_arg(sync_parser)
     _add_output_option(sync_parser)
     sync_parser.set_defaults(func=_cmd_sync)
@@ -1555,9 +1567,14 @@ def _cmd_lock(args: argparse.Namespace, ctx: _DispatchContext) -> OperationResul
     return lock_manifest(args.manifest)
 
 
-def _cmd_sync(args: argparse.Namespace, ctx: _DispatchContext) -> OperationResult[ManifestData]:
+def _cmd_sync(
+    args: argparse.Namespace, ctx: _DispatchContext
+) -> OperationResult[ManifestData] | OperationResult[ManifestVerificationData]:
     from pipx.commands.manifest import sync_manifest
 
+    if args.verify and args.policy is None:
+        msg = "--verify needs --policy POLICY."
+        raise PipxError(msg)
     return sync_manifest(
         args.manifest,
         ctx.venv_container,
@@ -1568,6 +1585,8 @@ def _cmd_sync(args: argparse.Namespace, ctx: _DispatchContext) -> OperationResul
             verbose=ctx.verbose,
             prune=args.prune,
             backend=ctx.backend,
+            policy=args.policy,
+            verify=args.verify,
         ),
     )
 

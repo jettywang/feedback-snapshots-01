@@ -1,0 +1,20 @@
+[project]
+name = "pipx-tools"
+version = "1"
+dependencies = []
+requires-python = ">=3.10"
+
+[dependency-groups]
+black = ["black>=25,<26"]
+pycowsay = ["pycowsay"]
+
+[tool.pipx]
+version = "1.0"
+
+[tool.pipx.tools.black]
+apps = ["black"]
+lock = "pylock.black.toml"
+
+[tool.pipx.tools.pycowsay]
+apps = ["pycowsay"]
+lock = "pylock.pycowsay.toml"
