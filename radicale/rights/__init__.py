@@ -117,6 +117,16 @@ class BaseRights:
         """
         self.configuration = configuration
 
+    def update(self) -> None:
+        """Update internal state for a new request.
+
+        Called once per request before the first authorization check.
+        Backends that cache external state (e.g. a rights file) can
+        refresh it here. A request that is already in progress must
+        keep the state it started with.
+
+        """
+
     def authorization(self, user: str, user_groups: set, path: str) -> str:
         """Get granted rights of ``user`` for the collection ``path``.
 

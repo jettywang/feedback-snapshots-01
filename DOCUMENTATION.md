@@ -2937,6 +2937,12 @@ This section describes the format of the rights file for the `from_file`
 authentication backend. The configuration option `file` in the `rights`
 section must point to the rights file.
 
+The rights file is reloaded automatically when it changes on disk, the
+server does not need to be restarted. A request that is already in
+progress finishes with the rules it started with. If the new file is
+incomplete or contains an invalid rule, the change is ignored, an error
+is logged, and the previous rules stay in effect.
+
 The recommended rights method is `owner_only`. If access is granted
 to calendars and address books outside the home directory of users
 (that's `/USERNAME/`), clients will not detect these collections automatically,

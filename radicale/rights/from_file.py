@@ -37,7 +37,9 @@ Leading or ending slashes are trimmed from collection's path.
 
 import configparser
 import logging
+import os
 import re
+import threading
 from typing import Union
 
 from radicale import config, pathutils, rights
@@ -48,11 +50,32 @@ class Rights(rights.BaseRights):
 
     _filename: str
     _rights_config: dict
+    _lock: threading.Lock
+    _local: threading.local
+    _file_size: int
+    _file_mtime_ns: int
+    _file_stat_error: bool
 
     def __init__(self, configuration: config.Configuration) -> None:
         super().__init__(configuration)
         self._filename = configuration.get("rights", "file")
         self._log_rights_rule_doesnt_match_on_debug = configuration.get("logging", "rights_rule_doesnt_match_on_debug")
+        self._lock = threading.Lock()
+        self._local = threading.local()
+        self._file_stat_error = False
+        self._rights_config = self._load_rights_config()
+        file_stat = os.stat(self._filename)
+        self._file_size = file_stat.st_size
+        self._file_mtime_ns = file_stat.st_mtime_ns
+
+    def _load_rights_config(self) -> dict:
+        """Read and validate the whole rights file.
+
+        Returns the pre-loaded rights. Raises ``RuntimeError`` when the
+        file cannot be read or contains an invalid rule, in which case
+        the caller keeps the current rights.
+
+        """
         rights_config_parser = configparser.ConfigParser()
         try:
             with open(self._filename, "r") as f:
@@ -63,7 +86,7 @@ class Rights(rights.BaseRights):
                                (self._filename, e)) from e
 
         # Pre-load rights (ConfigParser is slow)
-        self._rights_config = {}
+        rights_config = {}
         for section in rights_config_parser.sections():
             try:
                 user_pattern = rights_config_parser.get(section, "user", fallback="")
@@ -95,20 +118,65 @@ class Rights(rights.BaseRights):
                     error = "unsupported 'U'"
                 if error is not None:
                     raise RuntimeError("%s permission found in section %r: %r" % (error, section, permission))
-                self._rights_config[section] = {"user_pattern": user_pattern, "collection_pattern": collection_pattern,
-                                                "allowed_groups": allowed_groups, "permission": permission}
+                rights_config[section] = {"user_pattern": user_pattern, "collection_pattern": collection_pattern,
+                                          "allowed_groups": allowed_groups, "permission": permission}
             except Exception as e:
                 raise RuntimeError("Error in section %r of rights file %r: "
                                    "%s" % (section, self._filename, e)) from e
+        return rights_config
+
+    def update(self) -> None:
+        """Reload the rights file when it changed on disk.
+
+        The whole file is parsed and validated first. The new rules
+        replace the current ones atomically only when the file is
+        complete and valid, otherwise the current rules stay in effect
+        and the failure is logged. The ruleset in use is pinned for
+        the remainder of the request, so a request that is already in
+        progress keeps the rules it started with.
+
+        """
+        try:
+            file_stat = os.stat(self._filename)
+        except OSError as e:
+            if not self._file_stat_error:
+                logger.error("Rights file %r cannot be checked, keep current "
+                             "rights: %s", self._filename, e)
+            self._file_stat_error = True
+        else:
+            self._file_stat_error = False
+            if (file_stat.st_size != self._file_size or
+                    file_stat.st_mtime_ns != self._file_mtime_ns):
+                with self._lock:
+                    if (file_stat.st_size != self._file_size or
+                            file_stat.st_mtime_ns != self._file_mtime_ns):
+                        try:
+                            rights_config = self._load_rights_config()
+                        except Exception as e:
+                            logger.error("Rights file %r not reloaded, keep "
+                                         "current rights: %s",
+                                         self._filename, e)
+                        else:
+                            self._rights_config = rights_config
+                            logger.info("Rights file %r reloaded",
+                                        self._filename)
+                        # handle each version of the file only once
+                        self._file_size = file_stat.st_size
+                        self._file_mtime_ns = file_stat.st_mtime_ns
+        # pin the ruleset for this request
+        self._local.rights_config = self._rights_config
 
     def authorization(self, user: str, user_groups: set, path: str) -> str:
         user = user or ""
         sane_path = pathutils.strip_path(path)
         # Prevent "regex injection"
         escaped_user = re.escape(user)
+        rights_config = getattr(self._local, "rights_config", None)
+        if rights_config is None:
+            rights_config = self._rights_config
         if not self._log_rights_rule_doesnt_match_on_debug:
             logger.debug("logging of rules which doesn't match suppressed by config/option [logging] rights_rule_doesnt_match_on_debug")
-        for section, rules in self._rights_config.items():
+        for section, rules in rights_config.items():
             group_match = None
             user_match = None
             try:

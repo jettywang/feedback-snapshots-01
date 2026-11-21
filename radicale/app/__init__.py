@@ -289,6 +289,10 @@ class Application(ApplicationPartDelete, ApplicationPartHead,
 
         context = AuthContext()
 
+        # Refresh rights backend state (e.g. reload a changed rights
+        # file), the state is pinned for the duration of this request
+        self._rights.update()
+
         """Manage a request."""
         def response(status: int, headers: types.WSGIResponseHeaders,
                      answer: Union[None, str, bytes],

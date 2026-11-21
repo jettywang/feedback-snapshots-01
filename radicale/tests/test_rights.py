@@ -21,6 +21,7 @@ Radicale tests with simple requests and rights.
 import datetime
 import logging
 import os
+import threading
 
 import vobject
 
@@ -1188,6 +1189,126 @@ permissions: RrWwu""")
             assert "u" in str(e)
         except Exception:
             raise
+
+
+class TestFromFileReload(BaseTest):
+    """Hot reload of the rights file of the from_file backend."""
+
+    def _configure(self, rights_file_path: str) -> None:
+        htpasswd_file_path = os.path.join(self.colpath, ".htpasswd")
+        with open(htpasswd_file_path, "w") as f:
+            f.write("tmp:bepo\n")
+        self.configure({
+            "rights": {"type": "from_file", "file": rights_file_path},
+            "auth": {"type": "htpasswd",
+                     "htpasswd_filename": htpasswd_file_path,
+                     "htpasswd_encryption": "plain"}})
+
+    def test_reload_during_request_keeps_one_version(self, monkeypatch) -> None:
+        """A started PROPFIND sees one ruleset, later requests the new one."""
+        rights_file_path = os.path.join(self.colpath, "rights")
+        with open(rights_file_path, "w") as f:
+            f.write("""\
+[all]
+user: tmp
+collection: .*
+permissions: RrWw""")
+        self._configure(rights_file_path)
+        self.mkcol("/shared/", login="tmp:bepo")
+        self.mkcalendar("/shared/a/", login="tmp:bepo")
+        self.mkcalendar("/shared/b/", login="tmp:bepo")
+        _status, _headers, answer = self.request(
+            "PROPFIND", "/shared/", login="tmp:bepo", HTTP_DEPTH="1", check=207)
+        assert "/shared/a/" in answer
+        assert "/shared/b/" in answer
+
+        rights_obj = self.application._rights
+        original_authorization = rights_obj.authorization
+        fired = False
+
+        def authorization_wrapper(user, user_groups, path):
+            nonlocal fired
+            if not fired:
+                fired = True
+                # a concurrent request stores a new rights file and reloads
+                with open(rights_file_path, "w") as f:
+                    f.write("""\
+[owner]
+user: tmp
+collection: {user}(/.*)?
+permissions: RrWw
+[shared]
+user: tmp
+collection: shared
+permissions: R
+[shared-a]
+user: tmp
+collection: shared/a(/.*)?
+permissions: Rr""")
+                reloader = threading.Thread(target=rights_obj.update)
+                reloader.start()
+                reloader.join()
+            return original_authorization(user, user_groups, path)
+
+        monkeypatch.setattr(rights_obj, "authorization", authorization_wrapper)
+        _status, _headers, answer = self.request(
+            "PROPFIND", "/shared/", login="tmp:bepo", HTTP_DEPTH="1", check=207)
+        assert fired
+        # the started request completes with the rules it began with
+        assert "/shared/a/" in answer
+        assert "/shared/b/" in answer
+        monkeypatch.undo()
+        # later requests use the reloaded rules
+        _status, _headers, answer = self.request(
+            "PROPFIND", "/shared/", login="tmp:bepo", HTTP_DEPTH="1", check=207)
+        assert "/shared/a/" in answer
+        assert "/shared/b/" not in answer
+
+    def test_broken_rights_file_keeps_current_rules(self, caplog) -> None:
+        """A half-written or invalid rights file does not take effect."""
+        caplog.set_level(logging.WARNING)
+        rights_file_path = os.path.join(self.colpath, "rights")
+        with open(rights_file_path, "w") as f:
+            f.write("""\
+[owner]
+user: tmp
+collection: {user}(/.*)?
+permissions: RrWw""")
+        self._configure(rights_file_path)
+        self.mkcalendar("/tmp/calendar/", login="tmp:bepo")
+        status_before, _headers, answer_before = self.request(
+            "PROPFIND", "/tmp/calendar/", login="tmp:bepo", check=207)
+
+        # half-written file
+        with open(rights_file_path, "w") as f:
+            f.write("[owner\nuser: tmp\ncollec")
+        status, _headers, answer = self.request(
+            "PROPFIND", "/tmp/calendar/", login="tmp:bepo", check=207)
+        assert (status, answer) == (status_before, answer_before)
+        # file with an invalid rule
+        with open(rights_file_path, "w") as f:
+            f.write("""\
+[owner]
+user: tmp
+collection: {user}(/.*)?
+permissions: RrWwDd""")
+        status, _headers, answer = self.request(
+            "PROPFIND", "/tmp/calendar/", login="tmp:bepo", check=207)
+        assert (status, answer) == (status_before, answer_before)
+        # the failures are logged for the administrator
+        messages = [message for message in caplog.messages
+                    if "not reloaded" in message]
+        assert len(messages) == 2
+
+        # a fixed rights file takes effect again
+        with open(rights_file_path, "w") as f:
+            f.write("""\
+[owner]
+user: tmp
+collection: {user}(/.*)?
+permissions: Rr""")
+        self.proppatch("/tmp/calendar/", login="tmp:bepo", check=403)
+        self.propfind("/tmp/calendar/", login="tmp:bepo", check=207)
 
 
 class TestCollectionRights(BaseTest):
