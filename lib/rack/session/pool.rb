@@ -12,6 +12,12 @@ module Rack
     # In the context of a multithreaded environment, sessions being
     # committed to the pool is done in a merging manner.
     #
+    # Exit commit guarantee: a session is only committed if its session id
+    # is still present in the pool. Once a session is deleted (e.g. by
+    # calling `session.destroy` on logout), any requests still in flight
+    # for that session fail to commit, so stale data such as authentication
+    # details can never be written back after the session has exited.
+    #
     # The :drop option is available in rack.session.options if you wish to
     # explicitly remove the session from the session cache.
     #
@@ -53,6 +59,8 @@ module Rack
 
       def write_session(req, session_id, new_session, options)
         @mutex.synchronize do
+          # Refuse to recreate a session that was deleted (e.g. logged out)
+          # while this request was still in flight:
           return false unless get_session_with_fallback(session_id)
           @pool.store session_id.private_id, new_session
           session_id

@@ -336,4 +336,104 @@ describe Rack::Session::Pool do
     response = Rack::MockRequest.new(app).get("/", "HTTP_COOKIE" => login_cookie)
     response.body.must_equal "{}"
   end
+
+  it "does not write back session data from in-flight requests after logout" do
+    # Coordinates the interleaving of the two concurrent requests:
+    slow_loaded = Queue.new
+    logout_committed = Queue.new
+
+    app = Rack::Lint.new(lambda do |env|
+      session = env["rack.session"]
+
+      case env["PATH_INFO"]
+      when "/login"
+        session[:user_id] = 1
+        session[:role] = "admin"
+      when "/slow"
+        # Load the authentication data into memory, wait for the logout
+        # request to fully commit, then try to write the stale
+        # authentication data back:
+        session[:user_id]
+        slow_loaded << true
+        logout_committed.pop
+        session[:user_id] = 1
+        session[:role] = "admin"
+      when "/logout"
+        session.destroy
+      when "/incr"
+        session[:counter] = (session[:counter] || 0) + 1
+      end
+
+      Rack::Response.new(session.to_hash.inspect).to_a
+    end)
+
+    pool = Rack::Session::Pool.new(app)
+    req = Rack::MockRequest.new(pool)
+
+    login = req.get("/login")
+    cookie = login["Set-Cookie"]
+    old_sid = cookie[session_match, 1]
+    old_private_id = Rack::Session::SessionId.new(old_sid).private_id
+    pool.pool[old_private_id].must_equal("user_id" => 1, "role" => "admin")
+
+    # The first concurrent request starts on the same session and loads
+    # the authentication data before the logout happens:
+    slow_thread = Thread.new do
+      req.get("/slow", "HTTP_COOKIE" => cookie)
+    end
+    slow_loaded.pop
+
+    # Two unrelated sessions are served concurrently while the slow
+    # request is still in flight:
+    counter_threads = 2.times.map do
+      counter_cookie = req.get("/incr")["Set-Cookie"]
+      Thread.new do
+        4.times { req.get("/incr", "HTTP_COOKIE" => counter_cookie) }
+        counter_cookie
+      end
+    end
+    counter_cookies = counter_threads.map(&:value)
+
+    # The second concurrent request logs out and exits the session:
+    logout = req.get("/logout", "HTTP_COOKIE" => cookie)
+    logout.body.must_equal "{}"
+    logout_cookie = logout["Set-Cookie"]
+    new_sid = logout_cookie[session_match, 1]
+    new_sid.wont_equal old_sid
+
+    # Let the in-flight request finish after the logout has committed:
+    logout_committed << true
+    slow_response = slow_thread.value
+
+    # The in-flight request still held the stale authentication data
+    # locally, but its commit was dropped and no cookie was sent back:
+    slow_response.body.must_equal({"user_id" => 1, "role" => "admin"}.to_s)
+    slow_response["Set-Cookie"].must_be_nil
+
+    # The pool holds no authentication data: the old session id is gone
+    # and the replacement session is empty:
+    pool.pool.size.must_equal 3
+    pool.pool.keys.wont_include old_private_id
+    pool.pool[Rack::Session::SessionId.new(new_sid).private_id].must_equal({})
+    pool.pool.each_value do |data|
+      data.keys.wont_include "user_id"
+      data.keys.wont_include "role"
+    end
+
+    # A new request with the old cookie reads no permissions and is
+    # issued a fresh cookie rather than the exited session id:
+    reused = req.get("/", "HTTP_COOKIE" => cookie)
+    reused.body.must_equal "{}"
+    reused["Set-Cookie"][session_match, 1].wont_equal old_sid
+
+    # A new request with the post-logout cookie also reads no permissions:
+    after = req.get("/", "HTTP_COOKIE" => logout_cookie)
+    after.body.must_equal "{}"
+
+    # The unrelated sessions kept running undisturbed:
+    counter_cookies.each do |counter_cookie|
+      res = req.get("/", "HTTP_COOKIE" => counter_cookie)
+      res.body.must_equal({"counter" => 5}.to_s)
+    end
+  end
 end
