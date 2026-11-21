@@ -336,4 +336,126 @@ describe Rack::Session::Pool do
     response = Rack::MockRequest.new(app).get("/", "HTTP_COOKIE" => login_cookie)
     response.body.must_equal "{}"
   end
+
+  describe "server-side retention" do
+    fake_clock = lambda do
+      time = Time.at(1_700_000_000)
+      clock = lambda { time }
+      clock.define_singleton_method(:advance) { |seconds| time += seconds }
+      clock
+    end
+
+    timestamps_of = lambda do |pool|
+      pool.instance_variable_get(:@timestamps)
+    end
+
+    it "keeps an active session alive by renewing the idle timeout on each access" do
+      clock = fake_clock.call
+      pool = Rack::Session::Pool.new(incrementor, idle_timeout: 60, clock: clock)
+      req = Rack::MockRequest.new(pool)
+
+      cookie = req.get("/")["Set-Cookie"]
+      cookie.must_match(session_match)
+
+      clock.advance(30)
+      res = req.get("/", "HTTP_COOKIE" => cookie)
+      res.body.must_equal ({"counter"=>2}.to_s)
+
+      clock.advance(30)
+      res = req.get("/", "HTTP_COOKIE" => cookie)
+      res.body.must_equal ({"counter"=>3}.to_s)
+
+      pool.pool.size.must_equal 1
+    end
+
+    it "expires an idle session and removes the underlying data" do
+      clock = fake_clock.call
+      pool = Rack::Session::Pool.new(incrementor, idle_timeout: 60, clock: clock)
+      req = Rack::MockRequest.new(pool)
+
+      cookie = req.get("/")["Set-Cookie"]
+      session_id = Rack::Session::SessionId.new cookie[session_match, 1]
+
+      clock.advance(61)
+      res = req.get("/", "HTTP_COOKIE" => cookie)
+
+      # The next access starts a fresh session with a new id:
+      res.body.must_equal ({"counter"=>1}.to_s)
+      res["Set-Cookie"][session_match].wont_equal cookie[session_match]
+
+      # The expired record was deleted from the pool:
+      pool.pool[session_id.private_id].must_be_nil
+      timestamps_of.call(pool)[session_id.private_id].must_be_nil
+      pool.pool.size.must_equal 1
+    end
+
+    it "expires a session at the absolute timeout even while it stays active" do
+      clock = fake_clock.call
+      pool = Rack::Session::Pool.new(incrementor, idle_timeout: 60, absolute_timeout: 100, clock: clock)
+      req = Rack::MockRequest.new(pool)
+
+      cookie = req.get("/")["Set-Cookie"]
+      session_id = Rack::Session::SessionId.new cookie[session_match, 1]
+
+      3.times do |n|
+        clock.advance(30)
+        res = req.get("/", "HTTP_COOKIE" => cookie)
+        res.body.must_equal ({"counter"=>n + 2}.to_s)
+      end
+
+      clock.advance(30)
+      res = req.get("/", "HTTP_COOKIE" => cookie)
+      res.body.must_equal ({"counter"=>1}.to_s)
+      res["Set-Cookie"][session_match].wont_equal cookie[session_match]
+      pool.pool[session_id.private_id].must_be_nil
+      pool.pool.size.must_equal 1
+    end
+
+    it "rejects legacy sessions without timing information when legacy_sessions: :reject" do
+      clock = fake_clock.call
+      pool = Rack::Session::Pool.new(incrementor, idle_timeout: 60, legacy_sessions: :reject, clock: clock)
+      req = Rack::MockRequest.new(pool)
+
+      cookie = req.get("/")["Set-Cookie"]
+      session_id = Rack::Session::SessionId.new cookie[session_match, 1]
+
+      # Simulate a record stored before retention was enabled:
+      timestamps_of.call(pool).delete(session_id.private_id)
+
+      res = req.get("/", "HTTP_COOKIE" => cookie)
+      res.body.must_equal ({"counter"=>1}.to_s)
+      res["Set-Cookie"][session_match].wont_equal cookie[session_match]
+      pool.pool[session_id.private_id].must_be_nil
+      pool.pool.size.must_equal 1
+    end
+
+    it "backfills legacy sessions without timing information by default" do
+      clock = fake_clock.call
+      pool = Rack::Session::Pool.new(incrementor, idle_timeout: 60, clock: clock)
+      req = Rack::MockRequest.new(pool)
+
+      cookie = req.get("/")["Set-Cookie"]
+      session_id = Rack::Session::SessionId.new cookie[session_match, 1]
+
+      # Simulate a record stored before retention was enabled:
+      timestamps_of.call(pool).delete(session_id.private_id)
+
+      # The legacy session is kept and stamped with the current time:
+      res = req.get("/", "HTTP_COOKIE" => cookie)
+      res.body.must_equal ({"counter"=>2}.to_s)
+      timestamps_of.call(pool)[session_id.private_id].wont_be_nil
+
+      # From then on the retention policy applies to it:
+      clock.advance(61)
+      res = req.get("/", "HTTP_COOKIE" => cookie)
+      res.body.must_equal ({"counter"=>1}.to_s)
+      pool.pool[session_id.private_id].must_be_nil
+    end
+
+    it "raises ArgumentError for an unknown :legacy_sessions value" do
+      lambda do
+        Rack::Session::Pool.new(incrementor, idle_timeout: 60, legacy_sessions: :keep)
+      end.must_raise(ArgumentError)
+    end
+  end
 end

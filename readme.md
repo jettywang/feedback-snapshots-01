@@ -32,6 +32,23 @@ class MyApp
 end
 ```
 
+### Server-side retention
+
+`Rack::Session::Pool` can discard sessions stored on the server after two
+kinds of time limits:
+
+``` ruby
+use Rack::Session::Pool,
+  :idle_timeout => 3600,        # sliding window, renewed on every access
+  :absolute_timeout => 86400,   # fixed maximum lifetime from creation
+  :legacy_sessions => :backfill # or :reject
+```
+
+Sessions stored before retention was enabled carry no timing information.
+They can either be cautiously rejected (`:reject`) or gradually stamped with
+the current time as they are accessed (`:backfill`, the default). A `:clock`
+option accepting a callable is available for testing.
+
 ### Compatibility
 
 `rack-session` code used to be part of Rack, but it was extracted in Rack v3 to this gem. The v1 release of this gem is compatible with Rack v2, and the v2 release of this gem is compatible with Rack v3+. That means you can add `gem "rack-session"` to your application and it will be compatible with all versions of Rack.
