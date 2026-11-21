@@ -267,3 +267,75 @@ The above example would be written:
     print(resolver.lookup("https://json-schema.org/draft/2020-12/schema"))
 
 It is otherwise functionally equivalent to the above, other than that retrieval will not repeatedly make a web request.
+
+
+Constraining Retrieval by Source
+--------------------------------
+
+Some applications receive documents from more than one *source*: their own built-in documents as well as documents submitted by partners or other publishers.
+In that setting, an administrator may want to declare that documents published by one source are only allowed to reference documents from a known set of other sources.
+
+A `referencing.policy.TrustPolicy` represents precisely these rules, as a mapping from each source label to the sources it may depend on.
+Trust is not itself transitive -- each reference, including references found inside a retrieved document, is checked against the trust relationships of the document making the reference.
+
+.. testcode::
+
+    from referencing import exceptions
+    from referencing.jsonschema import DRAFT202012
+    from referencing.policy import SourceAwareResolver, TrustPolicy
+
+    platform = "platform.example"
+    partner = "partner.example"
+    shared = "shared.example"
+
+    entry_uri = f"https://{platform}/entry.json"
+    shared_uri = f"https://{shared}/common.json"
+
+    documents = {
+        entry_uri: {"$id": entry_uri, "$ref": shared_uri},
+        shared_uri: {"$id": shared_uri, "type": "object"},
+    }
+
+    def retrieve(uri):
+        return DRAFT202012.create_resource(documents[uri])
+
+    # Platform-published documents may rely on the shared source; a
+    # partner-specific policy below deliberately does not.
+    policy = TrustPolicy.from_mapping({platform: {shared}})
+    resolver = SourceAwareResolver(policy=policy, retrieve=retrieve)
+
+    resolved = resolver.lookup(
+        entry_uri,
+        shared_uri,
+        root=documents[entry_uri],
+    )
+    print(resolved.contents["type"])
+
+.. testoutput::
+
+    object
+
+The check runs before the underlying retrieval function, and is based on the trust relationship of the current reference path rather than on whether the target is already in memory.
+Two different paths may therefore point at the exact same URI, with one resolving and the other failing -- even if they share the same caching retrieval callable.
+
+.. testcode::
+
+    untrusted = TrustPolicy.from_mapping({partner: set()})
+    partner_resolver = SourceAwareResolver(
+        policy=untrusted,
+        retrieve=retrieve,
+    )
+    try:
+        partner_resolver.get_or_retrieve(
+            f"https://{partner}/entry.json",
+            shared_uri,
+        )
+    except exceptions.RetrievalDenied as error:
+        print(error.target)
+
+.. testoutput::
+
+    shared.example
+
+Fragment-only references (beginning with ``#``) never invoke retrieval, so local, recursive references within an already-loaded document continue to resolve normally without being consulted against the policy.
+

@@ -5,6 +5,9 @@ Changelog
 v0.37.0
 -------
 
+* Add source-aware retrieval (`referencing.policy`), allowing an administrator to declare which publication sources a given source may reference. The resulting trust rules are checked on every external retrieval, including indirect references reached through intermediate documents, and apply independently of any resources already loaded by other requests. Local, same-document (fragment) references are unaffected.
+* Add `referencing.exceptions.RetrievalDenied`, raised when a retrieval is refused by a trust policy.
+
 * Declare support for Python 3.14.
 * Drop support for Python 3.9 which is near EOL.
 

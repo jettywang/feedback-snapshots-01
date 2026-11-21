@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from referencing.typing import URI
 
 
-@frozen
+@attrs.frozen  # Because here we allow subclassing below.
 class NoSuchResource(KeyError):
     """
     The given URI is not present in a registry.
@@ -33,6 +33,35 @@ class NoSuchResource(KeyError):
 
     def __hash__(self) -> int:
         return hash(attrs.astuple(self))
+
+
+@attrs.frozen  # Subclasses NoSuchResource, like Unresolvable below.
+class RetrievalDenied(NoSuchResource):
+    """
+    A retrieval was refused because the requesting source is not trusted.
+
+    Unlike a resource which is simply missing, the target URI may well be
+    retrievable via some other path; the error reflects the trust
+    relationship of the *current* reference path rather than the existence
+    of the resource itself.
+
+    It is a `NoSuchResource` subclass so that, like other failed lookups, it
+    propagates through `Registry.get_or_retrieve` and is turned into an
+    `Unresolvable` error by `Resolver.lookup`.
+    """
+
+    source: str
+    target: URI
+    reason: str | None = None
+
+    def __str__(self) -> str:
+        message = (
+            f"retrieval of {self.target!r} from source {self.source!r} is "
+            "not allowed by the configured trust policy"
+        )
+        if self.reason is not None:
+            message += f": {self.reason}"
+        return message
 
 
 @frozen
