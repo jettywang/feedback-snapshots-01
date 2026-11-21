@@ -524,6 +524,172 @@ class TestRegistry:
         registry = Registry(retrieve=blow_up).with_resource("urn:root", root)
         assert registry.crawl()["urn:child"] == child
 
+    def test_with_resource_stores_the_same_contents_by_default(self):
+        contents = {"foo": {"bar": "baz"}}
+        resource = Resource.opaque(contents=contents)
+        registry = Registry().with_resource("urn:example", resource)
+        assert registry["urn:example"].contents is contents
+
+    def test_with_resource_copies_contents(self):
+        contents = {"foo": {"bar": "baz"}}
+        resource = Resource.opaque(contents=contents)
+        registry = Registry().with_resource(
+            "urn:example",
+            resource,
+            copy_contents=True,
+        )
+
+        stored = registry["urn:example"]
+        assert stored == resource
+        assert stored.contents is not contents
+        assert stored.contents == contents
+        assert stored.contents["foo"] is not contents["foo"]
+
+        contents["foo"]["bar"] = "mutated"
+        assert registry["urn:example"].contents == {"foo": {"bar": "baz"}}
+
+    def test_with_resources_copies_contents(self):
+        first_contents = {"foo": {"bar": "baz"}}
+        second_contents = {"quux": [1, 2, 3]}
+        first = Resource.opaque(contents=first_contents)
+        second = Resource.opaque(contents=second_contents)
+
+        registry = Registry().with_resources(
+            [("urn:one", first), ("urn:two", second)],
+            copy_contents=True,
+        )
+
+        for uri, original in [("urn:one", first), ("urn:two", second)]:
+            stored = registry[uri]
+            assert stored == original
+            assert stored.contents is not original.contents
+
+        first_contents["foo"]["bar"] = "mutated"
+        second_contents["quux"].append(4)
+        assert registry["urn:one"].contents == {"foo": {"bar": "baz"}}
+        assert registry["urn:two"].contents == {"quux": [1, 2, 3]}
+
+    def test_with_resources_does_not_copy_by_default(self):
+        contents = {"foo": {"bar": "baz"}}
+        resource = Resource.opaque(contents=contents)
+        registry = Registry().with_resources([("urn:example", resource)])
+        assert registry["urn:example"].contents is contents
+
+    def test_with_contents_copies_contents(self):
+        schema = {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "properties": {"foo": {"type": "string"}},
+        }
+        registry = Registry().with_contents(
+            [("urn:example", schema)],
+            copy_contents=True,
+        )
+
+        stored = registry["urn:example"]
+        assert stored == Resource(contents=schema, specification=DRAFT202012)
+        assert stored.contents is not schema
+        assert stored.contents["properties"] is not schema["properties"]
+
+        schema["properties"]["foo"]["type"] = "integer"
+        assert (
+            registry["urn:example"].contents["properties"]["foo"]["type"]
+            == "string"
+        )
+
+    def test_copied_contents_preserve_nested_subresources(self):
+        """
+        A snapshot still crawls to its nested objects and child resources,
+        each reflecting the version present when the contents were stored.
+        """
+
+        contents = {
+            "ID": "urn:root",
+            "children": [{"ID": "urn:child", "foo": {"bar": 12}}],
+        }
+        resource = ID_AND_CHILDREN.create_resource(contents)
+        registry = Registry().with_resource(
+            "urn:root",
+            resource,
+            copy_contents=True,
+        ).crawl()
+
+        assert registry["urn:child"].contents == {
+            "ID": "urn:child",
+            "foo": {"bar": 12},
+        }
+
+        contents["children"][0]["foo"]["bar"] = 99
+        assert registry["urn:child"].contents["foo"] == {"bar": 12}
+
+    def test_resolver_pins_copied_contents_across_lookups(self):
+        """
+        Resolvers built before and after a document changes each resolve the
+        version of the contents present when their registry was loaded,
+        even when the original dict or the resolver's cursor is changed.
+        """
+
+        root_contents = {
+            "ID": "http://example.com/",
+            "children": [{"ID": "child/", "foo": "bar"}],
+        }
+        audited = ID_AND_CHILDREN.create_resource(root_contents)
+        old_registry = (
+            Registry()
+            .with_resource(
+                "http://example.com/",
+                audited,
+                copy_contents=True,
+            )
+            .crawl()
+        )
+        old_resolver = old_registry.resolver()
+
+        # The caller keeps and later updates the original dictionary.
+        root_contents["children"][0]["foo"] = "mutated"
+        new_registry = (
+            Registry()
+            .with_resource(
+                "http://example.com/",
+                ID_AND_CHILDREN.create_resource(root_contents),
+            )
+            .crawl()
+        )
+        new_resolver = new_registry.resolver()
+
+        assert old_resolver.lookup(
+            "http://example.com/child/",
+        ).contents == {"ID": "child/", "foo": "bar"}
+        assert new_resolver.lookup(
+            "http://example.com/child/",
+        ).contents == {"ID": "child/", "foo": "mutated"}
+
+        # Moving the old resolver's cursor (its base URI) doesn't change the
+        # version of the contents its registry was loaded with.
+        moved = old_resolver.in_subresource(
+            ID_AND_CHILDREN.create_resource(
+                {"ID": "http://example.com/child/", "foo": "bar"},
+            ),
+        )
+        assert moved.lookup("http://example.com/child/").contents == {
+            "ID": "child/",
+            "foo": "bar",
+        }
+
+        # The two registries hold independent snapshots: a value looked up
+        # from one can never reach the other registry's version, and the
+        # caller's original document is fully detached from both.
+        looked_up = old_resolver.lookup("http://example.com/").contents
+        looked_up["children"][0]["foo"] = "tampered"
+        assert new_resolver.lookup(
+            "http://example.com/child/",
+        ).contents == {"ID": "child/", "foo": "mutated"}
+        assert root_contents["children"][0] is not old_registry[
+            "http://example.com/child/"
+        ].contents
+        assert root_contents is not old_registry[
+            "http://example.com/"
+        ].contents
+
     def test_resolver(self):
         one = Resource.opaque(contents={})
         registry = Registry({"http://example.com": one})

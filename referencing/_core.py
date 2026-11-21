@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator, Sequence
+from copy import deepcopy
 from enum import Enum
 from typing import Any, ClassVar, Generic, Protocol, TypeVar
 from urllib.parse import unquote, urldefrag, urljoin
@@ -289,6 +290,17 @@ def _fail_to_retrieve(uri: URI):
     raise exceptions.NoSuchResource(ref=uri)
 
 
+def _copied(resource: Resource[D]) -> Resource[D]:
+    """
+    Return a resource whose contents are a detached deep copy.
+
+    The returned resource retains the same specification but no longer shares
+    any mutable nested object with the caller's original contents, so later
+    mutation of the originals cannot change what is stored in the registry.
+    """
+    return evolve(resource, contents=deepcopy(resource.contents))
+
+
 @frozen
 class Registry(Mapping[URI, Resource[D]]):
     r"""
@@ -506,18 +518,36 @@ class Registry(Mapping[URI, Resource[D]]):
             uncrawled=EMPTY_UNCRAWLED,
         )
 
-    def with_resource(self, uri: URI, resource: Resource[D]):
+    def with_resource(
+        self,
+        uri: URI,
+        resource: Resource[D],
+        copy_contents: bool = False,
+    ):
         """
         Add the given `Resource` to the registry, without crawling it.
+
+        If ``copy_contents`` is true, the resource's contents are deep copied
+        before being stored, preserving a protected snapshot of the audited
+        contents which is unaffected by later mutation of the caller's
+        original document even though the caller keeps a reference to it.
         """
+        if copy_contents:
+            resource = _copied(resource)
         return self.with_resources([(uri, resource)])
 
     def with_resources(
         self,
         pairs: Iterable[tuple[URI, Resource[D]]],
+        copy_contents: bool = False,
     ) -> Registry[D]:
         r"""
         Add the given `Resource`\ s to the registry, without crawling them.
+
+        If ``copy_contents`` is true, each resource's contents are deep copied
+        before being stored, preserving protected snapshots of the audited
+        contents which are unaffected by later mutation of the callers'
+        original documents even though the callers keep references to them.
         """
         resources = self._resources
         uncrawled = self._uncrawled
@@ -525,6 +555,8 @@ class Registry(Mapping[URI, Resource[D]]):
             # Empty fragment URIs are equivalent to URIs without the fragment.
             # TODO: Is this true for non JSON Schema resources? Probably not.
             uri = uri.rstrip("#")
+            if copy_contents:
+                resource = _copied(resource)
             uncrawled = uncrawled.insert(uri)
             resources = resources.insert(uri, resource)
         return evolve(self, resources=resources, uncrawled=uncrawled)
@@ -532,15 +564,22 @@ class Registry(Mapping[URI, Resource[D]]):
     def with_contents(
         self,
         pairs: Iterable[tuple[URI, D]],
+        copy_contents: bool = False,
         **kwargs: Any,
     ) -> Registry[D]:
         r"""
         Add the given contents to the registry, autodetecting when necessary.
+
+        If ``copy_contents`` is true, each set of contents is deep copied
+        before being stored, preserving protected snapshots of the audited
+        contents which are unaffected by later mutation of the callers'
+        original documents even though the callers keep references to them.
         """
-        return self.with_resources(
+        resources = (
             (uri, Resource.from_contents(each, **kwargs))
             for uri, each in pairs
         )
+        return self.with_resources(resources, copy_contents=copy_contents)
 
     def combine(self, *registries: Registry[D]) -> Registry[D]:
         """

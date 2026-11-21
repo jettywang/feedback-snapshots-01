@@ -204,6 +204,32 @@ If you have more than one resource to add, you can use `Registry.with_resources`
 
 You may also want to have a look at `Registry.with_contents` for a further method to add resources to a registry without constructing a `Resource` object yourself.
 
+Preserving Audited Contents
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+By default, registries store the objects you give them directly, without copying them.
+This means that if your code retains a reference to the dictionary representing some schema or other document and then mutates that dictionary, what the registry sees also changes.
+
+If you are registering documents which you have separately audited or otherwise vetted, you can instead ask for a protected snapshot of the contents by passing ``copy_contents=True`` to `Registry.with_resource`, `Registry.with_resources`, or `Registry.with_contents`.
+The registered contents are then fully deep copied before being stored, including any nested objects or subresources, so later updates to your original dictionary do not affect the audited version retained by the registry:
+
+.. testcode::
+
+    audited = {"$defs": {"name": {"type": "string"}}}
+    registry = Registry().with_contents(
+        [("urn:example:audited", audited)],
+        default_specification=referencing.Specification.OPAQUE,
+        copy_contents=True,
+    )
+    audited["$defs"]["name"]["type"] = "integer"
+    print(registry.contents("urn:example:audited"))
+
+.. testoutput::
+
+    {'$defs': {'name': {'type': 'string'}}}
+
+Resolvers returned from a registry containing these snapshots continue to resolve against the version of each document present when the registry was loaded, even as separate registries and resolvers load newer versions.
+
 
 Dynamically Retrieving Resources
 --------------------------------

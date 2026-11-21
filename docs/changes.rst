@@ -2,6 +2,17 @@
 Changelog
 =========
 
+v0.38.0
+-------
+
+* Add an opt-in ``copy_contents`` argument to `Registry.with_resource`,
+  `Registry.with_resources`, and `Registry.with_contents`.
+  When enabled, registered contents are deep copied before they are stored,
+  preserving a protected snapshot of the audited document so that later
+  mutation of the caller's original dictionary (including its nested objects
+  and subresources) does not change the version retained by the registry or
+  its resolvers.
+
 v0.37.0
 -------
 
