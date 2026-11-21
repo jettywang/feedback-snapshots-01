@@ -1,0 +1,4 @@
+# Same deployment after the operator removes legacy rules and accepts the
+# new policy-in-code defaults. widget:list keeps a deliberate override,
+# widget:create and widget:share now fall back to registered defaults.
+widget:list: 'role:owner'

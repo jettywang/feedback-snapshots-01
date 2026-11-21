@@ -1,0 +1,3 @@
+from policy_diff.cli import main
+
+raise SystemExit(main())

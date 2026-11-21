@@ -1,0 +1,19 @@
+# Policy-in-code defaults registered by the service BEFORE the upgrade.
+# This file is a local, service-agnostic description of RuleDefault objects.
+
+# Helper rule referenced by other defaults.
+admin_or_owner:
+  check_str: 'role:admin or (role:owner and user_id:%(user_id)s)'
+widget:create:
+  check_str: 'role:admin'
+widget:list:
+  check_str: 'rule:admin_or_owner'
+# Still registered under its old name in the deployed release.
+old_widget:share:
+  check_str: 'role:admin'
+widget:delete:
+  check_str: 'role:admin'
+  scope_types:
+    - project
+old_widget:rename:
+  check_str: 'role:admin'

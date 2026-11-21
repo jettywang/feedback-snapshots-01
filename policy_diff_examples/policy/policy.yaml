@@ -1,0 +1,14 @@
+# Operator policy.yaml on the deployment. The same file is present on both
+# sides of the upgrade so the diff shows which overrides survive.
+#
+# 1) Retained site override: widget:list keeps this exact value even though
+#    the registered default changes to role:reader.
+widget:list: 'role:owner'
+#
+# 2) Accepted new default: widget:create is intentionally absent here, so
+#    the new policy-in-code default role:member takes effect.
+#
+# 3) Deprecated rule still in use: the old rule name is carried over from
+#    the previous release. oslo.policy applies it to the new widget:share
+#    default to avoid silently widening access on upgrade.
+old_widget:share: 'rule:admin_or_owner'

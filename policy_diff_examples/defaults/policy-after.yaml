@@ -1,0 +1,48 @@
+# Policy-in-code defaults registered by the service AFTER the upgrade.
+
+# Helper rule referenced by other defaults; unchanged by the upgrade.
+admin_or_owner:
+  check_str: 'role:admin or (role:owner and user_id:%(user_id)s)'
+
+# widget:create - same name, new default; no operator override in the
+# sample policy file, so deployments accept the new secure default.
+widget:create:
+  check_str: 'role:member'
+  deprecated_rule:
+    check_str: 'role:admin'
+    deprecated_reason: 'project members may create widgets'
+    deprecated_since: '2026.2'
+
+# widget:list - site override exists in policy.yaml and must keep winning.
+widget:list:
+  check_str: 'role:reader'
+  deprecated_rule:
+    check_str: 'rule:admin_or_owner'
+    deprecated_reason: 'reader role replaces admin_or_owner'
+    deprecated_since: '2026.2'
+
+# widget:share - no new-name override, but the deprecated name is still
+# written in the operator policy file (legacy rule retained).
+widget:share:
+  check_str: 'role:member'
+  deprecated_rule:
+    name: 'old_widget:share'
+    check_str: 'role:admin'
+    deprecated_reason: 'action renamed to the widget namespace'
+    deprecated_since: '2026.2'
+
+# widget:delete - keeps the same default but gains scope_types; a
+# system-scoped token must now be rejected.
+widget:delete:
+  check_str: 'role:admin'
+  scope_types:
+    - project
+
+# widget:rename - pure rename, check string unchanged.
+widget:rename:
+  check_str: 'role:admin'
+  deprecated_rule:
+    name: 'old_widget:rename'
+    check_str: 'role:admin'
+    deprecated_reason: 'consistent naming convention'
+    deprecated_since: '2026.2'
