@@ -1,6 +1,7 @@
 # Changelog
 
 ## 3.9.3.dev
+* Add: [auth] `cache_successful_logins_groups_expiry` to refresh cached `ldap`/`pam` groups independently of the successful-login cache
 * Adjustment: the built-in server logs a warning at startup that it is meant for local testing, not for production (use `[server] type = cheroot` or `hypercorn`)
 * Fix: PROPFIND reports a shared principal's own URL, including from its parent
 * Fix: a calendar component that is only a recurrence override is reported once

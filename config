@@ -96,6 +96,9 @@
 # Expiration time for caching successful logins in seconds
 #cache_successful_logins_expiry = 15
 
+# Expiration time for caching user groups of successful logins in seconds
+#cache_successful_logins_groups_expiry = 15
+
 ## Expiration time of caching failed logins in seconds
 #cache_failed_logins_expiry = 90
 

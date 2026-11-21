@@ -1140,6 +1140,41 @@ Expiration time of caching successful logins in seconds
 
 Default: `15`
 
+##### cache_successful_logins_groups_expiry
+
+_(>= 3.9.3)_
+
+Expiration time of cached user groups from `ldap` and `pam` authentication in
+seconds. The password remains cached for
+[`cache_successful_logins_expiry`](#cache_successful_logins_expiry). When this
+shorter timeout is reached, the next login verifies the password and refreshes
+the groups before they are used for authorization. A group removed in the
+directory therefore stops granting access after the first login at or after
+this timeout, without forcing clients to change the password.
+
+The comparison is `now - groups_verified_at >= cache_successful_logins_groups_expiry`,
+where `now` is read once at the start of the login. The timeout is therefore
+inclusive: a value of `30` refreshes groups at 30 seconds and later. A failed
+group refresh does not delete the cached successful password entry; it is
+recorded in the failed-login cache. A successful refresh replaces the groups
+and resets the group timestamp.
+
+Set this lower than `cache_successful_logins_expiry` when group membership
+changes often, for example:
+
+```ini
+[auth]
+cache_logins = True
+cache_successful_logins_expiry = 300
+cache_successful_logins_groups_expiry = 30
+```
+
+The value `0` refreshes the groups on every request that reaches the auth
+backend through this cache. This option has no effect on authentication types
+that do not provide user groups or when `cache_logins` is `False`.
+
+Default: `15`
+
 ##### cache_failed_logins_expiry
 
 _(>= 3.4.0)_

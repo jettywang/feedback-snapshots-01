@@ -368,6 +368,10 @@ DEFAULT_CONFIG_SCHEMA: types.CONFIG_SCHEMA = OrderedDict([
             "value": "15",
             "help": "expiration time for caching successful logins in seconds",
             "type": int}),
+        ("cache_successful_logins_groups_expiry", {
+            "value": "15",
+            "help": "expiration time for caching user groups of successful logins in seconds",
+            "type": int}),
         ("cache_failed_logins_expiry", {
             "value": "90",
             "help": "expiration time for caching failed logins in seconds",

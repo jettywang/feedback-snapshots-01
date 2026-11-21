@@ -27,11 +27,11 @@ import datetime
 import logging
 import os
 import sys
-from typing import Iterable, Tuple, Union
+from typing import Any, Iterable, Tuple, Union
 
 import pytest
 
-from radicale import pathutils, xmlutils
+from radicale import auth, pathutils, xmlutils
 from radicale.auth import htpasswd
 from radicale.tests import BaseTest
 
@@ -743,3 +743,176 @@ class TestBaseAuthRequests(BaseTest):
         self.propfind("/", login="tmp:bepo", check=207)
         assert any("htpasswd file still contains issues (REMINDER" in message
                    for message in caplog.messages)
+
+
+class _Directory:
+    """A mutable fake directory and its controllable clock."""
+
+    EPOCH_NS = 1_000_000_000_000_000_000
+
+    def __init__(self) -> None:
+        self.now_ns = self.EPOCH_NS
+        self.passwords = {"owner": "secret"}
+        self.groups = {"owner": {"staff"}}
+        self.calls = 0
+
+    def advance(self, seconds: int) -> None:
+        self.now_ns += seconds * 10**9
+
+    def time_ns(self) -> int:
+        return self.now_ns
+
+    def login(self, login: str, password: str) -> Tuple[str, set]:
+        self.calls += 1
+        if self.passwords.get(login) != password:
+            return "", set()
+        return login, set(self.groups.get(login, set()))
+
+
+class _DirectoryAuth(auth.BaseAuth):
+    """Fake backend that returns the directory's user groups."""
+
+    def __init__(self, configuration, directory: _Directory) -> None:
+        super().__init__(configuration)
+        self.directory = directory
+
+    def _login_ext_with_groups(self, login: str, password: str,
+                               context: auth.AuthContext) -> Tuple[str, set]:
+        return self.directory.login(login, password)
+
+
+class _CredentialsOnlyAuth(auth.BaseAuth):
+    """Fake backend that checks a password but supplies no groups."""
+
+    def __init__(self, configuration, directory: _Directory) -> None:
+        super().__init__(configuration)
+        self.directory = directory
+
+    def _login(self, login: str, password: str) -> str:
+        return self.directory.login(login, password)[0]
+
+
+class TestDirectoryGroupCache(BaseTest):
+    """Group membership expires independently of a cached password."""
+
+    def _setup(self, monkeypatch, *, group_expiry: int = 30,
+               auth_type: str = "groups",
+               credential_expiry: int = 300) -> Any:
+        directory = _Directory()
+        monkeypatch.setattr(auth.time, "time_ns", directory.time_ns)
+        rights_file_path = os.path.join(self.colpath, "rights")
+        with open(rights_file_path, "w") as f:
+            f.write("""\
+[owner]
+user: owner
+collection: owner(/.*)?
+permissions: RrWw
+[staff]
+groups: staff
+collection: shared(/.*)?
+permissions: RrWw
+""")
+        # Use an existing cacheable type name so the cache code runs, then
+        # replace the loaded backend with the fake directory.
+        plugin_type = "htpasswd" if auth_type == "credentials" else "ldap"
+        self.configure({
+            "auth": {"type": "denyall", "delay": "0"},
+            "rights": {"type": "from_file", "file": rights_file_path},
+            "server": {"delay_on_error": "0"}})
+        configured = self.configuration.copy()
+        configured.update({"auth": {
+            "type": plugin_type,
+            "cache_logins": "True",
+            "cache_successful_logins_expiry": str(credential_expiry),
+            "cache_successful_logins_groups_expiry": str(group_expiry)}},
+            "test", privileged=True)
+        fake = (_CredentialsOnlyAuth if auth_type == "credentials"
+                else _DirectoryAuth)
+        self.application._auth = fake(configured, directory)
+        return directory
+
+    @staticmethod
+    def _shared_calendar(colpath: str) -> None:
+        # A collection that only the directory group may access.
+        shared_path = os.path.join(colpath, "collection-root", "shared")
+        calendar_path = os.path.join(shared_path, "calendar")
+        os.makedirs(calendar_path)
+        with open(os.path.join(shared_path, ".Radicale.props"), "w",
+                  encoding="utf-8") as f:
+            f.write("{}\n")
+        with open(os.path.join(calendar_path, ".Radicale.props"), "w",
+                  encoding="utf-8") as f:
+            f.write('{"tag": "VCALENDAR"}\n')
+
+    def test_revocation_is_visible_at_group_timeout(self, monkeypatch) -> None:
+        directory = self._setup(monkeypatch)
+        self._shared_calendar(self.colpath)
+        self.propfind("/shared/calendar/", login="owner:secret", check=207)
+        calls = directory.calls
+
+        # Inside the group timeout the cached group still grants access.
+        directory.groups["owner"] = set()
+        directory.advance(29)
+        self.propfind("/shared/calendar/", login="owner:secret", check=207)
+        assert directory.calls == calls
+
+        # At the timeout the backend runs again. The password remains valid,
+        # but the revoked group no longer grants DAV access.
+        directory.advance(1)
+        self.propfind("/shared/calendar/", login="owner:secret", check=403)
+        assert directory.calls == calls + 1
+        # The same password still authenticates the user's own principal.
+        self.propfind("/owner/", login="owner:secret", check=207)
+
+        # Restoring membership is visible at the next group refresh.
+        directory.groups["owner"] = {"staff"}
+        directory.advance(30)
+        self.propfind("/shared/calendar/", login="owner:secret", check=207)
+        assert directory.calls == calls + 2
+
+    def test_zero_group_timeout_refreshes_every_request(self, monkeypatch) -> None:
+        directory = self._setup(monkeypatch, group_expiry=0)
+        self._shared_calendar(self.colpath)
+        calls = directory.calls
+        directory.groups["owner"] = set()
+        for expected in (403, 403):
+            self.propfind("/shared/calendar/", login="owner:secret",
+                          check=expected)
+        assert directory.calls == calls + 2
+
+    def test_refresh_revalidates_the_password(self, monkeypatch) -> None:
+        directory = self._setup(monkeypatch)
+        self.propfind("/owner/", login="owner:secret", check=207)
+        directory.passwords.pop("owner")
+        directory.groups["owner"] = set()
+        directory.advance(30)
+        # Refresh runs the backend. A now-invalid password is rejected.
+        self.propfind("/owner/", login="owner:secret", check=401)
+        self.propfind("/owner/", login="owner:secret", check=401)
+
+    def test_wrong_password_keeps_the_valid_cached_entry(self, monkeypatch) -> None:
+        directory = self._setup(monkeypatch)
+        self.propfind("/owner/", login="owner:secret", check=207)
+        calls = directory.calls
+        self.propfind("/owner/", login="owner:wrong", check=401)
+        # A failed attempt is cached without evicting the valid entry.
+        self.propfind("/owner/", login="owner:wrong", check=401)
+        assert directory.calls == calls + 1
+        self.propfind("/owner/", login="owner:secret", check=207)
+        assert directory.calls == calls + 1
+
+    def test_group_timeout_not_used_without_groups(self, monkeypatch) -> None:
+        directory = self._setup(monkeypatch, auth_type="credentials",
+                                group_expiry=0)
+        self.propfind("/owner/", login="owner:secret", check=207)
+        calls = directory.calls
+        directory.advance(100)
+        # A backend without groups keeps the successful entry until the
+        # credential timeout, regardless of the group timeout.
+        self.propfind("/owner/", login="owner:secret", check=207)
+        assert directory.calls == calls
+
+    def test_anonymous_request_does_not_touch_the_directory(self, monkeypatch) -> None:
+        directory = self._setup(monkeypatch, group_expiry=0)
+        self.propfind("/", check=401)
+        assert directory.calls == 0

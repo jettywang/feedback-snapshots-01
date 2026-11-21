@@ -58,6 +58,17 @@ CACHE_LOGIN_TYPES: Sequence[str] = (
                                     "pam",
                                    )
 
+CACHE_GROUP_TYPES: Sequence[str] = (
+                                    "ldap",
+                                    "pam",
+                                   )
+
+
+def _groups_are_cached(auth: "BaseAuth") -> bool:
+    """Whether this backend can supply user groups for the login cache."""
+    return auth._type in CACHE_GROUP_TYPES
+
+
 INSECURE_IF_NO_LOOPBACK_TYPES: Sequence[str] = (
                                     "remote_user",
                                     "http_remote_user",
@@ -117,8 +128,9 @@ class BaseAuth:
     _failed_auth_delay: float
     _type: str
     _cache_logins: bool
-    _cache_successful: dict                 # login -> (digest, time_ns)
+    _cache_successful: dict                 # login -> (digest, time_ns, user, groups, groups_time_ns)
     _cache_successful_logins_expiry: int
+    _cache_successful_logins_groups_expiry: int
     _cache_failed: dict                     # digest_failed -> (time_ns, login)
     _cache_failed_logins_expiry: int
     _cache_failed_logins_salt_ns: int       # persistent over runtime
@@ -159,10 +171,17 @@ class BaseAuth:
             self._cache_successful_logins_expiry = configuration.get("auth", "cache_successful_logins_expiry")
             if self._cache_successful_logins_expiry < 0:
                 raise RuntimeError("self._cache_successful_logins_expiry cannot be < 0")
+            self._cache_successful_logins_groups_expiry = configuration.get("auth", "cache_successful_logins_groups_expiry")
+            if self._cache_successful_logins_groups_expiry < 0:
+                raise RuntimeError("self._cache_successful_logins_groups_expiry cannot be < 0")
             self._cache_failed_logins_expiry = configuration.get("auth", "cache_failed_logins_expiry")
             if self._cache_failed_logins_expiry < 0:
                 raise RuntimeError("self._cache_failed_logins_expiry cannot be < 0")
             logger.info("auth.cache_successful_logins_expiry: %s seconds", self._cache_successful_logins_expiry)
+            if _groups_are_cached(self):
+                logger.info("auth.cache_successful_logins_groups_expiry: %s seconds", self._cache_successful_logins_groups_expiry)
+            else:
+                logger.info("auth.cache_successful_logins_groups_expiry: %s seconds (not used for type '%s')", self._cache_successful_logins_groups_expiry, self._type)
             logger.info("auth.cache_failed_logins_expiry: %s seconds", self._cache_failed_logins_expiry)
             # cache init
             self._cache_successful = dict()
@@ -328,7 +347,7 @@ class BaseAuth:
             cache_successful_entry = self._cache_successful.get(login)
             if cache_successful_entry:
                 # login found in cache "successful"
-                (digest_cache, time_ns_cache, groups) = cache_successful_entry
+                (digest_cache, time_ns_cache, user_cache, groups_cache, groups_time_ns_cache) = cache_successful_entry
                 digest = self._cache_digest(login, password, str(time_ns_cache))
                 if digest == digest_cache:
                     age_success = int((time_ns - time_ns_cache) / 10**9)
@@ -339,9 +358,21 @@ class BaseAuth:
                         self._cache_successful.pop(login, None)
                         self._lock.release()
                         digest = ""
+                    elif (_groups_are_cached(self) and
+                            time_ns - groups_time_ns_cache >= self._cache_successful_logins_groups_expiry * 10**9):
+                        # The password is still trusted, but the group snapshot is stale.
+                        # Verify again to replace the groups; a valid password keeps the
+                        # login and updates the groups, a failed verification is cached
+                        # as a failure without discarding the valid password entry.
+                        logger.debug("Login successful cache entry for user+password found but groups expired: %r (age: %d >= %d sec)", login, int((time_ns - groups_time_ns_cache) / 10**9), self._cache_successful_logins_groups_expiry)
+                        # Keep digest_cache/time_ns_cache so the successful entry
+                        # remains matchable after the backend call.
+                        digest = ""
                     else:
                         logger.debug("Login successful cache entry for user+password found: %r (age: %d sec)", login, age_success)
-                        result = login
+                        # The backend may map a login to a different user name.
+                        result = user_cache if _groups_are_cached(self) else login
+                        groups = groups_cache
                         _type = _type + "/cached"
                 else:
                     logger.debug("Login successful cache entry for user+password not matching: %r", login)
@@ -360,7 +391,7 @@ class BaseAuth:
                         digest = self._cache_digest(login, password, str(time_ns))
                     # store successful login in cache
                     self._lock.acquire()
-                    self._cache_successful[login] = (digest, time_ns, groups)
+                    self._cache_successful[login] = (digest, time_ns, result, groups, time_ns)
                     self._lock.release()
                     logger.debug("Login successful cache for user set: %r", login)
                     self._lock.acquire()
