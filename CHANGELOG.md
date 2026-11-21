@@ -1,6 +1,8 @@
 # Changelog
 
 ## 3.9.3.dev
+* Add: [sharing] `conversion_bday_fields` selects which VCARD fields a birthday share projects; the phone number, postal address, e-mail address and internal UID of a contact are never exposed
+* Add: [sharing] a birthday share supports incremental sync (`DAV:sync-collection`/`DAV:sync-token`); a change of an unprojected field does not produce an update
 * Adjustment: the built-in server logs a warning at startup that it is meant for local testing, not for production (use `[server] type = cheroot` or `hypercorn`)
 * Fix: PROPFIND reports a shared principal's own URL, including from its parent
 * Fix: a calendar component that is only a recurrence override is reported once

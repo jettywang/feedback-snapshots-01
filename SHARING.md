@@ -65,6 +65,8 @@ Types of supported sharing configuration:
  * `none`: no conversion
  * `bday`: auto-mapping on-the-fly a VADDRESSBOOK to a VCALENDAR of all entries containing a `BDAY`
     * Permissions enforced to read-only
+    * Only the fields selected by the share are projected (`Actions` config `conversion_bday_fields`, defaults to `fn,n,nickname`); the phone number, postal address, e-mail address, revision and the contact's internal UID are never copied into the generated events
+    * A share supports an incremental sync (`DAV:sync-collection` and `DAV:sync-token`) on the projected calendar: a change of a field that is not projected does not produce an update, a changed birthday or a changed projected field does
 
 ### Sharing Configuration Entry Storage
 
@@ -323,7 +325,7 @@ PermittedCreateCollectionByToken=True
 SupportedConversions=(bday none)
 PermittedPropertiesOverlay=True
 SupportedPropertiesOverlay=(C:calendar-description ICAL:calendar-color CR:addressbook-description INF:addressbook-color D:displayname ICAL:calendar-order)
-SupportedActions='{'config': {'conversion_bday_summary_template': 'str', 'conversion_bday_description_template': 'str', 'conversion_bday_alarm_trigger_template': 'str', 'conversion_bday_categories': 'str', 'conversion_bday_age_max': 'int', 'view': 'str'}}'
+SupportedActions='{'config': {'conversion_bday_fields': 'str', 'conversion_bday_summary_template': 'str', 'conversion_bday_description_template': 'str', 'conversion_bday_alarm_trigger_template': 'str', 'conversion_bday_categories': 'str', 'conversion_bday_age_max': 'int', 'view': 'str'}}'
 ```
 
 ###### json->json, parsed with jq
@@ -354,6 +356,7 @@ curl -u user:$userpw --silent -H "accept: application/json" -d "" http://localho
   ],
   "SupportedActions": {
     "config": {
+      "conversion_bday_fields": "str",
       "conversion_bday_summary_template": "str",
       "conversion_bday_description_template": "str",
       "conversion_bday_alarm_trigger_template": "str",
@@ -773,6 +776,38 @@ Preconditions:
    * `permit_create_map`
 
 #### Examples using API
+
+##### Field projection
+
+The share owner decides which VCARD fields may appear in the projected events.
+`conversion_bday_fields` is a comma-separated subset of `fn`, `n`, `nickname`
+(the vCard property names `FN`, `N`, `NICKNAME` are accepted too). A field that
+cannot be projected is ignored.
+
+```bash
+## only the full name, no structured name and no nickname
+curl -u owner:$ownerpw -H "Content-Type: application/json" -d '{ "PathMapped": "/owner/addressbook/", "PathOrToken": "/owner/bday-of-addressbook/", "Actions": { "config": { "conversion_bday_fields": "fn" }}}' http://localhost:5232/.sharing/v1/map/update
+{"ApiVersion": 1, "Status": "success"}
+```
+
+Only the selected fields are projected. The phone number, postal address,
+e-mail address, revision and the contact's internal UID are never copied into
+the generated events, whatever the templates ask for. A projected event gets a
+stable identifier derived from the contact and the projection, so it never
+carries the contact UID.
+
+###### Incremental sync
+
+A birthday share supports `DAV:sync-collection` and exposes `DAV:sync-token`
+(and the same value as `CS:getctag`). The token and the change list are derived
+from the projected events:
+
+ * a changed birthday or a changed projected field produces an update
+ * a changed phone number, postal address, revision or internal UID does not
+ * a contact that loses its birthday (or every projected name) is reported as
+   deleted
+ * changing the projection itself (e.g. `conversion_bday_fields` or a template)
+   starts a new token; an old token is answered with `403 valid-sync-token`
 
 ##### Mapping
 

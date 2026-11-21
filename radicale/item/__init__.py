@@ -46,10 +46,13 @@ from radicale.log import LOG_LEVEL_TRACE, logger
 
 # Product ID for auto-conversion
 PRODID_CONVERTED = u"-//Radicale//NONSGML " + utils.package_version("radicale") + "//EN (auto-converted)"
-PRODID_SUFFIX = " (auto-converted by Radicale " + utils.package_version("radicale") + ")"
-UID_SUFFIX = "-auto-converted-by-Radicale"
 
 VCF_TO_ICS_SUPPORTED_PLACEHOLDERS: list = ["fn", "n:f", "n:g", "n:a", "age", "nickname", "year", "month", "day"]
+
+# Fields of the birthday projection that may be selected per share with the
+# Actions config ``conversion_bday_fields``.  Nothing else is copied from the
+# VCARD into a projected VEVENT.
+VCF_TO_ICS_PROJECTION_FIELDS: Sequence[str] = ("fn", "n", "nickname")
 
 # List of BDAY years acting as flag for "no year specified"
 VCF_TO_ICS_BDAY_NO_YEAR: list = ["1604"]
@@ -529,6 +532,14 @@ def verify(file: str, encoding: str, max_vevent_rrule_occurrence: int):
     return True
 
 
+def _projection_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (list, tuple)):
+        return ",".join(str(entry) for entry in value)
+    return str(value)
+
+
 def replace_placeholders(text: str, placeholder_mapping: dict) -> str:
     if logger.isEnabledFor(logging.DEBUG):
         logger.trace("item/convert_vcf_to_ics: resolve placeholders: %r", text)
@@ -770,15 +781,11 @@ class Item:
         else:
             pass
 
-        # convert last_modified (format: 'Wed, 30 Sep 2026 05:58:48 GMT') into dtstamp
+        # The projected event must not change when an unprojected VCARD field
+        # changes. DTSTAMP is therefore derived from the projected content
+        # (see the hash below), not from the VCARD's last-modified time.
         if logger.isEnabledFor(logging.DEBUG):
-            logger.trace("item/convert_vcf_to_ics: convert VCF to ICS (last_modified): %r", self.last_modified)
-        if self.last_modified is not None:
-            dtstamp = vobject.icalendar.dateTimeToString(datetime.datetime.strptime(self.last_modified, "%a, %d %b %Y %H:%M:%S GMT").replace(tzinfo=datetime.timezone.utc), convertToUTC=True)
-        else:
-            dtstamp = "19700101T000000Z"  # default
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.trace("item/convert_vcf_to_ics: convert VCF to ICS (dtstamp): %r", dtstamp)
+            logger.trace("item/convert_vcf_to_ics: derive stable dtstamp for: %r", self.href)
 
         bday = self.vobject_item.bday
         if logger.isEnabledFor(logging.DEBUG):
@@ -808,6 +815,11 @@ class Item:
         bdayM = int(match[2])
         bdayD = int(match[3])
 
+        # DTSTAMP is the birthday (UTC midnight). It is stable across an
+        # unprojected VCARD change and changes with the birthday, so neither
+        # the projected body nor the collection ETag reacts to a phone change.
+        dtstamp = bdayS + "T000000Z"
+
         placeholder_mapping['{year}'] = match[1]
         placeholder_mapping['{month}'] = match[2]
         placeholder_mapping['{day}'] = match[3]
@@ -815,52 +827,78 @@ class Item:
         if not vcard_has_year:
             placeholder_mapping['{year}'] = "????"
 
-        # create ICS
-        if hasattr(self.vobject_item, "fn"):
+        # Resolve the projected fields. A missing field is replaced by its
+        # marker so the template fallback logic can pick the next alternative.
+        fields = sharing.bday_fields(ShareActions)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.trace("item/convert_vcf_to_ics: projected fields: %r", fields)
+
+        name = ""
+        if "fn" in fields and hasattr(self.vobject_item, "fn"):
             name = self.vobject_item.fn.value
-        elif hasattr(self.vobject_item, "n"):
+        if name == "" and "n" in fields and hasattr(self.vobject_item, "n"):
             name = self.vobject_item.n.value.family + " " + self.vobject_item.n.value.given
-        elif hasattr(self.vobject_item, "nickname"):
+        if name == "" and "nickname" in fields and hasattr(self.vobject_item, "nickname"):
             name = self.vobject_item.nickname.value
-        else:
+        if name == "":
             if logger.isEnabledFor(logging.DEBUG):
-                logger.trace("item/convert_vcf_to_ics: has bday but neither FN or N or NICKNAME (skip): %r", self.href)
+                logger.trace("item/convert_vcf_to_ics: has bday but neither projected FN, N or NICKNAME (skip): %r", self.href)
             return None
 
-        if hasattr(self.vobject_item, "nickname") and self.vobject_item.nickname.value != "":
+        if "nickname" in fields and hasattr(self.vobject_item, "nickname") and self.vobject_item.nickname.value != "":
             placeholder_mapping['{nickname}'] = self.vobject_item.nickname.value
         else:
             placeholder_mapping['{nickname}'] = '!nickname!'
 
-        if hasattr(self.vobject_item, "fn") and self.vobject_item.fn.value != "":
+        if "fn" in fields and hasattr(self.vobject_item, "fn") and self.vobject_item.fn.value != "":
             placeholder_mapping['{fn}'] = self.vobject_item.fn.value
         else:
             placeholder_mapping['{fn}'] = '!fn!'
 
         # rfc6350#6.2 FamilyName;GivenName;AdditionalNames;HonorificPrefixes;HonorificSuffixes
-        if hasattr(self.vobject_item, "n") and self.vobject_item.n.value.family != "":
+        if "n" in fields and hasattr(self.vobject_item, "n") and self.vobject_item.n.value.family != "":
             placeholder_mapping['{n:f}'] = self.vobject_item.n.value.family
         else:
             placeholder_mapping['{n:f}'] = '!n:f!'
 
-        if hasattr(self.vobject_item, "n") and self.vobject_item.n.value.given != "":
+        if "n" in fields and hasattr(self.vobject_item, "n") and self.vobject_item.n.value.given != "":
             placeholder_mapping['{n:g}'] = self.vobject_item.n.value.given
         else:
             placeholder_mapping['{n:g}'] = '!n:g!'
 
-        if hasattr(self.vobject_item, "n") and self.vobject_item.n.value.additional != "":
+        if "n" in fields and hasattr(self.vobject_item, "n") and self.vobject_item.n.value.additional != "":
             placeholder_mapping['{n:a}'] = self.vobject_item.n.value.additional
         else:
             placeholder_mapping['{n:a}'] = '!n:a!'
+
+        # A stable identifier for the projected event. The original VCARD UID
+        # identifies the contact and must not be exposed to the birthday
+        # subscription, but the identifier has to stay the same across
+        # rendering. It is therefore derived from the contact UID and the
+        # projected fields only; a change of an unprojected field (phone,
+        # address, REV, ...) does not change it.
+        contact_identity = get_uid_from_object(self.vobject_item)
+        projected_values = ",".join(
+            _projection_value(placeholder_mapping.get("{%s}" % key, ""))
+            for key in ("fn", "n:f", "n:g", "n:a", "nickname"))
+        uid = "bday-" + utils.sha256_str(
+            contact_identity + "\n" + ",".join(fields) + "\n" + projected_values)[:40]
+
+        # Fields not projected must never leak into the generated VEVENT, no
+        # matter what a template asks for. The template placeholders already
+        # carry the marker for an unprojected field, so nothing else is copied
+        # from the source VCARD.
+        rendered_values: list = []
 
         # create VCALENDAR
         item_ics = vobject.newFromBehavior('vcalendar')
 
         # set PRODID
-        if hasattr(self.vobject_item, "prodid"):
-            item_ics.add('prodid').value = self.vobject_item.prodid.value + PRODID_SUFFIX
-        else:
-            item_ics.add('prodid').value = PRODID_CONVERTED
+        #
+        # The source PRODID identifies the client that wrote the VCARD and is
+        # not part of the birthday projection. A fixed value keeps the
+        # projected output independent of unprojected VCARD properties.
+        item_ics.add('prodid').value = PRODID_CONVERTED
 
         # prepare SUMMARY
         if ShareActions is not None and 'config' in ShareActions and 'conversion_bday_summary_template' in ShareActions['config']:
@@ -915,18 +953,6 @@ class Item:
             else:
                 vevent_enable_age = True
 
-        # create UID
-        if hasattr(self.vobject_item, "uid"):
-            pattern = re.compile('^(.*)-[0-9a-fA-F]{12}(.*)$')
-            match = pattern.match(self.vobject_item.uid.value)
-            if match:
-                # replace part of UUID by bday
-                uid = match[1] + '-' + 'bda0' + bdayS + match[2]
-            else:
-                uid = self.vobject_item.uid.value + UID_SUFFIX
-        else:
-            uid = match[1] + match[2] + match[3] + "@" + name.replace(" ", "-") + UID_SUFFIX
-
         # create new href
         href = self.href
         if href is not None:
@@ -970,7 +996,9 @@ class Item:
                 placeholder_mapping['{age}'] = "!age!"
 
             # set SUMMARY
-            vevent.add('summary').value = replace_placeholders(summary, placeholder_mapping)
+            summary_value = replace_placeholders(summary, placeholder_mapping)
+            rendered_values.append(summary_value)
+            vevent.add('summary').value = summary_value
 
             # set CATEGORIES
             if categories is not None and categories != []:
@@ -992,7 +1020,9 @@ class Item:
                     if td is not None:
                         valarm = vevent.add('valarm')
                         valarm.add('action').value = "DISPLAY"
-                        valarm.add('description').value = replace_placeholders(alarm_description, placeholder_mapping)
+                        alarm_value = replace_placeholders(alarm_description, placeholder_mapping)
+                        rendered_values.append(alarm_value)
+                        valarm.add('description').value = alarm_value
                         valarm.add('trigger').value = td
 
             # set RRULE
@@ -1009,7 +1039,9 @@ class Item:
 
             # set DESCRIPTION
             if description != "":
-                vevent.add('description').value = replace_placeholders(description, placeholder_mapping)
+                description_value = replace_placeholders(description, placeholder_mapping)
+                rendered_values.append(description_value)
+                vevent.add('description').value = description_value
 
             # set X-RADICALE-NAME
             vevent.add('X-RADICALE-NAME').value = href
@@ -1021,12 +1053,23 @@ class Item:
         #   4 chars special token: 'bda0'
         #   8 chars date         : YYYYMMDD
         #   2 chars separator    : 00
-        #  32 chars              : leading template hash
+        #  32 chars              : leading projected content hash
         #   2 chars separator    : 00
-        #  16 chars              : trailing original etag
-        etag = self.etag
-        template_hash = utils.sha256_str(summary + description + ','.join(categories) + alarm_trigger)[:32]
-        etag = '"bda0' + bdayS + '00' + template_hash + '00' + etag[49:]
+        #  16 chars              : trailing projection identity hash
+        #
+        # The projected content hash only covers what the projected event
+        # exposes: birthday, projected fields and the rendered templates. It
+        # excludes DTSTAMP and every unprojected VCARD property, so a change
+        # of a phone number, address, REV or internal UID does not create a
+        # projection update while a changed birthday or projected name does.
+        projected_hash = utils.sha256_str(
+            "v1\n" + bdayS + "\n" + "\n".join(fields) + "\n" +
+            "\n".join(sorted(set(rendered_values))) + "\n" + summary +
+            "\n" + description + "\n" + ','.join(categories) + "\n" +
+            alarm_trigger)[:32]
+        identity_hash = utils.sha256_str(
+            contact_identity + "\n" + ",".join(fields) + "\n" + projected_values)
+        etag = '"bda0' + bdayS + '00' + projected_hash + '00' + identity_hash[:16]
 
         item_new: Item = Item(
                 collection=self.collection,

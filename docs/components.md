@@ -70,6 +70,8 @@ See [data-model.md](data-model.md). `storage/multifilesystem/` splits the backen
 
 `collection_by_map` exposes another user's collection under the authenticated user. `collection_by_token` exposes a collection at `/.token/...` without that user logging in. Both features default off. `permit_create_map` and `permit_create_token` control who may create those rows. Rights letters `M`, `m`, `S`, `T`, and `t` override those options per collection.
 
+`bday.py` is the contract shared by a birthday share's reads and its incremental sync: it renders the projected ETag per member and computes the sync token and change list. The `Actions` config `conversion_bday_fields` selects the VCARD fields of the projection; `radicale/item/__init__.py` applies it and keeps every unprojected field, DTSTAMP aside, out of the generated event.
+
 ## `radicale/hook/`
 
 `[hook] type`: `none`, `email`, `rabbitmq`.

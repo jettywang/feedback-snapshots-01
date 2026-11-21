@@ -355,8 +355,13 @@ class ApplicationPartGet(ApplicationBase):
                     #   2 chars separator    : 00
                     #  32 chars              : leading content hash
                     #   2 chars separator    : 00
-                    #  16 chars              : trailing original etag
-                    headers["ETag"] = '"bda0' + '00000000' + '00' + utils.sha256_str(answer)[:32] + '00' + item.etag[49:]
+                    #  16 chars              : trailing content hash
+                    #
+                    # Both hashes cover the projected content only. The source
+                    # address book ETag is not part of it, so a change to an
+                    # unprojected VCARD field does not change the ETag.
+                    collection_hash = utils.sha256_str(answer)
+                    headers["ETag"] = '"bda0' + '00000000' + '00' + collection_hash[:32] + '00' + collection_hash[32:]
                 else:
                     # convert item VCF to ICS
                     item_converted = item.convert_vcf_to_ics(ShareActions=share['Actions'])

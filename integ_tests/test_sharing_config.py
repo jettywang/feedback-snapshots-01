@@ -85,7 +85,10 @@ def test_sharing_config_save_and_reload(
     page.locator('input[data-name="shareuser"]').fill("max")
     page.locator('input[data-name="sharehref"]').fill("mapped-bday-reload")
 
-    # Verify all 5 config properties are present
+    # Verify all 6 config properties are present
+    expect(
+        page.locator("#newshare_config_conversion_bday_fields")
+    ).to_be_visible()
     expect(
         page.locator("#newshare_config_conversion_bday_summary_template")
     ).to_be_visible()

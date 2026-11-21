@@ -138,10 +138,66 @@ SHARING_BDAY_AGE_MAX_DEFAULT: int = 99
 SHARING_BDAY_SUMMARY_TEMPLATE_DEFAULT: str = "[{n:f} {n:g}|{fn}|{nickname}] ({year}) (BDAY)"
 SHARING_BDAY_DESCRIPTION_TEMPLATE_DEFAULT: str = "BDAY={year}-{month}-{day}"
 SHARING_BDAY_CATEGORIES_DEFAULT: str = 'Birthday'
+SHARING_BDAY_FIELDS_DEFAULT: str = 'fn,n,nickname'
 SHARING_ACTIONS_DELETE_VALUE: str = '#DEL#'
+SHARING_BDAY_SYNC_TOKEN_PREFIX: str = "http://radicale.org/ns/sync/bday/"
 
 SHARING_SEPARATOR_REALM: str = '@'
 SHARING_SEPARATOR_GROUP: str = ':'
+
+
+def check_bday_fields(data: Any) -> str:
+    """Validate and normalize the field projection of conversion "bday".
+
+    The value is a comma-separated list (a JSON list is accepted too) of
+    VCARD fields that may be used for the generated VEVENT.  Both the internal
+    names (``fn``, ``n``, ``nickname``) and the vCard property names (``FN``,
+    ``N``, ``NICKNAME``) are accepted.
+
+    A field that cannot be projected is dropped: the phone number, postal
+    address, e-mail address, revision, photo, source product and internal UID
+    never reach the projected event, so selecting them simply has no effect.
+    An empty value selects no field.
+
+    """
+    entries: Sequence[str]
+    if isinstance(data, str):
+        entries = data.split(',')
+    elif isinstance(data, (list, tuple)) and all(isinstance(entry, str) for entry in data):
+        entries = list(data)
+    else:
+        raise ValueError("field list is not a string or list of strings: %r" % (data,))
+    selected: list = []
+    for entry in entries:
+        field = entry.strip().lower()
+        if field == '':
+            continue
+        if field not in item.VCF_TO_ICS_PROJECTION_FIELDS:
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.trace("sharing/bday/fields: drop field not projectable: %r", entry)
+            continue
+        if field not in selected:
+            selected.append(field)
+    return ','.join(selected)
+
+
+def bday_fields(ShareActions: Union[dict, None]) -> Sequence[str]:
+    """Resolve the effective field projection of conversion "bday".
+
+    A value set on the share wins over the global default.  A missing value
+    falls back to all supported fields, so an existing share keeps working.
+    An explicitly empty value selects no field.
+
+    """
+    value: Union[str, list, None] = None
+    if ShareActions is not None and 'config' in ShareActions and 'conversion_bday_fields' in ShareActions['config']:
+        value = ShareActions['config']['conversion_bday_fields']
+    elif ShareActions is not None and 'config_default' in ShareActions and 'conversion_bday_fields' in ShareActions['config_default']:
+        value = ShareActions['config_default']['conversion_bday_fields']
+    if value is None:
+        return tuple(item.VCF_TO_ICS_PROJECTION_FIELDS)
+    return tuple(field for field in check_bday_fields(value).split(',')
+                 if field != '')
 
 
 def check_bday_max_age(data: Any) -> int:
@@ -222,6 +278,7 @@ ACTIONS_WHITELIST: dict = {
             'conversion_bday_alarm_trigger_template': check_template_alarm_trigger,
             'conversion_bday_categories': str,
             'conversion_bday_age_max': check_bday_max_age,
+            'conversion_bday_fields': check_bday_fields,
             'view': check_freebusy_view,
             'format': check_freebusy_format,
             },
@@ -235,6 +292,7 @@ ACTIONS_WHITELIST_INFO: dict = {
             'conversion_bday_alarm_trigger_template': "str",
             'conversion_bday_categories': "str",
             'conversion_bday_age_max': "int",
+            'conversion_bday_fields': "str",
             'view': "str",
             'format': "str",
             },
@@ -289,6 +347,7 @@ class BaseSharing:
         self.conversion_bday_alarm_trigger_template = configuration.get("sharing", "conversion_bday_alarm_trigger_template")
         self.conversion_bday_categories = configuration.get("sharing", "conversion_bday_categories")
         self.conversion_bday_age_max = configuration.get("sharing", "conversion_bday_age_max")
+        self.conversion_bday_fields = configuration.get("sharing", "conversion_bday_fields")
 
         logger.info("sharing.collection_by_map  : %s", self.sharing_collection_by_map)
         logger.info("sharing.collection_by_token: %s", self.sharing_collection_by_token)
@@ -303,6 +362,7 @@ class BaseSharing:
         logger.info("sharing.conversion_bday_alarm_trigger_template: %r", self.conversion_bday_alarm_trigger_template)
         logger.info("sharing.conversion_bday_categories: %r", self.conversion_bday_categories)
         logger.info("sharing.conversion_bday_age_max: %s", self.conversion_bday_age_max)
+        logger.info("sharing.conversion_bday_fields: %r", self.conversion_bday_fields)
 
         # database tasks
         self.sharing_db_type = configuration.get("sharing", "type")
@@ -551,6 +611,7 @@ class BaseSharing:
                                 'conversion_bday_alarm_trigger_template': self.conversion_bday_alarm_trigger_template,
                                 'conversion_bday_categories': self.conversion_bday_categories,
                                 'conversion_bday_age_max': self.conversion_bday_age_max,
+                                'conversion_bday_fields': self.conversion_bday_fields,
                                 },
                              }
                 else:
@@ -603,6 +664,16 @@ class BaseSharing:
                                 share['Actions'].update({'config_default': {}})
                             share['Actions']['config_default'].update(
                                 {'conversion_bday_age_max': self.conversion_bday_age_max}
+                                )
+
+                        if 'conversion_bday_fields' in share['Actions']['config']:
+                            # nothing to do
+                            pass
+                        else:
+                            if 'config_default' not in share['Actions']:
+                                share['Actions'].update({'config_default': {}})
+                            share['Actions']['config_default'].update(
+                                {'conversion_bday_fields': self.conversion_bday_fields}
                                 )
 
                 logger.debug("sharing/%s: resolved path %r->%r, user %r->%r, Permissions=%r Conversion=%r Actions=%r", share['ShareType'], share['PathOrToken'], share['PathMapped'], user, share['Owner'], share['Permissions'], share['Conversion'], share['Actions'])

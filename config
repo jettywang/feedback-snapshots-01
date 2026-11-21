@@ -403,6 +403,13 @@ type = none
 # Global categories of conversion "bday"
 #conversion_bday_categories = Birthday
 
+# Global fields of conversion "bday" projected from the VCARD (separated by ',')
+#  Supported: fn, n, nickname (vCard property names FN, N, NICKNAME accepted)
+#  Other fields (phone, address, e-mail, revision, internal UID, ...) are ignored
+#  A share can select a subset with the "conversion_bday_fields" Actions config
+#  An empty value projects no name field; the item is then skipped
+#conversion_bday_fields = fn,n,nickname
+
 # Global max limit of "bday" age
 #  Only active in case of {age} is used as placeholder
 #conversion_bday_age_max = 99

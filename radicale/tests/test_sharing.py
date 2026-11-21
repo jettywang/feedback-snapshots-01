@@ -5993,7 +5993,7 @@ permissions: RrWw""")
             response = self._propfind_allprop(path_shared_r, login="user:userpw")
             logging.debug("response: %r", response)
             assert "CR:supported-address-data" not in response
-            assert "D:sync-token" not in response
+            assert "D:sync-token" in response
             assert "C:supported-calendar-component-set" in response
             assert "D:current-user-privilege-set" in response
             assert "D:displayname" in response
@@ -6695,25 +6695,25 @@ permissions: RrWw""")
             logging.info("\n** GET item (ics) user  ETag: %s (template orig)", etag2)
             logging.info("\n** GET item (ics) user  ETag: %s (template mod )", etag3)
             assert etag3 != etag2
+            # the identity part stays when only the template changes
             assert etag3[49:] == etag2[49:]
 
             logging.info("\n*** GET collection (ics) user  ETag: comparison")
             logging.info("\n** GET collection (ics) user  ETag: %s (template orig)", etag2_collection_ics)
             logging.info("\n** GET collection (ics) user  ETag: %s (template mod )", etag3_collection_ics)
             assert etag3_collection_ics != etag2_collection_ics
-            assert etag3_collection_ics[49:] == etag2_collection_ics[49:]
 
             logging.info("\n*** GET collection (ics) user vs (vcf) owner ETag: comparison")
             logging.info("\n** GET collection (ics) user  ETag: %s (template orig)", etag2_collection_ics)
             logging.info("\n** GET collection (vcf) owner ETag: %s (vcf)", etag_collection_vcf)
+            # the projected collection ETag only depends on the projection and
+            # must not repeat the source collection ETag
             assert etag2_collection_ics != etag_collection_vcf
-            assert etag2_collection_ics[49:] == etag_collection_vcf[49:]
 
             logging.info("\n*** GET collection (ics) user vs (vcf) owner ETag: comparison")
             logging.info("\n** GET collection (ics) user  ETag: %s (template mod)", etag3_collection_ics)
             logging.info("\n** GET collection (vcf) owner ETag: %s (vcf)", etag_collection_vcf)
             assert etag3_collection_ics != etag_collection_vcf
-            assert etag3_collection_ics[49:] == etag_collection_vcf[49:]
 
     def test_sharing_bday_conversion_empty_fn(self) -> None:
         """BDAY-to-ICS conversion of a VCARD with an empty FN property.
@@ -6762,6 +6762,91 @@ permissions: RrWw""")
             "conversion_bday_summary_template": "[{n:f} {n:g}|{fn}|{nickname}] ({year}) (BDAY)",
             "conversion_bday_description_template": "BDAY={year}-{month}-{day}"}})
         assert converted is not None
+
+    def test_sharing_bday_projection_hides_sensitive_fields(self) -> None:
+        """The projected event contains no phone, address or internal UID.
+
+        The test card carries TEL, ADR, EMAIL and its own UID. Whatever a
+        template asks for, only the selected VCARD fields and the configured
+        templates may appear in the generated VEVENT.
+        """
+        card = "\r\n".join([
+            "BEGIN:VCARD",
+            "VERSION:3.0",
+            "UID:internal-uid-must-not-leak",
+            "N:Family;Given;;;",
+            "FN:Given Family",
+            "NICKNAME:Nick",
+            "BDAY:1970-01-01",
+            "TEL;TYPE=cell:+1-555-0100",
+            "ADR;TYPE=home:;;1 Secret Lane;Springfield;;12345;US",
+            "EMAIL:secret@example.invalid",
+            "REV:20260101T000000Z",
+            "END:VCARD",
+            ""])
+        vcard = vobject.readOne(card)
+
+        class _StubCollection:
+            path = "test"
+
+        item = Item(collection=cast(storage.BaseCollection, _StubCollection()),
+                    vobject_item=vcard, href="contact.vcf")
+        converted = item.convert_vcf_to_ics(ShareActions={"config": {}})
+        assert converted is not None
+        answer = converted.serialize()
+        for forbidden in ("internal-uid-must-not-leak", "+1-555-0100",
+                          "1 Secret Lane", "secret@example.invalid",
+                          "20260101T000000Z"):
+            assert forbidden not in answer
+
+        # only the projected fields are available to the templates
+        converted = item.convert_vcf_to_ics(ShareActions={"config": {
+            "conversion_bday_fields": "nickname",
+            "conversion_bday_summary_template": "[{fn}|{nickname}]",
+            "conversion_bday_description_template": "[{n:f}|{n:g}|{n:a}]"}})
+        assert converted is not None
+        answer = converted.serialize()
+        assert "SUMMARY:Nick" in answer
+        assert "!n:a!" in answer
+        for forbidden in ("Given Family", "Given", "Family",
+                          "internal-uid-must-not-leak", "+1-555-0100"):
+            assert forbidden not in answer
+
+    def test_sharing_bday_projection_per_share(self) -> None:
+        """A share selects the fields of its own projection."""
+        vcard = vobject.readOne("\r\n".join([
+            "BEGIN:VCARD",
+            "VERSION:3.0",
+            "UID:contact-1",
+            "N:Family;Given;;;",
+            "FN:Given Family",
+            "NICKNAME:Nick",
+            "BDAY:1970-01-01",
+            "END:VCARD",
+            ""]))
+
+        class _StubCollection:
+            path = "test"
+
+        item = Item(collection=cast(storage.BaseCollection, _StubCollection()),
+                    vobject_item=vcard, href="contact-1.vcf")
+        converted = item.convert_vcf_to_ics(ShareActions={"config": {
+            "conversion_bday_fields": "fn",
+            "conversion_bday_summary_template": "[{nickname}|{fn}]"}})
+        assert converted is not None
+        assert "SUMMARY:Given Family" in converted.serialize()
+
+    def test_sharing_bday_fields_option(self) -> None:
+        """The field option accepts quietly only the projectable fields."""
+        assert sharing.check_bday_fields("FN, n ,nickname") == "fn,n,nickname"
+        assert sharing.check_bday_fields(["FN", "nickname"]) == "fn,nickname"
+        assert sharing.check_bday_fields("") == ""
+        # a non-projectable field is dropped, never exposed
+        assert sharing.check_bday_fields("fn,uid,TEL,ADR,EMAIL,rev") == "fn"
+        assert sharing.bday_fields({"config": {"conversion_bday_fields": "uid,TEL"}}) == ()
+        with pytest.raises(ValueError):
+            sharing.check_bday_fields(5)
+
 
     def test_sharing_api_map_vcf_bday_age_template(self) -> None:
         """share-by-map with conversion=bday template tests with age."""
@@ -7464,6 +7549,133 @@ permissions: RrWw""")
             status, prop = response["RADICALE:getcontentcount"]
             assert int(str(prop.text)) == 2
 
+    def test_sharing_api_map_vcf_bday_sync(self) -> None:
+        """Incremental sync of a birthday share follows the projection."""
+
+        def report_sync(path: str, sync_token: str = "", **kwargs) -> Tuple[str, dict]:
+            token_xml = ("<sync-token><![CDATA[%s]]></sync-token>" % sync_token
+                         if sync_token else "<sync-token />")
+            _, _, body = self.request("REPORT", path, """\
+<?xml version="1.0" encoding="utf-8" ?>
+<sync-collection xmlns="DAV:">
+    <prop>
+        <getetag />
+    </prop>
+    %s
+</sync-collection>""" % token_xml, **kwargs)
+            token = re.search(r"<sync-token>([^<]*)</sync-token>", body)
+            assert token is not None
+            return token.group(1), self.parse_responses(body)
+
+        self.configure({"auth": {"type": "htpasswd",
+                                 "htpasswd_filename": self.htpasswd_file_path,
+                                 "htpasswd_encryption": "plain"},
+                        "sharing": {
+                                    "type": "csv",
+                                    "permit_create_map": True,
+                                    "collection_by_map": "True"},
+                        "rights": {"type": "owner_only"}})
+
+        path_mapped = "/owner/adressbook-sync.vcf/"
+        path_shared = "/owner/bday-sync.ics/"
+        self.create_addressbook(path_mapped, login="owner:ownerpw")
+        self.put(path_mapped + "contact_issue2224.vcf",
+                 get_file_content("contact_issue2224.vcf"), login="owner:ownerpw")
+
+        json_dict = {"User": "owner", "PathMapped": path_mapped,
+                     "PathOrToken": path_shared, "Conversion": "bday",
+                     "Permissions": "r", "Enabled": True, "Hidden": False}
+        _, _, answer = self._sharing_api_json(
+            "map", "create", check=200, login="owner:ownerpw", json_dict=json_dict)
+        assert json.loads(answer)['Status'] == "success"
+
+        # the share advertises a sync token
+        response = self._propfind_allprop(path_shared, login="owner:ownerpw")
+        assert "D:sync-token" in response
+        status, prop = response["D:sync-token"]
+        assert status == 200 and prop.text
+        assert prop.text.startswith(sharing.SHARING_BDAY_SYNC_TOKEN_PREFIX)
+
+        # the share also advertises the sync-collection report
+        _, responses = self.propfind(path_shared, """\
+<?xml version="1.0" encoding="utf-8" ?>
+<D:propfind xmlns:D="DAV:"><D:prop><D:supported-report-set /></D:prop></D:propfind>""",
+                                     login="owner:ownerpw")
+        response = responses[path_shared]
+        assert not isinstance(response, int)
+        status, reports = response["D:supported-report-set"]
+        assert status == 200
+        assert "D:sync-collection" in [
+            _supported_report_name(node)
+            for node in reports.findall(xmlutils.make_clark("D:supported-report"))]
+
+        # subscription output must not leak phone, address or the contact UID
+        _, answer = self.get(path_shared, login="owner:ownerpw")
+        assert "TEL" not in answer
+        assert "ADR" not in answer
+        assert "5e35b019-8a3a-f051-82ef-cf2a4938f4a2" not in answer
+
+        # initial sync lists the projected item with a projected ETag
+        sync_token, responses = report_sync(path_shared, login="owner:ownerpw")
+        assert len(responses) == 1
+        response = responses[path_shared + "contact_issue2224.ics"]
+        assert not isinstance(response, int)
+        assert "D:getetag" in response
+        assert response["D:getetag"][1].text.startswith('"bda0')
+
+        # no change: the token stays the same and nothing is reported
+        new_sync_token, responses = report_sync(
+            path_shared, sync_token, login="owner:ownerpw")
+        assert new_sync_token == sync_token
+        assert len(responses) == 0
+
+        # a changed phone number does not produce a projection update
+        changed = get_file_content("contact_issue2224.vcf").replace(
+            "xxxxxxxxxxxxxx", "11111111111111")
+        self.put(path_mapped + "contact_issue2224.vcf", changed,
+                 check=204, login="owner:ownerpw")
+        new_sync_token, responses = report_sync(
+            path_shared, sync_token, login="owner:ownerpw")
+        assert new_sync_token == sync_token
+        assert len(responses) == 0
+
+        # a changed birthday produces an incremental update
+        changed = changed.replace("BDAY:1970-01-01", "BDAY:1971-02-03")
+        self.put(path_mapped + "contact_issue2224.vcf", changed,
+                 check=204, login="owner:ownerpw")
+        new_sync_token, responses = report_sync(
+            path_shared, sync_token, login="owner:ownerpw")
+        assert new_sync_token != sync_token
+        assert len(responses) == 1
+        response = responses[path_shared + "contact_issue2224.ics"]
+        assert not isinstance(response, int)
+        assert response["D:getetag"][1].text.startswith('"bda019710203')
+
+        # multiget returns the same projected event through the share
+        _, responses = self.report(path_shared, """\
+<?xml version="1.0"?>
+<C:calendar-multiget xmlns="DAV:" xmlns:C="urn:ietf:params:xml:ns:caldav">
+   <prop>
+     <getetag />
+     <C:calendar-data />
+   </prop>
+   <href>""" + path_shared + "contact_issue2224.ics" + """</href>
+</C:calendar-multiget>""", login="owner:ownerpw")
+        response = responses[path_shared + "contact_issue2224.ics"]
+        assert not isinstance(response, int)
+        status, data = response["C:calendar-data"]
+        assert status == 200 and data.text is not None
+        assert "TEL" not in data.text
+        assert "ADR" not in data.text
+        assert "5e35b019-8a3a-f051-82ef-cf2a4938f4a2" not in data.text
+        assert "DTSTART;VALUE=DATE:19710203" in data.text
+
+        # a contact without a birthday is reported as removed
+        self.delete(path_mapped + "contact_issue2224.vcf", login="owner:ownerpw")
+        _, responses = report_sync(
+            path_shared, new_sync_token, login="owner:ownerpw")
+        assert responses.get(path_shared + "contact_issue2224.ics") == 404
+
     def test_sharing_api_map_vcf_bday_self(self) -> None:
         """share-by-map with conversion=bday to self tests (without and with simulated proxy)."""
         script_name = "/radicale"
@@ -7703,7 +7915,7 @@ permissions: RrWw""")
             response = self._propfind_allprop(path_shared, login="owner:ownerpw")
             logging.debug("response: %r", response)
             assert "CR:supported-address-data" not in response
-            assert "D:sync-token" not in response
+            assert "D:sync-token" in response
             assert "C:supported-calendar-component-set" in response
             assert "D:current-user-privilege-set" in response
 
@@ -7712,7 +7924,7 @@ permissions: RrWw""")
             response = self._propfind_allprop(script_name + path_shared, login="owner:ownerpw", x_forwarded_for="127.0.0.2")
             logging.debug("response: %r", response)
             assert "CR:supported-address-data" not in response
-            assert "D:sync-token" not in response
+            assert "D:sync-token" in response
             assert "C:supported-calendar-component-set" in response
             assert "D:current-user-privilege-set" in response
 
@@ -7870,7 +8082,7 @@ permissions: RrWw""")
             response = self._propfind_allprop(path_shared)
             logging.debug("response: %r", response)
             assert "CR:supported-address-data" not in response
-            assert "D:sync-token" not in response
+            assert "D:sync-token" in response
             assert "C:supported-calendar-component-set" in response
             assert "D:current-user-privilege-set" in response
             status, props = response["D:current-user-privilege-set"]

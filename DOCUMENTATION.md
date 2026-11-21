@@ -2760,6 +2760,41 @@ Global categories of conversion "bday", separated by `,`
 
 Default: `Birthday`
 
+##### conversion_bday_fields
+
+_(>= 3.9.3)_
+
+Global fields of conversion "bday" projected from the VCARD, separated by `,`
+
+Default: `fn,n,nickname`
+
+Supported fields (data used from VCARD):
+ * `fn`: full name (RFC6350#6.2.1)
+ * `n`: structured name (RFC6350#6.2.2), provides `{n:f}`, `{n:g}` and `{n:a}`
+ * `nickname`: nick name (RFC6350#6.2.3)
+
+The vCard property names (`FN`, `N`, `NICKNAME`) are accepted as well and are
+normalized to lower case. A field that cannot be projected is ignored: the
+phone number, postal address, e-mail address, revision, photo, source product
+and internal UID of a contact never reach a generated event, so selecting them
+has no effect.
+
+The address book itself is never exposed: only the projected fields, the
+birthday date and the configured templates appear in a generated event. The
+phone number, postal address, e-mail address, revision and the internal UID of
+a contact are never copied. A projected event gets a stable identifier derived
+from the contact and the projection, not the contact's UID.
+
+A share can select its own subset with the `conversion_bday_fields` entry in
+the `Actions` config (see [SHARING.md](SHARING.md)). A field that is not
+projected falls back like an empty value (`!fn!`, `!n:f!`, ...), so the
+`[...|...]` fallback in the templates still applies. An empty value projects
+no name field; a contact without any projected name is skipped.
+
+Changing a field that is not projected (e.g. a phone number) does not change
+the projected event and does not create a sync update. Changing the birthday or
+a projected field does.
+
 ##### conversion_bday_age_max
 
 _(>= 3.7.5)_

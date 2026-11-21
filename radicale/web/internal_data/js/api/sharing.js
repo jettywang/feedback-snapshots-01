@@ -155,6 +155,7 @@ export class ConfigProperty {
 }
 
 export const BDAY_CONFIG = Object.freeze([
+    Object.freeze(new ConfigProperty("conversion_bday_fields", "str", "Projected fields")),
     Object.freeze(new ConfigProperty("conversion_bday_summary_template", "str", "Summary template")),
     Object.freeze(new ConfigProperty("conversion_bday_description_template", "str", "Description template")),
     Object.freeze(new ConfigProperty("conversion_bday_alarm_trigger_template", "str", "Alarm trigger template")),

@@ -33,6 +33,7 @@ from radicale import (httputils, pathutils, rights, sharing, storage, types,
 from radicale.app.base import Access, ApplicationBase
 from radicale.hook.email.scheduling import owner_addresses
 from radicale.log import logger
+from radicale.sharing.bday import sync_token as bday_sync_token
 
 
 def xml_propfind(
@@ -204,11 +205,7 @@ def xml_propfind_response(
         if is_collection:
             if is_leaf:
                 props.append(xmlutils.make_clark("D:displayname"))
-                if share_bday_automap:
-                    # bday share has no sync-token support
-                    pass
-                else:
-                    props.append(xmlutils.make_clark("D:sync-token"))
+                props.append(xmlutils.make_clark("D:sync-token"))
             if collection.tag == "VCALENDAR" or share_bday_automap:
                 props.append(xmlutils.make_clark("CS:getctag"))
                 props.append(
@@ -410,8 +407,7 @@ def xml_propfind_response(
                            "D:principal-search-property-set",
                            "D:principal-property-search"]
             if not freebusy_only and is_collection and is_leaf:
-                if not share_bday_automap:
-                    reports.append("D:sync-collection")
+                reports.append("D:sync-collection")
                 if collection.tag == "VADDRESSBOOK" and not share_bday_automap:
                     reports.append("CR:addressbook-multiget")
                     reports.append("CR:addressbook-query")
@@ -546,12 +542,18 @@ def xml_propfind_response(
                     is404 = True
             elif tag == xmlutils.make_clark("CS:getctag"):
                 if is_leaf:
-                    element.text, _ = collection.sync()
+                    if share_bday_automap:
+                        element.text = bday_sync_token(collection, share)
+                    else:
+                        element.text, _ = collection.sync()
                 else:
                     is404 = True
             elif tag == xmlutils.make_clark("D:sync-token"):
                 if is_leaf:
-                    element.text, _ = collection.sync()
+                    if share_bday_automap:
+                        element.text = bday_sync_token(collection, share)
+                    else:
+                        element.text, _ = collection.sync()
                 else:
                     is404 = True
             elif tag == xmlutils.make_clark("CS:source"):

@@ -44,6 +44,7 @@ from radicale import httputils, pathutils, storage, types, utils, xmlutils
 from radicale.app.base import Access, ApplicationBase
 from radicale.item import filter as radicale_filter
 from radicale.log import logger
+from radicale.sharing.bday import sync as bday_sync
 
 DT_FORMAT_TIMESTAMP: str = '%Y%m%dT%H%M%SZ'
 DT_FORMAT_DATE: str = '%Y%m%d'
@@ -380,24 +381,53 @@ def xml_report(base_prefix: str, path: str, xml_request: Optional[ET.Element],
         if old_sync_token_element is not None and old_sync_token_element.text:
             old_sync_token = old_sync_token_element.text.strip()
         logger.debug("Client provided sync token: %r", old_sync_token)
-        try:
-            sync_token, names = collection.sync(old_sync_token)
-        except ValueError as e:
-            # Invalid sync token
-            remote_useragent_txt = ""
-            if request_info["useragent"] != "":
-                remote_useragent_txt = " using %r" % request_info["useragent"]
-            logger.warning("Client provided invalid sync token for path %r (user %r from %s%s): %s",
-                           path, user, request_info["host"], remote_useragent_txt, e, exc_info=True)
-            # client.CONFLICT doesn't work with some clients (e.g. InfCloud)
-            return (client.FORBIDDEN,
-                    xmlutils.webdav_error("D:valid-sync-token"))
-        hreferences = (pathutils.unstrip_path(
-            posixpath.join(collection.path, n)) for n in names)
-        # Append current sync token to response
-        sync_token_element = ET.Element(xmlutils.make_clark("D:sync-token"))
-        sync_token_element.text = sync_token
-        multistatus.append(sync_token_element)
+        if share_bday_automap:
+            # incremental sync of the projected calendar, not of the source
+            # address book; the token and the change list are derived from
+            # the projected events (see radicale.sharing.bday)
+            assert share is not None
+            try:
+                sync_token, changed, removed = bday_sync(
+                    collection, share, old_sync_token)
+            except ValueError as e:
+                remote_useragent_txt = ""
+                if request_info["useragent"] != "":
+                    remote_useragent_txt = " using %r" % request_info["useragent"]
+                logger.warning("Client provided invalid sync token for path %r (user %r from %s%s): %s",
+                               path, user, request_info["host"], remote_useragent_txt, e, exc_info=True)
+                return (client.FORBIDDEN,
+                        xmlutils.webdav_error("D:valid-sync-token"))
+            hreferences = []
+            for name in changed:
+                hreferences.append(pathutils.unstrip_path(
+                    posixpath.join(collection.path, name)))
+            for name in removed:
+                # report a removed projection as a deleted href in the share
+                uri = str(share['PathOrToken']) + name.removesuffix(".vcf") + ".ics"
+                multistatus.append(xml_item_response(
+                    base_prefix, uri, found_item=False, share=share))
+            sync_token_element = ET.Element(xmlutils.make_clark("D:sync-token"))
+            sync_token_element.text = sync_token
+            multistatus.append(sync_token_element)
+        else:
+            try:
+                sync_token, names = collection.sync(old_sync_token)
+            except ValueError as e:
+                # Invalid sync token
+                remote_useragent_txt = ""
+                if request_info["useragent"] != "":
+                    remote_useragent_txt = " using %r" % request_info["useragent"]
+                logger.warning("Client provided invalid sync token for path %r (user %r from %s%s): %s",
+                               path, user, request_info["host"], remote_useragent_txt, e, exc_info=True)
+                # client.CONFLICT doesn't work with some clients (e.g. InfCloud)
+                return (client.FORBIDDEN,
+                        xmlutils.webdav_error("D:valid-sync-token"))
+            hreferences = (pathutils.unstrip_path(
+                posixpath.join(collection.path, n)) for n in names)
+            # Append current sync token to response
+            sync_token_element = ET.Element(xmlutils.make_clark("D:sync-token"))
+            sync_token_element.text = sync_token
+            multistatus.append(sync_token_element)
     else:
         hreferences = (path,)
     filters = (

@@ -676,6 +676,10 @@ DEFAULT_CONFIG_SCHEMA: types.CONFIG_SCHEMA = OrderedDict([
             "value": sharing.SHARING_BDAY_CATEGORIES_DEFAULT,
             "help": "conversion bday categories",
             "type": str}),
+        ("conversion_bday_fields", {
+            "value": sharing.SHARING_BDAY_FIELDS_DEFAULT,
+            "help": "conversion bday fields projected from the VCARD (comma separated)",
+            "type": sharing.check_bday_fields}),
         ("conversion_bday_age_max", {
             "value": str(sharing.SHARING_BDAY_AGE_MAX_DEFAULT),
             "help": "conversion bday age max",
