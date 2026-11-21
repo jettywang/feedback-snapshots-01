@@ -37,6 +37,17 @@ SevenZipFile Object
    member data to custom objects with a :class:`WriterFactory`.
 
 
+.. _document-archive-object:
+
+Document Archive
+================
+
+.. autoclass:: py7zr.DocumentArchive
+   :members:
+
+.. autofunction:: py7zr.open_document_archive
+
+
 .. _archiveinfo-object:
 
 Information Objects
@@ -81,6 +92,10 @@ Exceptions
 .. autoexception:: py7zr.Bad7zFile
 
 .. autoexception:: py7zr.PasswordRequired
+
+.. autoexception:: py7zr.InvalidPasswordError
+
+.. autoexception:: py7zr.ProtectionRequired
 
 .. autoexception:: py7zr.UnsupportedCompressionMethodError
 

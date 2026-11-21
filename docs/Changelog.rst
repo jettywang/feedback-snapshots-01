@@ -9,6 +9,32 @@ All notable changes to this project will be documented in this file.
 `Unreleased`_
 =============
 
+Added
+-----
+- Add ``py7zr.open_document_archive()`` and ``DocumentArchive`` for
+  confidential documents: by default the table of contents (member names) and
+  the member data both require the password. Writes use a temporary file and
+  verify the finished archive under the same policy before atomically
+  replacing the target, so a failed create, overwrite or append leaves the
+  previous artifact intact and reopenable.
+- Add ``require_header_encryption``, ``require_content_encryption`` and
+  ``require_encryption`` arguments to ``SevenZipFile``. A read or append that
+  does not meet the policy raises ``ProtectionRequired``, which carries the
+  archive path and the unmet requirement names.
+- Add ``SevenZipFile.header_encrypted``, ``content_encrypted`` and
+  ``protection_status()`` to report the protection state actually stored in
+  the archive, independent of the password the caller supplied.
+- Add ``InvalidPasswordError`` (a ``Bad7zFile`` subclass) for a wrong password
+  on an encrypted header, carrying ``path``.
+
+Fixed
+-----
+- Appending to an archive with an encrypted header without
+  ``header_encryption=True`` used to rewrite the header in clear text and leak
+  every member name. It now raises ``ProtectionRequired``.
+- A write-mode request for an encrypted header without a password no longer
+  truncates or creates the target before failing.
+
 Changed
 -------
 - Switch the 7zAES crypto dependency from ``pycryptodomex`` (``Cryptodome``

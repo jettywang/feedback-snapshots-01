@@ -33,8 +33,8 @@ from operator import and_, or_
 from struct import pack, unpack
 from typing import Any, BinaryIO
 
-from py7zr.compressor import SevenZipCompressor, SevenZipDecompressor
-from py7zr.exceptions import Bad7zFile
+from py7zr.compressor import SevenZipCompressor, SevenZipDecompressor, SupportedMethods
+from py7zr.exceptions import Bad7zFile, InvalidPasswordError
 from py7zr.helpers import ArchiveTimestamp, calculate_crc32
 from py7zr.properties import DEFAULT_FILTERS, MAGIC_7Z, PROPERTY
 
@@ -1130,6 +1130,8 @@ class Header:
     :ivar _initialized: ``True`` if the header has been initialized for
         writing via ``initialize()``.
     :ivar filters: Compression filter configuration for header encoding.
+    :ivar header_encrypted: ``True`` when the header read from disk was
+        encrypted, so member names were not stored in plain text.
     """
 
     __slot__ = ["solid", "main_streams", "files_info", "size", "_start_pos", "_initialized", "filters"]
@@ -1143,12 +1145,48 @@ class Header:
         self.password: str | None = None
         self._initialized: bool = False
         self.filters: list[dict[str, int]] | None = None
+        self.header_encrypted: bool = False
 
     @classmethod
     def retrieve(cls, fp: BinaryIO, buffer: BytesIO, start_pos: int, password=None):
         obj = cls()
-        obj._read(fp, buffer, start_pos, password)
+        try:
+            obj._read(fp, buffer, start_pos, password)
+        except InvalidPasswordError:
+            raise
+        except (Bad7zFile, TypeError) as exc:
+            # A decryption failure with a password most often means the
+            # password is wrong. Keep the distinction visible so callers can
+            # point at the artifact instead of reporting a corrupt archive.
+            # The header_encrypted flag is set as soon as the encoded-header
+            # stream is identified, which always happens before decryption.
+            if password is not None and cls._declares_header_encryption(buffer):
+                raise InvalidPasswordError(
+                    "cannot decrypt archive header; the password is wrong or the header is damaged"
+                ) from exc
+            raise
         return obj
+
+    @staticmethod
+    def _declares_header_encryption(buffer: BytesIO) -> bool:
+        """Return True when *buffer* starts an encoded header encrypted with 7zAES.
+
+        Only the outer encoded-header descriptor is inspected; the payload is
+        not decrypted. Used to tell a wrong password from a malformed header.
+        """
+        saved = buffer.tell()
+        try:
+            buffer.seek(0)
+            if buffer.read(1) != PROPERTY.ENCODED_HEADER:
+                return False
+            streams = HeaderStreamsInfo.retrieve(buffer)
+            return any(
+                SupportedMethods.needs_password(folder.coders) for folder in streams.unpackinfo.folders
+            )
+        except (Bad7zFile, TypeError, ValueError, struct.error):
+            return False
+        finally:
+            buffer.seek(saved)
 
     def _read(self, fp: BinaryIO, buffer: BytesIO, start_pos: int, password) -> None:
         """
@@ -1171,6 +1209,9 @@ class Header:
         streams = HeaderStreamsInfo.retrieve(buffer)
         if not streams.packinfo.packsizes or not streams.unpackinfo.folders:
             raise Bad7zFile("encoded header without packed stream")
+        self.header_encrypted = any(
+            SupportedMethods.needs_password(folder.coders) for folder in streams.unpackinfo.folders
+        )
         buffer2 = io.BytesIO()
         src_start = self._start_pos
         decoded_size = 0

@@ -214,6 +214,44 @@ Here is a simple example to append some files into existent
         archive.write("additional_file.txt")
 
 
+Protected document archives
+---------------------------
+
+For confidential documents, both the table of contents (member names and
+sizes) and the member data must stay hidden until the password is supplied.
+:func:`py7zr.open_document_archive` wraps that policy:
+
+.. code-block:: python
+
+    import py7zr
+
+    with py7zr.open_document_archive("report.7z", "w", password="temporary") as doc:
+        doc.write("report.txt")
+
+    with py7zr.open_document_archive("report.7z", "r", password="temporary") as doc:
+        print(doc.namelist())          # requires the password
+        doc.extractall("out")          # requires the password
+
+Without the password, opening raises :class:`py7zr.PasswordRequired` before any
+member name is parsed. A wrong password raises
+:class:`py7zr.InvalidPasswordError`, whose ``path`` attribute names the
+archive. If a policy cannot be met (for example no password, or a filter chain
+that does not include 7zAES), :class:`py7zr.ProtectionRequired` reports the
+archive path and the unmet requirement in its ``missing`` attribute.
+
+Writes go to a temporary file and replace the target only after the finished
+archive has been reopened and verified. Overwriting an existing archive or
+appending entries therefore either produces a complete protected artifact or
+leaves the previous one untouched and reopenable.
+
+The lower-level :class:`py7zr.SevenZipFile` exposes the same checks through the
+``require_header_encryption``, ``require_content_encryption`` and
+``require_encryption`` arguments. Appending to an archive whose header is
+encrypted without passing ``header_encryption=True`` raises
+:class:`py7zr.ProtectionRequired` rather than silently writing member names in
+clear text.
+
+
 Extraction from multi-volume archive
 ------------------------------------
 

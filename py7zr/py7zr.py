@@ -38,6 +38,7 @@ import queue
 import re
 import stat
 import sys
+import tempfile
 import time
 from collections.abc import Collection
 from dataclasses import dataclass
@@ -58,7 +59,9 @@ from py7zr.exceptions import (
     DecompressionBombError,
     DecompressionError,
     InternalError,
+    InvalidPasswordError,
     PasswordRequired,
+    ProtectionRequired,
     UnsupportedCompressionMethodError,
 )
 from py7zr.helpers import (
@@ -414,6 +417,15 @@ class SevenZipFile(contextlib.AbstractContextManager):
         reading an encrypted archive or when writing with encryption filters.
     :param header_encryption: When ``True``, encrypt the archive header
         to hide file names and sizes.
+    :param require_header_encryption: When ``True``, write modes require an
+        encrypted header and a password; opening the archive later without the
+        password must not reveal member names. Reading checks the same policy
+        against the archive on disk.
+    :param require_content_encryption: When ``True``, write modes require
+        encrypted member data; every content folder in the archive must use
+        7zAES. Reading checks the same policy.
+    :param require_encryption: Shorthand for requiring both an encrypted
+        header and encrypted content.
     :param blocksize: Internal read block size in bytes. When ``None``,
         a default size is used.
     :param mp: When ``True``, use multiprocessing for parallel extraction
@@ -447,6 +459,13 @@ class SevenZipFile(contextlib.AbstractContextManager):
     :ivar encoded_header_mode: ``True`` when the header is stored in
         compressed form.
     :ivar header_encryption: ``True`` when the header is encrypted.
+    :ivar header_encrypted: ``True`` when the header read from disk was
+        encrypted, so member names were not stored in plain text.
+    :ivar require_header_encryption: ``True`` when the caller requires an
+        encrypted header.
+    :ivar require_content_encryption: ``True`` when the caller requires
+        encrypted member content.
+    :ivar require_encryption: ``True`` when the caller requires both.
 
     **Pack data positioning**
 
@@ -485,6 +504,9 @@ class SevenZipFile(contextlib.AbstractContextManager):
         dereference: bool = False,
         password: str | None = None,
         header_encryption: bool = False,
+        require_header_encryption: bool = False,
+        require_content_encryption: bool = False,
+        require_encryption: bool = False,
         blocksize: int | None = None,
         mp: bool = False,
         max_extract_size: int | None = None,
@@ -496,6 +518,12 @@ class SevenZipFile(contextlib.AbstractContextManager):
         self.mp = mp
         self.password_protected = password is not None
         self.max_extract_size = max_extract_size
+        self.encoded_header_mode = True
+        self.header_encryption = header_encryption
+        self.header_encrypted = False
+        self.require_header_encryption = require_header_encryption or require_encryption
+        self.require_content_encryption = require_content_encryption
+        self.require_encryption = require_encryption
         if blocksize:
             self._block_size = blocksize
         else:
@@ -520,15 +548,28 @@ class SevenZipFile(contextlib.AbstractContextManager):
             }
             filemode = modeDict[mode]
 
-            while True:
+            if mode in ("w", "x"):
+                # A failed protection preflight must not leave a new empty
+                # file behind (or touch an existing archive).
+                existed = os.path.exists(file)
+                self._preflight_protection(password, header_encryption, filters)
                 try:
                     self.fp = open(file, filemode)
-                except OSError:
-                    if filemode in modeDict:
-                        filemode = modeDict[filemode]
-                        continue
+                except BaseException:
+                    if not existed:
+                        with contextlib.suppress(OSError):
+                            os.unlink(file)
                     raise
-                break
+            else:
+                while True:
+                    try:
+                        self.fp = open(file, filemode)
+                    except OSError:
+                        if filemode in modeDict:
+                            filemode = modeDict[filemode]
+                            continue
+                        raise
+                    break
             self.mode = mode
         elif isinstance(file, multivolumefile.MultiVolume):
             self._filePassed = True
@@ -542,24 +583,28 @@ class SevenZipFile(contextlib.AbstractContextManager):
             self.mode = mode  # noqa
         else:
             raise TypeError(f"invalid file: {type(file)}")
-        self.encoded_header_mode = True
-        self.header_encryption = header_encryption
         try:
             if mode == "r":
                 self._real_get_contents(password)
+                self._check_read_protection()
                 self.fp.seek(self.pack_data_start)  # seek into start of payload and prepare worker to extract
                 self.worker = Worker(self.files, self.pack_data_start, self.header, self.mp)
-            elif mode == "w":
-                self._prepare_write(filters, password)
-            elif mode == "x":
+            elif mode in ("w", "x"):
+                # Preflight ran before open; record that it already checked.
                 self._prepare_write(filters, password)
             elif mode == "a":
                 try:
                     # Append if it's an existing 7zip file
                     self._real_get_contents(password)
+                    self._check_append_protection(password, header_encryption, filters)
                     self._prepare_append(filters, password)
+                except InvalidPasswordError:
+                    # The path is a 7z archive but the password is wrong, so
+                    # rewriting it would destroy a valid artifact.
+                    raise
                 except Bad7zFile:
                     # Not an existing 7zip file, write instead
+                    self._check_write_protection(password, header_encryption, filters)
                     self._prepare_write(filters, password)
             else:
                 raise ValueError("Mode must be 'r', 'w', 'x', or 'a'")  # never come here
@@ -580,6 +625,143 @@ class SevenZipFile(contextlib.AbstractContextManager):
         if not self._filePassed:
             self.fp.close()
 
+    def _protection_location(self) -> str | os.PathLike[str] | None:
+        return self.filename
+
+    def _preflight_protection(self, password: str | None, header_encryption: bool, filters) -> None:
+        """Check the write policy without opening or truncating the target."""
+        if self.require_header_encryption or self.require_content_encryption or (
+            header_encryption and password is None
+        ):
+            self._check_write_protection(password, header_encryption, filters)
+
+    def _check_write_protection(self, password: str | None, header_encryption: bool, filters=None) -> None:
+        """Refuse a write request that cannot meet the requested protection.
+
+        Called before the target path is truncated, so an unmet policy never
+        damages a previous archive. A request to encrypt the header but not
+        the content still needs a password, because 7zAES always needs one.
+        """
+        missing: list[str] = []
+        if header_encryption and password is None:
+            missing.append("password")
+        if self.require_header_encryption:
+            if password is None:
+                missing.append("password")
+            if not header_encryption:
+                missing.append("header_encryption")
+        if self.require_content_encryption and not SupportedMethods.needs_password_for_filters(filters or []):
+            # With no explicit filters, a password selects the encrypted
+            # default filter chain in _prepare_write().
+            if filters is not None:
+                missing.append("content_encryption")
+        if password is None and filters is not None and SupportedMethods.needs_password_for_filters(filters):
+            missing.append("password")
+        missing = list(dict.fromkeys(missing))
+        if missing:
+            raise ProtectionRequired(
+                "cannot create a protected archive",
+                path=self._protection_location(),
+                missing=tuple(missing),
+                detail="protected archive requirements were not met",
+            )
+
+    def _check_read_protection(self) -> None:
+        """Verify that a read-mode archive meets the caller's protection policy."""
+        missing: list[str] = []
+        if self.require_header_encryption and not self.header_encrypted:
+            missing.append("header_encryption")
+        if self.require_content_encryption and not self.content_encrypted:
+            missing.append("content_encryption")
+        if missing:
+            raise ProtectionRequired(
+                "archive does not meet the required protection",
+                path=self._protection_location(),
+                missing=tuple(missing),
+                detail="archive header or content is not protected",
+            )
+
+    def _check_append_protection(self, password: str | None, header_encryption: bool, filters) -> None:
+        """Verify an existing archive and the append request before extending it.
+
+        Appending rewrites the header, so it must keep the same protection as
+        the archive it extends: an encrypted header is never downgraded to a
+        plain one, and a required policy is checked against both the old and
+        the new state.
+        """
+        missing: list[str] = []
+        if self.header_encrypted and not header_encryption:
+            missing.append("header_encryption")
+        if not self.require_header_encryption:
+            if missing:
+                raise ProtectionRequired(
+                    "append would remove header encryption",
+                    path=self._protection_location(),
+                    missing=tuple(missing),
+                    detail="pass header_encryption=True to keep member names hidden",
+                )
+            return
+        if password is None:
+            missing.append("password")
+        if not header_encryption:
+            missing.append("header_encryption")
+        if self.require_content_encryption:
+            new_content_encrypted = password is not None or SupportedMethods.needs_password_for_filters(filters or [])
+            if not (self.content_encrypted or new_content_encrypted):
+                missing.append("content_encryption")
+        # De-duplicate while preserving order.
+        missing = list(dict.fromkeys(missing))
+        if missing:
+            raise ProtectionRequired(
+                "append cannot keep the required protection",
+                path=self._protection_location(),
+                missing=tuple(missing),
+                detail="existing archive or append request does not satisfy the policy",
+            )
+
+    @property
+    def content_encrypted(self) -> bool:
+        """``True`` when at least one content folder uses 7zAES.
+
+        Unlike :attr:`password_protected`, this is derived from the archive
+        itself, not from the password the caller supplied. An archive can have
+        an encrypted header but store its content unencrypted, or the reverse.
+        """
+        if self.header is None or self.header.main_streams is None:
+            return False
+        return any(
+            SupportedMethods.needs_password(folder.coders) for folder in self.header.main_streams.unpackinfo.folders
+        )
+
+    @property
+    def table_of_contents_encrypted(self) -> bool:
+        """``True`` when member names and the directory are encrypted."""
+        return self.header_encrypted
+
+    def protection_status(self) -> dict[str, bool]:
+        """Return the protection state of the archive as stored on disk.
+
+        The result separates the two independent protections because 7z
+        stores the header and the member data separately, and also reports
+        whether the caller's policy was satisfied. Reading this method does not
+        require the password when the header is readable; an encrypted header
+        fails to open without the password in the first place.
+
+        :return: A dict with keys ``header_encrypted``, ``content_encrypted``,
+            ``password_protected`` and ``satisfies_policy``.
+        """
+        status = {
+            "header_encrypted": self.header_encrypted,
+            "content_encrypted": self.content_encrypted,
+            "password_protected": self.password_protected,
+            "satisfies_policy": True,
+        }
+        if self.require_header_encryption and not self.header_encrypted:
+            status["satisfies_policy"] = False
+        if self.require_content_encryption and not self.content_encrypted:
+            status["satisfies_policy"] = False
+        return status
+
     def _real_get_contents(self, password) -> None:
         if not self._check_7zfile(self.fp):
             raise Bad7zFile("not a 7z file")
@@ -596,10 +778,16 @@ class SevenZipFile(contextlib.AbstractContextManager):
         buffer = io.BytesIO(self.fp.read(self.sig_header.nextheadersize))
         if self.sig_header.nextheadercrc != calculate_crc32(buffer.getvalue()):
             raise Bad7zFile("invalid header data")
-        header = Header.retrieve(self.fp, buffer, self.afterheader, password)  # type: ignore[arg-type]
+        try:
+            header = Header.retrieve(self.fp, buffer, self.afterheader, password)  # type: ignore[arg-type]
+        except InvalidPasswordError as exc:
+            if exc.path is None:
+                exc.path = self.filename
+            raise
         if header is None:
             self.pack_data_start = self.afterheader
             return
+        self.header_encrypted = header.header_encrypted
         header.size += 32 + self.sig_header.nextheadersize
         self.header = header
         # Calculate pack data start position once
@@ -952,11 +1140,21 @@ class SevenZipFile(contextlib.AbstractContextManager):
 
         :param mode: ``True`` to encrypt the header. This also enables the
             encoded header mode.
+        :raises ProtectionRequired: If the archive was opened with
+            ``require_header_encryption`` or ``require_encryption`` and
+            *mode* would turn header encryption off.
         """
         if mode:
             self.encoded_header_mode = True
             self.header_encryption = True
         else:
+            if getattr(self, "require_header_encryption", False):
+                raise ProtectionRequired(
+                    "cannot disable header encryption",
+                    path=self._protection_location(),
+                    missing=("header_encryption",),
+                    detail="this archive requires an encrypted header",
+                )
             self.header_encryption = False
 
     @staticmethod
@@ -1493,6 +1691,411 @@ class SevenZipFile(contextlib.AbstractContextManager):
 
 
 # --------------------
+# document archive
+# --------------------
+class DocumentArchive(contextlib.AbstractContextManager):
+    """Write and read a protected archive for confidential documents.
+
+    This is a small entry point for the "confidential report" use case: the
+    archive table of contents (member names and sizes) and the member data are
+    protected by a password, and the caller can require that protection as a
+    policy instead of relying on remembering two separate flags.
+
+    Writes go to a temporary file next to the target and are renamed into
+    place only after the finished archive has been reopened and verified
+    against the same policy. A failed write therefore never truncates or
+    corrupts an existing archive, and a returned archive is always one that
+    can be reopened with :func:`open_document_archive` and the same password.
+
+    Reading follows the same policy: without ``password`` an archive with an
+    encrypted header raises :class:`~py7zr.exceptions.PasswordRequired` before
+    any member name is parsed, and :class:`~py7zr.exceptions.ProtectionRequired`
+    points at the archive and the unmet requirement when the policy is not
+    satisfied.
+
+    Typical use::
+
+        with py7zr.open_document_archive("report.7z", "w", password=pw) as doc:
+            doc.write("report.txt")
+
+        with py7zr.open_document_archive("report.7z", "r", password=pw) as doc:
+            print(doc.namelist())
+            doc.extractall("out")
+
+    In append mode (``mode="a"``) the existing archive is checked before it is
+    touched: an encrypted header cannot be downgraded to a plain one, and the
+    same policy that was required for creation must still hold afterwards.
+
+    :param path: The archive path. File-like objects are not supported here;
+        use :class:`SevenZipFile` for those.
+    :param mode: ``"r"``, ``"w"``, ``"x"`` or ``"a"``.
+    :param password: Password used for both the header and the content.
+    :param require_header_encryption: Require member names to be encrypted.
+        Defaults to ``True``; pass ``False`` explicitly to allow a plain
+        header.
+    :param require_content_encryption: Require member data to be encrypted.
+        Defaults to ``True``; pass ``False`` explicitly to allow clear data.
+    :param filters: Compression filters for write modes. Defaults to an
+        encrypted LZMA2 chain when a password is given.
+    :param overwrite: For ``mode="a"``, whether an existing target may be
+        replaced when it cannot satisfy the policy (default ``False``). A
+        plain archive is never silently extended when protection is required.
+    """
+
+    def __init__(
+        self,
+        path: str | os.PathLike[str],
+        mode: str = "r",
+        *,
+        password: str | None = None,
+        require_header_encryption: bool = True,
+        require_content_encryption: bool = True,
+        filters: list[dict[str, int]] | None = None,
+        overwrite: bool = False,
+    ) -> None:
+        if mode not in ("r", "w", "x", "a"):
+            raise ValueError("DocumentArchive requires mode 'r', 'w', 'x', or 'a'")
+        self.path = pathlib.Path(path)
+        self.mode = mode
+        self.password = password
+        self.require_header_encryption = require_header_encryption
+        self.require_content_encryption = require_content_encryption
+        self.filters = filters
+        self.overwrite = overwrite
+        self._archive: SevenZipFile | None = None
+        self._temp_path: pathlib.Path | None = None
+        self._closed = False
+        try:
+            self._open()
+        except BaseException:
+            self._discard_temp()
+            raise
+
+    # -- context manager -------------------------------------------------
+    def __enter__(self) -> DocumentArchive:
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        if exc_type is None:
+            self.close()
+        else:
+            self.abort()
+
+    # -- lifecycle --------------------------------------------------------
+    def _open(self) -> None:
+        if self.mode == "r":
+            self._archive = SevenZipFile(
+                self.path,
+                "r",
+                password=self.password,
+                require_header_encryption=self.require_header_encryption,
+                require_content_encryption=self.require_content_encryption,
+            )
+            return
+        if not self.require_header_encryption and not self.require_content_encryption:
+            # The caller opted out of the protection policy: behave like the
+            # normal writer and do not intercept the target.
+            self._archive = SevenZipFile(self.path, self.mode, password=self.password, filters=self.filters)
+            return
+        if self.mode == "a":
+            self._open_for_append()
+            return
+        self._open_for_write()
+
+    def _open_for_write(self) -> None:
+        if self.mode == "x" and self.path.exists():
+            raise FileExistsError(f"archive already exists: {os.fspath(self.path)}")
+        # Validate the request before touching the destination, then write to
+        # a sibling temp file so a failure leaves the old archive intact.
+        if self.password is None:
+            raise ProtectionRequired(
+                "document archive requires a password",
+                path=self.path,
+                missing=("password",),
+                detail="member names and content are protected by this password",
+            )
+        if self.require_content_encryption and self.filters is not None:
+            if not SupportedMethods.needs_password_for_filters(self.filters):
+                raise ProtectionRequired(
+                    "write filters do not encrypt content",
+                    path=self.path,
+                    missing=("content_encryption",),
+                    detail="add FILTER_CRYPTO_AES256_SHA256 to the filter chain",
+                )
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{self.path.name}.", suffix=".tmp", dir=str(self.path.parent)
+        )
+        os.close(fd)
+        os.unlink(temp_name)
+        self._temp_path = pathlib.Path(temp_name)
+        try:
+            # Exclusive create on the selected temp name is still safe: the
+            # name is fresh and the target itself has not been touched.
+            self._archive = self._new_writer(self._temp_path, "w" if self.mode == "w" else "x")
+        except BaseException:
+            self._discard_temp()
+            raise
+
+    def _open_for_append(self) -> None:
+        if not self.path.exists():
+            self._open_for_write()
+            return
+        try:
+            self._check_existing_for_append()
+        except (ProtectionRequired, InvalidPasswordError):
+            if not self.overwrite:
+                raise
+            self._open_for_write()
+            return
+        # Copy to a temp file, append there, verify, then rename.
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{self.path.name}.", suffix=".tmp", dir=str(self.path.parent)
+        )
+        os.close(fd)
+        self._temp_path = pathlib.Path(temp_name)
+        try:
+            with self.path.open("rb") as src, self._temp_path.open("wb") as dst:
+                while True:
+                    chunk = src.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    dst.write(chunk)
+            self._archive = self._new_writer(self._temp_path, "a")
+        except BaseException:
+            self._discard_temp()
+            raise
+
+    def _check_existing_for_append(self) -> None:
+        """Check that the current target can be extended under the policy."""
+        existing = SevenZipFile(
+            self.path,
+            "r",
+            password=self.password,
+            require_header_encryption=self.require_header_encryption,
+            require_content_encryption=self.require_content_encryption,
+        )
+        try:
+            status = existing.protection_status()
+        finally:
+            existing.close()
+        if self.require_header_encryption and not status["header_encrypted"]:
+            raise ProtectionRequired(
+                "append target does not meet the required protection",
+                path=self.path,
+                missing=("header_encryption",),
+                detail="existing archive does not encrypt member names",
+            )
+        if self.require_content_encryption and not status["content_encrypted"]:
+            raise ProtectionRequired(
+                "append target does not meet the required protection",
+                path=self.path,
+                missing=("content_encryption",),
+                detail="existing archive does not encrypt member data",
+            )
+        if self.require_content_encryption and self.filters is not None:
+            if not SupportedMethods.needs_password_for_filters(self.filters):
+                raise ProtectionRequired(
+                    "append filters do not encrypt content",
+                    path=self.path,
+                    missing=("content_encryption",),
+                    detail="add FILTER_CRYPTO_AES256_SHA256 to the filter chain",
+                )
+
+    def _new_writer(self, target: pathlib.Path, mode: str) -> SevenZipFile:
+        return SevenZipFile(
+            target,
+            mode,
+            password=self.password,
+            header_encryption=True if self.password is not None else False,
+            require_header_encryption=self.require_header_encryption,
+            require_content_encryption=self.require_content_encryption,
+            filters=self.filters,
+        )
+
+    def _discard_temp(self) -> None:
+        if self._temp_path is not None:
+            with contextlib.suppress(OSError):
+                self._temp_path.unlink()
+            self._temp_path = None
+
+    def close(self) -> None:
+        """Finish the archive and, for write modes, publish it atomically.
+
+        The finished temp file is reopened under the same policy before it
+        replaces the target. If verification fails the target is untouched.
+        """
+        if self._closed:
+            return
+        self._closed = True
+        archive = self._archive
+        if archive is None:
+            return
+        try:
+            archive.close()
+        except BaseException:
+            self._discard_temp()
+            raise
+        finally:
+            self._archive = None
+        if self._temp_path is not None:
+            try:
+                self._verify(self._temp_path)
+                os.replace(self._temp_path, self.path)
+            except BaseException:
+                self._discard_temp()
+                raise
+            self._temp_path = None
+
+    def abort(self) -> None:
+        """Discard a write in progress, leaving the previous archive intact."""
+        self._closed = True
+        if self._archive is not None:
+            with contextlib.suppress(Exception):
+                self._archive.close()
+            self._archive = None
+        self._discard_temp()
+
+    def _verify(self, target: pathlib.Path) -> None:
+        with SevenZipFile(
+            target,
+            "r",
+            password=self.password,
+            require_header_encryption=self.require_header_encryption,
+            require_content_encryption=self.require_content_encryption,
+        ) as archive:
+            if self.require_header_encryption and not archive.header_encrypted:
+                raise ProtectionRequired(
+                    "written archive did not encrypt its header",
+                    path=self.path,
+                    missing=("header_encryption",),
+                    detail="verification of the finished archive failed",
+                )
+            if self.require_content_encryption and not archive.content_encrypted:
+                raise ProtectionRequired(
+                    "written archive did not encrypt its content",
+                    path=self.path,
+                    missing=("content_encryption",),
+                    detail="verification of the finished archive failed",
+                )
+
+    # -- delegated archive API -------------------------------------------
+    def _current(self) -> SevenZipFile:
+        if self._archive is None:
+            raise ValueError("document archive is not open")
+        return self._archive
+
+    @property
+    def filename(self) -> str | None:
+        """The underlying archive path, or ``None`` when not open."""
+        return os.fspath(self.path)
+
+    def namelist(self) -> list[str]:
+        """Return member names in archive order. Requires authorization."""
+        return self._current().namelist()
+
+    def getnames(self) -> list[str]:
+        """Alias of :meth:`namelist`."""
+        return self._current().getnames()
+
+    def list(self) -> list[FileInfo]:
+        """Return :class:`FileInfo` records. Requires authorization."""
+        return self._current().list()
+
+    def getinfo(self, name: str) -> FileInfo:
+        """Return one :class:`FileInfo` by member name."""
+        return self._current().getinfo(name)
+
+    def extractall(self, path=None, *, callback=None, factory=None) -> None:
+        """Extract every member. Requires authorization."""
+        self._current().extractall(path, callback=callback, factory=factory)
+
+    def extract(self, path=None, targets=None, recursive=False, *, callback=None, factory=None) -> None:
+        """Extract selected members. Requires authorization."""
+        self._current().extract(path, targets, recursive, callback=callback, factory=factory)
+
+    def write(self, file, arcname=None) -> None:
+        """Add a single file to the archive (write modes)."""
+        self._current().write(file, arcname)
+
+    def writeall(self, path, arcname=None) -> None:
+        """Add a file or directory tree (write modes)."""
+        self._current().writeall(path, arcname)
+
+    def writestr(self, data, arcname) -> None:
+        """Add in-memory data as a member (write modes)."""
+        self._current().writestr(data, arcname)
+
+    def testzip(self) -> str | None:
+        """Verify every member's CRC. Requires authorization for content."""
+        return self._current().testzip()
+
+    def test(self) -> bool | None:
+        """Verify packed-stream CRCs without decrypting content."""
+        return self._current().test()
+
+    def reset(self) -> None:
+        """Rewind a read-mode document archive so it can be extracted again."""
+        self._current().reset()
+
+    def protection_status(self) -> dict[str, bool]:
+        """Return the protection state, including whether policy is met."""
+        return self._current().protection_status()
+
+    def set_encrypted_header(self, mode: bool) -> None:
+        """Change header encryption before close (subject to the policy)."""
+        self._current().set_encrypted_header(mode)
+
+
+def open_document_archive(
+    path: str | os.PathLike[str],
+    mode: str = "r",
+    *,
+    password: str | None = None,
+    require_header_encryption: bool = True,
+    require_content_encryption: bool = True,
+    filters: list[dict[str, int]] | None = None,
+    overwrite: bool = False,
+) -> DocumentArchive:
+    """Open a protected document archive; see :class:`DocumentArchive`.
+
+    This is the main entry point for confidential documents whose member
+    names and content must not be readable without the password. It accepts
+    the same modes as :class:`SevenZipFile`. In write and append modes an
+    existing archive is preserved unless the new archive is complete and
+    verified under the same policy.
+
+    :param path: Archive path.
+    :param mode: ``"r"``, ``"w"``, ``"x"`` or ``"a"``.
+    :param password: Password protecting the header and the content.
+    :param require_header_encryption: Require member names and the directory
+        to be encrypted (default ``True``).
+    :param require_content_encryption: Require member data to be encrypted
+        (default ``True``).
+    :param filters: Optional compression filters for write modes.
+    :param overwrite: For append mode, replace an existing target that cannot
+        satisfy the policy instead of failing (default ``False``).
+    :return: A :class:`DocumentArchive` context manager.
+    :raises ProtectionRequired: If the request or the existing archive cannot
+        satisfy the policy. ``exc.path`` and ``exc.missing`` locate the
+        archive and the unmet requirement.
+    :raises PasswordRequired: If reading an encrypted header without a
+        password.
+    :raises InvalidPasswordError: If reading an encrypted header with a
+        wrong password.
+    """
+    return DocumentArchive(
+        path,
+        mode,
+        password=password,
+        require_header_encryption=require_header_encryption,
+        require_content_encryption=require_content_encryption,
+        filters=filters,
+        overwrite=overwrite,
+    )
+
+
+# --------------------
 # exported functions
 # --------------------
 def is_7zfile(file: SupportsReadAndSeek | IO[bytes] | str | os.PathLike[str]) -> bool:
@@ -1950,3 +2553,16 @@ class Worker:
         del self.header
         del self.files
         del self.concurrent
+
+
+__all__ = [
+    "ArchiveFile",
+    "ArchiveInfo",
+    "DocumentArchive",
+    "FileInfo",
+    "SevenZipFile",
+    "is_7zfile",
+    "open_document_archive",
+    "pack_7zarchive",
+    "unpack_7zarchive",
+]
