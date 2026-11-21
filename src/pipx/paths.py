@@ -127,6 +127,11 @@ class _PathContext:
         return self.home / ".cache" if self._chosen.home else self._default.cache
 
     @property
+    def quarantine(self) -> Path:
+        # staged environments wait here, outside venvs, so no pipx command treats one as installed before approval
+        return self.home / "quarantine"
+
+    @property
     def trash(self) -> Path:
         # renaming into the trash has to stay on one filesystem, so it follows the venvs under the home
         return self.home / ".trash" if self._home_exists else self._default.trash

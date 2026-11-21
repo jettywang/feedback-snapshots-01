@@ -137,6 +137,7 @@ if TYPE_CHECKING:
     from pipx.commands.pin import PinData
     from pipx.commands.reinstall import ReinstallData
     from pipx.commands.reset import ResetData
+    from pipx.commands.takeover import TakeoverData
     from pipx.commands.uninstall import UninstallData
     from pipx.commands.upgrade import SharedData, UpgradeData
 
@@ -319,6 +320,7 @@ def get_command_parser(*, prog: str | None = None) -> argparse.ArgumentParser:
     _add_reinstall_all(subparsers, shared_parser)
     _add_health(subparsers, completer_venvs.use, shared_parser)
     _add_repair(subparsers, completer_venvs.use, shared_parser)
+    _add_takeover(subparsers, shared_parser)
     _add_list(subparsers, completer_venvs.use, shared_parser)
     _add_interpreter(subparsers, shared_parser)
     _add_cache(subparsers, shared_parser)
@@ -1318,6 +1320,116 @@ def _selected_venv_dirs(args: argparse.Namespace, ctx: _DispatchContext) -> tupl
     return tuple(sorted(ctx.venv_container.iter_venv_dirs()))
 
 
+def _add_takeover(subparsers: argparse._SubParsersAction, shared_parser: argparse.ArgumentParser) -> None:
+    parser: Final[argparse.ArgumentParser] = subparsers.add_parser(
+        "takeover",
+        help="Review a virtual environment backup in quarantine before adopting it",
+        description=(
+            "Copy a virtual environment backup into an isolated quarantine, inspect it without running its "
+            "interpreter or exposing any of its commands, and only after approval link the resources that verified."
+        ),
+    )
+    commands: Final[argparse._SubParsersAction] = parser.add_subparsers(
+        title="subcommands",
+        description="Get help for commands with pipx takeover COMMAND --help",
+        dest="takeover_command",
+    )
+    stage_parser: Final[argparse.ArgumentParser] = commands.add_parser(
+        "stage",
+        help="Copy a backup into quarantine without exposing it",
+        description="Copy a virtual environment backup into quarantine and record what a later approval would expose.",
+        parents=[shared_parser],
+    )
+    stage_parser.add_argument("backup", type=Path, help="Directory holding the virtual environment backup.")
+    stage_parser.add_argument(
+        "--name",
+        help="Environment name to stage under; defaults to the package the backup records.",
+    )
+    stage_parser.add_argument(
+        "--source",
+        help="Where the backup came from, recorded in the staged environment for the reviewer.",
+    )
+    _add_output_option(stage_parser)
+    stage_parser.set_defaults(func=_cmd_takeover_stage)
+    list_parser: Final[argparse.ArgumentParser] = commands.add_parser(
+        "list",
+        help="List environments waiting in quarantine",
+        description="List the staged environments, their provenance and any reason approval would fail.",
+        parents=[shared_parser],
+    )
+    _add_output_option(list_parser)
+    list_parser.set_defaults(func=_cmd_takeover_list)
+    check_parser: Final[argparse.ArgumentParser] = commands.add_parser(
+        "check",
+        help="Re-verify a staged environment without approving it",
+        description=(
+            "Re-read a quarantined environment statically and report every app and man page approval would expose, "
+            "without running its interpreter or touching the executable directory."
+        ),
+        parents=[shared_parser],
+    )
+    check_parser.add_argument("environment", help="Staged environment to check.")
+    _add_output_option(check_parser)
+    check_parser.set_defaults(func=_cmd_takeover_check)
+    approve_parser: Final[argparse.ArgumentParser] = commands.add_parser(
+        "approve",
+        help="Adopt a staged environment and expose only verified resources",
+        description=(
+            "Move a checked environment into the managed store and expose the apps and man pages that verified. "
+            "Any file the executable directory already holds under one of those names is left alone."
+        ),
+        parents=[shared_parser],
+    )
+    approve_parser.add_argument("environment", help="Staged environment to approve.")
+    _add_output_option(approve_parser)
+    approve_parser.set_defaults(func=_cmd_takeover_approve)
+    remove_parser: Final[argparse.ArgumentParser] = commands.add_parser(
+        "remove",
+        help="Discard a staged environment without exposing it",
+        description="Delete a quarantined environment and its staged record.",
+        parents=[shared_parser],
+    )
+    remove_parser.add_argument("environment", help="Staged environment to discard.")
+    _add_output_option(remove_parser)
+    remove_parser.set_defaults(func=_cmd_takeover_remove)
+    parser.set_defaults(func=_make_print_help(parser))
+
+
+def _cmd_takeover_stage(args: argparse.Namespace, ctx: _DispatchContext) -> OperationResult[TakeoverData]:
+    del ctx
+    from pipx.commands.takeover import stage_backup
+
+    return stage_backup(args.backup, name=args.name, source=args.source)
+
+
+def _cmd_takeover_list(args: argparse.Namespace, ctx: _DispatchContext) -> OperationResult[TakeoverData]:
+    del args, ctx
+    from pipx.commands.takeover import list_staged
+
+    return list_staged()
+
+
+def _cmd_takeover_check(args: argparse.Namespace, ctx: _DispatchContext) -> OperationResult[TakeoverData]:
+    del ctx
+    from pipx.commands.takeover import check_staged
+
+    return check_staged(args.environment)
+
+
+def _cmd_takeover_approve(args: argparse.Namespace, ctx: _DispatchContext) -> OperationResult[TakeoverData]:
+    del ctx
+    from pipx.commands.takeover import approve_staged
+
+    return approve_staged(args.environment, CTX.bin_dir, CTX.man_dir)
+
+
+def _cmd_takeover_remove(args: argparse.Namespace, ctx: _DispatchContext) -> OperationResult[TakeoverData]:
+    del ctx
+    from pipx.commands.takeover import remove_staged
+
+    return remove_staged(args.environment)
+
+
 def _add_repair(
     subparsers: argparse._SubParsersAction,
     venv_completer: _VenvCompleter,
@@ -2315,7 +2427,7 @@ def _output_format(args: argparse.Namespace) -> OutputFormat:
 
 def _command_tokens(args: argparse.Namespace) -> tuple[str, ...]:
     tokens: Final[list[str]] = [args.command]
-    for subcommand in ("cache_command", "interpreter_command", "manifest_command"):
+    for subcommand in ("cache_command", "interpreter_command", "manifest_command", "takeover_command"):
         if value := getattr(args, subcommand, None):
             tokens.append(value)
     return tuple(tokens)

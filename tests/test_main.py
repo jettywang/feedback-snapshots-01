@@ -225,6 +225,7 @@ def _subparsers(parser: argparse.ArgumentParser) -> Iterator[tuple[str, argparse
         pytest.param(["uninstall-all"], id="uninstall-all"),
         pytest.param(["health"], id="health"),
         pytest.param(["repair"], id="repair"),
+        pytest.param(["takeover", "list"], id="takeover-list"),
         pytest.param(["list"], id="list"),
     ],
 )

@@ -16,8 +16,9 @@ SYNOPSIS
 
 **pipx** [*global-options*] [**install** | **install-all** | **uninject** | **inject** | **expose** | **unexpose** |
 **pin** | **unpin** | **upgrade** | **upgrade-all** | **upgrade-shared** | **uninstall** | **uninstall-all** | **reset**
-| **reinstall** | **reinstall-all** | **health** | **repair** | **list** | **interpreter** | **cache** | **manifest** |
-**run** | **exec** | **runpip** | **ensurepath** | **environment** | **completions** | **help**] [*command-options*]
+| **reinstall** | **reinstall-all** | **health** | **repair** | **takeover** | **list** | **interpreter** | **cache** |
+**manifest** | **run** | **exec** | **runpip** | **ensurepath** | **environment** | **completions** | **help**]
+[*command-options*]
 
 DESCRIPTION
 -----------
@@ -81,6 +82,9 @@ COMMANDS
 
 **repair**
     Repair broken package environments
+
+**takeover**
+    Review a virtual environment backup in quarantine before adopting it
 
 **list**
     List installed packages

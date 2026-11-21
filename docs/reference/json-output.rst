@@ -59,7 +59,8 @@ option or a missing argument, print plain text instead: the usage message goes t
 
 ``--output json`` is available on: ``install``, ``inject``, ``uninject``, ``expose``, ``unexpose``, ``pin``,
 ``unpin``, ``upgrade``, ``upgrade-all``, ``upgrade-shared``, ``uninstall``, ``uninstall-all``, ``reinstall``,
-``reinstall-all``, ``reset``, ``health``, ``repair``, ``manifest lock``, ``manifest sync``, ``interpreter list``,
+``reinstall-all``, ``reset``, ``health``, ``repair``, ``takeover stage``, ``takeover list``, ``takeover check``,
+``takeover approve``, ``takeover remove``, ``manifest lock``, ``manifest sync``, ``interpreter list``,
 ``interpreter prune``, ``interpreter upgrade``, ``cache dir``, ``cache purge``, and ``list --outdated``.
 
 It is not available on ``install-all``, ``run``, ``exec``, ``runpip``, ``ensurepath``, ``environment``,

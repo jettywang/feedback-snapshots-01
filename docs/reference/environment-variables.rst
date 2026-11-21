@@ -117,6 +117,8 @@ platform; they are reported, not set.
       - Directory holding command logs.
     - - ``PIPX_TRASH_DIR``
       - Staging directory for deletions on the same filesystem as the venvs.
+    - - ``PIPX_QUARANTINE_DIR``
+      - Directory holding virtual environment backups staged by ``pipx takeover``, outside the managed venvs.
     - - ``PIPX_VENV_CACHEDIR``
       - Cache directory for ``pipx run`` environments.
     - - ``PIPX_STANDALONE_PYTHON_CACHEDIR``

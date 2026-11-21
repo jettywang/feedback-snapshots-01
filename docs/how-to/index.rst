@@ -22,6 +22,7 @@ effect. They assume pipx is already installed unless the guide is about installi
     standalone-python
     dependency-cooldown
     use-private-index
+    take-over-a-backup
     use-uv-backend
     use-with-pre-commit
     troubleshoot

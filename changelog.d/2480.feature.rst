@@ -1,0 +1,4 @@
+Add ``pipx takeover`` to review a virtual environment backup in quarantine before adopting it. ``stage`` copies the
+backup outside the managed environments, ``check`` reports the apps and man pages approval would expose, and only
+``approve`` writes metadata and links the resources that verified. The preflight never runs the backup's interpreter or
+replays its recorded pip arguments.

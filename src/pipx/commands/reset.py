@@ -53,6 +53,7 @@ def reset(
             CTX.standalone_python_cachedir,
             CTX.logs,
             CTX.trash,
+            CTX.quarantine,
         )
         if target.is_dir()
     )
