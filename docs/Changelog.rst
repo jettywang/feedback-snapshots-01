@@ -9,6 +9,17 @@ All notable changes to this project will be documented in this file.
 `Unreleased`_
 =============
 
+Added
+-----
+- Add a read-only archive comparison entry point, :func:`py7zr.compare_archives`
+  and the ``py7zr compare`` subcommand. Two archives can be compared without
+  extracting any member to disk: member data is hashed in memory and discarded.
+  The result separates confirmed member content changes (including added and
+  removed members), members whose content is verified equal but whose archive
+  packaging differs, and members that could not be verified. Members are
+  matched by name and occurrence, so duplicate names remain individually
+  traceable, and ``--json`` emits a digest-only evidence record.
+
 Changed
 -------
 - Switch the 7zAES crypto dependency from ``pycryptodomex`` (``Cryptodome``

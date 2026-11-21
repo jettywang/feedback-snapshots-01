@@ -148,6 +148,19 @@ Command-line options
 
    Test whether the 7z file is valid or not.
 
+.. option:: compare <left 7z file> <right 7z file> [--json] [--show-identical] [-P]
+
+   Compare two archives read-only, without extracting any member to disk. The
+   report separates members whose content actually changed (including members
+   that were added or removed), members whose content is verified equal but
+   whose archive packaging differs (compression method, timestamps,
+   attributes, solid layout), and members that could not be verified.
+
+   Exit status is ``0`` when no content change was confirmed, ``1`` when at
+   least one member changed content or is missing, and ``2`` when nothing is
+   confirmed to have changed but some member could not be verified. ``--json``
+   emits an evidence record containing digests, never member data.
+
 
 Common command options
 ----------------------

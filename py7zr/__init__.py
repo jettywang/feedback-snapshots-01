@@ -24,6 +24,15 @@ from py7zr.exceptions import (
     PasswordRequired,
     UnsupportedCompressionMethodError,
 )
+from py7zr.forensics import (
+    ArchiveComparison,
+    ArchiveSnapshot,
+    MemberCategory,
+    MemberDiff,
+    MemberSnapshot,
+    MemberVerdict,
+    compare_archives,
+)
 from py7zr.io import Py7zIO, WriterFactory
 from py7zr.properties import (
     CHECK_CRC32,
@@ -57,9 +66,16 @@ __copyright__ = "Copyright (C) 2019-2021 Hiroshi Miura"
 
 __all__ = [
     "__version__",
+    "ArchiveComparison",
     "ArchiveInfo",
+    "ArchiveSnapshot",
     "FileInfo",
+    "MemberCategory",
+    "MemberDiff",
+    "MemberSnapshot",
+    "MemberVerdict",
     "SevenZipFile",
+    "compare_archives",
     "is_7zfile",
     "pack_7zarchive",
     "unpack_7zarchive",

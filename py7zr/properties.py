@@ -35,6 +35,7 @@ COMMAND_HELP_STRING = """<Commands>
   l : List contents of archive
   t : Test integrity of archive
   x : eXtract files with full paths
+  compare : Compare two archives without extracting
 """
 
 

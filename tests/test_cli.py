@@ -134,9 +134,9 @@ def test_cli_list_2(capsys):
 @pytest.mark.cli
 def test_cli_help(capsys):
     if sys.version_info >= (3, 10):
-        expected = "usage: py7zr [-h] [--version] {l,x,c,a,t,i} ...\n\npy7zr\n\noptions:"
+        expected = "usage: py7zr [-h] [--version] {l,x,c,a,t,i,compare} ...\n\npy7zr\n\noptions:"
     else:
-        expected = "usage: py7zr [-h] [--version] {l,x,c,a,t," "i} ...\n\npy7zr\n\noptional arguments:\n  -h, --help"
+        expected = "usage: py7zr [-h] [--version] {l,x,c,a,t," "i,compare} ...\n\npy7zr\n\noptional arguments:\n  -h, --help"
     cli = py7zr.cli.Cli()
     with pytest.raises(SystemExit):
         cli.run(["-h"])
@@ -148,7 +148,7 @@ def test_cli_help(capsys):
 def test_cli_no_subcommand(capsys):
     expected = py7zr.cli.Cli._get_version()
     if sys.version_info >= (3, 10):
-        expected += "\nusage: py7zr [-h] [--version] {l,x,c,a,t,i} ...\n\npy7zr\n\noptions:"
+        expected += "\nusage: py7zr [-h] [--version] {l,x,c,a,t,i,compare} ...\n\npy7zr\n\noptions:"
     else:
         expected += "\nusage: py7zr [-h] [--version] {l,x,c,a,t,i} ...\n\npy7zr\n\noptional arguments:\n  -h, --help"
     cli = py7zr.cli.Cli()

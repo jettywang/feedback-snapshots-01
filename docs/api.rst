@@ -47,6 +47,32 @@ Information Objects
 .. autoclass:: py7zr.FileInfo
 
 
+.. _comparison-objects:
+
+Archive Comparison
+==================
+
+:func:`py7zr.compare_archives` compares two archives read-only. See
+:ref:`compare-archives` for a walkthrough.
+
+.. autofunction:: py7zr.compare_archives
+
+.. autoclass:: py7zr.ArchiveComparison
+   :members:
+
+.. autoclass:: py7zr.ArchiveSnapshot
+
+.. autoclass:: py7zr.MemberSnapshot
+
+.. autoclass:: py7zr.MemberDiff
+
+.. autoclass:: py7zr.MemberVerdict
+   :members:
+
+.. autoclass:: py7zr.MemberCategory
+   :members:
+
+
 Functions
 =========
 

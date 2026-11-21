@@ -21,6 +21,7 @@ import argparse
 import getpass
 import inspect
 import io
+import json
 import lzma
 import os
 import pathlib
@@ -143,6 +144,35 @@ class Cli:
         test_parser.add_argument("arcfile", help="7z archive file")
         info_parser = subparsers.add_parser("i")
         info_parser.set_defaults(func=self.run_info)
+        compare_parser = subparsers.add_parser(
+            "compare",
+            help="Read-only comparison of two 7z archives",
+            description=(
+                "Compare two 7z archives without extracting any member to disk.\n"
+                "Members whose content really changed, members whose content is equal\n"
+                "but whose archive packaging changed, and members that could not be\n"
+                "verified are reported separately."
+            ),
+        )
+        compare_parser.set_defaults(func=self.run_compare)
+        compare_parser.add_argument("left", type=pathlib.Path, help="baseline 7z archive")
+        compare_parser.add_argument("right", type=pathlib.Path, help="received 7z archive")
+        compare_parser.add_argument(
+            "--json",
+            action="store_true",
+            help="Emit a machine-readable evidence report (digests, no member data)",
+        )
+        compare_parser.add_argument(
+            "--show-identical",
+            action="store_true",
+            help="Also list members that are identical on both sides",
+        )
+        compare_parser.add_argument(
+            "-P",
+            "--password",
+            action="store_true",
+            help="Password protected archive(you will be asked a password).",
+        )
         parser.add_argument("--version", action="store_true", help="Show version")
         parser.set_defaults(func=self.show_help)
         return parser
@@ -380,6 +410,34 @@ class Cli:
             return 1
         else:
             return 0
+
+    def run_compare(self, args: argparse.Namespace) -> int:
+        """Compare two archives read-only and report content vs packaging changes."""
+        password: str | None = None
+        if args.password:
+            try:
+                password = getpass.getpass()
+            except getpass.GetPassWarning:
+                sys.stderr.write("Warning: your password may be shown.\n")
+                return 1
+        if not args.left.exists():
+            print(f"left archive not found: {args.left}")
+            return 1
+        if not args.right.exists():
+            print(f"right archive not found: {args.right}")
+            return 1
+        comparison = py7zr.compare_archives(args.left, args.right, password=password)
+        if args.json:
+            print(json.dumps(comparison.to_dict(), indent=2))
+        else:
+            print(comparison.format_text(show_identical=args.show_identical))
+        # 0: no confirmed content change; 1: at least one member changed content;
+        # 2: nothing changed but some members could not be verified.
+        if comparison.has_content_changes:
+            return 1
+        if comparison.has_unverifiable or comparison.has_archive_errors:
+            return 2
+        return 0
 
     def _check_volumesize_valid(self, size: str) -> bool:
         if self.unit_pattern.match(size):

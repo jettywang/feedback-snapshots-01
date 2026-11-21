@@ -189,3 +189,50 @@ mandatory headers are omitted.
         factory = StreamIOFactory()
         with py7zr.SevenZipFile("target.7z") as archive:
             archive.extractall(factory=factory)
+
+
+.. _compare-archives:
+
+Compare two archives without extracting
+=======================================
+
+:func:`py7zr.compare_archives` answers three separate questions about a pair
+of archives: did a member's *content* change, did only its *archive packaging*
+change, or could its content not be verified at all. Opening two archives is
+enough; nothing is written to disk and every member is hashed in memory.
+
+.. code-block:: python
+
+    import py7zr
+
+    comparison = py7zr.compare_archives("baseline.7z", "received.7z")
+    print(comparison.format_text())
+
+    for member in comparison.content_changes:
+        print(member.display_name, member.evidence, member.left.sha256, member.right.sha256)
+
+Each side is recorded as a :class:`py7zr.MemberSnapshot` with member metadata
+and a SHA-256 digest. Members are matched by name *and* occurrence, so an
+archive that stores the same name twice is compared member by member rather
+than as an ambiguous set of names. The verdict for each entry is a
+:class:`py7zr.MemberVerdict`:
+
+``identical``
+    Content and wrapper metadata are equal.
+
+``packaging_changed``
+    Content digest is equal, but packaging differs -- compression method,
+    compressed size, timestamps, attributes, solid layout, and so on.
+
+``content_changed`` / ``added`` / ``removed``
+    A real change to member content or membership, backed by a differing
+    SHA-256 digest.
+
+``unverifiable``
+    At least one side could not produce a complete digest: encrypted without a
+    password, unsupported method, corrupt stream, unreadable file. An exact
+    size or stored CRC difference can still promote this to a content change;
+    otherwise the pair is reported as unverifiable rather than assumed equal.
+
+:meth:`ArchiveComparison.to_dict` produces a JSON-serialisable evidence record
+of digests and metadata only, suitable for attaching to an incident ticket.
