@@ -353,6 +353,10 @@ class CreateMultipartUploadTask(Task):
         )
         upload_id = response['UploadId']
 
+        recorder = self._transfer_coordinator.handover_recorder
+        if recorder is not None:
+            recorder.note_upload_id(upload_id)
+
         # Add a cleanup if the multipart upload fails at any point.
         self._transfer_coordinator.add_failure_cleanup(
             client.abort_multipart_upload,
@@ -381,10 +385,13 @@ class CompleteMultipartUploadTask(Task):
         :param extra_args:  A dictionary of any extra arguments that may be
             used in completing the multipart transfer.
         """
-        client.complete_multipart_upload(
+        response = client.complete_multipart_upload(
             Bucket=bucket,
             Key=key,
             UploadId=upload_id,
             MultipartUpload={'Parts': parts},
             **extra_args,
         )
+        recorder = self._transfer_coordinator.handover_recorder
+        if recorder is not None:
+            recorder.note_result(response)

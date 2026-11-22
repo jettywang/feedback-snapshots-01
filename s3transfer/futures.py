@@ -196,6 +196,9 @@ class TransferCoordinator:
         self._associated_futures_lock = threading.Lock()
         self._done_callbacks_lock = threading.Lock()
         self._failure_cleanups_lock = threading.Lock()
+        # Optional s3transfer.handover.HandoverRecorder collecting evidence
+        # for this transfer.  ``None`` means handover records are disabled.
+        self.handover_recorder = None
 
     def __repr__(self):
         return f'{self.__class__.__name__}(transfer_id={self.transfer_id})'

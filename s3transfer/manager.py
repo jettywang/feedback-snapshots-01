@@ -34,6 +34,7 @@ from s3transfer.futures import (
     TransferFuture,
     TransferMeta,
 )
+from s3transfer.handover import HandoverRecorder
 from s3transfer.upload import UploadSubmissionTask
 from s3transfer.utils import (
     CallArgs,
@@ -313,7 +314,15 @@ class TransferManager:
     def config(self):
         return self._config
 
-    def upload(self, fileobj, bucket, key, extra_args=None, subscribers=None):
+    def upload(
+        self,
+        fileobj,
+        bucket,
+        key,
+        extra_args=None,
+        subscribers=None,
+        handover=None,
+    ):
         """Uploads a file to S3
 
         :type fileobj: str or seekable file-like object
@@ -336,6 +345,14 @@ class TransferManager:
             order provided based on the event emit during the process of
             the transfer request.
 
+        :type handover: s3transfer.handover.HandoverRecorder
+        :param handover: Optional recorder that collects a handover record
+            for the transfer. When provided, the recorder's scope is populated
+            up front and its finalized
+            :class:`~s3transfer.handover.HandoverRecord` is available once the
+            transfer future completes. The recorder only captures non-secret
+            metadata, never credentials or SSE key material.
+
         :rtype: s3transfer.futures.TransferFuture
         :returns: Transfer future representing the upload
         """
@@ -343,6 +360,7 @@ class TransferManager:
         extra_args = extra_args.copy() if extra_args else {}
         if subscribers is None:
             subscribers = []
+        self._validate_handover(handover)
         self._validate_all_known_args(extra_args, self.ALLOWED_UPLOAD_ARGS)
         self._validate_if_bucket_supported(bucket)
         self._add_operation_defaults(extra_args)
@@ -357,8 +375,23 @@ class TransferManager:
         if self._bandwidth_limiter:
             extra_main_kwargs['bandwidth_limiter'] = self._bandwidth_limiter
         return self._submit_transfer(
-            call_args, UploadSubmissionTask, extra_main_kwargs
+            call_args,
+            UploadSubmissionTask,
+            extra_main_kwargs,
+            handover=handover,
+            scope=self._build_upload_scope(fileobj, bucket, key),
         )
+
+    def _build_upload_scope(self, fileobj, bucket, key):
+        source_name = fileobj
+        if not isinstance(fileobj, str):
+            source_name = getattr(fileobj, 'name', repr(fileobj))
+        return {
+            'operation': 'upload',
+            'source': {'type': 'stream', 'name': source_name},
+            'destination': {'bucket': bucket, 'key': key},
+            'source_version_id': None,
+        }
 
     def download(
         self, bucket, key, fileobj, extra_args=None, subscribers=None
@@ -416,6 +449,7 @@ class TransferManager:
         extra_args=None,
         subscribers=None,
         source_client=None,
+        handover=None,
     ):
         """Copies a file in S3
 
@@ -448,6 +482,12 @@ class TransferManager:
             If no client is provided, the transfer manager's client is used
             as the client for the source object.
 
+        :type handover: s3transfer.handover.HandoverRecorder
+        :param handover: Optional recorder that collects a handover record for
+            the copy. When provided, the source coordinates (including any
+            source ``VersionId``) and destination evidence are captured so the
+            exact replicated version can be proven after the transfer.
+
         :rtype: s3transfer.futures.TransferFuture
         :returns: Transfer future representing the copy
         """
@@ -455,6 +495,7 @@ class TransferManager:
             extra_args = {}
         if subscribers is None:
             subscribers = []
+        self._validate_handover(handover)
         if source_client is None:
             source_client = self._client
         # Warn when Metadata/Tagging are supplied without a directive. To match
@@ -494,7 +535,30 @@ class TransferManager:
             subscribers=subscribers,
             source_client=source_client,
         )
-        return self._submit_transfer(call_args, CopySubmissionTask)
+        return self._submit_transfer(
+            call_args,
+            CopySubmissionTask,
+            handover=handover,
+            scope=self._build_copy_scope(copy_source, bucket, key),
+        )
+
+    def _build_copy_scope(self, copy_source, bucket, key):
+        if isinstance(copy_source, dict):
+            source = {
+                'type': 's3',
+                'bucket': copy_source.get('Bucket'),
+                'key': copy_source.get('Key'),
+            }
+            source_version_id = copy_source.get('VersionId')
+        else:
+            source = {'type': 's3', 'copy_source': copy_source}
+            source_version_id = None
+        return {
+            'operation': 'copy',
+            'source': source,
+            'destination': {'bucket': bucket, 'key': key},
+            'source_version_id': source_version_id,
+        }
 
     def delete(self, bucket, key, extra_args=None, subscribers=None):
         """Delete an S3 object.
@@ -562,7 +626,12 @@ class TransferManager:
             set_default_checksum_algorithm(extra_args)
 
     def _submit_transfer(
-        self, call_args, submission_task_cls, extra_main_kwargs=None
+        self,
+        call_args,
+        submission_task_cls,
+        extra_main_kwargs=None,
+        handover=None,
+        scope=None,
     ):
         if not extra_main_kwargs:
             extra_main_kwargs = {}
@@ -571,6 +640,11 @@ class TransferManager:
         transfer_future, components = self._get_future_with_components(
             call_args
         )
+
+        if handover is not None:
+            self._configure_handover(
+                handover, components['coordinator'], scope
+            )
 
         # Add any provided done callbacks to the created transfer future
         # to be invoked on the transfer future being complete.
@@ -595,6 +669,26 @@ class TransferManager:
         self._id_counter += 1
 
         return transfer_future
+
+    def _configure_handover(self, handover, transfer_coordinator, scope):
+        handover.set_scope(scope or {})
+        handover.attach_to_client(self._client)
+        transfer_coordinator.handover_recorder = handover
+        transfer_coordinator.add_done_callback(
+            self._finalize_handover, transfer_coordinator, handover
+        )
+
+    def _validate_handover(self, handover):
+        if handover is not None and not isinstance(
+            handover, HandoverRecorder
+        ):
+            raise TypeError(
+                'handover must be a s3transfer.handover.HandoverRecorder '
+                f'instance, got {type(handover).__name__}.'
+            )
+
+    def _finalize_handover(self, transfer_coordinator, handover):
+        handover.finalize(transfer_coordinator.status)
 
     def _get_future_with_components(self, call_args):
         transfer_id = self._id_counter

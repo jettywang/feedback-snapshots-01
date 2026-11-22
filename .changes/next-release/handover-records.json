@@ -1,0 +1,5 @@
+{
+    "category": "manager",
+    "description": "Add optional handover records to upload() and copy() so migration and archive transfers can prove the source version and the actual destination object (destination VersionId, ETag, completed parts and HTTP retry attempts), while cancelled transfers retain only their status and scope.",
+    "type": "feature"
+}

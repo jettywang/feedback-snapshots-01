@@ -793,7 +793,12 @@ class PutObjectTask(Task):
             used in the upload.
         """
         with fileobj as body:
-            client.put_object(Bucket=bucket, Key=key, Body=body, **extra_args)
+            response = client.put_object(
+                Bucket=bucket, Key=key, Body=body, **extra_args
+            )
+        recorder = self._transfer_coordinator.handover_recorder
+        if recorder is not None:
+            recorder.note_result(response)
 
 
 class UploadPartTask(Task):
@@ -837,4 +842,7 @@ class UploadPartTask(Task):
             checksum_member = f'Checksum{algorithm_name}'
             if checksum_member in response:
                 part_metadata[checksum_member] = response[checksum_member]
+        recorder = self._transfer_coordinator.handover_recorder
+        if recorder is not None:
+            recorder.note_part(part_metadata)
         return part_metadata

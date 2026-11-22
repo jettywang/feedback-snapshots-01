@@ -167,6 +167,9 @@ class CopySubmissionTask(SubmissionTask):
             # Provide an etag to ensure a stored object is not modified
             # during a multipart copy.
             transfer_future.meta.provide_object_etag(response.get('ETag'))
+            recorder = self._transfer_coordinator.handover_recorder
+            if recorder is not None:
+                recorder.note_head_object(response)
             preserved_metadata = self._extract_preserved_metadata(response)
 
         # If it is greater than threshold do a multipart copy, otherwise
@@ -413,6 +416,9 @@ class CopyCompleteMultipartUploadTask(CompleteMultipartUploadTask):
         )
         dest_etag = response.get('ETag')
         dest_version_id = response.get('VersionId')
+        recorder = self._transfer_coordinator.handover_recorder
+        if recorder is not None:
+            recorder.note_result(response)
         self._apply_tags(client, call_args, source_version_id, dest_version_id)
         self._apply_annotations(
             client, call_args, source_version_id, dest_version_id, dest_etag
@@ -550,9 +556,12 @@ class CopyObjectTask(Task):
             the callbacks
 
         """
-        client.copy_object(
+        response = client.copy_object(
             CopySource=copy_source, Bucket=bucket, Key=key, **extra_args
         )
+        recorder = self._transfer_coordinator.handover_recorder
+        if recorder is not None:
+            recorder.note_result(response)
         for callback in callbacks:
             callback(bytes_transferred=size)
 
@@ -629,4 +638,7 @@ class CopyPartTask(Task):
                 part_metadata[checksum_member] = response['CopyPartResult'][
                     checksum_member
                 ]
+        recorder = self._transfer_coordinator.handover_recorder
+        if recorder is not None:
+            recorder.note_part(part_metadata)
         return part_metadata
