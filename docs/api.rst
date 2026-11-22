@@ -132,6 +132,8 @@ API Reference
 
 .. autofunction:: bind_contextvars
 .. autofunction:: bound_contextvars
+.. autofunction:: restricted_contextvars
+.. autofunction:: copy_restricted_context
 .. autofunction:: get_contextvars
 .. autofunction:: get_merged_contextvars
 .. autofunction:: merge_contextvars

@@ -181,3 +181,63 @@ event='user did something' view='/login' peer='127.0.0.1' something='shot_in_foo
 ```
 
 As you can see, `view`, `peer`, and `request_id` are present in **both** log entries.
+
+(restricted-handoff)=
+
+## Restricted Context Handoff to Background Work
+
+A common requirement is to finish a request quickly while a background task continues the work asynchronously.
+The task should keep correlation fields such as a trace ID, but it must **not** inherit sensitive request data like customer profiles or email addresses.
+
+Passing the whole context around is unsafe here, because both threads and `asyncio` tasks copy the caller's context: a background task would silently inherit every bound value.
+
+### Forking an isolated context
+
+{func}`structlog.contextvars.copy_restricted_context` returns a fresh, isolated {class}`contextvars.Context` that contains only the keys you explicitly allow.
+It carries no other state — neither the remaining structlog context variables nor any unrelated `contextvars` — and changes inside the fork never flow back to the caller.
+
+The resulting object can be handed directly to a thread pool or an `asyncio` task:
+
+```python
+from concurrent.futures import ThreadPoolExecutor
+
+import structlog
+
+structlog.contextvars.bind_contextvars(
+    trace_id="abc-123",
+    customer="alice",
+    email="alice@example.com",
+)
+
+
+def background_job() -> None:
+    # Only trace_id is visible here.
+    structlog.get_logger().info("background work")
+
+
+ctx = structlog.contextvars.copy_restricted_context("trace_id")
+
+with ThreadPoolExecutor() as pool:
+    pool.submit(lambda: ctx.run(background_job))
+```
+
+For `asyncio`, pass the context when creating the task:
+
+```python
+ctx = structlog.contextvars.copy_restricted_context("trace_id")
+loop.create_task(background_job(), context=ctx)
+```
+
+### Temporarily masking the context
+
+If the library you use copies the current context itself, use the {func}`structlog.contextvars.restricted_contextvars` context manager / decorator to hide everything but the allowed keys for the duration of the block.
+The full context — including any values bound or changed inside the block — is restored afterwards, so the surrounding request is unaffected:
+
+```python
+with structlog.contextvars.restricted_contextvars("trace_id"):
+    # Tasks created here only inherit trace_id.
+    asyncio.create_task(background_job())
+# The complete request context is available again here.
+```
+
+Both primitives compose with the regular context binding functions: nothing about how you bind values with {func}`bind_contextvars`, {func}`bound_contextvars`, or bound loggers has to change.

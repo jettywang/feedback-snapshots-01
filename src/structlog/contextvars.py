@@ -192,3 +192,57 @@ def bound_contextvars(**kw: Any) -> Generator[None, None, None]:
     finally:
         unbind_contextvars(*kw.keys())
         bind_contextvars(**saved)
+
+
+@contextlib.contextmanager
+def restricted_contextvars(
+    *allowed: str,
+) -> Generator[None, None, None]:
+    """
+    Expose only the *allowed* keys of the context-local context inside the
+    block, restoring the full context afterwards.
+
+    All other structlog context variables are temporarily hidden, so they do
+    not leak into work that is scheduled while the block is active (for
+    example a background task created via :func:`asyncio.create_task`).
+    Context variables not managed by *structlog* are untouched.
+
+    Can be used as a context manager or decorator.
+
+    .. versionadded:: 26.2.0
+    """
+    saved = get_contextvars()
+
+    unbind_contextvars(*saved.keys())
+    bind_contextvars(**{k: saved[k] for k in allowed if k in saved})
+    try:
+        yield
+    finally:
+        unbind_contextvars(*get_contextvars().keys())
+        bind_contextvars(**saved)
+
+
+def copy_restricted_context(*allowed: str) -> contextvars.Context:
+    """
+    Return a fresh, isolated :class:`contextvars.Context` that contains only
+    the *allowed* keys from the current context-local context.
+
+    The returned context does **not** share any state with the current one,
+    which makes it safe to hand to code running in another thread or task
+    (for example via :func:`concurrent.futures.Executor.submit` or the
+    *context* argument of :class:`asyncio.Task`). Sensitive values such as
+    customer data bound to the parent request never cross the boundary.
+
+    Context variables not managed by *structlog* are not copied either.
+
+    .. versionadded:: 26.2.0
+    """
+    values = get_contextvars()
+    ctx = contextvars.Context()
+
+    def _populate() -> None:
+        bind_contextvars(**{k: values[k] for k in allowed if k in values})
+
+    ctx.run(_populate)
+
+    return ctx

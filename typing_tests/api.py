@@ -9,6 +9,7 @@ Make sure our configuration examples actually pass the type checker.
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import logging.config
 
@@ -369,6 +370,18 @@ is_active = fbl.is_enabled_for(20)
 def f() -> None:
     with structlog.contextvars.bound_contextvars(y=23):
         pass
+
+
+@structlog.contextvars.restricted_contextvars("trace_id")
+def restricted() -> None:
+    with structlog.contextvars.restricted_contextvars("trace_id"):
+        pass
+
+
+forked: contextvars.Context = (
+    structlog.contextvars.copy_restricted_context("trace_id")
+)
+forked.run(restricted)
 
 
 # ConsoleRenderer properties

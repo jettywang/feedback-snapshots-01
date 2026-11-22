@@ -15,6 +15,15 @@ You can find our backwards-compatibility policy [here](https://github.com/hynek/
 
 ## [Unreleased](https://github.com/hynek/structlog/compare/26.1.0...HEAD)
 
+### Added
+
+- `structlog.contextvars.restricted_contextvars` and
+  `structlog.contextvars.copy_restricted_context` for handing a *restricted*
+  logging context to background work.
+  They let a request spawn a thread or task that only inherits explicitly
+  allow-listed fields (for example `trace_id`) while sensitive values like
+  customer data stay bound to the parent context.
+
 ### Changed
 
 - On Python 3.15 and later, *structlog* uses [PEP 810](https://peps.python.org/pep-0810/) lazy imports for modules that are only needed once you log.
