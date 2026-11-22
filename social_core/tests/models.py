@@ -12,6 +12,9 @@ from social_core.storage import (
     CodeMixin,
     NonceMixin,
     PartialMixin,
+    RevocationRecord,
+    RevocationStorageMixin,
+    RevocationStatus,
     UserMixin,
 )
 
@@ -99,12 +102,13 @@ class UserWithNames(User):
     last_name: str | None = None
 
 
-class TestUserSocialAuth(UserMixin, BaseModel):
+class TestUserSocialAuth(UserMixin, RevocationStorageMixin, BaseModel):
     __test__ = False
 
     NEXT_ID = 1
     cache: dict[int, TestUserSocialAuth] = {}
     cache_by_uid: dict[tuple[str, str], TestUserSocialAuth] = {}
+    revocations: list[RevocationRecord] = []
 
     def __init__(
         self, user: User, provider, uid, extra_data=None, id_key: str = ""
@@ -128,6 +132,31 @@ class TestUserSocialAuth(UserMixin, BaseModel):
     def reset_cache(cls) -> None:
         cls.cache = {}
         cls.cache_by_uid = {}
+        cls.revocations = []
+
+    @classmethod
+    def record_revocation(cls, record: RevocationRecord) -> None:
+        cls.revocations.append(dict(record))
+
+    @classmethod
+    def get_revocations(
+        cls, status: RevocationStatus | None = None
+    ) -> list[RevocationRecord]:
+        return [
+            dict(record)
+            for record in cls.revocations
+            if status is None or record["status"] == status
+        ]
+
+    @classmethod
+    def update_revocation(cls, record: RevocationRecord) -> None:
+        cls.revocations = [
+            existing
+            for existing in cls.revocations
+            if (existing["provider"], existing["uid"])
+            != (record["provider"], record["uid"])
+        ]
+        cls.revocations.append(dict(record))
 
     @classmethod
     def changed(cls, user) -> None:

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Record token revocation outcomes when `REVOKE_TOKENS_ON_DISCONNECT` is
+  enabled: confirmed revocations leave a plain receipt while transport errors
+  or providers that cannot confirm revocation leave a pending receipt that
+  keeps the token. Storages can persist receipts by implementing the optional
+  `RevocationStorageMixin`, and integrations can drive the controlled
+  compensation process with `social_core.actions.retry_pending_revocations`,
+  which never recreates disconnected local associations.
+
 ## [7.2.0](https://github.com/python-social-auth/social-core/releases/tag/7.2.0) - 2026-11-12
 
 ### Added

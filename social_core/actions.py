@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 from urllib.parse import quote
 
+from .exceptions import AuthConfigurationError, AuthProviderError
 from .utils import (
     get_allowed_redirect_schemes,
     is_private_use_redirect,
@@ -18,7 +19,14 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from .backends.base import BaseAuth
-    from .storage import PartialMixin, PipelineUserProtocol, UserMixin, UserProtocol
+    from .storage import (
+        PartialMixin,
+        PipelineUserProtocol,
+        RevocationRecord,
+        UserMixin,
+        UserProtocol,
+    )
+    from .strategy import BaseStrategy
 
 
 _PartialResult = TypeVar("_PartialResult")
@@ -282,3 +290,47 @@ def do_disconnect(
             raise ValueError("Disallowed URL")
         return backend.strategy.redirect(url)
     return response
+
+
+def retry_pending_revocations(
+    strategy: BaseStrategy[object],
+) -> list[RevocationRecord]:
+    """Retry provider revocation for receipts left in pending state.
+
+    Controlled compensation for the disconnect flow: only receipts recorded
+    by the ``revoke_tokens`` pipeline step are processed. A confirmed
+    revocation scrubs the stored token from the receipt; unconfirmable
+    tokens stay pending for a later run. Local associations are never
+    recreated, so retrying cannot restore an already disconnected account.
+
+    Requires the user storage to implement ``RevocationStorageMixin``.
+    Returns the receipts confirmed during this run.
+    """
+    user_storage = strategy.storage.user
+    get_revocations = getattr(user_storage, "get_revocations", None)
+    update_revocation = getattr(user_storage, "update_revocation", None)
+    if not callable(get_revocations) or not callable(update_revocation):
+        raise AuthConfigurationError(code="unsupported_feature", stage="disconnect")
+    confirmed = []
+    for record in get_revocations(status="pending"):
+        access_token = record.get("access_token")
+        if not access_token:
+            continue
+        try:
+            backend = strategy.get_backend(record["provider"])
+        except AuthConfigurationError:
+            continue
+        try:
+            revoked = bool(backend.revoke_token(access_token, record["uid"]))
+        except AuthProviderError:
+            continue
+        if not revoked:
+            continue
+        updated: RevocationRecord = {
+            "provider": record["provider"],
+            "uid": record["uid"],
+            "status": "revoked",
+        }
+        update_revocation(updated)
+        confirmed.append(updated)
+    return confirmed

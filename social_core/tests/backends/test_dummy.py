@@ -4,12 +4,13 @@ import datetime as dt
 import json
 from typing import Any, cast
 
+import requests
 import responses
 
-from social_core.actions import do_disconnect
+from social_core.actions import do_disconnect, retry_pending_revocations
 from social_core.backends.oauth import BaseOAuth2
 from social_core.exceptions import AuthPolicyError
-from social_core.tests.models import User
+from social_core.tests.models import TestUserSocialAuth, User
 
 from .oauth import BaseAuthUrlTestMixin, OAuth2Test
 
@@ -58,6 +59,13 @@ class Dummy2OAuth2(DummyOAuth2):
     GET_ALL_EXTRA_DATA = True
 
 
+class UnconfirmableDummyOAuth2(DummyOAuth2):
+    """Fake provider that cannot confirm token revocation."""
+
+    name = "unconfirmable-dummy"
+    REVOKE_TOKEN_URL = ""
+
+
 class DummyOAuth2Test(OAuth2Test, BaseAuthUrlTestMixin):
     backend_path = "social_core.tests.backends.test_dummy.DummyOAuth2"
     user_data_url = "http://dummy.com/user"
@@ -95,6 +103,134 @@ class DummyOAuth2Test(OAuth2Test, BaseAuthUrlTestMixin):
             status=200,
         )
         do_disconnect(self.backend, user)
+
+    def _user_ready_to_disconnect(self) -> User:
+        self.strategy.set_settings({"SOCIAL_AUTH_REVOKE_TOKENS_ON_DISCONNECT": True})
+        self.do_login()
+        user = cast("User", User.get(self.expected_username))
+        user.password = "password"
+        return user
+
+    def _add_revoke_response(self, **kwargs) -> None:
+        responses.add(
+            self._method(self.backend.REVOKE_TOKEN_METHOD),
+            self.backend.REVOKE_TOKEN_URL,
+            **kwargs,
+        )
+
+    def test_revoke_token_records_receipt(self) -> None:
+        user = self._user_ready_to_disconnect()
+        uid = user.social[0].uid
+        self._add_revoke_response(status=200)
+        do_disconnect(self.backend, user)
+        self.assertEqual(len(user.social), 0)
+        self.assertIsNotNone(User.get(self.expected_username))
+        self.assertEqual(
+            TestUserSocialAuth.get_revocations(),
+            [{"provider": "dummy", "uid": uid, "status": "revoked"}],
+        )
+
+    def test_revoke_token_transport_error_leaves_pending_receipt(self) -> None:
+        user = self._user_ready_to_disconnect()
+        uid = user.social[0].uid
+        self._add_revoke_response(body=requests.ConnectionError())
+        do_disconnect(self.backend, user)
+        self.assertEqual(len(user.social), 0)
+        self.assertIsNotNone(User.get(self.expected_username))
+        self.assertEqual(
+            TestUserSocialAuth.get_revocations(),
+            [
+                {
+                    "provider": "dummy",
+                    "uid": uid,
+                    "status": "pending",
+                    "access_token": "foobar",
+                }
+            ],
+        )
+
+    def test_retry_pending_revocations_confirms_without_restoring_association(
+        self,
+    ) -> None:
+        user = self._user_ready_to_disconnect()
+        uid = user.social[0].uid
+        self._add_revoke_response(body=requests.ConnectionError())
+        do_disconnect(self.backend, user)
+        self.assertEqual(len(TestUserSocialAuth.get_revocations("pending")), 1)
+
+        responses.reset()
+        self._add_revoke_response(status=200)
+        associations_before = dict(TestUserSocialAuth.cache_by_uid)
+        confirmed = retry_pending_revocations(self.strategy)
+
+        self.assertEqual(
+            confirmed, [{"provider": "dummy", "uid": uid, "status": "revoked"}]
+        )
+        self.assertEqual(TestUserSocialAuth.get_revocations("pending"), [])
+        self.assertEqual(
+            TestUserSocialAuth.get_revocations(),
+            [{"provider": "dummy", "uid": uid, "status": "revoked"}],
+        )
+        self.assertEqual(len(user.social), 0)
+        self.assertEqual(dict(TestUserSocialAuth.cache_by_uid), associations_before)
+
+    def test_retry_pending_revocations_keeps_unconfirmed_tokens_pending(self) -> None:
+        user = self._user_ready_to_disconnect()
+        self._add_revoke_response(body=requests.ConnectionError())
+        do_disconnect(self.backend, user)
+
+        responses.reset()
+        self._add_revoke_response(body=requests.ConnectionError())
+        confirmed = retry_pending_revocations(self.strategy)
+
+        self.assertEqual(confirmed, [])
+        pending = TestUserSocialAuth.get_revocations("pending")
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["access_token"], "foobar")
+        self.assertEqual(len(user.social), 0)
+
+
+class UnconfirmableDummyOAuth2Test(OAuth2Test, BaseAuthUrlTestMixin):
+    backend_path = "social_core.tests.backends.test_dummy.UnconfirmableDummyOAuth2"
+    user_data_url = DummyOAuth2Test.user_data_url
+    expected_username = DummyOAuth2Test.expected_username
+    access_token_body = DummyOAuth2Test.access_token_body
+    user_data_body = DummyOAuth2Test.user_data_body
+
+    def _user_ready_to_disconnect(self) -> User:
+        self.strategy.set_settings({"SOCIAL_AUTH_REVOKE_TOKENS_ON_DISCONNECT": True})
+        self.do_login()
+        user = cast("User", User.get(self.expected_username))
+        user.password = "password"
+        return user
+
+    def test_disconnect_leaves_pending_receipt(self) -> None:
+        user = self._user_ready_to_disconnect()
+        uid = user.social[0].uid
+        do_disconnect(self.backend, user)
+        self.assertEqual(len(user.social), 0)
+        self.assertIsNotNone(User.get(self.expected_username))
+        self.assertEqual(
+            TestUserSocialAuth.get_revocations(),
+            [
+                {
+                    "provider": "unconfirmable-dummy",
+                    "uid": uid,
+                    "status": "pending",
+                    "access_token": "foobar",
+                }
+            ],
+        )
+
+    def test_retry_keeps_pending_and_does_not_restore_association(self) -> None:
+        user = self._user_ready_to_disconnect()
+        do_disconnect(self.backend, user)
+        associations_before = dict(TestUserSocialAuth.cache_by_uid)
+        confirmed = retry_pending_revocations(self.strategy)
+        self.assertEqual(confirmed, [])
+        self.assertEqual(len(TestUserSocialAuth.get_revocations("pending")), 1)
+        self.assertEqual(len(user.social), 0)
+        self.assertEqual(dict(TestUserSocialAuth.cache_by_uid), associations_before)
 
 
 class WhitelistEmailsTest(DummyOAuth2Test):

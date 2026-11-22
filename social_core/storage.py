@@ -9,7 +9,7 @@ from abc import abstractmethod
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from time import time as _time
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypedDict, cast
 
 from openid.association import Association as OpenIdAssociation
 
@@ -355,6 +355,52 @@ class UserMixin:
         cls, social, uid: str, id_key: str, *, evidence_key: str | None = None
     ):
         """Atomically replace identifiers, revalidating supplied evidence under lock."""
+        raise NotImplementedError("Implement in subclass")
+
+
+RevocationStatus = Literal["revoked", "pending"]
+
+
+class RevocationRecord(TypedDict, total=False):
+    """Receipt for the revocation follow-up of a disconnected association.
+
+    A ``revoked`` receipt only keeps the association coordinates so the
+    disconnection stays auditable and the account can be associated again
+    later. A ``pending`` receipt additionally keeps the unconfirmed
+    ``access_token`` so the controlled compensation process can retry the
+    provider revocation; the token is dropped once revocation is confirmed.
+    """
+
+    provider: str
+    uid: str
+    status: RevocationStatus
+    access_token: str
+
+
+class RevocationStorageMixin:
+    """Optional user-storage interface for token-revocation follow-up.
+
+    Integrations that enable ``REVOKE_TOKENS_ON_DISCONNECT`` can implement
+    this mixin on their user storage to persist revocation receipts and to
+    drive the compensation process for tokens whose revocation could not be
+    confirmed during disconnect.
+    """
+
+    @classmethod
+    def record_revocation(cls, record: RevocationRecord) -> None:
+        """Persist the revocation receipt for a disconnected association."""
+        raise NotImplementedError("Implement in subclass")
+
+    @classmethod
+    def get_revocations(
+        cls, status: RevocationStatus | None = None
+    ) -> list[RevocationRecord]:
+        """Return recorded revocation receipts, optionally filtered by status."""
+        raise NotImplementedError("Implement in subclass")
+
+    @classmethod
+    def update_revocation(cls, record: RevocationRecord) -> None:
+        """Replace the receipt identified by provider and uid."""
         raise NotImplementedError("Implement in subclass")
 
 
