@@ -14,6 +14,8 @@ DEFAULTS = {
     "TOKEN_NAME": "sesame",
     # Tokens lifecycle
     "MAX_AGE": None,
+    # Approval queue
+    "APPROVAL_MAX_AGE": None,
     "ONE_TIME": False,
     "INVALIDATE_ON_PASSWORD_CHANGE": True,
     "INVALIDATE_ON_EMAIL_CHANGE": False,
@@ -77,6 +79,11 @@ def load():
     # Support defining MAX_AGE as a timedelta rather than a number of seconds.
     if isinstance(MAX_AGE, datetime.timedelta):
         MAX_AGE = MAX_AGE.total_seconds()
+
+    # Support defining APPROVAL_MAX_AGE as a timedelta rather than seconds.
+    global APPROVAL_MAX_AGE
+    if isinstance(APPROVAL_MAX_AGE, datetime.timedelta):
+        APPROVAL_MAX_AGE = APPROVAL_MAX_AGE.total_seconds()
 
     # Import token creation and parsing modules.
     TOKENS = [importlib.import_module(tokens) for tokens in TOKENS]

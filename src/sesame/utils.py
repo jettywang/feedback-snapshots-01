@@ -1,12 +1,29 @@
+import datetime
+import time
 from urllib.parse import urlencode
 
 from django.contrib.auth import authenticate
+from django.core.exceptions import ImproperlyConfigured
 from django.utils import timezone
 
 from . import settings
 from .tokens import create_token
 
-__all__ = ["get_token", "get_parameters", "get_query_string", "get_user"]
+__all__ = [
+    "get_token",
+    "get_token_for_queued_notification",
+    "get_parameters",
+    "get_query_string",
+    "get_user",
+    "ApprovalExpired",
+]
+
+
+class ApprovalExpired(Exception):
+    """
+    The approval of a queued notification is outside its permitted window.
+
+    """
 
 
 def get_token(user, scope=""):
@@ -18,6 +35,48 @@ def get_token(user, scope=""):
     Use this function to create a token that :func:`get_user` will accept.
 
     """
+    return create_token(user, scope)
+
+
+def get_token_for_queued_notification(user, approved_at, scope="", approval_window=None):
+    """
+    Generate a signed token for a notification that waited in an approval queue.
+
+    When emails sit in an approval queue before being sent, check that the
+    approval is still within its permitted window before generating a token.
+
+    ``approved_at`` is the :class:`~datetime.datetime` when the notification
+    was approved for sending. Naive values are interpreted as UTC.
+
+    ``approval_window`` is a :class:`datetime.timedelta` or a number of
+    seconds. By default, it is read from the :data:`SESAME_APPROVAL_MAX_AGE`
+    setting.
+
+    Raise :exc:`ApprovalExpired` when the approval is outside the window.
+    The window is anchored at ``approved_at`` and is never extended:
+    retrying an expired queue record keeps failing instead of turning an
+    old task into a new permission.
+
+    The token's lifetime starts when it is generated, so the time spent in
+    the queue doesn't reduce the recipient's access time.
+
+    """
+    if approval_window is None:
+        approval_window = settings.APPROVAL_MAX_AGE
+    if approval_window is None:
+        raise ImproperlyConfigured(
+            "set SESAME_APPROVAL_MAX_AGE or pass the approval_window argument"
+        )
+    if isinstance(approval_window, datetime.timedelta):
+        approval_window = approval_window.total_seconds()
+    if timezone.is_naive(approved_at):
+        approved_at = timezone.make_aware(approved_at, datetime.timezone.utc)
+    age = time.time() - approved_at.timestamp()
+    if age < 0 or age >= approval_window:
+        raise ApprovalExpired(
+            f"approval is outside the permitted window: "
+            f"age = {age:.0f} seconds, window = {approval_window:.0f} seconds"
+        )
     return create_token(user, scope)
 
 

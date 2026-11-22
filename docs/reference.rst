@@ -52,6 +52,16 @@ Settings
 
     Specifically, updating the user's last login date invalidates tokens.
 
+.. data:: SESAME_APPROVAL_MAX_AGE
+    :value: None
+
+    Lifetime of a queued notification's approval, as a
+    :class:`datetime.timedelta` or a number of seconds.
+
+    When emails wait in an approval queue before being sent,
+    :func:`sesame.utils.get_token_for_queued_notification` refuses to
+    generate a token once the approval is older than this window.
+
 .. data:: SESAME_INVALIDATE_ON_PASSWORD_CHANGE
     :value: True
 
@@ -121,6 +131,14 @@ according to the context.
 .. autofunction:: sesame.utils.get_parameters
 
 .. autofunction:: sesame.utils.get_token
+
+When emails wait in an approval queue before being sent, django-sesame
+provides a function that checks the approval is still within its permitted
+window before generating a token.
+
+.. autofunction:: sesame.utils.get_token_for_queued_notification
+
+.. autoexception:: sesame.utils.ApprovalExpired
 
 Token validation
 ----------------

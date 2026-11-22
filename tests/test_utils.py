@@ -1,6 +1,17 @@
+import datetime
+import unittest.mock
+
+from django.core.exceptions import ImproperlyConfigured
 from django.test import RequestFactory, TestCase, override_settings
 
-from sesame.utils import get_parameters, get_query_string, get_token, get_user
+from sesame.utils import (
+    ApprovalExpired,
+    get_parameters,
+    get_query_string,
+    get_token,
+    get_token_for_queued_notification,
+    get_user,
+)
 
 from .mixins import CaptureLogMixin, CreateUserMixin
 
@@ -130,3 +141,79 @@ class TestUtils(CaptureLogMixin, CreateUserMixin, TestCase):
         self.assertEqual(get_user(token, update_last_login=False), self.user)
         self.user.refresh_from_db()
         self.assertEqual(self.user.last_login, last_login)
+
+
+@override_settings(SESAME_MAX_AGE=300, SESAME_APPROVAL_MAX_AGE=300)
+class TestQueuedNotifications(CaptureLogMixin, CreateUserMixin, TestCase):
+    """
+    Emails may wait in an approval queue before being sent. A token may be
+    generated only while the approval is still within its permitted window.
+    """
+
+    APPROVED_AT = datetime.datetime(2026, 11, 23, 12, 0, tzinfo=datetime.timezone.utc)
+    APPROVED_AT_TS = APPROVED_AT.timestamp()
+
+    def get_token_at(self, now, **kwargs):
+        with unittest.mock.patch("time.time", return_value=now):
+            return get_token_for_queued_notification(
+                self.user, self.APPROVED_AT, **kwargs
+            )
+
+    def get_user_at(self, token, now):
+        with unittest.mock.patch("time.time", return_value=now):
+            return get_user(token)
+
+    def test_timely_notification(self):
+        # The notification is emailed one minute after its approval.
+        sent_at = self.APPROVED_AT_TS + 60
+        token = self.get_token_at(sent_at)
+        self.assertIsInstance(token, str)
+        self.assertEqual(self.get_user_at(token, sent_at), self.user)
+
+    def test_boundary_notification(self):
+        # The notification is emailed in the last second of the window.
+        sent_at = self.APPROVED_AT_TS + 299
+        token = self.get_token_at(sent_at)
+        self.assertEqual(self.get_user_at(token, sent_at), self.user)
+
+    def test_expired_approval(self):
+        # The notification stayed in the queue long after the window closed.
+        with self.assertRaises(ApprovalExpired) as exc:
+            self.get_token_at(self.APPROVED_AT_TS + 86400)
+        self.assertIn("approval is outside the permitted window", str(exc.exception))
+
+    def test_expired_approval_is_never_extended(self):
+        # Retrying an expired queue record doesn't turn it into a new
+        # permission: the window stays anchored at the approval date.
+        for now in [self.APPROVED_AT_TS + 300, self.APPROVED_AT_TS + 86400]:
+            with self.assertRaises(ApprovalExpired):
+                self.get_token_at(now)
+
+    def test_future_approval(self):
+        # An approval dated in the future is outside the window too.
+        with self.assertRaises(ApprovalExpired):
+            self.get_token_at(self.APPROVED_AT_TS - 1)
+
+    def test_recipient_keeps_full_access_time(self):
+        # The token lifetime starts when the email is sent, not when the
+        # notification was approved: queueing doesn't eat the access time.
+        sent_at = self.APPROVED_AT_TS + 60
+        token = self.get_token_at(sent_at)
+        self.assertEqual(self.get_user_at(token, sent_at + 299), self.user)
+        self.assertIsNone(self.get_user_at(token, sent_at + 300))
+        self.assertLogsContain("Expired token")
+
+    def test_approval_window_argument(self):
+        sent_at = self.APPROVED_AT_TS + 60
+        token = self.get_token_at(
+            sent_at, approval_window=datetime.timedelta(minutes=5)
+        )
+        self.assertEqual(self.get_user_at(token, sent_at), self.user)
+        with self.assertRaises(ApprovalExpired):
+            self.get_token_at(sent_at, approval_window=30)
+
+    @override_settings(SESAME_APPROVAL_MAX_AGE=None)
+    def test_approval_window_required(self):
+        with self.assertRaises(ImproperlyConfigured) as exc:
+            self.get_token_at(self.APPROVED_AT_TS + 60)
+        self.assertIn("SESAME_APPROVAL_MAX_AGE", str(exc.exception))
