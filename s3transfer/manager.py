@@ -66,6 +66,7 @@ class TransferConfig:
         max_in_memory_upload_chunks=10,
         max_in_memory_download_chunks=10,
         max_bandwidth=None,
+        enforce_stable_input=False,
     ):
         """Configurations for the transfer manager
 
@@ -137,6 +138,17 @@ class TransferConfig:
         :param max_bandwidth: The maximum bandwidth that will be consumed
             in uploading and downloading file content. The value is in terms of
             bytes per second.
+
+        :param enforce_stable_input: Whether to fail an upload if its
+            source file is replaced, truncated, or otherwise modified by
+            another process while the upload is in progress. When enabled,
+            uploads sourced from a filename (or a file-like object backed
+            by an actual file on disk) are monitored and the transfer is
+            failed with a
+            ``s3transfer.exceptions.FileModifiedDuringTransferError``
+            instead of silently uploading inconsistent data. Sources that
+            have no on-disk identity to monitor (e.g. non-seekable
+            streams) are not affected by this option. Defaults to False.
         """
         self.multipart_threshold = multipart_threshold
         self.multipart_chunksize = multipart_chunksize
@@ -150,10 +162,13 @@ class TransferConfig:
         self.max_in_memory_upload_chunks = max_in_memory_upload_chunks
         self.max_in_memory_download_chunks = max_in_memory_download_chunks
         self.max_bandwidth = max_bandwidth
+        self.enforce_stable_input = enforce_stable_input
         self._validate_attrs_are_nonzero()
 
     def _validate_attrs_are_nonzero(self):
         for attr, attr_val in self.__dict__.items():
+            if isinstance(attr_val, bool):
+                continue
             if (
                 attr_val is not None
                 and attr_val is not self.UNSET_DEFAULT

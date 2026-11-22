@@ -22,7 +22,9 @@ from botocore.exceptions import ClientError
 from botocore.httpchecksum import DEFAULT_CHECKSUM_ALGORITHM
 from botocore.stub import ANY
 
+from s3transfer.exceptions import FileModifiedDuringTransferError
 from s3transfer.manager import TransferConfig, TransferManager
+from s3transfer.subscribers import BaseSubscriber
 from s3transfer.upload import UploadSubmissionTask
 from s3transfer.utils import ChunksizeAdjuster
 from tests import (
@@ -862,3 +864,177 @@ class TestMultipartUpload(BaseUploadTest):
         )
         future.result()
         self.assert_expected_client_calls_were_correct()
+
+
+class ModifyFileOnFirstProgress(BaseSubscriber):
+    """Subscriber that modifies a file on the first progress callback"""
+
+    def __init__(self, modify_callback):
+        self._modify_callback = modify_callback
+        self._modified = False
+
+    def on_progress(self, future, bytes_transferred, **kwargs):
+        if not self._modified:
+            self._modified = True
+            self._modify_callback()
+
+
+class ReplaceOnReadFileobj:
+    """Fileobj wrapper that replaces the on-disk file on a specific read
+
+    This simulates another process swapping out the underlying file while
+    it is being read for an upload.
+    """
+
+    def __init__(self, fileobj, filename, replace_on_read, new_content):
+        self._fileobj = fileobj
+        self._filename = filename
+        self._replace_on_read = replace_on_read
+        self._new_content = new_content
+        self._read_count = 0
+
+    def read(self, amount=-1):
+        self._read_count += 1
+        if self._read_count == self._replace_on_read:
+            with open(self._filename, 'wb') as f:
+                f.write(self._new_content)
+        return self._fileobj.read(amount)
+
+    def __getattr__(self, name):
+        return getattr(self._fileobj, name)
+
+
+class TestStableInputEnforcement(BaseUploadTest):
+    __test__ = True
+
+    def setUp(self):
+        super().setUp()
+        self.config.enforce_stable_input = True
+        self.multipart_id = 'my-upload-id'
+        # Track calls that would create or complete the remote object.
+        self.abort_calls = []
+        self.complete_calls = []
+        self.client.meta.events.register(
+            'before-parameter-build.s3.AbortMultipartUpload',
+            lambda **kwargs: self.abort_calls.append(kwargs),
+        )
+        self.client.meta.events.register(
+            'before-parameter-build.s3.CompleteMultipartUpload',
+            lambda **kwargs: self.complete_calls.append(kwargs),
+        )
+
+    def _use_multipart_config(self):
+        self.config = TransferConfig(
+            max_request_concurrency=1,
+            multipart_threshold=1,
+            multipart_chunksize=4,
+            enforce_stable_input=True,
+        )
+        self._manager = TransferManager(self.client, self.config)
+
+    def _replace_file(self, content=b'replaced content'):
+        replacement_filename = os.path.join(self.tempdir, 'replacement')
+        with open(replacement_filename, 'wb') as f:
+            f.write(content)
+        os.replace(replacement_filename, self.filename)
+
+    def _truncate_file(self, content=b'x'):
+        with open(self.filename, 'wb') as f:
+            f.write(content)
+
+    def test_put_object_fails_when_file_truncated_during_read(self):
+        # Use a body larger than the progress callback aggregation
+        # threshold (256 KB) so that the file is truncated while the
+        # body is still being streamed.
+        self.content = b'a' * 300 * 1024
+        with open(self.filename, 'wb') as f:
+            f.write(self.content)
+        self.stubber.add_response(method='put_object', service_response={})
+        subscriber = ModifyFileOnFirstProgress(self._truncate_file)
+        future = self.manager.upload(
+            self.filename, self.bucket, self.key, subscribers=[subscriber]
+        )
+        with self.assertRaises(FileModifiedDuringTransferError):
+            future.result()
+
+    def test_multipart_fails_when_file_replaced_between_parts(self):
+        self._use_multipart_config()
+        self.stubber.add_response(
+            method='create_multipart_upload',
+            service_response={'UploadId': self.multipart_id},
+        )
+        self.stubber.add_response(
+            method='upload_part',
+            service_response={'ETag': 'etag-1'},
+        )
+        self.stubber.add_response(
+            method='abort_multipart_upload',
+            service_response={},
+        )
+        # Replace the file once the first part has been read so that the
+        # replacement happens between the reads of two parts.
+        replaced = []
+
+        def replace_after_first_part_read(params, model, **kwargs):
+            if model.name != 'UploadPart':
+                return
+            if not replaced:
+                replaced.append(True)
+                self._replace_file()
+
+        # Registered after the body-collecting handler so that it runs
+        # once the first part's body has been fully read.
+        self.client.meta.events.register(
+            'before-parameter-build.s3.*', replace_after_first_part_read
+        )
+
+        future = self.manager.upload(self.filename, self.bucket, self.key)
+        with self.assertRaises(FileModifiedDuringTransferError):
+            future.result()
+        # The multipart upload must have been aborted and the remote
+        # object must never have been completed.
+        self.assertEqual(len(self.abort_calls), 1)
+        self.assertEqual(self.complete_calls, [])
+        self.assert_expected_client_calls_were_correct()
+
+    def test_seekable_fileobj_fails_when_file_replaced_between_part_reads(
+        self,
+    ):
+        self._use_multipart_config()
+        self.stubber.add_response(
+            method='create_multipart_upload',
+            service_response={'UploadId': self.multipart_id},
+        )
+        self.stubber.add_response(
+            method='upload_part',
+            service_response={'ETag': 'etag-1'},
+        )
+        self.stubber.add_response(
+            method='abort_multipart_upload',
+            service_response={},
+        )
+        # The file is swapped out for shorter content on the second read,
+        # which is the read of the second part.
+        fileobj = ReplaceOnReadFileobj(
+            open(self.filename, 'rb'),
+            self.filename,
+            replace_on_read=2,
+            new_content=b'x',
+        )
+        try:
+            future = self.manager.upload(fileobj, self.bucket, self.key)
+            with self.assertRaises(FileModifiedDuringTransferError):
+                future.result()
+        finally:
+            fileobj.close()
+        # The remote object must never have been completed.
+        self.assertEqual(self.complete_calls, [])
+
+    def test_nonseekable_stream_upload_succeeds_with_enforcement(self):
+        # Non-seekable streams have no on-disk identity to monitor, so
+        # the enforcement does not apply and uploads proceed as before.
+        self.stubber.add_response(method='put_object', service_response={})
+        body = NonSeekableReader(self.content)
+        future = self.manager.upload(body, self.bucket, self.key)
+        future.result()
+        self.assertEqual(self.sent_bodies, [self.content])

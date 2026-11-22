@@ -11,10 +11,12 @@
 # ANY KIND, either express or implied. See the License for the specific
 # language governing permissions and limitations under the License.
 import math
+import os
 from io import BytesIO
 
 from s3transfer.compat import readable, seekable
 from s3transfer.constants import FULL_OBJECT_CHECKSUM_ARGS
+from s3transfer.exceptions import FileModifiedDuringTransferError
 from s3transfer.futures import IN_MEMORY_UPLOAD_TAG
 from s3transfer.tasks import (
     CompleteMultipartUploadTask,
@@ -107,6 +109,123 @@ class InterruptReader:
         self.close()
 
 
+class FileStabilityChecker:
+    """Detects modifications to an upload source while it is transferred
+
+    A fingerprint of the source's on-disk metadata (device, inode, size,
+    and modification time) is captured when the checker is created. Each
+    call to ``validate()`` re-fingerprints the source and raises a
+    ``FileModifiedDuringTransferError`` if another process replaced,
+    truncated, removed, or otherwise modified it in the meantime.
+    """
+
+    def __init__(self, stat_callable, description):
+        self._stat_callable = stat_callable
+        self._description = description
+        self._fingerprint = self._take_fingerprint()
+
+    @classmethod
+    def for_source(cls, upload_source):
+        """Builds a checker for an upload source if it can be monitored
+
+        :param upload_source: The source of an upload, either a filename
+            or a file-like object.
+
+        :returns: A FileStabilityChecker for the source, or None if the
+            source has no on-disk identity that can be monitored (e.g. an
+            in-memory or streaming object).
+        """
+        if isinstance(upload_source, str):
+            return cls(lambda: os.stat(upload_source), repr(upload_source))
+        name = getattr(upload_source, 'name', None)
+        if isinstance(name, str) and os.path.isfile(name):
+            return cls(lambda: os.stat(name), repr(name))
+        fileno = getattr(upload_source, 'fileno', None)
+        if fileno is not None:
+            try:
+                fd = fileno()
+            except (OSError, ValueError):
+                return None
+            if isinstance(fd, int):
+                return cls(lambda: os.fstat(fd), repr(upload_source))
+        return None
+
+    def validate(self):
+        """Validates that the source has not changed since the snapshot
+
+        :raises FileModifiedDuringTransferError: If the source was
+            replaced, truncated, removed, or otherwise modified since the
+            checker was created.
+        """
+        try:
+            current_fingerprint = self._take_fingerprint()
+        except OSError:
+            raise FileModifiedDuringTransferError(
+                f'The upload source {self._description} was removed or '
+                'became unreadable while the transfer was in progress. '
+                'Aborting the transfer to avoid uploading inconsistent '
+                'data.'
+            )
+        if current_fingerprint != self._fingerprint:
+            raise FileModifiedDuringTransferError(
+                f'The upload source {self._description} was replaced, '
+                'truncated, or otherwise modified while the transfer was '
+                'in progress. Aborting the transfer to avoid uploading '
+                'inconsistent data.'
+            )
+
+    def _take_fingerprint(self):
+        stat_result = self._stat_callable()
+        return (
+            stat_result.st_dev,
+            stat_result.st_ino,
+            stat_result.st_size,
+            stat_result.st_mtime_ns,
+        )
+
+
+class StableInputReader:
+    """Wrapper that fails reads if the source changes mid-transfer
+
+    It uses a file stability checker to raise an error if the underlying
+    source is replaced, truncated, or otherwise modified by another
+    process while it is being read from.
+
+    :type fileobj: file-like obj
+    :param fileobj: The file-like object to read from
+
+    :type stability_checker: FileStabilityChecker
+    :param stability_checker: The checker used to validate that the
+        source remains stable while it is being read.
+    """
+
+    def __init__(self, fileobj, stability_checker):
+        self._fileobj = fileobj
+        self._stability_checker = stability_checker
+
+    def read(self, amount=None):
+        self._stability_checker.validate()
+        return self._fileobj.read(amount)
+
+    def seek(self, where, whence=0):
+        self._fileobj.seek(where, whence)
+
+    def tell(self):
+        return self._fileobj.tell()
+
+    def close(self):
+        try:
+            self._stability_checker.validate()
+        finally:
+            self._fileobj.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args, **kwargs):
+        self.close()
+
+
 class UploadInputManager:
     """Base manager class for handling various types of files for uploads
 
@@ -123,10 +242,18 @@ class UploadInputManager:
     public methods from this class.
     """
 
-    def __init__(self, osutil, transfer_coordinator, bandwidth_limiter=None):
+    def __init__(
+        self,
+        osutil,
+        transfer_coordinator,
+        bandwidth_limiter=None,
+        enforce_stable_input=False,
+    ):
         self._osutil = osutil
         self._transfer_coordinator = transfer_coordinator
         self._bandwidth_limiter = bandwidth_limiter
+        self._enforce_stable_input = enforce_stable_input
+        self._stability_checker = None
 
     @classmethod
     def is_compatible(cls, upload_source):
@@ -217,6 +344,23 @@ class UploadInputManager:
             )
         return fileobj
 
+    def _wrap_stable_input(self, fileobj, upload_source):
+        """Wraps fileobj to enforce the source stays stable while read
+
+        The base implementation is a no-op because not all input types
+        have an on-disk identity that can be monitored for changes.
+        """
+        return fileobj
+
+    def _get_stability_checker(self, upload_source):
+        if not self._enforce_stable_input:
+            return None
+        if self._stability_checker is None:
+            self._stability_checker = FileStabilityChecker.for_source(
+                upload_source
+            )
+        return self._stability_checker
+
     def _get_progress_callbacks(self, transfer_future):
         callbacks = get_callbacks(transfer_future, 'progress')
         # We only want to be wrapping the callbacks if there are callbacks to
@@ -259,6 +403,12 @@ class UploadFilenameInputManager(UploadInputManager):
         # to completely read all of the data.
         fileobj = self._wrap_fileobj(fileobj)
 
+        # Wrap fileobj to fail the upload if the source changes while
+        # it is being read.
+        fileobj = self._wrap_stable_input(
+            fileobj, transfer_future.meta.call_args.fileobj
+        )
+
         callbacks = self._get_progress_callbacks(transfer_future)
         close_callbacks = self._get_close_callbacks(callbacks)
         size = transfer_future.meta.size
@@ -293,6 +443,12 @@ class UploadFilenameInputManager(UploadInputManager):
             # to completely read all of the data.
             fileobj = self._wrap_fileobj(fileobj)
 
+            # Wrap fileobj to fail the upload if the source changes while
+            # it is being read.
+            fileobj = self._wrap_stable_input(
+                fileobj, transfer_future.meta.call_args.fileobj
+            )
+
             # Wrap the file-like object into a ReadFileChunk to get progress.
             read_file_chunk = self._osutil.open_file_chunk_reader_from_fileobj(
                 fileobj=fileobj,
@@ -318,6 +474,12 @@ class UploadFilenameInputManager(UploadInputManager):
         start_byte = kwargs['start_byte']
         full_size = kwargs['full_file_size']
         return self._get_deferred_open_file(fileobj, start_byte), full_size
+
+    def _wrap_stable_input(self, fileobj, upload_source):
+        checker = self._get_stability_checker(upload_source)
+        if checker is None:
+            return fileobj
+        return StableInputReader(fileobj, checker)
 
     def _get_num_parts(self, transfer_future, part_size):
         return int(math.ceil(transfer_future.meta.size / float(part_size)))
@@ -356,7 +518,12 @@ class UploadSeekableInputManager(UploadFilenameInputManager):
         # points to the same OS filehandle which causes concurrency
         # issues). So instead we need to read from the fileobj and
         # chunk the data out to separate file-like objects in memory.
+        checker = self._get_stability_checker(fileobj)
+        if checker is not None:
+            checker.validate()
         data = fileobj.read(kwargs['part_size'])
+        if checker is not None:
+            checker.validate()
         # We return the length of the data instead of the full_file_size
         # because we partitioned the data into separate BytesIO objects
         # meaning the BytesIO object has no knowledge of its start position
@@ -375,8 +542,19 @@ class UploadSeekableInputManager(UploadFilenameInputManager):
 class UploadNonSeekableInputManager(UploadInputManager):
     """Upload utility for a file-like object that cannot seek."""
 
-    def __init__(self, osutil, transfer_coordinator, bandwidth_limiter=None):
-        super().__init__(osutil, transfer_coordinator, bandwidth_limiter)
+    def __init__(
+        self,
+        osutil,
+        transfer_coordinator,
+        bandwidth_limiter=None,
+        enforce_stable_input=False,
+    ):
+        super().__init__(
+            osutil,
+            transfer_coordinator,
+            bandwidth_limiter,
+            enforce_stable_input,
+        )
         self._initial_data = b''
 
     @classmethod
@@ -589,7 +767,14 @@ class UploadSubmissionTask(SubmissionTask):
         """
         upload_input_manager = self._get_upload_input_manager_cls(
             transfer_future
-        )(osutil, self._transfer_coordinator, bandwidth_limiter)
+        )(
+            osutil,
+            self._transfer_coordinator,
+            bandwidth_limiter,
+            enforce_stable_input=getattr(
+                config, 'enforce_stable_input', False
+            ),
+        )
 
         # Determine the size if it was not provided
         if transfer_future.meta.size is None:

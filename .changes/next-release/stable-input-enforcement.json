@@ -1,0 +1,5 @@
+{
+  "category": "Uploads",
+  "description": "Add the ``enforce_stable_input`` option to ``TransferConfig``. When enabled, an upload fails with a ``FileModifiedDuringTransferError`` if its source file is replaced, truncated, or removed by another process while the upload is in progress.",
+  "type": "feature"
+}

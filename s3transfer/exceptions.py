@@ -23,6 +23,12 @@ class S3UploadFailedError(Exception):
     pass
 
 
+class FileModifiedDuringTransferError(Exception):
+    """Raised when an upload source changes while being transferred"""
+
+    pass
+
+
 class S3DownloadFailedError(Exception):
     pass
 

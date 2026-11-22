@@ -19,12 +19,15 @@ from io import BytesIO
 
 from botocore.stub import ANY
 
+from s3transfer.exceptions import FileModifiedDuringTransferError
 from s3transfer.futures import IN_MEMORY_UPLOAD_TAG
 from s3transfer.manager import TransferConfig
 from s3transfer.upload import (
     AggregatedProgressCallback,
+    FileStabilityChecker,
     InterruptReader,
     PutObjectTask,
+    StableInputReader,
     UploadFilenameInputManager,
     UploadNonSeekableInputManager,
     UploadPartTask,
@@ -692,3 +695,90 @@ class TestUploadPartTask(BaseUploadTest):
             self.stubber.assert_no_pending_responses()
             self.assertEqual(rval, {'ETag': etag, 'PartNumber': part_number})
             self.assertEqual(self.sent_bodies, [self.content])
+
+
+class TestFileStabilityChecker(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.mkdtemp()
+        self.filename = os.path.join(self.tempdir, 'myfile')
+        with open(self.filename, 'wb') as f:
+            f.write(b'my content')
+
+    def tearDown(self):
+        shutil.rmtree(self.tempdir)
+
+    def test_validate_passes_when_file_unchanged(self):
+        checker = FileStabilityChecker.for_source(self.filename)
+        checker.validate()
+
+    def test_validate_raises_when_file_truncated(self):
+        checker = FileStabilityChecker.for_source(self.filename)
+        with open(self.filename, 'wb') as f:
+            f.write(b'x')
+        with self.assertRaises(FileModifiedDuringTransferError):
+            checker.validate()
+
+    def test_validate_raises_when_file_replaced(self):
+        checker = FileStabilityChecker.for_source(self.filename)
+        replacement = os.path.join(self.tempdir, 'replacement')
+        with open(replacement, 'wb') as f:
+            f.write(b'my content')
+        os.replace(replacement, self.filename)
+        with self.assertRaises(FileModifiedDuringTransferError):
+            checker.validate()
+
+    def test_validate_raises_when_file_removed(self):
+        checker = FileStabilityChecker.for_source(self.filename)
+        os.remove(self.filename)
+        with self.assertRaises(FileModifiedDuringTransferError):
+            checker.validate()
+
+    def test_for_source_monitors_fileobj_by_name(self):
+        with open(self.filename, 'rb') as fileobj:
+            checker = FileStabilityChecker.for_source(fileobj)
+            self.assertIsNotNone(checker)
+            with open(self.filename, 'wb') as f:
+                f.write(b'x')
+            with self.assertRaises(FileModifiedDuringTransferError):
+                checker.validate()
+
+    def test_for_source_returns_none_for_in_memory_fileobj(self):
+        self.assertIsNone(FileStabilityChecker.for_source(BytesIO(b'data')))
+
+
+class TestStableInputReader(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.mkdtemp()
+        self.filename = os.path.join(self.tempdir, 'myfile')
+        with open(self.filename, 'wb') as f:
+            f.write(b'my content')
+
+    def tearDown(self):
+        shutil.rmtree(self.tempdir)
+
+    def test_reads_pass_when_file_is_stable(self):
+        checker = FileStabilityChecker.for_source(self.filename)
+        with open(self.filename, 'rb') as fileobj:
+            reader = StableInputReader(fileobj, checker)
+            self.assertEqual(reader.read(), b'my content')
+            reader.close()
+
+    def test_read_raises_after_file_modified(self):
+        checker = FileStabilityChecker.for_source(self.filename)
+        with open(self.filename, 'rb') as fileobj:
+            reader = StableInputReader(fileobj, checker)
+            self.assertEqual(reader.read(2), b'my')
+            with open(self.filename, 'wb') as f:
+                f.write(b'x')
+            with self.assertRaises(FileModifiedDuringTransferError):
+                reader.read(2)
+
+    def test_close_raises_after_file_modified(self):
+        checker = FileStabilityChecker.for_source(self.filename)
+        with open(self.filename, 'rb') as fileobj:
+            reader = StableInputReader(fileobj, checker)
+            reader.read()
+            with open(self.filename, 'wb') as f:
+                f.write(b'x')
+            with self.assertRaises(FileModifiedDuringTransferError):
+                reader.close()
