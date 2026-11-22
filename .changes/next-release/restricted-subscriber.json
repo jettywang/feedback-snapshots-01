@@ -1,0 +1,5 @@
+{
+  "category": "subscribers",
+  "description": "Add ``RestrictedSubscriber`` for recipients such as shared monitoring pipelines. It forwards only an allow listed view of a transfer (transfer id, size, progress, and sanitized final status) so tenant specific bucket names, keys, and request parameters never leave the business process, while failures raised by the monitoring recipient are isolated from the transfer.",
+  "type": "feature"
+}

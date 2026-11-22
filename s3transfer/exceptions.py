@@ -35,6 +35,20 @@ class InvalidSubscriberMethodError(Exception):
     pass
 
 
+class RestrictedTransferError(Exception):
+    """A failure exposed through a restricted subscription interface
+
+    The original failure raised by a transfer can include tenant specific
+    details such as the bucket, key, or request parameters. Those details are
+    intentionally withheld from this error so it is safe to hand to a
+    recipient that is only authorized to see transfer status. The original,
+    unsanitized exception remains available through the business facing
+    ``TransferFuture.result()``.
+    """
+
+    pass
+
+
 class TransferNotDoneError(Exception):
     pass
 
