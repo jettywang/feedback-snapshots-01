@@ -660,6 +660,110 @@ describe "hmac_paths plugin" do
     status(path).must_equal 404
   end
 
+  it "plugin requires revoked argument be callable if given" do
+    proc{app.plugin :hmac_paths, secret: '1'*32, revoked: 1}.must_raise Roda::RodaError
+    proc{app.plugin :hmac_paths, secret: '1'*32, revoked: '1'}.must_raise Roda::RodaError
+  end
+
+  it "hmac_path revocable argument requires a namespace" do
+    app(:bare) do
+      plugin :hmac_paths, secret: '1'*32, revoked: ->(ns){false}
+      route{|r| hmac_path('/1', revocable: true)}
+    end
+    proc{body}.must_raise Roda::RodaError
+  end
+
+  it "hmac_path revocable argument requires the plugin be configured with a revoked callable" do
+    hmac_paths_app{|r| hmac_path('/1', namespace: '1', revocable: true)}
+    proc{body}.must_raise Roda::RodaError
+  end
+
+  it "hmac_path sets r flag for revocable argument and HMAC depends on it" do
+    app(:bare) do
+      plugin :hmac_paths, secret: '1'*32, revoked: ->(ns){false}
+      route do |r|
+        r.get('a'){hmac_path('/1', namespace: '1')}
+        hmac_path('/1', namespace: '1', revocable: true)
+      end
+    end
+    body.must_equal "/14888a8574caae3e2195c6a476f2b84ec37c015d16b1a5de5f1b4e66ae72326a/nr/1"
+    body('/a').must_equal "/4ac78addcebf8b8e00c901e127934c6e4dd4ac0b76dcc9d837099bea01afd777/n/1"
+  end
+
+  it "r.hmac_path raises for path with r flag if plugin is not configured with a revoked callable" do
+    app(:bare) do
+      plugin :hmac_paths, secret: '1'*32, revoked: ->(ns){false}
+      route do |r|
+        r.get('path'){hmac_path('/1', namespace: '1', revocable: true)}
+        r.hmac_path(namespace: '1'){r.remaining_path}
+      end
+    end
+    path = body('/path')
+    app.plugin :hmac_paths, secret: '1'*32
+    proc{body(path)}.must_raise Roda::RodaError
+  end
+
+  it "r.hmac_path supports revocation by namespace for revocable paths, without affecting other namespaces or non-revocable paths" do
+    revoked = {}
+    app(:bare) do
+      plugin :hmac_paths, secret: '1'*32, revoked: ->(ns){revoked[ns]}
+
+      route do |r|
+        r.get 'path', String, String do |ns, id|
+          hmac_path("/#{id}", namespace: ns, revocable: true)
+        end
+
+        r.get 'nested', String, String do |ns, id|
+          hmac_path("/#{id}", root: '/report', namespace: ns, revocable: true)
+        end
+
+        r.get 'legacy', String, String do |ns, id|
+          hmac_path("/#{id}", namespace: ns, valid_until: Time.now.to_i + 3600)
+        end
+
+        r.get 'expired', String, String do |ns, id|
+          hmac_path("/#{id}", namespace: ns, valid_until: 3)
+        end
+
+        r.on 'report' do
+          r.hmac_path(namespace: r.GET['ns']){r.remaining_path}
+        end
+
+        r.hmac_path(namespace: r.GET['ns']){r.remaining_path}
+      end
+    end
+
+    path1 = body('/path/1/1')
+    path2 = body('/path/2/1')
+    nested1 = body('/nested/1/1')
+    nested2 = body('/nested/2/1')
+    legacy1 = body('/legacy/1/1')
+    expired1 = body('/expired/1/1')
+
+    # Both projects' links work before revocation, at both the root and nested r.hmac_path calls
+    body(path1, 'QUERY_STRING'=>'ns=1').must_equal '/1'
+    body(path2, 'QUERY_STRING'=>'ns=2').must_equal '/1'
+    body(nested1, 'QUERY_STRING'=>'ns=1').must_equal '/1'
+    body(nested2, 'QUERY_STRING'=>'ns=2').must_equal '/1'
+    body(legacy1, 'QUERY_STRING'=>'ns=1').must_equal '/1'
+    status(expired1, 'QUERY_STRING'=>'ns=1').must_equal 404
+
+    # Revoke project 1
+    revoked['1'] = true
+
+    # Revoked project's revocable links no longer match, at both the root and nested r.hmac_path calls
+    status(path1, 'QUERY_STRING'=>'ns=1').must_equal 404
+    status(nested1, 'QUERY_STRING'=>'ns=1').must_equal 404
+
+    # Other project's links are unaffected
+    body(path2, 'QUERY_STRING'=>'ns=2').must_equal '/1'
+    body(nested2, 'QUERY_STRING'=>'ns=2').must_equal '/1'
+
+    # Non-revocable links for the revoked project remain valid until their explicit deadline
+    body(legacy1, 'QUERY_STRING'=>'ns=1').must_equal '/1'
+    status(expired1, 'QUERY_STRING'=>'ns=1').must_equal 404
+  end
+
   it "example code in documation is accurate" do
     app(:bare) do
       plugin :hmac_paths, secret: 'some-secret-value-with-at-least-32-bytes'
