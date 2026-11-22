@@ -138,6 +138,30 @@ django-sesame also provides a low-level utility function for validating tokens.
 
 .. autofunction:: sesame.utils.get_user
 
+Action-scoped capabilities
+..........................
+
+.. versionadded:: 3.3
+
+These APIs provide a verification contract that authorizes a single named
+action without creating a session or running login hooks. See
+:ref:`Action-scoped capabilities`.
+
+.. autoclass:: sesame.capabilities.Capability
+    :members:
+
+.. autodata:: sesame.capabilities.CAPABILITY_ATTRIBUTE
+
+.. autofunction:: sesame.capabilities.require_capability
+
+.. autofunction:: sesame.capabilities.get_capability
+
+.. autofunction:: sesame.capabilities.get_capability_token
+
+.. autofunction:: sesame.capabilities.get_capability_parameters
+
+.. autofunction:: sesame.capabilities.get_capability_query_string
+
 Token customization
 -------------------
 

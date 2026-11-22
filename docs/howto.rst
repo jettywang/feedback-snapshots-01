@@ -371,3 +371,88 @@ This view can be implemented more concisely, albeit more magically, as follows:
     :class: warning
 
     It only accepts tokens generated with the default scope.
+
+Action-scoped capabilities
+--------------------------
+
+.. versionadded:: 3.3
+
+Sometimes a magic link must let a user perform *one* action — for example, open
+a quote received by email — without giving them a complete, site-wide session.
+
+A :class:`~sesame.capabilities.Capability` makes that contract explicit. It
+binds a token to a named ``action`` and provides matching APIs on both sides:
+
+* the contract mints a token that is valid only for that action;
+* a view decorator only accepts such a token.
+
+Unlike :class:`~sesame.views.LoginView` or
+:class:`~sesame.middleware.AuthenticationMiddleware`, enforcing a capability
+never calls :func:`~django.contrib.auth.login`:
+
+* no session is created, so the next request to another page is anonymous;
+* Django's ``user_logged_in`` signal is never sent, so ordinary login hooks
+  don't run.
+
+Start by defining the contract for an action:
+
+.. code-block:: python
+
+    from sesame.capabilities import Capability
+
+    view_quote = Capability("quote:view")
+
+Mint a one-action link with the contract and add it to the target URL:
+
+.. code-block:: python
+
+    url = "https://example.com/quote/view/" + view_quote.mint_query_string(user)
+
+Then protect the business route with the same contract:
+
+.. code-block:: python
+
+    from django.http import HttpResponse
+
+    @view_quote.require
+    def view_quote_view(request):
+        return HttpResponse(f"Here is your quote, {request.user}!")
+
+A token minted for another action, a token with the default scope, or no token
+at all results in an HTTP 403 Forbidden response without creating a session.
+
+After a successful authentication, the view can state the capability that was
+granted for the current request with
+:func:`~sesame.capabilities.get_capability`:
+
+.. code-block:: python
+
+    from sesame.capabilities import get_capability
+
+    @view_quote.require
+    def view_quote_view(request):
+        assert get_capability(request) == "quote:view"
+        ...
+
+The action may contain ``str.format`` placeholders, interpolated from the
+view's positional and keyword arguments. This is useful when the action
+depends on a resource identifier:
+
+.. code-block:: python
+
+    from sesame.capabilities import require_capability
+
+    @require_capability("quote:confirm:{quote_id}")
+    def confirm_quote(request, quote_id):
+        ...
+
+A token generated for ``"quote:confirm:66"`` is only accepted on the route for
+quote 66, not on the route for quote 67.
+
+.. admonition:: Capabilities are built on top of :ref:`scoped tokens <Scoped
+        tokens>` and provide a higher-level, session-free verification contract.
+    :class: tip
+
+    Use a capability when the link must authorize a single action without
+    logging the user in. Use :class:`~sesame.views.LoginView` or the
+    :ref:`middleware <Site-wide>` when the goal is a full, persistent login.

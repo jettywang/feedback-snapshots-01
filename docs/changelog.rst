@@ -1,6 +1,16 @@
 Changelog
 =========
 
+3.3
+---
+
+* Added action-scoped capabilities with the
+  :mod:`sesame.capabilities` module. A
+  :class:`~sesame.capabilities.Capability` defines an explicit verification
+  contract that authorizes a single named action without creating a session or
+  sending the ``user_logged_in`` signal. The capability granted for a request
+  is available through :func:`~sesame.capabilities.get_capability`.
+
 3.2
 ---
 
