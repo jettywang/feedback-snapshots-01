@@ -1,0 +1,5 @@
+{
+  "category": "TransferManager",
+  "description": "Add a transfer-manager level disk reservation limit (`max_disk_reservation_bytes`) that caps the temporary disk space reserved by concurrent filename downloads; callers can choose to wait for budget or fail fast with `disk_reservation_blocking`, and in-memory destinations are excluded from the budget.",
+  "type": "feature"
+}

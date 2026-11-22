@@ -21,6 +21,7 @@ import pytest
 
 from s3transfer.bandwidth import BandwidthLimiter
 from s3transfer.compat import SOCKET_ERROR
+from s3transfer.diskio import DiskReservationManager
 from s3transfer.download import (
     CompleteDownloadNOOPTask,
     DeferQueue,
@@ -38,7 +39,10 @@ from s3transfer.download import (
     IOStreamingWriteTask,
     IOWriteTask,
 )
-from s3transfer.exceptions import RetriesExceededError
+from s3transfer.exceptions import (
+    DiskReservationLimitExceededError,
+    RetriesExceededError,
+)
 from s3transfer.futures import IN_MEMORY_DOWNLOAD_TAG, BoundedExecutor
 from s3transfer.utils import CallArgs, OSUtils
 from tests import (
@@ -190,6 +194,113 @@ class TestDownloadFilenameOutputManager(BaseDownloadOutputManagerTest):
 
         io_write_task()
         self.assertEqual(fileobj.writes, [(3, 'foo')])
+
+
+class TestDownloadFilenameOutputManagerDiskReservation(
+    BaseDownloadOutputManagerTest
+):
+    def setUp(self):
+        super().setUp()
+        self.size = 100
+        self.reservation_manager = DiskReservationManager(self.size)
+        self.download_output_manager = DownloadFilenameOutputManager(
+            self.osutil,
+            self.transfer_coordinator,
+            io_executor=self.io_executor,
+            disk_reservation_manager=self.reservation_manager,
+        )
+        self.future.meta.provide_transfer_size(self.size)
+
+    def _temp_filename(self):
+        return self.download_output_manager.get_fileobj_for_io_writes(
+            self.future
+        ).name
+
+    def test_reserves_and_physically_allocates_before_io(self):
+        temp_filename = self._temp_filename()
+        self.download_output_manager.prepare_for_size(self.future)
+
+        self.assertEqual(self.reservation_manager.reserved_bytes, self.size)
+        self.assertTrue(os.path.exists(temp_filename))
+        self.assertEqual(os.path.getsize(temp_filename), self.size)
+
+    def test_done_callback_releases_reservation(self):
+        self._temp_filename()
+        self.download_output_manager.prepare_for_size(self.future)
+        self.assertEqual(self.reservation_manager.reserved_bytes, self.size)
+
+        self.transfer_coordinator.announce_done()
+        self.assertEqual(self.reservation_manager.reserved_bytes, 0)
+
+    def test_allocation_failure_releases_reservation(self):
+        self._temp_filename()
+        with mock.patch.object(
+            self.osutil, 'allocate', side_effect=OSError('no space')
+        ):
+            with self.assertRaises(OSError):
+                self.download_output_manager.prepare_for_size(self.future)
+
+        self.assertEqual(self.reservation_manager.reserved_bytes, 0)
+
+    def test_nonblocking_raises_when_budget_unavailable(self):
+        manager = DownloadFilenameOutputManager(
+            self.osutil,
+            self.transfer_coordinator,
+            io_executor=self.io_executor,
+            disk_reservation_manager=self.reservation_manager,
+            disk_reservation_blocking=False,
+        )
+        # Exhaust the budget from outside the download.
+        self.reservation_manager.reserve(self.size)
+        manager.get_fileobj_for_io_writes(self.future)
+
+        with self.assertRaises(DiskReservationLimitExceededError):
+            manager.prepare_for_size(self.future)
+        self.assertEqual(self.reservation_manager.reserved_bytes, self.size)
+
+    def test_prepare_is_idempotent(self):
+        self._temp_filename()
+        self.download_output_manager.prepare_for_size(self.future)
+        # A second call must not reserve again or re-allocate.
+        with mock.patch.object(self.osutil, 'allocate') as allocate:
+            self.download_output_manager.prepare_for_size(self.future)
+            self.assertEqual(allocate.call_count, 0)
+        self.assertEqual(self.reservation_manager.reserved_bytes, self.size)
+
+    def test_no_reservation_without_manager(self):
+        manager = DownloadFilenameOutputManager(
+            self.osutil,
+            self.transfer_coordinator,
+            io_executor=self.io_executor,
+        )
+        manager.get_fileobj_for_io_writes(self.future)
+        manager.prepare_for_size(self.future)
+        # Nothing to assert on a manager-less download beyond it not raising;
+        # the temp file is created lazily only when IO actually opens it.
+        self.assertIsNone(manager._disk_reservation)
+
+    def test_no_reservation_when_size_unknown(self):
+        future = self.get_transfer_future(CallArgs(fileobj=self.filename))
+        manager = DownloadFilenameOutputManager(
+            self.osutil,
+            self.transfer_coordinator,
+            io_executor=self.io_executor,
+            disk_reservation_manager=self.reservation_manager,
+        )
+        manager.get_fileobj_for_io_writes(future)
+        manager.prepare_for_size(future)
+        self.assertEqual(self.reservation_manager.reserved_bytes, 0)
+
+    def test_allocate_skipped_when_requested(self):
+        temp_filename = self._temp_filename()
+        with mock.patch.object(self.osutil, 'allocate') as allocate:
+            self.download_output_manager.prepare_for_size(
+                self.future, allocate=False
+            )
+            self.assertEqual(allocate.call_count, 0)
+        # The budget is still reserved even though the file is not allocated.
+        self.assertEqual(self.reservation_manager.reserved_bytes, self.size)
+        self.assertFalse(os.path.exists(temp_filename))
 
 
 class TestDownloadSpecialFilenameOutputManager(BaseDownloadOutputManagerTest):

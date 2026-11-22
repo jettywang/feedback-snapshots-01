@@ -24,6 +24,7 @@ from s3transfer.constants import (
 )
 from s3transfer.copies import CopySubmissionTask
 from s3transfer.delete import DeleteSubmissionTask
+from s3transfer.diskio import DiskReservationManager
 from s3transfer.download import DownloadSubmissionTask
 from s3transfer.exceptions import CancelledError, FatalError
 from s3transfer.futures import (
@@ -66,6 +67,8 @@ class TransferConfig:
         max_in_memory_upload_chunks=10,
         max_in_memory_download_chunks=10,
         max_bandwidth=None,
+        max_disk_reservation_bytes=None,
+        disk_reservation_blocking=True,
     ):
         """Configurations for the transfer manager
 
@@ -137,6 +140,25 @@ class TransferConfig:
         :param max_bandwidth: The maximum bandwidth that will be consumed
             in uploading and downloading file content. The value is in terms of
             bytes per second.
+
+        :param max_disk_reservation_bytes: The maximum number of bytes of
+            temporary disk space that downloads writing to filenames may have
+            reserved at any given point in time across the entire transfer
+            manager. When set, each filename download reserves the object's
+            full size before its temporary file is allocated and releases the
+            reservation as soon as the transfer reaches a terminal state.
+            Downloads targeting in-memory file-like objects do not consume
+            any of this budget. When ``None`` (the default) no disk
+            reservation limit is enforced.
+
+        :param disk_reservation_blocking: Controls what happens when a
+            download needs more disk reservation bytes than are available.
+            When True (the default) the download waits until enough budget is
+            released by completing transfers, and aborts the wait if the
+            transfer is cancelled. When False the download fails fast with a
+            :class:`s3transfer.exceptions.DiskReservationLimitExceededError`
+            instead of waiting. Has no effect when
+            ``max_disk_reservation_bytes`` is not set.
         """
         self.multipart_threshold = multipart_threshold
         self.multipart_chunksize = multipart_chunksize
@@ -150,6 +172,8 @@ class TransferConfig:
         self.max_in_memory_upload_chunks = max_in_memory_upload_chunks
         self.max_in_memory_download_chunks = max_in_memory_download_chunks
         self.max_bandwidth = max_bandwidth
+        self.max_disk_reservation_bytes = max_disk_reservation_bytes
+        self.disk_reservation_blocking = disk_reservation_blocking
         self._validate_attrs_are_nonzero()
 
     def _validate_attrs_are_nonzero(self):
@@ -157,6 +181,7 @@ class TransferConfig:
             if (
                 attr_val is not None
                 and attr_val is not self.UNSET_DEFAULT
+                and attr != 'disk_reservation_blocking'
                 and attr_val <= 0
             ):
                 raise ValueError(
@@ -239,7 +264,14 @@ class TransferManager:
         ),
     }
 
-    def __init__(self, client, config=None, osutil=None, executor_cls=None):
+    def __init__(
+        self,
+        client,
+        config=None,
+        osutil=None,
+        executor_cls=None,
+        disk_reservation_manager=None,
+    ):
         """A transfer manager interface for Amazon S3
 
         :param client: Client to be used by the manager
@@ -250,6 +282,14 @@ class TransferManager:
         :type executor_cls: s3transfer.futures.BaseExecutor
         :param executor_cls: The class of executor to use with the transfer
             manager. By default, concurrent.futures.ThreadPoolExecutor is used.
+
+        :type disk_reservation_manager: s3transfer.diskio.DiskReservationManager
+        :param disk_reservation_manager: A shared disk reservation manager
+            used to cap the amount of temporary disk space reserved by
+            filename downloads. When provided it takes precedence over
+            ``config.max_disk_reservation_bytes``. When not provided and the
+            config sets a limit, a manager is created for the configured
+            limit.
         """
         self._client = client
         self._config = config
@@ -261,6 +301,19 @@ class TransferManager:
         self._coordinator_controller = TransferCoordinatorController()
         # A counter to create unique id's for each transfer submitted.
         self._id_counter = 0
+
+        # The component responsible for keeping the aggregate temporary disk
+        # space reserved by filename downloads within a configured budget. It
+        # is only created when a limit has been configured or a manager was
+        # injected; otherwise filename downloads are not disk-budgeted.
+        self._disk_reservation_manager = disk_reservation_manager
+        if (
+            self._disk_reservation_manager is None
+            and self._config.max_disk_reservation_bytes is not None
+        ):
+            self._disk_reservation_manager = DiskReservationManager(
+                self._config.max_disk_reservation_bytes
+            )
 
         # The executor responsible for making S3 API transfer requests
         self._request_executor = BoundedExecutor(
@@ -312,6 +365,11 @@ class TransferManager:
     @property
     def config(self):
         return self._config
+
+    @property
+    def disk_reservation_manager(self):
+        """The disk reservation manager in use, or None if unconfigured."""
+        return self._disk_reservation_manager
 
     def upload(self, fileobj, bucket, key, extra_args=None, subscribers=None):
         """Uploads a file to S3
@@ -404,6 +462,13 @@ class TransferManager:
         extra_main_kwargs = {'io_executor': self._io_executor}
         if self._bandwidth_limiter:
             extra_main_kwargs['bandwidth_limiter'] = self._bandwidth_limiter
+        if self._disk_reservation_manager is not None:
+            extra_main_kwargs['disk_reservation_manager'] = (
+                self._disk_reservation_manager
+            )
+            extra_main_kwargs['disk_reservation_blocking'] = (
+                self._config.disk_reservation_blocking
+            )
         return self._submit_transfer(
             call_args, DownloadSubmissionTask, extra_main_kwargs
         )

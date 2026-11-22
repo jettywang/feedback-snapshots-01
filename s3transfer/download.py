@@ -53,10 +53,19 @@ class DownloadOutputManager:
     public methods from this class.
     """
 
-    def __init__(self, osutil, transfer_coordinator, io_executor):
+    def __init__(
+        self,
+        osutil,
+        transfer_coordinator,
+        io_executor,
+        disk_reservation_manager=None,
+        disk_reservation_blocking=True,
+    ):
         self._osutil = osutil
         self._transfer_coordinator = transfer_coordinator
         self._io_executor = io_executor
+        self._disk_reservation_manager = disk_reservation_manager
+        self._disk_reservation_blocking = disk_reservation_blocking
 
     @classmethod
     def is_compatible(cls, download_target, osutil):
@@ -71,6 +80,26 @@ class DownloadOutputManager:
             otherwise returns False.
         """
         raise NotImplementedError('must implement is_compatible()')
+
+    def prepare_for_size(self, transfer_future, allocate=True):
+        """Reserve disk budget once the download size is known.
+
+        Filename-backed downloads reserve their full expected size against the
+        shared :class:`s3transfer.diskio.DiskReservationManager` before any
+        temporary file space is consumed. In-memory output managers have no
+        disk footprint so the base implementation is a no-op, which keeps
+        memory destinations completely independent of the disk budget.
+
+        :type transfer_future: s3transfer.futures.TransferFuture
+        :param transfer_future: The future associated with the download. Its
+            size must already be known.
+
+        :type allocate: boolean
+        :param allocate: When True, also physically pre-allocate the
+            temporary file. This is skipped on the HEAD-less download path
+            where the first chunk may already have opened the file.
+        """
+        return
 
     def get_download_task_tag(self):
         """Get the tag (if any) to associate all GetObjectTasks
@@ -153,22 +182,83 @@ class DownloadOutputManager:
 
 
 class DownloadFilenameOutputManager(DownloadOutputManager):
-    def __init__(self, osutil, transfer_coordinator, io_executor):
-        super().__init__(osutil, transfer_coordinator, io_executor)
+    def __init__(
+        self,
+        osutil,
+        transfer_coordinator,
+        io_executor,
+        disk_reservation_manager=None,
+        disk_reservation_blocking=True,
+    ):
+        super().__init__(
+            osutil,
+            transfer_coordinator,
+            io_executor,
+            disk_reservation_manager=disk_reservation_manager,
+            disk_reservation_blocking=disk_reservation_blocking,
+        )
         self._final_filename = None
         self._temp_filename = None
         self._temp_fileobj = None
+        self._disk_prepared = False
+        self._disk_reservation = None
 
     @classmethod
     def is_compatible(cls, download_target, osutil):
         return isinstance(download_target, str)
 
     def get_fileobj_for_io_writes(self, transfer_future):
+        self._ensure_temp_fileobj(transfer_future)
+        return self._temp_fileobj
+
+    def _ensure_temp_fileobj(self, transfer_future):
+        # Idempotent so the reservation step can establish the temporary
+        # filename before any GET runs without creating a second temp file.
+        if self._temp_fileobj is not None:
+            return
         fileobj = transfer_future.meta.call_args.fileobj
         self._final_filename = fileobj
         self._temp_filename = self._osutil.get_temp_filename(fileobj)
         self._temp_fileobj = self._get_temp_fileobj()
-        return self._temp_fileobj
+
+    def prepare_for_size(self, transfer_future, allocate=True):
+        # The size is only known after the HEAD (or the first GET). Reserving
+        # here keeps the operation idempotent so both code paths can call it.
+        if self._disk_prepared:
+            return
+        self._disk_prepared = True
+        size = transfer_future.meta.size
+        if size is None or self._disk_reservation_manager is None:
+            return
+        # Make sure the temporary filename exists so a physical pre-allocation
+        # has a target. This does not open the file yet.
+        self._ensure_temp_fileobj(transfer_future)
+        # Reserve the full expected download size before any temporary file
+        # space is consumed. A cancelled transfer unblocks this wait rather
+        # than holding a submission thread hostage.
+        self._disk_reservation = self._disk_reservation_manager.reserve(
+            size,
+            blocking=self._disk_reservation_blocking,
+            is_cancelled=self._transfer_coordinator.done,
+        )
+        # Release the budget as soon as the transfer reaches a terminal state
+        # so failed, cancelled and completed downloads all free their share
+        # promptly. Releasing twice (e.g. via a later explicit cleanup) is a
+        # no-op on the reservation handle.
+        self._transfer_coordinator.add_done_callback(self._release_reservation)
+        if allocate:
+            try:
+                self._osutil.allocate(self._temp_filename, size)
+            except Exception:
+                # Physical allocation failed (e.g. ENOSPC). The reserved
+                # budget was never turned into a file, so give it back
+                # immediately instead of waiting for the transfer to finish.
+                self._release_reservation()
+                raise
+
+    def _release_reservation(self):
+        if self._disk_reservation is not None:
+            self._disk_reservation.release()
 
     def get_final_io_task(self):
         # A task to rename the file from the temporary file to its final
@@ -193,6 +283,22 @@ class DownloadFilenameOutputManager(DownloadOutputManager):
 
 
 class DownloadSeekableOutputManager(DownloadOutputManager):
+    def __init__(
+        self,
+        osutil,
+        transfer_coordinator,
+        io_executor,
+        disk_reservation_manager=None,
+        disk_reservation_blocking=True,
+    ):
+        super().__init__(
+            osutil,
+            transfer_coordinator,
+            io_executor,
+            disk_reservation_manager=disk_reservation_manager,
+            disk_reservation_blocking=disk_reservation_blocking,
+        )
+
     @classmethod
     def is_compatible(cls, download_target, osutil):
         return seekable(download_target)
@@ -211,9 +317,21 @@ class DownloadSeekableOutputManager(DownloadOutputManager):
 
 class DownloadNonSeekableOutputManager(DownloadOutputManager):
     def __init__(
-        self, osutil, transfer_coordinator, io_executor, defer_queue=None
+        self,
+        osutil,
+        transfer_coordinator,
+        io_executor,
+        defer_queue=None,
+        disk_reservation_manager=None,
+        disk_reservation_blocking=True,
     ):
-        super().__init__(osutil, transfer_coordinator, io_executor)
+        super().__init__(
+            osutil,
+            transfer_coordinator,
+            io_executor,
+            disk_reservation_manager=disk_reservation_manager,
+            disk_reservation_blocking=disk_reservation_blocking,
+        )
         if defer_queue is None:
             defer_queue = DeferQueue()
         self._defer_queue = defer_queue
@@ -258,10 +376,21 @@ class DownloadNonSeekableOutputManager(DownloadOutputManager):
 
 class DownloadSpecialFilenameOutputManager(DownloadNonSeekableOutputManager):
     def __init__(
-        self, osutil, transfer_coordinator, io_executor, defer_queue=None
+        self,
+        osutil,
+        transfer_coordinator,
+        io_executor,
+        defer_queue=None,
+        disk_reservation_manager=None,
+        disk_reservation_blocking=True,
     ):
         super().__init__(
-            osutil, transfer_coordinator, io_executor, defer_queue
+            osutil,
+            transfer_coordinator,
+            io_executor,
+            defer_queue=defer_queue,
+            disk_reservation_manager=disk_reservation_manager,
+            disk_reservation_blocking=disk_reservation_blocking,
         )
         self._fileobj = None
 
@@ -325,6 +454,8 @@ class DownloadSubmissionTask(SubmissionTask):
         io_executor,
         transfer_future,
         bandwidth_limiter=None,
+        disk_reservation_manager=None,
+        disk_reservation_blocking=True,
     ):
         """
         :param client: The client associated with the transfer manager
@@ -351,10 +482,25 @@ class DownloadSubmissionTask(SubmissionTask):
         :type bandwidth_limiter: s3transfer.bandwidth.BandwidthLimiter
         :param bandwidth_limiter: The bandwidth limiter to use when
             downloading streams
+
+        :type disk_reservation_manager: s3transfer.diskio.DiskReservationManager
+        :param disk_reservation_manager: The shared manager used to reserve
+            temporary disk space for filename downloads. May be None when no
+            disk reservation limit is configured.
+
+        :type disk_reservation_blocking: boolean
+        :param disk_reservation_blocking: Whether filename downloads wait for
+            disk budget (True) or fail fast (False) when the limit is reached.
         """
         download_output_manager = self._get_download_output_manager_cls(
             transfer_future, osutil
-        )(osutil, self._transfer_coordinator, io_executor)
+        )(
+            osutil,
+            self._transfer_coordinator,
+            io_executor,
+            disk_reservation_manager=disk_reservation_manager,
+            disk_reservation_blocking=disk_reservation_blocking,
+        )
 
         # Skip the HEAD request only when the caller has explicitly opted out
         # of response checksum validation. Otherwise we need the HEAD to
@@ -389,6 +535,11 @@ class DownloadSubmissionTask(SubmissionTask):
             # Provide an etag to ensure a stored object is not modified
             # during a multipart download.
             transfer_future.meta.provide_object_etag(response.get('ETag'))
+
+        # Reserve the full expected size against the shared disk budget (and
+        # pre-allocate the temporary file) before submitting any GETs. No-op
+        # for in-memory destinations or when no limit is configured.
+        download_output_manager.prepare_for_size(transfer_future)
 
         # If it is greater than threshold do a ranged download, otherwise
         # do a regular GetObject download.
@@ -684,6 +835,13 @@ class GetObjectFirstChunkOnDoneCallback:
         size, etag = self._extract_metadata(response)
         self._transfer_future.meta.provide_transfer_size(size)
         self._transfer_future.meta.provide_object_etag(etag)
+
+        # The full size is only known now that the first GET returned.
+        # Reserve the budget without physically re-allocating because the
+        # first chunk may already have opened and truncated the temp file.
+        self._download_output_manager.prepare_for_size(
+            self._transfer_future, allocate=False
+        )
 
         if size == 0:
             # Queue an empty write through the io executor so the

@@ -47,3 +47,14 @@ class FatalError(CancelledError):
 
 class S3ValidationError(Exception):
     pass
+
+
+class DiskReservationLimitExceededError(Exception):
+    """Raised when a non-blocking disk reservation cannot be granted
+
+    The aggregate reserved disk usage of the transfer manager is already at
+    (or would exceed) its configured limit, and the caller asked the
+    reservation not to wait for space to become available.
+    """
+
+    pass
