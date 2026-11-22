@@ -7,7 +7,7 @@ import re
 import struct
 import time
 
-from . import packers, settings
+from . import diagnostics, packers, settings
 
 __all__ = ["create_token", "detect_token", "parse_token"]
 
@@ -161,6 +161,7 @@ def parse_token(token, get_user, scope="", max_age=None):
     try:
         data = base64.urlsafe_b64decode(token + b"=" * (-len(token) % 4))
     except Exception:
+        diagnostics.set_reason(diagnostics.INVALID_TOKEN)
         logger.debug("Bad token: cannot decode token")
         return None
 
@@ -169,16 +170,19 @@ def parse_token(token, get_user, scope="", max_age=None):
     try:
         user_pk, timestamp_and_signature = packers.packer.unpack_pk(data)
     except Exception:
+        diagnostics.set_reason(diagnostics.INVALID_TOKEN)
         logger.debug("Bad token: cannot extract primary key")
         return None
 
     try:
         age, signature = unpack_timestamp(timestamp_and_signature)
     except Exception:
+        diagnostics.set_reason(diagnostics.INVALID_TOKEN)
         logger.debug("Bad token: cannot extract timestamp")
         return None
 
     if len(signature) != settings.SIGNATURE_SIZE:
+        diagnostics.set_reason(diagnostics.INVALID_TOKEN)
         logger.debug("Bad token: cannot extract signature")
         return None
 
@@ -202,6 +206,7 @@ def parse_token(token, get_user, scope="", max_age=None):
     elif isinstance(max_age, datetime.timedelta):
         max_age = max_age.total_seconds()
     if age is not None and age >= max_age:
+        diagnostics.set_reason(diagnostics.EXPIRED)
         logger.debug("Expired token: age = %d seconds", age)
         return None
 
@@ -209,6 +214,8 @@ def parse_token(token, get_user, scope="", max_age=None):
 
     user = get_user(user_pk)
     if user is None:
+        if diagnostics.get_reason() is None:
+            diagnostics.set_reason(diagnostics.UNKNOWN_USER)
         logger.debug(
             "Unknown or inactive user: %s = %r",
             settings.PRIMARY_KEY_FIELD,
@@ -232,6 +239,7 @@ def parse_token(token, get_user, scope="", max_age=None):
             return user
 
     log_scope = "in default scope" if scope == "" else f"in scope {scope}"
+    diagnostics.set_reason(diagnostics.INVALID_TOKEN)
     logger.debug("Invalid token for user %s %s", user, log_scope)
     return None
 

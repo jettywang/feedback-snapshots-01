@@ -1,7 +1,7 @@
 from django.contrib.auth import backends as auth_backends
 from django.contrib.auth import get_user_model
 
-from . import settings
+from . import diagnostics, settings
 from .tokens import parse_token
 
 __all__ = ["ModelBackend", "SesameBackendMixin"]
@@ -65,8 +65,10 @@ class ModelBackend(SesameBackendMixin, auth_backends.ModelBackend):
         try:
             user = User._default_manager.get(**{settings.PRIMARY_KEY_FIELD: user_id})
         except User.DoesNotExist:
+            diagnostics.set_reason(diagnostics.UNKNOWN_USER)
             return None
         if self.user_can_authenticate(user):
             return user
         else:
+            diagnostics.set_reason(diagnostics.INACTIVE_USER)
             return None

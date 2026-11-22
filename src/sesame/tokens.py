@@ -1,6 +1,6 @@
 import logging
 
-from . import settings
+from . import diagnostics, settings
 
 logger = logging.getLogger("sesame")
 
@@ -21,11 +21,13 @@ def parse_token(token, get_user, scope="", max_age=None):
     Obtain a user from a signed token and an optional scope.
 
     """
+    diagnostics.reset_reason()
     for tokens in settings.TOKENS:
         # We can detect the version of a token simply by inspecting it:
         # v1 tokens contain a colon; v2 tokens don't.
         if tokens.detect_token(token):
             return tokens.parse_token(token, get_user, scope, max_age)
     else:
+        diagnostics.set_reason(diagnostics.BAD_FORMAT)
         logger.debug("Bad token: doesn't match a supported format")
         return None

@@ -1,6 +1,16 @@
 Changelog
 =========
 
+Unreleased
+----------
+
+* Added an opt-in, restricted diagnostic record for failed logins with the
+  :data:`SESAME_DIAGNOSTICS` setting. It reports a machine-readable reason
+  code — expired, unrecognized, or deactivated user — without ever logging
+  tokens or URL parameters.
+* Removed tokens from ``sesame.tokens_v1`` log messages so that URL
+  credentials never reach the logging system.
+
 3.2
 ---
 

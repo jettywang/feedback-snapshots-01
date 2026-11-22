@@ -17,6 +17,8 @@ DEFAULTS = {
     "ONE_TIME": False,
     "INVALIDATE_ON_PASSWORD_CHANGE": True,
     "INVALIDATE_ON_EMAIL_CHANGE": False,
+    # Diagnostics
+    "DIAGNOSTICS": False,
     # Custom primary keys
     "PACKER": None,
     "PRIMARY_KEY_FIELD": "pk",

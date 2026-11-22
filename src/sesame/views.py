@@ -8,7 +8,7 @@ from django.shortcuts import resolve_url
 from django.utils.http import url_has_allowed_host_and_scheme  # private API
 from django.views.generic import View
 
-from . import settings
+from . import diagnostics, settings
 
 try:
     from django.contrib.auth.views import RedirectURLMixin  # private API
@@ -67,6 +67,10 @@ class LoginView(RedirectURLMixin, View):
     ``get_default_redirect_url()``. These APIs behave like their counterparts
     in Django's built-in :class:`~django.contrib.auth.views.LoginView`.
 
+    When :data:`SESAME_DIAGNOSTICS` is enabled, :meth:`report_failure` emits
+    a restricted diagnostic record explaining why authentication failed,
+    while users keep receiving the same generic failure response.
+
     """
 
     scope = ""
@@ -77,6 +81,7 @@ class LoginView(RedirectURLMixin, View):
         if not hasattr(request, "user"):
             raise ImproperlyConfigured("LoginView requires django.contrib.auth")
 
+        diagnostics.reset_reason()
         sesame = request.GET.get(settings.TOKEN_NAME)
         if sesame is None:
             return self.login_failed()
@@ -95,7 +100,23 @@ class LoginView(RedirectURLMixin, View):
         return self.login_success()
 
     def login_failed(self):
+        self.report_failure()
         raise PermissionDenied
+
+    def report_failure(self):
+        """
+        Emit a restricted diagnostic record when diagnostics are enabled.
+
+        The record contains only a machine-readable reason code — never the
+        token or other URL parameters — so it's safe to send to the logging
+        system and to aggregate for statistics. Override this method to
+        route diagnostics to another restricted channel.
+
+        """
+        if not settings.DIAGNOSTICS:
+            return
+        reason = diagnostics.get_reason() or diagnostics.NO_TOKEN
+        diagnostics.logger.info("Login failed: %s", reason)
 
     def login_success(self):
         if self.next_page is None:

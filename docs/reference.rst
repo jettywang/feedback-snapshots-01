@@ -66,6 +66,22 @@ Settings
     Set :data:`SESAME_INVALIDATE_ON_EMAIL_CHANGE` to :obj:`True` to
     invalidate tokens when a user changes their email.
 
+.. data:: SESAME_DIAGNOSTICS
+    :value: False
+
+    Set :data:`SESAME_DIAGNOSTICS` to :obj:`True` to emit a restricted
+    diagnostic record to the ``sesame.diagnostics`` logger when
+    :class:`~sesame.views.LoginView` rejects a login.
+
+    The record contains only a machine-readable reason code — ``expired``,
+    ``invalid_token``, ``bad_format``, ``unknown_user``, ``inactive_user``,
+    or ``no_token`` — never the token or other URL parameters, so it's safe
+    to send to the logging system and to aggregate for statistics. The
+    response shown to users remains a generic failure page in all cases.
+
+    Override :meth:`sesame.views.LoginView.report_failure` to route
+    diagnostics to another restricted channel.
+
 .. data:: SESAME_PRIMARY_KEY_FIELD
     :value: "pk"
 

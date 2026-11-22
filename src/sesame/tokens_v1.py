@@ -4,7 +4,7 @@ import re
 from django.core import signing
 from django.utils import crypto
 
-from . import packers, settings
+from . import diagnostics, packers, settings
 
 __all__ = ["create_token", "detect_token", "parse_token"]
 
@@ -101,12 +101,15 @@ def parse_token(token, get_user, scope="", max_age=None):
     try:
         data = unsign(token)
     except signing.SignatureExpired:
-        logger.debug("Expired token: %s", token)
+        diagnostics.set_reason(diagnostics.EXPIRED)
+        logger.debug("Expired token")
         return None
     except signing.BadSignature:
-        logger.debug("Bad token: %s", token)
+        diagnostics.set_reason(diagnostics.INVALID_TOKEN)
+        logger.debug("Bad token: invalid signature")
         return None
     except Exception:
+        diagnostics.set_reason(diagnostics.INVALID_TOKEN)
         logger.exception(
             "Valid signature but unexpected token; if you enabled "
             "or disabled SESAME_MAX_AGE, you must regenerate tokens"
@@ -116,6 +119,7 @@ def parse_token(token, get_user, scope="", max_age=None):
     try:
         user_pk, key = packers.packer.unpack_pk(data)
     except Exception:
+        diagnostics.set_reason(diagnostics.INVALID_TOKEN)
         logger.exception(
             "Valid signature but unexpected token; if you changed "
             "SESAME_PACKER, you must regenerate tokens"
@@ -124,12 +128,15 @@ def parse_token(token, get_user, scope="", max_age=None):
 
     user = get_user(user_pk)
     if user is None:
+        if diagnostics.get_reason() is None:
+            diagnostics.set_reason(diagnostics.UNKNOWN_USER)
         logger.debug("Unknown or inactive user: %s", user_pk)
         return None
     if not crypto.constant_time_compare(key, get_revocation_key(user)):
-        logger.debug("Invalid token: %s", token)
+        diagnostics.set_reason(diagnostics.INVALID_TOKEN)
+        logger.debug("Invalid token")
         return None
-    logger.debug("Valid token for user %s: %s", user, token)
+    logger.debug("Valid token for user %s", user)
 
     return user
 
