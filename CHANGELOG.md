@@ -15,6 +15,11 @@ You can find our backwards-compatibility policy [here](https://github.com/hynek/
 
 ## [Unreleased](https://github.com/hynek/structlog/compare/26.1.0...HEAD)
 
+### Added
+
+- Optional queue handoff for the standard library integration: `structlog.stdlib.QueueHandler` enqueues stable, restricted dictionaries instead of `logging.LogRecord`s, `structlog.stdlib.QueueListener` re-creates records for `ProcessorFormatter`, and `structlog.stdlib.sanitize_for_queue()` copies only approved values.
+  Unapproved objects are replaced by a type-only placeholder without calling `str()` or `repr()` -- including in queue error handling -- and correlation IDs are kept so `group_by_correlation_id()` and `merge_by_correlation_id()` can join events on the consumer side.
+
 ### Changed
 
 - On Python 3.15 and later, *structlog* uses [PEP 810](https://peps.python.org/pep-0810/) lazy imports for modules that are only needed once you log.

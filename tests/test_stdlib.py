@@ -9,6 +9,8 @@ import json
 import logging
 import logging.config
 import os
+import pickle
+import queue
 import sys
 
 from collections.abc import Callable, Collection
@@ -39,15 +41,24 @@ from structlog.stdlib import (
     LoggerFactory,
     PositionalArgumentsFormatter,
     ProcessorFormatter,
+    QUEUE_ENVELOPE_KEY,
+    QUEUE_UNAPPROVED_KEY,
+    QueueFormatter,
+    QueueHandler,
+    QueueListener,
     _FixedFindCallerLogger,
     add_log_level,
     add_log_level_number,
     add_logger_name,
+    exception_to_queue,
     filter_by_level,
     get_logger,
+    group_by_correlation_id,
+    merge_by_correlation_id,
     recreate_defaults,
     render_to_log_args_and_kwargs,
     render_to_log_kwargs,
+    sanitize_for_queue,
 )
 from structlog.testing import CapturedCall
 from structlog.typing import BindableLogger, EventDict
@@ -1683,3 +1694,611 @@ def test_recreate_defaults(log_level):
         assert log_level == log.getEffectiveLevel()
     else:
         assert 1 == log.getEffectiveLevel()
+
+
+class _Unapproved:
+    """
+    An object that records any attempt to stringify or serialize it.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def __str__(self) -> str:
+        self.calls.append("str")
+        raise AssertionError("must not be stringified")
+
+    def __repr__(self) -> str:
+        self.calls.append("repr")
+        raise AssertionError("must not be repr()ed")
+
+    def __reduce__(self) -> Any:
+        self.calls.append("reduce")
+        raise AssertionError("must not be pickled")
+
+    def __structlog__(self) -> Any:
+        self.calls.append("__structlog__")
+        raise AssertionError("must not be called")
+
+
+class _HostileStr(str):
+    """
+    A string whose formatting hooks must never be called.
+    """
+
+    def __str__(self) -> str:
+        raise AssertionError("must not be stringified")
+
+    def __repr__(self) -> str:
+        raise AssertionError("must not be repr()ed")
+
+
+class TestSanitizeForQueue:
+    def test_primitives_and_containers_are_copied(self):
+        value = {
+            "int": 42,
+            "float": 4.2,
+            "bool": True,
+            "none": None,
+            "str": _HostileStr("plain"),
+            "bytes": b"bytes",
+            "list": [1, (2, 3)],
+            "nested": {"key": "value"},
+        }
+
+        rv = sanitize_for_queue(value)
+
+        assert {
+            "int": 42,
+            "float": 4.2,
+            "bool": True,
+            "none": None,
+            "str": "plain",
+            "bytes": "bytes",
+            "list": [1, [2, 3]],
+            "nested": {"key": "value"},
+        } == rv
+        assert type(rv["str"]) is str
+        assert type(rv["list"]) is list
+
+    def test_unapproved_value_becomes_placeholder_without_stringifying(
+        self,
+    ):
+        unapproved = _Unapproved()
+
+        rv = sanitize_for_queue({"allowed": "ok", "bad": unapproved})
+
+        assert "ok" == rv["allowed"]
+        assert {QUEUE_UNAPPROVED_KEY: "_Unapproved"} == rv["bad"]
+        assert [] == unapproved.calls
+
+    def test_unapproved_keys_are_dropped(self):
+        rv = sanitize_for_queue({_Unapproved(): "value", "allowed": 1})
+
+        assert {"allowed": 1} == rv
+
+    def test_cycle_is_truncated(self):
+        value: list[Any] = [1]
+        value.append(value)
+
+        assert [1, {"__structlog_truncated__": "cycle"}] == (
+            sanitize_for_queue(value)
+        )
+
+    def test_approved_types_survive_through_converter(self):
+        class Custom:
+            def __init__(self, value: str):
+                self.value = value
+
+        rv = sanitize_for_queue(
+            {"custom": Custom("v")},
+            allow={Custom: lambda custom: {"value": custom.value}},
+        )
+
+        assert {"custom": {"value": "v"}} == rv
+
+    def test_failing_converter_is_unapproved(self):
+        class Custom:
+            pass
+
+        def boom(_: Custom) -> Any:
+            raise RuntimeError("boom")
+
+        rv = sanitize_for_queue(
+            {"custom": Custom()}, allow={Custom: boom}
+        )
+
+        assert QUEUE_UNAPPROVED_KEY in rv["custom"]
+
+    def test_limits(self):
+        assert "abc" == sanitize_for_queue("abcdef", max_string=3)
+        assert [
+            1,
+            2,
+            {"__structlog_truncated__": "max-items"},
+        ] == sanitize_for_queue([1, 2, 3], max_items=2)
+        assert {"__structlog_truncated__": "max-depth"} == (
+            sanitize_for_queue({"a": {"b": 1}}, max_depth=1)["a"]
+        )
+
+
+class TestExceptionToQueue:
+    def test_chained_exceptions_are_structured(self):
+        try:
+            try:
+                raise ValueError("inner")
+            except ValueError as exc:
+                raise RuntimeError("outer") from exc
+        except RuntimeError:
+            exc_info = sys.exc_info()
+
+        stacks = exception_to_queue(exc_info)
+
+        assert ["RuntimeError", "ValueError"] == [
+            stack["exc_type"] for stack in stacks
+        ]
+        assert [False, True] == [stack["is_cause"] for stack in stacks]
+        assert "outer" == stacks[0]["exc_value"]
+        assert "inner" == stacks[1]["exc_value"]
+
+    def test_unapproved_exception_args_are_not_stringified(self):
+        unapproved = _Unapproved()
+
+        try:
+            raise ValueError(unapproved)
+        except ValueError:
+            exc_info = sys.exc_info()
+
+        stacks = exception_to_queue(exc_info)
+
+        assert [{"__structlog_truncated__": "cycle"}] != stacks
+        assert [] == unapproved.calls
+        assert QUEUE_UNAPPROVED_KEY in json.dumps(stacks)
+
+    def test_custom_traceback_attribute_is_not_used(self):
+        class HostileError(Exception):
+            def __getattr__(self, name: str) -> Any:
+                raise AssertionError(f"custom getattr for {name}")
+
+        try:
+            raise HostileError("nope")
+        except HostileError:
+            exc_info = sys.exc_info()
+
+        stacks = exception_to_queue(exc_info)
+
+        assert "HostileError" == stacks[0]["exc_type"]
+
+
+class TestQueueHandler:
+    @pytest.fixture(name="qlog")
+    def _qlog(self):
+        # A standalone logger: it's not registered with the logging manager,
+        # so pytest's log capturing can't attach additional handlers to it.
+        queue_: queue.Queue[Any] = queue.Queue()
+        logger = logging.Logger("test.queue")
+        handler = QueueHandler(queue_)
+        logger.handlers = [handler]
+        logger.setLevel(logging.DEBUG)
+        logger.propagate = False
+
+        return logger, handler, queue_
+
+    def _get_all(self, queue_: queue.Queue[Any]) -> list[Any]:
+        rv = []
+        while not queue_.empty():
+            rv.append(queue_.get_nowait())
+
+        return rv
+
+    def _handle(
+        self,
+        logger: logging.Logger,
+        handler: QueueHandler,
+        msg: Any,
+        args: tuple[Any, ...] = (),
+        *,
+        exc_info: Any = None,
+        level: int = logging.INFO,
+    ) -> None:
+        record = logger.makeRecord(
+            logger.name,
+            level,
+            __file__,
+            1,
+            msg,
+            args,
+            exc_info,
+        )
+        handler.handle(record)
+
+    def test_plain_dict_is_enqueued_unchanged(self, qlog):
+        logger, handler, queue_ = qlog
+
+        logger.info(
+            {
+                "event": "user logged in",
+                "correlation_id": "corr-1",
+                "user": "test-user",
+                "nested": {"allowed": [1, 2, True, None]},
+            }
+        )
+
+        (item,) = self._get_all(queue_)
+
+        assert isinstance(item, dict)
+        assert "user logged in" == item["event"]
+        assert "corr-1" == item["correlation_id"]
+        assert "test-user" == item["user"]
+        assert {"allowed": [1, 2, True, None]} == item["nested"]
+        assert "corr-1" == item[QUEUE_ENVELOPE_KEY]["correlation_id"]
+        assert "info" == item[QUEUE_ENVELOPE_KEY]["level"]
+        assert "test.queue" == item[QUEUE_ENVELOPE_KEY]["logger"]
+        assert 1 == item[QUEUE_ENVELOPE_KEY]["version"]
+
+    def test_unapproved_object_never_leaves_process(self, qlog):
+        logger, handler, queue_ = qlog
+        unapproved = _Unapproved()
+
+        logger.info(
+            {
+                "event": "data",
+                "correlation_id": "corr-2",
+                "secret": unapproved,
+            }
+        )
+
+        (item,) = self._get_all(queue_)
+
+        assert {QUEUE_UNAPPROVED_KEY: "_Unapproved"} == item["secret"]
+        assert [] == unapproved.calls
+        assert "must not" not in json.dumps(item)
+
+    def test_exception_record_is_structured(self, qlog):
+        logger, handler, queue_ = qlog
+
+        try:
+            raise ValueError("boom")
+        except ValueError:
+            logger.exception(
+                {"event": "failed", "correlation_id": "corr-3"}
+            )
+
+        (item,) = self._get_all(queue_)
+
+        (stack,) = item["exception"]
+        assert "ValueError" == stack["exc_type"]
+        assert "boom" == stack["exc_value"]
+        assert stack["frames"]
+        assert "corr-3" == item[QUEUE_ENVELOPE_KEY]["correlation_id"]
+
+    def test_hostile_exception_args_are_not_stringified(self, qlog):
+        logger, handler, queue_ = qlog
+        unapproved = _Unapproved()
+
+        try:
+            raise ValueError(unapproved)
+        except ValueError:
+            logger.exception(
+                {"event": "failed", "correlation_id": "corr-4"}
+            )
+
+        (item,) = self._get_all(queue_)
+
+        assert [] == unapproved.calls
+        serialized = json.dumps(item)
+        assert "must not" not in serialized
+        assert QUEUE_UNAPPROVED_KEY in serialized
+
+    def test_foreign_logging_calls_are_supported(self, qlog):
+        logger, handler, queue_ = qlog
+
+        logger.info("hello %s", "world")
+
+        (item,) = self._get_all(queue_)
+
+        assert "hello world" == item["event"]
+
+    def test_foreign_logging_unapproved_args_are_not_formatted(self, qlog):
+        logger, handler, queue_ = qlog
+        unapproved = _Unapproved()
+
+        logger.info("hello %s", unapproved)
+
+        (item,) = self._get_all(queue_)
+
+        assert "hello %s" == item["event"]
+        assert [] == unapproved.calls
+
+    def test_enqueued_data_is_pickleable(self, qlog):
+        logger, handler, queue_ = qlog
+
+        logger.info(
+            {
+                "event": "data",
+                "correlation_id": "corr-5",
+                "bad": _Unapproved(),
+            }
+        )
+
+        (item,) = self._get_all(queue_)
+
+        assert item == pickle.loads(pickle.dumps(item))
+
+    def test_handle_error_does_not_touch_the_event(self, qlog, capsys):
+        logger, handler, _ = qlog
+        unapproved = _Unapproved()
+
+        class BrokenQueue:
+            def put_nowait(self, record):
+                raise RuntimeError("queue is full")
+
+        handler.queue = BrokenQueue()
+
+        logger.info({"event": "data", "bad": unapproved})
+
+        out, err = capsys.readouterr()
+
+        assert "" == out
+        assert "--- Logging error ---" in err
+        assert "queue is full" in err
+        assert "must not" not in err
+        assert [] == unapproved.calls
+
+    def test_serializer_receives_only_sanitized_data(self, qlog):
+        logger, handler, queue_ = qlog
+        seen = []
+        handler.serializer = lambda event: (
+            seen.append(event) or json.dumps(event)
+        )
+
+        logger.info({"event": "data", "bad": _Unapproved()})
+
+        (item,) = self._get_all(queue_)
+
+        assert isinstance(item, str)
+        assert QUEUE_UNAPPROVED_KEY in item
+        assert isinstance(seen[0], dict)
+
+
+class TestQueueConsumer:
+    def _enqueue(self, *events, **kw):
+        queue_: queue.Queue[Any] = queue.Queue()
+        handler = QueueHandler(queue_, **kw)
+        logger = logging.getLogger("test.queue.consumer")
+        logger.handlers = [handler]
+        logger.setLevel(logging.DEBUG)
+        logger.propagate = False
+        for event in events:
+            logger.info(event)
+
+        items = []
+        while not queue_.empty():
+            items.append(queue_.get_nowait())
+
+        return items
+
+    def test_listener_reconstructs_structlog_record(self):
+        (item,) = self._enqueue(
+            {"event": "hello", "correlation_id": "corr-1"}
+        )
+        listener = QueueListener(queue.Queue())
+
+        record = listener.prepare(item)
+
+        assert isinstance(record, logging.LogRecord)
+        assert {"event": "hello", "correlation_id": "corr-1"}.items() <= (
+            record.msg.items()
+        )
+        assert "corr-1" == record.correlation_id
+        assert item is record._queue_envelope
+        assert logging.INFO == record.levelno
+
+    def test_queue_formatter_adds_correlation_id(self):
+        (item,) = self._enqueue({"event": "hello", "correlation_id": "c-1"})
+        del item["correlation_id"]
+        listener = QueueListener(queue.Queue())
+        record = listener.prepare(item)
+        formatter = QueueFormatter(
+            processors=[JSONRenderer()],
+            correlation_id_key="correlation_id",
+        )
+
+        rendered = json.loads(formatter.format(record))
+
+        assert "c-1" == rendered["correlation_id"]
+
+    def test_listener_passes_foreign_records_through(self):
+        listener = QueueListener(queue.Queue())
+        record = logging.LogRecord(
+            "name", logging.INFO, "path", 1, "msg", (), None
+        )
+
+        assert record is listener.prepare(record)
+
+    def test_end_to_end_consumer_runs_for_structlog_and_foreign(self):
+        items = self._enqueue(
+            {"event": "structlog", "correlation_id": "c-1", "bad": _Unapproved()},
+        )
+        items.append(
+            {
+                "event": "foreign",
+                "correlation_id": "c-2",
+                QUEUE_ENVELOPE_KEY: {
+                    "version": 1,
+                    "level": "warning",
+                    "logger": "third.party",
+                    "correlation_id": "c-2",
+                },
+            }
+        )
+
+        queue_: queue.Queue[Any] = queue.Queue()
+        for item in items:
+            queue_.put_nowait(item)
+
+        handler = logging.StreamHandler(StringIO())
+        handler.setFormatter(
+            QueueFormatter(
+                processors=[
+                    ProcessorFormatter.remove_processors_meta,
+                    JSONRenderer(),
+                ]
+            )
+        )
+        listener = QueueListener(queue_, handler)
+        listener.start()
+        listener.stop()
+
+        rendered = [
+            json.loads(line) for line in handler.stream.getvalue().splitlines()
+        ]
+        assert ["structlog", "foreign"] == [
+            event["event"] for event in rendered
+        ]
+        assert "c-2" == rendered[1]["correlation_id"]
+
+    def test_group_and_merge_by_correlation_id(self):
+        items = self._enqueue(
+            {"event": "one", "correlation_id": "c-1", "a": 1},
+            {"event": "two", "correlation_id": "c-1", "b": 2},
+            {"event": "three", "correlation_id": "c-2", "c": 3},
+        )
+
+        grouped = group_by_correlation_id(items)
+        merged = merge_by_correlation_id(items)
+
+        assert {"c-1", "c-2"} == set(grouped)
+        assert 2 == len(grouped["c-1"])
+        assert 2 == merged["c-1"]["b"]
+        assert "c-1" == merged["c-1"]["correlation_id"]
+
+    def test_group_by_correlation_id_can_skip_missing(self):
+        items = self._enqueue({"event": "no-id"})
+
+        assert {} == group_by_correlation_id(items)
+        assert {None: items} == group_by_correlation_id(
+            items, include_missing=True
+        )
+
+
+def test_wrap_for_queue_in_structlog_chain():
+    """
+    `wrap_for_queue` can be used as the final processor of a structlog chain
+    and the resulting event is a restricted dictionary.
+    """
+    from structlog.stdlib import wrap_for_queue
+
+    log_queue: queue.Queue[Any] = queue.Queue()
+    logger = logging.Logger("test.queue.wrap")
+    logger.handlers = [QueueHandler(log_queue)]
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    bound = wrap_logger(
+        logger,
+        processors=[add_log_level, wrap_for_queue],
+        wrapper_class=BoundLogger,
+    )
+
+    bound.warning(
+        "hello %s",
+        "world",
+        correlation_id="corr-9",
+        secret=_Unapproved(),
+    )
+
+    item = log_queue.get_nowait()
+
+    assert isinstance(item, dict)
+    assert "corr-9" == item["correlation_id"]
+    assert "warning" == item["level"]
+    assert {QUEUE_UNAPPROVED_KEY: "_Unapproved"} == item["secret"]
+    assert item[QUEUE_ENVELOPE_KEY]["is_structlog"] is True
+
+
+def test_queue_handler_can_run_processors():
+    """
+    Processors passed to QueueHandler run before sanitizing.
+    """
+    log_queue: queue.Queue[Any] = queue.Queue()
+    logger = logging.Logger("test.queue.processors")
+    logger.handlers = [
+        QueueHandler(
+            log_queue,
+            processors=[lambda _, __, ed: {**ed, "processed": True}],
+        )
+    ]
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+
+    logger.info({"event": "data", "correlation_id": "corr-10"})
+
+    item = log_queue.get_nowait()
+
+    assert item["processed"] is True
+
+
+def test_queue_handler_correlation_id_fallbacks():
+    """
+    ``request_id`` and ``trace_id`` are used if ``correlation_id`` is absent.
+    """
+    log_queue: queue.Queue[Any] = queue.Queue()
+    logger = logging.Logger("test.queue.correlation")
+    handler = QueueHandler(log_queue)
+    logger.handlers = [handler]
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+
+    logger.info({"event": "a", "request_id": "req-1"})
+    logger.info({"event": "b", "trace_id": "trace-1"})
+    logger.info({"event": "c"})
+
+    first = log_queue.get_nowait()
+    second = log_queue.get_nowait()
+    third = log_queue.get_nowait()
+
+    assert "req-1" == first["correlation_id"]
+    assert "trace-1" == second["correlation_id"]
+    assert third["correlation_id"] is None
+    assert third[QUEUE_ENVELOPE_KEY]["correlation_id"] is None
+
+
+def test_queue_handler_custom_correlation_id_key():
+    """
+    A custom *correlation_id_key* is honored.
+    """
+    log_queue: queue.Queue[Any] = queue.Queue()
+    logger = logging.Logger("test.queue.custom-corr")
+    logger.handlers = [QueueHandler(log_queue, correlation_id_key="run_id")]
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+
+    logger.info({"event": "a", "run_id": "run-1"})
+
+    item = log_queue.get_nowait()
+
+    assert "run-1" == item["run_id"]
+    assert "run-1" == item[QUEUE_ENVELOPE_KEY]["correlation_id"]
+
+
+def test_queue_listener_then_formatter_round_trip():
+    """
+    The listener produces records that QueueFormatter can render.
+    """
+    log_queue: queue.Queue[Any] = queue.Queue()
+    logger = logging.Logger("test.queue.roundtrip")
+    logger.handlers = [QueueHandler(log_queue)]
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+
+    logger.info({"event": "hello", "correlation_id": "corr-11"})
+    item = log_queue.get_nowait()
+
+    listener = QueueListener(queue.Queue())
+    record = listener.prepare(item)
+    formatter = QueueFormatter(processors=[JSONRenderer()])
+
+    rendered = json.loads(formatter.format(record))
+
+    assert "hello" == rendered["event"]
+    assert "corr-11" == rendered["correlation_id"]

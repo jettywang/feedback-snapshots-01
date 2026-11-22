@@ -328,6 +328,22 @@ API Reference
 .. autoclass:: ProcessorFormatter
    :members: wrap_for_formatter, remove_processors_meta
 
+.. autofunction:: sanitize_for_queue
+
+.. autofunction:: exception_to_queue
+
+.. autoclass:: QueueHandler
+
+.. autoclass:: QueueListener
+
+.. autoclass:: QueueFormatter
+
+.. autofunction:: group_by_correlation_id
+
+.. autofunction:: merge_by_correlation_id
+
+.. autofunction:: wrap_for_queue
+
 
 `structlog.tracebacks` Module
 -----------------------------

@@ -12,17 +12,31 @@ See also :doc:`structlog's standard library support <standard-library>`.
 from __future__ import annotations
 
 
-__lazy_modules__ = ["asyncio", "threading", "warnings"]
+__lazy_modules__ = [
+    "asyncio",
+    "logging.handlers",
+    "threading",
+    "traceback",
+    "warnings",
+]
 
 import asyncio
 import contextvars
 import functools
 import logging
+import logging.handlers
 import sys
 import threading
+import traceback
 import warnings
 
-from collections.abc import Callable, Collection, Iterable, Sequence
+from collections.abc import (
+    Callable,
+    Collection,
+    Iterable,
+    Mapping,
+    Sequence,
+)
 from functools import partial
 from typing import Any, cast
 
@@ -60,14 +74,29 @@ __all__ = [
     "LoggerFactory",
     "PositionalArgumentsFormatter",
     "ProcessorFormatter",
+    "QUEUE_ENVELOPE_KEY",
+    "QUEUE_ENVELOPE_VERSION",
+    "QUEUE_UNAPPROVED_KEY",
+    "QueueFormatter",
+    "QueueHandler",
+    "QueueListener",
+    "QueueProcessorFormatter",
+    "SafeQueueHandler",
+    "SafeQueueListener",
     "add_log_level",
     "add_log_level_number",
     "add_logger_name",
+    "exception_to_queue",
     "filter_by_level",
     "get_logger",
+    "group_by_correlation_id",
+    "merge_by_correlation_id",
+    "merge_events_by_correlation_id",
     "recreate_defaults",
     "render_to_log_args_and_kwargs",
     "render_to_log_kwargs",
+    "sanitize_for_queue",
+    "wrap_for_queue",
 ]
 
 
@@ -1244,6 +1273,19 @@ class ProcessorFormatter(logging.Formatter):
         return (event_dict,), {"extra": {"_logger": logger, "_name": name}}
 
     @staticmethod
+    def wrap_for_queue(
+        logger: logging.Logger, name: str, event_dict: EventDict
+    ) -> tuple[tuple[EventDict], dict[str, dict[str, Any]]]:
+        """
+        Wrap *logger*, *name*, and *event_dict* for the queue handoff.
+
+        Alias for `QueueHandler.wrap_for_queue`.
+
+        .. versionadded:: 26.2.0
+        """
+        return QueueHandler.wrap_for_queue(logger, name, event_dict)
+
+    @staticmethod
     def remove_processors_meta(
         _: WrappedLogger, __: str, event_dict: EventDict
     ) -> EventDict:
@@ -1259,3 +1301,988 @@ class ProcessorFormatter(logging.Formatter):
         del event_dict["_from_structlog"]
 
         return event_dict
+
+
+QUEUE_ENVELOPE_KEY = "_queue"
+"""
+Key under which `QueueHandler` stores its stable metadata.
+
+The event dictionary itself is kept flat and unchanged -- apart from the
+allowed-values filtering -- so that approved structured data survives the
+process boundary without being turned into a string.
+"""
+
+QUEUE_ENVELOPE_VERSION = 1
+"""
+Version of the queue envelope written by `QueueHandler`.
+"""
+
+QUEUE_UNAPPROVED_KEY = "__structlog_unapproved__"
+"""
+Key of the placeholder for values that were not approved for the queue.
+"""
+
+_CORRELATION_ID_KEY = "correlation_id"
+_DEFAULT_CORRELATION_ID_KEYS = ("correlation_id", "request_id", "trace_id")
+_QUEUE_UNAPPROVED = {
+    "kind": "unapproved",
+}
+_MISSING = object()
+
+_SAFE_SCALAR_TYPES = (str, int, float, bool, type(None))
+_SAFE_CONTAINER_TYPES = (dict, list, tuple)
+
+
+def _type_name(value: Any) -> str:
+    """
+    Return a stable name for *value*'s type without invoking user code.
+    """
+    tp = type(value)
+    try:
+        name = type.__getattribute__(tp, "__name__")
+    except Exception:  # noqa: BLE001
+        name = "object"
+
+    return name if isinstance(name, str) else "object"
+
+
+def _unapproved(value: Any) -> dict[str, Any]:
+    """
+    Return a JSON-safe, stable placeholder for an unapproved value.
+
+    Notably, neither ``str()`` nor ``repr()`` is called on *value*.
+    """
+    return {QUEUE_UNAPPROVED_KEY: _type_name(value)}
+
+
+def _safe_str(value: str) -> str:
+    """
+    Return a plain ``str`` from *value* without calling an overridden
+    ``__str__``.
+    """
+    return str.__getitem__(value, slice(None))
+
+
+def _safe_int(value: int) -> int:
+    return int.__int__(value)
+
+
+def _safe_float(value: float) -> float:
+    return float.__float__(value)
+
+
+def _safe_bool(value: bool) -> bool:
+    return bool.__bool__(value)
+
+
+def _safe_items(value: dict[Any, Any]) -> Iterable[tuple[Any, Any]]:
+    return dict.items(value)
+
+
+def _safe_mapping_key(key: Any) -> str | None:
+    """
+    Return a string key for *key*, if it's an approved primitive.
+    """
+    if isinstance(key, str):
+        return _safe_str(key)
+    if isinstance(key, bool):
+        return "true" if _safe_bool(key) else "false"
+    if isinstance(key, int):
+        return str(_safe_int(key))
+    if isinstance(key, float):
+        return str(_safe_float(key))
+    if key is None:
+        return "null"
+
+    return None
+
+
+def _safe_iter(value: list[Any] | tuple[Any, ...]) -> Iterable[Any]:
+    if isinstance(value, list):
+        return list.__iter__(value)
+
+    return tuple.__iter__(value)
+
+
+def sanitize_for_queue(
+    value: Any,
+    *,
+    allow: Mapping[type, Callable[[Any], Any]] | None = None,
+    max_depth: int = 16,
+    max_items: int = 1000,
+    max_string: int | None = 65536,
+) -> Any:
+    """
+    Return a queue-safe copy of *value*.
+
+    Only approved, structured values cross the queue:
+
+    - ``None``, `bool`, `int`, `float`, and `str` are passed as plain
+      built-in types.
+    - ``bytes`` are decoded using ``utf-8`` with the ``replace`` error
+      handler.
+    - `dict` and `list` / `tuple` are copied recursively. Unapproved keys are
+      dropped; values that aren't recursively approved are replaced with a
+      stable placeholder.
+    - Everything else is replaced with a placeholder that only contains the
+      type name.
+
+    The placeholder is a plain dictionary like
+    ``{"__structlog_unapproved__": "Type"}``. No ``str()`` or ``repr()`` is
+    ever called on an unapproved value, so custom formatting hooks can't run
+    accidentally -- not even while handling queue errors.
+
+    Args:
+        value:
+            The value to sanitize.
+
+        allow:
+            An optional mapping of types to converters for otherwise
+            unapproved values. The converter receives the value and must
+            return JSON-safe data. This is the explicit approval mechanism.
+
+        max_depth:
+            Maximum nesting depth. Deeper values are replaced with a
+            truncation placeholder.
+
+        max_items:
+            Maximum number of items copied from a container. Surplus items are
+            dropped and a truncation placeholder is appended.
+
+        max_string:
+            Maximum length of strings. Longer strings are truncated. `None`
+            disables truncation.
+
+    Returns:
+        A plain, JSON-safe copy of *value*.
+
+    .. versionadded:: 26.2.0
+    """
+    if max_depth < 1:
+        msg = "'max_depth' must be at least 1"
+        raise ValueError(msg)
+    if max_items < 1:
+        msg = "'max_items' must be at least 1"
+        raise ValueError(msg)
+
+    allowed = allow or {}
+    seen: set[int] = set()
+
+    def _sanitize(value: Any, depth: int) -> Any:
+        # Exact types first; their base methods don't run user code.
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return _safe_bool(value)
+        if isinstance(value, int):
+            return _safe_int(value)
+        if isinstance(value, float):
+            return _safe_float(value)
+        if isinstance(value, str):
+            plain_str = _safe_str(value)
+            if max_string is not None and len(plain_str) > max_string:
+                return plain_str[:max_string]
+
+            return plain_str
+        if isinstance(value, bytes):
+            return bytes.decode(value, "utf-8", "replace")
+
+        converter = allowed.get(type(value))
+        if converter is not None:
+            try:
+                return _sanitize(converter(value), depth)
+            except Exception:  # noqa: BLE001
+                return _unapproved(value)
+
+        if depth >= max_depth:
+            return {"__structlog_truncated__": "max-depth"}
+
+        if isinstance(value, dict):
+            identity = id(value)
+            if identity in seen:
+                return {"__structlog_truncated__": "cycle"}
+            seen.add(identity)
+            rv: dict[str, Any] = {}
+            try:
+                for index, (key, item) in enumerate(_safe_items(value)):
+                    if index >= max_items:
+                        rv["__structlog_truncated__"] = "max-items"
+                        break
+                    safe_key = _safe_mapping_key(key)
+                    if safe_key is None:
+                        continue
+                    rv[safe_key] = _sanitize(item, depth + 1)
+            finally:
+                seen.discard(identity)
+
+            return rv
+
+        if isinstance(value, (list, tuple)):
+            identity = id(value)
+            if identity in seen:
+                return {"__structlog_truncated__": "cycle"}
+            seen.add(identity)
+            rv_list: list[Any] = []
+            try:
+                for index, item in enumerate(_safe_iter(value)):
+                    if index >= max_items:
+                        rv_list.append(
+                            {"__structlog_truncated__": "max-items"}
+                        )
+                        break
+                    rv_list.append(_sanitize(item, depth + 1))
+            finally:
+                seen.discard(identity)
+
+            return rv_list
+
+        return _unapproved(value)
+
+    return _sanitize(value, 0)
+
+
+def _exception_type_name(exc_type: type[BaseException]) -> str:
+    try:
+        name = type.__getattribute__(exc_type, "__name__")
+    except Exception:  # noqa: BLE001
+        name = "BaseException"
+
+    return name if isinstance(name, str) else "BaseException"
+
+
+def _safe_exception_args(exc: BaseException) -> tuple[Any, ...]:
+    """
+    Return exception args without triggering a custom ``args`` property.
+    """
+    try:
+        descriptor = vars(BaseException)["args"]
+        args = descriptor.__get__(exc, type(exc))
+    except Exception:  # noqa: BLE001
+        return ()
+
+    return tuple(args) if isinstance(args, tuple) else ()
+
+
+def _safe_exception_message(args: tuple[Any, ...]) -> Any:
+    """
+    Return a useful message only if it can be produced from approved values.
+
+    ``BaseException.__str__`` formats the arguments with ``str()`` -- but the
+    arguments are already approved at this point, so it's safe to use them
+    directly.
+    """
+    if not args:
+        return ""
+
+    first = args[0]
+    if type(first) in (str, int, float, bool):
+        return _safe_str(first) if isinstance(first, str) else first
+
+    if len(args) == 1:
+        return _unapproved(first)
+
+    return _unapproved(args)
+
+
+def _safe_frames(exc: BaseException, max_frames: int) -> list[dict[str, Any]]:
+    frames: list[dict[str, Any]] = []
+    tb: Any
+    try:
+        descriptor = vars(BaseException)["__traceback__"]
+        tb = descriptor.__get__(exc, type(exc))
+    except Exception:  # noqa: BLE001
+        tb = None
+    while tb is not None and len(frames) < max_frames:
+        frame = tb.tb_frame
+        code = frame.f_code
+        frames.append(
+            {
+                "filename": _safe_str(code.co_filename),
+                "lineno": _safe_int(tb.tb_lineno),
+                "name": _safe_str(code.co_name),
+            }
+        )
+        tb = tb.tb_next
+
+    return frames
+
+
+def _exception_descriptor(
+    exc: BaseException, name: str, *, default: Any = None
+) -> Any:
+    """
+    Read an exception attribute using the base descriptor, if possible.
+
+    This avoids custom ``__getattr__`` implementations on exceptions.
+    """
+    descriptor = vars(BaseException).get(name)
+    if descriptor is None:
+        return default
+
+    try:
+        return descriptor.__get__(exc, type(exc))
+    except Exception:  # noqa: BLE001
+        return default
+
+
+def _exception_group_children(
+    exc: BaseException,
+) -> Iterable[BaseException] | None:
+    """
+    Return an exception group's direct children without custom iteration.
+    """
+    try:
+        from builtins import BaseExceptionGroup  # noqa: PLC0415
+    except ImportError:  # pragma: no cover
+        return None
+
+    if not isinstance(exc, BaseExceptionGroup):
+        return None
+
+    descriptor = vars(BaseExceptionGroup)["exceptions"]
+    try:
+        children = descriptor.__get__(exc, type(exc))
+    except Exception:  # noqa: BLE001
+        return None
+
+    return children if isinstance(children, (list, tuple)) else None
+
+
+def _exception_to_queue(
+    exc_type: type[BaseException],
+    exc: BaseException,
+    *,
+    max_frames: int,
+    seen: set[int],
+) -> dict[str, Any]:
+    rv: dict[str, Any] = {
+        "exc_type": _exception_type_name(exc_type),
+        "frames": _safe_frames(exc, max_frames),
+    }
+    args = _safe_exception_args(exc)
+    if args:
+        rv["exc_args"] = sanitize_for_queue(list(args))
+    rv["exc_value"] = _safe_exception_message(args)
+
+    group = _exception_group_children(exc)
+    if group is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        branches = []
+        for child in group:
+            if not isinstance(child, BaseException):
+                continue
+            branch = _exception_to_queue(
+                type(child),
+                child,
+                max_frames=max_frames,
+                seen=seen,
+            )
+            branch.setdefault("is_cause", False)
+            branches.append(branch)
+        rv["exceptions"] = branches
+
+    return rv
+
+
+def exception_to_queue(
+    exc_info: ExcInfo, *, max_frames: int = 32
+) -> list[dict[str, Any]]:
+    """
+    Convert an exception to a structured, queue-safe representation.
+
+    Unlike `structlog.tracebacks.ExceptionDictTransformer`, this function never
+    calls ``str()`` or ``repr()`` on exception arguments or local variables.
+    Exception arguments that aren't approved primitives are represented by the
+    same stable placeholder that `sanitize_for_queue` uses.
+
+    Args:
+        exc_info:
+            A tuple as returned by `sys.exc_info`.
+
+        max_frames:
+            Maximum number of frames per exception.
+
+    Returns:
+        A list of exception dictionaries, including chained exceptions and
+        exception groups.
+
+    .. versionadded:: 26.2.0
+    """
+    exc_type, exc, _ = exc_info
+    if exc is None:
+        return []
+
+    result: list[dict[str, Any]] = []
+    group_seen: set[int] = set()
+    chain_seen: set[int] = set()
+    current_type: type[BaseException] = exc_type or type(exc)
+    current: BaseException | None = exc
+    is_cause = False
+    while current is not None and id(current) not in chain_seen:
+        chain_seen.add(id(current))
+        entry = _exception_to_queue(
+            current_type, current, max_frames=max_frames, seen=group_seen
+        )
+        entry["is_cause"] = is_cause
+        result.append(entry)
+
+        cause = _exception_descriptor(current, "__cause__")
+        if cause is not None:
+            current, current_type, is_cause = cause, type(cause), True
+            continue
+
+        context = _exception_descriptor(current, "__context__")
+        suppressed = _exception_descriptor(
+            current, "__suppress_context__", default=False
+        )
+        if context is not None and not suppressed:
+            current, current_type = context, type(context)
+            continue
+
+        break
+
+    # Like `traceback`, report the outermost exception first; following
+    # ``__cause__`` / ``__context__`` already walks from the outside in.
+    return result
+
+
+class QueueHandler(logging.handlers.QueueHandler):
+    """
+    A `logging.handlers.QueueHandler` that enqueues plain, restricted
+    dictionaries instead of `logging.LogRecord` objects.
+
+    This is the producer side of the optional queue handoff for *structlog*'s
+    standard library integration. Use it together with `QueueListener` and --
+    ideally -- `ProcessorFormatter`.
+
+    The regular queue handler runs `LogRecord.getMessage()` before pickling,
+    which turns dictionaries and custom objects into strings. Depending on the
+    path that either loses the structured data or invokes a user-defined
+    ``__str__`` on untrusted objects. This handler instead:
+
+    - keeps the event as a flat dictionary,
+    - copies only approved values and replaces the rest with a stable
+      placeholder that contains just the type name,
+    - embeds a fixed `QUEUE_ENVELOPE_KEY` metadata dictionary with the
+      envelope version, level, logger name, and correlation ID,
+    - stores exceptions in a structured form that never stringifies
+      unapproved arguments, and
+    - overrides `handleError` so even error reporting doesn't inspect or
+      stringify the record's message and arguments.
+
+    The queue therefore always sees JSON-safe dictionaries, regardless of
+    whether a plain dictionary, an event with unapproved values, or an
+    exception record was logged.
+
+    Args:
+        queue:
+            The queue to enqueue into. Standard `queue.Queue` and
+            `multiprocessing.Queue` instances work.
+
+        processors:
+            Optional *structlog* processors to run against the event
+            dictionary before it's sanitized. They must return a dictionary
+            or a string/bytes event. Exceptions raised by them are handed to
+            `handleError`.
+
+        correlation_id_key:
+            The event / record attribute that carries the correlation ID. For
+            convenience, ``request_id`` and ``trace_id`` are used as fallbacks
+            when ``correlation_id`` is absent.
+
+        allow:
+            An optional mapping of types to converters that are explicitly
+            approved for the queue. See `sanitize_for_queue`.
+
+        max_depth, max_items, max_string:
+            Limits used by `sanitize_for_queue`.
+
+        serializer:
+            An optional callable that receives the sanitized envelope and
+            returns the final queue item. By default, the plain dictionary is
+            enqueued. Since it only ever sees sanitized data, it can't invoke
+            user-defined formatting hooks.
+
+    .. versionadded:: 26.2.0
+    """
+
+    queue: Any
+
+    def __init__(
+        self,
+        queue: Any,
+        *,
+        processors: Sequence[Processor] = (),
+        correlation_id_key: str = _CORRELATION_ID_KEY,
+        allow: Mapping[type, Callable[[Any], Any]] | None = None,
+        max_depth: int = 16,
+        max_items: int = 1000,
+        max_string: int | None = 65536,
+        serializer: Callable[[dict[str, Any]], Any] | None = None,
+        max_frames: int = 32,
+    ) -> None:
+        super().__init__(queue)
+        self.processors = tuple(processors)
+        self.correlation_id_key = correlation_id_key
+        self.correlation_id_keys = _DEFAULT_CORRELATION_ID_KEYS
+        self.allow = allow
+        self.max_depth = max_depth
+        self.max_items = max_items
+        self.max_string = max_string
+        self.serializer = serializer
+        self.max_frames = max_frames
+
+    @staticmethod
+    def wrap_for_queue(
+        logger: logging.Logger, name: str, event_dict: EventDict
+    ) -> tuple[tuple[EventDict], dict[str, dict[str, Any]]]:
+        """
+        Wrap *logger*, *name*, and *event_dict* for `QueueHandler`.
+
+        This is equivalent to `ProcessorFormatter.wrap_for_formatter` and is
+        provided as a discoverable final processor for queue setups.
+
+        .. versionadded:: 26.2.0
+        """
+        return (event_dict,), {"extra": {"_logger": logger, "_name": name}}
+
+    def _event_dict(self, record: logging.LogRecord) -> dict[str, Any]:
+        msg = record.msg
+        event_dict = dict.copy(msg) if isinstance(msg, dict) else {}
+
+        # `structlog.stdlib.BoundLogger` passes positional arguments in
+        # `extra.positional_args` when used with `wrap_for_queue`.
+        if isinstance(event_dict.get("positional_args"), tuple):
+            event_dict["positional_args"] = list(
+                event_dict["positional_args"]
+            )
+
+        # Preserve approved structured data that was passed through `extra`.
+        for key, value in record.__dict__.items():
+            if key in _LOG_RECORD_KEYS or key in (
+                "_logger",
+                "_name",
+                "_record",
+                "_from_structlog",
+                "_queue_envelope",
+            ):
+                continue
+            if key == "exc_info":
+                # Rendered below from `record.exc_info`, never copied raw.
+                continue
+            event_dict.setdefault(key, value)
+
+        if isinstance(msg, dict):
+            method_name = getattr(record, "_name", record.levelname.lower())
+            logger = getattr(record, "_logger", None)
+            if logger is None:
+                logger = logging.getLogger(record.name)
+            for proc in self.processors:
+                processed = proc(logger, method_name, event_dict)
+                if isinstance(processed, Mapping):
+                    event_dict = dict(processed)
+                elif isinstance(processed, tuple) and len(processed) == 2:
+                    # `wrap_for_formatter` / `wrap_for_queue` style result.
+                    args, kwargs = processed
+                    if args and isinstance(args[0], Mapping):
+                        event_dict = dict(args[0])
+                    else:
+                        event_dict = {}
+                    extra = kwargs.get("extra")
+                    if isinstance(extra, Mapping):
+                        for key, value in extra.items():
+                            if isinstance(key, str) and key not in (
+                                "_logger",
+                                "_name",
+                            ):
+                                event_dict.setdefault(key, value)
+                elif isinstance(processed, (str, bytes, bytearray)):
+                    event_dict = {"event": processed}
+                else:
+                    event_dict = {"event": _unapproved(processed)}
+        elif "event" not in event_dict:
+            event_dict["event"] = self._format_plain_message(record)
+
+        return event_dict
+
+    def _format_plain_message(self, record: logging.LogRecord) -> Any:
+        msg = record.msg
+        args = record.args
+        if not args:
+            return msg
+
+        safe_args = _safe_positional_args(args)
+        if safe_args is _MISSING:
+            return msg
+
+        try:
+            return msg % safe_args
+        except Exception:  # noqa: BLE001
+            return msg
+
+    def _find_correlation_id(
+        self, record: logging.LogRecord, event_dict: Mapping[str, Any]
+    ) -> Any:
+        keys = (self.correlation_id_key, *self.correlation_id_keys)
+        for key in keys:
+            if key in event_dict:
+                return event_dict[key]
+            if key in record.__dict__:
+                return record.__dict__[key]
+
+        return _MISSING
+
+    def prepare(self, record: logging.LogRecord) -> dict[str, Any]:
+        """
+        Build the restricted dictionary that is actually enqueued.
+        """
+        try:
+            event_dict = self._event_dict(record)
+        except Exception:  # noqa: BLE001
+            event_dict = {"event": _unapproved(record.msg)}
+
+        envelope = sanitize_for_queue(
+            event_dict,
+            allow=self.allow,
+            max_depth=self.max_depth,
+            max_items=self.max_items,
+            max_string=self.max_string,
+        )
+        if not isinstance(envelope, dict):
+            envelope = {"event": envelope}
+
+        correlation_id = self._find_correlation_id(record, event_dict)
+        if correlation_id is _MISSING:
+            safe_correlation_id = None
+        else:
+            safe_correlation_id = sanitize_for_queue(
+                correlation_id,
+                allow=self.allow,
+                max_depth=1,
+                max_items=self.max_items,
+                max_string=self.max_string,
+            )
+        if not isinstance(
+            safe_correlation_id, (str, int, float, bool, type(None))
+        ):
+            # Keep grouping predictable even if the correlation ID itself
+            # wasn't approved.
+            safe_correlation_id = None
+
+        envelope.setdefault(self.correlation_id_key, safe_correlation_id)
+
+        exception: list[dict[str, Any]] | None = None
+        if record.exc_info:
+            try:
+                exc_info = cast(ExcInfo, record.exc_info)
+                exception = exception_to_queue(
+                    exc_info, max_frames=self.max_frames
+                )
+            except Exception:  # noqa: BLE001
+                exc_type, exc_value, _ = cast(ExcInfo, record.exc_info)
+                exception = [
+                    {
+                        "exc_type": _exception_type_name(
+                            exc_type or BaseException
+                        ),
+                        "exc_value": _unapproved(exc_value),
+                        "frames": [],
+                        "is_cause": False,
+                    }
+                ]
+
+        if exception is not None:
+            envelope.pop("exc_info", None)
+            envelope.pop("stack_info", None)
+            envelope["exception"] = exception
+
+        envelope[QUEUE_ENVELOPE_KEY] = {
+            "version": QUEUE_ENVELOPE_VERSION,
+            "level": _safe_str(record.levelname).lower(),
+            "logger": _safe_str(record.name),
+            "correlation_id": safe_correlation_id,
+            "is_structlog": isinstance(record.msg, dict),
+        }
+
+        return envelope
+
+    def enqueue(self, record: Any) -> None:
+        if self.serializer is not None:
+            record = self.serializer(record)
+
+        self.queue.put_nowait(record)
+
+    def handleError(self, record: logging.LogRecord) -> None:
+        """
+        Report an error without touching the record's message or arguments.
+
+        The default implementation formats and prints ``record.msg`` and
+        ``record.args``. That would be a second, unguarded path for
+        unapproved objects to be turned into strings. This override only
+        prints the exception and the callsite -- never the event data.
+
+        .. versionadded:: 26.2.0
+        """
+        if not logging.raiseExceptions or sys.stderr is None:
+            return
+
+        exc_type, exc_value, exc_tb = sys.exc_info()
+        try:
+            sys.stderr.write("--- Logging error ---\n")
+            if exc_type is not None:
+                traceback.print_exception(
+                    exc_type, exc_value, exc_tb, None, sys.stderr
+                )
+            sys.stderr.write(
+                f"Logged from file {record.filename}, line {record.lineno}\n"
+            )
+        except OSError:  # pragma: no cover
+            pass
+
+
+def _safe_positional_args(args: Any) -> Any:
+    """
+    Return positional arguments if formatting them can't run user code.
+    """
+    if isinstance(args, tuple):
+        if all(type(arg) in _SAFE_SCALAR_TYPES for arg in args):
+            return tuple(
+                sanitize_for_queue(arg) for arg in tuple.__iter__(args)
+            )
+        return _MISSING
+
+    if isinstance(args, dict):
+        if all(
+            type(key) in (str, int, float, bool, type(None))
+            and type(value) in _SAFE_SCALAR_TYPES
+            for key, value in dict.items(args)
+        ):
+            return {
+                sanitize_for_queue(key): sanitize_for_queue(value)
+                for key, value in dict.items(args)
+            }
+        return _MISSING
+
+    return _MISSING
+
+
+class QueueListener(logging.handlers.QueueListener):
+    """
+    Consumer side of the queue handoff for *structlog*'s standard library
+    integration.
+
+    It accepts the dictionaries produced by `QueueHandler` and reconstructs
+    `logging.LogRecord` objects that `ProcessorFormatter` recognizes as
+    *structlog* entries. The original envelope is available as
+    ``record._queue_envelope`` and the correlation ID as
+    ``record.correlation_id``.
+
+    `logging.LogRecord` instances (for example from other handlers that use
+    the regular queue handler) are passed through unchanged.
+
+    Args:
+        queue:
+            The queue to read from.
+
+        *handlers:
+            Handlers that process the reconstructed records.
+
+        respect_handler_level:
+            Passed to `logging.handlers.QueueListener`.
+
+        correlation_id_key:
+            Key of the correlation ID in the envelope's metadata.
+
+    .. versionadded:: 26.2.0
+    """
+
+    def __init__(
+        self,
+        queue: Any,
+        *handlers: logging.Handler,
+        respect_handler_level: bool = False,
+        correlation_id_key: str = _CORRELATION_ID_KEY,
+    ) -> None:
+        super().__init__(
+            queue,
+            *handlers,
+            respect_handler_level=respect_handler_level,
+        )
+        self.correlation_id_key = correlation_id_key
+
+    def prepare(self, record: Any) -> Any:
+        if not isinstance(record, dict):
+            return super().prepare(record)
+
+        metadata = record.get(QUEUE_ENVELOPE_KEY)
+        if not isinstance(metadata, dict):
+            metadata = {}
+
+        level_name = metadata.get("level")
+        level = NAME_TO_LEVEL.get(level_name, logging.INFO) if isinstance(
+            level_name, str
+        ) else logging.INFO
+        logger_name = metadata.get("logger")
+        if not isinstance(logger_name, str):
+            logger_name = "structlog.queue"
+
+        event = {
+            key: value
+            for key, value in record.items()
+            if key != QUEUE_ENVELOPE_KEY
+        }
+        log_record = logging.LogRecord(
+            logger_name,
+            level,
+            "<queue>",
+            0,
+            event,
+            (),
+            None,
+        )
+        log_record._queue_envelope = record
+        log_record.correlation_id = metadata.get(self.correlation_id_key)
+        log_record._logger = logging.getLogger(logger_name)
+        fallback_method = level_name if isinstance(level_name, str) else "info"
+        log_record._name = metadata.get("method_name", fallback_method)
+
+        return super().prepare(log_record)
+
+
+class QueueFormatter(ProcessorFormatter):
+    """
+    `ProcessorFormatter` that also accepts `QueueListener` records.
+
+    Since `QueueListener` prepares records the same way
+    `ProcessorFormatter.wrap_for_formatter` does, the regular
+    `ProcessorFormatter` works too. This subclass exists as a discoverable,
+    queue-specific name and adds the correlation ID to the event dictionary
+    when a processor didn't already do so.
+
+    Args:
+        correlation_id_key:
+            Key of the correlation ID in the event dictionary.
+
+        *args, **kwargs:
+            Passed to `ProcessorFormatter`.
+
+    .. versionadded:: 26.2.0
+    """
+
+    def __init__(
+        self,
+        *args: Any,
+        correlation_id_key: str = _CORRELATION_ID_KEY,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.correlation_id_key = correlation_id_key
+
+    def format(self, record: logging.LogRecord) -> str:
+        correlation_id = getattr(record, "correlation_id", None)
+        if (
+            correlation_id is not None
+            and isinstance(record.msg, dict)
+            and self.correlation_id_key not in record.msg
+        ):
+            record = logging.makeLogRecord(record.__dict__)
+            msg = record.msg
+            if isinstance(msg, dict):
+                msg = dict.copy(msg)
+                msg[self.correlation_id_key] = correlation_id
+                record.msg = msg
+
+        return super().format(record)
+
+
+def group_by_correlation_id(
+    events: Iterable[Mapping[str, Any]],
+    *,
+    correlation_id_key: str = _CORRELATION_ID_KEY,
+    include_missing: bool = False,
+) -> dict[Any, list[Mapping[str, Any]]]:
+    """
+    Group queue envelopes by their correlation ID.
+
+    Args:
+        events:
+            The envelopes read from the queue.
+
+        correlation_id_key:
+            Top-level key of the correlation ID, with a fallback to the
+            `QUEUE_ENVELOPE_KEY` metadata.
+
+        include_missing:
+            If `True`, events without a correlation ID are grouped under
+            `None`.
+
+    Returns:
+        A dictionary mapping correlation IDs to the envelopes that belong to
+        them.
+
+    .. versionadded:: 26.2.0
+    """
+    groups: dict[Any, list[Mapping[str, Any]]] = {}
+    for event in events:
+        correlation_id = event.get(correlation_id_key)
+        if correlation_id is None:
+            metadata = event.get(QUEUE_ENVELOPE_KEY)
+            if isinstance(metadata, dict):
+                correlation_id = metadata.get(correlation_id_key)
+        if correlation_id is None and not include_missing:
+            continue
+        groups.setdefault(correlation_id, []).append(event)
+
+    return groups
+
+
+def merge_by_correlation_id(
+    events: Iterable[Mapping[str, Any]],
+    *,
+    correlation_id_key: str = _CORRELATION_ID_KEY,
+) -> dict[Any, dict[str, Any]]:
+    """
+    Merge queue envelopes that share a correlation ID.
+
+    Fields are merged shallowly; later events win on conflicts. The
+    correlation ID is always present in the result and the `QUEUE_ENVELOPE_KEY`
+    metadata is taken from the first event.
+
+    .. versionadded:: 26.2.0
+    """
+    merged: dict[Any, dict[str, Any]] = {}
+    for correlation_id, group in group_by_correlation_id(
+        events, correlation_id_key=correlation_id_key
+    ).items():
+        result: dict[str, Any] = {}
+        for event in group:
+            for key, value in event.items():
+                if key == QUEUE_ENVELOPE_KEY:
+                    result.setdefault(key, value)
+                else:
+                    result[key] = value
+        result.setdefault(correlation_id_key, correlation_id)
+        merged[correlation_id] = result
+
+    return merged
+
+
+def wrap_for_queue(
+    logger: logging.Logger, name: str, event_dict: EventDict
+) -> tuple[tuple[EventDict], dict[str, dict[str, Any]]]:
+    """
+    Wrap *logger*, *name*, and *event_dict* for `QueueHandler`.
+
+    A module-level convenience alias for `QueueHandler.wrap_for_queue`.
+
+    .. versionadded:: 26.2.0
+    """
+    return QueueHandler.wrap_for_queue(logger, name, event_dict)
+
+
+# Descriptive aliases for discoverability.  The names follow the standard
+# library's queue handlers.
+SafeQueueHandler = QueueHandler
+SafeQueueListener = QueueListener
+QueueProcessorFormatter = QueueFormatter
+merge_events_by_correlation_id = merge_by_correlation_id

@@ -578,3 +578,121 @@ Meaning: you can define a `format` for {class}`~structlog.stdlib.ProcessorFormat
 
 
 [*python-json-logger*]: https://github.com/nhairs/python-json-logger
+
+(queue-handoff)=
+
+## Queue handoff
+
+If the formatting should happen in another process -- for example, to keep file-write contention and traceback rendering out of your request handlers -- the standard library's {class}`logging.handlers.QueueHandler` / {class}`logging.handlers.QueueListener` are the usual building blocks.
+However, the stock queue handler calls `LogRecord.getMessage()`, which turns dictionaries and custom objects into strings before they are pickled.
+That loses structured data and it invokes user-defined `__str__` / `__repr__` implementations that may belong to untrusted data.
+
+For that use case *structlog* ships a restricted handoff:
+
+- {class}`~structlog.stdlib.QueueHandler` keeps events as flat dictionaries and only lets approved data cross the process boundary.
+  Unapproved objects become a stable placeholder (`{"__structlog_unapproved__": "Type"}`) that contains the type name -- *without* calling `str()` or `repr()` on the object.
+  The same override is applied to `handleError()`, so error reporting doesn't inspect the event's message or arguments either.
+- {class}`~structlog.stdlib.QueueListener` turns those dictionaries back into `logging.LogRecord`\s that {class}`~structlog.stdlib.ProcessorFormatter` understands.
+- {class}`~structlog.stdlib.QueueFormatter` is a {class}`~structlog.stdlib.ProcessorFormatter` that additionally carries the correlation ID into the event dictionary.
+- {func}`~structlog.stdlib.group_by_correlation_id()` and {func}`~structlog.stdlib.merge_by_correlation_id()` join events on the consumer side.
+
+Every enqueued event is a plain dictionary with a fixed metadata key (`_queue`) containing the envelope version, level, logger name, and correlation ID.
+It's also pickleable and contains no objects besides dictionaries, lists, strings, numbers, booleans, and `None`.
+
+```python
+import logging
+import logging.handlers
+import queue
+
+import structlog
+from structlog.stdlib import (
+    ProcessorFormatter,
+    QueueFormatter,
+    QueueHandler,
+    QueueListener,
+)
+
+log_queue: queue.Queue = queue.Queue()
+
+# -- producer process -----------------------------------------------------
+structlog.configure(
+    processors=[
+        structlog.contextvars.merge_contextvars,
+        structlog.stdlib.add_log_level,
+        structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
+    ],
+    logger_factory=structlog.stdlib.LoggerFactory(),
+    wrapper_class=structlog.stdlib.BoundLogger,
+)
+
+logging.getLogger().addHandler(QueueHandler(log_queue))
+logging.getLogger().setLevel(logging.INFO)
+
+# -- consumer process -----------------------------------------------------
+handler = logging.StreamHandler()
+handler.setFormatter(
+    QueueFormatter(
+        processors=[
+            ProcessorFormatter.remove_processors_meta,
+            structlog.processors.JSONRenderer(),
+        ],
+    )
+)
+listener = QueueListener(log_queue, handler)
+listener.start()
+```
+
+`structlog.get_logger().info("user logged in", correlation_id="req-1", user_id=42)` arrives at the consumer as:
+
+```json
+{
+  "event": "user logged in",
+  "correlation_id": "req-1",
+  "user_id": 42,
+  "_queue": {
+    "version": 1,
+    "level": "info",
+    "logger": "app",
+    "correlation_id": "req-1",
+    "is_structlog": true
+  }
+}
+```
+
+`structlog.stdlib.QueueHandler` also accepts *processors* that run before the data is sanitized, and a *serializer* that receives the final, sanitized dictionary.
+The serialized result is what's put on the queue.
+
+To join events that share a correlation ID, use {func}`~structlog.stdlib.group_by_correlation_id()` or {func}`~structlog.stdlib.merge_by_correlation_id()`:
+
+```python
+from structlog.stdlib import merge_by_correlation_id
+
+merged = merge_by_correlation_id(events_from_queue)
+```
+
+Objects that aren't approved -- an arbitrary custom class, for example -- become `{"__structlog_unapproved__": "Secret"}` instead.
+If you want a type to be allowed, pass an explicit converter to *allow*.
+The converter runs inside your trust boundary and must return JSON-safe data:
+
+```python
+class SecretToken:
+    def __init__(self, value: str) -> None:
+        self.value = value
+
+
+def redact_token(token: SecretToken) -> str:
+    return "<redacted>"
+
+
+structlog.get_logger().bind(token=SecretToken("..."))
+QueueHandler(log_queue, allow={SecretToken: redact_token})
+```
+
+Exception records are converted by {func}`~structlog.stdlib.exception_to_queue()` into a structured, JSON-safe list that keeps the exception type, frame locations, and chained exceptions.
+Like the rest of the handoff, it never stringifies exception arguments that aren't approved.
+
+:::{note}
+The default `_queue` metadata key and the unapproved placeholder are stable API.
+If you need a different envelope, pass *serializer* to {class}`~structlog.stdlib.QueueHandler`.
+It only receives sanitized data.
+:::
