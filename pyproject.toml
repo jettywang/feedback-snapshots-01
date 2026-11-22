@@ -254,6 +254,7 @@ max-complexity = 11  # TODO: should be lower
 
 [tool.ruff.lint.per-file-ignores]
 "scripts/check_distribution.py" = ["implicit-namespace-package", "print"]
+"scripts/preflight_demo.py" = ["implicit-namespace-package", "print"]
 "social_core/**tests**.py" = ["assert"]
 "social_core/pipeline/debug.py" = ["p-print", "print"]
 

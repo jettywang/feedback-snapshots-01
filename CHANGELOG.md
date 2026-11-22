@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Read-only OIDC and SAML configuration preflight (`social_core.preflight`).
+  It resolves the provider, issuer/entity, endpoints, and callback address a
+  login flow would select, records the winning setting or discovery/metadata
+  source for each value, and flags unconfigured tenants and intent conflicts
+  against caller-supplied fake discovery documents or SAML metadata. The check
+  performs no login, storage writes, or network calls and redacts secrets, so
+  it runs with placeholder credentials.
+
 ## [7.2.0](https://github.com/python-social-auth/social-core/releases/tag/7.2.0) - 2026-11-12
 
 ### Added
