@@ -93,16 +93,24 @@ class Roda
           cache = hash_public_cache
           mutex = hash_public_mutex
           unless digest = mutex.synchronize{cache[file]}
-            digest = Digest::SHA256.file(File.join(public_root, file)).base64digest
-            digest.chomp!("=")
-            digest.tr!("+/", "-_")
-            if length = hash_public_length
-              digest = digest[0, length]
-            end
-            digest.freeze
+            digest = _hash_path_digest(File.join(public_root, file))
             mutex.synchronize{cache[file] = digest}
           end
           digest
+        end
+
+        # Compute the digest for the file at the given absolute path, applying
+        # the configured :length.  This does not read or modify the cache, so
+        # it can be used to build a candidate cache without affecting the
+        # currently active cache.
+        def _hash_path_digest(path)
+          digest = Digest::SHA256.file(path).base64digest
+          digest.chomp!("=")
+          digest.tr!("+/", "-_")
+          if length = hash_public_length
+            digest = digest[0, length]
+          end
+          digest.freeze
         end
       end
 

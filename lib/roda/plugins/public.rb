@@ -103,8 +103,9 @@ class Roda
 
         app.opts[:public_root] = app.expand_path(root || app.public_root || "public")
         app.opts[:public_default_mime] =  default_mime || 'text/plain'
+        app.opts[:public_headers] = headers || app.public_headers || OPTS
         files = defined?(Rack::Files) ? Rack::Files : Rack::File
-        app.opts[:public_server] = files.new(app.public_root, headers||OPTS, app.public_default_mime)
+        app.opts[:public_server] = files.new(app.public_root, app.public_headers, app.public_default_mime)
 
         app.opts[:public_encodings] = if encodings
           encodings.map{|a| [*a, /\b#{a[0]}\b/].freeze}.freeze
@@ -124,6 +125,7 @@ class Roda
         RodaPlugins.opt_attr_reader(self, :public_server)
         RodaPlugins.opt_attr_reader(self, :public_encodings)
         RodaPlugins.opt_attr_reader(self, :public_default_mime)
+        RodaPlugins.opt_attr_reader(self, :public_headers)
       end
 
       module RequestMethods
