@@ -23,6 +23,8 @@ urlpatterns = [
     # For test_views.TestLoginView
     path("login/", LoginView.as_view()),
     path("login/no_redirect/", LoginView.as_view(next_page=None)),
+    # For test_compatibility.TestEntryPointMaxAge
+    path("login/max_age/", LoginView.as_view(max_age=2)),
     # For test_middleware.TestMiddleware
     re_path("", show_user),  # catchall pattern
 ]
