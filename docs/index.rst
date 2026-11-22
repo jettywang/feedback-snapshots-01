@@ -9,6 +9,7 @@ django-sesame
     reference
     topics
     faq
+    rotation
     contributing
     changelog
 
