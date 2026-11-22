@@ -1,6 +1,15 @@
 Changelog
 =========
 
+Unreleased
+----------
+
+* Added support for multiple sites sharing one code base: tokens can be bound
+  to a site and authentication reads users from the database mapped to that
+  site, with the :data:`SESAME_SITE_MODE` setting for a staged rollout.
+* Added :func:`sesame.legacy.audit_token` to check tokens generated before
+  site binding.
+
 3.2
 ---
 

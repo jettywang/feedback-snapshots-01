@@ -8,6 +8,8 @@ from . import packers, settings
 
 __all__ = ["create_token", "detect_token", "parse_token"]
 
+SUPPORTS_SITES = False
+
 logger = logging.getLogger("sesame")
 
 
@@ -76,19 +78,21 @@ def unsign(token):
     return signing.b64_decode(data.encode())
 
 
-def create_token(user, scope=""):
+def create_token(user, scope="", site=None):
     """
     Create a v1 signed token for a user.
 
     """
     if scope != "":
         raise NotImplementedError("v1 tokens don't support scope")
+    if site:
+        raise NotImplementedError("v1 tokens don't support sites")
     primary_key = packers.packer.pack_pk(getattr(user, settings.PRIMARY_KEY_FIELD))
     key = get_revocation_key(user)
     return sign(primary_key + key)
 
 
-def parse_token(token, get_user, scope="", max_age=None):
+def parse_token(token, get_user, scope="", max_age=None, site=None):
     """
     Obtain a user from a v1 signed token.
 
@@ -97,6 +101,8 @@ def parse_token(token, get_user, scope="", max_age=None):
         raise NotImplementedError("v1 tokens don't support scope")
     if max_age is not None:
         raise NotImplementedError("v1 tokens don't support max_age")
+    if site:
+        raise NotImplementedError("v1 tokens don't support sites")
 
     try:
         data = unsign(token)

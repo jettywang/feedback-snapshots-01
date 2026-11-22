@@ -155,7 +155,61 @@ django-sesame requires configuring a compatible authentication backend in
 .. autoclass:: sesame.backends.ModelBackend
 
     .. automethod:: get_user
+    .. automethod:: get_user_for_database
 
 .. autoclass:: sesame.backends.SesameBackendMixin
 
     .. automethod:: authenticate
+    .. automethod:: resolve_site
+    .. automethod:: get_user_for_database
+
+Multiple sites
+--------------
+
+.. data:: SESAME_SITE_MODE
+    :value: "disabled"
+
+    How tokens and requests are bound to sites. Possible values:
+
+    - ``"disabled"``: tokens aren't bound to sites; users are read from the
+      default database. This preserves the historical behavior.
+    - ``"compatible"``: new tokens are bound to their site; unbound tokens are
+      accepted only when they match exactly one user across databases.
+    - ``"enforced"``: every request must identify a known site and every token
+      must be bound to it.
+
+.. data:: SESAME_SITES
+    :value: {}
+
+    A :class:`dict` mapping site identifiers to database aliases, for example
+    ``{"site_a": "default", "site_b": "site_b"}``.
+
+.. data:: SESAME_SITE
+    :value: None
+
+    Default site when :data:`SESAME_SITE_RESOLVER` doesn't identify one. Useful
+    for single-site deployments that still want token binding.
+
+.. data:: SESAME_SITE_RESOLVER
+    :value: None
+
+    A callable or the dotted path to a callable receiving the request and
+    returning a site identifier or :obj:`None`.
+
+.. data:: SESAME_LEGACY_SITES
+    :value: []
+
+    Restricts the databases audited when accepting unbound tokens to the
+    selected sites. Use it when only some sites issued tokens before the
+    migration. Defaults to every database in :data:`SESAME_SITES` plus
+    ``"default"``.
+
+.. autofunction:: sesame.legacy.audit_token
+
+.. autoclass:: sesame.legacy.LegacyAudit
+    :members:
+
+.. autoclass:: sesame.legacy.LegacyMatch
+    :members:
+
+.. autoclass:: sesame.middleware.SiteMiddleware

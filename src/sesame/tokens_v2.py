@@ -11,6 +11,8 @@ from . import packers, settings
 
 __all__ = ["create_token", "detect_token", "parse_token"]
 
+SUPPORTS_SITES = True
+
 logger = logging.getLogger("sesame")
 
 TIMESTAMP_OFFSET = 1577836800  # 2020-01-01T00:00:00Z
@@ -125,18 +127,23 @@ def sign(data, key, size):
     ).digest()
 
 
-def create_token(user, scope=""):
+def create_token(user, scope="", site=None):
     """
     Create a v2 signed token for a user.
+
+    Set ``site`` to bind the token to a site. The site is included in the
+    signature but not in the token, so tokens keep the same size. Pass
+    ``site=None`` for the default site.
 
     """
     primary_key = packers.packer.pack_pk(getattr(user, settings.PRIMARY_KEY_FIELD))
     timestamp = pack_timestamp()
     revocation_key = get_revocation_key(user)
+    signing_key, _ = settings.get_site_settings(site)
 
     signature = sign(
         primary_key + timestamp + revocation_key + scope.encode(),
-        settings.SIGNING_KEY,
+        signing_key,
         settings.SIGNATURE_SIZE,
     )
 
@@ -147,9 +154,11 @@ def create_token(user, scope=""):
     return token.decode()
 
 
-def parse_token(token, get_user, scope="", max_age=None):
+def parse_token(token, get_user, scope="", max_age=None, site=None):
     """
     Obtain a user from a v2 signed token.
+
+    Set ``site`` to verify a token bound to this site.
 
     """
     token = token.encode()
@@ -220,7 +229,8 @@ def parse_token(token, get_user, scope="", max_age=None):
 
     primary_key_and_timestamp = data[: -settings.SIGNATURE_SIZE]
     revocation_key = get_revocation_key(user)
-    for verification_key in settings.VERIFICATION_KEYS:
+    _, verification_keys = settings.get_site_settings(site)
+    for verification_key in verification_keys:
         expected_signature = sign(
             primary_key_and_timestamp + revocation_key + scope.encode(),
             verification_key,
@@ -228,11 +238,13 @@ def parse_token(token, get_user, scope="", max_age=None):
         )
         if hmac.compare_digest(signature, expected_signature):
             log_scope = "in default scope" if scope == "" else f"in scope {scope}"
-            logger.debug("Valid token for user %s %s", user, log_scope)
+            log_site = "" if not site else f" for site {site}"
+            logger.debug("Valid token for user %s%s %s", user, log_site, log_scope)
             return user
 
     log_scope = "in default scope" if scope == "" else f"in scope {scope}"
-    logger.debug("Invalid token for user %s %s", user, log_scope)
+    log_site = "" if not site else f" for site {site}"
+    logger.debug("Invalid token for user %s%s %s", user, log_site, log_scope)
     return None
 
 

@@ -55,6 +55,13 @@ looks like:
 
 Now, your project can authenticate users based on django-sesame tokens.
 
+If several sites share one code base but store users in separate databases,
+bind tokens to their site with ``SESAME_SITE_MODE``, ``SESAME_SITES``, and
+``sesame.middleware.SiteMiddleware``. See `Multiple sites`__ and the runnable
+``examples/multi_site/demo.py``.
+
+__ https://django-sesame.readthedocs.io/en/stable/howto.html#multiple-sites
+
 Quick example
 -------------
 

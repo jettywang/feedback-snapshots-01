@@ -17,6 +17,7 @@ def authenticate(
     required=True,
     permanent=False,
     override=True,
+    site=None,
 ):
     """
     Decorator that looks for a signed token in the URL and authenticates a user.
@@ -40,6 +41,9 @@ def authenticate(
     If ``scope`` is set, a :ref:`scoped token <Scoped tokens>` is expected.
 
     If ``max_age`` is set, override the :data:`SESAME_MAX_AGE` setting.
+
+    If ``site`` is set, a token bound to this site is expected. Else, the site
+    is resolved from the request or from :data:`SESAME_SITE`.
 
     Set ``required`` to :obj:`False` to set ``request.user`` to an
     :class:`~django.contrib.auth.models.AnonymousUser` and execute the view when
@@ -69,6 +73,7 @@ def authenticate(
             required=required,
             permanent=permanent,
             override=override,
+            site=site,
         )
 
     @functools.wraps(view)
@@ -89,6 +94,7 @@ def authenticate(
             update_last_login=False if permanent else None,
             scope=scope.format(*args, **kwargs),
             max_age=max_age,
+            site=site,
         )
 
         request.user = user if user is not None else AnonymousUser()

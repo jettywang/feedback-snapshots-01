@@ -371,3 +371,124 @@ This view can be implemented more concisely, albeit more magically, as follows:
     :class: warning
 
     It only accepts tokens generated with the default scope.
+
+Multiple sites
+--------------
+
+When several sites share one code base but store users in separate databases,
+a token generated for one site must not authenticate a user on another site.
+Primary keys are only meaningful inside one database: the same key may belong
+to different accounts in each site.
+
+django-sesame binds tokens to a site. The site is mixed into the signing key,
+so the token format and length don't change, but a token generated for one
+site is rejected on another site, even when both sites share ``SECRET_KEY``.
+
+Configure the mapping from site identifiers to database aliases:
+
+.. code-block:: python
+
+    SESAME_SITE_MODE = "compatible"
+    SESAME_SITES = {
+        "site_a": "default",
+        "site_b": "site_b",
+    }
+    SESAME_SITE_RESOLVER = "myproject.sites.resolve_site"
+
+``SESAME_SITE_RESOLVER`` may be a dotted path to a callable or a callable. It
+receives the request and returns a site identifier or :obj:`None`. A typical
+implementation reads the host name or a header set by a reverse proxy:
+
+.. code-block:: python
+
+    def resolve_site(request):
+        return request.META.get("HTTP_X_SITE") or None
+
+Place :class:`sesame.middleware.SiteMiddleware` before Django's
+:class:`~django.contrib.auth.middleware.AuthenticationMiddleware`:
+
+.. code-block:: python
+
+    MIDDLEWARE = [
+        "django.contrib.sessions.middleware.SessionMiddleware",
+        "sesame.middleware.SiteMiddleware",
+        "django.contrib.auth.middleware.AuthenticationMiddleware",
+        "sesame.middleware.AuthenticationMiddleware",
+        ...,
+    ]
+
+The middleware resolves the site once, exposes it as ``request.sesame_site``,
+and binds it to the current context so that users reloaded from the session
+are read from the right database. It also binds sessions to the site where they
+were created: a session presented on another site is discarded, because the
+same primary key may designate a different account there.
+
+Tokens generated with :func:`sesame.utils.get_token` and friends infer the
+site from the database where the user was loaded. You can also pass ``site``
+explicitly:
+
+.. code-block:: python
+
+    get_token(user, site="site_b")
+    get_token(user)  # equivalent when user was loaded from the site_b database
+
+Authentication functions accept ``site`` as well: :func:`sesame.utils.get_user`,
+:func:`sesame.decorators.authenticate`, and :class:`sesame.views.LoginView`.
+
+Rolling it out
+..............
+
+``SESAME_SITE_MODE`` supports three values:
+
+``"disabled"``
+    Default. django-sesame behaves as before: tokens aren't bound to sites and
+    users are read from the default database.
+
+``"compatible"``
+    New tokens are bound to their site. Tokens generated before the migration
+    are still accepted, but only when they match exactly one user across the
+    configured databases. Requests that identify a site that isn't in
+    :data:`SESAME_SITES` keep using the default database, so that sites can be
+    migrated one at a time.
+
+``"enforced"``
+    Every request must identify a known site and every token must be bound.
+    Unbound tokens and requests without a site are rejected.
+
+A safe migration goes through ``"compatible"`` first. The worst case for an
+unbound token is a primary key that exists in two databases with the same
+password hash: the token would match both users. This is exactly why
+``"compatible"`` refuses ambiguous tokens and why you should audit stock
+before switching to ``"enforced"``.
+
+If the site resolver raises an exception, authentication fails closed in every
+mode: the request is never treated as one that simply omits the site, because
+that would enable the ambiguous-token fallback.
+
+Auditing stock
+..............
+
+Use :func:`sesame.legacy.audit_token` to check unbound tokens before the
+switch, for example by replaying every link still in your outbox:
+
+.. code-block:: python
+
+    from sesame.legacy import audit_token
+
+    audit = audit_token(token)
+    audit.status  # "unique", "ambiguous", or "invalid"
+    audit.is_safe  # True only when status == "unique"
+
+Pass ``site=...`` to check whether a token is safe for one site specifically.
+Reissue every ambiguous token. A token that's ``"unique"`` remains valid in
+``"compatible"`` mode but is rejected in ``"enforced"`` mode, so plan to let
+short-lived tokens expire or reissue them before enforcing.
+
+In ``"compatible"`` mode, :func:`sesame.utils.get_token` still issues unbound
+tokens for users whose database isn't mapped in :data:`SESAME_SITES`. In
+``"enforced"`` mode it raises
+:exc:`~django.core.exceptions.ImproperlyConfigured` instead of silently issuing
+a token that bypasses site isolation.
+
+See ``examples/multi_site/demo.py`` for a runnable end-to-end example with two
+SQLite user tables that share a primary key.

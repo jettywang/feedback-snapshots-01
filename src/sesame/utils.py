@@ -1,6 +1,7 @@
 from urllib.parse import urlencode
 
 from django.contrib.auth import authenticate
+from django.core.exceptions import ImproperlyConfigured
 from django.utils import timezone
 
 from . import settings
@@ -9,45 +10,70 @@ from .tokens import create_token
 __all__ = ["get_token", "get_parameters", "get_query_string", "get_user"]
 
 
-def get_token(user, scope=""):
+def get_token(user, scope="", site=None):
     """
     Generate a signed token to authenticate ``user``.
 
     Set ``scope`` to create a :ref:`scoped token <Scoped tokens>`.
 
+    Set ``site`` to bind the token to a site. When ``site`` is :obj:`None` and
+    :data:`SESAME_SITE_MODE` isn't ``"disabled"``, the site is inferred from
+    the database where ``user`` was loaded, then from :data:`SESAME_SITE`.
+
     Use this function to create a token that :func:`get_user` will accept.
 
     """
-    return create_token(user, scope)
+    if site is None:
+        site = settings.get_token_site(user)
+        if site is None and settings.SITE_MODE == "enforced":
+            raise ImproperlyConfigured(
+                "cannot determine the site of this user; pass site=..., load "
+                "the user from a database listed in SESAME_SITES, or set "
+                "SESAME_SITE"
+            )
+        # In compatible mode, an unmigrated site may still issue unbound
+        # tokens. They're accepted only while they map to exactly one user.
+    return create_token(user, scope, site)
 
 
-def get_parameters(user, scope=""):
+def get_parameters(user, scope="", site=None):
     """
     Generate a :class:`dict` of query string parameters to authenticate ``user``.
 
     Set ``scope`` to create a :ref:`scoped token <Scoped tokens>`.
 
+    Set ``site`` to bind the token to a site.
+
     Use this function to add authentication to a URL that already contains a
     query string.
 
     """
-    return {settings.TOKEN_NAME: create_token(user, scope)}
+    return {settings.TOKEN_NAME: get_token(user, scope, site)}
 
 
-def get_query_string(user, scope=""):
+def get_query_string(user, scope="", site=None):
     """
     Generate a complete query string to authenticate ``user``.
 
     Set ``scope`` to create a :ref:`scoped token <Scoped tokens>`.
 
+    Set ``site`` to bind the token to a site.
+
     Use this function to add authentication to a URL that doesn't contain a
     query string.
 
     """
-    return "?" + urlencode({settings.TOKEN_NAME: create_token(user, scope)})
+    return "?" + urlencode({settings.TOKEN_NAME: get_token(user, scope, site)})
 
 
-def get_user(request_or_sesame, scope="", max_age=None, *, update_last_login=None):
+def get_user(
+    request_or_sesame,
+    scope="",
+    max_age=None,
+    *,
+    update_last_login=None,
+    site=None,
+):
     """
     Authenticate a user based on a signed token.
 
@@ -62,6 +88,9 @@ def get_user(request_or_sesame, scope="", max_age=None, *, update_last_login=Non
     If ``scope`` is set, a :ref:`scoped token <Scoped tokens>` is expected.
 
     If ``max_age`` is set, override the :data:`SESAME_MAX_AGE` setting.
+
+    If ``site`` is set, a token bound to this site is expected. Else, the site
+    is resolved from the request or from :data:`SESAME_SITE`.
 
     If single-use tokens are enabled, :func:`get_user` invalidates the token by
     updating the user's last login date.
@@ -88,12 +117,16 @@ def get_user(request_or_sesame, scope="", max_age=None, *, update_last_login=Non
 
     # Call authenticate() to set user.backend to the value expected by login(),
     # "sesame.backends.ModelBackend" or the dotted path to a subclass.
-    user = authenticate(
-        request,
-        sesame=sesame,
-        scope=scope,
-        max_age=max_age,
-    )
+    credentials = {
+        "sesame": sesame,
+        "scope": scope,
+        "max_age": max_age,
+    }
+    # Only pass site when it's set, so that custom backends written against the
+    # previous signature keep working.
+    if site is not None:
+        credentials["site"] = site
+    user = authenticate(request, **credentials)
     if user is None:
         return None
 

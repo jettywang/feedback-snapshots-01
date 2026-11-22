@@ -8,7 +8,11 @@ AUTHENTICATION_BACKENDS = [
 
 CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
 
-DATABASES = {"default": {"ENGINE": "django.db.backends.sqlite3"}}
+DATABASES = {
+    "default": {"ENGINE": "django.db.backends.sqlite3"},
+    # A second independent user table, used by tests/test_sites.py.
+    "site_b": {"ENGINE": "django.db.backends.sqlite3"},
+}
 
 INSTALLED_APPS = [
     "django.contrib.auth",

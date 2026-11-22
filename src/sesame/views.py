@@ -59,6 +59,9 @@ class LoginView(RedirectURLMixin, View):
     If a ``scope`` attribute is set, a :ref:`scoped token <Scoped tokens>` is
     expected.
 
+    If a ``site`` attribute is set, a token bound to this site is expected.
+    Else, the site is resolved from the request or from :data:`SESAME_SITE`.
+
     If a ``max_age`` attribute is set, override the :data:`SESAME_MAX_AGE`
     setting.
 
@@ -71,6 +74,7 @@ class LoginView(RedirectURLMixin, View):
 
     scope = ""
     max_age = None
+    site = None
     next_page = django_settings.LOGIN_REDIRECT_URL
 
     def get(self, request):
@@ -86,6 +90,7 @@ class LoginView(RedirectURLMixin, View):
             sesame=sesame,
             scope=self.scope,
             max_age=self.max_age,
+            **({"site": self.site} if self.site is not None else {}),
         )
         if user is None:
             return self.login_failed()
