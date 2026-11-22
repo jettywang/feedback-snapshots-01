@@ -15,7 +15,11 @@ from concurrent.futures import ThreadPoolExecutor
 
 from s3transfer.exceptions import CancelledError, FatalError
 from s3transfer.futures import TransferCoordinator
-from s3transfer.manager import TransferConfig, TransferCoordinatorController
+from s3transfer.manager import (
+    TransferConfig,
+    TransferCoordinatorController,
+    TransferManager,
+)
 from tests import TransferCoordinatorWithInterrupt, unittest
 
 
@@ -141,3 +145,37 @@ class TestTransferCoordinatorController(unittest.TestCase):
         )
         with self.assertRaises(KeyboardInterrupt):
             self.coordinator_controller.wait()
+
+
+class TestCopyCompliancePolicyValidation(unittest.TestCase):
+    def setUp(self):
+        self.manager = TransferManager.__new__(TransferManager)
+
+    def test_none_policy_is_allowed(self):
+        self.manager._validate_compliance_policy(None, {})
+
+    def test_wrong_policy_type_raises(self):
+        from s3transfer.manager import TransferManager as RealManager
+
+        manager = RealManager.__new__(RealManager)
+        with self.assertRaisesRegex(ValueError, 'compliance_policy'):
+            manager._validate_compliance_policy(object(), {})
+
+    def test_tagging_conflict_warns(self):
+        from s3transfer.compliance import CopyCompliancePolicy
+
+        with self.assertLogs('s3transfer.manager', level='WARNING'):
+            self.manager._validate_compliance_policy(
+                CopyCompliancePolicy(required_tags=['a']),
+                {'Tagging': 'a=b', 'TaggingDirective': 'REPLACE'},
+            )
+
+    def test_policy_without_tags_does_not_warn_about_tagging(self):
+        from s3transfer.compliance import CopyCompliancePolicy
+
+        # No assertion failure with assertNoLogs means no warning was emitted.
+        with self.assertNoLogs('s3transfer.manager', level='WARNING'):
+            self.manager._validate_compliance_policy(
+                CopyCompliancePolicy(require_legal_hold=True),
+                {'Tagging': 'a=b', 'TaggingDirective': 'REPLACE'},
+            )

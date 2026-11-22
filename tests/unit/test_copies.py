@@ -17,6 +17,7 @@ from s3transfer.copies import (
     CopyCompleteMultipartUploadTask,
     CopyObjectTask,
     CopyPartTask,
+    CopySubmissionTask,
 )
 from s3transfer.exceptions import S3CopyFailedError
 from tests import BaseTaskTest, RecordingSubscriber
@@ -629,3 +630,87 @@ class TestCopyPartTask(BaseCopyTaskTest):
         )
         self.stubber.assert_no_pending_responses()
         self.assertEqual(subscriber.calculate_bytes_seen(), self.size)
+
+
+class TestCompliancePlanApplication(unittest.TestCase):
+    def setUp(self):
+        self.submission = CopySubmissionTask.__new__(CopySubmissionTask)
+        self.extra_args = {
+            'Tagging': 'caller=ignored',
+            'TaggingDirective': 'COPY',
+            'ObjectLockMode': 'GOVERNANCE',
+            'ObjectLockLegalHoldStatus': 'OFF',
+            'ContentType': 'application/json',
+        }
+
+    def make_plan(self, tag_set=None, object_lock_args=()):
+        from s3transfer.compliance import CopyCompliancePlan
+
+        return CopyCompliancePlan(
+            tag_set=tag_set,
+            object_lock_args=object_lock_args,
+            manages_object_lock=bool(object_lock_args),
+        )
+
+    def test_noop_plan_returns_extra_args_unchanged(self):
+        from s3transfer.compliance import CopyCompliancePlan
+
+        plan = CopyCompliancePlan()
+        self.assertIs(
+            self.submission._apply_compliance_plan(self.extra_args, plan),
+            self.extra_args,
+        )
+
+    def test_policy_tags_override_caller_directive_for_copy_object(self):
+        plan = self.make_plan(
+            tag_set=({'Key': 'classification', 'Value': 'restricted'},)
+        )
+        result = self.submission._apply_compliance_plan(
+            self.extra_args, plan, copy_object=True
+        )
+        self.assertEqual(result['Tagging'], 'classification=restricted')
+        self.assertEqual(result['TaggingDirective'], 'REPLACE')
+        self.assertEqual(result['ContentType'], 'application/json')
+
+    def test_policy_tags_omit_directive_for_multipart_creation(self):
+        plan = self.make_plan(
+            tag_set=({'Key': 'classification', 'Value': 'restricted'},)
+        )
+        result = self.submission._apply_compliance_plan(
+            self.extra_args, plan, copy_object=False
+        )
+        self.assertEqual(result['Tagging'], 'classification=restricted')
+        self.assertNotIn('TaggingDirective', result)
+
+    def test_policy_object_lock_replaces_caller_values(self):
+        import datetime
+
+        retain_until = datetime.datetime(
+            2035, 1, 1, tzinfo=datetime.timezone.utc
+        )
+        plan = self.make_plan(
+            object_lock_args=(
+                ('ObjectLockMode', 'COMPLIANCE'),
+                ('ObjectLockRetainUntilDate', retain_until),
+                ('ObjectLockLegalHoldStatus', 'ON'),
+            )
+        )
+        result = self.submission._apply_compliance_plan(self.extra_args, plan)
+        self.assertEqual(result['ObjectLockMode'], 'COMPLIANCE')
+        self.assertEqual(result['ObjectLockRetainUntilDate'], retain_until)
+        self.assertEqual(result['ObjectLockLegalHoldStatus'], 'ON')
+        self.assertEqual(result['ContentType'], 'application/json')
+
+    def test_small_and_large_paths_receive_same_compliance_args(self):
+        plan = self.make_plan(
+            tag_set=({'Key': 'classification', 'Value': 'restricted'},),
+            object_lock_args=(('ObjectLockLegalHoldStatus', 'ON'),),
+        )
+        small = self.submission._apply_compliance_plan(
+            self.extra_args, plan, copy_object=True
+        )
+        large = self.submission._apply_compliance_plan(
+            self.extra_args, plan, copy_object=False
+        )
+        small.pop('TaggingDirective')
+        self.assertEqual(small, large)

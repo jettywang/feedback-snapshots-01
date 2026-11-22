@@ -16,6 +16,7 @@ import re
 import threading
 
 from s3transfer.bandwidth import BandwidthLimiter, LeakyBucket
+from s3transfer.compliance import CopyCompliancePolicy
 from s3transfer.constants import (
     ALLOWED_DOWNLOAD_ARGS,
     FULL_OBJECT_CHECKSUM_ARGS,
@@ -416,6 +417,7 @@ class TransferManager:
         extra_args=None,
         subscribers=None,
         source_client=None,
+        compliance_policy=None,
     ):
         """Copies a file in S3
 
@@ -448,6 +450,14 @@ class TransferManager:
             If no client is provided, the transfer manager's client is used
             as the client for the source object.
 
+        :type compliance_policy: s3transfer.compliance.CopyCompliancePolicy
+        :param compliance_policy: Optional policy describing which object
+            tags and Object Lock restrictions the destination must carry.
+            When supplied, the policy is resolved for both single-part and
+            multipart copies before any destination request is made, and
+            it takes precedence over caller-supplied ``Tagging`` or
+            ``TaggingDirective`` values.
+
         :rtype: s3transfer.futures.TransferFuture
         :returns: Transfer future representing the copy
         """
@@ -457,6 +467,7 @@ class TransferManager:
             subscribers = []
         if source_client is None:
             source_client = self._client
+        self._validate_compliance_policy(compliance_policy, extra_args)
         # Warn when Metadata/Tagging are supplied without a directive. To match
         # the low-level CopyObject behavior, the supplied values are silently
         # ignored unless the corresponding directive is set to 'REPLACE'. The
@@ -475,6 +486,7 @@ class TransferManager:
         if (
             extra_args.get('Tagging')
             and extra_args.get('TaggingDirective') is None
+            and not self._policy_manages_tags(compliance_policy)
         ):
             logger.warning(
                 "Tagging was supplied without a tagging directive. The "
@@ -493,8 +505,29 @@ class TransferManager:
             extra_args=extra_args,
             subscribers=subscribers,
             source_client=source_client,
+            compliance_policy=compliance_policy,
         )
         return self._submit_transfer(call_args, CopySubmissionTask)
+
+    def _validate_compliance_policy(self, compliance_policy, extra_args):
+        if compliance_policy is None:
+            return
+        if not isinstance(compliance_policy, CopyCompliancePolicy):
+            raise ValueError(
+                'compliance_policy must be a '
+                's3transfer.compliance.CopyCompliancePolicy instance.'
+            )
+        if compliance_policy.manages_tags and (
+            extra_args.get('Tagging') or extra_args.get('TaggingDirective')
+        ):
+            logger.warning(
+                'Tagging was supplied together with a compliance policy '
+                'that manages tags. The policy takes precedence and the '
+                'supplied Tagging/TaggingDirective values will be ignored.'
+            )
+
+    def _policy_manages_tags(self, compliance_policy):
+        return compliance_policy is not None and compliance_policy.manages_tags
 
     def delete(self, bucket, key, extra_args=None, subscribers=None):
         """Delete an S3 object.

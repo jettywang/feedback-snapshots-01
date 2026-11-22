@@ -16,6 +16,7 @@ from urllib.parse import parse_qsl
 
 from botocore.exceptions import ClientError
 
+from s3transfer.compliance import resolve_copy_compliance
 from s3transfer.exceptions import S3CopyFailedError
 from s3transfer.tasks import (
     CompleteMultipartUploadTask,
@@ -134,6 +135,7 @@ class CopySubmissionTask(SubmissionTask):
         source_version_id = None
         if isinstance(call_args.copy_source, dict):
             source_version_id = call_args.copy_source.get('VersionId')
+        head_response = None
         if (
             transfer_future.meta.size is None
             or transfer_future.meta.etag is None
@@ -168,12 +170,30 @@ class CopySubmissionTask(SubmissionTask):
             # during a multipart copy.
             transfer_future.meta.provide_object_etag(response.get('ETag'))
             preserved_metadata = self._extract_preserved_metadata(response)
+            head_response = response
+
+        # Resolve any compliance policy before submitting a destination
+        # request. Both the single-part and multipart paths use the same
+        # resolved plan so they enforce identical destination attributes.
+        compliance_plan = resolve_copy_compliance(
+            getattr(call_args, 'compliance_policy', None),
+            call_args.source_client,
+            call_args.copy_source,
+            source_version_id,
+            call_args.extra_args,
+            head_response=head_response,
+        )
 
         # If it is greater than threshold do a multipart copy, otherwise
         # do a regular copy object.
         if transfer_future.meta.size < config.multipart_threshold:
             self._submit_copy_request(
-                client, config, osutil, request_executor, transfer_future
+                client,
+                config,
+                osutil,
+                request_executor,
+                transfer_future,
+                compliance_plan=compliance_plan,
             )
         else:
             self._submit_multipart_request(
@@ -184,10 +204,17 @@ class CopySubmissionTask(SubmissionTask):
                 transfer_future,
                 preserved_metadata,
                 source_version_id=source_version_id,
+                compliance_plan=compliance_plan,
             )
 
     def _submit_copy_request(
-        self, client, config, osutil, request_executor, transfer_future
+        self,
+        client,
+        config,
+        osutil,
+        request_executor,
+        transfer_future,
+        compliance_plan=None,
     ):
         call_args = transfer_future.meta.call_args
 
@@ -204,7 +231,11 @@ class CopySubmissionTask(SubmissionTask):
                     'copy_source': call_args.copy_source,
                     'bucket': call_args.bucket,
                     'key': call_args.key,
-                    'extra_args': call_args.extra_args,
+                    'extra_args': self._apply_compliance_plan(
+                        call_args.extra_args,
+                        compliance_plan,
+                        copy_object=True,
+                    ),
                     'callbacks': progress_callbacks,
                     'size': transfer_future.meta.size,
                 },
@@ -221,10 +252,22 @@ class CopySubmissionTask(SubmissionTask):
         transfer_future,
         preserved_metadata=None,
         source_version_id=None,
+        compliance_plan=None,
     ):
         call_args = transfer_future.meta.call_args
         merged_extra_args = self._apply_preserved_metadata(
             call_args.extra_args, preserved_metadata or {}
+        )
+        merged_extra_args = self._apply_compliance_plan(
+            merged_extra_args, compliance_plan
+        )
+        # CREATE_MULTIPART_ARGS_BLACKLIST drops Tagging from the creation
+        # request because caller-supplied tags are applied after completion.
+        # Policy-managed tags are different: they are authoritative and are
+        # submitted with the creation request so the destination is created
+        # with its final tag set, matching CopyObject's REPLACE behavior.
+        managed_tags = compliance_plan is not None and (
+            compliance_plan.manages_tags
         )
 
         # Submit the request to create a multipart upload and make sure it
@@ -233,6 +276,8 @@ class CopySubmissionTask(SubmissionTask):
         for param, val in merged_extra_args.items():
             if param not in self.CREATE_MULTIPART_ARGS_BLACKLIST:
                 create_multipart_extra_args[param] = val
+        if managed_tags and compliance_plan.tagging:
+            create_multipart_extra_args['Tagging'] = compliance_plan.tagging
 
         create_multipart_future = self._transfer_coordinator.submit(
             request_executor,
@@ -328,6 +373,7 @@ class CopySubmissionTask(SubmissionTask):
                     'extra_args': complete_multipart_extra_args,
                     'call_args': call_args,
                     'source_version_id': source_version_id,
+                    'compliance_manages_tags': managed_tags,
                 },
                 pending_main_kwargs={
                     'upload_id': create_multipart_future,
@@ -336,6 +382,36 @@ class CopySubmissionTask(SubmissionTask):
                 is_final=True,
             ),
         )
+
+    def _apply_compliance_plan(
+        self, extra_args, compliance_plan, copy_object=False
+    ):
+        if compliance_plan is None or compliance_plan.is_noop:
+            return extra_args
+        result = dict(extra_args)
+        if compliance_plan.manages_tags:
+            # The policy is the single source of truth for tags. Drop any
+            # caller-supplied Tagging/TaggingDirective so both copy paths
+            # submit the resolved set instead of the caller's.
+            result.pop('Tagging', None)
+            result.pop('TaggingDirective', None)
+            if copy_object:
+                # CopyObject defaults to COPY. Pin REPLACE so the resolved
+                # tag set is submitted verbatim. CreateMultipartUpload takes
+                # Tagging directly and needs no directive.
+                result['TaggingDirective'] = 'REPLACE'
+        if compliance_plan.manages_object_lock:
+            # The resolved object lock values already fold in any stronger
+            # caller-supplied floors and policy minimums. Drop the caller's
+            # raw values so a weaker one cannot override the resolution.
+            for key in (
+                'ObjectLockMode',
+                'ObjectLockRetainUntilDate',
+                'ObjectLockLegalHoldStatus',
+            ):
+                result.pop(key, None)
+        result.update(compliance_plan.destination_args)
+        return result
 
     def _extract_preserved_metadata(self, head_object_response):
         preserved = {}
@@ -403,6 +479,7 @@ class CopyCompleteMultipartUploadTask(CompleteMultipartUploadTask):
         extra_args,
         call_args,
         source_version_id,
+        compliance_manages_tags=False,
     ):
         response = client.complete_multipart_upload(
             Bucket=bucket,
@@ -413,14 +490,30 @@ class CopyCompleteMultipartUploadTask(CompleteMultipartUploadTask):
         )
         dest_etag = response.get('ETag')
         dest_version_id = response.get('VersionId')
-        self._apply_tags(client, call_args, source_version_id, dest_version_id)
+        self._apply_tags(
+            client,
+            call_args,
+            source_version_id,
+            dest_version_id,
+            compliance_manages_tags=compliance_manages_tags,
+        )
         self._apply_annotations(
             client, call_args, source_version_id, dest_version_id, dest_etag
         )
 
     def _apply_tags(
-        self, client, call_args, source_version_id, dest_version_id
+        self,
+        client,
+        call_args,
+        source_version_id,
+        dest_version_id,
+        compliance_manages_tags=False,
     ):
+        if compliance_manages_tags:
+            # Policy-managed tags were submitted with CreateMultipartUpload,
+            # so the destination already carries the resolved tag set and no
+            # post-completion put is needed.
+            return
         extra_args = call_args.extra_args
         directive = extra_args.get('TaggingDirective')
         if directive not in ('COPY', 'REPLACE'):

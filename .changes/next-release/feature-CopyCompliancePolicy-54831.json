@@ -1,0 +1,5 @@
+{
+  "category": "``s3``",
+  "description": "Add an opt-in `CopyCompliancePolicy` to `TransferManager.copy` that preserves and floors object tags, retention, and legal hold for both single-part and multipart copies, and stops the copy before any destination request when required source attributes cannot be read.",
+  "type": "feature"
+}

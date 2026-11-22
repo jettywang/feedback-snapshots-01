@@ -31,6 +31,18 @@ class S3CopyFailedError(Exception):
     pass
 
 
+class CopyComplianceError(S3CopyFailedError):
+    """Base error for a copy that cannot satisfy its compliance policy."""
+
+
+class ComplianceViolationError(CopyComplianceError):
+    """The destination would be weaker than the source or the policy."""
+
+
+class UnknownSourceComplianceError(CopyComplianceError):
+    """Required source compliance attributes could not be determined."""
+
+
 class InvalidSubscriberMethodError(Exception):
     pass
 
