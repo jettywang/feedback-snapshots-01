@@ -159,3 +159,35 @@ django-sesame requires configuring a compatible authentication backend in
 .. autoclass:: sesame.backends.SesameBackendMixin
 
     .. automethod:: authenticate
+
+Stateful single-use magic links
+-------------------------------
+
+See :ref:`Stateful single-use magic links`.
+
+Model
+.....
+
+.. autoclass:: sesame.magiclink.models.MagicLink
+    :members:
+    :member-order: bysource
+
+Services
+........
+
+.. automodule:: sesame.magiclink.services
+    :members:
+    :member-order: bysource
+
+Views
+.....
+
+.. autoclass:: sesame.magiclink.views.MagicLinkLoginView
+    :members:
+
+Exceptions
+..........
+
+.. automodule:: sesame.magiclink.exceptions
+    :members:
+    :member-order: bysource

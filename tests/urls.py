@@ -1,9 +1,11 @@
 from django.urls import path, re_path
-
 from sesame.decorators import authenticate
+from sesame.magiclink.views import MagicLinkLoginView
 from sesame.views import LoginView
 
 from .views import show_user
+
+MAGIC_LINK_SCOPE = "email-login"
 
 urlpatterns = [
     # For test_decorators.TestAuthenticate
@@ -23,6 +25,16 @@ urlpatterns = [
     # For test_views.TestLoginView
     path("login/", LoginView.as_view()),
     path("login/no_redirect/", LoginView.as_view(next_page=None)),
+    # For test_magiclink
+    path(
+        "magic-link/login/",
+        MagicLinkLoginView.as_view(scope=MAGIC_LINK_SCOPE),
+        name="magic-link-login",
+    ),
+    path(
+        "magic-link/login/no_redirect/",
+        MagicLinkLoginView.as_view(scope=MAGIC_LINK_SCOPE, next_page=None),
+    ),
     # For test_middleware.TestMiddleware
     re_path("", show_user),  # catchall pattern
 ]

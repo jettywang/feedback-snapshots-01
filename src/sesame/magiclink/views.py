@@ -1,0 +1,104 @@
+from http import HTTPStatus
+
+from django.conf import settings as django_settings
+from django.contrib.auth import REDIRECT_FIELD_NAME, login
+from django.core.exceptions import ImproperlyConfigured, PermissionDenied
+from django.http import HttpResponse, HttpResponseRedirect
+from django.shortcuts import resolve_url
+from django.utils.http import url_has_allowed_host_and_scheme  # private API
+from django.views.generic import View
+
+from sesame import settings
+
+from .exceptions import MagicLinkError
+from .services import claim_magic_link, consume_magic_link
+
+try:
+    from django.contrib.auth.views import RedirectURLMixin  # private API
+except ImportError:  # Django < 4.1
+    # Added to Django in https://github.com/django/django/pull/15608
+    class RedirectURLMixin:
+        next_page = None
+        redirect_field_name = REDIRECT_FIELD_NAME
+        success_url_allowed_hosts = set()
+
+        def get_success_url(self):
+            return self.get_redirect_url() or self.get_default_redirect_url()
+
+        def get_redirect_url(self):
+            """Return the user-originating redirect URL if it's safe."""
+            redirect_to = self.request.POST.get(
+                self.redirect_field_name, self.request.GET.get(self.redirect_field_name)
+            )
+            url_is_safe = url_has_allowed_host_and_scheme(
+                url=redirect_to,
+                allowed_hosts=self.get_success_url_allowed_hosts(),
+                require_https=self.request.is_secure(),
+            )
+            return redirect_to if url_is_safe else ""
+
+        def get_success_url_allowed_hosts(self):
+            return {self.request.get_host(), *self.success_url_allowed_hosts}
+
+        def get_default_redirect_url(self):
+            """Return the default redirect URL."""
+            if self.next_page:
+                return resolve_url(self.next_page)
+            else:  # pragma: no cover
+                raise ImproperlyConfigured("no URL to redirect to; provide a next_page")
+
+
+__all__ = ["MagicLinkLoginView"]
+
+
+class MagicLinkLoginView(RedirectURLMixin, View):
+    """
+    Consume a single-use, stateful magic link and log the user in.
+
+    The view expects a token generated for ``scope`` with
+    :func:`~sesame.magiclink.services.issue_magic_link`. The link is reserved
+    in the database before the session is created and marked as consumed only
+    after login succeeds. If anything fails beforehand, the reservation is
+    released and the link remains usable.
+
+    Because the reservation is an atomic conditional update, two concurrent
+    requests carrying the same token can never both create a session.
+
+    """
+
+    scope = ""
+    max_age = None
+    next_page = django_settings.LOGIN_REDIRECT_URL
+
+    def get(self, request):
+        if not hasattr(request, "user"):
+            raise ImproperlyConfigured(
+                "MagicLinkLoginView requires django.contrib.auth"
+            )
+
+        token = request.GET.get(settings.TOKEN_NAME)
+        if token is None:
+            return self.login_failed()
+
+        try:
+            link, user = claim_magic_link(
+                token,
+                self.scope,
+                max_age=self.max_age,
+            )
+        except MagicLinkError:
+            return self.login_failed()
+
+        login(request, user)  # updates the last login date
+        consume_magic_link(link)
+
+        return self.login_success()
+
+    def login_failed(self):
+        raise PermissionDenied
+
+    def login_success(self):
+        if self.next_page is None:
+            return HttpResponse(status=HTTPStatus.NO_CONTENT)
+        else:
+            return HttpResponseRedirect(self.get_success_url())

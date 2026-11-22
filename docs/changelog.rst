@@ -1,6 +1,17 @@
 Changelog
 =========
 
+3.3
+---
+
+*Under development*
+
+* Added the optional :mod:`sesame.magiclink` application for stateful,
+  single-use magic links bound to a business scope. It records whether each
+  emailed link is issued, claimed, consumed, or revoked, reserves links with an
+  atomic update so concurrent requests on the same token create at most one
+  session, and leaves every other scope working the stateless way.
+
 3.2
 ---
 

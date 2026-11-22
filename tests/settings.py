@@ -8,11 +8,25 @@ AUTHENTICATION_BACKENDS = [
 
 CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}}
 
-DATABASES = {"default": {"ENGINE": "django.db.backends.sqlite3"}}
+DATABASES = {
+    "default": {"ENGINE": "django.db.backends.sqlite3"},
+    # Declared so the connection exists for Django's system checks. The
+    # concurrency tests repoint this alias at a fresh file at runtime and route
+    # only the MagicLink model to it; the test runner otherwise leaves it alone
+    # thanks to TEST.MIGRATE.
+    "magiclink_file": {
+        "ENGINE": "django.db.backends.sqlite3",
+        "NAME": "",
+        "TEST": {"MIGRATE": False},
+    },
+}
+
+DATABASE_ROUTERS = ["tests.db_routers.MagicLinkRouter"]
 
 INSTALLED_APPS = [
     "django.contrib.auth",
     "django.contrib.contenttypes",
+    "sesame.magiclink",
     "tests",
 ]
 

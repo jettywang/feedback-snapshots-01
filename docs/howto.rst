@@ -371,3 +371,157 @@ This view can be implemented more concisely, albeit more magically, as follows:
     :class: warning
 
     It only accepts tokens generated with the default scope.
+
+Stateful single-use magic links
+-------------------------------
+
+The :data:`SESAME_ONE_TIME` setting makes tokens single-use by tying them to
+the user's last login date. That approach is global to the project, doesn't
+record the state of an individual link in the database, and cannot guarantee
+that two concurrent requests on the same token don't both log in.
+
+When you email a temporary access link and need to authorize it exactly once
+for a given business scope — while every other scope keeps working the usual,
+stateless way — use the optional :mod:`sesame.magiclink` application.
+
+Setup
+.....
+
+Add the application to :setting:`INSTALLED_APPS` and install its model:
+
+.. code-block:: python
+
+    INSTALLED_APPS = [
+        ...,
+        "sesame.magiclink",
+    ]
+
+.. code-block:: console
+
+    $ python manage.py migrate sesame_magiclink
+
+The standard sesame authentication backend is still required:
+
+.. code-block:: python
+
+    AUTHENTICATION_BACKENDS = [
+        "django.contrib.auth.backends.ModelBackend",
+        "sesame.backends.ModelBackend",
+    ]
+
+Issuing a link
+..............
+
+Pick a scope that identifies the business use case, for example
+``"email-login"``. :func:`~sesame.magiclink.services.issue_magic_link` creates
+a row and returns the raw token to put in the email:
+
+.. code-block:: python
+
+    from sesame.magiclink import issue_magic_link
+
+    link, token = issue_magic_link(user, "email-login", max_age=900)
+    url = f"https://example.com/magic-link/login/?sesame={token}"
+    # send `url` by email
+
+Only a SHA-256 hash of the token is stored, so a database leak does not reveal
+a usable token. A random nonce is mixed into the cryptographic scope, which
+guarantees that two links issued for the same user and scope never share a
+token. By default, issuing a new link revokes the still-active links of that
+user and scope; pass ``revoke_previous=False`` to keep them.
+
+Consuming a link
+................
+
+Wire :class:`~sesame.magiclink.views.MagicLinkLoginView` to the same scope:
+
+.. code-block:: python
+
+    from django.urls import path
+    from sesame.magiclink.views import MagicLinkLoginView
+
+    urlpatterns = [
+        path(
+            "magic-link/login/",
+            MagicLinkLoginView.as_view(scope="email-login"),
+            name="magic-link-login",
+        ),
+    ]
+
+When a request arrives, the view:
+
+1. Reserves the link with an atomic conditional database update, flipping it
+   from ``issued`` to ``claimed``. Two concurrent requests presenting the same
+   token cannot both win; at most one creates a session.
+2. Verifies the cryptographic sesame token against the link's scope and nonce.
+3. Logs the user in and only then marks the link ``consumed``.
+
+If anything fails before the session is created — a missing, malformed,
+expired, or revoked token — the reservation is released back to ``issued`` and
+the view returns 403. A link that errors before login therefore stays usable,
+whereas a link that already produced a session is ``consumed`` and can never be
+reused.
+
+Observable states
+.................
+
+The :class:`~sesame.magiclink.models.MagicLink` model exposes the full
+lifecycle through its ``status`` column, so the database always tells whether a
+request currently holds a link or whether it was consumed or revoked:
+
+``issued``
+    Waiting to be used.
+
+``claimed``
+    A request has reserved the link and is about to create the session.
+
+``consumed``
+    The link produced a valid session exactly once. It cannot be revoked or
+    reused.
+
+``revoked``
+    The link was invalidated before consumption, for example because a
+    replacement link was sent.
+
+Consumption and revocation stay distinct forever. Use
+:func:`~sesame.magiclink.services.resend_magic_link` to supersede a link: the
+previous one becomes ``revoked`` and the new one starts as ``issued``.
+:func:`~sesame.magiclink.services.revoke_magic_link` revokes a single link and
+refuses to touch a ``consumed`` one.
+
+Service-level API
+.................
+
+Outside of a view, the same primitives are available directly:
+
+.. code-block:: python
+
+    from sesame.magiclink import (
+        MagicLinkInvalid,
+        claim_magic_link,
+        consume_magic_link,
+        release_magic_link,
+    )
+
+    try:
+        link, user = claim_magic_link(token, "email-login")
+    except MagicLinkInvalid:
+        # The link was released automatically and remains usable.
+        ...
+    else:
+        # ... create the session or grant the resource ...
+        consume_magic_link(link)
+
+Each failure mode maps to a dedicated exception subclass of
+:class:`~sesame.magiclink.exceptions.MagicLinkError`, making it straightforward
+to tell an unknown, expired, revoked, already-consumed, or busy link apart.
+
+Other scopes are unaffected
+...........................
+
+The magic-link flow is opt-in and bound to the scope you choose. Tokens
+generated for the default scope or for any other scope keep behaving exactly
+as before through :class:`~sesame.views.LoginView`,
+:func:`~sesame.decorators.authenticate`, and :func:`~sesame.utils.get_user`.
+A magic-link token is rejected by those entry points and a regular token is
+rejected by :class:`~sesame.magiclink.views.MagicLinkLoginView`.
