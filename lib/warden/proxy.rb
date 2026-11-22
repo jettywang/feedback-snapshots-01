@@ -13,11 +13,22 @@ module Warden
     # :api: public
     attr_reader :env, :manager, :config, :winning_strategies
 
+    # The login events recorded during this request. Each entry is a
+    # Warden::LoginEvent describing a fresh strategy authentication, a
+    # session restore, a manual set_user or a rejected attempt, together
+    # with the scoped identity it concerns.
+    # :api: public
+    attr_reader :login_events
+
     extend ::Forwardable
     include ::Warden::Mixins::Common
 
     ENV_WARDEN_ERRORS = 'warden.errors'.freeze
     ENV_SESSION_OPTIONS = 'rack.session.options'.freeze
+
+    # Sentinel used to detect whether a strategy threw :warden.
+    # :api: private
+    NOT_THROWN = Object.new.freeze
 
     # :api: private
     def_delegators :winning_strategy, :headers, :status, :custom_response
@@ -29,6 +40,7 @@ module Warden
       @env, @users, @winning_strategies, @locked = env, {}, {}, false
       @manager, @config = manager, manager.config.dup
       @strategies = Hash.new { |h,k| h[k] = {} }
+      @login_events = []
     end
 
     # Run the on_request callbacks
@@ -160,6 +172,20 @@ module Warden
       result
     end
 
+    # Check to see if the user for the given scope presented fresh
+    # credentials during this request, i.e. a strategy just succeeded.
+    # This is false when the user was restored from the session or set
+    # manually, which is the distinction needed to reconcile "when did
+    # the user actually log in" against login_events.
+    #
+    # Parameters:
+    #   scope - the scope to check for a fresh authentication. Defaults to default_scope
+    #
+    # :api: public
+    def fresh_authentication?(scope = @config.default_scope)
+      @login_events.any? { |event| event.scope == scope && event.fresh_credentials? }
+    end
+
     # Manually set the user into the session and auth proxy
     #
     # Parameters:
@@ -175,7 +201,8 @@ module Warden
       opts[:event] ||= :set_user
       @users[scope] = user
 
-      if opts[:store] != false && opts[:event] != :fetch
+      stored = opts[:store] != false && opts[:event] != :fetch
+      if stored
         options = env[ENV_SESSION_OPTIONS]
         if options
           if options.frozen?
@@ -187,8 +214,19 @@ module Warden
         session_serializer.store(user, scope)
       end
 
+      # Record the login event before running the callbacks so the evidence
+      # is kept even when a hook fails.
+      event = _record_login_event(opts[:event], scope, user, stored)
+
       run_callbacks = opts.fetch(:run_callbacks, true)
-      manager._run_callbacks(:after_set_user, user, self, opts) if run_callbacks
+      if run_callbacks
+        begin
+          manager._run_callbacks(:after_set_user, user, self, opts)
+        rescue => error
+          event.hook_error = error
+          raise
+        end
+      end
 
       @users[scope]
     end
@@ -332,12 +370,25 @@ module Warden
       # Look for an existing user in the session for this scope.
       # If there was no user in the session, see if we can get one from the request.
       return user, opts if user = user(opts.merge(:scope => scope))
-      _run_strategies_for(scope, args)
+
+      performed_before = @strategies[scope].values.count(&:performed?)
+
+      # Guard the strategy run so a strategy throwing :warden still leaves
+      # a failure event behind before the throw is re-raised.
+      thrown = catch(:warden) do
+        _run_strategies_for(scope, args)
+        NOT_THROWN
+      end
 
       if winning_strategy && winning_strategy.successful?
         opts[:store] = opts.fetch(:store, winning_strategy.store?)
         set_user(winning_strategy.user, opts.merge!(:event => :authentication))
+      elsif winning_strategy && winning_strategy.result == :failure &&
+            @strategies[scope].values.count(&:performed?) > performed_before
+        _record_login_event(:failure, scope, nil, false)
       end
+
+      throw(:warden, thrown) unless thrown.equal?(NOT_THROWN)
 
       [@users[scope], opts]
     end
@@ -389,6 +440,18 @@ module Warden
     # Updates the winning strategy for a given scope
     def _update_winning_strategy(strategy, scope)
       self.winning_strategy = @winning_strategies[scope] = strategy
+    end
+
+    # Records a login event for the current request and returns it.
+    def _record_login_event(event, scope, user, stored) #:nodoc:
+      strategy = nil
+      if [:authentication, :failure].include?(event) && winning_strategy
+        strategy = @strategies[scope].key(winning_strategy)
+      end
+
+      LoginEvent.new(event, scope, user, :strategy => strategy, :stored => stored).tap do |login_event|
+        @login_events << login_event
+      end
     end
   end # Proxy
 

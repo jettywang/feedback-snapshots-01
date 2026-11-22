@@ -1,5 +1,15 @@
 # CHANGELOG
 
+## Unreleased
+* Add `Warden::Proxy#login_events`, a reconcilable per-request log of
+  `Warden::LoginEvent` entries that distinguishes fresh strategy
+  authentication (`:authentication`) from session restores (`:fetch`),
+  manual `set_user` calls (`:set_user`) and rejected attempts (`:failure`).
+  Each event carries the scoped identity, the strategy label, whether it
+  was stored in the session and any error raised by an `after_set_user`
+  hook (the error is still re-raised). `Warden::Proxy#fresh_authentication?`
+  answers whether the user presented fresh credentials during the request.
+
 ## Version 1.2.9 / 2020-08-31
 * Avoid warning on uninitialized instance variable (#188)
 * Bump rack to 2.2.3 (#190)
