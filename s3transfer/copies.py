@@ -59,6 +59,7 @@ class CopySubmissionTask(SubmissionTask):
         'SSECustomerKeyMD5',
         'RequestPayer',
         'ExpectedBucketOwner',
+        'ExpectedSourceBucketOwner',
     ]
 
     CREATE_MULTIPART_ARGS_BLACKLIST = [
@@ -73,6 +74,7 @@ class CopySubmissionTask(SubmissionTask):
         'TaggingDirective',
         'AnnotationDirective',
         'Tagging',
+        'ExpectedSourceBucketOwner',
     ]
 
     # Metadata fields to preserve for multipart copies.
@@ -157,6 +159,9 @@ class CopySubmissionTask(SubmissionTask):
                     head_object_request[
                         self.EXTRA_ARGS_TO_HEAD_ARGS_MAPPING[param]
                     ] = value
+            # The HEAD is a read of the source object, so the source-specific
+            # owner must win over the destination owner if both are supplied.
+            head_object_request.update(self._source_owner_kwargs(extra_args))
 
             response = call_args.source_client.head_object(
                 **head_object_request
@@ -373,6 +378,22 @@ class CopySubmissionTask(SubmissionTask):
         # onto the upload_part_copy calls.
         return get_filtered_dict(extra_args, self.UPLOAD_PART_COPY_ARGS)
 
+    @staticmethod
+    def _source_owner_kwargs(extra_args):
+        """Build the owner assertion for a request against the source bucket.
+
+        Source-side read APIs (HeadObject, GetObjectTagging, and the
+        annotation reads) only model ``ExpectedBucketOwner``. A caller-supplied
+        ``ExpectedSourceBucketOwner`` identifies the source bucket and takes
+        precedence; otherwise ``ExpectedBucketOwner`` is used as before.
+        """
+        owner = extra_args.get('ExpectedSourceBucketOwner')
+        if owner is None:
+            owner = extra_args.get('ExpectedBucketOwner')
+        if owner is None:
+            return {}
+        return {'ExpectedBucketOwner': owner}
+
     def _extra_complete_multipart_args(self, extra_args):
         return get_filtered_dict(extra_args, self.COMPLETE_MULTIPART_ARGS)
 
@@ -433,6 +454,9 @@ class CopyCompleteMultipartUploadTask(CompleteMultipartUploadTask):
                     extra_args, CopySubmissionTask.GET_OBJECT_TAGGING_ARGS
                 ),
             }
+            src_kwargs.update(
+                CopySubmissionTask._source_owner_kwargs(extra_args)
+            )
             if source_version_id:
                 src_kwargs['VersionId'] = source_version_id
             tag_set = call_args.source_client.get_object_tagging(
@@ -484,12 +508,16 @@ class CopyCompleteMultipartUploadTask(CompleteMultipartUploadTask):
                 extra_args, CopySubmissionTask.LIST_OBJECT_ANNOTATIONS_ARGS
             ),
         }
+        list_kwargs.update(CopySubmissionTask._source_owner_kwargs(extra_args))
         get_kwargs_base = {
             **src_base,
             **get_filtered_dict(
                 extra_args, CopySubmissionTask.GET_OBJECT_ANNOTATION_ARGS
             ),
         }
+        get_kwargs_base.update(
+            CopySubmissionTask._source_owner_kwargs(extra_args)
+        )
         put_passthrough = get_filtered_dict(
             extra_args, CopySubmissionTask.PUT_OBJECT_ANNOTATION_ARGS
         )

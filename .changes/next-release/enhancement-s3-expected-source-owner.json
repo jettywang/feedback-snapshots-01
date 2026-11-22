@@ -1,0 +1,5 @@
+{
+  "category": "``s3``",
+  "description": "Support ``ExpectedSourceBucketOwner`` for copy transfers so source-bucket reads can assert a different owner than the destination bucket.",
+  "type": "enhancement"
+}

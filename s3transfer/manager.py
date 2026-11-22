@@ -218,6 +218,7 @@ class TransferManager:
         'CopySourceSSECustomerAlgorithm',
         'CopySourceSSECustomerKey',
         'CopySourceSSECustomerKeyMD5',
+        'ExpectedSourceBucketOwner',
         'MetadataDirective',
         'TaggingDirective',
         'AnnotationDirective',
