@@ -1,0 +1,5 @@
+{
+  "category": "``bandwidth``",
+  "description": "Add per-affiliation bandwidth quotas with ``TransferConfig.max_bandwidth_affiliations`` and an ``affiliation`` argument on ``TransferManager.upload`` and ``TransferManager.download``. Requests sharing an affiliation share its quota while remaining subject to the host-wide ``max_bandwidth`` quota, and cancelling a queued request releases its reservation.",
+  "type": "feature"
+}

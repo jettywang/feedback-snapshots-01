@@ -10,6 +10,9 @@
 # distributed on an 'AS IS' BASIS, WITHOUT WARRANTIES OR CONDITIONS OF
 # ANY KIND, either express or implied. See the License for the specific
 # language governing permissions and limitations under the License.
+import os
+import shutil
+import tempfile
 from io import BytesIO
 
 from botocore.awsrequest import create_request_object
@@ -189,3 +192,169 @@ class TestTransferManager(StubbedClientTest):
         manager = TransferManager(self.client, config)
         manager.VALIDATE_SUPPORTED_BUCKET_VALUES = False
         manager.delete(s3_object_lambda_arn, 'my-key')
+
+
+class TestDownloadBandwidthAffiliations(StubbedClientTest):
+    chunk = 256 * 1024
+
+    def setUp(self):
+        super().setUp()
+        self.bucket = 'mybucket'
+        self.key = 'mykey'
+        self.content = b'a' * self.chunk * 6
+        self.tempdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tempdir)
+        super().tearDown()
+
+    def add_responses(self, content):
+        self.stubber.add_response(
+            'head_object',
+            {'ContentLength': len(content), 'ETag': 'etag'},
+        )
+        self.stubber.add_response('get_object', {'Body': BytesIO(content)})
+
+    def test_rejects_unknown_affiliation(self):
+        manager = TransferManager(
+            self.client,
+            TransferConfig(
+                max_bandwidth=10**6,
+                max_bandwidth_affiliations={'tenant-a': 10**5},
+            ),
+        )
+        with self.assertRaises(ValueError):
+            manager.download(
+                self.bucket,
+                self.key,
+                os.path.join(self.tempdir, 'out'),
+                affiliation='tenant-b',
+            )
+
+    def test_downloads_charge_host_and_affiliation(self):
+        config = TransferConfig(
+            max_bandwidth=10**7,
+            max_bandwidth_affiliations={'tenant-a': 10**6},
+        )
+        manager = TransferManager(self.client, config)
+        self.add_responses(self.content)
+        filename = os.path.join(self.tempdir, 'out')
+        future = manager.download(
+            self.bucket, self.key, filename, affiliation='tenant-a'
+        )
+        future.result()
+        self.stubber.assert_no_pending_responses()
+        # Empty reads (the terminal read sentinel) are not billed.
+        self.assertEqual(
+            manager.bandwidth_limiter.bytes_consumed, len(self.content)
+        )
+        self.assertEqual(
+            manager.bandwidth_limiter.get_affiliation_bytes_consumed(
+                'tenant-a'
+            ),
+            len(self.content),
+        )
+        self.assertEqual(manager.bandwidth_limiter.affiliations, {'tenant-a'})
+
+    def test_small_download_is_billed(self):
+        # Small bodies stay under the read threshold and are never closed by
+        # the download path; they must still be billed when the transfer
+        # finishes.
+        content = b'a' * 10 * 1024
+        config = TransferConfig(
+            max_bandwidth=10**7,
+            max_bandwidth_affiliations={'tenant-a': 10**6},
+        )
+        manager = TransferManager(self.client, config)
+        self.add_responses(content)
+        future = manager.download(
+            self.bucket,
+            self.key,
+            os.path.join(self.tempdir, 'small'),
+            affiliation='tenant-a',
+        )
+        future.result()
+        self.assertEqual(
+            manager.bandwidth_limiter.bytes_consumed, len(content)
+        )
+        self.assertEqual(
+            manager.bandwidth_limiter.get_affiliation_bytes_consumed(
+                'tenant-a'
+            ),
+            len(content),
+        )
+
+
+class TestUploadBandwidthAffiliations(StubbedClientTest):
+    def setUp(self):
+        super().setUp()
+        self.bucket = 'mybucket'
+        self.key = 'mykey'
+        self.content = b'a' * 300 * 1024
+        self.tempdir = tempfile.mkdtemp()
+        self.filename = os.path.join(self.tempdir, 'in')
+        with open(self.filename, 'wb') as f:
+            f.write(self.content)
+
+    def tearDown(self):
+        shutil.rmtree(self.tempdir)
+        super().tearDown()
+
+    def _read_body(self, params, model, **kwargs):
+        # The stubber does not drive an HTTP body read, so signal that the
+        # body is being transferred and then read it, mirroring what
+        # ``tests.functional.test_upload`` does.
+        body = params.get('Body')
+        if body is None:
+            return
+        request = create_request_object(
+            {
+                'method': 'PUT',
+                'url': 'https://s3.amazonaws.com',
+                'body': body,
+                'headers': {},
+                'context': {},
+            }
+        )
+        self.client.meta.events.emit(
+            f'request-created.s3.{model.name}',
+            request=request,
+            operation_name=model.name,
+        )
+        data = body.read(8192)
+        while data:
+            data = body.read(8192)
+
+    def test_upload_charges_host_and_affiliation(self):
+        config = TransferConfig(
+            max_bandwidth=10**7,
+            max_bandwidth_affiliations={'tenant-a': 10**6},
+        )
+        manager = TransferManager(self.client, config)
+        self.client.meta.events.register(
+            'before-parameter-build.s3.*', self._read_body
+        )
+        self.stubber.add_response(
+            'put_object',
+            {},
+            {
+                'Bucket': self.bucket,
+                'Key': self.key,
+                'Body': mock.ANY,
+                'ChecksumAlgorithm': 'CRC32',
+            },
+        )
+        future = manager.upload(
+            self.filename, self.bucket, self.key, affiliation='tenant-a'
+        )
+        future.result()
+        self.stubber.assert_no_pending_responses()
+        self.assertEqual(
+            manager.bandwidth_limiter.bytes_consumed, len(self.content)
+        )
+        self.assertEqual(
+            manager.bandwidth_limiter.get_affiliation_bytes_consumed(
+                'tenant-a'
+            ),
+            len(self.content),
+        )

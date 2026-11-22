@@ -684,7 +684,39 @@ class TestGetObjectTask(BaseTaskTest):
         self.stubber.assert_no_pending_responses()
         self.assertEqual(
             bandwidth_limiter.get_bandwith_limited_stream.call_args_list,
-            [mock.call(mock.ANY, self.transfer_coordinator)],
+            [
+                mock.call(
+                    mock.ANY,
+                    self.transfer_coordinator,
+                    affiliation=None,
+                )
+            ],
+        )
+
+    def test_uses_bandwidth_affiliation_for_limiter(self):
+        bandwidth_limiter = mock.Mock(BandwidthLimiter)
+
+        self.stubber.add_response(
+            'get_object',
+            service_response={'Body': self.stream},
+            expected_params={'Bucket': self.bucket, 'Key': self.key},
+        )
+        task = self.get_download_task(
+            bandwidth_limiter=bandwidth_limiter,
+            bandwidth_affiliation='tenant-a',
+        )
+        task()
+
+        self.stubber.assert_no_pending_responses()
+        self.assertEqual(
+            bandwidth_limiter.get_bandwith_limited_stream.call_args_list,
+            [
+                mock.call(
+                    mock.ANY,
+                    self.transfer_coordinator,
+                    affiliation='tenant-a',
+                )
+            ],
         )
 
     def test_retries_succeeds(self):

@@ -28,6 +28,44 @@ class TestTransferConfig(unittest.TestCase):
         with self.assertRaises(ValueError):
             TransferConfig(max_request_queue_size=0)
 
+    def test_requires_host_limit_for_affiliations(self):
+        with self.assertRaises(ValueError):
+            TransferConfig(max_bandwidth_affiliations={'tenant-a': 1024})
+
+    def test_rejects_non_mapping_affiliations(self):
+        with self.assertRaises(ValueError):
+            TransferConfig(
+                max_bandwidth=10**6, max_bandwidth_affiliations=[1, 2]
+            )
+
+    def test_rejects_empty_affiliation_name(self):
+        with self.assertRaises(ValueError):
+            TransferConfig(
+                max_bandwidth=10**6,
+                max_bandwidth_affiliations={'': 1024},
+            )
+
+    def test_rejects_non_positive_affiliation_rate(self):
+        with self.assertRaises(ValueError):
+            TransferConfig(
+                max_bandwidth=10**6,
+                max_bandwidth_affiliations={'tenant-a': 0},
+            )
+
+    def test_rejects_non_numeric_affiliation_rate(self):
+        with self.assertRaises(ValueError):
+            TransferConfig(
+                max_bandwidth=10**6,
+                max_bandwidth_affiliations={'tenant-a': 'fast'},
+            )
+
+    def test_allows_none_for_affiliation(self):
+        config = TransferConfig(
+            max_bandwidth=10**6,
+            max_bandwidth_affiliations={'tenant-a': None},
+        )
+        self.assertIsNone(config.max_bandwidth_affiliations['tenant-a'])
+
 
 class TestTransferCoordinatorController(unittest.TestCase):
     def setUp(self):

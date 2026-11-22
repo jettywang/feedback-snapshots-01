@@ -427,6 +427,7 @@ class DownloadSubmissionTask(SubmissionTask):
         bandwidth_limiter,
     ):
         call_args = transfer_future.meta.call_args
+        bandwidth_affiliation = getattr(call_args, 'affiliation', None)
 
         # Get a handle to the file that will be used for writing downloaded
         # contents
@@ -459,6 +460,7 @@ class DownloadSubmissionTask(SubmissionTask):
                     'download_output_manager': download_output_manager,
                     'io_chunksize': config.io_chunksize,
                     'bandwidth_limiter': bandwidth_limiter,
+                    'bandwidth_affiliation': bandwidth_affiliation,
                 },
                 done_callbacks=[final_task],
             ),
@@ -477,6 +479,7 @@ class DownloadSubmissionTask(SubmissionTask):
         bandwidth_limiter,
     ):
         call_args = transfer_future.meta.call_args
+        bandwidth_affiliation = getattr(call_args, 'affiliation', None)
 
         # Get the needed progress callbacks for the task
         progress_callbacks = get_callbacks(transfer_future, 'progress')
@@ -532,6 +535,7 @@ class DownloadSubmissionTask(SubmissionTask):
                         'download_output_manager': download_output_manager,
                         'io_chunksize': config.io_chunksize,
                         'bandwidth_limiter': bandwidth_limiter,
+                        'bandwidth_affiliation': bandwidth_affiliation,
                     },
                     done_callbacks=[finalize_download_invoker.decrement],
                 ),
@@ -569,6 +573,7 @@ class DownloadSubmissionTask(SubmissionTask):
         bandwidth_limiter,
     ):
         call_args = transfer_future.meta.call_args
+        bandwidth_affiliation = getattr(call_args, 'affiliation', None)
 
         # Get a handle to the file that will be used for writing downloaded
         # contents
@@ -604,6 +609,7 @@ class DownloadSubmissionTask(SubmissionTask):
             fileobj,
             progress_callbacks,
             get_object_tag,
+            bandwidth_affiliation,
         )
 
         task = GetObjectTask(
@@ -620,6 +626,7 @@ class DownloadSubmissionTask(SubmissionTask):
                 'download_output_manager': download_output_manager,
                 'io_chunksize': config.io_chunksize,
                 'bandwidth_limiter': bandwidth_limiter,
+                'bandwidth_affiliation': bandwidth_affiliation,
             },
             done_callbacks=[on_done_callback],
         )
@@ -646,6 +653,7 @@ class GetObjectFirstChunkOnDoneCallback:
         fileobj,
         progress_callbacks,
         get_object_tag,
+        bandwidth_affiliation=None,
     ):
         self._transfer_future = transfer_future
         self._download_output_manager = download_output_manager
@@ -658,6 +666,7 @@ class GetObjectFirstChunkOnDoneCallback:
         self._fileobj = fileobj
         self._progress_callbacks = progress_callbacks
         self._get_object_tag = get_object_tag
+        self._bandwidth_affiliation = bandwidth_affiliation
         self._task = None
 
     def __call__(self):
@@ -761,6 +770,7 @@ class GetObjectFirstChunkOnDoneCallback:
                         'download_output_manager': self._download_output_manager,
                         'io_chunksize': self._config.io_chunksize,
                         'bandwidth_limiter': self._bandwidth_limiter,
+                        'bandwidth_affiliation': self._bandwidth_affiliation,
                     },
                     done_callbacks=[finalize_download_invoker.decrement],
                 ),
@@ -783,6 +793,7 @@ class GetObjectTask(Task):
         io_chunksize,
         start_index=0,
         bandwidth_limiter=None,
+        bandwidth_affiliation=None,
     ):
         """Downloads an object and places content into io queue
 
@@ -801,6 +812,8 @@ class GetObjectTask(Task):
             content of the key to.
         :param bandwidth_limiter: The bandwidth limiter to use when throttling
             the downloading of data in streams.
+        :param bandwidth_affiliation: The bandwidth affiliation whose quota
+            should also be charged for this download.
         """
         last_exception = None
         for i in range(max_attempts):
@@ -822,7 +835,9 @@ class GetObjectTask(Task):
                 if bandwidth_limiter:
                     streaming_body = (
                         bandwidth_limiter.get_bandwith_limited_stream(
-                            streaming_body, self._transfer_coordinator
+                            streaming_body,
+                            self._transfer_coordinator,
+                            affiliation=bandwidth_affiliation,
                         )
                     )
 
@@ -840,7 +855,11 @@ class GetObjectTask(Task):
                         )
                         current_index += len(chunk)
                     else:
+                        self._finalize_bandwidth_stream(streaming_body)
                         return
+                # The response body is not closed here, so flush any bytes
+                # buffered below the bandwidth limiter's read threshold.
+                self._finalize_bandwidth_stream(streaming_body)
                 return
             except ClientError as e:
                 error_code = e.response.get('Error', {}).get('Code')
@@ -879,6 +898,13 @@ class GetObjectTask(Task):
 
     def _handle_io(self, download_output_manager, fileobj, chunk, index):
         download_output_manager.queue_file_io_task(fileobj, chunk, index)
+
+    def _finalize_bandwidth_stream(self, streaming_body):
+        # Only the bandwidth limited wrapper buffers bytes for billing;
+        # StreamReaderProgress and plain response bodies do not.
+        finalize = getattr(streaming_body, 'finalize', None)
+        if finalize is not None:
+            finalize()
 
     def get_response(self):
         return getattr(self, '_response', None)

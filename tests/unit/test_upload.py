@@ -178,6 +178,8 @@ class BaseUploadInputManagerTest(BaseUploadTest):
 
 
 class TestUploadFilenameInputManager(BaseUploadInputManagerTest):
+    upload_manager_cls = UploadFilenameInputManager
+
     def setUp(self):
         super().setUp()
         self.upload_input_manager = UploadFilenameInputManager(
@@ -246,6 +248,31 @@ class TestUploadFilenameInputManager(BaseUploadInputManagerTest):
             self.recording_subscriber.calculate_bytes_seen(), len(self.content)
         )
 
+    def test_uses_bandwidth_affiliation_for_limiter(self):
+        calls = []
+
+        class RecordingLimiter:
+            def get_bandwith_limited_stream(
+                self, fileobj, coordinator, enabled=True, affiliation=None
+            ):
+                calls.append((fileobj, coordinator, enabled, affiliation))
+                return fileobj
+
+        upload_input_manager = self.__class__.upload_manager_cls(
+            self.osutil,
+            self.transfer_coordinator,
+            RecordingLimiter(),
+            'tenant-a',
+        )
+        self.future.meta.provide_transfer_size(len(self.content))
+        upload_input_manager.get_put_object_body(self.future)
+
+        self.assertEqual(len(calls), 1)
+        _, coordinator, enabled, affiliation = calls[0]
+        self.assertIs(coordinator, self.transfer_coordinator)
+        self.assertFalse(enabled)
+        self.assertEqual(affiliation, 'tenant-a')
+
     def test_get_put_object_body_is_interruptable(self):
         self.future.meta.provide_transfer_size(len(self.content))
         read_file_chunk = self.upload_input_manager.get_put_object_body(
@@ -309,6 +336,8 @@ class TestUploadFilenameInputManager(BaseUploadInputManagerTest):
 
 
 class TestUploadSeekableInputManager(TestUploadFilenameInputManager):
+    upload_manager_cls = UploadSeekableInputManager
+
     def setUp(self):
         super().setUp()
         self.upload_input_manager = UploadSeekableInputManager(
@@ -356,6 +385,8 @@ class TestUploadSeekableInputManager(TestUploadFilenameInputManager):
 
 
 class TestUploadNonSeekableInputManager(TestUploadFilenameInputManager):
+    upload_manager_cls = UploadNonSeekableInputManager
+
     def setUp(self):
         super().setUp()
         self.upload_input_manager = UploadNonSeekableInputManager(

@@ -123,10 +123,17 @@ class UploadInputManager:
     public methods from this class.
     """
 
-    def __init__(self, osutil, transfer_coordinator, bandwidth_limiter=None):
+    def __init__(
+        self,
+        osutil,
+        transfer_coordinator,
+        bandwidth_limiter=None,
+        bandwidth_affiliation=None,
+    ):
         self._osutil = osutil
         self._transfer_coordinator = transfer_coordinator
         self._bandwidth_limiter = bandwidth_limiter
+        self._bandwidth_affiliation = bandwidth_affiliation
 
     @classmethod
     def is_compatible(cls, upload_source):
@@ -213,7 +220,10 @@ class UploadInputManager:
         fileobj = InterruptReader(fileobj, self._transfer_coordinator)
         if self._bandwidth_limiter:
             fileobj = self._bandwidth_limiter.get_bandwith_limited_stream(
-                fileobj, self._transfer_coordinator, enabled=False
+                fileobj,
+                self._transfer_coordinator,
+                enabled=False,
+                affiliation=self._bandwidth_affiliation,
             )
         return fileobj
 
@@ -375,8 +385,19 @@ class UploadSeekableInputManager(UploadFilenameInputManager):
 class UploadNonSeekableInputManager(UploadInputManager):
     """Upload utility for a file-like object that cannot seek."""
 
-    def __init__(self, osutil, transfer_coordinator, bandwidth_limiter=None):
-        super().__init__(osutil, transfer_coordinator, bandwidth_limiter)
+    def __init__(
+        self,
+        osutil,
+        transfer_coordinator,
+        bandwidth_limiter=None,
+        bandwidth_affiliation=None,
+    ):
+        super().__init__(
+            osutil,
+            transfer_coordinator,
+            bandwidth_limiter,
+            bandwidth_affiliation,
+        )
         self._initial_data = b''
 
     @classmethod
@@ -587,9 +608,17 @@ class UploadSubmissionTask(SubmissionTask):
         :param transfer_future: The transfer future associated with the
             transfer request that tasks are being submitted for
         """
+        bandwidth_affiliation = getattr(
+            transfer_future.meta.call_args, 'affiliation', None
+        )
         upload_input_manager = self._get_upload_input_manager_cls(
             transfer_future
-        )(osutil, self._transfer_coordinator, bandwidth_limiter)
+        )(
+            osutil,
+            self._transfer_coordinator,
+            bandwidth_limiter,
+            bandwidth_affiliation,
+        )
 
         # Determine the size if it was not provided
         if transfer_future.meta.size is None:

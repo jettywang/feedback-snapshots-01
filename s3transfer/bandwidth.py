@@ -10,6 +10,40 @@
 # distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF
 # ANY KIND, either express or implied. See the License for the specific
 # language governing permissions and limitations under the License.
+"""Bandwidth limiting primitives shared by S3 uploads and downloads.
+
+Metering model
+--------------
+A ``LeakyBucket`` admits a read only when the projected rate for that
+bucket stays at or below its ``max_rate``.  Every admitted read is
+recorded exactly once against the bucket, so ``LeakyBucket.bytes_consumed``
+is the amount of payload actually billed to that bucket.
+
+When affiliations are configured, a transfer that declares an
+``affiliation`` is checked against two buckets for every read:
+
+* the host bucket (``max_bandwidth``), shared by every affiliation, and
+* the affiliation bucket (``max_bandwidth_affiliations[affiliation]``),
+  shared only by transfers from that affiliation.
+
+A read is admitted only when both buckets admit it.  Both buckets are
+then charged the same bytes under the same lock, and neither is charged
+when either one rejects the read.  This gives two useful invariants:
+
+* every read that goes through an affiliation is billed exactly once to
+  that affiliation and exactly once to the host, so
+  ``host.bytes_consumed >= sum(affiliation.bytes_consumed)`` (equality
+  holds when every read is affiliated), and
+* a tenant that saturates its own bucket cannot stop another tenant
+  from using capacity that the host bucket still has available.
+
+A rejected read is queued in the bucket's ``ConsumptionScheduler`` and
+the caller waits for the returned retry time; queued reads are not
+billed.  Cancelling a transfer removes its queued reservation from both
+buckets without charging them, so a cancelled request cannot hold
+capacity that other requests could use.
+"""
+
 import threading
 import time
 
@@ -59,22 +93,61 @@ class TimeUtils:
 
 
 class BandwidthLimiter:
-    def __init__(self, leaky_bucket, time_utils=None):
+    def __init__(
+        self,
+        leaky_bucket,
+        time_utils=None,
+        affiliation_leaky_buckets=None,
+    ):
         """Limits bandwidth for shared S3 transfers
 
         :type leaky_bucket: LeakyBucket
-        :param leaky_bucket: The leaky bucket to use limit bandwidth
+        :param leaky_bucket: The host leaky bucket. Every limited read,
+            including reads made on behalf of an affiliation, is checked
+            against this bucket so the host-wide limit is never exceeded.
 
         :type time_utils: TimeUtils
         :param time_utils: Time utility to use for interacting with time.
+
+        :type affiliation_leaky_buckets: dict
+        :param affiliation_leaky_buckets: A mapping of affiliation name to
+            the ``LeakyBucket`` that is shared by every transfer belonging
+            to that affiliation.
         """
         self._leaky_bucket = leaky_bucket
         self._time_utils = time_utils
         if time_utils is None:
             self._time_utils = TimeUtils()
+        self._affiliation_leaky_buckets = dict(affiliation_leaky_buckets or {})
+
+    @property
+    def affiliations(self):
+        """The names of the configured bandwidth affiliations"""
+        return frozenset(self._affiliation_leaky_buckets)
+
+    @property
+    def bytes_consumed(self):
+        """The number of bytes billed to the host bucket"""
+        return self._leaky_bucket.bytes_consumed
+
+    def get_affiliation_bytes_consumed(self, affiliation):
+        """Get the number of bytes billed to an affiliation bucket
+
+        :type affiliation: str
+        :param affiliation: The affiliation to look up
+
+        :rtype: int
+        """
+        if affiliation not in self._affiliation_leaky_buckets:
+            raise ValueError(
+                f'Unknown bandwidth affiliation {affiliation!r}. '
+                f'Configured affiliations: '
+                f'{sorted(self._affiliation_leaky_buckets)!r}'
+            )
+        return self._affiliation_leaky_buckets[affiliation].bytes_consumed
 
     def get_bandwith_limited_stream(
-        self, fileobj, transfer_coordinator, enabled=True
+        self, fileobj, transfer_coordinator, enabled=True, affiliation=None
     ):
         """Wraps a fileobj in a bandwidth limited stream wrapper
 
@@ -87,9 +160,32 @@ class BandwidthLimiter:
 
         :type enabled: boolean
         :param enabled: Whether bandwidth limiting should be enabled to start
+
+        :type affiliation: str
+        :param affiliation: The affiliation whose quota should also be
+            charged for reads on this stream. The host bucket is always
+            charged as well. If not supplied, only the host bucket applies.
         """
+        bucket = self._leaky_bucket
+        if affiliation is not None:
+            try:
+                affiliation_bucket = self._affiliation_leaky_buckets[
+                    affiliation
+                ]
+            except KeyError:
+                raise ValueError(
+                    f'Unknown bandwidth affiliation {affiliation!r}. '
+                    f'Configured affiliations: '
+                    f'{sorted(self._affiliation_leaky_buckets)!r}'
+                )
+            bucket = AffiliationBandwidthBucket(
+                self._leaky_bucket,
+                affiliation_bucket,
+                affiliation,
+                self._time_utils,
+            )
         stream = BandwidthLimitedStream(
-            fileobj, self._leaky_bucket, transfer_coordinator, self._time_utils
+            fileobj, bucket, transfer_coordinator, self._time_utils
         )
         if not enabled:
             stream.disable_bandwidth_limiting()
@@ -112,7 +208,9 @@ class BandwidthLimitedStream:
 
         :type leaky_bucket: LeakyBucket
         :param leaky_bucket: The leaky bucket to use to throttle reads on
-            the stream
+            the stream. This may also be an
+            ``AffiliationBandwidthBucket``, which enforces both the host
+            and affiliation quotas for each read.
 
         :type transfer_coordinator: s3transfer.futures.TransferCoordinator
         param transfer_coordinator: The coordinator for the general transfer
@@ -143,22 +241,26 @@ class BandwidthLimitedStream:
     def read(self, amount):
         """Read a specified amount
 
-        Reads will only be throttled if bandwidth limiting is enabled.
+        Reads will only be throttled if bandwidth limiting is enabled. Only
+        bytes actually returned by the underlying stream are billed, so a
+        read that hits EOF or returns a short read does not over-count the
+        transfer.
         """
         if not self._bandwidth_limiting_enabled:
             return self._fileobj.read(amount)
 
+        data = self._fileobj.read(amount)
         # We do not want to be calling consume on every read as the read
         # amounts can be small causing the lock of the leaky bucket to
         # introduce noticeable overhead. So instead we keep track of
         # how many bytes we have seen and only call consume once we pass a
         # certain threshold.
-        self._bytes_seen += amount
+        self._bytes_seen += len(data)
         if self._bytes_seen < self._bytes_threshold:
-            return self._fileobj.read(amount)
+            return data
 
         self._consume_through_leaky_bucket()
-        return self._fileobj.read(amount)
+        return data
 
     def _consume_through_leaky_bucket(self):
         # NOTE: If the read amount on the stream are high, it will result
@@ -166,17 +268,30 @@ class BandwidthLimitedStream:
         # reads. However given the read's on this abstraction are at most 256KB
         # (via downloads), it reduces the burstiness to be small KB bursts at
         # worst.
-        while not self._transfer_coordinator.exception:
+        while True:
+            if self._transfer_coordinator.exception:
+                # Do not leave a queued reservation behind when a transfer
+                # is cancelled or fails while it is waiting for capacity.
+                # Otherwise the cancelled request would keep billing time
+                # against the bucket queues of later requests.
+                self._cancel_pending_consumption()
+                raise self._transfer_coordinator.exception
             try:
                 self._leaky_bucket.consume(
                     self._bytes_seen, self._request_token
                 )
+            except RequestExceededException as e:
+                try:
+                    self._time_utils.sleep(e.retry_time)
+                except BaseException:
+                    self._cancel_pending_consumption()
+                    raise
+            else:
                 self._bytes_seen = 0
                 return
-            except RequestExceededException as e:
-                self._time_utils.sleep(e.retry_time)
-        else:
-            raise self._transfer_coordinator.exception
+
+    def _cancel_pending_consumption(self):
+        self._leaky_bucket.cancel(self._request_token)
 
     def signal_transferring(self):
         """Signal that data being read is being transferred to S3"""
@@ -193,20 +308,135 @@ class BandwidthLimitedStream:
         return self._fileobj.tell()
 
     def close(self):
-        if self._bandwidth_limiting_enabled and self._bytes_seen:
-            # This handles the case where the file is small enough to never
-            # trigger the threshold and thus is never subjugated to the
-            # leaky bucket on read(). This specifically happens for small
-            # uploads. So instead to account for those bytes, have
+        self.finalize()
+        self._fileobj.close()
+
+    def finalize(self):
+        """Bill any bytes buffered below the threshold, without closing
+
+        Reads smaller than ``bytes_threshold`` are batched so the leaky
+        bucket lock is not taken for every tiny read. A stream that is never
+        closed (for example a download response body) still needs those
+        bytes billed once the transfer is done.
+        """
+        if not self._bytes_seen:
+            return
+        if self._transfer_coordinator.exception:
+            # A cancelled transfer should not be billed for bytes that
+            # were buffered but never sent, nor keep a reservation.
+            self._cancel_pending_consumption()
+            self._bytes_seen = 0
+        elif self._bandwidth_limiting_enabled:
+            # This handles the case where the file is small enough to
+            # never trigger the threshold and thus is never subjugated to
+            # the leaky bucket on read(). This specifically happens for
+            # small uploads. So instead to account for those bytes, have
             # it go through the leaky bucket when the file gets closed.
             self._consume_through_leaky_bucket()
-        self._fileobj.close()
 
     def __enter__(self):
         return self
 
     def __exit__(self, *args, **kwargs):
         self.close()
+
+
+class AffiliationBandwidthBucket:
+    """A bucket that enforces a host quota and an affiliation quota together
+
+    Reads are admitted only when both the host bucket and the affiliation
+    bucket admit them, and an admitted read is billed exactly once to each
+    bucket. A rejected read is queued in whichever bucket rejected it and
+    is not billed to either bucket.
+    """
+
+    def __init__(
+        self, host_bucket, affiliation_bucket, affiliation, time_utils=None
+    ):
+        """
+        :type host_bucket: LeakyBucket
+        :param host_bucket: The bucket shared by the whole host
+
+        :type affiliation_bucket: LeakyBucket
+        :param affiliation_bucket: The bucket shared by one affiliation
+
+        :type affiliation: str
+        :param affiliation: The name of the affiliation
+
+        :type time_utils: TimeUtils
+        :param time_utils: The clock used to evaluate both buckets. It
+            should be the same clock the buckets were created with.
+        """
+        self._host_bucket = host_bucket
+        self._affiliation_bucket = affiliation_bucket
+        self._affiliation = affiliation
+        self._time_utils = time_utils
+        if time_utils is None:
+            self._time_utils = host_bucket._time_utils
+        self._lock = threading.Lock()
+
+    def consume(self, amt, request_token):
+        """Consume an amount from both the host and affiliation buckets
+
+        Both buckets are evaluated under one lock so a request can never
+        be billed to one bucket without being billed to the other. If
+        either bucket rejects the read, no bucket is billed and any
+        reservation that a bucket already holds for this token is kept so
+        the request does not lose its place in the queue.
+
+        :raises RequestExceededException: If either bucket rejects the read
+        """
+        with (
+            self._lock,
+            self._host_bucket._lock,
+            self._affiliation_bucket._lock,
+        ):
+            time_now = self._time_utils.time()
+            host_admitted, host_retry_time = (
+                self._host_bucket._check_consumption(
+                    amt, request_token, time_now
+                )
+            )
+            affiliation_admitted, affiliation_retry_time = (
+                self._affiliation_bucket._check_consumption(
+                    amt, request_token, time_now
+                )
+            )
+            if not (host_admitted and affiliation_admitted):
+                retry_times = [
+                    retry_time
+                    for retry_time in (host_retry_time, affiliation_retry_time)
+                    if retry_time is not None
+                ]
+                raise RequestExceededException(amt, max(retry_times))
+            self._host_bucket._commit_consumption(amt, time_now, request_token)
+            self._affiliation_bucket._commit_consumption(
+                amt, time_now, request_token
+            )
+            return amt
+
+    def is_scheduled(self, request_token):
+        """Whether the token holds a queued reservation in either bucket"""
+        with (
+            self._lock,
+            self._host_bucket._lock,
+            self._affiliation_bucket._lock,
+        ):
+            return self._host_bucket._has_reservation(
+                request_token
+            ) or self._affiliation_bucket._has_reservation(request_token)
+
+    def cancel(self, request_token):
+        """Drop any queued reservation for the token in both buckets"""
+        with (
+            self._lock,
+            self._host_bucket._lock,
+            self._affiliation_bucket._lock,
+        ):
+            self._host_bucket._cancel_scheduled_consumption(request_token)
+            self._affiliation_bucket._cancel_scheduled_consumption(
+                request_token
+            )
 
 
 class LeakyBucket:
@@ -244,6 +474,18 @@ class LeakyBucket:
         self._consumption_scheduler = consumption_scheduler
         if consumption_scheduler is None:
             self._consumption_scheduler = ConsumptionScheduler()
+        self._bytes_consumed = 0
+
+    @property
+    def max_rate(self):
+        """The maximum number of bytes per second this bucket allows"""
+        return self._max_rate
+
+    @property
+    def bytes_consumed(self):
+        """The total number of bytes this bucket has billed"""
+        with self._lock:
+            return self._bytes_consumed
 
     def consume(self, amt, request_token):
         """Consume an a requested amount
@@ -265,41 +507,86 @@ class LeakyBucket:
         """
         with self._lock:
             time_now = self._time_utils.time()
-            if self._consumption_scheduler.is_scheduled(request_token):
-                return self._release_requested_amt_for_scheduled_request(
-                    amt, request_token, time_now
+            admitted, retry_time = self._check_consumption(
+                amt, request_token, time_now
+            )
+            if not admitted:
+                raise RequestExceededException(
+                    requested_amt=amt, retry_time=retry_time
                 )
-            elif self._projected_to_exceed_max_rate(amt, time_now):
-                self._raise_request_exceeded_exception(
-                    amt, request_token, time_now
-                )
-            else:
-                return self._release_requested_amt(amt, time_now)
+            return self._commit_consumption(amt, time_now, request_token)
+
+    def cancel(self, request_token):
+        """Cancel any queued consumption for the provided token
+
+        This is used when a transfer is cancelled while it is waiting for
+        capacity. The queued reservation is removed without billing the
+        bucket, so the capacity can be offered to other requests.
+
+        :type request_token: RequestToken
+        :param request_token: The token used in the queued consume() request
+        """
+        with self._lock:
+            self._cancel_scheduled_consumption(request_token)
+
+    def is_scheduled(self, request_token):
+        """Whether the token currently holds a queued reservation
+
+        :type request_token: RequestToken
+        :param request_token: The token to inspect
+        """
+        with self._lock:
+            return self._has_reservation(request_token)
+
+    def _has_reservation(self, request_token):
+        # Caller must already hold self._lock.
+        return self._consumption_scheduler.is_scheduled(request_token)
+
+    def _check_consumption(self, amt, request_token, time_now):
+        """Decide whether amt can be admitted without billing the bucket
+
+        A request that already holds a reservation is admitted once it is
+        retried; the reservation is released later, but only if every
+        bucket involved also admits the read. A new request is admitted if
+        its projected rate stays within the bucket's maximum rate;
+        otherwise it is queued and the retry time is returned.
+
+        :rtype: tuple
+        :returns: ``(admitted, retry_time)`` where ``retry_time`` is None
+            when the request is admitted.
+        """
+        if self._consumption_scheduler.is_scheduled(request_token):
+            return True, None
+        if self._projected_to_exceed_max_rate(amt, time_now):
+            retry_time = self._schedule_consumption(amt, request_token)
+            return False, retry_time
+        return True, None
+
+    def _commit_consumption(self, amt, time_now, request_token):
+        """Bill an admitted read, releasing any queued reservation"""
+        if self._consumption_scheduler.is_scheduled(request_token):
+            self._consumption_scheduler.process_scheduled_consumption(
+                request_token
+            )
+        self._rate_tracker.record_consumption_rate(amt, time_now)
+        self._bytes_consumed += amt
+        return amt
+
+    def _schedule_consumption(self, amt, request_token):
+        allocated_time = amt / float(self._max_rate)
+        return self._consumption_scheduler.schedule_consumption(
+            amt, request_token, allocated_time
+        )
+
+    def _cancel_scheduled_consumption(self, request_token):
+        if self._consumption_scheduler.is_scheduled(request_token):
+            self._consumption_scheduler.process_scheduled_consumption(
+                request_token
+            )
 
     def _projected_to_exceed_max_rate(self, amt, time_now):
         projected_rate = self._rate_tracker.get_projected_rate(amt, time_now)
         return projected_rate > self._max_rate
-
-    def _release_requested_amt_for_scheduled_request(
-        self, amt, request_token, time_now
-    ):
-        self._consumption_scheduler.process_scheduled_consumption(
-            request_token
-        )
-        return self._release_requested_amt(amt, time_now)
-
-    def _raise_request_exceeded_exception(self, amt, request_token, time_now):
-        allocated_time = amt / float(self._max_rate)
-        retry_time = self._consumption_scheduler.schedule_consumption(
-            amt, request_token, allocated_time
-        )
-        raise RequestExceededException(
-            requested_amt=amt, retry_time=retry_time
-        )
-
-    def _release_requested_amt(self, amt, time_now):
-        self._rate_tracker.record_consumption_rate(amt, time_now)
-        return amt
 
 
 class ConsumptionScheduler:

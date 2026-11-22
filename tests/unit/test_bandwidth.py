@@ -13,6 +13,7 @@
 import os
 import shutil
 import tempfile
+from io import BytesIO
 
 from s3transfer.bandwidth import (
     BandwidthLimitedStream,
@@ -24,6 +25,7 @@ from s3transfer.bandwidth import (
     RequestToken,
     TimeUtils,
 )
+from s3transfer.exceptions import CancelledError
 from s3transfer.futures import TransferCoordinator
 from tests import mock, unittest
 
@@ -358,6 +360,310 @@ class TestLeakyBucket(unittest.TestCase):
         # should have been processed.
         self.assert_nothing_scheduled()
         self.assert_processed_request_token(request_token)
+
+    def test_consume_bills_bytes_consumed(self):
+        self.set_projected_rate(0)
+        self.leaky_bucket.consume(5, RequestToken())
+        self.leaky_bucket.consume(7, RequestToken())
+        self.assertEqual(self.leaky_bucket.bytes_consumed, 12)
+
+    def test_rejected_consume_is_not_billed(self):
+        self.set_projected_rate(self.max_rate + 1)
+        with self.assertRaises(RequestExceededException):
+            self.leaky_bucket.consume(3, RequestToken())
+        self.assertEqual(self.leaky_bucket.bytes_consumed, 0)
+
+    def test_cancel_removes_scheduled_reservation(self):
+        token = RequestToken()
+        self.scheduler.is_scheduled.return_value = True
+        self.leaky_bucket.cancel(token)
+        self.assert_processed_request_token(token)
+        self.assertEqual(self.leaky_bucket.bytes_consumed, 0)
+
+    def test_cancel_without_reservation_does_nothing(self):
+        self.scheduler.is_scheduled.return_value = False
+        self.leaky_bucket.cancel(RequestToken())
+        self.assertFalse(self.scheduler.process_scheduled_consumption.called)
+
+
+class FakeTimeUtils(TimeUtils):
+    """A manual clock so scheduling tests never sleep in real time"""
+
+    def __init__(self):
+        self.now = 0.0
+        self.sleep_records = []
+
+    def time(self):
+        return self.now
+
+    def sleep(self, value):
+        self.sleep_records.append(value)
+        self.now += value
+
+
+class TestAffiliationBandwidthLimiter(unittest.TestCase):
+    chunk = 256 * 1024
+
+    def setUp(self):
+        self.clock = FakeTimeUtils()
+        self.host = LeakyBucket(self.chunk * 16, time_utils=self.clock)
+        self.affiliation_a = LeakyBucket(self.chunk, time_utils=self.clock)
+        self.affiliation_b = LeakyBucket(self.chunk * 4, time_utils=self.clock)
+        self.limiter = BandwidthLimiter(
+            self.host,
+            time_utils=self.clock,
+            affiliation_leaky_buckets={
+                'A': self.affiliation_a,
+                'B': self.affiliation_b,
+            },
+        )
+
+    def get_stream(self, affiliation, num_chunks, coordinator=None):
+        if coordinator is None:
+            coordinator = TransferCoordinator()
+            coordinator.set_status_to_queued()
+        stream = self.limiter.get_bandwith_limited_stream(
+            BytesIO(b'a' * self.chunk * num_chunks),
+            coordinator,
+            affiliation=affiliation,
+        )
+        return stream, coordinator
+
+    def test_host_is_charged_for_unaffiliated_streams(self):
+        coordinator = TransferCoordinator()
+        stream = self.limiter.get_bandwith_limited_stream(
+            BytesIO(b'a' * self.chunk), coordinator
+        )
+        stream.read(self.chunk)
+        self.assertEqual(self.host.bytes_consumed, self.chunk)
+        self.assertEqual(self.affiliation_a.bytes_consumed, 0)
+        self.assertEqual(self.affiliation_b.bytes_consumed, 0)
+
+    def test_affiliated_read_is_charged_to_host_and_affiliation(self):
+        stream, _ = self.get_stream('A', 1)
+        stream.read(self.chunk)
+        self.assertEqual(self.affiliation_a.bytes_consumed, self.chunk)
+        self.assertEqual(self.affiliation_b.bytes_consumed, 0)
+        self.assertEqual(self.host.bytes_consumed, self.chunk)
+
+    def test_known_affiliations_are_exposed(self):
+        self.assertEqual(self.limiter.affiliations, frozenset({'A', 'B'}))
+        self.assertEqual(self.limiter.bytes_consumed, 0)
+        self.assertEqual(self.limiter.get_affiliation_bytes_consumed('A'), 0)
+
+    def test_unknown_affiliation_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.get_stream('C', 1)
+
+    def test_saturated_affiliation_does_not_block_other_affiliation(self):
+        # A gets 1 chunk/s, B gets 4 chunks/s, and the host gets 2 chunks/s.
+        # Once A's quota is used, A waits a full second per chunk, while B
+        # keeps making progress at the host's rate.
+        self.affiliation_a = LeakyBucket(1 * self.chunk, time_utils=self.clock)
+        self.affiliation_b = LeakyBucket(4 * self.chunk, time_utils=self.clock)
+        self.host = LeakyBucket(2 * self.chunk, time_utils=self.clock)
+        self.limiter = BandwidthLimiter(
+            self.host,
+            time_utils=self.clock,
+            affiliation_leaky_buckets={
+                'A': self.affiliation_a,
+                'B': self.affiliation_b,
+            },
+        )
+
+        stream_a, _ = self.get_stream('A', 3)
+        stream_b, _ = self.get_stream('B', 3)
+
+        waits = {'A': [], 'B': []}
+        for _ in range(3):
+            for name, stream in (('A', stream_a), ('B', stream_b)):
+                start = self.clock.now
+                stream.read(self.chunk)
+                waits[name].append(round(self.clock.now - start, 2))
+
+        self.assertEqual(waits['A'], [0.0, 1.0, 1.0])
+        self.assertEqual(waits['B'], [0.5, 0.5, 0.5])
+        self.assertEqual(self.affiliation_a.bytes_consumed, 3 * self.chunk)
+        self.assertEqual(self.affiliation_b.bytes_consumed, 3 * self.chunk)
+        self.assertEqual(self.host.bytes_consumed, 6 * self.chunk)
+
+    def test_read_bills_actual_bytes_not_requested_amount(self):
+        coordinator = TransferCoordinator()
+        stream = BandwidthLimitedStream(
+            BytesIO(b'a' * 5),
+            self.limiter._leaky_bucket,
+            coordinator,
+            time_utils=self.clock,
+            bytes_threshold=1,
+        )
+        self.assertEqual(len(stream.read(self.chunk)), 5)
+        self.assertEqual(self.host.bytes_consumed, 5)
+
+    def test_finalize_bills_small_reads_below_threshold(self):
+        coordinator = TransferCoordinator()
+        stream = self.limiter.get_bandwith_limited_stream(
+            BytesIO(b'a' * 10000), coordinator, affiliation='A'
+        )
+        # Below the 256KB threshold, so no consume() happens on read().
+        self.assertEqual(len(stream.read(self.chunk)), 10000)
+        self.assertEqual(self.host.bytes_consumed, 0)
+        stream.finalize()
+        self.assertEqual(self.affiliation_a.bytes_consumed, 10000)
+        self.assertEqual(self.host.bytes_consumed, 10000)
+
+    def test_finalize_is_noop_when_all_bytes_already_billed(self):
+        stream, _ = self.get_stream('A', 1)
+        stream.read(self.chunk)
+        self.assertEqual(self.host.bytes_consumed, self.chunk)
+        stream.finalize()
+        self.assertEqual(self.host.bytes_consumed, self.chunk)
+
+    def test_finalize_does_not_bill_cancelled_buffered_bytes(self):
+        coordinator = TransferCoordinator()
+        stream = self.limiter.get_bandwith_limited_stream(
+            BytesIO(b'a' * 10000), coordinator, affiliation='A'
+        )
+        stream.read(10000)
+        coordinator.cancel('cancelled')
+        stream.finalize()
+        self.assertEqual(self.affiliation_a.bytes_consumed, 0)
+        self.assertEqual(self.host.bytes_consumed, 0)
+
+    def test_empty_read_is_not_billed(self):
+        coordinator = TransferCoordinator()
+        stream = self.limiter.get_bandwith_limited_stream(
+            BytesIO(b''), coordinator, affiliation='A'
+        )
+        self.assertEqual(stream.read(self.chunk), b'')
+        self.assertEqual(self.affiliation_a.bytes_consumed, 0)
+        self.assertEqual(self.host.bytes_consumed, 0)
+
+    def test_queued_read_waits_only_for_its_own_affiliation(self):
+        stream_a, _ = self.get_stream('A', 2)
+        stream_a.read(self.chunk)
+        self.assertEqual(self.affiliation_a.bytes_consumed, self.chunk)
+
+        start = self.clock.now
+        stream_a.read(self.chunk)
+        # A needs a full refill of its one-chunk-per-second bucket. Since the
+        # host bucket is 16 chunks/s, it is the affiliation bucket that sets
+        # the wait, and nothing is billed until the read is admitted.
+        self.assertEqual(self.clock.now - start, 1.0)
+        self.assertEqual(
+            self.clock.sleep_records,
+            [1.0],
+        )
+        self.assertEqual(self.affiliation_a.bytes_consumed, self.chunk * 2)
+        self.assertEqual(self.host.bytes_consumed, self.chunk * 2)
+
+    def test_queued_read_is_removed_when_transfer_is_cancelled(self):
+        stream_a, coordinator = self.get_stream('A', 2)
+        token = stream_a._request_token
+        stream_a.read(self.chunk)
+
+        self.clock.sleep = lambda value: coordinator.cancel('cancelled')
+        with self.assertRaisesRegex(CancelledError, 'cancelled'):
+            stream_a.read(self.chunk)
+
+        # Cancellation removes the queued reservation without billing it.
+        self.assertFalse(self.affiliation_a.is_scheduled(token))
+        self.assertFalse(self.host.is_scheduled(token))
+        self.assertEqual(self.affiliation_a.bytes_consumed, self.chunk)
+        self.assertEqual(self.host.bytes_consumed, self.chunk)
+
+        # The freed host capacity can immediately be used by another
+        # affiliation.
+        stream_b, _ = self.get_stream('B', 1)
+        stream_b.read(self.chunk)
+        self.assertEqual(self.affiliation_b.bytes_consumed, self.chunk)
+
+    def test_large_and_small_requests_share_affiliation_queue(self):
+        # One large request plus several small requests, all on A, plus B.
+        # A's quota is 1 chunk/s, B's is 4 chunks/s, and the host's is
+        # 16 chunks/s, so A is the bottleneck for A's requests while B keeps
+        # making progress.
+        self.affiliation_a = LeakyBucket(1 * self.chunk, time_utils=self.clock)
+        self.affiliation_b = LeakyBucket(4 * self.chunk, time_utils=self.clock)
+        self.host = LeakyBucket(16 * self.chunk, time_utils=self.clock)
+        self.limiter = BandwidthLimiter(
+            self.host,
+            time_utils=self.clock,
+            affiliation_leaky_buckets={
+                'A': self.affiliation_a,
+                'B': self.affiliation_b,
+            },
+        )
+        large, _ = self.get_stream('A', 4)
+        smalls = [self.get_stream('A', 1)[0] for _ in range(3)]
+        other, _ = self.get_stream('B', 5)
+
+        order = []
+        for i in range(3):
+            for name, stream in (
+                ('large', large),
+                (f'small-{i}', smalls[i]),
+                ('other', other),
+            ):
+                start = self.clock.now
+                data = stream.read(self.chunk)
+                order.append(
+                    (name, round(self.clock.now - start, 2), len(data))
+                )
+        start = self.clock.now
+        order.append(
+            (
+                'large',
+                round(self.clock.now - start, 2),
+                len(large.read(self.chunk)),
+            )
+        )
+
+        # Order alternates by caller, not by quota: every A read waits for
+        # A's 1 chunk/s bucket while the other affiliation keeps moving. The
+        # last large read is free because A's bucket refilled while B read.
+        self.assertEqual(
+            [name for name, _, _ in order],
+            [
+                'large',
+                'small-0',
+                'other',
+                'large',
+                'small-1',
+                'other',
+                'large',
+                'small-2',
+                'other',
+                'large',
+            ],
+        )
+        self.assertEqual(
+            [wait for _, wait, _ in order],
+            [0.0, 1.0, 0.06, 1.0, 1.0, 0.06, 1.0, 1.0, 0.06, 0.0],
+        )
+        self.assertEqual([length for _, _, length in order], [self.chunk] * 10)
+        self.assertEqual(self.affiliation_a.bytes_consumed, 7 * self.chunk)
+        self.assertEqual(self.affiliation_b.bytes_consumed, 3 * self.chunk)
+        self.assertEqual(self.host.bytes_consumed, 10 * self.chunk)
+        self.assertEqual(
+            self.affiliation_a.bytes_consumed
+            + self.affiliation_b.bytes_consumed,
+            self.host.bytes_consumed,
+        )
+
+    def test_billed_totals_balance_after_interleaved_reads(self):
+        stream_a, _ = self.get_stream('A', 10)
+        stream_b, _ = self.get_stream('B', 10)
+        for _ in range(2):
+            stream_a.read(self.chunk)
+            stream_b.read(self.chunk)
+        # Every admitted read is billed once to its affiliation and once to
+        # the host, and the host never bills more than its own quota allows.
+        self.assertEqual(
+            self.affiliation_a.bytes_consumed
+            + self.affiliation_b.bytes_consumed,
+            self.host.bytes_consumed,
+        )
+        self.assertLessEqual(self.host.bytes_consumed, self.chunk * 4)
 
 
 class TestConsumptionScheduler(unittest.TestCase):

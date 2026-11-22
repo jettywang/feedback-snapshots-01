@@ -14,8 +14,9 @@ import copy
 import logging
 import re
 import threading
+from collections.abc import Mapping
 
-from s3transfer.bandwidth import BandwidthLimiter, LeakyBucket
+from s3transfer.bandwidth import BandwidthLimiter, LeakyBucket, TimeUtils
 from s3transfer.constants import (
     ALLOWED_DOWNLOAD_ARGS,
     FULL_OBJECT_CHECKSUM_ARGS,
@@ -66,6 +67,7 @@ class TransferConfig:
         max_in_memory_upload_chunks=10,
         max_in_memory_download_chunks=10,
         max_bandwidth=None,
+        max_bandwidth_affiliations=None,
     ):
         """Configurations for the transfer manager
 
@@ -137,6 +139,13 @@ class TransferConfig:
         :param max_bandwidth: The maximum bandwidth that will be consumed
             in uploading and downloading file content. The value is in terms of
             bytes per second.
+
+        :param max_bandwidth_affiliations: A mapping of affiliation name to
+            the maximum bandwidth in bytes per second that requests
+            declaring that affiliation may consume. Transfers opting into an
+            affiliation are also still limited by ``max_bandwidth``, so the
+            host-wide limit is always enforced. A mapping value of ``None``
+            gives that affiliation an unlimited share of the host limit.
         """
         self.multipart_threshold = multipart_threshold
         self.multipart_chunksize = multipart_chunksize
@@ -150,15 +159,49 @@ class TransferConfig:
         self.max_in_memory_upload_chunks = max_in_memory_upload_chunks
         self.max_in_memory_download_chunks = max_in_memory_download_chunks
         self.max_bandwidth = max_bandwidth
+        self.max_bandwidth_affiliations = max_bandwidth_affiliations
         self._validate_attrs_are_nonzero()
+        self._validate_bandwidth_affiliations()
+
+    def _validate_bandwidth_affiliations(self):
+        affiliations = self.max_bandwidth_affiliations
+        if affiliations is None:
+            return
+        if not isinstance(affiliations, Mapping):
+            raise ValueError(
+                'max_bandwidth_affiliations must be a mapping of affiliation '
+                'name to a bandwidth in bytes per second.'
+            )
+        if self.max_bandwidth is None:
+            raise ValueError(
+                'max_bandwidth must be set when max_bandwidth_affiliations '
+                'is configured so that the host-wide limit is always '
+                'enforced.'
+            )
+        for affiliation, max_rate in affiliations.items():
+            if not isinstance(affiliation, str) or not affiliation:
+                raise ValueError(
+                    'max_bandwidth_affiliations keys must be non-empty '
+                    f'strings, got {affiliation!r}.'
+                )
+            if max_rate is not None and (
+                not isinstance(max_rate, int | float) or max_rate <= 0
+            ):
+                raise ValueError(
+                    'max_bandwidth_affiliations value for '
+                    f'{affiliation!r} must be greater than 0 or None, got '
+                    f'{max_rate!r}.'
+                )
 
     def _validate_attrs_are_nonzero(self):
         for attr, attr_val in self.__dict__.items():
-            if (
-                attr_val is not None
-                and attr_val is not self.UNSET_DEFAULT
-                and attr_val <= 0
-            ):
+            if attr_val is None or attr_val is self.UNSET_DEFAULT:
+                continue
+            # Affiliations are validated by _validate_bandwidth_affiliations
+            # so non-numeric containers do not trip the numeric check here.
+            if attr == 'max_bandwidth_affiliations':
+                continue
+            if attr_val <= 0:
                 raise ValueError(
                     f'Provided parameter {attr} of value {attr_val} must '
                     'be greater than 0.'
@@ -294,14 +337,43 @@ class TransferManager:
         )
 
         # The component responsible for limiting bandwidth usage if it
-        # is configured.
+        # is configured. Each affiliation gets its own bucket in addition
+        # to the shared host bucket, so a request declaring an affiliation
+        # is charged to both.
         self._bandwidth_limiter = None
-        if self._config.max_bandwidth is not None:
+        if (
+            self._config.max_bandwidth is not None
+            or self._config.max_bandwidth_affiliations
+        ):
+            if self._config.max_bandwidth is None:
+                raise ValueError(
+                    'max_bandwidth must be set when '
+                    'max_bandwidth_affiliations is configured so that the '
+                    'host-wide limit is always enforced.'
+                )
             logger.debug(
                 'Setting max_bandwidth to %s', self._config.max_bandwidth
             )
-            leaky_bucket = LeakyBucket(self._config.max_bandwidth)
-            self._bandwidth_limiter = BandwidthLimiter(leaky_bucket)
+            bandwidth_time_utils = TimeUtils()
+            leaky_bucket = LeakyBucket(
+                self._config.max_bandwidth, time_utils=bandwidth_time_utils
+            )
+            affiliation_leaky_buckets = {}
+            for affiliation, max_rate in (
+                self._config.max_bandwidth_affiliations or {}
+            ).items():
+                if max_rate is None:
+                    # An unlimited affiliation is still subject to the
+                    # host bucket, so give it a bucket that never limits.
+                    max_rate = float('inf')
+                affiliation_leaky_buckets[affiliation] = LeakyBucket(
+                    max_rate, time_utils=bandwidth_time_utils
+                )
+            self._bandwidth_limiter = BandwidthLimiter(
+                leaky_bucket,
+                time_utils=bandwidth_time_utils,
+                affiliation_leaky_buckets=affiliation_leaky_buckets,
+            )
 
         self._register_handlers()
 
@@ -313,7 +385,24 @@ class TransferManager:
     def config(self):
         return self._config
 
-    def upload(self, fileobj, bucket, key, extra_args=None, subscribers=None):
+    @property
+    def bandwidth_limiter(self):
+        """The bandwidth limiter for this manager, if one is configured
+
+        The limiter exposes billed byte counts for the host bucket and each
+        configured affiliation, which can be used to meter usage.
+        """
+        return self._bandwidth_limiter
+
+    def upload(
+        self,
+        fileobj,
+        bucket,
+        key,
+        extra_args=None,
+        subscribers=None,
+        affiliation=None,
+    ):
         """Uploads a file to S3
 
         :type fileobj: str or seekable file-like object
@@ -336,10 +425,16 @@ class TransferManager:
             order provided based on the event emit during the process of
             the transfer request.
 
+        :type affiliation: str
+        :param affiliation: The bandwidth affiliation to charge this upload
+            to. Uploads sharing an affiliation share that affiliation's
+            bandwidth quota and are also subject to the host-wide
+            ``max_bandwidth`` quota.
+
         :rtype: s3transfer.futures.TransferFuture
         :returns: Transfer future representing the upload
         """
-
+        affiliation = self._validate_bandwidth_affiliation(affiliation)
         extra_args = extra_args.copy() if extra_args else {}
         if subscribers is None:
             subscribers = []
@@ -352,6 +447,7 @@ class TransferManager:
             key=key,
             extra_args=extra_args,
             subscribers=subscribers,
+            affiliation=affiliation,
         )
         extra_main_kwargs = {}
         if self._bandwidth_limiter:
@@ -361,7 +457,13 @@ class TransferManager:
         )
 
     def download(
-        self, bucket, key, fileobj, extra_args=None, subscribers=None
+        self,
+        bucket,
+        key,
+        fileobj,
+        extra_args=None,
+        subscribers=None,
+        affiliation=None,
     ):
         """Downloads a file from S3
 
@@ -385,9 +487,16 @@ class TransferManager:
             order provided based on the event emit during the process of
             the transfer request.
 
+        :type affiliation: str
+        :param affiliation: The bandwidth affiliation to charge this download
+            to. Downloads sharing an affiliation share that affiliation's
+            bandwidth quota and are also subject to the host-wide
+            ``max_bandwidth`` quota.
+
         :rtype: s3transfer.futures.TransferFuture
         :returns: Transfer future representing the download
         """
+        affiliation = self._validate_bandwidth_affiliation(affiliation)
         if extra_args is None:
             extra_args = {}
         if subscribers is None:
@@ -400,6 +509,7 @@ class TransferManager:
             fileobj=fileobj,
             extra_args=extra_args,
             subscribers=subscribers,
+            affiliation=affiliation,
         )
         extra_main_kwargs = {'io_executor': self._io_executor}
         if self._bandwidth_limiter:
@@ -531,6 +641,27 @@ class TransferManager:
             subscribers=subscribers,
         )
         return self._submit_transfer(call_args, DeleteSubmissionTask)
+
+    def _validate_bandwidth_affiliation(self, affiliation):
+        if affiliation is None:
+            return None
+        if not isinstance(affiliation, str) or not affiliation:
+            raise ValueError(
+                'affiliation must be a non-empty string, got '
+                f'{affiliation!r}.'
+            )
+        if self._config.max_bandwidth_affiliations is None:
+            raise ValueError(
+                f'Cannot use bandwidth affiliation {affiliation!r} because '
+                'max_bandwidth_affiliations is not configured.'
+            )
+        if affiliation not in self._config.max_bandwidth_affiliations:
+            raise ValueError(
+                f'Unknown bandwidth affiliation {affiliation!r}. '
+                'Configured affiliations: '
+                f'{sorted(self._config.max_bandwidth_affiliations)!r}'
+            )
+        return affiliation
 
     def _validate_if_bucket_supported(self, bucket):
         # s3 high level operations don't support some resources
