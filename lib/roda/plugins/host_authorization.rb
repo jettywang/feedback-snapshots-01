@@ -91,6 +91,14 @@ class Roda
     #   end
     #
     # The block passed to this plugin is treated as a match block.
+    #
+    # = Auditing
+    #
+    # If the protection_audit plugin is loaded, +check_host_authorization!+
+    # emits a protection audit event with source +:host_authorization+ and
+    # action +:allowed+ or +:denied+, reflecting the actual result of the
+    # check.  Only the source and action are recorded; the request's host
+    # is never included in the audit event.
     module HostAuthorization
       def self.configure(app, host, opts=(no_positional_opts = true; OPTS),
           check_forwarded: opts[:check_forwarded],
@@ -115,7 +123,10 @@ class Roda
         # immediately based on the plugin block.
         def check_host_authorization!
           r = @_request
-          return if host_authorized?(_convert_host_for_authorization(r.env["HTTP_HOST"].to_s.dup))
+          if host_authorized?(_convert_host_for_authorization(r.env["HTTP_HOST"].to_s.dup))
+            _host_authorization_audit(:allowed)
+            return
+          end
 
           if self.class.host_authorization_check_forwarded? && (host = r.env["HTTP_X_FORWARDED_HOST"])
             if i = host.rindex(',')
@@ -124,16 +135,24 @@ class Roda
             host = _convert_host_for_authorization(host.strip)
 
             if !host.empty? && host_authorized?(host)
+              _host_authorization_audit(:allowed)
               return
             end
           end
 
+          _host_authorization_audit(:denied)
           r.on do
             host_authorization_unauthorized(r)
           end
         end
 
         private
+
+        # Emit a protection audit event for the host authorization stage if
+        # the protection_audit plugin is loaded.  Does nothing otherwise.
+        def _host_authorization_audit(action)
+          protection_audit_event(:host_authorization, action) if respond_to?(:protection_audit_event)
+        end
 
         # Remove the port information from the passed string (mutates the passed argument).
         def _convert_host_for_authorization(host)
