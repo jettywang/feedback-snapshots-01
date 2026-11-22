@@ -10,7 +10,9 @@ Terminology:
 
 from __future__ import annotations
 
+import base64
 import json
+import zlib
 from html import escape
 from secrets import token_urlsafe
 from typing import Any, cast
@@ -107,6 +109,10 @@ SAML_RESPONSE_ERRORS = (
     XMLSecError,
     ValueError,
 )
+
+# Per-IdP SLO replay history kept in the browser session. The list is bounded;
+# only the most recent message IDs are retained.
+SLO_HISTORY_LIMIT = 16
 
 
 class SAMLIdentityProvider:
@@ -363,6 +369,85 @@ class SAMLAuth(BaseAuth[ResponseT_co]):
 
     def _authn_request_id_session_key(self, idp_name: str) -> str:
         return f"{self.name}_{idp_name}_authn_request_id"
+
+    def _logout_request_id_session_key(self, idp_name: str) -> str:
+        return f"{self.name}_{idp_name}_logout_request_id"
+
+    def _logout_message_ids_session_key(self, idp_name: str) -> str:
+        return f"{self.name}_{idp_name}_logout_message_ids"
+
+    def _incoming_slo_message_id(self) -> str | None:
+        """Best-effort ID of the inbound SLO message, before toolkit validation.
+
+        Used only for same-session duplicate detection; signature and protocol
+        validation remain the responsibility of ``OneLogin_Saml2_Auth``. Both
+        HTTP-Redirect (deflated base64) and HTTP-POST (base64) bindings are
+        accepted, mirroring the toolkit's own binding handling.
+        """
+        request = self.strategy.request_data()
+        if "SAMLResponse" in request:
+            field = "SAMLResponse"
+        elif "SAMLRequest" in request:
+            field = "SAMLRequest"
+        else:
+            return None
+        encoded = request[field]
+        if not isinstance(encoded, str):
+            return None
+        try:
+            payload = base64.b64decode(encoded, validate=True)
+            # HTTP-POST carries plain base64 XML; HTTP-Redirect applies DEFLATE
+            # to both requests and responses. Try the plain form first and only
+            # inflate when it is not parseable XML.
+            try:
+                document = OneLogin_Saml2_XML.to_etree(payload)
+            except XMLSyntaxError:
+                document = OneLogin_Saml2_XML.to_etree(
+                    zlib.decompress(payload, -15)
+                )
+        except (ValueError, zlib.error, XMLSyntaxError):
+            return None
+        local_name = OneLogin_Saml2_XML.query(document, "/*")[0]
+        if local_name.tag not in (
+            "{urn:oasis:names:tc:SAML:2.0:protocol}LogoutRequest",
+            "{urn:oasis:names:tc:SAML:2.0:protocol}LogoutResponse",
+        ):
+            return None
+        message_id = local_name.get("ID")
+        return message_id if isinstance(message_id, str) else None
+
+    def _claim_slo_message_id(
+        self, idp: SAMLIdentityProvider
+    ) -> tuple[bool, str | None]:
+        """Return ``(is_duplicate, message_id)`` for the inbound SLO message.
+
+        New IDs are recorded optimistically so a concurrent or repeated
+        delivery within the same browser session is rejected without touching
+        the local session. A failed SLO rollback removes the optimistic entry.
+        """
+        message_id = self._incoming_slo_message_id()
+        if message_id is None:
+            return False, None
+        key = self._logout_message_ids_session_key(idp.name)
+        seen = cast("list[str]", self.strategy.session_get(key, []))
+        if not isinstance(seen, list):
+            seen = []
+        if message_id in seen:
+            return True, message_id
+        seen.append(message_id)
+        self.strategy.session_set(key, seen[-SLO_HISTORY_LIMIT:])
+        return False, message_id
+
+    def _rollback_slo_message_id(
+        self, idp: SAMLIdentityProvider, message_id: str | None
+    ) -> None:
+        if message_id is None:
+            return
+        key = self._logout_message_ids_session_key(idp.name)
+        seen = cast("list[str]", self.strategy.session_get(key, []))
+        if isinstance(seen, list) and message_id in seen:
+            seen.remove(message_id)
+            self.strategy.session_set(key, seen)
 
     def _process_response(
         self, auth: OneLogin_Saml2_Auth, request_id: str | None = None
@@ -827,21 +912,70 @@ class SAMLAuth(BaseAuth[ResponseT_co]):
         extra_data["name_id"] = response["attributes"]["name_id"]
         return extra_data
 
-    def request_logout(self, idp_name, social_auth, return_to=None):
+    def request_logout(
+        self,
+        idp_name: str,
+        social_auth: Any,
+        return_to: str | None = None,
+    ) -> str:
         idp = self.get_idp(idp_name)
         auth = self._get_saml_auth(idp, stage="disconnect")
         name_id = social_auth.extra_data["name_id"]
         session_index = social_auth.extra_data["session_index"]
-        return auth.logout(
+        url = auth.logout(
             name_id=name_id, session_index=session_index, return_to=return_to
         )
+        # Correlate the IdP's LogoutResponse with this exact IdP session. The
+        # key is namespaced per IdP so another enterprise's SLO cannot consume
+        # or be blocked by this transaction.
+        request_id = cast("str | None", auth.get_last_request_id())
+        if request_id:
+            self.strategy.session_set(
+                self._logout_request_id_session_key(idp.name), request_id
+            )
+        self.log_debug(
+            "SAML logout initiated for IdP %s (local session pending)", idp.name
+        )
+        return url
 
-    def process_logout(self, idp_name, delete_session_cb):
+    def process_logout(
+        self, idp_name: str, delete_session_cb: Any
+    ) -> tuple[str | None, list[str]]:
         idp = self.get_idp(idp_name)
+        duplicate, message_id = self._claim_slo_message_id(idp)
+        if duplicate:
+            self.log_warning(
+                "SAML logout message for IdP %s was already processed; "
+                "local session left unchanged",
+                idp.name,
+            )
+            return None, ["replayed_logout_response"]
         auth = self._get_saml_auth(idp, stage="disconnect")
-        url = auth.process_slo(delete_session_cb=delete_session_cb)
+        request_id_key = self._logout_request_id_session_key(idp.name)
+        request_id = cast("str | None", self.strategy.session_get(request_id_key))
+        # Keep the local session when the SLO cannot be validated; the
+        # integrator callback runs only once, on a fully successful message.
+        url = auth.process_slo(
+            request_id=request_id,
+            delete_session_cb=delete_session_cb,
+            keep_local_session=True,
+        )
         errors = auth.get_errors()
-        return url, errors
+        if errors:
+            self._rollback_slo_message_id(idp, message_id)
+            self.log_warning(
+                "SAML logout for IdP %s failed (%s); local session still active",
+                idp.name,
+                ", ".join(str(error) for error in errors),
+            )
+            return url, errors
+        if request_id:
+            self.strategy.session_pop(request_id_key)
+        delete_session_cb()
+        self.log_debug(
+            "SAML logout completed for IdP %s (local session ended)", idp.name
+        )
+        return url, []
 
     def _check_entitlements(self, idp, attributes) -> None:
         """

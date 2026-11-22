@@ -83,7 +83,7 @@ and the selected backend's documentation.
 
 | Property | Security violation |
 | --- | --- |
-| Correlated protocols accept callbacks only for the initiating flow/session after required state, nonce, or request checks; OAuth2 login state expires and is consumed once before token exchange | An uninitiated, mismatched, expired, or reused transaction authenticates or links an account |
+| Correlated protocols accept callbacks only for the initiating flow/session after required state, nonce, or request checks; OAuth2 login state expires and is consumed once before token exchange; SAML logout is correlated per IdP and replayed within the browser session without ending a local session | An uninitiated, mismatched, expired, or reused transaction authenticates, links an account, or terminates another IdP's local session |
 | OpenID assertions match a one-use signed transaction and backend-scoped discovery state in the initiating browser session; fixed providers bind to the exact discovered HTTPS endpoint | Unsolicited, cross-session, stale, or foreign-provider assertions authenticate under the backend namespace |
 | Identity assertions pass backend-required signature, issuer, audience, time, nonce/request, subject, and destination checks | Forged or misdirected assertions authenticate or link an account |
 | Provider identities use a non-empty stable identifier in their backend namespace; missing migration evidence fails except for the compatibility exceptions below, and conflicting evidence always fails | Distinct identities collapse onto one association or access another account outside the exceptions below |

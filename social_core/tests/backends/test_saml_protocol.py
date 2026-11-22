@@ -759,6 +759,11 @@ class SAMLProtocolTest(BaseBackendTest):
                 if kind == "LogoutRequest" and variant == "status":
                     continue
                 with self.subTest(kind=kind, variant=variant):
+                    # Each subtest reuses the same canned SLO message ID, so
+                    # reset the per-IdP replay history between deliveries.
+                    self.strategy.session_set(
+                        "saml_idp_logout_message_ids", []
+                    )
                     node = saml.logout(kind)
                     if variant == "issuer":
                         saml.find(

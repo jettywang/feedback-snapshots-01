@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ## [Unreleased]
 
+### Security
+
+- Correlate SAML single logout with the IdP-scoped browser session. SP-initiated
+  logout responses are matched against the stored LogoutRequest ID, and repeated
+  SLO messages within a session are rejected without ending the local session.
+  The integrator's session termination callback now runs only after a fully
+  validated SLO message, so failed or duplicate logout attempts leave every
+  local session, including other enterprises' sessions, intact.
+
 ## [7.2.0](https://github.com/python-social-auth/social-core/releases/tag/7.2.0) - 2026-11-12
 
 ### Added
