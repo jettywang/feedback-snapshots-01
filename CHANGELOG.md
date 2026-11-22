@@ -1,5 +1,9 @@
 # CHANGELOG
 
+## Unreleased
+* Document the strategy result contract on `Warden::Strategies::Base` (pass vs. soft fail vs. hard fail vs. success)
+* Add `Warden::Strategies::Base#failed?`, true for both `fail` and `fail!` but not for `pass`
+
 ## Version 1.2.9 / 2020-08-31
 * Avoid warning on uninitialized instance variable (#188)
 * Bump rack to 2.2.3 (#190)

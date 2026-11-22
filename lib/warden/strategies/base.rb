@@ -29,6 +29,45 @@ module Warden
     #      Warden::Strategies.add(:foo, MyStrategy)
     #
     class Base
+      # == Result contract
+      #
+      # A strategy reports the outcome of +authenticate!+ through a small, fixed
+      # set of terminal helpers. The framework only inspects two things once the
+      # strategy has run: the +result+ (+nil+, +:success+, +:failure+,
+      # +:redirect+ or +:custom+) and whether the strategy was halted. Express
+      # your intent through the helpers below instead of setting those directly.
+      #
+      # +pass+ (or returning without any helper)::
+      #   +result+ is +nil+ and the strategy is not halted. There is no usable
+      #   material for this strategy, so Warden cascades to the next strategy and
+      #   treats the request as unauthenticated when none remains. Use this for a
+      #   missing credential rather than a rejection.
+      #
+      # +fail+(message)::
+      #   +result+ is +:failure+, the strategy is not halted and +failed?+ is
+      #   true. A soft, recoverable failure, such as an upstream check that could
+      #   not be verified. Warden records the message and keeps cascading; the
+      #   message of the last failing strategy wins.
+      #
+      # +fail!+(message)::
+      #   +result+ is +:failure+, the strategy is halted and +failed?+ is true.
+      #   A definitive rejection where the upstream positively confirmed the
+      #   identity must not be accepted (for example a deactivated account).
+      #   Warden stops cascading immediately and renders the failure response.
+      #
+      # +success!+(user, message = nil)::
+      #   +result+ is +:success+, the strategy is halted, +user+ is assigned and
+      #   +successful?+ is true. Warden short-circuits the remaining strategies
+      #   and logs the user in.
+      #
+      # +redirect!+(url, ...) / +custom!+(response)::
+      #   Halted terminal outcomes (+:redirect+ / +:custom+) that take effect
+      #   together with +throw(:warden)+.
+      #
+      # In short: a missing credential +pass+es and cascades, an unverifiable
+      # answer soft-+fail+s and still cascades, a confirmed refusal +fail!+s and
+      # terminates, and +success!+ terminates with an authenticated user.
+      #
       # :api: public
       attr_accessor :user, :message
 
@@ -113,6 +152,14 @@ module Warden
       # Returns true only if the result is a success and a user was assigned.
       def successful?
         @result == :success && !user.nil?
+      end
+
+      # Returns true only if the result is a failure, whether the strategy was
+      # halted (+fail!+) or merely soft-failed (+fail+). A strategy that simply
+      # +pass+ed returns false because it never produced a failure result.
+      # :api: public
+      def failed?
+        @result == :failure
       end
 
       # Whenever you want to provide a user object as "authenticated" use the +success!+ method.

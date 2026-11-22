@@ -244,6 +244,27 @@ describe Warden::Strategies::Base do
       @soft._run!
       expect(@soft.result).to be(:failure)
     end
+
+    it "should be failed for both hard and soft failures" do
+      @hard._run!
+      @soft._run!
+      expect(@hard).to be_failed
+      expect(@soft).to be_failed
+    end
+  end
+
+  describe "failed predicate" do
+    it "should not be treated as a failure" do
+      RAS.add(:foobar) do
+        def authenticate!
+          pass
+        end
+      end
+      str = RAS[:foobar].new(env_with_params)
+      str._run!
+      expect(str).not_to be_failed
+      expect(str).not_to be_successful
+    end
   end
 
   describe "success" do
