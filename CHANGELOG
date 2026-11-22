@@ -1,5 +1,7 @@
 === master
 
+* Add RodaRequest#no_sessions! to conditional_sessions plugin, for marking individual routes as sessionless so they never load or persist sessions, with request and env accessors to verify the guarantee
+
 * Add keyword arguments and deprecate positional hash for json_parser plugin (jeremyevans)
 
 * Deprecate the indifferent_params plugin, switch to typecast_params instead (jeremyevans)

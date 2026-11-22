@@ -884,6 +884,41 @@ are not disclosed to an attacker.  Knowledge of the
 secret(s) can allow an attacker to inject arbitrary session values.  In the case of
 <tt>Rack::Session::Cookie</tt>, that can also lead remote code execution.
 
+If most requests use sessions, but a few public endpoints (such as health checks
+or previews) must never read or write the session cookie, use the
++conditional_sessions+ plugin and mark those routes with +no_sessions!+:
+
+  class App < Roda
+    plugin :conditional_sessions, secret: ENV['SESSION_SECRET'] do
+      true
+    end
+
+    route do |r|
+      r.on "public" do
+        r.on "health" do
+          r.no_sessions!
+          "OK"
+        end
+      end
+    end
+  end
+
+For a marked request, +session+, +session_created_at+, and +session_updated_at+
+raise a RodaError, +persist_session+ and +clear_session+ do nothing, and the
+sessions plugin's after processing is skipped entirely, so no session cookie is
+set or deleted.  The marker is stored in the request environment, so it also
+applies to nested Roda applications dispatched with +r.run+.
+
+The guarantee can be verified from routing code or tests with
++r.sessionless?+, +r.session_loaded?+, +r.session_persist_called?+, and
++r.session_persisted?+.  The same information is available after the request
+under <tt>roda.conditional_sessions.sessionless</tt>,
+<tt>roda.conditional_sessions.persist_called</tt>, and
+<tt>roda.conditional_sessions.persisted</tt> environment keys.  Calling
++no_sessions!+ after the session was already loaded still prevents it from being
+written back, but raises a RodaError because the sessionless guarantee can no
+longer be met.
+
 === Cross Site Request Forgery (CSRF)
 
 CSRF can be prevented by using the +route_csrf+ plugin that ships with Roda.
