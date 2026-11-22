@@ -41,7 +41,7 @@ from ._frames import (
 from ._log_levels import NAME_TO_LEVEL, add_log_level
 from ._utils import get_processname
 from .contextvars import _ASYNC_CALLING_THREAD
-from .tracebacks import ExceptionDictTransformer
+from .tracebacks import ExceptionDictTransformer, safe_str
 from .typing import (
     EventDict,
     ExceptionTransformer,
@@ -52,6 +52,8 @@ from .typing import (
 
 __all__ = [
     "NAME_TO_LEVEL",  # some people rely on it being here
+    "BUDGET_TRUNCATION_KEY",
+    "BudgetedExceptionRenderer",
     "CallsiteParameter",
     "CallsiteParameterAdder",
     "EventRenamer",
@@ -59,6 +61,7 @@ __all__ = [
     "JSONRenderer",
     "KeyValueRenderer",
     "LogfmtRenderer",
+    "MIN_STRUCTURED_BUDGET",
     "StackInfoRenderer",
     "TimeStamper",
     "UnicodeDecoder",
@@ -465,6 +468,483 @@ The treatment of the ``exc_info`` key is identical to `format_exc_info`.
     :doc:`exceptions` for a broader explanation of *structlog*'s exception
     features.
 """
+
+
+BUDGET_TRUNCATION_KEY = "exception_truncation"
+"""
+Key under which a budgeted renderer stores truncation metadata.
+
+.. versionadded:: 26.2.0
+"""
+
+_BUDGET_TRUNCATED_MARKER = "[truncated] "
+# A structured fallback is an object with two string fields, which cannot be
+# serialized below this many bytes, even with empty values.  String output
+# can honor any budget >= 2.
+MIN_STRUCTURED_BUDGET = 33
+"""
+Smallest budget that can reliably hold a structured fallback object.
+
+.. versionadded:: 26.2.0
+"""
+
+
+def _rendered_size(value: Any, serializer: Callable[..., str | bytes]) -> int:
+    """
+    Return the size in bytes of *value* as produced by *serializer*.
+
+    Serialization problems must never break logging, so an upper bound based
+    on the object's string representation is returned as a fallback.
+    """
+    try:
+        rendered = serializer(value)
+    except Exception:  # noqa: BLE001
+        return len(repr(value).encode("utf-8", "replace"))
+
+    if isinstance(rendered, str):
+        return len(rendered.encode("utf-8"))
+
+    return len(rendered)
+
+
+def _shrink_to_budget(text: str, budget: int) -> tuple[str, bool]:
+    """
+    Shrink *text* so that ``_BUDGET_TRUNCATED_MARKER + text`` fits *budget*
+    UTF-8 bytes.
+
+    Return the shrunk text without the marker and whether shrinking happened.
+    Budgets too small to hold the marker leave the text to the caller, which
+    drops the marker in that case.
+    """
+    prefix = _BUDGET_TRUNCATED_MARKER.encode("utf-8")
+    encoded = text.encode("utf-8")
+    if len(prefix) + len(encoded) <= budget:
+        return text, False
+
+    capacity = max(budget - len(prefix), 0)
+    low, high = 0, len(text)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if len(text[:middle].encode("utf-8")) <= capacity:
+            low = middle
+        else:
+            high = middle - 1
+
+    return text[:low], True
+
+
+def _truncate_text(text: str, budget: int) -> str:
+    """
+    Return *text* cut to *budget* UTF-8 bytes.
+
+    The truncation marker is prepended only when content had to be removed
+    and there is room for it; budgets smaller than the marker keep the raw
+    cut text.
+    """
+    shrunk, shrank = _shrink_to_budget(text, budget)
+    if not shrank:
+        return text
+    marked = _BUDGET_TRUNCATED_MARKER + shrunk
+    if len(marked.encode("utf-8")) <= budget:
+        return marked
+    # Budget is smaller than the marker itself: cut the raw text instead.
+    capacity = budget
+    low, high = 0, len(text)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if len(text[:middle].encode("utf-8")) <= capacity:
+            low = middle
+        else:
+            high = middle - 1
+    return text[:low]
+
+
+def _root_exception(exc_info: ExcInfo) -> ExcInfo:
+    """
+    Walk the explicit/implicit cause chain to its deepest exception.
+    """
+    seen: set[int] = set()
+    exc_type, exc_value, traceback = exc_info
+    while id(exc_value) not in seen:
+        seen.add(id(exc_value))
+        cause = getattr(exc_value, "__cause__", None)
+        if cause is None and not getattr(
+            exc_value, "__suppress_context__", False
+        ):
+            cause = exc_value.__context__
+        if cause is None:
+            break
+        exc_type, exc_value, traceback = (
+            cause.__class__,
+            cause,
+            cause.__traceback__,
+        )
+
+    return exc_type, exc_value, traceback
+
+
+def _trim_stacks(
+    stacks: Any,
+    *,
+    keep_root_only: bool,
+    keep_frames: int | None,
+    strip_locals: bool,
+) -> Any:
+    """
+    Reduce structured traceback stacks in place.
+
+    With *keep_root_only*, only the final (root-cause) stack of each chain is
+    kept.  *keep_frames* limits the number of frames of every remaining stack;
+    ``None`` keeps every frame.  When *strip_locals* is true, frame locals are
+    removed, so each reduction step produces a verifiably lower detail level.
+    """
+    if not isinstance(stacks, list):
+        return stacks
+
+    if keep_root_only:
+        stacks = stacks[-1:] if stacks else stacks
+
+    for stack in stacks:
+        if not isinstance(stack, dict):
+            continue
+
+        frames = stack.get("frames")
+        if isinstance(frames, list):
+            if strip_locals:
+                for frame in frames:
+                    if isinstance(frame, dict) and "locals" in frame:
+                        del frame["locals"]
+            if keep_frames is not None and len(frames) > keep_frames:
+                stack["frames"] = frames[-keep_frames:]
+
+        nested = stack.get("exceptions")
+        if isinstance(nested, list):
+            _trim_stacks(
+                nested,
+                keep_root_only=keep_root_only,
+                keep_frames=keep_frames,
+                strip_locals=strip_locals,
+            )
+
+    return stacks
+
+
+class BudgetedExceptionRenderer:
+    """
+    Replace an ``exc_info`` field with a size-budgeted ``exception`` field.
+
+    Centralized log systems reject or truncate log events that exceed a per
+    event size limit.  A verbose exception -- for example one with a wide
+    stack, a long cause chain, or large local variables -- can therefore blow
+    the whole event, causing the exception *and* every other field of the
+    event to be lost.  This processor renders the exception with the same
+    *exception_formatter* as `ExceptionRenderer`, but guarantees that the
+    serialized ``exception`` field does not exceed *max_size* bytes.
+
+    The exception is rendered at progressively lower detail levels until one
+    fits the budget:
+
+    - The full, unmodified formatter output.
+    - For string output, the root-cause traceback.  For structured output,
+      the same stacks with bulky frame locals removed.
+    - For string output, the last traceback line (the root-cause summary).
+      For structured output, a frame-count cap, then only the root-cause
+      stack, then a single root-cause frame.
+    - A minimal ``{"exc_type", "exc_value"}`` dictionary as a last resort for
+      structured output.
+
+    Whenever the output had to be reduced, metadata describing the original
+    and final size, the applied detail level, and how much was cut is stored
+    under *truncation_key*.  The event itself is never dropped: subsequent
+    processors keep running, so ordinary events logged right after an
+    over-budget exception are unaffected.
+
+    Args:
+        max_size:
+            Maximum size of the serialized ``exception`` field in bytes.
+
+        exception_formatter:
+            A callable that is used to format the exception, identical to the
+            one accepted by `ExceptionRenderer`.
+
+        serializer:
+            A :func:`json.dumps`-compatible callable used to measure the
+            size of rendered values.  Should match the serializer used by
+            your renderer (defaults to :func:`json.dumps`).
+
+        truncation_key:
+            Key under which truncation metadata is stored when the exception
+            had to be reduced.
+
+    Raises:
+        ValueError: If *max_size* is smaller than 1.
+
+    .. note::
+
+        String formatters can honor any budget of two bytes or more.
+        Structured formatters (like
+        :class:`~structlog.tracebacks.ExceptionDictTransformer`) ultimately
+        fall back to a small two-field object, so a *max_size* below
+        :data:`MIN_STRUCTURED_BUDGET` cannot be satisfied for them.
+
+    .. seealso::
+        :doc:`exceptions` for a broader explanation of *structlog*'s exception
+        features.
+
+    .. versionadded:: 26.2.0
+    """
+
+    format_exception: ExceptionTransformer
+    max_size: int
+    truncation_key: str
+
+    def __init__(
+        self,
+        max_size: int = 8192,
+        exception_formatter: ExceptionTransformer = _format_exception,
+        serializer: Callable[..., str | bytes] = json.dumps,
+        truncation_key: str = BUDGET_TRUNCATION_KEY,
+    ) -> None:
+        if max_size < 1:
+            msg = f'"max_size" must be >= 1: {max_size}'
+            raise ValueError(msg)
+
+        self.max_size = max_size
+        self.format_exception = exception_formatter
+        self._serializer = serializer
+        self.truncation_key = truncation_key
+
+    def __call__(
+        self, logger: WrappedLogger, name: str, event_dict: EventDict
+    ) -> EventDict:
+        exc_info = _figure_out_exc_info(event_dict.pop("exc_info", None))
+        if not exc_info:
+            return event_dict
+
+        try:
+            rendered = self.format_exception(exc_info)
+        except Exception as error:  # noqa: BLE001
+            # A broken formatter must not take the whole event down.
+            rendered = (
+                f"<exception-formatter-error "
+                f"{type(error).__name__}: {error}>"
+            )
+
+        original_size = self._size(rendered)
+        if self._fits(rendered, original_size):
+            event_dict["exception"] = rendered
+            return event_dict
+
+        if isinstance(rendered, str):
+            value, info = self._budget_string(exc_info, rendered)
+        else:
+            value, info = self._budget_dict(exc_info, rendered)
+
+        info["original_size"] = original_size
+        info["rendered_size"] = self._size(value)
+        event_dict["exception"] = value
+        event_dict[self.truncation_key] = info
+
+        return event_dict
+
+    def _size(self, value: Any) -> int:
+        return _rendered_size(value, self._serializer)
+
+    def _fits(self, value: Any, size: int | None = None) -> bool:
+        """
+        Check whether *value* stays within the budget once embedded in an
+        event.  A top-level string gets two quote characters from JSON.
+        """
+        if size is None:
+            size = self._size(value)
+        if isinstance(value, str):
+            size += 2
+        return size <= self.max_size
+
+    def _text_budget(self) -> int:
+        # Two bytes are spent on the quotes surrounding a JSON string.
+        return max(self.max_size - 2, 0)
+
+    def _budget_string(
+        self, exc_info: ExcInfo, full: str
+    ) -> tuple[str, dict[str, Any]]:
+        root = _root_exception(exc_info)
+        chain_length = _chain_length(exc_info[1])
+        candidates: list[tuple[str, str]] = [
+            ("root_traceback", self.format_exception(root)),
+        ]
+        root_line = _format_exception(root).strip().splitlines()
+        root_summary = root_line[-1] if root_line else safe_str(root[1])
+        candidates.append(("root_summary", root_summary))
+
+        budget = self._text_budget()
+        for detail, candidate in candidates:
+            value = _truncate_text(candidate, budget)
+            if self._fits(value):
+                return value, self._info(
+                    detail, full, value, chain_length
+                )
+
+        # Neither level fits uncut; the truncated summary is the last resort
+        # and always honors the byte budget by construction.
+        value = _truncate_text(root_summary, budget)
+        return value, self._info(
+            "root_summary", full, value, chain_length
+        )
+
+    def _budget_dict(
+        self, exc_info: ExcInfo, full: Any
+    ) -> tuple[Any, dict[str, Any]]:
+        root = _root_exception(exc_info)
+        chain_length = _chain_length(exc_info[1])
+        frame_cap = self._frame_cap()
+        candidates: list[tuple[str, Any]] = [
+            # Drop bulky frame locals but keep every stack and frame.
+            (
+                "locals_removed",
+                _trim_stacks(
+                    _copy_jsonish(full),
+                    keep_root_only=False,
+                    keep_frames=None,
+                    strip_locals=True,
+                ),
+            ),
+            # Also cap the number of frames per stack.
+            (
+                "frames_capped",
+                _trim_stacks(
+                    _copy_jsonish(full),
+                    keep_root_only=False,
+                    keep_frames=frame_cap,
+                    strip_locals=True,
+                ),
+            ),
+            # Collapse the chain to the root-cause stack.
+            (
+                "root_stack",
+                _trim_stacks(
+                    _copy_jsonish(full),
+                    keep_root_only=True,
+                    keep_frames=frame_cap,
+                    strip_locals=True,
+                ),
+            ),
+            # Keep a single root-cause frame.
+            (
+                "root_summary",
+                _trim_stacks(
+                    _copy_jsonish(full),
+                    keep_root_only=True,
+                    keep_frames=1,
+                    strip_locals=True,
+                ),
+            ),
+        ]
+
+        for detail, candidate in candidates:
+            if self._fits(candidate):
+                return candidate, self._info(
+                    detail, full, candidate, chain_length
+                )
+            shrunk = self._shrink_json_strings(candidate)
+            if self._fits(shrunk):
+                return shrunk, self._info(
+                    detail, full, shrunk, chain_length
+                )
+
+        fallback = self._fallback(root)
+        return fallback, self._info(
+            "root_cause_only", full, fallback, chain_length
+        )
+
+    def _frame_cap(self) -> int:
+        # Keep the cap small relative to the budget while staying useful.
+        return max(2, min(50, self.max_size // 256))
+
+    def _shrink_json_strings(self, value: Any) -> Any:
+        if isinstance(value, str):
+            return _truncate_text(value, self.max_size)
+        if isinstance(value, list):
+            return [self._shrink_json_strings(item) for item in value]
+        if isinstance(value, dict):
+            return {
+                key: self._shrink_json_strings(item)
+                for key, item in value.items()
+            }
+        return value
+
+    def _fallback(self, root: ExcInfo) -> dict[str, str]:
+        result = {
+            "exc_type": safe_str(root[0].__name__),
+            "exc_value": safe_str(root[1]),
+        }
+        if self._fits(result):
+            return result
+
+        # Shrink the value against the bytes already spent on the keys and
+        # the exception type.
+        overhead = self._size(result) - self._size(result["exc_value"])
+        result["exc_value"] = _truncate_text(
+            result["exc_value"], max(self.max_size - overhead, 0)
+        )
+        if self._fits(result):
+            return result
+
+        # Drop the value entirely; the type is the most traceable remnant.
+        result["exc_value"] = ""
+        if self._fits(result):
+            return result
+
+        # Only reached for budgets below the structural minimum.
+        result["exc_type"] = ""
+        return result
+
+    def _info(
+        self,
+        detail: str,
+        full: Any,
+        value: Any,
+        chain_length: int,
+    ) -> dict[str, Any]:
+        full_size = self._size(full)
+        value_size = self._size(value)
+        return {
+            "detail": detail,
+            "chain_length": chain_length,
+            "original_size": full_size,
+            "rendered_size": value_size,
+            "dropped_bytes": full_size - value_size,
+        }
+
+
+def _chain_length(exc_value: BaseException) -> int:
+    """
+    Count the exceptions in the explicit/implicit cause chain.
+    """
+    seen: set[int] = set()
+    length = 0
+    current: BaseException | None = exc_value
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        length += 1
+        cause: BaseException | None = getattr(current, "__cause__", None)
+        if cause is None and not getattr(
+            current, "__suppress_context__", False
+        ):
+            cause = current.__context__
+        current = cause
+    return length
+
+
+def _copy_jsonish(value: Any) -> Any:
+    """
+    Deep-copy JSON-compatible structures without importing ``copy``.
+    """
+    if isinstance(value, dict):
+        return {key: _copy_jsonish(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_copy_jsonish(item) for item in value]
+    return value
 
 
 class TimeStamper:

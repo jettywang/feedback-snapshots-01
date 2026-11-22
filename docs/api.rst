@@ -259,6 +259,12 @@ API Reference
       ...     dict_tracebacks(None, "", {"exc_info": True})  # doctest: +ELLIPSIS
       {'exception': [{'exc_type': 'ValueError', 'exc_value': 'onoes', ..., 'frames': [{'filename': ...
 
+.. autoclass:: BudgetedExceptionRenderer
+
+.. autodata:: BUDGET_TRUNCATION_KEY
+
+.. autodata:: MIN_STRUCTURED_BUDGET
+
 .. autoclass:: StackInfoRenderer
 
 .. autoclass:: ExceptionPrettyPrinter

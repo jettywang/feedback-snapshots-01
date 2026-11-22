@@ -15,6 +15,12 @@ You can find our backwards-compatibility policy [here](https://github.com/hynek/
 
 ## [Unreleased](https://github.com/hynek/structlog/compare/26.1.0...HEAD)
 
+### Added
+
+- `structlog.processors.BudgetedExceptionRenderer` renders the `exc_info` field into an `exception` field that is guaranteed not to exceed a configurable byte budget.
+  Over-budget exceptions are reduced through deterministic detail levels (locals removal, frame capping, root-cause stack, minimal fallback) instead of dropping the event, and truncation metadata is recorded under `structlog.processors.BUDGET_TRUNCATION_KEY`.
+  This keeps a traceable root-cause summary for very long business exceptions without starving subsequent events.
+
 ### Changed
 
 - On Python 3.15 and later, *structlog* uses [PEP 810](https://peps.python.org/pep-0810/) lazy imports for modules that are only needed once you log.
