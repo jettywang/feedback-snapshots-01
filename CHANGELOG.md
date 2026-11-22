@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Optional two-phase account linking workflow (`social_core.linking`) for
+  resolving duplicate third-party registrations: `suggest_account_link`
+  returns a read-only recommendation without writing, and
+  `confirm_account_link` creates the association only after the integration
+  layer confirms both local accounts are authenticated, failing closed on
+  conflicts or email-evidence mismatches and staying idempotent on duplicate
+  submissions.
+
 ## [7.2.0](https://github.com/python-social-auth/social-core/releases/tag/7.2.0) - 2026-11-12
 
 ### Added

@@ -177,6 +177,11 @@ REASONS: dict[str, tuple[str, ErrorSource, RecoveryAction]] = {
         "storage",
         "use_existing_account",
     ),
+    "link_not_authorized": (
+        "The accounts could not be linked without proving ownership of both.",
+        "local_policy",
+        "reauthenticate",
+    ),
     "email_in_use": (
         "This email address is already in use.",
         "storage",
