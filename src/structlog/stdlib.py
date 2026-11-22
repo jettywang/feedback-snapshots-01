@@ -22,7 +22,7 @@ import sys
 import threading
 import warnings
 
-from collections.abc import Callable, Collection, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from functools import partial
 from typing import Any, cast
 
@@ -42,7 +42,14 @@ from .contextvars import (
     _ASYNC_CALLING_THREAD,
     merge_contextvars,
 )
-from .exceptions import DropEvent
+from .exceptions import (
+    PROCESSOR_FAILURE_STAGE_REDACTION,
+    PROCESSOR_FAILURE_STAGE_RENDER,
+    DropEvent,
+    ProcessorFailureReport,
+    build_processor_failure_report,
+    format_processor_failure_event,
+)
 from .processors import StackInfoRenderer
 from .typing import (
     Context,
@@ -60,6 +67,7 @@ __all__ = [
     "LoggerFactory",
     "PositionalArgumentsFormatter",
     "ProcessorFormatter",
+    "ProcessorFailureReport",
     "add_log_level",
     "add_log_level_number",
     "add_logger_name",
@@ -1085,6 +1093,22 @@ class ProcessorFormatter(logging.Formatter):
             If True, use ``record.getMessage`` to get a fully rendered log
             message, otherwise use ``str(record.msg)``. (default: True)
 
+        on_processor_failure:
+            An optional callable that receives a
+            `ProcessorFailureReport` whenever one of *processors* raises.
+            It's the hook for paging / alerting systems.
+
+            It is called **after** the failing event has been replaced by a
+            disclosure-safe alert string, and exceptions raised by it are
+            swallowed so that alerting can never make logging leak or crash.
+
+            The report contains no event values. (default: `None`)
+
+        failure_event_name:
+            If `True`, the ``event`` key's value is included in the alert
+            report.  This is useful if event names are known not to contain
+            secrets, but it is off by default. (default: `False`)
+
     Raises:
         TypeError: If both or neither *processor* and *processors* are passed.
 
@@ -1097,6 +1121,12 @@ class ProcessorFormatter(logging.Formatter):
        *processor* (singular) in favor of *processors* (plural). Removal is not
        planned.
     .. versionadded:: 23.3.0 *use_get_message*
+    .. versionadded:: 26.2.0 *on_processor_failure* and *failure_event_name*
+
+       Failures inside *processors* no longer escape into `logging`'s
+       ``handleError`` where the raw event dictionary -- including secrets a
+       failing redactor was supposed to remove -- would be dumped to stderr.
+       Instead, a disclosure-safe alert is emitted through the same handler.
     """
 
     processors: Sequence[Processor]
@@ -1106,6 +1136,8 @@ class ProcessorFormatter(logging.Formatter):
     logger: logging.Logger | None
     pass_foreign_args: bool
     use_get_message: bool
+    on_processor_failure: Callable[[ProcessorFailureReport], None] | None
+    failure_event_name: bool
 
     def __init__(
         self,
@@ -1117,6 +1149,10 @@ class ProcessorFormatter(logging.Formatter):
         logger: logging.Logger | None = None,
         pass_foreign_args: bool = False,
         use_get_message: bool = True,
+        on_processor_failure: (
+            Callable[[ProcessorFailureReport], None] | None
+        ) = None,
+        failure_event_name: bool = False,
         *args: Any,
         **kwargs: Any,
     ) -> None:
@@ -1144,6 +1180,121 @@ class ProcessorFormatter(logging.Formatter):
         self.logger = logger
         self.pass_foreign_args = pass_foreign_args
         self.use_get_message = use_get_message
+        self.on_processor_failure = on_processor_failure
+        self.failure_event_name = failure_event_name
+
+    def _alert(
+        self,
+        record: logging.LogRecord,
+        shared_record: logging.LogRecord,
+        *,
+        stage: str,
+        processor: Any,
+        processor_index: int,
+        method_name: str,
+        error: BaseException,
+        event_dict: Mapping[str, Any] | None,
+    ) -> str:
+        """
+        Turn a processor failure into a disclosure-safe alert.
+
+        The *record* is de-fanged in place so that neither a later handler nor
+        `logging`'s ``handleError`` can dump the raw event dictionary.  The
+        alert string itself is returned for the handler that is formatting
+        right now.
+        """
+        try:
+            report = build_processor_failure_report(
+                stage=stage,
+                processor=processor,
+                processor_index=processor_index,
+                logger_name=getattr(record, "name", "") or "",
+                method_name=method_name,
+                exc_type=type(error),
+                event_dict=event_dict,
+                include_event_name=self.failure_event_name,
+            )
+        except Exception:  # noqa: BLE001
+            # Building the report must never raise into `handleError`.
+            report = ProcessorFailureReport(
+                stage=stage,
+                processor="<unavailable>",
+                processor_index=processor_index,
+                logger_name="",
+                method_name=method_name,
+                exc_type="Exception",
+            )
+
+        if self.on_processor_failure is not None:
+            try:
+                self.on_processor_failure(report)
+            except Exception:  # noqa: BLE001
+                # Alerting must never break logging -- or make it leak.
+                pass
+
+        alert = format_processor_failure_event(report)
+
+        # Later handlers must not see the raw dict, and `handleError` must not
+        # print it if a *different* formatter fails on this record.  Sanitize
+        # the copy this formatter works on *and* the original record that
+        # `logging` keeps passing to other handlers.
+        for target in (record, shared_record):
+            target.msg = alert
+            target.args = ()
+            target.exc_info = None
+            target.exc_text = None
+            target.stack_info = None
+
+        # Without these, a second ProcessorFormatter would mistake the alert
+        # string for a structlog event dict and fail again.
+        for attr in ("_logger", "_name"):
+            if hasattr(shared_record, attr):
+                delattr(shared_record, attr)
+        shared_record.__dict__["_structlog_processor_failure"] = True
+
+        return alert
+
+    def _run_chain(
+        self,
+        logger: WrappedLogger,
+        method_name: str,
+        ed: ProcessorReturnValue,
+        record: logging.LogRecord,
+        shared_record: logging.LogRecord,
+    ) -> tuple[ProcessorReturnValue, bool]:
+        """
+        Run *processors*, converting any failure into a safe alert string.
+
+        Return the final value and whether a failure occurred.  If it did, the
+        returned value is the alert string and must be emitted as-is.
+        """
+        chain = self.processors
+        last = len(chain) - 1
+
+        for index, proc in enumerate(chain):
+            stage = (
+                PROCESSOR_FAILURE_STAGE_RENDER
+                if index == last
+                else PROCESSOR_FAILURE_STAGE_REDACTION
+            )
+            try:
+                ed = proc(logger, method_name, ed)  # type: ignore[arg-type]
+            except Exception as error:  # noqa: BLE001
+                return (
+                    self._alert(
+                        record,
+                        shared_record,
+                        stage=stage,
+                        processor=proc,
+                        processor_index=index,
+                        method_name=method_name,
+                        error=error,
+                        event_dict=ed if isinstance(ed, Mapping) else None,
+                    ),
+                    True,
+                )
+
+        return ed, False
 
     def format(self, record: logging.LogRecord) -> str:
         """
@@ -1151,9 +1302,22 @@ class ProcessorFormatter(logging.Formatter):
 
         *record* has been patched by `wrap_for_formatter` first though, so the
          type isn't quite right.
+
+        If a processor raises, the raw event is never handed to `logging`'s
+        error handling.  Instead, a disclosure-safe alert that identifies the
+        failing stage and processor is returned, and *record* is sanitized.
         """
         # Make a shallow copy of the record to let other handlers/formatters
         # process the original one
+        if getattr(record, "_structlog_processor_failure", False):
+            # Another ProcessorFormatter already contained a failure for this
+            # record.  The message is a disclosure-safe alert; just format it.
+            for attr in ("_logger", "_name"):
+                if hasattr(record, attr):
+                    delattr(record, attr)
+            return super().format(record)
+
+        shared_record = record
         record = logging.makeLogRecord(record.__dict__)
 
         logger = getattr(record, "_logger", _SENTINEL)
@@ -1198,8 +1362,20 @@ class ProcessorFormatter(logging.Formatter):
 
             # Non-structlog allows to run through a chain to prepare it for the
             # final processor (e.g. adding timestamps and log levels).
-            for proc in self.foreign_pre_chain or ():
-                ed = cast(EventDict, proc(logger, meth_name, ed))
+            for index, proc in enumerate(self.foreign_pre_chain or ()):
+                try:
+                    ed = cast(EventDict, proc(logger, meth_name, ed))
+                except Exception as error:  # noqa: BLE001
+                    return self._alert(
+                        record,
+                        shared_record,
+                        stage=PROCESSOR_FAILURE_STAGE_REDACTION,
+                        processor=proc,
+                        processor_index=index,
+                        method_name=meth_name,
+                        error=error,
+                        event_dict=ed if isinstance(ed, Mapping) else None,
+                    )
 
         # If required, unset stack-related attributes on the record copy so
         # that the base implementation doesn't append stacktraces to the
@@ -1210,20 +1386,26 @@ class ProcessorFormatter(logging.Formatter):
         if not self.keep_stack_info:
             record.stack_info = None
 
-        for p in self.processors:
-            ed = p(logger, meth_name, ed)  # type: ignore[arg-type]
+        result, failed = self._run_chain(
+            logger, meth_name, ed, record, shared_record
+        )
 
-        if not isinstance(ed, str):
+        if failed:
+            # The alert is already in record.msg; let the configured format
+            # string apply so the emitted line matches the normal output.
+            return cast(str, super().format(record))
+
+        if not isinstance(result, str):
             warnings.warn(
                 "The last processor in ProcessorFormatter.processors must "
                 f"return a string, but {self.processors[-1]} returned a "
-                f"{type(ed)} instead.",
+                f"{type(result)} instead.",
                 category=RuntimeWarning,
                 stacklevel=1,
             )
-            ed = cast(str, ed)
+            result = cast(str, result)
 
-        record.msg = ed
+        record.msg = result
 
         return super().format(record)
 

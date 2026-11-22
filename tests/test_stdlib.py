@@ -11,7 +11,7 @@ import logging.config
 import os
 import sys
 
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Mapping
 from io import StringIO
 from typing import Any
 from unittest.mock import patch
@@ -1517,6 +1517,350 @@ class TestProcessorFormatter:
 
         assert proc.format(record)
         assert "le msg: %s" == event_dicts[0]["event"]
+
+
+SECRET = "SYNTHETIC-SECRET-7f3a9c"  # noqa: S105
+
+
+def redaction_bomb(_, __, event_dict):
+    """
+    A redactor that fails *before* removing the secret it was meant to remove.
+    """
+    raise ValueError(f"cannot redact {event_dict['api_key']}")
+
+
+def renderer_bomb(_, __, event_dict):
+    """
+    A renderer that fails while the event still contains business data.
+    """
+    raise RuntimeError(f"cannot render {event_dict['customer']}")
+
+
+def drop_secret(_, __, event_dict):
+    event_dict.pop("api_key", None)
+
+    return event_dict
+
+
+@pytest.fixture(name="failure_logger")
+def _failure_logger():
+    """
+    Configure structlog through a stdlib handler using ProcessorFormatter.
+    """
+    configure(
+        processors=[ProcessorFormatter.wrap_for_formatter],
+        logger_factory=LoggerFactory(),
+        wrapper_class=BoundLogger,
+    )
+
+
+def _run_failing(
+    processors, on_failure=None, foreign=False, shared_handler=None
+):
+    """
+    Emit one event through *processors* and return the captured streams.
+    """
+    event_stream = StringIO()
+    handler = logging.StreamHandler(event_stream)
+    handler.setFormatter(
+        ProcessorFormatter(
+            processors=processors, on_processor_failure=on_failure
+        )
+    )
+
+    logger = logging.getLogger("failure-check")
+    logger.handlers = [handler]
+    if shared_handler is not None:
+        logger.handlers.append(shared_handler)
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+
+    if foreign:
+        logger.info("payment.authorized", extra={"api_key": SECRET})
+    else:
+        get_logger("failure-check").info(
+            "payment.authorized", customer="acme", api_key=SECRET
+        )
+
+    logger.handlers = []
+
+    return event_stream.getvalue()
+
+
+class TestProcessorFormatterFailures:
+    """
+    A failing processor must alert without disclosing the event.
+
+    The original behavior delegated to `logging.Handler.handleError` which
+    dumped the *entire* raw event dict -- including the secret a failing
+    redactor was supposed to remove -- to stderr.
+    """
+
+    def test_redaction_failure_is_located_and_contains_no_secret(
+        self, failure_logger, capsys
+    ):
+        """
+        A redaction failure emits a `log.redaction_failed` alert that names
+        the processor and stage -- but never the event's values.
+        """
+        reports = []
+
+        out = _run_failing(
+            [redaction_bomb, renderer_bomb], on_failure=reports.append
+        )
+
+        assert "log.redaction_failed" in out
+        assert "failure_stage='redaction'" in out
+        assert "failure_processor='redaction_bomb'" in out
+        assert "failure_exception='ValueError'" in out
+
+        assert 1 == len(reports)
+        report = reports[0]
+        assert "redaction" == report.stage
+        assert "redaction_bomb" == report.processor
+        assert "ValueError" == report.exc_type
+        assert ("api_key", "customer", "event") == report.event_keys
+        assert report.event_fingerprint
+
+        assert SECRET not in out
+        assert "acme" not in out
+        assert "" == capsys.readouterr().err
+
+    def test_redaction_failure_leaves_no_secret_on_the_shared_record(
+        self, failure_logger, capsys
+    ):
+        """
+        Handlers that run after the failing formatter must not receive the
+        raw event dict either.
+        """
+        after = StringIO()
+        after_handler = logging.StreamHandler(after)
+
+        _run_failing(
+            [redaction_bomb, renderer_bomb], shared_handler=after_handler
+        )
+
+        assert "log.redaction_failed" in after.getvalue()
+        assert SECRET not in after.getvalue()
+        assert "" == capsys.readouterr().err
+
+    def test_render_failure_is_distinguishable_from_redaction_failure(
+        self, failure_logger, capsys
+    ):
+        """
+        A renderer failure emits `log.render_failed` -- a signal distinct from
+        `log.redaction_failed` even though the alert machinery is shared.
+        """
+        reports = []
+
+        out = _run_failing(
+            [drop_secret, renderer_bomb], on_failure=reports.append
+        )
+
+        assert "log.render_failed" in out
+        assert "failure_stage='render'" in out
+        assert "failure_processor='renderer_bomb'" in out
+        assert "log.redaction_failed" not in out
+
+        assert "render" == reports[0].stage
+        assert SECRET not in out
+        assert "" == capsys.readouterr().err
+
+    def test_foreign_record_failure_is_contained(self, failure_logger, capsys):
+        """
+        Failures while formatting non-structlog records are contained too.
+        """
+        out = _run_failing(
+            [redaction_bomb, renderer_bomb], foreign=True
+        )
+
+        assert "log.redaction_failed" in out
+        assert SECRET not in out
+        assert "" == capsys.readouterr().err
+
+    def test_failing_alert_hook_does_not_break_or_leak(
+        self, failure_logger, capsys
+    ):
+        """
+        If the alerting hook itself fails, the alert is still emitted and the
+        failure is still contained.
+        """
+
+        def hook(report):
+            raise RuntimeError(f"pager down: {report.event_keys}")
+
+        out = _run_failing(
+            [redaction_bomb, renderer_bomb], on_failure=hook
+        )
+
+        assert "log.redaction_failed" in out
+        assert SECRET not in out
+        assert "" == capsys.readouterr().err
+
+    def test_failure_event_name_can_be_opted_in(self, failure_logger):
+        """
+        Event names are business data and thus off by default, but can be
+        included explicitly.
+        """
+        reports = []
+        formatter = ProcessorFormatter(
+            processors=[redaction_bomb, renderer_bomb],
+            on_processor_failure=reports.append,
+            failure_event_name=True,
+        )
+        record = logging.LogRecord(
+            "failure-check",
+            logging.INFO,
+            __file__,
+            1,
+            {"event": "payment.authorized"},
+            (),
+            None,
+        )
+        record._logger = logging.getLogger("failure-check")
+        record._name = "info"
+
+        out = formatter.format(record)
+
+        assert "payment.authorized" == reports[0].event
+        assert "payment.authorized" in out
+
+    def test_success_is_unaffected(self, failure_logger, capsys):
+        """
+        A processor chain that doesn't raise behaves exactly as before.
+        """
+        reports = []
+        out = _run_failing(
+            [
+                drop_secret,
+                ProcessorFormatter.remove_processors_meta,
+                JSONRenderer(),
+            ],
+            on_failure=reports.append,
+        )
+
+        assert {"customer": "acme", "event": "payment.authorized"} == (
+            json.loads(out)
+        )
+        assert [] == reports
+        assert ("", "") == capsys.readouterr()
+
+    def test_chained_formatters_alert_once_and_stay_safe(
+        self, failure_logger, capsys
+    ):
+        """
+        If several `ProcessorFormatter` handlers process the same record, only
+        the first one alerts; the others emit the already-sanitized alert.
+        """
+        alerts = []
+        streams = []
+        logger = logging.getLogger("failure-check")
+        logger.handlers = []
+        for _ in range(2):
+            stream = StringIO()
+            handler = logging.StreamHandler(stream)
+            handler.setFormatter(
+                ProcessorFormatter(
+                    processors=[redaction_bomb, renderer_bomb],
+                    on_processor_failure=alerts.append,
+                )
+            )
+            logger.handlers.append(handler)
+            streams.append(stream)
+        logger.setLevel(logging.DEBUG)
+        logger.propagate = False
+
+        get_logger("failure-check").info(
+            "payment.authorized", customer="acme", api_key=SECRET
+        )
+
+        logger.handlers = []
+
+        assert 1 == len(alerts)
+        assert streams[0].getvalue() == streams[1].getvalue()
+        assert "log.redaction_failed" in streams[0].getvalue()
+        assert SECRET not in streams[0].getvalue()
+        assert "" == capsys.readouterr().err
+
+    def test_broken_event_dict_still_produces_an_alert(
+        self, failure_logger, capsys
+    ):
+        """
+        Even if the event dict cannot be inspected at all, the failure is
+        reported and the record is sanitized.
+        """
+
+        class Evil(Mapping):
+            def __getitem__(self, key):
+                raise RuntimeError("no keys for you")
+
+            def __iter__(self):
+                raise RuntimeError("no keys for you")
+
+            def __len__(self):
+                return 1
+
+        reports = []
+        formatter = ProcessorFormatter(
+            processors=[redaction_bomb, renderer_bomb],
+            on_processor_failure=reports.append,
+        )
+        record = logging.LogRecord(
+            "failure-check", logging.INFO, __file__, 1, "x", (), None
+        )
+
+        out = formatter._alert(
+            record,
+            record,
+            stage="redaction",
+            processor=redaction_bomb,
+            processor_index=0,
+            method_name="info",
+            error=ValueError("nope"),
+            event_dict=Evil(),
+        )
+
+        assert "log.redaction_failed" in out
+        assert SECRET not in out
+        assert 1 == len(reports)
+        assert "" == capsys.readouterr().err
+
+    def test_report_never_stringifies_values(self, failure_logger):
+        """
+        Values -- including ones with noisy __repr__ -- are never touched.
+        """
+
+        class Loud:
+            touched = False
+
+            def __repr__(self):
+                type(self).touched = True
+                return f"<loud {SECRET}>"
+
+        reports = []
+
+        formatter = ProcessorFormatter(
+            processors=[redaction_bomb, renderer_bomb],
+            on_processor_failure=reports.append,
+        )
+        record = logging.LogRecord(
+            "failure-check",
+            logging.INFO,
+            __file__,
+            1,
+            {"event": "x", "api_key": SECRET, "noisy": Loud()},
+            (),
+            None,
+        )
+        record._logger = logging.getLogger("failure-check")
+        record._name = "info"
+
+        formatter.format(record)
+
+        assert not Loud.touched
+        assert ("api_key", "event", "noisy") == reports[0].event_keys
+        assert SECRET not in repr(reports[0])
+        assert SECRET not in str(reports[0])
 
 
 @pytest_asyncio.fixture(name="abl")

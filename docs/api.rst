@@ -328,6 +328,9 @@ API Reference
 .. autoclass:: ProcessorFormatter
    :members: wrap_for_formatter, remove_processors_meta
 
+.. autoclass:: ProcessorFailureReport
+   :members: as_dict
+
 
 `structlog.tracebacks` Module
 -----------------------------

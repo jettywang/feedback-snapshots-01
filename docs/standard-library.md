@@ -577,4 +577,54 @@ If you leave `foreign_pre_chain` as `None`, formatting will be left to `logging`
 Meaning: you can define a `format` for {class}`~structlog.stdlib.ProcessorFormatter` too!
 
 
+(processor-failure-containment)=
+
+### Handling failing processors
+
+Production logs often run redactors and renderers that must not leak secrets if they fail.
+Without special handling, `logging` would call its own `handleError()` when a formatter raises — and dump the **entire raw record**, including the values a failing redactor was supposed to remove, to stderr.
+
+{class}`~structlog.stdlib.ProcessorFormatter` therefore contains processor failures instead:
+
+- A processor *before* the last one is treated as a redaction-stage processor; a failure raises the `log.redaction_failed` alert.
+- A failure in the *last* processor raises the `log.render_failed` alert.
+
+Both alerts are emitted through the same handler that is formatting, formatted with the configured `format` string, and contain **no event values** — only the logger name, the log method, the processor's name and index, the exception's type, the event's *keys*, and a fingerprint over those keys.
+The original record is sanitized as well, so handlers that run later cannot re-emit the raw event.
+Failures in `foreign_pre_chain` are contained the same way.
+
+To page an on-call engineer, pass a callable as *on_processor_failure*.
+It receives a {class}`~structlog.stdlib.ProcessorFailureReport` — the same metadata the alert contains, without any event values:
+
+```python
+import logging
+
+import structlog
+
+
+def page_oncall(report):
+    if report.stage == "redaction":
+        pager.trigger("log.redaction_failed", report.as_dict())
+    else:
+        pager.trigger("log.render_failed", report.as_dict())
+
+
+formatter = structlog.stdlib.ProcessorFormatter(
+    processors=[
+        structlog.processors.add_log_level,
+        structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+        structlog.processors.JSONRenderer(),
+    ],
+    on_processor_failure=page_oncall,
+)
+```
+
+Exceptions raised by the hook itself are swallowed: alerting must never break logging or make it leak.
+If your event names are known not to contain secrets, pass `failure_event_name=True` to include the `event` value in the alert and report.
+
+:::{versionadded} 26.2.0
+*on_processor_failure* and the built-in failure containment.
+:::
+
+
 [*python-json-logger*]: https://github.com/nhairs/python-json-logger

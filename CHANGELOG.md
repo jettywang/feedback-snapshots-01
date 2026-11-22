@@ -15,6 +15,15 @@ You can find our backwards-compatibility policy [here](https://github.com/hynek/
 
 ## [Unreleased](https://github.com/hynek/structlog/compare/26.1.0...HEAD)
 
+### Added
+
+- `structlog.stdlib.ProcessorFailureReport` and the `on_processor_failure` hook of `structlog.stdlib.ProcessorFormatter`.
+  The hook receives a disclosure-safe report and is meant for paging / security alerting.
+
+  If a processor raises, `ProcessorFormatter` now emits a `log.redaction_failed` or `log.render_failed` alert through the same handler instead of letting `logging`'s `handleError` dump the raw event dictionary to stderr.
+  The alert contains no event values and the record is sanitized so later handlers cannot re-emit them.
+  Passing `failure_event_name=True` additionally includes the event name in the alert.
+
 ### Changed
 
 - On Python 3.15 and later, *structlog* uses [PEP 810](https://peps.python.org/pep-0810/) lazy imports for modules that are only needed once you log.
