@@ -24,7 +24,9 @@ from botocore.exceptions import ClientError, ReadTimeoutError
 from s3transfer.constants import PROCESS_USER_AGENT
 from s3transfer.exceptions import CancelledError, RetriesExceededError
 from s3transfer.processpool import (
+    IDENTITY_CREDENTIAL_KEYS,
     SHUTDOWN_SIGNAL,
+    BaseClientFactory,
     ClientFactory,
     DownloadFileRequest,
     GetObjectJob,
@@ -37,6 +39,7 @@ from s3transfer.processpool import (
     TransferMonitor,
     TransferState,
     ignore_ctrl_c,
+    validate_identity_client_kwargs,
 )
 from s3transfer.utils import CallArgs, OSUtils
 from tests import (
@@ -77,6 +80,72 @@ class TestProcessPoolDownloader(unittest.TestCase):
             self.assertEqual(
                 factory.call_args[0][0], {'region_name': 'myregion'}
             )
+
+    def test_uses_provided_client_factory(self):
+        client_factory = mock.Mock(BaseClientFactory)
+        with mock.patch('s3transfer.processpool.ClientFactory') as factory:
+            downloader = ProcessPoolDownloader(client_factory=client_factory)
+            self.assertIs(downloader._client_factory, client_factory)
+            self.assertFalse(factory.called)
+
+    def test_download_file_passes_identity_client_kwargs(self):
+        identity = {
+            'aws_access_key_id': 'access-key',
+            'aws_secret_access_key': 'secret-key',
+            'aws_session_token': 'session-token',
+        }
+        downloader = self.create_started_downloader()
+        future = downloader.download_file(
+            'bucket',
+            'key',
+            'filename',
+            client_kwargs=identity,
+        )
+        request = downloader._download_request_queue.get_nowait()
+        self.assertEqual(request.client_kwargs, identity)
+        self.assertEqual(future.meta.call_args.client_kwargs, identity)
+
+    def test_download_file_defaults_to_empty_identity(self):
+        downloader = self.create_started_downloader()
+        downloader.download_file('bucket', 'key', 'filename')
+        request = downloader._download_request_queue.get_nowait()
+        self.assertEqual(request.client_kwargs, {})
+
+    def test_download_file_rejects_incomplete_identity(self):
+        downloader = self.create_started_downloader()
+        with self.assertRaises(ValueError):
+            downloader.download_file(
+                'bucket',
+                'key',
+                'filename',
+                client_kwargs={'aws_access_key_id': 'access-key'},
+            )
+        self.assertTrue(downloader._download_request_queue.empty())
+
+    def test_download_file_rejects_unexpected_identity_key(self):
+        identity = {
+            'aws_access_key_id': 'access-key',
+            'aws_secret_access_key': 'secret-key',
+            'aws_session_token': 'session-token',
+            'region_name': 'myregion',
+        }
+        downloader = self.create_started_downloader()
+        with self.assertRaises(ValueError):
+            downloader.download_file(
+                'bucket', 'key', 'filename', client_kwargs=identity
+            )
+        self.assertTrue(downloader._download_request_queue.empty())
+
+    def create_started_downloader(self):
+        # Wire up only the in-process state download_file() needs so the
+        # test never spawns the submitter or worker processes.
+        downloader = ProcessPoolDownloader(
+            client_factory=mock.Mock(BaseClientFactory)
+        )
+        downloader._download_request_queue = queue.Queue()
+        downloader._transfer_monitor = TransferMonitor()
+        downloader._started = True
+        return downloader
 
 
 class TestProcessPoolTransferFuture(unittest.TestCase):
@@ -171,6 +240,125 @@ class TestClientFactory(unittest.TestCase):
         config = Config(user_agent='foo/1.0')
         client = ClientFactory({'config': config}).create_client()
         self.assertIn(PROCESS_USER_AGENT, client.meta.config.user_agent)
+
+    def test_create_client_without_identity_uses_default_kwargs(self):
+        factory = ClientFactory(
+            {
+                'region_name': 'myregion',
+                'aws_access_key_id': 'default-key',
+                'aws_secret_access_key': 'default-secret',
+                'aws_session_token': 'default-token',
+            }
+        )
+        client = factory.create_client()
+        credentials = client._request_signer._credentials
+        self.assertEqual(credentials.access_key, 'default-key')
+        self.assertEqual(credentials.token, 'default-token')
+        self.assertEqual(client.meta.region_name, 'myregion')
+
+    def test_scoped_client_uses_download_identity(self):
+        factory = ClientFactory(
+            {
+                'region_name': 'myregion',
+                'aws_access_key_id': 'default-key',
+                'aws_secret_access_key': 'default-secret',
+                'aws_session_token': 'default-token',
+            }
+        )
+        download_identity = {
+            'aws_access_key_id': 'scoped-key',
+            'aws_secret_access_key': 'scoped-secret',
+            'aws_session_token': 'scoped-token',
+        }
+        client = factory.create_client(download_identity)
+        credentials = client._request_signer._credentials
+        self.assertEqual(credentials.access_key, 'scoped-key')
+        self.assertEqual(credentials.secret_key, 'scoped-secret')
+        self.assertEqual(credentials.token, 'scoped-token')
+        # Non-credential settings of the factory still apply.
+        self.assertEqual(client.meta.region_name, 'myregion')
+        self.assertIn(PROCESS_USER_AGENT, client.meta.config.user_agent)
+
+    def test_scoped_client_does_not_inherit_default_identity(self):
+        factory = ClientFactory(
+            {
+                'aws_access_key_id': 'default-key',
+                'aws_secret_access_key': 'default-secret',
+                'aws_session_token': 'default-token',
+            }
+        )
+        download_identity = {
+            'aws_access_key_id': 'scoped-key',
+            'aws_secret_access_key': 'scoped-secret',
+            'aws_session_token': 'scoped-token',
+        }
+        client = factory.create_client(download_identity)
+        credentials = client._request_signer._credentials
+        self.assertNotEqual(credentials.access_key, 'default-key')
+        self.assertEqual(credentials.access_key, 'scoped-key')
+
+        # The factory's default identity must remain untouched and still be
+        # used for downloads without their own identity.
+        default_client = factory.create_client()
+        self.assertEqual(
+            default_client._request_signer._credentials.access_key,
+            'default-key',
+        )
+
+    def test_scoped_client_does_not_mutate_input_identity(self):
+        factory = ClientFactory({'region_name': 'myregion'})
+        download_identity = {
+            'aws_access_key_id': 'scoped-key',
+            'aws_secret_access_key': 'scoped-secret',
+            'aws_session_token': 'scoped-token',
+        }
+        original = dict(download_identity)
+        factory.create_client(download_identity)
+        self.assertEqual(download_identity, original)
+
+    def test_scoped_client_rejects_incomplete_identity(self):
+        factory = ClientFactory()
+        with self.assertRaises(ValueError):
+            factory.create_client({'aws_access_key_id': 'scoped-key'})
+
+    def test_is_base_client_factory(self):
+        self.assertIsInstance(ClientFactory(), BaseClientFactory)
+
+
+class TestValidateIdentityClientKwargs(unittest.TestCase):
+    def test_empty_kwargs_are_valid(self):
+        validate_identity_client_kwargs({})
+        validate_identity_client_kwargs(None)
+
+    def test_complete_identity_is_valid(self):
+        validate_identity_client_kwargs(
+            {
+                'aws_access_key_id': 'access-key',
+                'aws_secret_access_key': 'secret-key',
+                'aws_session_token': 'session-token',
+            }
+        )
+
+    def test_rejects_missing_credentials(self):
+        for key in IDENTITY_CREDENTIAL_KEYS:
+            with self.subTest(key=key):
+                identity = {
+                    credential: 'value'
+                    for credential in IDENTITY_CREDENTIAL_KEYS
+                }
+                identity[key] = ''
+                with self.assertRaises(ValueError):
+                    validate_identity_client_kwargs(identity)
+
+    def test_rejects_unexpected_keys(self):
+        identity = {
+            'aws_access_key_id': 'access-key',
+            'aws_secret_access_key': 'secret-key',
+            'aws_session_token': 'session-token',
+            'region_name': 'myregion',
+        }
+        with self.assertRaises(ValueError):
+            validate_identity_client_kwargs(identity)
 
 
 class TestTransferMonitor(unittest.TestCase):
@@ -328,6 +516,7 @@ class TestGetObjectSubmitter(StubbedClientTest):
         self.osutil.get_temp_filename.return_value = self.temp_filename
         self.extra_args = {}
         self.expected_size = None
+        self.client_kwargs = {}
 
     def add_download_file_request(self, **override_kwargs):
         kwargs = {
@@ -337,6 +526,7 @@ class TestGetObjectSubmitter(StubbedClientTest):
             'filename': self.filename,
             'extra_args': self.extra_args,
             'expected_size': self.expected_size,
+            'client_kwargs': self.client_kwargs,
         }
         kwargs.update(override_kwargs)
         self.download_request_queue.put(DownloadFileRequest(**kwargs))
@@ -365,6 +555,7 @@ class TestGetObjectSubmitter(StubbedClientTest):
                     offset=0,
                     extra_args={},
                     filename=self.filename,
+                    client_kwargs={},
                 )
             ]
         )
@@ -386,6 +577,7 @@ class TestGetObjectSubmitter(StubbedClientTest):
                     offset=0,
                     extra_args={'Range': 'bytes=0-1'},
                     filename=self.filename,
+                    client_kwargs={},
                 ),
                 GetObjectJob(
                     transfer_id=self.transfer_id,
@@ -395,6 +587,7 @@ class TestGetObjectSubmitter(StubbedClientTest):
                     offset=2,
                     extra_args={'Range': 'bytes=2-'},
                     filename=self.filename,
+                    client_kwargs={},
                 ),
             ]
         )
@@ -420,6 +613,7 @@ class TestGetObjectSubmitter(StubbedClientTest):
                     offset=0,
                     extra_args={},
                     filename=self.filename,
+                    client_kwargs={},
                 )
             ]
         )
@@ -451,6 +645,7 @@ class TestGetObjectSubmitter(StubbedClientTest):
                     offset=0,
                     extra_args={'VersionId': 'versionid'},
                     filename=self.filename,
+                    client_kwargs={},
                 )
             ]
         )
@@ -474,6 +669,63 @@ class TestGetObjectSubmitter(StubbedClientTest):
         self.assert_submitted_get_object_jobs([])
         self.assertIsInstance(
             self.transfer_monitor.get_exception(self.transfer_id), OSError
+        )
+
+    def test_run_propagates_scoped_identity_to_jobs(self):
+        identity = {
+            'aws_access_key_id': 'scoped-key',
+            'aws_secret_access_key': 'scoped-secret',
+            'aws_session_token': 'scoped-token',
+        }
+        self.add_download_file_request(expected_size=1, client_kwargs=identity)
+        self.add_shutdown()
+        self.submitter.run()
+        job = self.worker_queue.get_nowait()
+        self.assertEqual(job.client_kwargs, identity)
+        self.assertTrue(self.worker_queue.empty())
+        # The size was provided so no scoped client is needed for HeadObject.
+        # The only factory call is the process' default client bootstrap.
+        self.client_factory.create_client.assert_called_once_with()
+
+    def test_run_uses_scoped_client_for_head_object(self):
+        identity = {
+            'aws_access_key_id': 'scoped-key',
+            'aws_secret_access_key': 'scoped-secret',
+            'aws_session_token': 'scoped-token',
+        }
+        scoped_client = mock.Mock()
+        scoped_client.head_object.return_value = {'ContentLength': 1}
+        self.client_factory.create_client.side_effect = [
+            self.client,
+            scoped_client,
+        ]
+        self.add_download_file_request(
+            expected_size=None, client_kwargs=identity
+        )
+        self.add_shutdown()
+        self.submitter.run()
+        self.client_factory.create_client.assert_called_with(identity)
+        scoped_client.head_object.assert_called_once_with(
+            Bucket=self.bucket, Key=self.key
+        )
+        job = self.worker_queue.get_nowait()
+        self.assertEqual(job.client_kwargs, identity)
+
+    def test_run_skips_cancelled_transfer_without_scoped_client(self):
+        self.transfer_monitor.notify_exception(
+            self.transfer_id, CancelledError()
+        )
+        self.add_download_file_request(expected_size=None)
+        self.add_shutdown()
+        self.submitter.run()
+        self.assert_submitted_get_object_jobs([])
+        # No scoped client is created to serve the cancelled download. The
+        # only factory call is the process' default client bootstrap.
+        self.client_factory.create_client.assert_called_once_with()
+        self.assertTrue(self.transfer_monitor.is_done(self.transfer_id))
+        self.assertIsInstance(
+            self.transfer_monitor.get_exception(self.transfer_id),
+            CancelledError,
         )
 
     @skip_if_windows('os.kill() with SIGINT not supported on Windows')
@@ -521,6 +773,7 @@ class TestGetObjectWorker(StubbedClientTest):
         self.offset = 0
         self.final_filename = self.files.full_path('final_filename')
         self.stream = BytesIO(self.remote_contents)
+        self.client_kwargs = {}
         self.transfer_monitor.notify_expected_jobs_to_complete(
             self.transfer_id, 1000
         )
@@ -538,6 +791,7 @@ class TestGetObjectWorker(StubbedClientTest):
             'extra_args': self.extra_args,
             'offset': self.offset,
             'filename': self.final_filename,
+            'client_kwargs': self.client_kwargs,
         }
         kwargs.update(override_kwargs)
         self.queue.put(GetObjectJob(**kwargs))
@@ -590,6 +844,87 @@ class TestGetObjectWorker(StubbedClientTest):
         self.stubber.assert_no_pending_responses()
         self.assert_contents(self.temp_filename, self.remote_contents)
         self.assert_does_not_exist(self.final_filename)
+
+    def test_run_scoped_job_creates_client_with_identity(self):
+        identity = {
+            'aws_access_key_id': 'scoped-key',
+            'aws_secret_access_key': 'scoped-secret',
+            'aws_session_token': 'scoped-token',
+        }
+        scoped_client = mock.Mock()
+        scoped_client.get_object.return_value = {'Body': self.stream}
+        self.client_factory.create_client.side_effect = [
+            self.client,
+            scoped_client,
+        ]
+
+        self.add_get_object_job(client_kwargs=identity)
+        self.add_shutdown()
+        self.worker.run()
+
+        self.client_factory.create_client.assert_called_with(identity)
+        scoped_client.get_object.assert_called_once_with(
+            Bucket=self.bucket, Key=self.key
+        )
+
+    def test_run_scoped_job_does_not_use_default_client(self):
+        identity = {
+            'aws_access_key_id': 'scoped-key',
+            'aws_secret_access_key': 'scoped-secret',
+            'aws_session_token': 'scoped-token',
+        }
+        default_client = mock.Mock()
+        scoped_client = mock.Mock()
+        scoped_client.get_object.return_value = {'Body': self.stream}
+        self.client_factory.create_client.side_effect = [
+            default_client,
+            scoped_client,
+        ]
+
+        self.add_get_object_job(client_kwargs=identity)
+        self.add_shutdown()
+        self.worker.run()
+
+        self.client_factory.create_client.assert_called_with(identity)
+        self.assertFalse(default_client.get_object.called)
+        self.assertTrue(scoped_client.get_object.called)
+
+    def test_run_caches_scoped_client_per_identity(self):
+        identity = {
+            'aws_access_key_id': 'scoped-key',
+            'aws_secret_access_key': 'scoped-secret',
+            'aws_session_token': 'scoped-token',
+        }
+        scoped_client = mock.Mock()
+        scoped_client.get_object.return_value = {'Body': self.stream}
+        self.client_factory.create_client.side_effect = [
+            self.client,
+            scoped_client,
+        ]
+
+        self.add_get_object_job(client_kwargs=identity)
+        self.add_get_object_job(client_kwargs=identity)
+        self.add_shutdown()
+        self.worker.run()
+
+        self.assertEqual(
+            self.client_factory.create_client.call_args_list,
+            [mock.call(), mock.call(identity)],
+        )
+        self.assertEqual(scoped_client.get_object.call_count, 2)
+
+    def test_run_default_job_uses_default_client(self):
+        self.add_get_object_job()
+        self.add_shutdown()
+        self.add_stubbed_get_object_response()
+        self.transfer_monitor.notify_expected_jobs_to_complete(
+            self.transfer_id, 1000
+        )
+
+        self.worker.run()
+        # The only factory call is the process' default client bootstrap.
+        self.client_factory.create_client.assert_called_once_with()
+        self.stubber.assert_no_pending_responses()
 
     def test_run_with_extra_args(self):
         self.add_get_object_job(extra_args={'VersionId': 'versionid'})

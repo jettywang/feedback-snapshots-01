@@ -1,0 +1,5 @@
+{
+  "type": "feature",
+  "category": "``s3``",
+  "description": "Add per-download identity support to the process pool downloader so subprocesses create clients scoped to the credentials authorized for each download instead of inheriting the parent process' default identity."
+}

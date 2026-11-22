@@ -20,7 +20,11 @@ import botocore.session
 from botocore.stub import Stubber
 
 from s3transfer.exceptions import CancelledError
-from s3transfer.processpool import ProcessPoolDownloader, ProcessTransferConfig
+from s3transfer.processpool import (
+    BaseClientFactory,
+    ProcessPoolDownloader,
+    ProcessTransferConfig,
+)
 from tests import FileCreator, mock, unittest
 
 
@@ -35,6 +39,10 @@ class StubbedClient:
         self._stubber = Stubber(self._client)
         self._stubber.activate()
         self._caught_stubber_errors = []
+        # Records the identity each client was created with alongside the
+        # order in which the clients were created. The list lives behind a
+        # manager proxy so it is shared across every subprocess.
+        self.creation_records = []
 
     def get_object(self, **kwargs):
         return self._client.get_object(**kwargs)
@@ -48,6 +56,12 @@ class StubbedClient:
     def add_client_error(self, *args, **kwargs):
         self._stubber.add_client_error(*args, **kwargs)
 
+    def record_client_creation(self, client_kwargs):
+        self.creation_records.append(client_kwargs.get('aws_access_key_id'))
+
+    def get_creation_records(self):
+        return list(self.creation_records)
+
 
 class StubbedClientManager(BaseManager):
     pass
@@ -59,7 +73,7 @@ StubbedClientManager.register('StubbedClient', StubbedClient)
 # Ideally a Mock would be used here. However, they cannot be pickled
 # for Windows. So instead we define a factory class at the module level that
 # can return a stubbed client we initialized in the setUp.
-class StubbedClientFactory:
+class StubbedClientFactory(BaseClientFactory):
     def __init__(self, stubbed_client):
         self._stubbed_client = stubbed_client
 
@@ -69,7 +83,11 @@ class StubbedClientFactory:
         # returned when the patched class is instantiated.
         return self
 
-    def create_client(self):
+    def create_client(self, client_kwargs=None):
+        if client_kwargs:
+            # Record which download identity the client belongs to and the
+            # order in which scoped clients are created.
+            self._stubbed_client.record_client_creation(client_kwargs)
         return self._stubbed_client
 
 
@@ -260,6 +278,136 @@ class TestProcessPoolDownloader(unittest.TestCase):
             future.cancel()
             with self.assertRaises(CancelledError):
                 future.result()
+
+    def identity(self, access_key):
+        return {
+            'aws_access_key_id': access_key,
+            'aws_secret_access_key': f'{access_key}-secret',
+            'aws_session_token': f'{access_key}-token',
+        }
+
+    def test_ranged_downloads_use_their_own_identities(self):
+        half_of_content_length = int(len(self.remote_contents) / 2)
+        config = ProcessTransferConfig(
+            multipart_chunksize=half_of_content_length,
+            multipart_threshold=half_of_content_length,
+            max_request_processes=1,
+        )
+        identities = [
+            self.identity('identity-a'),
+            self.identity('identity-b'),
+        ]
+        for _ in range(4):
+            self.stubbed_client.add_response(
+                'get_object', {'Body': BytesIO(self.stream.read())}
+            )
+            self.stream.seek(0)
+        downloader = ProcessPoolDownloader(config=config)
+        first_file = self.files.full_path('filename-a')
+        second_file = self.files.full_path('filename-b')
+        with downloader:
+            first_future = downloader.download_file(
+                self.bucket,
+                self.key,
+                first_file,
+                expected_size=len(self.remote_contents),
+                client_kwargs=identities[0],
+            )
+            second_future = downloader.download_file(
+                self.bucket,
+                self.key,
+                second_file,
+                expected_size=len(self.remote_contents),
+                client_kwargs=identities[1],
+            )
+            first_future.result()
+            second_future.result()
+
+        records = self.stubbed_client.get_creation_records()
+        # Each download's segmented requests are served by a client created
+        # with that download's identity, and the creation order follows the
+        # order in which the downloads were submitted.
+        self.assertEqual(records, ['identity-a', 'identity-b'])
+        self.assert_contents(first_file, self.remote_contents)
+        self.assert_contents(second_file, self.remote_contents)
+
+    def test_incomplete_identity_gets_no_scoped_client(self):
+        incomplete_identity = {
+            'aws_access_key_id': 'incomplete-identity',
+        }
+        with self.downloader:
+            with self.assertRaises(ValueError):
+                self.downloader.download_file(
+                    self.bucket,
+                    self.key,
+                    self.filename,
+                    expected_size=len(self.remote_contents),
+                    client_kwargs=incomplete_identity,
+                )
+        self.assertEqual(self.stubbed_client.get_creation_records(), [])
+        self.assertFalse(os.path.exists(self.filename))
+
+    def test_cancelled_identity_gets_no_scoped_client(self):
+        identity = self.identity('cancelled-identity')
+        self.stubbed_client.add_response(
+            'get_object', {'Body': BytesIO(self.remote_contents)}
+        )
+        with self.downloader:
+            future = self.downloader.download_file(
+                self.bucket,
+                self.key,
+                self.filename,
+                expected_size=len(self.remote_contents),
+                client_kwargs=identity,
+            )
+            future.cancel()
+            with self.assertRaises(CancelledError):
+                future.result()
+        self.assertEqual(self.stubbed_client.get_creation_records(), [])
+
+    def test_normal_download_continues_after_process_recycling(self):
+        identity = self.identity('scoped-identity')
+        self.stubbed_client.add_response(
+            'get_object', {'Body': BytesIO(self.remote_contents)}
+        )
+        self.stubbed_client.add_response(
+            'get_object', {'Body': BytesIO(self.remote_contents)}
+        )
+        scoped_file = self.files.full_path('scoped-filename')
+        normal_file = self.files.full_path('normal-filename')
+
+        first_downloader = ProcessPoolDownloader(
+            config=ProcessTransferConfig(max_request_processes=1)
+        )
+        with first_downloader:
+            scoped_future = first_downloader.download_file(
+                self.bucket,
+                self.key,
+                scoped_file,
+                expected_size=len(self.remote_contents),
+                client_kwargs=identity,
+            )
+            scoped_future.result()
+        # The first downloader's processes have been reaped. A brand new
+        # downloader must still be able to serve a download that relies on
+        # the default identity rather than a per-download identity.
+        recycled_downloader = ProcessPoolDownloader(
+            config=ProcessTransferConfig(max_request_processes=1)
+        )
+        with recycled_downloader:
+            normal_future = recycled_downloader.download_file(
+                self.bucket,
+                self.key,
+                normal_file,
+                expected_size=len(self.remote_contents),
+            )
+            normal_future.result()
+
+        self.assertEqual(
+            self.stubbed_client.get_creation_records(), ['scoped-identity']
+        )
+        self.assert_contents(scoped_file, self.remote_contents)
+        self.assert_contents(normal_file, self.remote_contents)
 
     def test_shutdown_with_no_downloads(self):
         downloader = ProcessPoolDownloader()

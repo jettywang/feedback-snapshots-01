@@ -191,8 +191,56 @@ that would have been used in the :meth:`botocore.Session.create_client` call:
 This snippet ensures that all clients created by the ``ProcessPoolDownloader``
 are using ``us-west-2`` as their region.
 
+
+Per-Download Identities
+=======================
+
+By default every subprocess shares the identity derived from the
+``client_kwargs`` (or the environment) of the parent process. A download can
+instead bring its own identity by passing credential keyword arguments through
+the ``client_kwargs`` parameter of :meth:`ProcessPoolDownloader.download_file`.
+
+.. code:: python
+
+     from s3transfer.processpool import ProcessPoolDownloader
+
+     identity = {
+         'aws_access_key_id': 'my-access-key',
+         'aws_secret_access_key': 'my-secret-key',
+         'aws_session_token': 'my-session-token',
+     }
+     with ProcessPoolDownloader() as downloader:
+          downloader.download_file(
+               'mybucket', 'mykey', 'myfile', client_kwargs=identity)
+
+When a per-download identity is provided, the clients created in the
+subprocesses to serve that download use that identity only. The parent
+process' default identity is not merged into those clients, so it is never
+handed down for a read it was not approved for. A complete set of credentials
+is required; an incomplete identity is rejected before any work is submitted.
+
+The clients themselves are created through the
+:class:`BaseClientFactory` onboarding contract. A custom factory can be
+supplied to fully control how subprocesses obtain a client for each download:
+
+.. code:: python
+
+     from s3transfer.processpool import (
+         BaseClientFactory,
+         ProcessPoolDownloader,
+     )
+
+
+     class MyClientFactory(BaseClientFactory):
+         def create_client(self, client_kwargs=None):
+             ...
+
+
+     downloader = ProcessPoolDownloader(client_factory=MyClientFactory())
+
 """
 
+import abc
 import collections
 import contextlib
 import logging
@@ -221,6 +269,16 @@ logger = logging.getLogger(__name__)
 
 SHUTDOWN_SIGNAL = 'SHUTDOWN'
 
+# The credential keyword arguments that make up the identity a client uses
+# when signing requests. A download may supply its own identity through the
+# per-transfer ``client_kwargs`` so that the subprocess performing the reads
+# never has to rely on the parent process' default credentials.
+IDENTITY_CREDENTIAL_KEYS = (
+    'aws_access_key_id',
+    'aws_secret_access_key',
+    'aws_session_token',
+)
+
 # The DownloadFileRequest tuple is submitted from the ProcessPoolDownloader
 # to the GetObjectSubmitter in order for the submitter to begin submitting
 # GetObjectJobs to the GetObjectWorkers.
@@ -233,6 +291,10 @@ DownloadFileRequest = collections.namedtuple(
         'filename',  # The user-requested download location
         'extra_args',  # Extra arguments to provide to client calls
         'expected_size',  # The user-provided expected size of the download
+        # The client keyword arguments carrying the identity authorized for
+        # this particular download. Empty for downloads that use the client
+        # factory's default identity.
+        'client_kwargs',
     ],
 )
 
@@ -251,6 +313,10 @@ GetObjectJob = collections.namedtuple(
         'filename',  # The user-requested download location. The worker
         # of final GetObjectJob will move the file located at
         # temp_filename to the location of filename.
+        # The client keyword arguments carrying the identity authorized for
+        # this particular download. Empty for downloads that use the client
+        # factory's default identity.
+        'client_kwargs',
     ],
 )
 
@@ -291,21 +357,34 @@ class ProcessTransferConfig:
 
 
 class ProcessPoolDownloader:
-    def __init__(self, client_kwargs=None, config=None):
+    def __init__(self, client_kwargs=None, config=None, client_factory=None):
         """Downloads S3 objects using process pools
 
         :type client_kwargs: dict
         :param client_kwargs: The keyword arguments to provide when
             instantiating S3 clients. The arguments must match the keyword
             arguments provided to the
-            `botocore.session.Session.create_client()` method.
+            `botocore.session.Session.create_client()` method. These
+            arguments only apply to downloads that do not provide their
+            own identity through the ``client_kwargs`` parameter of
+            :meth:`download_file`.
 
         :type config: ProcessTransferConfig
         :param config: Configuration for the downloader
+
+        :type client_factory: BaseClientFactory
+        :param client_factory: The factory used to create the S3 clients in
+            the subprocesses. It defines the onboarding contract a
+            subprocess relies on to obtain a client for a particular
+            download. By default a :class:`ClientFactory` is created from
+            the provided ``client_kwargs``.
         """
-        if client_kwargs is None:
-            client_kwargs = {}
-        self._client_factory = ClientFactory(client_kwargs)
+        if client_factory is not None:
+            self._client_factory = client_factory
+        else:
+            if client_kwargs is None:
+                client_kwargs = {}
+            self._client_factory = ClientFactory(client_kwargs)
 
         self._transfer_config = config
         if config is None:
@@ -325,7 +404,13 @@ class ProcessPoolDownloader:
         self._workers = []
 
     def download_file(
-        self, bucket, key, filename, extra_args=None, expected_size=None
+        self,
+        bucket,
+        key,
+        filename,
+        extra_args=None,
+        expected_size=None,
+        client_kwargs=None,
     ):
         """Downloads the object's contents to a file
 
@@ -348,6 +433,16 @@ class ProcessPoolDownloader:
             object's size and use the provided value instead. The size is
             needed to determine whether to do a multipart download.
 
+        :type client_kwargs: dict
+        :param client_kwargs: The keyword arguments carrying the identity
+            (i.e. credentials) authorized for this particular download. When
+            provided, every client created in the subprocesses to serve this
+            download uses this identity and the parent process' default
+            identity is not handed down to those clients. The dictionary may
+            only contain the credential keyword arguments and must contain a
+            complete set of credentials. When not provided, the downloader's
+            default client identity is used.
+
         :rtype: s3transfer.futures.TransferFuture
         :returns: Transfer future representing the download
         """
@@ -355,6 +450,9 @@ class ProcessPoolDownloader:
         if extra_args is None:
             extra_args = {}
         self._validate_all_known_args(extra_args)
+        if client_kwargs is None:
+            client_kwargs = {}
+        validate_identity_client_kwargs(client_kwargs)
         transfer_id = self._transfer_monitor.notify_new_transfer()
         download_file_request = DownloadFileRequest(
             transfer_id=transfer_id,
@@ -363,6 +461,7 @@ class ProcessPoolDownloader:
             filename=filename,
             extra_args=extra_args,
             expected_size=expected_size,
+            client_kwargs=client_kwargs,
         )
         logger.debug(
             'Submitting download file request: %s.', download_file_request
@@ -374,6 +473,7 @@ class ProcessPoolDownloader:
             filename=filename,
             extra_args=extra_args,
             expected_size=expected_size,
+            client_kwargs=client_kwargs,
         )
         future = self._get_transfer_future(transfer_id, call_args)
         return future
@@ -557,7 +657,68 @@ class ProcessPoolTransferMeta(BaseTransferMeta):
         return self._user_context
 
 
-class ClientFactory:
+def validate_identity_client_kwargs(client_kwargs):
+    """Validate the per-download identity keyword arguments
+
+    A download that brings its own identity must provide a complete set of
+    credentials and nothing else. An incomplete configuration can never be
+    granted the read, and allowing unrelated arguments would let a download
+    widen its permissions beyond the identity it was approved for.
+
+    :type client_kwargs: dict
+    :param client_kwargs: The keyword arguments to validate. An empty dict
+        represents a download that relies on the factory's default identity.
+    """
+    if not client_kwargs:
+        return
+    unexpected = [
+        kwarg
+        for kwarg in client_kwargs
+        if kwarg not in IDENTITY_CREDENTIAL_KEYS
+    ]
+    if unexpected:
+        raise ValueError(
+            f'Invalid client_kwargs key(s) for a per-download identity: '
+            f'{", ".join(sorted(unexpected))}. Only credential keys are '
+            f'allowed: {", ".join(IDENTITY_CREDENTIAL_KEYS)}.'
+        )
+    missing = [
+        kwarg
+        for kwarg in IDENTITY_CREDENTIAL_KEYS
+        if not client_kwargs.get(kwarg)
+    ]
+    if missing:
+        raise ValueError(
+            'Incomplete per-download identity, missing credential key(s): '
+            f'{", ".join(missing)}.'
+        )
+
+
+class BaseClientFactory(abc.ABC):
+    """The onboarding contract used by subprocesses to obtain S3 clients
+
+    Botocore sessions and clients are not pickleable so they cannot be
+    inherited across process boundaries. Instead, each subprocess asks the
+    factory for a client once it is running. A factory must be able to serve
+    the identity scoped to an individual download so that a subprocess never
+    has to rely on the parent process' default identity.
+    """
+
+    @abc.abstractmethod
+    def create_client(self, client_kwargs=None):
+        """Create a botocore S3 client
+
+        :type client_kwargs: dict
+        :param client_kwargs: The keyword arguments carrying the identity
+            authorized for the download the client is created for. When empty,
+            the factory's default client is returned.
+
+        :return: A botocore S3 client
+        """
+        raise NotImplementedError('create_client()')
+
+
+class ClientFactory(BaseClientFactory):
     def __init__(self, client_kwargs=None):
         """Creates S3 clients for processes
 
@@ -570,16 +731,52 @@ class ClientFactory:
             self._client_kwargs = {}
 
         client_config = deepcopy(self._client_kwargs.get('config', Config()))
+        self._add_process_user_agent(client_config)
+        self._client_kwargs['config'] = client_config
+
+    def _add_process_user_agent(self, client_config):
         if not client_config.user_agent_extra:
             client_config.user_agent_extra = PROCESS_USER_AGENT
         else:
             client_config.user_agent_extra += " " + PROCESS_USER_AGENT
-        self._client_kwargs['config'] = client_config
 
-    def create_client(self):
-        """Create a botocore S3 client"""
+    def create_client(self, client_kwargs=None):
+        """Create a botocore S3 client
+
+        When ``client_kwargs`` carries a per-download identity, the returned
+        client is built from that identity alone: the factory's default
+        credential arguments are not merged in so the parent process' default
+        identity is never handed down to that client. Non-credential settings
+        such as the region and the process user agent are still applied.
+
+        :type client_kwargs: dict
+        :param client_kwargs: The keyword arguments carrying the identity
+            authorized for the download the client is created for. When empty,
+            the factory's default client is returned.
+        """
         session = botocore.session.Session()
-        return create_nested_client(session, 's3', **self._client_kwargs)
+        if client_kwargs:
+            validate_identity_client_kwargs(client_kwargs)
+            resolved_kwargs = self._resolve_scoped_kwargs(client_kwargs)
+        else:
+            resolved_kwargs = deepcopy(self._client_kwargs)
+        return create_nested_client(session, 's3', **resolved_kwargs)
+
+    def _resolve_scoped_kwargs(self, client_kwargs):
+        # Only inherit non-credential settings. Copying the default kwargs and
+        # dropping their credential entries guarantees the parent's default
+        # identity cannot leak into the scoped client.
+        resolved_kwargs = {
+            key: deepcopy(value)
+            for key, value in self._client_kwargs.items()
+            if key not in IDENTITY_CREDENTIAL_KEYS
+        }
+        resolved_kwargs.update(deepcopy(client_kwargs))
+        if 'config' not in resolved_kwargs:
+            client_config = Config()
+            self._add_process_user_agent(client_config)
+            resolved_kwargs['config'] = client_config
+        return resolved_kwargs
 
 
 class TransferMonitor:
@@ -759,6 +956,14 @@ class BaseS3TransferProcess(multiprocessing.Process):
     def _do_run(self):
         raise NotImplementedError('_do_run()')
 
+    def _get_client(self, client_kwargs):
+        # A download without its own identity keeps using the process'
+        # default client. A scoped download gets a client that only carries
+        # the identity authorized for that download.
+        if not client_kwargs:
+            return self._client
+        return self._client_factory.create_client(client_kwargs)
+
 
 class GetObjectSubmitter(BaseS3TransferProcess):
     def __init__(
@@ -796,6 +1001,18 @@ class GetObjectSubmitter(BaseS3TransferProcess):
             if download_file_request == SHUTDOWN_SIGNAL:
                 logger.debug('Submitter shutdown signal received.')
                 return
+            if self._transfer_monitor.get_exception(
+                download_file_request.transfer_id
+            ):
+                logger.debug(
+                    'Skipping download file request %s because the transfer '
+                    'was cancelled or already failed.',
+                    download_file_request,
+                )
+                self._transfer_monitor.notify_done(
+                    download_file_request.transfer_id
+                )
+                continue
             try:
                 self._submit_get_object_jobs(download_file_request)
             except Exception as e:
@@ -828,7 +1045,8 @@ class GetObjectSubmitter(BaseS3TransferProcess):
     def _get_size(self, download_file_request):
         expected_size = download_file_request.expected_size
         if expected_size is None:
-            expected_size = self._client.head_object(
+            client = self._get_client(download_file_request.client_kwargs)
+            expected_size = client.head_object(
                 Bucket=download_file_request.bucket,
                 Key=download_file_request.key,
                 **download_file_request.extra_args,
@@ -854,6 +1072,7 @@ class GetObjectSubmitter(BaseS3TransferProcess):
             offset=0,
             extra_args=download_file_request.extra_args,
             filename=download_file_request.filename,
+            client_kwargs=download_file_request.client_kwargs,
         )
 
     def _submit_ranged_get_object_jobs(
@@ -879,6 +1098,7 @@ class GetObjectSubmitter(BaseS3TransferProcess):
                 offset=offset,
                 extra_args=get_object_kwargs,
                 filename=download_file_request.filename,
+                client_kwargs=download_file_request.client_kwargs,
             )
 
     def _submit_get_object_job(self, **get_object_job_kwargs):
@@ -919,6 +1139,10 @@ class GetObjectWorker(BaseS3TransferProcess):
         self._client_factory = client_factory
         self._transfer_monitor = transfer_monitor
         self._osutil = osutil
+        # Clients created for a per-download identity are reused across the
+        # jobs of that identity. The cache key is the immutable set of
+        # credential keyword arguments so identities never get mixed up.
+        self._scoped_clients = {}
 
     def _do_run(self):
         while True:
@@ -950,6 +1174,7 @@ class GetObjectWorker(BaseS3TransferProcess):
     def _run_get_object_job(self, job):
         try:
             self._do_get_object(
+                client=self._get_scoped_client(job.client_kwargs),
                 bucket=job.bucket,
                 key=job.key,
                 temp_filename=job.temp_filename,
@@ -966,11 +1191,21 @@ class GetObjectWorker(BaseS3TransferProcess):
             )
             self._transfer_monitor.notify_exception(job.transfer_id, e)
 
-    def _do_get_object(self, bucket, key, extra_args, temp_filename, offset):
+    def _get_scoped_client(self, client_kwargs):
+        if not client_kwargs:
+            return self._client
+        cache_key = tuple(sorted(client_kwargs.items()))
+        if cache_key not in self._scoped_clients:
+            self._scoped_clients[cache_key] = self._get_client(client_kwargs)
+        return self._scoped_clients[cache_key]
+
+    def _do_get_object(
+        self, client, bucket, key, extra_args, temp_filename, offset
+    ):
         last_exception = None
         for i in range(self._MAX_ATTEMPTS):
             try:
-                response = self._client.get_object(
+                response = client.get_object(
                     Bucket=bucket, Key=key, **extra_args
                 )
                 self._write_to_file(temp_filename, offset, response['Body'])
