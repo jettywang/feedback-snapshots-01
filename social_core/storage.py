@@ -16,7 +16,7 @@ from openid.association import Association as OpenIdAssociation
 from .exceptions import AuthConfigurationError, AuthCredentialError, AuthResponseError
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
 
     from social_core.backends.base import BaseAuth, ResponseT_co
     from social_core.strategy import BaseStrategy
@@ -34,6 +34,51 @@ class UserProtocol(Protocol):
     def is_active(self, /) -> bool | Callable[[], bool]: ...
     @property
     def is_authenticated(self, /) -> bool | Callable[[], bool]: ...
+
+
+class GroupGrantProtocol(Protocol):
+    """A local group granted by one provider source, or by unknown history.
+
+    ``provider`` and ``source`` are both set for grants this library may
+    manage.  Legacy records have no provenance and are reported instead of
+    being changed.  Locally assigned grants are not part of this interface.
+    """
+
+    @property
+    def target(self, /) -> str | int: ...
+    @property
+    def provider(self, /) -> str | None: ...
+    @property
+    def source(self, /) -> str | None: ...
+
+
+class GroupGrantMixin:
+    """Storage contract for provider-sourced local group memberships.
+
+    Implement these methods on ``BaseStorage.groups`` to enable managed group
+    synchronization.  ``remove_group_grants`` must delete only the supplied
+    provider grants and must not remove a local membership that another
+    provider grant or a local assignment still grants.
+    """
+
+    @classmethod
+    def get_group_grants(cls, user: UserProtocol) -> Iterable[GroupGrantProtocol]:
+        """Return recorded provider grants; may include legacy records."""
+        raise NotImplementedError("Implement in subclass")
+
+    @classmethod
+    def add_group_grants(
+        cls, user: UserProtocol, grants: Iterable[GroupGrantProtocol]
+    ) -> None:
+        """Record grants and ensure the corresponding local memberships."""
+        raise NotImplementedError("Implement in subclass")
+
+    @classmethod
+    def remove_group_grants(
+        cls, user: UserProtocol, grants: Iterable[GroupGrantProtocol]
+    ) -> None:
+        """Remove the supplied grants and only the memberships they alone held."""
+        raise NotImplementedError("Implement in subclass")
 
 
 class PipelineUserProtocol(UserProtocol, Protocol):
@@ -565,6 +610,7 @@ class BaseStorage:
     association = AssociationMixin
     code = CodeMixin
     partial = PartialMixin
+    groups = GroupGrantMixin
 
     @classmethod
     def is_integrity_error(cls, exception) -> bool:

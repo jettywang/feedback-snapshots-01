@@ -12,11 +12,22 @@ from social_core.backends.okta import OktaOAuth2
 from social_core.backends.okta_openidconnect import OktaOpenIdConnect
 from social_core.backends.open_id_connect import OpenIdConnectAuth
 from social_core.exceptions import AuthConfigurationError, AuthResponseError
-from social_core.groups import group_sync_targets
+from social_core.groups import (
+    GroupGrant,
+    group_sync_targets,
+    normalize_group_grants,
+    plan_group_sync,
+)
 from social_core.pipeline.social_auth import social_details
 from social_core.pipeline.user import sync_groups
 from social_core.pipeline.utils import partial_prepare
-from social_core.tests.models import TestStorage
+from social_core.tests.models import (
+    TestGroupGrant,
+    TestGroupGrantStorage,
+    TestStorage,
+    TestUserSocialAuth,
+    User,
+)
 from social_core.tests.strategy import TestStrategy
 
 
@@ -24,6 +35,12 @@ class GroupsTest(TestCase):
     def setUp(self) -> None:
         self.strategy = TestStrategy(TestStorage)
         self.backend = KeycloakOAuth2(self.strategy)
+        User.reset_cache()
+        TestUserSocialAuth.reset_cache()
+        TestGroupGrantStorage.reset_cache()
+        self.addCleanup(User.reset_cache)
+        self.addCleanup(TestUserSocialAuth.reset_cache)
+        self.addCleanup(TestGroupGrantStorage.reset_cache)
 
     def configure(self, **kwargs) -> None:
         self.strategy.set_settings(
@@ -366,3 +383,268 @@ class GroupsTest(TestCase):
 
     def test_base_backend_does_not_extract_groups(self) -> None:
         self.assertIsNone(BaseAuth(self.strategy).get_user_groups({"groups": ["a"]}))
+
+
+class ManagedGroupSyncTest(TestCase):
+    """Provider sync removes only the grants its own source recorded."""
+
+    def setUp(self) -> None:
+        User.reset_cache()
+        TestUserSocialAuth.reset_cache()
+        TestGroupGrantStorage.reset_cache()
+        self.addCleanup(User.reset_cache)
+        self.addCleanup(TestUserSocialAuth.reset_cache)
+        self.addCleanup(TestGroupGrantStorage.reset_cache)
+        self.strategy = TestStrategy(TestStorage)
+        self.strategy.set_settings(
+            {
+                "SOCIAL_AUTH_AUTHENTICATION_BACKENDS": [
+                    "social_core.backends.keycloak.KeycloakOAuth2",
+                    "social_core.backends.okta.OktaOAuth2",
+                ],
+                "SOCIAL_AUTH_KEYCLOAK_GROUPS_KEY": "groups",
+                "SOCIAL_AUTH_KEYCLOAK_GROUPS_MAP": {
+                    "reviewers": ["Reviewers", "Shared"],
+                    "translators": ["Translators"],
+                },
+                "SOCIAL_AUTH_KEYCLOAK_GROUPS_SYNC_MODE": "managed",
+                "SOCIAL_AUTH_KEYCLOAK_GROUPS_COMPLETE": True,
+                "SOCIAL_AUTH_OKTA_OAUTH2_GROUPS_KEY": "groups",
+                "SOCIAL_AUTH_OKTA_OAUTH2_GROUPS_MAP": {
+                    "reviewers": ["Shared"],
+                    "operators": ["Operators"],
+                },
+                "SOCIAL_AUTH_OKTA_OAUTH2_GROUPS_SYNC_MODE": "managed",
+                "SOCIAL_AUTH_OKTA_OAUTH2_GROUPS_COMPLETE": True,
+            }
+        )
+        self.keycloak = KeycloakOAuth2(self.strategy)
+        self.okta = OktaOAuth2(self.strategy)
+        self.user = User("managed")
+
+    def sync(self, backend, groups: list[str]):
+        return self.strategy.sync_user_groups(
+            self.user, groups, backend=backend, response={"groups": groups}
+        )
+
+    def grants(self) -> set[tuple[str | int, str | None, str | None]]:
+        return {
+            (grant.target, grant.provider, grant.source)
+            for grant in TestGroupGrantStorage.get_group_grants(self.user)
+        }
+
+    def test_local_assignment_and_unrelated_provider_grants_survive(self) -> None:
+        TestGroupGrantStorage.assign_local(self.user, "SiteAdmins")
+        self.sync(self.keycloak, ["reviewers", "translators"])
+        self.assertEqual(
+            TestGroupGrantStorage.local_groups(self.user),
+            {"SiteAdmins", "Reviewers", "Shared", "Translators"},
+        )
+        self.sync(self.keycloak, ["reviewers"])
+        self.assertEqual(
+            TestGroupGrantStorage.local_groups(self.user),
+            {"SiteAdmins", "Reviewers", "Shared"},
+        )
+        self.assertEqual(
+            self.grants(),
+            {
+                ("Reviewers", "keycloak", ""),
+                ("Shared", "keycloak", ""),
+            },
+        )
+
+    def test_same_named_group_keeps_other_providers_membership(self) -> None:
+        self.sync(self.keycloak, ["reviewers"])
+        self.sync(self.okta, ["reviewers", "operators"])
+        self.assertEqual(
+            self.grants(),
+            {
+                ("Reviewers", "keycloak", ""),
+                ("Shared", "keycloak", ""),
+                ("Shared", "okta-oauth2", ""),
+                ("Operators", "okta-oauth2", ""),
+            },
+        )
+        # Keycloak stops reporting the shared group; Okta still grants it.
+        self.sync(self.keycloak, [])
+        self.assertEqual(
+            TestGroupGrantStorage.local_groups(self.user),
+            {"Shared", "Operators"},
+        )
+        self.assertEqual(
+            self.grants(),
+            {
+                ("Shared", "okta-oauth2", ""),
+                ("Operators", "okta-oauth2", ""),
+            },
+        )
+
+    def test_same_provider_sources_are_independent(self) -> None:
+        class TwoSourceBackend(BaseAuth):
+            name = "two-source"
+
+            def get_group_setting(self, name, response, default=None):
+                if name == "GROUPS_MAP":
+                    return {"reviewers": ["Shared"], "operators": ["Operators"]}
+                if name == "GROUPS_SYNC_MODE":
+                    return "managed"
+                return default
+
+            def get_group_source(self, response) -> str:
+                return response["source"]
+
+            def get_group_complete(self, response) -> bool:
+                return True
+
+        backend = TwoSourceBackend(self.strategy)
+        first = {"source": "idp-first"}
+        second = {"source": "idp-second"}
+        self.strategy.sync_user_groups(
+            self.user, ["reviewers"], backend=backend, response=first
+        )
+        self.strategy.sync_user_groups(
+            self.user, ["reviewers", "operators"], backend=backend, response=second
+        )
+        self.assertEqual(
+            self.grants(),
+            {
+                ("Shared", "two-source", "idp-first"),
+                ("Shared", "two-source", "idp-second"),
+                ("Operators", "two-source", "idp-second"),
+            },
+        )
+        self.strategy.sync_user_groups(self.user, [], backend=backend, response=first)
+        self.assertEqual(
+            TestGroupGrantStorage.local_groups(self.user), {"Shared", "Operators"}
+        )
+
+    def test_admin_assignment_to_a_synced_group_is_independent(self) -> None:
+        TestGroupGrantStorage.assign_local(self.user, "Reviewers")
+        self.sync(self.keycloak, ["reviewers"])
+        self.assertEqual(
+            TestGroupGrantStorage.local_groups(self.user), {"Reviewers", "Shared"}
+        )
+        self.sync(self.keycloak, [])
+        # The provider grant is gone, but the administrator still assigned it.
+        self.assertEqual(TestGroupGrantStorage.local_groups(self.user), {"Reviewers"})
+        self.assertEqual(self.grants(), set())
+
+    def test_partial_snapshot_withholds_revocations(self) -> None:
+        self.sync(self.keycloak, ["reviewers", "translators"])
+        # The claim is known to be truncated, so absence is not a revocation.
+        self.strategy.set_settings({"SOCIAL_AUTH_KEYCLOAK_GROUPS_COMPLETE": False})
+        with self.assertLogs("social", level="WARNING") as logs:
+            self.sync(self.keycloak, ["reviewers"])
+        self.assertEqual(
+            TestGroupGrantStorage.local_groups(self.user),
+            {"Reviewers", "Shared", "Translators"},
+        )
+        self.assertIn("incomplete group snapshot", logs.output[0])
+        self.strategy.set_settings({"SOCIAL_AUTH_KEYCLOAK_GROUPS_COMPLETE": True})
+        self.sync(self.keycloak, ["reviewers"])
+        self.assertEqual(
+            TestGroupGrantStorage.local_groups(self.user), {"Reviewers", "Shared"}
+        )
+
+    def test_explicit_revocation_then_readd(self) -> None:
+        self.sync(self.okta, ["operators"])
+        self.sync(self.okta, [])
+        self.assertEqual(TestGroupGrantStorage.local_groups(self.user), set())
+        self.assertEqual(self.grants(), set())
+        self.sync(self.okta, ["operators"])
+        self.assertEqual(TestGroupGrantStorage.local_groups(self.user), {"Operators"})
+
+    def test_legacy_records_are_reported_and_left_alone(self) -> None:
+        TestGroupGrantStorage.grants.append(
+            TestGroupGrant(self.user, "HistoricallyGranted")
+        )
+        TestGroupGrantStorage.assign_local(self.user, "SiteAdmins")
+        with self.assertLogs("social", level="WARNING") as logs:
+            plan = self.sync(self.keycloak, [])
+        self.assertIn("have no recorded source", logs.output[0])
+        self.assertIsNotNone(plan)
+        self.assertEqual(
+            plan.unidentified, (GroupGrant("HistoricallyGranted", None, None),)
+        )
+        self.assertEqual(
+            TestGroupGrantStorage.local_groups(self.user),
+            {"SiteAdmins", "HistoricallyGranted"},
+        )
+        self.assertEqual(self.grants(), {("HistoricallyGranted", None, None)})
+
+    def test_legacy_integrations_opt_in_explicitly(self) -> None:
+        self.strategy.set_settings({"SOCIAL_AUTH_KEYCLOAK_GROUPS_SYNC_MODE": "legacy"})
+        with self.assertRaises(AuthConfigurationError) as caught:
+            self.sync(self.keycloak, ["reviewers"])
+        self.assertEqual(caught.exception.code, "unsupported_feature")
+        self.assertEqual(caught.exception.parameter, "GROUPS_MAP")
+        self.assertEqual(TestGroupGrantStorage.local_groups(self.user), set())
+
+    def test_invalid_mode_and_completeness_are_configuration_errors(self) -> None:
+        for name, value in (
+            ("GROUPS_SYNC_MODE", "automatic"),
+            ("GROUPS_SYNC_MODE", True),
+            ("GROUPS_COMPLETE", "yes"),
+        ):
+            self.strategy.set_settings(
+                {
+                    "SOCIAL_AUTH_KEYCLOAK_GROUPS_SYNC_MODE": "managed",
+                    "SOCIAL_AUTH_KEYCLOAK_GROUPS_COMPLETE": True,
+                    f"SOCIAL_AUTH_KEYCLOAK_{name}": value,
+                }
+            )
+            with (
+                self.subTest(name=name, value=value),
+                self.assertRaises(AuthConfigurationError) as caught,
+            ):
+                self.sync(self.keycloak, ["reviewers"])
+            self.assertEqual(caught.exception.code, "invalid_setting")
+            self.assertEqual(caught.exception.parameter, name)
+
+    def test_missing_strategy_or_storage_support_is_reported(self) -> None:
+        self.strategy.set_settings({"SOCIAL_AUTH_KEYCLOAK_GROUPS_SYNC_MODE": "managed"})
+
+        class PlainStorage(TestStorage):
+            groups = type(
+                "UnsupportedGroups",
+                (),
+                {
+                    "get_group_grants": classmethod(
+                        lambda cls, user: (_ for _ in ()).throw(
+                            NotImplementedError("Implement in subclass")
+                        )
+                    )
+                },
+            )
+
+        self.strategy._storage = PlainStorage
+        with self.assertRaises(AuthConfigurationError) as caught:
+            self.sync(self.keycloak, ["reviewers"])
+        self.assertEqual(caught.exception.code, "unsupported_feature")
+        self.assertEqual(caught.exception.parameter, "group storage")
+        self.assertEqual(caught.exception.stage, "pipeline")
+
+    def test_plan_reports_preserved_and_unidentified_grants(self) -> None:
+        grants = [
+            GroupGrant("Reviewers", "okta-oauth2", ""),
+            GroupGrant("Shared", "okta-oauth2", ""),
+            GroupGrant("Legacy", None, None),
+        ]
+        plan = plan_group_sync(self.keycloak, ["reviewers"], {}, grants)
+        self.assertEqual(plan.additions, {"Reviewers", "Shared"})
+        self.assertEqual(plan.revocations, frozenset())
+        self.assertEqual(plan.preserved, ())
+        self.assertEqual(plan.unidentified, (GroupGrant("Legacy", None, None),))
+
+    def test_normalize_rejects_malformed_storage_records(self) -> None:
+        for record in (
+            Mock(target=True, provider="keycloak", source=""),
+            Mock(target="", provider="keycloak", source=""),
+            Mock(target="A", provider=1, source=""),
+            Mock(target="A", provider="keycloak", source=2),
+        ):
+            with (
+                self.subTest(record=record),
+                self.assertRaises(AuthConfigurationError),
+            ):
+                normalize_group_grants(self.keycloak, [record])

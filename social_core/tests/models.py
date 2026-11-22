@@ -10,13 +10,17 @@ from social_core.storage import (
     AssociationMixin,
     BaseStorage,
     CodeMixin,
+    GroupGrantMixin,
     NonceMixin,
     PartialMixin,
     UserMixin,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from social_core.storage import (
+        GroupGrantProtocol,
         UserProtocol,
     )
 
@@ -373,6 +377,94 @@ class TestPartial(PartialMixin, BaseModel):
         return cls.cache.get(key)
 
 
+class TestGroupGrant:
+    """A fake persisted grant row; legacy rows have no provenance."""
+
+    __test__ = False
+
+    def __init__(
+        self,
+        user: User,
+        target: str | int,
+        provider: str | None = None,
+        source: str | None = None,
+    ) -> None:
+        self.user = user
+        self.target = target
+        self.provider = provider
+        self.source = source
+
+    def __repr__(self) -> str:
+        return f"TestGroupGrant({self.target!r}, {self.provider!r}, {self.source!r})"
+
+
+class TestGroupGrantStorage(GroupGrantMixin):
+    """Fake storage that keeps provenance and distinct local memberships."""
+
+    __test__ = False
+
+    grants: list[TestGroupGrant] = []
+    assigned: dict[int, set[str | int]] = {}
+
+    @classmethod
+    def reset_cache(cls) -> None:
+        cls.grants = []
+        cls.assigned = {}
+
+    @classmethod
+    def local_groups(cls, user: User) -> set[str | int]:
+        """Return memberships: administrator assignments plus grants."""
+        return set(cls.assigned.get(user.id, set())) | {
+            grant.target for grant in cls.grants if grant.user.id == user.id
+        }
+
+    @classmethod
+    def assign_local(cls, user: User, *targets: str | int) -> None:
+        """Assign a group without a provider grant, as an administrator does."""
+        cls.assigned.setdefault(user.id, set()).update(targets)
+
+    @classmethod
+    def get_group_grants(cls, user: UserProtocol) -> Iterable[GroupGrantProtocol]:
+        return [grant for grant in cls.grants if grant.user.id == user.id]
+
+    @classmethod
+    def add_group_grants(
+        cls, user: UserProtocol, grants: Iterable[GroupGrantProtocol]
+    ) -> None:
+        for grant in grants:
+            existing = [
+                row
+                for row in cls.grants
+                if row.user.id == user.id
+                and row.target == grant.target
+                and row.provider == grant.provider
+                and row.source == grant.source
+            ]
+            if not existing:
+                cls.grants.append(
+                    TestGroupGrant(
+                        cast("User", user),
+                        grant.target,
+                        grant.provider,
+                        grant.source,
+                    )
+                )
+
+    @classmethod
+    def remove_group_grants(
+        cls, user: UserProtocol, grants: Iterable[GroupGrantProtocol]
+    ) -> None:
+        removed = {(grant.target, grant.provider, grant.source) for grant in grants}
+        cls.grants = [
+            row
+            for row in cls.grants
+            if not (
+                row.user.id == user.id
+                and (row.target, row.provider, row.source) in removed
+            )
+        ]
+
+
 class TestStorage(BaseStorage):
     __test__ = False
 
@@ -381,6 +473,7 @@ class TestStorage(BaseStorage):
     association: type[AssociationMixin] = TestAssociation
     code: type[CodeMixin] = TestCode
     partial: type[PartialMixin] = TestPartial
+    groups: type[GroupGrantMixin] = TestGroupGrantStorage
 
     @classmethod
     def is_integrity_error(cls, exception) -> bool:

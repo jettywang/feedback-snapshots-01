@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Add opt-in provenance-aware group synchronization. With
+  `GROUPS_SYNC_MODE = "managed"`, a strategy records each provider source's
+  local group grants through the new storage group-grant methods and removes
+  only grants that source no longer reports. Locally assigned groups, grants
+  from other providers, and records without provenance are preserved; the
+  last are reported through the `social` logger. Set `GROUPS_COMPLETE` to
+  `True` only when the provider returns a full snapshot, otherwise absence is
+  treated as a partial list and makes no revocation. The default `"legacy"`
+  mode keeps existing strategies working unchanged.
+
 ## [7.2.0](https://github.com/python-social-auth/social-core/releases/tag/7.2.0) - 2026-11-12
 
 ### Added

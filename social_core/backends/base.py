@@ -524,6 +524,15 @@ class BaseAuth(Generic[ResponseT_co]):
         """Identify the provider's active membership source."""
         return ""
 
+    def get_group_complete(self, response) -> bool:
+        """Return whether the current membership list is a full snapshot.
+
+        Providers without a trustworthy completeness signal must return
+        ``False`` so synchronization cannot revoke groups merely because a
+        truncated or filtered response omitted them.
+        """
+        return False
+
     def id_key(self) -> str:
         """Return the ID_KEY to use for this backend, checking settings first."""
         configured = self.setting("ID_KEY")

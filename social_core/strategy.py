@@ -10,7 +10,14 @@ from .backends.base import ResponseT_co
 # Preserve the historical import path for integrations and tests.
 from .backends.utils import get_backend
 from .exceptions import AuthConfigurationError, ErrorStage
-from .groups import validate_group_mapping
+from .groups import (
+    LEGACY_GROUP_SYNC,
+    GroupGrant,
+    GroupSyncPlan,
+    group_sync_mode,
+    plan_group_sync,
+    validate_group_mapping,
+)
 from .pipeline import DEFAULT_AUTH_PIPELINE, DEFAULT_DISCONNECT_PIPELINE
 from .pipeline.utils import partial_load, to_plain_dict
 from .response_types import HttpResponseProtocol as _HttpResponseProtocol
@@ -22,6 +29,7 @@ from .utils import (
     PARTIAL_TOKEN_SESSION_NAME,
     module_member,
     setting_name,
+    social_logger,
 )
 
 HttpResponseProtocol: TypeAlias = _HttpResponseProtocol
@@ -124,16 +132,95 @@ class BaseStrategy(Generic[ResponseT_co]):
         backend: BaseAuth[object],
         response,
         **kwargs,
-    ) -> None:
-        """Override to apply configured external memberships to local groups."""
-        if validate_group_mapping(
+    ) -> GroupSyncPlan | None:
+        """Apply configured external memberships to local groups.
+
+        ``GROUPS_SYNC_MODE="managed"`` records each provider source's grants
+        and removes only grants that source no longer reports.  The default
+        ``"legacy"`` mode keeps older integrations working unchanged: they
+        keep overriding this method, and the base implementation still reports
+        an unsupported mapping if they do not.
+
+        Managed mode returns the computed plan so integrations can observe
+        unidentified legacy grants and withheld revocations; otherwise it
+        returns ``None``.
+        """
+        mode = group_sync_mode(backend, response)
+        mapping = validate_group_mapping(
             backend, backend.get_group_setting("GROUPS_MAP", response, {})
-        ):
+        )
+        if mode == LEGACY_GROUP_SYNC:
+            if mapping:
+                raise AuthConfigurationError(
+                    backend,
+                    code="unsupported_feature",
+                    parameter="GROUPS_MAP",
+                    stage="pipeline",
+                )
+            return None
+        if not mapping:
+            return None
+        storage = self._group_storage(backend)
+        plan = plan_group_sync(
+            backend, groups, response, self._group_grants(user, storage, backend)
+        )
+        self._apply_group_plan(user, plan, backend, storage)
+        return plan
+
+    def _group_storage(self, backend: BaseAuth[object]):
+        storage = getattr(self.storage, "groups", None)
+        if storage is None:
             raise AuthConfigurationError(
                 backend,
+                "Managed group synchronization requires storage support",
                 code="unsupported_feature",
-                parameter="GROUPS_MAP",
+                parameter="group storage",
                 stage="pipeline",
+            )
+        return storage
+
+    def _group_grants(self, user, storage, backend: BaseAuth[object]):
+        try:
+            return storage.get_group_grants(user)
+        except NotImplementedError as error:
+            raise AuthConfigurationError(
+                backend,
+                "Managed group synchronization requires storage support",
+                code="unsupported_feature",
+                parameter="group storage",
+                stage="pipeline",
+            ) from error
+
+    def _apply_group_plan(self, user, plan, backend: BaseAuth[object], storage) -> None:
+        if plan.additions:
+            storage.add_group_grants(
+                user,
+                [
+                    GroupGrant(target, plan.provider, plan.source)
+                    for target in plan.additions
+                ],
+            )
+        if plan.revocations:
+            storage.remove_group_grants(
+                user,
+                [
+                    GroupGrant(target, plan.provider, plan.source)
+                    for target in plan.revocations
+                ],
+            )
+        if plan.unidentified:
+            social_logger.warning(
+                "%s: %d local group grants have no recorded source and were "
+                "left unchanged",
+                backend.name,
+                len(plan.unidentified),
+            )
+        if plan.withheld_revocations:
+            social_logger.warning(
+                "%s: incomplete group snapshot; %d previously granted local "
+                "groups were left unchanged",
+                backend.name,
+                len(plan.withheld_revocations),
             )
 
     def session_setdefault(self, name: str, value):
