@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Add an optional `BaseStrategy.record_login_evidence()` hook that receives
+  non-sensitive `LoginEvidence` records at each authentication decision:
+  identifier resolution, allow-list policy, account association, and the final
+  login. Records carry the provider, the selected pipeline name and version, the
+  deciding step, the outcome, whether an association was created, reused, or
+  absent, and whether the attempt began anonymously or from an authenticated
+  user. Tokens, provider identifiers, and profile values are never included.
+  The default hook discards records and recorder exceptions are caught, so
+  adding a recorder cannot change an existing authorization result. Set
+  `PIPELINE_NAME` to label a pipeline and `PIPELINE_VERSION` to pin its version;
+  otherwise the ordered pipeline steps are hashed.
+
 ## [7.2.0](https://github.com/python-social-auth/social-core/releases/tag/7.2.0) - 2026-11-12
 
 ### Added

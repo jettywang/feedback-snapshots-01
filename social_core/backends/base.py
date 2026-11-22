@@ -343,6 +343,14 @@ class BaseAuth(Generic[ResponseT_co]):
         kwargs.setdefault("is_new", False)
         pipeline = self.strategy.get_pipeline(self)
         args, kwargs = self.strategy.clean_authenticate_args(*args, **kwargs)
+        # Capture the initiating context before steps may attach a new user.
+        self._login_evidence_initiator = (
+            "authenticated"
+            if user_is_authenticated(kwargs.get("user"))
+            else "anonymous"
+        )
+        self._login_evidence_new_association = False
+        self._login_evidence_pipeline = tuple(pipeline)
         return self.pipeline(pipeline, *args, **kwargs)
 
     def pipeline(
@@ -355,6 +363,7 @@ class BaseAuth(Generic[ResponseT_co]):
             self._pipeline_type.reset(token)
         if not isinstance(out, dict):
             return out
+        self._login_evidence_new_association = bool(out.get("new_association"))
         user = cast("UserProtocol | None", out.get("user"))
         if user:
             pipeline_user: PipelineUserProtocol = cast("PipelineUserProtocol", user)

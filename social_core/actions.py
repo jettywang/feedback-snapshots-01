@@ -3,6 +3,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Literal, TypeVar, cast
 from urllib.parse import quote
 
+from .login_evidence import (
+    association_outcome,
+    evidence_actor,
+    record_login_evidence,
+)
 from .utils import (
     get_allowed_redirect_schemes,
     is_private_use_redirect,
@@ -175,8 +180,25 @@ def do_complete(
 
     if is_authenticated:
         if not authenticated_user:
+            record_login_evidence(
+                backend,
+                stage="login",
+                decision="denied",
+                reason="no_user_result",
+                actor=evidence_actor(do_complete),
+                user=partial_user,
+            )
             url = setting_url(backend, redirect_url, "LOGIN_REDIRECT_URL")
         else:
+            record_login_evidence(
+                backend,
+                stage="login",
+                decision="allowed",
+                reason="association_only",
+                actor=evidence_actor(do_complete),
+                association=association_outcome(backend),
+                user=partial_user,
+            )
             url = setting_url(
                 backend,
                 redirect_url,
@@ -191,6 +213,15 @@ def do_complete(
         if bypass_inactivation or user_is_active(authenticated_user):
             is_new = _login_user(backend, login, authenticated_user)
 
+            record_login_evidence(
+                backend,
+                stage="login",
+                decision="allowed",
+                reason="new_user_login" if is_new else "existing_user_login",
+                actor=evidence_actor(do_complete),
+                association=association_outcome(backend),
+                user=partial_user,
+            )
             if is_new:
                 url = setting_url(
                     backend,
@@ -203,10 +234,26 @@ def do_complete(
         else:
             if backend.setting("INACTIVE_USER_LOGIN", False):
                 login(backend, authenticated_user, _get_social_user(authenticated_user))
+            record_login_evidence(
+                backend,
+                stage="login",
+                decision="denied",
+                reason="inactive_user",
+                actor=evidence_actor(do_complete),
+                user=partial_user,
+            )
             url = setting_url(
                 backend, "INACTIVE_USER_URL", "LOGIN_ERROR_URL", "LOGIN_URL"
             )
     else:
+        record_login_evidence(
+            backend,
+            stage="login",
+            decision="denied",
+            reason="no_user_result",
+            actor=evidence_actor(do_complete),
+            user=partial_user,
+        )
         url = setting_url(backend, "LOGIN_ERROR_URL", "LOGIN_URL")
 
     if not url:

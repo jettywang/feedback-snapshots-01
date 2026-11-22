@@ -8,6 +8,7 @@ from social_core.exceptions import (
     AuthResponseError,
 )
 from social_core.identifiers import identifier_matches
+from social_core.login_evidence import evidence_actor, record_login_evidence
 from social_core.utils import normalize_user_names
 
 if TYPE_CHECKING:
@@ -42,9 +43,36 @@ def social_names(backend: BaseAuth[object], details, *args, **kwargs):
     return {"details": normalized}
 
 
-def social_uid(backend: BaseAuth[object], details, response, *args, **kwargs):
-    raw_uid = backend.get_user_id(details, response)
+def social_uid(
+    backend: BaseAuth[object],
+    details,
+    response,
+    *args,
+    user: UserProtocol | None = None,
+    **kwargs,
+):
+    try:
+        raw_uid = backend.get_user_id(details, response)
+    except AuthResponseError as error:
+        if error.code == "missing_claim":
+            record_login_evidence(
+                backend,
+                stage="identity",
+                decision="denied",
+                reason="missing_claim",
+                actor=evidence_actor(social_uid),
+                user=user,
+            )
+        raise
     if raw_uid is None or raw_uid == "":
+        record_login_evidence(
+            backend,
+            stage="identity",
+            decision="denied",
+            reason="missing_claim",
+            actor=evidence_actor(social_uid),
+            user=user,
+        )
         raise AuthResponseError(
             backend,
             claim=backend.id_key(),
@@ -54,6 +82,14 @@ def social_uid(backend: BaseAuth[object], details, response, *args, **kwargs):
     uid = str(raw_uid)
     id_key = backend.id_key()
     identifiers = backend.get_legacy_user_identifiers(details, response)
+    record_login_evidence(
+        backend,
+        stage="identity",
+        decision="allowed",
+        reason="identifier_resolved",
+        actor=evidence_actor(social_uid),
+        user=user,
+    )
     return {
         "uid": uid,
         "id_key": id_key,
@@ -64,11 +100,34 @@ def social_uid(backend: BaseAuth[object], details, response, *args, **kwargs):
     }
 
 
-def auth_allowed(backend: BaseAuth[object], details, response, *args, **kwargs) -> None:
+def auth_allowed(
+    backend: BaseAuth[object],
+    details,
+    response,
+    *args,
+    user: UserProtocol | None = None,
+    **kwargs,
+) -> None:
     if not backend.auth_allowed(response, details):
+        record_login_evidence(
+            backend,
+            stage="policy",
+            decision="denied",
+            reason="authentication_disallowed",
+            actor=evidence_actor(auth_allowed),
+            user=user,
+        )
         raise AuthPolicyError(
             backend, code="authentication_disallowed", stage="pipeline"
         )
+    record_login_evidence(
+        backend,
+        stage="policy",
+        decision="allowed",
+        reason="authentication_allowed",
+        actor=evidence_actor(auth_allowed),
+        user=user,
+    )
 
 
 def _legacy_social_auth(
@@ -192,6 +251,15 @@ def social_user(
             social = backend.get_legacy_social_auth(uid, id_key, response, user=user)
         if social is not None:
             if user and social.user != user:
+                record_login_evidence(
+                    backend,
+                    stage="association",
+                    decision="denied",
+                    reason="identity_in_use",
+                    actor=evidence_actor(social_user),
+                    association="existing",
+                    user=user,
+                )
                 raise AuthAssociationError(
                     backend, code="identity_in_use", stage="pipeline"
                 )
@@ -200,6 +268,15 @@ def social_user(
             )
     if social:
         if user and social.user != user:
+            record_login_evidence(
+                backend,
+                stage="association",
+                decision="denied",
+                reason="identity_in_use",
+                actor=evidence_actor(social_user),
+                association="existing",
+                user=user,
+            )
             raise AuthAssociationError(
                 backend,
                 code="identity_in_use",
@@ -212,6 +289,15 @@ def social_user(
             )
         if not user:
             user = social.user
+    record_login_evidence(
+        backend,
+        stage="association",
+        decision="allowed",
+        reason="association_found" if social else "association_missing",
+        actor=evidence_actor(social_user),
+        association="existing" if social else "none",
+        user=user,
+    )
     return {
         "social": social,
         "user": user,
@@ -258,6 +344,15 @@ def associate_user(
             if not result["social"]:
                 raise
             return result
+        record_login_evidence(
+            backend,
+            stage="association",
+            decision="allowed",
+            reason="association_created",
+            actor=evidence_actor(associate_user),
+            association="created",
+            user=user,
+        )
         return {"social": social, "user": social.user, "new_association": True}
     return None
 

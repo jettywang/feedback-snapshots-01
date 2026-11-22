@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from collections.abc import Generator, Mapping
 
     from .backends.base import BaseAuth
+    from .login_evidence import LoginEvidence
     from .storage import BaseStorage, CodeMixin, PartialMixin, UserProtocol
 
 
@@ -135,6 +136,13 @@ class BaseStrategy(Generic[ResponseT_co]):
                 parameter="GROUPS_MAP",
                 stage="pipeline",
             )
+
+    def record_login_evidence(self, evidence: LoginEvidence) -> None:
+        """Observe a staged login authorization decision.
+
+        Override to persist or forward the record. The default discards it so
+        adding a recorder cannot change an authentication result.
+        """
 
     def session_setdefault(self, name: str, value):
         self.session_set(name, value)
