@@ -11,6 +11,7 @@
 # ANY KIND, either express or implied. See the License for the specific
 # language governing permissions and limitations under the License.
 import copy
+import hashlib
 import os
 import shutil
 import tempfile
@@ -36,9 +37,11 @@ from s3transfer.download import (
     IOCloseTask,
     IORenameFileTask,
     IOStreamingWriteTask,
+    IOValidateAndRenameFileTask,
     IOWriteTask,
+    calculate_md5,
 )
-from s3transfer.exceptions import RetriesExceededError
+from s3transfer.exceptions import RetriesExceededError, S3ValidationError
 from s3transfer.futures import IN_MEMORY_DOWNLOAD_TAG, BoundedExecutor
 from s3transfer.utils import CallArgs, OSUtils
 from tests import (
@@ -877,6 +880,163 @@ class TestIORenameFileTask(BaseIOTaskTest):
             task()
         self.assertTrue(os.path.exists(self.final_filename))
         self.assertFalse(os.path.exists(self.temp_filename))
+
+
+class TestIOValidateAndRenameFileTask(BaseIOTaskTest):
+    def setUp(self):
+        super().setUp()
+        self.contents = b'my validated contents'
+        self.etag = hashlib.md5(self.contents).hexdigest()
+        with open(self.temp_filename, 'wb') as f:
+            f.write(self.contents)
+        self.fileobj = open(self.temp_filename, 'rb+')
+        self.kwargs = {
+            'fileobj': self.fileobj,
+            'final_filename': self.final_filename,
+            'osutil': self.osutil,
+            'expected_etag': self.etag,
+            'expected_size': len(self.contents),
+        }
+
+    def tearDown(self):
+        if not self.fileobj.closed:
+            self.fileobj.close()
+        super().tearDown()
+
+    def _get_task(self, **overrides):
+        kwargs = copy.copy(self.kwargs)
+        kwargs.update(overrides)
+        return self.get_task(IOValidateAndRenameFileTask, main_kwargs=kwargs)
+
+    def _run_main(self, **overrides):
+        # Invoke _main() directly so validation failures propagate instead of
+        # being recorded on the transfer coordinator.
+        self._get_task(**overrides)._main(**{**self.kwargs, **overrides})
+
+    def test_main_publishes_file_when_checksum_matches(self):
+        self._run_main()
+        self.assertTrue(self.fileobj.closed)
+        self.assertTrue(os.path.exists(self.final_filename))
+        self.assertFalse(os.path.exists(self.temp_filename))
+        with open(self.final_filename, 'rb') as f:
+            self.assertEqual(f.read(), self.contents)
+
+    def test_accepts_uppercase_etag(self):
+        self._run_main(expected_etag=self.etag.upper())
+        self.assertTrue(os.path.exists(self.final_filename))
+
+    def test_checksum_mismatch_does_not_publish_or_remove_old_target(self):
+        with open(self.final_filename, 'wb') as f:
+            f.write(b'original destination contents')
+
+        with self.assertRaises(S3ValidationError) as e:
+            self._run_main(
+                expected_etag=hashlib.md5(b'something else').hexdigest()
+            )
+        self.assertIn('Checksum mismatch', str(e.exception))
+
+        self.assertTrue(self.fileobj.closed)
+        # The task never renames, so the temporary file remains available for
+        # inspection and the pre-existing destination file is untouched.
+        self.assertTrue(os.path.exists(self.temp_filename))
+        with open(self.final_filename, 'rb') as f:
+            self.assertEqual(f.read(), b'original destination contents')
+
+    def test_size_mismatch_does_not_publish_or_remove_old_target(self):
+        with open(self.final_filename, 'wb') as f:
+            f.write(b'original destination contents')
+
+        with self.assertRaises(S3ValidationError) as e:
+            self._run_main(expected_size=len(self.contents) + 1)
+        self.assertIn('bytes but the object was expected', str(e.exception))
+
+        self.assertTrue(os.path.exists(self.temp_filename))
+        with open(self.final_filename, 'rb') as f:
+            self.assertEqual(f.read(), b'original destination contents')
+
+    def test_multipart_etag_is_rejected(self):
+        with self.assertRaises(S3ValidationError) as e:
+            self._run_main(expected_etag=f'{self.etag}-2')
+        self.assertIn('multipart ETag', str(e.exception))
+        self.assertTrue(os.path.exists(self.temp_filename))
+        self.assertFalse(os.path.exists(self.final_filename))
+
+    def test_non_md5_etag_is_rejected(self):
+        with self.assertRaises(S3ValidationError):
+            self._run_main(expected_etag='not-a-md5-etag')
+        self.assertTrue(os.path.exists(self.temp_filename))
+
+    def test_wrong_length_hex_etag_is_rejected(self):
+        with self.assertRaises(S3ValidationError):
+            self._run_main(expected_etag='abcdef0123456789')
+        self.assertTrue(os.path.exists(self.temp_filename))
+
+    def test_missing_etag_is_rejected(self):
+        with self.assertRaises(S3ValidationError) as e:
+            self._run_main(expected_etag=None)
+        self.assertIn('no ETag was provided', str(e.exception))
+        self.assertTrue(os.path.exists(self.temp_filename))
+
+    def test_accepts_quoted_etag(self):
+        self._run_main(expected_etag=f'"{self.etag}"')
+        self.assertTrue(os.path.exists(self.final_filename))
+
+    def test_calculate_md5_matches_file_contents(self):
+        self.assertEqual(
+            calculate_md5(self.temp_filename, self.osutil), self.etag
+        )
+
+
+class TestDownloadFilenameOutputManagerChecksumValidation(
+    BaseDownloadOutputManagerTest
+):
+    def _make_manager(self):
+        return DownloadFilenameOutputManager(
+            self.osutil,
+            self.transfer_coordinator,
+            io_executor=self.io_executor,
+            validate_download_checksum=True,
+        )
+
+    def _make_future(self, etag='myetag', size=10):
+        call_args = CallArgs(fileobj=self.filename)
+        future = self.get_transfer_future(call_args)
+        if etag is not None:
+            future.meta.provide_object_etag(etag)
+        if size is not None:
+            future.meta.provide_transfer_size(size)
+        return future
+
+    def test_final_task_validates_when_enabled(self):
+        manager = self._make_manager()
+        future = self._make_future(etag='"myetag"')
+        manager.get_fileobj_for_io_writes(future)
+        final_task = manager.get_final_io_task()
+        self.assertIsInstance(final_task, IOValidateAndRenameFileTask)
+        # The raw ETag (including surrounding quotes) is handed to the task;
+        # normalization happens inside the task's validation logic.
+        self.assertEqual(final_task._main_kwargs['expected_etag'], '"myetag"')
+        self.assertEqual(final_task._main_kwargs['expected_size'], 10)
+
+    def test_final_task_renames_without_validation_when_disabled(self):
+        manager = DownloadFilenameOutputManager(
+            self.osutil,
+            self.transfer_coordinator,
+            io_executor=self.io_executor,
+        )
+        future = self._make_future()
+        manager.get_fileobj_for_io_writes(future)
+        self.assertIsInstance(manager.get_final_io_task(), IORenameFileTask)
+
+    def test_missing_etag_is_deferred_to_final_task(self):
+        manager = self._make_manager()
+        future = self._make_future(etag=None)
+        manager.get_fileobj_for_io_writes(future)
+        # Constructing the final task must not raise; the missing ETag is
+        # reported when the task runs on the IO executor.
+        final_task = manager.get_final_io_task()
+        self.assertIsInstance(final_task, IOValidateAndRenameFileTask)
+        self.assertIsNone(final_task._main_kwargs['expected_etag'])
 
 
 class TestIOCloseTask(BaseIOTaskTest):

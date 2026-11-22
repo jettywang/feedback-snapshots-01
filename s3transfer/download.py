@@ -10,6 +10,7 @@
 # distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF
 # ANY KIND, either express or implied. See the License for the specific
 # language governing permissions and limitations under the License.
+import hashlib
 import heapq
 import logging
 import threading
@@ -38,6 +39,31 @@ from s3transfer.utils import (
 
 logger = logging.getLogger(__name__)
 
+#: Size of each block read from disk when computing a whole-object checksum.
+CHECKSUM_CHUNKSIZE = 1024 * 1024
+
+
+def calculate_md5(filename, osutil):
+    """Compute the hex MD5 digest of the contents of a local file.
+
+    The file is streamed in fixed-size blocks so memory usage stays
+    constant regardless of the size of the downloaded object.
+
+    :type filename: str
+    :param filename: The path to the file to checksum.
+
+    :type osutil: s3transfer.utils.OSUtils
+    :param osutil: The os utility used to open the file.
+
+    :rtype: str
+    :returns: The lowercase hex MD5 digest of the file's contents.
+    """
+    digest = hashlib.md5()
+    with osutil.open(filename, 'rb') as f:
+        for chunk in iter(lambda: f.read(CHECKSUM_CHUNKSIZE), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
 
 class DownloadOutputManager:
     """Base manager class for handling various types of files for downloads
@@ -53,10 +79,17 @@ class DownloadOutputManager:
     public methods from this class.
     """
 
-    def __init__(self, osutil, transfer_coordinator, io_executor):
+    def __init__(
+        self,
+        osutil,
+        transfer_coordinator,
+        io_executor,
+        validate_download_checksum=False,
+    ):
         self._osutil = osutil
         self._transfer_coordinator = transfer_coordinator
         self._io_executor = io_executor
+        self._validate_download_checksum = validate_download_checksum
 
     @classmethod
     def is_compatible(cls, download_target, osutil):
@@ -153,11 +186,23 @@ class DownloadOutputManager:
 
 
 class DownloadFilenameOutputManager(DownloadOutputManager):
-    def __init__(self, osutil, transfer_coordinator, io_executor):
-        super().__init__(osutil, transfer_coordinator, io_executor)
+    def __init__(
+        self,
+        osutil,
+        transfer_coordinator,
+        io_executor,
+        validate_download_checksum=False,
+    ):
+        super().__init__(
+            osutil,
+            transfer_coordinator,
+            io_executor,
+            validate_download_checksum=validate_download_checksum,
+        )
         self._final_filename = None
         self._temp_filename = None
         self._temp_fileobj = None
+        self._transfer_future = None
 
     @classmethod
     def is_compatible(cls, download_target, osutil):
@@ -165,6 +210,7 @@ class DownloadFilenameOutputManager(DownloadOutputManager):
 
     def get_fileobj_for_io_writes(self, transfer_future):
         fileobj = transfer_future.meta.call_args.fileobj
+        self._transfer_future = transfer_future
         self._final_filename = fileobj
         self._temp_filename = self._osutil.get_temp_filename(fileobj)
         self._temp_fileobj = self._get_temp_fileobj()
@@ -173,7 +219,21 @@ class DownloadFilenameOutputManager(DownloadOutputManager):
     def get_final_io_task(self):
         # A task to rename the file from the temporary file to its final
         # location is needed. This should be the last task needed to complete
-        # the download.
+        # the download. When checksum validation is enabled, verify the
+        # fully downloaded contents first so that a mismatch never reaches
+        # the final filename.
+        if self._validate_download_checksum:
+            return IOValidateAndRenameFileTask(
+                transfer_coordinator=self._transfer_coordinator,
+                main_kwargs={
+                    'fileobj': self._temp_fileobj,
+                    'final_filename': self._final_filename,
+                    'osutil': self._osutil,
+                    'expected_etag': self._transfer_future.meta.etag,
+                    'expected_size': self._transfer_future.meta.size,
+                },
+                is_final=True,
+            )
         return IORenameFileTask(
             transfer_coordinator=self._transfer_coordinator,
             main_kwargs={
@@ -211,9 +271,19 @@ class DownloadSeekableOutputManager(DownloadOutputManager):
 
 class DownloadNonSeekableOutputManager(DownloadOutputManager):
     def __init__(
-        self, osutil, transfer_coordinator, io_executor, defer_queue=None
+        self,
+        osutil,
+        transfer_coordinator,
+        io_executor,
+        defer_queue=None,
+        validate_download_checksum=False,
     ):
-        super().__init__(osutil, transfer_coordinator, io_executor)
+        super().__init__(
+            osutil,
+            transfer_coordinator,
+            io_executor,
+            validate_download_checksum=validate_download_checksum,
+        )
         if defer_queue is None:
             defer_queue = DeferQueue()
         self._defer_queue = defer_queue
@@ -258,10 +328,19 @@ class DownloadNonSeekableOutputManager(DownloadOutputManager):
 
 class DownloadSpecialFilenameOutputManager(DownloadNonSeekableOutputManager):
     def __init__(
-        self, osutil, transfer_coordinator, io_executor, defer_queue=None
+        self,
+        osutil,
+        transfer_coordinator,
+        io_executor,
+        defer_queue=None,
+        validate_download_checksum=False,
     ):
         super().__init__(
-            osutil, transfer_coordinator, io_executor, defer_queue
+            osutil,
+            transfer_coordinator,
+            io_executor,
+            defer_queue,
+            validate_download_checksum=validate_download_checksum,
         )
         self._fileobj = None
 
@@ -354,7 +433,12 @@ class DownloadSubmissionTask(SubmissionTask):
         """
         download_output_manager = self._get_download_output_manager_cls(
             transfer_future, osutil
-        )(osutil, self._transfer_coordinator, io_executor)
+        )(
+            osutil,
+            self._transfer_coordinator,
+            io_executor,
+            validate_download_checksum=config.validate_download_checksum,
+        )
 
         # Skip the HEAD request only when the caller has explicitly opted out
         # of response checksum validation. Otherwise we need the HEAD to
@@ -973,6 +1057,84 @@ class IORenameFileTask(Task):
     def _main(self, fileobj, final_filename, osutil):
         fileobj.close()
         osutil.rename_file(fileobj.name, final_filename)
+
+
+class IOValidateAndRenameFileTask(IORenameFileTask):
+    """A task that validates full contents before renaming the temp file.
+
+    The fully downloaded temporary file is checked against the known
+    whole-object size and checksum before it is published to the final
+    filename. If either check fails an ``S3ValidationError`` is raised and
+    the temporary file is left closed (and later removed by the transfer's
+    failure cleanup), while any pre-existing final filename is never
+    touched.
+
+    :param fileobj: The file handle that content was written to.
+    :param final_filename: The final name of the file to rename to upon
+        successful validation.
+    :param osutil: OS utility.
+    :param expected_etag: The ETag value reported for the object, including
+        surrounding quotes if present. Only plain MD5 ETags (32 hex
+        characters) can be validated; multipart ETags containing ``-`` are
+        rejected.
+    :param expected_size: The expected size in bytes of the full object.
+    """
+
+    def _main(
+        self, fileobj, final_filename, osutil, expected_etag, expected_size
+    ):
+        # Validate the ETag first, before touching the temp file, so that an
+        # unusable ETag surfaces a clear error rather than an IO error.
+        expected_etag = self._validate_etag(expected_etag)
+
+        # Close the handle so every byte is flushed before hashing. The
+        # temporary file itself still exists on disk.
+        fileobj.close()
+        temp_filename = fileobj.name
+        actual_size = osutil.get_file_size(temp_filename)
+        if expected_size is not None and actual_size != expected_size:
+            raise S3ValidationError(
+                f'Downloaded content for "{final_filename}" is '
+                f'{actual_size} bytes but the object was expected to be '
+                f'{expected_size} bytes.'
+            )
+        actual_checksum = calculate_md5(temp_filename, osutil)
+        if actual_checksum != expected_etag.lower():
+            raise S3ValidationError(
+                f'Checksum mismatch for downloaded object "{final_filename}". '
+                f'Expected MD5 checksum "{expected_etag}" based on the '
+                f'object ETag but calculated "{actual_checksum}". The '
+                'downloaded contents were not published.'
+            )
+        osutil.rename_file(temp_filename, final_filename)
+
+    def _validate_etag(self, expected_etag):
+        if expected_etag is None:
+            raise S3ValidationError(
+                'Cannot validate the download because no ETag was provided '
+                'for the object.'
+            )
+        # S3 ETags are quoted in HTTP responses; normalize to the bare value.
+        expected_etag = expected_etag.strip('"')
+        if '-' in expected_etag:
+            raise S3ValidationError(
+                f'Cannot validate the download against ETag "{expected_etag}" '
+                'because it is a multipart ETag rather than a whole-object '
+                'MD5 checksum.'
+            )
+        try:
+            int(expected_etag, 16)
+        except ValueError:
+            raise S3ValidationError(
+                f'ETag "{expected_etag}" is not a valid MD5 checksum and '
+                'cannot be used to validate the downloaded contents.'
+            )
+        if len(expected_etag) != 32:
+            raise S3ValidationError(
+                f'ETag "{expected_etag}" is not a 32 character MD5 checksum '
+                'and cannot be used to validate the downloaded contents.'
+            )
+        return expected_etag
 
 
 class IOCloseTask(Task):

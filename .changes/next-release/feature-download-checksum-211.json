@@ -1,0 +1,5 @@
+{
+  "category": "download",
+  "description": "Add a ``validate_download_checksum`` option to ``TransferConfig`` that validates the full downloaded content against the object's whole-object MD5 checksum before the temporary file is renamed to its final filename. A checksum or size mismatch fails the transfer with an ``S3ValidationError``, removes the temporary file and leaves any pre-existing destination file untouched.",
+  "type": "feature"
+}
