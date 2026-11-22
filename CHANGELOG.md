@@ -1,5 +1,8 @@
 # CHANGELOG
 
+## Unreleased
+* Add optional, directional scope inheritance via `Config#inherit_scope`. A scope keeps consulting its own session and strategies first, and only falls back to a read-only identity resolved through a declared chain; source sessions are never written to. Malformed rules and inheritance cycles raise `Warden::InvalidScopeInheritance` at configuration time.
+
 ## Version 1.2.9 / 2020-08-31
 * Avoid warning on uninitialized instance variable (#188)
 * Bump rack to 2.2.3 (#190)

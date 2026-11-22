@@ -1,6 +1,12 @@
 # encoding: utf-8
 # frozen_string_literal: true
 module Warden
+  # Raised during configuration when a scope inheritance rule is malformed
+  # or cannot be resolved (for example an unknown rule or an inheritance
+  # cycle). Raising at configuration time keeps invalid rules from silently
+  # weakening authentication at runtime.
+  class InvalidScopeInheritance < StandardError; end
+
   class Proxy
     # Lifted from DataMapper's dm-validations plugin :)
     # @author Guy van den Berg

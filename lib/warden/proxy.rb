@@ -221,12 +221,13 @@ module Warden
       if @users.has_key?(scope)
         @users[scope]
       else
-        unless user = session_serializer.fetch(scope)
+        if user = session_serializer.fetch(scope) || _inherited_user(scope, opts)
+          @users[scope] = set_user(user, opts.merge(:event => :fetch))
+        else
           run_callbacks = opts.fetch(:run_callbacks, true)
           manager._run_callbacks(:after_failed_fetch, user, self, :scope => scope) if run_callbacks
+          @users[scope] = nil
         end
-
-        @users[scope] = user ? set_user(user, opts.merge(:event => :fetch)) : nil
       end
     end
 
@@ -347,6 +348,21 @@ module Warden
       scope = opts[:scope] || @config.default_scope
       opts  = (@config[:scope_defaults][scope] || {}).merge(opts)
       [scope, opts]
+    end
+
+    # Resolves an identity through the configured scope inheritance chain.
+    # Each source scope consults its own session via #user, which runs that
+    # scope's own deserialization and callbacks. Nothing is written into any
+    # source scope's session: the inherited identity is only read and cached
+    # for the requesting scope.
+    def _inherited_user(scope, opts) #:nodoc:
+      @config.scope_inheritance_chain(scope).each do |source_scope|
+        source_opts = { :scope => source_scope }
+        source_opts[:run_callbacks] = opts[:run_callbacks] if opts.key?(:run_callbacks)
+        user = user(source_opts)
+        return user if user
+      end
+      nil
     end
 
     # Run the strategies for a given scope
