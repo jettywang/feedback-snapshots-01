@@ -84,6 +84,25 @@ class ExceptionContractTest(unittest.TestCase):
         self.assertEqual(error.recovery, "none")
         self.assertEqual(str(error), str(AuthPolicyError()))
 
+    def test_refresh_save_failure_retries_only_the_save(self):
+        error = AuthCredentialError(
+            None,
+            code="refresh_save_failed",
+            stage="refresh",
+            context={"retry_operation": "save"},
+        )
+        self.assertEqual(
+            error.public_metadata(),
+            {
+                "error_code": "refresh_save_failed",
+                "error_source": "storage",
+                "error_stage": "refresh",
+                "error_recovery": "retry_later",
+            },
+        )
+        self.assertEqual(error.context, {"retry_operation": "save"})
+        self.assertNotIn("token", str(error))
+
     def test_removed_names_are_not_aliases(self):
         for name in (
             "AuthFailed",

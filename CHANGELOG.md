@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- `UserMixin.refresh_token()` now returns a `RefreshResult` with a stable
+  status (`saved`, `unchanged`, `superseded`, `save_failed`, or `skipped`).
+  Storages can opt into an atomic credential save by setting
+  `supports_atomic_refresh_save = True` and overriding `save_refresh_result()`
+  to compare and swap `extra_data`, so a refresh that finished earlier cannot
+  overwrite a later authorized state. `retry_refresh_save()` retries only the
+  failed persistence step, and `get_access_token()` raises `AuthCredentialError`
+  with `refresh_save_failed` instead of returning a stale token. The default
+  storage behavior is unchanged.
+
 ## [7.2.0](https://github.com/python-social-auth/social-core/releases/tag/7.2.0) - 2026-11-12
 
 ### Added

@@ -7,13 +7,15 @@ import re
 import uuid
 from abc import abstractmethod
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from time import time as _time
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 from openid.association import Association as OpenIdAssociation
 
 from .exceptions import AuthConfigurationError, AuthCredentialError, AuthResponseError
+from .utils import social_logger
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -42,9 +44,69 @@ class PipelineUserProtocol(UserProtocol, Protocol):
     is_new: bool
 
 
+RefreshStatus = Literal[
+    "saved",
+    "unchanged",
+    "superseded",
+    "save_failed",
+    "skipped",
+]
+RefreshSaveOutcome = Literal["saved", "unchanged", "superseded"]
+RefreshRetryOperation = Literal["none", "save"]
+
+
+@dataclass(frozen=True)
+class RefreshResult:
+    """Outcome of a token renewal and of persisting its new credentials.
+
+    ``status`` is the authoritative, machine-readable result:
+
+    ``saved``
+        The provider exchange and the credential save both completed.
+    ``unchanged``
+        The exchange completed without changing any stored value.
+    ``superseded``
+        The exchange completed, but the stored record had already moved to a
+        newer authorized state, so the stale result was intentionally dropped.
+    ``save_failed``
+        The exchange completed but the credentials could not be persisted.
+        Retry only the save: the provider may already have rotated the
+        refresh token, so repeating the exchange can invalidate the account.
+        This status is reported only by storages that opt into
+        ``supports_atomic_refresh_save``; other storages keep raising the
+        original save exception.
+    ``skipped``
+        No provider exchange was attempted.
+
+    ``retry_operation`` states which operation, if any, may be retried:
+    ``"save"`` for ``save_failed`` and ``"none"`` for every other status.
+    """
+
+    status: RefreshStatus
+    retry_operation: RefreshRetryOperation = "none"
+    # Credential payloads are never rendered; routine logging and exception
+    # formatting must not disclose access or refresh tokens.
+    base_extra_data: dict[str, Any] = field(default_factory=dict, repr=False)
+    refreshed_extra_data: dict[str, Any] = field(default_factory=dict, repr=False)
+    error: Exception | None = field(default=None, repr=False)
+
+    @property
+    def refresh_completed(self) -> bool:
+        """Return whether the provider returned refreshed credentials."""
+        return self.status in ("saved", "unchanged", "superseded", "save_failed")
+
+    @property
+    def can_retry(self) -> bool:
+        """Return whether the caller may retry the failed persistence step."""
+        return self.retry_operation != "none"
+
+
 class UserMixin:
     # Consider tokens that expire in 5 seconds as already expired
     ACCESS_TOKEN_EXPIRED_THRESHOLD = 5
+    # Opt-in marker for storages whose save_refresh_result() is a conditional,
+    # atomic compare-and-swap rather than a last-writer-wins save.
+    supports_atomic_refresh_save = False
     provider = ""
     id_key = ""
     uid: str
@@ -74,35 +136,155 @@ class UserMixin:
         """Return access_token stored in extra_data or None"""
         return self.extra_data.get("access_token")
 
-    def refresh_token(self, strategy: BaseStrategy[object], *args, **kwargs) -> None:
+    def refresh_token(
+        self, strategy: BaseStrategy[object], *args, **kwargs
+    ) -> RefreshResult:
         """Renew stored credentials using the backend's selected token.
 
         Missing renewal credentials require reauthentication only when the
         stored access token is known to have expired. Otherwise no request is
         sent. Backends without a refresh method are left unchanged.
+
+        The returned :class:`RefreshResult` reports whether the refreshed
+        credentials were saved, were unnecessary, were dropped because a newer
+        authorization won, or failed to persist. A save failure is reported,
+        not raised, so callers can retry only the persistence step; repeating
+        the provider exchange could reuse an already rotated refresh token.
         """
         backend = self.get_backend_instance(strategy)
         if backend is None:
-            return
+            return RefreshResult(status="skipped")
         refresh_token = getattr(backend, "refresh_token", None)
-        if callable(refresh_token):
-            token = backend.get_refresh_token(self.extra_data)
-            if not token:
-                if self.access_token_expired():
-                    raise AuthCredentialError(
-                        backend, code="reauthentication_required", stage="refresh"
-                    )
-                return
-            refresh_kwargs = backend.get_refresh_token_kwargs(self.extra_data)
-            refresh_kwargs.update(kwargs)
-            response = cast(
-                "dict[str, Any]", refresh_token(token, *args, **refresh_kwargs)
+        if not callable(refresh_token):
+            return RefreshResult(status="skipped")
+        token = backend.get_refresh_token(self.extra_data)
+        if not token:
+            if self.access_token_expired():
+                raise AuthCredentialError(
+                    backend, code="reauthentication_required", stage="refresh"
+                )
+            return RefreshResult(status="skipped")
+        if self.supports_atomic_refresh_save and (
+            type(self).save_refresh_result is UserMixin.save_refresh_result
+        ):
+            raise AuthConfigurationError(
+                backend,
+                "supports_atomic_refresh_save requires overriding save_refresh_result",
+                code="invalid_setting",
+                parameter="save_refresh_result",
+                stage="refresh",
             )
-            extra_data = backend.extra_data(
-                self.user, self.uid, response, self.extra_data or {}, {}
+        base_extra_data = dict(self.extra_data or {})
+        refresh_kwargs = backend.get_refresh_token_kwargs(self.extra_data)
+        refresh_kwargs.update(kwargs)
+        response = cast(
+            "dict[str, Any]", refresh_token(token, *args, **refresh_kwargs)
+        )
+        refreshed_extra_data = backend.extra_data(
+            self.user, self.uid, response, self.extra_data or {}, {}
+        )
+        return self._save_refreshed_credentials(base_extra_data, refreshed_extra_data)
+
+    def _save_refreshed_credentials(
+        self,
+        base_extra_data: dict[str, Any],
+        refreshed_extra_data: dict[str, Any],
+    ) -> RefreshResult:
+        """Persist a completed renewal without exposing credential values."""
+        previous_extra_data = dict(self.extra_data or {})
+        try:
+            outcome = self.save_refresh_result(base_extra_data, refreshed_extra_data)
+        # pylint: disable-next=broad-exception-caught
+        except Exception as error:
+            # Storages without the atomic contract keep propagating save
+            # failures: they have no conditional retry, so swallowing the
+            # error would silently lose the refreshed credentials.
+            if not self.supports_atomic_refresh_save:
+                raise
+            # Leave the in-memory record on its pre-refresh baseline so a save
+            # retry starts from the same snapshot and does not pose as saved.
+            if isinstance(self.extra_data, dict):
+                self.extra_data.clear()
+                self.extra_data.update(previous_extra_data)
+            # Log only stable metadata: provider names and status values are
+            # safe, while exception text or payloads may contain tokens.
+            social_logger.warning(
+                "refresh: credential save failed for provider %s; retry save only",
+                self.provider,
             )
-            if self.set_extra_data(extra_data):
-                self.save()
+            return RefreshResult(
+                status="save_failed",
+                retry_operation="save",
+                base_extra_data=base_extra_data,
+                refreshed_extra_data=refreshed_extra_data,
+                error=error,
+            )
+        if outcome == "superseded":
+            social_logger.info(
+                "refresh: discarded stale credentials for provider %s",
+                self.provider,
+            )
+        elif outcome == "saved" and isinstance(self.extra_data, dict):
+            # Keep the in-memory record consistent with the persisted value so
+            # atomic implementations only need to make the conditional write.
+            self.extra_data.clear()
+            self.extra_data.update(
+                self.merge_extra_data(base_extra_data, refreshed_extra_data)
+            )
+        return RefreshResult(
+            status=outcome,
+            base_extra_data=base_extra_data,
+            refreshed_extra_data=refreshed_extra_data,
+        )
+
+    @staticmethod
+    def merge_extra_data(
+        base_extra_data: Mapping[str, Any],
+        refreshed_extra_data: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Return the stored value after applying refreshed credentials."""
+        merged = dict(base_extra_data)
+        merged.update(refreshed_extra_data)
+        return merged
+
+    def retry_refresh_save(self, result: RefreshResult) -> RefreshResult:
+        """Retry only the failed save of an already completed renewal.
+
+        A ``save_failed`` result carries the exact credential snapshot an
+        atomic implementation compares against, so the conditional write can
+        be retried without another provider request. Other statuses are
+        returned unchanged because retrying the exchange may reuse a rotated
+        refresh token.
+        """
+        if result.status != "save_failed":
+            return result
+        return self._save_refreshed_credentials(
+            result.base_extra_data, result.refreshed_extra_data
+        )
+
+    def save_refresh_result(
+        self,
+        base_extra_data: dict[str, Any],
+        refreshed_extra_data: dict[str, Any],
+    ) -> RefreshSaveOutcome:
+        """Persist refreshed credentials and report whether they won.
+
+        This is the optional atomic-save contract. The default implementation
+        keeps the historical last-writer-wins behavior, so existing storages
+        remain compatible without changes. A storage that can compare and swap
+        sets ``supports_atomic_refresh_save = True`` and overrides this method
+        to perform the comparison and write as one operation, returning
+        ``"superseded"`` when the stored record no longer matches
+        ``base_extra_data``. Implementations must not modify stored or
+        in-memory credentials until the conditional write succeeds, and should
+        return ``"unchanged"`` without writing when the merged value equals
+        ``base_extra_data``. ``merge_extra_data()`` computes the default merge
+        so the comparison and the write use identical values.
+        """
+        if self.set_extra_data(dict(refreshed_extra_data)):
+            self.save()
+            return "saved"
+        return "unchanged"
 
     def _compute_expiration_from_timestamp(
         self, value: int | str, field_name: str = "expires"
@@ -237,7 +419,15 @@ class UserMixin:
     def get_access_token(self, strategy: BaseStrategy[object]) -> str | None:
         """Returns a valid access token."""
         if self.access_token_expired():
-            self.refresh_token(strategy)
+            result = self.refresh_token(strategy)
+            if result.status == "save_failed":
+                # Do not hand out the old token or silently swallow the loss.
+                raise AuthCredentialError(
+                    None,
+                    code="refresh_save_failed",
+                    stage="refresh",
+                    context={"retry_operation": result.retry_operation},
+                )
         return self.access_token
 
     def set_extra_data(self, extra_data: dict[str, Any] | None = None) -> bool:

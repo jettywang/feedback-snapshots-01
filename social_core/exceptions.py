@@ -152,6 +152,11 @@ REASONS: dict[str, tuple[str, ErrorSource, RecoveryAction]] = {
         "storage",
         "reauthenticate",
     ),
+    "refresh_save_failed": (
+        "Refreshed credentials could not be saved. Retry saving them.",
+        "storage",
+        "retry_later",
+    ),
     "email_verification_rejected": (
         "The email confirmation could not be verified.",
         "request",

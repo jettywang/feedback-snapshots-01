@@ -93,6 +93,7 @@ and the selected backend's documentation.
 | Request-derived redirect values are destinations, not references to unrelated settings | A redirect discloses a sensitive configuration value |
 | Provider credentials and responses use the configured authenticated TLS channel | A network attacker reads credentials or substitutes identity data under the supported transport posture |
 | Default profile updates preserve protected identity and authorization fields; configured authentication restrictions require matching provider data under the documented policy | Provider data changes protected account authority or bypasses an access restriction |
+| When a storage enables the optional atomic refresh-save contract, refreshed credentials replace stored values only if the record still matches the snapshot taken before the provider exchange; a stale result is discarded rather than overwriting newer authorization | An earlier refresh overwrites credentials issued by a later authorized request |
 | Malformed or rejected provider input does not establish an authenticated identity; supported rejection paths use social-auth authentication exceptions | Invalid data authenticates a user |
 
 Identity, flow, policy, redirect, and transport violations are security-critical
