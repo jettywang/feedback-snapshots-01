@@ -28,6 +28,15 @@ RSpec.describe Warden::Config do
     expect(@config.silence_missing_strategies?).to eq(true)
   end
 
+  it "should keep stored sessions on unconfirmed fetches by default" do
+    expect(@config.clear_stored_session_on_unconfirmed?).to eq(false)
+  end
+
+  it "should allow unconfirmed fetches to clear the stored session" do
+    @config.clear_stored_session_on_unconfirmed!
+    expect(@config.clear_stored_session_on_unconfirmed?).to eq(true)
+  end
+
   it "should set the default_scope" do
     expect(@config.default_scope).to eq(:default)
     @config.default_scope = :foo

@@ -1,5 +1,8 @@
 # CHANGELOG
 
+## Unreleased
+* Add `Warden::SessionSerializer::SessionResult`, a return contract for `serialize_from_session` blocks that distinguishes permanently denied principals (e.g. a disabled account) from temporarily unconfirmed ones (e.g. a storage read failure). Denied results always remove the stored session; unconfirmed results keep it by default and remove it only when `Warden::Config#clear_stored_session_on_unconfirmed!` is enabled.
+
 ## Version 1.2.9 / 2020-08-31
 * Avoid warning on uninitialized instance variable (#188)
 * Bump rack to 2.2.3 (#190)

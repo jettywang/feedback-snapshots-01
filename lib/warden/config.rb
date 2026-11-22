@@ -58,6 +58,19 @@ module Warden
       !!self[:silence_missing_strategies]
     end
 
+    # Make a temporary failure to confirm a stored session (a
+    # Warden::SessionSerializer::SessionResult with the :unconfirmed status)
+    # remove the stored session key. By default the key is kept so the session
+    # can be re-evaluated on the next request once the underlying problem clears.
+    # :api: public
+    def clear_stored_session_on_unconfirmed!
+      self[:clear_stored_session_on_unconfirmed] = true
+    end
+
+    def clear_stored_session_on_unconfirmed?
+      !!self[:clear_stored_session_on_unconfirmed]
+    end
+
     # Set the default strategies to use.
     # :api: public
     def default_strategies(*strategies)
