@@ -31,7 +31,11 @@ from structlog._config import _CONFIG
 from structlog._log_levels import CRITICAL, DEBUG, NAME_TO_LEVEL, WARN
 from structlog.dev import ConsoleRenderer
 from structlog.exceptions import DropEvent
-from structlog.processors import JSONRenderer, KeyValueRenderer
+from structlog.processors import (
+    JSONRenderer,
+    KeyValueRenderer,
+    LogfmtRenderer,
+)
 from structlog.stdlib import (
     AsyncBoundLogger,
     BoundLogger,
@@ -1418,6 +1422,74 @@ class TestProcessorFormatter:
             None,
             {"foo": "bar", "_record": "foo", "_from_structlog": True},
         )
+
+    def test_single_line_reader_gets_one_event_per_line(self, capsys):
+        """
+        A line-oriented collector sees exactly one line per event -- both for
+        structlog events and for records that come in through standard
+        logging -- and approved fields can be restored.
+        """
+        renderer = LogfmtRenderer(
+            single_line=True,
+            key_order=["event", "request_id"],
+            drop_missing=True,
+        )
+        configure_logging([add_log_level], renderer=renderer)
+        configure(
+            processors=[
+                add_log_level,
+                ProcessorFormatter.wrap_for_formatter,
+            ],
+            logger_factory=LoggerFactory(),
+            wrapper_class=BoundLogger,
+        )
+
+        log = get_logger()
+        log.info("business-event", request_id="req-1")
+        logging.getLogger().warning(
+            "multi\nline\r\n%s",
+            "record\x1cwith\x85separators\x1fand unicode",
+        )
+        log.info("business-event", request_id="req-2")
+
+        out, err = capsys.readouterr()
+        assert "" == out
+
+        lines = err.splitlines()
+        assert 3 == len(lines)
+        assert all("" != line for line in lines)
+
+        assert "event=business-event request_id=req-1" in lines[0]
+        assert "event=business-event request_id=req-2" in lines[2]
+
+        # The foreign record's line boundary characters are escaped, but its
+        # newline semantics survive in the decoded field.
+        middle = lines[1]
+        assert "level=warning" in middle
+        event_value = middle.split("event=", 1)[1].split(" level=", 1)[0]
+        if event_value.startswith('"'):
+            event_value = json.loads(event_value)
+        assert (
+            "multi\nline\r\nrecord\x1cwith\x85separators\x1fand unicode"
+            == event_value
+        )
+
+    def test_default_logfmt_style_still_works(self, capsys):
+        """
+        Callers that don't opt into single_line keep the old rendering.
+        """
+        event_dict = {"event": "foo", "x": "a b"}
+        rv = LogfmtRenderer()(None, None, event_dict.copy())
+        assert 'event=foo x="a b"' == rv
+
+        configure_logging(None, renderer=LogfmtRenderer(sort_keys=True))
+
+        get_logger().warning("foo", x="a b")
+
+        out, err = capsys.readouterr()
+        assert "" == out
+        assert 'event=foo level=warning x="a b"' in err
+        assert 1 == len(err.splitlines())
 
     def test_non_string_message_warning(self):
         """

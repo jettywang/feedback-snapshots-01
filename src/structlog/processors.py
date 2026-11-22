@@ -88,10 +88,23 @@ class KeyValueRenderer:
         repr_native_str:
             When ``True``, :func:`repr()` is also applied to native strings.
 
+        single_line:
+            When ``True``, escape every character that
+            :meth:`str.splitlines` treats as a line boundary so that each
+            event is rendered on exactly one line.
+
+            Unlike `LogfmtRenderer`, the value representation is otherwise
+            left alone -- ``repr()`` usually escapes line boundaries already;
+            this option only matters for custom ``__repr__`` implementations
+            and ``repr_native_str=False``.
+
     .. versionadded:: 0.2.0 *key_order*
     .. versionadded:: 16.1.0 *drop_missing*
     .. versionadded:: 17.1.0 *repr_native_str*
+    .. versionadded:: 26.2.0 *single_line*
     """
+
+    single_line: bool
 
     def __init__(
         self,
@@ -99,8 +112,10 @@ class KeyValueRenderer:
         key_order: Sequence[str] | None = None,
         drop_missing: bool = False,
         repr_native_str: bool = True,
+        single_line: bool = False,
     ):
         self._ordered_items = _items_sorter(sort_keys, key_order, drop_missing)
+        self.single_line = single_line
 
         if repr_native_str is True:
             self._repr = repr
@@ -117,6 +132,14 @@ class KeyValueRenderer:
     def __call__(
         self, _: WrappedLogger, __: str, event_dict: EventDict
     ) -> str:
+        if self.single_line:
+            return " ".join(
+                key.translate(_LINE_SEPARATOR_ESCAPES)
+                + "="
+                + self._repr(value).translate(_LINE_SEPARATOR_ESCAPES)
+                for key, value in self._ordered_items(event_dict)
+            )
+
         return " ".join(
             k + "=" + self._repr(v) for k, v in self._ordered_items(event_dict)
         )
@@ -145,13 +168,32 @@ class LogfmtRenderer:
             ``flag=true``. ``{"flag": False}`` is always rendered as
             ``flag=false``.
 
+        single_line:
+            When ``True``, render values with fully reversible JSON-style
+            escapes: ``\\n``, ``\\r``, ``\\t``, ``\\f``, ``\\b``, ``\\"``,
+            ``\\\\``, and ``\\uXXXX`` for control and separator characters.
+            Values are quoted whenever escaping changed them, so decoding the
+            quoted value restores the original -- including its newlines --
+            exactly.
+
+            Use this if your collector decodes values and you need plain
+            newlines to be distinguishable from literal backslash sequences.
+
+            Regardless of this option, `LogfmtRenderer` always escapes every
+            character that :meth:`str.splitlines` treats as a line boundary
+            (including ``\\r``, ``U+0085``, and ``U+2028``) so that an event
+            never spans lines. The familiar ``\\n`` output for plain newlines
+            is unchanged.
+
     Raises:
         ValueError: If a key contains non-printable or whitespace characters.
 
     .. versionadded:: 21.5.0
+    .. versionadded:: 26.2.0 *single_line*
     """
 
     bool_as_flag: bool
+    single_line: bool
 
     def __init__(
         self,
@@ -159,9 +201,11 @@ class LogfmtRenderer:
         key_order: Sequence[str] | None = None,
         drop_missing: bool = False,
         bool_as_flag: bool = True,
+        single_line: bool = False,
     ):
         self._ordered_items = _items_sorter(sort_keys, key_order, drop_missing)
         self.bool_as_flag = bool_as_flag
+        self.single_line = single_line
 
     def __call__(
         self, _: WrappedLogger, __: str, event_dict: EventDict
@@ -171,6 +215,10 @@ class LogfmtRenderer:
             if any(c <= " " for c in key):
                 msg = f'Invalid key: "{key}"'
                 raise ValueError(msg)
+
+            # Keys can't contain whitespace, so only line boundaries from the
+            # remaining C0/C1 range can be a problem.
+            key = key.translate(_LINE_SEPARATOR_ESCAPES)
 
             if value is None:
                 elements.append(f"{key}=")
@@ -183,20 +231,76 @@ class LogfmtRenderer:
                 value = "true" if value else "false"
 
             value = str(value)
+            if self.single_line:
+                escaped = value.translate(_SINGLE_LINE_ESCAPES)
+                # Escape sequences are only valid within quoted values and
+                # backslashes are escaped too, so quote whenever we changed
+                # anything.
+                if escaped != value or " " in value or "=" in value:
+                    escaped = f'"{escaped}"'
+
+                elements.append(f"{key}={escaped}")
+                continue
+
             backslashes_need_escaping = (
                 " " in value or "=" in value or '"' in value
             )
             if backslashes_need_escaping and "\\" in value:
                 value = value.replace("\\", "\\\\")
 
-            value = value.replace('"', '\\"').replace("\n", "\\n")
+            value = value.replace('"', '\\"')
 
             if backslashes_need_escaping:
                 value = f'"{value}"'
 
-            elements.append(f"{key}={value}")
+            # Still escape the remaining line boundaries so the event can't
+            # span lines even without single_line.
+            elements.append(
+                f"{key}={value.translate(_LINE_SEPARATOR_ESCAPES)}"
+            )
 
         return " ".join(elements)
+
+
+def _make_escape_table(*codepoints: int) -> dict[int, str]:
+    return {cp: f"\\u{cp:04x}" for cp in codepoints}
+
+
+# Escape everything that str.splitlines() considers a line boundary, plus
+# backslashes and double quotes so the result stays unambiguous and JSON-
+# compatible when it's decoded again.
+_LINE_BOUNDARIES = (
+    0x0A,  # \n
+    0x0B,  # \v
+    0x0C,  # \f
+    0x0D,  # \r
+    0x1C,  # file separator
+    0x1D,  # group separator
+    0x1E,  # record separator
+    0x85,  # next line
+    0x2028,  # line separator
+    0x2029,  # paragraph separator
+)
+
+_SINGLE_LINE_ESCAPES: dict[int, str] = {
+    **_make_escape_table(*range(0x00, 0x20), 0x7F, *_LINE_BOUNDARIES),
+    # The usual JSON short escapes take precedence.
+    0x08: "\\b",
+    0x09: "\\t",
+    0x0A: "\\n",
+    0x0C: "\\f",
+    0x0D: "\\r",
+    0x22: '\\"',
+    0x5C: "\\\\",
+}
+
+_LINE_SEPARATOR_ESCAPES: dict[int, str] = {
+    **_make_escape_table(*_LINE_BOUNDARIES),
+    # Use the familiar short escapes where they exist.
+    0x0C: "\\f",
+    0x0D: "\\r",
+    0x0A: "\\n",
+}
 
 
 def _items_sorter(

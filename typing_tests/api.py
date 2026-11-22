@@ -238,6 +238,8 @@ structlog.configure(
         structlog.processors.format_exc_info,
         structlog.processors.UnicodeDecoder(),
         structlog.processors.LogfmtRenderer(),
+        structlog.processors.LogfmtRenderer(single_line=True),
+        structlog.processors.KeyValueRenderer(single_line=True),
     ],
     context_class=dict,
     logger_factory=structlog.stdlib.LoggerFactory(),

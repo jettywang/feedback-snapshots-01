@@ -163,6 +163,18 @@ This should give you enough power to use *structlog* with any logging system whi
 The probably most useful formatter for string based loggers is {class}`structlog.processors.JSONRenderer`.
 Advanced log aggregation and analysis tools like [Logstash](https://www.elastic.co/logstash) offer features like telling them "this is JSON, deal with it" instead of fiddling with regular expressions.
 
+If you need a text format and your collector reads the stream line by line, {class}`structlog.processors.LogfmtRenderer` never lets an event span lines: it escapes every character `str.splitlines()` treats as a line boundary, including Unicode ones like `U+2028`.
+For fully reversible values -- so a collector can restore the original newlines -- enable its *single_line* mode:
+
+```pycon
+>>> from structlog.processors import LogfmtRenderer
+>>> LogfmtRenderer(single_line=True)(None, "", {"event": "one\ntwo"})
+'event="one\\ntwo"'
+```
+
+It uses JSON-style escapes, so decoding the quoted value restores the original field exactly.
+The same renderer can be plugged into {class}`structlog.stdlib.ProcessorFormatter`'s *processors* to also cover records that enter through standard library `logging`.
+
 For a list of shipped processors, check out the {ref}`API documentation <procs>`.
 
 

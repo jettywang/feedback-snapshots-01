@@ -122,6 +122,26 @@ class TestKeyValueRenderer:
         cnt = rv.count("哈")
         assert 2 == cnt
 
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "first\nsecond",
+            "first\r\nsecond",
+            "before\x85after",
+            "before\u2028after",
+        ],
+    )
+    def test_single_line_renders_one_line(self, raw):
+        """
+        single_line escapes line boundaries that repr_native_str=False would
+        otherwise pass through unchanged.
+        """
+        rv = KeyValueRenderer(
+            repr_native_str=False, single_line=True
+        )(None, None, {"event": raw})
+
+        assert 1 == len(rv.splitlines())
+
 
 class TestLogfmtRenderer:
     def test_sort_keys(self, event_dict):
@@ -300,6 +320,122 @@ class TestLogfmtRenderer:
         rv = LogfmtRenderer()(None, None, {"key": raw})
 
         assert f"key={escaped}" == rv
+
+    @pytest.mark.parametrize(
+        "separator",
+        [
+            "\n",
+            "\r",
+            "\r\n",
+            "\v",
+            "\f",
+            "\x1c",
+            "\x1d",
+            "\x1e",
+            "\x85",
+            "\u2028",
+            "\u2029",
+        ],
+    )
+    def test_single_line_escapes_all_line_boundaries(self, separator):
+        """
+        In single-line mode, every separator str.splitlines() honors is
+        escaped, so the rendered event is exactly one line.
+        """
+        rv = LogfmtRenderer(single_line=True)(
+            None, None, {"event": f"before{separator}after"}
+        )
+
+        assert 1 == len(rv.splitlines())
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "one\ntwo",
+            "one\r\ntwo",
+            'quote " and \\ backslash',
+            "some=value",
+            "some value",
+            "tab\there",
+            "before\u2028after",
+            "",
+        ],
+    )
+    def test_single_line_round_trips(self, raw):
+        """
+        Single-line escapes are reversible: quoted values decode as JSON
+        strings and the original value is restored exactly.
+        """
+        rv = LogfmtRenderer(single_line=True)(None, None, {"key": raw})
+        rendered = rv.split("key=", 1)[1]
+
+        if rendered.startswith('"'):
+            assert raw == json.loads(rendered)
+        else:
+            assert raw == rendered
+
+    def test_single_line_keeps_newline_semantics(self):
+        """
+        Newline meaning is preserved in the decoded field value while the line
+        itself stays on one line.
+        """
+        rv = LogfmtRenderer(single_line=True)(
+            None, None, {"event": "first\nsecond", "id": 42}
+        )
+
+        assert 1 == len(rv.splitlines())
+        assert "first\nsecond" == json.loads(
+            rv.split("event=", 1)[1].split(" id=", 1)[0]
+        )
+        assert "id=42" in rv
+
+    def test_single_line_off_by_default(self):
+        """
+        Without single_line, rendering is unchanged.
+        """
+        event_dict = {"event": "first\nsecond", "id": 42}
+
+        assert LogfmtRenderer()(None, None, event_dict) == LogfmtRenderer(
+            single_line=False
+        )(None, None, event_dict)
+
+    @pytest.mark.parametrize(
+        "separator",
+        [
+            "\n",
+            "\r",
+            "\r\n",
+            "\v",
+            "\f",
+            "\x1c",
+            "\x1d",
+            "\x1e",
+            "\x85",
+            "\u2028",
+            "\u2029",
+        ],
+    )
+    def test_default_rendering_never_spans_lines(self, separator):
+        """
+        Even without single_line, every separator str.splitlines() honors is
+        escaped, so a collector reading one line at a time sees one event.
+        """
+        rv = LogfmtRenderer()(
+            None, None, {"event": f"before{separator}after"}
+        )
+
+        assert 1 == len(rv.splitlines())
+
+    def test_single_line_bool_and_none(self):
+        """
+        single_line doesn't affect flags, None values, or empty dicts.
+        """
+        rv = LogfmtRenderer(single_line=True)(
+            None, None, {"flag": True, "missing": None}
+        )
+
+        assert "flag missing=" == rv
+        assert "" == LogfmtRenderer(single_line=True)(None, None, {})
 
 
 class TestJSONRenderer:

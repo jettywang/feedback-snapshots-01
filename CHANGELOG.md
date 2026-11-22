@@ -15,7 +15,17 @@ You can find our backwards-compatibility policy [here](https://github.com/hynek/
 
 ## [Unreleased](https://github.com/hynek/structlog/compare/26.1.0...HEAD)
 
+### Added
+
+- `structlog.processors.LogfmtRenderer` and `structlog.processors.KeyValueRenderer` accept a *single_line* argument (default: `False`).
+  It renders values with fully reversible JSON-style escapes for control and separator characters; for `LogfmtRenderer`, decoding a quoted value restores the original field value exactly, including its newlines.
+  The renderer works in `structlog.stdlib.ProcessorFormatter` too, covering records that enter through standard library `logging`.
+
 ### Changed
+
+- `structlog.processors.LogfmtRenderer` now escapes every character that `str.splitlines()` treats as a line boundary -- including `\r`, `U+0085`, and `U+2028` -- so that each event is rendered on exactly one line.
+  Previously, only `\n` was escaped.
+  Rendering for values without line boundaries is unchanged.
 
 - On Python 3.15 and later, *structlog* uses [PEP 810](https://peps.python.org/pep-0810/) lazy imports for modules that are only needed once you log.
   This makes `import structlog` significantly faster.

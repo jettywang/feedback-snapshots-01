@@ -226,6 +226,8 @@ API Reference
       'a=42 b="[1, 2, 3]" flag'
       >>> LogfmtRenderer(key_order=["b", "a"], bool_as_flag=False)(None, "", event_dict)
       'b="[1, 2, 3]" a=42 flag=true'
+      >>> LogfmtRenderer(single_line=True)(None, "", {"event": "one\ntwo"})
+      'event="one\\ntwo"'
 
 .. autoclass:: EventRenamer
 
