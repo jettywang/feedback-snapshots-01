@@ -15,6 +15,11 @@ You can find our backwards-compatibility policy [here](https://github.com/hynek/
 
 ## [Unreleased](https://github.com/hynek/structlog/compare/26.1.0...HEAD)
 
+### Added
+
+- `structlog.processors.RestrictedJSONRenderer`, a JSON renderer for multi-tenant logging that only calls `__structlog__()` on explicitly approved types and renders every other object with `repr()`.
+  Values returned by an approved hook are sanitized so nested objects cannot disclose themselves through the internal fallback, and a hook that raises falls back to `repr()` instead of dropping the log entry.
+
 ### Changed
 
 - On Python 3.15 and later, *structlog* uses [PEP 810](https://peps.python.org/pep-0810/) lazy imports for modules that are only needed once you log.

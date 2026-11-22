@@ -59,6 +59,7 @@ __all__ = [
     "JSONRenderer",
     "KeyValueRenderer",
     "LogfmtRenderer",
+    "RestrictedJSONRenderer",
     "StackInfoRenderer",
     "TimeStamper",
     "UnicodeDecoder",
@@ -372,6 +373,137 @@ def _json_fallback_handler(obj: Any) -> Any:
         return obj.__structlog__()
     except AttributeError:
         return repr(obj)
+
+
+def _freeze_json_value(obj: Any) -> Any:
+    """
+    Turn the result of an approved ``__structlog__()`` hook into plain
+    JSON-serializable data.
+
+    Nested objects never get to run their own hooks or the renderer's
+    fallback again: any non-native value is rendered via ``repr()``, so an
+    approved type cannot smuggle extra disclosure through its return value.
+    """
+    if obj is None or isinstance(obj, (str, int, float, bool)):
+        return obj
+
+    if isinstance(obj, dict):
+        frozen: dict[str, Any] = {}
+        for key, value in obj.items():
+            frozen_key = key if isinstance(key, str) else repr(key)
+            frozen[frozen_key] = _freeze_json_value(value)
+
+        return frozen
+
+    if isinstance(obj, (list, tuple)):
+        return [_freeze_json_value(item) for item in obj]
+
+    return repr(obj)
+
+
+def _make_restricted_json_default(
+    allowed_types: tuple[type, ...],
+) -> Callable[[Any], Any]:
+    """
+    Build a ``default`` callable that only invokes ``__structlog__()`` on
+    instances of *allowed_types*.
+
+    Everything else -- including objects nested inside a hook's return
+    value, and hooks that raise -- is rendered with ``repr()``.
+    """
+
+    def default(obj: Any) -> Any:
+        # circular imports :(
+        from structlog.threadlocal import _ThreadLocalDictWrapper
+
+        if isinstance(obj, _ThreadLocalDictWrapper):
+            return obj._dict
+
+        if isinstance(obj, allowed_types):
+            try:
+                return _freeze_json_value(getattr(obj, "__structlog__")())
+            except Exception:
+                return repr(obj)
+
+        return repr(obj)
+
+    return default
+
+
+class RestrictedJSONRenderer:
+    """
+    Render the ``event_dict`` as JSON while only trusting serialization
+    hooks of explicitly approved types.
+
+    Unlike `JSONRenderer`, an object's ``__structlog__()`` method is called
+    only if its type is listed in *allowed_types*.  All other objects are
+    rendered using :func:`repr`, which is useful for multi-tenant logging
+    where unvetted customer code must not be able to execute arbitrary
+    serialization logic -- or disclose extra data through it.
+
+    Values returned by an approved ``__structlog__()`` hook are sanitized
+    before serialization: nested objects are rendered with :func:`repr` and
+    never get to run their own hooks, so an approved type cannot expose
+    additional objects through an internal fallback.  If an approved hook
+    raises, the object is rendered with :func:`repr` instead of failing the
+    whole log entry.
+
+    Native JSON types (``str``, ``int``, ``float``, ``bool``, ``None``,
+    lists, tuples and dictionaries) are rendered normally.
+
+    Args:
+        allowed_types:
+            Types that are permitted to serialize themselves via
+            ``__structlog__()``.  A single class or a tuple of classes;
+            subclasses are approved too.  By default nothing is approved.
+
+        serializer:
+            A :func:`json.dumps`-compatible callable that will be used to
+            format the string (default: :func:`json.dumps`).
+
+        dumps_kw:
+            Are passed unmodified to *serializer*.  If *default* is passed,
+            it replaces the restricted fallback and disables the
+            *allowed_types* protection.
+
+    .. versionadded:: 26.2.0
+    """
+
+    def __init__(
+        self,
+        allowed_types: type | tuple[type, ...] = (),
+        serializer: Callable[..., str | bytes] = json.dumps,
+        **dumps_kw: Any,
+    ) -> None:
+        if isinstance(allowed_types, type):
+            allowed_types = (allowed_types,)
+        else:
+            try:
+                normalized = tuple(allowed_types)
+            except TypeError as error:
+                raise TypeError(
+                    "allowed_types must be a class or an iterable of classes."
+                ) from error
+
+            if not all(isinstance(t, type) for t in normalized):
+                raise TypeError("allowed_types must contain classes only.")
+
+            allowed_types = normalized
+
+        dumps_kw.setdefault(
+            "default", _make_restricted_json_default(allowed_types)
+        )
+        self._allowed_types = allowed_types
+        self._dumps_kw = dumps_kw
+        self._dumps = serializer
+
+    def __call__(
+        self, logger: WrappedLogger, name: str, event_dict: EventDict
+    ) -> str | bytes:
+        """
+        The return type of this depends on the return type of self._dumps.
+        """
+        return self._dumps(event_dict, **self._dumps_kw)
 
 
 class ExceptionRenderer:

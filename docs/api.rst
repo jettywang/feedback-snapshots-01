@@ -205,6 +205,46 @@ API Reference
          ...     log.exception("Cannot compute!")
          {"event": "Cannot compute!", "exception": [{"exc_type": "ZeroDivisionError", "exc_value": "division by zero", "exc_notes": [], "syntax_error": null, "is_cause": false, "frames": [{"filename": "<doctest default[3]>", "lineno": 2, "name": "<module>", "locals": {..., "var": "'spam'"}}], "is_group": false, "exceptions": []}]}
 
+.. autoclass:: RestrictedJSONRenderer
+
+   Multi-tenant logging cannot trust arbitrary objects to serialize
+   themselves safely: a ``__structlog__()`` method may execute unwanted
+   code or disclose data that should not end up in a shared log.
+   This renderer therefore only calls ``__structlog__()`` on the types you
+   explicitly approve and renders every other object with :func:`repr`.
+
+   .. doctest::
+
+      >>> from structlog.processors import RestrictedJSONRenderer
+      >>> class Approved:
+      ...     def __structlog__(self):
+      ...         return {"trusted": True}
+      ...     def __repr__(self):
+      ...         return "<approved repr>"
+      >>> class Untrusted:
+      ...     def __structlog__(self):
+      ...         return "this never runs"
+      ...     def __repr__(self):
+      ...         return "<untrusted repr>"
+      >>> RestrictedJSONRenderer(
+      ...     allowed_types=Approved, sort_keys=True
+      ... )(None, "", {"ok": Approved(), "other": Untrusted()})
+      '{"ok": {"trusted": true}, "other": "<untrusted repr>"}'
+
+   Values returned by an approved hook are sanitized before they are
+   serialized.
+   Objects nested inside the return value never get their own
+   ``__structlog__()`` call -- even when their type is approved -- and are
+   rendered with :func:`repr` instead.
+   This prevents an approved type from exposing additional objects through
+   the internal fallback.
+   If an approved hook raises an exception, the object is likewise rendered
+   with :func:`repr` and the log entry is still emitted.
+
+   As with `JSONRenderer`, passing a *default* keyword argument replaces the
+   restricted fallback entirely and disables the *allowed_types*
+   protection.
+
 .. autoclass:: KeyValueRenderer
 
    .. doctest::

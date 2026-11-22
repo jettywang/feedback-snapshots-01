@@ -9,6 +9,8 @@ import datetime as dt
 import json
 import pickle
 
+from typing import Any
+
 import pytest
 import time_machine
 
@@ -18,6 +20,7 @@ from structlog.processors import (
     KeyValueRenderer,
     LogfmtRenderer,
     MaybeTimeStamper,
+    RestrictedJSONRenderer,
     TimeStamper,
     _json_fallback_handler,
     format_exc_info,
@@ -369,6 +372,254 @@ class TestJSONRenderer:
             "y": "test",
             "z": [1, 2],
         } == json.loads(jr(None, None, event_dict))
+
+
+class _Marker:
+    """
+    Records every ``__structlog__()`` invocation in a shared list.
+    """
+
+    hook_result: object = "MARKER-HOOK-RESULT"
+
+    def __init__(self, calls: list[str], label: str) -> None:
+        self._calls = calls
+        self._label = label
+
+    def __structlog__(self) -> Any:
+        self._calls.append(self._label)
+
+        return self.hook_result
+
+    def __repr__(self) -> str:
+        return f"<{self._label} REPR>"
+
+
+class _FailingMarker(_Marker):
+    def __structlog__(self) -> Any:
+        self._calls.append(self._label)
+
+        raise RuntimeError("hook exploded")
+
+
+class TestRestrictedJSONRenderer:
+    def test_native_types_render_normally(self):
+        """
+        Plain JSON values are rendered exactly like JSONRenderer.
+        """
+        event_dict = {
+            "event": "hello",
+            "integer": 7,
+            "fraction": 1.5,
+            "flag": True,
+            "nothing": None,
+            "list": [1, "two", False],
+            "tuple": (1, 2),
+            "nested": {"a": 1},
+        }
+
+        rv = RestrictedJSONRenderer(sort_keys=True)(
+            None, None, event_dict
+        )
+
+        assert json.loads(rv) == {
+            "event": "hello",
+            "integer": 7,
+            "fraction": 1.5,
+            "flag": True,
+            "nothing": None,
+            "list": [1, "two", False],
+            "tuple": [1, 2],
+            "nested": {"a": 1},
+        }
+
+    def test_approved_type_runs_its_hook(self):
+        """
+        Approved types serialize via __structlog__ and leave a call marker.
+        """
+        calls: list[str] = []
+        marker = _Marker(calls, "approved")
+
+        rv = RestrictedJSONRenderer(allowed_types=_Marker)(
+            None, None, {"value": marker}
+        )
+
+        assert json.loads(rv) == {"value": "MARKER-HOOK-RESULT"}
+        assert calls == ["approved"]
+
+    def test_approved_tuple_of_types(self):
+        """
+        A tuple of approved types is accepted and all of them are trusted.
+        """
+        calls: list[str] = []
+
+        class OtherApproved(_Marker):
+            pass
+
+        rv = RestrictedJSONRenderer(
+            allowed_types=(_Marker, OtherApproved)
+        )(
+            None,
+            None,
+            {"first": _Marker(calls, "first"), "second": OtherApproved(
+                calls, "second"
+            )},
+        )
+
+        assert json.loads(rv) == {
+            "first": "MARKER-HOOK-RESULT",
+            "second": "MARKER-HOOK-RESULT",
+        }
+        assert calls == ["first", "second"]
+
+    def test_subclass_of_approved_type_is_trusted(self):
+        """
+        Subclasses inherit approval of their base type.
+        """
+        calls: list[str] = []
+
+        class SubMarker(_Marker):
+            pass
+
+        rv = RestrictedJSONRenderer(allowed_types=_Marker)(
+            None, None, {"value": SubMarker(calls, "sub")}
+        )
+
+        assert json.loads(rv) == {"value": "MARKER-HOOK-RESULT"}
+        assert calls == ["sub"]
+
+    def test_unknown_object_uses_repr_without_hook(self):
+        """
+        Objects of unapproved types never have their hook called and fall
+        back to repr().
+        """
+        calls: list[str] = []
+        marker = _Marker(calls, "unknown")
+
+        rv = RestrictedJSONRenderer()(None, None, {"value": marker})
+
+        assert json.loads(rv) == {"value": "<unknown REPR>"}
+        assert calls == []
+
+    def test_failing_hook_falls_back_to_repr(self):
+        """
+        A raising approved hook does not break the log entry and is
+        represented via repr().
+        """
+        calls: list[str] = []
+        marker = _FailingMarker(calls, "boom")
+
+        rv = RestrictedJSONRenderer(allowed_types=_FailingMarker)(
+            None, None, {"value": marker}
+        )
+
+        assert json.loads(rv) == {"value": "<boom REPR>"}
+        assert calls == ["boom"]
+
+    def test_nested_unknown_object_gets_no_hook(self):
+        """
+        An unknown object nested inside an approved hook result is rendered
+        with repr() and cannot disclose itself via its own hook.
+        """
+        calls: list[str] = []
+        nested = _Marker(calls, "nested")
+
+        class Container(_Marker):
+            hook_result = {"payload": [1, nested], "ok": True}
+
+        rv = RestrictedJSONRenderer(allowed_types=Container)(
+            None, None, {"value": Container(calls, "container")}
+        )
+
+        assert json.loads(rv) == {
+            "value": {"payload": [1, "<nested REPR>"], "ok": True}
+        }
+        assert calls == ["container"]
+
+    def test_nested_approved_object_gets_no_hook(self):
+        """
+        Even approved types do not get a second hook invocation when nested
+        inside another hook's return value.
+        """
+        calls: list[str] = []
+        nested = _Marker(calls, "nested-approved")
+
+        class Container(_Marker):
+            hook_result = {"child": nested}
+
+        rv = RestrictedJSONRenderer(
+            allowed_types=(Container, _Marker)
+        )(None, None, {"value": Container(calls, "container")})
+
+        assert json.loads(rv) == {
+            "value": {"child": "<nested-approved REPR>"}
+        }
+        assert calls == ["container"]
+
+    def test_nested_dict_keys_and_values_are_sanitized(self):
+        """
+        Non-string keys and non-native values inside a hook result are both
+        reduced to repr() strings.
+        """
+        calls: list[str] = []
+
+        class Container(_Marker):
+            hook_result = {1: _Marker(calls, "nested")}
+
+        rv = RestrictedJSONRenderer(allowed_types=Container)(
+            None, None, {"value": Container(calls, "container")}
+        )
+
+        assert json.loads(rv) == {"value": {"1": "<nested REPR>"}}
+        assert calls == ["container"]
+
+    def test_thread_local_dict_wrapped_dict_is_unwrapped(self):
+        """
+        The deprecated thread-local dict wrapper stays supported, matching
+        JSONRenderer.
+        """
+        with pytest.deprecated_call():
+            wrapped = wrap_dict(dict)({"a": 42})
+
+        rv = RestrictedJSONRenderer()(None, None, {"ctx": wrapped})
+
+        assert json.loads(rv) == {"ctx": {"a": 42}}
+
+    def test_hooks_are_per_entry_not_cached_across_entries(self):
+        """
+        Each log entry evaluates fresh and never leaks frozen state.
+        """
+        calls: list[str] = []
+        renderer = RestrictedJSONRenderer(allowed_types=_Marker)
+
+        first = renderer(None, None, {"value": _Marker(calls, "one")})
+        second = renderer(None, None, {"value": _Marker(calls, "two")})
+
+        assert json.loads(first) == {"value": "MARKER-HOOK-RESULT"}
+        assert json.loads(second) == {"value": "MARKER-HOOK-RESULT"}
+        assert calls == ["one", "two"]
+
+    @pytest.mark.parametrize("bad", [42, "not-a-class", [object(), 1]])
+    def test_invalid_allowed_types(self, bad):
+        """
+        Non-class allowed types are rejected at configuration time.
+        """
+        with pytest.raises(TypeError, match="allowed_types"):
+            RestrictedJSONRenderer(allowed_types=bad)
+
+    def test_explicit_default_overrides_protection(self):
+        """
+        Passing default explicitly replaces the restricted fallback, just
+        like JSONRenderer.
+        """
+        calls: list[str] = []
+        renderer = RestrictedJSONRenderer(
+            allowed_types=_Marker, default=lambda obj: "CUSTOM"
+        )
+
+        rv = renderer(None, None, {"value": _Marker(calls, "ignored")})
+
+        assert json.loads(rv) == {"value": "CUSTOM"}
+        assert calls == []
 
 
 class TestTimeStamper:
