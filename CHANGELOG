@@ -1,5 +1,7 @@
 === master
 
+* Add trusted_proxy plugin, for determining request.ip through an explicit trusted proxy chain while indicating whether the chain was confirmed (jettywang)
+
 * Add keyword arguments and deprecate positional hash for json_parser plugin (jeremyevans)
 
 * Deprecate the indifferent_params plugin, switch to typecast_params instead (jeremyevans)
