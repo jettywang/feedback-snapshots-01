@@ -45,6 +45,8 @@ class PipelineUserProtocol(UserProtocol, Protocol):
 class UserMixin:
     # Consider tokens that expire in 5 seconds as already expired
     ACCESS_TOKEN_EXPIRED_THRESHOLD = 5
+    # extra_data key holding the cumulative, provider-confirmed OAuth scopes
+    GRANTED_SCOPES_KEY = "granted_scopes"
     provider = ""
     id_key = ""
     uid: str
@@ -240,14 +242,52 @@ class UserMixin:
             self.refresh_token(strategy)
         return self.access_token
 
+    @staticmethod
+    def _normalize_granted_scopes(value: Any) -> set[str]:
+        if isinstance(value, str):
+            value = value.split()
+        if not isinstance(value, (list, tuple, set)):
+            return set()
+        return {scope for scope in (str(entry).strip() for entry in value) if scope}
+
     def set_extra_data(self, extra_data: dict[str, Any] | None = None) -> bool:
         if extra_data and self.extra_data != extra_data:
             if self.extra_data and not isinstance(self.extra_data, str):
+                incoming_scopes = extra_data.get(self.GRANTED_SCOPES_KEY)
+                if incoming_scopes is not None:
+                    # Confirmed grants are cumulative: union the newly
+                    # confirmed scopes with the previously stored ones instead
+                    # of overwriting them.
+                    extra_data = {
+                        **extra_data,
+                        self.GRANTED_SCOPES_KEY: sorted(
+                            self._normalize_granted_scopes(incoming_scopes)
+                            | self._normalize_granted_scopes(
+                                self.extra_data.get(self.GRANTED_SCOPES_KEY)
+                            )
+                        ),
+                    }
                 self.extra_data.update(extra_data)
             else:
                 self.extra_data = extra_data
             return True
         return False
+
+    def get_granted_scopes(self) -> list[str]:
+        """Return the provider scopes explicitly confirmed across all flows.
+
+        Only scopes the provider listed in a token response are recorded;
+        scopes that were merely requested are never assumed to be granted.
+        """
+        if not isinstance(self.extra_data, dict):
+            return []
+        return sorted(
+            self._normalize_granted_scopes(self.extra_data.get(self.GRANTED_SCOPES_KEY))
+        )
+
+    def has_granted_scope(self, scope: str) -> bool:
+        """Return True if the given scope was explicitly granted by the provider."""
+        return scope in self.get_granted_scopes()
 
     @classmethod
     def clean_username(cls, value: str) -> str:

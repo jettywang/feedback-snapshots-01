@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Record provider-confirmed OAuth2 scopes in `extra_data["granted_scopes"]` and
+  merge repeated confirmations as a cumulative union, so incremental
+  authorization (for example, a basic sign-in followed by a later calendar
+  grant) preserves every explicitly confirmed grant. Responses that do not
+  list granted scopes record nothing; requested scopes are never assumed to be
+  granted. `UserMixin.get_granted_scopes()` and
+  `UserMixin.has_granted_scope()` let applications gate features on the
+  confirmed grants.
+
 ## [7.2.0](https://github.com/python-social-auth/social-core/releases/tag/7.2.0) - 2026-11-12
 
 ### Added

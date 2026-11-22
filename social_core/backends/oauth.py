@@ -626,7 +626,32 @@ class BaseOAuth2(OAuthAuth[ResponseT_co]):
         data["token_type"] = response.get("token_type") or pipeline_kwargs.get(
             "token_type"
         )
+        granted_scopes = self.get_granted_scopes(response)
+        if granted_scopes is not None:
+            data["granted_scopes"] = granted_scopes
         return data
+
+    def get_granted_scopes(self, response: dict[str, Any]) -> list[str] | None:
+        """Return the scopes the provider explicitly confirmed in this response.
+
+        Returns None when the response does not list granted scopes, in which
+        case nothing is recorded: requested scopes must never be assumed to be
+        granted. Storage merges repeated confirmations as a union, so grants
+        confirmed in earlier flows are preserved and never expanded beyond
+        what the provider explicitly listed.
+        """
+        scope = response.get("scope")
+        if isinstance(scope, str):
+            separator = self.SCOPE_SEPARATOR or " "
+            if separator.strip():
+                scope = scope.replace(separator, " ")
+            scopes = scope.split()
+        elif isinstance(scope, (list, tuple, set)):
+            scopes = [str(entry) for entry in scope]
+        else:
+            return None
+        granted = sorted({entry.strip() for entry in scopes if entry.strip()})
+        return granted or None
 
     def request_access_token(
         self,

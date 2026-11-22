@@ -299,6 +299,44 @@ class UserMixinRefreshTokenTests(unittest.TestCase):
         save.assert_called_once_with()
 
 
+class GrantedScopesStorageTests(unittest.TestCase):
+    def make_social(self, extra_data=None) -> BrokenUser:
+        social = BrokenUser()
+        social.extra_data = extra_data or {}
+        return social
+
+    def test_granted_scopes_merge_as_union_across_confirmations(self) -> None:
+        social = self.make_social({"granted_scopes": ["openid", "profile"]})
+        social.set_extra_data({"granted_scopes": ["profile", "calendar"]})
+        self.assertEqual(
+            social.extra_data["granted_scopes"], ["calendar", "openid", "profile"]
+        )
+
+    def test_missing_granted_scopes_preserves_stored_value(self) -> None:
+        social = self.make_social({"granted_scopes": ["calendar"]})
+        social.set_extra_data({"access_token": "new-token"})
+        self.assertEqual(social.get_granted_scopes(), ["calendar"])
+        self.assertEqual(social.extra_data["access_token"], "new-token")
+
+    def test_repeated_confirmation_does_not_expand_or_duplicate(self) -> None:
+        social = self.make_social({"granted_scopes": ["calendar", "openid"]})
+        social.set_extra_data({"granted_scopes": ["openid"]})
+        self.assertEqual(social.get_granted_scopes(), ["calendar", "openid"])
+
+    def test_granted_scopes_helpers_tolerate_missing_or_legacy_values(self) -> None:
+        social = self.make_social()
+        self.assertEqual(social.get_granted_scopes(), [])
+        self.assertFalse(social.has_granted_scope("calendar"))
+
+        social.extra_data = {"granted_scopes": "openid profile"}
+        self.assertEqual(social.get_granted_scopes(), ["openid", "profile"])
+        self.assertTrue(social.has_granted_scope("profile"))
+        self.assertFalse(social.has_granted_scope("calendar"))
+
+        social.extra_data = {"granted_scopes": 42}
+        self.assertEqual(social.get_granted_scopes(), [])
+
+
 class BrokenAssociationTests(unittest.TestCase):
     def test_expiry(self):
         association = BrokenAssociation()
