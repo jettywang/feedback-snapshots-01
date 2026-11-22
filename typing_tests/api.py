@@ -412,3 +412,21 @@ cr.event_key = "le event"
 
 cr.repr_native_str
 cr.repr_native_str = True
+
+
+# structlog.audit: the security channel is a regular processor and its sink
+# protocol is satisfied by the in-memory reference implementation.
+from structlog.audit import (  # noqa: E402
+    AuditSink,
+    FilterWitness,
+    ListAuditSink,
+    SecurityAuditRouter,
+)
+
+audit_sink: AuditSink = ListAuditSink()
+audit_router: SecurityAuditRouter = SecurityAuditRouter(audit_sink)
+audit_witness: FilterWitness = audit_sink.witnesses[0] if audit_sink.witnesses else (
+    audit_router.build_witness(logging.getLogger(), "info", {}, "below_effective_level")
+)
+audit_payload: dict[str, Any] = audit_witness.to_dict()
+audit_stats: dict[str, int | float] = dict(audit_router.stats())

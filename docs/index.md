@@ -107,6 +107,7 @@ The following chapters deal with considerations of using *structlog* in the real
 
 recipes
 logging-best-practices
+security-auditing
 performance
 ```
 

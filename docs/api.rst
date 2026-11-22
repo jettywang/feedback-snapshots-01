@@ -98,6 +98,26 @@ API Reference
 .. autofunction:: set_exc_info
 
 
+`structlog.audit` Module
+------------------------
+
+.. automodule:: structlog.audit
+
+.. autofunction:: is_security_event
+
+.. autoclass:: FilterWitness
+   :members: to_dict
+
+.. autoclass:: AuditSink
+   :members: emit_archived, emit_witness
+
+.. autoclass:: ListAuditSink
+   :members: archived, witnesses, emit_archived, emit_witness
+
+.. autoclass:: SecurityAuditRouter
+   :members: stats, build_witness
+
+
 `structlog.testing` Module
 --------------------------
 

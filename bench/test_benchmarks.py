@@ -197,3 +197,77 @@ def test_log_exception_formatted():
     except ValueError:
         for _ in range(ROUNDS):
             log.exception("cannot compute")
+
+
+class _BenchLevelLogger:
+    """
+    Minimal logger exposing the duck-typed level surface.
+    """
+
+    name = "bench.security"
+    disabled = False
+
+    def __init__(self, effective_level):
+        self._effective_level = effective_level
+
+    def getEffectiveLevel(self):
+        return self._effective_level
+
+    def isEnabledFor(self, level):
+        return level >= self._effective_level
+
+    def __getattr__(self, name):
+        def _log(*args, **kwargs):
+            return None
+
+        return _log
+
+
+def test_security_audit_router_filtered():
+    """
+    Benchmark the accountable path for a security event that is filtered:
+    one level check, one witness write, no rendering.
+    """
+    sink = structlog.audit.ListAuditSink()
+    router = structlog.audit.SecurityAuditRouter(sink)
+    log = structlog.wrap_logger(
+        _BenchLevelLogger(logging.WARNING),
+        processors=[router, structlog.processors.JSONRenderer()],
+    ).bind(security_audit=True)
+
+    for _ in range(ROUNDS):
+        log.info("filtered_security_event")
+
+
+def test_security_audit_router_archived():
+    """
+    Benchmark the accepted path: archive copy plus normal rendering.
+    """
+    sink = structlog.audit.ListAuditSink()
+    router = structlog.audit.SecurityAuditRouter(sink)
+    log = structlog.wrap_logger(
+        _BenchLevelLogger(logging.DEBUG),
+        processors=[router, structlog.processors.JSONRenderer()],
+    ).bind(security_audit=True)
+
+    for _ in range(ROUNDS):
+        log.info("archived_security_event", **KWARGS)
+
+
+def test_security_audit_router_business_passthrough():
+    """
+    Benchmark ordinary business events, which must pay only the marker
+    lookup and skip the sink entirely.
+    """
+    sink = structlog.audit.ListAuditSink()
+    router = structlog.audit.SecurityAuditRouter(sink)
+    log = structlog.wrap_logger(
+        _BenchLevelLogger(logging.WARNING),
+        processors=[router, structlog.processors.JSONRenderer()],
+    )
+
+    for _ in range(ROUNDS):
+        log.info("ordinary_business_event", **KWARGS)
+
+    assert sink.archived == []
+    assert sink.witnesses == []

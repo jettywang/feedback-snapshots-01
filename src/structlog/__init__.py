@@ -14,11 +14,13 @@ __lazy_modules__ = [
     "structlog._generic",
     "structlog._native",
     "structlog._output",
+    "structlog.audit",
     "structlog.exceptions",
     "structlog.testing",
 ]
 
 from structlog import (
+    audit,
     contextvars,
     dev,
     processors,
@@ -80,6 +82,7 @@ __all__ = [
     "ReturnLoggerFactory",
     "WriteLogger",
     "WriteLoggerFactory",
+    "audit",
     "configure",
     "configure_once",
     "contextvars",

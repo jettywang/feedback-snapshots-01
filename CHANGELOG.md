@@ -15,6 +15,11 @@ You can find our backwards-compatibility policy [here](https://github.com/hynek/
 
 ## [Unreleased](https://github.com/hynek/structlog/compare/26.1.0...HEAD)
 
+### Added
+
+- New `structlog.audit` module providing a separately routable, auditable channel for security events.
+  `structlog.audit.SecurityAuditRouter` archives accepted security events at their original level and emits an immutable, JSON-serializable `structlog.audit.FilterWitness` whenever one is filtered by level or by a disabled logger, without changing the default level rules for ordinary callers.
+
 ### Changed
 
 - On Python 3.15 and later, *structlog* uses [PEP 810](https://peps.python.org/pep-0810/) lazy imports for modules that are only needed once you log.
