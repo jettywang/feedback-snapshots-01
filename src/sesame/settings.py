@@ -8,6 +8,7 @@ from django.contrib.auth import get_user_model
 from django.core.exceptions import FieldDoesNotExist, ImproperlyConfigured
 from django.core.signals import setting_changed
 from django.dispatch import receiver
+from django.utils.module_loading import import_string
 
 DEFAULTS = {
     # Generating URLs
@@ -17,6 +18,8 @@ DEFAULTS = {
     "ONE_TIME": False,
     "INVALIDATE_ON_PASSWORD_CHANGE": True,
     "INVALIDATE_ON_EMAIL_CHANGE": False,
+    # Custom revocation keys, allowing to revoke tokens by scope
+    "REVOCATION_KEY": None,
     # Custom primary keys
     "PACKER": None,
     "PRIMARY_KEY_FIELD": "pk",
@@ -72,11 +75,15 @@ def load():
     for name, default in DEFAULTS.items():
         setattr(module, name, getattr(settings, "SESAME_" + name, default))
 
-    global KEY, MAX_AGE, SIGNING_KEY, TOKENS, VERIFICATION_KEYS
+    global KEY, MAX_AGE, REVOCATION_KEY, SIGNING_KEY, TOKENS, VERIFICATION_KEYS
 
     # Support defining MAX_AGE as a timedelta rather than a number of seconds.
     if isinstance(MAX_AGE, datetime.timedelta):
         MAX_AGE = MAX_AGE.total_seconds()
+
+    # Resolve the custom revocation key callable, if configured.
+    if REVOCATION_KEY is not None and isinstance(REVOCATION_KEY, str):
+        REVOCATION_KEY = import_string(REVOCATION_KEY)
 
     # Import token creation and parsing modules.
     TOKENS = [importlib.import_module(tokens) for tokens in TOKENS]

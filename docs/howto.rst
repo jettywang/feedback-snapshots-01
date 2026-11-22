@@ -371,3 +371,73 @@ This view can be implemented more concisely, albeit more magically, as follows:
     :class: warning
 
     It only accepts tokens generated with the default scope.
+
+Revoking tokens by purpose
+--------------------------
+
+Scoped tokens keep a token created for one purpose from being reused for
+another purpose. However, on their own, they don't let you revoke all tokens
+of a given purpose: the built-in revocation mechanisms — changing the password,
+changing the email, and single-use tokens — invalidate *every* token of a user,
+regardless of scope.
+
+For example, when an employee leaves the company, you may want to revoke the
+authenticated links to their reports while keeping the links to their receipts
+valid until the receipts expire.
+
+The :data:`SESAME_REVOCATION_KEY` setting lets your application provide a
+persistent *version marker* for each user and scope. It must be the dotted path
+of a callable accepting the user and the scope:
+
+.. code-block:: python
+
+    # myapp/tokens.py
+
+    def get_revocation_key(user, scope):
+        # Return a marker stored persistently, for example on the user model or
+        # in a dedicated table. A different marker revokes existing tokens.
+        return TokenVersion.objects.get_value(user=user, scope=scope)
+
+Then configure it in your settings:
+
+.. code-block:: python
+
+    SESAME_REVOCATION_KEY = "myapp.tokens.get_revocation_key"
+
+Generate one token per purpose, as usual:
+
+.. code-block:: python
+
+    report_link = get_token(user, scope="report")
+    receipt_link = get_token(user, scope="receipt")
+    login_link = get_token(user)  # default scope, reserved for logging in
+
+The marker is included in the revocation key used to sign each token. To revoke
+the report links of a user — and only those — bump the marker stored for that
+user and the ``"report"`` scope:
+
+.. code-block:: python
+
+    TokenVersion.objects.bump(user=user, scope="report")
+
+Existing report tokens now fail authentication, while receipt tokens and login
+tokens remain valid until their own expiration. New report tokens are signed
+with the new marker, so they work immediately: the previous revocation doesn't
+affect them.
+
+.. admonition:: Store the marker persistently.
+    :class: tip
+
+    The marker must survive process restarts, otherwise revocations are lost.
+    A database field or table keyed by the user and the scope is the usual
+    choice. Returning :obj:`None` makes the callable contribute nothing, which
+    is convenient when a user has no marker yet.
+
+Since the marker is looked up by scope, revoking one user's tokens never affects
+other users, even for the same scope.
+
+.. admonition:: This feature only applies to tokens v2.
+    :class: warning
+
+    Tokens v1 don't support scopes, so they cannot be revoked by purpose.
+

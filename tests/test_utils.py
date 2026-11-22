@@ -3,9 +3,14 @@ from django.test import RequestFactory, TestCase, override_settings
 from sesame.utils import get_parameters, get_query_string, get_token, get_user
 
 from .mixins import CaptureLogMixin, CreateUserMixin
+from .test_tokens_v2 import revocation_versions
 
 
 class TestUtils(CaptureLogMixin, CreateUserMixin, TestCase):
+    def setUp(self):
+        super().setUp()
+        revocation_versions.clear()
+
     def test_get_token(self):
         self.assertIsInstance(get_token(self.user), str)
 
@@ -130,3 +135,31 @@ class TestUtils(CaptureLogMixin, CreateUserMixin, TestCase):
         self.assertEqual(get_user(token, update_last_login=False), self.user)
         self.user.refresh_from_db()
         self.assertEqual(self.user.last_login, last_login)
+
+    @override_settings(
+        SESAME_REVOCATION_KEY="tests.test_tokens_v2.get_revocation_version"
+    )
+    def test_revoke_by_purpose_leaves_other_purpose_valid(self):
+        # The same account issues a report link, a receipt link, and an
+        # ordinary login link.
+        report_link = get_token(self.user, scope="report")
+        receipt_link = get_token(self.user, scope="receipt")
+        login_link = get_token(self.user)
+
+        # All three links work for their own purpose.
+        self.assertEqual(get_user(report_link, scope="report"), self.user)
+        self.assertEqual(get_user(receipt_link, scope="receipt"), self.user)
+        self.assertEqual(get_user(login_link), self.user)
+
+        # The user leaves the company: revoke the report purpose only.
+        revocation_versions[(self.user.pk, "report")] = 1
+
+        # The report link is revoked ...
+        self.assertIsNone(get_user(report_link, scope="report"))
+        # ... but the receipt link and the login link remain valid.
+        self.assertEqual(get_user(receipt_link, scope="receipt"), self.user)
+        self.assertEqual(get_user(login_link), self.user)
+
+        # A freshly generated report link uses the new marker and works.
+        new_report_link = get_token(self.user, scope="report")
+        self.assertEqual(get_user(new_report_link, scope="report"), self.user)

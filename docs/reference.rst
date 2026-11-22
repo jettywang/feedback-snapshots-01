@@ -66,6 +66,31 @@ Settings
     Set :data:`SESAME_INVALIDATE_ON_EMAIL_CHANGE` to :obj:`True` to
     invalidate tokens when a user changes their email.
 
+.. data:: SESAME_REVOCATION_KEY
+    :value: None
+
+    Dotted path of a callable providing a custom, application-defined
+    revocation marker, or :obj:`None` to disable it.
+
+    The callable receives the user and the token's scope and must return the
+    persistent version marker for that user and scope:
+
+    .. code-block:: python
+
+        def get_revocation_key(user, scope):
+            ...
+
+    When the returned marker changes, tokens generated for that user and scope
+    become invalid, while tokens generated for other scopes — including the
+    default scope — keep working until they expire. This makes it possible to
+    :ref:`revoke tokens by purpose <Revoking tokens by purpose>`.
+
+    The marker is converted to a string unless it is :obj:`None`, in which
+    case it contributes nothing to the revocation key. Store it somewhere that
+    survives restarts, such as a database field, so that revocations persist.
+
+    This setting only applies to tokens v2. See :ref:`Tokens design`.
+
 .. data:: SESAME_PRIMARY_KEY_FIELD
     :value: "pk"
 

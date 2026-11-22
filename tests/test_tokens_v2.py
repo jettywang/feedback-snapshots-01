@@ -19,7 +19,21 @@ from sesame.tokens_v2 import (
 from .mixins import CaptureLogMixin, CreateUserMixin
 
 
+# Persistent, per-user and per-scope version markers backing the custom
+# SESAME_REVOCATION_KEY callable used below. In a real application these would
+# be stored in the database, keyed by the user and the token's purpose.
+revocation_versions = {}
+
+
+def get_revocation_version(user, scope):
+    return revocation_versions.get((user.pk, scope), 0)
+
+
 class TestTokensV2(CaptureLogMixin, CreateUserMixin, TestCase):
+    def setUp(self):
+        super().setUp()
+        revocation_versions.clear()
+
     def test_valid_token(self):
         token = create_token(self.user)
         self.assertTrue(detect_token(token))
@@ -235,6 +249,109 @@ class TestTokensV2(CaptureLogMixin, CreateUserMixin, TestCase):
         user = parse_token(token, self.get_user, scope="test")
         self.assertIsNone(user)
         self.assertLogsContain("Invalid token for user john in scope test")
+
+    # Test revocation by scope with a custom revocation key
+
+    @override_settings(
+        SESAME_REVOCATION_KEY="tests.test_tokens_v2.get_revocation_version"
+    )
+    def test_custom_revocation_key_marker_validates_token(self):
+        token = create_token(self.user, scope="test")
+        user = parse_token(token, self.get_user, scope="test")
+        self.assertEqual(user, self.user)
+        self.assertLogsContain("Valid token for user john in scope test")
+
+    @override_settings(
+        SESAME_REVOCATION_KEY="tests.test_tokens_v2.get_revocation_version"
+    )
+    def test_changing_marker_revokes_token_in_scope(self):
+        token = create_token(self.user, scope="test")
+        self.assertEqual(parse_token(token, self.get_user, scope="test"), self.user)
+        revocation_versions[(self.user.pk, "test")] = 1
+        user = parse_token(token, self.get_user, scope="test")
+        self.assertIsNone(user)
+        self.assertLogsContain("Invalid token for user john in scope test")
+
+    @override_settings(
+        SESAME_REVOCATION_KEY="tests.test_tokens_v2.get_revocation_version"
+    )
+    def test_changing_marker_does_not_affect_other_scopes(self):
+        report_token = create_token(self.user, scope="report")
+        receipt_token = create_token(self.user, scope="receipt")
+        login_token = create_token(self.user)
+
+        # Revoke only the "report" purpose.
+        revocation_versions[(self.user.pk, "report")] = 1
+
+        # The report link is revoked ...
+        self.assertIsNone(parse_token(report_token, self.get_user, scope="report"))
+        # ... while the receipt link and the ordinary login link stay valid
+        # until their own expiration.
+        self.assertEqual(
+            parse_token(receipt_token, self.get_user, scope="receipt"), self.user
+        )
+        self.assertEqual(parse_token(login_token, self.get_user), self.user)
+
+    @override_settings(
+        SESAME_REVOCATION_KEY="tests.test_tokens_v2.get_revocation_version"
+    )
+    def test_revocation_distinguishes_existing_credentials_and_new_users(self):
+        # One account issues three links, one per purpose.
+        report_token = create_token(self.user, scope="report")
+        receipt_token = create_token(self.user, scope="receipt")
+        login_token = create_token(self.user)
+
+        # Another user creates a link for the same purpose before the
+        # revocation happens.
+        other_user = self.create_user("jane")
+        other_report_token = create_token(other_user, scope="report")
+
+        # Bump the report marker of the first user only.
+        revocation_versions[(self.user.pk, "report")] = 1
+
+        # The old report credential is rejected, while the other two purposes
+        # of the same user and the other user's credential remain valid.
+        self.assertIsNone(parse_token(report_token, self.get_user, scope="report"))
+        self.assertEqual(
+            parse_token(receipt_token, self.get_user, scope="receipt"), self.user
+        )
+        self.assertEqual(parse_token(login_token, self.get_user), self.user)
+        self.assertEqual(
+            parse_token(other_report_token, self.get_user, scope="report"),
+            other_user,
+        )
+
+        # A newly created report link for the revoked user carries the new
+        # marker and is therefore accepted: old revocation state doesn't carry
+        # over to freshly generated links.
+        new_report_token = create_token(self.user, scope="report")
+        self.assertEqual(
+            parse_token(new_report_token, self.get_user, scope="report"), self.user
+        )
+
+    @override_settings(
+        SESAME_REVOCATION_KEY="tests.test_tokens_v2.get_revocation_version"
+    )
+    def test_marker_is_scoped_per_purpose_for_same_user(self):
+        # Even with the marker mechanism enabled, a token generated for one
+        # purpose can never be accepted in another purpose: the scope is also
+        # covered by the signature.
+        token = create_token(self.user, scope="report")
+        self.assertIsNone(parse_token(token, self.get_user, scope="receipt"))
+        self.assertIsNone(parse_token(token, self.get_user))
+
+    def test_revocation_key_includes_marker_only_when_configured(self):
+        default_key = get_revocation_key(self.user, scope="test")
+        revocation_versions[(self.user.pk, "other")] = 2
+        with override_settings(
+            SESAME_REVOCATION_KEY="tests.test_tokens_v2.get_revocation_version"
+        ):
+            scoped_key = get_revocation_key(self.user, scope="test")
+            same_scope_again = get_revocation_key(self.user, scope="test")
+            other_scope_key = get_revocation_key(self.user, scope="other")
+        self.assertNotEqual(default_key, scoped_key)
+        self.assertEqual(scoped_key, same_scope_again)
+        self.assertNotEqual(scoped_key, other_scope_key)
 
     # Test custom max_age
 

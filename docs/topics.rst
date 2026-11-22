@@ -21,7 +21,11 @@ The revocation key is derived from:
   is disabled;
 - The email of the user, if :data:`SESAME_INVALIDATE_ON_EMAIL_CHANGE` is
   enabled;
-- The last login date of the user, if :data:`SESAME_ONE_TIME` is enabled.
+- The last login date of the user, if :data:`SESAME_ONE_TIME` is enabled;
+- The marker returned by the callable configured with
+  :data:`SESAME_REVOCATION_KEY`, if any, for the user and the token's scope.
+  This allows :ref:`revoking tokens by purpose <Revoking tokens by purpose>`,
+  for tokens v2 only.
 
 django-sesame provides two token formats:
 

@@ -1,6 +1,15 @@
 Changelog
 =========
 
+3.3
+---
+
+* Added the :data:`SESAME_REVOCATION_KEY` setting, which lets an application
+  provide a persistent version marker per user and scope. Changing the marker
+  revokes tokens for that user and scope only, making it possible to
+  :ref:`revoke tokens by purpose <Revoking tokens by purpose>`. This feature is
+  only available for tokens v2.
+
 3.2
 ---
 

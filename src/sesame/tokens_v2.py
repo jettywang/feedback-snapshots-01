@@ -55,7 +55,7 @@ HASH_SIZES = {
 }
 
 
-def get_revocation_key(user):
+def get_revocation_key(user, scope=""):
     """
     When the value returned by this method changes, this revokes tokens.
 
@@ -67,6 +67,11 @@ def get_revocation_key(user):
 
     For one-time tokens, it also contains the last login datetime so that
     logging in revokes existing tokens.
+
+    If :data:`~sesame.settings.REVOCATION_KEY` is configured, it also contains
+    the marker returned by that callable for the user and the scope. Changing
+    that marker revokes only the tokens generated for that user and scope,
+    which makes it possible to revoke tokens by purpose.
 
     """
     data = ""
@@ -109,6 +114,11 @@ def get_revocation_key(user):
     if settings.ONE_TIME and user.last_login is not None:
         data += user.last_login.isoformat()
 
+    if settings.REVOCATION_KEY is not None:
+        marker = settings.REVOCATION_KEY(user, scope)
+        if marker is not None:
+            data += str(marker)
+
     return data.encode()
 
 
@@ -132,7 +142,7 @@ def create_token(user, scope=""):
     """
     primary_key = packers.packer.pack_pk(getattr(user, settings.PRIMARY_KEY_FIELD))
     timestamp = pack_timestamp()
-    revocation_key = get_revocation_key(user)
+    revocation_key = get_revocation_key(user, scope)
 
     signature = sign(
         primary_key + timestamp + revocation_key + scope.encode(),
@@ -219,7 +229,7 @@ def parse_token(token, get_user, scope="", max_age=None):
     # Check if signature is valid
 
     primary_key_and_timestamp = data[: -settings.SIGNATURE_SIZE]
-    revocation_key = get_revocation_key(user)
+    revocation_key = get_revocation_key(user, scope)
     for verification_key in settings.VERIFICATION_KEYS:
         expected_signature = sign(
             primary_key_and_timestamp + revocation_key + scope.encode(),
