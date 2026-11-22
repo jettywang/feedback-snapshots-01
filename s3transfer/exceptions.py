@@ -47,3 +47,9 @@ class FatalError(CancelledError):
 
 class S3ValidationError(Exception):
     pass
+
+
+class S3UploadEncryptionError(ValueError):
+    """Raised when an upload does not satisfy its encryption policy."""
+
+    pass

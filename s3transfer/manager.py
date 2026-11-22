@@ -313,7 +313,15 @@ class TransferManager:
     def config(self):
         return self._config
 
-    def upload(self, fileobj, bucket, key, extra_args=None, subscribers=None):
+    def upload(
+        self,
+        fileobj,
+        bucket,
+        key,
+        extra_args=None,
+        subscribers=None,
+        encryption_policy=None,
+    ):
         """Uploads a file to S3
 
         :type fileobj: str or seekable file-like object
@@ -336,6 +344,15 @@ class TransferManager:
             order provided based on the event emit during the process of
             the transfer request.
 
+        :type encryption_policy: s3transfer.encryption.UploadEncryptionPolicy
+        :param encryption_policy: An optional policy describing the
+            server-side encryption settings approved for this upload. The
+            policy is resolved once, before any request is made, and the
+            resolved settings are used for both single and multipart
+            uploads. If the upload cannot satisfy the policy, an
+            ``S3UploadEncryptionError`` is raised before any object data is
+            written.
+
         :rtype: s3transfer.futures.TransferFuture
         :returns: Transfer future representing the upload
         """
@@ -346,6 +363,10 @@ class TransferManager:
         self._validate_all_known_args(extra_args, self.ALLOWED_UPLOAD_ARGS)
         self._validate_if_bucket_supported(bucket)
         self._add_operation_defaults(extra_args)
+        if encryption_policy is not None:
+            client_meta = getattr(self._client, 'meta', None)
+            region_name = getattr(client_meta, 'region_name', None)
+            extra_args = encryption_policy.resolve(region_name, extra_args)
         call_args = CallArgs(
             fileobj=fileobj,
             bucket=bucket,

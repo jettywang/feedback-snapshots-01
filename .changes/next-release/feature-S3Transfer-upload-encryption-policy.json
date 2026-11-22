@@ -1,0 +1,5 @@
+{
+  "type": "feature",
+  "category": "``s3``",
+  "description": "Add ``UploadEncryptionPolicy`` and an ``encryption_policy`` argument to ``TransferManager.upload`` so a caller can require approved server-side encryption settings for a single upload. The policy is resolved once, before any request is made, and the same decision is applied to both single-part and multipart uploads."
+}

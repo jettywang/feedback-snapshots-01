@@ -122,6 +122,29 @@ transfer.  For example:
     transfer.upload_file('/tmp/foo', 'bucket', 'key')
 
 
+Upload encryption policies
+==========================
+
+``TransferManager.upload`` accepts an optional ``encryption_policy`` that
+describes the server-side encryption settings approved for a single upload.
+The policy is resolved once, before any request is made, and the same
+decision is applied to both single-part and multipart uploads:
+
+.. code-block:: python
+
+    from s3transfer.encryption import UploadEncryptionPolicy
+
+    policy = UploadEncryptionPolicy(
+        server_side_encryption='aws:kms',
+        sse_kms_key_id='arn:aws:kms:us-west-2:123456789012:key/abc',
+    )
+    future = manager.upload(
+        '/tmp/myfile', 'bucket', 'key', encryption_policy=policy
+    )
+
+If the upload cannot satisfy the policy, an ``S3UploadEncryptionError`` is
+raised from ``upload`` before any object data is written.
+
 """
 
 import concurrent.futures
