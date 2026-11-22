@@ -919,6 +919,9 @@ def test_json_tracebacks_skip_sunder_dunder(
         {"max_frames": -1},
         {"max_frames": 0},
         {"max_frames": 1},
+        {"disclosure": "nope"},
+        {"redacted_max_frames": 0},
+        {"redacted_max_frames": -1},
     ],
 )
 def test_json_traceback_value_error(kwargs: dict[str, Any]) -> None:
@@ -1010,6 +1013,166 @@ def test_json_exception_groups() -> None:
             }
         ],
     ] == exceptions
+
+
+def _walk_stack_dicts(
+    stack_dicts: list[dict[str, Any]],
+) -> Iterator[dict[str, Any]]:
+    """
+    Yield all stack dicts, recursing into the sub-exceptions of groups.
+    """
+    for stack in stack_dicts:
+        yield stack
+        for sub_trace in stack["exceptions"]:
+            yield from _walk_stack_dicts(sub_trace)
+
+
+def _make_nested_secret_exc_info() -> structlog.types.ExcInfo:
+    """
+    Build an exception group with two branches, one of which has a cause
+    chain.  Secrets hide in exception args, notes, and local variables.
+    """
+
+    def inner() -> None:
+        secret_local = "hunter2-local"
+        raise ValueError(f"inner failed with {secret_local}")
+
+    def branch_a() -> None:
+        try:
+            inner()
+        except ValueError as e:
+            raise RuntimeError("wrapper-secret-arg") from e
+
+    def branch_b() -> None:
+        token = "hunter2-token"
+        raise KeyError(token)
+
+    try:
+        branch_a()
+    except RuntimeError as e:
+        branch_a_exc = e
+    try:
+        branch_b()
+    except KeyError as e:
+        branch_b_exc = e
+
+    group = ExceptionGroup(  # noqa: F821
+        "group-secret-msg", [branch_a_exc, branch_b_exc]
+    )
+    group.add_note("secret-note")
+    try:
+        raise group
+    except BaseException as e:
+        return (type(e), e, e.__traceback__)
+
+
+SECRETS = (
+    "hunter2-local",
+    "hunter2-token",
+    "wrapper-secret-arg",
+    "group-secret-msg",
+    "secret-note",
+)
+
+
+@pytest.mark.skipif(
+    sys.version_info < (3, 11), reason="Requires Python 3.11 or higher"
+)
+def test_json_traceback_disclosure_redacted() -> None:
+    """
+    With disclosure="redacted", only exception class names and the last
+    redacted_max_frames frames per stack remain.  Secrets in exception args,
+    notes, and locals don't leak -- not even through causes or sub-exceptions
+    of groups.  The chain/group structure is preserved.
+    """
+    format_json = tracebacks.ExceptionDictTransformer(
+        show_locals=True, disclosure="redacted", redacted_max_frames=2
+    )
+    result = format_json(_make_nested_secret_exc_info())
+
+    serialized = json.dumps(result)
+    for secret in SECRETS:
+        assert secret not in serialized
+
+    # The group and chain structure is preserved: the group stack, branch a
+    # with its cause, and branch b.
+    stacks = list(_walk_stack_dicts(result))
+    assert [
+        "ExceptionGroup",
+        "RuntimeError",
+        "ValueError",
+        "KeyError",
+    ] == [s["exc_type"] for s in stacks]
+    assert result[0]["is_group"]
+    assert 2 == len(result[0]["exceptions"])
+    assert any(s["is_cause"] for s in stacks)
+
+    for stack in stacks:
+        assert "<redacted>" == stack["exc_value"]
+        assert [] == stack["exc_notes"]
+        assert stack["syntax_error"] is None
+        assert 0 < len(stack["frames"]) <= 2
+        for frame in stack["frames"]:
+            assert "locals" not in frame
+
+
+@pytest.mark.skipif(
+    sys.version_info < (3, 11), reason="Requires Python 3.11 or higher"
+)
+def test_json_traceback_disclosure_full_is_default() -> None:
+    """
+    disclosure="full" (the default) keeps exception args, notes, and locals
+    for privileged consumers like on-call engineers.
+    """
+    for kwargs in ({}, {"disclosure": "full"}):
+        format_json = tracebacks.ExceptionDictTransformer(
+            show_locals=True, **kwargs
+        )
+        result = format_json(_make_nested_secret_exc_info())
+
+        serialized = json.dumps(result)
+        for secret in SECRETS:
+            assert secret in serialized
+
+
+def test_json_traceback_disclosure_redacted_chain() -> None:
+    """
+    In redacted mode, the last redacted_max_frames frames are kept and locals
+    as well as exception args are gone -- also for plain cause chains without
+    groups.
+    """
+
+    def inner() -> None:
+        password = "hunter2-pw"
+        raise ValueError(f"login failed for {password}")
+
+    def outer() -> None:
+        try:
+            inner()
+        except ValueError as e:
+            raise RuntimeError("outer-secret") from e
+
+    try:
+        outer()
+    except RuntimeError as e:
+        format_json = tracebacks.ExceptionDictTransformer(
+            show_locals=True, disclosure="redacted", redacted_max_frames=1
+        )
+        result = format_json((type(e), e, e.__traceback__))
+
+    serialized = json.dumps(result)
+    assert "hunter2-pw" not in serialized
+    assert "outer-secret" not in serialized
+
+    assert ["RuntimeError", "ValueError"] == [s["exc_type"] for s in result]
+    assert result[1]["is_cause"]
+    for stack in result:
+        assert "<redacted>" == stack["exc_value"]
+        assert 1 == len(stack["frames"])
+        assert "locals" not in stack["frames"][0]
+
+    # The kept frame is the last one: closest to where the exception happened.
+    assert "inner" == result[1]["frames"][0]["name"]
 
 
 class TestLogException:

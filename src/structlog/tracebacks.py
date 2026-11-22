@@ -25,7 +25,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import asdict, dataclass, field
 from traceback import walk_tb
 from types import ModuleType, TracebackType
-from typing import Any, TypeAlias
+from typing import Any, Literal, TypeAlias
 
 
 try:
@@ -53,8 +53,21 @@ SHOW_LOCALS = True
 LOCALS_MAX_LENGTH = 10
 LOCALS_MAX_STRING = 80
 MAX_FRAMES = 50
+REDACTED_MAX_FRAMES = 3
 
 OptExcInfo: TypeAlias = ExcInfo | tuple[None, None, None]
+
+DisclosureLevel: TypeAlias = Literal["full", "redacted"]
+"""
+Disclosure levels for :class:`ExceptionDictTransformer`:
+
+- ``"full"``: Everything is rendered (the default, historic behavior).
+- ``"redacted"``: Only exception class names and the last few frames are
+  rendered.  Exception messages (which may contain exception arguments),
+  notes, syntax error details, and local variables are omitted.
+"""
+
+REDACTED = "<redacted>"
 
 
 @dataclass
@@ -411,6 +424,28 @@ class ExceptionDictTransformer:
             locals.  If ``False`` or if rich_ is not installed, fall back to
             a simpler algorithm.
 
+        disclosure:
+            The disclosure level of the output:
+
+            - ``"full"`` (the default) renders everything, governed by the
+              remaining arguments.
+            - ``"redacted"`` renders only exception class names and the last
+              *redacted_max_frames* frames of each stack.  Exception messages
+              (which may contain sensitive exception arguments), exception
+              notes, syntax error details, and local variables are omitted --
+              locals are not even extracted.  The structure of exception
+              chains and groups is preserved.
+
+            Use ``"redacted"`` for output that leaves your organization
+            (e.g. customer-facing tickets) and ``"full"`` for privileged
+            consumers (e.g. on-call engineers).
+
+        redacted_max_frames:
+            Number of frames kept per stack when *disclosure* is
+            ``"redacted"``.  Frames are kept from the end of the stack, i.e.
+            the frames closest to where the exception was raised.
+            Ignored otherwise.
+
     .. seealso::
         :doc:`exceptions` for a broader explanation of *structlog*'s exception
         features.
@@ -425,6 +460,9 @@ class ExceptionDictTransformer:
 
     .. versionchanged:: 25.4.0
        Handle exception groups.
+
+    .. versionchanged:: 26.2.0
+       Added *disclosure* and *redacted_max_frames* arguments.
     """
 
     show_locals: bool
@@ -435,6 +473,8 @@ class ExceptionDictTransformer:
     suppress: Sequence[str]
     max_frames: int
     use_rich: bool
+    disclosure: DisclosureLevel
+    redacted_max_frames: int
 
     def __init__(
         self,
@@ -447,6 +487,8 @@ class ExceptionDictTransformer:
         suppress: Iterable[str | ModuleType] = (),
         max_frames: int = MAX_FRAMES,
         use_rich: bool = True,
+        disclosure: DisclosureLevel = "full",
+        redacted_max_frames: int = REDACTED_MAX_FRAMES,
     ) -> None:
         if locals_max_length is not None and locals_max_length < 0:
             msg = f'"locals_max_length" must be >= 0: {locals_max_length}'
@@ -456,6 +498,14 @@ class ExceptionDictTransformer:
             raise ValueError(msg)
         if max_frames < 2:
             msg = f'"max_frames" must be >= 2: {max_frames}'
+            raise ValueError(msg)
+        if disclosure not in ("full", "redacted"):
+            msg = f'"disclosure" must be "full" or "redacted": {disclosure}'
+            raise ValueError(msg)
+        if redacted_max_frames < 1:
+            msg = (
+                f'"redacted_max_frames" must be >= 1: {redacted_max_frames}'
+            )
             raise ValueError(msg)
         self.show_locals = show_locals
         self.locals_max_length = locals_max_length
@@ -478,11 +528,16 @@ class ExceptionDictTransformer:
             self.suppress.append(path)
         self.max_frames = max_frames
         self.use_rich = use_rich
+        self.disclosure = disclosure
+        self.redacted_max_frames = redacted_max_frames
 
     def __call__(self, exc_info: ExcInfo) -> list[dict[str, Any]]:
+        redacted = self.disclosure == "redacted"
         trace = extract(
             *exc_info,
-            show_locals=self.show_locals,
+            # In redacted mode, never even extract locals so they cannot
+            # leak through any code path below.
+            show_locals=self.show_locals and not redacted,
             locals_max_length=self.locals_max_length,
             locals_max_string=self.locals_max_string,
             locals_hide_dunder=self.locals_hide_dunder,
@@ -490,25 +545,43 @@ class ExceptionDictTransformer:
             use_rich=self.use_rich,
         )
 
-        for stack in trace.stacks:
-            if len(stack.frames) <= self.max_frames:
-                continue
+        if redacted:
+            self._redact(trace)
+        else:
+            for stack in trace.stacks:
+                if len(stack.frames) <= self.max_frames:
+                    continue
 
-            half = (
-                self.max_frames // 2
-            )  # Force int division to handle odd numbers correctly
-            fake_frame = Frame(
-                filename="",
-                lineno=-1,
-                name=f"Skipped frames: {len(stack.frames) - (2 * half)}",
-            )
-            stack.frames[:] = [
-                *stack.frames[:half],
-                fake_frame,
-                *stack.frames[-half:],
-            ]
+                half = (
+                    self.max_frames // 2
+                )  # Force int division to handle odd numbers correctly
+                fake_frame = Frame(
+                    filename="",
+                    lineno=-1,
+                    name=f"Skipped frames: {len(stack.frames) - (2 * half)}",
+                )
+                stack.frames[:] = [
+                    *stack.frames[:half],
+                    fake_frame,
+                    *stack.frames[-half:],
+                ]
 
         return self._as_dict(trace)
+
+    def _redact(self, trace: Trace) -> None:
+        """
+        Strip everything but exception class names and the last few frames
+        from *trace*, recursing into chained and grouped sub-exceptions.
+        """
+        for stack in trace.stacks:
+            stack.exc_value = REDACTED
+            stack.exc_notes = []
+            stack.syntax_error = None
+            del stack.frames[: -self.redacted_max_frames]
+            for frame in stack.frames:
+                frame.locals = None
+            for sub_trace in stack.exceptions:
+                self._redact(sub_trace)
 
     def _as_dict(self, trace: Trace) -> list[dict[str, Any]]:
         stack_dicts = []

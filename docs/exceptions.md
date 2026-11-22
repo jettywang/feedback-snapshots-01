@@ -32,6 +32,18 @@ The most common use-cases are already covered by the following processors:
 {class}`structlog.tracebacks.ExceptionDictTransformer` can be customized with a number of parameters.
 If these prove insufficient, see {ref}`Custom Filtering of Dict Tracebacks <custom-dict-tracebacks>`.
 
+### Disclosure Levels
+
+If the same exception is rendered for audiences with different levels of trust -- say, a customer-facing ticket and an internal on-call page -- use the *disclosure* argument:
+
+- `disclosure="full"` (the default) renders everything, governed by the remaining parameters.
+  This is the level for privileged consumers like on-call engineers.
+- `disclosure="redacted"` renders only exception class names and the last *redacted_max_frames* frames of each stack.
+  Exception messages (which may contain sensitive exception arguments), exception notes, syntax error details, and local variables are omitted -- locals are never even extracted.
+  The structure of exception chains and exception groups is preserved, so tooling can still correlate sub-exceptions.
+
+For example, run two {class}`structlog.processors.ExceptionRenderer` instances with differently configured transformers and route their outputs accordingly.
+
 
 ## Console rendering
 

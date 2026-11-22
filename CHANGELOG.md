@@ -15,6 +15,13 @@ You can find our backwards-compatibility policy [here](https://github.com/hynek/
 
 ## [Unreleased](https://github.com/hynek/structlog/compare/26.1.0...HEAD)
 
+### Added
+
+- `structlog.tracebacks.ExceptionDictTransformer` now supports explicit disclosure levels via the new *disclosure* and *redacted_max_frames* arguments.
+  With `disclosure="redacted"`, only exception class names and the last few frames of each stack are rendered; exception messages (which may contain sensitive arguments), notes, syntax error details, and local variables are omitted, while the structure of exception chains and groups is preserved.
+  This allows rendering the same exception for customer-facing tickets and for privileged on-call consumers.
+
+
 ### Changed
 
 - On Python 3.15 and later, *structlog* uses [PEP 810](https://peps.python.org/pep-0810/) lazy imports for modules that are only needed once you log.
