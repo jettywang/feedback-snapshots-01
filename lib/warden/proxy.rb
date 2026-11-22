@@ -27,6 +27,7 @@ module Warden
 
     def initialize(env, manager) #:nodoc:
       @env, @users, @winning_strategies, @locked = env, {}, {}, false
+      @levels = {}
       @manager, @config = manager, manager.config.dup
       @strategies = Hash.new { |h,k| h[k] = {} }
     end
@@ -100,10 +101,15 @@ module Warden
     #
     # Parameters:
     #   args - a list of symbols (labels) that name the strategies to attempt
-    #   opts - an options hash that contains the :scope of the user to check
+    #   opts - an options hash that contains the :scope of the user to check.
+    #          Use :min_level to require a minimum authentication level. When an
+    #          existing session is below that level the strategies are run to
+    #          elevate it; if elevation does not reach the level the existing
+    #          session is left untouched and nil is returned.
     #
     # Example:
     #   env['warden'].authenticate(:password, :basic, :scope => :sudo)
+    #   env['warden'].authenticate(:password, :min_level => 2)
     #
     # :api: public
     def authenticate(*args)
@@ -127,6 +133,7 @@ module Warden
     #
     # Example
     #   env['warden'].authenticate!(:password, :scope => :publisher) # throws if it cannot authenticate
+    #   env['warden'].authenticate!(:password, :min_level => 2)     # throws unless level 2 was verified
     #
     # :api: public
     def authenticate!(*args)
@@ -141,30 +148,61 @@ module Warden
     #
     # Parameters:
     #   scope - the scope to check for authentication. Defaults to default_scope
+    #   opts - optional hash accepting :min_level, the minimum authentication
+    #          level the loaded session must carry. Sessions written before
+    #          levels existed are treated as level 0 and never satisfy a
+    #          positive minimum.
     #
     # Example:
     #   env['warden'].authenticated?(:admin)
+    #   env['warden'].authenticated?(:admin, :min_level => 2)
     #
     # :api: public
-    def authenticated?(scope = @config.default_scope)
-      result = !!user(scope)
+    def authenticated?(scope = @config.default_scope, opts = {})
+      if scope.is_a?(Hash)
+        opts = scope
+        scope = opts[:scope] || @config.default_scope
+      end
+
+      result = !!user(opts.merge(:scope => scope))
       yield if block_given? && result
       result
     end
 
     # Same API as authenticated?, but returns false when authenticated.
     # :api: public
-    def unauthenticated?(scope = @config.default_scope)
-      result = !authenticated?(scope)
+    def unauthenticated?(scope = @config.default_scope, opts = {})
+      if scope.is_a?(Hash)
+        opts = scope
+        scope = opts[:scope] || @config.default_scope
+      end
+
+      result = !authenticated?(scope, opts)
       yield if block_given? && result
       result
+    end
+
+    # The authentication level currently associated with the scope, or nil
+    # when no user is loaded. Sessions written before levels existed report
+    # Warden::UNKNOWN_AUTHENTICATION_LEVEL (0).
+    #
+    # :api: public
+    def authentication_level(scope = @config.default_scope)
+      scope = (scope[:scope] || @config.default_scope) if scope.is_a?(Hash)
+      user(scope)
+      @levels[scope]
     end
 
     # Manually set the user into the session and auth proxy
     #
     # Parameters:
     #   user - An object that has been setup to serialize into and out of the session.
-    #   opts - An options hash.  Use the :scope option to set the scope of the user, set the :store option to false to skip serializing into the session, set the :run_callbacks to false to skip running the callbacks (the default is true).
+    #   opts - An options hash. Use the :scope option to set the scope of the user,
+    #          set the :store option to false to skip serializing into the session,
+    #          set the :run_callbacks to false to skip running the callbacks
+    #          (the default is true), and use :level to record the authentication
+    #          level that produced this user (defaults to the scope's existing
+    #          level for fetches, otherwise DEFAULT_AUTHENTICATION_LEVEL).
     #
     # :api: public
     def set_user(user, opts = {})
@@ -175,7 +213,24 @@ module Warden
       opts[:event] ||= :set_user
       @users[scope] = user
 
-      if opts[:store] != false && opts[:event] != :fetch
+      # An explicit :level is authoritative (it is also how a fetched session
+      # reports the level it was stored with). Otherwise a manual set_user is
+      # an ordinary login and starts at the default level; it must not inherit
+      # a previous elevation, which could belong to a different user.
+      level = if opts.key?(:level)
+        Warden.coerce_authentication_level(opts[:level])
+      else
+        Warden::DEFAULT_AUTHENTICATION_LEVEL
+      end
+
+      if user
+        level ||= Warden::DEFAULT_AUTHENTICATION_LEVEL
+        @levels[scope] = level
+      else
+        @levels.delete(scope)
+      end
+
+      if opts[:store] != false && opts[:event] != :fetch && user
         options = env[ENV_SESSION_OPTIONS]
         if options
           if options.frozen?
@@ -185,6 +240,7 @@ module Warden
           end
         end
         session_serializer.store(user, scope)
+        session_serializer.store_level(scope, level)
       end
 
       run_callbacks = opts.fetch(:run_callbacks, true)
@@ -213,21 +269,39 @@ module Warden
     #  # with a scope and run_callbacks option
     #  env['warden'].user(:scope => :admin, :run_callbacks => true)
     #
+    #  # require a minimum authentication level on the loaded session
+    #  env['warden'].user(:scope => :admin, :min_level => 2)
+    #
+    # When :min_level is given and the session's recorded level is lower, nil
+    # is returned. A session written before levels existed reports level 0 and
+    # therefore fails any positive minimum.
+    #
     # :api: public
     def user(argument = {})
       opts  = argument.is_a?(Hash) ? argument : { :scope => argument }
       scope = (opts[:scope] ||= @config.default_scope)
 
       if @users.has_key?(scope)
-        @users[scope]
+        loaded = @users[scope]
       else
         unless user = session_serializer.fetch(scope)
           run_callbacks = opts.fetch(:run_callbacks, true)
           manager._run_callbacks(:after_failed_fetch, user, self, :scope => scope) if run_callbacks
         end
 
-        @users[scope] = user ? set_user(user, opts.merge(:event => :fetch)) : nil
+        if user
+          opts = opts.merge(:event => :fetch,
+                            :level => session_serializer.fetch_level(scope))
+        end
+        @users[scope] = loaded = user ? set_user(user, opts) : nil
       end
+
+      min_level = Warden.coerce_authentication_level(opts[:min_level])
+      return loaded if min_level.nil?
+      return nil unless loaded
+
+      level = @levels[scope]
+      level && level >= min_level ? loaded : nil
     end
 
     # Provides a scoped session data for authenticated users.
@@ -273,7 +347,9 @@ module Warden
         user = @users.delete(scope)
         manager._run_callbacks(:before_logout, user, self, :scope => scope)
 
+        @levels.delete(scope)
         raw_session.delete("warden.user.#{scope}.session") unless raw_session.nil?
+        raw_session.delete("warden.user.#{scope}.level") unless raw_session.nil?
         session_serializer.delete(scope, user)
       end
 
@@ -287,9 +363,11 @@ module Warden
     end
 
     # Proxy through to the authentication strategy to find out the message that was generated.
+    # When a level requirement could not be met, a message explaining the
+    # shortfall takes precedence.
     # :api: public
     def message
-      winning_strategy && winning_strategy.message
+      @level_failure_message || (winning_strategy && winning_strategy.message)
     end
 
     # Provides a way to return a 401 without warden deferring to the failure app
@@ -327,19 +405,52 @@ module Warden
 
     def _perform_authentication(*args)
       scope, opts = _retrieve_scope_and_opts(args)
-      user = nil
+      min_level = Warden.coerce_authentication_level(opts[:min_level])
+      @level_failure_message = nil
 
       # Look for an existing user in the session for this scope.
-      # If there was no user in the session, see if we can get one from the request.
-      return user, opts if user = user(opts.merge(:scope => scope))
+      # If the loaded session already satisfies the requested level, there is
+      # nothing left to verify.
+      if current = user(:scope => scope, :run_callbacks => opts.fetch(:run_callbacks, true))
+        return current, opts if min_level.nil? || authentication_level(scope) >= min_level
+
+        # The session exists but is below the requested level: allow the
+        # strategies for this scope to run again to elevate it.
+        clear_strategies_cache!(:scope => scope)
+      end
+
       _run_strategies_for(scope, args)
 
       if winning_strategy && winning_strategy.successful?
+        verified_level = winning_strategy.level
+
+        if min_level && verified_level < min_level
+          # The strategy succeeded without verifying enough for this action.
+          # Leave any existing session untouched instead of replacing it with
+          # a weaker one, and report failure to the caller.
+          @level_failure_message =
+            "Authentication level #{verified_level} is below the required level #{min_level}"
+          return nil, opts
+        end
+
         opts[:store] = opts.fetch(:store, winning_strategy.store?)
+        opts[:level] = verified_level
         set_user(winning_strategy.user, opts.merge!(:event => :authentication))
       end
 
-      [@users[scope], opts]
+      authenticated_user = @users[scope]
+      if min_level && (authenticated_user.nil? || (authentication_level(scope) || 0) < min_level)
+        # Keep a strategy's own failure/redirect message when there is one;
+        # otherwise explain the level shortfall so callers can report it.
+        unless winning_strategy && winning_strategy.message
+          @level_failure_message =
+            "Authentication level #{authentication_level(scope) || Warden::UNKNOWN_AUTHENTICATION_LEVEL} is below the required level #{min_level}"
+        end
+        return nil, opts
+      end
+
+      @level_failure_message = nil
+      [authenticated_user, opts]
     end
 
     def _retrieve_scope_and_opts(args) #:nodoc:

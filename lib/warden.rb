@@ -13,6 +13,34 @@ require 'warden/strategies/base'
 module Warden
   class NotAuthenticated < StandardError; end
 
+  # Sessions written before authentication levels existed carry no level.
+  # They are treated as unknown: ordinary (level-less) authentication keeps
+  # working, but they can never satisfy a positive level requirement.
+  UNKNOWN_AUTHENTICATION_LEVEL = 0
+
+  # A strategy that succeeds without declaring a level performed an ordinary
+  # login. This is also the level used by #set_user when none is given.
+  DEFAULT_AUTHENTICATION_LEVEL = 1
+
+  # Coerces a declared authentication level into a non-negative Integer.
+  # Raises ArgumentError with an actionable message for invalid values.
+  def self.coerce_authentication_level(value)
+    if value.nil?
+      nil
+    else
+      level = begin
+        Integer(value)
+      rescue ArgumentError, TypeError
+        nil
+      end
+
+      if level.nil? || level < 0
+        raise ArgumentError, "authentication level must be a non-negative integer, got #{value.inspect}"
+      end
+      level
+    end
+  end
+
   module Test
     autoload :WardenHelpers,  'warden/test/warden_helpers'
     autoload :Helpers,        'warden/test/helpers'

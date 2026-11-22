@@ -29,8 +29,44 @@ module Warden
     #      Warden::Strategies.add(:foo, MyStrategy)
     #
     class Base
+      # Declares the authentication level this strategy performs when it
+      # succeeds. Strategies that do not declare one perform an ordinary
+      # login (DEFAULT_AUTHENTICATION_LEVEL).
+      #
+      # Example:
+      #   Warden::Strategies.add(:password) do
+      #     authentication_level 1
+      #     def authenticate!; ...; end
+      #   end
+      #
+      #   Warden::Strategies.add(:reauthenticate) do
+      #     authentication_level 2
+      #     def authenticate!; ...; end
+      #   end
+      #
+      # :api: public
+      def self.authentication_level(value = nil)
+        if value.nil?
+          if defined?(@authentication_level)
+            @authentication_level
+          elsif superclass.respond_to?(:authentication_level)
+            superclass.authentication_level
+          else
+            Warden::DEFAULT_AUTHENTICATION_LEVEL
+          end
+        else
+          @authentication_level = Warden.coerce_authentication_level(value)
+        end
+      end
+
       # :api: public
       attr_accessor :user, :message
+
+      # The level associated with the verification performed by this run of
+      # the strategy. Defaults to the declared class level and can be
+      # overridden per attempt with #success!(user, message, level: n).
+      # :api: public
+      attr_writer :level
 
       # :api: private
       attr_accessor :result, :custom_response
@@ -46,6 +82,14 @@ module Warden
         @status, @headers = nil, {}
         @halted, @performed = false, false
         @result = nil
+        @level = nil
+      end
+
+      # The authentication level declared by this strategy, unless the
+      # current attempt overrides it.
+      # :api: public
+      def level
+        @level || self.class.authentication_level
       end
 
       # The method that is called from above. This method calls the underlying authenticate! method
@@ -121,12 +165,21 @@ module Warden
       #
       # Parameters:
       #   user - The user object to login.  This object can be anything you have setup to serialize in and out of the session
+      #   message - An optional message describing the successful authentication
+      #   opts - Optional keyword options:
+      #     level - The authentication level this verification performed. Overrides
+      #             the strategy's declared authentication_level for this attempt.
       #
       # :api: public
-      def success!(user, message = nil)
+      def success!(user, message = nil, opts = {})
+        if message.is_a?(Hash) && opts.empty?
+          opts = message
+          message = nil
+        end
         halt!
         @user = user
         @message = message
+        @level = Warden.coerce_authentication_level(opts[:level]) if opts.key?(:level)
         @result = :success
       end
 
