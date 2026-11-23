@@ -258,6 +258,49 @@ layer is configured or the channel layer doesn't support groups, connecting
 to a ``WebsocketConsumer`` with a non-empty ``groups`` attribute will raise
 ``channels.exceptions.InvalidChannelLayerError``. See :ref:`groups` for more.
 
+Identity-gated groups
+~~~~~~~~~~~~~~~~~~~~~
+
+Declaring a group and authorising membership in it are separate concerns.
+``groups`` is the declaration of ordinary observing groups: those memberships
+are joined on connect without inspecting the connection's identity. To make a
+group's membership depend on who is connected, declare it in
+``identity_groups`` instead and override ``authorize_group()``:
+
+.. code-block:: python
+
+    class ChatConsumer(AsyncWebsocketConsumer):
+        groups = ["announcements"]
+        identity_groups = ["staff", "members"]
+
+        async def authorize_group(self, group, user):
+            if group == "staff":
+                return user.is_staff
+            return await is_room_member(user, group)
+
+``authorize_group()`` is called once per declared identity group, after a
+reliable user has been resolved (from ``scope["user"]`` when it is already
+resolved, otherwise from ``scope["session"]`` via
+``channels.auth.get_user()``). It may be a normal or async method and must
+return a truthy value to allow the join. A group declared in both ``groups``
+and ``identity_groups`` is treated as identity-gated.
+
+If no reliable identity can be established — for example the consumer is not
+wrapped in ``AuthMiddlewareStack``/``SessionMiddlewareStack`` — the identity
+groups are left *pending*: no membership is submitted and the connection can
+still be accepted for the observing groups. A session that resolves to
+``AnonymousUser`` is a reliable conclusion, so its identity groups are
+*denied* rather than pending.
+
+Each consumer instance exposes ``group_membership`` for diagnostics, along
+with the ``submitted_groups``, ``joined_groups``, ``pending_groups``,
+``denied_groups`` and ``failed_groups`` properties. ``submitted_groups``
+records every group the connection asked the channel layer to join, which is
+what lets cleanup target a membership that a backend committed before a
+cancelled ``group_add()`` returned. A hook that raises is recorded in
+``failed_groups`` for that group only; other approved groups are still
+joined.
+
 
 AsyncWebsocketConsumer
 ~~~~~~~~~~~~~~~~~~~~~~
