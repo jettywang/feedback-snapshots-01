@@ -1,0 +1,90 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:PutObjectAcl",
+        "s3:GetObject",
+        "s3:GetObjectVersion",
+        "s3:GetBucketVersioning",
+        "s3:ListBucket"
+      ],
+      "Resource": "arn:aws:s3:::prod-app-artifacts"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "codebuild:StartBuild",
+        "codebuild:BatchGetBuilds",
+        "iam:PassRole",
+        "ecs:DescribeServices",
+        "ecs:DescribeTaskDefinition",
+        "ecs:DescribeTasks",
+        "ecs:ListTasks",
+        "ecs:RegisterTaskDefinition",
+        "ecs:UpdateService"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "codestar-connections:UseConnection",
+      "Resource": "arn:aws:codestar-connections:us-east-2:111222333444:connection/abc"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:GetObject",
+        "s3:GetObjectVersion"
+      ],
+      "Resource": "arn:aws:s3:::prod-app-artifacts/*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:CompleteLayerUpload",
+        "ecr:GetAuthorizationToken",
+        "ecr:InitiateLayerUpload",
+        "ecr:PutImage",
+        "ecr:UploadLayerPart"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "sns:Publish",
+      "Resource": "arn:aws:sns:us-east-2:111222333444:MySNSTopic"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "logs:CreateLogGroup",
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:UpdateRole",
+        "iam:PutRolePolicy",
+        "iam:PutRolePermissionsBoundary",
+        "iam:DeleteRolePermissionsBoundary",
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

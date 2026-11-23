@@ -1,0 +1,57 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Parameters:
+  Environment:
+    Type: String
+    Default: prod
+Conditions:
+  IsProduction: !Equals [!Ref Environment, prod]
+Resources:
+  AuditBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${Environment}-audit-data"
+  Notifications:
+    Type: AWS::SNS::Topic
+  DataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${Environment}-app-data"
+  WorkerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Principal:
+              Service: lambda.amazonaws.com
+            Effect: Allow
+        Version: "2012-10-17"
+      RoleName: WorkerRole
+      Policies:
+        - PolicyName: DataAccess
+          PolicyDocument:
+            Statement:
+              - Sid: ConditionalWrite
+                Resource: !If
+                  - IsProduction
+                  - !Sub "${DataBucket.Arn}/write/*"
+                  - !Sub "${AuditBucket.Arn}/write/*"
+                Action:
+                  - s3:PutObjectAcl
+                  - s3:PutObject
+                Effect: Allow
+              - Sid: ReadData
+                Resource:
+                  - !Sub "${DataBucket.Arn}/cache/*"
+                  - !Sub "${DataBucket.Arn}/read/*"
+                Action:
+                  - s3:GetObjectVersion
+                  - s3:GetObject
+                Effect: Allow
+              - Sid: PublishNotifications
+                Resource: !Ref Notifications
+                Action:
+                  - sns:GetTopicAttributes
+                  - sns:Publish
+                Effect: Allow
+            Version: "2012-10-17"

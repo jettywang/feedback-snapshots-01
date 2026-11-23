@@ -1,0 +1,35 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ApprovedReadData",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:GetObjectVersion"
+      ],
+      "Resource": [
+        "arn:aws:s3:::prod-app-data/read/*",
+        "arn:aws:s3:::prod-app-data/cache/*"
+      ]
+    },
+    {
+      "Sid": "ApprovedPublishNotifications",
+      "Effect": "Allow",
+      "Action": [
+        "sns:Publish",
+        "sns:GetTopicAttributes"
+      ],
+      "Resource": "arn:aws:sns:us-east-2:111222333444:Notifications"
+    },
+    {
+      "Sid": "ApprovedConditionalWrite",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:PutObjectAcl"
+      ],
+      "Resource": "arn:aws:s3:::prod-app-data/write/*"
+    }
+  ]
+}
