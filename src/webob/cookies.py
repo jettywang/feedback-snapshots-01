@@ -1,7 +1,9 @@
 import base64
 import binascii
+from collections import namedtuple
 from collections.abc import MutableMapping
 from datetime import date, datetime, timedelta, timezone
+import enum
 import hashlib
 import hmac
 import json
@@ -16,6 +18,9 @@ from webob.util import bytes_, text_
 __all__ = [
     "Cookie",
     "CookieProfile",
+    "CookieReadResult",
+    "CookieReadStatus",
+    "SecureCookieReader",
     "SignedCookieProfile",
     "SignedSerializer",
     "JSONSerializer",
@@ -29,12 +34,270 @@ _marker = object()
 # See the documentation for ``make_cookie`` for more information.
 SAMESITE_VALIDATION = True
 
+# environ key holding the provenance of the current Cookie header
+_COOKIE_PROVENANCE_KEY = "webob._cookie_provenance"
+
+
+class CookieReadStatus(enum.Enum):
+    """Outcome of a strict, security-sensitive cookie read.
+
+    ``PRESENT``
+        The cookie name appeared exactly once in a header whose origin is
+        still known, so its single value can be trusted.
+    ``MISSING``
+        The cookie name did not appear in a header whose origin is known.
+    ``AMBIGUOUS``
+        The cookie name appeared more than once.  No single value is
+        trustworthy, so the caller must not pick one (in particular it must
+        not silently pick the last value, which an attacker controls).
+    ``SOURCE_UNKNOWN``
+        The original WSGI ``HTTP_COOKIE`` header can no longer be
+        reconstructed because the in-process cookie view was edited, so there
+        is no received request evidence to read.
+    """
+
+    PRESENT = "present"
+    MISSING = "missing"
+    AMBIGUOUS = "ambiguous"
+    SOURCE_UNKNOWN = "source_unknown"
+
+
+class CookieReadResult(
+    namedtuple(
+        "CookieReadResult",
+        (
+            "name",
+            "status",
+            "values",
+            "generation",
+            "from_wsgi_input",
+            "header_fingerprint",
+        ),
+    )
+):
+    """What one strict cookie read observed.
+
+    ``values`` always retains every value seen for the name in order (it is
+    empty for ``MISSING``/``SOURCE_UNKNOWN``), so an ambiguous result can be
+    audited rather than collapsed.  ``generation`` and
+    ``header_fingerprint`` identify the exact revision of the request the
+    observation came from, and ``from_wsgi_input`` says whether that
+    revision still reflects the raw WSGI entry.
+    """
+
+    __slots__ = ()
+
+    @property
+    def is_definite(self):
+        return self.status is CookieReadStatus.PRESENT
+
+    @property
+    def is_ambiguous(self):
+        return self.status is CookieReadStatus.AMBIGUOUS
+
+    @property
+    def is_missing(self):
+        return self.status is CookieReadStatus.MISSING
+
+    @property
+    def source_unknown(self):
+        return self.status is CookieReadStatus.SOURCE_UNKNOWN
+
+    @property
+    def value(self):
+        """The single definite value, or ``None`` when none can be trusted."""
+        if self.status is CookieReadStatus.PRESENT:
+            return self.values[0]
+        return None
+
+
+class _CookieProvenance:
+    """Bookkeeping for the origin of the current Cookie header.
+
+    A request starts life backed by the raw WSGI ``HTTP_COOKIE`` header
+    (``from_wsgi_input=True``, ``compromised=False``).  Point edits through
+    the normal mapping interface destroy the ability to reconstruct the wire
+    value (``compromised=True``), while replacing the whole header installs a
+    new application-provided source (``from_wsgi_input=False``,
+    ``compromised=False``).  ``generation`` is bumped on every transition so
+    observations can name the revision they were taken from.
+    """
+
+    __slots__ = (
+        "generation",
+        "from_wsgi_input",
+        "compromised",
+        "header_fingerprint",
+    )
+
+    def __init__(
+        self,
+        generation=0,
+        from_wsgi_input=True,
+        compromised=False,
+        header_fingerprint=None,
+    ):
+        self.generation = generation
+        self.from_wsgi_input = from_wsgi_input
+        self.compromised = compromised
+        self.header_fingerprint = header_fingerprint
+
+    def copy(self):
+        return self.__class__(
+            self.generation,
+            self.from_wsgi_input,
+            self.compromised,
+            self.header_fingerprint,
+        )
+
+
+def _reconcile_cookie_provenance(environ):
+    """Return provenance for ``environ``, detecting out-of-band header edits."""
+    header = environ.get("HTTP_COOKIE")
+    provenance = environ.get(_COOKIE_PROVENANCE_KEY)
+
+    if provenance is None:
+        provenance = _CookieProvenance(header_fingerprint=header)
+        environ[_COOKIE_PROVENANCE_KEY] = provenance
+    elif provenance.header_fingerprint != header:
+        # The header was replaced without going through a mapping point edit,
+        # so this is a freshly installed, application-provided source rather
+        # than a corrupted view of the wire header.
+        provenance.generation += 1
+        provenance.from_wsgi_input = False
+        provenance.compromised = False
+        provenance.header_fingerprint = header
+
+    return provenance
+
+
+def clone_cookie_provenance(environ):
+    """Give a copied request its own derived, distinct provenance.
+
+    The copy never inherits a reusable verdict (such as a prior ambiguous
+    read): it gets a fresh generation and is marked as not originating from
+    the raw WSGI entry even when its parent did.
+    """
+    provenance = environ.get(_COOKIE_PROVENANCE_KEY)
+
+    if provenance is None:
+        provenance = _CookieProvenance(
+            from_wsgi_input=False,
+            header_fingerprint=environ.get("HTTP_COOKIE"),
+        )
+    else:
+        cloned = provenance.copy()
+        cloned.generation += 1
+        cloned.from_wsgi_input = False
+        provenance = cloned
+
+    environ[_COOKIE_PROVENANCE_KEY] = provenance
+    return provenance
+
+
+class SecureCookieReader:
+    """Strictly reads a small set of authentication cookies from a request.
+
+    Unlike the dict-like :class:`RequestCookies` view -- which keeps the last
+    value when a name is repeated and is freely mutable -- this reader never
+    collapses duplicates and reports exactly why a value can or cannot be
+    trusted via :class:`CookieReadStatus`.
+    """
+
+    def __init__(self, environ, auth_cookies=()):
+        self._environ = environ
+        self._auth_cookies = frozenset(auth_cookies)
+
+    def _values_for(self, name):
+        header = self._environ.get("HTTP_COOKIE") or ""
+        wanted = bytes_(name, "utf-8")
+        values = []
+        for key, value in parse_cookie(header):
+            if key == wanted:
+                values.append(value.decode("utf8"))
+        return values
+
+    def read(self, name):
+        """Read one cookie, distinguishing present/missing/ambiguous/unknown."""
+        provenance = _reconcile_cookie_provenance(self._environ)
+        header = self._environ.get("HTTP_COOKIE")
+
+        if provenance.compromised:
+            return CookieReadResult(
+                name,
+                CookieReadStatus.SOURCE_UNKNOWN,
+                (),
+                provenance.generation,
+                False,
+                header,
+            )
+
+        values = tuple(self._values_for(name))
+        if not values:
+            status = CookieReadStatus.MISSING
+        elif len(values) > 1:
+            status = CookieReadStatus.AMBIGUOUS
+        else:
+            status = CookieReadStatus.PRESENT
+
+        return CookieReadResult(
+            name,
+            status,
+            values,
+            provenance.generation,
+            provenance.from_wsgi_input,
+            header,
+        )
+
+    def read_auth_cookies(self):
+        """Read every configured authentication cookie by name."""
+        return {name: self.read(name) for name in self._auth_cookies}
+
+
 
 class RequestCookies(MutableMapping):
     _cache_key = "webob._parsed_cookies"
 
     def __init__(self, environ):
         self._environ = environ
+
+    def _mark_compromised(self):
+        # A point edit rewrites part of the header, so the raw WSGI value can
+        # no longer be reconstructed.  Strict reads must refuse to treat the
+        # result as received-request evidence.
+        provenance = _reconcile_cookie_provenance(self._environ)
+        provenance.generation += 1
+        provenance.compromised = True
+        provenance.header_fingerprint = self._environ.get("HTTP_COOKIE")
+
+    def _install_header(self, header):
+        # Replacing the whole header installs a new, application-provided
+        # source: the previous wire value is gone but the new one is explicit.
+        provenance = _reconcile_cookie_provenance(self._environ)
+        provenance.generation += 1
+        provenance.from_wsgi_input = False
+        provenance.compromised = False
+        if header:
+            self._environ["HTTP_COOKIE"] = header
+        else:
+            self._environ["HTTP_COOKIE"] = ""
+        provenance.header_fingerprint = self._environ.get("HTTP_COOKIE")
+
+    def replace_all(self, mapping):
+        """Replace the entire cookie view with ``mapping``'s name/value pairs.
+
+        Unlike point edits this resets provenance to a known,
+        application-provided source instead of corrupting the wire header.
+        """
+        parts = []
+        for name, value in dict(mapping).items():
+            name = self._valid_cookie_name(name)
+            if not isinstance(value, str):
+                raise ValueError(value, "cookie value must be a string")
+            bytes_name = bytes_(name, "ascii")
+            bytes_val = _value_quote(bytes_(value, "utf-8"))
+            parts.append(bytes_name + b"=" + bytes_val)
+        self._install_header(text_(b"; ".join(parts), "latin-1"))
 
     @property
     def _cache(self):
@@ -56,6 +319,7 @@ class RequestCookies(MutableMapping):
     def _mutate_header(self, name, value):
         header = self._environ.get("HTTP_COOKIE")
         had_header = header is not None
+        original_header = header
         header = header or ""
 
         header = header.encode("latin-1")
@@ -89,11 +353,17 @@ class RequestCookies(MutableMapping):
                 else:
                     header = replacement
 
+        new_header = text_(header, "latin-1") if header else ""
+        effective_header = new_header if (header or had_header) else None
         if header:
-            self._environ["HTTP_COOKIE"] = text_(header, "latin-1")
+            self._environ["HTTP_COOKIE"] = new_header
         elif had_header:
             self._environ["HTTP_COOKIE"] = ""
 
+        # Only a mutation that actually changed the header destroys the
+        # ability to reconstruct the original WSGI value.
+        if effective_header != original_header:
+            self._mark_compromised()
         return found
 
     def _valid_cookie_name(self, name):
@@ -151,6 +421,7 @@ class RequestCookies(MutableMapping):
 
     def clear(self):
         self._environ["HTTP_COOKIE"] = ""
+        self._mark_compromised()
 
     def __repr__(self):
         return f"<RequestCookies (dict-like) with values {self._cache!r}>"

@@ -8,6 +8,7 @@ from webob.datetime_utils import (
     week,
     year,
 )
+from webob.cookies import CookieReadResult, CookieReadStatus, SecureCookieReader
 from webob.request import BaseRequest, Request
 from webob.response import Response
 from webob.util import html_escape
@@ -16,6 +17,9 @@ __all__ = [
     "BaseRequest",
     "Request",
     "Response",
+    "CookieReadResult",
+    "CookieReadStatus",
+    "SecureCookieReader",
     "UTC",
     "day",
     "week",

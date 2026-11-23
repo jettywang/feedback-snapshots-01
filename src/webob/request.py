@@ -17,7 +17,11 @@ from webob.acceptparse import (
 )
 from webob.cachecontrol import CacheControl, serialize_cache_control
 from webob.compat import cgi_FieldStorage
-from webob.cookies import RequestCookies
+from webob.cookies import (
+    RequestCookies,
+    SecureCookieReader,
+    clone_cookie_provenance,
+)
 from webob.descriptors import (
     CHARSET_RE,
     SCHEME_RE,
@@ -882,7 +886,20 @@ class BaseRequest:
     def cookies(self, val):
         self.environ.pop("HTTP_COOKIE", None)
         r = RequestCookies(self.environ)
-        r.update(val)
+        r.replace_all(val)
+
+    def secure_cookie_reader(self, auth_cookies=()):
+        """Return a strict reader for a small set of authentication cookies.
+
+        The legacy :attr:`cookies` mapping keeps serving preference/UI
+        cookies; this reader distinguishes definite, missing, ambiguous and
+        source-unknown reads instead of collapsing duplicates.
+        """
+        return SecureCookieReader(self.environ, auth_cookies)
+
+    def read_secure_cookie(self, name):
+        """Strictly read one authentication cookie from this request."""
+        return SecureCookieReader(self.environ).read(name)
 
     def copy(self):
         """
@@ -892,6 +909,7 @@ class BaseRequest:
         """
         self.make_body_seekable()
         env = self.environ.copy()
+        clone_cookie_provenance(env)
         new_req = self.__class__(env)
         new_req.copy_body()
 
@@ -904,6 +922,7 @@ class BaseRequest:
         verb) then it becomes GET, and the request body is thrown away.
         """
         env = self.environ.copy()
+        clone_cookie_provenance(env)
 
         return self.__class__(env, method="GET", content_type=None, body=b"")
 
