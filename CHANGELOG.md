@@ -19,6 +19,16 @@ You can find our backwards-compatibility policy [here](https://github.com/hynek/
 
 - Official support for Python 3.15.
   No code changes were necessary.
+- An explicit, versioned cross-platform digest policy: `argon2.DigestPolicy`,
+  together with `argon2.PlatformCapabilities`, `argon2.DigestDecision`,
+  `argon2.MigrationDecision`, and the `argon2.PolicyPasswordHasher` wrapper.
+  They decide when password hashes may be upgraded to an application-declared
+  target and when a record must wait for a more capable worker (for example a
+  regular server versus a single-threaded WebAssembly runtime).
+  Existing hashes stay verifiable on every platform, compliant records are
+  never rewritten, and each decision carries the policy version so migration
+  reasons remain locally auditable.
+  See `examples/cross_platform_policy_demo.py` for a runnable demonstration.
 
 
 ### Removed

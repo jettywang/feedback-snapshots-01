@@ -16,6 +16,15 @@ from ._password_hasher import (
 )
 from ._utils import Parameters, extract_parameters
 from .low_level import Type
+from .policy import (
+    DigestDecision,
+    DigestPolicy,
+    MigrationDecision,
+    PlatformCapabilities,
+    PolicyPasswordHasher,
+    SERVER_PLATFORM,
+    WASM_PLATFORM,
+)
 
 
 __title__ = "argon2-cffi"
@@ -31,9 +40,16 @@ __all__ = [
     "DEFAULT_PARALLELISM",
     "DEFAULT_RANDOM_SALT_LENGTH",
     "DEFAULT_TIME_COST",
+    "DigestDecision",
+    "DigestPolicy",
+    "MigrationDecision",
     "Parameters",
     "PasswordHasher",
+    "PlatformCapabilities",
+    "PolicyPasswordHasher",
+    "SERVER_PLATFORM",
     "Type",
+    "WASM_PLATFORM",
     "exceptions",
     "extract_parameters",
     "hash_password",

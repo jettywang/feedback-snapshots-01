@@ -6,6 +6,35 @@ API Reference
 .. autoclass:: PasswordHasher
   :members: from_parameters, hash, verify, check_needs_rehash
 
+Cross-Platform Policies
+-----------------------
+
+.. automodule:: argon2.policy
+
+.. autoclass:: DigestPolicy
+  :members: effective_parameters, evaluate
+
+.. autoclass:: PolicyPasswordHasher
+  :members: hash, verify, verify_and_plan, rehash_if_allowed,
+            policy_platform_hash
+
+.. autoclass:: PlatformCapabilities
+  :members: supports, validate
+
+.. autoclass:: MigrationDecision
+  :members:
+
+.. autoclass:: DigestDecision
+  :members:
+
+.. data:: SERVER_PLATFORM
+
+   Capabilities of a regular multi-threaded server process.
+
+.. data:: WASM_PLATFORM
+
+   Capabilities of a single-threaded WebAssembly worker.
+
 If you don't specify any parameters, the following constants are used:
 
 .. data:: DEFAULT_RANDOM_SALT_LENGTH
