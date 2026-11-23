@@ -1,0 +1,180 @@
+[
+  {
+    "change_id": "A1",
+    "rule": [
+      "carol",
+      "data3",
+      "read"
+    ],
+    "action": "add",
+    "call_returned": "RuntimeError: broker rejected publish of generic (event #1)",
+    "local_applied": false,
+    "local_probe": {
+      "request": [
+        "carol",
+        "data3",
+        "read"
+      ],
+      "allowed": false
+    },
+    "persisted": true,
+    "persistence_seq": 1,
+    "notified": false,
+    "publish_seq": null,
+    "remote_callback_ran": false,
+    "remote_applied": false,
+    "remote_probe": {
+      "request": [
+        "carol",
+        "data3",
+        "read"
+      ],
+      "allowed": false
+    },
+    "gaps": [
+      "call raised BEFORE model.add_policy: durable + no local effect + no notification"
+    ],
+    "verdict": "DURABLE but local commit not proven (call failed before/within model update)"
+  },
+  {
+    "change_id": "A2",
+    "rule": [
+      "carol",
+      "data3",
+      "read"
+    ],
+    "action": "add",
+    "call_returned": "RuntimeError: broker rejected publish of generic (event #1)",
+    "local_applied": true,
+    "local_probe": {
+      "request": [
+        "carol",
+        "data3",
+        "read"
+      ],
+      "allowed": true
+    },
+    "persisted": true,
+    "persistence_seq": 1,
+    "notified": false,
+    "publish_seq": null,
+    "remote_callback_ran": false,
+    "remote_applied": false,
+    "remote_probe": {
+      "request": [
+        "carol",
+        "data3",
+        "read"
+      ],
+      "allowed": false
+    },
+    "gaps": [
+      "return value True means local+durable; the raise arrives AFTER unlock, so callers that only catch exceptions wrongly assume the write failed"
+    ],
+    "verdict": "LOCAL + DURABLE only; no remote evidence"
+  },
+  {
+    "change_id": "A3",
+    "rule": [
+      "carol",
+      "data3",
+      "read"
+    ],
+    "action": "add",
+    "call_returned": "RuntimeError: broker rejected publish of generic (event #1)",
+    "local_applied": false,
+    "local_probe": {
+      "request": [
+        "carol",
+        "data3",
+        "read"
+      ],
+      "allowed": false
+    },
+    "persisted": true,
+    "persistence_seq": 1,
+    "notified": false,
+    "publish_seq": null,
+    "remote_callback_ran": false,
+    "remote_applied": false,
+    "remote_probe": {},
+    "gaps": [
+      "same ordering as plain enforcer, awaited: durable, not local, not notified"
+    ],
+    "verdict": "DURABLE but local commit not proven (call failed before/within model update)"
+  },
+  {
+    "change_id": "B1",
+    "rule": [
+      "carol",
+      "data3",
+      "read"
+    ],
+    "action": "add",
+    "call_returned": true,
+    "local_applied": true,
+    "local_probe": {
+      "request": [
+        "carol",
+        "data3",
+        "read"
+      ],
+      "allowed": true
+    },
+    "persisted": true,
+    "persistence_seq": null,
+    "notified": true,
+    "publish_seq": 1,
+    "remote_callback_ran": 2,
+    "remote_applied": true,
+    "remote_probe": {
+      "request": [
+        "carol",
+        "data3",
+        "read"
+      ],
+      "allowed": true
+    },
+    "gaps": [
+      "two callback_entered records prove delivery/redelivery only; until reload_finished the duplicate cannot be told apart from the original and remote enforce() stays False"
+    ],
+    "verdict": "PROVEN end-to-end on the observed nodes"
+  },
+  {
+    "change_id": "B2",
+    "rule": [
+      "carol",
+      "data3",
+      "read"
+    ],
+    "action": "add",
+    "call_returned": true,
+    "local_applied": true,
+    "local_probe": {
+      "request": [
+        "carol",
+        "data3",
+        "read"
+      ],
+      "allowed": true
+    },
+    "persisted": true,
+    "persistence_seq": null,
+    "notified": true,
+    "publish_seq": 1,
+    "remote_callback_ran": 3,
+    "remote_applied": true,
+    "remote_probe": {
+      "request": [
+        "carol",
+        "data3",
+        "read"
+      ],
+      "allowed": true
+    },
+    "gaps": [
+      "duplicate_ignored exists only because this receiver keeps an idempotency set; a broker redelivery without such a set (or an out-of-order remove/add) is not provably safe from the receipt alone"
+    ],
+    "verdict": "PROVEN end-to-end on the observed nodes"
+  }
+]

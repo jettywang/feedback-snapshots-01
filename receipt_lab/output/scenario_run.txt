@@ -1,0 +1,82 @@
+
+==============================================================================
+A1  PLAIN Enforcer  |  store OK, broker publish FAILS
+==============================================================================
+  add_policy() result : raised -> RuntimeError: broker rejected publish of generic (event #1)
+  store journal      : [{'seq': 1, 'op': 'add_policy', 'sec': 'p', 'ptype': 'p', 'rules': [['carol', 'data3', 'read']], 'ok': True, 'detail': 'stored'}]
+  broker deliveries  : []
+  enforce('carol', 'data3', 'read')  node-a=False  node-b=False
+  node-a model has rule: False
+  node-b model has rule: False
+  node-b timeline    : []
+  RECEIPT verdict    : DURABLE but local commit not proven (call failed before/within model update)
+
+==============================================================================
+A2  SYNCED Enforcer  |  store OK, broker publish FAILS (notify deferred)
+==============================================================================
+  add_policy() result : returned=None, then raised -> RuntimeError: broker rejected publish of generic (event #1)
+  store journal      : [{'seq': 1, 'op': 'add_policy', 'sec': 'p', 'ptype': 'p', 'rules': [['carol', 'data3', 'read']], 'ok': True, 'detail': 'stored'}]
+  broker deliveries  : []
+  enforce('carol', 'data3', 'read')  node-a=True   node-b=False
+  node-a model has rule: True
+  node-b model has rule: False
+  node-b timeline    : []
+  RECEIPT verdict    : LOCAL + DURABLE only; no remote evidence
+
+==============================================================================
+A3  ASYNC Enforcer  |  store OK, broker publish FAILS
+==============================================================================
+  await add_policy() : raised -> RuntimeError: broker rejected publish of generic (event #1)
+  store journal      : [{'seq': 1, 'op': 'add_policy', 'sec': 'p', 'ptype': 'p', 'rules': [['carol', 'data3', 'read']], 'ok': True, 'detail': 'stored'}]
+  local model has rule: False  (diverged from its own store)
+  RECEIPT verdict    : DURABLE but local commit not proven (call failed before/within model update)
+
+==============================================================================
+B1  GENERIC watcher  |  duplicate signal while receiver reload is blocked
+==============================================================================
+  add_policy() -> True; broker published event #1
+  -- window: node-b callback ran but reload is blocked --
+  enforce('carol', 'data3', 'read')  node-a=True   node-b=False
+  node-a model has rule: True
+  node-b model has rule: False
+  node-b timeline (1): [{'t': 0.000345, 'node': 'node-b', 'phase': 'callback_entered', 'event': 'generic', 'seq': 1, 'rule': None}, {'t': 0.00035, 'node': 'node-b', 'phase': 'reload_blocked', 'event': 'generic', 'seq': 1, 'rule': None}]
+  -- after redelivery of event #1, still blocked --
+  enforce('carol', 'data3', 'read')  node-a=True   node-b=False
+  node-a model has rule: True
+  node-b model has rule: False
+  node-b timeline (2): [{'t': 0.000345, 'node': 'node-b', 'phase': 'callback_entered', 'event': 'generic', 'seq': 1, 'rule': None}, {'t': 0.00035, 'node': 'node-b', 'phase': 'reload_blocked', 'event': 'generic', 'seq': 1, 'rule': None}, {'t': 0.000431, 'node': 'node-b', 'phase': 'callback_entered', 'event': 'generic', 'seq': 1, 'rule': None}, {'t': 0.000432, 'node': 'node-b', 'phase': 'reload_blocked', 'event': 'generic', 'seq': 1, 'rule': None}]
+  -- receiver unblocked and finished a full LoadPolicy() --
+  enforce('carol', 'data3', 'read')  node-a=True   node-b=True 
+  node-a model has rule: True
+  node-b model has rule: True
+  node-b timeline (3): [{'t': 0.000345, 'node': 'node-b', 'phase': 'callback_entered', 'event': 'generic', 'seq': 1, 'rule': None}, {'t': 0.00035, 'node': 'node-b', 'phase': 'reload_blocked', 'event': 'generic', 'seq': 1, 'rule': None}, {'t': 0.000431, 'node': 'node-b', 'phase': 'callback_entered', 'event': 'generic', 'seq': 1, 'rule': None}, {'t': 0.000432, 'node': 'node-b', 'phase': 'reload_blocked', 'event': 'generic', 'seq': 1, 'rule': None}, {'t': 0.000492, 'node': 'node-b', 'phase': 'gate_unblocked', 'event': '-', 'seq': None, 'rule': None}, {'t': 0.000493, 'node': 'node-b', 'phase': 'reload_started:manual', 'event': 'full', 'seq': None, 'rule': None}, {'t': 0.000564, 'node': 'node-b', 'phase': 'reload_finished:manual', 'event': 'full', 'seq': None, 'rule': None}]
+  RECEIPT verdict    : PROVEN end-to-end on the observed nodes
+
+==============================================================================
+B2  TYPED WatcherEx  |  duplicate typed event while receiver apply is blocked
+==============================================================================
+  add_policy() -> True; typed event Event(#1 add p ['carol', 'data3', 'read'] from=node-a)
+  -- window: apply blocked on node-b --
+  enforce('carol', 'data3', 'read')  node-a=True   node-b=False
+  node-a model has rule: True
+  node-b model has rule: False
+  node-b timeline (1): [{'t': 0.000366, 'node': 'node-b', 'phase': 'callback_entered', 'event': 'add', 'seq': 1, 'rule': ['carol', 'data3', 'read']}, {'t': 0.000367, 'node': 'node-b', 'phase': 'apply_blocked', 'event': 'add', 'seq': 1, 'rule': ['carol', 'data3', 'read']}]
+  -- redelivery of identical typed event, still blocked --
+  node-b timeline (2): [{'t': 0.000366, 'node': 'node-b', 'phase': 'callback_entered', 'event': 'add', 'seq': 1, 'rule': ['carol', 'data3', 'read']}, {'t': 0.000367, 'node': 'node-b', 'phase': 'apply_blocked', 'event': 'add', 'seq': 1, 'rule': ['carol', 'data3', 'read']}, {'t': 0.000438, 'node': 'node-b', 'phase': 'callback_entered', 'event': 'add', 'seq': 1, 'rule': ['carol', 'data3', 'read']}, {'t': 0.000439, 'node': 'node-b', 'phase': 'apply_blocked', 'event': 'add', 'seq': 1, 'rule': ['carol', 'data3', 'read']}]
+  -- unblocked and one redelivery is applied --
+  enforce('carol', 'data3', 'read')  node-a=True   node-b=True 
+  node-a model has rule: True
+  node-b model has rule: True
+  node-b timeline (3): [{'t': 0.000366, 'node': 'node-b', 'phase': 'callback_entered', 'event': 'add', 'seq': 1, 'rule': ['carol', 'data3', 'read']}, {'t': 0.000367, 'node': 'node-b', 'phase': 'apply_blocked', 'event': 'add', 'seq': 1, 'rule': ['carol', 'data3', 'read']}, {'t': 0.000438, 'node': 'node-b', 'phase': 'callback_entered', 'event': 'add', 'seq': 1, 'rule': ['carol', 'data3', 'read']}, {'t': 0.000439, 'node': 'node-b', 'phase': 'apply_blocked', 'event': 'add', 'seq': 1, 'rule': ['carol', 'data3', 'read']}, {'t': 0.000445, 'node': 'node-b', 'phase': 'gate_unblocked', 'event': '-', 'seq': None, 'rule': None}, {'t': 0.000446, 'node': 'node-b', 'phase': 'callback_entered', 'event': 'add', 'seq': 1, 'rule': ['carol', 'data3', 'read']}, {'t': 0.000447, 'node': 'node-b', 'phase': 'apply_started', 'event': 'add', 'seq': 1, 'rule': ['carol', 'data3', 'read']}, {'t': 0.000457, 'node': 'node-b', 'phase': 'apply_finished', 'event': 'add', 'seq': 1, 'rule': ['carol', 'data3', 'read']}]
+  RECEIPT verdict    : PROVEN end-to-end on the observed nodes
+
+==============================================================================
+B3  TYPED watcher  |  out-of-order add then remove (remove delivered first)
+==============================================================================
+  node-a final enforce('carol', 'data3', 'read'): False (rule removed, matches store)
+  node-b final enforce('carol', 'data3', 'read'): True  <- True means stale add won
+  node-b timeline: [{'t': 0.000302, 'node': 'node-b', 'phase': 'callback_entered', 'event': 'remove', 'seq': 2, 'rule': ['carol', 'data3', 'read']}, {'t': 0.000304, 'node': 'node-b', 'phase': 'apply_started', 'event': 'remove', 'seq': 2, 'rule': ['carol', 'data3', 'read']}, {'t': 0.000308, 'node': 'node-b', 'phase': 'apply_finished', 'event': 'remove', 'seq': 2, 'rule': ['carol', 'data3', 'read']}, {'t': 0.000309, 'node': 'node-b', 'phase': 'callback_entered', 'event': 'add', 'seq': 1, 'rule': ['carol', 'data3', 'read']}, {'t': 0.00031, 'node': 'node-b', 'phase': 'apply_started', 'event': 'add', 'seq': 1, 'rule': ['carol', 'data3', 'read']}, {'t': 0.000316, 'node': 'node-b', 'phase': 'apply_finished', 'event': 'add', 'seq': 1, 'rule': ['carol', 'data3', 'read']}]
+  DIAGNOSIS: events carry no version/vector clock; the receiver cannot know
+             the add is stale. Missing evidence = a monotonic store version per rule.
+
+receipts written to receipt_lab/output/receipts.json
