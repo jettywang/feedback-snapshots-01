@@ -91,6 +91,9 @@ You can find a working example on how to use this gem in a passwordless login in
 If you are migrating an existing application from the legacy FIDO U2F JavaScript API to WebAuthn, also refer to
 [`docs/u2f_migration.md`](docs/u2f_migration.md).
 
+If support needs to replace a user's passkey while keeping the old device usable until the new one is reliably
+registered, refer to [`docs/credential_replacement.md`](docs/credential_replacement.md).
+
 ### Configuration
 
 If you have a multi-tenant application or just need to configure WebAuthn differently for separate parts of your application (e.g. if your users authenticate to different subdomains in the same application), we strongly recommend you look at this [Advanced Configuration](docs/advanced_configuration.md) section instead of this.

@@ -2,6 +2,10 @@
 
 ## [Unreleased](https://github.com/cedarcode/webauthn-ruby/compare/v3.5.1...master/)
 
+### Added
+
+- Add a support-initiated credential replacement handoff: `WebAuthn::CredentialReplacement::Approval`, the `CredentialReplacement::Store` contract, `RelyingParty#begin_credential_replacement`, `#options_for_replacement_registration`, `#verify_replacement_registration`, `#complete_credential_replacement` and `#commit_credential_replacement`. Only the commit that applies a replacement may revoke its old credential; retries and late conflicting approvals leave the credential set unchanged. Ordinary registration keeps its own entry point.
+
 ## [v3.5.1](https://github.com/cedarcode/webauthn-ruby/compare/v3.5.0...v3.5.1/) - 2026-11-10
 
 ### Changed

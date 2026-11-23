@@ -2,6 +2,7 @@
 
 require "openssl"
 require "webauthn/credential"
+require "webauthn/credential_replacement"
 require "webauthn/encoder"
 require "webauthn/error"
 
@@ -127,6 +128,122 @@ module WebAuthn
       end
     end
 
+    # Starts a support-initiated passkey replacement.
+    #
+    # The returned Approval names the account, the credential being replaced
+    # and the operators allowed to complete the replacement. It is persisted
+    # through +store+ so that the eventual commit can be made atomically.
+    def begin_credential_replacement(account_id:, replaced_credential_id:, operators:, store:)
+      approval = CredentialReplacement::Approval.new(
+        account_id: account_id,
+        replaced_credential_id: replaced_credential_id,
+        operators: operators
+      )
+
+      store.save_replacement_approval(approval)
+
+      approval
+    end
+
+    # Registration options for the replacement device.
+    #
+    # This is a registration ceremony like any other; the only difference is
+    # that the credential being replaced is excluded. Use
+    # #verify_replacement_registration to verify its result. The ordinary
+    # registration entry point (#options_for_registration and
+    # #verify_registration) is unaffected.
+    def options_for_replacement_registration(approval:, user:, exclude: nil, **keyword_arguments)
+      excluded = Array(exclude).dup
+      unless excluded.any? { |credential| credential_id_for(credential) == approval.replaced_credential_id }
+        excluded << approval.replaced_credential_id
+      end
+
+      options_for_registration(
+        **keyword_arguments,
+        user: user,
+        exclude: excluded
+      )
+    end
+
+    # Verifies the replacement device's registration and checks that +operator+
+    # may act on +approval+.
+    #
+    # Verification and the store write are separate on purpose: a caller may
+    # retry #complete_credential_replacement after a write failure without
+    # asking the user to register again.
+    def verify_replacement_registration(
+      raw_credential,
+      challenge,
+      approval:,
+      operator:,
+      user_presence: nil,
+      user_verification: nil
+    )
+      verify_replacement_operator!(approval, operator)
+
+      webauthn_credential = verify_registration(
+        raw_credential,
+        challenge,
+        user_presence: user_presence,
+        user_verification: user_verification
+      )
+
+      if webauthn_credential.id == approval.replaced_credential_id
+        raise CredentialReplacement::ApprovalMismatchError,
+              "the replacement credential must differ from the replaced credential"
+      end
+
+      webauthn_credential
+    end
+
+    # Commits an already verified replacement credential through +store+.
+    #
+    # The store must apply the swap atomically and idempotently. This method
+    # never revokes a credential itself; it reports the store's Outcome as a
+    # Result and only exposes revocation for the call that actually applied it.
+    def complete_credential_replacement(approval:, credential:, operator:, store:)
+      verify_replacement_operator!(approval, operator)
+
+      outcome = store.commit_credential_replacement(
+        approval: approval,
+        credential: credential,
+        operator: operator
+      )
+
+      CredentialReplacement::Result.from_outcome(outcome, approval: approval, credential: credential)
+    rescue CredentialReplacement::Store::WriteError => error
+      CredentialReplacement::Result.failure(approval: approval, credential: credential, error: error)
+    end
+
+    # Convenience handoff for a single request: verify the replacement device
+    # and commit it. Retries of the same approval and credential are safe,
+    # because the store makes the commit idempotent.
+    def commit_credential_replacement(
+      raw_credential,
+      challenge,
+      approval:,
+      operator:,
+      store:,
+      user_presence: nil,
+      user_verification: nil
+    )
+      credential = verify_replacement_registration(
+        raw_credential,
+        challenge,
+        approval: approval,
+        operator: operator,
+        user_presence: user_presence,
+        user_verification: user_verification
+      )
+
+      complete_credential_replacement(
+        approval: approval,
+        credential: credential,
+        operator: operator,
+        store: store
+      )
+    end
+
     # DEPRECATED: This method will be removed in future.
     def origin
       warn(
@@ -149,6 +266,24 @@ module WebAuthn
       )
 
       @allowed_origins ||= Array(new_origin) # rubocop:disable Naming/MemoizedInstanceVariableName
+    end
+
+    private
+
+    def credential_id_for(credential)
+      credential.respond_to?(:webauthn_id) ? credential.webauthn_id : credential
+    end
+
+    def verify_replacement_operator!(approval, operator)
+      unless approval.is_a?(CredentialReplacement::Approval)
+        raise CredentialReplacement::InvalidApprovalError,
+              "approval must be a WebAuthn::CredentialReplacement::Approval"
+      end
+
+      unless approval.authorized_operator?(operator)
+        raise CredentialReplacement::OperatorNotAuthorizedError,
+              "operator #{operator.inspect} is not allowed to act on approval #{approval.id}"
+      end
     end
   end
 end
