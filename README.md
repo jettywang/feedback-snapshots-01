@@ -22,6 +22,7 @@ a user's [public key credential](https://www.w3.org/TR/webauthn/#public-key-cred
 - [Prerequisites](#prerequisites)
 - [Install](#install)
 - [Usage](#usage)
+- [Account Binding](#account-binding)
 - [API](#api)
 - [Attestation Statement Formats](#attestation-statement-formats)
 - [Testing Your Integration](#testing-your-integration)
@@ -339,6 +340,32 @@ A list of all currently defined extensions:
 
   - [Last published version](https://www.w3.org/TR/webauthn-2/#sctn-defined-extensions)
   - [Next version (in draft)](https://w3c.github.io/webauthn/#sctn-defined-extensions)
+
+## Account Binding
+
+Verifying an assertion is necessary but not sufficient to sign a user in. When
+your application supports both a usernameless entry (the account is resolved
+from the credential) and a known-account entry (the account is established
+before the ceremony), and when some accounts still store a legacy user handle,
+the step from a verified credential to a session principal needs its own
+contract.
+
+`WebAuthn::AccountBinding::Contract` implements that contract in two phases:
+
+- `verify` reads the credential and account, applies the handle policy for the
+  entry and verifies the assertion. It returns an `Attempt` that is **not** a
+  session.
+- `commit` re-reads the credential and account and only then returns a
+  `Principal`. If the account was merged, unbound or disabled in between, the
+  attempt is rejected instead of letting the earlier read decide the new
+  account state.
+
+Known-account legacy handles are only accepted when the
+`known_account: :legacy_fallback` policy is explicitly configured; the
+usernameless entry always requires a modern handle.
+
+See [docs/account_binding.md](docs/account_binding.md) for the full contract,
+the rejection reasons and the executable scenario report.
 
 ## API
 

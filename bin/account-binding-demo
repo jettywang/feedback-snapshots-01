@@ -1,0 +1,171 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+$LOAD_PATH.unshift(File.expand_path("../lib", __dir__))
+
+require "webauthn"
+require "webauthn/fake_client"
+require "webauthn/relying_party"
+require "webauthn/account_binding"
+
+ORIGIN = "https://example.test"
+
+World = Struct.new(:rp, :client, :store, :alpha, :beta, :alpha_handle, :legacy_handle, keyword_init: true)
+
+def raw(handle)
+  WebAuthn::Encoders::Base64UrlEncoder.decode(handle)
+end
+
+def build_world
+  rp = WebAuthn::RelyingParty.new(allowed_origins: [ORIGIN], id: "example.test", name: "Example")
+  client = WebAuthn::FakeClient.new(ORIGIN, authenticator: WebAuthn::FakeAuthenticator.new)
+  store = WebAuthn::AccountBinding::InMemoryStore.new
+  alpha_handle = WebAuthn.generate_user_handle
+  legacy_handle = "legacy-user-handle"
+
+  alpha_credential = create_credential(client: client, relying_party: rp)
+  beta_credential = create_credential(client: client, relying_party: rp)
+
+  store.add_account(id: "alpha", user_handle: alpha_handle)
+  store.add_account(id: "beta", legacy_user_handle: legacy_handle)
+
+  store.add_credential(
+    id: alpha_credential.first,
+    account_id: "alpha",
+    public_key: rp.encoder.encode(alpha_credential[1]),
+    sign_count: alpha_credential[2],
+    user_handle: alpha_handle,
+    handle_format: :modern,
+    discoverable: true
+  )
+
+  store.add_credential(
+    id: beta_credential.first,
+    account_id: "beta",
+    public_key: rp.encoder.encode(beta_credential[1]),
+    sign_count: beta_credential[2],
+    user_handle: legacy_handle,
+    handle_format: :legacy,
+    discoverable: true
+  )
+
+  World.new(
+    rp: rp,
+    client: client,
+    store: store,
+    alpha: alpha_credential.first,
+    beta: beta_credential.first,
+    alpha_handle: alpha_handle,
+    legacy_handle: legacy_handle
+  )
+end
+
+def create_credential(client:, relying_party:)
+  options = relying_party.options_for_registration(user: { id: WebAuthn.generate_user_handle, name: "User" })
+  result = client.create(challenge: options.challenge, rp_id: relying_party.id)
+  credential = relying_party.verify_registration(result, options.challenge)
+
+  [credential.id, relying_party.encoder.decode(credential.public_key), credential.sign_count]
+end
+
+def assertion_for(world, entry:, handle:)
+  options = world.rp.options_for_authentication
+
+  raw_credential = world.client.get(
+    challenge: options.challenge,
+    rp_id: world.rp.id,
+    user_handle: handle,
+    allow_credentials: [entry == :usernameless ? world.alpha : world.beta],
+    sign_count: 1
+  )
+
+  [raw_credential, options.challenge]
+end
+
+def run_scenario(description:, entry:, mutation: nil, handle_policy: :modern_only, presented: :none)
+  world = build_world
+  contract = WebAuthn::AccountBinding::Contract.new(
+    store: world.store,
+    relying_party: world.rp,
+    handle_policies: { known_account: handle_policy }
+  )
+
+  handle =
+    case presented
+    when :legacy then world.legacy_handle
+    when :alpha then raw(world.alpha_handle)
+    end
+  raw_credential, challenge = assertion_for(world, entry: entry, handle: handle)
+
+  attempt = contract.verify(
+    entry: entry,
+    raw_credential: raw_credential,
+    challenge: challenge,
+    account_id: entry == :known_account ? "beta" : nil
+  )
+
+  case mutation
+  when :merge then world.store.merge_accounts!(from: "alpha", into: "beta")
+  when :unbind then world.store.unbind_credential!(world.alpha)
+  when :disable then world.store.disable_account!("alpha")
+  when :disable_beta then world.store.disable_account!("beta")
+  end
+
+  result = contract.commit(attempt)
+
+  {
+    description: description,
+    entry: entry,
+    verify: attempt.verified? ? "verified" : attempt.rejection,
+    commit: result.session_created? ? "session" : result.reason,
+    principal: result.principal&.account_id || "-",
+    account_reads: "#{attempt.account_reads}+#{result.account_reads - attempt.account_reads}=#{result.account_reads}"
+  }
+end
+
+scenarios = [
+  run_scenario(description: "usernameless / stable", entry: :usernameless, presented: :alpha),
+  run_scenario(
+    description: "usernameless / merged after callback",
+    entry: :usernameless,
+    mutation: :merge,
+    presented: :alpha
+  ),
+  run_scenario(
+    description: "usernameless / unbound after callback",
+    entry: :usernameless,
+    mutation: :unbind,
+    presented: :alpha
+  ),
+  run_scenario(
+    description: "usernameless / disabled after callback",
+    entry: :usernameless,
+    mutation: :disable,
+    presented: :alpha
+  ),
+  run_scenario(
+    description: "known / legacy policy enabled",
+    entry: :known_account,
+    handle_policy: :legacy_fallback,
+    presented: :legacy
+  ),
+  run_scenario(
+    description: "known / disabled after callback",
+    entry: :known_account,
+    handle_policy: :legacy_fallback,
+    presented: :legacy,
+    mutation: :disable_beta
+  ),
+  run_scenario(description: "known / legacy policy disabled", entry: :known_account, presented: :legacy)
+]
+
+headers = ["scenario", "entry", "verify", "commit", "principal", "account reads (verify+commit=total)"]
+widths = headers.each_with_index.map do |header, index|
+  ([header.length] + scenarios.map { |scenario| scenario.values[index].to_s.length }).max
+end
+
+row = ->(values) { values.each_with_index.map { |value, index| value.to_s.ljust(widths[index]) }.join(" | ") }
+
+puts row.call(headers)
+puts widths.map { |width| "-" * width }.join("-+-")
+scenarios.each { |scenario| puts row.call(scenario.values) }

@@ -2,6 +2,10 @@
 
 ## [Unreleased](https://github.com/cedarcode/webauthn-ruby/compare/v3.5.1...master/)
 
+### Added
+
+- Add `WebAuthn::AccountBinding::Contract`, a two-phase contract from a verified assertion to a session principal for usernameless and known-account entries, including explicit legacy user handle compatibility and re-validation of account binding at session creation. See `docs/account_binding.md`.
+
 ## [v3.5.1](https://github.com/cedarcode/webauthn-ruby/compare/v3.5.0...v3.5.1/) - 2026-11-10
 
 ### Changed

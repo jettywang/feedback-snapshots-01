@@ -6,6 +6,7 @@ require "webauthn/credential"
 require "webauthn/credential_creation_options"
 require "webauthn/credential_request_options"
 require "webauthn/version"
+require "webauthn/account_binding"
 
 module WebAuthn
   TYPE_PUBLIC_KEY = "public-key"
